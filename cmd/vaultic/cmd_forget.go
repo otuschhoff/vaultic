@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -115,6 +116,9 @@ type ForgetOptions struct {
 	KeepTags      data.TagLists
 
 	UnsafeAllowRemoveAll bool
+	// OverrideDeleteProtection ignores delete protection (delete_never /
+	// delete_after) markers on snapshots.
+	OverrideDeleteProtection bool
 
 	data.SnapshotFilter
 	Compact bool
@@ -140,6 +144,7 @@ func (opts *ForgetOptions) AddFlags(f *pflag.FlagSet) {
 	f.VarP(&opts.WithinYearly, "keep-within-yearly", "", "keep yearly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
 	f.Var(&opts.KeepTags, "keep-tag", "keep snapshots with this `taglist` (can be specified multiple times)")
 	f.BoolVar(&opts.UnsafeAllowRemoveAll, "unsafe-allow-remove-all", false, "allow deleting all snapshots of a snapshot group")
+	f.BoolVar(&opts.OverrideDeleteProtection, "override-delete-protection", false, "remove snapshots even if they are marked delete-protected (delete_never/delete_after)")
 
 	f.StringArrayVar(&opts.Hosts, "hostname", nil, "only consider snapshots with the given `hostname` (can be specified multiple times)")
 	err := f.MarkDeprecated("hostname", "use --host")
@@ -200,15 +205,32 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 	var snapshots data.Snapshots
 	removeSnIDs := vaultic.NewIDSet()
 
+	now := time.Now()
+	protected := 0
+	isProtected := func(sn *data.Snapshot) bool {
+		if opts.OverrideDeleteProtection || sn.Delete == nil {
+			return false
+		}
+		return sn.Delete.MustKeep(now)
+	}
+
 	err = opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
+		}
+		// honor delete protection: protected snapshots are kept, not removed
+		if isProtected(sn) {
+			protected++
+			return nil
 		}
 		snapshots = append(snapshots, sn)
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	if protected > 0 && !gopts.JSON {
+		printer.P("kept %d delete-protected snapshots\n", protected)
 	}
 
 	var jsonGroups []*ForgetGroup
