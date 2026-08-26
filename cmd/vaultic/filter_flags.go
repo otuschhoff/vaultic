@@ -1,0 +1,133 @@
+package main
+
+import (
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+)
+
+// This file holds the pflag.Value adapters that populate the extended fields
+// of data.SnapshotFilter from the rustic-compatible --filter-* flags. They are
+// registered once for every snapshot-selecting command via
+// initExtendedSnapshotFilter.
+
+// stringListFlag collects repeated comma-separated lists into [][]string.
+type stringListFlag struct {
+	target *[][]string
+}
+
+func (f *stringListFlag) String() string { return "" }
+func (f *stringListFlag) Type() string   { return "list" }
+func (f *stringListFlag) Set(s string) error {
+	if s == "" {
+		return errors.New("empty list")
+	}
+	*f.target = append(*f.target, strings.Split(s, ","))
+	return nil
+}
+
+// timeFlag parses a timestamp for --filter-after / --filter-before.
+type timeFlag struct {
+	target *time.Time
+}
+
+func (f *timeFlag) String() string {
+	if f.target == nil || f.target.IsZero() {
+		return ""
+	}
+	return f.target.Format(time.RFC3339)
+}
+func (f *timeFlag) Type() string { return "time" }
+func (f *timeFlag) Set(s string) error {
+	t, err := parseFilterTime(s)
+	if err != nil {
+		return err
+	}
+	*f.target = t
+	return nil
+}
+
+// parseFilterTime accepts RFC3339, the vaultic time format, or a plain date.
+func parseFilterTime(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, errors.Errorf("invalid time %q (use RFC3339 or '2006-01-02[ 15:04:05]')", s)
+}
+
+// sizeRangeFlag parses "min" or "min:max" sizes with optional k/m/g/t suffixes.
+type sizeRangeFlag struct {
+	min, max *uint64
+}
+
+func (f *sizeRangeFlag) String() string { return "" }
+func (f *sizeRangeFlag) Type() string   { return "size" }
+func (f *sizeRangeFlag) Set(s string) error {
+	lo, hi := s, ""
+	if i := strings.Index(s, ":"); i >= 0 {
+		lo, hi = s[:i], s[i+1:]
+	}
+	loV, err := parseFilterSize(lo)
+	if err != nil {
+		return err
+	}
+	*f.min = loV
+	if hi != "" {
+		hiV, err := parseFilterSize(hi)
+		if err != nil {
+			return err
+		}
+		*f.max = hiV
+	}
+	return nil
+}
+
+// parseFilterSize parses a byte size with an optional k/m/g/t suffix (base 1024).
+func parseFilterSize(s string) (uint64, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0, errors.New("empty size")
+	}
+	mult := uint64(1)
+	switch s[len(s)-1] {
+	case 'k':
+		mult = 1 << 10
+	case 'm':
+		mult = 1 << 20
+	case 'g':
+		mult = 1 << 30
+	case 't':
+		mult = 1 << 40
+	default:
+	}
+	if mult != 1 {
+		s = s[:len(s)-1]
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, errors.Errorf("invalid size %q", s)
+	}
+	return v * mult, nil
+}
+
+// initExtendedSnapshotFilter registers the rustic-compatible --filter-* flags.
+// They are additive to the classic --host/--tag/--path flags. --filter-last is
+// only meaningful for multi-snapshot commands and is registered only there.
+func initExtendedSnapshotFilter(flags *pflag.FlagSet, filt *data.SnapshotFilter, withLast bool) {
+	flags.StringArrayVar(&filt.Labels, "filter-label", nil, "only consider snapshots with this `label` (can be specified multiple times)")
+	flags.Var(&stringListFlag{target: &filt.PathsExact}, "filter-paths-exact", "only consider snapshots whose paths exactly match this `path[,path,...]` list (can be specified multiple times)")
+	flags.Var(&stringListFlag{target: &filt.TagsExact}, "filter-tags-exact", "only consider snapshots whose tags exactly match this `tag[,tag,...]` list (can be specified multiple times)")
+	flags.Var(&timeFlag{target: &filt.After}, "filter-after", "only consider snapshots taken at or after `time` (e.g. 2024-01-01 or RFC3339)")
+	flags.Var(&timeFlag{target: &filt.TimestampLimit}, "filter-before", "only consider snapshots taken before `time` (e.g. 2024-01-01 or RFC3339)")
+	flags.Var(&sizeRangeFlag{min: &filt.SizeMin, max: &filt.SizeMax}, "filter-size", "only consider snapshots with a total size within `min[:max]` (suffixes k/m/g/t allowed)")
+	flags.Var(&sizeRangeFlag{min: &filt.SizeAddedMin, max: &filt.SizeAddedMax}, "filter-size-added", "only consider snapshots adding within `min[:max]` to the repository")
+	if withLast {
+		flags.IntVar(&filt.FilterLast, "filter-last", 0, "only consider the newest `n` matching snapshots")
+	}
+}
