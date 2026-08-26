@@ -527,7 +527,7 @@ flag spelling as hidden aliases (migration aid only).
 
 | Item | Effort | Notes |
 |---|---|---|
-| Multiple snapshots per run from config `[[backup.snapshots]]` | M | WS-F; rustic-only capability |
+| Multiple snapshots per run from config `[[backup.snapshots]]` | M | ✅ WS-F; `backup --name` selects named jobs |
 | `--label`, `--description`, `--description-from` | S | WS-B |
 | `--delete-never`, `--delete-after` | S | WS-B |
 | `--as-path` (store relative/custom path) | S | archiver target path override; also enables relative-path backups |
@@ -535,10 +535,10 @@ flag spelling as hidden aliases (migration aid only).
 | `--exclude-if-xattr` | S | exclude by xattr presence |
 | `--set-atime/--set-ctime/--set-devid/--set-xattr/--set-blockdev` | M | synthetic metadata for stdin/command sources; block-device backup support (rustic `--set-blockdev`) |
 | `--stdin-from-command` | — | already present ([cmd_backup.go](../cmd/vaultic/cmd_backup.go#L117)) — no action |
-| `--init` | S | auto-init missing repo |
-| `--ls` | S | print created snapshot listing |
+| `--init` | S | ✅ auto-init missing repo |
+| `--ls` | S | ✅ list contents of the created snapshot |
 | Multiple `--parent` | M | merge several parents' trees for change detection |
-| Hooks + telemetry integration | S | WS-F/WS-H |
+| Hooks + telemetry integration | S | ✅ WS-F/WS-H |
 
 ### 7.3 `restore` ([cmd_restore.go](../cmd/vaultic/cmd_restore.go))
 

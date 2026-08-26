@@ -53,7 +53,8 @@ or more named jobs.
    tag = ["daily"]
 
 ``backup --init`` initializes the repository when it does not exist before
-running the backup.
+running the backup. ``backup --ls`` lists the contents of the snapshot after
+it is created.
 
 Hooks
 -----

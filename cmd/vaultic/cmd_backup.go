@@ -110,6 +110,7 @@ type BackupOptions struct {
 	SkipIfUnchanged   bool
 	ProfileNames      []string
 	Init              bool
+	List              bool
 
 	readConcurrencyFlag *pflag.Flag
 }
@@ -161,6 +162,7 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.SkipIfUnchanged, "skip-if-unchanged", false, "skip snapshot creation if identical to parent snapshot")
 	f.StringSliceVar(&opts.ProfileNames, "name", nil, "run named [[backup.snapshots]] profile job (repeatable)")
 	f.BoolVar(&opts.Init, "init", false, "initialize the repository if it does not exist")
+	f.BoolVar(&opts.List, "ls", false, "list the contents of the created snapshot")
 
 	opts.readConcurrencyFlag = f.Lookup("read-concurrency")
 
@@ -848,6 +850,13 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		// The snapshot is already durable. Observability outages must not turn a
 		// completed backup into a failed one.
 		printer.E("telemetry publish failed: %v\n", err)
+	}
+	if opts.List {
+		if err := runLs(ctx, LsOptions{}, gopts, []string{id.String()}, term); err != nil {
+			// The snapshot is already durable. Keep the backup successful even if
+			// the optional post-backup listing cannot be rendered.
+			printer.E("listing created snapshot failed: %v\n", err)
+		}
 	}
 	return nil
 }
