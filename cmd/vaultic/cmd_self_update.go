@@ -1,0 +1,101 @@
+//go:build selfupdate
+
+package main
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/global"
+	"github.com/vaultic/vaultic/internal/selfupdate"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+)
+
+func registerSelfUpdateCommand(cmd *cobra.Command, globalOptions *global.Options) {
+	cmd.AddCommand(
+		newSelfUpdateCommand(globalOptions),
+	)
+}
+
+func newSelfUpdateCommand(globalOptions *global.Options) *cobra.Command {
+	var opts SelfUpdateOptions
+
+	cmd := &cobra.Command{
+		Use:   "self-update [flags]",
+		Short: "Update the vaultic binary",
+		Long: `
+The "self-update" command downloads the latest stable release of vaultic from
+GitHub and replaces the currently running binary. After download, the
+authenticity of the binary is verified using the GPG signature on the release
+files.
+
+EXIT STATUS
+===========
+
+Exit status is 0 if the command was successful.
+Exit status is 1 if there was any error.
+`,
+		DisableAutoGenTag: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSelfUpdate(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+		},
+	}
+
+	opts.AddFlags(cmd.Flags())
+	return cmd
+}
+
+// SelfUpdateOptions collects all options for the update-vaultic command.
+type SelfUpdateOptions struct {
+	Output string
+}
+
+func (opts *SelfUpdateOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVar(&opts.Output, "output", "", "Save the downloaded file as `filename` (default: running binary itself)")
+}
+
+func runSelfUpdate(ctx context.Context, opts SelfUpdateOptions, gopts global.Options, args []string, term ui.Terminal) error {
+	if opts.Output == "" {
+		file, err := os.Executable()
+		if err != nil {
+			return errors.Wrap(err, "unable to find executable")
+		}
+
+		opts.Output = file
+	}
+
+	fi, err := os.Lstat(opts.Output)
+	if err != nil {
+		dirname := filepath.Dir(opts.Output)
+		di, err := os.Lstat(dirname)
+		if err != nil {
+			return err
+		}
+		if !di.Mode().IsDir() {
+			return errors.Fatalf("output parent path %v is not a directory, use --output to specify a different file path", dirname)
+		}
+	} else {
+		if !fi.Mode().IsRegular() {
+			return errors.Fatalf("output path %v is not a normal file, use --output to specify a different file path", opts.Output)
+		}
+	}
+
+	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+	printer.P("writing vaultic to %v", opts.Output)
+
+	v, err := selfupdate.DownloadLatestStableRelease(ctx, opts.Output, global.Version, printer.P)
+	if err != nil {
+		return errors.Fatalf("unable to update vaultic: %v", err)
+	}
+
+	if v != global.Version {
+		printer.S("successfully updated vaultic to version %v", v)
+	}
+
+	return nil
+}

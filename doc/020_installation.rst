@@ -205,7 +205,7 @@ Stable releases
 ===============
 
 You can download the latest stable release versions of restic from the `restic
-release page <https://github.com/restic/restic/releases/latest>`__. These builds
+release page <https://github.com/vaultic/vaultic/releases/latest>`__. These builds
 are considered stable and releases are made regularly in a controlled manner.
 
 There are both pre-compiled binaries for different platforms as well as the source
@@ -314,7 +314,7 @@ In order to build restic from source, execute the following steps:
 
 .. code-block:: console
 
-    $ git clone https://github.com/restic/restic
+    $ git clone https://github.com/vaultic/vaultic
     [...]
 
     $ cd restic

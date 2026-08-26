@@ -15,21 +15,21 @@ errors, improving documentation or pointing out usability issues are a great
 help also.
 
 The restic project uses the GitHub infrastructure (see the
-[project page](https://github.com/restic/restic)) for all related discussions
+[project page](https://github.com/vaultic/vaultic)) for all related discussions
 as well as the [forum](https://forum.restic.net/) and the `#restic` channel
 on [irc.libera.chat](https://kiwiirc.com/nextclient/#ircs://irc.libera.chat:6697/#restic).
 
 If you want to find an area that currently needs improving have a look at the
 open issues listed at the
-[issues page](https://github.com/restic/restic/issues). This is also the place
+[issues page](https://github.com/vaultic/vaultic/issues). This is also the place
 for discussing enhancement to the restic tools.
 
 If you are unsure what to do, please have a look at the issues, especially
 those tagged
-[minor complexity](https://github.com/restic/restic/labels/help%3A%20minor%20complexity)
-or [good first issue](https://github.com/restic/restic/labels/help%3A%20good%20first%20issue).
+[minor complexity](https://github.com/vaultic/vaultic/labels/help%3A%20minor%20complexity)
+or [good first issue](https://github.com/vaultic/vaultic/labels/help%3A%20good%20first%20issue).
 If you are already a bit experienced with the restic internals, take a look
-at the issues tagged as [help wanted](https://github.com/restic/restic/labels/help%3A%20wanted).
+at the issues tagged as [help wanted](https://github.com/vaultic/vaultic/labels/help%3A%20wanted).
 
 
 Reporting Bugs
@@ -83,18 +83,18 @@ Make sure you have the minimum required Go version installed. Clone the repo
 (without having `$GOPATH` set) and `cd` into the directory:
 
     $ unset GOPATH
-    $ git clone https://github.com/restic/restic
+    $ git clone https://github.com/vaultic/vaultic
     $ cd restic
 
 Then use the `go` tool to build restic:
 
-    $ go build ./cmd/restic
+    $ go build ./cmd/vaultic
     $ ./restic version
     restic 0.14.0-dev (compiled manually) compiled with go1.19 on linux/amd64
 
 To create a debug build use:
 
-    $ go build -tags debug ./cmd/restic
+    $ go build -tags debug ./cmd/vaultic
 
 You can run all tests with the following command:
 

@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/peterbourgon/unixtransport"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
 	"golang.org/x/net/http2"
 )
 

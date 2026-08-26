@@ -3,11 +3,11 @@ package backend
 import (
 	"fmt"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // FileType is the type of a file in the backend.
-// Numeric values must match restic.FileType; enforced in internal/repository/filetype.go.
+// Numeric values must match vaultic.FileType; enforced in internal/repository/filetype.go.
 type FileType uint8
 
 // These are the different data types a backend can store.
@@ -20,7 +20,7 @@ const (
 	ConfigFile
 )
 
-// Keep in sync with restic.FileType.String().
+// Keep in sync with vaultic.FileType.String().
 func (t FileType) String() string {
 	s := "invalid"
 	switch t {

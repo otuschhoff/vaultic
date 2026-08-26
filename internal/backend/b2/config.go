@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/options"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/options"
 )
 
 // Config contains all configuration necessary to connect to an b2 compatible
@@ -59,7 +59,7 @@ func checkBucketName(name string) error {
 
 // ParseConfig parses the string s and extracts the b2 config. The supported
 // configuration format is b2:bucketname/prefix. If no prefix is given the
-// prefix "restic" will be used.
+// prefix "vaultic" will be used.
 func ParseConfig(s string) (*Config, error) {
 	if !strings.HasPrefix(s, "b2:") {
 		return nil, errors.New("invalid format, want: b2:bucket-name[:path]")

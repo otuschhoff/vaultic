@@ -29,7 +29,7 @@ var opts = struct {
 
 func init() {
 	pflag.BoolVarP(&opts.Verbose, "verbose", "v", false, "be verbose")
-	pflag.StringVarP(&opts.SourceDir, "source", "s", "/restic", "path to the source code `directory`")
+	pflag.StringVarP(&opts.SourceDir, "source", "s", "/vaultic", "path to the source code `directory`")
 	pflag.StringVarP(&opts.OutputDir, "output", "o", "/output", "path to the output `directory`")
 	pflag.StringVar(&opts.Tags, "tags", "", "additional build `tags`")
 	pflag.StringVar(&opts.PlatformSubset, "platform-subset", "", "specify `n/t` to only build this subset")
@@ -95,10 +95,10 @@ func abs(dir string) string {
 }
 
 func build(sourceDir, outputDir, goos, goarch string) (filename string) {
-	filename = fmt.Sprintf("%v_%v_%v", "restic", goos, goarch)
+	filename = fmt.Sprintf("%v_%v_%v", "vaultic", goos, goarch)
 
 	if opts.Version != "" {
-		filename = fmt.Sprintf("%v_%v_%v_%v", "restic", opts.Version, goos, goarch)
+		filename = fmt.Sprintf("%v_%v_%v_%v", "vaultic", opts.Version, goos, goarch)
 	}
 
 	if goos == "windows" {
@@ -117,7 +117,7 @@ func build(sourceDir, outputDir, goos, goarch string) (filename string) {
 		"-o", outputFile,
 		"-ldflags", "-s -w",
 		"-tags", tags,
-		"./cmd/restic",
+		"./cmd/vaultic",
 	)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr

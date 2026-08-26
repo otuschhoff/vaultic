@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/restorer"
-	"github.com/restic/restic/internal/ui"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/restorer"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type textPrinter struct {
-	restic.Printer
+	vaultic.Printer
 
 	terminal ui.Terminal
 }

@@ -8,13 +8,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/local"
-	"github.com/restic/restic/internal/backend/mem"
-	"github.com/restic/restic/internal/backend/retry"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/local"
+	"github.com/vaultic/vaultic/internal/backend/mem"
+	"github.com/vaultic/vaultic/internal/backend/retry"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"github.com/restic/chunker"
 )
@@ -50,7 +50,7 @@ const testChunkerPol = chunker.Pol(0x3DA3358B4DC173)
 func TestRepositoryWithBackend(t testing.TB, be backend.Backend, version uint, opts Options) (*Repository, backend.Backend) {
 	t.Helper()
 	TestUseLowSecurityKDFParameters(t)
-	restic.TestDisableCheckPolynomial(t)
+	vaultic.TestDisableCheckPolynomial(t)
 
 	if be == nil {
 		be = TestBackend(t)
@@ -66,7 +66,7 @@ func TestRepositoryWithBackend(t testing.TB, be backend.Backend, version uint, o
 	}
 
 	if version == 0 {
-		version = restic.StableRepoVersion
+		version = vaultic.StableRepoVersion
 	}
 	pol := testChunkerPol
 	err = repo.Init(context.TODO(), version, test.TestPassword, &pol)
@@ -78,7 +78,7 @@ func TestRepositoryWithBackend(t testing.TB, be backend.Backend, version uint, o
 }
 
 // TestRepository returns a repository initialized with a test password on an
-// in-memory backend. When the environment variable RESTIC_TEST_REPO is set to
+// in-memory backend. When the environment variable VAULTIC_TEST_REPO is set to
 // a non-existing directory, a local backend is created there and this is used
 // instead. The directory is not removed, but left there for inspection.
 func TestRepository(t testing.TB) *Repository {
@@ -87,9 +87,9 @@ func TestRepository(t testing.TB) *Repository {
 	return repo
 }
 
-func TestRepositoryWithVersion(t testing.TB, version uint) (*Repository, restic.Unpacked[restic.FileType], backend.Backend) {
+func TestRepositoryWithVersion(t testing.TB, version uint) (*Repository, vaultic.Unpacked[vaultic.FileType], backend.Backend) {
 	t.Helper()
-	dir := os.Getenv("RESTIC_TEST_REPO")
+	dir := os.Getenv("VAULTIC_TEST_REPO")
 	opts := Options{}
 	var repo *Repository
 	var be backend.Backend
@@ -146,7 +146,7 @@ func TestOpenBackend(t testing.TB, be backend.Backend) *Repository {
 type VersionedTest func(t *testing.T, version uint)
 
 func TestAllVersions(t *testing.T, test VersionedTest) {
-	for version := restic.MinRepoVersion; version <= restic.MaxRepoVersion; version++ {
+	for version := vaultic.MinRepoVersion; version <= vaultic.MaxRepoVersion; version++ {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			t.Parallel()
 			test(t, uint(version))
@@ -157,7 +157,7 @@ func TestAllVersions(t *testing.T, test VersionedTest) {
 type VersionedBenchmark func(b *testing.B, version uint)
 
 func BenchmarkAllVersions(b *testing.B, bench VersionedBenchmark) {
-	for version := restic.MinRepoVersion; version <= restic.MaxRepoVersion; version++ {
+	for version := vaultic.MinRepoVersion; version <= vaultic.MaxRepoVersion; version++ {
 		b.Run(fmt.Sprintf("v%d", version), func(b *testing.B) {
 			bench(b, uint(version))
 		})
@@ -168,7 +168,7 @@ func BenchmarkAllVersions(b *testing.B, bench VersionedBenchmark) {
 func TestCheckRepo(t testing.TB, repo *Repository) {
 	chkr := newChecker(repo)
 
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) != 0 {
 		t.Fatalf("errors loading index: %v", errs)
 	}
@@ -187,16 +187,16 @@ func TestCheckRepo(t testing.TB, repo *Repository) {
 
 	// read data
 	errChan = make(chan error)
-	go chkr.ReadPacks(context.TODO(), func(packs map[restic.ID]int64) map[restic.ID]int64 {
+	go chkr.ReadPacks(context.TODO(), func(packs map[vaultic.ID]int64) map[vaultic.ID]int64 {
 		return packs
-	}, restic.NewNoopPrinter(), errChan)
+	}, vaultic.NewNoopPrinter(), errChan)
 
 	for err := range errChan {
 		t.Error(err)
 	}
 }
 
-func TestInjectKey(t testing.TB, keyID restic.ID, key string) {
+func TestInjectKey(t testing.TB, keyID vaultic.ID, key string) {
 	var k crypto.Key
 	err := json.Unmarshal([]byte(key), &k)
 	if err != nil {

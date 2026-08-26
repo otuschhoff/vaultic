@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestIndexMapBasic(t *testing.T) {
 	t.Parallel()
 
 	var (
-		id restic.ID
+		id vaultic.ID
 		m  indexMap
 		r  = rand.New(rand.NewSource(98765))
 	)
@@ -43,7 +43,7 @@ func TestIndexMapForeach(t *testing.T) {
 	}
 
 	for i := range N {
-		var id restic.ID
+		var id vaultic.ID
 		id[0] = byte(i)
 		m.add(id, uint32(i), uint32(i), uint32(i), uint32(i/2))
 	}
@@ -76,7 +76,7 @@ func TestIndexMapForeachWithID(t *testing.T) {
 	const ndups = 3
 
 	var (
-		id restic.ID
+		id vaultic.ID
 		m  indexMap
 		r  = rand.New(rand.NewSource(1234321))
 	)
@@ -95,7 +95,7 @@ func TestIndexMapForeachWithID(t *testing.T) {
 	}
 
 	for range 100 {
-		var otherid restic.ID
+		var otherid vaultic.ID
 		r.Read(otherid[:])
 		m.add(otherid, math.MaxUint32, 0, 0, 0)
 	}
@@ -130,16 +130,16 @@ func TestHashedArrayTree(t *testing.T) {
 
 func BenchmarkIndexMapHash(b *testing.B) {
 	var m indexMap
-	m.add(restic.ID{}, 0, 0, 0, 0) // Trigger lazy initialization.
+	m.add(vaultic.ID{}, 0, 0, 0, 0) // Trigger lazy initialization.
 
-	ids := make([]restic.ID, 128) // 4 KiB.
+	ids := make([]vaultic.ID, 128) // 4 KiB.
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i := range ids {
 		r.Read(ids[i][:])
 	}
 
 	b.ReportAllocs()
-	b.SetBytes(int64(len(restic.ID{}) * len(ids)))
+	b.SetBytes(int64(len(vaultic.ID{}) * len(ids)))
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -153,10 +153,10 @@ func TestIndexMapFirstIndex(t *testing.T) {
 	t.Parallel()
 
 	var (
-		id restic.ID
+		id vaultic.ID
 		m  indexMap
 		r  = rand.New(rand.NewSource(98765))
-		fi = make(map[restic.ID]int)
+		fi = make(map[vaultic.ID]int)
 	)
 
 	for i := 1; i <= 400; i++ {
@@ -178,7 +178,7 @@ func TestIndexMapFirstIndexDuplicates(t *testing.T) {
 	t.Parallel()
 
 	var (
-		id restic.ID
+		id vaultic.ID
 		m  indexMap
 		r  = rand.New(rand.NewSource(98765))
 	)

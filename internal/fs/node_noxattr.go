@@ -2,7 +2,7 @@
 
 package fs
 
-import "github.com/restic/restic/internal/data"
+import "github.com/vaultic/vaultic/internal/data"
 
 // nodeRestoreExtendedAttributes is a no-op
 func nodeRestoreExtendedAttributes(_ *data.Node, _ string, _ func(xattrName string) bool) error {

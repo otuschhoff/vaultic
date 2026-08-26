@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // ErrNoSnapshotFound is returned when no snapshot for the given criteria could be found.
@@ -35,7 +35,7 @@ func (f *SnapshotFilter) matches(sn *Snapshot) bool {
 
 // findLatest finds the latest snapshot with optional target/directory,
 // tags, hostname, and timestamp filters.
-func (f *SnapshotFilter) findLatest(ctx context.Context, be restic.Lister, loader restic.LoaderUnpacked) (*Snapshot, error) {
+func (f *SnapshotFilter) findLatest(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked) (*Snapshot, error) {
 
 	var err error
 	absTargets := make([]string, 0, len(f.Paths))
@@ -52,7 +52,7 @@ func (f *SnapshotFilter) findLatest(ctx context.Context, be restic.Lister, loade
 
 	var latest *Snapshot
 
-	err = ForAllSnapshots(ctx, be, loader, nil, func(id restic.ID, snapshot *Snapshot, err error) error {
+	err = ForAllSnapshots(ctx, be, loader, nil, func(id vaultic.ID, snapshot *Snapshot, err error) error {
 		if err != nil {
 			return errors.Errorf("Error loading snapshot %v: %v", id.Str(), err)
 		}
@@ -91,14 +91,14 @@ func splitSnapshotID(s string) (id, subfolder string) {
 
 // FindSnapshot takes a string and tries to find a snapshot whose ID matches
 // the string as closely as possible.
-func FindSnapshot(ctx context.Context, be restic.Lister, loader restic.LoaderUnpacked, s string) (*Snapshot, string, error) {
+func FindSnapshot(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, s string) (*Snapshot, string, error) {
 	s, subfolder := splitSnapshotID(s)
 
 	// no need to list snapshots if `s` is already a full id
-	id, err := restic.ParseID(s)
+	id, err := vaultic.ParseID(s)
 	if err != nil {
 		// find snapshot id with prefix
-		id, err = restic.Find(ctx, be, restic.SnapshotFile, s)
+		id, err = vaultic.Find(ctx, be, vaultic.SnapshotFile, s)
 		if err != nil {
 			return nil, "", err
 		}
@@ -109,7 +109,7 @@ func FindSnapshot(ctx context.Context, be restic.Lister, loader restic.LoaderUnp
 
 // FindLatest returns either the latest of a filtered list of all snapshots
 // or a snapshot specified by `snapshotID`.
-func (f *SnapshotFilter) FindLatest(ctx context.Context, be restic.Lister, loader restic.LoaderUnpacked, snapshotID string) (*Snapshot, string, error) {
+func (f *SnapshotFilter) FindLatest(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, snapshotID string) (*Snapshot, string, error) {
 	id, subfolder := splitSnapshotID(snapshotID)
 	if id == "latest" {
 		sn, err := f.findLatest(ctx, be, loader)
@@ -127,17 +127,17 @@ type SnapshotFindCb func(string, *Snapshot, error) error
 var ErrInvalidSnapshotSyntax = errors.New("<snapshot>:<subfolder> syntax not allowed")
 
 // FindAll yields Snapshots, either given explicitly by `snapshotIDs` or filtered from the list of all snapshots.
-func (f *SnapshotFilter) FindAll(ctx context.Context, be restic.Lister, loader restic.LoaderUnpacked, snapshotIDs []string, fn SnapshotFindCb) error {
+func (f *SnapshotFilter) FindAll(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, snapshotIDs []string, fn SnapshotFindCb) error {
 	if len(snapshotIDs) != 0 {
 		var err error
 		usedFilter := false
 
-		be, err := restic.MemorizeList(ctx, be, restic.SnapshotFile)
+		be, err := vaultic.MemorizeList(ctx, be, vaultic.SnapshotFile)
 		if err != nil {
 			return err
 		}
 
-		ids := restic.NewIDSet()
+		ids := vaultic.NewIDSet()
 		// Process all snapshot IDs given as arguments.
 		for _, s := range snapshotIDs {
 			if ctx.Err() != nil {
@@ -189,7 +189,7 @@ func (f *SnapshotFilter) FindAll(ctx context.Context, be restic.Lister, loader r
 		return ctx.Err()
 	}
 
-	err := ForAllSnapshots(ctx, be, loader, nil, func(id restic.ID, sn *Snapshot, err error) error {
+	err := ForAllSnapshots(ctx, be, loader, nil, func(id vaultic.ID, sn *Snapshot, err error) error {
 		if err == nil && !f.matches(sn) {
 			return nil
 		}

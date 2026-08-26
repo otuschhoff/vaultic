@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type MetaDirData struct {
@@ -332,7 +332,7 @@ func (d *SnapshotsDirStructure) updateSnapshots(ctx context.Context) error {
 		return nil
 	}
 
-	err = d.root.repo.LoadIndex(ctx, restic.NoopTerminalCounterFactory)
+	err = d.root.repo.LoadIndex(ctx, vaultic.NoopTerminalCounterFactory)
 	if err != nil {
 		return err
 	}

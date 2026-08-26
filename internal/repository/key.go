@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
 )
 
 var (
@@ -41,7 +41,7 @@ type Key struct {
 	user   *crypto.Key
 	master *crypto.Key
 
-	id restic.ID
+	id vaultic.ID
 }
 
 // params tracks the parameters used for the KDF. If not set, it will be
@@ -66,7 +66,7 @@ func createMasterKey(ctx context.Context, s *Repository, password string) (*Key,
 }
 
 // openKey tries do decrypt the key specified by name with the given password.
-func openKey(ctx context.Context, s *Repository, id restic.ID, password string) (*Key, error) {
+func openKey(ctx context.Context, s *Repository, id vaultic.ID, password string) (*Key, error) {
 	if key, ok := testKeyInjection.Load(id); ok {
 		return &Key{
 			master: key.(*crypto.Key),
@@ -132,7 +132,7 @@ func searchKey(ctx context.Context, s *Repository, password string, maxKeys int,
 	checked := 0
 
 	if len(keyHint) > 0 {
-		id, err := restic.Find(ctx, s, restic.KeyFile, keyHint)
+		id, err := vaultic.Find(ctx, s, vaultic.KeyFile, keyHint)
 
 		if err == nil {
 			key, err := openKey(ctx, s, id, password)
@@ -152,7 +152,7 @@ func searchKey(ctx context.Context, s *Repository, password string, maxKeys int,
 	defer cancel()
 
 	// try at most maxKeys keys in repo
-	err = s.List(listCtx, restic.KeyFile, func(id restic.ID, _ int64) error {
+	err = s.List(listCtx, vaultic.KeyFile, func(id vaultic.ID, _ int64) error {
 		checked++
 		if maxKeys > 0 && checked > maxKeys {
 			return ErrMaxKeysReached
@@ -193,8 +193,8 @@ func searchKey(ctx context.Context, s *Repository, password string, maxKeys int,
 }
 
 // LoadKey loads a key from the backend.
-func LoadKey(ctx context.Context, s *Repository, id restic.ID) (k *Key, err error) {
-	data, err := s.LoadRaw(ctx, restic.KeyFile, id)
+func LoadKey(ctx context.Context, s *Repository, id vaultic.ID) (k *Key, err error) {
+	data, err := s.LoadRaw(ctx, vaultic.KeyFile, id)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +283,7 @@ func AddKey(ctx context.Context, s *Repository, password, username, hostname str
 		return nil, errors.Wrap(err, "Marshal")
 	}
 
-	id := restic.Hash(buf)
+	id := vaultic.Hash(buf)
 	// store in repository and return
 	h := backend.Handle{Type: backend.KeyFile, Name: id.String()}
 
@@ -297,7 +297,7 @@ func AddKey(ctx context.Context, s *Repository, password, username, hostname str
 	return newkey, nil
 }
 
-func RemoveKey(ctx context.Context, repo *Repository, id restic.ID) error {
+func RemoveKey(ctx context.Context, repo *Repository, id vaultic.ID) error {
 	if id == repo.KeyID() {
 		return errors.New("refusing to remove key currently used to access repository")
 	}
@@ -314,7 +314,7 @@ func (k *Key) String() string {
 }
 
 // ID returns an identifier for the key.
-func (k Key) ID() restic.ID {
+func (k Key) ID() vaultic.ID {
 	return k.id
 }
 

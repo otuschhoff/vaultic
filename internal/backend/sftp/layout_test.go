@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/sftp"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/sftp"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestLayout(t *testing.T) {

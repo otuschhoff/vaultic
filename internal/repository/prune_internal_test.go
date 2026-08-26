@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // TestPruneMaxUnusedDuplicate checks that MaxUnused correctly accounts for duplicates.
@@ -39,17 +39,17 @@ func TestPruneMaxUnusedDuplicate(t *testing.T) {
 		random.Read(buf)
 		bufs = append(bufs, buf)
 	}
-	keep := restic.NewBlobSet()
+	keep := vaultic.NewBlobSet()
 
 	for _, blobs := range [][][]byte{
 		{bufs[0], bufs[3]},
 		{bufs[1], bufs[3]},
 		{bufs[2], bufs[3]},
 	} {
-		rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+		rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 			for _, blob := range blobs {
-				id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, blob, restic.ID{}, true)
-				keep.Insert(restic.BlobHandle{Type: restic.DataBlob, ID: id})
+				id, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, blob, vaultic.ID{}, true)
+				keep.Insert(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
 				rtest.OK(t, err)
 			}
 			return nil
@@ -64,15 +64,15 @@ func TestPruneMaxUnusedDuplicate(t *testing.T) {
 		MaxUnusedBytes: func(used uint64) (unused uint64) { return blobSize / 2 },
 	}
 
-	plan, err := PlanPrune(context.TODO(), opts, repo, func(ctx context.Context, repo restic.Repository, usedBlobs restic.FindBlobSet) error {
+	plan, err := PlanPrune(context.TODO(), opts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
 		for blob := range keep {
 			usedBlobs.Insert(blob)
 		}
 		return nil
-	}, restic.NewNoopPrinter())
+	}, vaultic.NewNoopPrinter())
 	rtest.OK(t, err)
 
-	rtest.OK(t, plan.Execute(context.TODO(), restic.NewNoopPrinter()))
+	rtest.OK(t, plan.Execute(context.TODO(), vaultic.NewNoopPrinter()))
 
 	rsize := plan.Stats().Size
 	remainingUnusedSize := rsize.Duplicate + rsize.Unused - rsize.Remove - rsize.Repackrm

@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 func init() {

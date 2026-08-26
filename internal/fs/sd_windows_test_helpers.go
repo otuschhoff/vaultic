@@ -6,8 +6,8 @@ import (
 	"os/user"
 	"testing"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/test"
 	"golang.org/x/sys/windows"
 )
 

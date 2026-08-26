@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend"
 
-	"github.com/restic/restic/internal/backend/dryrun"
-	"github.com/restic/restic/internal/backend/mem"
+	"github.com/vaultic/vaultic/internal/backend/dryrun"
+	"github.com/vaultic/vaultic/internal/backend/mem"
 )
 
 // make sure that Backend implements backend.Backend

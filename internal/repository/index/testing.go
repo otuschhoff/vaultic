@@ -3,15 +3,15 @@ package index
 import (
 	"testing"
 
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-func TestMergeIndex(t testing.TB, mi *MasterIndex) ([]*Index, int, restic.IDSet) {
+func TestMergeIndex(t testing.TB, mi *MasterIndex) ([]*Index, int, vaultic.IDSet) {
 	finalIndexes := mi.finalizeNotFinalIndexes()
-	ids := restic.NewIDSet()
+	ids := vaultic.NewIDSet()
 	for _, idx := range finalIndexes {
-		id := restic.NewRandomID()
+		id := vaultic.NewRandomID()
 		ids.Insert(id)
 		test.OK(t, idx.SetID(id))
 	}

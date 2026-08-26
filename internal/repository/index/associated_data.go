@@ -5,7 +5,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type associatedSetSub[T any] struct {
@@ -25,14 +25,14 @@ type associatedSetSub[T any] struct {
 // BlobHandles that are not part of the MasterIndex can be stored by placing them in
 // an overflow set that is expected to be empty in the normal case.
 type AssociatedSet[T any] struct {
-	byType   [restic.NumBlobTypes]associatedSetSub[T]
-	overflow map[restic.BlobHandle]T
+	byType   [vaultic.NumBlobTypes]associatedSetSub[T]
+	overflow map[vaultic.BlobHandle]T
 	idx      *MasterIndex
 }
 
 func NewAssociatedSet[T any](mi *MasterIndex) *AssociatedSet[T] {
 	a := AssociatedSet[T]{
-		overflow: make(map[restic.BlobHandle]T),
+		overflow: make(map[vaultic.BlobHandle]T),
 		idx:      mi,
 	}
 
@@ -41,7 +41,7 @@ func NewAssociatedSet[T any](mi *MasterIndex) *AssociatedSet[T] {
 			continue
 		}
 		// index starts counting at 1
-		count := mi.stableLen(restic.BlobType(typ)) + 1
+		count := mi.stableLen(vaultic.BlobType(typ)) + 1
 		a.byType[typ].value = make([]T, count)
 		a.byType[typ].isSet = make([]bool, count)
 	}
@@ -49,7 +49,7 @@ func NewAssociatedSet[T any](mi *MasterIndex) *AssociatedSet[T] {
 	return &a
 }
 
-func (a *AssociatedSet[T]) Get(bh restic.BlobHandle) (T, bool) {
+func (a *AssociatedSet[T]) Get(bh vaultic.BlobHandle) (T, bool) {
 	if val, ok := a.overflow[bh]; ok {
 		return val, true
 	}
@@ -69,12 +69,12 @@ func (a *AssociatedSet[T]) Get(bh restic.BlobHandle) (T, bool) {
 	return zero, false
 }
 
-func (a *AssociatedSet[T]) Has(bh restic.BlobHandle) bool {
+func (a *AssociatedSet[T]) Has(bh vaultic.BlobHandle) bool {
 	_, ok := a.Get(bh)
 	return ok
 }
 
-func (a *AssociatedSet[T]) Set(bh restic.BlobHandle, val T) {
+func (a *AssociatedSet[T]) Set(bh vaultic.BlobHandle, val T) {
 	if _, ok := a.overflow[bh]; ok {
 		a.overflow[bh] = val
 		return
@@ -90,12 +90,12 @@ func (a *AssociatedSet[T]) Set(bh restic.BlobHandle, val T) {
 	}
 }
 
-func (a *AssociatedSet[T]) Insert(bh restic.BlobHandle) {
+func (a *AssociatedSet[T]) Insert(bh vaultic.BlobHandle) {
 	var zero T
 	a.Set(bh, zero)
 }
 
-func (a *AssociatedSet[T]) Delete(bh restic.BlobHandle) {
+func (a *AssociatedSet[T]) Delete(bh vaultic.BlobHandle) {
 	if _, ok := a.overflow[bh]; ok {
 		delete(a.overflow, bh)
 		return
@@ -109,7 +109,7 @@ func (a *AssociatedSet[T]) Delete(bh restic.BlobHandle) {
 }
 
 type haser interface {
-	Has(bh restic.BlobHandle) bool
+	Has(bh vaultic.BlobHandle) bool
 }
 
 // Intersect returns a new set containing the handles that are present in both sets.
@@ -150,8 +150,8 @@ func (a *AssociatedSet[T]) Len() int {
 	return count
 }
 
-func (a *AssociatedSet[T]) All() iter.Seq2[restic.BlobHandle, T] {
-	return func(yield func(restic.BlobHandle, T) bool) {
+func (a *AssociatedSet[T]) All() iter.Seq2[vaultic.BlobHandle, T] {
+	return func(yield func(vaultic.BlobHandle, T) bool) {
 		for k, v := range a.overflow {
 			if !yield(k, v) {
 				return
@@ -175,8 +175,8 @@ func (a *AssociatedSet[T]) All() iter.Seq2[restic.BlobHandle, T] {
 	}
 }
 
-func (a *AssociatedSet[T]) Keys() iter.Seq[restic.BlobHandle] {
-	return func(yield func(restic.BlobHandle) bool) {
+func (a *AssociatedSet[T]) Keys() iter.Seq[vaultic.BlobHandle] {
+	return func(yield func(vaultic.BlobHandle) bool) {
 		for bh := range a.All() {
 			if !yield(bh) {
 				return
@@ -186,7 +186,7 @@ func (a *AssociatedSet[T]) Keys() iter.Seq[restic.BlobHandle] {
 }
 
 func (a *AssociatedSet[T]) String() string {
-	list := restic.BlobHandles(slices.Collect(a.Keys()))
+	list := vaultic.BlobHandles(slices.Collect(a.Keys()))
 	sort.Sort(list)
 
 	str := list.String()

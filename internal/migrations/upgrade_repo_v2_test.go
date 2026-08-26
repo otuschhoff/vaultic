@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/restic/restic/internal/repository"
+	"github.com/vaultic/vaultic/internal/repository"
 )
 
 func TestUpgradeRepoV2(t *testing.T) {

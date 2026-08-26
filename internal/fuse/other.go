@@ -7,7 +7,7 @@ import (
 
 	"github.com/anacrolix/fuse"
 	"github.com/anacrolix/fuse/fs"
-	"github.com/restic/restic/internal/data"
+	"github.com/vaultic/vaultic/internal/data"
 )
 
 // Statically ensure that *other implements the given interface

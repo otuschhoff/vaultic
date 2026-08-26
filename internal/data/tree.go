@@ -12,8 +12,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // For documentation purposes only:
@@ -142,8 +142,8 @@ func (t *treeIterator) assertToken(token json.Token) error {
 	return nil
 }
 
-func LoadTree(ctx context.Context, loader restic.BlobLoader, content restic.ID) (TreeNodeIterator, error) {
-	rd, err := loader.LoadBlob(ctx, restic.BlobHandle{Type: restic.TreeBlob, ID: content}, nil)
+func LoadTree(ctx context.Context, loader vaultic.BlobLoader, content vaultic.ID) (TreeNodeIterator, error) {
+	rd, err := loader.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: content}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -203,10 +203,10 @@ func (t *TreeFinder) Close() {
 
 type TreeWriter struct {
 	builder *TreeJSONBuilder
-	saver   restic.BlobSaver
+	saver   vaultic.BlobSaver
 }
 
-func NewTreeWriter(saver restic.BlobSaver) *TreeWriter {
+func NewTreeWriter(saver vaultic.BlobSaver) *TreeWriter {
 	builder := NewTreeJSONBuilder()
 	return &TreeWriter{builder: builder, saver: saver}
 }
@@ -215,12 +215,12 @@ func (t *TreeWriter) AddNode(node *Node) error {
 	return t.builder.AddNode(node)
 }
 
-func (t *TreeWriter) Finalize(ctx context.Context) (restic.ID, error) {
+func (t *TreeWriter) Finalize(ctx context.Context) (vaultic.ID, error) {
 	buf, err := t.builder.Finalize()
 	if err != nil {
-		return restic.ID{}, err
+		return vaultic.ID{}, err
 	}
-	id, _, _, err := t.saver.SaveBlob(ctx, restic.TreeBlob, buf, restic.ID{}, false)
+	id, _, _, err := t.saver.SaveBlob(ctx, vaultic.TreeBlob, buf, vaultic.ID{}, false)
 	return id, err
 }
 
@@ -229,15 +229,15 @@ func (t *TreeWriter) Count() int {
 	return t.builder.Count()
 }
 
-func SaveTree(ctx context.Context, saver restic.BlobSaver, nodes TreeNodeIterator) (restic.ID, error) {
+func SaveTree(ctx context.Context, saver vaultic.BlobSaver, nodes TreeNodeIterator) (vaultic.ID, error) {
 	treeWriter := NewTreeWriter(saver)
 	for item := range nodes {
 		if item.Error != nil {
-			return restic.ID{}, item.Error
+			return vaultic.ID{}, item.Error
 		}
 		err := treeWriter.AddNode(item.Node)
 		if err != nil {
-			return restic.ID{}, err
+			return vaultic.ID{}, err
 		}
 	}
 	return treeWriter.Finalize(ctx)
@@ -288,7 +288,7 @@ func (builder *TreeJSONBuilder) Count() int {
 	return builder.countNodes
 }
 
-func FindTreeDirectory(ctx context.Context, repo restic.BlobLoader, id *restic.ID, dir string) (*restic.ID, error) {
+func FindTreeDirectory(ctx context.Context, repo vaultic.BlobLoader, id *vaultic.ID, dir string) (*vaultic.ID, error) {
 	if id == nil {
 		return nil, errors.New("tree id is null")
 	}
@@ -313,7 +313,7 @@ func FindTreeDirectory(ctx context.Context, repo restic.BlobLoader, id *restic.I
 		}
 		if node == nil {
 			if runtime.GOOS == "windows" && strings.Contains(dir, "\\") {
-				return nil, fmt.Errorf("path %s: not found; subfolder syntax currently requires forward slashes; check the output of `restic ls` for valid paths", subfolder)
+				return nil, fmt.Errorf("path %s: not found; subfolder syntax currently requires forward slashes; check the output of `vaultic ls` for valid paths", subfolder)
 			}
 			return nil, fmt.Errorf("path %s: not found", subfolder)
 		}

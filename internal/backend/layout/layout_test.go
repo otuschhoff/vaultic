@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestDefaultLayout(t *testing.T) {

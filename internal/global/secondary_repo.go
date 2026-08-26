@@ -4,8 +4,8 @@ import (
 	"context"
 	"os"
 
-	"github.com/restic/restic/internal/errors"
 	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 type SecondaryRepoOptions struct {
@@ -26,11 +26,11 @@ type SecondaryRepoOptions struct {
 }
 
 func (opts *SecondaryRepoOptions) AddFlags(f *pflag.FlagSet, repoPrefix string, repoUsage string) {
-	f.StringVarP(&opts.LegacyRepo, "repo2", "", "", repoPrefix+" `repository` "+repoUsage+" (default: $RESTIC_REPOSITORY2)")
-	f.StringVarP(&opts.LegacyRepositoryFile, "repository-file2", "", "", "`file` from which to read the "+repoPrefix+" repository location "+repoUsage+" (default: $RESTIC_REPOSITORY_FILE2)")
-	f.StringVarP(&opts.LegacyPasswordFile, "password-file2", "", "", "`file` to read the "+repoPrefix+" repository password from (default: $RESTIC_PASSWORD_FILE2)")
-	f.StringVarP(&opts.LegacyKeyHint, "key-hint2", "", "", "key ID of key to try decrypting the "+repoPrefix+" repository first (default: $RESTIC_KEY_HINT2)")
-	f.StringVarP(&opts.LegacyPasswordCommand, "password-command2", "", "", "shell `command` to obtain the "+repoPrefix+" repository password from (default: $RESTIC_PASSWORD_COMMAND2)")
+	f.StringVarP(&opts.LegacyRepo, "repo2", "", "", repoPrefix+" `repository` "+repoUsage+" (default: $VAULTIC_REPOSITORY2)")
+	f.StringVarP(&opts.LegacyRepositoryFile, "repository-file2", "", "", "`file` from which to read the "+repoPrefix+" repository location "+repoUsage+" (default: $VAULTIC_REPOSITORY_FILE2)")
+	f.StringVarP(&opts.LegacyPasswordFile, "password-file2", "", "", "`file` to read the "+repoPrefix+" repository password from (default: $VAULTIC_PASSWORD_FILE2)")
+	f.StringVarP(&opts.LegacyKeyHint, "key-hint2", "", "", "key ID of key to try decrypting the "+repoPrefix+" repository first (default: $VAULTIC_KEY_HINT2)")
+	f.StringVarP(&opts.LegacyPasswordCommand, "password-command2", "", "", "shell `command` to obtain the "+repoPrefix+" repository password from (default: $VAULTIC_PASSWORD_COMMAND2)")
 
 	// hide repo2 options
 	_ = f.MarkDeprecated("repo2", "use --repo or --from-repo instead")
@@ -39,24 +39,24 @@ func (opts *SecondaryRepoOptions) AddFlags(f *pflag.FlagSet, repoPrefix string, 
 	_ = f.MarkHidden("key-hint2")
 	_ = f.MarkHidden("password-command2")
 
-	opts.LegacyRepo = os.Getenv("RESTIC_REPOSITORY2")
-	opts.LegacyRepositoryFile = os.Getenv("RESTIC_REPOSITORY_FILE2")
-	opts.LegacyPasswordFile = os.Getenv("RESTIC_PASSWORD_FILE2")
-	opts.LegacyKeyHint = os.Getenv("RESTIC_KEY_HINT2")
-	opts.LegacyPasswordCommand = os.Getenv("RESTIC_PASSWORD_COMMAND2")
+	opts.LegacyRepo = os.Getenv("VAULTIC_REPOSITORY2")
+	opts.LegacyRepositoryFile = os.Getenv("VAULTIC_REPOSITORY_FILE2")
+	opts.LegacyPasswordFile = os.Getenv("VAULTIC_PASSWORD_FILE2")
+	opts.LegacyKeyHint = os.Getenv("VAULTIC_KEY_HINT2")
+	opts.LegacyPasswordCommand = os.Getenv("VAULTIC_PASSWORD_COMMAND2")
 
-	f.StringVarP(&opts.Repo, "from-repo", "", "", "source `repository` "+repoUsage+" (default: $RESTIC_FROM_REPOSITORY)")
-	f.StringVarP(&opts.RepositoryFile, "from-repository-file", "", "", "`file` from which to read the source repository location "+repoUsage+" (default: $RESTIC_FROM_REPOSITORY_FILE)")
-	f.StringVarP(&opts.PasswordFile, "from-password-file", "", "", "`file` to read the source repository password from (default: $RESTIC_FROM_PASSWORD_FILE)")
-	f.StringVarP(&opts.KeyHint, "from-key-hint", "", "", "key ID of key to try decrypting the source repository first (default: $RESTIC_FROM_KEY_HINT)")
-	f.StringVarP(&opts.PasswordCommand, "from-password-command", "", "", "shell `command` to obtain the source repository password from (default: $RESTIC_FROM_PASSWORD_COMMAND)")
+	f.StringVarP(&opts.Repo, "from-repo", "", "", "source `repository` "+repoUsage+" (default: $VAULTIC_FROM_REPOSITORY)")
+	f.StringVarP(&opts.RepositoryFile, "from-repository-file", "", "", "`file` from which to read the source repository location "+repoUsage+" (default: $VAULTIC_FROM_REPOSITORY_FILE)")
+	f.StringVarP(&opts.PasswordFile, "from-password-file", "", "", "`file` to read the source repository password from (default: $VAULTIC_FROM_PASSWORD_FILE)")
+	f.StringVarP(&opts.KeyHint, "from-key-hint", "", "", "key ID of key to try decrypting the source repository first (default: $VAULTIC_FROM_KEY_HINT)")
+	f.StringVarP(&opts.PasswordCommand, "from-password-command", "", "", "shell `command` to obtain the source repository password from (default: $VAULTIC_FROM_PASSWORD_COMMAND)")
 	f.BoolVar(&opts.InsecureNoPassword, "from-insecure-no-password", false, "use an empty password for the source repository (insecure)")
 
-	opts.Repo = os.Getenv("RESTIC_FROM_REPOSITORY")
-	opts.RepositoryFile = os.Getenv("RESTIC_FROM_REPOSITORY_FILE")
-	opts.PasswordFile = os.Getenv("RESTIC_FROM_PASSWORD_FILE")
-	opts.KeyHint = os.Getenv("RESTIC_FROM_KEY_HINT")
-	opts.PasswordCommand = os.Getenv("RESTIC_FROM_PASSWORD_COMMAND")
+	opts.Repo = os.Getenv("VAULTIC_FROM_REPOSITORY")
+	opts.RepositoryFile = os.Getenv("VAULTIC_FROM_REPOSITORY_FILE")
+	opts.PasswordFile = os.Getenv("VAULTIC_FROM_PASSWORD_FILE")
+	opts.KeyHint = os.Getenv("VAULTIC_FROM_KEY_HINT")
+	opts.PasswordCommand = os.Getenv("VAULTIC_FROM_PASSWORD_COMMAND")
 }
 
 func (opts *SecondaryRepoOptions) FillGlobalOpts(ctx context.Context, gopts Options, repoPrefix string) (Options, bool, error) {
@@ -89,7 +89,7 @@ func (opts *SecondaryRepoOptions) FillGlobalOpts(ctx context.Context, gopts Opti
 		dstGopts.KeyHint = opts.KeyHint
 		dstGopts.InsecureNoPassword = opts.InsecureNoPassword
 
-		pwdEnv = "RESTIC_FROM_PASSWORD"
+		pwdEnv = "VAULTIC_FROM_PASSWORD"
 		repoPrefix = "source"
 	} else {
 		if opts.LegacyRepo != "" && opts.LegacyRepositoryFile != "" {
@@ -104,7 +104,7 @@ func (opts *SecondaryRepoOptions) FillGlobalOpts(ctx context.Context, gopts Opti
 		// keep existing behavior for legacy options
 		dstGopts.InsecureNoPassword = false
 
-		pwdEnv = "RESTIC_PASSWORD2"
+		pwdEnv = "VAULTIC_PASSWORD2"
 	}
 
 	if opts.Password != "" {

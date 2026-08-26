@@ -3,7 +3,7 @@ package restorer
 import (
 	"os"
 
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/debug"
 	"golang.org/x/sys/windows"
 )
 

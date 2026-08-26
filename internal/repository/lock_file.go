@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // unlockCancelDelay bounds the duration how long lock cleanup operations will wait
@@ -37,8 +37,8 @@ type Lock struct {
 // lockHandle is a reference to a lock file in the repository.
 type lockHandle struct {
 	Lock
-	repo   restic.Unpacked[restic.FileType]
-	lockID *restic.ID
+	repo   vaultic.Unpacked[vaultic.FileType]
+	lockID *vaultic.ID
 }
 
 // alreadyLockedError is returned when newLock is unable to acquire the desired lock.
@@ -99,7 +99,7 @@ func TestSetLockTimeout(t testing.TB, d time.Duration) {
 // exclusive lock is already held by another process, it returns an error
 // that satisfies IsAlreadyLocked. If the new lock is exclusive, then other
 // non-exclusive locks also result in an IsAlreadyLocked error.
-func newLock(ctx context.Context, repo restic.Unpacked[restic.FileType], exclusive bool) (*lockHandle, error) {
+func newLock(ctx context.Context, repo vaultic.Unpacked[vaultic.FileType], exclusive bool) (*lockHandle, error) {
 	lock := &lockHandle{
 		Lock: Lock{
 			Time:      time.Now(),
@@ -146,7 +146,7 @@ func (l *lockHandle) fillUserInfo() error {
 	}
 	l.Username = usr.Username
 
-	l.UID, l.GID, err = restic.UidGidInt(usr)
+	l.UID, l.GID, err = vaultic.UidGidInt(usr)
 	return err
 }
 
@@ -158,7 +158,7 @@ func (l *lockHandle) fillUserInfo() error {
 // exclusive lock is found.
 func (l *lockHandle) checkForOtherLocks(ctx context.Context) error {
 	var err error
-	checkedIDs := restic.NewIDSet()
+	checkedIDs := vaultic.NewIDSet()
 	if l.lockID != nil {
 		checkedIDs.Insert(*l.lockID)
 	}
@@ -175,7 +175,7 @@ func (l *lockHandle) checkForOtherLocks(ctx context.Context) error {
 
 		// Store updates in new IDSet to prevent data races with Has() check in forAllLocks
 		newCheckedIDs := checkedIDs.Clone()
-		err = forAllLocks(ctx, l.repo, checkedIDs, func(id restic.ID, lock *lockHandle, err error) error {
+		err = forAllLocks(ctx, l.repo, checkedIDs, func(id vaultic.ID, lock *lockHandle, err error) error {
 			if err != nil {
 				// if we cannot load a lock then it is unclear whether it can be ignored
 				// it could either be invalid or just unreadable due to network/permission problems
@@ -201,7 +201,7 @@ func (l *lockHandle) checkForOtherLocks(ctx context.Context) error {
 			return err
 		}
 	}
-	if errors.Is(err, restic.ErrInvalidData) {
+	if errors.Is(err, vaultic.ErrInvalidData) {
 		return &invalidLockError{err}
 	}
 	return err
@@ -220,10 +220,10 @@ func cancelableDelay(ctx context.Context, delay time.Duration) error {
 }
 
 // createLock acquires the lock by creating a file in the repository.
-func (l *lockHandle) createLock(ctx context.Context) (restic.ID, error) {
-	id, err := restic.SaveJSONUnpacked(ctx, l.repo, restic.LockFile, &l.Lock)
+func (l *lockHandle) createLock(ctx context.Context) (vaultic.ID, error) {
+	id, err := vaultic.SaveJSONUnpacked(ctx, l.repo, vaultic.LockFile, &l.Lock)
 	if err != nil {
-		return restic.ID{}, err
+		return vaultic.ID{}, err
 	}
 
 	return id, nil
@@ -238,7 +238,7 @@ func (l *lockHandle) unlock(ctx context.Context) error {
 	ctx, cancel := delayedCancelContext(ctx, unlockCancelDelay)
 	defer cancel()
 
-	return l.repo.RemoveUnpacked(ctx, restic.LockFile, *l.lockID)
+	return l.repo.RemoveUnpacked(ctx, vaultic.LockFile, *l.lockID)
 }
 
 var staleLockTimeout = 30 * time.Minute
@@ -308,17 +308,17 @@ func (l *lockHandle) refresh(ctx context.Context) error {
 	return l.adoptReplacementLock(ctx, id)
 }
 
-func (l *lockHandle) createReplacementLock(ctx context.Context) (restic.ID, error) {
+func (l *lockHandle) createReplacementLock(ctx context.Context) (vaultic.ID, error) {
 	l.Time = time.Now()
 	return l.createLock(ctx)
 }
 
-func (l *lockHandle) adoptReplacementLock(ctx context.Context, id restic.ID) error {
+func (l *lockHandle) adoptReplacementLock(ctx context.Context, id vaultic.ID) error {
 	debug.Log("new lock ID %v", id)
 	oldID := *l.lockID
 	l.lockID = &id
 
-	return l.repo.RemoveUnpacked(ctx, restic.LockFile, oldID)
+	return l.repo.RemoveUnpacked(ctx, vaultic.LockFile, oldID)
 }
 
 // refreshStaleLock is an extended variant of refresh that can also refresh stale lock files.
@@ -348,13 +348,13 @@ func (l *lockHandle) refreshStaleLock(ctx context.Context) error {
 
 	if err != nil {
 		// cleanup replacement lock
-		_ = l.repo.RemoveUnpacked(ctx, restic.LockFile, id)
+		_ = l.repo.RemoveUnpacked(ctx, vaultic.LockFile, id)
 		return err
 	}
 
 	if !exists {
 		// cleanup replacement lock
-		_ = l.repo.RemoveUnpacked(ctx, restic.LockFile, id)
+		_ = l.repo.RemoveUnpacked(ctx, vaultic.LockFile, id)
 		return errRemovedLock
 	}
 
@@ -364,7 +364,7 @@ func (l *lockHandle) refreshStaleLock(ctx context.Context) error {
 func (l *lockHandle) checkExistence(ctx context.Context) (bool, error) {
 	exists := false
 
-	err := l.repo.List(ctx, restic.LockFile, func(id restic.ID, _ int64) error {
+	err := l.repo.List(ctx, vaultic.LockFile, func(id vaultic.ID, _ int64) error {
 		if id.Equal(*l.lockID) {
 			exists = true
 		}
@@ -384,9 +384,9 @@ func (l *lockHandle) String() string {
 }
 
 // LoadLock loads and unserializes a lock from a repository.
-func LoadLock(ctx context.Context, repo restic.LoaderUnpacked, id restic.ID) (Lock, error) {
+func LoadLock(ctx context.Context, repo vaultic.LoaderUnpacked, id vaultic.ID) (Lock, error) {
 	var lock Lock
-	err := restic.LoadJSONUnpacked(ctx, repo, restic.LockFile, id, &lock)
+	err := vaultic.LoadJSONUnpacked(ctx, repo, vaultic.LockFile, id, &lock)
 	return lock, err
 }
 
@@ -394,11 +394,11 @@ func LoadLock(ctx context.Context, repo restic.LoaderUnpacked, id restic.ID) (Lo
 // It is guaranteed that the function is not run concurrently. If the
 // callback returns an error, this function is cancelled and also returns that error.
 // If a lock ID is passed via excludeID, it will be ignored.
-func forAllLocks(ctx context.Context, repo restic.ListerLoaderUnpacked, excludeIDs restic.IDSet, fn func(restic.ID, *lockHandle, error) error) error {
+func forAllLocks(ctx context.Context, repo vaultic.ListerLoaderUnpacked, excludeIDs vaultic.IDSet, fn func(vaultic.ID, *lockHandle, error) error) error {
 	var m sync.Mutex
 
 	// For locks decoding is nearly for free, thus just assume were only limited by IO
-	return restic.ParallelList(ctx, repo, restic.LockFile, repo.Connections(), func(ctx context.Context, id restic.ID, size int64) error {
+	return vaultic.ParallelList(ctx, repo, vaultic.LockFile, repo.Connections(), func(ctx context.Context, id vaultic.ID, size int64) error {
 		if excludeIDs.Has(id) {
 			return nil
 		}

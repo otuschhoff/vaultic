@@ -4,15 +4,15 @@ import (
 	"sort"
 	"time"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/ui"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // jsonProgress reports progress for the `backup` command in JSON.
 type jsonProgress struct {
-	restic.Printer
+	vaultic.Printer
 
 	term ui.Terminal
 	v    uint
@@ -163,7 +163,7 @@ func (b *jsonProgress) ReportTotal(start time.Time, s archiver.ScanStats) {
 }
 
 // Finish prints the finishing messages.
-func (b *jsonProgress) Finish(snapshotID restic.ID, summary *archiver.Summary, dryRun bool) {
+func (b *jsonProgress) Finish(snapshotID vaultic.ID, summary *archiver.Summary, dryRun bool) {
 	id := ""
 	// empty if snapshot creation was skipped
 	if !snapshotID.IsNull() {

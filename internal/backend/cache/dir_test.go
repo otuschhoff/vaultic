@@ -4,21 +4,21 @@ import (
 	"os"
 	"testing"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
-// DefaultDir should honor RESTIC_CACHE_DIR on all platforms.
+// DefaultDir should honor VAULTIC_CACHE_DIR on all platforms.
 func TestCacheDirEnv(t *testing.T) {
-	cachedir := os.Getenv("RESTIC_CACHE_DIR")
+	cachedir := os.Getenv("VAULTIC_CACHE_DIR")
 
 	if cachedir == "" {
 		cachedir = "/doesnt/exist"
-		err := os.Setenv("RESTIC_CACHE_DIR", cachedir)
+		err := os.Setenv("VAULTIC_CACHE_DIR", cachedir)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer func() {
-			err := os.Unsetenv("RESTIC_CACHE_DIR")
+			err := os.Unsetenv("VAULTIC_CACHE_DIR")
 			if err != nil {
 				t.Fatal(err)
 			}

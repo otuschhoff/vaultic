@@ -7,13 +7,13 @@ import (
 	"path"
 	"testing"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestBackendRESTWithUnixSocket(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/rest.TestBackendREST")
+			rtest.SkipDisallowed(t, "vaultic/backend/rest.TestBackendREST")
 		}
 	}()
 

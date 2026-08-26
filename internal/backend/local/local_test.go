@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/restic/restic/internal/backend/local"
-	"github.com/restic/restic/internal/backend/test"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend/local"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func newTestSuite(t testing.TB) *test.Suite[local.Config] {

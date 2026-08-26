@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 func (d *Dumper) dumpTar(ctx context.Context, ch <-chan *data.Node) (err error) {
@@ -39,7 +39,7 @@ const (
 	cISVTX = 0o1000 // Save text (sticky bit)
 )
 
-// in a 32-bit build of restic:
+// in a 32-bit build of vaultic:
 // substitute a uid or gid of -1 (which was converted to 2^32 - 1) with 0
 func tarIdentifier(id uint32) int {
 	if int(id) == -1 {

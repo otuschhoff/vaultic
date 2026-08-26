@@ -4,19 +4,19 @@ import (
 	"context"
 	"sync"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
 )
 
 type repackBlobSet interface {
-	Has(bh restic.BlobHandle) bool
-	Delete(bh restic.BlobHandle)
+	Has(bh vaultic.BlobHandle) bool
+	Delete(bh vaultic.BlobHandle)
 	Len() int
 }
 
@@ -32,11 +32,11 @@ type LogFunc func(msg string, args ...any)
 func CopyBlobs(
 	ctx context.Context,
 	repo *Repository,
-	dstRepo restic.Repository,
-	dstUploader restic.BlobSaverWithAsync,
-	packs restic.IDSet,
+	dstRepo vaultic.Repository,
+	dstUploader vaultic.BlobSaverWithAsync,
+	packs vaultic.IDSet,
 	keepBlobs repackBlobSet,
-	p restic.Counter,
+	p vaultic.Counter,
 	logf LogFunc,
 ) error {
 	debug.Log("repacking %d packs while keeping %d blobs", len(packs), keepBlobs.Len())
@@ -57,11 +57,11 @@ func CopyBlobs(
 func repack(
 	ctx context.Context,
 	repo *Repository,
-	dstRepo restic.Repository,
-	uploader restic.BlobSaverWithAsync,
-	packs restic.IDSet,
+	dstRepo vaultic.Repository,
+	uploader vaultic.BlobSaverWithAsync,
+	packs vaultic.IDSet,
 	keepBlobs repackBlobSet,
-	p restic.Counter,
+	p vaultic.Counter,
 	logf LogFunc,
 ) error {
 
@@ -89,7 +89,7 @@ func repack(
 			keepMutex.Lock()
 			// filter out unnecessary blobs
 			for _, entry := range pbs.Blobs {
-				h := restic.BlobHandle{ID: entry.ID, Type: entry.Type}
+				h := vaultic.BlobHandle{ID: entry.ID, Type: entry.Type}
 				if keepBlobs.Has(h) {
 					packBlobs = append(packBlobs, entry)
 				}
@@ -107,7 +107,7 @@ func repack(
 
 	worker := func() error {
 		for t := range downloadQueue {
-			err := repo.loadBlobsFromPack(wgCtx, t.PackID, t.Blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+			err := repo.loadBlobsFromPack(wgCtx, t.PackID, t.Blobs, func(blob vaultic.BlobHandle, buf []byte, err error) error {
 				if err != nil {
 					// a required blob couldn't be retrieved
 					return err

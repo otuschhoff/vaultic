@@ -3,9 +3,9 @@ package location_test
 import (
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 type testConfig struct {
@@ -39,7 +39,7 @@ func TestParseFallback(t *testing.T) {
 		"/dir1:foobar/dir2",
 		`\dir1\foobar\dir2`,
 		`c:\dir1\foobar\dir2`,
-		`C:\Users\appveyor\AppData\Local\Temp\1\restic-test-879453535\repo`,
+		`C:\Users\appveyor\AppData\Local\Temp\1\vaultic-test-879453535\repo`,
 		`c:/dir1/foobar/dir2`,
 	}
 

@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // A ProgressPrinter can print various progress messages.
@@ -17,11 +17,11 @@ type ProgressPrinter interface {
 	ScannerError(item string, err error) error
 	CompleteItem(messageType string, item string, s archiver.ItemStats, d time.Duration)
 	ReportTotal(start time.Time, s archiver.ScanStats)
-	Finish(snapshotID restic.ID, summary *archiver.Summary, dryRun bool)
+	Finish(snapshotID vaultic.ID, summary *archiver.Summary, dryRun bool)
 	Reset()
 	ExcludedItem(path string)
 
-	restic.Printer
+	vaultic.Printer
 }
 
 type Counter struct {
@@ -158,7 +158,7 @@ func (p *Progress) ReportTotal(item string, s archiver.ScanStats) {
 }
 
 // Finish prints the finishing messages.
-func (p *Progress) Finish(snapshotID restic.ID, summary *archiver.Summary, dryrun bool) {
+func (p *Progress) Finish(snapshotID vaultic.ID, summary *archiver.Summary, dryrun bool) {
 	// wait for the status update goroutine to shut down
 	p.Updater.Done()
 	p.printer.Finish(snapshotID, summary, dryrun)

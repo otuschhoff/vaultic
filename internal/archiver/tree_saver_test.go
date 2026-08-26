@@ -7,10 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -19,14 +19,14 @@ type mockSaver struct {
 	mutex sync.Mutex
 }
 
-func (m *mockSaver) SaveBlobAsync(_ context.Context, _ restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool, cb func(newID restic.ID, known bool, sizeInRepo int, err error)) {
+func (m *mockSaver) SaveBlobAsync(_ context.Context, _ vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, sizeInRepo int, err error)) {
 	// Fake async operation
 	go func() {
 		m.mutex.Lock()
 		m.saved[string(buf)]++
 		m.mutex.Unlock()
 
-		cb(restic.Hash(buf), false, len(buf), nil)
+		cb(vaultic.Hash(buf), false, len(buf), nil)
 	}()
 }
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // Test saving a blob and loading it again, with varying buffer sizes.
@@ -17,19 +17,19 @@ func FuzzSaveLoadBlob(f *testing.F) {
 			t.Skip()
 		}
 
-		id := restic.Hash(blob)
+		id := vaultic.Hash(blob)
 		repo, _, _ := TestRepositoryWithVersion(t, 2)
 
-		rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-			_, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, blob, id, false)
+		rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+			_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, blob, id, false)
 			return err
 		}))
 
-		buf, err := repo.LoadBlob(context.TODO(), restic.BlobHandle{Type: restic.DataBlob, ID: id}, make([]byte, buflen))
+		buf, err := repo.LoadBlob(context.TODO(), vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}, make([]byte, buflen))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if restic.Hash(buf) != id {
+		if vaultic.Hash(buf) != id {
 			t.Fatal("mismatch")
 		}
 	})

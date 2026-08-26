@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
 
 	"github.com/Backblaze/blazer/b2"
 	"github.com/Backblaze/blazer/base"
@@ -319,7 +319,7 @@ func (be *b2Backend) List(ctx context.Context, t backend.FileType, fn func(backe
 	return iter.Err()
 }
 
-// Delete removes all restic keys in the bucket. It will not remove the bucket itself.
+// Delete removes all vaultic keys in the bucket. It will not remove the bucket itself.
 func (be *b2Backend) Delete(ctx context.Context) error {
 	return util.DefaultDelete(ctx, be)
 }

@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/test"
 
-	"github.com/restic/restic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend"
 )
 
 func seedRand(t testing.TB) *rand.Rand {
@@ -146,7 +146,7 @@ func (s *Suite[C]) TestLoad(t *testing.T) {
 	length := random.Intn(1<<20) + 2000
 
 	data := test.Random(23, length)
-	id := restic.Hash(data)
+	id := vaultic.Hash(data)
 
 	handle := backend.Handle{Type: backend.PackFile, Name: id.String()}
 	err = b.Save(context.TODO(), handle, backend.NewByteReader(data, b.Hasher()))
@@ -273,14 +273,14 @@ func (s *Suite[C]) TestList(t *testing.T) {
 		t.Fatalf("backend not empty at start of test - contains: %v", found)
 	}
 
-	list1 := make(map[restic.ID]int64)
+	list1 := make(map[vaultic.ID]int64)
 	var m sync.Mutex
 
 	wg, ctx := errgroup.WithContext(context.TODO())
 	for range numTestFiles {
 		data := test.Random(random.Int(), random.Intn(100)+55)
 		wg.Go(func() error {
-			id := restic.Hash(data)
+			id := vaultic.Hash(data)
 			h := backend.Handle{Type: backend.PackFile, Name: id.String()}
 			err := b.Save(ctx, h, backend.NewByteReader(data, b.Hasher()))
 
@@ -298,10 +298,10 @@ func (s *Suite[C]) TestList(t *testing.T) {
 
 	t.Logf("wrote %v files", len(list1))
 
-	list2 := make(map[restic.ID]int64)
+	list2 := make(map[vaultic.ID]int64)
 
 	err = b.List(context.TODO(), backend.PackFile, func(fi backend.FileInfo) error {
-		id, err := restic.ParseID(fi.Name)
+		id, err := vaultic.ParseID(fi.Name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -356,7 +356,7 @@ func (s *Suite[C]) TestListCancel(t *testing.T) {
 
 	for i := range numTestFiles {
 		data := fmt.Appendf(nil, "random test blob %v", i)
-		id := restic.Hash(data)
+		id := vaultic.Hash(data)
 		h := backend.Handle{Type: backend.PackFile, Name: id.String()}
 		err := b.Save(context.TODO(), h, backend.NewByteReader(data, b.Hasher()))
 		if err != nil {
@@ -508,7 +508,7 @@ func (s *Suite[C]) TestSave(t *testing.T) {
 
 	b := s.open(t)
 	defer s.close(t, b)
-	var id restic.ID
+	var id vaultic.ID
 
 	saveTests := 10
 	if s.MinimalData {
@@ -555,7 +555,7 @@ func (s *Suite[C]) TestSave(t *testing.T) {
 	}
 
 	// test saving from a tempfile
-	tmpfile, err := os.CreateTemp("", "restic-backend-save-test-")
+	tmpfile, err := os.CreateTemp("", "vaultic-backend-save-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func (s *Suite[C]) TestSaveError(t *testing.T) {
 
 	length := random.Intn(1<<23) + 200000
 	data := test.Random(24, length)
-	var id restic.ID
+	var id vaultic.ID
 	copy(id[:], data)
 
 	// test that incomplete uploads fail
@@ -670,7 +670,7 @@ func (s *Suite[C]) TestSaveWrongHash(t *testing.T) {
 
 	length := random.Intn(1<<23) + 200000
 	data := test.Random(25, length)
-	var id restic.ID
+	var id vaultic.ID
 	copy(id[:], data)
 
 	// test that upload with hash mismatch fails
@@ -701,7 +701,7 @@ var testStrings = []struct {
 }
 
 func store(t testing.TB, b backend.Backend, tpe backend.FileType, data []byte) backend.Handle {
-	id := restic.Hash(data)
+	id := vaultic.Hash(data)
 	h := backend.Handle{Name: id.String(), Type: tpe}
 	err := b.Save(context.TODO(), h, backend.NewByteReader(data, b.Hasher()))
 	test.OK(t, err)
@@ -765,12 +765,12 @@ func (s *Suite[C]) delayedRemove(t testing.TB, be backend.Backend, handles ...ba
 	return nil
 }
 
-func delayedList(t testing.TB, b backend.Backend, tpe backend.FileType, max int, maxwait time.Duration) restic.IDs {
-	list := restic.NewIDSet()
+func delayedList(t testing.TB, b backend.Backend, tpe backend.FileType, max int, maxwait time.Duration) vaultic.IDs {
+	list := vaultic.NewIDSet()
 	start := time.Now()
 	for range max {
 		err := b.List(context.TODO(), tpe, func(fi backend.FileInfo) error {
-			id := restic.TestParseID(fi.Name)
+			id := vaultic.TestParseID(fi.Name)
 			list.Insert(id)
 			return nil
 		})
@@ -804,7 +804,7 @@ func (s *Suite[C]) TestBackend(t *testing.T) {
 
 			// detect non-existing files
 			for _, ts := range testStrings {
-				id, err := restic.ParseID(ts.id)
+				id, err := vaultic.ParseID(ts.id)
 				test.OK(t, err)
 
 				// test if blob is already in repository
@@ -871,10 +871,10 @@ func (s *Suite[C]) TestBackend(t *testing.T) {
 			test.OK(t, err)
 
 			// list items
-			IDs := restic.IDs{}
+			IDs := vaultic.IDs{}
 
 			for _, ts := range testStrings {
-				id, err := restic.ParseID(ts.id)
+				id, err := vaultic.ParseID(ts.id)
 				test.OK(t, err)
 				IDs = append(IDs, id)
 			}
@@ -893,7 +893,7 @@ func (s *Suite[C]) TestBackend(t *testing.T) {
 
 			var handles []backend.Handle
 			for _, ts := range testStrings {
-				id, err := restic.ParseID(ts.id)
+				id, err := vaultic.ParseID(ts.id)
 				test.OK(t, err)
 
 				h := backend.Handle{Type: tpe, Name: id.String()}

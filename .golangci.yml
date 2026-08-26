@@ -35,20 +35,20 @@ linters:
             - "!**/internal/backend/test/**"
             - "!**/*_test.go"
           deny:
-            - pkg: "github.com/restic/restic/internal/restic"
+            - pkg: "github.com/vaultic/vaultic/internal/restic"
               desc: "internal/restic should not be imported to keep the architectural layers intact"
-            - pkg: "github.com/restic/restic/internal/repository"
+            - pkg: "github.com/vaultic/vaultic/internal/repository"
               desc: "internal/repository should not be imported to keep the architectural layers intact"
         repository-internals:
           files:
             - "**"
             - "!**/internal/repository/**"
           deny:
-            - pkg: "github.com/restic/restic/internal/repository/"
+            - pkg: "github.com/vaultic/vaultic/internal/repository/"
               desc: "packages below internal/repository should not be imported to not depend on repository internals"
     importas:
       alias:
-        - pkg: github.com/restic/restic/internal/test
+        - pkg: github.com/vaultic/vaultic/internal/test
           alias: rtest
     staticcheck:
       checks:

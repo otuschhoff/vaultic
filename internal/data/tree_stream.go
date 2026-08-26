@@ -5,26 +5,26 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
 type trackedTreeItem struct {
-	restic.ID
-	Subtrees restic.IDs
+	vaultic.ID
+	Subtrees vaultic.IDs
 	rootIdx  int
 }
 
 type trackedID struct {
-	restic.ID
+	vaultic.ID
 	rootIdx int
 }
 
 // subtreesCollector wraps a TreeNodeIterator and returns a new iterator that collects the subtrees.
-func subtreesCollector(tree TreeNodeIterator) (TreeNodeIterator, func() restic.IDs) {
-	subtrees := restic.IDs{}
+func subtreesCollector(tree TreeNodeIterator) (TreeNodeIterator, func() vaultic.IDs) {
+	subtrees := vaultic.IDs{}
 	isComplete := false
 
 	return func(yield func(NodeOrError) bool) {
@@ -38,7 +38,7 @@ func subtreesCollector(tree TreeNodeIterator) (TreeNodeIterator, func() restic.I
 				}
 			}
 			isComplete = true
-		}, func() restic.IDs {
+		}, func() vaultic.IDs {
 			if !isComplete {
 				panic("tree was not read completely")
 			}
@@ -49,9 +49,9 @@ func subtreesCollector(tree TreeNodeIterator) (TreeNodeIterator, func() restic.I
 // loadTreeWorker loads trees from repo and sends them to out.
 func loadTreeWorker(
 	ctx context.Context,
-	repo restic.Loader,
+	repo vaultic.Loader,
 	in <-chan trackedID,
-	process func(id restic.ID, error error, nodes TreeNodeIterator) error,
+	process func(id vaultic.ID, error error, nodes TreeNodeIterator) error,
 	out chan<- trackedTreeItem,
 ) error {
 
@@ -63,7 +63,7 @@ func loadTreeWorker(
 		debug.Log("load tree %v (%v) returned err: %v", tree, treeID, err)
 
 		//  wrap iterator to collect subtrees while `process` iterates over `tree`
-		var collectSubtrees func() restic.IDs
+		var collectSubtrees func() vaultic.IDs
 		if tree != nil {
 			tree, collectSubtrees = subtreesCollector(tree)
 		}
@@ -74,7 +74,7 @@ func loadTreeWorker(
 		}
 
 		// assume that the number of subtrees is within reasonable limits, such that the memory usage is not a problem
-		var subtrees restic.IDs
+		var subtrees vaultic.IDs
 		if collectSubtrees != nil {
 			subtrees = collectSubtrees()
 		}
@@ -91,8 +91,8 @@ func loadTreeWorker(
 }
 
 // filterTree receives the result of a tree load and queues new trees for loading and processing.
-func filterTrees(ctx context.Context, repo restic.Loader, trees restic.IDs, loaderChan chan<- trackedID, hugeTreeLoaderChan chan<- trackedID,
-	in <-chan trackedTreeItem, skip func(tree restic.ID) bool, p restic.Counter) {
+func filterTrees(ctx context.Context, repo vaultic.Loader, trees vaultic.IDs, loaderChan chan<- trackedID, hugeTreeLoaderChan chan<- trackedID,
+	in <-chan trackedTreeItem, skip func(tree vaultic.ID) bool, p vaultic.Counter) {
 
 	var (
 		inCh                    = in
@@ -124,7 +124,7 @@ func filterTrees(ctx context.Context, repo restic.Loader, trees restic.IDs, load
 				continue
 			}
 
-			treeSize, found := repo.LookupBlobSize(restic.BlobHandle{Type: restic.TreeBlob, ID: nextTreeID.ID})
+			treeSize, found := repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: nextTreeID.ID})
 			if found && treeSize > 50*1024*1024 {
 				loadCh = hugeTreeLoaderChan
 			} else {
@@ -185,11 +185,11 @@ func filterTrees(ctx context.Context, repo restic.Loader, trees restic.IDs, load
 // abort and return the error.
 func StreamTrees(
 	ctx context.Context,
-	repo restic.Loader,
-	trees restic.IDs,
-	p restic.Counter,
-	skip func(tree restic.ID) bool,
-	process func(id restic.ID, error error, nodes TreeNodeIterator) error,
+	repo vaultic.Loader,
+	trees vaultic.IDs,
+	p vaultic.Counter,
+	skip func(tree vaultic.ID) bool,
+	process func(id vaultic.ID, error error, nodes TreeNodeIterator) error,
 ) error {
 	loaderChan := make(chan trackedID)
 	hugeTreeChan := make(chan trackedID, 10)

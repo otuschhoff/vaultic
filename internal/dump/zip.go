@@ -5,8 +5,8 @@ import (
 	"context"
 	"path/filepath"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 func (d *Dumper) dumpZip(ctx context.Context, ch <-chan *data.Node) (err error) {

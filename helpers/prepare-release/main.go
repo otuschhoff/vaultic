@@ -252,7 +252,7 @@ func preCheckChangelogVersion() {
 			die("error scanning: %v", sc.Err())
 		}
 
-		if strings.Contains(strings.TrimSpace(sc.Text()), fmt.Sprintf("Changelog for restic %v", opts.Version)) {
+		if strings.Contains(strings.TrimSpace(sc.Text()), fmt.Sprintf("Changelog for vaultic %v", opts.Version)) {
 			return
 		}
 	}
@@ -271,34 +271,34 @@ func preCheckDockerBuilderGoVersion() {
 	}
 	localVersion := strings.TrimSpace(string(buf))
 
-	msg("update docker container restic/builder")
-	run("docker", "pull", "restic/builder")
-	buf, err = exec.Command("docker", "run", "--rm", "restic/builder", "go", "version").Output()
+	msg("update docker container vaultic/builder")
+	run("docker", "pull", "vaultic/builder")
+	buf, err = exec.Command("docker", "run", "--rm", "vaultic/builder", "go", "version").Output()
 	if err != nil {
 		die("unable to check Go version in docker image: %v", err)
 	}
 	containerVersion := strings.TrimSpace(string(buf))
 
 	if localVersion != containerVersion {
-		die("version in docker container restic/builder is different:\n  local:     %v\n  container: %v\n",
+		die("version in docker container vaultic/builder is different:\n  local:     %v\n  container: %v\n",
 			localVersion, containerVersion)
 	}
 }
 
 func generateFiles() {
 	msg("generate files")
-	run("go", "run", "build.go", "-o", "restic-generate.temp")
+	run("go", "run", "build.go", "-o", "vaultic-generate.temp")
 
 	mandir := filepath.Join("doc", "man")
 	rmdir(mandir)
 	mkdir(mandir)
-	run("./restic-generate.temp", "generate",
+	run("./vaultic-generate.temp", "generate",
 		"--man", "doc/man",
 		"--zsh-completion", "doc/zsh-completion.zsh",
 		"--powershell-completion", "doc/powershell-completion.ps1",
 		"--fish-completion", "doc/fish-completion.fish",
 		"--bash-completion", "doc/bash-completion.sh")
-	rm("restic-generate.temp")
+	rm("vaultic-generate.temp")
 
 	run("git", "add", "doc")
 	changes := uncommittedChanges("doc")
@@ -336,7 +336,7 @@ func updateVersionDev() {
 	newVersion := fmt.Sprintf(`const Version = "%s-dev (compiled manually)"`, opts.Version)
 	replace(versionCodeFile, versionPattern, newVersion)
 
-	msg("committing cmd/restic/global.go with dev version")
+	msg("committing cmd/vaultic/global.go with dev version")
 	run("git", "commit", "-m", fmt.Sprintf("Set development version for %v", opts.Version), "VERSION", versionCodeFile)
 }
 
@@ -347,10 +347,10 @@ func addTag() {
 }
 
 func exportTar(version, tarFilename string) {
-	cmd := fmt.Sprintf("git archive --format=tar --prefix=restic-%s/ v%s | gzip -n > %s",
+	cmd := fmt.Sprintf("git archive --format=tar --prefix=vaultic-%s/ v%s | gzip -n > %s",
 		version, version, tarFilename)
 	run("sh", "-c", cmd)
-	msg("build restic-%s.tar.gz", version)
+	msg("build vaultic-%s.tar.gz", version)
 }
 
 func extractTar(filename, outputDir string) {
@@ -368,9 +368,9 @@ func extractTar(filename, outputDir string) {
 func runBuild(sourceDir, outputDir, version string) {
 	msg("building binaries...")
 	run("docker", "run", "--rm",
-		"--volume", sourceDir+":/restic",
+		"--volume", sourceDir+":/vaultic",
 		"--volume", outputDir+":/output",
-		"restic/builder",
+		"vaultic/builder",
 		"go", "run", "helpers/build-release-binaries/main.go",
 		"--version", version)
 }
@@ -422,14 +422,14 @@ func signFiles(filenames ...string) {
 
 func updateDocker(sourceDir, version string) string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	builderName := fmt.Sprintf("restic-release-builder-%d", r.Int())
+	builderName := fmt.Sprintf("vaultic-release-builder-%d", r.Int())
 	run("docker", "buildx", "create", "--name", builderName, "--driver", "docker-container", "--bootstrap")
 
 	buildCmd := fmt.Sprintf("docker buildx build --builder %s --platform linux/386,linux/amd64,linux/arm,linux/arm64 --pull -f docker/Dockerfile.release %q", builderName, sourceDir)
 	run("sh", "-c", buildCmd+" --no-cache")
 
 	var publishCmds strings.Builder
-	for _, tag := range []string{"restic/restic:latest", "restic/restic:" + version} {
+	for _, tag := range []string{"vaultic/vaultic:latest", "vaultic/vaultic:" + version} {
 		publishCmds.WriteString(buildCmd + fmt.Sprintf(" --tag %q --push\n", tag))
 	}
 	return publishCmds.String() + "\ndocker buildx rm " + builderName
@@ -477,7 +477,7 @@ func main() {
 	addTag()
 	updateVersionDev()
 
-	tarFilename := filepath.Join(opts.OutputDir, fmt.Sprintf("restic-%s.tar.gz", opts.Version))
+	tarFilename := filepath.Join(opts.OutputDir, fmt.Sprintf("vaultic-%s.tar.gz", opts.Version))
 	exportTar(opts.Version, tarFilename)
 
 	extractTar(tarFilename, sourceDir)

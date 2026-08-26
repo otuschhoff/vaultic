@@ -6,49 +6,49 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func randomSize(random *rand.Rand, min, max int) int {
 	return random.Intn(max-min) + min
 }
 
-func createRandomBlobs(t testing.TB, random *rand.Rand, repo restic.Repository, blobs int, pData float32, smallBlobs bool) {
+func createRandomBlobs(t testing.TB, random *rand.Rand, repo vaultic.Repository, blobs int, pData float32, smallBlobs bool) {
 	// two loops to allow creating multiple pack files
 	for blobs > 0 {
-		rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+		rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 			for blobs > 0 {
 				blobs--
 				var (
-					tpe    restic.BlobType
+					tpe    vaultic.BlobType
 					length int
 				)
 
 				if random.Float32() < pData {
-					tpe = restic.DataBlob
+					tpe = vaultic.DataBlob
 					if smallBlobs {
 						length = randomSize(random, 1*1024, 20*1024) // 1KiB to 20KiB of data
 					} else {
 						length = randomSize(random, 10*1024, 1024*1024) // 10KiB to 1MiB of data
 					}
 				} else {
-					tpe = restic.TreeBlob
+					tpe = vaultic.TreeBlob
 					length = randomSize(random, 1*1024, 20*1024) // 1KiB to 20KiB
 				}
 
 				buf := make([]byte, length)
 				random.Read(buf)
 
-				id, exists, _, err := uploader.SaveBlob(ctx, tpe, buf, restic.ID{}, false)
+				id, exists, _, err := uploader.SaveBlob(ctx, tpe, buf, vaultic.ID{}, false)
 				if err != nil {
 					t.Fatalf("SaveFrom() error %v", err)
 				}
 
 				if exists {
-					t.Errorf("duplicate blob %v/%v ignored", id, restic.DataBlob)
+					t.Errorf("duplicate blob %v/%v ignored", id, vaultic.DataBlob)
 					continue
 				}
 
@@ -61,30 +61,30 @@ func createRandomBlobs(t testing.TB, random *rand.Rand, repo restic.Repository, 
 	}
 }
 
-func createRandomWrongBlob(t testing.TB, random *rand.Rand, repo restic.Repository) restic.BlobHandle {
+func createRandomWrongBlob(t testing.TB, random *rand.Rand, repo vaultic.Repository) vaultic.BlobHandle {
 	length := randomSize(random, 10*1024, 1024*1024) // 10KiB to 1MiB of data
 	buf := make([]byte, length)
 	random.Read(buf)
-	id := restic.Hash(buf)
+	id := vaultic.Hash(buf)
 	// invert first data byte
 	buf[0] ^= 0xff
 
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		_, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, buf, id, false)
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, buf, id, false)
 		return err
 	}))
-	return restic.BlobHandle{ID: id, Type: restic.DataBlob}
+	return vaultic.BlobHandle{ID: id, Type: vaultic.DataBlob}
 }
 
 // selectBlobs splits the list of all blobs randomly into two lists. A blob
 // will be contained in the firstone with probability p.
-func selectBlobs(t *testing.T, random *rand.Rand, repo restic.Repository, p float32) (list1, list2 restic.BlobSet) {
-	list1 = restic.NewBlobSet()
-	list2 = restic.NewBlobSet()
+func selectBlobs(t *testing.T, random *rand.Rand, repo vaultic.Repository, p float32) (list1, list2 vaultic.BlobSet) {
+	list1 = vaultic.NewBlobSet()
+	list2 = vaultic.NewBlobSet()
 
-	blobs := restic.NewBlobSet()
+	blobs := vaultic.NewBlobSet()
 
-	err := repo.List(context.TODO(), restic.PackFile, func(id restic.ID, size int64) error {
+	err := repo.List(context.TODO(), vaultic.PackFile, func(id vaultic.ID, size int64) error {
 		handles, err := repo.ListPackHandles(context.TODO(), id, size)
 		if err != nil {
 			t.Fatalf("error listing pack %v: %v", id, err)
@@ -112,13 +112,13 @@ func selectBlobs(t *testing.T, random *rand.Rand, repo restic.Repository, p floa
 	return list1, list2
 }
 
-func listPacks(t *testing.T, repo restic.Lister) restic.IDSet {
-	return listFiles(t, repo, restic.PackFile)
+func listPacks(t *testing.T, repo vaultic.Lister) vaultic.IDSet {
+	return listFiles(t, repo, vaultic.PackFile)
 }
 
-func listFiles(t *testing.T, repo restic.Lister, tpe restic.FileType) restic.IDSet {
-	list := restic.NewIDSet()
-	err := repo.List(context.TODO(), tpe, func(id restic.ID, size int64) error {
+func listFiles(t *testing.T, repo vaultic.Lister, tpe vaultic.FileType) vaultic.IDSet {
+	list := vaultic.NewIDSet()
+	err := repo.List(context.TODO(), tpe, func(id vaultic.ID, size int64) error {
 		list.Insert(id)
 		return nil
 	})
@@ -130,8 +130,8 @@ func listFiles(t *testing.T, repo restic.Lister, tpe restic.FileType) restic.IDS
 	return list
 }
 
-func findPacksForBlobs(t *testing.T, repo restic.Repository, blobs restic.BlobSet) restic.IDSet {
-	packs := restic.NewIDSet()
+func findPacksForBlobs(t *testing.T, repo vaultic.Repository, blobs vaultic.BlobSet) vaultic.IDSet {
+	packs := vaultic.NewIDSet()
 
 	for h := range blobs {
 		list := repo.LookupBlob(h)
@@ -147,9 +147,9 @@ func findPacksForBlobs(t *testing.T, repo restic.Repository, blobs restic.BlobSe
 	return packs
 }
 
-func repack(t *testing.T, repo *repository.Repository, be backend.Backend, packs restic.IDSet, blobs restic.BlobSet) {
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		return repository.CopyBlobs(ctx, repo, repo, uploader, packs, blobs, restic.NoopCounter, nil)
+func repack(t *testing.T, repo *repository.Repository, be backend.Backend, packs vaultic.IDSet, blobs vaultic.BlobSet) {
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		return repository.CopyBlobs(ctx, repo, repo, uploader, packs, blobs, vaultic.NoopCounter, nil)
 	}))
 
 	for id := range packs {
@@ -160,9 +160,9 @@ func repack(t *testing.T, repo *repository.Repository, be backend.Backend, packs
 func rebuildAndReloadIndex(t *testing.T, repo *repository.Repository) {
 	rtest.OK(t, repository.RepairIndex(context.TODO(), repo, repository.RepairIndexOptions{
 		ReadAllPacks: true,
-	}, restic.NewNoopPrinter()))
+	}, vaultic.NewNoopPrinter()))
 
-	rtest.OK(t, repo.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory))
+	rtest.OK(t, repo.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory))
 }
 
 func TestRepack(t *testing.T) {
@@ -270,8 +270,8 @@ func testRepackCopy(t *testing.T, version uint) {
 	_, keepBlobs := selectBlobs(t, random, repo, 0.2)
 	copyPacks := findPacksForBlobs(t, repo, keepBlobs)
 
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		return repository.CopyBlobs(ctx, repo, dstRepo, uploader, copyPacks, keepBlobs, restic.NoopCounter, nil)
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		return repository.CopyBlobs(ctx, repo, dstRepo, uploader, copyPacks, keepBlobs, vaultic.NoopCounter, nil)
 	}))
 	rebuildAndReloadIndex(t, dstRepo)
 
@@ -308,8 +308,8 @@ func testRepackWrongBlob(t *testing.T, version uint) {
 	_, keepBlobs := selectBlobs(t, random, repo, 0)
 	rewritePacks := findPacksForBlobs(t, repo, keepBlobs)
 
-	err := repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		return repository.CopyBlobs(ctx, repo, repo, uploader, rewritePacks, keepBlobs, restic.NoopCounter, nil)
+	err := repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		return repository.CopyBlobs(ctx, repo, repo, uploader, rewritePacks, keepBlobs, vaultic.NoopCounter, nil)
 	})
 	if err == nil {
 		t.Fatal("expected repack to fail but got no error")
@@ -332,7 +332,7 @@ func testRepackBlobFallback(t *testing.T, version uint) {
 	length := randomSize(random, 10*1024, 1024*1024) // 10KiB to 1MiB of data
 	buf := make([]byte, length)
 	random.Read(buf)
-	id := restic.Hash(buf)
+	id := vaultic.Hash(buf)
 
 	// corrupted copy
 	modbuf := make([]byte, len(buf))
@@ -341,27 +341,27 @@ func testRepackBlobFallback(t *testing.T, version uint) {
 	modbuf[0] ^= 0xff
 
 	// create pack with broken copy
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		_, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, modbuf, id, false)
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, modbuf, id, false)
 		return err
 	}))
 
 	// find pack with damaged blob
-	keepBlobs := restic.NewBlobSet(restic.BlobHandle{Type: restic.DataBlob, ID: id})
+	keepBlobs := vaultic.NewBlobSet(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
 	rewritePacks := findPacksForBlobs(t, repo, keepBlobs)
 
 	// create pack with valid copy
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		_, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, buf, id, true)
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, buf, id, true)
 		return err
 	}))
 
 	// repack must fallback to valid copy
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
-		return repository.CopyBlobs(ctx, repo, repo, uploader, rewritePacks, keepBlobs, restic.NoopCounter, nil)
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		return repository.CopyBlobs(ctx, repo, repo, uploader, rewritePacks, keepBlobs, vaultic.NoopCounter, nil)
 	}))
 
-	keepBlobs = restic.NewBlobSet(restic.BlobHandle{Type: restic.DataBlob, ID: id})
+	keepBlobs = vaultic.NewBlobSet(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
 	packs := findPacksForBlobs(t, repo, keepBlobs)
 	rtest.Assert(t, len(packs) == 3, "unexpected number of copies: %v", len(packs))
 }

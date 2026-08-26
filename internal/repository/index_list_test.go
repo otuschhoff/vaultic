@@ -4,34 +4,34 @@ import (
 	"context"
 	"testing"
 
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestAllIndexBlobs(t *testing.T) {
 	repo, _, _ := repository.TestRepositoryWithVersion(t, 0)
 
-	want := restic.NewBlobSet()
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	want := vaultic.NewBlobSet()
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		for i := range 5 {
 			data := []byte{byte('a' + i)}
-			id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, data, restic.ID{}, false)
+			id, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, data, vaultic.ID{}, false)
 			rtest.OK(t, err)
-			want.Insert(restic.BlobHandle{Type: restic.DataBlob, ID: id})
+			want.Insert(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
 		}
 		return nil
 	}))
 
-	rtest.OK(t, repo.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory))
+	rtest.OK(t, repo.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory))
 
-	fromMaster := restic.NewBlobSet()
-	rtest.OK(t, repo.ListBlobs(context.TODO(), func(pb restic.PackBlob) {
+	fromMaster := vaultic.NewBlobSet()
+	rtest.OK(t, repo.ListBlobs(context.TODO(), func(pb vaultic.PackBlob) {
 		fromMaster.Insert(pb.Handle())
 	}))
 	rtest.Equals(t, want, fromMaster)
 
-	fromStream := restic.NewBlobSet()
+	fromStream := vaultic.NewBlobSet()
 	for entry := range repository.AllIndexBlobs(context.TODO(), repo, repo) {
 		if entry.Error != nil {
 			t.Fatalf("unexpected error: %v", entry.Error)
@@ -44,9 +44,9 @@ func TestAllIndexBlobs(t *testing.T) {
 func TestAllIndexBlobsEarlyStop(t *testing.T) {
 	repo, _, _ := repository.TestRepositoryWithVersion(t, 0)
 
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		for range 5 {
-			_, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, []byte("test"), restic.ID{}, false)
+			_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, []byte("test"), vaultic.ID{}, false)
 			rtest.OK(t, err)
 		}
 		return nil

@@ -11,11 +11,11 @@ import (
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 type memMap map[backend.Handle][]byte

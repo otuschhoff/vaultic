@@ -3,7 +3,7 @@ package cache
 import (
 	"testing"
 
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 const testCacheID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

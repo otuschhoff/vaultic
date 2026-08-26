@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/restorer"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/restorer"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type State struct {
@@ -42,7 +42,7 @@ type ProgressPrinter interface {
 	Error(item string, err error) error
 	CompleteItem(action restorer.ItemAction, item string, size uint64)
 	Finish(progress State, duration time.Duration)
-	restic.Printer
+	vaultic.Printer
 }
 
 var _ restorer.ProgressReporter = (*Progress)(nil)

@@ -8,11 +8,11 @@ import (
 	"io"
 	"sync"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
-	"github.com/restic/restic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
 )
 
 // ErrBroken is returned by Add and Finalize after a write error. The packer
@@ -38,7 +38,7 @@ func NewPacker(k *crypto.Key, wr io.Writer) *Packer {
 
 // Add saves the data read from rd as a new blob to the packer. Returned is the
 // number of bytes written to the pack plus the pack header entry size.
-func (p *Packer) Add(t restic.BlobType, id restic.ID, data []byte, uncompressedLength int) (int, error) {
+func (p *Packer) Add(t vaultic.BlobType, id vaultic.ID, data []byte, uncompressedLength int) (int, error) {
 	p.m.Lock()
 	defer p.m.Unlock()
 
@@ -57,7 +57,7 @@ func (p *Packer) Add(t restic.BlobType, id restic.ID, data []byte, uncompressedL
 	}
 
 	c := Blob{
-		BlobHandle:         restic.BlobHandle{Type: t, ID: id},
+		BlobHandle:         vaultic.BlobHandle{Type: t, ID: id},
 		Length:             uint(n),
 		Offset:             p.bytes,
 		UncompressedLength: uint(uncompressedLength),
@@ -68,15 +68,15 @@ func (p *Packer) Add(t restic.BlobType, id restic.ID, data []byte, uncompressedL
 	return n + CalculateEntrySize(c.IsCompressed()), nil
 }
 
-var entrySize = uint(binary.Size(restic.BlobType(0)) + 2*headerLengthSize + len(restic.ID{}))
-var plainEntrySize = uint(binary.Size(restic.BlobType(0)) + headerLengthSize + len(restic.ID{}))
+var entrySize = uint(binary.Size(vaultic.BlobType(0)) + 2*headerLengthSize + len(vaultic.ID{}))
+var plainEntrySize = uint(binary.Size(vaultic.BlobType(0)) + headerLengthSize + len(vaultic.ID{}))
 
 // headerEntry describes the format of header entries. It serves only as
 // documentation.
 type headerEntry struct {
 	Type   uint8
 	Length uint32
-	ID     restic.ID
+	ID     vaultic.ID
 }
 
 // compressedHeaderEntry describes the format of header entries for compressed blobs.
@@ -85,7 +85,7 @@ type compressedHeaderEntry struct {
 	Type               uint8
 	Length             uint32
 	UncompressedLength uint32
-	ID                 restic.ID
+	ID                 vaultic.ID
 }
 
 // Finalize writes the header for all added blobs and finalizes the pack.
@@ -110,7 +110,7 @@ func (p *Packer) Finalize() error {
 
 	if err := verifyHeader(p.k, encryptedHeader, p.blobs); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return fmt.Errorf("Detected data corruption while writing pack-file header: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting.", err)
+		return fmt.Errorf("Detected data corruption while writing pack-file header: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting.", err)
 	}
 
 	// append the header
@@ -162,13 +162,13 @@ func makeHeader(blobs []Blob) ([]byte, error) {
 
 	for _, b := range blobs {
 		switch {
-		case b.Type == restic.DataBlob && b.UncompressedLength == 0:
+		case b.Type == vaultic.DataBlob && b.UncompressedLength == 0:
 			buf = append(buf, 0)
-		case b.Type == restic.TreeBlob && b.UncompressedLength == 0:
+		case b.Type == vaultic.TreeBlob && b.UncompressedLength == 0:
 			buf = append(buf, 1)
-		case b.Type == restic.DataBlob && b.UncompressedLength != 0:
+		case b.Type == vaultic.DataBlob && b.UncompressedLength != 0:
 			buf = append(buf, 2)
-		case b.Type == restic.TreeBlob && b.UncompressedLength != 0:
+		case b.Type == vaultic.TreeBlob && b.UncompressedLength != 0:
 			buf = append(buf, 3)
 		default:
 			return nil, errors.Errorf("invalid blob type %v", b.Type)
@@ -396,9 +396,9 @@ func parseHeaderEntry(p []byte) (b Blob, size uint, err error) {
 
 	switch tpe {
 	case 0, 2:
-		b.Type = restic.DataBlob
+		b.Type = vaultic.DataBlob
 	case 1, 3:
-		b.Type = restic.TreeBlob
+		b.Type = vaultic.TreeBlob
 	default:
 		return b, size, errors.Errorf("invalid type %d", tpe)
 	}
@@ -439,10 +439,10 @@ func CalculateHeaderSize(blobs Blobs) int {
 // If onlyHdr is set to true, only the size of the header is returned
 // Note that this function only gives correct sizes, if there are no
 // duplicates in the index.
-func Size(ctx context.Context, idx restic.ListBlobser, onlyHdr bool) (map[restic.ID]int64, error) {
-	packSize := make(map[restic.ID]int64)
+func Size(ctx context.Context, idx vaultic.ListBlobser, onlyHdr bool) (map[vaultic.ID]int64, error) {
+	packSize := make(map[vaultic.ID]int64)
 
-	err := idx.ListBlobs(ctx, func(blob restic.PackBlob) {
+	err := idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
 		packID := blob.PackID()
 		size, ok := packSize[packID]
 		if !ok {

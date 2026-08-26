@@ -6,16 +6,16 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-// CalculateProgressInterval returns the interval configured via RESTIC_PROGRESS_FPS
+// CalculateProgressInterval returns the interval configured via VAULTIC_PROGRESS_FPS
 // or if unset returns an interval for 60fps on interactive terminals and 0 (=disabled)
 // for non-interactive terminals or when run using the --quiet flag
 func CalculateProgressInterval(show bool, json bool, canUpdateStatus bool) time.Duration {
 	interval := time.Second / 10
-	fps, err := strconv.ParseFloat(os.Getenv("RESTIC_PROGRESS_FPS"), 64)
+	fps, err := strconv.ParseFloat(os.Getenv("VAULTIC_PROGRESS_FPS"), 64)
 	if err == nil && fps > 0 {
 		if fps > 60 {
 			fps = 60
@@ -28,9 +28,9 @@ func CalculateProgressInterval(show bool, json bool, canUpdateStatus bool) time.
 }
 
 // newProgressMax returns a progress.Counter that prints to terminal if provided.
-func newProgressMax(show bool, max uint64, description string, term ui.Terminal) restic.Counter {
+func newProgressMax(show bool, max uint64, description string, term ui.Terminal) vaultic.Counter {
 	if !show {
-		return restic.NoopCounter
+		return vaultic.NoopCounter
 	}
 	interval := CalculateProgressInterval(show, false, term.CanUpdateStatus())
 
@@ -58,11 +58,11 @@ type terminalPrinter struct {
 	v    uint
 }
 
-func (t *terminalPrinter) NewCounter(description string) restic.Counter {
+func (t *terminalPrinter) NewCounter(description string) vaultic.Counter {
 	return newProgressMax(t.v > 0, 0, description, t.term)
 }
 
-func (t *terminalPrinter) NewCounterTerminalOnly(description string) restic.Counter {
+func (t *terminalPrinter) NewCounterTerminalOnly(description string) vaultic.Counter {
 	return newProgressMax(t.v > 0 && t.term.OutputIsTerminal(), 0, description, t.term)
 }
 
@@ -98,7 +98,7 @@ func (t *terminalPrinter) VV(msg string, args ...any) {
 	}
 }
 
-func NewTerminalPrinter(json bool, verbosity uint, term ui.Terminal) restic.Printer {
+func NewTerminalPrinter(json bool, verbosity uint, term ui.Terminal) vaultic.Printer {
 	if json {
 		verbosity = 0
 	}

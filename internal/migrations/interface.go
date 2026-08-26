@@ -3,18 +3,18 @@ package migrations
 import (
 	"context"
 
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // Migration implements a data migration.
 type Migration interface {
 	// Check returns true if the migration can be applied to a repo. If the option is not applicable it can return a specific reason.
-	Check(context.Context, restic.Repository) (bool, string, error)
+	Check(context.Context, vaultic.Repository) (bool, string, error)
 
 	RepoCheck() bool
 
 	// Apply runs the migration.
-	Apply(context.Context, restic.Repository) error
+	Apply(context.Context, vaultic.Repository) error
 
 	// Name returns a short name.
 	Name() string

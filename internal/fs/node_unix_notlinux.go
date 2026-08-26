@@ -5,7 +5,7 @@ package fs
 import (
 	"syscall"
 
-	"github.com/restic/restic/internal/data"
+	"github.com/vaultic/vaultic/internal/data"
 )
 
 // utimesNano is like syscall.UtimesNano, except that it skips symlinks.

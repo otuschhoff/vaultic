@@ -1,0 +1,73 @@
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/spf13/cobra"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/global"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
+)
+
+func newKeyRemoveCommand(globalOptions *global.Options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remove [ID]",
+		Short: "Remove key ID (password) from the repository",
+		Long: `
+The "key remove" command removes the selected key ID. It does not allow removing the
+current key being used to access the repository.
+
+EXIT STATUS
+===========
+
+Exit status is 0 if the command was successful.
+Exit status is 1 if there was any error.
+Exit status is 10 if the repository does not exist.
+Exit status is 11 if the repository is already locked.
+Exit status is 12 if the password is incorrect.
+	`,
+		DisableAutoGenTag: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runKeyRemove(cmd.Context(), *globalOptions, args, globalOptions.Term)
+		},
+	}
+	return cmd
+}
+
+func runKeyRemove(ctx context.Context, gopts global.Options, args []string, term ui.Terminal) error {
+	if len(args) != 1 {
+		return fmt.Errorf("key remove expects one argument as the key id")
+	}
+
+	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	return deleteKey(ctx, repo, args[0], printer)
+}
+
+func deleteKey(ctx context.Context, repo *repository.Repository, idPrefix string, printer vaultic.Printer) error {
+	id, err := vaultic.Find(ctx, repo, vaultic.KeyFile, idPrefix)
+	if err != nil {
+		return err
+	}
+
+	if id == repo.KeyID() {
+		return errors.Fatal("refusing to remove key currently used to access repository")
+	}
+
+	err = repository.RemoveKey(ctx, repo, id)
+	if err != nil {
+		return err
+	}
+
+	printer.P("removed key %v", id)
+	return nil
+}

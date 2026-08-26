@@ -5,15 +5,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type mockPrinter struct {
 	sync.Mutex
-	restic.Printer
+	vaultic.Printer
 	dirUnchanged, fileNew bool
-	id                    restic.ID
+	id                    vaultic.ID
 }
 
 func (p *mockPrinter) Update(_, _ Counter, _ uint, _ map[string]struct{}, _ time.Time, _ uint64) {
@@ -34,7 +34,7 @@ func (p *mockPrinter) CompleteItem(messageType string, _ string, _ archiver.Item
 }
 
 func (p *mockPrinter) ReportTotal(_ time.Time, _ archiver.ScanStats) {}
-func (p *mockPrinter) Finish(id restic.ID, _ *archiver.Summary, _ bool) {
+func (p *mockPrinter) Finish(id vaultic.ID, _ *archiver.Summary, _ bool) {
 	p.Lock()
 	defer p.Unlock()
 
@@ -47,7 +47,7 @@ func (p *mockPrinter) ExcludedItem(_ string) {}
 func TestProgress(t *testing.T) {
 	t.Parallel()
 
-	prnt := &mockPrinter{Printer: restic.NewNoopPrinter()}
+	prnt := &mockPrinter{Printer: vaultic.NewNoopPrinter()}
 	prog := newProgress(prnt, time.Millisecond)
 
 	prog.StartFile("foo")
@@ -59,7 +59,7 @@ func TestProgress(t *testing.T) {
 	prog.CompleteItem("foo", archiver.ActionFileNew, archiver.ItemStats{}, 0)
 
 	time.Sleep(10 * time.Millisecond)
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 	prog.Finish(id, nil, false)
 
 	if !prnt.dirUnchanged {

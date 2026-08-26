@@ -1,18 +1,18 @@
 package pack
 
-import "github.com/restic/restic/internal/restic"
+import "github.com/vaultic/vaultic/internal/vaultic"
 
 // PackedBlob is one index entry for a blob in a pack (may be duplicate across indexes).
 type PackedBlob struct {
-	Pack restic.ID
+	Pack vaultic.ID
 	Blob Blob
 }
 
-var _ restic.PackBlob = (*PackedBlob)(nil)
+var _ vaultic.PackBlob = (*PackedBlob)(nil)
 
-func (pb *PackedBlob) PackID() restic.ID { return pb.Pack }
+func (pb *PackedBlob) PackID() vaultic.ID { return pb.Pack }
 
-func (pb *PackedBlob) Handle() restic.BlobHandle { return pb.Blob.BlobHandle }
+func (pb *PackedBlob) Handle() vaultic.BlobHandle { return pb.Blob.BlobHandle }
 
 func (pb *PackedBlob) CiphertextLength() uint { return pb.Blob.Length }
 

@@ -68,7 +68,7 @@ func extractToFile(buf []byte, filename, target string, printf func(string, ...a
 
 	// Write everything to a temp file
 	dir := filepath.Dir(target)
-	newFile, err := os.CreateTemp(dir, "restic")
+	newFile, err := os.CreateTemp(dir, "vaultic")
 	if err != nil {
 		return err
 	}
@@ -110,22 +110,22 @@ func extractToFile(buf []byte, filename, target string, printf func(string, ...a
 }
 
 // DownloadLatestStableRelease downloads the latest stable released version of
-// restic and saves it to target. It returns the version string for the newest
+// vaultic and saves it to target. It returns the version string for the newest
 // version. The function printf is used to print progress information.
 func DownloadLatestStableRelease(ctx context.Context, target, currentVersion string, printf func(string, ...any)) (version string, err error) {
 	if printf == nil {
 		printf = func(string, ...any) {}
 	}
 
-	printf("find latest release of restic at GitHub\n")
+	printf("find latest release of vaultic at GitHub\n")
 
-	rel, err := GitHubLatestRelease(ctx, "restic", "restic")
+	rel, err := GitHubLatestRelease(ctx, "vaultic", "vaultic")
 	if err != nil {
 		return "", err
 	}
 
 	if rel.Version == currentVersion {
-		printf("restic is up to date\n")
+		printf("vaultic is up to date\n")
 		return currentVersion, nil
 	}
 

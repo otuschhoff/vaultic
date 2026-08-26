@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
 
 	"github.com/ncw/swift/v2"
 )
@@ -154,7 +154,7 @@ func (be *beSwift) openReader(ctx context.Context, h backend.Handle, length int,
 		objLength, e := obj.Length(cctx)
 		if e == nil && objLength != int64(length) {
 			_ = obj.Close()
-			return nil, &swift.Error{StatusCode: http.StatusRequestedRangeNotSatisfiable, Text: "restic-file-too-short"}
+			return nil, &swift.Error{StatusCode: http.StatusRequestedRangeNotSatisfiable, Text: "vaultic-file-too-short"}
 		}
 	}
 
@@ -259,7 +259,7 @@ func (be *beSwift) IsPermanentError(err error) bool {
 	return false
 }
 
-// Delete removes all restic objects in the container.
+// Delete removes all vaultic objects in the container.
 // It will not remove the container itself.
 func (be *beSwift) Delete(ctx context.Context) error {
 	return util.DefaultDelete(ctx, be)

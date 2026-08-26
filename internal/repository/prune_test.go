@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func testPrune(t *testing.T, opts repository.PruneOptions, errOnUnused bool) {
@@ -24,7 +24,7 @@ func testPrune(t *testing.T, opts repository.PruneOptions, errOnUnused bool) {
 	createRandomBlobs(t, random, repo, 5, 0.5, true)
 	keep, _ := selectBlobs(t, random, repo, 0.5)
 
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		// duplicate a few blobs to exercise those code paths
 		for blob := range keep {
 			buf, err := repo.LoadBlob(ctx, blob, nil)
@@ -35,15 +35,15 @@ func testPrune(t *testing.T, opts repository.PruneOptions, errOnUnused bool) {
 		return nil
 	}))
 
-	plan, err := repository.PlanPrune(context.TODO(), opts, repo, func(ctx context.Context, repo restic.Repository, usedBlobs restic.FindBlobSet) error {
+	plan, err := repository.PlanPrune(context.TODO(), opts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
 		for blob := range keep {
 			usedBlobs.Insert(blob)
 		}
 		return nil
-	}, restic.NewNoopPrinter())
+	}, vaultic.NewNoopPrinter())
 	rtest.OK(t, err)
 
-	rtest.OK(t, plan.Execute(context.TODO(), restic.NewNoopPrinter()))
+	rtest.OK(t, plan.Execute(context.TODO(), vaultic.NewNoopPrinter()))
 
 	repo = repository.TestOpenBackend(t, be)
 	repository.TestCheckRepo(t, repo)
@@ -131,16 +131,16 @@ func TestPruneSmall(t *testing.T) {
 	const blobSize = 1000 * 1000
 	const numBlobsCreated = 55
 
-	keep := restic.NewBlobSet()
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	keep := vaultic.NewBlobSet()
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		// we need a minimum of 11 packfiles, each packfile will be about 5 Mb long
 		for range numBlobsCreated {
 			buf := make([]byte, blobSize)
 			random.Read(buf)
 
-			id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, buf, restic.ID{}, false)
+			id, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, buf, vaultic.ID{}, false)
 			rtest.OK(t, err)
-			keep.Insert(restic.BlobHandle{Type: restic.DataBlob, ID: id})
+			keep.Insert(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
 		}
 		return nil
 	}))
@@ -153,21 +153,21 @@ func TestPruneSmall(t *testing.T) {
 
 	// and reopen repository with default packsize
 	repo = repository.TestOpenBackend(t, be)
-	rtest.OK(t, repo.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory))
+	rtest.OK(t, repo.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory))
 
 	opts := repository.PruneOptions{
 		MaxRepackBytes: math.MaxUint64,
 		MaxUnusedBytes: func(used uint64) (unused uint64) { return blobSize / 4 },
 		SmallPackBytes: 5 * 1024 * 1024,
 	}
-	plan, err := repository.PlanPrune(context.TODO(), opts, repo, func(ctx context.Context, repo restic.Repository, usedBlobs restic.FindBlobSet) error {
+	plan, err := repository.PlanPrune(context.TODO(), opts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
 		for blob := range keep {
 			usedBlobs.Insert(blob)
 		}
 		return nil
-	}, restic.NewNoopPrinter())
+	}, vaultic.NewNoopPrinter())
 	rtest.OK(t, err)
-	rtest.OK(t, plan.Execute(context.TODO(), restic.NewNoopPrinter()))
+	rtest.OK(t, plan.Execute(context.TODO(), vaultic.NewNoopPrinter()))
 
 	stats := plan.Stats()
 	rtest.Equals(t, stats.Size.Used/blobSize, uint64(numBlobsCreated), fmt.Sprintf("total size of blobs should be %d but is %d",

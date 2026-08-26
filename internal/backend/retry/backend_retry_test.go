@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mock"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mock"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestBackendSaveRetry(t *testing.T) {
@@ -475,7 +475,7 @@ func TestBackendCanceledContext(t *testing.T) {
 	// check that we received the expected context canceled error instead
 	TestFastRetries(t)
 	retryBackend := New(mock.NewBackend(), 2, nil, nil)
-	h := backend.Handle{Type: backend.PackFile, Name: restic.NewRandomID().String()}
+	h := backend.Handle{Type: backend.PackFile, Name: vaultic.NewRandomID().String()}
 
 	// create an already canceled context
 	ctx, cancel := context.WithCancel(context.Background())

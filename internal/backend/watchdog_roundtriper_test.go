@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestRead(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // A Func is a callback for a Counter.
@@ -22,7 +22,7 @@ type Counter struct {
 	value, max atomic.Uint64
 }
 
-var _ restic.Counter = (*Counter)(nil)
+var _ vaultic.Counter = (*Counter)(nil)
 
 // NewCounter starts a new Counter.
 func NewCounter(interval time.Duration, total uint64, report Func) *Counter {

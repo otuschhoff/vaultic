@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/options"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/options"
 )
 
 // VSSConfig holds extended options of windows volume shadow copy service.

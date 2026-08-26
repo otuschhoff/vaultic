@@ -5,11 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/restic/restic/internal/data"
+	"github.com/vaultic/vaultic/internal/data"
 	"golang.org/x/sys/windows"
 )
 
-// fixpath returns an absolute path on windows, so restic can open long file
+// fixpath returns an absolute path on windows, so vaultic can open long file
 // names.
 func fixpath(name string) string {
 	abspath, err := filepath.Abs(name)

@@ -1,16 +1,16 @@
 package all
 
 import (
-	"github.com/restic/restic/internal/backend/azure"
-	"github.com/restic/restic/internal/backend/b2"
-	"github.com/restic/restic/internal/backend/gs"
-	"github.com/restic/restic/internal/backend/local"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/rclone"
-	"github.com/restic/restic/internal/backend/rest"
-	"github.com/restic/restic/internal/backend/s3"
-	"github.com/restic/restic/internal/backend/sftp"
-	"github.com/restic/restic/internal/backend/swift"
+	"github.com/vaultic/vaultic/internal/backend/azure"
+	"github.com/vaultic/vaultic/internal/backend/b2"
+	"github.com/vaultic/vaultic/internal/backend/gs"
+	"github.com/vaultic/vaultic/internal/backend/local"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/rclone"
+	"github.com/vaultic/vaultic/internal/backend/rest"
+	"github.com/vaultic/vaultic/internal/backend/s3"
+	"github.com/vaultic/vaultic/internal/backend/sftp"
+	"github.com/vaultic/vaultic/internal/backend/swift"
 )
 
 func Backends() *location.Registry {

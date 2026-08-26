@@ -1,7 +1,7 @@
 package restorer
 
 import (
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // WriteAt writes p to f.File at offset. It tries to do a sparse write
@@ -15,7 +15,7 @@ func (f *partialFile) WriteAt(p []byte, offset int64) (n int, err error) {
 
 	// Skip the longest all-zero prefix of p.
 	// If it's long enough, we can punch a hole in the file.
-	skipped := restic.ZeroPrefixLen(p)
+	skipped := vaultic.ZeroPrefixLen(p)
 	p = p[skipped:]
 	offset += int64(skipped)
 

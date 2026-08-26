@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend/gs"
-	"github.com/restic/restic/internal/backend/test"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend/gs"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func newGSTestSuite() *test.Suite[gs.Config] {
@@ -18,12 +18,12 @@ func newGSTestSuite() *test.Suite[gs.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*gs.Config, error) {
-			cfg, err := gs.ParseConfig(os.Getenv("RESTIC_TEST_GS_REPOSITORY"))
+			cfg, err := gs.ParseConfig(os.Getenv("VAULTIC_TEST_GS_REPOSITORY"))
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.ProjectID = os.Getenv("RESTIC_TEST_GS_PROJECT_ID")
+			cfg.ProjectID = os.Getenv("VAULTIC_TEST_GS_PROJECT_ID")
 			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
 			return cfg, nil
 		},
@@ -35,13 +35,13 @@ func newGSTestSuite() *test.Suite[gs.Config] {
 func TestBackendGS(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/gs.TestBackendGS")
+			rtest.SkipDisallowed(t, "vaultic/backend/gs.TestBackendGS")
 		}
 	}()
 
 	vars := []string{
-		"RESTIC_TEST_GS_PROJECT_ID",
-		"RESTIC_TEST_GS_REPOSITORY",
+		"VAULTIC_TEST_GS_PROJECT_ID",
+		"VAULTIC_TEST_GS_REPOSITORY",
 	}
 
 	for _, v := range vars {
@@ -61,8 +61,8 @@ func TestBackendGS(t *testing.T) {
 
 func BenchmarkBackendGS(t *testing.B) {
 	vars := []string{
-		"RESTIC_TEST_GS_PROJECT_ID",
-		"RESTIC_TEST_GS_REPOSITORY",
+		"VAULTIC_TEST_GS_PROJECT_ID",
+		"VAULTIC_TEST_GS_REPOSITORY",
 	}
 
 	for _, v := range vars {

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/swift"
-	"github.com/restic/restic/internal/backend/test"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/swift"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func newSwiftTestSuite(t testing.TB) *test.Suite[swift.Config] {
@@ -35,12 +35,12 @@ func newSwiftTestSuite(t testing.TB) *test.Suite[swift.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*swift.Config, error) {
-			cfg, err := swift.ParseConfig(os.Getenv("RESTIC_TEST_SWIFT"))
+			cfg, err := swift.ParseConfig(os.Getenv("VAULTIC_TEST_SWIFT"))
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.ApplyEnvironment("RESTIC_TEST_")
+			cfg.ApplyEnvironment("VAULTIC_TEST_")
 			cfg.Prefix += fmt.Sprintf("/test-%d", time.Now().UnixNano())
 			t.Logf("using prefix %v", cfg.Prefix)
 			return cfg, nil
@@ -53,12 +53,12 @@ func newSwiftTestSuite(t testing.TB) *test.Suite[swift.Config] {
 func TestBackendSwift(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/swift.TestBackendSwift")
+			rtest.SkipDisallowed(t, "vaultic/backend/swift.TestBackendSwift")
 		}
 	}()
 
-	if os.Getenv("RESTIC_TEST_SWIFT") == "" {
-		t.Skip("RESTIC_TEST_SWIFT unset, skipping test")
+	if os.Getenv("VAULTIC_TEST_SWIFT") == "" {
+		t.Skip("VAULTIC_TEST_SWIFT unset, skipping test")
 		return
 	}
 
@@ -67,8 +67,8 @@ func TestBackendSwift(t *testing.T) {
 }
 
 func BenchmarkBackendSwift(t *testing.B) {
-	if os.Getenv("RESTIC_TEST_SWIFT") == "" {
-		t.Skip("RESTIC_TEST_SWIFT unset, skipping test")
+	if os.Getenv("VAULTIC_TEST_SWIFT") == "" {
+		t.Skip("VAULTIC_TEST_SWIFT unset, skipping test")
 		return
 	}
 

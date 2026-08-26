@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/restic/restic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend"
 )
 
 // DefaultLoad implements Backend.Load using lower-level openReader func
@@ -24,7 +24,7 @@ func DefaultLoad(ctx context.Context, h backend.Handle, length int, offset int64
 	return rd.Close()
 }
 
-// DefaultDelete removes all restic keys in the bucket. It will not remove the bucket itself.
+// DefaultDelete removes all vaultic keys in the bucket. It will not remove the bucket itself.
 func DefaultDelete(ctx context.Context, be backend.Backend) error {
 	alltypes := []backend.FileType{
 		backend.PackFile,

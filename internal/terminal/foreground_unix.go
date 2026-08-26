@@ -7,15 +7,15 @@ import (
 	"os/exec"
 	"os/signal"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
 
 	"golang.org/x/sys/unix"
 )
 
 func startForeground(cmd *exec.Cmd) (bg func() error, err error) {
 	// run the command in its own process group
-	// this ensures that sending ctrl-c to restic will not immediately stop the backend process.
+	// this ensures that sending ctrl-c to vaultic will not immediately stop the backend process.
 	cmd.SysProcAttr = &unix.SysProcAttr{
 		Setpgid: true,
 	}
@@ -27,7 +27,7 @@ func startForeground(cmd *exec.Cmd) (bg func() error, err error) {
 		return startFallback(cmd)
 	}
 
-	// only move child process to foreground if restic is in the foreground
+	// only move child process to foreground if vaultic is in the foreground
 	prev, err := tcgetpgrp(int(tty.Fd()))
 	if err != nil {
 		_ = tty.Close()
@@ -36,7 +36,7 @@ func startForeground(cmd *exec.Cmd) (bg func() error, err error) {
 
 	self := getpgrp()
 	if prev != self {
-		debug.Log("restic is not controlling the tty; err = %v", err)
+		debug.Log("vaultic is not controlling the tty; err = %v", err)
 		if err := tty.Close(); err != nil {
 			return nil, err
 		}

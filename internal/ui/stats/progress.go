@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/ui"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui/progress"
 )
 
 // Progress reports progress for the stats command.

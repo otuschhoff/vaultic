@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestNew(t *testing.T) {
 	parent := rtest.TempDir(t)
 	basedir := filepath.Join(parent, "cache")
-	id := restic.NewRandomID().String()
+	id := vaultic.NewRandomID().String()
 	tagFile := filepath.Join(basedir, "CACHEDIR.TAG")
 	versionFile := filepath.Join(basedir, id, "version")
 

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 func TestCommandReaderSuccess(t *testing.T) {

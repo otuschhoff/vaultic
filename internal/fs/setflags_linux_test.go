@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 
 	"golang.org/x/sys/unix"
 )
 
 func TestNoatime(t *testing.T) {
-	f, err := os.CreateTemp("", "restic-test-noatime")
+	f, err := os.CreateTemp("", "vaultic-test-noatime")
 	if err != nil {
 		t.Fatal(err)
 	}

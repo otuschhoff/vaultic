@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -144,24 +144,24 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 		}
 
 		// Fail if no credentials were found to prevent repeated attempts to (unsuccessfully) retrieve new credentials.
-		// The first attempt still has to timeout which slows down restic usage considerably. Thus, migrate towards forcing
+		// The first attempt still has to timeout which slows down vaultic usage considerably. Thus, migrate towards forcing
 		// users to explicitly decide between authenticated and anonymous access.
 		return nil, fmt.Errorf("no credentials found. Use `-o s3.unsafe-anonymous-auth=true` for anonymous authentication")
 	}
 
-	roleArn := os.Getenv("RESTIC_AWS_ASSUME_ROLE_ARN")
+	roleArn := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_ARN")
 	if roleArn != "" {
 		// use the region provided by the configuration by default
 		awsRegion := cfg.Region
 		// allow the region to be overridden if for some reason it is required
-		if os.Getenv("RESTIC_AWS_ASSUME_ROLE_REGION") != "" {
-			awsRegion = os.Getenv("RESTIC_AWS_ASSUME_ROLE_REGION")
+		if os.Getenv("VAULTIC_AWS_ASSUME_ROLE_REGION") != "" {
+			awsRegion = os.Getenv("VAULTIC_AWS_ASSUME_ROLE_REGION")
 		}
 
-		sessionName := os.Getenv("RESTIC_AWS_ASSUME_ROLE_SESSION_NAME")
-		externalID := os.Getenv("RESTIC_AWS_ASSUME_ROLE_EXTERNAL_ID")
-		policy := os.Getenv("RESTIC_AWS_ASSUME_ROLE_POLICY")
-		stsEndpoint := os.Getenv("RESTIC_AWS_ASSUME_ROLE_STS_ENDPOINT")
+		sessionName := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_SESSION_NAME")
+		externalID := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_EXTERNAL_ID")
+		policy := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_POLICY")
+		stsEndpoint := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_STS_ENDPOINT")
 
 		if stsEndpoint == "" {
 			if awsRegion != "" {
@@ -339,7 +339,7 @@ func (be *s3) openReader(ctx context.Context, h backend.Handle, length int, offs
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) && length > 0 {
 		if info.Size > 0 && info.Size != int64(length) {
 			_ = rd.Close()
-			return nil, minio.ErrorResponse{Code: "InvalidRange", Message: "restic-file-too-short"}
+			return nil, minio.ErrorResponse{Code: "InvalidRange", Message: "vaultic-file-too-short"}
 		}
 	}
 
@@ -443,7 +443,7 @@ func (be *s3) List(ctx context.Context, t backend.FileType, fn func(backend.File
 	return ctx.Err()
 }
 
-// Delete removes all restic keys in the bucket. It will not remove the bucket itself.
+// Delete removes all vaultic keys in the bucket. It will not remove the bucket itself.
 func (be *s3) Delete(ctx context.Context) error {
 	return util.DefaultDelete(ctx, be)
 }

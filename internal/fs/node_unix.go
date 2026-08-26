@@ -5,7 +5,7 @@ package fs
 import (
 	"os"
 
-	"github.com/restic/restic/internal/data"
+	"github.com/vaultic/vaultic/internal/data"
 )
 
 func lchown(name string, node *data.Node, lookupByName bool) error {

@@ -3,8 +3,8 @@ package repository
 import (
 	"context"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type warmupJob struct {
@@ -23,7 +23,7 @@ func (job *warmupJob) Wait(ctx context.Context) error {
 }
 
 // StartWarmup creates a new warmup job, requesting the backend to warmup the specified packs.
-func (r *Repository) StartWarmup(ctx context.Context, packs restic.IDSet) (restic.WarmupJob, error) {
+func (r *Repository) StartWarmup(ctx context.Context, packs vaultic.IDSet) (vaultic.WarmupJob, error) {
 	handles := make([]backend.Handle, 0, len(packs))
 	for pack := range packs {
 		handles = append(handles, backend.Handle{Type: backend.PackFile, Name: pack.String()})

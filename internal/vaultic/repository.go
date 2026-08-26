@@ -1,0 +1,167 @@
+package vaultic
+
+import (
+	"context"
+	"iter"
+
+	"github.com/vaultic/vaultic/internal/errors"
+)
+
+// ErrInvalidData is used to report that a file is corrupted
+var ErrInvalidData = errors.New("invalid data returned")
+
+// Repository stores data in a backend. It provides high-level functions and
+// transparently encrypts/decrypts data.
+type Repository interface {
+	// Connections returns the maximum number of concurrent backend operations
+	Connections() uint
+	Config() Config
+	PackSize() uint
+	ChunkerFactory() ChunkerFactory
+
+	LoadIndex(ctx context.Context, p TerminalCounterFactory) error
+
+	LookupBlob(bh BlobHandle) []PackBlob
+	LookupBlobSize(bh BlobHandle) (size uint, exists bool)
+
+	NewAssociatedBlobSet() AssociatedBlobSet
+	// ListBlobs runs fn on all blobs known to the index. When the context is cancelled,
+	// the index iteration returns immediately with ctx.Err(). This blocks any modification of the index.
+	ListBlobs(ctx context.Context, fn func(PackBlob)) error
+	// ListPackHandles returns the blob handles stored in the pack file header.
+	ListPackHandles(ctx context.Context, id ID, packSize int64) ([]BlobHandle, error)
+
+	LoadBlob(ctx context.Context, bh BlobHandle, buf []byte) ([]byte, error)
+	LoadBlobsFromPack(ctx context.Context, packID ID, blobs []BlobHandle, handleBlobFn func(blob BlobHandle, buf []byte, err error) error) error
+
+	// WithUploader starts the necessary workers to upload new blobs. Once the callback returns,
+	// the workers are stopped and the index is written to the repository. The callback must use
+	// the passed context and must not keep references to any of its parameters after returning.
+	WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader BlobSaverWithAsync) error) error
+
+	// List calls the function fn for each file of type t in the repository.
+	// When an error is returned by fn, processing stops and List() returns the
+	// error.
+	//
+	// The function fn is called in the same Goroutine List() was called from.
+	List(ctx context.Context, t FileType, fn func(ID, int64) error) error
+	// LoadRaw reads all data stored in the backend for the file with id and filetype t.
+	// If the backend returns data that does not match the id, then the buffer is returned
+	// along with an error that is a vaultic.ErrInvalidData error.
+	LoadRaw(ctx context.Context, t FileType, id ID) (data []byte, err error)
+	// LoadUnpacked loads and decrypts the file with the given type and ID.
+	LoadUnpacked(ctx context.Context, t FileType, id ID) (data []byte, err error)
+	// SaveUnpacked stores a file in the repository. This is restricted to snapshots.
+	SaveUnpacked(ctx context.Context, t WriteableFileType, buf []byte) (ID, error)
+	// RemoveUnpacked removes a file from the repository. This is restricted to snapshots.
+	RemoveUnpacked(ctx context.Context, t WriteableFileType, id ID) error
+
+	// StartWarmup creates a new warmup job, requesting the backend to warmup the specified packs.
+	StartWarmup(ctx context.Context, packs IDSet) (WarmupJob, error)
+}
+
+// LoaderUnpacked allows loading a blob not stored in a pack file
+type LoaderUnpacked interface {
+	// Connections returns the maximum number of concurrent backend operations
+	Connections() uint
+	LoadUnpacked(ctx context.Context, t FileType, id ID) (data []byte, err error)
+}
+
+// SaverUnpacked allows saving a blob not stored in a pack file
+type SaverUnpacked[FT FileTypes] interface {
+	// Connections returns the maximum number of concurrent backend operations
+	Connections() uint
+	SaveUnpacked(ctx context.Context, t FT, buf []byte) (ID, error)
+}
+
+// RemoverUnpacked allows removing an unpacked blob
+type RemoverUnpacked[FT FileTypes] interface {
+	// Connections returns the maximum number of concurrent backend operations
+	Connections() uint
+	RemoveUnpacked(ctx context.Context, t FT, id ID) error
+}
+
+type SaverRemoverUnpacked[FT FileTypes] interface {
+	SaverUnpacked[FT]
+	RemoverUnpacked[FT]
+}
+
+type TerminalCounterFactory interface {
+	// NewCounterTerminalOnly returns a new progress counter that is only shown if stdout points to a
+	// terminal. It is not shown if --quiet or --json is specified.
+	NewCounterTerminalOnly(description string) Counter
+}
+
+// Lister allows listing files in a backend.
+type Lister interface {
+	List(ctx context.Context, t FileType, fn func(ID, int64) error) error
+}
+
+type ListerLoaderUnpacked interface {
+	Lister
+	LoaderUnpacked
+}
+
+type Unpacked[FT FileTypes] interface {
+	ListerLoaderUnpacked
+	SaverUnpacked[FT]
+	RemoverUnpacked[FT]
+}
+
+type ListBlobser interface {
+	ListBlobs(ctx context.Context, fn func(PackBlob)) error
+}
+
+type BlobLoader interface {
+	LoadBlob(context.Context, BlobHandle, []byte) ([]byte, error)
+}
+
+type WithBlobUploader interface {
+	WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader BlobSaverWithAsync) error) error
+}
+
+type BlobSaverWithAsync interface {
+	BlobSaver
+	BlobSaverAsync
+}
+
+type BlobSaver interface {
+	// SaveBlob saves a blob to the repository. ctx must be derived from the context created by WithBlobUploader.
+	SaveBlob(ctx context.Context, tpe BlobType, buf []byte, id ID, storeDuplicate bool) (newID ID, known bool, sizeInRepo int, err error)
+}
+
+type BlobSaverAsync interface {
+	// SaveBlobAsync saves a blob to the repository. ctx must be derived from the context created by WithBlobUploader.
+	// The callback is called asynchronously from a different goroutine.
+	SaveBlobAsync(ctx context.Context, tpe BlobType, buf []byte, id ID, storeDuplicate bool, cb func(newID ID, known bool, sizeInRepo int, err error))
+}
+
+// Loader loads a blob from a repository.
+type Loader interface {
+	LoadBlob(context.Context, BlobHandle, []byte) ([]byte, error)
+	LookupBlobSize(bh BlobHandle) (uint, bool)
+	Connections() uint
+}
+
+type WarmupJob interface {
+	// HandleCount returns the number of handles that are currently warming up.
+	HandleCount() int
+	// Wait waits for all handles to be warm.
+	Wait(ctx context.Context) error
+}
+
+// FindBlobSet is a set of blob handles used by prune.
+type FindBlobSet interface {
+	Has(bh BlobHandle) bool
+	Insert(bh BlobHandle)
+}
+
+type AssociatedBlobSet interface {
+	Has(bh BlobHandle) bool
+	Insert(bh BlobHandle)
+	Delete(bh BlobHandle)
+	Len() int
+	Keys() iter.Seq[BlobHandle]
+	Intersect(other AssociatedBlobSet) AssociatedBlobSet
+	Sub(other AssociatedBlobSet) AssociatedBlobSet
+}

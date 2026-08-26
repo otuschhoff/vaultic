@@ -17,10 +17,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type packDumpEntry struct {
@@ -29,10 +29,10 @@ type packDumpEntry struct {
 }
 
 type packDumpBlob struct {
-	Type   restic.BlobType `json:"type"`
-	Length uint            `json:"length"`
-	ID     restic.ID       `json:"id"`
-	Offset uint            `json:"offset"`
+	Type   vaultic.BlobType `json:"type"`
+	Length uint             `json:"length"`
+	ID     vaultic.ID       `json:"id"`
+	Offset uint             `json:"offset"`
 }
 
 func writePackDumpJSON(wr io.Writer, item any) error {
@@ -45,9 +45,9 @@ func writePackDumpJSON(wr io.Writer, item any) error {
 }
 
 // DumpPacks lists each pack file and writes its header blob layout as JSON to wr.
-func DumpPacks(ctx context.Context, repo *Repository, wr io.Writer, printer restic.Printer) error {
+func DumpPacks(ctx context.Context, repo *Repository, wr io.Writer, printer vaultic.Printer) error {
 	var m sync.Mutex
-	return restic.ParallelList(ctx, repo, restic.PackFile, repo.Connections(), func(ctx context.Context, id restic.ID, size int64) error {
+	return vaultic.ParallelList(ctx, repo, vaultic.PackFile, repo.Connections(), func(ctx context.Context, id vaultic.ID, size int64) error {
 		blobs, err := repo.listPack(ctx, id, size)
 		if err != nil {
 			printer.E("error for pack %v: %v", id.Str(), err)
@@ -74,8 +74,8 @@ func DumpPacks(ctx context.Context, repo *Repository, wr io.Writer, printer rest
 }
 
 // DumpIndexes loads each on-disk index file and writes its debug dump to wr.
-func DumpIndexes(ctx context.Context, repo restic.ListerLoaderUnpacked, wr io.Writer, printer restic.Printer) error {
-	return index.ForAllIndexes(ctx, repo, repo, func(id restic.ID, idx *index.Index, err error) error {
+func DumpIndexes(ctx context.Context, repo vaultic.ListerLoaderUnpacked, wr io.Writer, printer vaultic.Printer) error {
+	return index.ForAllIndexes(ctx, repo, repo, func(id vaultic.ID, idx *index.Index, err error) error {
 		printer.S("index_id: %v", id)
 		if err != nil {
 			return err
@@ -94,16 +94,16 @@ type ExaminePackOptions struct {
 }
 
 // ExaminePack loads and inspects a pack file and its index entries.
-func ExaminePack(ctx context.Context, repo *Repository, id restic.ID, opts ExaminePackOptions, printer restic.Printer) error {
+func ExaminePack(ctx context.Context, repo *Repository, id vaultic.ID, opts ExaminePackOptions, printer vaultic.Printer) error {
 	printer.S("examine %v", id)
 
-	buf, err := repo.LoadRaw(ctx, restic.PackFile, id)
+	buf, err := repo.LoadRaw(ctx, vaultic.PackFile, id)
 	// also process damaged pack files
 	if buf == nil {
 		return err
 	}
 	printer.S("  file size is %v", len(buf))
-	gotID := restic.Hash(buf)
+	gotID := vaultic.Hash(buf)
 	if !id.Equal(gotID) {
 		printer.S("  wanted hash %v, got %v", id, gotID)
 	} else {
@@ -115,7 +115,7 @@ func ExaminePack(ctx context.Context, repo *Repository, id restic.ID, opts Exami
 
 	blobsLoaded := false
 	// examine all data the indexes have for the pack file
-	for b := range repo.listPacksFromIndex(ctx, restic.NewIDSet(id)) {
+	for b := range repo.listPacksFromIndex(ctx, vaultic.NewIDSet(id)) {
 		if len(b.Blobs) == 0 {
 			continue
 		}
@@ -145,7 +145,7 @@ func ExaminePack(ctx context.Context, repo *Repository, id restic.ID, opts Exami
 	return nil
 }
 
-func checkPackSize(blobs pack.Blobs, fileSize int, printer restic.Printer) {
+func checkPackSize(blobs pack.Blobs, fileSize int, printer vaultic.Printer) {
 	// track current size and offset
 	var size, offset uint64
 
@@ -168,7 +168,7 @@ func checkPackSize(blobs pack.Blobs, fileSize int, printer restic.Printer) {
 	}
 }
 
-func tryRepairWithBitflip(key *crypto.Key, input []byte, bytewise bool, printer restic.Printer) []byte {
+func tryRepairWithBitflip(key *crypto.Key, input []byte, bytewise bool, printer vaultic.Printer) []byte {
 	if bytewise {
 		printer.S("        trying to repair blob by finding a broken byte")
 	} else {
@@ -198,7 +198,7 @@ func tryRepairWithBitflip(key *crypto.Key, input []byte, bytewise bool, printer 
 				if err == nil {
 					printer.S("")
 					printer.S("        blob could be repaired by XORing byte %v with 0x%02x", idx, pattern)
-					printer.S("        hash is %v", restic.Hash(plaintext))
+					printer.S("        hash is %v", vaultic.Hash(plaintext))
 					close(done)
 					found = true
 					fixed = plaintext
@@ -283,19 +283,19 @@ func decryptUnsigned(k *crypto.Key, buf []byte) []byte {
 	return out
 }
 
-func loadBlobs(ctx context.Context, opts ExaminePackOptions, repo *Repository, packID restic.ID, list pack.Blobs, printer restic.Printer) error {
+func loadBlobs(ctx context.Context, opts ExaminePackOptions, repo *Repository, packID vaultic.ID, list pack.Blobs, printer vaultic.Printer) error {
 	dec, err := zstd.NewReader(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	packData, err := repo.LoadRaw(ctx, restic.PackFile, packID)
+	packData, err := repo.LoadRaw(ctx, vaultic.PackFile, packID)
 	// allow processing broken pack files
 	if packData == nil {
 		return err
 	}
 
-	err = repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	err = repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		for _, blob := range list {
 			printer.S("      loading blob %v at %v (length %v)", blob.ID, blob.Offset, blob.Length)
 			if int(blob.Offset+blob.Length) > len(packData) {
@@ -337,7 +337,7 @@ func loadBlobs(ctx context.Context, opts ExaminePackOptions, repo *Repository, p
 				}
 			}
 
-			id := restic.Hash(plaintext)
+			id := vaultic.Hash(plaintext)
 			var prefix string
 			if !id.Equal(blob.ID) {
 				printer.S("         successfully %vdecrypted blob (length %v), hash is %v, ID does not match, wanted %v", outputPrefix, len(plaintext), id, blob.ID)
@@ -365,7 +365,7 @@ func loadBlobs(ctx context.Context, opts ExaminePackOptions, repo *Repository, p
 	return err
 }
 
-func storePlainBlob(id restic.ID, prefix string, plain []byte, printer restic.Printer) error {
+func storePlainBlob(id vaultic.ID, prefix string, plain []byte, printer vaultic.Printer) error {
 	filename := fmt.Sprintf("%s%s.bin", prefix, id)
 	f, err := os.Create(filename)
 	if err != nil {

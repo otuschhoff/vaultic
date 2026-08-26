@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/checker"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/checker"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 var testSnapshotTime = time.Unix(1460289341, 207401672)
@@ -24,7 +24,7 @@ func TestCreateSnapshot(t *testing.T) {
 		data.TestCreateSnapshot(t, repo, testSnapshotTime.Add(time.Duration(i)*time.Second), testDepth)
 	}
 
-	snapshots, err := data.TestLoadAllSnapshots(context.TODO(), repo, restic.NewIDSet())
+	snapshots, err := data.TestLoadAllSnapshots(context.TODO(), repo, vaultic.NewIDSet())
 	if err != nil {
 		t.Fatal(err)
 	}

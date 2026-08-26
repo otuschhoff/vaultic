@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type unlocker struct {
@@ -88,7 +88,7 @@ retryLoop:
 		}
 	}
 	if isInvalidLock(err) {
-		return nil, ctx, errors.Fatalf("%v\n\nthe `unlock --remove-all` command can be used to remove invalid locks. Make sure that no other restic process is accessing the repository when running the command", err)
+		return nil, ctx, errors.Fatalf("%v\n\nthe `unlock --remove-all` command can be used to remove invalid locks. Make sure that no other vaultic process is accessing the repository when running the command", err)
 	}
 	if err != nil {
 		return nil, ctx, fmt.Errorf("unable to create lock in backend: %w", err)
@@ -269,7 +269,7 @@ func tryRefreshStaleLock(ctx context.Context, be backend.Backend, lock *lockHand
 // RemoveStaleLocks deletes all locks detected as stale from the repository.
 func RemoveStaleLocks(ctx context.Context, repo *Repository) (uint, error) {
 	var processed uint
-	err := forAllLocks(ctx, repo, nil, func(id restic.ID, lock *lockHandle, err error) error {
+	err := forAllLocks(ctx, repo, nil, func(id vaultic.ID, lock *lockHandle, err error) error {
 		if err != nil {
 			// ignore locks that cannot be loaded
 			debug.Log("ignore lock %v: %v", id, err)
@@ -277,7 +277,7 @@ func RemoveStaleLocks(ctx context.Context, repo *Repository) (uint, error) {
 		}
 
 		if lock.stale() {
-			err = (&internalRepository{repo}).RemoveUnpacked(ctx, restic.LockFile, id)
+			err = (&internalRepository{repo}).RemoveUnpacked(ctx, vaultic.LockFile, id)
 			if err == nil {
 				processed++
 			}
@@ -292,8 +292,8 @@ func RemoveStaleLocks(ctx context.Context, repo *Repository) (uint, error) {
 // RemoveAllLocks removes all locks forcefully.
 func RemoveAllLocks(ctx context.Context, repo *Repository) (uint, error) {
 	var processed uint32
-	err := restic.ParallelList(ctx, repo, restic.LockFile, repo.Connections(), func(ctx context.Context, id restic.ID, _ int64) error {
-		err := (&internalRepository{repo}).RemoveUnpacked(ctx, restic.LockFile, id)
+	err := vaultic.ParallelList(ctx, repo, vaultic.LockFile, repo.Connections(), func(ctx context.Context, id vaultic.ID, _ int64) error {
+		err := (&internalRepository{repo}).RemoveUnpacked(ctx, vaultic.LockFile, id)
 		if err == nil {
 			atomic.AddUint32(&processed, 1)
 		}

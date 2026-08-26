@@ -5,10 +5,10 @@ package fuse
 import (
 	"os"
 
-	"github.com/restic/restic/internal/bloblru"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/bloblru"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"github.com/anacrolix/fuse/fs"
 )
@@ -23,7 +23,7 @@ type Config struct {
 
 // Root is the root node of the fuse mount of a repository.
 type Root struct {
-	repo      restic.Repository
+	repo      vaultic.Repository
 	cfg       Config
 	blobCache *bloblru.Cache
 
@@ -42,7 +42,7 @@ const rootInode = 1
 const blobCacheSize = 64 << 20
 
 // NewRoot initializes a new root node from a repository.
-func NewRoot(repo restic.Repository, cfg Config) *Root {
+func NewRoot(repo vaultic.Repository, cfg Config) *Root {
 	debug.Log("NewRoot(), config %v", cfg)
 
 	root := &Root{

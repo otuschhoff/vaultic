@@ -9,14 +9,14 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/limiter"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/fileio"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/limiter"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/fileio"
 
 	"github.com/cenkalti/backoff/v4"
 )

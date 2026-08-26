@@ -4,24 +4,24 @@ import (
 	"context"
 	"sync"
 
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // FindUsedBlobs traverses the tree ID and adds all seen blobs (trees and data
 // blobs) to the set blobs. Already seen tree blobs will not be visited again.
-func FindUsedBlobs(ctx context.Context, repo restic.Loader, treeIDs restic.IDs, blobs restic.FindBlobSet, p restic.Counter) error {
+func FindUsedBlobs(ctx context.Context, repo vaultic.Loader, treeIDs vaultic.IDs, blobs vaultic.FindBlobSet, p vaultic.Counter) error {
 	var lock sync.Mutex
 
-	return StreamTrees(ctx, repo, treeIDs, p, func(treeID restic.ID) bool {
+	return StreamTrees(ctx, repo, treeIDs, p, func(treeID vaultic.ID) bool {
 		// locking is necessary the goroutine below concurrently adds data blobs
 		lock.Lock()
-		h := restic.BlobHandle{ID: treeID, Type: restic.TreeBlob}
+		h := vaultic.BlobHandle{ID: treeID, Type: vaultic.TreeBlob}
 		blobReferenced := blobs.Has(h)
 		// noop if already referenced
 		blobs.Insert(h)
 		lock.Unlock()
 		return blobReferenced
-	}, func(_ restic.ID, err error, nodes TreeNodeIterator) error {
+	}, func(_ vaultic.ID, err error, nodes TreeNodeIterator) error {
 		if err != nil {
 			return err
 		}
@@ -34,7 +34,7 @@ func FindUsedBlobs(ctx context.Context, repo restic.Loader, treeIDs restic.IDs, 
 			switch item.Node.Type {
 			case NodeTypeFile:
 				for _, blob := range item.Node.Content {
-					blobs.Insert(restic.BlobHandle{ID: blob, Type: restic.DataBlob})
+					blobs.Insert(vaultic.BlobHandle{ID: blob, Type: vaultic.DataBlob})
 				}
 			}
 			lock.Unlock()

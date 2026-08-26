@@ -11,15 +11,15 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/restic/chunker"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/cache"
-	"github.com/restic/restic/internal/backend/dryrun"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/cache"
+	"github.com/vaultic/vaultic/internal/backend/dryrun"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -31,9 +31,9 @@ const MaxPackSize = 128 * 1024 * 1024
 // Repository is used to access a repository in a backend.
 type Repository struct {
 	be    backend.Backend
-	cfg   restic.Config
+	cfg   vaultic.Config
 	key   *crypto.Key
-	keyID restic.ID
+	keyID vaultic.ID
 	idx   *index.MasterIndex
 	cache *cache.Cache
 
@@ -53,7 +53,7 @@ type Repository struct {
 	dec      *zstd.Decoder
 
 	zeroChunkOnce sync.Once
-	zeroChunkID   restic.ID
+	zeroChunkID   vaultic.ID
 }
 
 // internalRepository allows using SaveUnpacked and RemoveUnpacked with all FileTypes
@@ -148,12 +148,12 @@ func New(be backend.Backend, opts Options) (*Repository, error) {
 }
 
 // setConfig assigns the given config and updates the repository parameters accordingly
-func (r *Repository) setConfig(cfg restic.Config) {
+func (r *Repository) setConfig(cfg vaultic.Config) {
 	r.cfg = cfg
 }
 
 // Config returns the repository configuration.
-func (r *Repository) Config() restic.Config {
+func (r *Repository) Config() vaultic.Config {
 	return r.cfg
 }
 
@@ -186,11 +186,11 @@ func (r *Repository) Checker() *Checker {
 }
 
 // LoadUnpacked loads and decrypts the file with the given type and ID.
-func (r *Repository) LoadUnpacked(ctx context.Context, t restic.FileType, id restic.ID) ([]byte, error) {
+func (r *Repository) LoadUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) ([]byte, error) {
 	debug.Log("load %v with id %v", t, id)
 
-	if t == restic.ConfigFile {
-		id = restic.ID{}
+	if t == vaultic.ConfigFile {
+		id = vaultic.ID{}
 	}
 
 	buf, err := r.LoadRaw(ctx, t, id)
@@ -207,7 +207,7 @@ func (r *Repository) LoadUnpacked(ctx context.Context, t restic.FileType, id res
 	if err != nil {
 		return nil, err
 	}
-	if t != restic.ConfigFile {
+	if t != vaultic.ConfigFile {
 		return r.decompressUnpacked(plaintext)
 	}
 
@@ -245,7 +245,7 @@ func sortCachedPacksFirst(cache haver, blobs []*pack.PackedBlob) {
 
 // LoadBlob loads a blob from the repository.
 // It may use all of buf[:cap(buf)] as scratch space.
-func (r *Repository) LoadBlob(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error) {
+func (r *Repository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []byte) ([]byte, error) {
 	debug.Log("load %v (buf len %v, cap %d)", bh, len(buf), cap(buf))
 
 	// lookup packs
@@ -381,7 +381,7 @@ func (r *Repository) getZstdDecoder() *zstd.Decoder {
 // is small enough, it will be packed together with other small blobs. The
 // caller must ensure that the id matches the data. Returned is the size data
 // occupies in the repo (compressed or not, including the encryption overhead).
-func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data []byte, id restic.ID) (size int, err error) {
+func (r *Repository) saveAndEncrypt(ctx context.Context, t vaultic.BlobType, data []byte, id vaultic.ID) (size int, err error) {
 	debug.Log("save id %v (%v, %d bytes)", id, t, len(data))
 
 	uncompressedLength := 0
@@ -392,7 +392,7 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 		// uncompressedLength != 0 is used to indicate compressed data. Thus, a zero-sized blob
 		// cannot be compressed. This special case is only relevant for tests, normal operation does not
 		// generate zero-sized blobs.
-		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != restic.DataBlob) {
+		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != vaultic.DataBlob) {
 			uncompressedLength = len(data)
 			data = r.getZstdEncoder().EncodeAll(data, nil)
 		}
@@ -408,16 +408,16 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 
 	if err := r.verifyCiphertext(ciphertext, uncompressedLength, id); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return 0, fmt.Errorf("Detected data corruption while saving blob %v: %w\nCorrupted blobs are either caused by hardware issues or software bugs. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting.", id, err)
+		return 0, fmt.Errorf("Detected data corruption while saving blob %v: %w\nCorrupted blobs are either caused by hardware issues or software bugs. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting.", id, err)
 	}
 
 	// find suitable packer and add blob
 	var pm *packerManager
 
 	switch t {
-	case restic.TreeBlob:
+	case vaultic.TreeBlob:
 		pm = r.treePM
-	case restic.DataBlob:
+	case vaultic.DataBlob:
 		pm = r.dataPM
 	default:
 		panic(fmt.Sprintf("invalid type: %v", t))
@@ -426,7 +426,7 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t restic.BlobType, data
 	return pm.SaveBlob(ctx, t, id, ciphertext, uncompressedLength)
 }
 
-func (r *Repository) verifyCiphertext(buf []byte, uncompressedLength int, id restic.ID) error {
+func (r *Repository) verifyCiphertext(buf []byte, uncompressedLength int, id vaultic.ID) error {
 	if r.opts.NoExtraVerify {
 		return nil
 	}
@@ -444,7 +444,7 @@ func (r *Repository) verifyCiphertext(buf []byte, uncompressedLength int, id res
 			return fmt.Errorf("decompression failed: %w", err)
 		}
 	}
-	if !restic.Hash(plaintext).Equal(id) {
+	if !vaultic.Hash(plaintext).Equal(id) {
 		return errors.New("hash mismatch")
 	}
 
@@ -487,20 +487,20 @@ func (r *Repository) decompressUnpacked(p []byte) ([]byte, error) {
 
 // SaveUnpacked encrypts data and stores it in the backend. Returned is the
 // storage hash.
-func (r *Repository) SaveUnpacked(ctx context.Context, t restic.WriteableFileType, buf []byte) (id restic.ID, err error) {
+func (r *Repository) SaveUnpacked(ctx context.Context, t vaultic.WriteableFileType, buf []byte) (id vaultic.ID, err error) {
 	return r.saveUnpacked(ctx, t.ToFileType(), buf)
 }
 
-func (r *internalRepository) SaveUnpacked(ctx context.Context, t restic.FileType, buf []byte) (id restic.ID, err error) {
+func (r *internalRepository) SaveUnpacked(ctx context.Context, t vaultic.FileType, buf []byte) (id vaultic.ID, err error) {
 	return r.Repository.saveUnpacked(ctx, t, buf)
 }
 
-func (r *Repository) saveUnpacked(ctx context.Context, t restic.FileType, buf []byte) (id restic.ID, err error) {
+func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf []byte) (id vaultic.ID, err error) {
 	p := buf
-	if t != restic.ConfigFile {
+	if t != vaultic.ConfigFile {
 		p, err = r.compressUnpacked(p)
 		if err != nil {
-			return restic.ID{}, err
+			return vaultic.ID{}, err
 		}
 	}
 
@@ -513,27 +513,27 @@ func (r *Repository) saveUnpacked(ctx context.Context, t restic.FileType, buf []
 
 	if err := r.verifyUnpacked(ciphertext, t, buf); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return restic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting.", t, err)
+		return vaultic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting.", t, err)
 	}
 
-	if t == restic.ConfigFile {
-		id = restic.ID{}
+	if t == vaultic.ConfigFile {
+		id = vaultic.ID{}
 	} else {
-		id = restic.Hash(ciphertext)
+		id = vaultic.Hash(ciphertext)
 	}
 	h := backend.Handle{Type: backend.FileType(t), Name: id.String()}
 
 	err = r.be.Save(ctx, h, backend.NewByteReader(ciphertext, r.be.Hasher()))
 	if err != nil {
 		debug.Log("error saving blob %v: %v", h, err)
-		return restic.ID{}, err
+		return vaultic.ID{}, err
 	}
 
 	debug.Log("blob %v saved", h)
 	return id, nil
 }
 
-func (r *Repository) verifyUnpacked(buf []byte, t restic.FileType, expected []byte) error {
+func (r *Repository) verifyUnpacked(buf []byte, t vaultic.FileType, expected []byte) error {
 	if r.opts.NoExtraVerify {
 		return nil
 	}
@@ -543,7 +543,7 @@ func (r *Repository) verifyUnpacked(buf []byte, t restic.FileType, expected []by
 	if err != nil {
 		return fmt.Errorf("decryption failed: %w", err)
 	}
-	if t != restic.ConfigFile {
+	if t != vaultic.ConfigFile {
 		plaintext, err = r.decompressUnpacked(plaintext)
 		if err != nil {
 			return fmt.Errorf("decompression failed: %w", err)
@@ -556,19 +556,19 @@ func (r *Repository) verifyUnpacked(buf []byte, t restic.FileType, expected []by
 	return nil
 }
 
-func (r *Repository) RemoveUnpacked(ctx context.Context, t restic.WriteableFileType, id restic.ID) error {
+func (r *Repository) RemoveUnpacked(ctx context.Context, t vaultic.WriteableFileType, id vaultic.ID) error {
 	return r.removeUnpacked(ctx, t.ToFileType(), id)
 }
 
-func (r *internalRepository) RemoveUnpacked(ctx context.Context, t restic.FileType, id restic.ID) error {
+func (r *internalRepository) RemoveUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) error {
 	return r.Repository.removeUnpacked(ctx, t, id)
 }
 
-func (r *Repository) removeUnpacked(ctx context.Context, t restic.FileType, id restic.ID) error {
+func (r *Repository) removeUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) error {
 	return r.be.Remove(ctx, backend.Handle{Type: backend.FileType(t), Name: id.String()})
 }
 
-func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader restic.BlobSaverWithAsync) error) error {
+func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wg, ctx := errgroup.WithContext(ctx)
@@ -609,8 +609,8 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 	innerWg, ctx := errgroup.WithContext(ctx)
 	r.packerWg = innerWg
 	r.uploader = newPackerUploader(ctx, innerWg, r, r.Connections())
-	r.treePM = newPackerManager(r.key, restic.TreeBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
-	r.dataPM = newPackerManager(r.key, restic.DataBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
+	r.treePM = newPackerManager(r.key, vaultic.TreeBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
+	r.dataPM = newPackerManager(r.key, vaultic.DataBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
 
 	wg.Go(func() error {
 		return innerWg.Wait()
@@ -621,11 +621,11 @@ type blobSaverRepo struct {
 	repo *Repository
 }
 
-func (r *blobSaverRepo) SaveBlob(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool) (newID restic.ID, known bool, size int, err error) {
+func (r *blobSaverRepo) SaveBlob(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool) (newID vaultic.ID, known bool, size int, err error) {
 	return r.repo.saveBlob(ctx, t, buf, id, storeDuplicate)
 }
 
-func (r *blobSaverRepo) SaveBlobAsync(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool, cb func(newID restic.ID, known bool, size int, err error)) {
+func (r *blobSaverRepo) SaveBlobAsync(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, size int, err error)) {
 	r.repo.saveBlobAsync(ctx, t, buf, id, storeDuplicate, cb)
 }
 
@@ -678,9 +678,9 @@ func (r *Repository) Connections() uint {
 	return r.be.Properties().Connections
 }
 
-func (r *Repository) LookupBlob(bh restic.BlobHandle) []restic.PackBlob {
+func (r *Repository) LookupBlob(bh vaultic.BlobHandle) []vaultic.PackBlob {
 	entries := r.idx.Lookup(bh)
-	out := make([]restic.PackBlob, len(entries))
+	out := make([]vaultic.PackBlob, len(entries))
 	for i, e := range entries {
 		out[i] = e
 	}
@@ -688,13 +688,13 @@ func (r *Repository) LookupBlob(bh restic.BlobHandle) []restic.PackBlob {
 }
 
 // LookupBlobSize returns the size of blob id. Also returns pending blobs.
-func (r *Repository) LookupBlobSize(bh restic.BlobHandle) (uint, bool) {
+func (r *Repository) LookupBlobSize(bh vaultic.BlobHandle) (uint, bool) {
 	return r.idx.LookupSize(bh)
 }
 
 // ListBlobs runs fn on all blobs known to the index. When the context is cancelled,
 // the index iteration returns immediately with ctx.Err(). This blocks any modification of the index.
-func (r *Repository) ListBlobs(ctx context.Context, fn func(restic.PackBlob)) error {
+func (r *Repository) ListBlobs(ctx context.Context, fn func(vaultic.PackBlob)) error {
 	for blob := range r.idx.Values() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -705,7 +705,7 @@ func (r *Repository) ListBlobs(ctx context.Context, fn func(restic.PackBlob)) er
 }
 
 // listPacksFromIndex returns index entries for the given packs, grouped by pack file.
-func (r *Repository) listPacksFromIndex(ctx context.Context, packs restic.IDSet) <-chan index.PackBlobs {
+func (r *Repository) listPacksFromIndex(ctx context.Context, packs vaultic.IDSet) <-chan index.PackBlobs {
 	return r.idx.ListPacks(ctx, packs)
 }
 
@@ -714,12 +714,12 @@ func (r *Repository) clearIndex() {
 }
 
 // LoadIndex loads all index files from the backend in parallel and stores them
-func (r *Repository) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory) error {
+func (r *Repository) LoadIndex(ctx context.Context, p vaultic.TerminalCounterFactory) error {
 	return r.loadIndexWithCallback(ctx, p, nil)
 }
 
 // loadIndexWithCallback loads all index files from the backend in parallel and stores them
-func (r *Repository) loadIndexWithCallback(ctx context.Context, p restic.TerminalCounterFactory, cb func(id restic.ID, idx *index.Index, err error) error) error {
+func (r *Repository) loadIndexWithCallback(ctx context.Context, p vaultic.TerminalCounterFactory, cb func(id vaultic.ID, idx *index.Index, err error) error) error {
 	debug.Log("Loading index")
 
 	bar := p.NewCounterTerminalOnly("index files loaded")
@@ -761,7 +761,7 @@ func (r *Repository) loadIndexWithCallback(ctx context.Context, p restic.Termina
 // createIndexFromPacks creates a new index by reading all given pack files (with sizes).
 // The index is added to the MasterIndex but not marked as finalized.
 // Returned is the list of pack files which could not be read.
-func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[restic.ID]int64, p restic.Counter) (invalid restic.IDs, err error) {
+func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[vaultic.ID]int64, p vaultic.Counter) (invalid vaultic.IDs, err error) {
 	var m sync.Mutex
 
 	debug.Log("Loading index from pack files")
@@ -771,7 +771,7 @@ func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[rest
 	wg, wgCtx := errgroup.WithContext(ctx)
 
 	type FileInfo struct {
-		restic.ID
+		vaultic.ID
 		Size int64
 	}
 	ch := make(chan FileInfo)
@@ -828,19 +828,19 @@ func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[rest
 	return invalid, nil
 }
 
-func (r *Repository) NewAssociatedBlobSet() restic.AssociatedBlobSet {
+func (r *Repository) NewAssociatedBlobSet() vaultic.AssociatedBlobSet {
 	return &associatedBlobSet{*index.NewAssociatedSet[struct{}](r.idx)}
 }
 
-// associatedBlobSet is a wrapper around index.AssociatedSet to implement the restic.AssociatedBlobSet interface.
+// associatedBlobSet is a wrapper around index.AssociatedSet to implement the vaultic.AssociatedBlobSet interface.
 type associatedBlobSet struct {
 	index.AssociatedSet[struct{}]
 }
 
-func (s *associatedBlobSet) Intersect(other restic.AssociatedBlobSet) restic.AssociatedBlobSet {
+func (s *associatedBlobSet) Intersect(other vaultic.AssociatedBlobSet) vaultic.AssociatedBlobSet {
 	return &associatedBlobSet{*s.AssociatedSet.Intersect(other)}
 }
-func (s *associatedBlobSet) Sub(other restic.AssociatedBlobSet) restic.AssociatedBlobSet {
+func (s *associatedBlobSet) Sub(other vaultic.AssociatedBlobSet) vaultic.AssociatedBlobSet {
 	return &associatedBlobSet{*s.AssociatedSet.Sub(other)}
 }
 
@@ -851,7 +851,7 @@ func (r *Repository) prepareCache() error {
 		return nil
 	}
 
-	packs := r.idx.Packs(restic.NewIDSet())
+	packs := r.idx.Packs(vaultic.NewIDSet())
 
 	ids := make(map[string]struct{})
 	for id := range packs {
@@ -875,7 +875,7 @@ func (r *Repository) SearchKey(ctx context.Context, password string, maxKeys int
 
 	r.key = key.master
 	r.keyID = key.ID()
-	cfg, err := restic.LoadConfig(ctx, r)
+	cfg, err := vaultic.LoadConfig(ctx, r)
 	if err != nil {
 		r.key = oldKey
 		r.keyID = oldKeyID
@@ -893,11 +893,11 @@ func (r *Repository) SearchKey(ctx context.Context, password string, maxKeys int
 // Init creates a new master key with the supplied password, initializes and
 // saves the repository config.
 func (r *Repository) Init(ctx context.Context, version uint, password string, chunkerPolynomial *chunker.Pol) error {
-	if version > restic.MaxRepoVersion {
+	if version > vaultic.MaxRepoVersion {
 		return fmt.Errorf("repository version %v too high", version)
 	}
 
-	if version < restic.MinRepoVersion {
+	if version < vaultic.MinRepoVersion {
 		return fmt.Errorf("repository version %v too low", version)
 	}
 
@@ -911,7 +911,7 @@ func (r *Repository) Init(ctx context.Context, version uint, password string, ch
 	// double check to make sure that a repository is not accidentally reinitialized
 	// if the backend somehow fails to stat the config file. An initialized repository
 	// must always contain at least one key file.
-	if err := r.List(ctx, restic.KeyFile, func(_ restic.ID, _ int64) error {
+	if err := r.List(ctx, vaultic.KeyFile, func(_ vaultic.ID, _ int64) error {
 		return errors.New("repository already contains keys")
 	}); err != nil {
 		return err
@@ -920,13 +920,13 @@ func (r *Repository) Init(ctx context.Context, version uint, password string, ch
 	// policy that deletes files older than x days. For such repositories usually the
 	// config and key files are removed first and therefore the check would not detect
 	// the old repository.
-	if err := r.List(ctx, restic.SnapshotFile, func(_ restic.ID, _ int64) error {
+	if err := r.List(ctx, vaultic.SnapshotFile, func(_ vaultic.ID, _ int64) error {
 		return errors.New("repository already contains snapshots")
 	}); err != nil {
 		return err
 	}
 
-	cfg, err := restic.CreateConfig(version, chunkerPolynomial)
+	cfg, err := vaultic.CreateConfig(version, chunkerPolynomial)
 	if err != nil {
 		return err
 	}
@@ -936,7 +936,7 @@ func (r *Repository) Init(ctx context.Context, version uint, password string, ch
 
 // init creates a new master key with the supplied password and uses it to save
 // the config into the repo.
-func (r *Repository) init(ctx context.Context, password string, cfg restic.Config) error {
+func (r *Repository) init(ctx context.Context, password string, cfg vaultic.Config) error {
 	key, err := createMasterKey(ctx, r, password)
 	if err != nil {
 		return err
@@ -945,7 +945,7 @@ func (r *Repository) init(ctx context.Context, password string, cfg restic.Confi
 	r.key = key.master
 	r.keyID = key.ID()
 	r.setConfig(cfg)
-	return restic.SaveConfig(ctx, &internalRepository{r}, cfg)
+	return vaultic.SaveConfig(ctx, &internalRepository{r}, cfg)
 }
 
 // Key returns the current master key.
@@ -954,14 +954,14 @@ func (r *Repository) Key() *crypto.Key {
 }
 
 // KeyID returns the id of the current key in the backend.
-func (r *Repository) KeyID() restic.ID {
+func (r *Repository) KeyID() vaultic.ID {
 	return r.keyID
 }
 
 // List runs fn for all files of type t in the repo.
-func (r *Repository) List(ctx context.Context, t restic.FileType, fn func(restic.ID, int64) error) error {
+func (r *Repository) List(ctx context.Context, t vaultic.FileType, fn func(vaultic.ID, int64) error) error {
 	return r.be.List(ctx, backend.FileType(t), func(fi backend.FileInfo) error {
-		id, err := restic.ParseID(fi.Name)
+		id, err := vaultic.ParseID(fi.Name)
 		if err != nil {
 			debug.Log("unable to parse %v as an ID", fi.Name)
 			return nil
@@ -971,7 +971,7 @@ func (r *Repository) List(ctx context.Context, t restic.FileType, fn func(restic
 }
 
 // listPack returns blob entries from the pack file header including offsets.
-func (r *Repository) listPack(ctx context.Context, id restic.ID, size int64) (pack.Blobs, error) {
+func (r *Repository) listPack(ctx context.Context, id vaultic.ID, size int64) (pack.Blobs, error) {
 	h := backend.Handle{Type: backend.PackFile, Name: id.String()}
 
 	entries, _, err := pack.List(r.Key(), backend.ReaderAt(ctx, r.be, h), size)
@@ -988,12 +988,12 @@ func (r *Repository) listPack(ctx context.Context, id restic.ID, size int64) (pa
 }
 
 // ListPackHandles returns the blob handles stored in the pack file header.
-func (r *Repository) ListPackHandles(ctx context.Context, id restic.ID, size int64) ([]restic.BlobHandle, error) {
+func (r *Repository) ListPackHandles(ctx context.Context, id vaultic.ID, size int64) ([]vaultic.BlobHandle, error) {
 	blobs, err := r.listPack(ctx, id, size)
 	if err != nil {
 		return nil, err
 	}
-	handles := make([]restic.BlobHandle, len(blobs))
+	handles := make([]vaultic.BlobHandle, len(blobs))
 	for i, blob := range blobs {
 		handles[i] = blob.BlobHandle
 	}
@@ -1018,10 +1018,10 @@ func (r *Repository) Close() error {
 // Also returns if the blob was already known before.
 // If the blob was not known before, it returns the number of bytes the blob
 // occupies in the repo (compressed or not, including encryption overhead).
-func (r *Repository) saveBlob(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool) (newID restic.ID, known bool, size int, err error) {
+func (r *Repository) saveBlob(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool) (newID vaultic.ID, known bool, size int, err error) {
 
 	if int64(len(buf)) > math.MaxUint32 {
-		return restic.ID{}, false, 0, fmt.Errorf("blob is larger than 4GB")
+		return vaultic.ID{}, false, 0, fmt.Errorf("blob is larger than 4GB")
 	}
 
 	// compute plaintext hash if not already set
@@ -1029,17 +1029,17 @@ func (r *Repository) saveBlob(ctx context.Context, t restic.BlobType, buf []byte
 		// Special case the hash calculation for all zero chunks. This is especially
 		// useful for sparse files containing large all zero regions. For these we can
 		// process chunks as fast as we can read the from disk.
-		if len(buf) == chunker.MinSize && restic.ZeroPrefixLen(buf) == chunker.MinSize {
+		if len(buf) == chunker.MinSize && vaultic.ZeroPrefixLen(buf) == chunker.MinSize {
 			newID = r.zeroChunk()
 		} else {
-			newID = restic.Hash(buf)
+			newID = vaultic.Hash(buf)
 		}
 	} else {
 		newID = id
 	}
 
 	// first try to add to pending blobs; if not successful, this blob is already known
-	known = !r.idx.AddPending(restic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
+	known = !r.idx.AddPending(vaultic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
 
 	// only save when needed or explicitly told
 	if !known || storeDuplicate {
@@ -1049,11 +1049,11 @@ func (r *Repository) saveBlob(ctx context.Context, t restic.BlobType, buf []byte
 	return newID, known, size, err
 }
 
-func (r *Repository) saveBlobAsync(ctx context.Context, t restic.BlobType, buf []byte, id restic.ID, storeDuplicate bool, cb func(newID restic.ID, known bool, size int, err error)) {
+func (r *Repository) saveBlobAsync(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, size int, err error)) {
 	r.mainWg.Go(func() error {
 		if ctx.Err() != nil {
 			// fail fast if the context is cancelled
-			cb(restic.ID{}, false, 0, ctx.Err())
+			cb(vaultic.ID{}, false, 0, ctx.Err())
 			return ctx.Err()
 		}
 		newID, known, size, err := r.saveBlob(ctx, t, buf, id, storeDuplicate)
@@ -1063,7 +1063,7 @@ func (r *Repository) saveBlobAsync(ctx context.Context, t restic.BlobType, buf [
 }
 
 type backendLoadFn func(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error
-type loadBlobFn func(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error)
+type loadBlobFn func(ctx context.Context, bh vaultic.BlobHandle, buf []byte) ([]byte, error)
 
 // Skip sections with more than 1MB unused blobs
 const maxUnusedRange = 1 * 1024 * 1024
@@ -1073,7 +1073,7 @@ const maxUnusedRange = 1 * 1024 * 1024
 // handleBlobFn is called at most once for each blob. If the callback returns an error,
 // then LoadBlobsFromPack will abort and not retry it. The buf passed to the callback is only valid within
 // this specific call. The callback must not keep a reference to buf.
-func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 	blobs, err := r.blobsInPack(packID, handles)
 	if err != nil {
 		return err
@@ -1081,7 +1081,7 @@ func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID restic.ID, ha
 	return r.loadBlobsFromPack(ctx, packID, blobs, handleBlobFn)
 }
 
-func (r *Repository) blobsInPack(packID restic.ID, handles []restic.BlobHandle) (pack.Blobs, error) {
+func (r *Repository) blobsInPack(packID vaultic.ID, handles []vaultic.BlobHandle) (pack.Blobs, error) {
 	blobs := make(pack.Blobs, 0, len(handles))
 	for _, h := range handles {
 		found := false
@@ -1099,11 +1099,11 @@ func (r *Repository) blobsInPack(packID restic.ID, handles []restic.BlobHandle) 
 	return blobs, nil
 }
 
-func (r *Repository) loadBlobsFromPack(ctx context.Context, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+func (r *Repository) loadBlobsFromPack(ctx context.Context, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 	return streamPack(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
 }
 
-func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 	if len(blobs) == 0 {
 		// nothing to do
 		return nil
@@ -1146,7 +1146,7 @@ func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn
 	return streamPackPart(ctx, beLoad, loadBlobFn, dec, key, packID, blobs[lowerIdx:], handleBlobFn)
 }
 
-func streamPackPart(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID restic.ID, blobs pack.Blobs, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+func streamPackPart(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 	h := backend.Handle{Type: backend.PackFile, Name: packID.String(), IsMetadata: blobs[0].Type.IsMetadata()}
 
 	dataStart := blobs[0].Offset
@@ -1252,7 +1252,7 @@ func (b *byteReader) ReadFull(n int) (buf []byte, err error) {
 }
 
 type packBlobIterator struct {
-	packID        restic.ID
+	packID        vaultic.ID
 	rd            discardReader
 	currentOffset uint
 
@@ -1264,14 +1264,14 @@ type packBlobIterator struct {
 }
 
 type packBlobValue struct {
-	Handle    restic.BlobHandle
+	Handle    vaultic.BlobHandle
 	Plaintext []byte
 	Err       error
 }
 
 var errPackEOF = errors.New("reached EOF of pack file")
 
-func newPackBlobIterator(packID restic.ID, rd discardReader, currentOffset uint,
+func newPackBlobIterator(packID vaultic.ID, rd discardReader, currentOffset uint,
 	blobs pack.Blobs, key *crypto.Key, dec *zstd.Decoder) *packBlobIterator {
 	return &packBlobIterator{
 		packID:        packID,
@@ -1303,7 +1303,7 @@ func (b *packBlobIterator) Next() (packBlobValue, error) {
 	}
 	b.currentOffset = entry.Offset
 
-	h := restic.BlobHandle{ID: entry.ID, Type: entry.Type}
+	h := vaultic.BlobHandle{ID: entry.ID, Type: entry.Type}
 	debug.Log("  process blob %v, skipped %d, %v", h, skipBytes, entry)
 
 	buf, err := b.rd.ReadFull(int(entry.Length))
@@ -1335,7 +1335,7 @@ func (b *packBlobIterator) Next() (packBlobValue, error) {
 		}
 	}
 	if err == nil {
-		id := restic.Hash(plaintext)
+		id := vaultic.Hash(plaintext)
 		if !id.Equal(entry.ID) {
 			debug.Log("read blob %v/%v from pack %v: wrong data returned, hash is %v",
 				h.Type, h.ID, b.packID.String(), id)
@@ -1347,9 +1347,9 @@ func (b *packBlobIterator) Next() (packBlobValue, error) {
 	return packBlobValue{entry.BlobHandle, plaintext, err}, nil
 }
 
-func (r *Repository) zeroChunk() restic.ID {
+func (r *Repository) zeroChunk() vaultic.ID {
 	r.zeroChunkOnce.Do(func() {
-		r.zeroChunkID = restic.Hash(make([]byte, chunker.MinSize))
+		r.zeroChunkID = vaultic.Hash(make([]byte, chunker.MinSize))
 	})
 	return r.zeroChunkID
 }

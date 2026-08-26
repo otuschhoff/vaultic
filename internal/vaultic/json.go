@@ -1,0 +1,32 @@
+package vaultic
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+)
+
+// LoadJSONUnpacked decrypts the data and afterwards calls json.Unmarshal on
+// the item.
+func LoadJSONUnpacked(ctx context.Context, repo LoaderUnpacked, t FileType, id ID, item any) (err error) {
+	buf, err := repo.LoadUnpacked(ctx, t, id)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(buf, item)
+}
+
+// SaveJSONUnpacked serialises item as JSON and encrypts and saves it in the
+// backend as type t, without a pack. It returns the storage hash.
+func SaveJSONUnpacked[FT FileTypes](ctx context.Context, repo SaverUnpacked[FT], t FT, item any) (ID, error) {
+	debug.Log("save new blob %v", t)
+	plaintext, err := json.Marshal(item)
+	if err != nil {
+		return ID{}, errors.Wrap(err, "json.Marshal")
+	}
+
+	return repo.SaveUnpacked(ctx, t, plaintext)
+}

@@ -5,7 +5,7 @@ import (
 	"iter"
 	"math"
 
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // An indexMap is a chained hash table that maps blob IDs to indexEntries.
@@ -42,7 +42,7 @@ const (
 
 // add inserts an indexEntry for the given arguments into the map,
 // using id as the key.
-func (m *indexMap) add(id restic.ID, packIdx uint32, offset, length uint32, uncompressedLength uint32) {
+func (m *indexMap) add(id vaultic.ID, packIdx uint32, offset, length uint32, uncompressedLength uint32) {
 	// Make sure there is enough space for the new entry.
 	m.preallocate(int(m.numentries) + 1)
 
@@ -72,7 +72,7 @@ func (m *indexMap) values() iter.Seq[*indexEntry] {
 }
 
 // valuesWithID returns an iterator over all entries with the given id.
-func (m *indexMap) valuesWithID(id restic.ID) iter.Seq[*indexEntry] {
+func (m *indexMap) valuesWithID(id vaultic.ID) iter.Seq[*indexEntry] {
 	return func(yield func(*indexEntry) bool) {
 		if len(m.buckets) == 0 {
 			return
@@ -96,7 +96,7 @@ func (m *indexMap) valuesWithID(id restic.ID) iter.Seq[*indexEntry] {
 }
 
 // get returns the first entry for the given id.
-func (m *indexMap) get(id restic.ID) *indexEntry {
+func (m *indexMap) get(id vaultic.ID) *indexEntry {
 	if len(m.buckets) == 0 {
 		return nil
 	}
@@ -115,7 +115,7 @@ func (m *indexMap) get(id restic.ID) *indexEntry {
 
 // firstIndex returns the index of the first entry for ID id.
 // This index is guaranteed to never change.
-func (m *indexMap) firstIndex(id restic.ID) int {
+func (m *indexMap) firstIndex(id vaultic.ID) int {
 	if len(m.buckets) == 0 {
 		return -1
 	}
@@ -170,7 +170,7 @@ func (m *indexMap) preallocate(numEntries int) {
 	m.blockList.preallocate(uint(numEntries))
 }
 
-func (m *indexMap) hash(id restic.ID) uint {
+func (m *indexMap) hash(id vaultic.ID) uint {
 	// We use maphash to prevent backups of specially crafted inputs
 	// from degrading performance.
 	// While SHA-256 should be collision-resistant, for hash table indices
@@ -215,7 +215,7 @@ func bloomCleanID(idx uint) uint {
 	return idx & uint(bloomMask)
 }
 
-func bloomForID(id restic.ID) uint {
+func bloomForID(id vaultic.ID) uint {
 	// A bloom filter with a single hash function seems to work best.
 	// This is probably because the entry chains can be quite long, such that several entries end
 	// up in the same bloom filter. In this case, a single hash function yields the lowest false positive rate.
@@ -225,7 +225,7 @@ func bloomForID(id restic.ID) uint {
 
 // bloomHasID returns whether the idx could contain the id. Returns false only if the index cannot contain the id.
 // It may return true even if the id is not present in the entry chain. However, those false positives are expected to be rare.
-func bloomHasID(idx uint, id restic.ID) bool {
+func bloomHasID(idx uint, id vaultic.ID) bool {
 	if math.MaxUint == math.MaxUint32 {
 		// On 32-bit systems, the bloom filter is empty for all entries.
 		// Thus, simply check if there is a next entry.
@@ -235,7 +235,7 @@ func bloomHasID(idx uint, id restic.ID) bool {
 	return bloom&bloomForID(id) != 0
 }
 
-func bloomInsertID(idx uint, nextIdx uint, id restic.ID) uint {
+func bloomInsertID(idx uint, nextIdx uint, id vaultic.ID) uint {
 	// extra variable to compile on 32bit systems
 	bloomMask := uint64(bloomMask)
 	oldBloom := (nextIdx & ^uint(bloomMask))
@@ -244,7 +244,7 @@ func bloomInsertID(idx uint, nextIdx uint, id restic.ID) uint {
 }
 
 type indexEntry struct {
-	id                 restic.ID
+	id                 vaultic.ID
 	next               uint
 	packIndex          uint32 // Position in containing Index's packs field.
 	offset             uint32

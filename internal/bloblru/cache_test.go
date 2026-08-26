@@ -6,13 +6,13 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
 func TestCache(t *testing.T) {
-	var id1, id2, id3 restic.ID
+	var id1, id2, id3 vaultic.ID
 	id1[0] = 1
 	id2[0] = 2
 	id3[0] = 3
@@ -24,7 +24,7 @@ func TestCache(t *testing.T) {
 
 	c := New(cacheSize)
 
-	addAndCheck := func(id restic.ID, exp []byte) {
+	addAndCheck := func(id vaultic.ID, exp []byte) {
 		c.add(id, exp)
 		blob, ok := c.get(id)
 		rtest.Assert(t, ok, "blob %v added but not found in cache", id)
@@ -56,7 +56,7 @@ func TestCache(t *testing.T) {
 }
 
 func TestCacheGetOrCompute(t *testing.T) {
-	var id1, id2 restic.ID
+	var id1, id2 vaultic.ID
 	id1[0] = 1
 	id2[0] = 2
 
@@ -128,7 +128,7 @@ func BenchmarkAdd(b *testing.B) {
 	c := New(64 * MiB)
 
 	buf := make([]byte, 8*MiB)
-	ids := make([]restic.ID, nblobs)
+	ids := make([]vaultic.ID, nblobs)
 	sizes := make([]int, nblobs)
 
 	r := rand.New(rand.NewSource(100))

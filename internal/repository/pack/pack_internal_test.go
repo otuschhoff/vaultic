@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestParseHeaderEntry(t *testing.T) {
@@ -26,7 +26,7 @@ func TestParseHeaderEntry(t *testing.T) {
 
 	b, size, err := parseHeaderEntry(buf.Bytes())
 	rtest.OK(t, err)
-	rtest.Equals(t, restic.DataBlob, b.Type)
+	rtest.Equals(t, vaultic.DataBlob, b.Type)
 	rtest.Equals(t, plainEntrySize, size)
 	t.Logf("%v %v", h.ID, b.ID)
 	rtest.Equals(t, h.ID[:], b.ID[:])
@@ -47,7 +47,7 @@ func TestParseHeaderEntry(t *testing.T) {
 
 	b, size, err = parseHeaderEntry(buf.Bytes())
 	rtest.OK(t, err)
-	rtest.Equals(t, restic.DataBlob, b.Type)
+	rtest.Equals(t, vaultic.DataBlob, b.Type)
 	rtest.Equals(t, entrySize, size)
 	t.Logf("%v %v", c.ID, b.ID)
 	rtest.Equals(t, c.ID[:], b.ID[:])
@@ -181,7 +181,7 @@ func TestUnpackedVerification(t *testing.T) {
 	k := crypto.NewRandomKey()
 	blobs := []Blob{
 		{
-			BlobHandle:         restic.NewRandomBlobHandle(),
+			BlobHandle:         vaultic.NewRandomBlobHandle(),
 			Length:             42,
 			Offset:             0,
 			UncompressedLength: 2 * 42,

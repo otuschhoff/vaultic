@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
 // treeSaver concurrently saves incoming trees to the repo.
 type treeSaver struct {
-	uploader restic.BlobSaverAsync
+	uploader vaultic.BlobSaverAsync
 	errFn    ErrorFunc
 
 	ch chan<- saveTreeJob
@@ -20,7 +20,7 @@ type treeSaver struct {
 
 // newTreeSaver returns a new tree saver. A worker pool with treeWorkers is
 // started, it is stopped when ctx is cancelled.
-func newTreeSaver(ctx context.Context, wg *errgroup.Group, treeWorkers uint, uploader restic.BlobSaverAsync, errFn ErrorFunc) *treeSaver {
+func newTreeSaver(ctx context.Context, wg *errgroup.Group, treeWorkers uint, uploader vaultic.BlobSaverAsync, errFn ErrorFunc) *treeSaver {
 	ch := make(chan saveTreeJob)
 
 	s := &treeSaver{
@@ -133,11 +133,11 @@ func (s *treeSaver) save(ctx context.Context, job *saveTreeJob) (*data.Node, Ite
 		known      bool
 		length     int
 		sizeInRepo int
-		id         restic.ID
+		id         vaultic.ID
 	)
 
 	ch := make(chan struct{}, 1)
-	s.uploader.SaveBlobAsync(ctx, restic.TreeBlob, buf, restic.ID{}, false, func(newID restic.ID, cbKnown bool, cbSizeInRepo int, cbErr error) {
+	s.uploader.SaveBlobAsync(ctx, vaultic.TreeBlob, buf, vaultic.ID{}, false, func(newID vaultic.ID, cbKnown bool, cbSizeInRepo int, cbErr error) {
 		known = cbKnown
 		length = len(buf)
 		sizeInRepo = cbSizeInRepo

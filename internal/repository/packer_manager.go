@@ -10,15 +10,15 @@ import (
 	"os"
 	"sync"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/hashing"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/hashing"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/fileio"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/fileio"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/pack"
 )
 
 // packer holds a pack.packer together with a hash writer.
@@ -30,9 +30,9 @@ type packer struct {
 
 // packerManager keeps a list of open packs and creates new on demand.
 type packerManager struct {
-	tpe     restic.BlobType
+	tpe     vaultic.BlobType
 	key     *crypto.Key
-	queueFn func(ctx context.Context, t restic.BlobType, p *packer) error
+	queueFn func(ctx context.Context, t vaultic.BlobType, p *packer) error
 
 	pm       sync.Mutex
 	packers  []*packer
@@ -43,7 +43,7 @@ const defaultPackerCount = 2
 
 // newPackerManager returns a new packer manager which writes temporary files
 // to a temporary directory
-func newPackerManager(key *crypto.Key, tpe restic.BlobType, packSize uint, packerCount int, queueFn func(ctx context.Context, t restic.BlobType, p *packer) error) *packerManager {
+func newPackerManager(key *crypto.Key, tpe vaultic.BlobType, packSize uint, packerCount int, queueFn func(ctx context.Context, t vaultic.BlobType, p *packer) error) *packerManager {
 	return &packerManager{
 		tpe:      tpe,
 		key:      key,
@@ -113,7 +113,7 @@ func (r *packerManager) mergePackers() ([]*packer, error) {
 	return pendingPackers, nil
 }
 
-func (r *packerManager) SaveBlob(ctx context.Context, t restic.BlobType, id restic.ID, ciphertext []byte, uncompressedLength int) (int, error) {
+func (r *packerManager) SaveBlob(ctx context.Context, t vaultic.BlobType, id vaultic.ID, ciphertext []byte, uncompressedLength int) (int, error) {
 	r.pm.Lock()
 	defer r.pm.Unlock()
 
@@ -170,7 +170,7 @@ func (r *packerManager) pickPacker(ciphertextLen int) (*packer, error) {
 	// randomly distribute blobs onto multiple packer instances. This makes it harder for
 	// an attacker to learn at which points a file was chunked and therefore mitigates the attack described in
 	// https://www.daemonology.net/blog/chunking-attacks.pdf .
-	// See https://github.com/restic/restic/issues/5291#issuecomment-2746146193 for details on the mitigation.
+	// See https://github.com/vaultic/vaultic/issues/5291#issuecomment-2746146193 for details on the mitigation.
 	idx, err := randomInt(len(r.packers))
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func (r *packerManager) forgetPacker(packer *packer) {
 // created or one is returned that already has some blobs.
 func (r *packerManager) newPacker() (pck *packer, err error) {
 	debug.Log("create new pack")
-	tmpfile, err := fileio.TempFile("", "restic-temp-pack-")
+	tmpfile, err := fileio.TempFile("", "vaultic-temp-pack-")
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -218,7 +218,7 @@ func (r *packerManager) newPacker() (pck *packer, err error) {
 }
 
 // savePacker stores p in the backend.
-func (r *Repository) savePacker(ctx context.Context, t restic.BlobType, p *packer) error {
+func (r *Repository) savePacker(ctx context.Context, t vaultic.BlobType, p *packer) error {
 	debug.Log("save packer for %v with %d blobs (%d bytes)\n", t, p.Packer.Count(), p.Packer.Size())
 	err := p.Packer.Finalize()
 	if err != nil {
@@ -248,7 +248,7 @@ func (r *Repository) savePacker(ctx context.Context, t restic.BlobType, p *packe
 		return err
 	}
 
-	id := restic.IDFromHash(hr.Sum(nil))
+	id := vaultic.IDFromHash(hr.Sum(nil))
 	h := backend.Handle{Type: backend.PackFile, Name: id.String(), IsMetadata: t.IsMetadata()}
 	var beHash []byte
 	if beHr != nil {

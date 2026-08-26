@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mem"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mem"
+	"github.com/vaultic/vaultic/internal/debug"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type backendWrapper func(r backend.Backend) (backend.Backend, error)
@@ -300,19 +300,19 @@ func TestLockWaitSuccess(t *testing.T) {
 	unlock()
 }
 
-func createFakeLock(repo *Repository, t time.Time, pid int) (restic.ID, error) {
+func createFakeLock(repo *Repository, t time.Time, pid int) (vaultic.ID, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
-		return restic.ID{}, err
+		return vaultic.ID{}, err
 	}
 
 	newLock := &Lock{Time: t, PID: pid, Hostname: hostname}
-	return restic.SaveJSONUnpacked(context.TODO(), &internalRepository{repo}, restic.LockFile, newLock)
+	return vaultic.SaveJSONUnpacked(context.TODO(), &internalRepository{repo}, vaultic.LockFile, newLock)
 }
 
-func lockExists(repo restic.Lister, t testing.TB, lockID restic.ID) bool {
+func lockExists(repo vaultic.Lister, t testing.TB, lockID vaultic.ID) bool {
 	var exists bool
-	rtest.OK(t, repo.List(context.TODO(), restic.LockFile, func(id restic.ID, size int64) error {
+	rtest.OK(t, repo.List(context.TODO(), vaultic.LockFile, func(id vaultic.ID, size int64) error {
 		if id == lockID {
 			exists = true
 		}
@@ -322,8 +322,8 @@ func lockExists(repo restic.Lister, t testing.TB, lockID restic.ID) bool {
 	return exists
 }
 
-func removeLock(repo *Repository, id restic.ID) error {
-	return (&internalRepository{repo}).RemoveUnpacked(context.TODO(), restic.LockFile, id)
+func removeLock(repo *Repository, id vaultic.ID) error {
+	return (&internalRepository{repo}).RemoveUnpacked(context.TODO(), vaultic.LockFile, id)
 }
 
 func TestLockWithStaleLock(t *testing.T) {

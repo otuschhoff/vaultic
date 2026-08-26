@@ -11,19 +11,19 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 var checkerTestData = filepath.Join("..", "checker", "testdata", "checker-test-repo.tar.gz")
 
 func testWrapCheckPack(ctx context.Context, t *testing.T, repo *Repository,
-	packID restic.ID, blobs pack.Blobs, size int64,
+	packID vaultic.ID, blobs pack.Blobs, size int64,
 ) error {
 	t.Helper()
 	bufRd := bufio.NewReaderSize(nil, maxStreamBufferSize)
@@ -35,21 +35,21 @@ func testWrapCheckPack(ctx context.Context, t *testing.T, repo *Repository,
 
 // TestGapInBlobs creates a gap in the blob list by omitting the first entry before passing it to checkPack
 func TestGapInBlobs(t *testing.T) {
-	TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, _ := TestFromFixture(t, checkerTestData)
 
-	err := repo.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	err := repo.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	rtest.OK(t, err)
 
 	repoPacks, err := pack.Size(context.TODO(), repo, false)
 	rtest.OK(t, err)
 
-	packID := restic.TestParseID("19a731a515618ec8b75fc0ff3b887d8feb83aef1001c9899f6702761142ed068")
+	packID := vaultic.TestParseID("19a731a515618ec8b75fc0ff3b887d8feb83aef1001c9899f6702761142ed068")
 	_, ok := repoPacks[packID]
 	rtest.Assert(t, ok, "expected pack 19a731a515618ec8b75fc0ff3b887d8feb83aef1001c9899f6702761142ed068")
 
 	blobs := pack.Blobs{}
-	pb := <-repo.listPacksFromIndex(context.TODO(), restic.NewIDSet(packID))
+	pb := <-repo.listPacksFromIndex(context.TODO(), vaultic.NewIDSet(packID))
 	blobs = append(blobs, pb.Blobs...)
 
 	// assertion for clarity, actually can't fail as the packfile content is fixed
@@ -90,9 +90,9 @@ func collectErrors(ctx context.Context, f func(context.Context, chan<- error)) (
 func runReadPacks(chkr *Checker) []error {
 	return collectErrors(context.TODO(),
 		func(ctx context.Context, errCh chan<- error) {
-			chkr.ReadPacks(ctx, func(packs map[restic.ID]int64) map[restic.ID]int64 {
+			chkr.ReadPacks(ctx, func(packs map[vaultic.ID]int64) map[vaultic.ID]int64 {
 				return packs
-			}, restic.NewNoopPrinter(), errCh)
+			}, vaultic.NewNoopPrinter(), errCh)
 		})
 }
 
@@ -164,7 +164,7 @@ func setupChecker(t *testing.T, wrap func(backend.Backend) backend.Backend) *Che
 	chkr := newChecker(checkRepo)
 
 	// make sure the index is loaded
-	err := checkRepo.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	err := checkRepo.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	rtest.OK(t, err)
 
 	return chkr
@@ -209,7 +209,7 @@ func TestCheckPackDownloadError(t *testing.T) {
 
 // TestCheckPackPartialDownloadError verifies that a partial read (truncated
 // response) is returned as ErrPackData, so the check command can suggest
-// `restic repair packs` for the affected pack.
+// `vaultic repair packs` for the affected pack.
 // Covers the partialReadError branch of the be.Load error path.
 func TestCheckPackPartialDownloadError(t *testing.T) {
 	chkr := setupChecker(t, func(be backend.Backend) backend.Backend {

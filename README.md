@@ -1,6 +1,6 @@
 [![Documentation](https://readthedocs.org/projects/restic/badge/?version=latest)](https://restic.readthedocs.io/en/latest/?badge=latest)
-[![Build Status](https://github.com/restic/restic/workflows/test/badge.svg)](https://github.com/restic/restic/actions?query=workflow%3Atest)
-[![Go Report Card](https://goreportcard.com/badge/github.com/restic/restic)](https://goreportcard.com/report/github.com/restic/restic)
+[![Build Status](https://github.com/vaultic/vaultic/workflows/test/badge.svg)](https://github.com/vaultic/vaultic/actions?query=workflow%3Atest)
+[![Go Report Card](https://goreportcard.com/badge/github.com/vaultic/vaultic)](https://goreportcard.com/report/github.com/vaultic/vaultic)
 
 # Introduction
 

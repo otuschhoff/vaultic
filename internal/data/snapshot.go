@@ -9,28 +9,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // Snapshot is the state of a resource at one point in time.
 type Snapshot struct {
-	Time     time.Time  `json:"time"`
-	Parent   *restic.ID `json:"parent,omitempty"`
-	Tree     *restic.ID `json:"tree"`
-	Paths    []string   `json:"paths"`
-	Hostname string     `json:"hostname,omitempty"`
-	Username string     `json:"username,omitempty"`
-	UID      uint32     `json:"uid,omitempty"`
-	GID      uint32     `json:"gid,omitempty"`
-	Excludes []string   `json:"excludes,omitempty"`
-	Tags     []string   `json:"tags,omitempty"`
-	Original *restic.ID `json:"original,omitempty"`
+	Time     time.Time   `json:"time"`
+	Parent   *vaultic.ID `json:"parent,omitempty"`
+	Tree     *vaultic.ID `json:"tree"`
+	Paths    []string    `json:"paths"`
+	Hostname string      `json:"hostname,omitempty"`
+	Username string      `json:"username,omitempty"`
+	UID      uint32      `json:"uid,omitempty"`
+	GID      uint32      `json:"gid,omitempty"`
+	Excludes []string    `json:"excludes,omitempty"`
+	Tags     []string    `json:"tags,omitempty"`
+	Original *vaultic.ID `json:"original,omitempty"`
 
 	ProgramVersion string           `json:"program_version,omitempty"`
 	Summary        *SnapshotSummary `json:"summary,omitempty"`
 
-	id *restic.ID // plaintext ID, used during restore
+	id *vaultic.ID // plaintext ID, used during restore
 }
 
 type SnapshotSummary struct {
@@ -81,9 +81,9 @@ func NewSnapshot(paths []string, tags []string, hostname string, time time.Time)
 }
 
 // LoadSnapshot loads the snapshot with the id and returns it.
-func LoadSnapshot(ctx context.Context, loader restic.LoaderUnpacked, id restic.ID) (*Snapshot, error) {
+func LoadSnapshot(ctx context.Context, loader vaultic.LoaderUnpacked, id vaultic.ID) (*Snapshot, error) {
 	sn := &Snapshot{id: &id}
-	err := restic.LoadJSONUnpacked(ctx, loader, restic.SnapshotFile, id, sn)
+	err := vaultic.LoadJSONUnpacked(ctx, loader, vaultic.SnapshotFile, id, sn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load snapshot %v: %w", id.Str(), err)
 	}
@@ -92,8 +92,8 @@ func LoadSnapshot(ctx context.Context, loader restic.LoaderUnpacked, id restic.I
 }
 
 // SaveSnapshot saves the snapshot sn and returns its ID.
-func SaveSnapshot(ctx context.Context, repo restic.SaverUnpacked[restic.WriteableFileType], sn *Snapshot) (restic.ID, error) {
-	return restic.SaveJSONUnpacked(ctx, repo, restic.WriteableSnapshotFile, sn)
+func SaveSnapshot(ctx context.Context, repo vaultic.SaverUnpacked[vaultic.WriteableFileType], sn *Snapshot) (vaultic.ID, error) {
+	return vaultic.SaveJSONUnpacked(ctx, repo, vaultic.WriteableSnapshotFile, sn)
 }
 
 // ForAllSnapshots reads all snapshots in parallel and calls the
@@ -101,11 +101,11 @@ func SaveSnapshot(ctx context.Context, repo restic.SaverUnpacked[restic.Writeabl
 // If the called function returns an error, this function is cancelled and
 // also returns this error.
 // If a snapshot ID is in excludeIDs, it will be ignored.
-func ForAllSnapshots(ctx context.Context, be restic.Lister, loader restic.LoaderUnpacked, excludeIDs restic.IDSet, fn func(restic.ID, *Snapshot, error) error) error {
+func ForAllSnapshots(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, excludeIDs vaultic.IDSet, fn func(vaultic.ID, *Snapshot, error) error) error {
 	var m sync.Mutex
 
 	// For most snapshots decoding is nearly for free, thus just assume were only limited by IO
-	return restic.ParallelList(ctx, be, restic.SnapshotFile, loader.Connections(), func(ctx context.Context, id restic.ID, _ int64) error {
+	return vaultic.ParallelList(ctx, be, vaultic.SnapshotFile, loader.Connections(), func(ctx context.Context, id vaultic.ID, _ int64) error {
 		if excludeIDs.Has(id) {
 			return nil
 		}
@@ -123,7 +123,7 @@ func (sn Snapshot) String() string {
 }
 
 // ID returns the snapshot's ID.
-func (sn Snapshot) ID() *restic.ID {
+func (sn Snapshot) ID() *vaultic.ID {
 	return sn.id
 }
 
@@ -135,7 +135,7 @@ func (sn *Snapshot) fillUserInfo() error {
 	sn.Username = usr.Username
 
 	// set userid and groupid
-	sn.UID, sn.GID, err = restic.UidGidInt(usr)
+	sn.UID, sn.GID, err = vaultic.UidGidInt(usr)
 	return err
 }
 

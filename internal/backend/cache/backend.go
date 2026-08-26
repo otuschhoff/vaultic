@@ -5,11 +5,11 @@ import (
 	"io"
 	"sync"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
-// cacheBackend wraps a restic.cacheBackend and adds a cache.
+// cacheBackend wraps a vaultic.cacheBackend and adds a cache.
 type cacheBackend struct {
 	backend.Backend
 	*Cache

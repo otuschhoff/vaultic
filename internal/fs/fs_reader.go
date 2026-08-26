@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 type reader struct {

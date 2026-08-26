@@ -14,12 +14,12 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/test"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 	"golang.org/x/sys/windows"
 )
 

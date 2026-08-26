@@ -13,14 +13,14 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/klauspost/compress/zstd"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mem"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mem"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type mapcache map[backend.Handle]bool
@@ -36,7 +36,7 @@ func TestSortCachedPacksFirst(t *testing.T) {
 	)
 
 	for i := range len(blobs) {
-		var id restic.ID
+		var id vaultic.ID
 		r.Read(id[:])
 		blobs[i] = &pack.PackedBlob{Pack: id, Blob: pack.Blob{}}
 
@@ -67,7 +67,7 @@ func BenchmarkSortCachedPacksFirst(b *testing.B) {
 	)
 
 	for i := range nblobs {
-		var id restic.ID
+		var id vaultic.ID
 		r.Read(id[:])
 		blobs[i] = &pack.PackedBlob{Pack: id, Blob: pack.Blob{}}
 
@@ -98,9 +98,9 @@ func benchmarkLoadIndex(b *testing.B, version uint) {
 	idx := index.NewIndex()
 
 	for range 5000 {
-		idx.StorePack(restic.NewRandomID(), pack.Blobs{
+		idx.StorePack(vaultic.NewRandomID(), pack.Blobs{
 			{
-				BlobHandle: restic.NewRandomBlobHandle(),
+				BlobHandle: vaultic.NewRandomBlobHandle(),
 				Length:     1234,
 				Offset:     1235,
 			},
@@ -125,8 +125,8 @@ func benchmarkLoadIndex(b *testing.B, version uint) {
 }
 
 // loadIndex loads the index id from backend and returns it.
-func loadIndex(ctx context.Context, repo restic.LoaderUnpacked, id restic.ID) (*index.Index, error) {
-	buf, err := repo.LoadUnpacked(ctx, restic.IndexFile, id)
+func loadIndex(ctx context.Context, repo vaultic.LoaderUnpacked, id vaultic.ID) (*index.Index, error) {
+	buf, err := repo.LoadUnpacked(ctx, vaultic.IndexFile, id)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func buildPackfileWithoutHeader(blobSizes []int, key *crypto.Key, compress bool)
 	var offset uint
 	for i, size := range blobSizes {
 		plaintext := rtest.Random(800+i, size)
-		id := restic.Hash(plaintext)
+		id := vaultic.Hash(plaintext)
 		uncompressedLength := uint(0)
 		if compress {
 			uncompressedLength = uint(len(plaintext))
@@ -176,8 +176,8 @@ func buildPackfileWithoutHeader(blobSizes []int, key *crypto.Key, compress bool)
 		ciphertextLength := after - before
 
 		blobs = append(blobs, pack.Blob{
-			BlobHandle: restic.BlobHandle{
-				Type: restic.DataBlob,
+			BlobHandle: vaultic.BlobHandle{
+				Type: vaultic.DataBlob,
 				ID:   id,
 			},
 			Length:             uint(ciphertextLength),
@@ -303,12 +303,12 @@ func testStreamPack(t *testing.T, version uint) {
 			t.Run("", func(t *testing.T) {
 				ctx := t.Context()
 
-				gotBlobs := make(map[restic.ID]int)
+				gotBlobs := make(map[vaultic.ID]int)
 
-				handleBlob := func(blob restic.BlobHandle, buf []byte, err error) error {
+				handleBlob := func(blob vaultic.BlobHandle, buf []byte, err error) error {
 					gotBlobs[blob.ID]++
 
-					id := restic.Hash(buf)
+					id := vaultic.Hash(buf)
 					if !id.Equal(blob.ID) {
 						t.Fatalf("wrong id %v for blob %s returned", id, blob.ID)
 					}
@@ -316,14 +316,14 @@ func testStreamPack(t *testing.T, version uint) {
 					return err
 				}
 
-				wantBlobs := make(map[restic.ID]int)
+				wantBlobs := make(map[vaultic.ID]int)
 				for _, blob := range test.blobs {
 					wantBlobs[blob.ID] = 1
 				}
 
 				loadCalls = 0
 				shortFirstLoad = test.shortFirstLoad
-				err := streamPack(ctx, load, nil, dec, &key, restic.ID{}, test.blobs, handleBlob)
+				err := streamPack(ctx, load, nil, dec, &key, vaultic.ID{}, test.blobs, handleBlob)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -381,11 +381,11 @@ func testStreamPack(t *testing.T, version uint) {
 			t.Run("", func(t *testing.T) {
 				ctx := t.Context()
 
-				handleBlob := func(blob restic.BlobHandle, buf []byte, err error) error {
+				handleBlob := func(blob vaultic.BlobHandle, buf []byte, err error) error {
 					return err
 				}
 
-				err := streamPack(ctx, load, nil, dec, &key, restic.ID{}, test.blobs, handleBlob)
+				err := streamPack(ctx, load, nil, dec, &key, vaultic.ID{}, test.blobs, handleBlob)
 				if err == nil {
 					t.Fatalf("wanted error %v, got nil", test.err)
 				}
@@ -418,7 +418,7 @@ func TestBlobVerification(t *testing.T) {
 		{damageCiphertext, "ciphertext verification failed"},
 	} {
 		plaintext := rtest.Random(800, 1234)
-		id := restic.Hash(plaintext)
+		id := vaultic.Hash(plaintext)
 		if test.damage == damageData {
 			plaintext[42] ^= 0x42
 		}
@@ -487,7 +487,7 @@ func TestUnpackedVerification(t *testing.T) {
 			ciphertext[42] ^= 0x42
 		}
 
-		err := repo.verifyUnpacked(ciphertext, restic.IndexFile, orig)
+		err := repo.verifyUnpacked(ciphertext, vaultic.IndexFile, orig)
 		if test.msg == "" {
 			rtest.Assert(t, err == nil, "expected no error, got %v", err)
 		} else {
@@ -520,14 +520,14 @@ func TestStreamPackFallback(t *testing.T) {
 		defer cancel()
 
 		plaintext := rtest.Random(800, 42)
-		blobID := restic.Hash(plaintext)
+		blobID := vaultic.Hash(plaintext)
 		blobs := pack.Blobs{
 			{
 				Length: uint(crypto.CiphertextLength(len(plaintext))),
 				Offset: 0,
-				BlobHandle: restic.BlobHandle{
+				BlobHandle: vaultic.BlobHandle{
 					ID:   blobID,
-					Type: restic.DataBlob,
+					Type: vaultic.DataBlob,
 				},
 			},
 		}
@@ -545,7 +545,7 @@ func TestStreamPackFallback(t *testing.T) {
 			}
 		}
 
-		loadBlob := func(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error) {
+		loadBlob := func(ctx context.Context, bh vaultic.BlobHandle, buf []byte) ([]byte, error) {
 			if bh.ID == blobID {
 				return plaintext, nil
 			}
@@ -553,7 +553,7 @@ func TestStreamPackFallback(t *testing.T) {
 		}
 
 		blobOK := false
-		handleBlob := func(blob restic.BlobHandle, buf []byte, err error) error {
+		handleBlob := func(blob vaultic.BlobHandle, buf []byte, err error) error {
 			rtest.OK(t, err)
 			rtest.Equals(t, blobID, blob.ID)
 			rtest.Equals(t, plaintext, buf)
@@ -561,7 +561,7 @@ func TestStreamPackFallback(t *testing.T) {
 			return err
 		}
 
-		err := streamPack(ctx, loadPack, loadBlob, dec, &key, restic.ID{}, blobs, handleBlob)
+		err := streamPack(ctx, loadPack, loadBlob, dec, &key, vaultic.ID{}, blobs, handleBlob)
 		rtest.OK(t, err)
 		rtest.Assert(t, blobOK, "blob failed to load")
 	}
@@ -596,7 +596,7 @@ func TestOpenKeyShortData(t *testing.T) {
 		buf, err := json.Marshal(key)
 		rtest.OK(t, err)
 
-		id := restic.Hash(buf)
+		id := vaultic.Hash(buf)
 		h := backend.Handle{Type: backend.KeyFile, Name: id.String()}
 		rtest.OK(t, be.Save(context.TODO(), h, backend.NewByteReader(buf, be.Hasher())))
 
@@ -614,11 +614,11 @@ func TestLoadUnpackedShortData(t *testing.T) {
 	repo, err := New(be, Options{})
 	rtest.OK(t, err)
 
-	h := backend.Handle{Type: backend.ConfigFile, Name: restic.ID{}.String()}
+	h := backend.Handle{Type: backend.ConfigFile, Name: vaultic.ID{}.String()}
 	rtest.OK(t, be.Save(context.TODO(), h, backend.NewByteReader([]byte{}, be.Hasher())))
 
 	repo.key = crypto.NewRandomKey()
-	_, err = repo.LoadUnpacked(context.TODO(), restic.ConfigFile, restic.ID{})
+	_, err = repo.LoadUnpacked(context.TODO(), vaultic.ConfigFile, vaultic.ID{})
 	rtest.Assert(t, err != nil && strings.Contains(err.Error(), "too short"),
 		"expected a 'too short' error, got %v", err)
 }

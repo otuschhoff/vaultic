@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// fixpath returns an absolute path on windows, so restic can open long file
+// fixpath returns an absolute path on windows, so vaultic can open long file
 // names.
 func fixpath(name string) string {
 	return name

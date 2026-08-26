@@ -76,7 +76,7 @@ channel. These errors are often caused by hardware problems which **must** be
 investigated and fixed. Otherwise, the backup will be damaged again and again.
 
 Similarly, if a repository is repeatedly damaged, please open an `issue on GitHub
-<https://github.com/restic/restic/issues/new/choose>`_ as this could indicate a bug
+<https://github.com/vaultic/vaultic/issues/new/choose>`_ as this could indicate a bug
 somewhere. Please include the check output and additional information that might
 help locate the problem.
 
@@ -116,7 +116,7 @@ remove data unexpectedly.
 Please take the time to understand what the commands described in the following
 do. If you are unsure, then ask for help in the forum or our IRC channel. Search
 whether your issue is already known and solved. Please take a look at the
-`forum`_ and `GitHub issues <https://github.com/restic/restic/issues>`_.
+`forum`_ and `GitHub issues <https://github.com/vaultic/vaultic/issues>`_.
 
 
 3. Repairing the index
@@ -179,7 +179,7 @@ In case of damage to a snapshot file, ``check`` will show an error message like 
 
   restic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f
 
-  Damaged snapshot files can be caused by backend problems, hardware problems or bugs in restic. Please open an issue at https://github.com/restic/restic/issues/new/choose for further troubleshooting!
+  Damaged snapshot files can be caused by backend problems, hardware problems or bugs in restic. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting!
   Fatal: repository contains errors
 
 As explained in the command output, you have to run ``restic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f`` to remove the broken snapshot file.

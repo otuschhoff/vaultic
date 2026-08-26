@@ -1,10 +1,10 @@
-// Package location implements parsing the restic repository location from a string.
+// Package location implements parsing the vaultic repository location from a string.
 package location
 
 import (
 	"strings"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // Location specifies the location of a repository, including the method of

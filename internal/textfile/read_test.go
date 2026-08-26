@@ -12,7 +12,7 @@ import (
 func writeTempfile(t testing.TB, data []byte) (string, func()) {
 	t.Helper()
 
-	f, err := os.CreateTemp("", "restic-test-textfile-read-")
+	f, err := os.CreateTemp("", "vaultic-test-textfile-read-")
 	if err != nil {
 		t.Fatal(err)
 	}

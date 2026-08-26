@@ -48,7 +48,7 @@ The ``init`` command has an option called ``--repository-version`` which can
 be used to explicitly set the version of the new repository. By default, the
 current stable version is used (see table below). The alias ``latest`` will
 always resolve to the latest repository version. Have a look at the `design
-documentation <https://github.com/restic/restic/blob/master/doc/design.rst>`__
+documentation <https://github.com/vaultic/vaultic/blob/master/doc/design.rst>`__
 for more details.
 
 The below table shows which restic version is required to use a certain
@@ -761,7 +761,7 @@ repository specification):
 .. _rclone: https://rclone.org/
 .. _configure: https://rclone.org/docs/
 .. _configured with environment variables: https://rclone.org/docs/#environment-variables
-.. _issue #1657: https://github.com/restic/restic/pull/1657#issuecomment-377707486
+.. _issue #1657: https://github.com/vaultic/vaultic/pull/1657#issuecomment-377707486
 
 Password prompt on Windows
 **************************

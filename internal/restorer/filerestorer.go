@@ -8,10 +8,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 const (
@@ -30,29 +30,29 @@ type fileInfo struct {
 }
 
 type fileBlobInfo struct {
-	id     restic.ID // the blob id
-	offset int64     // blob offset in the file
+	id     vaultic.ID // the blob id
+	offset int64      // blob offset in the file
 }
 
 // information about a data pack required to restore one or more files
 type packInfo struct {
-	id    restic.ID              // the pack id
+	id    vaultic.ID             // the pack id
 	files map[*fileInfo]struct{} // set of files that use blobs from this pack
 }
 
-type blobsLoaderFn func(ctx context.Context, packID restic.ID, blobs []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error
-type startWarmupFn func(context.Context, restic.IDSet) (restic.WarmupJob, error)
+type blobsLoaderFn func(ctx context.Context, packID vaultic.ID, blobs []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error
+type startWarmupFn func(context.Context, vaultic.IDSet) (vaultic.WarmupJob, error)
 
 // fileRestorer restores set of files
 type fileRestorer struct {
-	idx         func(restic.BlobHandle) []restic.PackBlob
+	idx         func(vaultic.BlobHandle) []vaultic.PackBlob
 	blobsLoader blobsLoaderFn
 
 	startWarmup startWarmupFn
 
 	workerCount int
 	filesWriter *filesWriter
-	zeroChunk   restic.ID
+	zeroChunk   vaultic.ID
 	sparse      bool
 	progress    ProgressReporter
 
@@ -66,13 +66,13 @@ type fileRestorer struct {
 
 func newFileRestorer(dst string,
 	blobsLoader blobsLoaderFn,
-	idx func(restic.BlobHandle) []restic.PackBlob,
+	idx func(vaultic.BlobHandle) []vaultic.PackBlob,
 	connections uint,
 	sparse bool,
 	allowRecursiveDelete bool,
 	startWarmup startWarmupFn,
 	progress ProgressReporter,
-	zeroChunk restic.ID) *fileRestorer {
+	zeroChunk vaultic.ID) *fileRestorer {
 
 	// as packs are streamed the concurrency is limited by IO
 	workerCount := int(connections)
@@ -93,7 +93,7 @@ func newFileRestorer(dst string,
 	}
 }
 
-func (r *fileRestorer) addFile(location string, content restic.IDs, size int64, state *fileState) {
+func (r *fileRestorer) addFile(location string, content vaultic.IDs, size int64, state *fileState) {
 	r.files = append(r.files, &fileInfo{location: location, blobs: content, size: size, state: state})
 }
 
@@ -101,14 +101,14 @@ func (r *fileRestorer) targetPath(location string) string {
 	return filepath.Join(r.dst, location)
 }
 
-func (r *fileRestorer) forEachBlob(blobIDs []restic.ID, fn func(blob restic.PackBlob, idx int, fileOffset int64)) error {
+func (r *fileRestorer) forEachBlob(blobIDs []vaultic.ID, fn func(blob vaultic.PackBlob, idx int, fileOffset int64)) error {
 	if len(blobIDs) == 0 {
 		return nil
 	}
 
 	fileOffset := int64(0)
 	for i, blobID := range blobIDs {
-		packs := r.idx(restic.BlobHandle{Type: restic.DataBlob, ID: blobID})
+		packs := r.idx(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID})
 		if len(packs) == 0 {
 			return errors.Errorf("Unknown blob %s", blobID.String())
 		}
@@ -122,11 +122,11 @@ func (r *fileRestorer) forEachBlob(blobIDs []restic.ID, fn func(blob restic.Pack
 
 func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 
-	packs := make(map[restic.ID]*packInfo) // all packs
+	packs := make(map[vaultic.ID]*packInfo) // all packs
 	// Process packs in order of first access. While this cannot guarantee
 	// that file chunks are restored sequentially, it offers a good enough
 	// approximation to shorten restore times by up to 19% in some test.
-	var packOrder restic.IDs
+	var packOrder vaultic.IDs
 
 	// create packInfo from fileInfo
 	for _, file := range r.files {
@@ -134,15 +134,15 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		fileBlobs := file.blobs.(restic.IDs)
+		fileBlobs := file.blobs.(vaultic.IDs)
 		largeFile := len(fileBlobs) > largeFileBlobCount
-		var packsMap map[restic.ID][]fileBlobInfo
+		var packsMap map[vaultic.ID][]fileBlobInfo
 		if largeFile {
-			packsMap = make(map[restic.ID][]fileBlobInfo)
+			packsMap = make(map[vaultic.ID][]fileBlobInfo)
 			file.blobs = packsMap
 		}
 		restoredBlobs := false
-		err := r.forEachBlob(fileBlobs, func(blob restic.PackBlob, idx int, fileOffset int64) {
+		err := r.forEachBlob(fileBlobs, func(blob vaultic.PackBlob, idx int, fileOffset int64) {
 			packID := blob.PackID()
 			if !file.state.HasMatchingBlob(idx) {
 				if largeFile {
@@ -202,7 +202,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 	r.files = nil
 
 	if feature.Flag.Enabled(feature.S3Restore) {
-		warmupJob, err := r.startWarmup(ctx, restic.NewIDSet(packOrder...))
+		warmupJob, err := r.startWarmup(ctx, vaultic.NewIDSet(packOrder...))
 		if err != nil {
 			return err
 		}
@@ -259,16 +259,16 @@ func (r *fileRestorer) truncateFileToSize(location string, size int64) error {
 	return f.Close()
 }
 
-type blobToFileOffsetsMapping map[restic.ID]struct {
+type blobToFileOffsetsMapping map[vaultic.ID]struct {
 	files map[*fileInfo][]int64 // file -> offsets (plural!) of the blob in the file
-	blob  restic.BlobHandle
+	blob  vaultic.BlobHandle
 }
 
 func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 	// calculate blob->[]files->[]offsets mappings
 	blobs := make(blobToFileOffsetsMapping)
 	for file := range pack.files {
-		addBlob := func(blob restic.BlobHandle, fileOffset int64) {
+		addBlob := func(blob vaultic.BlobHandle, fileOffset int64) {
 			blobInfo, ok := blobs[blob.ID]
 			if !ok {
 				blobInfo.files = make(map[*fileInfo][]int64)
@@ -277,8 +277,8 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 			}
 			blobInfo.files[file] = append(blobInfo.files[file], fileOffset)
 		}
-		if fileBlobs, ok := file.blobs.(restic.IDs); ok {
-			err := r.forEachBlob(fileBlobs, func(blob restic.PackBlob, idx int, fileOffset int64) {
+		if fileBlobs, ok := file.blobs.(vaultic.IDs); ok {
+			err := r.forEachBlob(fileBlobs, func(blob vaultic.PackBlob, idx int, fileOffset int64) {
 				if blob.PackID().Equal(pack.id) && !file.state.HasMatchingBlob(idx) {
 					addBlob(blob.Handle(), fileOffset)
 				}
@@ -287,9 +287,9 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 				// restoreFiles should have caught this error before
 				panic(err)
 			}
-		} else if packsMap, ok := file.blobs.(map[restic.ID][]fileBlobInfo); ok {
+		} else if packsMap, ok := file.blobs.(map[vaultic.ID][]fileBlobInfo); ok {
 			for _, blob := range packsMap[pack.id] {
-				idxPacks := r.idx(restic.BlobHandle{Type: restic.DataBlob, ID: blob.id})
+				idxPacks := r.idx(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blob.id})
 				for _, idxPack := range idxPacks {
 					if idxPack.PackID().Equal(pack.id) {
 						addBlob(idxPack.Handle(), blob.offset)
@@ -301,7 +301,7 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 	}
 
 	// track already processed blobs for precise error reporting
-	processedBlobs := restic.NewBlobSet()
+	processedBlobs := vaultic.NewBlobSet()
 	err := r.downloadBlobs(ctx, pack.id, blobs, processedBlobs)
 	return r.reportError(blobs, processedBlobs, err)
 }
@@ -316,7 +316,7 @@ func (r *fileRestorer) sanitizeError(file *fileInfo, err error) error {
 	}
 }
 
-func (r *fileRestorer) reportError(blobs blobToFileOffsetsMapping, processedBlobs restic.BlobSet, err error) error {
+func (r *fileRestorer) reportError(blobs blobToFileOffsetsMapping, processedBlobs vaultic.BlobSet, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -340,15 +340,15 @@ func (r *fileRestorer) reportError(blobs blobToFileOffsetsMapping, processedBlob
 	return nil
 }
 
-func (r *fileRestorer) downloadBlobs(ctx context.Context, packID restic.ID,
-	blobs blobToFileOffsetsMapping, processedBlobs restic.BlobSet) error {
+func (r *fileRestorer) downloadBlobs(ctx context.Context, packID vaultic.ID,
+	blobs blobToFileOffsetsMapping, processedBlobs vaultic.BlobSet) error {
 
-	blobList := make([]restic.BlobHandle, 0, len(blobs))
+	blobList := make([]vaultic.BlobHandle, 0, len(blobs))
 	for _, entry := range blobs {
 		blobList = append(blobList, entry.blob)
 	}
 	return r.blobsLoader(ctx, packID, blobList,
-		func(h restic.BlobHandle, blobData []byte, err error) error {
+		func(h vaultic.BlobHandle, blobData []byte, err error) error {
 			processedBlobs.Insert(h)
 			blob := blobs[h.ID]
 			if err != nil {

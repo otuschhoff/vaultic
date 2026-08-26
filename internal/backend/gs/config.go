@@ -5,9 +5,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/options"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/options"
 )
 
 // Config contains all configuration necessary to connect to a Google Cloud Storage

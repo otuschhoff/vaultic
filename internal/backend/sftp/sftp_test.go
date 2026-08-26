@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/sftp"
-	"github.com/restic/restic/internal/backend/test"
-	"github.com/restic/restic/internal/errors"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/sftp"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/errors"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func findSFTPServerBinary() string {
@@ -56,7 +56,7 @@ func newTestSuite(t testing.TB) *test.Suite[sftp.Config] {
 func TestBackendSFTP(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/sftp.TestBackendSFTP")
+			rtest.SkipDisallowed(t, "vaultic/backend/sftp.TestBackendSFTP")
 		}
 	}()
 

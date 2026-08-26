@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/options"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/options"
 )
 
 // Config contains all configuration necessary to connect to an s3 compatible
@@ -58,7 +58,7 @@ func init() {
 // ParseConfig parses the string s and extracts the s3 config. The two
 // supported configuration formats are s3://host/bucketname/prefix and
 // s3:host/bucketname/prefix. The host can also be a valid s3 region
-// name. If no prefix is given the prefix "restic" will be used.
+// name. If no prefix is given the prefix "vaultic" will be used.
 func ParseConfig(s string) (*Config, error) {
 	switch {
 	case strings.HasPrefix(s, "s3:http"):

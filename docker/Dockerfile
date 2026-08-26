@@ -1,6 +1,6 @@
 FROM golang:1.26-alpine AS builder
 
-WORKDIR /go/src/github.com/restic/restic
+WORKDIR /go/src/github.com/vaultic/vaultic
 
 # Caching dependencies
 COPY go.mod go.sum ./
@@ -11,7 +11,7 @@ RUN go run build.go
 FROM alpine:latest AS restic
 RUN apk add --no-cache ca-certificates fuse openssh-client tzdata jq
 
-COPY --from=builder /go/src/github.com/restic/restic/restic /usr/bin
+COPY --from=builder /go/src/github.com/vaultic/vaultic/restic /usr/bin
 COPY ./docker/entrypoint.sh /entrypoint.sh
 
 # IO class default is "none"- 0, however busybox reject ionice `-c0 -n<something>`

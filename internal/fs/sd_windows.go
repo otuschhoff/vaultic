@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 	"golang.org/x/sys/windows"
 )
 
@@ -41,7 +41,7 @@ func getSecurityDescriptor(filePath string) (securityDescriptor *[]byte, err err
 		// but instead an access denied error is returned. Workaround that by just retrying with
 		// the low privilege version, but don't switch privileges as we cannot distinguish this
 		// case from actual access denied errors.
-		// see https://github.com/restic/restic/issues/5003#issuecomment-2452314191 for details
+		// see https://github.com/vaultic/vaultic/issues/5003#issuecomment-2452314191 for details
 		if err != nil && isAccessDeniedError(err) {
 			sd, err = getNamedSecurityInfoLow(filePath)
 		}

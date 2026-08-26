@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/s3"
-	"github.com/restic/restic/internal/backend/test"
-	"github.com/restic/restic/internal/options"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/s3"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/options"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func mkdir(t testing.TB, dir string) {
@@ -105,40 +105,40 @@ func newMinioTestSuite(t testing.TB) (*test.Suite[s3.Config], func()) {
 	cleanup := runMinio(ctx, t, tempdir, key, secret)
 
 	return &test.Suite[s3.Config]{
-			// NewConfig returns a config for a new temporary backend that will be used in tests.
-			NewConfig: func() (*s3.Config, error) {
-				cfg := s3.NewConfig()
-				cfg.Endpoint = "localhost:9000"
-				cfg.Bucket = "restictestbucket"
-				cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
-				cfg.UseHTTP = true
-				cfg.KeyID = key
-				cfg.Secret = options.NewSecretString(secret)
-				return &cfg, nil
-			},
+		// NewConfig returns a config for a new temporary backend that will be used in tests.
+		NewConfig: func() (*s3.Config, error) {
+			cfg := s3.NewConfig()
+			cfg.Endpoint = "localhost:9000"
+			cfg.Bucket = "vaultictestbucket"
+			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
+			cfg.UseHTTP = true
+			cfg.KeyID = key
+			cfg.Secret = options.NewSecretString(secret)
+			return &cfg, nil
+		},
 
-			Factory: location.NewHTTPBackendFactory("s3", s3.ParseConfig, location.NoPassword, func(ctx context.Context, cfg s3.Config, rt http.RoundTripper, errorLog func(string, ...any)) (be backend.Backend, err error) {
-				for i := range 50 {
-					be, err = s3.Create(ctx, cfg, rt, errorLog)
-					if err != nil {
-						t.Logf("s3 open: try %d: error %v", i, err)
-						time.Sleep(500 * time.Millisecond)
-						continue
-					}
-					break
+		Factory: location.NewHTTPBackendFactory("s3", s3.ParseConfig, location.NoPassword, func(ctx context.Context, cfg s3.Config, rt http.RoundTripper, errorLog func(string, ...any)) (be backend.Backend, err error) {
+			for i := range 50 {
+				be, err = s3.Create(ctx, cfg, rt, errorLog)
+				if err != nil {
+					t.Logf("s3 open: try %d: error %v", i, err)
+					time.Sleep(500 * time.Millisecond)
+					continue
 				}
-				return be, err
-			}, s3.Open),
-		}, func() {
-			defer cancel()
-			defer cleanup()
-		}
+				break
+			}
+			return be, err
+		}, s3.Open),
+	}, func() {
+		defer cancel()
+		defer cleanup()
+	}
 }
 
 func TestBackendMinio(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/s3.TestBackendMinio")
+			rtest.SkipDisallowed(t, "vaultic/backend/s3.TestBackendMinio")
 		}
 	}()
 
@@ -176,13 +176,13 @@ func newS3TestSuite() *test.Suite[s3.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*s3.Config, error) {
-			cfg, err := s3.ParseConfig(os.Getenv("RESTIC_TEST_S3_REPOSITORY"))
+			cfg, err := s3.ParseConfig(os.Getenv("VAULTIC_TEST_S3_REPOSITORY"))
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.KeyID = os.Getenv("RESTIC_TEST_S3_KEY")
-			cfg.Secret = options.NewSecretString(os.Getenv("RESTIC_TEST_S3_SECRET"))
+			cfg.KeyID = os.Getenv("VAULTIC_TEST_S3_KEY")
+			cfg.Secret = options.NewSecretString(os.Getenv("VAULTIC_TEST_S3_SECRET"))
 			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
 			return cfg, nil
 		},
@@ -194,14 +194,14 @@ func newS3TestSuite() *test.Suite[s3.Config] {
 func TestBackendS3(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/s3.TestBackendS3")
+			rtest.SkipDisallowed(t, "vaultic/backend/s3.TestBackendS3")
 		}
 	}()
 
 	vars := []string{
-		"RESTIC_TEST_S3_KEY",
-		"RESTIC_TEST_S3_SECRET",
-		"RESTIC_TEST_S3_REPOSITORY",
+		"VAULTIC_TEST_S3_KEY",
+		"VAULTIC_TEST_S3_SECRET",
+		"VAULTIC_TEST_S3_REPOSITORY",
 	}
 
 	for _, v := range vars {
@@ -217,9 +217,9 @@ func TestBackendS3(t *testing.T) {
 
 func BenchmarkBackendS3(t *testing.B) {
 	vars := []string{
-		"RESTIC_TEST_S3_KEY",
-		"RESTIC_TEST_S3_SECRET",
-		"RESTIC_TEST_S3_REPOSITORY",
+		"VAULTIC_TEST_S3_KEY",
+		"VAULTIC_TEST_S3_SECRET",
+		"VAULTIC_TEST_S3_REPOSITORY",
 	}
 
 	for _, v := range vars {

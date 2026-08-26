@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/options"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/options"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 type secretTest struct {

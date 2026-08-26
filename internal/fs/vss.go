@@ -5,7 +5,7 @@ package fs
 import (
 	"time"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // mountPoint is a dummy for non-windows platforms to let client code compile.

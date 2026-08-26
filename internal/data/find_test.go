@@ -12,26 +12,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-func loadIDSet(t testing.TB, filename string) restic.BlobSet {
+func loadIDSet(t testing.TB, filename string) vaultic.BlobSet {
 	f, err := os.Open(filename)
 	if err != nil {
 		t.Logf("unable to open golden file %v: %v", filename, err)
-		return restic.NewBlobSet()
+		return vaultic.NewBlobSet()
 	}
 
 	sc := bufio.NewScanner(f)
 
-	blobs := restic.NewBlobSet()
+	blobs := vaultic.NewBlobSet()
 	for sc.Scan() {
-		var h restic.BlobHandle
+		var h vaultic.BlobHandle
 		err := json.Unmarshal([]byte(sc.Text()), &h)
 		if err != nil {
 			t.Errorf("file %v contained invalid blob: %#v", filename, err)
@@ -48,14 +48,14 @@ func loadIDSet(t testing.TB, filename string) restic.BlobSet {
 	return blobs
 }
 
-func saveIDSet(t testing.TB, filename string, s restic.BlobSet) {
+func saveIDSet(t testing.TB, filename string, s vaultic.BlobSet) {
 	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		t.Fatalf("unable to update golden file %v: %v", filename, err)
 		return
 	}
 
-	var hs restic.BlobHandles
+	var hs vaultic.BlobHandles
 	for h := range s {
 		hs = append(hs, h)
 	}
@@ -98,8 +98,8 @@ func TestFindUsedBlobs(t *testing.T) {
 	defer p.Done()
 
 	for i, sn := range snapshots {
-		usedBlobs := restic.NewBlobSet()
-		err := data.FindUsedBlobs(context.TODO(), repo, restic.IDs{*sn.Tree}, usedBlobs, p)
+		usedBlobs := vaultic.NewBlobSet()
+		err := data.FindUsedBlobs(context.TODO(), repo, vaultic.IDs{*sn.Tree}, usedBlobs, p)
 		if err != nil {
 			t.Errorf("FindUsedBlobs returned error: %v", err)
 			continue
@@ -130,14 +130,14 @@ func TestFindUsedBlobs(t *testing.T) {
 func TestMultiFindUsedBlobs(t *testing.T) {
 	repo := repository.TestRepository(t)
 
-	var snapshotTrees restic.IDs
+	var snapshotTrees vaultic.IDs
 	for i := range findTestSnapshots {
 		sn := data.TestCreateSnapshot(t, repo, findTestTime.Add(time.Duration(i)*time.Second), findTestDepth)
 		t.Logf("snapshot %v saved, tree %v", sn.ID().Str(), sn.Tree.Str())
 		snapshotTrees = append(snapshotTrees, *sn.Tree)
 	}
 
-	want := restic.NewBlobSet()
+	want := vaultic.NewBlobSet()
 	for i := range snapshotTrees {
 		goldenFilename := filepath.Join("testdata", fmt.Sprintf("used_blobs_snapshot%d", i))
 		want.Merge(loadIDSet(t, goldenFilename))
@@ -147,7 +147,7 @@ func TestMultiFindUsedBlobs(t *testing.T) {
 	defer p.Done()
 
 	// run twice to check progress bar handling of duplicate tree roots
-	usedBlobs := restic.NewBlobSet()
+	usedBlobs := vaultic.NewBlobSet()
 	for i := 1; i < 3; i++ {
 		err := data.FindUsedBlobs(context.TODO(), repo, snapshotTrees, usedBlobs, p)
 		test.OK(t, err)
@@ -163,11 +163,11 @@ func TestMultiFindUsedBlobs(t *testing.T) {
 
 type ForbiddenRepo struct{}
 
-func (r ForbiddenRepo) LoadBlob(context.Context, restic.BlobHandle, []byte) ([]byte, error) {
+func (r ForbiddenRepo) LoadBlob(context.Context, vaultic.BlobHandle, []byte) ([]byte, error) {
 	return nil, errors.New("should not be called")
 }
 
-func (r ForbiddenRepo) LookupBlobSize(_ restic.BlobHandle) (uint, bool) {
+func (r ForbiddenRepo) LookupBlobSize(_ vaultic.BlobHandle) (uint, bool) {
 	return 0, false
 }
 
@@ -181,13 +181,13 @@ func TestFindUsedBlobsSkipsSeenBlobs(t *testing.T) {
 	snapshot := data.TestCreateSnapshot(t, repo, findTestTime, findTestDepth)
 	t.Logf("snapshot %v saved, tree %v", snapshot.ID().Str(), snapshot.Tree.Str())
 
-	usedBlobs := restic.NewBlobSet()
-	err := data.FindUsedBlobs(context.TODO(), repo, restic.IDs{*snapshot.Tree}, usedBlobs, restic.NoopCounter)
+	usedBlobs := vaultic.NewBlobSet()
+	err := data.FindUsedBlobs(context.TODO(), repo, vaultic.IDs{*snapshot.Tree}, usedBlobs, vaultic.NoopCounter)
 	if err != nil {
 		t.Fatalf("FindUsedBlobs returned error: %v", err)
 	}
 
-	err = data.FindUsedBlobs(context.TODO(), ForbiddenRepo{}, restic.IDs{*snapshot.Tree}, usedBlobs, restic.NoopCounter)
+	err = data.FindUsedBlobs(context.TODO(), ForbiddenRepo{}, vaultic.IDs{*snapshot.Tree}, usedBlobs, vaultic.NoopCounter)
 	if err != nil {
 		t.Fatalf("FindUsedBlobs returned error: %v", err)
 	}
@@ -201,8 +201,8 @@ func BenchmarkFindUsedBlobs(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		blobs := restic.NewBlobSet()
-		err := data.FindUsedBlobs(context.TODO(), repo, restic.IDs{*sn.Tree}, blobs, restic.NoopCounter)
+		blobs := vaultic.NewBlobSet()
+		err := data.FindUsedBlobs(context.TODO(), repo, vaultic.IDs{*sn.Tree}, blobs, vaultic.NoopCounter)
 		if err != nil {
 			b.Error(err)
 		}

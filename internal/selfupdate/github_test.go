@@ -5,12 +5,12 @@ import (
 	"net/http"
 	"testing"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestNewGitHubRequest(t *testing.T) {
 	ctx := context.Background()
-	url := "https://api.github.com/repos/restic/restic/releases/latest"
+	url := "https://api.github.com/repos/vaultic/vaultic/releases/latest"
 	acceptHeader := "application/vnd.github.v3+json"
 
 	t.Run("With GITHUB_ACCESS_TOKEN", func(t *testing.T) {

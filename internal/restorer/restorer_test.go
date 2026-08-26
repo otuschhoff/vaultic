@@ -16,14 +16,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type Node any
@@ -62,11 +62,11 @@ type FileAttributes struct {
 	Encrypted bool
 }
 
-func saveFile(t testing.TB, repo restic.BlobSaver, data string) restic.ID {
+func saveFile(t testing.TB, repo vaultic.BlobSaver, data string) vaultic.ID {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	id, _, _, err := repo.SaveBlob(ctx, restic.DataBlob, []byte(data), restic.ID{}, false)
+	id, _, _, err := repo.SaveBlob(ctx, vaultic.DataBlob, []byte(data), vaultic.ID{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func saveFile(t testing.TB, repo restic.BlobSaver, data string) restic.ID {
 	return id
 }
 
-func saveDir(t testing.TB, repo restic.BlobSaver, nodes map[string]Node, inode uint64, getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage)) restic.ID {
+func saveDir(t testing.TB, repo vaultic.BlobSaver, nodes map[string]Node, inode uint64, getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage)) vaultic.ID {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -91,7 +91,7 @@ func saveDir(t testing.TB, repo restic.BlobSaver, nodes map[string]Node, inode u
 			if lc == 0 {
 				lc = 1
 			}
-			fc := []restic.ID{}
+			fc := []vaultic.ID{}
 			size := 0
 			if len(node.Data) > 0 {
 				size = len(node.Data)
@@ -157,12 +157,12 @@ func saveDir(t testing.TB, repo restic.BlobSaver, nodes map[string]Node, inode u
 	return data.TestSaveNodes(t, ctx, repo, tree)
 }
 
-func saveSnapshot(t testing.TB, repo restic.Repository, snapshot Snapshot, getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage)) (*data.Snapshot, restic.ID) {
+func saveSnapshot(t testing.TB, repo vaultic.Repository, snapshot Snapshot, getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage)) (*data.Snapshot, vaultic.ID) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var treeID restic.ID
-	rtest.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	var treeID vaultic.ID
+	rtest.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		treeID = saveDir(t, uploader, snapshot.Nodes, 1000, getGenericAttributes)
 		return nil
 	}))
@@ -398,7 +398,7 @@ func TestRestorer(t *testing.T) {
 			}
 
 			if len(test.ErrorsMust)+len(test.ErrorsMay) == 0 {
-				_, err = res.VerifyFiles(ctx, tempdir, countRestoredFiles, restic.NoopCounter)
+				_, err = res.VerifyFiles(ctx, tempdir, countRestoredFiles, vaultic.NoopCounter)
 				rtest.OK(t, err)
 			}
 
@@ -774,7 +774,7 @@ func checkConsistentInfo(t testing.TB, file string, fi os.FileInfo, modtime time
 	}
 }
 
-// test inspired from test case https://github.com/restic/restic/issues/1212
+// test inspired from test case https://github.com/vaultic/vaultic/issues/1212
 func TestRestorerConsistentTimestampsAndPermissions(t *testing.T) {
 	timeForTest := time.Date(2019, time.January, 9, 1, 46, 40, 0, time.UTC)
 
@@ -880,7 +880,7 @@ func TestVerifyCancel(t *testing.T) {
 		return err
 	}
 
-	nverified, err := res.VerifyFiles(ctx, tempdir, countRestoredFiles, restic.NoopCounter)
+	nverified, err := res.VerifyFiles(ctx, tempdir, countRestoredFiles, vaultic.NoopCounter)
 	rtest.Equals(t, 0, nverified)
 	rtest.Assert(t, err != nil, "nil error from VerifyFiles")
 	rtest.Equals(t, 1, len(errs))
@@ -957,7 +957,7 @@ func saveSnapshotsAndOverwrite(t *testing.T, baseSnapshot Snapshot, overwriteSna
 	countRestoredFiles, err := res.RestoreTo(ctx, tempdir)
 	rtest.OK(t, err)
 
-	_, err = res.VerifyFiles(ctx, tempdir, countRestoredFiles, restic.NoopCounter)
+	_, err = res.VerifyFiles(ctx, tempdir, countRestoredFiles, vaultic.NoopCounter)
 	rtest.OK(t, err)
 
 	return tempdir
@@ -1220,7 +1220,7 @@ func TestRestoreModified(t *testing.T) {
 		res := NewRestorer(repo, sn, Options{Overwrite: OverwriteIfChanged})
 		countRestoredFiles, err := res.RestoreTo(ctx, tempdir)
 		rtest.OK(t, err)
-		n, err := res.VerifyFiles(ctx, tempdir, countRestoredFiles, restic.NoopCounter)
+		n, err := res.VerifyFiles(ctx, tempdir, countRestoredFiles, vaultic.NoopCounter)
 		rtest.OK(t, err)
 		rtest.Equals(t, 2, n, "unexpected number of verified files")
 	}
@@ -1516,6 +1516,6 @@ func TestRestorerLongPath(t *testing.T) {
 
 	countRestoredFiles, err := res.RestoreTo(ctx, tmp)
 	rtest.OK(t, err)
-	_, err = res.VerifyFiles(ctx, tmp, countRestoredFiles, restic.NoopCounter)
+	_, err = res.VerifyFiles(ctx, tmp, countRestoredFiles, vaultic.NoopCounter)
 	rtest.OK(t, err)
 }

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -23,7 +23,7 @@ func generateRandomFiles(t testing.TB, random *rand.Rand, tpe backend.FileType, 
 	ids := make(map[string]struct{})
 	for i := 0; i < random.Intn(15)+10; i++ {
 		buf := rtest.Random(random.Int(), 1<<15)
-		id := restic.Hash(buf)
+		id := vaultic.Hash(buf)
 		h := backend.Handle{Type: tpe, Name: id.String()}
 
 		if c.Has(h) {
@@ -104,7 +104,7 @@ func TestFiles(t *testing.T) {
 			id := randomID(ids)
 
 			h := backend.Handle{Type: tpe, Name: id}
-			id2 := restic.Hash(load(t, c, h))
+			id2 := vaultic.Hash(load(t, c, h))
 
 			if id != id2.String() {
 				t.Errorf("wrong data returned, want %v, got %v", id, id2.String())
@@ -146,7 +146,7 @@ func TestFileLoad(t *testing.T) {
 
 	// save about 5 MiB of data in the cache
 	data := rtest.Random(random.Int(), 5234142)
-	id := restic.ID{}
+	id := vaultic.ID{}
 	copy(id[:], data)
 	h := backend.Handle{
 		Type: backend.PackFile,
@@ -208,7 +208,7 @@ func TestFileLoad(t *testing.T) {
 
 // Simulate multiple processes writing to a cache, using goroutines.
 //
-// The possibility of sharing a cache between multiple concurrent restic
+// The possibility of sharing a cache between multiple concurrent vaultic
 // processes isn't guaranteed in the docs and doesn't always work on Windows, hence the
 // check on GOOS. Cache sharing is considered a "nice to have" on POSIX, for now.
 //
@@ -233,7 +233,7 @@ func TestFileSaveConcurrent(t *testing.T) {
 		c    = TestNewCache(t)
 		data = rtest.Random(1, 10000)
 		g    errgroup.Group
-		id   restic.ID
+		id   vaultic.ID
 	)
 
 	random.Read(id[:])
@@ -282,7 +282,7 @@ func TestFileSaveAfterDamage(t *testing.T) {
 
 	// save a few bytes of data in the cache
 	data := rtest.Random(123456789, 42)
-	id := restic.Hash(data)
+	id := vaultic.Hash(data)
 	h := backend.Handle{
 		Type: backend.PackFile,
 		Name: id.String(),

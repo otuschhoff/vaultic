@@ -4,16 +4,16 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-func prepareTempdirRepoSrc(t testing.TB, src archiver.TestDir) (string, restic.Repository, backend.Backend) {
+func prepareTempdirRepoSrc(t testing.TB, src archiver.TestDir) (string, vaultic.Repository, backend.Backend) {
 	tempdir := rtest.TempDir(t)
 	repo, _, be := repository.TestRepositoryWithVersion(t, 0)
 

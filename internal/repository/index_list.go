@@ -4,23 +4,23 @@ import (
 	"context"
 	"iter"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // IndexBlob is one blob handle from an on-disk index file, or an error from loading/decoding
 // that file.
 type IndexBlob struct {
-	Handle restic.BlobHandle
+	Handle vaultic.BlobHandle
 	Error  error
 }
 
 // AllIndexBlobs streams blob handles from each index file without building a master index.
-func AllIndexBlobs(ctx context.Context, lister restic.Lister, loader restic.LoaderUnpacked) iter.Seq[IndexBlob] {
+func AllIndexBlobs(ctx context.Context, lister vaultic.Lister, loader vaultic.LoaderUnpacked) iter.Seq[IndexBlob] {
 	return func(yield func(IndexBlob) bool) {
 		stopIteration := errors.New("stop index blob iteration")
-		err := index.ForAllIndexes(ctx, lister, loader, func(_ restic.ID, idx *index.Index, err error) error {
+		err := index.ForAllIndexes(ctx, lister, loader, func(_ vaultic.ID, idx *index.Index, err error) error {
 			if err != nil {
 				return err
 			}

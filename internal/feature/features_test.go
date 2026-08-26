@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/feature"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/feature"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 var (

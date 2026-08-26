@@ -3,8 +3,8 @@ package filter
 import (
 	"strings"
 
-	"github.com/restic/restic/internal/errors"
 	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // IncludeByNameFunc is a function that takes a filename that should be included

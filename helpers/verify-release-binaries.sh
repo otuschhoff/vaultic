@@ -30,10 +30,10 @@ highlight() {
 
 highlight "Verifying release self-consistency"
 
-curl -OLSs https://github.com/restic/restic/releases/download/v${restic_version}/restic-${restic_version}.tar.gz.asc
+curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/restic-${restic_version}.tar.gz.asc
 # tarball is downloaded while processing the SHA256SUMS
-curl -OLSs https://github.com/restic/restic/releases/download/v${restic_version}/SHA256SUMS.asc
-curl -OLSs https://github.com/restic/restic/releases/download/v${restic_version}/SHA256SUMS
+curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/SHA256SUMS.asc
+curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/SHA256SUMS
 
 export GNUPGHOME=$PWD/gnupg
 mkdir -p 700 $GNUPGHOME
@@ -43,7 +43,7 @@ gpg --verify SHA256SUMS.asc SHA256SUMS
 
 for i in $(cat SHA256SUMS | cut -d " "  -f 3 ) ; do
     echo "Downloading $i"
-    curl -OLSs https://github.com/restic/restic/releases/download/v${restic_version}/"$i"
+    curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/"$i"
 done
 shasum -a256 -c SHA256SUMS || set_invalid "WARNING: RELEASE BINARIES DO NOT MATCH SHA256SUMS!"
 gpg --verify restic-${restic_version}.tar.gz.asc restic-${restic_version}.tar.gz
@@ -53,7 +53,7 @@ gpg --verify restic-${restic_version}.tar.gz.asc restic-${restic_version}.tar.gz
 highlight "Verifying tarball matches tagged commit"
 
 tar xzf "restic-${restic_version}.tar.gz"
-git clone -b "v${restic_version}" https://github.com/restic/restic.git
+git clone -b "v${restic_version}" https://github.com/vaultic/vaultic.git
 rm -rf restic/.git
 diff -r restic restic-${restic_version}
 

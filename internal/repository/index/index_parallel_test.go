@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestRepositoryForAllIndexes(t *testing.T) {
@@ -20,13 +20,13 @@ func TestRepositoryForAllIndexes(t *testing.T) {
 	}()
 	index.Full = func(*index.Index) bool { return true }
 
-	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, restic.StableRepoVersion)
+	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, vaultic.StableRepoVersion)
 
 	mi := index.NewMasterIndex()
 	for range 3 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		blob := pack.Blob{
-			BlobHandle: restic.NewRandomBlobHandle(),
+			BlobHandle: vaultic.NewRandomBlobHandle(),
 			Length:     uint(crypto.CiphertextLength(10)),
 			Offset:     0,
 		}
@@ -34,17 +34,17 @@ func TestRepositoryForAllIndexes(t *testing.T) {
 		rtest.OK(t, mi.Flush(context.TODO(), unpacked))
 	}
 
-	expectedIndexIDs := restic.NewIDSet()
-	rtest.OK(t, repo.List(context.TODO(), restic.IndexFile, func(id restic.ID, size int64) error {
+	expectedIndexIDs := vaultic.NewIDSet()
+	rtest.OK(t, repo.List(context.TODO(), vaultic.IndexFile, func(id vaultic.ID, size int64) error {
 		expectedIndexIDs.Insert(id)
 		return nil
 	}))
 	rtest.Assert(t, len(expectedIndexIDs) > 1, "test repo should have multiple indexes")
 
 	// check that all expected indexes are loaded without errors
-	indexIDs := restic.NewIDSet()
+	indexIDs := vaultic.NewIDSet()
 	var indexErr error
-	rtest.OK(t, index.ForAllIndexes(context.TODO(), repo, repo, func(id restic.ID, index *index.Index, err error) error {
+	rtest.OK(t, index.ForAllIndexes(context.TODO(), repo, repo, func(id vaultic.ID, index *index.Index, err error) error {
 		if err != nil {
 			indexErr = err
 		}
@@ -57,7 +57,7 @@ func TestRepositoryForAllIndexes(t *testing.T) {
 	// must failed with the returned error
 	iterErr := errors.New("error to pass upwards")
 
-	err := index.ForAllIndexes(context.TODO(), repo, repo, func(id restic.ID, index *index.Index, err error) error {
+	err := index.ForAllIndexes(context.TODO(), repo, repo, func(id vaultic.ID, index *index.Index, err error) error {
 		return iterErr
 	})
 

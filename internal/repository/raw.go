@@ -6,21 +6,21 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // LoadRaw reads all data stored in the backend for the file with id and filetype t.
 // If the backend returns data that does not match the id, then the buffer is returned
-// along with an error that is a restic.ErrInvalidData error.
-func (r *Repository) LoadRaw(ctx context.Context, t restic.FileType, id restic.ID) (buf []byte, err error) {
+// along with an error that is a vaultic.ErrInvalidData error.
+func (r *Repository) LoadRaw(ctx context.Context, t vaultic.FileType, id vaultic.ID) (buf []byte, err error) {
 	h := backend.Handle{Type: backend.FileType(t), Name: id.String()}
 
 	buf, err = loadRaw(ctx, r.be, h)
 
 	// retry loading damaged data only once. If a file fails to download correctly
 	// the second time, then it is likely corrupted at the backend.
-	if h.Type != backend.ConfigFile && id != restic.Hash(buf) {
+	if h.Type != backend.ConfigFile && id != vaultic.Hash(buf) {
 		if r.cache != nil {
 			// Cleanup cache to make sure it's not the cached copy that is broken.
 			// Ignore error as there's not much we can do in that case.
@@ -29,10 +29,10 @@ func (r *Repository) LoadRaw(ctx context.Context, t restic.FileType, id restic.I
 
 		buf, err = loadRaw(ctx, r.be, h)
 
-		if err == nil && id != restic.Hash(buf) {
+		if err == nil && id != vaultic.Hash(buf) {
 			// Return corrupted data to the caller if it is still broken the second time to
 			// let the caller decide what to do with the data.
-			return buf, fmt.Errorf("LoadRaw(%v): %w", h, restic.ErrInvalidData)
+			return buf, fmt.Errorf("LoadRaw(%v): %w", h, vaultic.ErrInvalidData)
 		}
 	}
 

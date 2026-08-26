@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mock"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mock"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestWarmupRepository(t *testing.T) {
@@ -29,10 +29,10 @@ func TestWarmupRepository(t *testing.T) {
 
 	repo, _ := New(be, Options{})
 
-	id1, _ := restic.ParseID("1111111111111111111111111111111111111111111111111111111111111111")
-	id2, _ := restic.ParseID("2222222222222222222222222222222222222222222222222222222222222222")
-	id3, _ := restic.ParseID("3333333333333333333333333333333333333333333333333333333333333333")
-	job, err := repo.StartWarmup(context.TODO(), restic.NewIDSet(id1, id2))
+	id1, _ := vaultic.ParseID("1111111111111111111111111111111111111111111111111111111111111111")
+	id2, _ := vaultic.ParseID("2222222222222222222222222222222222222222222222222222222222222222")
+	id3, _ := vaultic.ParseID("3333333333333333333333333333333333333333333333333333333333333333")
+	job, err := repo.StartWarmup(context.TODO(), vaultic.NewIDSet(id1, id2))
 	if err != nil {
 		t.Fatalf("error when starting warmup: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestWarmupRepository(t *testing.T) {
 	}
 
 	simulateWarmingUp = true
-	job, err = repo.StartWarmup(context.TODO(), restic.NewIDSet(id3))
+	job, err = repo.StartWarmup(context.TODO(), vaultic.NewIDSet(id3))
 	if err != nil {
 		t.Fatalf("error when starting warmup: %v", err)
 	}

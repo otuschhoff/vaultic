@@ -8,7 +8,7 @@ import (
 	"net/http/httputil"
 	"os"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 type eofDetectRoundTripper struct {

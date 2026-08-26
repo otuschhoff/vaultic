@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestPathsFromSn(t *testing.T) {
-	id1, _ := restic.ParseID("1234567812345678123456781234567812345678123456781234567812345678")
+	id1, _ := vaultic.ParseID("1234567812345678123456781234567812345678123456781234567812345678")
 	time1, _ := time.Parse("2006-01-02T15:04:05", "2021-01-01T00:00:01")
 	sn1 := &data.Snapshot{Hostname: "host", Username: "user", Tags: []string{"tag1", "tag2"}, Time: time1}
 	data.TestSetSnapshotID(t, sn1, id1)
@@ -65,22 +65,22 @@ func TestMakeDirs(t *testing.T) {
 		timeTemplate:  timeTemplate,
 	}
 
-	id0, _ := restic.ParseID("0000000012345678123456781234567812345678123456781234567812345678")
+	id0, _ := vaultic.ParseID("0000000012345678123456781234567812345678123456781234567812345678")
 	time0, _ := time.Parse("2006-01-02T15:04:05", "2020-12-31T00:00:01")
 	sn0 := &data.Snapshot{Hostname: "host", Username: "user", Tags: []string{"tag1", "tag2"}, Time: time0}
 	data.TestSetSnapshotID(t, sn0, id0)
 
-	id1, _ := restic.ParseID("1234567812345678123456781234567812345678123456781234567812345678")
+	id1, _ := vaultic.ParseID("1234567812345678123456781234567812345678123456781234567812345678")
 	time1, _ := time.Parse("2006-01-02T15:04:05", "2021-01-01T00:00:01")
 	sn1 := &data.Snapshot{Hostname: "host", Username: "user", Tags: []string{"tag1", "tag2"}, Time: time1}
 	data.TestSetSnapshotID(t, sn1, id1)
 
-	id2, _ := restic.ParseID("8765432112345678123456781234567812345678123456781234567812345678")
+	id2, _ := vaultic.ParseID("8765432112345678123456781234567812345678123456781234567812345678")
 	time2, _ := time.Parse("2006-01-02T15:04:05", "2021-01-01T01:02:03")
 	sn2 := &data.Snapshot{Hostname: "host2", Username: "user2", Tags: []string{"tag2", "tag3", "tag4"}, Time: time2}
 	data.TestSetSnapshotID(t, sn2, id2)
 
-	id3, _ := restic.ParseID("aaaaaaaa12345678123456781234567812345678123456781234567812345678")
+	id3, _ := vaultic.ParseID("aaaaaaaa12345678123456781234567812345678123456781234567812345678")
 	time3, _ := time.Parse("2006-01-02T15:04:05", "2021-01-01T01:02:03")
 	sn3 := &data.Snapshot{Hostname: "host", Username: "user2", Tags: []string{}, Time: time3}
 	data.TestSetSnapshotID(t, sn3, id3)

@@ -12,12 +12,12 @@ import (
 	"path"
 	"strings"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
@@ -358,7 +358,7 @@ func (be *Backend) openReader(ctx context.Context, h backend.Handle, length int,
 
 	if length > 0 && (resp.ContentLength == nil || *resp.ContentLength != int64(length)) {
 		_ = resp.Body.Close()
-		return nil, &azcore.ResponseError{ErrorCode: "restic-file-too-short", StatusCode: http.StatusRequestedRangeNotSatisfiable}
+		return nil, &azcore.ResponseError{ErrorCode: "vaultic-file-too-short", StatusCode: http.StatusRequestedRangeNotSatisfiable}
 	}
 
 	return resp.Body, err
@@ -453,7 +453,7 @@ func (be *Backend) List(ctx context.Context, t backend.FileType, fn func(backend
 	return ctx.Err()
 }
 
-// Delete removes all restic keys in the bucket. It will not remove the bucket itself.
+// Delete removes all vaultic keys in the bucket. It will not remove the bucket itself.
 func (be *Backend) Delete(ctx context.Context) error {
 	return util.DefaultDelete(ctx, be)
 }

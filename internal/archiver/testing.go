@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/fs"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // TestSnapshot creates a new snapshot of path.
-func TestSnapshot(t testing.TB, repo restic.Repository, path string, parent *restic.ID) *data.Snapshot {
+func TestSnapshot(t testing.TB, repo vaultic.Repository, path string, parent *vaultic.ID) *data.Snapshot {
 	arch := New(repo, fs.NewLocal(), Options{})
 	opts := SnapshotOptions{
 		Time:     time.Now(),
@@ -234,7 +234,7 @@ func TestEnsureFiles(t testing.TB, target string, dir TestDir) {
 }
 
 // TestEnsureFileContent checks if the file in the repo is the same as file.
-func TestEnsureFileContent(ctx context.Context, t testing.TB, repo restic.BlobLoader, filename string, node *data.Node, file TestFile) {
+func TestEnsureFileContent(ctx context.Context, t testing.TB, repo vaultic.BlobLoader, filename string, node *data.Node, file TestFile) {
 	if int(node.Size) != len(file.Content) {
 		t.Fatalf("%v: wrong node size: want %d, got %d", filename, node.Size, len(file.Content))
 		return
@@ -243,7 +243,7 @@ func TestEnsureFileContent(ctx context.Context, t testing.TB, repo restic.BlobLo
 	content := make([]byte, len(file.Content))
 	pos := 0
 	for _, id := range node.Content {
-		part, err := repo.LoadBlob(ctx, restic.BlobHandle{Type: restic.DataBlob, ID: id}, content[pos:])
+		part, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}, content[pos:])
 		if err != nil {
 			t.Fatalf("error loading blob %v: %v", id.Str(), err)
 			return
@@ -262,7 +262,7 @@ func TestEnsureFileContent(ctx context.Context, t testing.TB, repo restic.BlobLo
 
 // TestEnsureTree checks that the tree ID in the repo matches dir. On Windows,
 // Symlinks are ignored.
-func TestEnsureTree(ctx context.Context, t testing.TB, prefix string, repo restic.BlobLoader, treeID restic.ID, dir TestDir) {
+func TestEnsureTree(ctx context.Context, t testing.TB, prefix string, repo vaultic.BlobLoader, treeID vaultic.ID, dir TestDir) {
 	t.Helper()
 
 	tree, err := data.LoadTree(ctx, repo, treeID)
@@ -324,7 +324,7 @@ func TestEnsureTree(ctx context.Context, t testing.TB, prefix string, repo resti
 
 // TestEnsureSnapshot tests if the snapshot in the repo has exactly the same
 // structure as dir. On Windows, Symlinks are ignored.
-func TestEnsureSnapshot(t testing.TB, repo restic.Repository, snapshotID restic.ID, dir TestDir) {
+func TestEnsureSnapshot(t testing.TB, repo vaultic.Repository, snapshotID vaultic.ID, dir TestDir) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

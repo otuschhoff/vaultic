@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"path"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type NodeRewriteFunc func(node *data.Node, path string) *data.Node
-type FailedTreeRewriteFunc func(nodeID restic.ID, path string, err error) (data.TreeNodeIterator, error)
+type FailedTreeRewriteFunc func(nodeID vaultic.ID, path string, err error) (data.TreeNodeIterator, error)
 type QueryRewrittenSizeFunc func() SnapshotSize
 type NodeKeepEmptyDirectoryFunc func(path string) bool
 
@@ -31,7 +31,7 @@ type RewriteOpts struct {
 	DisableNodeCache           bool
 }
 
-type idMap map[restic.ID]restic.ID
+type idMap map[vaultic.ID]vaultic.ID
 
 type TreeRewriter struct {
 	opts RewriteOpts
@@ -54,7 +54,7 @@ func NewTreeRewriter(opts RewriteOpts) *TreeRewriter {
 	}
 	if rw.opts.RewriteFailedTree == nil {
 		// fail with error by default
-		rw.opts.RewriteFailedTree = func(_ restic.ID, _ string, err error) (data.TreeNodeIterator, error) {
+		rw.opts.RewriteFailedTree = func(_ vaultic.ID, _ string, err error) (data.TreeNodeIterator, error) {
 			return nil, err
 		}
 	}
@@ -90,7 +90,7 @@ func NewSnapshotSizeRewriter(rewriteNode NodeRewriteFunc, keepEmptyDirectoryFilt
 	return t, ss
 }
 
-func (t *TreeRewriter) RewriteTree(ctx context.Context, loader restic.BlobLoader, saver restic.BlobSaver, nodepath string, nodeID restic.ID) (newNodeID restic.ID, err error) {
+func (t *TreeRewriter) RewriteTree(ctx context.Context, loader vaultic.BlobLoader, saver vaultic.BlobSaver, nodepath string, nodeID vaultic.ID) (newNodeID vaultic.ID, err error) {
 	// check if tree was already changed
 	newID, ok := t.replaces[nodeID]
 	if ok {
@@ -102,16 +102,16 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader restic.BlobLoader
 	if err != nil {
 		replacement, err := t.opts.RewriteFailedTree(nodeID, nodepath, err)
 		if err != nil {
-			return restic.ID{}, err
+			return vaultic.ID{}, err
 		}
 		if replacement != nil {
 			replacementID, err := data.SaveTree(ctx, saver, replacement)
 			if err != nil {
-				return restic.ID{}, err
+				return vaultic.ID{}, err
 			}
 			return replacementID, nil
 		}
-		return restic.ID{}, nil
+		return vaultic.ID{}, nil
 	}
 
 	if !t.opts.AllowUnstableSerialization {
@@ -120,17 +120,17 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader restic.BlobLoader
 		// a custom UnmarshalJSON to decode trees, see also https://github.com/golang/go/issues/41144
 		testID, err := data.SaveTree(ctx, saver, curTree)
 		if err != nil {
-			return restic.ID{}, err
+			return vaultic.ID{}, err
 		}
 		if nodeID != testID {
-			return restic.ID{}, fmt.Errorf("cannot encode tree at %q without losing information", nodepath)
+			return vaultic.ID{}, fmt.Errorf("cannot encode tree at %q without losing information", nodepath)
 		}
 
 		// reload the tree to get a new iterator
 		curTree, err = data.LoadTree(ctx, loader, nodeID)
 		if err != nil {
 			// shouldn't fail as the first load was successful
-			return restic.ID{}, fmt.Errorf("failed to reload tree %v: %w", nodeID, err)
+			return vaultic.ID{}, fmt.Errorf("failed to reload tree %v: %w", nodeID, err)
 		}
 	}
 
@@ -139,10 +139,10 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader restic.BlobLoader
 	tb := data.NewTreeWriter(saver)
 	for item := range curTree {
 		if ctx.Err() != nil {
-			return restic.ID{}, ctx.Err()
+			return vaultic.ID{}, ctx.Err()
 		}
 		if item.Error != nil {
-			return restic.ID{}, item.Error
+			return vaultic.ID{}, item.Error
 		}
 		node := item.Node
 
@@ -155,34 +155,34 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader restic.BlobLoader
 		if node.Type != data.NodeTypeDir {
 			err = tb.AddNode(node)
 			if err != nil {
-				return restic.ID{}, err
+				return vaultic.ID{}, err
 			}
 			continue
 		}
 		// treat nil as null id
-		var subtree restic.ID
+		var subtree vaultic.ID
 		if node.Subtree != nil {
 			subtree = *node.Subtree
 		}
 		newID, err := t.RewriteTree(ctx, loader, saver, path, subtree)
 		if err != nil {
-			return restic.ID{}, err
+			return vaultic.ID{}, err
 		} else if err == nil && newID.IsNull() {
 			continue
 		}
 		node.Subtree = &newID
 		err = tb.AddNode(node)
 		if err != nil {
-			return restic.ID{}, err
+			return vaultic.ID{}, err
 		}
 	}
 
 	newTreeID, err := tb.Finalize(ctx)
 	if err != nil {
-		return restic.ID{}, err
+		return vaultic.ID{}, err
 	}
 	if tb.Count() == 0 && !t.opts.KeepEmptyDirectory(nodepath) {
-		return restic.ID{}, nil
+		return vaultic.ID{}, nil
 	}
 
 	if t.replaces != nil {

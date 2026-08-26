@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mem"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mem"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestLockFile(t *testing.T) {
@@ -177,10 +177,10 @@ func TestLockStale(t *testing.T) {
 	}
 }
 
-func checkSingleLock(t *testing.T, repo restic.Lister) restic.ID {
+func checkSingleLock(t *testing.T, repo vaultic.Lister) vaultic.ID {
 	t.Helper()
-	var lockID *restic.ID
-	err := repo.List(context.TODO(), restic.LockFile, func(id restic.ID, size int64) error {
+	var lockID *vaultic.ID
+	err := repo.List(context.TODO(), vaultic.LockFile, func(id vaultic.ID, size int64) error {
 		if lockID != nil {
 			t.Error("more than one lock found")
 		}

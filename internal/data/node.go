@@ -12,10 +12,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 // ExtendedAttribute is a tuple storing the xattr name and value for various filesystems.
@@ -106,8 +106,8 @@ type Node struct {
 	ExtendedAttributes []ExtendedAttribute                      `json:"extended_attributes,omitempty"`
 	GenericAttributes  map[GenericAttributeType]json.RawMessage `json:"generic_attributes,omitempty"`
 	Device             uint64                                   `json:"device,omitempty"` // in case of Type == "dev", stat.st_rdev
-	Content            restic.IDs                               `json:"content"`
-	Subtree            *restic.ID                               `json:"subtree,omitempty"`
+	Content            vaultic.IDs                              `json:"content"`
+	Subtree            *vaultic.ID                              `json:"subtree,omitempty"`
 
 	Error string `json:"error,omitempty"`
 
@@ -400,7 +400,7 @@ func handleUnknownGenericAttributeFound(genericAttributeType GenericAttributeTyp
 			debug.Log("Ignoring a generic attribute found in the repository: %s which may not be compatible with your OS. Compatible OS: %s", genericAttributeType, os)
 		} else {
 			// If genericAttributesForOS in node.go does not know about this attribute, then the repository may have been created by a newer version which has a newer GenericAttributeType.
-			warn(fmt.Sprintf("Found an unrecognized generic attribute in the repository: %s. You may need to upgrade to latest version of restic.", genericAttributeType))
+			warn(fmt.Sprintf("Found an unrecognized generic attribute in the repository: %s. You may need to upgrade to latest version of vaultic.", genericAttributeType))
 		}
 	}
 }

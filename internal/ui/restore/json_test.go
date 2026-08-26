@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restorer"
-	"github.com/restic/restic/internal/test"
-	"github.com/restic/restic/internal/ui"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/restorer"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/ui"
 )
 
 func createJSONProgress() (*ui.MockTerminal, ProgressPrinter) {

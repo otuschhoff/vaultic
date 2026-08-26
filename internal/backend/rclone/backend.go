@@ -18,13 +18,13 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/limiter"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/rest"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/terminal"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/limiter"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/rest"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/terminal"
 	"golang.org/x/net/http2"
 )
 
@@ -292,7 +292,7 @@ func Open(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog func(st
 	return be, nil
 }
 
-// Create initializes a new restic repo with rclone.
+// Create initializes a new vaultic repo with rclone.
 func Create(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog func(string, ...any)) (backend.Backend, error) {
 	be, err := newBackend(ctx, cfg, lim, errorLog)
 	if err != nil {

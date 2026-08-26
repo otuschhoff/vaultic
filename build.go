@@ -52,9 +52,9 @@ import (
 
 // config contains the configuration for the program to build.
 var config = Config{
-	Name:      "restic",                   // name of the program executable and directory
-	Namespace: "github.com/restic/restic", // subdir of GOPATH, e.g. "github.com/foo/bar"
-	Main:      "./cmd/restic",             // package name for the main package
+	Name:      "vaultic",                    // name of the program executable and directory
+	Namespace: "github.com/vaultic/vaultic", // subdir of GOPATH, e.g. "github.com/foo/bar"
+	Main:      "./cmd/vaultic",              // package name for the main package
 	// disable_grpc_modules is necessary to reduce the binary size since cloud.google.com/go/storage v1.44.0
 	// see https://github.com/googleapis/google-cloud-go/issues/11448
 	DefaultBuildTags: []string{"selfupdate", "disable_grpc_modules"}, // specify build tags which are always used
@@ -322,7 +322,7 @@ func (v GoVersion) String() string {
 
 func main() {
 	if !goVersion.AtLeast(config.MinVersion) {
-		fmt.Fprintf(os.Stderr, "Detected version %s is too old, restic requires at least %s\n", goVersion, config.MinVersion)
+		fmt.Fprintf(os.Stderr, "Detected version %s is too old, vaultic requires at least %s\n", goVersion, config.MinVersion)
 		os.Exit(1)
 	}
 

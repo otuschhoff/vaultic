@@ -8,9 +8,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mock"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mock"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func randomBytes(t *testing.T, size int) []byte {

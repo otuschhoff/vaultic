@@ -2,7 +2,7 @@
 
 package terminal
 
-import "github.com/restic/restic/internal/debug"
+import "github.com/vaultic/vaultic/internal/debug"
 
 // IsProcessBackground reports whether the current process is running in the
 // background. fd must be a file descriptor for the terminal.

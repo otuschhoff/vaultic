@@ -5,9 +5,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/options"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/options"
 )
 
 // Config contains all configuration necessary to connect to a REST server.
@@ -82,8 +82,8 @@ func (cfg *Config) ApplyEnvironment(prefix string) {
 
 	// Only apply env variable values if neither username nor password are provided.
 	if username == "" && !pwdSet {
-		envName := os.Getenv(prefix + "RESTIC_REST_USERNAME")
-		envPwd := os.Getenv(prefix + "RESTIC_REST_PASSWORD")
+		envName := os.Getenv(prefix + "VAULTIC_REST_USERNAME")
+		envPwd := os.Getenv(prefix + "VAULTIC_REST_PASSWORD")
 
 		cfg.URL.User = url.UserPassword(envName, envPwd)
 	}

@@ -3,24 +3,24 @@ package repository
 import (
 	"context"
 
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type RepairIndexOptions struct {
 	ReadAllPacks bool
 }
 
-func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions, printer restic.Printer) error {
-	var obsoleteIndexes restic.IDs
-	packSizeFromList := make(map[restic.ID]int64)
-	packSizeFromIndex := make(map[restic.ID]int64)
-	removePacks := restic.NewIDSet()
+func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions, printer vaultic.Printer) error {
+	var obsoleteIndexes vaultic.IDs
+	packSizeFromList := make(map[vaultic.ID]int64)
+	packSizeFromIndex := make(map[vaultic.ID]int64)
+	removePacks := vaultic.NewIDSet()
 
 	if opts.ReadAllPacks {
 		// get list of old index files but start with empty index
-		err := repo.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
+		err := repo.List(ctx, vaultic.IndexFile, func(id vaultic.ID, _ int64) error {
 			obsoleteIndexes = append(obsoleteIndexes, id)
 			return nil
 		})
@@ -31,7 +31,7 @@ func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions,
 
 	} else {
 		printer.P("loading indexes...\n")
-		err := repo.loadIndexWithCallback(ctx, restic.NoopTerminalCounterFactory, func(id restic.ID, _ *index.Index, err error) error {
+		err := repo.loadIndexWithCallback(ctx, vaultic.NoopTerminalCounterFactory, func(id vaultic.ID, _ *index.Index, err error) error {
 			if err != nil {
 				printer.E("removing invalid index %v: %v\n", id, err)
 				obsoleteIndexes = append(obsoleteIndexes, id)
@@ -52,7 +52,7 @@ func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions,
 	oldIndexes := repo.idx.IDs()
 
 	printer.P("getting pack files to read...\n")
-	err := repo.List(ctx, restic.PackFile, func(id restic.ID, packSize int64) error {
+	err := repo.List(ctx, vaultic.PackFile, func(id vaultic.ID, packSize int64) error {
 		size, ok := packSizeFromIndex[id]
 		if !ok || size != packSize {
 			// Pack was not referenced in index or size does not match
@@ -102,16 +102,16 @@ func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions,
 	return nil
 }
 
-func rewriteIndexFiles(ctx context.Context, repo *Repository, removePacks restic.IDSet, oldIndexes restic.IDSet, extraObsolete restic.IDs, printer restic.Printer) error {
+func rewriteIndexFiles(ctx context.Context, repo *Repository, removePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, printer vaultic.Printer) error {
 	printer.P("rebuilding index\n")
 
 	bar := printer.NewCounter("indexes processed")
 	return repo.idx.Rewrite(ctx, &internalRepository{repo}, removePacks, oldIndexes, extraObsolete, index.MasterIndexRewriteOpts{
 		SaveProgress: bar,
-		DeleteProgress: func() restic.Counter {
+		DeleteProgress: func() vaultic.Counter {
 			return printer.NewCounter("old indexes deleted")
 		},
-		DeleteReport: func(id restic.ID, err error) {
+		DeleteReport: func(id vaultic.ID, err error) {
 			if err != nil {
 				printer.VV("failed to remove index %v: %v\n", id.String(), err)
 			} else {

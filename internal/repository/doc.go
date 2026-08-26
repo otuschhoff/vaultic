@@ -1,6 +1,6 @@
-// Package repository implements a restic repository on top of a backend. In
+// Package repository implements a vaultic repository on top of a backend. In
 // the following the abstractions used for this package are listed. More
-// information can be found in the restic design document.
+// information can be found in the vaultic design document.
 //
 // # File
 //

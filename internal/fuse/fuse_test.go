@@ -12,15 +12,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/bloblru"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/bloblru"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"github.com/anacrolix/fuse"
 	"github.com/anacrolix/fuse/fs"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func testRead(t testing.TB, f fs.Handle, offset, length int, data []byte) {
@@ -38,8 +38,8 @@ func testRead(t testing.TB, f fs.Handle, offset, length int, data []byte) {
 	rtest.OK(t, fr.Read(ctx, req, resp))
 }
 
-func firstSnapshotID(t testing.TB, repo restic.Lister) (first restic.ID) {
-	err := repo.List(context.TODO(), restic.SnapshotFile, func(id restic.ID, size int64) error {
+func firstSnapshotID(t testing.TB, repo vaultic.Lister) (first vaultic.ID) {
+	err := repo.List(context.TODO(), vaultic.SnapshotFile, func(id vaultic.ID, size int64) error {
 		if first.IsNull() {
 			first = id
 		}
@@ -53,14 +53,14 @@ func firstSnapshotID(t testing.TB, repo restic.Lister) (first restic.ID) {
 	return first
 }
 
-func loadFirstSnapshot(t testing.TB, repo restic.ListerLoaderUnpacked) *data.Snapshot {
+func loadFirstSnapshot(t testing.TB, repo vaultic.ListerLoaderUnpacked) *data.Snapshot {
 	id := firstSnapshotID(t, repo)
 	sn, err := data.LoadSnapshot(context.TODO(), repo, id)
 	rtest.OK(t, err)
 	return sn
 }
 
-func loadTree(t testing.TB, repo restic.Loader, id restic.ID) data.TreeNodeIterator {
+func loadTree(t testing.TB, repo vaultic.Loader, id vaultic.ID) data.TreeNodeIterator {
 	tree, err := data.LoadTree(context.TODO(), repo, id)
 	rtest.OK(t, err)
 	return tree
@@ -78,7 +78,7 @@ func TestFuseFile(t *testing.T) {
 	sn := loadFirstSnapshot(t, repo)
 	tree := loadTree(t, repo, *sn.Tree)
 
-	var content restic.IDs
+	var content vaultic.IDs
 	for item := range tree {
 		rtest.OK(t, item.Error)
 		content = append(content, item.Node.Content...)
@@ -90,11 +90,11 @@ func TestFuseFile(t *testing.T) {
 		memfile  []byte
 	)
 	for _, id := range content {
-		size, found := repo.LookupBlobSize(restic.BlobHandle{Type: restic.DataBlob, ID: id})
+		size, found := repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
 		rtest.Assert(t, found, "Expected to find blob id %v", id)
 		filesize += uint64(size)
 
-		buf, err := repo.LoadBlob(context.TODO(), restic.BlobHandle{Type: restic.DataBlob, ID: id}, nil)
+		buf, err := repo.LoadBlob(context.TODO(), vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}, nil)
 		rtest.OK(t, err)
 
 		if len(buf) != int(size) {
@@ -187,7 +187,7 @@ func TestTopUIDGID(t *testing.T) {
 	testTopUIDGID(t, Config{OwnerIsRoot: true}, repo, 0, 0)
 }
 
-func testTopUIDGID(t *testing.T, cfg Config, repo restic.Repository, uid, gid uint32) {
+func testTopUIDGID(t *testing.T, cfg Config, repo vaultic.Repository, uid, gid uint32) {
 	t.Helper()
 
 	ctx := context.Background()

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type TestBlob struct {
@@ -33,19 +33,19 @@ type TestWarmupJob struct {
 }
 
 type testPackBlob struct {
-	packID     restic.ID
-	handle     restic.BlobHandle
+	packID     vaultic.ID
+	handle     vaultic.BlobHandle
 	offset     uint
 	ciphertext uint
 	plaintext  uint
 	compressed bool
 }
 
-var _ restic.PackBlob = (*testPackBlob)(nil)
+var _ vaultic.PackBlob = (*testPackBlob)(nil)
 
-func (pb *testPackBlob) PackID() restic.ID { return pb.packID }
+func (pb *testPackBlob) PackID() vaultic.ID { return pb.packID }
 
-func (pb *testPackBlob) Handle() restic.BlobHandle { return pb.handle }
+func (pb *testPackBlob) Handle() vaultic.BlobHandle { return pb.handle }
 
 func (pb *testPackBlob) CiphertextLength() uint { return pb.ciphertext }
 
@@ -56,10 +56,10 @@ func (pb *testPackBlob) PlaintextLength() uint { return pb.plaintext }
 func (pb *testPackBlob) IsCompressed() bool { return pb.compressed }
 
 type TestRepo struct {
-	packsIDToData map[restic.ID][]byte
+	packsIDToData map[vaultic.ID][]byte
 
 	// blobs and files
-	blobs              map[restic.ID][]restic.PackBlob
+	blobs              map[vaultic.ID][]vaultic.PackBlob
 	files              []*fileInfo
 	filesPathToContent map[string]string
 
@@ -69,7 +69,7 @@ type TestRepo struct {
 	loader blobsLoaderFn
 }
 
-func (i *TestRepo) Lookup(bh restic.BlobHandle) []restic.PackBlob {
+func (i *TestRepo) Lookup(bh vaultic.BlobHandle) []vaultic.PackBlob {
 	packs := i.blobs[bh.ID]
 	return packs
 }
@@ -78,7 +78,7 @@ func (i *TestRepo) fileContent(file *fileInfo) string {
 	return i.filesPathToContent[file.location]
 }
 
-func (i *TestRepo) StartWarmup(_ context.Context, packs restic.IDSet) (restic.WarmupJob, error) {
+func (i *TestRepo) StartWarmup(_ context.Context, packs vaultic.IDSet) (vaultic.WarmupJob, error) {
 	job := TestWarmupJob{handlesCount: len(packs)}
 	i.warmupJobs = append(i.warmupJobs, &job)
 	return &job, nil
@@ -103,7 +103,7 @@ func newTestRepo(content []TestFile) *TestRepo {
 	type Pack struct {
 		name  string
 		data  []byte
-		blobs map[restic.ID]packBlobLayout
+		blobs map[vaultic.ID]packBlobLayout
 	}
 	packs := make(map[string]Pack)
 	filesPathToContent := make(map[string]string)
@@ -117,11 +117,11 @@ func newTestRepo(content []TestFile) *TestRepo {
 			var pack Pack
 			var found bool
 			if pack, found = packs[blob.pack]; !found {
-				pack = Pack{name: blob.pack, blobs: make(map[restic.ID]packBlobLayout)}
+				pack = Pack{name: blob.pack, blobs: make(map[vaultic.ID]packBlobLayout)}
 			}
 
 			// calculate blob id and add to the pack as necessary
-			blobID := restic.Hash([]byte(blob.data))
+			blobID := vaultic.Hash([]byte(blob.data))
 			if _, found := pack.blobs[blobID]; !found {
 				blobData := []byte(blob.data)
 				n := uint(len(blobData))
@@ -139,16 +139,16 @@ func newTestRepo(content []TestFile) *TestRepo {
 		filesPathToContent[file.name] = content.String()
 	}
 
-	blobs := make(map[restic.ID][]restic.PackBlob)
-	packsIDToData := make(map[restic.ID][]byte)
+	blobs := make(map[vaultic.ID][]vaultic.PackBlob)
+	packsIDToData := make(map[vaultic.ID][]byte)
 
 	for _, pack := range packs {
-		packID := restic.Hash(pack.data)
+		packID := vaultic.Hash(pack.data)
 		packsIDToData[packID] = pack.data
 		for blobID, layout := range pack.blobs {
 			blobs[blobID] = append(blobs[blobID], &testPackBlob{
 				packID: packID,
-				handle: restic.BlobHandle{Type: restic.DataBlob, ID: blobID},
+				handle: vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID},
 				offset: layout.offset, ciphertext: layout.ciphertext,
 				plaintext: layout.plaintext, compressed: layout.compressed,
 			})
@@ -157,9 +157,9 @@ func newTestRepo(content []TestFile) *TestRepo {
 
 	var files []*fileInfo
 	for _, file := range content {
-		content := restic.IDs{}
+		content := vaultic.IDs{}
 		for _, blob := range file.blobs {
-			content = append(content, restic.Hash([]byte(blob.data)))
+			content = append(content, vaultic.Hash([]byte(blob.data)))
 		}
 		files = append(files, &fileInfo{location: file.name, blobs: content})
 	}
@@ -171,7 +171,7 @@ func newTestRepo(content []TestFile) *TestRepo {
 		filesPathToContent: filesPathToContent,
 		warmupJobs:         []*TestWarmupJob{},
 	}
-	repo.loader = func(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+	repo.loader = func(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 		entries := make([]*testPackBlob, 0, len(handles))
 		for _, h := range handles {
 			found := false
@@ -356,7 +356,7 @@ func TestErrorRestoreFiles(t *testing.T) {
 
 	loadError := errors.New("load error")
 	// loader always returns an error
-	repo.loader = func(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+	repo.loader = func(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 		return loadError
 	}
 
@@ -390,9 +390,9 @@ func TestFatalDownloadError(t *testing.T) {
 	repo := newTestRepo(content)
 
 	loader := repo.loader
-	repo.loader = func(ctx context.Context, packID restic.ID, handles []restic.BlobHandle, handleBlobFn func(blob restic.BlobHandle, buf []byte, err error) error) error {
+	repo.loader = func(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
 		ctr := 0
-		return loader(ctx, packID, handles, func(blob restic.BlobHandle, buf []byte, err error) error {
+		return loader(ctx, packID, handles, func(blob vaultic.BlobHandle, buf []byte, err error) error {
 			if ctr < 2 {
 				ctr++
 				return handleBlobFn(blob, buf, err)

@@ -5,8 +5,8 @@ import (
 	"hash"
 	"io"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 // Backend passes reads through to an underlying layer and accepts writes, but

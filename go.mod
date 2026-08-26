@@ -1,4 +1,4 @@
-module github.com/restic/restic
+module github.com/vaultic/vaultic
 
 go 1.25.8
 

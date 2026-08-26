@@ -9,24 +9,24 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/restic/restic/internal/checker"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/checker"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestMasterIndex(t *testing.T) {
-	bhInIdx1 := restic.NewRandomBlobHandle()
-	bhInIdx2 := restic.NewRandomBlobHandle()
-	bhInIdx12 := restic.BlobHandle{ID: restic.NewRandomID(), Type: restic.TreeBlob}
+	bhInIdx1 := vaultic.NewRandomBlobHandle()
+	bhInIdx2 := vaultic.NewRandomBlobHandle()
+	bhInIdx12 := vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.TreeBlob}
 
 	blob1 := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle: bhInIdx1,
 			Length:     uint(crypto.CiphertextLength(10)),
@@ -35,7 +35,7 @@ func TestMasterIndex(t *testing.T) {
 	}
 
 	blob2 := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle:         bhInIdx2,
 			Length:             uint(crypto.CiphertextLength(100)),
@@ -45,7 +45,7 @@ func TestMasterIndex(t *testing.T) {
 	}
 
 	blob12a := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle:         bhInIdx12,
 			Length:             uint(crypto.CiphertextLength(123)),
@@ -55,7 +55,7 @@ func TestMasterIndex(t *testing.T) {
 	}
 
 	blob12b := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle:         bhInIdx12,
 			Length:             uint(crypto.CiphertextLength(123)),
@@ -116,9 +116,9 @@ func TestMasterIndex(t *testing.T) {
 	rtest.Equals(t, uint(80), size)
 
 	// test not in index
-	blobs = mIdx.Lookup(restic.NewRandomBlobHandle())
+	blobs = mIdx.Lookup(vaultic.NewRandomBlobHandle())
 	rtest.Assert(t, blobs == nil, "Expected no blobs when fetching with a random id")
-	_, found = mIdx.LookupSize(restic.NewRandomBlobHandle())
+	_, found = mIdx.LookupSize(vaultic.NewRandomBlobHandle())
 	rtest.Assert(t, !found, "Expected no blobs when fetching with a random id")
 }
 
@@ -126,7 +126,7 @@ func TestMasterIndexAddPending(t *testing.T) {
 	mIdx := index.NewMasterIndex()
 
 	// Test AddPending: successfully add a new blob
-	bhPending := restic.NewRandomBlobHandle()
+	bhPending := vaultic.NewRandomBlobHandle()
 	added := mIdx.AddPending(bhPending, 100)
 	rtest.Equals(t, true, added)
 
@@ -135,9 +135,9 @@ func TestMasterIndexAddPending(t *testing.T) {
 	rtest.Equals(t, false, added)
 
 	// Test AddPending: try to add a blob that's already in an index (should return false)
-	bhInIndex := restic.NewRandomBlobHandle()
+	bhInIndex := vaultic.NewRandomBlobHandle()
 	idx := index.NewIndex()
-	idx.StorePack(restic.NewRandomID(), pack.Blobs{{
+	idx.StorePack(vaultic.NewRandomID(), pack.Blobs{{
 		BlobHandle:         bhInIndex,
 		Length:             uint(crypto.CiphertextLength(50)),
 		Offset:             0,
@@ -161,20 +161,20 @@ func (n *noopSaver) Connections() uint {
 	return 2
 }
 
-func (n *noopSaver) SaveUnpacked(_ context.Context, _ restic.FileType, buf []byte) (restic.ID, error) {
-	return restic.Hash(buf), nil
+func (n *noopSaver) SaveUnpacked(_ context.Context, _ vaultic.FileType, buf []byte) (vaultic.ID, error) {
+	return vaultic.Hash(buf), nil
 }
 
 func TestMasterIndexStorePackRemovesPending(t *testing.T) {
 	mIdx := index.NewMasterIndex()
 
 	// Add a blob as pending
-	bhPending := restic.NewRandomBlobHandle()
+	bhPending := vaultic.NewRandomBlobHandle()
 	added := mIdx.AddPending(bhPending, 75)
 	rtest.Equals(t, true, added)
 
 	// Store the blob in a pack
-	packID := restic.NewRandomID()
+	packID := vaultic.NewRandomID()
 	blob := pack.Blob{
 		BlobHandle:         bhPending,
 		Length:             uint(crypto.CiphertextLength(75)),
@@ -202,11 +202,11 @@ func TestMasterIndexStorePackRemovesPending(t *testing.T) {
 }
 
 func TestMasterMergeFinalIndexes(t *testing.T) {
-	bhInIdx1 := restic.NewRandomBlobHandle()
-	bhInIdx2 := restic.NewRandomBlobHandle()
+	bhInIdx1 := vaultic.NewRandomBlobHandle()
+	bhInIdx2 := vaultic.NewRandomBlobHandle()
 
 	blob1 := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle: bhInIdx1,
 			Length:     10,
@@ -215,7 +215,7 @@ func TestMasterMergeFinalIndexes(t *testing.T) {
 	}
 
 	blob2 := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle:         bhInIdx2,
 			Length:             100,
@@ -234,7 +234,7 @@ func TestMasterMergeFinalIndexes(t *testing.T) {
 	mIdx.Insert(idx1)
 	mIdx.Insert(idx2)
 
-	rtest.Equals(t, restic.NewIDSet(), mIdx.IDs())
+	rtest.Equals(t, vaultic.NewIDSet(), mIdx.IDs())
 
 	finalIndexes, idxCount, ids := index.TestMergeIndex(t, mIdx)
 	rtest.Equals(t, []*index.Index{idx1, idx2}, finalIndexes)
@@ -253,7 +253,7 @@ func TestMasterMergeFinalIndexes(t *testing.T) {
 	blobs = mIdx.Lookup(bhInIdx2)
 	rtest.Equals(t, []*pack.PackedBlob{blob2}, blobs)
 
-	blobs = mIdx.Lookup(restic.NewRandomBlobHandle())
+	blobs = mIdx.Lookup(vaultic.NewRandomBlobHandle())
 	rtest.Assert(t, blobs == nil, "Expected no blobs when fetching with a random id")
 
 	// merge another index containing identical blobs
@@ -282,7 +282,7 @@ func TestMasterMergeFinalIndexes(t *testing.T) {
 	rtest.Equals(t, 2, blobCount)
 }
 
-func createRandomMasterIndex(t testing.TB, rng *rand.Rand, num, size int) (*index.MasterIndex, restic.BlobHandle) {
+func createRandomMasterIndex(t testing.TB, rng *rand.Rand, num, size int) (*index.MasterIndex, vaultic.BlobHandle) {
 	mIdx := index.NewMasterIndex()
 	for i := 0; i < num-1; i++ {
 		idx, _ := createRandomIndex(rng, size)
@@ -331,7 +331,7 @@ func BenchmarkMasterIndexLookupMultipleIndex(b *testing.B) {
 }
 
 func BenchmarkMasterIndexLookupSingleIndexUnknown(b *testing.B) {
-	lookupBh := restic.NewRandomBlobHandle()
+	lookupBh := vaultic.NewRandomBlobHandle()
 	mIdx, _ := createRandomMasterIndex(b, rand.New(rand.NewSource(0)), 1, 200000)
 
 	for b.Loop() {
@@ -340,7 +340,7 @@ func BenchmarkMasterIndexLookupSingleIndexUnknown(b *testing.B) {
 }
 
 func BenchmarkMasterIndexLookupMultipleIndexUnknown(b *testing.B) {
-	lookupBh := restic.NewRandomBlobHandle()
+	lookupBh := vaultic.NewRandomBlobHandle()
 	mIdx, _ := createRandomMasterIndex(b, rand.New(rand.NewSource(0)), 100, 10000)
 
 	for b.Loop() {
@@ -350,7 +350,7 @@ func BenchmarkMasterIndexLookupMultipleIndexUnknown(b *testing.B) {
 
 func BenchmarkMasterIndexLookupParallel(b *testing.B) {
 	for _, numindices := range []int{25, 50, 100} {
-		var lookupBh restic.BlobHandle
+		var lookupBh vaultic.BlobHandle
 
 		b.StopTimer()
 		rng := rand.New(rand.NewSource(0))
@@ -366,7 +366,7 @@ func BenchmarkMasterIndexLookupParallel(b *testing.B) {
 			})
 		})
 
-		lookupBh = restic.NewRandomBlobHandle()
+		lookupBh = vaultic.NewRandomBlobHandle()
 		name = fmt.Sprintf("unknown,indices=%d", numindices)
 		b.Run(name, func(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
@@ -413,7 +413,7 @@ var (
 	depth        = 2
 )
 
-func createFilledRepo(t testing.TB, snapshots int, version uint) (*repository.Repository, restic.Unpacked[restic.FileType]) {
+func createFilledRepo(t testing.TB, snapshots int, version uint) (*repository.Repository, vaultic.Unpacked[vaultic.FileType]) {
 	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, version)
 
 	for i := range snapshots {
@@ -429,27 +429,27 @@ func TestIndexSave(t *testing.T) {
 func testIndexSave(t *testing.T, version uint) {
 	for _, test := range []struct {
 		name  string
-		saver func(idx *index.MasterIndex, repo restic.Unpacked[restic.FileType]) error
+		saver func(idx *index.MasterIndex, repo vaultic.Unpacked[vaultic.FileType]) error
 	}{
-		{"rewrite no-op", func(idx *index.MasterIndex, repo restic.Unpacked[restic.FileType]) error {
+		{"rewrite no-op", func(idx *index.MasterIndex, repo vaultic.Unpacked[vaultic.FileType]) error {
 			return idx.Rewrite(context.TODO(), repo, nil, nil, nil, index.MasterIndexRewriteOpts{})
 		}},
-		{"rewrite skip-all", func(idx *index.MasterIndex, repo restic.Unpacked[restic.FileType]) error {
-			return idx.Rewrite(context.TODO(), repo, nil, restic.NewIDSet(), nil, index.MasterIndexRewriteOpts{})
+		{"rewrite skip-all", func(idx *index.MasterIndex, repo vaultic.Unpacked[vaultic.FileType]) error {
+			return idx.Rewrite(context.TODO(), repo, nil, vaultic.NewIDSet(), nil, index.MasterIndexRewriteOpts{})
 		}},
-		{"SaveFallback", func(idx *index.MasterIndex, repo restic.Unpacked[restic.FileType]) error {
-			err := restic.ParallelRemove(context.TODO(), repo, idx.IDs(), restic.IndexFile, nil, restic.NoopCounter)
+		{"SaveFallback", func(idx *index.MasterIndex, repo vaultic.Unpacked[vaultic.FileType]) error {
+			err := vaultic.ParallelRemove(context.TODO(), repo, idx.IDs(), vaultic.IndexFile, nil, vaultic.NoopCounter)
 			if err != nil {
 				return nil
 			}
-			return idx.SaveFallback(context.TODO(), repo, restic.NewIDSet(), restic.NoopCounter)
+			return idx.SaveFallback(context.TODO(), repo, vaultic.NewIDSet(), vaultic.NoopCounter)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repo, unpacked := createFilledRepo(t, 3, version)
 
 			idx := index.NewMasterIndex()
-			rtest.OK(t, idx.Load(context.TODO(), repo, restic.NoopCounter, nil))
+			rtest.OK(t, idx.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 			blobs := make(map[pack.PackedBlob]struct{})
 			for pb := range idx.Values() {
 				blobs[*pb] = struct{}{}
@@ -457,7 +457,7 @@ func testIndexSave(t *testing.T, version uint) {
 
 			rtest.OK(t, test.saver(idx, unpacked))
 			idx = index.NewMasterIndex()
-			rtest.OK(t, idx.Load(context.TODO(), repo, restic.NoopCounter, nil))
+			rtest.OK(t, idx.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 
 			for pb := range idx.Values() {
 				if _, ok := blobs[*pb]; ok {
@@ -482,7 +482,7 @@ func testIndexSavePartial(t *testing.T, version uint) {
 
 	// capture blob list before adding fourth snapshot
 	idx := index.NewMasterIndex()
-	rtest.OK(t, idx.Load(context.TODO(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, idx.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 	blobs := make(map[pack.PackedBlob]struct{})
 	for pb := range idx.Values() {
 		blobs[*pb] = struct{}{}
@@ -491,18 +491,18 @@ func testIndexSavePartial(t *testing.T, version uint) {
 	// add+remove new snapshot and track its pack files
 	packsBefore := listPacks(t, repo)
 	sn := data.TestCreateSnapshot(t, repo, snapshotTime.Add(time.Duration(4)*time.Second), depth)
-	rtest.OK(t, repo.RemoveUnpacked(context.TODO(), restic.WriteableSnapshotFile, *sn.ID()))
+	rtest.OK(t, repo.RemoveUnpacked(context.TODO(), vaultic.WriteableSnapshotFile, *sn.ID()))
 	packsAfter := listPacks(t, repo)
 	newPacks := packsAfter.Sub(packsBefore)
 
 	// rewrite index and remove pack files of new snapshot
 	idx = index.NewMasterIndex()
-	rtest.OK(t, idx.Load(context.TODO(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, idx.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 	rtest.OK(t, idx.Rewrite(context.TODO(), unpacked, newPacks, nil, nil, index.MasterIndexRewriteOpts{}))
 
 	// check blobs
 	idx = index.NewMasterIndex()
-	rtest.OK(t, idx.Load(context.TODO(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, idx.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 	for pb := range idx.Values() {
 		if _, ok := blobs[*pb]; ok {
 			delete(blobs, *pb)
@@ -513,12 +513,12 @@ func testIndexSavePartial(t *testing.T, version uint) {
 	rtest.Equals(t, 0, len(blobs), "saved index is missing blobs")
 
 	// remove pack files to make check happy
-	rtest.OK(t, restic.ParallelRemove(context.TODO(), unpacked, newPacks, restic.PackFile, nil, restic.NoopCounter))
+	rtest.OK(t, vaultic.ParallelRemove(context.TODO(), unpacked, newPacks, vaultic.PackFile, nil, vaultic.NoopCounter))
 
 	checker.TestCheckRepo(t, repo)
 }
 
-func loadIndexAndCollectBlobs(t *testing.T, repo restic.ListerLoaderUnpacked, master *index.MasterIndex, indexCount int) map[pack.PackedBlob]struct{} {
+func loadIndexAndCollectBlobs(t *testing.T, repo vaultic.ListerLoaderUnpacked, master *index.MasterIndex, indexCount int) map[pack.PackedBlob]struct{} {
 	p := progress.NewCounter(0, 0, nil)
 	rtest.OK(t, master.Load(context.TODO(), repo, p, nil))
 	v, max := p.Get()
@@ -536,7 +536,7 @@ func collectBlobs(master *index.MasterIndex) map[pack.PackedBlob]struct{} {
 }
 
 func TestMasterIndexIncrementalLoad(t *testing.T) {
-	repo, _ := createFilledRepo(t, 3, restic.StableRepoVersion)
+	repo, _ := createFilledRepo(t, 3, vaultic.StableRepoVersion)
 
 	// Normal full index load
 	master1 := index.NewMasterIndex()
@@ -562,9 +562,9 @@ func TestMasterIndexIncrementalLoad(t *testing.T) {
 	}
 }
 
-func listPacks(t testing.TB, repo restic.Lister) restic.IDSet {
-	s := restic.NewIDSet()
-	rtest.OK(t, repo.List(context.TODO(), restic.PackFile, func(id restic.ID, _ int64) error {
+func listPacks(t testing.TB, repo vaultic.Lister) vaultic.IDSet {
+	s := vaultic.NewIDSet()
+	rtest.OK(t, repo.List(context.TODO(), vaultic.PackFile, func(id vaultic.ID, _ int64) error {
 		s.Insert(id)
 		return nil
 	}))
@@ -584,10 +584,10 @@ func TestRewriteOversizedIndex(t *testing.T) {
 		index.Oversized = originalIndexOversized
 	}()
 	index.Full = func(idx *index.Index) bool {
-		return idx.Len(restic.DataBlob) > fullIndexCount
+		return idx.Len(vaultic.DataBlob) > fullIndexCount
 	}
 	index.Oversized = func(idx *index.Index) bool {
-		return idx.Len(restic.DataBlob) > 2*fullIndexCount
+		return idx.Len(vaultic.DataBlob) > 2*fullIndexCount
 	}
 
 	var blobs pack.Blobs
@@ -596,14 +596,14 @@ func TestRewriteOversizedIndex(t *testing.T) {
 	idx := index.NewIndex()
 	numPacks := 5
 	for range numPacks {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		packBlobs := make(pack.Blobs, 0, fullIndexCount)
 
 		for i := range fullIndexCount {
 			blob := pack.Blob{
-				BlobHandle: restic.BlobHandle{
-					Type: restic.DataBlob,
-					ID:   restic.NewRandomID(),
+				BlobHandle: vaultic.BlobHandle{
+					Type: vaultic.DataBlob,
+					ID:   vaultic.NewRandomID(),
 				},
 				Length: 100,
 				Offset: uint(i * 100),
@@ -620,14 +620,14 @@ func TestRewriteOversizedIndex(t *testing.T) {
 
 	// construct master index for the oversized index
 	mi := index.NewMasterIndex()
-	rtest.OK(t, mi.Load(context.Background(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, mi.Load(context.Background(), repo, vaultic.NoopCounter, nil))
 
 	// rewrite the index
 	rtest.OK(t, mi.Rewrite(context.Background(), unpacked, nil, nil, nil, index.MasterIndexRewriteOpts{}))
 
 	// load the rewritten indexes
 	mi2 := index.NewMasterIndex()
-	rtest.OK(t, mi2.Load(context.Background(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, mi2.Load(context.Background(), repo, vaultic.NoopCounter, nil))
 
 	// verify that blobs are still in the index
 	for _, blob := range blobs {
@@ -641,14 +641,14 @@ func TestRewriteOversizedIndex(t *testing.T) {
 }
 
 func TestRewriteSplitPacks(t *testing.T) {
-	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, restic.StableRepoVersion)
+	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, vaultic.StableRepoVersion)
 
-	bh1 := restic.NewRandomBlobHandle()
-	bh2 := restic.NewRandomBlobHandle()
-	bhOther := restic.NewRandomBlobHandle()
+	bh1 := vaultic.NewRandomBlobHandle()
+	bh2 := vaultic.NewRandomBlobHandle()
+	bhOther := vaultic.NewRandomBlobHandle()
 
 	blob1 := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle: bh1,
 			Length:     uint(crypto.CiphertextLength(10)),
@@ -666,7 +666,7 @@ func TestRewriteSplitPacks(t *testing.T) {
 	}
 	// used to force index repacking
 	blobOther := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle: bhOther,
 			Length:     uint(crypto.CiphertextLength(100)),
@@ -682,10 +682,10 @@ func TestRewriteSplitPacks(t *testing.T) {
 	rtest.OK(t, mi.StorePack(context.TODO(), blobOther.PackID(), pack.Blobs{blobOther.Blob}, unpacked))
 	rtest.OK(t, mi.Flush(context.TODO(), unpacked))
 
-	rtest.OK(t, mi.Rewrite(context.TODO(), unpacked, restic.NewIDSet(blobOther.PackID()), nil, nil, index.MasterIndexRewriteOpts{}))
+	rtest.OK(t, mi.Rewrite(context.TODO(), unpacked, vaultic.NewIDSet(blobOther.PackID()), nil, nil, index.MasterIndexRewriteOpts{}))
 
 	mi = index.NewMasterIndex()
-	rtest.OK(t, mi.Load(context.TODO(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, mi.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 
 	// test that all blobs are still in the index
 	for _, blob := range []*pack.PackedBlob{blob1, blob2} {
@@ -710,15 +710,15 @@ func TestRewriteFullPacks(t *testing.T) {
 	}()
 	index.Full = func(*index.Index) bool { return true }
 
-	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, restic.StableRepoVersion)
+	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, vaultic.StableRepoVersion)
 
-	packA := restic.NewRandomID()
-	packB := restic.NewRandomID()
+	packA := vaultic.NewRandomID()
+	packB := vaultic.NewRandomID()
 
 	blobA := &pack.PackedBlob{
 		Pack: packA,
 		Blob: pack.Blob{
-			BlobHandle: restic.NewRandomBlobHandle(),
+			BlobHandle: vaultic.NewRandomBlobHandle(),
 			Length:     uint(crypto.CiphertextLength(10)),
 			Offset:     0,
 		},
@@ -726,7 +726,7 @@ func TestRewriteFullPacks(t *testing.T) {
 	blobB := &pack.PackedBlob{
 		Pack: packB,
 		Blob: pack.Blob{
-			BlobHandle: restic.NewRandomBlobHandle(),
+			BlobHandle: vaultic.NewRandomBlobHandle(),
 			Length:     uint(crypto.CiphertextLength(50)),
 			Offset:     0,
 		},
@@ -746,7 +746,7 @@ func TestRewriteFullPacks(t *testing.T) {
 	rtest.OK(t, mi.Rewrite(context.TODO(), unpacked, nil, indexIDs, nil, index.MasterIndexRewriteOpts{}))
 
 	mi2 := index.NewMasterIndex()
-	rtest.OK(t, mi2.Load(context.TODO(), repo, restic.NoopCounter, nil))
+	rtest.OK(t, mi2.Load(context.TODO(), repo, vaultic.NoopCounter, nil))
 
 	afterRewrite := mi2.IDs()
 	rtest.Equals(t, 2, len(afterRewrite))

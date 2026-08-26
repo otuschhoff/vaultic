@@ -12,7 +12,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // Assert fails the test if the condition is false.
@@ -145,7 +145,7 @@ func Env(t testing.TB, repoFixture string) string {
 		tempdir = t.TempDir()
 	} else {
 		var err error
-		tempdir, err = os.MkdirTemp(TestTempDir, "restic-test-env-")
+		tempdir, err = os.MkdirTemp(TestTempDir, "vaultic-test-env-")
 		OK(t, err)
 		t.Logf("leaving temporary directory %v used for test", tempdir)
 	}
@@ -211,7 +211,7 @@ func RemoveAll(t testing.TB, path string) {
 // except if TestCleanupTempDirs is set to false.
 func TempDir(t testing.TB) string {
 	t.Helper()
-	tempdir, err := os.MkdirTemp(TestTempDir, "restic-test-")
+	tempdir, err := os.MkdirTemp(TestTempDir, "vaultic-test-")
 	if err != nil {
 		t.Fatal(err)
 	}

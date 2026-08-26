@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/restic/restic/internal/data"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 type fsLocalMetadataTestcase struct {

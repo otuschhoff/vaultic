@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/repository"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestRestorerRestoreEmptyHardlinkedFields(t *testing.T) {

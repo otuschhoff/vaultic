@@ -6,14 +6,14 @@ import (
 	"io"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func saveRandomFile(t testing.TB, be backend.Backend, length int) ([]byte, backend.Handle) {
 	data := test.Random(23, length)
-	id := restic.Hash(data)
+	id := vaultic.Hash(data)
 	handle := backend.Handle{Type: backend.PackFile, Name: id.String()}
 	err := be.Save(context.TODO(), handle, backend.NewByteReader(data, be.Hasher()))
 	if err != nil {
@@ -146,7 +146,7 @@ func (s *Suite[C]) BenchmarkSave(t *testing.B) {
 
 	length := 1<<24 + 2123
 	data := test.Random(23, length)
-	id := restic.Hash(data)
+	id := vaultic.Hash(data)
 	handle := backend.Handle{Type: backend.PackFile, Name: id.String()}
 
 	rd := backend.NewByteReader(data, be.Hasher())

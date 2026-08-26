@@ -1,6 +1,6 @@
 package archiver
 
-import "github.com/restic/restic/internal/data"
+import "github.com/vaultic/vaultic/internal/data"
 
 // ItemAction describes backup progress for a single file or directory.
 // The zero value indicates an error or incomplete item.

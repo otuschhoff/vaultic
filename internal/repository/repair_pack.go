@@ -6,11 +6,11 @@ import (
 	"io"
 	"slices"
 
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-func RepairPacks(ctx context.Context, repo *Repository, ids restic.IDSet, printer restic.Printer) error {
+func RepairPacks(ctx context.Context, repo *Repository, ids vaultic.IDSet, printer vaultic.Printer) error {
 	printer.P("salvaging intact data from specified pack files")
 	bar := printer.NewCounter("pack files")
 	bar.SetMax(uint64(len(ids)))
@@ -21,7 +21,7 @@ func RepairPacks(ctx context.Context, repo *Repository, ids restic.IDSet, printe
 		return err
 	}
 
-	err = repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	err = repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		// examine all data the indexes have for the pack file
 		for b := range repo.listPacksFromIndex(ctx, ids) {
 			indexBlobs := b.Blobs
@@ -65,7 +65,7 @@ func RepairPacks(ctx context.Context, repo *Repository, ids restic.IDSet, printe
 	printer.P("removing salvaged pack files")
 	// if we fail to delete the damaged pack files, then prune will remove them later on
 	bar = printer.NewCounter("files deleted")
-	_ = restic.ParallelRemove(ctx, &internalRepository{repo}, ids, restic.PackFile, func(id restic.ID, err error) error {
+	_ = vaultic.ParallelRemove(ctx, &internalRepository{repo}, ids, vaultic.PackFile, func(id vaultic.ID, err error) error {
 		// only log errors while deleting pack files
 		if err != nil {
 			printer.E("failed to delete pack file %v: %v", id, err)
@@ -77,10 +77,10 @@ func RepairPacks(ctx context.Context, repo *Repository, ids restic.IDSet, printe
 	return nil
 }
 
-func resolveBlobsForPacks(ctx context.Context, repo *Repository, ids restic.IDSet) (map[restic.ID]pack.Blobs, error) {
-	packToBlobs := make(map[restic.ID]pack.Blobs)
+func resolveBlobsForPacks(ctx context.Context, repo *Repository, ids vaultic.IDSet) (map[vaultic.ID]pack.Blobs, error) {
+	packToBlobs := make(map[vaultic.ID]pack.Blobs)
 
-	err := repo.List(ctx, restic.PackFile, func(id restic.ID, size int64) error {
+	err := repo.List(ctx, vaultic.PackFile, func(id vaultic.ID, size int64) error {
 		if ids.Has(id) {
 			blobs, err := repo.listPack(ctx, id, size)
 			if err != nil {
@@ -97,13 +97,13 @@ func resolveBlobsForPacks(ctx context.Context, repo *Repository, ids restic.IDSe
 	return packToBlobs, nil
 }
 
-func reuploadBlobsFromPack(ctx context.Context, repo *Repository, packID restic.ID, blobs pack.Blobs, printer restic.Printer, uploader restic.BlobSaverWithAsync) error {
-	err := repo.loadBlobsFromPack(ctx, packID, blobs, func(blob restic.BlobHandle, buf []byte, err error) error {
+func reuploadBlobsFromPack(ctx context.Context, repo *Repository, packID vaultic.ID, blobs pack.Blobs, printer vaultic.Printer, uploader vaultic.BlobSaverWithAsync) error {
+	err := repo.loadBlobsFromPack(ctx, packID, blobs, func(blob vaultic.BlobHandle, buf []byte, err error) error {
 		if err != nil {
 			printer.E("failed to load blob %v: %v", blob.ID, err)
 			return nil
 		}
-		id, _, _, err := uploader.SaveBlob(ctx, blob.Type, buf, restic.ID{}, true)
+		id, _, _, err := uploader.SaveBlob(ctx, blob.Type, buf, vaultic.ID{}, true)
 		if err == nil && !id.Equal(blob.ID) {
 			panic("pack id mismatch during upload")
 		}

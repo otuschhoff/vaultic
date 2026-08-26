@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/rest"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/rest"
 )
 
 func TestListAPI(t *testing.T) {
@@ -41,7 +41,7 @@ func TestListAPI(t *testing.T) {
 		},
 		{
 			Name:        "content-type-v1",
-			ContentType: "application/vnd.x.restic.rest.v1",
+			ContentType: "application/vnd.x.vaultic.rest.v1",
 			Data: `[
 				"1122e6749358b057fa1ac6b580a0fbe7a9a5fbc92e82743ee21aaf829624a985",
 				"3b6ec1af8d4f7099d0445b12fdb75b166ba19f789e5c48350c423dc3b3e68352",
@@ -56,7 +56,7 @@ func TestListAPI(t *testing.T) {
 		},
 		{
 			Name:        "content-type-v2",
-			ContentType: "application/vnd.x.restic.rest.v2",
+			ContentType: "application/vnd.x.vaultic.rest.v2",
 			Data: `[
 				{"name": "1122e6749358b057fa1ac6b580a0fbe7a9a5fbc92e82743ee21aaf829624a985", "size": 1001},
 				{"name": "3b6ec1af8d4f7099d0445b12fdb75b166ba19f789e5c48350c423dc3b3e68352", "size": 1002},

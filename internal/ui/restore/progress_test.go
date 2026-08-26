@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/restorer"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/restorer"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type printerTraceEntry struct {
@@ -38,7 +38,7 @@ type mockPrinter struct {
 	trace  printerTrace
 	items  itemTrace
 	errors errorTrace
-	restic.Printer
+	vaultic.Printer
 }
 
 const mockFinishDuration = 42 * time.Second
@@ -58,7 +58,7 @@ func (p *mockPrinter) Finish(progress State, _ time.Duration) {
 }
 
 func testProgress(fn func(progress *Progress) bool) (printerTrace, itemTrace, errorTrace) {
-	printer := &mockPrinter{Printer: restic.NewNoopPrinter()}
+	printer := &mockPrinter{Printer: vaultic.NewNoopPrinter()}
 	progress := newProgress(printer, 0)
 	final := fn(progress)
 	progress.update(0, final)

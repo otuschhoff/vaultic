@@ -5,10 +5,10 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type noopSaver struct{}
@@ -16,14 +16,14 @@ type noopSaver struct{}
 func (n *noopSaver) Connections() uint {
 	return 2
 }
-func (n *noopSaver) SaveUnpacked(_ context.Context, _ restic.FileType, buf []byte) (restic.ID, error) {
-	return restic.Hash(buf), nil
+func (n *noopSaver) SaveUnpacked(_ context.Context, _ vaultic.FileType, buf []byte) (vaultic.ID, error) {
+	return vaultic.Hash(buf), nil
 }
 
-func makeFakePackedBlob() (restic.BlobHandle, *pack.PackedBlob) {
-	bh := restic.NewRandomBlobHandle()
+func makeFakePackedBlob() (vaultic.BlobHandle, *pack.PackedBlob) {
+	bh := vaultic.NewRandomBlobHandle()
 	pb := &pack.PackedBlob{
-		Pack: restic.NewRandomID(),
+		Pack: vaultic.NewRandomID(),
 		Blob: pack.Blob{
 			BlobHandle: bh,
 			Length:     uint(crypto.CiphertextLength(10)),
@@ -33,8 +33,8 @@ func makeFakePackedBlob() (restic.BlobHandle, *pack.PackedBlob) {
 	return bh, pb
 }
 
-func list(bs *AssociatedSet[uint8]) restic.BlobHandles {
-	return restic.BlobHandles(slices.Collect(bs.Keys()))
+func list(bs *AssociatedSet[uint8]) vaultic.BlobHandles {
+	return vaultic.BlobHandles(slices.Collect(bs.Keys()))
 }
 
 func TestAssociatedSet(t *testing.T) {
@@ -46,7 +46,7 @@ func TestAssociatedSet(t *testing.T) {
 
 	bs := NewAssociatedSet[uint8](mi)
 	test.Equals(t, bs.Len(), 0)
-	test.Equals(t, list(bs), restic.BlobHandles(nil))
+	test.Equals(t, list(bs), vaultic.BlobHandles(nil))
 
 	// check non existent
 	test.Equals(t, bs.Has(bh), false)
@@ -57,7 +57,7 @@ func TestAssociatedSet(t *testing.T) {
 	bs.Insert(bh)
 	test.Equals(t, bs.Has(bh), true)
 	test.Equals(t, bs.Len(), 1)
-	test.Equals(t, list(bs), restic.BlobHandles{bh})
+	test.Equals(t, list(bs), vaultic.BlobHandles{bh})
 	test.Equals(t, 0, len(bs.overflow))
 
 	// test set
@@ -75,7 +75,7 @@ func TestAssociatedSet(t *testing.T) {
 	bs.Delete(bh)
 	test.Equals(t, bs.Len(), 0)
 	test.Equals(t, bs.Has(bh), false)
-	test.Equals(t, list(bs), restic.BlobHandles(nil))
+	test.Equals(t, list(bs), vaultic.BlobHandles(nil))
 
 	test.Equals(t, "{}", bs.String())
 
@@ -95,7 +95,7 @@ func TestAssociatedSet(t *testing.T) {
 	test.Equals(t, 0, len(bs.overflow))
 
 	// test overflow blob
-	of := restic.NewRandomBlobHandle()
+	of := vaultic.NewRandomBlobHandle()
 	test.Equals(t, false, bs.Has(of))
 	// set
 	bs.Set(of, 7)
@@ -105,7 +105,7 @@ func TestAssociatedSet(t *testing.T) {
 	val, ok = bs.Get(of)
 	test.Equals(t, true, ok)
 	test.Equals(t, uint8(7), val)
-	test.Equals(t, list(bs), restic.BlobHandles{of, bh})
+	test.Equals(t, list(bs), vaultic.BlobHandles{of, bh})
 	// update
 	bs.Set(of, 8)
 	val, ok = bs.Get(of)
@@ -116,7 +116,7 @@ func TestAssociatedSet(t *testing.T) {
 	bs.Delete(of)
 	test.Equals(t, bs.Len(), 1)
 	test.Equals(t, bs.Has(of), false)
-	test.Equals(t, list(bs), restic.BlobHandles{bh})
+	test.Equals(t, list(bs), vaultic.BlobHandles{bh})
 	test.Equals(t, 0, len(bs.overflow))
 }
 
@@ -144,7 +144,7 @@ func TestAssociatedSetWithExtendedIndex(t *testing.T) {
 	val, ok := bs.Get(of)
 	test.Equals(t, true, ok)
 	test.Equals(t, uint8(5), val)
-	test.Equals(t, list(bs), restic.BlobHandles{of})
+	test.Equals(t, list(bs), vaultic.BlobHandles{of})
 	// update
 	bs.Set(of, 8)
 	val, ok = bs.Get(of)
@@ -155,7 +155,7 @@ func TestAssociatedSetWithExtendedIndex(t *testing.T) {
 	bs.Delete(of)
 	test.Equals(t, bs.Len(), 0)
 	test.Equals(t, bs.Has(of), false)
-	test.Equals(t, list(bs), restic.BlobHandles(nil))
+	test.Equals(t, list(bs), vaultic.BlobHandles(nil))
 	test.Equals(t, 0, len(bs.overflow))
 }
 

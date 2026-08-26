@@ -12,22 +12,22 @@ import (
 	"time"
 
 	"github.com/restic/chunker"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/cache"
-	"github.com/restic/restic/internal/backend/limiter"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/logger"
-	"github.com/restic/restic/internal/backend/retry"
-	"github.com/restic/restic/internal/backend/sema"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/options"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/textfile"
-	"github.com/restic/restic/internal/ui"
 	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/cache"
+	"github.com/vaultic/vaultic/internal/backend/limiter"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/logger"
+	"github.com/vaultic/vaultic/internal/backend/retry"
+	"github.com/vaultic/vaultic/internal/backend/sema"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/options"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/textfile"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // ErrNoRepository is used to report if opening a repository failed due
@@ -36,12 +36,12 @@ var ErrNoRepository = errors.New("repository does not exist")
 
 const Version = "0.19.1-dev (compiled manually)"
 
-// TimeFormat is the format used for all timestamps printed by restic.
+// TimeFormat is the format used for all timestamps printed by vaultic.
 const TimeFormat = "2006-01-02 15:04:05"
 
 type BackendWrapper func(r backend.Backend) (backend.Backend, error)
 
-// Options hold all global options for restic.
+// Options hold all global options for vaultic.
 type Options struct {
 	Repo               string
 	RepositoryFile     string
@@ -88,11 +88,11 @@ type Options struct {
 }
 
 func (opts *Options) AddFlags(f *pflag.FlagSet) {
-	f.StringVarP(&opts.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $RESTIC_REPOSITORY)")
-	f.StringVarP(&opts.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $RESTIC_REPOSITORY_FILE)")
-	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $RESTIC_PASSWORD_FILE)")
-	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $RESTIC_KEY_HINT)")
-	f.StringVarP(&opts.PasswordCommand, "password-command", "", "", "shell `command` to obtain the repository password from (default: $RESTIC_PASSWORD_COMMAND)")
+	f.StringVarP(&opts.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $VAULTIC_REPOSITORY)")
+	f.StringVarP(&opts.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)")
+	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
+	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
+	f.StringVarP(&opts.PasswordCommand, "password-command", "", "", "shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)")
 	f.BoolVarP(&opts.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
 	// use empty parameter name as `-v, --verbose n` instead of the correct `--verbose=n` is confusing
 	f.CountVarP(&opts.Verbose, "verbose", "v", "be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)")
@@ -101,51 +101,51 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.BoolVarP(&opts.JSON, "json", "", false, "set output mode to JSON for commands that support it")
 	f.StringVar(&opts.CacheDir, "cache-dir", "", "set the cache `directory`. (default: use system default cache directory)")
 	f.BoolVar(&opts.NoCache, "no-cache", false, "do not use a local cache")
-	f.StringSliceVar(&opts.RootCertFilenames, "cacert", nil, "`file` to load root certificates from (default: use system certificates or $RESTIC_CACERT)")
-	f.StringVar(&opts.TLSClientCertKeyFilename, "tls-client-cert", "", "path to a `file` containing PEM encoded TLS client certificate and private key (default: $RESTIC_TLS_CLIENT_CERT)")
-	f.BoolVar(&opts.InsecureNoPassword, "insecure-no-password", false, "use an empty password for the repository, must be passed to every restic command (insecure)")
+	f.StringSliceVar(&opts.RootCertFilenames, "cacert", nil, "`file` to load root certificates from (default: use system certificates or $VAULTIC_CACERT)")
+	f.StringVar(&opts.TLSClientCertKeyFilename, "tls-client-cert", "", "path to a `file` containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)")
+	f.BoolVar(&opts.InsecureNoPassword, "insecure-no-password", false, "use an empty password for the repository, must be passed to every vaultic command (insecure)")
 	f.BoolVar(&opts.InsecureTLS, "insecure-tls", false, "skip TLS certificate verification when connecting to the repository (insecure)")
 	f.BoolVar(&opts.CleanupCache, "cleanup-cache", false, "auto remove old cache directories")
 	const compressionFlag = "compression"
-	f.Var(&opts.Compression, compressionFlag, "compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $RESTIC_COMPRESSION)")
+	f.Var(&opts.Compression, compressionFlag, "compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)")
 	f.BoolVar(&opts.NoExtraVerify, "no-extra-verify", false, "skip additional verification of data before upload (see documentation)")
 	f.IntVar(&opts.Limits.UploadKb, "limit-upload", 0, "limits uploads to a maximum `rate` in KiB/s. (default: unlimited)")
 	f.IntVar(&opts.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
 	const packSizeFlag = "pack-size"
-	f.UintVar(&opts.PackSize, packSizeFlag, 0, "set target pack `size` in MiB, created pack files may be larger (default: $RESTIC_PACK_SIZE)")
+	f.UintVar(&opts.PackSize, packSizeFlag, 0, "set target pack `size` in MiB, created pack files may be larger (default: $VAULTIC_PACK_SIZE)")
 	f.StringSliceVarP(&opts.Options, "option", "o", []string{}, "set extended option (`key=value`, can be specified multiple times)")
 	f.StringVar(&opts.HTTPUserAgent, "http-user-agent", "", "set a http user agent for outgoing http requests")
 	f.DurationVar(&opts.StuckRequestTimeout, "stuck-request-timeout", 5*time.Minute, "`duration` after which to retry stuck requests")
 
-	opts.Repo = os.Getenv("RESTIC_REPOSITORY")
-	opts.RepositoryFile = os.Getenv("RESTIC_REPOSITORY_FILE")
-	opts.PasswordFile = os.Getenv("RESTIC_PASSWORD_FILE")
-	opts.KeyHint = os.Getenv("RESTIC_KEY_HINT")
-	opts.PasswordCommand = os.Getenv("RESTIC_PASSWORD_COMMAND")
-	if os.Getenv("RESTIC_CACERT") != "" {
-		opts.RootCertFilenames = strings.Split(os.Getenv("RESTIC_CACERT"), ",")
+	opts.Repo = os.Getenv("VAULTIC_REPOSITORY")
+	opts.RepositoryFile = os.Getenv("VAULTIC_REPOSITORY_FILE")
+	opts.PasswordFile = os.Getenv("VAULTIC_PASSWORD_FILE")
+	opts.KeyHint = os.Getenv("VAULTIC_KEY_HINT")
+	opts.PasswordCommand = os.Getenv("VAULTIC_PASSWORD_COMMAND")
+	if os.Getenv("VAULTIC_CACERT") != "" {
+		opts.RootCertFilenames = strings.Split(os.Getenv("VAULTIC_CACERT"), ",")
 	}
-	opts.TLSClientCertKeyFilename = os.Getenv("RESTIC_TLS_CLIENT_CERT")
+	opts.TLSClientCertKeyFilename = os.Getenv("VAULTIC_TLS_CLIENT_CERT")
 	opts.packSizeFlag = f.Lookup(packSizeFlag)
 	opts.compressionFlag = f.Lookup(compressionFlag)
 
-	if os.Getenv("RESTIC_HTTP_USER_AGENT") != "" {
-		opts.HTTPUserAgent = os.Getenv("RESTIC_HTTP_USER_AGENT")
+	if os.Getenv("VAULTIC_HTTP_USER_AGENT") != "" {
+		opts.HTTPUserAgent = os.Getenv("VAULTIC_HTTP_USER_AGENT")
 	}
 }
 
 func (opts *Options) PreRun(needsPassword bool) error {
-	if envVal := os.Getenv("RESTIC_PACK_SIZE"); envVal != "" && !opts.packSizeFlag.Changed {
+	if envVal := os.Getenv("VAULTIC_PACK_SIZE"); envVal != "" && !opts.packSizeFlag.Changed {
 		targetPackSize, err := strconv.ParseUint(envVal, 10, 32)
 		if err != nil {
 			// Failing fast here keeps backups from running for a long time with the wrong pack size.
-			return errors.Fatalf("invalid value for RESTIC_PACK_SIZE %q: %v", envVal, err)
+			return errors.Fatalf("invalid value for VAULTIC_PACK_SIZE %q: %v", envVal, err)
 		}
 		opts.PackSize = uint(targetPackSize)
 	}
-	if envVal := os.Getenv("RESTIC_COMPRESSION"); envVal != "" && !opts.compressionFlag.Changed {
+	if envVal := os.Getenv("VAULTIC_COMPRESSION"); envVal != "" && !opts.compressionFlag.Changed {
 		if err := opts.Compression.Set(envVal); err != nil {
-			return errors.Fatalf("invalid value for RESTIC_COMPRESSION %q: %v", envVal, err)
+			return errors.Fatalf("invalid value for VAULTIC_COMPRESSION %q: %v", envVal, err)
 		}
 	}
 
@@ -173,7 +173,7 @@ func (opts *Options) PreRun(needsPassword bool) error {
 	if !needsPassword {
 		return nil
 	}
-	pwd, err := resolvePassword(opts, "RESTIC_PASSWORD")
+	pwd, err := resolvePassword(opts, "VAULTIC_PASSWORD")
 	if err != nil {
 		return errors.Fatalf("Resolving password failed: %v", err)
 	}
@@ -221,7 +221,7 @@ func LoadPasswordFromFile(pwdFile string) (string, error) {
 }
 
 // readPassword reads the password from a password file, the environment
-// variable RESTIC_PASSWORD or prompts the user. If the context is canceled,
+// variable VAULTIC_PASSWORD or prompts the user. If the context is canceled,
 // the function leaks the password reading goroutine.
 func readPassword(ctx context.Context, gopts Options, prompt string) (string, error) {
 	if gopts.InsecureNoPassword {
@@ -241,7 +241,7 @@ func readPassword(ctx context.Context, gopts Options, prompt string) (string, er
 	}
 
 	if len(password) == 0 {
-		return "", errors.Fatal("an empty password is not allowed by default. Pass the flag `--insecure-no-password` to restic to disable this check")
+		return "", errors.Fatal("an empty password is not allowed by default. Pass the flag `--insecure-no-password` to vaultic to disable this check")
 	}
 
 	return password, nil
@@ -297,7 +297,7 @@ func readRepo(gopts Options) (string, error) {
 const maxKeys = 20
 
 // OpenRepository reads the password and opens the repository.
-func OpenRepository(ctx context.Context, gopts Options, printer restic.Printer) (*repository.Repository, error) {
+func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (*repository.Repository, error) {
 	repo, err := readRepo(gopts)
 	if err != nil {
 		return nil, err
@@ -368,7 +368,7 @@ func createRepositoryInstance(be backend.Backend, gopts Options) (*repository.Re
 }
 
 // decryptRepository handles password reading and decrypts the repository.
-func decryptRepository(ctx context.Context, s *repository.Repository, gopts *Options, printer restic.Printer) error {
+func decryptRepository(ctx context.Context, s *repository.Repository, gopts *Options, printer vaultic.Printer) error {
 	passwordTriesLeft := 1
 	if gopts.Term.InputIsTerminal() && gopts.Password == "" && !gopts.InsecureNoPassword {
 		passwordTriesLeft = 3
@@ -405,7 +405,7 @@ func decryptRepository(ctx context.Context, s *repository.Repository, gopts *Opt
 }
 
 // printRepositoryInfo displays the repository ID, version and compression level.
-func printRepositoryInfo(s *repository.Repository, gopts Options, printer restic.Printer) {
+func printRepositoryInfo(s *repository.Repository, gopts Options, printer vaultic.Printer) {
 	id := s.Config().ID
 	if len(id) > 8 {
 		id = id[:8]
@@ -418,7 +418,7 @@ func printRepositoryInfo(s *repository.Repository, gopts Options, printer restic
 }
 
 // setupCache creates a new cache and removes old cache directories if instructed to do so.
-func setupCache(s *repository.Repository, gopts Options, printer restic.Printer) error {
+func setupCache(s *repository.Repository, gopts Options, printer vaultic.Printer) error {
 	c, err := cache.New(s.Config().ID, gopts.CacheDir)
 	if err != nil {
 		printer.E("unable to open cache: %v", err)
@@ -453,16 +453,16 @@ func setupCache(s *repository.Repository, gopts Options, printer restic.Printer)
 			}
 		}
 	} else {
-		printer.PT("found %d old cache directories in %v, run `restic cache --cleanup` to remove them",
+		printer.PT("found %d old cache directories in %v, run `vaultic cache --cleanup` to remove them",
 			len(oldCacheDirs), c.Base)
 	}
 	return nil
 }
 
 // CreateRepository a repository with the given version and chunker polynomial.
-func CreateRepository(ctx context.Context, gopts Options, version uint, chunkerPolynomial *chunker.Pol, printer restic.Printer) (*repository.Repository, error) {
-	if version < restic.MinRepoVersion || version > restic.MaxRepoVersion {
-		return nil, errors.Fatalf("only repository versions between %v and %v are allowed", restic.MinRepoVersion, restic.MaxRepoVersion)
+func CreateRepository(ctx context.Context, gopts Options, version uint, chunkerPolynomial *chunker.Pol, printer vaultic.Printer) (*repository.Repository, error) {
+	if version < vaultic.MinRepoVersion || version > vaultic.MaxRepoVersion {
+		return nil, errors.Fatalf("only repository versions between %v and %v are allowed", vaultic.MinRepoVersion, vaultic.MaxRepoVersion)
 	}
 
 	repo, err := readRepo(gopts)
@@ -495,7 +495,7 @@ func CreateRepository(ctx context.Context, gopts Options, version uint, chunkerP
 	return s, nil
 }
 
-func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options.Options, create bool, printer restic.Printer) (backend.Backend, error) {
+func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options.Options, create bool, printer vaultic.Printer) (backend.Backend, error) {
 	debug.Log("parsing location %v", location.StripPassword(gopts.Backends, s))
 
 	scheme, cfg, err := parseConfig(gopts.Backends, s, opts)
@@ -558,7 +558,7 @@ func setupTransport(gopts Options) (http.RoundTripper, limiter.Limiter, error) {
 }
 
 // createOrOpenBackend creates or opens a backend using the appropriate factory method.
-func createOrOpenBackend(ctx context.Context, scheme string, cfg any, rt http.RoundTripper, lim limiter.Limiter, gopts Options, s string, create bool, printer restic.Printer) (backend.Backend, error) {
+func createOrOpenBackend(ctx context.Context, scheme string, cfg any, rt http.RoundTripper, lim limiter.Limiter, gopts Options, s string, create bool, printer vaultic.Printer) (backend.Backend, error) {
 	factory := gopts.Backends.Lookup(scheme)
 	if factory == nil {
 		return nil, errors.Fatalf("invalid backend: %q", scheme)
@@ -588,7 +588,7 @@ func createOrOpenBackend(ctx context.Context, scheme string, cfg any, rt http.Ro
 }
 
 // wrapBackend applies debug logging, test hooks, and retry wrapper to the backend.
-func wrapBackend(be backend.Backend, gopts Options, printer restic.Printer) (backend.Backend, error) {
+func wrapBackend(be backend.Backend, gopts Options, printer vaultic.Printer) (backend.Backend, error) {
 	// wrap with debug logging and connection limiting
 	be = logger.New(sema.NewBackend(be))
 

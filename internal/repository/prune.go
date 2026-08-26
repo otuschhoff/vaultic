@@ -8,11 +8,11 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 var ErrIndexIncomplete = errors.Fatal("index is not complete")
@@ -73,11 +73,11 @@ type PruneStats struct {
 }
 
 type PrunePlan struct {
-	removePacksFirst restic.IDSet                // packs to remove first (unreferenced packs)
-	repackPacks      restic.IDSet                // packs to repack
+	removePacksFirst vaultic.IDSet               // packs to remove first (unreferenced packs)
+	repackPacks      vaultic.IDSet               // packs to repack
 	keepBlobs        *index.AssociatedSet[uint8] // blobs to keep during repacking
-	removePacks      restic.IDSet                // packs to remove
-	ignorePacks      restic.IDSet                // packs to ignore when rebuilding the index
+	removePacks      vaultic.IDSet               // packs to remove
+	ignorePacks      vaultic.IDSet               // packs to ignore when rebuilding the index
 
 	repo  *Repository
 	stats PruneStats
@@ -91,19 +91,19 @@ type packInfo struct {
 	usedSize       uint64
 	unusedSize     uint64
 
-	tpe          restic.BlobType
+	tpe          vaultic.BlobType
 	uncompressed bool
 }
 
 type packInfoWithID struct {
-	ID restic.ID
+	ID vaultic.ID
 	packInfo
 	mustCompress bool
 }
 
 // PlanPrune selects which files to rewrite and which to delete and which blobs to keep.
 // Also some summary statistics are returned.
-func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsedBlobs func(ctx context.Context, repo restic.Repository, usedBlobs restic.FindBlobSet) error, printer restic.Printer) (*PrunePlan, error) {
+func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsedBlobs func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error, printer vaultic.Printer) (*PrunePlan, error) {
 	stats := PruneStats{MessageType: "summary"}
 
 	if opts.UnsafeRecovery {
@@ -141,7 +141,7 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 	if len(plan.repackPacks) != 0 {
 		// when repacking, we do not want to keep blobs which are
 		// already contained in kept packs, so delete them from keepBlobs
-		err := repo.ListBlobs(ctx, func(blob restic.PackBlob) {
+		err := repo.ListBlobs(ctx, func(blob vaultic.PackBlob) {
 			packID := blob.PackID()
 			if plan.removePacks.Has(packID) || plan.repackPacks.Has(packID) {
 				return
@@ -175,11 +175,11 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 	return &plan, nil
 }
 
-func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *index.AssociatedSet[uint8], stats *PruneStats, printer restic.Printer) (*index.AssociatedSet[uint8], map[restic.ID]packInfo, error) {
+func packInfoFromIndex(ctx context.Context, idx vaultic.ListBlobser, usedBlobs *index.AssociatedSet[uint8], stats *PruneStats, printer vaultic.Printer) (*index.AssociatedSet[uint8], map[vaultic.ID]packInfo, error) {
 	// iterate over all blobs in index to find out which blobs are duplicates
 	// The counter in usedBlobs describes how many instances of the blob exist in the repository index
 	// Thus 0 == blob is missing, 1 == blob exists once, >= 2 == duplicates exist
-	err := idx.ListBlobs(ctx, func(blob restic.PackBlob) {
+	err := idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
 		bh := blob.Handle()
 		count, ok := usedBlobs.Get(bh)
 		if ok {
@@ -198,7 +198,7 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 	}
 
 	// Check if all used blobs have been found in index
-	missingBlobs := restic.NewBlobSet()
+	missingBlobs := vaultic.NewBlobSet()
 	for bh, count := range usedBlobs.All() {
 		if count == 0 {
 			// blob does not exist in any pack files
@@ -211,11 +211,11 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 			"Integrity check failed: Data seems to be missing.\n"+
 			"Will not start prune to prevent (additional) data loss!\n"+
 			"Please report this error (along with the output of the 'prune' run) at\n"+
-			"https://github.com/restic/restic/issues/new/choose", missingBlobs)
+			"https://github.com/vaultic/vaultic/issues/new/choose", missingBlobs)
 		return nil, nil, ErrIndexIncomplete
 	}
 
-	indexPack := make(map[restic.ID]packInfo)
+	indexPack := make(map[vaultic.ID]packInfo)
 
 	// save computed pack header size
 	sz, err := pack.Size(ctx, idx, true)
@@ -224,25 +224,25 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 	}
 	for pid, hdrSize := range sz {
 		// initialize tpe with NumBlobTypes to indicate it's not set
-		indexPack[pid] = packInfo{tpe: restic.NumBlobTypes, usedSize: uint64(hdrSize)}
+		indexPack[pid] = packInfo{tpe: vaultic.NumBlobTypes, usedSize: uint64(hdrSize)}
 	}
 
 	hasDuplicates := false
 	// iterate over all blobs in index to generate packInfo
-	err = idx.ListBlobs(ctx, func(blob restic.PackBlob) {
+	err = idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
 		packID := blob.PackID()
 		h := blob.Handle()
 
 		ip := indexPack[packID]
 
 		// Set blob type if not yet set
-		if ip.tpe == restic.NumBlobTypes {
+		if ip.tpe == vaultic.NumBlobTypes {
 			ip.tpe = h.Type
 		}
 
 		// mark mixed packs with "Invalid blob type"
 		if ip.tpe != h.Type {
-			ip.tpe = restic.InvalidBlob
+			ip.tpe = vaultic.InvalidBlob
 		}
 
 		size := uint64(blob.CiphertextLength())
@@ -289,7 +289,7 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 	// - if there are no used blobs in a pack, possibly mark duplicates as "unused"
 	if hasDuplicates {
 		// iterate again over all blobs in index (this is pretty cheap, all in-mem)
-		err = idx.ListBlobs(ctx, func(blob restic.PackBlob) {
+		err = idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
 			packID := blob.PackID()
 			bh := blob.Handle()
 			count, ok := usedBlobs.Get(bh)
@@ -348,12 +348,12 @@ func packInfoFromIndex(ctx context.Context, idx restic.ListBlobser, usedBlobs *i
 
 // calculateTargetPacksize calculates the packsize as
 // 0.8 * max(4MB, third percentile of all packfile sizes)
-func calculateTargetPacksize(opts PruneOptions, indexPack map[restic.ID]packInfo) (targetPackSize uint) {
+func calculateTargetPacksize(opts PruneOptions, indexPack map[vaultic.ID]packInfo) (targetPackSize uint) {
 	// For an empty repository, the target pack size does not matter.
 	targetPackSize = 0
 	if len(indexPack) > 0 {
 		type ToSort struct {
-			packID restic.ID
+			packID vaultic.ID
 			size   uint64
 		}
 
@@ -383,10 +383,10 @@ func calculateTargetPacksize(opts PruneOptions, indexPack map[restic.ID]packInfo
 	return targetPackSize
 }
 
-func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, indexPack map[restic.ID]packInfo, stats *PruneStats, printer restic.Printer) (PrunePlan, error) {
-	removePacksFirst := restic.NewIDSet()
-	removePacks := restic.NewIDSet()
-	repackPacks := restic.NewIDSet()
+func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, indexPack map[vaultic.ID]packInfo, stats *PruneStats, printer vaultic.Printer) (PrunePlan, error) {
+	removePacksFirst := vaultic.NewIDSet()
+	removePacks := vaultic.NewIDSet()
+	repackPacks := vaultic.NewIDSet()
 
 	var repackCandidates []packInfoWithID
 	var repackSmallCandidates []packInfoWithID
@@ -396,7 +396,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 	// loop over all packs and decide what to do
 	bar := printer.NewCounter("packs processed")
 	bar.SetMax(uint64(len(indexPack)))
-	err := repo.List(ctx, restic.PackFile, func(id restic.ID, packSize int64) error {
+	err := repo.List(ctx, vaultic.PackFile, func(id vaultic.ID, packSize int64) error {
 		p, ok := indexPack[id]
 		if !ok {
 			// Pack was not referenced in index and is not used  => immediately remove!
@@ -410,7 +410,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 			// Pack size does not fit and pack is needed => error
 			// If the pack is not needed, this is no error, the pack can
 			// and will be simply removed, see below.
-			printer.E("pack %s: calculated size %d does not match real size %d\nRun 'restic repair index'",
+			printer.E("pack %s: calculated size %d does not match real size %d\nRun 'vaultic repair index'",
 				id.Str(), p.unusedSize+p.usedSize, packSize)
 			return ErrSizeNotMatching
 		}
@@ -432,7 +432,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 		if repoVersion >= 2 {
 			// repo v2: always repack tree blobs if uncompressed
 			// compress data blobs if requested
-			mustCompress = (p.tpe == restic.TreeBlob || opts.RepackUncompressed) && p.uncompressed
+			mustCompress = (p.tpe == vaultic.TreeBlob || opts.RepackUncompressed) && p.uncompressed
 		}
 
 		// decide what to do
@@ -443,11 +443,11 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 			stats.Blobs.Remove += p.unusedBlobs
 			stats.Size.Remove += p.unusedSize
 
-		case opts.RepackCacheableOnly && p.tpe == restic.DataBlob:
+		case opts.RepackCacheableOnly && p.tpe == vaultic.DataBlob:
 			// if this is a data pack and --repack-cacheable-only is set => keep pack!
 			stats.Packs.Keep++
 
-		case p.unusedBlobs == 0 && p.tpe != restic.InvalidBlob && !mustCompress:
+		case p.unusedBlobs == 0 && p.tpe != vaultic.InvalidBlob && !mustCompress:
 			if packSize >= int64(targetPackSize) {
 				// All blobs in pack are used and not mixed => keep pack!
 				stats.Packs.Keep++
@@ -473,7 +473,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 	// At this point indexPacks contains only missing packs!
 
 	// missing packs that are not needed can be ignored
-	ignorePacks := restic.NewIDSet()
+	ignorePacks := vaultic.NewIDSet()
 	for id, p := range indexPack {
 		if p.usedBlobs == 0 {
 			ignorePacks.Insert(id)
@@ -515,9 +515,9 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 		pi := repackCandidates[i].packInfo
 		pj := repackCandidates[j].packInfo
 		switch {
-		case pi.tpe != restic.DataBlob && pj.tpe == restic.DataBlob:
+		case pi.tpe != vaultic.DataBlob && pj.tpe == vaultic.DataBlob:
 			return true
-		case pj.tpe != restic.DataBlob && pi.tpe == restic.DataBlob:
+		case pj.tpe != vaultic.DataBlob && pi.tpe == vaultic.DataBlob:
 			return false
 		case pi.unusedSize+pi.usedSize < uint64(targetPackSize) && pj.unusedSize+pj.usedSize >= uint64(targetPackSize):
 			return true
@@ -527,7 +527,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 		return pi.unusedSize*pj.usedSize > pj.unusedSize*pi.usedSize
 	})
 
-	repack := func(id restic.ID, p packInfo) {
+	repack := func(id vaultic.ID, p packInfo) {
 		repackPacks.Insert(id)
 		stats.Blobs.Repack += p.unusedBlobs + p.usedBlobs
 		stats.Size.Repack += p.unusedSize + p.usedSize
@@ -552,7 +552,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 		case reachedRepackSize:
 			stats.Packs.Keep++
 
-		case p.tpe != restic.DataBlob, p.mustCompress:
+		case p.tpe != vaultic.DataBlob, p.mustCompress:
 			// repacking non-data packs / uncompressed-trees is only limited by repackSize
 			repack(p.ID, p.packInfo)
 
@@ -591,7 +591,7 @@ func (plan *PrunePlan) Stats() PruneStats {
 // - rebuild the index while ignoring all files that will be deleted
 // - delete the files
 // plan.removePacks and plan.ignorePacks are modified in this function.
-func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) error {
+func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) error {
 	if plan.opts.DryRun {
 		printer.V("Repeated prune dry-runs can report slightly different amounts of data to keep or repack. This is expected behavior.\n\n")
 		if len(plan.removePacksFirst) > 0 {
@@ -611,7 +611,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) erro
 	if len(plan.removePacksFirst) != 0 {
 		printer.P("deleting unreferenced packs\n")
 		// ignoring errors is fine here as keeping too many packs cannot damage the repository
-		_ = deleteFiles(ctx, true, &internalRepository{repo}, plan.removePacksFirst, restic.PackFile, printer)
+		_ = deleteFiles(ctx, true, &internalRepository{repo}, plan.removePacksFirst, vaultic.PackFile, printer)
 		// forget unused data
 		plan.removePacksFirst = nil
 	}
@@ -622,7 +622,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) erro
 	if len(plan.repackPacks) != 0 {
 		printer.P("repacking packs\n")
 		bar := printer.NewCounter("packs repacked")
-		err := repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+		err := repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 			return CopyBlobs(ctx, repo, repo, uploader, plan.repackPacks, plan.keepBlobs, bar, printer.P)
 		})
 		if err != nil {
@@ -638,7 +638,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) erro
 			printer.E("%v was not repacked\n\n"+
 				"Integrity check failed.\n"+
 				"Please report this error (along with the output of the 'prune' run) at\n"+
-				"https://github.com/restic/restic/issues/new/choose", plan.keepBlobs)
+				"https://github.com/vaultic/vaultic/issues/new/choose", plan.keepBlobs)
 			return errors.Fatal("internal error: blobs were not repacked")
 		}
 
@@ -655,7 +655,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) erro
 	if plan.opts.UnsafeRecovery {
 		printer.P("deleting index files\n")
 		indexFiles := repo.idx.IDs()
-		err := deleteFiles(ctx, false, &internalRepository{repo}, indexFiles, restic.IndexFile, printer)
+		err := deleteFiles(ctx, false, &internalRepository{repo}, indexFiles, vaultic.IndexFile, printer)
 		if err != nil {
 			return errors.Fatalf("%s", err)
 		}
@@ -669,7 +669,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) erro
 	if len(plan.removePacks) != 0 {
 		printer.P("removing %d old packs", len(plan.removePacks))
 		// ignoring errors is fine here as keeping too many packs cannot damage the repository
-		_ = deleteFiles(ctx, true, &internalRepository{repo}, plan.removePacks, restic.PackFile, printer)
+		_ = deleteFiles(ctx, true, &internalRepository{repo}, plan.removePacks, vaultic.PackFile, printer)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -691,11 +691,11 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer restic.Printer) erro
 
 // deleteFiles deletes the given fileList of fileType in parallel
 // if ignoreError=true, it will print a warning if there was an error, else it will abort.
-func deleteFiles(ctx context.Context, ignoreError bool, repo restic.RemoverUnpacked[restic.FileType], fileList restic.IDSet, fileType restic.FileType, printer restic.Printer) error {
+func deleteFiles(ctx context.Context, ignoreError bool, repo vaultic.RemoverUnpacked[vaultic.FileType], fileList vaultic.IDSet, fileType vaultic.FileType, printer vaultic.Printer) error {
 	bar := printer.NewCounter("files deleted")
 	defer bar.Done()
 
-	return restic.ParallelRemove(ctx, repo, fileList, fileType, func(id restic.ID, err error) error {
+	return vaultic.ParallelRemove(ctx, repo, fileList, fileType, func(id vaultic.ID, err error) error {
 		if err != nil {
 			printer.E("unable to remove %v/%v from the repository", fileType, id)
 			if !ignoreError {

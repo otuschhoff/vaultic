@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -73,11 +73,11 @@ type toNoder interface {
 }
 
 type archiverRepo interface {
-	restic.Loader
-	restic.WithBlobUploader
-	restic.SaverUnpacked[restic.WriteableFileType]
+	vaultic.Loader
+	vaultic.WithBlobUploader
+	vaultic.SaverUnpacked[vaultic.WriteableFileType]
 
-	ChunkerFactory() restic.ChunkerFactory
+	ChunkerFactory() vaultic.ChunkerFactory
 }
 
 // Archiver saves a directory structure to the repo.
@@ -247,7 +247,7 @@ func (arch *Archiver) trackItem(item string, previous, current *data.Node, s Ite
 	}
 }
 
-// nodeFromFileInfo returns the restic node from an os.FileInfo.
+// nodeFromFileInfo returns the vaultic node from an os.FileInfo.
 func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta toNoder, ignoreXattrListError bool) (*data.Node, error) {
 	node, err := meta.ToNode(ignoreXattrListError, func(format string, args ...any) {
 		_ = arch.error(filename, fmt.Errorf(format, args...))
@@ -264,7 +264,7 @@ func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta toNoder, ig
 		if node.Links == 1 || node.Type == data.NodeTypeDir {
 			// the DeviceID is only necessary for hardlinked files
 			// when using subvolumes or snapshots their deviceIDs tend to change which causes
-			// restic to upload new tree blobs
+			// vaultic to upload new tree blobs
 			node.DeviceID = 0
 		}
 	}
@@ -295,8 +295,8 @@ func (arch *Archiver) loadSubtree(ctx context.Context, node *data.Node) (data.Tr
 	return tree, nil
 }
 
-func (arch *Archiver) wrapLoadTreeError(id restic.ID, err error) error {
-	if _, ok := arch.Repo.LookupBlobSize(restic.BlobHandle{Type: restic.TreeBlob, ID: id}); ok {
+func (arch *Archiver) wrapLoadTreeError(id vaultic.ID, err error) error {
+	if _, ok := arch.Repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id}); ok {
 		err = errors.Errorf("tree %v could not be loaded; the repository could be damaged: %v", id, err)
 	} else {
 		err = errors.Errorf("tree %v is not known; the repository could be damaged, run `repair index` to try to repair it", id)
@@ -443,7 +443,7 @@ func (fn *futureNode) take(ctx context.Context) futureNodeResult {
 func (arch *Archiver) allBlobsPresent(previous *data.Node) bool {
 	// check if all blobs are contained in index
 	for _, id := range previous.Content {
-		if _, ok := arch.Repo.LookupBlobSize(restic.BlobHandle{Type: restic.DataBlob, ID: id}); !ok {
+		if _, ok := arch.Repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}); !ok {
 			return false
 		}
 	}
@@ -861,7 +861,7 @@ func (arch *Archiver) loadParentTree(ctx context.Context, sn *data.Snapshot) dat
 }
 
 // runWorkers starts the worker pools, which are stopped when the context is cancelled.
-func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group, uploader restic.BlobSaverAsync) {
+func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group, uploader vaultic.BlobSaverAsync) {
 	arch.fileSaver = newFileSaver(ctx, wg,
 		uploader,
 		arch.Repo.ChunkerFactory(),
@@ -880,24 +880,24 @@ func (arch *Archiver) stopWorkers() {
 }
 
 // Snapshot saves several targets and returns a snapshot.
-func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*data.Snapshot, restic.ID, *Summary, error) {
+func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*data.Snapshot, vaultic.ID, *Summary, error) {
 	arch.summary = &Summary{
 		BackupStart: opts.BackupStart,
 	}
 
 	cleanTargets, err := resolveRelativeTargets(arch.FS, targets)
 	if err != nil {
-		return nil, restic.ID{}, nil, err
+		return nil, vaultic.ID{}, nil, err
 	}
 
 	atree, err := newTree(arch.FS, cleanTargets)
 	if err != nil {
-		return nil, restic.ID{}, nil, err
+		return nil, vaultic.ID{}, nil, err
 	}
 
-	var rootTreeID restic.ID
+	var rootTreeID vaultic.ID
 
-	err = arch.Repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	err = arch.Repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		wg, wgCtx := errgroup.WithContext(ctx)
 		start := time.Now()
 
@@ -940,20 +940,20 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		return nil
 	})
 	if err != nil {
-		return nil, restic.ID{}, nil, err
+		return nil, vaultic.ID{}, nil, err
 	}
 
 	if opts.ParentSnapshot != nil && opts.SkipIfUnchanged {
 		ps := opts.ParentSnapshot
 		if ps.Tree != nil && rootTreeID.Equal(*ps.Tree) {
 			arch.summary.BackupEnd = time.Now()
-			return nil, restic.ID{}, arch.summary, nil
+			return nil, vaultic.ID{}, arch.summary, nil
 		}
 	}
 
 	sn, err := data.NewSnapshot(targets, opts.Tags, opts.Hostname, opts.Time)
 	if err != nil {
-		return nil, restic.ID{}, nil, err
+		return nil, vaultic.ID{}, nil, err
 	}
 
 	sn.ProgramVersion = opts.ProgramVersion
@@ -983,7 +983,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 
 	id, err := data.SaveSnapshot(ctx, arch.Repo, sn)
 	if err != nil {
-		return nil, restic.ID{}, nil, err
+		return nil, vaultic.ID{}, nil, err
 	}
 
 	return sn, id, arch.summary, nil

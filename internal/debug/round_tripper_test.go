@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 func TestRedactHeader(t *testing.T) {

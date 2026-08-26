@@ -1,4 +1,4 @@
-// Package gs provides a restic backend for Google Cloud Storage.
+// Package gs provides a vaultic backend for Google Cloud Storage.
 package gs
 
 import (
@@ -13,12 +13,12 @@ import (
 
 	"cloud.google.com/go/storage"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -214,7 +214,7 @@ func (be *gs) Save(ctx context.Context, h backend.Handle, rd backend.RewindReade
 	// where there is less (but some) buffering, which ultimately results
 	// in better rate limiting behavior.
 	//
-	// restic typically writes small blobs (4MB-30MB), so the resumable
+	// vaultic typically writes small blobs (4MB-30MB), so the resumable
 	// uploads are not providing significant benefit anyways.
 	w := be.bucket.Object(objName).NewWriter(ctx)
 	w.ChunkSize = 0
@@ -260,7 +260,7 @@ func (be *gs) openReader(ctx context.Context, h backend.Handle, length int, offs
 
 	if length > 0 && r.Attrs.Size < offset+int64(length) {
 		_ = r.Close()
-		return nil, &googleapi.Error{Code: http.StatusRequestedRangeNotSatisfiable, Message: "restic-file-too-short"}
+		return nil, &googleapi.Error{Code: http.StatusRequestedRangeNotSatisfiable, Message: "vaultic-file-too-short"}
 	}
 
 	return r, err
@@ -338,7 +338,7 @@ func (be *gs) List(ctx context.Context, t backend.FileType, fn func(backend.File
 	return ctx.Err()
 }
 
-// Delete removes all restic keys in the bucket. It will not remove the bucket itself.
+// Delete removes all vaultic keys in the bucket. It will not remove the bucket itself.
 func (be *gs) Delete(ctx context.Context) error {
 	return util.DefaultDelete(ctx, be)
 }

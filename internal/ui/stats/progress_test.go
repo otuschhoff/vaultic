@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	rtest "github.com/restic/restic/internal/test"
-	"github.com/restic/restic/internal/ui"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/ui"
 )
 
 func TestStatsProgress(t *testing.T) {

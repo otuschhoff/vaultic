@@ -1,4 +1,4 @@
-// Package test contains a test suite with benchmarks for restic backends.
+// Package test contains a test suite with benchmarks for vaultic backends.
 //
 // # Overview
 //

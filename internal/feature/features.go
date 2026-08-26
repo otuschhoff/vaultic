@@ -11,7 +11,7 @@ type state string
 type FlagName string
 
 const (
-	// Alpha features are disabled by default. They do not guarantee any backwards compatibility and may change in arbitrary ways between restic versions.
+	// Alpha features are disabled by default. They do not guarantee any backwards compatibility and may change in arbitrary ways between vaultic versions.
 	Alpha state = "alpha"
 	// Beta features are enabled by default. They may still change, but incompatible changes should be avoided.
 	Beta state = "beta"

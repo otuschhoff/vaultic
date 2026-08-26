@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mem"
-	backendtest "github.com/restic/restic/internal/backend/test"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mem"
+	backendtest "github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func loadAndCompare(t testing.TB, be backend.Backend, h backend.Handle, data []byte) {
@@ -49,7 +49,7 @@ func remove(t testing.TB, be backend.Backend, h backend.Handle) {
 
 func randomData(n int) (backend.Handle, []byte) {
 	data := test.Random(rand.Int(), n)
-	id := restic.Hash(data)
+	id := vaultic.Hash(data)
 	h := backend.Handle{
 		Type: backend.IndexFile,
 		Name: id.String(),

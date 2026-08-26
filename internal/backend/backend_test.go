@@ -3,8 +3,8 @@ package backend_test
 import (
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 type testBackend struct {

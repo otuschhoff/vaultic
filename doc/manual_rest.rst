@@ -238,7 +238,7 @@ Browse repository objects
 
 Internally, a repository stores data of several different types
 described in the `design
-documentation <https://github.com/restic/restic/blob/master/doc/design.rst>`__.
+documentation <https://github.com/vaultic/vaultic/blob/master/doc/design.rst>`__.
 You can ``list`` objects such as blobs, packs, index, snapshots, keys or
 locks with the following command:
 

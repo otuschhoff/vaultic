@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-func listIndex(t *testing.T, repo restic.Lister) restic.IDSet {
-	return listFiles(t, repo, restic.IndexFile)
+func listIndex(t *testing.T, repo vaultic.Lister) vaultic.IDSet {
+	return listFiles(t, repo, vaultic.IndexFile)
 }
 
 func testRebuildIndex(t *testing.T, readAllPacks bool, damage func(t *testing.T, repo *repository.Repository, be backend.Backend)) {
@@ -32,7 +32,7 @@ func testRebuildIndex(t *testing.T, readAllPacks bool, damage func(t *testing.T,
 	repo = repository.TestOpenBackend(t, be)
 	rtest.OK(t, repository.RepairIndex(context.TODO(), repo, repository.RepairIndexOptions{
 		ReadAllPacks: readAllPacks,
-	}, restic.NewNoopPrinter()))
+	}, vaultic.NewNoopPrinter()))
 
 	repository.TestCheckRepo(t, repo)
 }

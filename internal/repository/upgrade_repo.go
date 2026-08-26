@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type upgradeRepoV2Error struct {
@@ -45,7 +45,7 @@ func upgradeRepository(ctx context.Context, repo *Repository) error {
 	cfg := repo.Config()
 	cfg.Version = 2
 
-	err := restic.SaveConfig(ctx, &internalRepository{repo}, cfg)
+	err := vaultic.SaveConfig(ctx, &internalRepository{repo}, cfg)
 	if err != nil {
 		return fmt.Errorf("save new config file failed: %w", err)
 	}
@@ -58,7 +58,7 @@ func UpgradeRepo(ctx context.Context, repo *Repository) error {
 		return fmt.Errorf("repository has version %v, only upgrades from version 1 are supported", repo.Config().Version)
 	}
 
-	tempdir, err := os.MkdirTemp("", "restic-migrate-upgrade-repo-v2-")
+	tempdir, err := os.MkdirTemp("", "vaultic-migrate-upgrade-repo-v2-")
 	if err != nil {
 		return fmt.Errorf("create temp dir failed: %w", err)
 	}
@@ -66,7 +66,7 @@ func UpgradeRepo(ctx context.Context, repo *Repository) error {
 	h := backend.Handle{Type: backend.ConfigFile}
 
 	// read raw config file and save it to a temp dir, just in case
-	rawConfigFile, err := repo.LoadRaw(ctx, restic.ConfigFile, restic.ID{})
+	rawConfigFile, err := repo.LoadRaw(ctx, vaultic.ConfigFile, vaultic.ID{})
 	if err != nil {
 		return fmt.Errorf("load config file failed: %w", err)
 	}

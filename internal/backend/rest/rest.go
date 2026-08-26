@@ -10,13 +10,13 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/layout"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/layout"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
 )
 
 // make sure the rest backend implements backend.Backend
@@ -50,8 +50,8 @@ func NewFactory() location.Factory {
 
 // the REST API protocol version is decided by HTTP request headers, these are the constants.
 const (
-	ContentTypeV1 = "application/vnd.x.restic.rest.v1"
-	ContentTypeV2 = "application/vnd.x.restic.rest.v2"
+	ContentTypeV1 = "application/vnd.x.vaultic.rest.v1"
+	ContentTypeV2 = "application/vnd.x.vaultic.rest.v2"
 )
 
 // Open opens the REST backend with the given config.

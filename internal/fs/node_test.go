@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func BenchmarkNodeFromFileInfo(t *testing.B) {
-	tempfile, err := os.CreateTemp(t.TempDir(), "restic-test-temp-")
+	tempfile, err := os.CreateTemp(t.TempDir(), "vaultic-test-temp-")
 	rtest.OK(t, err)
 	path := tempfile.Name()
 	rtest.OK(t, tempfile.Close())
@@ -52,7 +52,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testFile",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0604,
@@ -63,7 +63,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testSuidFile",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0755 | os.ModeSetuid,
@@ -74,7 +74,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testSuidFile2",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0755 | os.ModeSetgid,
@@ -85,7 +85,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testSticky",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0755 | os.ModeSticky,
@@ -121,7 +121,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testFile",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0604,
@@ -143,7 +143,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testXattrFile",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0604,
@@ -171,7 +171,7 @@ var nodeTests = []data.Node{
 	{
 		Name:       "testXattrFileMacOSResourceFork",
 		Type:       data.NodeTypeFile,
-		Content:    restic.IDs{},
+		Content:    vaultic.IDs{},
 		UID:        uint32(os.Getuid()),
 		GID:        uint32(os.Getgid()),
 		Mode:       0604,

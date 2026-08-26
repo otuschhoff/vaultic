@@ -4,9 +4,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type checkRewriteFunc func(t testing.TB) (rewriter *TreeRewriter, final func(testing.TB))
@@ -331,12 +331,12 @@ func TestRewriterKeepEmptyDirectory(t *testing.T) {
 	tests := []struct {
 		name      string
 		keepEmpty NodeKeepEmptyDirectoryFunc
-		assert    func(t *testing.T, newRoot restic.ID)
+		assert    func(t *testing.T, newRoot vaultic.ID)
 	}{
 		{
 			name:      "Keep",
 			keepEmpty: func(string) bool { return true },
-			assert: func(t *testing.T, newRoot restic.ID) {
+			assert: func(t *testing.T, newRoot vaultic.ID) {
 				_, expRoot := BuildTreeMap(TestTree{"empty": TestTree{}})
 				test.Assert(t, newRoot == expRoot, "expected empty dir kept")
 			},
@@ -344,7 +344,7 @@ func TestRewriterKeepEmptyDirectory(t *testing.T) {
 		{
 			name:      "Drop subdir only",
 			keepEmpty: func(p string) bool { return p != "/empty" },
-			assert: func(t *testing.T, newRoot restic.ID) {
+			assert: func(t *testing.T, newRoot vaultic.ID) {
 				_, expRoot := BuildTreeMap(TestTree{})
 				test.Assert(t, newRoot == expRoot, "expected empty root")
 			},
@@ -352,7 +352,7 @@ func TestRewriterKeepEmptyDirectory(t *testing.T) {
 		{
 			name:      "Drop all",
 			keepEmpty: func(string) bool { return false },
-			assert: func(t *testing.T, newRoot restic.ID) {
+			assert: func(t *testing.T, newRoot vaultic.ID) {
 				test.Assert(t, newRoot.IsNull(), "expected null root")
 			},
 		},
@@ -362,7 +362,7 @@ func TestRewriterKeepEmptyDirectory(t *testing.T) {
 				paths = append(paths, p)
 				return p != "/empty"
 			},
-			assert: func(t *testing.T, newRoot restic.ID) {
+			assert: func(t *testing.T, newRoot vaultic.ID) {
 				test.Assert(t, len(paths) >= 2, "expected at least two KeepEmptyDirectory calls")
 				var hasRoot, hasEmpty bool
 				for _, p := range paths {
@@ -396,7 +396,7 @@ func TestRewriterKeepEmptyDirectory(t *testing.T) {
 func TestRewriterFailOnUnknownFields(t *testing.T) {
 	tm := data.TestWritableTreeMap{TestTreeMap: data.TestTreeMap{}}
 	node := []byte(`{"nodes":[{"name":"subfile","type":"file","mtime":"0001-01-01T00:00:00Z","atime":"0001-01-01T00:00:00Z","ctime":"0001-01-01T00:00:00Z","uid":0,"gid":0,"content":null,"unknown_field":42}]}`)
-	id := restic.Hash(node)
+	id := vaultic.Hash(node)
 	tm.TestTreeMap[id] = node
 
 	ctx := t.Context()
@@ -428,7 +428,7 @@ func TestRewriterFailOnUnknownFields(t *testing.T) {
 
 func TestRewriterTreeLoadError(t *testing.T) {
 	tm := data.TestWritableTreeMap{TestTreeMap: data.TestTreeMap{}}
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 
 	ctx := t.Context()
 
@@ -443,7 +443,7 @@ func TestRewriterTreeLoadError(t *testing.T) {
 	replacementID := data.TestSaveNodes(t, ctx, tm, []*data.Node{replacementNode})
 
 	rewriter = NewTreeRewriter(RewriteOpts{
-		RewriteFailedTree: func(nodeID restic.ID, path string, err error) (data.TreeNodeIterator, error) {
+		RewriteFailedTree: func(nodeID vaultic.ID, path string, err error) (data.TreeNodeIterator, error) {
 			if nodeID != id || path != "/" {
 				t.Fail()
 			}

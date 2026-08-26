@@ -9,14 +9,14 @@ import (
 	"io"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/feature"
-	"github.com/restic/restic/internal/repository/hashing"
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/vaultic/vaultic/internal/repository/hashing"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -24,8 +24,8 @@ const maxStreamBufferSize = 4 * 1024 * 1024
 
 // ErrIncompletePackEntry is returned when indexes contain different data for a pack.
 type ErrIncompletePackEntry struct {
-	PackID  restic.ID
-	Indexes restic.IDSet
+	PackID  vaultic.ID
+	Indexes vaultic.IDSet
 }
 
 func (e *ErrIncompletePackEntry) Error() string {
@@ -34,8 +34,8 @@ func (e *ErrIncompletePackEntry) Error() string {
 
 // ErrDuplicatePacks is returned when a pack is found in more than one index.
 type ErrDuplicatePacks struct {
-	PackID  restic.ID
-	Indexes restic.IDSet
+	PackID  vaultic.ID
+	Indexes vaultic.IDSet
 }
 
 func (e *ErrDuplicatePacks) Error() string {
@@ -44,7 +44,7 @@ func (e *ErrDuplicatePacks) Error() string {
 
 // ErrMixedPack is returned when a pack is found that contains both tree and data blobs.
 type ErrMixedPack struct {
-	PackID restic.ID
+	PackID vaultic.ID
 }
 
 func (e *ErrMixedPack) Error() string {
@@ -54,7 +54,7 @@ func (e *ErrMixedPack) Error() string {
 // ErrPackMetadata describes an error with a specific pack. It is used for missing, truncated or orphaned packs.
 // Errors of the actual pack data are returned as ErrPackData.
 type ErrPackMetadata struct {
-	ID        restic.ID
+	ID        vaultic.ID
 	Orphaned  bool
 	Truncated bool
 	Missing   bool
@@ -67,7 +67,7 @@ func (e *ErrPackMetadata) Error() string {
 
 // ErrPackData is returned if errors are discovered while verifying a packfile
 type ErrPackData struct {
-	PackID restic.ID
+	PackID vaultic.ID
 	errs   []error
 }
 
@@ -86,15 +86,15 @@ func newChecker(repo *Repository) *Checker {
 		repo: repo,
 	}
 }
-func computePackTypes(ctx context.Context, idx restic.ListBlobser) (map[restic.ID]restic.BlobType, error) {
-	packs := make(map[restic.ID]restic.BlobType)
-	err := idx.ListBlobs(ctx, func(pb restic.PackBlob) {
+func computePackTypes(ctx context.Context, idx vaultic.ListBlobser) (map[vaultic.ID]vaultic.BlobType, error) {
+	packs := make(map[vaultic.ID]vaultic.BlobType)
+	err := idx.ListBlobs(ctx, func(pb vaultic.PackBlob) {
 		packID := pb.PackID()
 		h := pb.Handle()
 		tpe, exists := packs[packID]
 		if exists {
 			if h.Type != tpe {
-				tpe = restic.InvalidBlob
+				tpe = vaultic.InvalidBlob
 			}
 		} else {
 			tpe = h.Type
@@ -105,15 +105,15 @@ func computePackTypes(ctx context.Context, idx restic.ListBlobser) (map[restic.I
 }
 
 // LoadIndex loads all index files.
-func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory) (hints []error, errs []error) {
+func (c *Checker) LoadIndex(ctx context.Context, p vaultic.TerminalCounterFactory) (hints []error, errs []error) {
 	debug.Log("Start")
-	packToIndex := make(map[restic.ID]restic.IDSet)
-	// in restic < 0.10.0, the blobs of a pack could be split over multiple indexes.
+	packToIndex := make(map[vaultic.ID]vaultic.IDSet)
+	// in vaultic < 0.10.0, the blobs of a pack could be split over multiple indexes.
 	// by now this is considered as repository damage.
-	packToPackBlobHash := make(map[restic.ID]restic.IDSet)
+	packToPackBlobHash := make(map[vaultic.ID]vaultic.IDSet)
 
 	// Use the repository's internal loadIndexWithCallback to handle per-index errors
-	err := c.repo.loadIndexWithCallback(ctx, p, func(id restic.ID, idx *index.Index, err error) error {
+	err := c.repo.loadIndexWithCallback(ctx, p, func(id vaultic.ID, idx *index.Index, err error) error {
 		debug.Log("process index %v, err %v", id, err)
 		err = errors.Wrapf(err, "error loading index %v", id)
 
@@ -132,15 +132,15 @@ func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory
 
 			packID := blob.PackID()
 			if _, ok := packToIndex[packID]; !ok {
-				packToIndex[packID] = restic.NewIDSet()
+				packToIndex[packID] = vaultic.NewIDSet()
 			}
 			packToIndex[packID].Insert(id)
 		}
 
-		for pbs := range idx.EachByPack(ctx, restic.NewIDSet()) {
+		for pbs := range idx.EachByPack(ctx, vaultic.NewIDSet()) {
 			packBlobHash := index.PackBlobsHash(pbs)
 			if _, ok := packToPackBlobHash[pbs.PackID]; !ok {
-				packToPackBlobHash[pbs.PackID] = restic.NewIDSet()
+				packToPackBlobHash[pbs.PackID] = vaultic.NewIDSet()
 			}
 			packToPackBlobHash[pbs.PackID].Insert(packBlobHash)
 		}
@@ -172,7 +172,7 @@ func (c *Checker) LoadIndex(ctx context.Context, p restic.TerminalCounterFactory
 				Indexes: packToIndex[packID],
 			})
 		}
-		if packTypes[packID] == restic.InvalidBlob {
+		if packTypes[packID] == vaultic.InvalidBlob {
 			hints = append(hints, &ErrMixedPack{
 				PackID: packID,
 			})
@@ -198,9 +198,9 @@ func (c *Checker) Packs(ctx context.Context, errChan chan<- error) {
 	debug.Log("checking for %d packs", len(packs))
 
 	debug.Log("listing repository packs")
-	repoPacks := make(map[restic.ID]int64)
+	repoPacks := make(map[vaultic.ID]int64)
 
-	err = c.repo.List(ctx, restic.PackFile, func(id restic.ID, size int64) error {
+	err = c.repo.List(ctx, vaultic.PackFile, func(id vaultic.ID, size int64) error {
 		repoPacks[id] = size
 		return nil
 	})
@@ -245,7 +245,7 @@ func (c *Checker) Packs(ctx context.Context, errChan chan<- error) {
 }
 
 // ReadPacks loads data from specified packs and checks the integrity.
-func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID]int64) map[restic.ID]int64, printer restic.Printer, errChan chan<- error) {
+func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[vaultic.ID]int64) map[vaultic.ID]int64, printer vaultic.Printer, errChan chan<- error) {
 	defer close(errChan)
 
 	// compute pack size using index entries
@@ -260,7 +260,7 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 	p.SetMax(uint64(len(packs)))
 	defer p.Done()
 
-	packSet := restic.NewIDSet()
+	packSet := vaultic.NewIDSet()
 	for pack := range packs {
 		packSet.Insert(pack)
 	}
@@ -282,7 +282,7 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 
 	g, ctx := errgroup.WithContext(ctx)
 	type checkTask struct {
-		id    restic.ID
+		id    vaultic.ID
 		size  int64
 		blobs pack.Blobs
 	}
@@ -349,7 +349,7 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 }
 
 // checkPack reads a pack and checks the integrity of all blobs.
-func checkPack(ctx context.Context, r *Repository, id restic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
+func checkPack(ctx context.Context, r *Repository, id vaultic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
 	err := checkPackInner(ctx, r, id, blobs, size, bufRd, dec)
 	if err != nil {
 		if r.cache != nil {
@@ -368,7 +368,7 @@ func checkPack(ctx context.Context, r *Repository, id restic.ID, blobs pack.Blob
 	return err
 }
 
-func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
+func checkPackInner(ctx context.Context, r *Repository, id vaultic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
 
 	type partialReadError struct {
 		error
@@ -400,7 +400,7 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 	}
 
 	// calculate hash on-the-fly while reading the pack and capture pack header
-	var hash restic.ID
+	var hash vaultic.ID
 	var hdrBuf []byte
 	// must use a separate slice from `errs` here as we're only interested in the last retry
 	var blobErrors []error
@@ -449,7 +449,7 @@ func checkPackInner(ctx context.Context, r *Repository, id restic.ID, blobs pack
 			return &partialReadError{err}
 		}
 
-		hash = restic.IDFromHash(hrd.Sum(nil))
+		hash = vaultic.IDFromHash(hrd.Sum(nil))
 		return nil
 	})
 	errs = append(errs, blobErrors...)

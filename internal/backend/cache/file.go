@@ -8,9 +8,9 @@ import (
 	"runtime"
 
 	"github.com/pkg/errors"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/util"
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/util"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 func (c *Cache) filename(h backend.Handle) string {
@@ -89,7 +89,7 @@ func (c *Cache) save(h backend.Handle, rd io.Reader) error {
 	}
 
 	// First save to a temporary location. This allows multiple concurrent
-	// restics to use a single cache dir.
+	// vaultic processes to use a single cache dir.
 	f, err := os.CreateTemp(dir, "tmp-")
 	if err != nil {
 		return err
@@ -129,7 +129,7 @@ func (c *Cache) Forget(h backend.Handle) error {
 	h.IsMetadata = false
 
 	if _, ok := c.forgotten.Load(h); ok {
-		// Delete a file at most once while restic runs.
+		// Delete a file at most once while vaultic runs.
 		// This prevents repeatedly caching and forgetting broken files
 		return fmt.Errorf("circuit breaker prevents repeated deletion of cached file %v", h)
 	}

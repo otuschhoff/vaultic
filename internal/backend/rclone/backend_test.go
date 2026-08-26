@@ -4,9 +4,9 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/restic/restic/internal/backend/rclone"
-	"github.com/restic/restic/internal/backend/test"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend/rclone"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func newTestSuite(t testing.TB) *test.Suite[rclone.Config] {
@@ -37,7 +37,7 @@ func TestBackendRclone(t *testing.T) {
 	t.Parallel()
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/rclone.TestBackendRclone")
+			rtest.SkipDisallowed(t, "vaultic/backend/rclone.TestBackendRclone")
 		}
 	}()
 

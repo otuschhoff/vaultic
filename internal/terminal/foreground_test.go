@@ -9,12 +9,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/terminal"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/terminal"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestForeground(t *testing.T) {
-	err := os.Setenv("RESTIC_PASSWORD", "supersecret")
+	err := os.Setenv("VAULTIC_PASSWORD", "supersecret")
+	rtest.OK(t, err)
+	// legacy variable names must be filtered as well
+	err = os.Setenv("RESTIC_PASSWORD", "supersecret")
 	rtest.OK(t, err)
 
 	cmd := exec.Command("env")
@@ -32,7 +35,8 @@ func TestForeground(t *testing.T) {
 
 	sc := bufio.NewScanner(stdout)
 	for sc.Scan() {
-		if strings.HasPrefix(sc.Text(), "RESTIC_PASSWORD=") {
+		if strings.HasPrefix(sc.Text(), "VAULTIC_PASSWORD=") ||
+			strings.HasPrefix(sc.Text(), "RESTIC_PASSWORD=") {
 			t.Error("subprocess got to see the password")
 		}
 	}

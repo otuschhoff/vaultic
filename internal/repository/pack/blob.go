@@ -3,13 +3,13 @@ package pack
 import (
 	"fmt"
 
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // Blob is one part of a file or a tree with pack layout information.
 type Blob struct {
-	restic.BlobHandle
+	vaultic.BlobHandle
 	Length             uint
 	Offset             uint
 	UncompressedLength uint

@@ -3,17 +3,17 @@ package index
 import (
 	"testing"
 
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestIndexOversized(t *testing.T) {
 	idx := NewIndex()
 
 	// Add blobs up to indexMaxBlobs + pack.MaxHeaderEntries - 1
-	packID := idx.addToPacks(restic.NewRandomID())
-	id := restic.NewRandomID()
+	packID := idx.addToPacks(vaultic.NewRandomID())
+	id := vaultic.NewRandomID()
 	for i := uint(0); i < indexMaxBlobs+pack.MaxHeaderEntries-1; i++ {
 		// Directly modify ID to avoid benchmarking NewRandomID
 		id[0] = byte(i)
@@ -22,8 +22,8 @@ func TestIndexOversized(t *testing.T) {
 		id[3] = byte(i >> 24)
 
 		idx.store(packID, pack.Blob{
-			BlobHandle: restic.BlobHandle{
-				Type: restic.DataBlob,
+			BlobHandle: vaultic.BlobHandle{
+				Type: vaultic.DataBlob,
 				ID:   id,
 			},
 			Length: 100,
@@ -35,9 +35,9 @@ func TestIndexOversized(t *testing.T) {
 
 	// Add one more blob to exceed the limit
 	idx.store(packID, pack.Blob{
-		BlobHandle: restic.BlobHandle{
-			Type: restic.DataBlob,
-			ID:   restic.NewRandomID(),
+		BlobHandle: vaultic.BlobHandle{
+			Type: vaultic.DataBlob,
+			ID:   vaultic.NewRandomID(),
 		},
 		Length: 100,
 		Offset: uint(indexMaxBlobs+pack.MaxHeaderEntries) * 100,

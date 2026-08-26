@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestFormatBytes(t *testing.T) {

@@ -1,7 +1,7 @@
 package fs
 
 import (
-	"github.com/restic/restic/internal/data"
+	"github.com/vaultic/vaultic/internal/data"
 	"golang.org/x/sys/unix"
 )
 

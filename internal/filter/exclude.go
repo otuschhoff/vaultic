@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/textfile"
 	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/textfile"
 )
 
 // RejectByNameFunc is a function that takes a filename of a

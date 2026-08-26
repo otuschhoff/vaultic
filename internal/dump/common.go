@@ -5,10 +5,10 @@ import (
 	"io"
 	"path"
 
-	"github.com/restic/restic/internal/bloblru"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/walker"
+	"github.com/vaultic/vaultic/internal/bloblru"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/vaultic/vaultic/internal/walker"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -17,11 +17,11 @@ import (
 type Dumper struct {
 	cache  *bloblru.Cache
 	format string
-	repo   restic.Loader
+	repo   vaultic.Loader
 	w      io.Writer
 }
 
-func New(format string, repo restic.Loader, w io.Writer) *Dumper {
+func New(format string, repo vaultic.Loader, w io.Writer) *Dumper {
 	return &Dumper{
 		cache:  bloblru.New(64 << 20),
 		format: format,
@@ -52,7 +52,7 @@ func (d *Dumper) DumpTree(ctx context.Context, tree data.TreeNodeIterator, rootP
 	return wg.Wait()
 }
 
-func sendTrees(ctx context.Context, repo restic.BlobLoader, nodes data.TreeNodeIterator, rootPath string, ch chan *data.Node) error {
+func sendTrees(ctx context.Context, repo vaultic.BlobLoader, nodes data.TreeNodeIterator, rootPath string, ch chan *data.Node) error {
 	defer close(ch)
 
 	for item := range nodes {
@@ -68,7 +68,7 @@ func sendTrees(ctx context.Context, repo restic.BlobLoader, nodes data.TreeNodeI
 	return nil
 }
 
-func sendNodes(ctx context.Context, repo restic.BlobLoader, root *data.Node, ch chan *data.Node) error {
+func sendNodes(ctx context.Context, repo vaultic.BlobLoader, root *data.Node, ch chan *data.Node) error {
 	select {
 	case ch <- root:
 	case <-ctx.Done():
@@ -80,7 +80,7 @@ func sendNodes(ctx context.Context, repo restic.BlobLoader, root *data.Node, ch 
 		return nil
 	}
 
-	err := walker.Walk(ctx, repo, *root.Subtree, walker.WalkVisitor{ProcessNode: func(_ restic.ID, nodepath string, node *data.Node, err error) error {
+	err := walker.Walk(ctx, repo, *root.Subtree, walker.WalkVisitor{ProcessNode: func(_ vaultic.ID, nodepath string, node *data.Node, err error) error {
 		if err != nil {
 			return err
 		}
@@ -142,7 +142,7 @@ loop:
 
 		wg.Go(func() error {
 			blob, err := d.cache.GetOrCompute(id, func() ([]byte, error) {
-				return d.repo.LoadBlob(ctx, restic.BlobHandle{Type: restic.DataBlob, ID: id}, nil)
+				return d.repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}, nil)
 			})
 
 			if err == nil {

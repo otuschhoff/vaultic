@@ -9,20 +9,20 @@ import (
 	"io"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/mem"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/mem"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 var testLens = []int{23, 31650, 25860, 10928, 13769, 19862, 5211, 127, 13690, 30231}
 
 type Buf struct {
 	data []byte
-	id   restic.ID
+	id   vaultic.ID
 }
 
 func newPack(t testing.TB, k *crypto.Key, lengths []int) ([]Buf, []byte, uint) {
@@ -32,7 +32,7 @@ func newPack(t testing.TB, k *crypto.Key, lengths []int) ([]Buf, []byte, uint) {
 	var buf bytes.Buffer
 	p := pack.NewPacker(k, &buf)
 	for _, b := range bufs {
-		_, err := p.Add(restic.TreeBlob, b.id, b.data, 2*len(b.data))
+		_, err := p.Add(vaultic.TreeBlob, b.id, b.data, 2*len(b.data))
 		rtest.OK(t, err)
 	}
 
@@ -101,11 +101,11 @@ func TestCreatePack(t *testing.T) {
 }
 
 var blobTypeJSON = []struct {
-	t   restic.BlobType
+	t   vaultic.BlobType
 	res string
 }{
-	{restic.DataBlob, `"data"`},
-	{restic.TreeBlob, `"tree"`},
+	{vaultic.DataBlob, `"data"`},
+	{vaultic.TreeBlob, `"tree"`},
 }
 
 func TestBlobTypeJSON(t *testing.T) {
@@ -116,7 +116,7 @@ func TestBlobTypeJSON(t *testing.T) {
 		rtest.Equals(t, test.res, string(buf))
 
 		// test unserialize
-		var v restic.BlobType
+		var v vaultic.BlobType
 		err = json.Unmarshal([]byte(test.res), &v)
 		rtest.OK(t, err)
 		rtest.Equals(t, test.t, v)
@@ -130,7 +130,7 @@ func TestUnpackReadSeeker(t *testing.T) {
 	bufs, packData, packSize := newPack(t, k, testLens)
 
 	b := mem.New()
-	id := restic.Hash(packData)
+	id := vaultic.Hash(packData)
 
 	handle := backend.Handle{Type: backend.PackFile, Name: id.String()}
 	rtest.OK(t, b.Save(context.TODO(), handle, backend.NewByteReader(packData, b.Hasher())))
@@ -143,7 +143,7 @@ func TestShortPack(t *testing.T) {
 	bufs, packData, packSize := newPack(t, k, []int{23})
 
 	b := mem.New()
-	id := restic.Hash(packData)
+	id := vaultic.Hash(packData)
 
 	handle := backend.Handle{Type: backend.PackFile, Name: id.String()}
 	rtest.OK(t, b.Save(context.TODO(), handle, backend.NewByteReader(packData, b.Hasher())))
@@ -162,12 +162,12 @@ func TestPackerBroken(t *testing.T) {
 
 	bufs := createBuffers(t, []int{100})
 
-	_, err := p.Add(restic.DataBlob, bufs[0].id, bufs[0].data, 0)
+	_, err := p.Add(vaultic.DataBlob, bufs[0].id, bufs[0].data, 0)
 	rtest.Assert(t, err != nil, "expected error on first Add")
 	rtest.Assert(t, !errors.Is(err, pack.ErrBroken), "first error must not be ErrBroken: %v", err)
 	rtest.Equals(t, 0, p.Count())
 
-	_, err = p.Add(restic.DataBlob, bufs[0].id, bufs[0].data, 0)
+	_, err = p.Add(vaultic.DataBlob, bufs[0].id, bufs[0].data, 0)
 	rtest.Assert(t, errors.Is(err, pack.ErrBroken), "expected ErrBroken on reuse, got %v", err)
 
 	err = p.Finalize()
@@ -184,14 +184,14 @@ func TestPackMerge(t *testing.T) {
 	var buf1 bytes.Buffer
 	packer1 := pack.NewPacker(k, &buf1)
 	for _, b := range bufs[:splitAt] {
-		_, err := packer1.Add(restic.TreeBlob, b.id, b.data, 2*len(b.data))
+		_, err := packer1.Add(vaultic.TreeBlob, b.id, b.data, 2*len(b.data))
 		rtest.OK(t, err)
 	}
 
 	var buf2 bytes.Buffer
 	packer2 := pack.NewPacker(k, &buf2)
 	for _, b := range bufs[splitAt:] {
-		_, err := packer2.Add(restic.DataBlob, b.id, b.data, 2*len(b.data))
+		_, err := packer2.Add(vaultic.DataBlob, b.id, b.data, 2*len(b.data))
 		rtest.OK(t, err)
 	}
 

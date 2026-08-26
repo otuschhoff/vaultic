@@ -4,8 +4,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 type Backend struct {

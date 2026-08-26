@@ -6,8 +6,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // ErrSkipNode is returned by WalkFunc when a dir node should not be walked.
@@ -21,7 +21,7 @@ var ErrSkipNode = errors.New("skip this node")
 // When the special value ErrSkipNode is returned and node is a dir node, it is
 // not walked. When the node is not a dir node, the remaining items in this
 // tree are skipped.
-type WalkFunc func(parentTreeID restic.ID, path string, node *data.Node, nodeErr error) (err error)
+type WalkFunc func(parentTreeID vaultic.ID, path string, node *data.Node, nodeErr error) (err error)
 
 type WalkVisitor struct {
 	// If the node is a `dir`, it will be entered afterwards unless `ErrSkipNode`
@@ -34,7 +34,7 @@ type WalkVisitor struct {
 // Walk calls walkFn recursively for each node in root. If walkFn returns an
 // error, it is passed up the call stack. The trees in ignoreTrees are not
 // walked. If walkFn ignores trees, these are added to the set.
-func Walk(ctx context.Context, repo restic.BlobLoader, root restic.ID, visitor WalkVisitor) error {
+func Walk(ctx context.Context, repo vaultic.BlobLoader, root vaultic.ID, visitor WalkVisitor) error {
 	tree, err := data.LoadTree(ctx, repo, root)
 	err = visitor.ProcessNode(root, "/", nil, err)
 
@@ -51,7 +51,7 @@ func Walk(ctx context.Context, repo restic.BlobLoader, root restic.ID, visitor W
 // walk recursively traverses the tree, ignoring subtrees when the ID of the
 // subtree is in ignoreTrees. If err is nil and ignore is true, the subtree ID
 // will be added to ignoreTrees by walk.
-func walk(ctx context.Context, repo restic.BlobLoader, prefix string, parentTreeID restic.ID, tree data.TreeNodeIterator, visitor WalkVisitor) (err error) {
+func walk(ctx context.Context, repo vaultic.BlobLoader, prefix string, parentTreeID vaultic.ID, tree data.TreeNodeIterator, visitor WalkVisitor) (err error) {
 	for item := range tree {
 		if item.Error != nil {
 			return item.Error

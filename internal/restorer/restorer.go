@@ -8,18 +8,18 @@ import (
 	"path/filepath"
 	"sync/atomic"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
 )
 
 // Restorer is used to restore a snapshot to a directory.
 type Restorer struct {
-	repo restic.Repository
+	repo vaultic.Repository
 	sn   *data.Snapshot
 	opts Options
 
@@ -98,7 +98,7 @@ func (c *OverwriteBehavior) Type() string {
 }
 
 // NewRestorer creates a restorer preloaded with the content from the snapshot id.
-func NewRestorer(repo restic.Repository, sn *data.Snapshot, opts Options) *Restorer {
+func NewRestorer(repo vaultic.Repository, sn *data.Snapshot, opts Options) *Restorer {
 	opts.Progress = progressOrNoop(opts.Progress)
 	r := &Restorer{
 		repo:              repo,
@@ -133,7 +133,7 @@ func (res *Restorer) sanitizeError(location string, err error) error {
 
 // traverseTree traverses a tree from the repo and calls treeVisitor.
 // target is the path in the file system, location within the snapshot.
-func (res *Restorer) traverseTree(ctx context.Context, target string, treeID restic.ID, visitor treeVisitor) error {
+func (res *Restorer) traverseTree(ctx context.Context, target string, treeID vaultic.ID, visitor treeVisitor) error {
 	location := string(filepath.Separator)
 
 	if visitor.enterDir != nil {
@@ -153,7 +153,7 @@ func (res *Restorer) traverseTree(ctx context.Context, target string, treeID res
 	return err
 }
 
-func (res *Restorer) traverseTreeInner(ctx context.Context, target, location string, treeID restic.ID, visitor treeVisitor) (filenames []string, hasRestored bool, err error) {
+func (res *Restorer) traverseTreeInner(ctx context.Context, target, location string, treeID vaultic.ID, visitor treeVisitor) (filenames []string, hasRestored bool, err error) {
 	debug.Log("%v %v %v", target, location, treeID)
 	tree, err := data.LoadTree(ctx, res.repo, treeID)
 	if err != nil {
@@ -621,7 +621,7 @@ const nVerifyWorkers = 8
 // have been successfully written to dst. It stops when it encounters an
 // error. It returns that error and the number of files it has successfully
 // verified.
-func (res *Restorer) VerifyFiles(ctx context.Context, dst string, countRestoredFiles uint64, p restic.Counter) (int, error) {
+func (res *Restorer) VerifyFiles(ctx context.Context, dst string, countRestoredFiles uint64, p vaultic.Counter) (int, error) {
 	type mustCheck struct {
 		node *data.Node
 		path string
@@ -745,7 +745,7 @@ func (res *Restorer) verifyFile(ctx context.Context, target string, node *data.N
 		if ctx.Err() != nil {
 			return nil, buf, ctx.Err()
 		}
-		length, found := res.repo.LookupBlobSize(restic.BlobHandle{Type: restic.DataBlob, ID: blobID})
+		length, found := res.repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID})
 		if !found {
 			return nil, buf, errors.Errorf("Unable to fetch blob %s", blobID)
 		}
@@ -763,7 +763,7 @@ func (res *Restorer) verifyFile(ctx context.Context, target string, node *data.N
 		if err != nil {
 			return nil, buf, err
 		}
-		matches[i] = blobID.Equal(restic.Hash(buf))
+		matches[i] = blobID.Equal(vaultic.Hash(buf))
 		if failFast && !matches[i] {
 			return nil, buf, errors.Errorf(
 				"Unexpected content in %s, starting at offset %d",

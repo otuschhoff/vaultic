@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/restic/restic/internal/errors"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/errors"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestReadRepo(t *testing.T) {
@@ -54,7 +54,7 @@ func TestReadEmptyPassword(t *testing.T) {
 }
 
 func TestPackSizeEnvParseError(t *testing.T) {
-	t.Setenv("RESTIC_PACK_SIZE", "64MiB")
+	t.Setenv("VAULTIC_PACK_SIZE", "64MiB")
 
 	var gopts Options
 	gopts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
@@ -62,11 +62,11 @@ func TestPackSizeEnvParseError(t *testing.T) {
 	err := gopts.PreRun(false)
 	rtest.Assert(t, err != nil, "expected error for invalid pack size env")
 	rtest.Assert(t, errors.IsFatal(err), "expected fatal error for invalid pack size env, got %T", err)
-	rtest.Assert(t, strings.Contains(err.Error(), "RESTIC_PACK_SIZE"), "error should mention RESTIC_PACK_SIZE, got %v", err)
+	rtest.Assert(t, strings.Contains(err.Error(), "VAULTIC_PACK_SIZE"), "error should mention VAULTIC_PACK_SIZE, got %v", err)
 }
 
 func TestPackSizeEnvApplied(t *testing.T) {
-	t.Setenv("RESTIC_PACK_SIZE", "64")
+	t.Setenv("VAULTIC_PACK_SIZE", "64")
 
 	var gopts Options
 	gopts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
@@ -77,7 +77,7 @@ func TestPackSizeEnvApplied(t *testing.T) {
 }
 
 func TestPackSizeEnvIgnoredWhenFlagSet(t *testing.T) {
-	t.Setenv("RESTIC_PACK_SIZE", "64MiB")
+	t.Setenv("VAULTIC_PACK_SIZE", "64MiB")
 
 	var gopts Options
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
@@ -92,7 +92,7 @@ func TestPackSizeEnvIgnoredWhenFlagSet(t *testing.T) {
 }
 
 func TestCompressionEnvParseError(t *testing.T) {
-	t.Setenv("RESTIC_COMPRESSION", "invalid")
+	t.Setenv("VAULTIC_COMPRESSION", "invalid")
 
 	var gopts Options
 	gopts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
@@ -100,11 +100,11 @@ func TestCompressionEnvParseError(t *testing.T) {
 	err := gopts.PreRun(false)
 	rtest.Assert(t, err != nil, "expected error for invalid compression env")
 	rtest.Assert(t, errors.IsFatal(err), "expected fatal error for invalid compression env, got %T", err)
-	rtest.Assert(t, strings.Contains(err.Error(), "RESTIC_COMPRESSION"), "error should mention RESTIC_COMPRESSION, got %v", err)
+	rtest.Assert(t, strings.Contains(err.Error(), "VAULTIC_COMPRESSION"), "error should mention VAULTIC_COMPRESSION, got %v", err)
 }
 
 func TestCompressionEnvApplied(t *testing.T) {
-	t.Setenv("RESTIC_COMPRESSION", "max")
+	t.Setenv("VAULTIC_COMPRESSION", "max")
 
 	var gopts Options
 	gopts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
@@ -115,7 +115,7 @@ func TestCompressionEnvApplied(t *testing.T) {
 }
 
 func TestCompressionEnvIgnoredWhenFlagSet(t *testing.T) {
-	t.Setenv("RESTIC_COMPRESSION", "invalid")
+	t.Setenv("VAULTIC_COMPRESSION", "invalid")
 
 	var gopts Options
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)

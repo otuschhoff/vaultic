@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/restic/restic/internal/repository/index"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository/index"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func TestIndexSerialize(t *testing.T) {
@@ -21,7 +21,7 @@ func TestIndexSerialize(t *testing.T) {
 
 	// create 50 packs with 20 blobs each
 	for i := range 50 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		var blobs pack.Blobs
 
 		pos := uint(0)
@@ -35,7 +35,7 @@ func TestIndexSerialize(t *testing.T) {
 			pb := &pack.PackedBlob{
 				Pack: packID,
 				Blob: pack.Blob{
-					BlobHandle:         restic.NewRandomBlobHandle(),
+					BlobHandle:         vaultic.NewRandomBlobHandle(),
 					Offset:             pos,
 					Length:             length,
 					UncompressedLength: uncompressedLength,
@@ -52,13 +52,13 @@ func TestIndexSerialize(t *testing.T) {
 	err := idx.Encode(wr)
 	rtest.OK(t, err)
 
-	idx2ID := restic.NewRandomID()
+	idx2ID := vaultic.NewRandomID()
 	idx2, err := index.DecodeIndex(wr.Bytes(), idx2ID)
 	rtest.OK(t, err)
 	rtest.Assert(t, idx2 != nil, "nil returned for decoded index")
 	indexID, err := idx2.IDs()
 	rtest.OK(t, err)
-	rtest.Equals(t, indexID, restic.IDs{idx2ID})
+	rtest.Equals(t, indexID, vaultic.IDs{idx2ID})
 
 	wr2 := bytes.NewBuffer(nil)
 	err = idx2.Encode(wr2)
@@ -85,7 +85,7 @@ func TestIndexSerialize(t *testing.T) {
 	// add more blobs to idx
 	newtests := []*pack.PackedBlob{}
 	for i := range 10 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		var blobs pack.Blobs
 
 		pos := uint(0)
@@ -94,7 +94,7 @@ func TestIndexSerialize(t *testing.T) {
 			pb := &pack.PackedBlob{
 				Pack: packID,
 				Blob: pack.Blob{
-					BlobHandle: restic.NewRandomBlobHandle(),
+					BlobHandle: vaultic.NewRandomBlobHandle(),
 					Offset:     pos,
 					Length:     length,
 				},
@@ -115,11 +115,11 @@ func TestIndexSerialize(t *testing.T) {
 	rtest.Assert(t, idx.Final(),
 		"index not final after encoding")
 
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 	rtest.OK(t, idx.SetID(id))
 	ids, err := idx.IDs()
 	rtest.OK(t, err)
-	rtest.Equals(t, restic.IDs{id}, ids)
+	rtest.Equals(t, vaultic.IDs{id}, ids)
 
 	idx3, err := index.DecodeIndex(wr3.Bytes(), id)
 	rtest.OK(t, err)
@@ -145,14 +145,14 @@ func TestIndexSize(t *testing.T) {
 	packs := 200
 	blobCount := 100
 	for i := range packs {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		var blobs pack.Blobs
 
 		pos := uint(0)
 		for j := range blobCount {
 			length := uint(i*100 + j)
 			blobs = append(blobs, pack.Blob{
-				BlobHandle: restic.NewRandomBlobHandle(),
+				BlobHandle: vaultic.NewRandomBlobHandle(),
 				Offset:     pos,
 				Length:     length,
 			})
@@ -167,8 +167,8 @@ func TestIndexSize(t *testing.T) {
 	err := idx.Encode(wr)
 	rtest.OK(t, err)
 
-	rtest.Equals(t, uint(packs*blobCount), idx.Len(restic.DataBlob))
-	rtest.Equals(t, uint(0), idx.Len(restic.TreeBlob))
+	rtest.Equals(t, uint(packs*blobCount), idx.Len(vaultic.DataBlob))
+	rtest.Equals(t, uint(0), idx.Len(vaultic.TreeBlob))
 
 	t.Logf("Index file size for %d blobs in %d packs is %d", blobCount*packs, packs, wr.Len())
 }
@@ -242,35 +242,35 @@ var docExampleV2 = []byte(`
 `)
 
 var exampleTests = []struct {
-	id, packID         restic.ID
-	tpe                restic.BlobType
+	id, packID         vaultic.ID
+	tpe                vaultic.BlobType
 	offset, length     uint
 	uncompressedLength uint
 }{
 	{
-		restic.TestParseID("3ec79977ef0cf5de7b08cd12b874cd0f62bbaf7f07f3497a5b1bbcc8cb39b1ce"),
-		restic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
-		restic.DataBlob, 0, 38, 0,
+		vaultic.TestParseID("3ec79977ef0cf5de7b08cd12b874cd0f62bbaf7f07f3497a5b1bbcc8cb39b1ce"),
+		vaultic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
+		vaultic.DataBlob, 0, 38, 0,
 	}, {
-		restic.TestParseID("9ccb846e60d90d4eb915848add7aa7ea1e4bbabfc60e573db9f7bfb2789afbae"),
-		restic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
-		restic.TreeBlob, 38, 112, 511,
+		vaultic.TestParseID("9ccb846e60d90d4eb915848add7aa7ea1e4bbabfc60e573db9f7bfb2789afbae"),
+		vaultic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
+		vaultic.TreeBlob, 38, 112, 511,
 	}, {
-		restic.TestParseID("d3dc577b4ffd38cc4b32122cabf8655a0223ed22edfd93b353dc0c3f2b0fdf66"),
-		restic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
-		restic.DataBlob, 150, 123, 234,
+		vaultic.TestParseID("d3dc577b4ffd38cc4b32122cabf8655a0223ed22edfd93b353dc0c3f2b0fdf66"),
+		vaultic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
+		vaultic.DataBlob, 150, 123, 234,
 	},
 }
 
 var exampleLookupTest = struct {
-	packID restic.ID
-	blobs  map[restic.ID]restic.BlobType
+	packID vaultic.ID
+	blobs  map[vaultic.ID]vaultic.BlobType
 }{
-	restic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
-	map[restic.ID]restic.BlobType{
-		restic.TestParseID("3ec79977ef0cf5de7b08cd12b874cd0f62bbaf7f07f3497a5b1bbcc8cb39b1ce"): restic.DataBlob,
-		restic.TestParseID("9ccb846e60d90d4eb915848add7aa7ea1e4bbabfc60e573db9f7bfb2789afbae"): restic.TreeBlob,
-		restic.TestParseID("d3dc577b4ffd38cc4b32122cabf8655a0223ed22edfd93b353dc0c3f2b0fdf66"): restic.DataBlob,
+	vaultic.TestParseID("73d04e6125cf3c28a299cc2f3cca3b78ceac396e4fcf9575e34536b26782413c"),
+	map[vaultic.ID]vaultic.BlobType{
+		vaultic.TestParseID("3ec79977ef0cf5de7b08cd12b874cd0f62bbaf7f07f3497a5b1bbcc8cb39b1ce"): vaultic.DataBlob,
+		vaultic.TestParseID("9ccb846e60d90d4eb915848add7aa7ea1e4bbabfc60e573db9f7bfb2789afbae"): vaultic.TreeBlob,
+		vaultic.TestParseID("d3dc577b4ffd38cc4b32122cabf8655a0223ed22edfd93b353dc0c3f2b0fdf66"): vaultic.DataBlob,
 	},
 }
 
@@ -282,11 +282,11 @@ func TestIndexUnserialize(t *testing.T) {
 		{docExampleV1, 1},
 		{docExampleV2, 2},
 	} {
-		idx, err := index.DecodeIndex(task.idxBytes, restic.NewRandomID())
+		idx, err := index.DecodeIndex(task.idxBytes, vaultic.NewRandomID())
 		rtest.OK(t, err)
 
 		for _, test := range exampleTests {
-			list := idx.Lookup(restic.BlobHandle{ID: test.id, Type: test.tpe}, nil)
+			list := idx.Lookup(vaultic.BlobHandle{ID: test.id, Type: test.tpe}, nil)
 			if len(list) != 1 {
 				t.Errorf("expected one result for blob %v, got %v: %v", test.id.Str(), len(list), list)
 			}
@@ -325,7 +325,7 @@ func TestIndexUnserialize(t *testing.T) {
 	}
 }
 
-func listPack(t testing.TB, idx *index.Index, id restic.ID) (pbs []*pack.PackedBlob) {
+func listPack(t testing.TB, idx *index.Index, id vaultic.ID) (pbs []*pack.PackedBlob) {
 	for pb := range idx.Values() {
 		if pb.PackID().Equal(id) {
 			pbs = append(pbs, pb)
@@ -353,7 +353,7 @@ func initBenchmarkIndexJSON() {
 func BenchmarkDecodeIndex(b *testing.B) {
 	benchmarkIndexJSONOnce.Do(initBenchmarkIndexJSON)
 
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -364,7 +364,7 @@ func BenchmarkDecodeIndex(b *testing.B) {
 
 func BenchmarkDecodeIndexParallel(b *testing.B) {
 	benchmarkIndexJSONOnce.Do(initBenchmarkIndexJSON)
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 
 	b.ResetTimer()
 
@@ -398,13 +398,13 @@ func BenchmarkEncodeIndex(b *testing.B) {
 
 func TestIndexPacks(t *testing.T) {
 	idx := index.NewIndex()
-	packs := restic.NewIDSet()
+	packs := vaultic.NewIDSet()
 
 	for range 20 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		idx.StorePack(packID, pack.Blobs{
 			{
-				BlobHandle: restic.NewRandomBlobHandle(),
+				BlobHandle: vaultic.NewRandomBlobHandle(),
 				Offset:     0,
 				Length:     23,
 			},
@@ -420,16 +420,16 @@ func TestIndexPacks(t *testing.T) {
 const maxPackSize = 16 * 1024 * 1024
 
 // This function generates a (insecure) random ID, similar to NewRandomID
-func NewRandomTestID(rng *rand.Rand) restic.ID {
-	id := restic.ID{}
+func NewRandomTestID(rng *rand.Rand) vaultic.ID {
+	id := vaultic.ID{}
 	rng.Read(id[:])
 	return id
 }
 
-func createRandomIndex(rng *rand.Rand, packfiles int) (idx *index.Index, lookupBh restic.BlobHandle) {
+func createRandomIndex(rng *rand.Rand, packfiles int) (idx *index.Index, lookupBh vaultic.BlobHandle) {
 	idx = index.NewIndex()
 	// the expectation is slightly above 8 blobs per pack, so preallocate 9 to be safe
-	idx.Preallocate(restic.DataBlob, packfiles*9)
+	idx.Preallocate(vaultic.DataBlob, packfiles*9)
 
 	// create index with given number of pack files
 	for i := range packfiles {
@@ -440,8 +440,8 @@ func createRandomIndex(rng *rand.Rand, packfiles int) (idx *index.Index, lookupB
 			size := 2000 + rng.Intn(4*1024*1024)
 			id := NewRandomTestID(rng)
 			blobs = append(blobs, pack.Blob{
-				BlobHandle: restic.BlobHandle{
-					Type: restic.DataBlob,
+				BlobHandle: vaultic.BlobHandle{
+					Type: vaultic.DataBlob,
 					ID:   id,
 				},
 				Length:             uint(size),
@@ -454,8 +454,8 @@ func createRandomIndex(rng *rand.Rand, packfiles int) (idx *index.Index, lookupB
 		idx.StorePack(packID, blobs)
 
 		if i == 0 {
-			lookupBh = restic.BlobHandle{
-				Type: restic.DataBlob,
+			lookupBh = vaultic.BlobHandle{
+				Type: vaultic.DataBlob,
 				ID:   blobs[rng.Intn(len(blobs))].ID,
 			}
 		}
@@ -466,9 +466,9 @@ func createRandomIndex(rng *rand.Rand, packfiles int) (idx *index.Index, lookupB
 
 func BenchmarkIndexHasUnknown(b *testing.B) {
 	idx, _ := createRandomIndex(rand.New(rand.NewSource(0)), 200000)
-	handles := make([]restic.BlobHandle, 0, 100000)
+	handles := make([]vaultic.BlobHandle, 0, 100000)
 	for i := 0; i < cap(handles); i++ {
-		handles = append(handles, restic.NewRandomBlobHandle())
+		handles = append(handles, vaultic.NewRandomBlobHandle())
 	}
 
 	for b.Loop() {
@@ -481,7 +481,7 @@ func BenchmarkIndexHasUnknown(b *testing.B) {
 
 func BenchmarkIndexHasKnown(b *testing.B) {
 	idx, _ := createRandomIndex(rand.New(rand.NewSource(0)), 200000)
-	handles := make([]restic.BlobHandle, 0, 100000)
+	handles := make([]vaultic.BlobHandle, 0, 100000)
 	for handle := range idx.Values() {
 		handles = append(handles, handle.Handle())
 		if len(handles) == cap(handles) {
@@ -524,7 +524,7 @@ func TestIndexHas(t *testing.T) {
 
 	// create 50 packs with 20 blobs each
 	for i := range 50 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		var blobs pack.Blobs
 
 		pos := uint(0)
@@ -538,7 +538,7 @@ func TestIndexHas(t *testing.T) {
 			pb := &pack.PackedBlob{
 				Pack: packID,
 				Blob: pack.Blob{
-					BlobHandle:         restic.NewRandomBlobHandle(),
+					BlobHandle:         vaultic.NewRandomBlobHandle(),
 					Offset:             pos,
 					Length:             length,
 					UncompressedLength: uncompressedLength,
@@ -555,26 +555,26 @@ func TestIndexHas(t *testing.T) {
 		rtest.Assert(t, idx.Has(testBlob.Handle()), "Index reports not having data blob added to it")
 	}
 
-	rtest.Assert(t, !idx.Has(restic.NewRandomBlobHandle()), "Index reports having a data blob not added to it")
-	rtest.Assert(t, !idx.Has(restic.BlobHandle{ID: tests[0].Handle().ID, Type: restic.TreeBlob}), "Index reports having a tree blob added to it with the same id as a data blob")
+	rtest.Assert(t, !idx.Has(vaultic.NewRandomBlobHandle()), "Index reports having a data blob not added to it")
+	rtest.Assert(t, !idx.Has(vaultic.BlobHandle{ID: tests[0].Handle().ID, Type: vaultic.TreeBlob}), "Index reports having a tree blob added to it with the same id as a data blob")
 }
 
 func TestMixedEachByPack(t *testing.T) {
 	idx := index.NewIndex()
 
-	expected := make(map[restic.ID]int)
+	expected := make(map[vaultic.ID]int)
 	// create 50 packs with 2 blobs each
 	for range 50 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		expected[packID] = 1
 		blobs := pack.Blobs{
 			{
-				BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: restic.NewRandomID()},
+				BlobHandle: vaultic.BlobHandle{Type: vaultic.DataBlob, ID: vaultic.NewRandomID()},
 				Offset:     0,
 				Length:     42,
 			},
 			{
-				BlobHandle: restic.BlobHandle{Type: restic.TreeBlob, ID: restic.NewRandomID()},
+				BlobHandle: vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: vaultic.NewRandomID()},
 				Offset:     42,
 				Length:     43,
 			},
@@ -582,16 +582,16 @@ func TestMixedEachByPack(t *testing.T) {
 		idx.StorePack(packID, blobs)
 	}
 
-	reported := make(map[restic.ID]int)
-	for bp := range idx.EachByPack(context.TODO(), restic.NewIDSet()) {
+	reported := make(map[vaultic.ID]int)
+	for bp := range idx.EachByPack(context.TODO(), vaultic.NewIDSet()) {
 		reported[bp.PackID]++
 
 		rtest.Equals(t, 2, len(bp.Blobs)) // correct blob count
 		bp.Blobs.Sort()
 		b0 := bp.Blobs[0]
-		rtest.Assert(t, b0.Type == restic.DataBlob && b0.Offset == 0 && b0.Length == 42, "wrong blob", b0)
+		rtest.Assert(t, b0.Type == vaultic.DataBlob && b0.Offset == 0 && b0.Length == 42, "wrong blob", b0)
 		b1 := bp.Blobs[1]
-		rtest.Assert(t, b1.Type == restic.TreeBlob && b1.Offset == 42 && b1.Length == 43, "wrong blob", b1)
+		rtest.Assert(t, b1.Type == vaultic.TreeBlob && b1.Offset == 42 && b1.Length == 43, "wrong blob", b1)
 	}
 	rtest.Equals(t, expected, reported)
 }
@@ -599,11 +599,11 @@ func TestMixedEachByPack(t *testing.T) {
 func TestEachByPackIgnoes(t *testing.T) {
 	idx := index.NewIndex()
 
-	ignores := restic.NewIDSet()
-	expected := make(map[restic.ID]int)
+	ignores := vaultic.NewIDSet()
+	expected := make(map[vaultic.ID]int)
 	// create 50 packs with one blob each
 	for i := range 50 {
-		packID := restic.NewRandomID()
+		packID := vaultic.NewRandomID()
 		if i < 3 {
 			ignores.Insert(packID)
 		} else {
@@ -611,7 +611,7 @@ func TestEachByPackIgnoes(t *testing.T) {
 		}
 		blobs := pack.Blobs{
 			{
-				BlobHandle: restic.BlobHandle{Type: restic.DataBlob, ID: restic.NewRandomID()},
+				BlobHandle: vaultic.BlobHandle{Type: vaultic.DataBlob, ID: vaultic.NewRandomID()},
 				Offset:     0,
 				Length:     42,
 			},
@@ -620,12 +620,12 @@ func TestEachByPackIgnoes(t *testing.T) {
 	}
 	idx.Finalize()
 
-	reported := make(map[restic.ID]int)
+	reported := make(map[vaultic.ID]int)
 	for bp := range idx.EachByPack(context.TODO(), ignores) {
 		reported[bp.PackID]++
 		rtest.Equals(t, 1, len(bp.Blobs)) // correct blob count
 		b0 := bp.Blobs[0]
-		rtest.Assert(t, b0.Type == restic.DataBlob && b0.Offset == 0 && b0.Length == 42, "wrong blob", b0)
+		rtest.Assert(t, b0.Type == vaultic.DataBlob && b0.Offset == 0 && b0.Length == 42, "wrong blob", b0)
 	}
 	rtest.Equals(t, expected, reported)
 }

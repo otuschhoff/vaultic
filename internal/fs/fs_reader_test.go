@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
 func verifyFileContentOpenFile(t testing.TB, fs FS, filename string, want []byte) {

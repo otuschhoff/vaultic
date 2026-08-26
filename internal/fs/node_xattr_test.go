@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/pkg/xattr"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestIsListxattrPermissionError(t *testing.T) {

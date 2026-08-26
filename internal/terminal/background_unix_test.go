@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestIsProcessBackground(t *testing.T) {

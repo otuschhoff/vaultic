@@ -7,16 +7,16 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
 // MasterIndex is a collection of indexes and IDs of chunks that are in the process of being saved.
 type MasterIndex struct {
 	idx          []*Index
-	pendingBlobs map[restic.BlobHandle]uint
+	pendingBlobs map[vaultic.BlobHandle]uint
 	idxMutex     sync.RWMutex
 }
 
@@ -35,11 +35,11 @@ func (mi *MasterIndex) clear() {
 }
 
 func (mi *MasterIndex) clearPendingBlobs() {
-	mi.pendingBlobs = make(map[restic.BlobHandle]uint)
+	mi.pendingBlobs = make(map[vaultic.BlobHandle]uint)
 }
 
 // Lookup queries all known Indexes for the ID and returns all matches.
-func (mi *MasterIndex) Lookup(bh restic.BlobHandle) []*pack.PackedBlob {
+func (mi *MasterIndex) Lookup(bh vaultic.BlobHandle) []*pack.PackedBlob {
 	mi.idxMutex.RLock()
 	defer mi.idxMutex.RUnlock()
 
@@ -53,7 +53,7 @@ func (mi *MasterIndex) Lookup(bh restic.BlobHandle) []*pack.PackedBlob {
 
 // LookupSize queries all known Indexes for the ID and returns the first match.
 // Also returns true if the ID is pending.
-func (mi *MasterIndex) LookupSize(bh restic.BlobHandle) (uint, bool) {
+func (mi *MasterIndex) LookupSize(bh vaultic.BlobHandle) (uint, bool) {
 	mi.idxMutex.RLock()
 	defer mi.idxMutex.RUnlock()
 
@@ -75,7 +75,7 @@ func (mi *MasterIndex) LookupSize(bh restic.BlobHandle) (uint, bool) {
 // Before doing so it checks if this blob is already known.
 // Returns true if adding was successful and false if the blob
 // was already known
-func (mi *MasterIndex) AddPending(bh restic.BlobHandle, size uint) bool {
+func (mi *MasterIndex) AddPending(bh vaultic.BlobHandle, size uint) bool {
 
 	mi.idxMutex.Lock()
 	defer mi.idxMutex.Unlock()
@@ -97,11 +97,11 @@ func (mi *MasterIndex) AddPending(bh restic.BlobHandle, size uint) bool {
 }
 
 // IDs returns the IDs of all indexes contained in the index.
-func (mi *MasterIndex) IDs() restic.IDSet {
+func (mi *MasterIndex) IDs() vaultic.IDSet {
 	mi.idxMutex.RLock()
 	defer mi.idxMutex.RUnlock()
 
-	ids := restic.NewIDSet()
+	ids := vaultic.NewIDSet()
 	for _, idx := range mi.idx {
 		if !idx.Final() {
 			continue
@@ -121,11 +121,11 @@ func (mi *MasterIndex) IDs() restic.IDSet {
 // Packs returns all packs that are covered by the index.
 // If packBlacklist is given, those packs are only contained in the
 // resulting IDSet if they are contained in a non-final (newly written) index.
-func (mi *MasterIndex) Packs(packBlacklist restic.IDSet) restic.IDSet {
+func (mi *MasterIndex) Packs(packBlacklist vaultic.IDSet) vaultic.IDSet {
 	mi.idxMutex.RLock()
 	defer mi.idxMutex.RUnlock()
 
-	packs := restic.NewIDSet()
+	packs := vaultic.NewIDSet()
 	for _, idx := range mi.idx {
 		idxPacks := idx.Packs()
 		if idx.final && len(packBlacklist) > 0 {
@@ -146,18 +146,18 @@ func (mi *MasterIndex) Insert(idx *Index) {
 }
 
 // StorePack remembers the id and pack in the index.
-func (mi *MasterIndex) StorePack(ctx context.Context, id restic.ID, blobs pack.Blobs, r restic.SaverUnpacked[restic.FileType]) error {
+func (mi *MasterIndex) StorePack(ctx context.Context, id vaultic.ID, blobs pack.Blobs, r vaultic.SaverUnpacked[vaultic.FileType]) error {
 	mi.storePack(id, blobs)
 	return mi.saveFullIndex(ctx, r)
 }
 
-func (mi *MasterIndex) storePack(id restic.ID, blobs pack.Blobs) {
+func (mi *MasterIndex) storePack(id vaultic.ID, blobs pack.Blobs) {
 	mi.idxMutex.Lock()
 	defer mi.idxMutex.Unlock()
 
 	// delete blobs from pending
 	for _, blob := range blobs {
-		delete(mi.pendingBlobs, restic.BlobHandle{Type: blob.Type, ID: blob.ID})
+		delete(mi.pendingBlobs, vaultic.BlobHandle{Type: blob.Type, ID: blob.ID})
 	}
 
 	for _, idx := range mi.idx {
@@ -249,7 +249,7 @@ func (mi *MasterIndex) MergeFinalIndexes() error {
 	}
 
 	// preallocate space for all blob types
-	for typ := range restic.NumBlobTypes {
+	for typ := range vaultic.NumBlobTypes {
 		size := 0
 		for _, idx := range mi.idx {
 			size += int(idx.Len(typ))
@@ -280,9 +280,9 @@ func (mi *MasterIndex) MergeFinalIndexes() error {
 	return nil
 }
 
-func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, p restic.Counter, cb func(id restic.ID, idx *Index, err error) error) error {
+func (mi *MasterIndex) Load(ctx context.Context, r vaultic.ListerLoaderUnpacked, p vaultic.Counter, cb func(id vaultic.ID, idx *Index, err error) error) error {
 	defer p.Done()
-	indexList, err := restic.MemorizeList(ctx, r, restic.IndexFile)
+	indexList, err := vaultic.MemorizeList(ctx, r, vaultic.IndexFile)
 	if err != nil {
 		return err
 	}
@@ -291,7 +291,7 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 		return err
 	}
 	var numIndexFiles uint64
-	err = indexList.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
+	err = indexList.List(ctx, vaultic.IndexFile, func(id vaultic.ID, _ int64) error {
 		if loadedIDs.Has(id) {
 			// skip already loaded indexes
 			return nil
@@ -304,7 +304,7 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 	}
 	p.SetMax(numIndexFiles)
 
-	err = ForAllIndexes(ctx, indexList, r, func(id restic.ID, idx *Index, err error) error {
+	err = ForAllIndexes(ctx, indexList, r, func(id vaultic.ID, idx *Index, err error) error {
 		if loadedIDs.Has(id) {
 			// skip already loaded indexes
 			return nil
@@ -331,7 +331,7 @@ func (mi *MasterIndex) Load(ctx context.Context, r restic.ListerLoaderUnpacked, 
 	return mi.MergeFinalIndexes()
 }
 
-func (mi *MasterIndex) prepareIncrementalLoad(ctx context.Context, indexList restic.Lister) (restic.IDSet, error) {
+func (mi *MasterIndex) prepareIncrementalLoad(ctx context.Context, indexList vaultic.Lister) (vaultic.IDSet, error) {
 	mi.idxMutex.Lock()
 	// support incremental loading, while also ensuring that the result is identical to the result of a full load into a new MasterIndex
 	mi.clearPendingBlobs()
@@ -342,10 +342,10 @@ func (mi *MasterIndex) prepareIncrementalLoad(ctx context.Context, indexList res
 	if err != nil {
 		panic("internal error - failed to get index IDs")
 	}
-	loadedIDs := restic.NewIDSet(loadedIDList...)
+	loadedIDs := vaultic.NewIDSet(loadedIDList...)
 
-	indexFiles := restic.NewIDSet()
-	err = indexList.List(ctx, restic.IndexFile, func(id restic.ID, _ int64) error {
+	indexFiles := vaultic.NewIDSet()
+	err = indexList.List(ctx, vaultic.IndexFile, func(id vaultic.ID, _ int64) error {
 		indexFiles.Insert(id)
 		return nil
 	})
@@ -363,9 +363,9 @@ func (mi *MasterIndex) prepareIncrementalLoad(ctx context.Context, indexList res
 }
 
 type MasterIndexRewriteOpts struct {
-	SaveProgress   restic.Counter
-	DeleteProgress func() restic.Counter
-	DeleteReport   func(id restic.ID, err error)
+	SaveProgress   vaultic.Counter
+	DeleteProgress func() vaultic.Counter
+	DeleteReport   func(id vaultic.ID, err error)
 }
 
 // Rewrite removes packs whose ID is in excludePacks from all known indexes.
@@ -374,14 +374,14 @@ type MasterIndexRewriteOpts struct {
 // This is used by repair index to only rewrite and delete the old indexes.
 //
 // Must not be called concurrently to any other MasterIndex operation.
-func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.FileType], excludePacks restic.IDSet, oldIndexes restic.IDSet, extraObsolete restic.IDs, opts MasterIndexRewriteOpts) error {
+func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaultic.FileType], excludePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, opts MasterIndexRewriteOpts) error {
 	for _, idx := range mi.idx {
 		if !idx.Final() {
 			panic("internal error - index must be saved before calling MasterIndex.Rewrite")
 		}
 	}
 
-	var indexes restic.IDSet
+	var indexes vaultic.IDSet
 	if oldIndexes != nil {
 		// repair index adds new index entries for already existing pack files
 		// only remove the old (possibly broken) entries by only processing old indexes
@@ -392,7 +392,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 
 	p := opts.SaveProgress
 	if p == nil {
-		p = restic.NoopCounter
+		p = vaultic.NoopCounter
 	}
 	p.SetMax(uint64(len(indexes)))
 
@@ -404,12 +404,12 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	// copy excludePacks to prevent unintended sideeffects
 	excludePacks = excludePacks.Clone()
 	if excludePacks == nil {
-		excludePacks = restic.NewIDSet()
+		excludePacks = vaultic.NewIDSet()
 	}
 	debug.Log("start rebuilding index of %d indexes, excludePacks: %v", len(indexes), excludePacks)
 	wg, wgCtx := errgroup.WithContext(ctx)
 
-	idxCh := make(chan restic.ID)
+	idxCh := make(chan vaultic.ID)
 	wg.Go(func() error {
 		defer close(idxCh)
 		for id := range indexes {
@@ -430,7 +430,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 	loader := func() error {
 		defer rewriteWg.Done()
 		for id := range idxCh {
-			buf, err := repo.LoadUnpacked(wgCtx, restic.IndexFile, id)
+			buf, err := repo.LoadUnpacked(wgCtx, vaultic.IndexFile, id)
 			if err != nil {
 				return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), err)
 			}
@@ -462,22 +462,22 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 		return nil
 	})
 
-	obsolete := restic.NewIDSet(extraObsolete...)
+	obsolete := vaultic.NewIDSet(extraObsolete...)
 	saveCh := make(chan *Index)
 
 	wg.Go(func() error {
 		defer close(saveCh)
 		// duplicate packs must be tracked separately to allow the `EachByPack` loop to check
 		// for duplicate index entries with different blobs.
-		// this is necessary to work around a bug in restic < 0.10.0 where the blobs of
+		// this is necessary to work around a bug in vaultic < 0.10.0 where the blobs of
 		// a pack file could be split over multiple indexes.
-		packBlobsIDSet := restic.NewIDSet()
+		packBlobsIDSet := vaultic.NewIDSet()
 		newIndex := NewIndex()
 		for task := range rewriteCh {
 			// always rewrite indexes that include a pack that must be removed or is a duplicate or that are not full
 			if len(task.idx.Packs().Intersect(excludePacks)) == 0 && Full(task.idx) && !Oversized(task.idx) {
 				// check that no pack index entry is a duplicate of an already processed one
-				idxPackBlobsIDSet := restic.NewIDSet()
+				idxPackBlobsIDSet := vaultic.NewIDSet()
 				for pbs := range task.idx.EachByPack(wgCtx, excludePacks) {
 					idxPackBlobsIDSet.Insert(PackBlobsHash(pbs))
 				}
@@ -494,7 +494,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 			if err != nil || len(ids) != 1 {
 				panic("internal error, index has no ID")
 			}
-			obsolete.Merge(restic.NewIDSet(ids...))
+			obsolete.Merge(vaultic.NewIDSet(ids...))
 
 			for pbs := range task.idx.EachByPack(wgCtx, excludePacks) {
 				// only filter pack blobs with matching packID and blobs
@@ -551,12 +551,12 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 		return fmt.Errorf("failed to rewrite indexes: %w", err)
 	}
 
-	p = restic.NoopCounter
+	p = vaultic.NoopCounter
 	if opts.DeleteProgress != nil {
 		p = opts.DeleteProgress()
 	}
 	defer p.Done()
-	return restic.ParallelRemove(ctx, repo, obsolete, restic.IndexFile, func(id restic.ID, err error) error {
+	return vaultic.ParallelRemove(ctx, repo, obsolete, vaultic.IndexFile, func(id vaultic.ID, err error) error {
 		if opts.DeleteReport != nil {
 			opts.DeleteReport(id, err)
 		}
@@ -569,7 +569,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo restic.Unpacked[restic.
 // It is only intended for use by prune with the UnsafeRecovery option.
 //
 // Must not be called concurrently to any other MasterIndex operation.
-func (mi *MasterIndex) SaveFallback(ctx context.Context, repo restic.SaverRemoverUnpacked[restic.FileType], excludePacks restic.IDSet, p restic.Counter) error {
+func (mi *MasterIndex) SaveFallback(ctx context.Context, repo vaultic.SaverRemoverUnpacked[vaultic.FileType], excludePacks vaultic.IDSet, p vaultic.Counter) error {
 	p.SetMax(uint64(len(mi.Packs(excludePacks))))
 
 	mi.idxMutex.Lock()
@@ -577,7 +577,7 @@ func (mi *MasterIndex) SaveFallback(ctx context.Context, repo restic.SaverRemove
 
 	debug.Log("start rebuilding index of %d indexes, excludePacks: %v", len(mi.idx), excludePacks)
 
-	obsolete := restic.NewIDSet()
+	obsolete := vaultic.NewIDSet()
 	wg, wgCtx := errgroup.WithContext(ctx)
 	// keep concurrency bounded as we're on a fallback path
 	wg.SetLimit(1 + int(repo.Connections()))
@@ -593,7 +593,7 @@ func (mi *MasterIndex) SaveFallback(ctx context.Context, repo restic.SaverRemove
 					panic("internal error - finalized index without ID")
 				}
 				debug.Log("adding index ids %v to supersedes field", ids)
-				obsolete.Merge(restic.NewIDSet(ids...))
+				obsolete.Merge(vaultic.NewIDSet(ids...))
 			}
 
 			for pbs := range idx.EachByPack(wgCtx, excludePacks) {
@@ -637,7 +637,7 @@ func (mi *MasterIndex) SaveFallback(ctx context.Context, repo restic.SaverRemove
 }
 
 // saveIndex saves all indexes in the backend.
-func (mi *MasterIndex) saveIndex(ctx context.Context, r restic.SaverUnpacked[restic.FileType], indexes ...*Index) error {
+func (mi *MasterIndex) saveIndex(ctx context.Context, r vaultic.SaverUnpacked[vaultic.FileType], indexes ...*Index) error {
 	for i, idx := range indexes {
 		debug.Log("Saving index %d", i)
 
@@ -653,23 +653,23 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r restic.SaverUnpacked[res
 }
 
 // Flush saves all new indexes in the backend.
-func (mi *MasterIndex) Flush(ctx context.Context, r restic.SaverUnpacked[restic.FileType]) error {
+func (mi *MasterIndex) Flush(ctx context.Context, r vaultic.SaverUnpacked[vaultic.FileType]) error {
 	return mi.saveIndex(ctx, r, mi.finalizeNotFinalIndexes()...)
 }
 
 // saveFullIndex saves all full indexes in the backend.
-func (mi *MasterIndex) saveFullIndex(ctx context.Context, r restic.SaverUnpacked[restic.FileType]) error {
+func (mi *MasterIndex) saveFullIndex(ctx context.Context, r vaultic.SaverUnpacked[vaultic.FileType]) error {
 	return mi.saveIndex(ctx, r, mi.finalizeFullIndexes()...)
 }
 
 // ListPacks returns the blobs of the specified pack files grouped by pack file.
-func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan PackBlobs {
+func (mi *MasterIndex) ListPacks(ctx context.Context, packs vaultic.IDSet) <-chan PackBlobs {
 	out := make(chan PackBlobs)
 	go func() {
 		defer close(out)
 		// only resort a part of the index to keep the memory overhead bounded
 		for i := range byte(16) {
-			packBlob := make(map[restic.ID]pack.Blobs)
+			packBlob := make(map[vaultic.ID]pack.Blobs)
 			for pack := range packs {
 				if pack[0]&0xf == i {
 					packBlob[pack] = nil
@@ -704,7 +704,7 @@ func (mi *MasterIndex) ListPacks(ctx context.Context, packs restic.IDSet) <-chan
 }
 
 // Only for use by AssociatedSet
-func (mi *MasterIndex) blobIndex(h restic.BlobHandle) int {
+func (mi *MasterIndex) blobIndex(h vaultic.BlobHandle) int {
 	mi.idxMutex.RLock()
 	defer mi.idxMutex.RUnlock()
 
@@ -713,7 +713,7 @@ func (mi *MasterIndex) blobIndex(h restic.BlobHandle) int {
 }
 
 // Only for use by AssociatedSet
-func (mi *MasterIndex) stableLen(t restic.BlobType) uint {
+func (mi *MasterIndex) stableLen(t vaultic.BlobType) uint {
 	mi.idxMutex.RLock()
 	defer mi.idxMutex.RUnlock()
 

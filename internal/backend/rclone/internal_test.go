@@ -5,12 +5,12 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/errors"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/errors"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
-// restic should detect rclone exiting.
+// vaultic should detect rclone exiting.
 func TestRcloneExit(t *testing.T) {
 	t.Parallel()
 	dir := rtest.TempDir(t)
@@ -41,7 +41,7 @@ func TestRcloneExit(t *testing.T) {
 	}
 }
 
-// restic should detect rclone startup failures
+// vaultic should detect rclone startup failures
 func TestRcloneFailedStart(t *testing.T) {
 	cfg := NewConfig()
 	// exits with exit code 1

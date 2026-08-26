@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func init() {
@@ -22,7 +22,7 @@ func (*UpgradeRepoV2) Desc() string {
 	return "upgrade a repository to version 2"
 }
 
-func (*UpgradeRepoV2) Check(_ context.Context, repo restic.Repository) (bool, string, error) {
+func (*UpgradeRepoV2) Check(_ context.Context, repo vaultic.Repository) (bool, string, error) {
 	isV1 := repo.Config().Version == 1
 	reason := ""
 	if !isV1 {
@@ -35,6 +35,6 @@ func (*UpgradeRepoV2) RepoCheck() bool {
 	return true
 }
 
-func (m *UpgradeRepoV2) Apply(ctx context.Context, repo restic.Repository) error {
+func (m *UpgradeRepoV2) Apply(ctx context.Context, repo vaultic.Repository) error {
 	return repository.UpgradeRepo(ctx, repo.(*repository.Repository))
 }

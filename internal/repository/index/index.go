@@ -13,19 +13,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/repository/pack"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 // In large repositories, millions of blobs are stored in the repository
-// and restic needs to store an index entry for each blob in memory for
+// and vaultic needs to store an index entry for each blob in memory for
 // most operations.
 // Hence the index data structure defined here is one of the main contributions
-// to the total memory requirements of restic.
+// to the total memory requirements of vaultic.
 //
 // We store the index entries in indexMaps. In these maps, entries take 56
 // bytes each, plus 8/4 = 2 bytes of unused pointers on average, not counting
@@ -54,11 +54,11 @@ import (
 // Index holds lookup tables for id -> pack.
 type Index struct {
 	m      sync.RWMutex
-	byType [restic.NumBlobTypes]indexMap
-	packs  restic.IDs
+	byType [vaultic.NumBlobTypes]indexMap
+	packs  vaultic.IDs
 
-	final   bool       // set to true for all indexes read from the backend ("finalized")
-	ids     restic.IDs // set to the IDs of the contained finalized indexes
+	final   bool        // set to true for all indexes read from the backend ("finalized")
+	ids     vaultic.IDs // set to the IDs of the contained finalized indexes
 	created time.Time
 }
 
@@ -71,7 +71,7 @@ func NewIndex() *Index {
 
 // addToPacks saves the given pack ID and return the index.
 // This procedere allows to use pack IDs which can be easily garbage collected after.
-func (idx *Index) addToPacks(id restic.ID) uint32 {
+func (idx *Index) addToPacks(id vaultic.ID) uint32 {
 	idx.packs = append(idx.packs, id)
 	// packIndex is stored as a uint32 in each indexEntry; guard against
 	// an (unrealistic) overflow so the cast below can never wrap.
@@ -145,7 +145,7 @@ var Oversized = func(idx *Index) bool {
 
 // Preallocate preallocates space for the given blob type.
 // This is used to avoid reallocations when adding a large number of blobs to the index.
-func (idx *Index) Preallocate(t restic.BlobType, numEntries int) {
+func (idx *Index) Preallocate(t vaultic.BlobType, numEntries int) {
 	idx.m.Lock()
 	defer idx.m.Unlock()
 
@@ -154,7 +154,7 @@ func (idx *Index) Preallocate(t restic.BlobType, numEntries int) {
 
 // StorePack remembers the ids of all blobs of a given pack
 // in the index
-func (idx *Index) StorePack(id restic.ID, blobs pack.Blobs) {
+func (idx *Index) StorePack(id vaultic.ID, blobs pack.Blobs) {
 	idx.m.Lock()
 	defer idx.m.Unlock()
 
@@ -170,11 +170,11 @@ func (idx *Index) StorePack(id restic.ID, blobs pack.Blobs) {
 	}
 }
 
-func (idx *Index) toPackedBlob(e *indexEntry, t restic.BlobType) *pack.PackedBlob {
+func (idx *Index) toPackedBlob(e *indexEntry, t vaultic.BlobType) *pack.PackedBlob {
 	return &pack.PackedBlob{
 		Pack: idx.packs[e.packIndex],
 		Blob: pack.Blob{
-			BlobHandle: restic.BlobHandle{
+			BlobHandle: vaultic.BlobHandle{
 				ID:   e.id,
 				Type: t,
 			},
@@ -187,7 +187,7 @@ func (idx *Index) toPackedBlob(e *indexEntry, t restic.BlobType) *pack.PackedBlo
 
 // Lookup queries the index for the blob ID and returns all entries including
 // duplicates. Adds found entries to pbs and returns the result.
-func (idx *Index) Lookup(bh restic.BlobHandle, pbs []*pack.PackedBlob) []*pack.PackedBlob {
+func (idx *Index) Lookup(bh vaultic.BlobHandle, pbs []*pack.PackedBlob) []*pack.PackedBlob {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
@@ -199,7 +199,7 @@ func (idx *Index) Lookup(bh restic.BlobHandle, pbs []*pack.PackedBlob) []*pack.P
 }
 
 // Has returns true iff the id is listed in the index.
-func (idx *Index) Has(bh restic.BlobHandle) bool {
+func (idx *Index) Has(bh vaultic.BlobHandle) bool {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
@@ -208,7 +208,7 @@ func (idx *Index) Has(bh restic.BlobHandle) bool {
 
 // LookupSize returns the length of the plaintext content of the blob with the
 // given id.
-func (idx *Index) LookupSize(bh restic.BlobHandle) (plaintextLength uint, found bool) {
+func (idx *Index) LookupSize(bh vaultic.BlobHandle) (plaintextLength uint, found bool) {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
@@ -232,7 +232,7 @@ func (idx *Index) Values() iter.Seq[*pack.PackedBlob] {
 		for typ := range idx.byType {
 			m := &idx.byType[typ]
 			for e := range m.values() {
-				if !yield(idx.toPackedBlob(e, restic.BlobType(typ))) {
+				if !yield(idx.toPackedBlob(e, vaultic.BlobType(typ))) {
 					return
 				}
 			}
@@ -242,7 +242,7 @@ func (idx *Index) Values() iter.Seq[*pack.PackedBlob] {
 
 // PackBlobs lists all blobs contained in a pack file according to the index.
 type PackBlobs struct {
-	PackID restic.ID
+	PackID vaultic.ID
 	Blobs  pack.Blobs
 }
 
@@ -253,7 +253,7 @@ type PackBlobs struct {
 // from the finalized index which have been re-read into a non-finalized index.
 // When the  context is cancelled, the background goroutine
 // terminates. This blocks any modification of the index.
-func (idx *Index) EachByPack(ctx context.Context, packBlacklist restic.IDSet) <-chan PackBlobs {
+func (idx *Index) EachByPack(ctx context.Context, packBlacklist vaultic.IDSet) <-chan PackBlobs {
 	idx.m.RLock()
 
 	ch := make(chan PackBlobs)
@@ -262,7 +262,7 @@ func (idx *Index) EachByPack(ctx context.Context, packBlacklist restic.IDSet) <-
 		defer idx.m.RUnlock()
 		defer close(ch)
 
-		byPack := make(map[restic.ID][restic.NumBlobTypes][]*indexEntry)
+		byPack := make(map[vaultic.ID][vaultic.NumBlobTypes][]*indexEntry)
 
 		for typ := range idx.byType {
 			m := &idx.byType[typ]
@@ -281,7 +281,7 @@ func (idx *Index) EachByPack(ctx context.Context, packBlacklist restic.IDSet) <-
 			result.PackID = packID
 			for typ, p := range packByType {
 				for _, e := range p {
-					result.Blobs = append(result.Blobs, idx.toPackedBlob(e, restic.BlobType(typ)).Blob)
+					result.Blobs = append(result.Blobs, idx.toPackedBlob(e, vaultic.BlobType(typ)).Blob)
 				}
 			}
 			// allow GC once entry is no longer necessary
@@ -298,11 +298,11 @@ func (idx *Index) EachByPack(ctx context.Context, packBlacklist restic.IDSet) <-
 }
 
 // Packs returns all packs in this index
-func (idx *Index) Packs() restic.IDSet {
+func (idx *Index) Packs() vaultic.IDSet {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
-	packs := restic.NewIDSet()
+	packs := vaultic.NewIDSet()
 	for _, packID := range idx.packs {
 		packs.Insert(packID)
 	}
@@ -311,22 +311,22 @@ func (idx *Index) Packs() restic.IDSet {
 }
 
 type packJSON struct {
-	ID    restic.ID  `json:"id"`
+	ID    vaultic.ID `json:"id"`
 	Blobs []blobJSON `json:"blobs"`
 }
 
 type blobJSON struct {
-	ID                 restic.ID       `json:"id"`
-	Type               restic.BlobType `json:"type"`
-	Offset             uint            `json:"offset"`
-	Length             uint            `json:"length"`
-	UncompressedLength uint            `json:"uncompressed_length,omitempty"`
+	ID                 vaultic.ID       `json:"id"`
+	Type               vaultic.BlobType `json:"type"`
+	Offset             uint             `json:"offset"`
+	Length             uint             `json:"length"`
+	UncompressedLength uint             `json:"uncompressed_length,omitempty"`
 }
 
 // generatePackList returns a list of packs.
 func (idx *Index) generatePackList() ([]packJSON, error) {
 	list := make([]packJSON, 0, len(idx.packs))
-	packs := make(map[restic.ID]int, len(list)) // Maps to index in list.
+	packs := make(map[vaultic.ID]int, len(list)) // Maps to index in list.
 
 	for typ := range idx.byType {
 		m := &idx.byType[typ]
@@ -347,7 +347,7 @@ func (idx *Index) generatePackList() ([]packJSON, error) {
 			// add blob
 			p.Blobs = append(p.Blobs, blobJSON{
 				ID:                 e.id,
-				Type:               restic.BlobType(typ),
+				Type:               vaultic.BlobType(typ),
 				Offset:             uint(e.offset),
 				Length:             uint(e.length),
 				UncompressedLength: uint(e.uncompressedLength),
@@ -359,7 +359,7 @@ func (idx *Index) generatePackList() ([]packJSON, error) {
 }
 
 type jsonIndex struct {
-	// removed: Supersedes restic.IDs `json:"supersedes,omitempty"`
+	// removed: Supersedes vaultic.IDs `json:"supersedes,omitempty"`
 	Packs []packJSON `json:"packs"`
 }
 
@@ -382,15 +382,15 @@ func (idx *Index) Encode(w io.Writer) error {
 }
 
 // SaveIndex saves an index in the repository.
-func (idx *Index) SaveIndex(ctx context.Context, repo restic.SaverUnpacked[restic.FileType]) (restic.ID, error) {
+func (idx *Index) SaveIndex(ctx context.Context, repo vaultic.SaverUnpacked[vaultic.FileType]) (vaultic.ID, error) {
 	buf := bytes.NewBuffer(nil)
 
 	err := idx.Encode(buf)
 	if err != nil {
-		return restic.ID{}, err
+		return vaultic.ID{}, err
 	}
 
-	id, err := repo.SaveUnpacked(ctx, restic.IndexFile, buf.Bytes())
+	id, err := repo.SaveUnpacked(ctx, vaultic.IndexFile, buf.Bytes())
 	ierr := idx.SetID(id)
 	if ierr != nil {
 		// logic bug
@@ -410,7 +410,7 @@ func (idx *Index) Finalize() {
 
 // IDs returns the IDs of the index, if available. If the index is not yet
 // finalized, an error is returned.
-func (idx *Index) IDs() (restic.IDs, error) {
+func (idx *Index) IDs() (vaultic.IDs, error) {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
@@ -423,7 +423,7 @@ func (idx *Index) IDs() (restic.IDs, error) {
 
 // SetID sets the ID the index has been written to. This requires that
 // Finalize() has been called before, otherwise an error is returned.
-func (idx *Index) SetID(id restic.ID) error {
+func (idx *Index) SetID(id vaultic.ID) error {
 	idx.m.Lock()
 	defer idx.m.Unlock()
 
@@ -500,8 +500,8 @@ func (idx *Index) merge(idx2 *Index) error {
 		// helper func to test if identical entry is contained in idx
 		hasIdenticalEntry := func(e2 *indexEntry) (found bool) {
 			for e := range m.valuesWithID(e2.id) {
-				b := idx.toPackedBlob(e, restic.BlobType(typ))
-				b2 := idx2.toPackedBlob(e2, restic.BlobType(typ))
+				b := idx.toPackedBlob(e, vaultic.BlobType(typ))
+				b2 := idx2.toPackedBlob(e2, vaultic.BlobType(typ))
 				if *b == *b2 {
 					found = true
 					break
@@ -524,7 +524,7 @@ func (idx *Index) merge(idx2 *Index) error {
 }
 
 // DecodeIndex unserializes an index from buf.
-func DecodeIndex(buf []byte, id restic.ID) (idx *Index, err error) {
+func DecodeIndex(buf []byte, id vaultic.ID) (idx *Index, err error) {
 	debug.Log("Start decoding index")
 	idxJSON := &jsonIndex{}
 
@@ -540,7 +540,7 @@ func DecodeIndex(buf []byte, id restic.ID) (idx *Index, err error) {
 
 		for _, blob := range p.Blobs {
 			idx.store(packID, pack.Blob{
-				BlobHandle: restic.BlobHandle{
+				BlobHandle: vaultic.BlobHandle{
 					Type: blob.Type,
 					ID:   blob.ID},
 				Offset:             blob.Offset,
@@ -556,21 +556,21 @@ func DecodeIndex(buf []byte, id restic.ID) (idx *Index, err error) {
 	return idx, nil
 }
 
-func (idx *Index) BlobIndex(bh restic.BlobHandle) int {
+func (idx *Index) BlobIndex(bh vaultic.BlobHandle) int {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
 	return idx.byType[bh.Type].firstIndex(bh.ID)
 }
 
-func (idx *Index) Len(t restic.BlobType) uint {
+func (idx *Index) Len(t vaultic.BlobType) uint {
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
 	return idx.byType[t].len()
 }
 
-func PackBlobsHash(pbs PackBlobs) restic.ID {
+func PackBlobsHash(pbs PackBlobs) vaultic.ID {
 	h := sha256.New()
 	h.Write(pbs.PackID[:])
 
@@ -585,5 +585,5 @@ func PackBlobsHash(pbs PackBlobs) restic.ID {
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(blob.UncompressedLength))
 		h.Write(buf)
 	}
-	return restic.ID(h.Sum(nil))
+	return vaultic.ID(h.Sum(nil))
 }

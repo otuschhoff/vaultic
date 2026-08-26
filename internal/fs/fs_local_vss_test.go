@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/go-ole/go-ole"
-	"github.com/restic/restic/internal/options"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/options"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func matchStrings(ptrs []string, strs []string) bool {

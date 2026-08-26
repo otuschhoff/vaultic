@@ -10,7 +10,7 @@ import (
 // new process group created for cmd. The returned function `bg` switches back
 // to the previous process group.
 //
-// The command's environment has all RESTIC_* variables removed.
+// The command's environment has all VAULTIC_* and RESTIC_* variables removed.
 //
 // Return exec.ErrDot if it would implicitly run an executable from the current
 // directory.
@@ -19,7 +19,7 @@ func StartForeground(cmd *exec.Cmd) (bg func() error, err error) {
 
 	cmd.Env = env[:0]
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "RESTIC_") {
+		if strings.HasPrefix(kv, "VAULTIC_") || strings.HasPrefix(kv, "RESTIC_") {
 			continue
 		}
 		cmd.Env = append(cmd.Env, kv)

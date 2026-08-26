@@ -1,8 +1,8 @@
 package debug_test
 
 import (
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"testing"
 )
@@ -14,7 +14,7 @@ func BenchmarkLogStatic(b *testing.B) {
 }
 
 func BenchmarkLogIDStr(b *testing.B) {
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 
 	b.ResetTimer()
 
@@ -24,7 +24,7 @@ func BenchmarkLogIDStr(b *testing.B) {
 }
 
 func BenchmarkLogIDString(b *testing.B) {
-	id := restic.NewRandomID()
+	id := vaultic.NewRandomID()
 
 	b.ResetTimer()
 

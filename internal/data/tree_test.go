@@ -13,12 +13,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/repository"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 var testFiles = []struct {
@@ -31,7 +31,7 @@ var testFiles = []struct {
 }
 
 func createTempDir(t *testing.T) string {
-	tempdir, err := os.MkdirTemp(rtest.TestTempDir, "restic-test-")
+	tempdir, err := os.MkdirTemp(rtest.TestTempDir, "vaultic-test-")
 	rtest.OK(t, err)
 
 	for _, test := range testFiles {
@@ -110,8 +110,8 @@ func TestEmptyLoadTree(t *testing.T) {
 	repo := repository.TestRepository(t)
 
 	nodes := []*data.Node{}
-	var id restic.ID
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	var id vaultic.ID
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		// save tree
 		id = data.TestSaveNodes(t, ctx, uploader, nodes)
 		return nil
@@ -174,14 +174,14 @@ func TestTreeLoadSaveCycle(t *testing.T) {
 	buf, err := builder.Finalize()
 	rtest.OK(t, err)
 
-	tm := data.TestTreeMap{restic.Hash(buf): buf}
-	it, err := data.LoadTree(context.TODO(), tm, restic.Hash(buf))
+	tm := data.TestTreeMap{vaultic.Hash(buf): buf}
+	it, err := data.LoadTree(context.TODO(), tm, vaultic.Hash(buf))
 	rtest.OK(t, err)
 
 	mtm := data.TestWritableTreeMap{TestTreeMap: data.TestTreeMap{}}
 	id, err := data.SaveTree(context.TODO(), mtm, it)
 	rtest.OK(t, err)
-	rtest.Equals(t, restic.Hash(buf), id, "saved tree id mismatch")
+	rtest.Equals(t, vaultic.Hash(buf), id, "saved tree id mismatch")
 }
 
 func BenchmarkBuildTree(b *testing.B) {
@@ -374,18 +374,18 @@ func TestFindTreeDirectory(t *testing.T) {
 
 	for _, exp := range []struct {
 		subfolder string
-		id        restic.ID
+		id        vaultic.ID
 		err       error
 	}{
-		{"", restic.TestParseID("8804a5505fc3012e7d08b2843e9bda1bf3dc7644f64b542470340e1b4059f09f"), nil},
-		{"/", restic.TestParseID("8804a5505fc3012e7d08b2843e9bda1bf3dc7644f64b542470340e1b4059f09f"), nil},
-		{".", restic.TestParseID("8804a5505fc3012e7d08b2843e9bda1bf3dc7644f64b542470340e1b4059f09f"), nil},
-		{"..", restic.ID{}, errors.New("path ..: not found")},
-		{"file-1", restic.ID{}, errors.New("path file-1: not a directory")},
-		{"dir-7", restic.TestParseID("1af51eb70cd4457d51db40d649bb75446a3eaa29b265916d411bb7ae971d4849"), nil},
-		{"/dir-7", restic.TestParseID("1af51eb70cd4457d51db40d649bb75446a3eaa29b265916d411bb7ae971d4849"), nil},
-		{"dir-7/", restic.TestParseID("1af51eb70cd4457d51db40d649bb75446a3eaa29b265916d411bb7ae971d4849"), nil},
-		{"dir-7/dir-5", restic.TestParseID("f05534d2673964de698860e5069da1ee3c198acf21c187975c6feb49feb8e9c9"), nil},
+		{"", vaultic.TestParseID("8804a5505fc3012e7d08b2843e9bda1bf3dc7644f64b542470340e1b4059f09f"), nil},
+		{"/", vaultic.TestParseID("8804a5505fc3012e7d08b2843e9bda1bf3dc7644f64b542470340e1b4059f09f"), nil},
+		{".", vaultic.TestParseID("8804a5505fc3012e7d08b2843e9bda1bf3dc7644f64b542470340e1b4059f09f"), nil},
+		{"..", vaultic.ID{}, errors.New("path ..: not found")},
+		{"file-1", vaultic.ID{}, errors.New("path file-1: not a directory")},
+		{"dir-7", vaultic.TestParseID("1af51eb70cd4457d51db40d649bb75446a3eaa29b265916d411bb7ae971d4849"), nil},
+		{"/dir-7", vaultic.TestParseID("1af51eb70cd4457d51db40d649bb75446a3eaa29b265916d411bb7ae971d4849"), nil},
+		{"dir-7/", vaultic.TestParseID("1af51eb70cd4457d51db40d649bb75446a3eaa29b265916d411bb7ae971d4849"), nil},
+		{"dir-7/dir-5", vaultic.TestParseID("f05534d2673964de698860e5069da1ee3c198acf21c187975c6feb49feb8e9c9"), nil},
 	} {
 		t.Run("", func(t *testing.T) {
 			id, err := data.FindTreeDirectory(context.TODO(), repo, sn.Tree, exp.subfolder)

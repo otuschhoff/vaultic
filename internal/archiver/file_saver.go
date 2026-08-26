@@ -6,11 +6,11 @@ import (
 	"io"
 	"sync"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/fs"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -19,9 +19,9 @@ const chunkReadBufSize = 512 * 1024 // matches chunker internal read buffer size
 // fileSaver concurrently saves incoming files to the repo.
 type fileSaver struct {
 	saveFilePool *bufferPool
-	uploader     restic.BlobSaverAsync
+	uploader     vaultic.BlobSaverAsync
 
-	chunkerFactory restic.ChunkerFactory
+	chunkerFactory vaultic.ChunkerFactory
 
 	ch chan<- saveFileJob
 
@@ -32,7 +32,7 @@ type fileSaver struct {
 
 // newFileSaver returns a new file saver. A worker pool with fileWorkers is
 // started, it is stopped when ctx is cancelled.
-func newFileSaver(ctx context.Context, wg *errgroup.Group, uploader restic.BlobSaverAsync, chunkerFactory restic.ChunkerFactory, fileWorkers uint) *fileSaver {
+func newFileSaver(ctx context.Context, wg *errgroup.Group, uploader vaultic.BlobSaverAsync, chunkerFactory vaultic.ChunkerFactory, fileWorkers uint) *fileSaver {
 	ch := make(chan saveFileJob)
 	debug.Log("new file saver with %v file workers", fileWorkers)
 
@@ -116,7 +116,7 @@ func (s *fileChunkState) reset() {
 
 // readNextChunk reads from rd and returns the next chunk of data. io.EOF is
 // returned when all chunks have been read.
-func (s *fileChunkState) readNextChunk(rd io.Reader, chnker restic.Chunker, data []byte) ([]byte, error) {
+func (s *fileChunkState) readNextChunk(rd io.Reader, chnker vaultic.Chunker, data []byte) ([]byte, error) {
 	data = data[:0]
 	for {
 		if s.bpos >= s.bmax {
@@ -157,7 +157,7 @@ func (s *fileChunkState) readNextChunk(rd io.Reader, chnker restic.Chunker, data
 }
 
 // saveFile stores the file f in the repo, then closes it.
-func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkState *fileChunkState, snPath string, target string, f fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
+func (s *fileSaver) saveFile(ctx context.Context, chnker vaultic.Chunker, chunkState *fileChunkState, snPath string, target string, f fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
 	start()
 
 	fnr := futureNodeResult{
@@ -220,7 +220,7 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 	chnker.Reset()
 	chunkState.reset()
 
-	node.Content = []restic.ID{}
+	node.Content = []vaultic.ID{}
 	node.Size = 0
 	var idx int
 	for {
@@ -253,10 +253,10 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker restic.Chunker, chunkSt
 		pos := idx
 
 		lock.Lock()
-		node.Content = append(node.Content, restic.ID{})
+		node.Content = append(node.Content, vaultic.ID{})
 		lock.Unlock()
 
-		s.uploader.SaveBlobAsync(ctx, restic.DataBlob, chunkData, restic.ID{}, false, func(newID restic.ID, known bool, sizeInRepo int, err error) {
+		s.uploader.SaveBlobAsync(ctx, vaultic.DataBlob, chunkData, vaultic.ID{}, false, func(newID vaultic.ID, known bool, sizeInRepo int, err error) {
 			defer buf.Release()
 			if err != nil {
 				completeError(err)

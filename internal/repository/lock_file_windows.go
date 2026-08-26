@@ -3,7 +3,7 @@ package repository
 import (
 	"os"
 
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 // checkProcess will check if the process retaining the lock exists.

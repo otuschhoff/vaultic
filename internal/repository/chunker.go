@@ -2,7 +2,7 @@ package repository
 
 import (
 	"github.com/restic/chunker"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type baseChunker struct {
@@ -20,7 +20,7 @@ func (c *baseChunker) NextSplitPoint(buf []byte) int {
 
 type chunkerFactory struct {
 	pol       chunker.Pol
-	zeroChunk func() restic.ID
+	zeroChunk func() vaultic.ID
 }
 
 func newChunkerFactory(r *Repository) *chunkerFactory {
@@ -30,7 +30,7 @@ func newChunkerFactory(r *Repository) *chunkerFactory {
 	}
 }
 
-func (f *chunkerFactory) NewChunker() restic.Chunker {
+func (f *chunkerFactory) NewChunker() vaultic.Chunker {
 	return &baseChunker{bc: chunker.NewBase(f.pol), pol: f.pol}
 }
 
@@ -38,10 +38,10 @@ func (f *chunkerFactory) MaxChunkSize() int {
 	return chunker.MaxSize
 }
 
-func (f *chunkerFactory) ZeroChunk() restic.ID {
+func (f *chunkerFactory) ZeroChunk() vaultic.ID {
 	return f.zeroChunk()
 }
 
-func (r *Repository) ChunkerFactory() restic.ChunkerFactory {
+func (r *Repository) ChunkerFactory() vaultic.ChunkerFactory {
 	return newChunkerFactory(r)
 }

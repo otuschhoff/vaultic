@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend/b2"
-	"github.com/restic/restic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/backend/b2"
+	"github.com/vaultic/vaultic/internal/backend/test"
 
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func newB2TestSuite() *test.Suite[b2.Config] {
@@ -22,12 +22,12 @@ func newB2TestSuite() *test.Suite[b2.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*b2.Config, error) {
-			cfg, err := b2.ParseConfig(os.Getenv("RESTIC_TEST_B2_REPOSITORY"))
+			cfg, err := b2.ParseConfig(os.Getenv("VAULTIC_TEST_B2_REPOSITORY"))
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.ApplyEnvironment("RESTIC_TEST_")
+			cfg.ApplyEnvironment("VAULTIC_TEST_")
 			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
 			return cfg, nil
 		},
@@ -38,9 +38,9 @@ func newB2TestSuite() *test.Suite[b2.Config] {
 
 func testVars(t testing.TB) {
 	vars := []string{
-		"RESTIC_TEST_B2_ACCOUNT_ID",
-		"RESTIC_TEST_B2_ACCOUNT_KEY",
-		"RESTIC_TEST_B2_REPOSITORY",
+		"VAULTIC_TEST_B2_ACCOUNT_ID",
+		"VAULTIC_TEST_B2_ACCOUNT_KEY",
+		"VAULTIC_TEST_B2_REPOSITORY",
 	}
 
 	for _, v := range vars {
@@ -54,7 +54,7 @@ func testVars(t testing.TB) {
 func TestBackendB2(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/b2.TestBackendB2")
+			rtest.SkipDisallowed(t, "vaultic/backend/b2.TestBackendB2")
 		}
 	}()
 

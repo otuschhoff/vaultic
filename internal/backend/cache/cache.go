@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/debug"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/debug"
 )
 
 // Cache manages a local cache.
@@ -157,7 +157,7 @@ func updateTimestamp(d string) error {
 const MaxCacheAge = 30 * 24 * time.Hour
 
 func validCacheDirName(s string) bool {
-	r := regexp.MustCompile(`^[a-fA-F0-9]{64}$|^restic-check-cache-[0-9]+$`)
+	r := regexp.MustCompile(`^[a-fA-F0-9]{64}$|^vaultic-check-cache-[0-9]+$`)
 	return r.MatchString(s)
 }
 

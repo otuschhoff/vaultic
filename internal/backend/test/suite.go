@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/backend/location"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/location"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/test"
 )
 
-// Suite implements a test suite for restic backends.
+// Suite implements a test suite for vaultic backends.
 type Suite[C any] struct {
 	// Config should be used to configure the backend.
 	Config *C

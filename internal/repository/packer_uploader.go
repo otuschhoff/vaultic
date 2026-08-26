@@ -3,18 +3,18 @@ package repository
 import (
 	"context"
 
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
 // savePacker implements saving a pack in the repository.
 type savePacker interface {
-	savePacker(ctx context.Context, t restic.BlobType, p *packer) error
+	savePacker(ctx context.Context, t vaultic.BlobType, p *packer) error
 }
 
 type uploadTask struct {
 	packer *packer
-	tpe    restic.BlobType
+	tpe    vaultic.BlobType
 }
 
 type packerUploader struct {
@@ -48,7 +48,7 @@ func newPackerUploader(ctx context.Context, wg *errgroup.Group, repo savePacker,
 	return pu
 }
 
-func (pu *packerUploader) QueuePacker(ctx context.Context, t restic.BlobType, p *packer) (err error) {
+func (pu *packerUploader) QueuePacker(ctx context.Context, t vaultic.BlobType, p *packer) (err error) {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

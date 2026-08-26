@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // Checker runs various checks on a repository. It is advisable to create an
@@ -21,13 +21,13 @@ type Checker struct {
 	*repository.Checker
 	blobRefs struct {
 		sync.Mutex
-		M restic.AssociatedBlobSet
+		M vaultic.AssociatedBlobSet
 	}
 	trackUnused bool
 
-	snapshots restic.Lister
+	snapshots vaultic.Lister
 
-	repo restic.Repository
+	repo vaultic.Repository
 
 	// when snapshot filtering is being used
 	snapshotFilter *data.SnapshotFilter
@@ -35,7 +35,7 @@ type Checker struct {
 }
 
 type checkerRepository interface {
-	restic.Repository
+	vaultic.Repository
 	Checker() *repository.Checker
 }
 
@@ -54,7 +54,7 @@ func New(repo checkerRepository, trackUnused bool) *Checker {
 
 func (c *Checker) LoadSnapshots(ctx context.Context, snapshotFilter *data.SnapshotFilter, args []string) error {
 	var err error
-	c.snapshots, err = restic.MemorizeList(ctx, c.repo, restic.SnapshotFile)
+	c.snapshots, err = vaultic.MemorizeList(ctx, c.repo, vaultic.SnapshotFile)
 	c.args = args
 	c.snapshotFilter = snapshotFilter
 	return err
@@ -67,7 +67,7 @@ func (c *Checker) IsFiltered() bool {
 
 // Error is an error that occurred while checking a repository.
 type Error struct {
-	TreeID restic.ID
+	TreeID vaultic.ID
 	Err    error
 }
 
@@ -81,7 +81,7 @@ func (e *Error) Error() string {
 
 // TreeError collects several errors that occurred while processing a tree.
 type TreeError struct {
-	ID     restic.ID
+	ID     vaultic.ID
 	Errors []error
 }
 
@@ -98,8 +98,8 @@ func (e *SnapshotError) Error() string {
 	return fmt.Sprintf("snapshot %v: %v", e.ID, e.Message)
 }
 
-func loadSnapshotTreeIDs(ctx context.Context, lister restic.Lister, repo restic.LoaderUnpacked) (ids restic.IDs, errs []error) {
-	err := data.ForAllSnapshots(ctx, lister, repo, nil, func(id restic.ID, sn *data.Snapshot, err error) error {
+func loadSnapshotTreeIDs(ctx context.Context, lister vaultic.Lister, repo vaultic.LoaderUnpacked) (ids vaultic.IDs, errs []error) {
+	err := data.ForAllSnapshots(ctx, lister, repo, nil, func(id vaultic.ID, sn *data.Snapshot, err error) error {
 		if err != nil {
 			errs = append(errs, &SnapshotError{ID: id.String(), Message: err})
 			return nil
@@ -116,8 +116,8 @@ func loadSnapshotTreeIDs(ctx context.Context, lister restic.Lister, repo restic.
 	return ids, errs
 }
 
-func (c *Checker) loadActiveTrees(ctx context.Context, snapshotFilter *data.SnapshotFilter, args []string) (trees restic.IDs, errs []error) {
-	trees = []restic.ID{}
+func (c *Checker) loadActiveTrees(ctx context.Context, snapshotFilter *data.SnapshotFilter, args []string) (trees vaultic.IDs, errs []error) {
+	trees = []vaultic.ID{}
 	errs = []error{}
 
 	if !c.IsFiltered() {
@@ -147,7 +147,7 @@ func (c *Checker) loadActiveTrees(ctx context.Context, snapshotFilter *data.Snap
 // Structure checks that for all snapshots all referenced data blobs and
 // subtrees are available in the index. errChan is closed after all trees have
 // been traversed.
-func (c *Checker) Structure(ctx context.Context, p restic.Counter, errChan chan<- error) {
+func (c *Checker) Structure(ctx context.Context, p vaultic.Counter, errChan chan<- error) {
 	trees, errs := c.loadActiveTrees(ctx, c.snapshotFilter, c.args)
 	p.SetMax(uint64(len(trees)))
 	debug.Log("need to check %d trees from snapshots, %d errs returned", len(trees), len(errs))
@@ -161,16 +161,16 @@ func (c *Checker) Structure(ctx context.Context, p restic.Counter, errChan chan<
 		}
 	}
 
-	err := data.StreamTrees(ctx, c.repo, trees, p, func(treeID restic.ID) bool {
+	err := data.StreamTrees(ctx, c.repo, trees, p, func(treeID vaultic.ID) bool {
 		// blobRefs may be accessed in parallel by checkTree
 		c.blobRefs.Lock()
-		h := restic.BlobHandle{ID: treeID, Type: restic.TreeBlob}
+		h := vaultic.BlobHandle{ID: treeID, Type: vaultic.TreeBlob}
 		blobReferenced := c.blobRefs.M.Has(h)
 		// noop if already referenced
 		c.blobRefs.M.Insert(h)
 		c.blobRefs.Unlock()
 		return blobReferenced
-	}, func(treeID restic.ID, err error, nodes data.TreeNodeIterator) error {
+	}, func(treeID vaultic.ID, err error, nodes data.TreeNodeIterator) error {
 		debug.Log("check tree %v (err %v)", treeID, err)
 
 		var errs []error
@@ -201,7 +201,7 @@ func (c *Checker) Structure(ctx context.Context, p restic.Counter, errChan chan<
 	}
 }
 
-func (c *Checker) checkTree(id restic.ID, tree data.TreeNodeIterator) (errs []error) {
+func (c *Checker) checkTree(id vaultic.ID, tree data.TreeNodeIterator) (errs []error) {
 	debug.Log("checking tree %v", id)
 
 	for item := range tree {
@@ -226,7 +226,7 @@ func (c *Checker) checkTree(id restic.ID, tree data.TreeNodeIterator) (errs []er
 				// unfortunately fails in some cases that are not resolvable
 				// by users, so we omit this check, see #1887
 
-				_, found := c.repo.LookupBlobSize(restic.BlobHandle{Type: restic.DataBlob, ID: blobID})
+				_, found := c.repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID})
 				if !found {
 					debug.Log("tree %v references blob %v which isn't contained in index", id, blobID)
 					errs = append(errs, &Error{TreeID: id, Err: errors.Errorf("file %q blob %v not found in index", node.Name, blobID)})
@@ -240,7 +240,7 @@ func (c *Checker) checkTree(id restic.ID, tree data.TreeNodeIterator) (errs []er
 					if blobID.IsNull() {
 						continue
 					}
-					h := restic.BlobHandle{ID: blobID, Type: restic.DataBlob}
+					h := vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob}
 					c.blobRefs.M.Insert(h)
 					debug.Log("blob %v is referenced", blobID)
 				}
@@ -274,7 +274,7 @@ func (c *Checker) checkTree(id restic.ID, tree data.TreeNodeIterator) (errs []er
 }
 
 // UnusedBlobs returns all blobs that have never been referenced.
-func (c *Checker) UnusedBlobs(ctx context.Context) (blobs restic.BlobHandles, err error) {
+func (c *Checker) UnusedBlobs(ctx context.Context) (blobs vaultic.BlobHandles, err error) {
 	if !c.trackUnused {
 		panic("only works when tracking blob references")
 	}
@@ -285,7 +285,7 @@ func (c *Checker) UnusedBlobs(ctx context.Context) (blobs restic.BlobHandles, er
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	err = c.repo.ListBlobs(ctx, func(blob restic.PackBlob) {
+	err = c.repo.ListBlobs(ctx, func(blob vaultic.PackBlob) {
 		h := blob.Handle()
 		if !c.blobRefs.M.Has(h) {
 			debug.Log("blob %v not referenced", h)
@@ -301,15 +301,15 @@ func (c *Checker) UnusedBlobs(ctx context.Context) (blobs restic.BlobHandles, er
 // with an unmodified parameter list
 // Otherwise it calculates the packfiles needed, gets their sizes from the full
 // packfile set and submits them to repository.ReadPacks()
-func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID]int64) map[restic.ID]int64, printer restic.Printer, errChan chan<- error) {
+func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[vaultic.ID]int64) map[vaultic.ID]int64, printer vaultic.Printer, errChan chan<- error) {
 	// no snapshot filtering, pass through
 	if !c.IsFiltered() {
 		c.Checker.ReadPacks(ctx, filter, printer, errChan)
 		return
 	}
 
-	packfileFilter := func(allPacks map[restic.ID]int64) map[restic.ID]int64 {
-		filteredPacks := make(map[restic.ID]int64)
+	packfileFilter := func(allPacks map[vaultic.ID]int64) map[vaultic.ID]int64 {
+		filteredPacks := make(map[vaultic.ID]int64)
 		c.blobRefs.Lock()
 		defer c.blobRefs.Unlock()
 

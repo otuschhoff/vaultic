@@ -113,5 +113,5 @@ html_context = {
 htmlhelp_basename = 'resticdoc'
 
 extlinks = {
-    'issue': ('https://github.com/restic/restic/issues/%s', '#%s'),
+    'issue': ('https://github.com/vaultic/vaultic/issues/%s', '#%s'),
 }

@@ -3,7 +3,7 @@ package local
 import (
 	"testing"
 
-	"github.com/restic/restic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/backend/test"
 )
 
 var configTests = []test.ConfigTestData[Config]{
@@ -31,8 +31,8 @@ var configTests = []test.ConfigTestData[Config]{
 		Path:        `c:\dir1\foobar\dir2`,
 		Connections: 2,
 	}},
-	{S: `local:C:\Users\appveyor\AppData\Local\Temp\1\restic-test-879453535\repo`, Cfg: Config{
-		Path:        `C:\Users\appveyor\AppData\Local\Temp\1\restic-test-879453535\repo`,
+	{S: `local:C:\Users\appveyor\AppData\Local\Temp\1\vaultic-test-879453535\repo`, Cfg: Config{
+		Path:        `C:\Users\appveyor\AppData\Local\Temp\1\vaultic-test-879453535\repo`,
 		Connections: 2,
 	}},
 	{S: `local:c:/dir1/foobar/dir2`, Cfg: Config{

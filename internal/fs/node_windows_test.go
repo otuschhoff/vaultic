@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/test"
 	"golang.org/x/sys/windows"
 )
 
@@ -118,7 +118,7 @@ func TestRestoreSecurityDescriptorInheritance(t *testing.T) {
 	test.OK(t, err)
 	test.Assert(t, control&windows.SE_DACL_PROTECTED == 0, "Pre-condition failed: child directory should have inheritance enabled")
 
-	// 4. Create a restic node for the child directory.
+	// 4. Create a vaultic node for the child directory.
 	genericAttrs, err := data.WindowsAttrsToGenericAttributes(data.WindowsAttributes{SecurityDescriptor: sdBytesOriginal})
 	test.OK(t, err)
 	childNode := getNode("child-restored", "dir", genericAttrs)
@@ -509,7 +509,7 @@ func TestPrepareVolumeName(t *testing.T) {
 		return pwd
 	}())
 	// Create a temporary directory for the test
-	tempDir, err := os.MkdirTemp("", "restic_test_"+time.Now().Format("20060102150405"))
+	tempDir, err := os.MkdirTemp("", "vaultic_test_"+time.Now().Format("20060102150405"))
 	if err != nil {
 		t.Fatalf("Failed to create temp directory: %v", err)
 	}

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/restic/chunker"
-	"github.com/restic/restic/internal/restic"
-	rtest "github.com/restic/restic/internal/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // fakeFile returns a reader which yields deterministic pseudo-random data.
@@ -22,7 +22,7 @@ func fakeFile(seed, size int64) io.Reader {
 
 type fakeFileSystem struct {
 	t       testing.TB
-	repo    restic.Repository
+	repo    vaultic.Repository
 	buf     []byte
 	chunker *chunker.Chunker
 	rand    *rand.Rand
@@ -30,7 +30,7 @@ type fakeFileSystem struct {
 
 // saveFile reads from rd and saves the blobs in the repository. The list of
 // IDs is returned.
-func (fs *fakeFileSystem) saveFile(ctx context.Context, uploader restic.BlobSaver, rd io.Reader) (blobs restic.IDs) {
+func (fs *fakeFileSystem) saveFile(ctx context.Context, uploader vaultic.BlobSaver, rd io.Reader) (blobs vaultic.IDs) {
 	if fs.buf == nil {
 		fs.buf = make([]byte, chunker.MaxSize)
 	}
@@ -41,7 +41,7 @@ func (fs *fakeFileSystem) saveFile(ctx context.Context, uploader restic.BlobSave
 		fs.chunker.Reset(rd, fs.repo.Config().ChunkerPolynomial)
 	}
 
-	blobs = restic.IDs{}
+	blobs = vaultic.IDs{}
 	for {
 		chunk, err := fs.chunker.Next(fs.buf)
 		if err == io.EOF {
@@ -52,7 +52,7 @@ func (fs *fakeFileSystem) saveFile(ctx context.Context, uploader restic.BlobSave
 			fs.t.Fatalf("unable to save chunk in repo: %v", err)
 		}
 
-		id, _, _, err := uploader.SaveBlob(ctx, restic.DataBlob, chunk.Data, restic.ID{}, false)
+		id, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, chunk.Data, vaultic.ID{}, false)
 		if err != nil {
 			fs.t.Fatalf("error saving chunk: %v", err)
 		}
@@ -70,7 +70,7 @@ const (
 )
 
 // saveTree saves a tree of fake files in the repo and returns the ID.
-func (fs *fakeFileSystem) saveTree(ctx context.Context, uploader restic.BlobSaver, seed int64, depth int) restic.ID {
+func (fs *fakeFileSystem) saveTree(ctx context.Context, uploader vaultic.BlobSaver, seed int64, depth int) vaultic.ID {
 	rnd := rand.NewSource(seed)
 	numNodes := int(rnd.Int63() % maxNodes)
 
@@ -110,7 +110,7 @@ func (fs *fakeFileSystem) saveTree(ctx context.Context, uploader restic.BlobSave
 }
 
 //nolint:revive // as this is a test helper, t should go first
-func TestSaveNodes(t testing.TB, ctx context.Context, uploader restic.BlobSaver, nodes []*Node) restic.ID {
+func TestSaveNodes(t testing.TB, ctx context.Context, uploader vaultic.BlobSaver, nodes []*Node) vaultic.ID {
 	slices.SortFunc(nodes, func(a, b *Node) int {
 		return strings.Compare(a.Name, b.Name)
 	})
@@ -129,7 +129,7 @@ func TestSaveNodes(t testing.TB, ctx context.Context, uploader restic.BlobSaver,
 // also used as the snapshot's timestamp. The tree's depth can be specified
 // with the parameter depth. The parameter duplication is a probability that
 // the same blob will saved again.
-func TestCreateSnapshot(t testing.TB, repo restic.Repository, at time.Time, depth int) *Snapshot {
+func TestCreateSnapshot(t testing.TB, repo vaultic.Repository, at time.Time, depth int) *Snapshot {
 	seed := at.Unix()
 	t.Logf("create fake snapshot at %s with seed %d", at, seed)
 
@@ -145,8 +145,8 @@ func TestCreateSnapshot(t testing.TB, repo restic.Repository, at time.Time, dept
 		rand: rand.New(rand.NewSource(seed)),
 	}
 
-	var treeID restic.ID
-	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	var treeID vaultic.ID
+	rtest.OK(t, repo.WithBlobUploader(context.TODO(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		treeID = fs.saveTree(ctx, uploader, seed, depth)
 		return nil
 	}))
@@ -165,7 +165,7 @@ func TestCreateSnapshot(t testing.TB, repo restic.Repository, at time.Time, dept
 }
 
 // TestSetSnapshotID sets the snapshot's ID.
-func TestSetSnapshotID(_ testing.TB, sn *Snapshot, id restic.ID) {
+func TestSetSnapshotID(_ testing.TB, sn *Snapshot, id vaultic.ID) {
 	sn.id = &id
 }
 
@@ -182,8 +182,8 @@ func ParseDurationOrPanic(s string) Duration {
 
 // TestLoadAllSnapshots returns a list of all snapshots in the repo.
 // If a snapshot ID is in excludeIDs, it will not be included in the result.
-func TestLoadAllSnapshots(ctx context.Context, repo restic.ListerLoaderUnpacked, excludeIDs restic.IDSet) (snapshots Snapshots, err error) {
-	err = ForAllSnapshots(ctx, repo, repo, excludeIDs, func(id restic.ID, sn *Snapshot, err error) error {
+func TestLoadAllSnapshots(ctx context.Context, repo vaultic.ListerLoaderUnpacked, excludeIDs vaultic.IDSet) (snapshots Snapshots, err error) {
+	err = ForAllSnapshots(ctx, repo, repo, excludeIDs, func(id vaultic.ID, sn *Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -200,10 +200,10 @@ func TestLoadAllSnapshots(ctx context.Context, repo restic.ListerLoaderUnpacked,
 }
 
 // TestTreeMap returns the trees from the map on LoadTree.
-type TestTreeMap map[restic.ID][]byte
+type TestTreeMap map[vaultic.ID][]byte
 
-func (t TestTreeMap) LoadBlob(_ context.Context, bh restic.BlobHandle, _ []byte) ([]byte, error) {
-	if bh.Type != restic.TreeBlob {
+func (t TestTreeMap) LoadBlob(_ context.Context, bh vaultic.BlobHandle, _ []byte) ([]byte, error) {
+	if bh.Type != vaultic.TreeBlob {
 		return nil, fmt.Errorf("can only load trees")
 	}
 	tree, ok := t[bh.ID]
@@ -222,13 +222,13 @@ type TestWritableTreeMap struct {
 	TestTreeMap
 }
 
-func (t TestWritableTreeMap) SaveBlob(_ context.Context, tpe restic.BlobType, buf []byte, id restic.ID, _ bool) (newID restic.ID, known bool, size int, err error) {
-	if tpe != restic.TreeBlob {
-		return restic.ID{}, false, 0, fmt.Errorf("can only save trees")
+func (t TestWritableTreeMap) SaveBlob(_ context.Context, tpe vaultic.BlobType, buf []byte, id vaultic.ID, _ bool) (newID vaultic.ID, known bool, size int, err error) {
+	if tpe != vaultic.TreeBlob {
+		return vaultic.ID{}, false, 0, fmt.Errorf("can only save trees")
 	}
 
 	if id.IsNull() {
-		id = restic.Hash(buf)
+		id = vaultic.Hash(buf)
 	}
 	_, ok := t.TestTreeMap[id]
 	if ok {

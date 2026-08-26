@@ -3,8 +3,8 @@ package progress
 import (
 	"time"
 
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/ui/signals"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/ui/signals"
 )
 
 // An UpdateFunc is a callback for a (progress) Updater.

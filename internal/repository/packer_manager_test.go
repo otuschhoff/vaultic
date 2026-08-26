@@ -7,13 +7,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/restic/restic/internal/repository/crypto"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
-func randomID(rd io.Reader) restic.ID {
-	id := restic.ID{}
+func randomID(rd io.Reader) vaultic.ID {
+	id := vaultic.ID{}
 	_, err := io.ReadFull(rd, id[:])
 	if err != nil {
 		panic(err)
@@ -31,7 +31,7 @@ func fillPacks(t testing.TB, rnd *rand.Rand, pm *packerManager, buf []byte) (byt
 		// Only change a few bytes so we know we're not benchmarking the RNG.
 		rnd.Read(buf[:min(l, 4)])
 
-		n, err := pm.SaveBlob(context.TODO(), restic.DataBlob, id, buf, 0)
+		n, err := pm.SaveBlob(context.TODO(), vaultic.DataBlob, id, buf, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func testPackerManager(t testing.TB) int64 {
 	rnd := rand.New(rand.NewSource(randomSeed))
 
 	savedBytes := 0
-	pm := newPackerManager(crypto.NewRandomKey(), restic.DataBlob, DefaultPackSize, defaultPackerCount, func(ctx context.Context, tp restic.BlobType, p *packer) error {
+	pm := newPackerManager(crypto.NewRandomKey(), vaultic.DataBlob, DefaultPackSize, defaultPackerCount, func(ctx context.Context, tp vaultic.BlobType, p *packer) error {
 		err := p.Finalize()
 		if err != nil {
 			return err
@@ -85,13 +85,13 @@ func testPackerManager(t testing.TB) int64 {
 func TestPackerManagerWithOversizeBlob(t *testing.T) {
 	packFiles := 0
 	sizeLimit := uint(512 * 1024)
-	pm := newPackerManager(crypto.NewRandomKey(), restic.DataBlob, sizeLimit, defaultPackerCount, func(ctx context.Context, tp restic.BlobType, p *packer) error {
+	pm := newPackerManager(crypto.NewRandomKey(), vaultic.DataBlob, sizeLimit, defaultPackerCount, func(ctx context.Context, tp vaultic.BlobType, p *packer) error {
 		packFiles++
 		return nil
 	})
 
 	for _, i := range []uint{sizeLimit / 2, sizeLimit, sizeLimit / 3} {
-		_, err := pm.SaveBlob(context.TODO(), restic.DataBlob, restic.ID{}, make([]byte, i), 0)
+		_, err := pm.SaveBlob(context.TODO(), vaultic.DataBlob, vaultic.ID{}, make([]byte, i), 0)
 		test.OK(t, err)
 	}
 	test.OK(t, pm.Flush(context.TODO()))
@@ -115,7 +115,7 @@ func BenchmarkPackerManager(t *testing.B) {
 
 	for i := 0; i < t.N; i++ {
 		rnd.Seed(randomSeed)
-		pm := newPackerManager(crypto.NewRandomKey(), restic.DataBlob, DefaultPackSize, defaultPackerCount, func(ctx context.Context, t restic.BlobType, p *packer) error {
+		pm := newPackerManager(crypto.NewRandomKey(), vaultic.DataBlob, DefaultPackSize, defaultPackerCount, func(ctx context.Context, t vaultic.BlobType, p *packer) error {
 			return nil
 		})
 		fillPacks(t, rnd, pm, blobBuf)

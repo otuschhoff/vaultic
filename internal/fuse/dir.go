@@ -14,9 +14,9 @@ import (
 	"github.com/anacrolix/fuse"
 	"github.com/anacrolix/fuse/fs"
 
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/debug"
-	"github.com/restic/restic/internal/restic"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // Statically ensure that *dir implement those interface
@@ -66,7 +66,7 @@ func unwrapCtxCanceled(err error) error {
 
 // replaceSpecialNodes replaces nodes with name "." and "/" by their contents.
 // Otherwise, the node is returned.
-func replaceSpecialNodes(ctx context.Context, repo restic.BlobLoader, node *data.Node) (data.TreeNodeIterator, error) {
+func replaceSpecialNodes(ctx context.Context, repo vaultic.BlobLoader, node *data.Node) (data.TreeNodeIterator, error) {
 	if node.Type != data.NodeTypeDir || node.Subtree == nil {
 		return slices.Values([]data.NodeOrError{{Node: node}}), nil
 	}

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend/rest"
-	"github.com/restic/restic/internal/backend/test"
-	rtest "github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend/rest"
+	"github.com/vaultic/vaultic/internal/backend/test"
+	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 var (
@@ -130,10 +130,10 @@ func runRESTServer(ctx context.Context, t testing.TB, dir, reqListenAddr string)
 	// to a URL suitable for us to connect to
 	var addrToConnectTo string
 	if strings.HasPrefix(reqListenAddr, "unix:") {
-		addrToConnectTo = fmt.Sprintf("http+unix://%s:/restic-test/", actualListenAddr)
+		addrToConnectTo = fmt.Sprintf("http+unix://%s:/vaultic-test/", actualListenAddr)
 	} else {
 		// while we may listen on 0.0.0.0, we connect to localhost
-		addrToConnectTo = fmt.Sprintf("http://%s/restic-test/", strings.Replace(actualListenAddr, "0.0.0.0", "localhost", 1))
+		addrToConnectTo = fmt.Sprintf("http://%s/vaultic-test/", strings.Replace(actualListenAddr, "0.0.0.0", "localhost", 1))
 	}
 
 	// parse to a URL
@@ -166,7 +166,7 @@ func newTestSuite(url *url.URL, minimalData bool) *test.Suite[rest.Config] {
 func TestBackendREST(t *testing.T) {
 	defer func() {
 		if t.Skipped() {
-			rtest.SkipDisallowed(t, "restic/backend/rest.TestBackendREST")
+			rtest.SkipDisallowed(t, "vaultic/backend/rest.TestBackendREST")
 		}
 	}()
 
@@ -180,9 +180,9 @@ func TestBackendREST(t *testing.T) {
 }
 
 func TestBackendRESTExternalServer(t *testing.T) {
-	repostr := os.Getenv("RESTIC_TEST_REST_REPOSITORY")
+	repostr := os.Getenv("VAULTIC_TEST_REST_REPOSITORY")
 	if repostr == "" {
-		t.Skipf("environment variable %v not set", "RESTIC_TEST_REST_REPOSITORY")
+		t.Skipf("environment variable %v not set", "VAULTIC_TEST_REST_REPOSITORY")
 	}
 
 	cfg, err := rest.ParseConfig(repostr)

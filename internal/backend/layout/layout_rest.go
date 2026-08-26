@@ -3,7 +3,7 @@ package layout
 import (
 	"path"
 
-	"github.com/restic/restic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend"
 )
 
 // RESTLayout implements the default layout for the REST protocol.

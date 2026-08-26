@@ -5,15 +5,15 @@ import (
 	"sort"
 	"time"
 
-	"github.com/restic/restic/internal/archiver"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/ui"
-	"github.com/restic/restic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/archiver"
+	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // textProgress reports progress for the `backup` command.
 type textProgress struct {
-	restic.Printer
+	vaultic.Printer
 
 	term      ui.Terminal
 	verbosity uint
@@ -130,7 +130,7 @@ func (b *textProgress) Reset() {
 }
 
 // Finish prints the finishing messages.
-func (b *textProgress) Finish(id restic.ID, summary *archiver.Summary, dryRun bool) {
+func (b *textProgress) Finish(id vaultic.ID, summary *archiver.Summary, dryRun bool) {
 	b.P("\n")
 	b.P("Files:       %5d new, %5d changed, %5d unmodified\n", summary.Files.New, summary.Files.Changed, summary.Files.Unchanged)
 	b.P("Dirs:        %5d new, %5d changed, %5d unmodified\n", summary.Dirs.New, summary.Dirs.Changed, summary.Dirs.Unchanged)

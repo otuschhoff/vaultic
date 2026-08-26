@@ -1,7 +1,7 @@
 package layout
 
 import (
-	"github.com/restic/restic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend"
 )
 
 // Layout computes paths for file name storage.

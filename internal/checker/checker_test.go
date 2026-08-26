@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/backend"
-	"github.com/restic/restic/internal/checker"
-	"github.com/restic/restic/internal/data"
-	"github.com/restic/restic/internal/errors"
-	"github.com/restic/restic/internal/repository"
-	"github.com/restic/restic/internal/restic"
-	"github.com/restic/restic/internal/test"
+	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/checker"
+	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/test"
+	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 var checkerTestData = filepath.Join("testdata", "checker-test-repo.tar.gz")
@@ -48,7 +48,7 @@ func checkStruct(chkr *checker.Checker) []error {
 		return []error{err}
 	}
 	return collectErrors(context.TODO(), func(ctx context.Context, errChan chan<- error) {
-		chkr.Structure(ctx, restic.NoopCounter, errChan)
+		chkr.Structure(ctx, vaultic.NoopCounter, errChan)
 	})
 }
 
@@ -56,9 +56,9 @@ func checkData(chkr *checker.Checker) []error {
 	return collectErrors(
 		context.TODO(),
 		func(ctx context.Context, errCh chan<- error) {
-			chkr.ReadPacks(ctx, func(packs map[restic.ID]int64) map[restic.ID]int64 {
+			chkr.ReadPacks(ctx, func(packs map[vaultic.ID]int64) map[vaultic.ID]int64 {
 				return packs
-			}, restic.NewNoopPrinter(), errCh)
+			}, vaultic.NewNoopPrinter(), errCh)
 		},
 	)
 }
@@ -72,11 +72,11 @@ func assertOnlyMixedPackHints(t *testing.T, hints []error) {
 }
 
 func TestCheckRepo(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, _ := repository.TestFromFixture(t, checkerTestData)
 
 	chkr := checker.New(repo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -90,14 +90,14 @@ func TestCheckRepo(t *testing.T) {
 }
 
 func TestMissingPack(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, be := repository.TestFromFixture(t, checkerTestData)
 
-	packID := restic.TestParseID("657f7fb64f6a854fff6fe9279998ee09034901eded4e6db9bcee0e59745bbce6")
+	packID := vaultic.TestParseID("657f7fb64f6a854fff6fe9279998ee09034901eded4e6db9bcee0e59745bbce6")
 	test.OK(t, be.Remove(context.TODO(), backend.Handle{Type: backend.PackFile, Name: packID.String()}))
 
 	chkr := checker.New(repo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -116,16 +116,16 @@ func TestMissingPack(t *testing.T) {
 }
 
 func TestUnreferencedPack(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, be := repository.TestFromFixture(t, checkerTestData)
 
 	// index 3f1a only references pack 60e0
 	packID := "60e0438dcb978ec6860cc1f8c43da648170ee9129af8f650f876bad19f8f788e"
-	indexID := restic.TestParseID("3f1abfcb79c6f7d0a3be517d2c83c8562fba64ef2c8e9a3544b4edaf8b5e3b44")
+	indexID := vaultic.TestParseID("3f1abfcb79c6f7d0a3be517d2c83c8562fba64ef2c8e9a3544b4edaf8b5e3b44")
 	test.OK(t, be.Remove(context.TODO(), backend.Handle{Type: backend.IndexFile, Name: indexID.String()}))
 
 	chkr := checker.New(repo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -144,25 +144,25 @@ func TestUnreferencedPack(t *testing.T) {
 }
 
 func TestUnreferencedBlobs(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, be := repository.TestFromFixture(t, checkerTestData)
 
-	snapshotID := restic.TestParseID("51d249d28815200d59e4be7b3f21a157b864dc343353df9d8e498220c2499b02")
+	snapshotID := vaultic.TestParseID("51d249d28815200d59e4be7b3f21a157b864dc343353df9d8e498220c2499b02")
 	test.OK(t, be.Remove(context.TODO(), backend.Handle{Type: backend.SnapshotFile, Name: snapshotID.String()}))
 
-	unusedBlobsBySnapshot := restic.BlobHandles{
-		restic.TestParseHandle("58c748bbe2929fdf30c73262bd8313fe828f8925b05d1d4a87fe109082acb849", restic.DataBlob),
-		restic.TestParseHandle("988a272ab9768182abfd1fe7d7a7b68967825f0b861d3b36156795832c772235", restic.DataBlob),
-		restic.TestParseHandle("c01952de4d91da1b1b80bc6e06eaa4ec21523f4853b69dc8231708b9b7ec62d8", restic.TreeBlob),
-		restic.TestParseHandle("bec3a53d7dc737f9a9bee68b107ec9e8ad722019f649b34d474b9982c3a3fec7", restic.TreeBlob),
-		restic.TestParseHandle("2a6f01e5e92d8343c4c6b78b51c5a4dc9c39d42c04e26088c7614b13d8d0559d", restic.TreeBlob),
-		restic.TestParseHandle("18b51b327df9391732ba7aaf841a4885f350d8a557b2da8352c9acf8898e3f10", restic.DataBlob),
+	unusedBlobsBySnapshot := vaultic.BlobHandles{
+		vaultic.TestParseHandle("58c748bbe2929fdf30c73262bd8313fe828f8925b05d1d4a87fe109082acb849", vaultic.DataBlob),
+		vaultic.TestParseHandle("988a272ab9768182abfd1fe7d7a7b68967825f0b861d3b36156795832c772235", vaultic.DataBlob),
+		vaultic.TestParseHandle("c01952de4d91da1b1b80bc6e06eaa4ec21523f4853b69dc8231708b9b7ec62d8", vaultic.TreeBlob),
+		vaultic.TestParseHandle("bec3a53d7dc737f9a9bee68b107ec9e8ad722019f649b34d474b9982c3a3fec7", vaultic.TreeBlob),
+		vaultic.TestParseHandle("2a6f01e5e92d8343c4c6b78b51c5a4dc9c39d42c04e26088c7614b13d8d0559d", vaultic.TreeBlob),
+		vaultic.TestParseHandle("18b51b327df9391732ba7aaf841a4885f350d8a557b2da8352c9acf8898e3f10", vaultic.DataBlob),
 	}
 
 	sort.Sort(unusedBlobsBySnapshot)
 
 	chkr := checker.New(repo, true)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -179,7 +179,7 @@ func TestUnreferencedBlobs(t *testing.T) {
 }
 
 func TestModifiedIndex(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, be := repository.TestFromFixture(t, checkerTestData)
 
 	done := make(chan struct{})
@@ -204,7 +204,7 @@ func TestModifiedIndex(t *testing.T) {
 	test.OK(t, be.Save(context.TODO(), h2, backend.NewByteReader(data, be.Hasher())))
 
 	chkr := checker.New(repo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) == 0 {
 		t.Fatalf("expected errors not found")
 	}
@@ -219,11 +219,11 @@ func TestModifiedIndex(t *testing.T) {
 var checkerDuplicateIndexTestData = filepath.Join("testdata", "duplicate-packs-in-index-test-repo.tar.gz")
 
 func TestDuplicatePacksInIndex(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("b9883c60bed42db51be171ca52f055104b6ea7cfa2bc381c05b2b1f78231280c"), `{"mac":{"k":"maQ4ILA872XnDxHVEno94A==","r":"OptMBABwkgIsMQcHME8cBw=="},"encrypt":"janrR1efN7HyQ8kOZ9zhHixooZ/e+WelH0mT4v9WskQ="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("b9883c60bed42db51be171ca52f055104b6ea7cfa2bc381c05b2b1f78231280c"), `{"mac":{"k":"maQ4ILA872XnDxHVEno94A==","r":"OptMBABwkgIsMQcHME8cBw=="},"encrypt":"janrR1efN7HyQ8kOZ9zhHixooZ/e+WelH0mT4v9WskQ="}`)
 	repo, _ := repository.TestFromFixture(t, checkerDuplicateIndexTestData)
 
 	chkr := checker.New(repo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(hints) == 0 {
 		t.Fatalf("did not get expected checker hints for duplicate packs in indexes")
 	}
@@ -363,7 +363,7 @@ func TestCheckerModifiedData(t *testing.T) {
 
 			chkr := checker.New(checkRepo, false)
 
-			hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+			hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 			if len(errs) > 0 {
 				t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 			}
@@ -397,13 +397,13 @@ func TestCheckerModifiedData(t *testing.T) {
 // loadTreesOnceRepository allows each tree to be loaded only once
 type loadTreesOnceRepository struct {
 	*repository.Repository
-	loadedTrees   restic.IDSet
+	loadedTrees   vaultic.IDSet
 	mutex         sync.Mutex
 	DuplicateTree bool
 }
 
-func (r *loadTreesOnceRepository) LoadBlob(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error) {
-	if bh.Type != restic.TreeBlob {
+func (r *loadTreesOnceRepository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []byte) ([]byte, error) {
+	if bh.Type != vaultic.TreeBlob {
 		return r.Repository.LoadBlob(ctx, bh, buf)
 	}
 	r.mutex.Lock()
@@ -419,15 +419,15 @@ func (r *loadTreesOnceRepository) LoadBlob(ctx context.Context, bh restic.BlobHa
 }
 
 func TestCheckerNoDuplicateTreeDecodes(t *testing.T) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, _ := repository.TestFromFixture(t, checkerTestData)
 	checkRepo := &loadTreesOnceRepository{
 		Repository:  repo,
-		loadedTrees: restic.NewIDSet(),
+		loadedTrees: vaultic.NewIDSet(),
 	}
 
 	chkr := checker.New(checkRepo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -442,21 +442,21 @@ func TestCheckerNoDuplicateTreeDecodes(t *testing.T) {
 // delayRepository delays read of a specific handle.
 type delayRepository struct {
 	*repository.Repository
-	DelayTree      restic.ID
+	DelayTree      vaultic.ID
 	UnblockChannel chan struct{}
 	Unblocker      sync.Once
 	Triggered      bool
 }
 
-func (r *delayRepository) LoadBlob(ctx context.Context, bh restic.BlobHandle, buf []byte) ([]byte, error) {
-	if bh.Type == restic.TreeBlob && bh.ID == r.DelayTree {
+func (r *delayRepository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []byte) ([]byte, error) {
+	if bh.Type == vaultic.TreeBlob && bh.ID == r.DelayTree {
 		<-r.UnblockChannel
 	}
 	return r.Repository.LoadBlob(ctx, bh, buf)
 }
 
-func (r *delayRepository) LookupBlobSize(bh restic.BlobHandle) (uint, bool) {
-	if bh.ID == r.DelayTree && bh.Type == restic.DataBlob {
+func (r *delayRepository) LookupBlobSize(bh vaultic.BlobHandle) (uint, bool) {
+	if bh.ID == r.DelayTree && bh.Type == vaultic.DataBlob {
 		r.Unblock()
 	}
 	return r.Repository.LookupBlobSize(bh)
@@ -480,22 +480,22 @@ func TestCheckerBlobTypeConfusion(t *testing.T) {
 		Type:    data.NodeTypeFile,
 		Mode:    0644,
 		Size:    42,
-		Content: restic.IDs{restic.TestParseID("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")},
+		Content: vaultic.IDs{vaultic.TestParseID("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")},
 	}
 	damagedNodes := []*data.Node{damagedNode}
 
-	var id restic.ID
-	test.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	var id vaultic.ID
+	test.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		id = data.TestSaveNodes(t, ctx, uploader, damagedNodes)
 		return nil
 	}))
 
-	buf, err := repo.LoadBlob(ctx, restic.BlobHandle{Type: restic.TreeBlob, ID: id}, nil)
+	buf, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id}, nil)
 	test.OK(t, err)
 
-	test.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	test.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		var err error
-		_, _, _, err = uploader.SaveBlob(ctx, restic.DataBlob, buf, id, false)
+		_, _, _, err = uploader.SaveBlob(ctx, vaultic.DataBlob, buf, id, false)
 		return err
 	}))
 
@@ -504,7 +504,7 @@ func TestCheckerBlobTypeConfusion(t *testing.T) {
 		Type:    data.NodeTypeFile,
 		Mode:    0644,
 		Size:    uint64(len(buf)),
-		Content: restic.IDs{id},
+		Content: vaultic.IDs{id},
 	}
 	dirNode := &data.Node{
 		Name:    "bbbbb",
@@ -515,8 +515,8 @@ func TestCheckerBlobTypeConfusion(t *testing.T) {
 
 	rootNodes := []*data.Node{malNode, dirNode}
 
-	var rootID restic.ID
-	test.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
+	var rootID vaultic.ID
+	test.OK(t, repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		rootID = data.TestSaveNodes(t, ctx, uploader, rootNodes)
 		return nil
 	}))
@@ -544,7 +544,7 @@ func TestCheckerBlobTypeConfusion(t *testing.T) {
 		delayRepo.Unblock()
 	}()
 
-	hints, errs := chkr.LoadIndex(ctx, restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(ctx, vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -568,12 +568,12 @@ func TestCheckerBlobTypeConfusion(t *testing.T) {
 	test.Assert(t, delayRepo.Triggered, "delay repository did not trigger")
 }
 
-func loadBenchRepository(t *testing.B) (*checker.Checker, restic.Repository) {
-	repository.TestInjectKey(t, restic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+func loadBenchRepository(t *testing.B) (*checker.Checker, vaultic.Repository) {
+	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
 	repo, _ := repository.TestFromFixture(t, checkerTestData)
 
 	chkr := checker.New(repo, false)
-	hints, errs := chkr.LoadIndex(context.TODO(), restic.NoopTerminalCounterFactory)
+	hints, errs := chkr.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory)
 	if len(errs) > 0 {
 		t.Fatalf("expected no errors, got %v: %v", len(errs), errs)
 	}
@@ -601,7 +601,7 @@ func BenchmarkChecker(t *testing.B) {
 func benchmarkSnapshotScaling(t *testing.B, newSnapshots int) {
 	chkr, repo := loadBenchRepository(t)
 
-	snID := restic.TestParseID("51d249d28815200d59e4be7b3f21a157b864dc343353df9d8e498220c2499b02")
+	snID := vaultic.TestParseID("51d249d28815200d59e4be7b3f21a157b864dc343353df9d8e498220c2499b02")
 	sn2, err := data.LoadSnapshot(context.TODO(), repo, snID)
 	if err != nil {
 		t.Fatal(err)
