@@ -1,0 +1,20 @@
+Change: Rename project and binary to `vaultic`, add `VAULTIC_*` env vars
+
+The project formerly known as restic has been renamed to vaultic. The binary
+is now called `vaultic` (formerly `restic`), the Go module path changed from
+`github.com/restic/restic` to `github.com/vaultic/vaultic`, and the command
+sources moved to `cmd/vaultic`.
+
+All vaultic-specific environment variables are now read under the `VAULTIC_`
+prefix (for example `VAULTIC_REPOSITORY`, `VAULTIC_PASSWORD`,
+`VAULTIC_PASSWORD_FILE`). For backwards compatibility, variables that are not
+set fall back to the legacy `RESTIC_` prefixed names, so existing scripts keep
+working. When both variants are set, the `VAULTIC_*` variable takes
+precedence.
+
+The repository format is unchanged: repositories stay fully compatible with
+restic and rustic in both directions. A new interop harness
+(`helpers/interop/`, run on demand via the `interop` CI workflow)
+continuously verifies cross-client compatibility.
+
+https://github.com/vaultic/vaultic/pull/22000

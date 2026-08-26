@@ -56,7 +56,7 @@ the conventions in Section 12.
    flags in [internal/feature/features.go](../internal/feature/features.go)
    (`Alpha` → `Beta` → `Stable`), mirroring how `S3Restore` was introduced.
 3. **Library-first.** New logic goes into `internal/*` packages with the CLI in
-   [cmd/restic](../cmd/restic) as a thin layer, so vaultic can later expose a
+   [cmd/vaultic](../cmd/vaultic) as a thin layer, so vaultic can later expose a
    supported Go API comparable to `rustic_core`.
 4. **Config wins over flags.** Following rustic, durable settings (compression,
    pack sizes, warm-up) move into the in-repo config so users stop repeating
@@ -72,15 +72,15 @@ the conventions in Section 12.
 |---|---|---|
 | Repo config (JSON) | [internal/restic/config.go](../internal/restic/config.go) | `Config` = version, id, chunker_polynomial only |
 | Snapshot model | [internal/data/snapshot.go](../internal/data/snapshot.go) | lacks label / description / delete-protection |
-| Snapshot find/filter | [internal/data/snapshot_find.go](../internal/data/snapshot_find.go), [cmd/restic/find.go](../cmd/restic/find.go) | host/paths/tags only |
+| Snapshot find/filter | [internal/data/snapshot_find.go](../internal/data/snapshot_find.go), [cmd/vaultic/find.go](../cmd/vaultic/find.go) | host/paths/tags only |
 | Warm-up plumbing | [internal/repository/warmup.go](../internal/repository/warmup.go), [internal/backend/backend.go](../internal/backend/backend.go) | `Warmup`/`WarmupWait` implemented by all backends; wired into restorer/checker/repack behind `feature.S3Restore` |
-| Locking | [internal/repository/lock.go](../internal/repository/lock.go), [cmd/restic/lock.go](../cmd/restic/lock.go) | exclusive/non-exclusive lock files; `--no-lock` exists but is unsafe-opt-out |
-| Prune | [internal/repository/prune.go](../internal/repository/prune.go), [cmd/restic/cmd_prune.go](../cmd/restic/cmd_prune.go) | single-phase, requires exclusive lock |
+| Locking | [internal/repository/lock.go](../internal/repository/lock.go), [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) | exclusive/non-exclusive lock files; `--no-lock` exists but is unsafe-opt-out |
+| Prune | [internal/repository/prune.go](../internal/repository/prune.go), [cmd/vaultic/cmd_prune.go](../cmd/vaultic/cmd_prune.go) | single-phase, requires exclusive lock |
 | Packer / pack size | [internal/repository/packer_manager.go](../internal/repository/packer_manager.go) | single pack-size target |
 | Global options | [internal/global/global.go](../internal/global/global.go), [internal/options](../internal/options) | no config-file support |
 | Backends | [internal/backend](../internal/backend) | local, sftp, rest, s3, swift, b2, azure, gs, rclone |
 | Feature flags | [internal/feature](../internal/feature) | alpha/beta/stable registry, env-driven |
-| CLI | [cmd/restic](../cmd/restic) | cobra commands, one file per command |
+| CLI | [cmd/vaultic](../cmd/vaultic) | cobra commands, one file per command |
 
 ### 4.2 Rustic features vaultic already has (no action)
 
@@ -222,13 +222,13 @@ repeating flags (`--compression`, `--pack-size`, …) on every invocation.
    today a single target size is used — split into tree vs data packers.
    Raise the internal pack-size limit from 128 MiB to 4 GiB
    (verify uploader and backend `Save` paths for >128 MiB blobs).
-3. New `config` command (new file `cmd_config.go` in [cmd/restic](../cmd/restic)):
+3. New `config` command (new file `cmd_config.go` in [cmd/vaultic](../cmd/vaultic)):
    `vaultic config [--set-compression N] [--set-append-only] ...`
    reads-modifies-writes the config file (requires lock; refuse on v1 repos
    for chunker changes).
 4. `show-config` command: prints effective config (repo config merged with
    profile/CLI overrides once WS-F lands).
-5. `init --set-*` flags map onto the same struct ([cmd/restic/cmd_init.go](../cmd/restic/cmd_init.go)).
+5. `init --set-*` flags map onto the same struct ([cmd/vaultic/cmd_init.go](../cmd/vaultic/cmd_init.go)).
 6. Compression: keep existing `--compression` CLI as override; resolution
    order CLI > repo config > default. Centralize in
    [internal/global/global.go](../internal/global/global.go).
@@ -269,10 +269,10 @@ and delete protection.
 
 2. `backup`: `--label`, `--description`, `--description-from file`,
    `--delete-never`, `--delete-after <time>` in
-   [cmd/restic/cmd_backup.go](../cmd/restic/cmd_backup.go).
+   [cmd/vaultic/cmd_backup.go](../cmd/vaultic/cmd_backup.go).
 3. `forget`: refuse to delete snapshots with `delete_never` or
    `delete_after > now` unless a new `--override-delete-protection` is given
-   ([cmd/restic/cmd_forget.go](../cmd/restic/cmd_forget.go)).
+   ([cmd/vaultic/cmd_forget.go](../cmd/vaultic/cmd_forget.go)).
 4. `snapshots`/`ls`/`find`: display label; `--group-by` gains `label`.
 5. `tag` command: add `--set-description`, `--set-label` editing.
 
@@ -305,7 +305,7 @@ dump, copy, tag, stats, check).
    ```
 
 2. Wire flag registration as a reusable pflag set (like today's
-   `initMultiSnapshotFilterFlags` in [cmd/restic/find.go](../cmd/restic/find.go))
+   `initMultiSnapshotFilterFlags` in [cmd/vaultic/find.go](../cmd/vaultic/find.go))
    so all commands expose identical `--filter-*` flags while keeping the legacy
    `--host/--paths/--tags` as aliases.
 3. ID resolution: extend the snapshot ID parser
@@ -385,7 +385,7 @@ can run concurrently with backups.
      key add/passwd/remove (keep requiring locks — rustic still serializes key
      management), prune (see two-phase), `repair index` (requires exclusive).
    - Locking layer: [internal/repository/lock.go](../internal/repository/lock.go)
-     and [cmd/restic/lock.go](../cmd/restic/lock.go) — introduce
+     and [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) — introduce
      `LockPolicy{None, Shared, Exclusive}` per command; restic/rustic clients
      holding classic lock files are tolerated (we ignore foreign locks in
      lock-free mode; document the mixed-client semantics).
@@ -447,7 +447,7 @@ profiles; hooks for automation.
    - Execution: no shell by default (documented escape hatch: `sh -c`).
 4. `backup --init` (init repo if missing), `backup --ls` (list created
    snapshot like `ls` output) — small additions in
-   [cmd/restic/cmd_backup.go](../cmd/restic/cmd_backup.go).
+   [cmd/vaultic/cmd_backup.go](../cmd/vaultic/cmd_backup.go).
 
 **Format impact:** none (client-side only). **Effort:** L (profiles) + M (hooks).
 **Depends on:** WS-A (profile must merge with in-repo config), WS-B (label).
@@ -488,7 +488,7 @@ covers these services, so this is UX/perf, not capability.
    summary metrics (`SnapshotSummary` in
    [internal/data/snapshot.go](../internal/data/snapshot.go)) to a
    pushgateway after successful backup; start in
-   [cmd/restic/cmd_backup.go](../cmd/restic/cmd_backup.go). M.
+   [cmd/vaultic/cmd_backup.go](../cmd/vaultic/cmd_backup.go). M.
 4. `--opentelemetry`: trace spans around repository operations
    (backend Save/Load, index, packer). Use OTel Go SDK, no-op unless
    configured. M.
@@ -514,7 +514,7 @@ Rustic ships a ratatui TUI. Vaultic equivalent: bubbletea-based UI embedding
 Effort assumes the relevant workstreams are done. "Aliases" = accept rustic
 flag spelling as hidden aliases (migration aid only).
 
-### 7.1 `init` ([cmd_init.go](../cmd/restic/cmd_init.go))
+### 7.1 `init` ([cmd_init.go](../cmd/vaultic/cmd_init.go))
 
 | Item | Effort | Notes |
 |---|---|---|
@@ -523,7 +523,7 @@ flag spelling as hidden aliases (migration aid only).
 | `--hot-only` | M | WS-D |
 | keep `--copy-chunker-params`, `--from-*` (rustic solves via `copy --init`) | — | no action |
 
-### 7.2 `backup` ([cmd_backup.go](../cmd/restic/cmd_backup.go))
+### 7.2 `backup` ([cmd_backup.go](../cmd/vaultic/cmd_backup.go))
 
 | Item | Effort | Notes |
 |---|---|---|
@@ -531,16 +531,16 @@ flag spelling as hidden aliases (migration aid only).
 | `--label`, `--description`, `--description-from` | S | WS-B |
 | `--delete-never`, `--delete-after` | S | WS-B |
 | `--as-path` (store relative/custom path) | S | archiver target path override; also enables relative-path backups |
-| `--git-ignore`, `--no-require-git`, `--custom-ignorefile` | M | extend [cmd/restic/exclude.go](../cmd/restic/exclude.go) with gitignore semantics |
+| `--git-ignore`, `--no-require-git`, `--custom-ignorefile` | M | extend [cmd/vaultic/exclude.go](../cmd/vaultic/exclude.go) with gitignore semantics |
 | `--exclude-if-xattr` | S | exclude by xattr presence |
 | `--set-atime/--set-ctime/--set-devid/--set-xattr/--set-blockdev` | M | synthetic metadata for stdin/command sources; block-device backup support (rustic `--set-blockdev`) |
-| `--stdin-from-command` | — | already present ([cmd_backup.go](../cmd/restic/cmd_backup.go#L117)) — no action |
+| `--stdin-from-command` | — | already present ([cmd_backup.go](../cmd/vaultic/cmd_backup.go#L117)) — no action |
 | `--init` | S | auto-init missing repo |
 | `--ls` | S | print created snapshot listing |
 | Multiple `--parent` | M | merge several parents' trees for change detection |
 | Hooks + telemetry integration | S | WS-F/WS-H |
 
-### 7.3 `restore` ([cmd_restore.go](../cmd/restic/cmd_restore.go))
+### 7.3 `restore` ([cmd_restore.go](../cmd/vaultic/cmd_restore.go))
 
 | Item | Effort | Notes |
 |---|---|---|
@@ -549,7 +549,7 @@ flag spelling as hidden aliases (migration aid only).
 | warm-up command integration | M | WS-D |
 | keep `--overwrite`, `--sparse`, `--verify` (rustic lacks) | — | no action |
 
-### 7.4 `forget` ([cmd_forget.go](../cmd/restic/cmd_forget.go))
+### 7.4 `forget` ([cmd_forget.go](../cmd/vaultic/cmd_forget.go))
 
 | Item | Effort | Notes |
 |---|---|---|
@@ -560,7 +560,7 @@ flag spelling as hidden aliases (migration aid only).
 | `--group-by` gains `label` | S | WS-B |
 | Retention from config profile `[forget]` | S | WS-F |
 
-### 7.5 `prune` ([cmd_prune.go](../cmd/restic/cmd_prune.go))
+### 7.5 `prune` ([cmd_prune.go](../cmd/vaultic/cmd_prune.go))
 
 Covered by WS-E: two-phase, `--fast-repack`, `--keep-pack`, `--keep-delete`,
 `--instant-delete`, `--max-repack` (size/%/unlimited), `--repack-all`,
@@ -569,7 +569,7 @@ cold-pack handling (WS-D). Also: keep `min_packsize_tolerate_percent` /
 `max_packsize_tolerate_percent` configurable in-repo (today hardcoded /
 `--repack-smaller-than` in [internal/repository/prune.go](../internal/repository/prune.go)).
 
-### 7.6 `check` ([cmd_check.go](../cmd/restic/cmd_check.go))
+### 7.6 `check` ([cmd_check.go](../cmd/vaultic/cmd_check.go))
 
 | Item | Effort | Notes |
 |---|---|---|
@@ -578,37 +578,37 @@ cold-pack handling (WS-D). Also: keep `min_packsize_tolerate_percent` /
 | `--read-data-subset` friendly names (`last-week`, `month-2026-01`, …) | S | parse helper |
 | Use existing cache by default | S | verify current behavior matches; roadmap item from upstream already landed — confirm |
 
-### 7.7 `snapshots` ([cmd_snapshots.go](../cmd/restic/cmd_snapshots.go))
+### 7.7 `snapshots` ([cmd_snapshots.go](../cmd/vaultic/cmd_snapshots.go))
 
 `--all` (no grouping collapse), `--long`, summarize identical snapshots
 (`+3` style), `--group-by` +label, `--filter-*` via WS-C. Effort: M.
 
-### 7.8 `ls` ([cmd_ls.go](../cmd/restic/cmd_ls.go))
+### 7.8 `ls` ([cmd_ls.go](../cmd/vaultic/cmd_ls.go))
 
 `--glob/--iglob(--file)` aliases for include/exclude, `--numeric-uid-gid`,
 `--summary`, `ls` of *local* paths using the same filter engine (rustic
 parity). Effort: M.
 
-### 7.9 `find` ([cmd_find.go](../cmd/restic/cmd_find.go))
+### 7.9 `find` ([cmd_find.go](../cmd/vaultic/cmd_find.go))
 
 `--path <full-path>` fast history lookup (file history view), result
 summarization across identical snapshots (`--all` to expand), `--show-misses`,
 `--group-by`, `--numeric-uid-gid`. Keep vaultic-only `--blob/--tree/--pack`.
 Effort: M–L (path index walk optimization).
 
-### 7.10 `diff` ([cmd_diff.go](../cmd/restic/cmd_diff.go))
+### 7.10 `diff` ([cmd_diff.go](../cmd/vaultic/cmd_diff.go))
 
 Support `latest` (with filters) as an argument, **diff snapshot vs local
 directory**, `--glob/--iglob` filters, `--no-content`, file-level sub-paths
 (WS-C). Effort: L (local-diff is the bulk: reuse restorer-side metadata
 comparison against [internal/fs](../internal/fs)).
 
-### 7.11 `dump` ([cmd_dump.go](../cmd/restic/cmd_dump.go))
+### 7.11 `dump` ([cmd_dump.go](../cmd/vaultic/cmd_dump.go))
 
 `--archive tar.gz`, `auto` format detection from `--target` extension,
 file-level sub-paths. Effort: S (see [internal/dump](../internal/dump)).
 
-### 7.12 `copy` ([cmd_copy.go](../cmd/restic/cmd_copy.go))
+### 7.12 `copy` ([cmd_copy.go](../cmd/vaultic/cmd_copy.go))
 
 `--init` (init target with matching chunker params — supersedes
 `init --copy-chunker-params` dance), verify-chunker-params check by default,
@@ -619,8 +619,8 @@ multiple targets (from config profiles, WS-F). Effort: M.
 | Command | Effort | Notes |
 |---|---|---|
 | `merge` (new command) | M | merge N snapshots into one (union of trees, newest metadata wins per path; keep source list in new snapshot's metadata). Implement as tree-level merge in [internal/data/tree.go](../internal/data/tree.go) + walker |
-| `repoinfo` (new) | S | aggregate stats: counts per file type, sizes, compression ratio; reuse [cmd_stats.go](../cmd/restic/cmd_stats.go) helpers |
-| `webdav` (new) | L | read-only WebDAV server exposing snapshots like [cmd_mount.go](../cmd/restic/cmd_mount.go)/[internal/fuse](../internal/fuse) does for FUSE; Go: `golang.org/x/net/webdav` with a repo-backed FS |
+| `repoinfo` (new) | S | aggregate stats: counts per file type, sizes, compression ratio; reuse [cmd_stats.go](../cmd/vaultic/cmd_stats.go) helpers |
+| `webdav` (new) | L | read-only WebDAV server exposing snapshots like [cmd_mount.go](../cmd/vaultic/cmd_mount.go)/[internal/fuse](../internal/fuse) does for FUSE; Go: `golang.org/x/net/webdav` with a repo-backed FS |
 | `config` / `show-config` (new) | M/S | WS-A |
 | `completions` alias of `generate` | S | rustic naming alias, keep `generate` |
 
@@ -646,14 +646,24 @@ graph TD
     P6 --> P7[Phase 7: Long tail WS-G/WS-I/WS-J]
 ```
 
-### Phase 0 — Hygiene & interop harness (prereq, S–M)
+### Phase 0 — Hygiene & interop harness (prereq, S–M) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
-- Complete the vaultic rename: Go module path, binary name, env vars
-  (`VAULTIC_*` with `RESTIC_*` fallback), docs. *Confirm scope with
-  maintainers before touching the module path (import churn).*
-- Stand up an **interop test harness** (Section 9) with pinned rustic/restic
-  binaries in CI (allowed-to-fail job first).
-- Exit criteria: CI green; interop smoke test runs on demand.
+- ~~Complete the vaultic rename~~ — **done**: module path
+  `github.com/vaultic/vaultic`, binary `vaultic`, `cmd/vaultic`,
+  `internal/vaultic`, docs, docker, release helpers. Environment variables
+  are read as `VAULTIC_*` with transparent `RESTIC_*` fallback
+  (see [internal/env](../internal/env)).
+- ~~Stand up an **interop test harness**~~ — **done**:
+  [helpers/interop](../helpers/interop/interop.sh) runs a 3×3 writer×reader
+  matrix (vaultic × restic 0.19.1 × rustic 0.11.4) covering
+  init/backup/snapshots/ls/restore/check/forget/prune; 99/99 steps pass.
+  CI: `.github/workflows/interop.yml` (workflow_dispatch, continue-on-error
+  until Phase 1 lands).
+- Exit criteria met: `go build ./...`, `go vet ./...` clean; unit tests green
+  except pre-existing, environment-dependent failures also present on
+  upstream master (mount needs FUSE, rclone needs a new-enough rclone,
+  fs xattr quirks). Interop smoke test verified locally and runnable on
+  demand in CI.
 
 ### Phase 1 — In-repo config (WS-A; F1–F7)
 
@@ -729,7 +739,7 @@ graph TD
 - **Unit:** per-package, mirroring existing `*_test.go` conventions; config
   parsing fuzz test (pattern: [internal/repository/fuzz_test.go](../internal/repository/fuzz_test.go)).
 - **Integration:** every §7 item gets a `cmd_<x>_integration_test.go` case;
-  reuse harness in [cmd/restic/integration_helpers_test.go](../cmd/restic/integration_helpers_test.go).
+  reuse harness in [cmd/vaultic/integration_helpers_test.go](../cmd/vaultic/integration_helpers_test.go).
 - **Backend suite:** new backends must pass
   [internal/backend/test](../internal/backend/test).
 - **Cold-storage fake backend:** test double delaying `Load` until `Warmup`
