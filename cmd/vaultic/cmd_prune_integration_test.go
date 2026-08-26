@@ -470,6 +470,34 @@ func TestLockFreeFeatureBackupRemainsWritable(t *testing.T) {
 	testListSnapshots(t, env.gopts, 2)
 }
 
+func TestLockFreeAppendRetainsSharedLock(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, true)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, env)
+	env.gopts.BackendTestHook = nil
+	before, err := os.ReadDir(filepath.Join(env.repo, "locks"))
+	rtest.OK(t, err)
+
+	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
+		_, _, unlock, err := openWithAppendLock(ctx, gopts, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		during, err := os.ReadDir(filepath.Join(env.repo, "locks"))
+		if err != nil {
+			return err
+		}
+		if len(during) != len(before)+1 {
+			return fmt.Errorf("lock-free append lock count = %d, want %d", len(during), len(before)+1)
+		}
+		return nil
+	}))
+}
+
 func TestLockFreeReadSkipsLockFile(t *testing.T) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, true)()
 

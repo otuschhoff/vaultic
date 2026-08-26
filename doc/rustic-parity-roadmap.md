@@ -433,7 +433,7 @@ without deletion revalidation caused a real backup ∥ prune corruption in the
 race soak. Therefore the following stages are mandatory before widening the
 feature flag.
 
-1. **Introduce explicit command lock policies.** Replace overloaded
+1. **✅ Explicit command lock policies (implemented).** Replaced overloaded
    ``dryRun``/``noLock`` booleans in
    [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) with
    ``LockPolicy{None, Shared, Exclusive}``:
@@ -446,7 +446,10 @@ feature flag.
 
    Preserve ``--no-lock`` only as an explicit override of ``None``/``Shared``;
    never let it silently install a dry-run backend. Keep command-specific
-   validation for dangerous combinations (for example destructive prune).
+  validation for dangerous combinations (for example destructive prune).
+  ``openWithReadLock``, ``openWithAppendLock``, and
+  ``openWithExclusiveLock`` now map to these typed policies; policy unit tests
+  and runtime lock-file tests enforce the mapping.
 
 2. **Prove append-only writer safety.** Audit backup, copy destination, merge,
    and key add so every repository mutation is additive and ordered as:
@@ -860,7 +863,8 @@ graph TD
   lose packs selected before the backup completed. **It is opt-in Alpha**;
   explicit ``--no-lock`` remains an operator override. Verified with a
   lock-free read no-lock-file regression, writable append/no-lock regressions,
-  and a race-enabled backup ∥ prune ∥ forget soak.
+  an append-lock-presence regression, and a race-enabled backup ∥ prune ∥
+  dry-run forget soak.
 - **F19 deferred-delete prune** — `PrunePlan.Execute` splits storage lifecycle
   into phase 1 (repack +
   write new index) and phase 2 (delete superseded packs + old index files)

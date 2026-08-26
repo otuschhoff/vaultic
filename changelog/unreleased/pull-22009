@@ -1,0 +1,15 @@
+Enhancement: explicit command lock policy foundation
+
+Vaultic now represents command locking through `LockPolicy{None, Shared,
+Exclusive}` instead of overloading dry-run and no-lock booleans. Read commands
+can resolve to `None` through the Alpha lock-free read feature; append writers
+use `Shared`; destructive and coherent-view commands use `Exclusive`.
+
+The typed policy layer keeps actual dry-runs non-writing, prevents lock-free
+mode from silently changing append operations into dry-runs, and preserves the
+safe current boundary: lock-free reads, shared append locks, exclusive prune
+and destructive operations. Tests cover policy resolution, lock-file creation
+for reads/appends, writable no-lock backups, and repeated race-enabled
+backup/prune/forget coordination.
+
+https://github.com/otuschhoff/vaultic/pull/22009
