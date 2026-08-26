@@ -249,6 +249,28 @@ func (r *Repository) Backend() backend.Backend {
 	return r.be
 }
 
+// HotCold returns the hot and cold backends if this repository is a hot/cold
+// repository (opened with --repo-hot), or nil otherwise. It unwraps the
+// wrapper backends (cache, retry, logging) to find the composite.
+func (r *Repository) HotCold() (hot, cold backend.Backend, ok bool) {
+	type hotcolder interface {
+		Hot() backend.Backend
+		Cold() backend.Backend
+	}
+	be := r.be
+	for be != nil {
+		if hc, isHC := be.(hotcolder); isHC {
+			return hc.Hot(), hc.Cold(), true
+		}
+		u, isUnwrapper := be.(backend.Unwrapper)
+		if !isUnwrapper {
+			break
+		}
+		be = u.Unwrap()
+	}
+	return nil, nil, false
+}
+
 // SetDryRun sets the repo backend into dry-run mode.
 func (r *Repository) SetDryRun() {
 	r.be = dryrun.New(r.be)

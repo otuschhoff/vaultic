@@ -18,12 +18,20 @@ func CopyMetadata(ctx context.Context, src, dst *Repository) error {
 	srcBe := src.Backend()
 	dstBe := dst.Backend()
 
-	for _, t := range []vaultic.FileType{vaultic.KeyFile, vaultic.SnapshotFile, vaultic.IndexFile} {
-		bt := backend.FileType(t)
-		err := srcBe.List(ctx, bt, func(fi backend.FileInfo) error {
-			return copyFile(ctx, srcBe, dstBe, bt, fi)
-		})
-		if err != nil {
+	// keys are mirrored in BOTH directions so that hot and cold share the same
+	// key set (the hot part may have created its own key during --hot-only;
+	// that key must also exist in the cold part for the cold repo to be a
+	// complete repository on its own)
+	for _, dir := range [][2]*Repository{{src, dst}, {dst, src}} {
+		if err := copyAll(ctx, dir[0].Backend(), dir[1].Backend(), backend.KeyFile); err != nil {
+			return err
+		}
+	}
+
+	// snapshots and indexes only flow from the existing (cold) repo to the new
+	// (hot) part
+	for _, t := range []vaultic.FileType{vaultic.SnapshotFile, vaultic.IndexFile} {
+		if err := copyAll(ctx, srcBe, dstBe, backend.FileType(t)); err != nil {
 			return err
 		}
 	}
@@ -61,6 +69,14 @@ func treePackIDs(ctx context.Context, repo *Repository) (vaultic.IDSet, error) {
 		}
 	})
 	return treePacks, err
+}
+
+// copyAll copies all files of type t that exist in src but not (with the same
+// size) in dst.
+func copyAll(ctx context.Context, srcBe, dstBe backend.Backend, bt backend.FileType) error {
+	return srcBe.List(ctx, bt, func(fi backend.FileInfo) error {
+		return copyFile(ctx, srcBe, dstBe, bt, fi)
+	})
 }
 
 // copyFile copies a single file verbatim (still encrypted) from src to dst,

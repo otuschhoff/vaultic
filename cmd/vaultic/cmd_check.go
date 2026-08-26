@@ -77,6 +77,7 @@ type CheckOptions struct {
 	ReadDataSubset string
 	CheckUnused    bool
 	WithCache      bool
+	CheckHotCold   bool
 	data.SnapshotFilter
 }
 
@@ -91,6 +92,7 @@ func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 		panic(err)
 	}
 	f.BoolVar(&opts.WithCache, "with-cache", false, "use existing cache, only read uncached data from repository")
+	f.BoolVar(&opts.CheckHotCold, "check-hot-cold", false, "for a hot/cold repository (--repo-hot): verify that the hot and cold parts agree")
 	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
 }
 
@@ -423,6 +425,24 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 
 	if ctx.Err() != nil {
 		return summary, ctx.Err()
+	}
+
+	// for a hot/cold repository, verify that the hot and cold parts agree
+	if opts.CheckHotCold {
+		hot, cold, ok := repo.HotCold()
+		if !ok {
+			return summary, errors.Fatal("--check-hot-cold requires a hot/cold repository (--repo-hot)")
+		}
+		printer.P("check hot/cold integrity\n")
+		hcErrs := checker.CheckHotCold(ctx, hot, cold)
+		for _, hcErr := range hcErrs {
+			errorsFound = true
+			summary.NumErrors++
+			printer.E("%v\n", hcErr)
+		}
+		if len(hcErrs) == 0 && !errorsFound {
+			printer.P("hot and cold parts agree\n")
+		}
 	}
 
 	if errorsFound {
