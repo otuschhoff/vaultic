@@ -835,6 +835,11 @@ type SnapshotOptions struct {
 	Time           time.Time
 	ParentSnapshot *data.Snapshot
 	ProgramVersion string
+	// Label, Description and Delete are vaultic/rustic snapshot metadata
+	// extensions (see internal/data).
+	Label       string
+	Description string
+	Delete      *data.DeleteOption
 	// SkipIfUnchanged omits the snapshot creation if it is identical to the parent snapshot.
 	SkipIfUnchanged bool
 }
@@ -958,6 +963,11 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 
 	sn.ProgramVersion = opts.ProgramVersion
 	sn.Excludes = opts.Excludes
+	sn.Label = opts.Label
+	sn.Description = opts.Description
+	if opts.Delete != nil && opts.Delete.IsSet() {
+		sn.Delete = opts.Delete
+	}
 	if opts.ParentSnapshot != nil {
 		sn.Parent = opts.ParentSnapshot.ID()
 	}

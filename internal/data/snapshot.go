@@ -30,6 +30,16 @@ type Snapshot struct {
 	ProgramVersion string           `json:"program_version,omitempty"`
 	Summary        *SnapshotSummary `json:"summary,omitempty"`
 
+	// vaultic/rustic extension fields (additive; unknown fields are ignored
+	// by restic when reading, and use the same names as rustic).
+
+	// Label is a short free-form label for grouping snapshots.
+	Label string `json:"label,omitempty"`
+	// Description is a longer free-form description of the snapshot content.
+	Description string `json:"description,omitempty"`
+	// Delete marks the snapshot as delete-protected (see DeleteOption).
+	Delete *DeleteOption `json:"delete,omitempty"`
+
 	id *vaultic.ID // plaintext ID, used during restore
 }
 

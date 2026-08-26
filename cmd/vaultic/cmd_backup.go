@@ -85,6 +85,11 @@ type BackupOptions struct {
 	StdinCommand      bool
 	Tags              data.TagLists
 	Host              string
+	Label             string
+	Description       string
+	DescriptionFrom   string
+	DeleteNever       bool
+	DeleteAfter       string
 	FilesFrom         []string
 	FilesFromVerbatim []string
 	FilesFromRaw      []string
@@ -117,6 +122,11 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.StdinFilename, "stdin-filename", "stdin", "`filename` to use when reading from stdin")
 	f.BoolVar(&opts.StdinCommand, "stdin-from-command", false, "interpret arguments as command to execute and store its stdout")
 	f.Var(&opts.Tags, "tag", "add `tags` for the new snapshot in the format `tag[,tag,...]` (can be specified multiple times)")
+	f.StringVar(&opts.Label, "label", "", "set a `label` for the new snapshot (for grouping/filtering)")
+	f.StringVar(&opts.Description, "description", "", "add a `description` to the new snapshot")
+	f.StringVar(&opts.DescriptionFrom, "description-from", "", "read the snapshot description from `file`")
+	f.BoolVar(&opts.DeleteNever, "delete-never", false, "mark the snapshot as never deletable by forget (delete protection)")
+	f.StringVar(&opts.DeleteAfter, "delete-after", "", "mark the snapshot as not deletable before a `duration` from now (e.g. 10d; delete protection)")
 	f.UintVar(&opts.ReadConcurrency, "read-concurrency", 0, "read `n` files concurrently (default: $VAULTIC_READ_CONCURRENCY or 2)")
 	f.StringVarP(&opts.Host, "host", "H", "", "set the `hostname` for the snapshot manually (default: $VAULTIC_HOST). To prevent an expensive rescan use the \"parent\" flag")
 	f.StringVar(&opts.Host, "hostname", "", "set the `hostname` for the snapshot manually")
@@ -687,9 +697,33 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		BackupStart:     backupStart,
 		Time:            timeStamp,
 		Hostname:        opts.Host,
+		Label:           opts.Label,
 		ParentSnapshot:  parentSnapshot,
 		ProgramVersion:  "vaultic " + global.Version,
 		SkipIfUnchanged: opts.SkipIfUnchanged,
+	}
+
+	// resolve description (--description-from overrides --description)
+	if opts.DescriptionFrom != "" {
+		data, err := textfile.Read(opts.DescriptionFrom)
+		if err != nil {
+			return errors.Fatalf("unable to read description from %q: %v", opts.DescriptionFrom, err)
+		}
+		snapshotOpts.Description = strings.TrimSpace(string(data))
+	} else {
+		snapshotOpts.Description = opts.Description
+	}
+
+	// resolve delete protection (--delete-never wins over --delete-after)
+	if opts.DeleteNever {
+		snapshotOpts.Delete = &data.DeleteOption{Never: true}
+	} else if opts.DeleteAfter != "" {
+		dur, err := data.ParseDuration(opts.DeleteAfter)
+		if err != nil || dur.Zero() {
+			return errors.Fatalf("invalid --delete-after duration %q: %v", opts.DeleteAfter, err)
+		}
+		until := timeStamp.AddDate(dur.Years, dur.Months, dur.Days).Add(time.Duration(dur.Hours) * time.Hour)
+		snapshotOpts.Delete = &data.DeleteOption{After: &until}
 	}
 
 	if !gopts.JSON {
