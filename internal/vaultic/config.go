@@ -18,20 +18,34 @@ type Config struct {
 	ID                string      `json:"id"`
 	ChunkerPolynomial chunker.Pol `json:"chunker_polynomial"`
 
-	// vaultic/rustic extension fields (additive; unknown fields are ignored
-	// by restic and rustic when reading the config).
+	// vaultic/rustic extension fields. These are additive, FLAT JSON members;
+	// both restic and rustic ignore unknown fields when reading the config.
+	// The names and layout mirror rustic's ConfigFile exactly so that both
+	// tools agree on a repository's settings. Do not nest them in objects.
 
-	// ChunkerCfg holds the chunker configuration for new data.
-	ChunkerCfg *ChunkerConfig `json:"chunker,omitempty"`
+	// ChunkerType selects the chunker algorithm ("rabin" or "fixed_size").
+	ChunkerType ChunkerType `json:"chunker,omitempty"`
+	// ChunkSizeBytes is the average (rabin) or exact (fixed_size) chunk size.
+	ChunkSizeBytes uint64 `json:"chunk_size,omitempty"`
+	// ChunkMinSizeBytes is the minimum chunk size (rabin only).
+	ChunkMinSizeBytes uint64 `json:"chunk_min_size,omitempty"`
+	// ChunkMaxSizeBytes is the maximum chunk size (rabin only).
+	ChunkMaxSizeBytes uint64 `json:"chunk_max_size,omitempty"`
+
 	// AppendOnlyFlag marks the repository as append-only.
 	AppendOnlyFlag bool `json:"append_only,omitempty"`
 	// Compression is the zstd compression level (-7..22; 0 = off). Nil means
 	// "auto" (decided per repository version).
 	Compression *int `json:"compression,omitempty"`
-	// TreePack holds the tree pack sizing configuration.
-	TreePack PackConfig `json:"treepack,omitempty"`
-	// DataPack holds the data pack sizing configuration.
-	DataPack PackConfig `json:"datapack,omitempty"`
+
+	// Tree/Data pack sizing (bytes). A zero size means "use the default".
+	TreePackSizeBytes      uint64  `json:"treepack_size,omitempty"`
+	TreePackGrowFactor     *uint32 `json:"treepack_growfactor,omitempty"`
+	TreePackSizeLimitBytes uint64  `json:"treepack_size_limit,omitempty"`
+	DataPackSizeBytes      uint64  `json:"datapack_size,omitempty"`
+	DataPackGrowFactor     *uint32 `json:"datapack_growfactor,omitempty"`
+	DataPackSizeLimitBytes uint64  `json:"datapack_size_limit,omitempty"`
+
 	// MinPacksizeToleratePercent is the tolerated minimum pack size in
 	// percent of the target (prune --repack-small threshold).
 	MinPacksizeToleratePercent *uint32 `json:"min_packsize_tolerate_percent,omitempty"`

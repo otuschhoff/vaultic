@@ -23,19 +23,19 @@ func TestConfigExtensionsRoundTrip(t *testing.T) {
 	comp := 10
 	ev := false
 	minTol := uint32(85)
+	gf := uint32(16)
 	cfg.Compression = &comp
 	cfg.AppendOnlyFlag = true
 	cfg.ExtraVerify = &ev
-	cfg.ChunkerCfg = &vaultic.ChunkerConfig{
-		Type:      vaultic.ChunkerRabin,
-		ChunkSize: 2 * 1024 * 1024,
-	}
-	cfg.TreePack = vaultic.PackConfig{Size: 4 * 1024 * 1024, GrowFactor: 32, SizeLimit: 128 * 1024 * 1024}
-	cfg.DataPack = vaultic.PackConfig{Size: 32 * 1024 * 1024, GrowFactor: 32, SizeLimit: 512 * 1024 * 1024}
+	cfg.ChunkerType = vaultic.ChunkerFixedSize
+	cfg.ChunkSizeBytes = 2 * 1024 * 1024
+	cfg.TreePackSizeBytes = 4 * 1024 * 1024
+	cfg.TreePackGrowFactor = &gf
+	cfg.TreePackSizeLimitBytes = 128 * 1024 * 1024
+	cfg.DataPackSizeBytes = 32 * 1024 * 1024
 	cfg.MinPacksizeToleratePercent = &minTol
 
 	rtest.OK(t, cfg.ValidateExtensions())
-
 	rtest.OK(t, vaultic.SaveConfig(context.TODO(), saver{save}, cfg))
 
 	load := func(tpe vaultic.FileType, id vaultic.ID) ([]byte, error) {
@@ -67,60 +67,62 @@ func TestConfigIgnoresUnknownFields(t *testing.T) {
 	rtest.Assert(t, cfg.Compression != nil && *cfg.Compression == 10, "compression not parsed")
 }
 
+// TestConfigRusticFieldNames ensures the extension keys exactly match
+// rustic's ConfigFile JSON layout (flat keys, chunker as a plain string).
 func TestConfigRusticFieldNames(t *testing.T) {
-	// the extension field names must match rustic's ConfigFile JSON keys so
-	// that both tools agree on a repository's settings
-	cfg := vaultic.Config{}
-	rtest.OK(t, cfg.ValidateExtensions())
-
-	cfg2 := vaultic.Config{
-		AppendOnlyFlag: true,
-		TreePack:       vaultic.PackConfig{Size: 1 << 20},
-		DataPack:       vaultic.PackConfig{Size: 8 << 20},
+	cfg := vaultic.Config{
+		ChunkerType:            vaultic.ChunkerFixedSize,
+		ChunkSizeBytes:         1 << 20,
+		AppendOnlyFlag:         true,
+		TreePackSizeBytes:      4 << 20,
+		DataPackSizeBytes:      32 << 20,
+		DataPackSizeLimitBytes: 512 << 20,
 	}
-	data, err := json.Marshal(cfg2)
+	rtest.OK(t, cfg.ValidateExtensions())
+	data, err := json.Marshal(cfg)
 	rtest.OK(t, err)
 	var m map[string]any
 	rtest.OK(t, json.Unmarshal(data, &m))
-	for _, key := range []string{"append_only", "treepack", "datapack"} {
+
+	// chunker must be a plain string using rustic's serde variant name
+	rtest.Equals(t, "FixedSize", m["chunker"])
+	for _, key := range []string{"append_only", "chunk_size", "treepack_size",
+		"datapack_size", "datapack_size_limit"} {
 		if _, ok := m[key]; !ok {
-			t.Fatalf("expected key %q in serialized config", key)
+			t.Fatalf("expected flat key %q in serialized config, got %s", key, data)
 		}
-	}
-	tp := m["treepack"].(map[string]any)
-	if _, ok := tp["size"]; !ok {
-		t.Fatalf("expected treepack.size in serialized config")
 	}
 }
 
-func TestChunkerConfigValidate(t *testing.T) {
-	rtest.OK(t, vaultic.ChunkerConfig{}.Validate())
-	rtest.OK(t, vaultic.ChunkerConfig{Type: vaultic.ChunkerRabin}.Validate())
-	rtest.OK(t, vaultic.ChunkerConfig{Type: vaultic.ChunkerFixedSize, ChunkSize: 1 << 20}.Validate())
+func TestChunkerValidate(t *testing.T) {
+	rtest.OK(t, vaultic.Config{}.ValidateExtensions())
+	rtest.OK(t, vaultic.Config{ChunkerType: vaultic.ChunkerRabin}.ValidateExtensions())
+	rtest.OK(t, vaultic.Config{ChunkerType: vaultic.ChunkerFixedSize, ChunkSizeBytes: 1 << 20}.ValidateExtensions())
 
-	err := vaultic.ChunkerConfig{Type: "bogus"}.Validate()
+	err := vaultic.Config{ChunkerType: "bogus"}.ValidateExtensions()
 	rtest.Assert(t, err != nil, "expected error for invalid chunker type")
 
-	err = vaultic.ChunkerConfig{Type: vaultic.ChunkerFixedSize}.Validate()
+	err = vaultic.Config{ChunkerType: vaultic.ChunkerFixedSize}.ValidateExtensions()
 	rtest.Assert(t, err != nil, "expected error for fixed_size without chunk_size")
 
-	err = vaultic.ChunkerConfig{ChunkMinSize: 8 << 20, ChunkMaxSize: 1 << 20}.Validate()
+	err = vaultic.Config{ChunkMinSizeBytes: 8 << 20, ChunkMaxSizeBytes: 1 << 20}.ValidateExtensions()
 	rtest.Assert(t, err != nil, "expected error for min > max chunk size")
 }
 
-func TestPackConfigDefaults(t *testing.T) {
-	p := vaultic.PackConfig{}
-	size, grow, limit := p.PackSize(vaultic.DefaultDataPackSize)
+func TestPackSizeDefaults(t *testing.T) {
+	c := vaultic.Config{}
+	size, limit, gf := c.DataPackSize()
 	rtest.Equals(t, uint64(vaultic.DefaultDataPackSize), size)
-	rtest.Equals(t, uint32(vaultic.DefaultPackGrowFactor), grow)
 	rtest.Equals(t, uint64(0), limit)
+	rtest.Equals(t, uint32(vaultic.DefaultPackGrowFactor), gf)
 
-	p = vaultic.PackConfig{Size: 64 << 20, SizeLimit: 128 << 20}
-	size, _, limit = p.PackSize(vaultic.DefaultDataPackSize)
+	c.DataPackSizeBytes = 64 << 20
+	c.DataPackSizeLimitBytes = 128 << 20
+	size, limit, _ = c.DataPackSize()
 	rtest.Equals(t, uint64(64<<20), size)
 	rtest.Equals(t, uint64(128<<20), limit)
 
-	rtest.Assert(t, p.Validate("data") == nil, "valid pack config rejected")
-	bad := vaultic.PackConfig{Size: 256 << 20, SizeLimit: 128 << 20}
-	rtest.Assert(t, bad.Validate("data") != nil, "size > limit accepted")
+	rtest.Assert(t, c.ValidateExtensions() == nil, "valid pack config rejected")
+	bad := vaultic.Config{DataPackSizeBytes: 256 << 20, DataPackSizeLimitBytes: 128 << 20}
+	rtest.Assert(t, bad.ValidateExtensions() != nil, "size > limit accepted")
 }

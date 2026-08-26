@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 
 	"github.com/restic/chunker"
 	"github.com/vaultic/vaultic/internal/backend/location"
 	"github.com/vaultic/vaultic/internal/errors"
 	"github.com/vaultic/vaultic/internal/global"
+	"github.com/vaultic/vaultic/internal/repository"
 	"github.com/vaultic/vaultic/internal/ui"
 	"github.com/vaultic/vaultic/internal/ui/progress"
 	"github.com/vaultic/vaultic/internal/vaultic"
@@ -47,12 +49,33 @@ type InitOptions struct {
 	global.SecondaryRepoOptions
 	CopyChunkerParameters bool
 	RepositoryVersion     string
+
+	// in-repo config applied right after init (subset of `config --set-*`)
+	SetCompression  string
+	SetAppendOnly   string
+	SetExtraVerify  string
+	SetChunker      string
+	SetChunkSize    string
+	SetChunkMinSize string
+	SetChunkMaxSize string
+	SetTreePackSize string
+	SetDataPackSize string
 }
 
 func (opts *InitOptions) AddFlags(f *pflag.FlagSet) {
 	opts.SecondaryRepoOptions.AddFlags(f, "secondary", "to copy chunker parameters from")
 	f.BoolVar(&opts.CopyChunkerParameters, "copy-chunker-params", false, "copy chunker parameters from the secondary repository (useful with the copy command)")
 	f.StringVar(&opts.RepositoryVersion, "repository-version", "stable", "repository format version to use, allowed values are a format version, 'latest' and 'stable'")
+
+	f.StringVar(&opts.SetCompression, "set-compression", "", "set initial compression `level` (-7..22, 0=off) in the repository config")
+	f.StringVar(&opts.SetAppendOnly, "set-append-only", "", "set initial append-only `mode` (true|false)")
+	f.StringVar(&opts.SetExtraVerify, "set-extra-verify", "", "verify data before upload (true|false; default true)")
+	f.StringVar(&opts.SetChunker, "set-chunker", "", "set chunker `type` (rabin|fixed_size)")
+	f.StringVar(&opts.SetChunkSize, "set-chunk-size", "", "set average/fixed chunk `size` in bytes")
+	f.StringVar(&opts.SetChunkMinSize, "set-chunk-min-size", "", "set minimum chunk `size` in bytes")
+	f.StringVar(&opts.SetChunkMaxSize, "set-chunk-max-size", "", "set maximum chunk `size` in bytes")
+	f.StringVar(&opts.SetTreePackSize, "set-treepack-size", "", "set target tree pack `size` in bytes")
+	f.StringVar(&opts.SetDataPackSize, "set-datapack-size", "", "set target data pack `size` in bytes")
 }
 
 func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args []string, term ui.Terminal) error {
@@ -86,6 +109,11 @@ func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args [
 		return errors.Fatalf("%s", err)
 	}
 
+	// apply initial in-repo config (from --set-* flags)
+	if err := opts.applyConfig(ctx, s); err != nil {
+		return err
+	}
+
 	if !gopts.JSON {
 		printer.P("created vaultic repository %v at %s", s.Config().ID[:10], location.StripPassword(gopts.Backends, gopts.Repo))
 		if opts.CopyChunkerParameters && chunkerPolynomial != nil {
@@ -106,6 +134,63 @@ func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args [
 	}
 
 	return nil
+}
+
+// applyConfig applies the --set-* init flags to the new repository config.
+func (opts *InitOptions) applyConfig(ctx context.Context, s *repository.Repository) error {
+	return s.UpdateConfig(ctx, func(cfg *vaultic.Config) error {
+		if opts.SetCompression != "" {
+			if err := setOptionalInt(opts.SetCompression, -7, 22, &cfg.Compression, "compression"); err != nil {
+				return err
+			}
+		}
+		if opts.SetAppendOnly != "" {
+			if _, err := parseOptionalBool(opts.SetAppendOnly, &cfg.AppendOnlyFlag); err != nil {
+				return err
+			}
+		}
+		if opts.SetExtraVerify != "" {
+			if err := setOptionalBoolPtr(opts.SetExtraVerify, &cfg.ExtraVerify); err != nil {
+				return err
+			}
+		}
+		if opts.SetChunker != "" {
+			switch strings.ToLower(opts.SetChunker) {
+			case "rabin":
+				cfg.ChunkerType = vaultic.ChunkerRabin
+			case "fixed_size", "fixedsize":
+				cfg.ChunkerType = vaultic.ChunkerFixedSize
+			default:
+				return errors.Fatalf("invalid chunker %q, must be one of (rabin|fixed_size)", opts.SetChunker)
+			}
+		}
+		if opts.SetChunkSize != "" {
+			if err := setOptionalUint64(opts.SetChunkSize, &cfg.ChunkSizeBytes); err != nil {
+				return err
+			}
+		}
+		if opts.SetChunkMinSize != "" {
+			if err := setOptionalUint64(opts.SetChunkMinSize, &cfg.ChunkMinSizeBytes); err != nil {
+				return err
+			}
+		}
+		if opts.SetChunkMaxSize != "" {
+			if err := setOptionalUint64(opts.SetChunkMaxSize, &cfg.ChunkMaxSizeBytes); err != nil {
+				return err
+			}
+		}
+		if opts.SetTreePackSize != "" {
+			if err := setOptionalUint64(opts.SetTreePackSize, &cfg.TreePackSizeBytes); err != nil {
+				return err
+			}
+		}
+		if opts.SetDataPackSize != "" {
+			if err := setOptionalUint64(opts.SetDataPackSize, &cfg.DataPackSizeBytes); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func maybeReadChunkerPolynomial(ctx context.Context, opts InitOptions, gopts global.Options, printer vaultic.Printer) (*chunker.Pol, error) {

@@ -460,10 +460,10 @@ func applyRepoConfig(s *repository.Repository, gopts Options) error {
 	// generic target but not an explicit per-type config value)
 	treeSize, treeLimit, _ := cfg.TreePackSize()
 	dataSize, dataLimit, _ := cfg.DataPackSize()
-	if cfg.TreePack.Size != 0 {
+	if cfg.TreePackSizeBytes != 0 {
 		s.SetTreePackSize(treeSize, treeLimit)
 	}
-	if cfg.DataPack.Size != 0 {
+	if cfg.DataPackSizeBytes != 0 {
 		s.SetDataPackSize(dataSize, dataLimit)
 	}
 	return nil

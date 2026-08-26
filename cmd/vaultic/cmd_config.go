@@ -150,48 +150,46 @@ func (opts *ConfigOptions) apply(flags *pflag.FlagSet, cfg *vaultic.Config) (boo
 	chunkerChanged := false
 	if set("set-chunker") {
 		switch strings.ToLower(opts.setChunker) {
-		case "unset":
-			cfg.ChunkerCfg = nil
+		case "unset", "":
+			cfg.ChunkerType = ""
+		case "rabin":
+			cfg.ChunkerType = vaultic.ChunkerRabin
+		case "fixed_size", "fixedsize":
+			cfg.ChunkerType = vaultic.ChunkerFixedSize
 		default:
-			ensureChunker(cfg)
-			cfg.ChunkerCfg.Type = vaultic.ChunkerType(strings.ToLower(opts.setChunker))
+			return false, errors.Fatalf("invalid chunker %q, must be one of (rabin|fixed_size|unset)", opts.setChunker)
 		}
 		chunkerChanged = true
 	}
 	if set("set-chunk-size") {
-		ensureChunker(cfg)
-		if err := setOptionalUint64(opts.setChunkSize, &cfg.ChunkerCfg.ChunkSize); err != nil {
+		if err := setOptionalUint64(opts.setChunkSize, &cfg.ChunkSizeBytes); err != nil {
 			return false, err
 		}
 		chunkerChanged = true
 	}
 	if set("set-chunk-min-size") {
-		ensureChunker(cfg)
-		if err := setOptionalUint64(opts.setChunkMinSize, &cfg.ChunkerCfg.ChunkMinSize); err != nil {
+		if err := setOptionalUint64(opts.setChunkMinSize, &cfg.ChunkMinSizeBytes); err != nil {
 			return false, err
 		}
 		chunkerChanged = true
 	}
 	if set("set-chunk-max-size") {
-		ensureChunker(cfg)
-		if err := setOptionalUint64(opts.setChunkMaxSize, &cfg.ChunkerCfg.ChunkMaxSize); err != nil {
+		if err := setOptionalUint64(opts.setChunkMaxSize, &cfg.ChunkMaxSizeBytes); err != nil {
 			return false, err
 		}
 		chunkerChanged = true
 	}
-	// drop an empty chunker block entirely
-	if chunkerChanged && cfg.ChunkerCfg != nil && *cfg.ChunkerCfg == (vaultic.ChunkerConfig{}) {
-		cfg.ChunkerCfg = nil
-	}
 	changed = changed || chunkerChanged
 
-	if err := applyPackConfig(flags, "set-treepack-", opts.setTreePackSize, opts.setTreePackGrowfactor, opts.setTreePackSizeLimit, &cfg.TreePack); err != nil {
+	if err := applyPackConfig(flags, "set-treepack-", opts.setTreePackSize, opts.setTreePackGrowfactor, opts.setTreePackSizeLimit,
+		&cfg.TreePackSizeBytes, &cfg.TreePackGrowFactor, &cfg.TreePackSizeLimitBytes); err != nil {
 		return false, err
 	}
 	if flags.Changed("set-treepack-size") || flags.Changed("set-treepack-growfactor") || flags.Changed("set-treepack-size-limit") {
 		changed = true
 	}
-	if err := applyPackConfig(flags, "set-datapack-", opts.setDataPackSize, opts.setDataPackGrowfactor, opts.setDataPackSizeLimit, &cfg.DataPack); err != nil {
+	if err := applyPackConfig(flags, "set-datapack-", opts.setDataPackSize, opts.setDataPackGrowfactor, opts.setDataPackSizeLimit,
+		&cfg.DataPackSizeBytes, &cfg.DataPackGrowFactor, &cfg.DataPackSizeLimitBytes); err != nil {
 		return false, err
 	}
 	if flags.Changed("set-datapack-size") || flags.Changed("set-datapack-growfactor") || flags.Changed("set-datapack-size-limit") {
@@ -214,32 +212,20 @@ func (opts *ConfigOptions) apply(flags *pflag.FlagSet, cfg *vaultic.Config) (boo
 	return changed, nil
 }
 
-func ensureChunker(cfg *vaultic.Config) {
-	if cfg.ChunkerCfg == nil {
-		cfg.ChunkerCfg = &vaultic.ChunkerConfig{}
-	}
-}
-
-// applyPackConfig applies the three --set-{tree,data}pack-* options.
-func applyPackConfig(flags *pflag.FlagSet, prefix, size, growfactor, sizeLimit string, p *vaultic.PackConfig) error {
+// applyPackConfig applies the three --set-{tree,data}pack-* options to the flat fields.
+func applyPackConfig(flags *pflag.FlagSet, prefix, size, growfactor, sizeLimit string, sizeDst *uint64, gfDst **uint32, limitDst *uint64) error {
 	if flags.Changed(prefix + "size") {
-		if err := setOptionalUint64(size, &p.Size); err != nil {
+		if err := setOptionalUint64(size, sizeDst); err != nil {
 			return err
 		}
 	}
 	if flags.Changed(prefix + "growfactor") {
-		if isUnset(growfactor) {
-			p.GrowFactor = 0
-		} else {
-			v, err := strconv.ParseUint(growfactor, 10, 32)
-			if err != nil {
-				return errors.Fatalf("invalid %s %q", prefix+"growfactor", growfactor)
-			}
-			p.GrowFactor = uint32(v)
+		if err := setOptionalUint32(growfactor, 1<<31-1, gfDst, prefix+"growfactor"); err != nil {
+			return err
 		}
 	}
 	if flags.Changed(prefix + "size-limit") {
-		if err := setOptionalUint64(sizeLimit, &p.SizeLimit); err != nil {
+		if err := setOptionalUint64(sizeLimit, limitDst); err != nil {
 			return err
 		}
 	}
@@ -335,31 +321,31 @@ func printConfig(cfg vaultic.Config, gopts global.Options, printer vaultic.Print
 	}
 	printer.S("append_only: %v", cfg.AppendOnly())
 	printer.S("extra_verify: %v", cfg.ExtraVerifyEnabled())
-	if cfg.ChunkerCfg != nil {
-		printer.S("chunker: %s", cfg.ChunkerCfg.Type)
-		if cfg.ChunkerCfg.ChunkSize != 0 {
-			printer.S("chunk_size: %d", cfg.ChunkerCfg.ChunkSize)
+	if cfg.ChunkerType != "" {
+		printer.S("chunker: %s", cfg.ChunkerType)
+	}
+	if cfg.ChunkSizeBytes != 0 {
+		printer.S("chunk_size: %d", cfg.ChunkSizeBytes)
+	}
+	if cfg.ChunkMinSizeBytes != 0 {
+		printer.S("chunk_min_size: %d", cfg.ChunkMinSizeBytes)
+	}
+	if cfg.ChunkMaxSizeBytes != 0 {
+		printer.S("chunk_max_size: %d", cfg.ChunkMaxSizeBytes)
+	}
+	printPack := func(name string, size uint64, gf *uint32, limit uint64) {
+		if size != 0 {
+			printer.S("%spack_size: %d", name, size)
 		}
-		if cfg.ChunkerCfg.ChunkMinSize != 0 {
-			printer.S("chunk_min_size: %d", cfg.ChunkerCfg.ChunkMinSize)
+		if gf != nil {
+			printer.S("%spack_growfactor: %d", name, *gf)
 		}
-		if cfg.ChunkerCfg.ChunkMaxSize != 0 {
-			printer.S("chunk_max_size: %d", cfg.ChunkerCfg.ChunkMaxSize)
+		if limit != 0 {
+			printer.S("%spack_size_limit: %d", name, limit)
 		}
 	}
-	printPack := func(name string, p vaultic.PackConfig) {
-		if p.Size != 0 {
-			printer.S("%spack_size: %d", name, p.Size)
-		}
-		if p.GrowFactor != 0 {
-			printer.S("%spack_growfactor: %d", name, p.GrowFactor)
-		}
-		if p.SizeLimit != 0 {
-			printer.S("%spack_size_limit: %d", name, p.SizeLimit)
-		}
-	}
-	printPack("tree", cfg.TreePack)
-	printPack("data", cfg.DataPack)
+	printPack("tree", cfg.TreePackSizeBytes, cfg.TreePackGrowFactor, cfg.TreePackSizeLimitBytes)
+	printPack("data", cfg.DataPackSizeBytes, cfg.DataPackGrowFactor, cfg.DataPackSizeLimitBytes)
 	if cfg.MinPacksizeToleratePercent != nil {
 		printer.S("min_packsize_tolerate_percent: %d", *cfg.MinPacksizeToleratePercent)
 	}
