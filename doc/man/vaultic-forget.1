@@ -41,6 +41,10 @@ Exit status is 12 if the password is incorrect.
 	keep the last \fBn\fR snapshots (use 'unlimited' to keep all snapshots)
 
 .PP
+\fB--keep-minutely\fP=0
+	keep the last \fBn\fR minutely snapshots
+
+.PP
 \fB-H\fP, \fB--keep-hourly\fP=0
 	keep the last \fBn\fR hourly snapshots (use 'unlimited' to keep all hourly snapshots)
 
@@ -57,12 +61,24 @@ Exit status is 12 if the password is incorrect.
 	keep the last \fBn\fR monthly snapshots (use 'unlimited' to keep all monthly snapshots)
 
 .PP
+\fB--keep-quarter-yearly\fP=0
+	keep the last \fBn\fR quarterly snapshots
+
+.PP
+\fB--keep-half-yearly\fP=0
+	keep the last \fBn\fR half-yearly snapshots
+
+.PP
 \fB-y\fP, \fB--keep-yearly\fP=0
 	keep the last \fBn\fR yearly snapshots (use 'unlimited' to keep all yearly snapshots)
 
 .PP
 \fB--keep-within\fP=
 	keep snapshots that are newer than \fBduration\fR (eg. 1y5m7d2h) relative to the latest snapshot
+
+.PP
+\fB--keep-within-minutely\fP=
+	keep minutely snapshots newer than \fBduration\fR
 
 .PP
 \fB--keep-within-hourly\fP=
@@ -81,6 +97,14 @@ Exit status is 12 if the password is incorrect.
 	keep monthly snapshots that are newer than \fBduration\fR (eg. 1y5m7d2h) relative to the latest snapshot
 
 .PP
+\fB--keep-within-quarter-yearly\fP=
+	keep quarterly snapshots newer than \fBduration\fR
+
+.PP
+\fB--keep-within-half-yearly\fP=
+	keep half-yearly snapshots newer than \fBduration\fR
+
+.PP
 \fB--keep-within-yearly\fP=
 	keep yearly snapshots that are newer than \fBduration\fR (eg. 1y5m7d2h) relative to the latest snapshot
 
@@ -90,6 +114,10 @@ Exit status is 12 if the password is incorrect.
 
 .PP
 \fB--unsafe-allow-remove-all\fP[=false]
+	allow deleting all snapshots of a snapshot group
+
+.PP
+\fB--keep-none\fP[=false]
 	allow deleting all snapshots of a snapshot group
 
 .PP

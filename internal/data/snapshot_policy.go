@@ -12,19 +12,25 @@ import (
 
 // ExpirePolicy configures which snapshots should be automatically removed.
 type ExpirePolicy struct {
-	Last          int       // keep the last n snapshots
-	Hourly        int       // keep the last n hourly snapshots
-	Daily         int       // keep the last n daily snapshots
-	Weekly        int       // keep the last n weekly snapshots
-	Monthly       int       // keep the last n monthly snapshots
-	Yearly        int       // keep the last n yearly snapshots
-	Within        Duration  // keep snapshots made within this duration
-	WithinHourly  Duration  // keep hourly snapshots made within this duration
-	WithinDaily   Duration  // keep daily snapshots made within this duration
-	WithinWeekly  Duration  // keep weekly snapshots made within this duration
-	WithinMonthly Duration  // keep monthly snapshots made within this duration
-	WithinYearly  Duration  // keep yearly snapshots made within this duration
-	Tags          []TagList // keep all snapshots that include at least one of the tag lists.
+	Last                int       // keep the last n snapshots
+	Minutely            int       // keep the last n minutely snapshots
+	Hourly              int       // keep the last n hourly snapshots
+	Daily               int       // keep the last n daily snapshots
+	Weekly              int       // keep the last n weekly snapshots
+	Monthly             int       // keep the last n monthly snapshots
+	QuarterYearly       int       // keep the last n quarterly snapshots
+	HalfYearly          int       // keep the last n half-yearly snapshots
+	Yearly              int       // keep the last n yearly snapshots
+	Within              Duration  // keep snapshots made within this duration
+	WithinMinutely      Duration  // keep minutely snapshots made within this duration
+	WithinHourly        Duration  // keep hourly snapshots made within this duration
+	WithinDaily         Duration  // keep daily snapshots made within this duration
+	WithinWeekly        Duration  // keep weekly snapshots made within this duration
+	WithinMonthly       Duration  // keep monthly snapshots made within this duration
+	WithinQuarterYearly Duration  // keep quarterly snapshots made within this duration
+	WithinHalfYearly    Duration  // keep half-yearly snapshots made within this duration
+	WithinYearly        Duration  // keep yearly snapshots made within this duration
+	Tags                []TagList // keep all snapshots that include at least one of the tag lists.
 }
 
 func (e ExpirePolicy) String() (s string) {
@@ -36,10 +42,13 @@ func (e ExpirePolicy) String() (s string) {
 		descr string
 	}{
 		{e.Last, "latest"},
+		{e.Minutely, "minutely"},
 		{e.Hourly, "hourly"},
 		{e.Daily, "daily"},
 		{e.Weekly, "weekly"},
 		{e.Monthly, "monthly"},
+		{e.QuarterYearly, "quarter-yearly"},
+		{e.HalfYearly, "half-yearly"},
 		{e.Yearly, "yearly"},
 	} {
 		if opt.count > 0 {
@@ -49,6 +58,9 @@ func (e ExpirePolicy) String() (s string) {
 		}
 	}
 
+	if !e.WithinMinutely.Zero() {
+		keepw = append(keepw, fmt.Sprintf("minutely snapshots within %v", e.WithinMinutely))
+	}
 	if !e.WithinHourly.Zero() {
 		keepw = append(keepw, fmt.Sprintf("hourly snapshots within %v", e.WithinHourly))
 	}
@@ -63,6 +75,12 @@ func (e ExpirePolicy) String() (s string) {
 
 	if !e.WithinMonthly.Zero() {
 		keepw = append(keepw, fmt.Sprintf("monthly snapshots within %v", e.WithinMonthly))
+	}
+	if !e.WithinQuarterYearly.Zero() {
+		keepw = append(keepw, fmt.Sprintf("quarter-yearly snapshots within %v", e.WithinQuarterYearly))
+	}
+	if !e.WithinHalfYearly.Zero() {
+		keepw = append(keepw, fmt.Sprintf("half-yearly snapshots within %v", e.WithinHalfYearly))
 	}
 
 	if !e.WithinYearly.Zero() {
@@ -118,6 +136,10 @@ func ymdh(d time.Time, _ int) int {
 	return d.Year()*1000000 + int(d.Month())*10000 + d.Day()*100 + d.Hour()
 }
 
+func ymdhm(d time.Time, _ int) int {
+	return d.Year()*100000000 + int(d.Month())*1000000 + d.Day()*10000 + d.Hour()*100 + d.Minute()
+}
+
 // ymd returns an integer in the form YYYYMMDD.
 func ymd(d time.Time, _ int) int {
 	return d.Year()*10000 + int(d.Month())*100 + d.Day()
@@ -138,6 +160,9 @@ func ym(d time.Time, _ int) int {
 func y(d time.Time, _ int) int {
 	return d.Year()
 }
+
+func yq(d time.Time, _ int) int { return d.Year()*10 + (int(d.Month())-1)/3 }
+func yh(d time.Time, _ int) int { return d.Year()*10 + (int(d.Month())-1)/6 }
 
 // always returns a unique number for d.
 func always(_ time.Time, nr int) int {
@@ -195,7 +220,7 @@ func ApplyPolicy(list Snapshots, p ExpirePolicy) (keep, remove Snapshots, reason
 	}
 
 	// These buckets are for keeping last n snapshots of given type
-	var buckets = [6]struct {
+	var buckets = []struct {
 		Count  int
 		bucker func(d time.Time, nr int) int
 		Last   int
@@ -207,10 +232,13 @@ func ApplyPolicy(list Snapshots, p ExpirePolicy) (keep, remove Snapshots, reason
 		{p.Weekly, yw, -1, "weekly snapshot"},
 		{p.Monthly, ym, -1, "monthly snapshot"},
 		{p.Yearly, y, -1, "yearly snapshot"},
+		{p.Minutely, ymdhm, -1, "minutely snapshot"},
+		{p.QuarterYearly, yq, -1, "quarter-yearly snapshot"},
+		{p.HalfYearly, yh, -1, "half-yearly snapshot"},
 	}
 
 	// These buckets are for keeping snapshots of given type within duration
-	var bucketsWithin = [5]struct {
+	var bucketsWithin = []struct {
 		Within Duration
 		bucker func(d time.Time, nr int) int
 		Last   int
@@ -221,6 +249,9 @@ func ApplyPolicy(list Snapshots, p ExpirePolicy) (keep, remove Snapshots, reason
 		{p.WithinWeekly, yw, -1, "weekly within"},
 		{p.WithinMonthly, ym, -1, "monthly within"},
 		{p.WithinYearly, y, -1, "yearly within"},
+		{p.WithinMinutely, ymdhm, -1, "minutely within"},
+		{p.WithinQuarterYearly, yq, -1, "quarter-yearly within"},
+		{p.WithinHalfYearly, yh, -1, "half-yearly within"},
 	}
 
 	latest := findLatestTimestamp(list)

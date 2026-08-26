@@ -72,7 +72,8 @@ func (opts *DiffOptions) AddFlags(f *pflag.FlagSet) {
 }
 
 func loadSnapshot(ctx context.Context, be vaultic.Lister, repo vaultic.LoaderUnpacked, desc string) (*data.Snapshot, string, error) {
-	sn, subfolder, err := data.FindSnapshot(ctx, be, repo, desc)
+	filter := data.SnapshotFilter{}
+	sn, subfolder, err := filter.FindLatest(ctx, be, repo, desc)
 	if err != nil {
 		return nil, "", errors.Fatalf("%s", err)
 	}

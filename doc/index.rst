@@ -15,6 +15,7 @@ Vaultic Documentation
    050_restore
    051_cold_storage
    052_profiles_automation
+   053_command_parity
    060_forget
    070_encryption
    075_scripting

@@ -55,6 +55,19 @@ func TestExpireSnapshotOps(t *testing.T) {
 	}
 }
 
+func TestApplyPolicyAdditionalPeriods(t *testing.T) {
+	list := data.Snapshots{
+		&data.Snapshot{Time: parseTimeUTC("2024-08-01 12:00:00")},
+		&data.Snapshot{Time: parseTimeUTC("2024-07-01 12:00:00")},
+		&data.Snapshot{Time: parseTimeUTC("2024-04-01 12:00:00")},
+		&data.Snapshot{Time: parseTimeUTC("2024-01-01 12:00:00")},
+	}
+	keep, _, _ := data.ApplyPolicy(list, data.ExpirePolicy{QuarterYearly: 2, HalfYearly: 1})
+	if len(keep) < 2 {
+		t.Fatalf("kept %d snapshots, expected quarterly/half-yearly retention", len(keep))
+	}
+}
+
 // ApplyPolicyResult is used to marshal/unmarshal the golden files for
 // TestApplyPolicy.
 type ApplyPolicyResult struct {

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
@@ -68,7 +70,7 @@ type DumpOptions struct {
 
 func (opts *DumpOptions) AddFlags(f *pflag.FlagSet) {
 	initSingleSnapshotFilter(f, &opts.SnapshotFilter)
-	f.StringVarP(&opts.Archive, "archive", "a", "tar", "set archive `format` as \"tar\" or \"zip\"")
+	f.StringVarP(&opts.Archive, "archive", "a", "tar", "set archive `format` as \"tar\", \"tar.gz\", \"zip\", or \"auto\"")
 	f.StringVarP(&opts.Target, "target", "t", "", "write the output to target `path`")
 }
 
@@ -139,8 +141,9 @@ func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args [
 
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
 
-	switch opts.Archive {
-	case "tar", "zip":
+	archive := resolveDumpArchive(opts.Archive, opts.Target)
+	switch archive {
+	case "tar", "tar.gz", "zip":
 	default:
 		return fmt.Errorf("unknown archive format %q", opts.Archive)
 	}
@@ -194,13 +197,38 @@ func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args [
 		canWriteArchiveFunc = func() error { return nil }
 	}
 
-	d := dump.New(opts.Archive, repo, outputFileWriter)
+	var gzipWriter *gzip.Writer
+	if archive == "tar.gz" {
+		gzipWriter = gzip.NewWriter(outputFileWriter)
+		outputFileWriter = gzipWriter
+		archive = "tar"
+	}
+	d := dump.New(archive, repo, outputFileWriter)
 	err = printFromTree(ctx, tree, repo, "/", splittedPath, d, canWriteArchiveFunc)
+	if gzipWriter != nil {
+		if closeErr := gzipWriter.Close(); err == nil {
+			err = closeErr
+		}
+	}
 	if err != nil {
 		return errors.Fatalf("cannot dump file: %v", err)
 	}
 
 	return nil
+}
+
+func resolveDumpArchive(archive, target string) string {
+	if archive != "auto" {
+		return archive
+	}
+	switch {
+	case strings.HasSuffix(strings.ToLower(target), ".tar.gz"), strings.HasSuffix(strings.ToLower(target), ".tgz"):
+		return "tar.gz"
+	case strings.HasSuffix(strings.ToLower(target), ".zip"):
+		return "zip"
+	default:
+		return "tar"
+	}
 }
 
 func checkStdoutArchive(term ui.Terminal) func() error {

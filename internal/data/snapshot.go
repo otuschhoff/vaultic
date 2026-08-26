@@ -39,6 +39,9 @@ type Snapshot struct {
 	Description string `json:"description,omitempty"`
 	// Delete marks the snapshot as delete-protected (see DeleteOption).
 	Delete *DeleteOption `json:"delete,omitempty"`
+	// MergedSnapshots records source snapshots for a snapshot created by
+	// `vaultic merge`. It is additive metadata and ignored by older clients.
+	MergedSnapshots []vaultic.ID `json:"merged_snapshots,omitempty"`
 
 	id *vaultic.ID // plaintext ID, used during restore
 }

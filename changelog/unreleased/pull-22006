@@ -1,0 +1,20 @@
+Enhancement: command-parity batch (merge, repoinfo, retention, dump)
+
+Vaultic now provides `merge`, an append-only snapshot-tree union command that
+creates a new snapshot without modifying its source snapshots or repository
+objects. Conflicting paths use the newest source; source snapshot IDs are kept
+in additive `merged_snapshots` metadata.
+
+`repoinfo` provides read-only object counts and stored sizes for packs, keys,
+snapshots, and indexes, including JSON output. It is compatible with lock-free
+read operation.
+
+`forget` gains minutely, quarterly-yearly, half-yearly, and matching
+`--keep-within-*` retention periods; `--keep-none` aliases the existing
+explicit all-removal acknowledgement. `dump` supports `tar.gz` and target
+extension based `auto` archive format selection. `diff` accepts `latest` and
+`latest~N`; `completions` aliases `generate`.
+
+WebDAV is intentionally out of scope for this batch and remains unimplemented.
+
+https://github.com/otuschhoff/vaultic/pull/22006

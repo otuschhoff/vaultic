@@ -101,19 +101,25 @@ func (c *ForgetPolicyCount) Type() string {
 
 // ForgetOptions collects all options for the forget command.
 type ForgetOptions struct {
-	Last          ForgetPolicyCount
-	Hourly        ForgetPolicyCount
-	Daily         ForgetPolicyCount
-	Weekly        ForgetPolicyCount
-	Monthly       ForgetPolicyCount
-	Yearly        ForgetPolicyCount
-	Within        data.Duration
-	WithinHourly  data.Duration
-	WithinDaily   data.Duration
-	WithinWeekly  data.Duration
-	WithinMonthly data.Duration
-	WithinYearly  data.Duration
-	KeepTags      data.TagLists
+	Last                ForgetPolicyCount
+	Minutely            ForgetPolicyCount
+	Hourly              ForgetPolicyCount
+	Daily               ForgetPolicyCount
+	Weekly              ForgetPolicyCount
+	Monthly             ForgetPolicyCount
+	QuarterYearly       ForgetPolicyCount
+	HalfYearly          ForgetPolicyCount
+	Yearly              ForgetPolicyCount
+	Within              data.Duration
+	WithinMinutely      data.Duration
+	WithinHourly        data.Duration
+	WithinDaily         data.Duration
+	WithinWeekly        data.Duration
+	WithinMonthly       data.Duration
+	WithinQuarterYearly data.Duration
+	WithinHalfYearly    data.Duration
+	WithinYearly        data.Duration
+	KeepTags            data.TagLists
 
 	UnsafeAllowRemoveAll bool
 	// OverrideDeleteProtection ignores delete protection (delete_never /
@@ -131,19 +137,26 @@ type ForgetOptions struct {
 
 func (opts *ForgetOptions) AddFlags(f *pflag.FlagSet) {
 	f.VarP(&opts.Last, "keep-last", "l", "keep the last `n` snapshots (use 'unlimited' to keep all snapshots)")
+	f.Var(&opts.Minutely, "keep-minutely", "keep the last `n` minutely snapshots")
 	f.VarP(&opts.Hourly, "keep-hourly", "H", "keep the last `n` hourly snapshots (use 'unlimited' to keep all hourly snapshots)")
 	f.VarP(&opts.Daily, "keep-daily", "d", "keep the last `n` daily snapshots (use 'unlimited' to keep all daily snapshots)")
 	f.VarP(&opts.Weekly, "keep-weekly", "w", "keep the last `n` weekly snapshots (use 'unlimited' to keep all weekly snapshots)")
 	f.VarP(&opts.Monthly, "keep-monthly", "m", "keep the last `n` monthly snapshots (use 'unlimited' to keep all monthly snapshots)")
+	f.Var(&opts.QuarterYearly, "keep-quarter-yearly", "keep the last `n` quarterly snapshots")
+	f.Var(&opts.HalfYearly, "keep-half-yearly", "keep the last `n` half-yearly snapshots")
 	f.VarP(&opts.Yearly, "keep-yearly", "y", "keep the last `n` yearly snapshots (use 'unlimited' to keep all yearly snapshots)")
 	f.VarP(&opts.Within, "keep-within", "", "keep snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
+	f.Var(&opts.WithinMinutely, "keep-within-minutely", "keep minutely snapshots newer than `duration`")
 	f.VarP(&opts.WithinHourly, "keep-within-hourly", "", "keep hourly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
 	f.VarP(&opts.WithinDaily, "keep-within-daily", "", "keep daily snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
 	f.VarP(&opts.WithinWeekly, "keep-within-weekly", "", "keep weekly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
 	f.VarP(&opts.WithinMonthly, "keep-within-monthly", "", "keep monthly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
+	f.Var(&opts.WithinQuarterYearly, "keep-within-quarter-yearly", "keep quarterly snapshots newer than `duration`")
+	f.Var(&opts.WithinHalfYearly, "keep-within-half-yearly", "keep half-yearly snapshots newer than `duration`")
 	f.VarP(&opts.WithinYearly, "keep-within-yearly", "", "keep yearly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
 	f.Var(&opts.KeepTags, "keep-tag", "keep snapshots with this `taglist` (can be specified multiple times)")
 	f.BoolVar(&opts.UnsafeAllowRemoveAll, "unsafe-allow-remove-all", false, "allow deleting all snapshots of a snapshot group")
+	f.BoolVar(&opts.UnsafeAllowRemoveAll, "keep-none", false, "allow deleting all snapshots of a snapshot group")
 	f.BoolVar(&opts.OverrideDeleteProtection, "override-delete-protection", false, "remove snapshots even if they are marked delete-protected (delete_never/delete_after)")
 
 	f.StringArrayVar(&opts.Hosts, "hostname", nil, "only consider snapshots with the given `hostname` (can be specified multiple times)")
@@ -247,19 +260,25 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 		}
 
 		policy := data.ExpirePolicy{
-			Last:          int(opts.Last),
-			Hourly:        int(opts.Hourly),
-			Daily:         int(opts.Daily),
-			Weekly:        int(opts.Weekly),
-			Monthly:       int(opts.Monthly),
-			Yearly:        int(opts.Yearly),
-			Within:        opts.Within,
-			WithinHourly:  opts.WithinHourly,
-			WithinDaily:   opts.WithinDaily,
-			WithinWeekly:  opts.WithinWeekly,
-			WithinMonthly: opts.WithinMonthly,
-			WithinYearly:  opts.WithinYearly,
-			Tags:          opts.KeepTags,
+			Last:                int(opts.Last),
+			Minutely:            int(opts.Minutely),
+			Hourly:              int(opts.Hourly),
+			Daily:               int(opts.Daily),
+			Weekly:              int(opts.Weekly),
+			Monthly:             int(opts.Monthly),
+			QuarterYearly:       int(opts.QuarterYearly),
+			HalfYearly:          int(opts.HalfYearly),
+			Yearly:              int(opts.Yearly),
+			Within:              opts.Within,
+			WithinMinutely:      opts.WithinMinutely,
+			WithinHourly:        opts.WithinHourly,
+			WithinDaily:         opts.WithinDaily,
+			WithinWeekly:        opts.WithinWeekly,
+			WithinMonthly:       opts.WithinMonthly,
+			WithinQuarterYearly: opts.WithinQuarterYearly,
+			WithinHalfYearly:    opts.WithinHalfYearly,
+			WithinYearly:        opts.WithinYearly,
+			Tags:                opts.KeepTags,
 		}
 
 		if policy.Empty() {

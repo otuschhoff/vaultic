@@ -19,8 +19,9 @@ func newGenerateCommand(globalOptions *global.Options) *cobra.Command {
 	var opts generateOptions
 
 	cmd := &cobra.Command{
-		Use:   "generate [flags]",
-		Short: "Generate manual pages and auto-completion files (bash, fish, zsh, powershell)",
+		Use:     "generate [flags]",
+		Aliases: []string{"completions"},
+		Short:   "Generate manual pages and auto-completion files (bash, fish, zsh, powershell)",
 		Long: `
 The "generate" command writes automatically generated files (like the man pages
 and the auto-completion files for bash, fish, powershell and zsh).

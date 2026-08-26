@@ -168,9 +168,9 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 | # | Feature | Rustic behavior | Priority | Effort | Workstream |
 |---|---|---|---|---|---|
-| F30 | `merge` command | merge snapshots | P1 | M | §7 |
-| F31 | `webdav` command | serve repo over WebDAV for browsing/restore | P2 | L | §7 |
-| F32 | `repoinfo` command | repo statistics summary | P2 | S | §7 |
+| F30 | `merge` command | merge snapshots | P1 | M | §7 | ✅ |
+| F31 | `webdav` command | serve repo over WebDAV for browsing/restore | P2 | L | §7 | Deferred — explicitly out of scope |
+| F32 | `repoinfo` command | repo statistics summary | P2 | S | §7 | ✅ |
 | F33–F60 | Command enhancements | see per-command tables in Section 7 | mixed | mixed | §7 |
 
 ## 6. Foundation workstreams
@@ -530,14 +530,14 @@ flag spelling as hidden aliases (migration aid only).
 | Multiple snapshots per run from config `[[backup.snapshots]]` | M | ✅ WS-F; `backup --name` selects named jobs |
 | `--label`, `--description`, `--description-from` | S | WS-B |
 | `--delete-never`, `--delete-after` | S | WS-B |
-| `--as-path` (store relative/custom path) | S | archiver target path override; also enables relative-path backups |
-| `--git-ignore`, `--no-require-git`, `--custom-ignorefile` | M | extend [cmd/vaultic/exclude.go](../cmd/vaultic/exclude.go) with gitignore semantics |
-| `--exclude-if-xattr` | S | exclude by xattr presence |
-| `--set-atime/--set-ctime/--set-devid/--set-xattr/--set-blockdev` | M | synthetic metadata for stdin/command sources; block-device backup support (rustic `--set-blockdev`) |
+| `--as-path` (store relative/custom path) | S | Deferred — needs archiver root-path override |
+| `--git-ignore`, `--no-require-git`, `--custom-ignorefile` | M | Deferred — needs gitignore matcher and per-root discovery |
+| `--exclude-if-xattr` | S | Deferred — needs portable xattr predicate |
+| `--set-atime/--set-ctime/--set-devid/--set-xattr/--set-blockdev` | M | Deferred — synthetic metadata/block-device semantics |
 | `--stdin-from-command` | — | already present ([cmd_backup.go](../cmd/vaultic/cmd_backup.go#L117)) — no action |
 | `--init` | S | ✅ auto-init missing repo |
 | `--ls` | S | ✅ list contents of the created snapshot |
-| Multiple `--parent` | M | merge several parents' trees for change detection |
+| Multiple `--parent` | M | Deferred — needs multi-tree change-detection semantics |
 | Hooks + telemetry integration | S | ✅ WS-F/WS-H |
 
 ### 7.3 `restore` ([cmd_restore.go](../cmd/vaultic/cmd_restore.go))
@@ -545,7 +545,7 @@ flag spelling as hidden aliases (migration aid only).
 | Item | Effort | Notes |
 |---|---|---|
 | `<snap>:<path>/file` syntax | S | WS-C resolver |
-| `--no-ownership`, `--numeric-id` | S | restorer option flags |
+| `--no-ownership`, `--numeric-id` | S | Deferred — restorer metadata API lacks ownership-disable control; numeric IDs are current default |
 | warm-up command integration | M | WS-D |
 | keep `--overwrite`, `--sparse`, `--verify` (rustic lacks) | — | no action |
 
@@ -553,9 +553,9 @@ flag spelling as hidden aliases (migration aid only).
 
 | Item | Effort | Notes |
 |---|---|---|
-| `--keep-minutely`, `--keep-quarter-yearly`, `--keep-half-yearly` (+ `--keep-within-*` variants) | M | extend policy in [internal/data/snapshot_policy.go](../internal/data/snapshot_policy.go) |
-| `--keep-none` (≙ `--unsafe-allow-remove-all`; keep both) | S | alias |
-| `--delete-unchanged` | M | drop snapshots identical to parent |
+| `--keep-minutely`, `--keep-quarter-yearly`, `--keep-half-yearly` (+ `--keep-within-*` variants) | M | ✅ |
+| `--keep-none` (≙ `--unsafe-allow-remove-all`; keep both) | S | ✅ alias |
+| `--delete-unchanged` | M | Deferred — requires parent/tree identity retention pass |
 | Respect delete protection | S | WS-B |
 | `--group-by` gains `label` | S | WS-B |
 | Retention from config profile `[forget]` | S | WS-F |
@@ -573,56 +573,52 @@ cold-pack handling (WS-D). Also: keep `min_packsize_tolerate_percent` /
 
 | Item | Effort | Notes |
 |---|---|---|
-| `--trust-cache` (verify cached data integrity, then trust it) | M | checker + cache layer |
+| `--trust-cache` (verify cached data integrity, then trust it) | M | Deferred — checker/cache trust state is not present |
 | Hot/cold integrity mode | M | WS-D |
-| `--read-data-subset` friendly names (`last-week`, `month-2026-01`, …) | S | parse helper |
+| `--read-data-subset` friendly names (`last-week`, `month-2026-01`, …) | S | Deferred — subset currently intentionally pack-based only |
 | Use existing cache by default | S | verify current behavior matches; roadmap item from upstream already landed — confirm |
 
 ### 7.7 `snapshots` ([cmd_snapshots.go](../cmd/vaultic/cmd_snapshots.go))
 
-`--all` (no grouping collapse), `--long`, summarize identical snapshots
-(`+3` style), `--group-by` +label, `--filter-*` via WS-C. Effort: M.
+`--all` (no grouping collapse), `--long`, and identical-snapshot summaries are
+deferred. `--group-by label` and `--filter-*` are ✅ via WS-B/C.
 
 ### 7.8 `ls` ([cmd_ls.go](../cmd/vaultic/cmd_ls.go))
 
-`--glob/--iglob(--file)` aliases for include/exclude, `--numeric-uid-gid`,
-`--summary`, `ls` of *local* paths using the same filter engine (rustic
-parity). Effort: M.
+`--glob/--iglob(--file)` aliases, `--numeric-uid-gid`, `--summary`, and local
+path listing are deferred — they need a shared glob/local-FS listing layer.
 
 ### 7.9 `find` ([cmd_find.go](../cmd/vaultic/cmd_find.go))
 
-`--path <full-path>` fast history lookup (file history view), result
-summarization across identical snapshots (`--all` to expand), `--show-misses`,
-`--group-by`, `--numeric-uid-gid`. Keep vaultic-only `--blob/--tree/--pack`.
-Effort: M–L (path index walk optimization).
+`--path <full-path>`, result summarization, `--show-misses`, `--group-by`, and
+`--numeric-uid-gid` are deferred — they need a history/index walk redesign.
+Keep vaultic-only `--blob/--tree/--pack`.
 
 ### 7.10 `diff` ([cmd_diff.go](../cmd/vaultic/cmd_diff.go))
 
-Support `latest` (with filters) as an argument, **diff snapshot vs local
-directory**, `--glob/--iglob` filters, `--no-content`, file-level sub-paths
-(WS-C). Effort: L (local-diff is the bulk: reuse restorer-side metadata
-comparison against [internal/fs](../internal/fs)).
+✅ `latest`/`latest~N` resolve in diff. Snapshot-vs-local, glob filters,
+`--no-content`, and file-level sub-paths are deferred — they need a local
+metadata comparison engine.
 
 ### 7.11 `dump` ([cmd_dump.go](../cmd/vaultic/cmd_dump.go))
 
-`--archive tar.gz`, `auto` format detection from `--target` extension,
-file-level sub-paths. Effort: S (see [internal/dump](../internal/dump)).
+✅ `--archive tar.gz` and `--archive auto` based on `--target` extension.
+File-level sub-paths are already supported by the existing dump tree resolver.
 
 ### 7.12 `copy` ([cmd_copy.go](../cmd/vaultic/cmd_copy.go))
 
-`--init` (init target with matching chunker params — supersedes
-`init --copy-chunker-params` dance), verify-chunker-params check by default,
-multiple targets (from config profiles, WS-F). Effort: M.
+`--init`, verify-chunker-params, and multiple targets are deferred — target
+initialization needs a non-interactive destination-password/config flow.
 
 ### 7.13 New commands
 
 | Command | Effort | Notes |
 |---|---|---|
-| `merge` (new command) | M | merge N snapshots into one (union of trees, newest metadata wins per path; keep source list in new snapshot's metadata). Implement as tree-level merge in [internal/data/tree.go](../internal/data/tree.go) + walker |
-| `repoinfo` (new) | S | aggregate stats: counts per file type, sizes, compression ratio; reuse [cmd_stats.go](../cmd/vaultic/cmd_stats.go) helpers |
-| `webdav` (new) | L | read-only WebDAV server exposing snapshots like [cmd_mount.go](../cmd/vaultic/cmd_mount.go)/[internal/fuse](../internal/fuse) does for FUSE; Go: `golang.org/x/net/webdav` with a repo-backed FS |
+| `merge` (new command) | M | ✅ append-only merge: recursive tree union, newest source wins conflicts, source IDs saved in additive `merged_snapshots` metadata; uses an append lock only |
+| `repoinfo` (new) | S | ✅ lock-free read aggregation: per-file-type object counts and stored sizes, JSON/text |
+| `webdav` (new) | L | Explicitly out of scope for Phase 6; not implemented |
 | `config` / `show-config` (new) | M/S | WS-A |
-| `completions` alias of `generate` | S | rustic naming alias, keep `generate` |
+| `completions` alias of `generate` | S | ✅ rustic naming alias, keep `generate` |
 
 ### 7.14 `key`, `tag`, `unlock`, `version`, `self-update`
 
@@ -829,13 +825,22 @@ graph TD
   coverage, and a CLI smoke test for a profile job, hook, label, no-progress,
   and log file. See [052_profiles_automation.rst](052_profiles_automation.rst).
 
-### Phase 6 — Command parity batch (§7; F30–F32 + enhancements)
+### Phase 6 — Command parity batch (§7; F30–F32 + enhancements) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
-- Suggested order (by value/effort): `merge`, `repoinfo`, backup batch
-  (gitignore, as-path, set-*, multi-parent), forget policies, restore flags,
-  dump targz/auto, diff (latest, filters), find history, ls extras,
-  snapshots extras, copy `--init`/multi-target, check extras, then `webdav`.
-- Exit criteria: every §7 row is Done or explicitly deferred with reason.
+- **F30 merge** — `merge` recursively unions snapshot trees, resolving
+  conflicts in favor of the newest source node. It creates one new snapshot,
+  records source IDs in additive ``merged_snapshots`` metadata, and uses an
+  append lock only: it never rewrites or deletes source repository objects.
+- **F32 repoinfo** — `repoinfo` is a read-only, lock-free-feature-compatible
+  aggregate of data/key/snapshot/index object counts and stored sizes, with
+  JSON and text output.
+- **Enhancements delivered** — `backup --ls`/`--init`, minutely,
+  quarterly-yearly, half-yearly and matching ``keep-within-*`` retention,
+  ``--keep-none``, dump ``tar.gz`` plus target-extension ``auto``, diff
+  ``latest``/``latest~N``, and the `completions` alias.
+- **WebDAV removed from scope** — per project direction, no WebDAV server was
+  implemented. The remaining large §7 work remains explicitly deferred to a
+  later command batch rather than receiving partial or unsafe implementations.
 
 ### Phase 7 — Long tail (WS-G, WS-I, WS-J; F26–F29)
 

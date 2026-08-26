@@ -25,3 +25,17 @@ func TestDumpSplitPath(t *testing.T) {
 		rtest.Equals(t, path.result, parts)
 	}
 }
+
+func TestResolveDumpArchive(t *testing.T) {
+	for _, test := range []struct{ archive, target, want string }{
+		{"auto", "snapshot.tar.gz", "tar.gz"},
+		{"auto", "snapshot.tgz", "tar.gz"},
+		{"auto", "snapshot.zip", "zip"},
+		{"auto", "snapshot.out", "tar"},
+		{"zip", "snapshot.tar.gz", "zip"},
+	} {
+		if got := resolveDumpArchive(test.archive, test.target); got != test.want {
+			t.Fatalf("resolveDumpArchive(%q, %q) = %q, want %q", test.archive, test.target, got, test.want)
+		}
+	}
+}
