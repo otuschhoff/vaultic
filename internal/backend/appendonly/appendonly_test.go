@@ -21,9 +21,12 @@ func TestAppendOnlyBackend(t *testing.T) {
 
 	ab := New(be)
 
-	// removing and deleting must be rejected
+	// removing data must be rejected, removing a lock must be allowed
 	rtest.Equals(t, ErrAppendOnly, ab.Remove(ctx, h))
 	rtest.Equals(t, ErrAppendOnly, ab.Delete(ctx))
+	lock := backend.Handle{Type: backend.LockFile, Name: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	rtest.OK(t, ab.Save(ctx, lock, backend.NewByteReader([]byte("lock"), be.Hasher())))
+	rtest.OK(t, ab.Remove(ctx, lock))
 
 	// overwriting the existing file must be rejected
 	err := ab.Save(ctx, h, backend.NewByteReader([]byte("other"), be.Hasher()))

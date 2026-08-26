@@ -26,8 +26,12 @@ func New(be backend.Backend) *Backend {
 	return &Backend{Backend: be}
 }
 
-// Remove is rejected in append-only mode.
-func (b *Backend) Remove(_ context.Context, _ backend.Handle) error {
+// Remove deletes lock files (so that locking and unlock keep working) but
+// rejects removal of any repository data in append-only mode.
+func (b *Backend) Remove(ctx context.Context, h backend.Handle) error {
+	if h.Type == backend.LockFile {
+		return b.Backend.Remove(ctx, h)
+	}
 	return ErrAppendOnly
 }
 

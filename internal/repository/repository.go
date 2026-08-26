@@ -967,6 +967,28 @@ func (r *Repository) ApplyRepoSettings() {
 	}
 }
 
+// UpdateConfig applies fn to the repository config, validates the result and
+// writes it back. The write is rejected on an append-only repository.
+func (r *Repository) UpdateConfig(ctx context.Context, fn func(*vaultic.Config) error) error {
+	if r.cfg.AppendOnly() {
+		return errors.Fatal("cannot modify config: repository is in append-only mode")
+	}
+
+	cfg := r.cfg
+	if err := fn(&cfg); err != nil {
+		return err
+	}
+	if err := cfg.ValidateExtensions(); err != nil {
+		return err
+	}
+
+	if err := vaultic.SaveConfig(ctx, &internalRepository{r}, cfg); err != nil {
+		return err
+	}
+	r.setConfig(cfg)
+	return nil
+}
+
 // Init creates a new master key with the supplied password, initializes and
 // saves the repository config.
 func (r *Repository) Init(ctx context.Context, version uint, password string, chunkerPolynomial *chunker.Pol) error {
