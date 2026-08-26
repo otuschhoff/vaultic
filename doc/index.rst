@@ -1,4 +1,4 @@
-Restic Documentation
+Vaultic Documentation
 ====================
 
 .. toctree::

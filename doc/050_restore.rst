@@ -23,7 +23,7 @@ command to restore the contents of the latest snapshot to
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo restore 79766175 --target /tmp/restore
+    $ vaultic -r /srv/vaultic-repo restore 79766175 --target /tmp/restore
     enter password for repository:
     restoring snapshot of [/home/user/work] at 2015-05-08 21:40:19.884408621 +0200 CEST to /tmp/restore
 
@@ -33,7 +33,7 @@ snapshot for a specific host, path or both:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo restore latest --path /home/art --host luigi --target /tmp/restore
+    $ vaultic -r /srv/vaultic-repo restore latest --path /home/art --host luigi --target /tmp/restore
     enter password for repository:
     restoring snapshot of [/home/art,/home/documents] at 2015-05-08 21:45:17.884408621 +0200 CEST to /tmp/restore
 
@@ -46,7 +46,7 @@ files in the snapshot (the two are mutually exclusive). For example, to restore 
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo restore 79766175 --target /tmp/restore --include /home/user/work/foo
+    $ vaultic -r /srv/vaultic-repo restore 79766175 --target /tmp/restore --include /home/user/work/foo
     enter password for repository:
     restoring snapshot of [/home/user/work] at 2015-05-08 21:40:19.884408621 +0200 CEST to /tmp/restore
 
@@ -54,20 +54,20 @@ This will restore the file to ``/tmp/restore/home/user/work/foo``.
 
 To only restore a specific subfolder, you can use the ``<snapshot>:<subfolder>``
 syntax, where ``snapshot`` is the ID of a snapshot (or the string ``latest``)
-and ``subfolder`` is a path within the snapshot tree as shown by ``restic ls``.
+and ``subfolder`` is a path within the snapshot tree as shown by ``vaultic ls``.
 Note that the subfolder syntax also affects options like ``--include`` and
 ``--exclude``, such that their arguments should be specified relative to
 ``subfolder`` (e.g. ``/foo`` instead of ``/home/user/work/foo``).
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo restore 79766175:/home/user/work --target /tmp/restore --include /foo
+    $ vaultic -r /srv/vaultic-repo restore 79766175:/home/user/work --target /tmp/restore --include /foo
     enter password for repository:
     restoring snapshot of [/home/user/work] at 2015-05-08 21:40:19.884408621 +0200 CEST to /tmp/restore
 
 This will restore the file ``/home/user/work/foo`` to ``/tmp/restore/foo``.
 
-You can use the command ``restic ls latest`` or ``restic find foo`` to find the
+You can use the command ``vaultic ls latest`` or ``vaultic find foo`` to find the
 path to the file within the snapshot. Pass that path to ``--include`` verbatim
 when restoring the full snapshot; with ``<snapshot>:<subfolder>``, use a path relative
 to ``subfolder`` as in the example above.
@@ -81,15 +81,15 @@ There are also ``--include-file``, ``--exclude-file``, ``--iinclude-file`` and
 
 Restoring symbolic links on Windows is only possible when the user has the
 ``SeCreateSymbolicLinkPrivilege`` privilege or is running as administrator. This is a
-restriction of Windows, not restic.
+restriction of Windows, not vaultic.
 
 Restoring full security descriptors on Windows is only possible when the user has the
 ``SeRestorePrivilege``, ``SeSecurityPrivilege`` and ``SeTakeOwnershipPrivilege``
-privileges or is running as administrator. This is a restriction of Windows, not restic.
+privileges or is running as administrator. This is a restriction of Windows, not vaultic.
 If not all of these privileges are available, only the DACL is restored.
 
-By default, restic does not restore files as sparse. Use ``restore --sparse`` to
-enable the creation of sparse files if supported by the filesystem. Then restic
+By default, vaultic does not restore files as sparse. Use ``restore --sparse`` to
+enable the creation of sparse files if supported by the filesystem. Then vaultic
 will restore long runs of zero bytes as holes in the corresponding files.
 Reading from a hole returns the original zero bytes, but it does not consume
 disk space. Note that the exact location of the holes can differ from those in
@@ -107,7 +107,7 @@ user and security namespaced extended attributes for files:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo restore 79766175 --target /tmp/restore --include-xattr user.* --include-xattr security.*
+    $ vaultic -r /srv/vaultic-repo restore 79766175 --target /tmp/restore --include-xattr user.* --include-xattr security.*
     enter password for repository:
     restoring snapshot of [/home/user/work] at 2015-05-08 21:40:19.884408621 +0200 CEST to /tmp/restore
 
@@ -149,7 +149,7 @@ exist in the snapshot.
 
 When specifying ``--include`` or ``--exclude`` options, only files or directories matched by those
 options will be deleted. For example, the command
-``restic -r /srv/restic-repo restore 79766175:/home/user/work --target /tmp/restore --include /foo --delete``
+``vaultic -r /srv/vaultic-repo restore 79766175:/home/user/work --target /tmp/restore --include /foo --delete``
 would only delete files within ``/tmp/restore/foo``.
 
 When using ``--target`` and ``--delete`` then the ``restore`` command only works if either an ``--include``
@@ -169,12 +169,12 @@ restored files when specifying ``--verbose=2``.
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo restore --target /tmp/restore --dry-run --verbose=2 latest
+    $ vaultic -r /srv/vaultic-repo restore --target /tmp/restore --dry-run --verbose=2 latest
 
-    unchanged /restic/internal/walker/walker.go with size 2.812 KiB
-    updated   /restic/internal/walker/walker_test.go with size 11.143 KiB
-    restored  /restic/restic with size 35.318 MiB
-    restored  /restic
+    unchanged /vaultic/internal/walker/walker.go with size 2.812 KiB
+    updated   /vaultic/internal/walker/walker_test.go with size 11.143 KiB
+    restored  /vaultic/vaultic with size 35.318 MiB
+    restored  /vaultic
     [...]
     Summary: Restored 9072 files/dirs (153.597 MiB) in 0:00
 
@@ -190,15 +190,15 @@ Restoring using mount
 =====================
 
 Browsing your backup as a regular file system is also very easy. First,
-create a mount point such as ``/mnt/restic`` and then use the following
+create a mount point such as ``/mnt/vaultic`` and then use the following
 command to serve the repository with FUSE:
 
 .. code-block:: console
 
-    $ mkdir /mnt/restic
-    $ restic -r /srv/restic-repo mount /mnt/restic
+    $ mkdir /mnt/vaultic
+    $ vaultic -r /srv/vaultic-repo mount /mnt/vaultic
     enter password for repository:
-    Now serving /srv/restic-repo at /mnt/restic
+    Now serving /srv/vaultic-repo at /mnt/vaultic
     Use another terminal or tool to browse the contents of this folder.
     When finished, quit with Ctrl-c here or umount the mountpoint.
 
@@ -211,18 +211,18 @@ On FreeBSD, you may need to install FUSE and load the kernel module (``kldload f
 .. note:: The mountpoint must not overlap the local repository directory.
    Using the repository directory itself, a subdirectory of it, or a parent
    of it as the mountpoint causes the FUSE server to read its own backend
-   files through the new mount and deadlock the kernel. ``restic mount``
+   files through the new mount and deadlock the kernel. ``vaultic mount``
    detects this and refuses such mountpoints.
 
-Restic supports storage and preservation of hard links. However, since
+Vaultic supports storage and preservation of hard links. However, since
 hard links exist in the scope of a filesystem by definition, restoring
 hard links from a FUSE mount should be done by a program that preserves
 hard links. A program that does so is ``rsync``, used with the option
 ``--hard-links``.
 
-.. note:: ``restic mount`` is mostly useful if you want to restore just a few
+.. note:: ``vaultic mount`` is mostly useful if you want to restore just a few
    files out of a snapshot, or to check which files are contained in a snapshot.
-   To restore many files or a whole snapshot, ``restic restore`` is the best
+   To restore many files or a whole snapshot, ``vaultic restore`` is the best
    alternative, often it is *significantly* faster.
 
 Printing files to stdout
@@ -233,7 +233,7 @@ the data directly. This can be achieved by using the ``dump`` command, like this
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump latest production.sql | mysql
+    $ vaultic -r /srv/vaultic-repo dump latest production.sql | mysql
 
 If you have saved multiple different things into the same repo, the ``latest``
 snapshot may not be the right one. For example, consider the following
@@ -241,7 +241,7 @@ snapshots in a repository:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots
+    $ vaultic -r /srv/vaultic-repo snapshots
     ID        Date                 Host        Tags        Paths
     ----------------------------------------------------------------------
     562bfc5e  2018-07-14 20:18:01  mopped                  /home/user/file1
@@ -252,21 +252,21 @@ snapshots in a repository:
     1541acae  2018-07-14 20:18:18  mopped                  /home/other/work
     ----------------------------------------------------------------------
 
-Here, restic would resolve ``latest`` to the snapshot ``1541acae``, which does
+Here, vaultic would resolve ``latest`` to the snapshot ``1541acae``, which does
 not contain the file you want to print at all (``production.sql``).  In this
-case, you can pass restic the snapshot ID of the snapshot you like to restore:
+case, you can pass vaultic the snapshot ID of the snapshot you like to restore:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump 098db9d5 production.sql | mysql
+    $ vaultic -r /srv/vaultic-repo dump 098db9d5 production.sql | mysql
 
-Or you can pass restic a path that should be used for selecting the latest
+Or you can pass vaultic a path that should be used for selecting the latest
 snapshot. The path must match a path printed in the "Paths" column,
 e.g.:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump --path /production.sql latest production.sql | mysql
+    $ vaultic -r /srv/vaultic-repo dump --path /production.sql latest production.sql | mysql
 
 If a snapshot was backed up using relative paths, then the paths shown in the output
 of ``snapshots`` may differ from the path layout inside the snapshot.
@@ -274,33 +274,33 @@ See :ref:`absolute-and-relative-paths` for details. Use ``ls`` to determine the 
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo ls e922c858
+    $ vaultic -r /srv/vaultic-repo ls e922c858
     snapshot e922c858 of [/home/other/work] at 2018-07-14 20:18:10.884408621 +0200 CEST by mopped filtered by []:
     /other
     /other/work
 
 You can also ``dump`` the contents of a whole folder structure to
-stdout. To retain the information about the files and folders restic will
+stdout. To retain the information about the files and folders vaultic will
 output the contents in the tar (default) or zip format:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump latest /home/other/work > restore.tar
+    $ vaultic -r /srv/vaultic-repo dump latest /home/other/work > restore.tar
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump -a zip latest /home/other/work > restore.zip
+    $ vaultic -r /srv/vaultic-repo dump -a zip latest /home/other/work > restore.zip
 
 The folder content is then contained at ``/home/other/work`` within the archive.
 To include the folder content at the root of the archive, you can use the ``<snapshot>:<subfolder>`` syntax:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump latest:/home/other/work / > restore.tar
+    $ vaultic -r /srv/vaultic-repo dump latest:/home/other/work / > restore.tar
 
 You can also ``dump`` the contents of a selected snapshot and folder
 structure to a file using the ``--target`` flag.
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo dump latest / --target /home/linux.user/output.tar -a tar
+    $ vaultic -r /srv/vaultic-repo dump latest / --target /home/linux.user/output.tar -a tar

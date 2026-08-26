@@ -1,4 +1,4 @@
-This document describes the way you can contribute to the restic project.
+This document describes the way you can contribute to the vaultic project.
 
 Ways to Help Out
 ================
@@ -14,21 +14,21 @@ bug fixes are most welcome. However even "minor" details as fixing spelling
 errors, improving documentation or pointing out usability issues are a great
 help also.
 
-The restic project uses the GitHub infrastructure (see the
+The vaultic project uses the GitHub infrastructure (see the
 [project page](https://github.com/vaultic/vaultic)) for all related discussions
-as well as the [forum](https://forum.restic.net/) and the `#restic` channel
-on [irc.libera.chat](https://kiwiirc.com/nextclient/#ircs://irc.libera.chat:6697/#restic).
+as well as the [forum](https://forum.vaultic.net/) and the `#vaultic` channel
+on [irc.libera.chat](https://kiwiirc.com/nextclient/#ircs://irc.libera.chat:6697/#vaultic).
 
 If you want to find an area that currently needs improving have a look at the
 open issues listed at the
 [issues page](https://github.com/vaultic/vaultic/issues). This is also the place
-for discussing enhancement to the restic tools.
+for discussing enhancement to the vaultic tools.
 
 If you are unsure what to do, please have a look at the issues, especially
 those tagged
 [minor complexity](https://github.com/vaultic/vaultic/labels/help%3A%20minor%20complexity)
 or [good first issue](https://github.com/vaultic/vaultic/labels/help%3A%20good%20first%20issue).
-If you are already a bit experienced with the restic internals, take a look
+If you are already a bit experienced with the vaultic internals, take a look
 at the issues tagged as [help wanted](https://github.com/vaultic/vaultic/labels/help%3A%20wanted).
 
 
@@ -39,8 +39,8 @@ You've found a bug? Thanks for letting us know so we can fix it! It is a good
 idea to describe in detail how to reproduce the bug (when you know how), what
 environment was used and so on. Please tell us at least the following things:
 
- * What's the version of restic you used? Please include the output of
-   `restic version` in your bug report.
+ * What's the version of vaultic you used? Please include the output of
+   `vaultic version` in your bug report.
  * What commands did you execute to get to where the bug occurred?
  * What did you expect?
  * What happened instead?
@@ -49,34 +49,34 @@ environment was used and so on. Please tell us at least the following things:
 Remember, the easier it is for us to reproduce the bug, the earlier it will be
 corrected!
 
-In addition, you can instruct restic to create a debug log by setting the
+In addition, you can instruct vaultic to create a debug log by setting the
 environment variable `DEBUG_LOG` to a file, e.g. like this:
 
-    $ export DEBUG_LOG=/tmp/restic-debug.log
-    $ restic backup ~/work
+    $ export DEBUG_LOG=/tmp/vaultic-debug.log
+    $ vaultic backup ~/work
 
 Please be aware that the debug log file will contain potentially sensitive
 things like file and directory names, so please either redact it before
 uploading it somewhere or post only the parts that are really relevant.
 
-If restic gets stuck, please also include a stacktrace in the description.
-On non-Windows systems, you can send a SIGQUIT signal to restic or press
-`Ctrl-\` to achieve the same result. This causes restic to print a stacktrace
+If vaultic gets stuck, please also include a stacktrace in the description.
+On non-Windows systems, you can send a SIGQUIT signal to vaultic or press
+`Ctrl-\` to achieve the same result. This causes vaultic to print a stacktrace
 and then exit immediately. This will not damage your repository, however,
 it might be necessary to manually clean up stale lock files using
-`restic unlock`.
+`vaultic unlock`.
 
-On Windows, please set the environment variable `RESTIC_DEBUG_STACKTRACE_SIGINT`
+On Windows, please set the environment variable `VAULTIC_DEBUG_STACKTRACE_SIGINT`
 to `true` and press `Ctrl-C` to create a stacktrace.
 
-If you think restic uses too much memory or a too large cache directory, then
-please include the output of `restic stats --mode debug`.
+If you think vaultic uses too much memory or a too large cache directory, then
+please include the output of `vaultic stats --mode debug`.
 
 
 Development Environment
 =======================
 
-The repository contains the code written for restic in the directories
+The repository contains the code written for vaultic in the directories
 `cmd/` and `internal/`.
 
 Make sure you have the minimum required Go version installed. Clone the repo
@@ -84,13 +84,13 @@ Make sure you have the minimum required Go version installed. Clone the repo
 
     $ unset GOPATH
     $ git clone https://github.com/vaultic/vaultic
-    $ cd restic
+    $ cd vaultic
 
-Then use the `go` tool to build restic:
+Then use the `go` tool to build vaultic:
 
     $ go build ./cmd/vaultic
-    $ ./restic version
-    restic 0.14.0-dev (compiled manually) compiled with go1.19 on linux/amd64
+    $ ./vaultic version
+    vaultic 0.14.0-dev (compiled manually) compiled with go1.19 on linux/amd64
 
 To create a debug build use:
 
@@ -104,20 +104,20 @@ You can run all tests with the following command:
 Performance and Memory Usage Issues
 ===================================
 
-Debug builds of restic support the `--block-profile`, `--cpu-profile`,
+Debug builds of vaultic support the `--block-profile`, `--cpu-profile`,
 `--mem-profile`, and `--trace-profile` options which collect performance data
 that later on can be analyzed using the go tools:
 
-    $ restic --cpu-profile . [...]
+    $ vaultic --cpu-profile . [...]
     $ go tool pprof -http localhost:12345 cpu.pprof
 
 To analyze a trace profile use `go tool trace -http=localhost:12345 trace.out`.
 
-As the memory usage of restic changes over time, it may be useful to capture a
+As the memory usage of vaultic changes over time, it may be useful to capture a
 snapshot of the current heap. This is possible using then `--listen-profile`
-option. Then while restic runs you can query and afterwards analyze the heap statistics.
+option. Then while vaultic runs you can query and afterwards analyze the heap statistics.
 
-    $ restic --listen-profile localhost:12345 [...]
+    $ vaultic --listen-profile localhost:12345 [...]
     $ curl http://localhost:12345/debug/pprof/heap -o heap.pprof
     $ go tool pprof -http localhost:12345 heap.pprof
 
@@ -175,7 +175,7 @@ down to the following steps:
 Please provide the patches for each bug or feature in a separate branch and
 open up a pull request for each, as this simplifies discussion and merging.
 
-The restic project uses the `gofmt` tool for Go source indentation, so please
+The vaultic project uses the `gofmt` tool for Go source indentation, so please
 run
 
     gofmt -w **/*.go
@@ -203,7 +203,7 @@ to be ashamed of. In contrast, that happens regularly for all of us. That's
 what the tests are there for.
 
 More details of how to structure tests can be found here at
-[writing tests](https://restic.readthedocs.io/en/stable/090_participating.html#writing-tests).
+[writing tests](https://vaultic.readthedocs.io/en/stable/090_participating.html#writing-tests).
 
 Git Commits
 -----------
@@ -224,7 +224,7 @@ allows staging and committing only some changes.
 Code Review
 ===========
 
-The restic project encourages actively reviewing the code, as it will store
+The vaultic project encourages actively reviewing the code, as it will store
 your precious data, so it's common practice to receive comments on provided
 patches.
 

@@ -2,7 +2,7 @@
 Local Cache
 ***********
 
-In order to speed up certain operations, restic manages a local cache of data.
+In order to speed up certain operations, vaultic manages a local cache of data.
 The location of the cache directory depends on the operating system and the
 environment; see :ref:`caching`.
 

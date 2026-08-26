@@ -1,5 +1,5 @@
 <!--
-Thank you very much for contributing code or documentation to restic! Please
+Thank you very much for contributing code or documentation to vaultic! Please
 fill out the following questions to make it easier for us to review your
 changes.
 -->
@@ -36,7 +36,7 @@ Please always follow these steps:
 - Format all commit messages in the same style as [the other commits in the repository](https://github.com/vaultic/vaultic/blob/master/CONTRIBUTING.md#git-commits).
 -->
 
-- [ ] I have added tests for all code changes, see [writing tests](https://restic.readthedocs.io/en/stable/090_participating.html#writing-tests)
+- [ ] I have added tests for all code changes, see [writing tests](https://vaultic.readthedocs.io/en/stable/090_participating.html#writing-tests)
 - [ ] I have added documentation for relevant changes (in the manual).
 - [ ] There's a new file in `changelog/unreleased/` that describes the changes for our users (see [template](https://github.com/vaultic/vaultic/blob/master/changelog/TEMPLATE)).
 - [ ] I'm done! This pull request is ready for review.

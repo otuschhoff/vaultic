@@ -16,7 +16,7 @@ Preparing a new repository
 
 The place where your backups will be saved is called a "repository". This is
 simply a directory containing a set of subdirectories and files created by
-restic to store your backups, some corresponding metadata and encryption keys.
+vaultic to store your backups, some corresponding metadata and encryption keys.
 
 To access the repository, a password (also called a key) must be specified. A
 repository can hold multiple keys that can all be used to access the repository.
@@ -27,22 +27,22 @@ covers using a local repository; the remaining sections cover all the
 other options. You can skip to the next chapter once you've read the relevant
 section here.
 
-For automated backups, restic supports specifying the repository location in the
-environment variable ``RESTIC_REPOSITORY``. Restic can also read the repository
+For automated backups, vaultic supports specifying the repository location in the
+environment variable ``VAULTIC_REPOSITORY``. Vaultic can also read the repository
 location from a file specified via the ``--repository-file`` option or the
-environment variable ``RESTIC_REPOSITORY_FILE``.
+environment variable ``VAULTIC_REPOSITORY_FILE``.
 
-For automating the supply of the repository password to restic, several options
+For automating the supply of the repository password to vaultic, several options
 exist:
 
-* Setting the environment variable ``RESTIC_PASSWORD``
+* Setting the environment variable ``VAULTIC_PASSWORD``
 
 * Specifying the path to a file with the password via the option
-  ``--password-file`` or the environment variable ``RESTIC_PASSWORD_FILE``
+  ``--password-file`` or the environment variable ``VAULTIC_PASSWORD_FILE``
 
 * Configuring a program to be called when the password is needed via the
   option ``--password-command`` or the environment variable
-  ``RESTIC_PASSWORD_COMMAND``
+  ``VAULTIC_PASSWORD_COMMAND``
 
 The ``init`` command has an option called ``--repository-version`` which can
 be used to explicitly set the version of the new repository. By default, the
@@ -51,12 +51,12 @@ always resolve to the latest repository version. Have a look at the `design
 documentation <https://github.com/vaultic/vaultic/blob/master/doc/design.rst>`__
 for more details.
 
-The below table shows which restic version is required to use a certain
+The below table shows which vaultic version is required to use a certain
 repository version, as well as notable features introduced in the various
 versions.
 
 +--------------------+-------------------------+---------------------+------------------+
-| Repository version | Required restic version | Major new features  | Comment          |
+| Repository version | Required vaultic version | Major new features  | Comment          |
 +====================+=========================+=====================+==================+
 | ``1``              | Any                     |                     |                  |
 +--------------------+-------------------------+---------------------+------------------+
@@ -67,15 +67,15 @@ versions.
 Local
 *****
 
-In order to create a repository at ``/srv/restic-repo``, run the following
+In order to create a repository at ``/srv/vaultic-repo``, run the following
 command and enter the same password twice:
 
 .. code-block:: console
 
-    $ restic init --repo /srv/restic-repo
+    $ vaultic init --repo /srv/vaultic-repo
     enter password for new repository:
     enter password again:
-    created restic repository 085b3c76b9 at /srv/restic-repo
+    created vaultic repository 085b3c76b9 at /srv/vaultic-repo
     Please note that knowledge of your password is required to access the repository.
     Losing your password means that your data is irrecoverably lost.
 
@@ -105,10 +105,10 @@ simply be achieved by changing the URL scheme in the ``init`` command:
 
 .. code-block:: console
 
-    $ restic -r sftp:user@host:/srv/restic-repo init
+    $ vaultic -r sftp:user@host:/srv/vaultic-repo init
     enter password for new repository:
     enter password again:
-    created restic repository f1c6108821 at sftp:user@host:/srv/restic-repo
+    created vaultic repository f1c6108821 at sftp:user@host:/srv/vaultic-repo
     Please note that knowledge of your password is required to access the repository.
     Losing your password means that your data is irrecoverably lost.
 
@@ -125,12 +125,12 @@ specify the user this way: ``user@domain@host``.
           relative path to the SFTP backend.
 
 If you need to specify a port number or IPv6 address, you'll need to use
-URL syntax. E.g., the repository ``/srv/restic-repo`` on ``[::1]`` (localhost)
+URL syntax. E.g., the repository ``/srv/vaultic-repo`` on ``[::1]`` (localhost)
 at port 2222 with username ``user`` can be specified as
 
 ::
 
-    sftp://user@[::1]:2222//srv/restic-repo
+    sftp://user@[::1]:2222//srv/vaultic-repo
 
 Note the double slash: the first slash separates the connection settings from
 the path, while the second is the start of the path. To specify a relative
@@ -151,15 +151,15 @@ specify the user name in this case):
 
 ::
 
-    $ restic -r sftp:foo:/srv/restic-repo init
+    $ vaultic -r sftp:foo:/srv/vaultic-repo init
 
 You can also add an entry with a special host name which does not exist,
-just for use with restic, and use the ``Hostname`` option to set the
+just for use with vaultic, and use the ``Hostname`` option to set the
 real host name:
 
 ::
 
-    Host restic-backup-host
+    Host vaultic-backup-host
         Hostname foo
         User bar
         Port 2222
@@ -168,7 +168,7 @@ Then use it in the backend specification:
 
 ::
 
-    $ restic -r sftp:restic-backup-host:/srv/restic-repo init
+    $ vaultic -r sftp:vaultic-backup-host:/srv/vaultic-repo init
 
 Last, if you'd like to use an entirely different program to create the
 SFTP connection, you can specify the command to be run with the option
@@ -177,7 +177,7 @@ setting the arguments passed to the default SSH command (ignored when
 ``sftp.command`` is set)
 
 .. note:: Please be aware that SFTP servers close connections when no data is
-          received by the client. This can happen when restic is processing huge
+          received by the client. This can happen when vaultic is processing huge
           amounts of unchanged data. To avoid this issue add the following lines
           to the client's .ssh/config file:
 
@@ -198,7 +198,7 @@ scheme like this:
 
 .. code-block:: console
 
-    $ restic -r rest:http://host:8000/ init
+    $ vaultic -r rest:http://host:8000/ init
 
 Depending on your REST server setup, you can use HTTPS protocol,
 unix socket, password protection, multiple repositories or any
@@ -207,23 +207,23 @@ Here are some more examples:
 
 .. code-block:: console
 
-    $ restic -r rest:https://host:8000/ init
-    $ restic -r rest:https://user:pass@host:8000/ init
-    $ restic -r rest:https://user:pass@host:8000/my_backup_repo/ init
-    $ restic -r rest:http+unix:///tmp/rest.socket:/my_backup_repo/ init
+    $ vaultic -r rest:https://host:8000/ init
+    $ vaultic -r rest:https://user:pass@host:8000/ init
+    $ vaultic -r rest:https://user:pass@host:8000/my_backup_repo/ init
+    $ vaultic -r rest:http+unix:///tmp/rest.socket:/my_backup_repo/ init
 
 The server username and password can be specified using environment
 variables as well:
 
 .. code-block:: console
 
-    $ export RESTIC_REST_USERNAME=<MY_REST_SERVER_USERNAME>
-    $ export RESTIC_REST_PASSWORD=<MY_REST_SERVER_PASSWORD>
+    $ export VAULTIC_REST_USERNAME=<MY_REST_SERVER_USERNAME>
+    $ export VAULTIC_REST_PASSWORD=<MY_REST_SERVER_PASSWORD>
 
-If you use TLS, restic will use the system's CA certificates to verify the
-server certificate. When the verification fails, restic refuses to proceed and
+If you use TLS, vaultic will use the system's CA certificates to verify the
+server certificate. When the verification fails, vaultic refuses to proceed and
 exits with an error. If you have your own self-signed certificate, or a custom
-CA certificate should be used for verification, you can pass restic the
+CA certificate should be used for verification, you can pass vaultic the
 certificate filename via the ``--cacert`` option. It will then verify that the
 server's certificate is contained in the file passed to this option, or signed
 by a CA certificate in the file. In this case, the system CA certificates are
@@ -238,7 +238,7 @@ simultaneously.
 Amazon S3
 *********
 
-Restic can backup data to any Amazon S3 bucket. However, in this case,
+Vaultic can backup data to any Amazon S3 bucket. However, in this case,
 changing the URL scheme is not enough since Amazon uses special security
 credentials to sign HTTP requests. Consequently, you must first setup
 the following environment variables with the credentials you obtained
@@ -258,23 +258,23 @@ uses ``us-east-1``. If the bucket does not exist it will be created in that regi
 
 .. code-block:: console
 
-    $ restic -r s3:s3.us-east-1.amazonaws.com/bucket_name init
+    $ vaultic -r s3:s3.us-east-1.amazonaws.com/bucket_name init
     enter password for new repository:
     enter password again:
-    created restic repository eefee03bbd at s3:s3.us-east-1.amazonaws.com/bucket_name
+    created vaultic repository eefee03bbd at s3:s3.us-east-1.amazonaws.com/bucket_name
     Please note that knowledge of your password is required to access the repository.
     Losing your password means that your data is irrecoverably lost.
 
-Until version 0.8.0, restic used a default prefix of ``restic``, so the files
-in the bucket were placed in a directory named ``restic``. If you want to
-access a repository created with an older version of restic, specify the path
+Until version 0.8.0, vaultic used a default prefix of ``vaultic``, so the files
+in the bucket were placed in a directory named ``vaultic``. If you want to
+access a repository created with an older version of vaultic, specify the path
 after the bucket name like this:
 
 .. code-block:: console
 
-    $ restic -r s3:s3.us-east-1.amazonaws.com/bucket_name/restic [...]
+    $ vaultic -r s3:s3.us-east-1.amazonaws.com/bucket_name/vaultic [...]
 
-.. note:: restic expects `path-style URLs <https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-bucket-intro.html>`__
+.. note:: vaultic expects `path-style URLs <https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-bucket-intro.html>`__
           like for example ``s3.us-west-2.amazonaws.com/bucket_name`` for Amazon S3.
           Virtual-hosted–style URLs like ``bucket_name.s3.us-west-2.amazonaws.com``,
           where the bucket name is part of the hostname are not supported. These must
@@ -299,15 +299,15 @@ credentials of your Minio Server.
     $ export AWS_ACCESS_KEY_ID=<YOUR-MINIO-ACCESS-KEY-ID>
     $ export AWS_SECRET_ACCESS_KEY=<YOUR-MINIO-SECRET-ACCESS-KEY>
 
-Now you can easily initialize restic to use Minio server as a backend with
+Now you can easily initialize vaultic to use Minio server as a backend with
 this command.
 
 .. code-block:: console
 
-    $ restic -r s3:http://localhost:9000/restic init
+    $ vaultic -r s3:http://localhost:9000/vaultic init
     enter password for new repository:
     enter password again:
-    created restic repository 6ad29560f5 at s3:http://localhost:9000/restic
+    created vaultic repository 6ad29560f5 at s3:http://localhost:9000/vaultic
     Please note that knowledge of your password is required to access
     the repository. Losing your password means that your data is irrecoverably lost.
 
@@ -323,10 +323,10 @@ You must also set credentials for authentication to the service.
 
     $ export AWS_ACCESS_KEY_ID=<YOUR-ACCESS-KEY-ID>
     $ export AWS_SECRET_ACCESS_KEY=<YOUR-SECRET-ACCESS-KEY>
-    $ restic -r s3:https://server:port/bucket_name init
+    $ vaultic -r s3:https://server:port/bucket_name init
 
 If needed, you can manually specify the region to use by either setting the
-environment variable ``AWS_DEFAULT_REGION`` or calling restic with an option
+environment variable ``AWS_DEFAULT_REGION`` or calling vaultic with an option
 parameter like ``-o s3.region="us-east-1"``. If the region is not specified,
 the default region ``us-east-1`` is used.
 
@@ -342,7 +342,7 @@ Certain S3-compatible servers do not properly implement the ``ListObjectsV2`` AP
 most notably Ceph versions before v14.2.5. On these backends, as a temporary
 workaround, you can provide the ``-o s3.list-objects-v1=true`` option to use the
 older ``ListObjects`` API instead. This option may be removed in future versions
-of restic.
+of vaultic.
 
 Wasabi
 ******
@@ -356,7 +356,7 @@ S3 storage from `Wasabi <https://wasabi.com>`__ can be used as follows.
 
     $ export AWS_ACCESS_KEY_ID=<YOUR-WASABI-ACCESS-KEY-ID>
     $ export AWS_SECRET_ACCESS_KEY=<YOUR-WASABI-SECRET-ACCESS-KEY>
-    $ restic -r s3:https://<WASABI-SERVICE-URL>/<WASABI-BUCKET-NAME> init
+    $ vaultic -r s3:https://<WASABI-SERVICE-URL>/<WASABI-BUCKET-NAME> init
 
 Alibaba Cloud (Aliyun) Object Storage System (OSS)
 **************************************************
@@ -371,12 +371,12 @@ S3 storage from `Alibaba OSS <https://www.alibabacloud.com/product/object-storag
 
     $ export AWS_ACCESS_KEY_ID=<YOUR-OSS-ACCESS-KEY-ID>
     $ export AWS_SECRET_ACCESS_KEY=<YOUR-OSS-SECRET-ACCESS-KEY>
-    $ restic -o s3.bucket-lookup=dns -o s3.region=<OSS-REGION> -r s3:https://<OSS-ENDPOINT>/<OSS-BUCKET-NAME> init
+    $ vaultic -o s3.bucket-lookup=dns -o s3.region=<OSS-REGION> -r s3:https://<OSS-ENDPOINT>/<OSS-BUCKET-NAME> init
 
 OpenStack Swift
 ***************
 
-Restic can backup data to an OpenStack Swift container. Because Swift supports
+Vaultic can backup data to an OpenStack Swift container. Because Swift supports
 various authentication methods, credentials are passed through environment
 variables. In order to help integration with existing OpenStack installations,
 the naming convention of those variables follows the official Python Swift client:
@@ -426,7 +426,7 @@ the naming convention of those variables follows the official Python Swift clien
    $ export OS_AUTH_TOKEN=<MY_AUTH_TOKEN>
 
 
-Restic should be compatible with an `OpenStack RC file
+Vaultic should be compatible with an `OpenStack RC file
 <https://docs.openstack.org/ocata/admin-guide/common/cli-set-environment-variables-using-openstack-rc.html>`__
 in most cases.
 
@@ -436,14 +436,14 @@ the container does not exist, it will be created automatically:
 
 .. code-block:: console
 
-   $ restic -r swift:container_name:/path init   # path is optional
+   $ vaultic -r swift:container_name:/path init   # path is optional
    enter password for new repository:
    enter password again:
-   created restic repository eefee03bbd at swift:container_name:/path
+   created vaultic repository eefee03bbd at swift:container_name:/path
    Please note that knowledge of your password is required to access the repository.
    Losing your password means that your data is irrecoverably lost.
 
-The policy of the new container created by restic can be changed using environment variable:
+The policy of the new container created by vaultic can be changed using environment variable:
 
 .. code-block:: console
 
@@ -455,21 +455,21 @@ Backblaze B2
 
 .. warning::
 
-   Due to issues with error handling in the current B2 library that restic uses,
+   Due to issues with error handling in the current B2 library that vaultic uses,
    the recommended way to utilize Backblaze B2 is by using its S3-compatible API.
 
    Follow the documentation to `generate S3-compatible access keys`_ and then
-   setup restic as described at :ref:`Amazon S3`. This is expected to work better
+   setup vaultic as described at :ref:`Amazon S3`. This is expected to work better
    than using the Backblaze B2 backend directly.
 
-   Different from the B2 backend, restic's S3 backend will only hide no longer
+   Different from the B2 backend, vaultic's S3 backend will only hide no longer
    necessary files. By default, Backblaze B2 retains all of the different versions of the
    files and "hides" the older versions. Thus, to free space occupied by hidden files,
    it is **recommended** to use the B2 lifecycle "Keep only the last version of the file".
    The previous version of the file is "hidden" for one day and then deleted automatically
    by B2. More details at the `Backblaze documentation <https://www.backblaze.com/docs/cloud-storage-lifecycle-rules>`__.
 
-Restic can backup data to any Backblaze B2 bucket. You need to first setup the
+Vaultic can backup data to any Backblaze B2 bucket. You need to first setup the
 following environment variables with the credentials you can find in the
 dashboard on the "Buckets" page when signed into your B2 account:
 
@@ -486,18 +486,18 @@ Key is forgotten, you must generate a new one.
 
 For more information on application keys, refer to the `Backblaze documentation <https://www.backblaze.com/docs/cloud-storage-application-keys>`__.
 
-.. note:: As of version 0.9.2, restic supports both master and non-master `application keys <https://www.backblaze.com/docs/cloud-storage-application-keys>`__. If using a non-master application key, ensure that it is created with at least **read and write** access to the B2 bucket. On earlier versions of restic, a master application key is required.
+.. note:: As of version 0.9.2, vaultic supports both master and non-master `application keys <https://www.backblaze.com/docs/cloud-storage-application-keys>`__. If using a non-master application key, ensure that it is created with at least **read and write** access to the B2 bucket. On earlier versions of vaultic, a master application key is required.
 
 You can then initialize a repository stored at Backblaze B2. If the
-bucket does not exist yet and the credentials you passed to restic have the
+bucket does not exist yet and the credentials you passed to vaultic have the
 privilege to create buckets, it will be created automatically:
 
 .. code-block:: console
 
-    $ restic -r b2:bucketname:path/to/repo init
+    $ vaultic -r b2:bucketname:path/to/repo init
     enter password for new repository:
     enter password again:
-    created restic repository eefee03bbd at b2:bucketname:path/to/repo
+    created vaultic repository eefee03bbd at b2:bucketname:path/to/repo
     Please note that knowledge of your password is required to access the repository.
     Losing your password means that your data is irrecoverably lost.
 
@@ -536,7 +536,7 @@ for the storage account.
 
     $ az login
 
-Alternatively, if run on Azure, restic will automatically use service accounts configured
+Alternatively, if run on Azure, vaultic will automatically use service accounts configured
 via the standard environment variables or Workload / Managed Identities.
 
 To enforce the use of the Azure CLI credential when other credentials are present, set the following environment variable:
@@ -545,7 +545,7 @@ To enforce the use of the Azure CLI credential when other credentials are presen
 
     $ export AZURE_FORCE_CLI_CREDENTIAL=true
 
-Restic will by default use Azure's global domain ``core.windows.net`` as endpoint suffix.
+Vaultic will by default use Azure's global domain ``core.windows.net`` as endpoint suffix.
 You can specify other suffixes as follows:
 
 .. code-block:: console
@@ -557,11 +557,11 @@ root path like this:
 
 .. code-block:: console
 
-    $ restic -r azure:foo:/ init
+    $ vaultic -r azure:foo:/ init
     enter password for new repository:
     enter password again:
 
-    created restic repository a934bac191 at azure:foo:/
+    created vaultic repository a934bac191 at azure:foo:/
     [...]
 
 The number of concurrent connections to the Azure Blob Storage service can be set with the
@@ -579,12 +579,12 @@ Google Cloud Storage
           the latter, please see :ref:`other-services` for instructions on using
           the rclone backend.
 
-Restic supports Google Cloud Storage as a backend and connects via a `service account`_.
+Vaultic supports Google Cloud Storage as a backend and connects via a `service account`_.
 
-For normal restic operation, the service account must have the
+For normal vaultic operation, the service account must have the
 ``storage.objects.{create,delete,get,list}`` permissions for the bucket. These
 are included in the "Storage Object Admin" role.
-``restic init`` can create the repository bucket. Doing so requires the
+``vaultic init`` can create the repository bucket. Doing so requires the
 ``storage.buckets.create`` permission ("Storage Admin" role). If the bucket
 already exists, that permission is unnecessary.
 
@@ -597,9 +597,9 @@ key file and the project ID as follows:
 .. code-block:: console
 
     $ export GOOGLE_PROJECT_ID=123123123123
-    $ export GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gs-secret-restic-key.json
+    $ export GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gs-secret-vaultic-key.json
 
-Restic uses Google's client library to generate `default authentication material`_,
+Vaultic uses Google's client library to generate `default authentication material`_,
 which means if you're running in Google Container Engine or are otherwise
 located on an instance with default service accounts then these should work out of
 the box.
@@ -621,11 +621,11 @@ repository in the bucket ``foo`` at the root path:
 
 .. code-block:: console
 
-    $ restic -r gs:foo:/ init
+    $ vaultic -r gs:foo:/ init
     enter password for new repository:
     enter password again:
 
-    created restic repository bde47d6254 at gs:foo/
+    created vaultic repository bde47d6254 at gs:foo/
     [...]
 
 The number of concurrent connections to the GCS service can be set with the
@@ -647,21 +647,21 @@ The program `rclone`_ can be used to access many other different services and
 store data there. First, you need to install and `configure`_ rclone.  The
 general backend specification format is ``rclone:<remote>:<path>``, the
 ``<remote>:<path>`` component will be directly passed to rclone. When you
-configure a remote named ``foo``, you can then call restic as follows to
+configure a remote named ``foo``, you can then call vaultic as follows to
 initiate a new repository in the path ``bar`` in the remote ``foo``:
 
 .. code-block:: console
 
-    $ restic -r rclone:foo:bar init
+    $ vaultic -r rclone:foo:bar init
 
-Restic takes care of starting and stopping rclone.
+Vaultic takes care of starting and stopping rclone.
 
 .. note:: If you get an error message saying "cannot implicitly run relative
           executable rclone found in current directory", this means that an
           rclone executable was found in the current directory. For security
-          reasons restic will not run this implicitly, instead you have to
+          reasons vaultic will not run this implicitly, instead you have to
           use the ``-o rclone.program=./rclone`` extended option to override
-          this security check and explicitly tell restic to use the executable.
+          this security check and explicitly tell vaultic to use the executable.
 
 As a more concrete example, suppose you have configured a remote named
 ``b2prod`` for Backblaze B2 with rclone, with a bucket called ``yggdrasil``.
@@ -672,18 +672,18 @@ You can then use rclone to list files in the bucket like this:
     $ rclone ls b2prod:yggdrasil
 
 In order to create a new repository in the root directory of the bucket, call
-restic like this:
+vaultic like this:
 
 .. code-block:: console
 
-    $ restic -r rclone:b2prod:yggdrasil init
+    $ vaultic -r rclone:b2prod:yggdrasil init
 
 If you want to use the path ``foo/bar/baz`` in the bucket instead, pass this to
-restic:
+vaultic:
 
 .. code-block:: console
 
-    $ restic -r rclone:b2prod:yggdrasil/foo/bar/baz init
+    $ vaultic -r rclone:b2prod:yggdrasil/foo/bar/baz init
 
 Listing the files of an empty repository directly with rclone should return a
 listing similar to the following:
@@ -707,45 +707,45 @@ For debugging rclone, you can set the environment variable ``RCLONE_VERBOSE=2``.
 The rclone backend has three additional options:
 
 * ``-o rclone.program`` specifies the path to rclone, the default value is just ``rclone``
-* ``-o rclone.args`` allows setting the arguments passed to rclone, by default this is ``serve restic --stdio --b2-hard-delete``
+* ``-o rclone.args`` allows setting the arguments passed to rclone, by default this is ``serve vaultic --stdio --b2-hard-delete``
 * ``-o rclone.timeout`` specifies timeout for waiting on repository opening, the default value is ``1m``
 
 The reason for the ``--b2-hard-delete`` parameters can be found in the corresponding GitHub `issue #1657`_.
 
-In order to start rclone, restic will build a list of arguments by joining the
+In order to start rclone, vaultic will build a list of arguments by joining the
 following lists (in this order): ``rclone.program``, ``rclone.args`` and as the
 last parameter the value that follows the ``rclone:`` prefix of the repository
 specification.
 
-So, calling restic like this
+So, calling vaultic like this
 
 .. code-block:: console
 
-    $ restic -o rclone.program="/path/to/rclone" \
-      -o rclone.args="serve restic --stdio --bwlimit 1M --b2-hard-delete --verbose" \
+    $ vaultic -o rclone.program="/path/to/rclone" \
+      -o rclone.args="serve vaultic --stdio --bwlimit 1M --b2-hard-delete --verbose" \
       -r rclone:b2:foo/bar
 
 runs rclone as follows:
 
 .. code-block:: console
 
-    $ /path/to/rclone serve restic --stdio --bwlimit 1M --b2-hard-delete --verbose b2:foo/bar
+    $ /path/to/rclone serve vaultic --stdio --bwlimit 1M --b2-hard-delete --verbose b2:foo/bar
 
 Manually setting ``rclone.program`` also allows running a remote instance of
 rclone e.g. via SSH on a server, for example:
 
 .. code-block:: console
 
-    $ restic -o rclone.program="ssh user@remotehost rclone" -r rclone:b2:foo/bar
+    $ vaultic -o rclone.program="ssh user@remotehost rclone" -r rclone:b2:foo/bar
 
-With these options, restic works with local files. It uses rclone and
+With these options, vaultic works with local files. It uses rclone and
 credentials stored on ``remotehost`` to communicate with B2. All data (except
 credentials) is encrypted/decrypted locally, then sent/received via
 ``remotehost`` to/from B2.
 
 A more advanced version of this setup forbids specific hosts from removing
 files in a repository. See the `blog post by Simon Ruderich
-<https://ruderich.org/simon/notes/append-only-backups-with-restic-and-rclone>`_
+<https://ruderich.org/simon/notes/append-only-backups-with-vaultic-and-rclone>`_
 for details and the documentation for the ``forget`` command to learn about
 important security considerations.
 
@@ -756,7 +756,7 @@ repository specification):
 
 .. code-block:: console
 
-    $ restic -o rclone.program="ssh user@host" -r rclone:x
+    $ vaultic -o rclone.program="ssh user@host" -r rclone:x
 
 .. _rclone: https://rclone.org/
 .. _configure: https://rclone.org/docs/
@@ -766,7 +766,7 @@ repository specification):
 Password prompt on Windows
 **************************
 
-At the moment, restic only supports the default Windows console
+At the moment, vaultic only supports the default Windows console
 interaction. If you use emulation environments like
 `MSYS2 <https://www.msys2.org/>`__ or
 `Cygwin <https://www.cygwin.com/>`__, which use terminals like
@@ -780,35 +780,35 @@ On MSYS2, you can install ``winpty`` as follows:
 .. code-block:: console
 
     $ pacman -S winpty
-    $ winpty restic -r /srv/restic-repo init
+    $ winpty vaultic -r /srv/vaultic-repo init
 
 
 Group accessible repositories
 *****************************
 
-Since restic version 0.14, both local and SFTP repositories can be made
+Since vaultic version 0.14, both local and SFTP repositories can be made
 accessible to all the members of a given UNIX group on the repository host.
 
-To permit multiple users to use a repository, first run ``restic init`` to
+To permit multiple users to use a repository, first run ``vaultic init`` to
 create it, if necessary. Then, some manual intervention is currently required.
 Run the following commands over the repository files themselves, which give
-the required permissions (and hints to restic). Thereafter, restic commands
+the required permissions (and hints to vaultic). Thereafter, vaultic commands
 can be run against that repository by any member of a given UNIX group.
 
-To allow UNIX group ``restic-users`` to read and write to a repository at
-``/srv/restic-repo``, run the following commands:
+To allow UNIX group ``vaultic-users`` to read and write to a repository at
+``/srv/vaultic-repo``, run the following commands:
 
 .. code-block:: console
 
-    $ chgrp -R restic-users /srv/restic-repo
-    $ find /srv/restic-repo -type f -exec chmod 440 '{}' \;
-    $ find /srv/restic-repo -type d -exec chmod 2770 '{}' \;
+    $ chgrp -R vaultic-users /srv/vaultic-repo
+    $ find /srv/vaultic-repo -type f -exec chmod 440 '{}' \;
+    $ find /srv/vaultic-repo -type d -exec chmod 2770 '{}' \;
 
-(Internally, the group read permission on the ``config`` file tells restic to
+(Internally, the group read permission on the ``config`` file tells vaultic to
 create all future files and directories inside the repository with
 group-read permission, and the ``setgid`` mode bit on directories causes
-restic to set the group of each newly created file to the group of its parent
-directory. They thus remain accessible to all members of group ``restic-users``,
+vaultic to set the group of each newly created file to the group of its parent
+directory. They thus remain accessible to all members of group ``vaultic-users``,
 regardless of which user created them.)
 
 .. note:: To manage who has access to the repository you can use
@@ -819,20 +819,20 @@ should belong to the appropriate group.
 
 .. code-block:: console
 
-    $ restic -r sftp:restic@repohost:/srv/restic-repo backup
+    $ vaultic -r sftp:vaultic@repohost:/srv/vaultic-repo backup
 
 In the example, the command could be run by the local user ``root`` who can read
-all the files on the client host, and send them for backup using a remote user ``restic``
-to add them to the repository. In this example, ``restic`` should be part of the
-``restic-users`` group on ``repohost``.
+all the files on the client host, and send them for backup using a remote user ``vaultic``
+to add them to the repository. In this example, ``vaultic`` should be part of the
+``vaultic-users`` group on ``repohost``.
 
 Repositories with empty password
 ********************************
 
-Restic by default refuses to create or operate on repositories that use an
-empty password. Since restic 0.17.0, the option ``--insecure-no-password`` allows
-disabling this check. Restic will not prompt for a password when using this option.
-Specifying ``--insecure-no-password`` while also passing a password to restic
+Vaultic by default refuses to create or operate on repositories that use an
+empty password. Since vaultic 0.17.0, the option ``--insecure-no-password`` allows
+disabling this check. Vaultic will not prompt for a password when using this option.
+Specifying ``--insecure-no-password`` while also passing a password to vaultic
 via a CLI option or via environment variable results in an error.
 
 For security reasons, the option must always be specified when operating on
@@ -841,7 +841,7 @@ with an empty password, use the following command.
 
 .. code-block:: console
 
-    restic init --insecure-no-password
+    vaultic init --insecure-no-password
 
 
 The ``init`` and ``copy`` commands also support the option ``--from-insecure-no-password``

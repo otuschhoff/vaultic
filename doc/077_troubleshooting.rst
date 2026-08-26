@@ -16,14 +16,14 @@
 Troubleshooting
 #########################
 
-The repository format used by restic is designed to be error resistant. In
+The repository format used by vaultic is designed to be error resistant. In
 particular, commands like, for example, ``backup`` or ``prune`` can be interrupted
 at *any* point in time without damaging the repository. You might have to run
 ``unlock`` manually though, but that's it.
 
 However, a repository might be damaged if some of its files are damaged or lost.
 This can occur due to hardware failures, accidentally removing files from the
-repository or bugs in the implementation of restic.
+repository or bugs in the implementation of vaultic.
 
 The following steps will help you recover a repository. This guide does not cover
 all possible types of repository damages. Thus, if the steps do not work for you
@@ -31,12 +31,12 @@ or you are unsure how to proceed, then ask for help. Please always include the
 check output discussed in the next section and what steps you've taken to repair
 the repository so far.
 
-.. _forum: https://forum.restic.net/
+.. _forum: https://forum.vaultic.net/
 
-* `Forum <https://forum.restic.net/>`__
-* Our IRC channel ``#restic`` on ``irc.libera.chat``
+* `Forum <https://forum.vaultic.net/>`__
+* Our IRC channel ``#vaultic`` on ``irc.libera.chat``
 
-Make sure that you **use the latest available restic version**. It can contain
+Make sure that you **use the latest available vaultic version**. It can contain
 bugfixes, and improvements to simplify the repair of a repository. It might also
 contain a fix for your repository problems!
 
@@ -48,11 +48,11 @@ The first step is always to check the repository.
 
 .. code-block:: console
 
-  $ restic check --read-data
+  $ vaultic check --read-data
 
-  using temporary cache in /tmp/restic-check-cache-1418935501
+  using temporary cache in /tmp/vaultic-check-cache-1418935501
   repository 12345678 opened (version 2, compression level auto)
-  created new cache in /tmp/restic-check-cache-1418935501
+  created new cache in /tmp/vaultic-check-cache-1418935501
   create exclusive lock for repository
   load indexes
   check all packs
@@ -80,7 +80,7 @@ Similarly, if a repository is repeatedly damaged, please open an `issue on GitHu
 somewhere. Please include the check output and additional information that might
 help locate the problem.
 
-When ``restic check`` detects damaged or missing packfiles, it will show instructions on how to repair
+When ``vaultic check`` detects damaged or missing packfiles, it will show instructions on how to repair
 them using the ``repair packs`` command. Use that command instead of the "Repairing the
 index" section in this guide.
 
@@ -124,16 +124,16 @@ whether your issue is already known and solved. Please take a look at the
 
 .. note::
 
-  If the ``check`` command tells you to run ``restic repair packs``, then use that
+  If the ``check`` command tells you to run ``vaultic repair packs``, then use that
   command instead. It will repair the damaged pack files and also update the index.
 
-Restic relies on its index to contain correct information about what data is
+Vaultic relies on its index to contain correct information about what data is
 stored in the repository. Thus, the first step to repair a repository is to
 repair the index:
 
 .. code-block:: console
 
-    $ restic repair index
+    $ vaultic repair index
 
     repository a14e5863 opened (version 2, compression level auto)
     loading indexes...
@@ -157,17 +157,17 @@ is actually damaged.
 
 .. note::
 
-  This step is only necessary if the ``check`` command tells you to run ``restic repair snapshots``.
+  This step is only necessary if the ``check`` command tells you to run ``vaultic repair snapshots``.
 
 In case of damage to a snapshot file, ``check`` will show an error message like the following:
 
 .. code-block:: console
 
-  $ restic check
-  using temporary cache in /tmp/restic-check-cache-2150939789
+  $ vaultic check
+  using temporary cache in /tmp/vaultic-check-cache-2150939789
   create exclusive lock for repository
   repository cfabc5ed opened (version 1)
-  created new cache in /tmp/restic-check-cache-2150939789
+  created new cache in /tmp/vaultic-check-cache-2150939789
   load indexes
   [0:00] 100.00%  1 / 1 index files loaded
   check all packs
@@ -175,14 +175,14 @@ In case of damage to a snapshot file, ``check`` will show an error message like 
   error: failed to load snapshot 1d204771: LoadRaw(<snapshot/1d20477115>): invalid data returned
   [0:00] 100.00%  1 / 1 snapshots
 
-  The repository contains damaged snapshot files. These damaged files must be removed to repair the repository. This can be done using the following commands. Please read the troubleshooting guide at https://restic.readthedocs.io/en/stable/077_troubleshooting.html first.
+  The repository contains damaged snapshot files. These damaged files must be removed to repair the repository. This can be done using the following commands. Please read the troubleshooting guide at https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.
 
-  restic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f
+  vaultic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f
 
-  Damaged snapshot files can be caused by backend problems, hardware problems or bugs in restic. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting!
+  Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting!
   Fatal: repository contains errors
 
-As explained in the command output, you have to run ``restic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f`` to remove the broken snapshot file.
+As explained in the command output, you have to run ``vaultic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f`` to remove the broken snapshot file.
 
 5. Running all backups (optional)
 *********************************
@@ -194,10 +194,10 @@ if the missing data is also contained in the new snapshot.
 Therefore, it is recommended to run all your ``backup`` tasks again. In some
 cases, this is enough to fully repair the repository.
 
-To check if the repository is fully repaired, you can run ``restic check``
+To check if the repository is fully repaired, you can run ``vaultic check``
 (without options) again.
 
-To get a list of still damaged files, you can run ``restic repair snapshots --dry-run``.
+To get a list of still damaged files, you can run ``vaultic repair snapshots --dry-run``.
 Look for ``would save new snapshot`` messages to find affected snapshots.
 
 6. Removing missing data from snapshots
@@ -210,12 +210,12 @@ command will automatically remove the original, damaged snapshots.
 
 .. code-block:: console
 
-  $ restic repair snapshots --forget
+  $ vaultic repair snapshots --forget
 
-  snapshot 6979421e of [/home/user/restic/restic] at 2022-11-02 20:59:18.617503315 +0100 CET by user@host
-    file "/restic/internal/fuse/snapshots_dir.go": removed missing content
-    file "/restic/internal/restorer/restorer_unix_test.go": removed missing content
-    file "/restic/internal/walker/walker.go": removed missing content
+  snapshot 6979421e of [/home/user/vaultic/vaultic] at 2022-11-02 20:59:18.617503315 +0100 CET by user@host
+    file "/vaultic/internal/fuse/snapshots_dir.go": removed missing content
+    file "/vaultic/internal/restorer/restorer_unix_test.go": removed missing content
+    file "/vaultic/internal/walker/walker.go": removed missing content
   saved new snapshot 7b094cea
   removed old snapshot 6979421e
 
@@ -223,7 +223,7 @@ command will automatically remove the original, damaged snapshots.
 
 If you did not add the ``--forget`` option, then you have to manually delete all
 modified snapshots using the ``forget`` command. In the example above, you'd have
-to run ``restic forget 6979421e``.
+to run ``vaultic forget 6979421e``.
 
 7. Checking the repository again
 ********************************
@@ -233,11 +233,11 @@ repaired.
 
 .. code-block:: console
 
-  $ restic check --read-data
+  $ vaultic check --read-data
 
-  using temporary cache in /tmp/restic-check-cache-2569290785
+  using temporary cache in /tmp/vaultic-check-cache-2569290785
   repository a14e5863 opened (version 2, compression level auto)
-  created new cache in /tmp/restic-check-cache-2569290785
+  created new cache in /tmp/vaultic-check-cache-2569290785
   create exclusive lock for repository
   load indexes
   check all packs
@@ -249,4 +249,4 @@ repaired.
 
 If the ``check`` command did not complete with ``no errors were found``, then
 the repository is still damaged. At this point, please ask for help at the
-`forum`_ or our IRC channel ``#restic`` on ``irc.libera.chat``.
+`forum`_ or our IRC channel ``#vaultic`` on ``irc.libera.chat``.

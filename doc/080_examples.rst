@@ -15,20 +15,20 @@ Examples
 ########
 
 ********************************
-Setting up restic with Amazon S3
+Setting up vaultic with Amazon S3
 ********************************
 
 Preface
 =======
 
-This tutorial will show you how to use restic with Amazon S3. It will show you how
+This tutorial will show you how to use vaultic with Amazon S3. It will show you how
 to navigate the AWS web interface, create an S3 bucket, create a user with
-access to only this bucket, and finally how to connect restic to this bucket.
+access to only this bucket, and finally how to connect vaultic to this bucket.
 
 Prerequisites
 =============
 
-You should already have a ``restic`` binary available on your system that you can
+You should already have a ``vaultic`` binary available on your system that you can
 run. Furthermore, you should also have an account with
 `AWS <https://aws.amazon.com/>`__. You will likely need to provide credit card
 details for billing purposes, even if you use their
@@ -67,8 +67,8 @@ list of them here:
 
 Click the "Create bucket" button and choose a name and region for your new
 bucket. For the purpose of this tutorial, the bucket will be named
-``restic-demo`` and reside in Frankfurt. Because the bucket name space is
-shared among all AWS users, the name ``restic-demo`` may not be available to
+``vaultic-demo`` and reside in Frankfurt. Because the bucket name space is
+shared among all AWS users, the name ``vaultic-demo`` may not be available to
 you. Be creative and choose a unique bucket name.
 
 .. image:: images/aws_s3/04_bucket_create_start.png
@@ -81,7 +81,7 @@ changes:
 .. image:: images/aws_s3/05_bucket_create_review.png
    :alt: Review Bucket Creation
 
-The newly created ``restic-demo`` bucket will now appear on the list of S3
+The newly created ``vaultic-demo`` bucket will now appear on the list of S3
 buckets:
 
 .. image:: images/aws_s3/06_buckets_list_after.png
@@ -103,16 +103,16 @@ them here. Use the "Add user" button at the top to create a new user:
 .. image:: images/aws_s3/08_user_list.png
    :alt: IAM User List
 
-For this tutorial, the new user will be named ``restic-demo-user``. Feel free to
+For this tutorial, the new user will be named ``vaultic-demo-user``. Feel free to
 choose your own name that best fits your needs. This user will only ever access
-AWS through the ``restic`` program and not through the web interface. Therefore,
+AWS through the ``vaultic`` program and not through the web interface. Therefore,
 "Programmatic access" is selected for "Access type":
 
 .. image:: images/aws_s3/09_user_name.png
    :alt: Choose User Name and Access Type
 
 During the next step, permissions can be assigned to the new user. To use this
-user with restic, it only needs access to the ``restic-demo`` bucket. Select
+user with vaultic, it only needs access to the ``vaultic-demo`` bucket. Select
 "Attach existing policies directly", which will bring up a list of pre-defined
 policies below. Afterwards, click the "Create policy" button to create a custom
 policy:
@@ -127,17 +127,17 @@ will be used to generate a policy:
 .. image:: images/aws_s3/11_policy_start.png
    :alt: Create a New Policy
 
-For restic to work, two permission statements must be created using the visual
+For vaultic to work, two permission statements must be created using the visual
 policy editor. The first statement is set up as follows:
 
 .. code::
 
    Service: S3
    Allow Actions: DeleteObject, GetObject, PutObject
-   Resources: arn:aws:s3:::restic-demo/*
+   Resources: arn:aws:s3:::vaultic-demo/*
 
-This statement allows restic to create, read and delete objects inside the S3
-bucket named ``restic-demo``. Adjust the bucket's name to the name of the
+This statement allows vaultic to create, read and delete objects inside the S3
+bucket named ``vaultic-demo``. Adjust the bucket's name to the name of the
 bucket you created earlier. Next, add a second statement using the "Add
 additional permissions" button:
 
@@ -145,16 +145,16 @@ additional permissions" button:
 
    Service: S3
    Allow Actions: ListBucket, GetBucketLocation
-   Resource: arn:aws:s3:::restic-demo
+   Resource: arn:aws:s3:::vaultic-demo
 
-Again, substitute ``restic-demo`` with the actual name of your bucket. Note
+Again, substitute ``vaultic-demo`` with the actual name of your bucket. Note
 that, unlike before, there is no ``/*`` after the bucket name. This statement
-allows restic to list the objects stored in the ``restic-demo`` bucket and to
+allows vaultic to list the objects stored in the ``vaultic-demo`` bucket and to
 query the bucket's region.
 
 Continue to the next step by clicking the "Review policy" button and enter a
 name and description for this policy. For this tutorial, the policy will be
-named ``restic-demo-policy``. Click "Create policy" to finish the process:
+named ``vaultic-demo-policy``. Click "Create policy" to finish the process:
 
 .. image:: images/aws_s3/13_policy_review.png
    :alt: Policy Review
@@ -162,7 +162,7 @@ named ``restic-demo-policy``. Click "Create policy" to finish the process:
 Go back to the browser window or tab where you were previously creating the new
 user. Click the button labeled "Refresh" above the list of policies to make
 sure the newly created policy is available to you. Afterwards, use the search
-function to search for the ``restic-demo-policy``. Select this policy using the
+function to search for the ``vaultic-demo-policy``. Select this policy using the
 checkbox on the left. Then, continue to the next step.
 
 .. image:: images/aws_s3/14_user_attach_policy.png
@@ -185,10 +185,10 @@ You have now completed the configuration in AWS. Feel free to close your web
 browser now.
 
 
-Initializing the restic repository
+Initializing the vaultic repository
 ==================================
 
-Open a terminal and make sure you have the ``restic`` binary ready. First, choose
+Open a terminal and make sure you have the ``vaultic`` binary ready. First, choose
 a password to encrypt your backups with. In this tutorial, ``apg`` is used for
 this purpose:
 
@@ -198,7 +198,7 @@ this purpose:
    I9n7G7G0ZpDWA3GOcJbIuwQCGvGUBkU5
 
 Note this password somewhere safe along with your AWS credentials. Next, the
-configuration of restic will be placed into environment variables. This will
+configuration of vaultic will be placed into environment variables. This will
 include sensitive information, such as your AWS secret and repository password.
 Therefore, make sure the next commands **do not** end up in your shell's
 history file. Adjust the contents of the environment variables to fit your
@@ -207,26 +207,26 @@ bucket's name, region, and your user's API credentials.
 .. code-block:: console
 
    $ unset HISTFILE
-   $ export RESTIC_REPOSITORY="s3:s3.eu-west-1.amazonaws.com/restic-demo"
+   $ export VAULTIC_REPOSITORY="s3:s3.eu-west-1.amazonaws.com/vaultic-demo"
    $ export AWS_ACCESS_KEY_ID="AKIAJAJSLTZCAZ4SRI5Q"
    $ export AWS_SECRET_ACCESS_KEY="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"
-   $ export RESTIC_PASSWORD="I9n7G7G0ZpDWA3GOcJbIuwQCGvGUBkU5"
+   $ export VAULTIC_PASSWORD="I9n7G7G0ZpDWA3GOcJbIuwQCGvGUBkU5"
 
 
-After the environment is set up, restic may be called to initialize the
+After the environment is set up, vaultic may be called to initialize the
 repository:
 
 
 .. code-block:: console
 
-   $ restic init
-   created restic backend b5c661a86a at s3:s3.eu-west-1.amazonaws.com/restic-demo
+   $ vaultic init
+   created vaultic backend b5c661a86a at s3:s3.eu-west-1.amazonaws.com/vaultic-demo
 
    Please note that knowledge of your password is required to access
    the repository. Losing your password means that your data is
    irrecoverably lost.
 
-restic is now ready to be used with Amazon S3. Try to create a backup:
+vaultic is now ready to be used with Amazon S3. Try to create a backup:
 
 .. code-block:: console
 
@@ -235,23 +235,23 @@ restic is now ready to be used with Amazon S3. Try to create a backup:
    10+0 records out
    10485760 bytes (10 MB, 10 MiB) copied, 0,0891322 s, 118 MB/s
 
-   $ restic backup test.bin
-   scan [/home/philip/restic-demo/test.bin]
+   $ vaultic backup test.bin
+   scan [/home/philip/vaultic-demo/test.bin]
    scanned 0 directories, 1 files in 0:00
    [0:04] 100.00%  2.500 MiB/s  10.000 MiB / 10.000 MiB  1 / 1 items ... ETA 0:00 
    duration: 0:04, 2.47MiB/s
    snapshot 10fdbace saved
 
-   $ restic snapshots
+   $ vaultic snapshots
    ID        Date                 Host        Tags        Directory
    ----------------------------------------------------------------------
-   10fdbace  2017-03-26 16:41:50  blackbox                /home/philip/restic-demo/test.bin
+   10fdbace  2017-03-26 16:41:50  blackbox                /home/philip/vaultic-demo/test.bin
 
 A snapshot was created and stored in the S3 bucket. By default backups to Amazon S3 will use the ``STANDARD`` storage class. Available storage classes include ``STANDARD``, ``STANDARD_IA``, ``ONEZONE_IA``, ``INTELLIGENT_TIERING``, and ``REDUCED_REDUNDANCY``. A different storage class could have been specified in the above command by using ``-o`` or ``--option``:
 
 .. code-block:: console
 
-  $ restic backup -o s3.storage-class=REDUCED_REDUNDANCY test.bin
+  $ vaultic backup -o s3.storage-class=REDUCED_REDUNDANCY test.bin
 
 This snapshot may now be restored:
 
@@ -259,8 +259,8 @@ This snapshot may now be restored:
 
    $ mkdir restore
 
-   $ restic restore 10fdbace --target restore
-   restoring <Snapshot 10fdbace of [/home/philip/restic-demo/test.bin] at 2017-03-26 16:41:50.201418102 +0200 CEST by philip@blackbox> to restore
+   $ vaultic restore 10fdbace --target restore
+   restoring <Snapshot 10fdbace of [/home/philip/vaultic-demo/test.bin] at 2017-03-26 16:41:50.201418102 +0200 CEST by philip@blackbox> to restore
 
    $ ls restore/
    test.bin
@@ -269,7 +269,7 @@ The snapshot was successfully restored. This concludes the tutorial.
 
 
 *****************************************************
-Backing up your system without running restic as root
+Backing up your system without running vaultic as root
 *****************************************************
 
 Motivation
@@ -297,31 +297,31 @@ back up a system.
 Using ambient capabilities (recommended)
 ========================================
 
-First, create a new user called ``restic`` that is going to create
+First, create a new user called ``vaultic`` that is going to create
 the backups:
 
 .. code-block:: console
 
-   # useradd --system --create-home --shell /sbin/nologin restic
+   # useradd --system --create-home --shell /sbin/nologin vaultic
 
 The capability can be granted to a process tree using the
 ``setpriv`` command, which must be run as ``root`` user and then
-switches to the ``restic`` user:
+switches to the ``vaultic`` user:
 
 .. code-block:: console
 
-   # setpriv --no-new-privs --reuid=$(id -u restic) --regid=$(id -g restic) --init-groups --reset-env --inh-caps +DAC_READ_SEARCH --ambient-caps +DAC_READ_SEARCH restic backup --exclude={/dev,/media,/mnt,/proc,/run,/sys,/tmp,/var/tmp} /
+   # setpriv --no-new-privs --reuid=$(id -u vaultic) --regid=$(id -g vaultic) --init-groups --reset-env --inh-caps +DAC_READ_SEARCH --ambient-caps +DAC_READ_SEARCH vaultic backup --exclude={/dev,/media,/mnt,/proc,/run,/sys,/tmp,/var/tmp} /
 
 Using ambient capabilities with systemd
 ---------------------------------------
 
-If you are running restic as a systemd service, you can use systemd's
+If you are running vaultic as a systemd service, you can use systemd's
 ambient capability feature to assign the necessary capability without
-modifying the restic binary itself. This is the preferred method,
+modifying the vaultic binary itself. This is the preferred method,
 as it still works after binary updates.
 
 Add the following directives to the ``[Service]`` section of your
-systemd unit file (e.g., ``/etc/systemd/system/restic.service``):
+systemd unit file (e.g., ``/etc/systemd/system/vaultic.service``):
 
 .. code-block:: ini
 
@@ -332,7 +332,7 @@ systemd unit file (e.g., ``/etc/systemd/system/restic.service``):
    CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 
 Note the use of ``DynamicUser=yes``. This is an added bonus of using the systemd method
-as you do not need to create a ``restic`` user.
+as you do not need to create a ``vaultic`` user.
 
 After editing the unit file, do not forget to reload systemd's configuration and restart
 the service:
@@ -346,13 +346,13 @@ Using file capabilities
 
 .. warning::
 
-   Granting ``CAP_DAC_READ_SEARCH`` to the restic binary allows any process
+   Granting ``CAP_DAC_READ_SEARCH`` to the vaultic binary allows any process
    executing that binary to bypass standard file permission checks for reading
    and directory traversal. In practice, anyone who can execute this binary can
    read most of the system, regardless of their user ID.
 
    Ensure that only a dedicated backup user (and root) can execute the
-   capability-enabled restic binary, and treat that account as highly privileged.
+   capability-enabled vaultic binary, and treat that account as highly privileged.
 
    See: `capabilities(7) <https://man7.org/linux/man-pages/man7/capabilities.7.html>`_
 
@@ -361,49 +361,49 @@ execution, the system will read the assigned capabilities and assign
 them to the process. This is less secure than using ambient capabilities
 as anyone who is able to execute the binary can make use of the capability.
 
-First, create a new user called ``restic`` that is going to create
+First, create a new user called ``vaultic`` that is going to create
 the backups:
 
 .. code-block:: console
 
-   # useradd --system --create-home --shell /sbin/nologin restic
+   # useradd --system --create-home --shell /sbin/nologin vaultic
 
-Then copy the restic binary into the user's home directory:
+Then copy the vaultic binary into the user's home directory:
 
 .. code-block:: console
 
-   # mkdir /home/restic/bin
-   # cp /usr/bin/restic /home/restic/bin/restic
+   # mkdir /home/vaultic/bin
+   # cp /usr/bin/vaultic /home/vaultic/bin/vaultic
 
-Before assigning any special capability to the restic binary,
+Before assigning any special capability to the vaultic binary,
 restrict its permissions so that only root and the newly created
-restic user can execute it. Otherwise any user could use the
-privileged restic binary to access any file.
+vaultic user can execute it. Otherwise any user could use the
+privileged vaultic binary to access any file.
 
 .. code-block:: console
 
-   # chown root:restic /home/restic/bin/restic
-   # chmod 750 /home/restic/bin/restic
+   # chown root:vaultic /home/vaultic/bin/vaultic
+   # chmod 750 /home/vaultic/bin/vaultic
 
 Finally, use ``setcap`` to add an extended attribute to the
-restic binary. On every execution the system will read the extended
+vaultic binary. On every execution the system will read the extended
 attribute, interpret it and assign capabilities accordingly.
 
 .. code-block:: console
 
-   # setcap cap_dac_read_search=+ep /home/restic/bin/restic
+   # setcap cap_dac_read_search=+ep /home/vaultic/bin/vaultic
 
 .. important:: The capabilities of the ``setcap`` command only apply to this
-    specific copy of the restic binary. If you run ``restic self-update`` or
+    specific copy of the vaultic binary. If you run ``vaultic self-update`` or
     in any other way replace or update the binary, the capabilities you added
     will be lost, and you must run the ``setcap`` command again.
 
-From now on the user ``restic`` can run restic to backup the whole
+From now on the user ``vaultic`` can run vaultic to backup the whole
 system.
 
 .. code-block:: console
 
-   # runuser -u restic /home/restic/bin/restic -r /tmp backup --exclude={/dev,/media,/mnt,/proc,/run,/sys,/tmp,/var/tmp} /
+   # runuser -u vaultic /home/vaultic/bin/vaultic -r /tmp backup --exclude={/dev,/media,/mnt,/proc,/run,/sys,/tmp,/var/tmp} /
 
 
 ***********************************************************
@@ -415,10 +415,10 @@ Idea
 
 The idea is to run `REST-server <https://github.com/restic/rest-server>`__ on
 an internal host as the repository server and then back up to it from a remote
-restic client through a reverse SSH tunnel.
+vaultic client through a reverse SSH tunnel.
 
 With this approach, you do not need to publicly expose the repository server
-to which the backups are sent, as the restic client can instead connect to it
+to which the backups are sent, as the vaultic client can instead connect to it
 through the SSH tunnel.
 
 An example use case for this method would be to create backups of a server,
@@ -450,16 +450,16 @@ and forwards these back through the tunnel to the *local* side:
    ssh -R 8000:localhost:8000 user@server
 
 .. note:: In this example, ``localhost`` refers to the local repository server,
-          and ``server`` refers to the remote system where restic is to be run.
+          and ``server`` refers to the remote system where vaultic is to be run.
 
-Running restic on the remote system
+Running vaultic on the remote system
 ===================================
 
-Now that the SSH session and tunnel is established, run restic on the remote
+Now that the SSH session and tunnel is established, run vaultic on the remote
 system as usual, but with a repository URL that targets that system's side of
 the SSH tunnel, in this example ``localhost:8000``.
 
-This will make restic on the remote system connect to port ``8000`` on its
+This will make vaultic on the remote system connect to port ``8000`` on its
 ``localhost``, where the SSH tunnel is listening, after which the connection
 is forwarded through the tunnel and finally reaches ``localhost:8000`` on the
 local side where REST-server is listening and acting as the repository server.
@@ -468,9 +468,9 @@ To initialize the repository:
 
 .. code-block:: console
 
-   restic -r rest:http://localhost:8000/ init
+   vaultic -r rest:http://localhost:8000/ init
 
-You can then use standard restic commands such as ``backup``, ``snapshots`` and
+You can then use standard vaultic commands such as ``backup``, ``snapshots`` and
 ``restore`` with the same repository URL and other options as usual.
 
 .. tip:: The tunnel will be active for the duration of the SSH session.
@@ -483,4 +483,4 @@ instead of using REST-server.
 
 .. code-block:: console
 
-   rclone serve restic --addr localhost:8000 /path/to/repo
+   rclone serve vaultic --addr localhost:8000 /path/to/repo

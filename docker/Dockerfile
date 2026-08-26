@@ -8,10 +8,10 @@ RUN go mod download
 
 COPY . .
 RUN go run build.go
-FROM alpine:latest AS restic
+FROM alpine:latest AS vaultic
 RUN apk add --no-cache ca-certificates fuse openssh-client tzdata jq
 
-COPY --from=builder /go/src/github.com/vaultic/vaultic/restic /usr/bin
+COPY --from=builder /go/src/github.com/vaultic/vaultic/vaultic /usr/bin
 COPY ./docker/entrypoint.sh /entrypoint.sh
 
 # IO class default is "none"- 0, however busybox reject ionice `-c0 -n<something>`

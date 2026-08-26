@@ -15,13 +15,13 @@ Backing up
 ##########
 
 You can now back up some data. The contents of a directory at a
-specific point in time is called a "snapshot" in restic. Run the
+specific point in time is called a "snapshot" in vaultic. Run the
 following command and enter the repository password you chose above
 again:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo --verbose backup ~/work
+    $ vaultic -r /srv/vaultic-repo --verbose backup ~/work
     open repository
     enter password for repository:
     repository a14e5863 opened (version 2, compression level auto)
@@ -37,17 +37,17 @@ again:
     processed 5307 files, 1.720 GiB in 0:12
     snapshot 40dc1520 saved
 
-As you can see, restic created a backup of the directory and was pretty
+As you can see, vaultic created a backup of the directory and was pretty
 fast! The specific snapshot just created is identified by a sequence of
 hexadecimal characters, ``40dc1520`` in this case.
 
-You can see that restic processed 1.720 GiB of data; this is the
+You can see that vaultic processed 1.720 GiB of data; this is the
 size of the files and directories in ``~/work`` on the local file system. It
 also reports that only 1.200 GiB was added to the repository. This means that
-some of the data was duplicate and restic was able to efficiently reduce it.
+some of the data was duplicate and vaultic was able to efficiently reduce it.
 The data compression also managed to compress the data down to 1.103 GiB.
 
-If you don't pass the ``--verbose`` option, restic will print less data. You'll
+If you don't pass the ``--verbose`` option, vaultic will print less data. You'll
 still get a nice live status display that looks like this:
 
 .. code-block:: console
@@ -61,13 +61,13 @@ totals come from the initial scan used for progress estimation, which can be
 disabled with ``--no-scan``). Next is a counter for the number of files that
 caused errors (these are logged above the progress bar), and finally an
 estimated time of completion. The file paths displayed below the progress bar
-are the files currently being read by restic.
+are the files currently being read by vaultic.
 
 Be aware that the live status shows the processed files and not the transferred
 data. Transferred volume might be lower (due to deduplication) or higher.
 
 On Windows, the ``--use-fs-snapshot`` option will use Windows' Volume Shadow Copy
-Service (VSS) when creating backups. Restic will transparently create a VSS
+Service (VSS) when creating backups. Vaultic will transparently create a VSS
 snapshot for each volume that contains files to backup. Files are read from the
 VSS snapshot instead of the regular filesystem. This allows to backup files that are
 exclusively locked by another process during the backup.
@@ -105,7 +105,7 @@ or by name:
 
 Also, ``MS`` can be used as alias for ``Microsoft Software Shadow Copy provider 1.0``.
 
-By default VSS ignores Outlook OST files. This is not a restriction of restic
+By default VSS ignores Outlook OST files. This is not a restriction of vaultic
 but the default Windows VSS configuration. The files not to snapshot are
 configured in the Windows registry under the following key:
 
@@ -116,13 +116,13 @@ configured in the Windows registry under the following key:
 For more details refer to the official Windows documentation e.g. the article
 ``Registry Keys and Values for Backup and Restore``.
 
-If you run the backup command again, restic will create another snapshot of
+If you run the backup command again, vaultic will create another snapshot of
 your data, but this time it's even faster and no new data was added to the
 repository (since all data is already there). This is deduplication at work!
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo --verbose backup ~/work
+    $ vaultic -r /srv/vaultic-repo --verbose backup ~/work
     open repository
     enter password for repository:
     repository a14e5863 opened (version 2, compression level auto)
@@ -144,19 +144,19 @@ You can even backup individual files in the same repository (not passing
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup ~/work.txt
+    $ vaultic -r /srv/vaultic-repo backup ~/work.txt
     enter password for repository:
     snapshot 249d0210 saved
 
-If you're interested in what restic does, pass ``--verbose`` twice (or
+If you're interested in what vaultic does, pass ``--verbose`` twice (or
 ``--verbose=2``) to display detailed information about each file and directory
-restic encounters:
+vaultic encounters:
 
 .. code-block:: console
 
     $ echo 'more data foo bar' >> ~/work.txt
 
-    $ restic -r /srv/restic-repo --verbose --verbose backup ~/work.txt
+    $ vaultic -r /srv/vaultic-repo --verbose --verbose backup ~/work.txt
     open repository
     enter password for repository:
     lock repository
@@ -179,23 +179,23 @@ restic encounters:
 In fact several hosts may use the same repository to backup directories
 and files leading to a greater deduplication.
 
-Now is a good time to run ``restic check`` to verify that all data
+Now is a good time to run ``vaultic check`` to verify that all data
 is properly stored in the repository. You should run this command regularly
 to make sure the internal structure of the repository is free of errors.
 
 File change detection
 *********************
 
-When restic encounters a file that has already been backed up, whether in the
+When vaultic encounters a file that has already been backed up, whether in the
 current backup or a previous one, it makes sure the file's content is only
 stored once in the repository. To do so, it normally has to scan the entire
-content of the file. Because this can be very expensive, restic also uses a
+content of the file. Because this can be very expensive, vaultic also uses a
 change detection rule based on file metadata to determine whether a file is
 likely unchanged since a previous backup. If it is, the file is not scanned
 again.
 
-The previous backup snapshot, called "parent" snapshot in restic terminology,
-is determined as follows. By default restic groups snapshots by hostname and
+The previous backup snapshot, called "parent" snapshot in vaultic terminology,
+is determined as follows. By default vaultic groups snapshots by hostname and
 backup paths, and then selects the latest snapshot in the group that matches
 the current backup. You can change the selection criteria using the
 ``--group-by`` option, which defaults to ``host,paths``. To select the latest
@@ -227,7 +227,7 @@ The reason for requiring both mtime and ctime to match is that Unix programs
 can freely change mtime (and some do). In such cases, a ctime change may be
 the only hint that a file did change.
 
-The following ``restic backup`` command line flags modify the change detection
+The following ``vaultic backup`` command line flags modify the change detection
 rules:
 
 * ``--force``: turn off change detection and rescan all files.
@@ -249,19 +249,19 @@ The other options are recognized but ignored.
 Skip creating snapshots if unchanged
 ************************************
 
-By default, restic always creates a new snapshot even if nothing has changed
+By default, vaultic always creates a new snapshot even if nothing has changed
 compared to the parent snapshot. To omit the creation of a new snapshot in this
 case, specify the ``--skip-if-unchanged`` option.
 
 Note that when using absolute paths to specify the backup source, then also
 changes to the parent folders result in a changed snapshot. For example, a backup
 of ``/home/user/work`` will create a new snapshot if the metadata of either
-``/``, ``/home`` or ``/home/user`` change. To avoid this problem run restic from
+``/``, ``/home`` or ``/home/user`` change. To avoid this problem run vaultic from
 the corresponding folder and use relative paths.
 
 .. code-block:: console
 
-    $ cd /home/user/work && restic -r /srv/restic-repo backup . --skip-if-unchanged
+    $ cd /home/user/work && vaultic -r /srv/vaultic-repo backup . --skip-if-unchanged
 
     open repository
     enter password for repository:
@@ -295,27 +295,27 @@ Note that the snapshot metadata will always contain the absolute path.
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup /home/user/work.txt
+    $ vaultic -r /srv/vaultic-repo backup /home/user/work.txt
     [...]
     snapshot c0899509 saved
 
-    $ restic -r /srv/restic-repo ls c0899509
+    $ vaultic -r /srv/vaultic-repo ls c0899509
     snapshot c0899509 of [/home/user/work.txt] at 2026-02-01 14:05:20.623159838 +0100 CET by user@host filtered by []:
     /home
     /home/user
     /home/user/work.txt
 
     $ cd /home
-    $ restic -r /srv/restic-repo backup user/work.txt
+    $ vaultic -r /srv/vaultic-repo backup user/work.txt
     [...]
     snapshot 90de7fb2 saved
 
-    $ restic -r /srv/restic-repo ls
+    $ vaultic -r /srv/vaultic-repo ls
     snapshot 90de7fb2 of [/home/user/work.txt] at 2026-02-01 14:07:30.856406104 +0100 CET by user@host filtered by []:
     /user
     /user/work.txt
 
-.. note:: When switching between absolute and relative paths, the change detection in restic
+.. note:: When switching between absolute and relative paths, the change detection in vaultic
     will not be able to detect unmodified files. This is because the change detection depends
     on the file path inside the snapshot.
 
@@ -331,7 +331,7 @@ Combined with ``--verbose``, you can see a list of changes:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup ~/work --dry-run -vv | grep "added"
+    $ vaultic -r /srv/vaultic-repo backup ~/work --dry-run -vv | grep "added"
     modified  /plan.txt, saved in 0.000s (9.110 KiB added)
     modified  /archive.tar.gz, saved in 0.140s (25.542 MiB added)
     Would be added to the repository: 25.551 MiB
@@ -353,12 +353,12 @@ the exclude options are:
 -  ``--exclude-larger-than size`` Specify once to exclude files larger than the given size
 -  ``--exclude-cloud-files`` Specify once to exclude online-only cloud files (such as OneDrive Files On-Demand, iCloud drive), currently only supported on Windows and macOS
 
-Please see ``restic help backup`` for more specific information about each exclude option.
+Please see ``vaultic help backup`` for more specific information about each exclude option.
 
 .. note::
 
    Excludes do not apply to backup sources that were explicitly passed to the `backup`
-   command. That is ``restic backup ~/work.txt`` will always backup the file ``~/work.txt``
+   command. That is ``vaultic backup ~/work.txt`` will always backup the file ``~/work.txt``
    independent of any excludes.
 
    This only applies to the exact paths that were explicitly passed to the `backup` command.
@@ -377,9 +377,9 @@ It can be used like this:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup ~/work --exclude="*.c" --exclude-file=excludes.txt
+    $ vaultic -r /srv/vaultic-repo backup ~/work --exclude="*.c" --exclude-file=excludes.txt
 
-This instructs restic to exclude files matching the following criteria:
+This instructs vaultic to exclude files matching the following criteria:
 
 * All files matching ``*.c`` (parameter ``--exclude``)
 * All files matching ``*.go`` (second line in ``excludes.txt``)
@@ -389,7 +389,7 @@ Patterns use the syntax of the Go function
 `filepath.Match <https://pkg.go.dev/path/filepath#Match>`__
 with the addition of the double-asterisk (``**``) wildcard,
 and are tested against the full path of a file/dir to be saved,
-even if restic is passed a relative path to save. Empty lines and lines
+even if vaultic is passed a relative path to save. Empty lines and lines
 starting with a ``#`` are ignored.
 
 Environment variables in exclude files are expanded with `os.ExpandEnv
@@ -406,7 +406,7 @@ Patterns need to match on complete path components. For example, the pattern ``f
 * does not match ``/dir/foobar`` or ``barfoo``
 
 A trailing ``/`` is ignored, a leading ``/`` anchors the pattern at the root directory.
-This means, ``/bin`` matches ``/bin/bash`` but does not match ``/usr/bin/restic``.
+This means, ``/bin`` matches ``/bin/bash`` but does not match ``/usr/bin/vaultic``.
 
 Regular wildcards cannot be used to match over the directory separator ``/``,
 e.g. ``b*ash`` matches ``/bin/bash`` but does not match ``/bin/ash``. To match
@@ -459,8 +459,8 @@ of the filename.
 
 Spaces in patterns listed in the other exclude options (e.g. ``--exclude`` on the
 command line) are specified in different ways depending on the operating system
-and/or shell. Restic itself does not need any escaping, but your shell may need
-some escaping in order to pass the name/pattern as a single argument to restic.
+and/or shell. Vaultic itself does not need any escaping, but your shell may need
+some escaping in order to pass the name/pattern as a single argument to vaultic.
 
 On most Unixy shells, you can either quote or use backslashes. For example:
 
@@ -490,27 +490,27 @@ directory, then selectively add back some of them.
     *.lo
     *.pyc
 
-By specifying the option ``--one-file-system`` you can instruct restic
+By specifying the option ``--one-file-system`` you can instruct vaultic
 to only backup files from the file systems the initially specified files
-or directories reside on. In other words, it will prevent restic from crossing
+or directories reside on. In other words, it will prevent vaultic from crossing
 filesystem boundaries and subvolumes when performing a backup.
 
 For example, if you backup ``/`` with this option and you have external
-media mounted under ``/media/usb`` then restic will not back up ``/media/usb``
+media mounted under ``/media/usb`` then vaultic will not back up ``/media/usb``
 at all because this is a different filesystem than ``/``. Virtual filesystems
 such as ``/proc`` are also considered different and thereby excluded when
 using ``--one-file-system``:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup --one-file-system /
+    $ vaultic -r /srv/vaultic-repo backup --one-file-system /
 
 Please note that this does not prevent you from specifying multiple filesystems
 on the command line, e.g:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup --one-file-system / /media/usb
+    $ vaultic -r /srv/vaultic-repo backup --one-file-system / /media/usb
 
 will back up both the ``/`` and ``/media/usb`` filesystems, but will not
 include other filesystems like ``/sys`` and ``/proc``.
@@ -523,7 +523,7 @@ option:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup ~/work --exclude-larger-than 1M
+    $ vaultic -r /srv/vaultic-repo backup ~/work --exclude-larger-than 1M
 
 This excludes files in ``~/work`` which are larger than 1 MiB from the backup.
 
@@ -537,7 +537,7 @@ Including files
 ***************
 
 The options ``--files-from``, ``--files-from-verbatim`` and ``--files-from-raw``
-allow you to give restic a file containing lists of file patterns or paths to
+allow you to give vaultic a file containing lists of file patterns or paths to
 be backed up. This is useful e.g. when you want to back up files from many
 different locations, or when you use some other software to generate the list
 of files to back up.
@@ -570,7 +570,7 @@ GNU ``find`` with the ``-print0`` flag).
 All three options interpret the argument ``-`` as standard input and will read
 the list of files/patterns from there instead of a text file.
 
-In all cases, paths may be absolute or relative to ``restic backup``'s working
+In all cases, paths may be absolute or relative to ``vaultic backup``'s working
 directory.
 
 For example, maybe you want to backup files which have a name that matches a
@@ -580,33 +580,33 @@ certain regular expression pattern (uses GNU ``find``):
 
     $ find /tmp/some_folder -regex PATTERN -print0 > /tmp/files_to_backup
 
-You can then use restic to backup the filtered files:
+You can then use vaultic to backup the filtered files:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup --files-from-raw /tmp/files_to_backup
+    $ vaultic -r /srv/vaultic-repo backup --files-from-raw /tmp/files_to_backup
 
 You can combine all three options with each other and with the normal file arguments:
 
 .. code-block:: console
 
-    $ restic backup --files-from /tmp/files_to_backup /tmp/some_additional_file
-    $ restic backup --files-from /tmp/glob-pattern --files-from-raw /tmp/generated-list /tmp/some_additional_file
+    $ vaultic backup --files-from /tmp/files_to_backup /tmp/some_additional_file
+    $ vaultic backup --files-from /tmp/glob-pattern --files-from-raw /tmp/generated-list /tmp/some_additional_file
 
 Comparing snapshots
 *******************
 
-Restic has a ``diff`` command which shows the difference between two snapshots
+Vaultic has a ``diff`` command which shows the difference between two snapshots
 and displays a small statistic, just pass the command two snapshot IDs:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo diff 5845b002 2ab627a6
+    $ vaultic -r /srv/vaultic-repo diff 5845b002 2ab627a6
     comparing snapshot ea657ce5 to 2ab627a6:
 
-    M    /restic/cmd_diff.go
-    +    /restic/foo
-    M    /restic/restic
+    M    /vaultic/cmd_diff.go
+    +    /vaultic/foo
+    M    /vaultic/vaultic
 
     Files:           0 new,     0 removed,     2 changed
     Dirs:            1 new,     0 removed
@@ -618,12 +618,12 @@ and displays a small statistic, just pass the command two snapshot IDs:
 
 To only compare files in specific subfolders, you can use the ``<snapshot>:<subfolder>``
 syntax, where ``snapshot`` is the ID of a snapshot (or the string ``latest``) and ``subfolder``
-is a path within the snapshot tree as shown by ``restic ls``. For example, to only compare files in
-the ``/restic`` folder, you could use the following command:
+is a path within the snapshot tree as shown by ``vaultic ls``. For example, to only compare files in
+the ``/vaultic`` folder, you could use the following command:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo diff 5845b002:/restic 2ab627a6:/restic
+    $ vaultic -r /srv/vaultic-repo diff 5845b002:/vaultic 2ab627a6:/vaultic
 
 By default, the ``diff`` command only lists differences in file contents.
 The flag ``--metadata`` shows changes to file metadata, too.
@@ -647,30 +647,30 @@ The characters left of the file path show what has changed for this file:
 Backing up special items and metadata
 *************************************
 
-**Symlinks** are archived as symlinks, ``restic`` does not follow them.
+**Symlinks** are archived as symlinks, ``vaultic`` does not follow them.
 When you restore, you get the same symlink again, with the same link target
 and the same timestamps.
 
-If there is a **bind-mount** below a directory that is to be saved, restic descends into it.
+If there is a **bind-mount** below a directory that is to be saved, vaultic descends into it.
 
 **Device files** are saved and restored as device files. This means that e.g. ``/dev/sda`` is
 archived as a block device file and restored as such. This also means that the content of the
 corresponding disk is not read, at least not from the device file.
 
-By default, restic does not save the access time (atime) for any files or other
+By default, vaultic does not save the access time (atime) for any files or other
 items, since it is not possible to reliably disable updating the access time by
-restic itself. This means that for each new backup a lot of metadata is
+vaultic itself. This means that for each new backup a lot of metadata is
 written, and the next backup needs to write new metadata again. If you really
 want to save the access time for files and directories, you can pass the
 ``--with-atime`` option to the ``backup`` command.
 
 Backing up full security descriptors on Windows is only possible when the user
 has ``SeBackupPrivilege`` privilege or is running as admin. This is a restriction
-of Windows not restic.
+of Windows not vaultic.
 If either of these conditions are not met, only the owner, group and DACL will
 be backed up.
 
-Note that ``restic`` does not back up some metadata associated with files. Of
+Note that ``vaultic`` does not back up some metadata associated with files. Of
 particular note are:
 
 * File creation date on Unix platforms
@@ -680,15 +680,15 @@ Reading data from a command
 ***************************
 
 Sometimes, it can be useful to directly save the output of a program, for example,
-``mysqldump`` so that the SQL can later be restored. Restic supports this mode
+``mysqldump`` so that the SQL can later be restored. Vaultic supports this mode
 of operation; just supply the option ``--stdin-from-command`` when using the
 ``backup`` action, and write the command in place of the files/directories. To prevent
-restic from interpreting the arguments for the command, make sure to add ``--`` before
+vaultic from interpreting the arguments for the command, make sure to add ``--`` before
 the command starts:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup --stdin-from-command -- mysqldump --host example mydb [...]
+    $ vaultic -r /srv/vaultic-repo backup --stdin-from-command -- mysqldump --host example mydb [...]
 
 This command creates a new snapshot based on the standard output of ``mysqldump``.
 By default, the command's standard output is saved in a file named ``stdin``.
@@ -696,43 +696,43 @@ A different name can be specified with ``--stdin-filename``:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup --stdin-filename production.sql --stdin-from-command -- mysqldump --host example mydb [...]
+    $ vaultic -r /srv/vaultic-repo backup --stdin-filename production.sql --stdin-from-command -- mysqldump --host example mydb [...]
 
-Restic uses the command exit code to determine whether the command succeeded. A
-non-zero exit code from the command causes restic to cancel the backup. This causes
-restic to fail with exit code 1. No snapshot will be created in this case.
+Vaultic uses the command exit code to determine whether the command succeeded. A
+non-zero exit code from the command causes vaultic to cancel the backup. This causes
+vaultic to fail with exit code 1. No snapshot will be created in this case.
 
 Reading data from stdin
 ***********************
 
 .. warning::
 
-    Restic cannot detect if data read from stdin is complete or not. As explained
+    Vaultic cannot detect if data read from stdin is complete or not. As explained
     below, this can cause incomplete backup unless additional checks (outside of
-    restic) are configured. If possible, use ``--stdin-from-command`` instead.
+    vaultic) are configured. If possible, use ``--stdin-from-command`` instead.
 
-Alternatively, restic supports reading arbitrary data directly from the standard
+Alternatively, vaultic supports reading arbitrary data directly from the standard
 input. Use the option ``--stdin`` of the ``backup`` command as  follows:
 
 .. code-block:: console
 
     # Will not notice failures, see the warning below
-    $ gzip bigfile.dat | restic -r /srv/restic-repo backup --stdin
+    $ gzip bigfile.dat | vaultic -r /srv/vaultic-repo backup --stdin
 
 This creates a new snapshot of the content of ``bigfile.dat``.
 As for ``--stdin-from-command``, the default file name is ``stdin``; a
 different name can be specified with ``--stdin-filename``.
 
-**Important**: while it is possible to pipe a command output to restic using
+**Important**: while it is possible to pipe a command output to vaultic using
 ``--stdin``, doing so is discouraged as it will mask errors from the
 command, leading to corrupted backups. For example, in the following code
-block, if ``mysqldump`` fails to connect to the MySQL database, the restic
+block, if ``mysqldump`` fails to connect to the MySQL database, the vaultic
 backup will nevertheless succeed in creating an _empty_ backup:
 
 .. code-block:: console
 
     # Will not notice failures, read the warning above
-    $ mysqldump [...] | restic -r /srv/restic-repo backup --stdin
+    $ mysqldump [...] | vaultic -r /srv/vaultic-repo backup --stdin
 
 A simple solution is to use ``--stdin-from-command`` (see above). If you
 still need to use the ``--stdin`` flag, you must use the shell option ``set -o pipefail``
@@ -750,7 +750,7 @@ information. Just specify the tags for a snapshot one by one with ``--tag``:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo backup --tag projectX --tag foo --tag bar ~/work
+    $ vaultic -r /srv/vaultic-repo backup --tag projectX --tag foo --tag bar ~/work
     [...]
 
 The tags can later be used to keep (or forget) snapshots with the ``forget``
@@ -760,20 +760,20 @@ snapshot.
 Scheduling backups
 ******************
 
-Restic does not have a built-in way of scheduling backups, as it's a tool
+Vaultic does not have a built-in way of scheduling backups, as it's a tool
 that runs when executed rather than a daemon. There are plenty of different
 ways to schedule backup runs on various different platforms, e.g. systemd
 and cron on Linux/BSD and Task Scheduler in Windows, depending on one's
 needs and requirements. If you don't want to implement your own scheduling,
 you can use `resticprofile <https://github.com/creativeprojects/resticprofile/#resticprofile>`__.
 
-When scheduling restic to run recurringly, please make sure to detect already
+When scheduling vaultic to run recurringly, please make sure to detect already
 running instances before starting the backup.
 
 Space requirements
 ******************
 
-Restic currently assumes that your backup repository has sufficient space
+Vaultic currently assumes that your backup repository has sufficient space
 for the backup operation you are about to perform. This is a realistic
 assumption for many cloud providers, but may not be true when backing up
 to local disks.
@@ -787,22 +787,22 @@ work.
 Exit status codes
 *****************
 
-Restic returns an exit status code after the backup command is run:
+Vaultic returns an exit status code after the backup command is run:
 
 * 0 when the backup was successful (snapshot with all source files created)
 * 1 when there was a fatal error (no snapshot created)
 * 3 when some source files could not be read (incomplete snapshot with remaining files created)
 * further exit codes are documented in :ref:`exit-codes`.
 
-Fatal errors occur for example when restic is unable to write to the backup destination, when
+Fatal errors occur for example when vaultic is unable to write to the backup destination, when
 there are network connectivity issues preventing successful communication, or when an invalid
-password or command line argument is provided. When restic returns this exit status code, one
+password or command line argument is provided. When vaultic returns this exit status code, one
 should not expect a snapshot to have been created.
 
-Source file read errors occur when restic fails to read one or more files or directories that
-it was asked to back up, e.g. due to permission problems. Restic displays the number of source
+Source file read errors occur when vaultic fails to read one or more files or directories that
+it was asked to back up, e.g. due to permission problems. Vaultic displays the number of source
 file read errors that occurred while running the backup. If there are errors of this type,
-restic will still try to complete the backup run with all the other files, and create a
+vaultic will still try to complete the backup run with all the other files, and create a
 snapshot that then contains all but the unreadable files.
 
 For use of these exit status codes in scripts and other automation tools, see :ref:`exit-codes`.
@@ -811,5 +811,5 @@ To manually inspect the exit code in e.g. Linux, run ``echo $?``.
 Environment variables
 *********************
 
-In addition to command-line options, restic supports passing various options in
+In addition to command-line options, vaultic supports passing various options in
 environment variables. See :ref:`environment-variables` for a list.

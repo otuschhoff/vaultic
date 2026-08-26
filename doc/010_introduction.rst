@@ -14,7 +14,7 @@
 Introduction
 ############
 
-Restic is a fast and secure backup program. The following sections present
+Vaultic is a fast and secure backup program. The following sections present
 typical workflows, starting with installing, preparing a new
 repository, and making the first backup.
 
@@ -25,39 +25,39 @@ To get started with a local repository, first define some environment variables:
 
 .. code-block:: console
 
-    export RESTIC_REPOSITORY=/srv/restic-repo
-    export RESTIC_PASSWORD=some-strong-password
+    export VAULTIC_REPOSITORY=/srv/vaultic-repo
+    export VAULTIC_PASSWORD=some-strong-password
 
 Initialize the repository (first time only):
 
 .. code-block:: console
 
-    restic init
+    vaultic init
 
 Create your first backup:
 
 .. code-block:: console
 
-    restic backup ~/work
+    vaultic backup ~/work
 
 You can list all the snapshots you created with:
 
 .. code-block:: console
 
-    restic snapshots
+    vaultic snapshots
 
 You can restore a snapshot by noting the snapshot ID you want and running:
 
 .. code-block:: console
 
-    restic restore --target /tmp/restore-work your-snapshot-ID
+    vaultic restore --target /tmp/restore-work your-snapshot-ID
 
 It is a good idea to periodically check your repository's metadata:
 
 .. code-block:: console
 
-    restic check
+    vaultic check
     # or full data:
-    restic check --read-data
+    vaultic check --read-data
 
 For more details continue reading the next sections.

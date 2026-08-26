@@ -28,7 +28,7 @@ repository.
 Repository Format
 =================
 
-All data is stored in a restic repository. A repository is able to store
+All data is stored in a vaultic repository. A repository is able to store
 data of several different types, which can later be requested based on
 an ID. This so-called "storage ID" is the SHA-256 hash of the content of
 a file. All files in a repository are only written once and never
@@ -71,7 +71,7 @@ like the following:
       "chunker_polynomial": "25b468838dcb75"
     }
 
-After decryption, restic first checks that the version field contains a
+After decryption, vaultic first checks that the version field contains a
 version number that it understands, otherwise it aborts. At the moment, the
 version is expected to be 1 or 2. The list of changes in the repository
 format is contained in the section "Changes" below.
@@ -93,7 +93,7 @@ The basic layout of a repository is shown here:
 
 ::
 
-    /tmp/restic-repo
+    /tmp/vaultic-repo
     ├── config
     ├── data
     │   ├── 21
@@ -115,16 +115,16 @@ The basic layout of a repository is shown here:
     │   └── 22a5af1bdc6e616f8a29579458c49627e01b32210d09adb288d1ecda7c5711ec
     └── tmp
 
-A local repository can be initialized with the ``restic init`` command, e.g.:
+A local repository can be initialized with the ``vaultic init`` command, e.g.:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo init
+    $ vaultic -r /tmp/vaultic-repo init
 
 S3 Legacy Layout (deprecated)
 -----------------------------
 
-Restic 0.17 is the last version that supports the legacy layout.
+Vaultic 0.17 is the last version that supports the legacy layout.
 
 Unfortunately during development the Amazon S3 backend uses slightly different
 paths (directory names use singular instead of plural for ``key``,
@@ -311,7 +311,7 @@ file is chosen so that the file size is kept below 8 MiB.
 Keys, Encryption and MAC
 ========================
 
-All data stored by restic in the repository is encrypted with AES-256 in
+All data stored by vaultic in the repository is encrypted with AES-256 in
 counter mode and authenticated using Poly1305-AES. For encrypting new
 data first 16 bytes are read from a cryptographically secure
 pseudo-random number generator as a random nonce. This is used both as
@@ -333,7 +333,7 @@ pretty-printed for example by using the Python module ``json``
 
 ::
 
-    $ python -mjson.tool /tmp/restic-repo/keys/b02de82*
+    $ python -mjson.tool /tmp/vaultic-repo/keys/b02de82*
     {
         "hostname": "kasimir",
         "username": "fd0"
@@ -346,7 +346,7 @@ pretty-printed for example by using the Python module ``json``
         "salt": "uW4fEI1+IOzj7ED9mVor+yTSJFd68DGlGOeLgJELYsTU5ikhG/83/+jGd4KKAaQdSrsfzrdOhAMftTSih5Ux6w==",
     }
 
-When the repository is opened by restic, the user is prompted for the
+When the repository is opened by vaultic, the user is prompted for the
 repository password. This is then used with ``scrypt``, a key derivation
 function (KDF), and the supplied parameters (``N``, ``r``, ``p`` and
 ``salt``) to derive 64 key bytes. The first 32 bytes are used as the
@@ -360,16 +360,16 @@ Those keys are used to authenticate and decrypt the bytes contained in
 the JSON field ``data`` with AES-256 and Poly1305-AES as if they were
 any other blob (after removing the Base64 encoding). If the
 password is incorrect or the key file has been tampered with, the
-computed MAC will not match the last 16 bytes of the data, and restic
+computed MAC will not match the last 16 bytes of the data, and vaultic
 exits with an error. Otherwise, the data yields a JSON document
 which contains the master encryption and message authentication keys for
 this repository (encoded in Base64). The command
-``restic cat masterkey`` can be used as follows to decrypt and
+``vaultic cat masterkey`` can be used as follows to decrypt and
 pretty-print the master key:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat masterkey
+    $ vaultic -r /tmp/vaultic-repo cat masterkey
     {
         "mac": {
           "k": "evFWd9wWlndL9jc501268g==",
@@ -395,15 +395,15 @@ a given point in time. For each backup that is made, a new snapshot is
 created. A snapshot is a JSON document that is stored in a file below
 the directory ``snapshots`` in the repository. It uses the file encoding
 described in the "Unpacked Data Format" section. The filename
-is the storage ID. This string is unique and used within restic to
+is the storage ID. This string is unique and used within vaultic to
 uniquely identify a snapshot.
 
-The command ``restic cat snapshot`` can be used as follows to decrypt
+The command ``vaultic cat snapshot`` can be used as follows to decrypt
 and pretty-print the contents of a snapshot file:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat snapshot 251c2e58
+    $ vaultic -r /tmp/vaultic-repo cat snapshot 251c2e58
     enter password for repository:
     {
       "time": "2015-01-02T18:10:50.895208559+01:00",
@@ -431,7 +431,7 @@ becomes:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat snapshot 22a5af1b
+    $ vaultic -r /tmp/vaultic-repo cat snapshot 22a5af1b
     enter password for repository:
     {
       "time": "2015-01-02T18:10:50.895208559+01:00",
@@ -453,7 +453,7 @@ becomes:
 Once introduced, the ``original`` field is not modified when the
 snapshot's metadata is changed again.
 
-All content within a restic repository is referenced according to its
+All content within a vaultic repository is referenced according to its
 SHA-256 hash. Before saving, each file is split into variable sized
 Blobs of data. The SHA-256 hashes of all Blobs are saved in an ordered
 list which then represents the content of the file.
@@ -473,13 +473,13 @@ The JSON encoder must deterministically encode the document and should
 match the behavior of the Go standard library implementation in ``encoding/json``.
 This ensures that trees can be properly deduplicated.
 
-The command ``restic cat blob`` can be used to inspect the tree
+The command ``vaultic cat blob`` can be used to inspect the tree
 referenced above (piping the output of the command to ``jq .`` so that
 the JSON is indented):
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat blob 2da81727b6585232894cfbb8f8bdab8d1eccd3d8f7c92bc934d62e62e618ffdf | jq .
+    $ vaultic -r /tmp/vaultic-repo cat blob 2da81727b6585232894cfbb8f8bdab8d1eccd3d8f7c92bc934d62e62e618ffdf | jq .
     enter password for repository:
     {
       "nodes": [
@@ -513,12 +513,12 @@ this metadata is generated:
   ID of another tree object.
 - Check the implementation for a full struct definition.
 
-When the command ``restic cat blob`` is used, the plaintext ID is needed
+When the command ``vaultic cat blob`` is used, the plaintext ID is needed
 to print a tree. The tree referenced above can be dumped as follows:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat blob b26e315b0988ddcd1cee64c351d13a100fedbc9fdbb144a67d1b765ab280b4dc | jq .
+    $ vaultic -r /tmp/vaultic-repo cat blob b26e315b0988ddcd1cee64c351d13a100fedbc9fdbb144a67d1b765ab280b4dc | jq .
     enter password for repository:
     {
       "nodes": [
@@ -551,7 +551,7 @@ A symlink uses the following data structure:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat blob 4c0a7d500bd1482ba01752e77c8d5a923304777d96b6522fae7c11e99b4e6fa6 | jq .
+    $ vaultic -r /tmp/vaultic-repo cat blob 4c0a7d500bd1482ba01752e77c8d5a923304777d96b6522fae7c11e99b4e6fa6 | jq .
     enter password for repository:
     {
       "nodes": [
@@ -576,16 +576,16 @@ A symlink uses the following data structure:
 
 The symlink target is stored in the field ``linktarget``. As JSON strings can
 only contain valid unicode, an exception applies if the ``linktarget`` is not a
-valid UTF-8 string. Since restic 0.16.0, in such a case the ``linktarget_raw``
+valid UTF-8 string. Since vaultic 0.16.0, in such a case the ``linktarget_raw``
 field contains a base64 encoded version of the raw linktarget. The
 ``linktarget_raw`` field is only set if ``linktarget`` cannot be encoded correctly.
 
-The command ``restic cat blob`` can also be used to extract and decrypt
+The command ``vaultic cat blob`` can also be used to extract and decrypt
 data given a plaintext ID, e.g. for the data mentioned above:
 
 .. code-block:: console
 
-    $ restic -r /tmp/restic-repo cat blob 50f77b3b4291e8411a027b9f9b9e64658181cc676ce6ba9958b95f268cb1109d | sha256sum
+    $ vaultic -r /tmp/vaultic-repo cat blob 50f77b3b4291e8411a027b9f9b9e64658181cc676ce6ba9958b95f268cb1109d | sha256sum
     enter password for repository:
     50f77b3b4291e8411a027b9f9b9e64658181cc676ce6ba9958b95f268cb1109d  -
 
@@ -596,11 +596,11 @@ the correct data has been returned.
 Locks
 =====
 
-The restic repository structure is designed in a way that allows
-parallel access of multiple instances of restic and even parallel writes.
+The vaultic repository structure is designed in a way that allows
+parallel access of multiple instances of vaultic and even parallel writes.
 However, there are some functions that work more efficient or even
 require exclusive access of the repository. In order to implement these
-functions, restic processes are required to create a lock on the
+functions, vaultic processes are required to create a lock on the
 repository before doing anything.
 
 Locks come in two types: Exclusive and non-exclusive locks. At most one
@@ -625,18 +625,18 @@ ID of the contents. It is stored in the file encoding described in the
     }
 
 The field ``exclusive`` defines the type of lock. When a new lock is to
-be created, restic checks all locks in the repository. When a lock is
+be created, vaultic checks all locks in the repository. When a lock is
 found, it is tested if the lock is stale, which is the case for locks
 with timestamps older than 30 minutes. If the lock was created on the
 same machine, even for younger locks it is tested whether the process is
-still alive by sending a signal to it. If that fails, restic assumes
+still alive by sending a signal to it. If that fails, vaultic assumes
 that the process is dead and considers the lock to be stale.
 
 When a new lock is to be created and no other conflicting locks are
-detected, restic creates a new lock, waits, and checks if other locks
+detected, vaultic creates a new lock, waits, and checks if other locks
 appeared in the repository. Depending on the type of the other locks and
-the lock to be created, restic either continues or fails. If the
-``--retry-lock`` option is specified, restic will retry
+the lock to be created, vaultic either continues or fails. If the
+``--retry-lock`` option is specified, vaultic will retry
 creating the lock periodically until it succeeds or the specified
 timeout expires.
 
@@ -694,7 +694,7 @@ followed, which are derived from the above invariants.
 Backups and Deduplication
 =========================
 
-For creating a backup, restic scans the source directory for all files,
+For creating a backup, vaultic scans the source directory for all files,
 sub-directories and other entries. The data from each file is split into
 variable length Blobs cut at offsets defined by a sliding window of 64
 bytes. The implementation uses Rabin Fingerprints for implementing this
@@ -712,7 +712,7 @@ positions within the file.
 Threat Model
 ============
 
-The design goals for restic include being able to securely store backups
+The design goals for vaultic include being able to securely store backups
 in a location that is not completely trusted (e.g., a shared system where
 others can potentially access the files) or even modify or delete them in
 the case of the system administrator.
@@ -721,9 +721,9 @@ General assumptions:
 
 -  The host system a backup is created on is trusted. This is the most
    basic requirement, and it is essential for creating trustworthy backups.
--  The user uses an authentic copy of restic.
+-  The user uses an authentic copy of vaultic.
 -  The user does not share the repository password with an attacker.
--  The restic backup program is not designed to protect against attackers
+-  The vaultic backup program is not designed to protect against attackers
    deleting files at the storage location. There is nothing that can be
    done about this. If this needs to be guaranteed, get a secure location
    without any access from third parties.
@@ -731,13 +731,13 @@ General assumptions:
    key management design, it is impossible to securely revoke a leaked key
    without re-encrypting the whole repository.
 -  Advances in cryptography attacks against the cryptographic primitives used
-   by restic (i.e., AES-256-CTR-Poly1305-AES and SHA-256) have not occurred. Such
+   by vaultic (i.e., AES-256-CTR-Poly1305-AES and SHA-256) have not occurred. Such
    advances could render the confidentiality or integrity protections provided
-   by restic useless.
+   by vaultic useless.
 -  Sufficient advances in computing have not occurred to make brute-force
-   attacks against restic's cryptographic protections feasible.
+   attacks against vaultic's cryptographic protections feasible.
 
-The restic backup program guarantees the following:
+The vaultic backup program guarantees the following:
 
 -  Unencrypted content of stored files and metadata cannot be accessed
    without a password for the repository. Everything except the metadata
@@ -762,7 +762,7 @@ An adversary with read access to your backup storage location could:
    attacker that can observe chunk sizes created for a known file can derive the secret
    chunker polynomial. Knowledge of the polynomial might in some cases allow an
    attacker to check whether certain large files are stored in a repository.
-   This has been mitigated in restic 0.18.0 by randomly assigning chunks to
+   This has been mitigated in vaultic 0.18.0 by randomly assigning chunks to
    pack files, which prevents an attacker from learning the chunk sizes as the
    attacker can no longer determine to which file and which part of it a chunk belongs.
    See `#5295 <https://github.com/vaultic/vaultic/pull/5295>`_ for more details
@@ -799,7 +799,7 @@ An adversary with write access to your files at the storage location could:
 -  Determine which files belong to what snapshot (e.g., based on the timestamps
    of the stored files). When only these files are deleted, the particular
    snapshot vanishes and all snapshots depending on data that has been added in
-   the snapshot cannot be restored completely. Restic is not designed to detect
+   the snapshot cannot be restored completely. Vaultic is not designed to detect
    this attack.
 
 An adversary who compromises a host system with append-only (read+write allowed,

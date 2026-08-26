@@ -6,10 +6,10 @@ set -e
 
 export DOCKER_BUILDKIT=${DOCKER_BUILDKIT-1}
 
-echo "Build docker image restic/restic:latest"
+echo "Build docker image vaultic/vaultic:latest"
 docker build \
   --rm \
   --pull \
   --file "${root}"/docker/Dockerfile \
-  --tag restic/restic:latest \
+  --tag vaultic/vaultic:latest \
   "${root}" "$@"

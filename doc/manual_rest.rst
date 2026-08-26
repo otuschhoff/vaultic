@@ -8,15 +8,15 @@ Usage help is available:
 
 .. code-block:: console
 
-    $ restic --help
+    $ vaultic --help
 
-    restic is a backup program which allows saving multiple revisions of files and
+    vaultic is a backup program which allows saving multiple revisions of files and
     directories in an encrypted repository stored on different backends.
 
-    The full documentation can be found at https://restic.readthedocs.io/ .
+    The full documentation can be found at https://vaultic.readthedocs.io/ .
 
     Usage:
-      restic [command]
+      vaultic [command]
 
     Available Commands:
       backup        Create a new backup of files and/or directories
@@ -26,7 +26,7 @@ Usage help is available:
       copy          Copy snapshots from one repository to another
       diff          Show differences between two snapshots
       dump          Print backed-up files or folders to stdout
-      find          Find a file, a directory or restic IDs
+      find          Find a file, a directory or vaultic IDs
       forget        Remove snapshots from the repository
       init          Initialize a new repository
       key           Manage keys (passwords)
@@ -51,40 +51,40 @@ Usage help is available:
     Additional Commands:
       generate      Generate manual pages and auto-completion files (bash, fish, zsh, powershell)
       help          Help about any command
-      self-update   Update the restic binary
+      self-update   Update the vaultic binary
       version       Print version information
 
     Flags:
-          --cacert file                      file to load root certificates from (default: use system certificates or $RESTIC_CACERT)
+          --cacert file                      file to load root certificates from (default: use system certificates or $VAULTIC_CACERT)
           --cache-dir directory              set the cache directory. (default: use system default cache directory)
           --cleanup-cache                    auto remove old cache directories
-          --compression mode                 compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $RESTIC_COMPRESSION) (default auto)
-      -h, --help                             help for restic
+          --compression mode                 compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION) (default auto)
+      -h, --help                             help for vaultic
           --http-user-agent string           set a http user agent for outgoing http requests
-          --insecure-no-password             use an empty password for the repository, must be passed to every restic command (insecure)
+          --insecure-no-password             use an empty password for the repository, must be passed to every vaultic command (insecure)
           --insecure-tls                     skip TLS certificate verification when connecting to the repository (insecure)
           --json                             set output mode to JSON for commands that support it
-          --key-hint key                     key ID of key to try decrypting first (default: $RESTIC_KEY_HINT)
+          --key-hint key                     key ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)
           --limit-download rate              limits downloads to a maximum rate in KiB/s. (default: unlimited)
           --limit-upload rate                limits uploads to a maximum rate in KiB/s. (default: unlimited)
           --no-cache                         do not use a local cache
           --no-extra-verify                  skip additional verification of data before upload (see documentation)
           --no-lock                          do not lock the repository, this allows some operations on read-only repositories
       -o, --option key=value                 set extended option (key=value, can be specified multiple times)
-          --pack-size size                   set target pack size in MiB, created pack files may be larger (default: $RESTIC_PACK_SIZE)
-          --password-command command         shell command to obtain the repository password from (default: $RESTIC_PASSWORD_COMMAND)
-      -p, --password-file file               file to read the repository password from (default: $RESTIC_PASSWORD_FILE)
+          --pack-size size                   set target pack size in MiB, created pack files may be larger (default: $VAULTIC_PACK_SIZE)
+          --password-command command         shell command to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)
+      -p, --password-file file               file to read the repository password from (default: $VAULTIC_PASSWORD_FILE)
       -q, --quiet                            do not output comprehensive progress report
-      -r, --repo repository                  repository to backup to or restore from (default: $RESTIC_REPOSITORY)
-          --repository-file file             file to read the repository location from (default: $RESTIC_REPOSITORY_FILE)
+      -r, --repo repository                  repository to backup to or restore from (default: $VAULTIC_REPOSITORY)
+          --repository-file file             file to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)
           --retry-lock duration              retry to lock the repository if it is already locked, takes a value like 5m or 2h (default: no retries)
           --stuck-request-timeout duration   duration after which to retry stuck requests (default 5m0s)
-          --tls-client-cert file             path to a file containing PEM encoded TLS client certificate and private key (default: $RESTIC_TLS_CLIENT_CERT)
+          --tls-client-cert file             path to a file containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)
       -v, --verbose                          be verbose (specify multiple times or a level using --verbose=n, max level/times is 2)
 
-    Use "restic [command] --help" for more information about a command.
+    Use "vaultic [command] --help" for more information about a command.
 
-Similar to programs such as ``git``, restic has a number of
+Similar to programs such as ``git``, vaultic has a number of
 sub-commands. You can see these commands in the listing above. Each
 sub-command may have its own command-line options, and there is a help
 option for each command which lists them, e.g. for the ``backup``
@@ -92,7 +92,7 @@ command:
 
 .. code-block:: console
 
-    $ restic backup --help
+    $ vaultic backup --help
 
     The "backup" command creates a new snapshot and saves the files and directories
     given as the arguments.
@@ -108,7 +108,7 @@ command:
     Exit status is 12 if the password is incorrect.
 
     Usage:
-      restic backup [flags] [FILE/DIR] ...
+      vaultic backup [flags] [FILE/DIR] ...
 
     Flags:
       -n, --dry-run                                do not upload or write any data, just show what would be done
@@ -123,7 +123,7 @@ command:
       -f, --force                                  force re-reading the source files/directories (overrides the "parent" flag)
       -g, --group-by group                         group snapshots by host, paths and/or tags, separated by comma (disable grouping with '') (default host,paths)
       -h, --help                                   help for backup
-      -H, --host hostname                          set the hostname for the snapshot manually (default: $RESTIC_HOST). To prevent an expensive rescan use the "parent" flag
+      -H, --host hostname                          set the hostname for the snapshot manually (default: $VAULTIC_HOST). To prevent an expensive rescan use the "parent" flag
           --iexclude pattern                       same as --exclude pattern but ignores the casing of filenames
           --iexclude-file file                     same as --exclude-file but ignores casing of filenames in patterns
           --ignore-ctime                           ignore ctime changes when checking for modified files
@@ -131,7 +131,7 @@ command:
           --no-scan                                do not run scanner to estimate size of backup
       -x, --one-file-system                        exclude other file systems, don't cross filesystem boundaries and subvolumes
           --parent snapshot                        use this parent snapshot (default: latest snapshot in the group determined by --group-by and not newer than the timestamp determined by --time)
-          --read-concurrency n                     read n files concurrently (default: $RESTIC_READ_CONCURRENCY or 2)
+          --read-concurrency n                     read n files concurrently (default: $VAULTIC_READ_CONCURRENCY or 2)
           --skip-if-unchanged                      skip snapshot creation if identical to parent snapshot
           --stdin                                  read backup from stdin
           --stdin-filename filename                filename to use when reading from stdin (default "stdin")
@@ -142,45 +142,45 @@ command:
           --with-atime                             store the atime for all files and directories
 
     Global Flags:
-          --cacert file                      file to load root certificates from (default: use system certificates or $RESTIC_CACERT)
+          --cacert file                      file to load root certificates from (default: use system certificates or $VAULTIC_CACERT)
           --cache-dir directory              set the cache directory. (default: use system default cache directory)
           --cleanup-cache                    auto remove old cache directories
-          --compression mode                 compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $RESTIC_COMPRESSION) (default auto)
+          --compression mode                 compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION) (default auto)
           --http-user-agent string           set a http user agent for outgoing http requests
-          --insecure-no-password             use an empty password for the repository, must be passed to every restic command (insecure)
+          --insecure-no-password             use an empty password for the repository, must be passed to every vaultic command (insecure)
           --insecure-tls                     skip TLS certificate verification when connecting to the repository (insecure)
           --json                             set output mode to JSON for commands that support it
-          --key-hint key                     key ID of key to try decrypting first (default: $RESTIC_KEY_HINT)
+          --key-hint key                     key ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)
           --limit-download rate              limits downloads to a maximum rate in KiB/s. (default: unlimited)
           --limit-upload rate                limits uploads to a maximum rate in KiB/s. (default: unlimited)
           --no-cache                         do not use a local cache
           --no-extra-verify                  skip additional verification of data before upload (see documentation)
           --no-lock                          do not lock the repository, this allows some operations on read-only repositories
       -o, --option key=value                 set extended option (key=value, can be specified multiple times)
-          --pack-size size                   set target pack size in MiB, created pack files may be larger (default: $RESTIC_PACK_SIZE)
-          --password-command command         shell command to obtain the repository password from (default: $RESTIC_PASSWORD_COMMAND)
-      -p, --password-file file               file to read the repository password from (default: $RESTIC_PASSWORD_FILE)
+          --pack-size size                   set target pack size in MiB, created pack files may be larger (default: $VAULTIC_PACK_SIZE)
+          --password-command command         shell command to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)
+      -p, --password-file file               file to read the repository password from (default: $VAULTIC_PASSWORD_FILE)
       -q, --quiet                            do not output comprehensive progress report
-      -r, --repo repository                  repository to backup to or restore from (default: $RESTIC_REPOSITORY)
-          --repository-file file             file to read the repository location from (default: $RESTIC_REPOSITORY_FILE)
+      -r, --repo repository                  repository to backup to or restore from (default: $VAULTIC_REPOSITORY)
+          --repository-file file             file to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)
           --retry-lock duration              retry to lock the repository if it is already locked, takes a value like 5m or 2h (default: no retries)
           --stuck-request-timeout duration   duration after which to retry stuck requests (default 5m0s)
-          --tls-client-cert file             path to a file containing PEM encoded TLS client certificate and private key (default: $RESTIC_TLS_CLIENT_CERT)
+          --tls-client-cert file             path to a file containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)
       -v, --verbose                          be verbose (specify multiple times or a level using --verbose=n, max level/times is 2)
 
 Subcommands that support showing progress information such as ``backup``,
 ``restore``, ``check`` and ``prune`` will do so unless the quiet flag ``-q``
 or ``--quiet`` is set. When running from a non-interactive console progress
 reporting is disabled by default to not fill your logs. For interactive and
-non-interactive consoles the environment variable ``RESTIC_PROGRESS_FPS`` can
+non-interactive consoles the environment variable ``VAULTIC_PROGRESS_FPS`` can
 be used to control the frequency of progress reporting. Use for example
 ``0.016666`` to only update the progress once per minute.
 
-Additionally, on Unix systems if ``restic`` receives a SIGUSR1 signal the
+Additionally, on Unix systems if ``vaultic`` receives a SIGUSR1 signal the
 current progress will be written to the standard output so you can check up
 on the status at will.
 
-Setting the ``RESTIC_PROGRESS_FPS`` environment variable or sending a ``SIGUSR1``
+Setting the ``VAULTIC_PROGRESS_FPS`` environment variable or sending a ``SIGUSR1``
 signal prints a status report even when ``--quiet`` was specified.
 
 Managing tags
@@ -196,7 +196,7 @@ command:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo tag --set NL --set CH 590c8fc8
+    $ vaultic -r /srv/vaultic-repo tag --set NL --set CH 590c8fc8
     create exclusive lock for repository
     modified tags on 1 snapshots
 
@@ -207,19 +207,19 @@ on the tag you just added. This way you can add and remove tags incrementally:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo tag --tag NL --remove CH
+    $ vaultic -r /srv/vaultic-repo tag --tag NL --remove CH
     create exclusive lock for repository
     modified tags on 1 snapshots
 
-    $ restic -r /srv/restic-repo tag --tag NL --add UK
+    $ vaultic -r /srv/vaultic-repo tag --tag NL --add UK
     create exclusive lock for repository
     modified tags on 1 snapshots
 
-    $ restic -r /srv/restic-repo tag --tag NL --remove NL
+    $ vaultic -r /srv/vaultic-repo tag --tag NL --remove NL
     create exclusive lock for repository
     modified tags on 1 snapshots
 
-    $ restic -r /srv/restic-repo tag --tag NL --add SOMETHING
+    $ vaultic -r /srv/vaultic-repo tag --tag NL --add SOMETHING
     no snapshots were modified
 
 To operate on untagged snapshots only, specify the empty string ``''`` as the
@@ -228,7 +228,7 @@ to all untagged snapshots:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo tag --tag '' --add OTHER
+    $ vaultic -r /srv/vaultic-repo tag --tag '' --add OTHER
 
 Under the hood
 --------------
@@ -244,7 +244,7 @@ locks with the following command:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo list snapshots
+    $ vaultic -r /srv/vaultic-repo list snapshots
     d369ccc7d126594950bf74f0a348d5d98d9e99f3215082eb69bf02dc9b3e464c
 
 The ``find`` command searches for a given
@@ -253,7 +253,7 @@ repository.
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo find test.txt
+    $ vaultic -r /srv/vaultic-repo find test.txt
     enter password for repository:
     found 1 matching entries in snapshot 196bc5760c909a7681647949e80e5448e276521489558525680acf1bd428af36
       -rw-r--r--   501    20      5 2015-08-26 14:09:57 +0200 CEST path/to/test.txt
@@ -263,7 +263,7 @@ objects or their raw content.
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo cat snapshot d369ccc7d126594950bf74f0a348d5d98d9e99f3215082eb69bf02dc9b3e464c
+    $ vaultic -r /srv/vaultic-repo cat snapshot d369ccc7d126594950bf74f0a348d5d98d9e99f3215082eb69bf02dc9b3e464c
     enter password for repository:
     {
       "time": "2015-08-12T12:52:44.091448856+02:00",
@@ -280,13 +280,13 @@ objects or their raw content.
 Metadata handling
 ~~~~~~~~~~~~~~~~~
 
-Restic saves and restores most default attributes, including extended attributes like ACLs.
+Vaultic saves and restores most default attributes, including extended attributes like ACLs.
 Information about holes in a sparse file is not stored explicitly, that is during a backup
 the zero bytes in a hole are deduplicated and compressed like any other data backed up.
 Instead, the restore command optionally creates holes in files by detecting and replacing
 long runs of zeros, in filesystems that support sparse files.
 
-The following metadata is handled by restic:
+The following metadata is handled by vaultic:
 
 - Name
 - Type
@@ -323,7 +323,7 @@ the size required to restore the files:
    file name/path hasn't changed) will cause them to look like different files, thus
    essentially causing the whole size of the file to be counted twice.
 -  ``raw-data`` counts the size of the blobs in the repository, regardless of how many
-   files reference them. This tells you how much restic has reduced all your original
+   files reference them. This tells you how much vaultic has reduced all your original
    data down to (either for a single snapshot or across all your backups), and compared
    to the size given by the restore-size mode, can tell you how much deduplication is
    helping you.
@@ -340,7 +340,7 @@ required to restore the latest snapshot (from any host that made it):
 
 .. code-block:: console
 
-    $ restic stats latest
+    $ vaultic stats latest
     Total File Count:   10538
           Total Size:   37.824 GiB
 
@@ -350,7 +350,7 @@ host by using the ``--host`` flag:
 
 .. code-block:: console
 
-    $ restic stats --host myserver latest
+    $ vaultic stats --host myserver latest
     Total File Count:   21766
           Total Size:   481.783 GiB
 
@@ -362,15 +362,15 @@ In case you have multiple backups running from the same host you can also use
 are looking for.
 
 But how much space does that snapshot take on disk? In other words, how much
-has restic's deduplication helped? You can check:
+has vaultic's deduplication helped? You can check:
 
 .. code-block:: console
 
-    $ restic stats --host myserver --mode raw-data latest
+    $ vaultic stats --host myserver --mode raw-data latest
     Total Blob Count:   340847
           Total Size:   458.663 GiB
 
-Comparing this size to the previous command, you can see that restic has saved
+Comparing this size to the previous command, you can see that vaultic has saved
 about 23 GiB of space with deduplication.
 
 Which mode you use depends on your exact use case. Some modes are more useful
@@ -381,14 +381,14 @@ depending on what you're trying to calculate.
 Scripting
 ---------
 
-Restic supports the output of some commands in JSON format, the JSON
+Vaultic supports the output of some commands in JSON format, the JSON
 data can then be processed by other programs (e.g.
 `jq <https://stedolan.github.io/jq/>`__). The following example
 lists all snapshots as JSON and uses ``jq`` to pretty-print the result:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots --json | jq .
+    $ vaultic -r /srv/vaultic-repo snapshots --json | jq .
     [
       {
         "time": "2017-03-11T09:57:43.26630619+01:00",
@@ -421,19 +421,19 @@ lists all snapshots as JSON and uses ``jq`` to pretty-print the result:
 Temporary files
 ---------------
 
-During some operations (e.g. ``backup`` and ``prune``) restic uses
+During some operations (e.g. ``backup`` and ``prune``) vaultic uses
 temporary files to store data. These files will, by default, be saved to
 the system's temporary directory, on Linux this is usually located in
 ``/tmp/``. To specify a different directory for temporary files, set
 the appropriate environment variable. On non-Windows operating systems,
 use the ``TMPDIR`` environment variable. On Windows, use the ``TMP``
-environment variable. For example, to use the directory ``/var/tmp/restic-tmp``
+environment variable. For example, to use the directory ``/var/tmp/vaultic-tmp``
 instead of the default, set the environment variable as follows:
 
 .. code-block:: console
 
-    $ export TMPDIR=/var/tmp/restic-tmp
-    $ restic -r /srv/restic-repo backup ~/work
+    $ export TMPDIR=/var/tmp/vaultic-tmp
+    $ vaultic -r /srv/vaultic-repo backup ~/work
 
 
 .. _caching:
@@ -441,21 +441,21 @@ instead of the default, set the environment variable as follows:
 Caching
 -------
 
-Restic keeps a cache with some files from the repository on the local machine.
+Vaultic keeps a cache with some files from the repository on the local machine.
 This allows faster operations, since metadata does not need to be loaded from
 a remote repository. The cache is automatically created, usually in an
 OS-specific cache folder:
 
-* Linux/other: ``$XDG_CACHE_HOME/restic``, or ``~/.cache/restic`` if
+* Linux/other: ``$XDG_CACHE_HOME/vaultic``, or ``~/.cache/vaultic`` if
   ``XDG_CACHE_HOME`` is not set
-* macOS: ``~/Library/Caches/restic``
-* Windows: ``%LOCALAPPDATA%/restic``
+* macOS: ``~/Library/Caches/vaultic``
+* Windows: ``%LOCALAPPDATA%/vaultic``
 
-If the relevant environment variables are not set, restic exits with an error
+If the relevant environment variables are not set, vaultic exits with an error
 message.
 
 The command line parameter ``--cache-dir`` or the environment variable
-``$RESTIC_CACHE_DIR`` can be used to override the default cache location. The
+``$VAULTIC_CACHE_DIR`` can be used to override the default cache location. The
 parameter ``--no-cache`` disables the cache entirely. In this case, all data
 is loaded from the repository.
 
@@ -467,8 +467,8 @@ The cache is ephemeral: When a file cannot be read from the cache, it is loaded
 from the repository.
 
 Within the cache directory, there's a sub directory for each repository the
-cache was used with. Restic updates the timestamps of a repository directory each
+cache was used with. Vaultic updates the timestamps of a repository directory each
 time it is used, so by looking at the timestamps of the sub directories of the
 cache directory it can decide which sub directories are old and probably not
 needed any more. You can either remove these directories manually, or run a
-restic command with the ``--cleanup-cache`` flag.
+vaultic command with the ``--cleanup-cache`` flag.

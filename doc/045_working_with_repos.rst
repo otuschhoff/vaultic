@@ -19,14 +19,14 @@ Listing all snapshots
 =====================
 
 Now, you can list all the snapshots stored in the repository. The size column
-only exists for snapshots created using restic 0.17.0 or later. It reflects the
+only exists for snapshots created using vaultic 0.17.0 or later. It reflects the
 size of the contained files at the time when the snapshot was created. The
 directory of a snapshot may differ from the directory structure in the snapshot,
 see :ref:`absolute-and-relative-paths` for details.
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots
+    $ vaultic -r /srv/vaultic-repo snapshots
     enter password for repository:
     ID        Date                 Host    Tags   Directory        Size
     -------------------------------------------------------------------------
@@ -40,7 +40,7 @@ You can filter the listing by directory path:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots --path="/srv"
+    $ vaultic -r /srv/vaultic-repo snapshots --path="/srv"
     enter password for repository:
     ID        Date                 Host    Tags   Directory  Size
     -------------------------------------------------------------------
@@ -51,7 +51,7 @@ Or filter by host:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots --host luigi
+    $ vaultic -r /srv/vaultic-repo snapshots --host luigi
     enter password for repository:
     ID        Date                 Host    Tags   Directory  Size
     -------------------------------------------------------------------
@@ -64,7 +64,7 @@ Furthermore, you can group the output by the same filters (host, paths, tags):
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots --group-by host
+    $ vaultic -r /srv/vaultic-repo snapshots --group-by host
 
     enter password for repository:
     snapshots for (host [kasimir])
@@ -93,7 +93,7 @@ To get a list of the files in a specific snapshot you can use the ``ls`` command
 
 .. code-block:: console
 
-    $ restic ls 073a90db
+    $ vaultic ls 073a90db
 
     snapshot 073a90db of [/home/user/work.txt] filtered by [] at 2024-01-21 16:51:18.474558607 +0100 CET:
     /home
@@ -105,7 +105,7 @@ The ``--host`` flag can be used in conjunction to select the latest snapshot ori
 
 .. code-block:: console
 
-    $ restic ls --host kasimir latest
+    $ vaultic ls --host kasimir latest
 
     snapshot 073a90db of [/home/user/work.txt] filtered by [] at 2024-01-21 16:51:18.474558607 +0100 CET:
     /home
@@ -122,7 +122,7 @@ as separator.
 
 .. code-block:: console
 
-    $ restic ls latest /home
+    $ vaultic ls latest /home
 
     snapshot 073a90db of [/home/user/work.txt] filtered by [/home] at 2024-01-21 16:51:18.474558607 +0100 CET:
     /home
@@ -130,7 +130,7 @@ as separator.
 
 .. code-block:: console
 
-    $ restic ls --recursive latest /home
+    $ vaultic ls --recursive latest /home
 
     snapshot 073a90db of [/home/user/work.txt] filtered by [/home] at 2024-01-21 16:51:18.474558607 +0100 CET:
     /home
@@ -143,7 +143,7 @@ file permissions, UID, GID, file size, modification time and file path. For scri
 
 .. code-block:: console
 
-    $ restic ls --long latest
+    $ vaultic ls --long latest
 
     snapshot 073a90db of [/home/user/work.txt] filtered by [] at 2024-01-21 16:51:18.474558607 +0100 CET:
     drwxr-xr-x     0     0      0 2024-01-21 16:50:52 /home
@@ -153,7 +153,7 @@ file permissions, UID, GID, file size, modification time and file path. For scri
 NCDU (NCurses Disk Usage) is a tool to analyse disk usage of directories. The ``ls`` command supports
 outputting information about a snapshot in the NCDU format using the ``--ncdu`` option.
 
-You can use it as follows: ``restic ls latest --ncdu | ncdu -f -``
+You can use it as follows: ``vaultic ls latest --ncdu | ncdu -f -``
 
 You can use the options ``--sort`` and ``--reverse`` to tailor ``ls`` output to your needs.
 ``--sort`` can be one of ``name | size | time=mtime | atime | ctime | extension``. The default
@@ -161,42 +161,42 @@ sorting option is ``name``. The sorting order can be reversed by specifying ``--
 
 .. code-block:: console
 
-    $ restic ls --long latest --sort size --reverse
+    $ vaultic ls --long latest --sort size --reverse
 
-    snapshot 711b0bb6 of [/tmp/restic] at 2025-02-03 08:16:05.310764668 +0000 UTC filtered by []:
-    -rw-rw-r--  1000  1000  16772 2025-02-03 08:09:11 /tmp/restic/cmd_find.go
-    -rw-rw-r--  1000  1000   3077 2025-02-03 08:15:46 /tmp/restic/conf.py
-    -rw-rw-r--  1000  1000   2834 2025-02-03 08:09:35 /tmp/restic/find.go
-    -rw-rw-r--  1000  1000   1473 2025-02-03 08:15:30 /tmp/restic/010_introduction.rst
-    drwxrwxr-x  1000  1000      0 2025-02-03 08:15:46 /tmp/restic
+    snapshot 711b0bb6 of [/tmp/vaultic] at 2025-02-03 08:16:05.310764668 +0000 UTC filtered by []:
+    -rw-rw-r--  1000  1000  16772 2025-02-03 08:09:11 /tmp/vaultic/cmd_find.go
+    -rw-rw-r--  1000  1000   3077 2025-02-03 08:15:46 /tmp/vaultic/conf.py
+    -rw-rw-r--  1000  1000   2834 2025-02-03 08:09:35 /tmp/vaultic/find.go
+    -rw-rw-r--  1000  1000   1473 2025-02-03 08:15:30 /tmp/vaultic/010_introduction.rst
+    drwxrwxr-x  1000  1000      0 2025-02-03 08:15:46 /tmp/vaultic
     dtrwxrwxrwx     0     0      0 2025-02-03 08:14:22 /tmp
 
 .. code-block:: console
 
-    $ restic ls --long latest --sort time
+    $ vaultic ls --long latest --sort time
 
-    snapshot 711b0bb6 of [/tmp/restic] at 2025-02-03 08:16:05.310764668 +0000 UTC filtered by []:
-    -rw-rw-r--  1000  1000  16772 2025-02-03 08:09:11 /tmp/restic/cmd_find.go
-    -rw-rw-r--  1000  1000   2834 2025-02-03 08:09:35 /tmp/restic/find.go
+    snapshot 711b0bb6 of [/tmp/vaultic] at 2025-02-03 08:16:05.310764668 +0000 UTC filtered by []:
+    -rw-rw-r--  1000  1000  16772 2025-02-03 08:09:11 /tmp/vaultic/cmd_find.go
+    -rw-rw-r--  1000  1000   2834 2025-02-03 08:09:35 /tmp/vaultic/find.go
     dtrwxrwxrwx     0     0      0 2025-02-03 08:14:22 /tmp
-    -rw-rw-r--  1000  1000   1473 2025-02-03 08:15:30 /tmp/restic/010_introduction.rst
-    drwxrwxr-x  1000  1000      0 2025-02-03 08:15:46 /tmp/restic
-    -rw-rw-r--  1000  1000   3077 2025-02-03 08:15:46 /tmp/restic/conf.py
+    -rw-rw-r--  1000  1000   1473 2025-02-03 08:15:30 /tmp/vaultic/010_introduction.rst
+    drwxrwxr-x  1000  1000      0 2025-02-03 08:15:46 /tmp/vaultic
+    -rw-rw-r--  1000  1000   3077 2025-02-03 08:15:46 /tmp/vaultic/conf.py
 
 Sorting works with option ``--json`` as well. Sorting and option ``--ncdu`` are mutually exclusive.
 It works also without specifying the option ``--long``.
 
 .. code-block:: console
 
-    $ restic ls latest --sort extension
+    $ vaultic ls latest --sort extension
 
-    snapshot 711b0bb6 of [/tmp/restic] at 2025-02-03 08:16:05.310764668 +0000 UTC filtered by []:
+    snapshot 711b0bb6 of [/tmp/vaultic] at 2025-02-03 08:16:05.310764668 +0000 UTC filtered by []:
     /tmp
-    /tmp/restic
-    /tmp/restic/cmd_find.go
-    /tmp/restic/find.go
-    /tmp/restic/conf.py
-    /tmp/restic/010_introduction.rst
+    /tmp/vaultic
+    /tmp/vaultic/cmd_find.go
+    /tmp/vaultic/find.go
+    /tmp/vaultic/conf.py
+    /tmp/vaultic/010_introduction.rst
 
 
 Copying snapshots between repositories
@@ -207,7 +207,7 @@ example from a local to a remote repository, you can use the ``copy`` command:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo-copy copy --from-repo /srv/restic-repo --verbose
+    $ vaultic -r /srv/vaultic-repo-copy copy --from-repo /srv/vaultic-repo --verbose
     repository d6504c63 opened successfully
     repository 3dd0878c opened successfully
     [0:00] 100.00%  2 / 2 index files loaded
@@ -223,7 +223,7 @@ example from a local to a remote repository, you can use the ``copy`` command:
     snapshot 7a746a07 saved, copied from source snapshot 410b18a2
 
 The example command copies all snapshots from the source repository
-``/srv/restic-repo`` to the destination repository ``/srv/restic-repo-copy``.
+``/srv/vaultic-repo`` to the destination repository ``/srv/vaultic-repo-copy``.
 The destination repository must already exist; when creating it for the first
 time, use ``init --from-repo`` with ``--copy-chunker-params`` as described in
 :ref:`copy-deduplication` below so that deduplication works across both
@@ -248,15 +248,15 @@ messages can appear some time after the snapshot content was copied.
 
 The source repository is specified with ``--from-repo`` or can be read
 from a file specified via ``--from-repository-file``. Both of these options
-can also be set as environment variables ``$RESTIC_FROM_REPOSITORY`` or
-``$RESTIC_FROM_REPOSITORY_FILE``, respectively. For the source repository
+can also be set as environment variables ``$VAULTIC_FROM_REPOSITORY`` or
+``$VAULTIC_FROM_REPOSITORY_FILE``, respectively. For the source repository
 the password can be read from a file ``--from-password-file`` or from a command
 ``--from-password-command``.
-Alternatively the environment variables ``$RESTIC_FROM_PASSWORD_COMMAND`` and
-``$RESTIC_FROM_PASSWORD_FILE`` can be used. You can also directly
-pass the password via ``$RESTIC_FROM_PASSWORD``. The key which should be used
+Alternatively the environment variables ``$VAULTIC_FROM_PASSWORD_COMMAND`` and
+``$VAULTIC_FROM_PASSWORD_FILE`` can be used. You can also directly
+pass the password via ``$VAULTIC_FROM_PASSWORD``. The key which should be used
 for decryption can be selected by passing its ID via the flag ``--from-key-hint``
-or the environment variable ``$RESTIC_FROM_KEY_HINT``.
+or the environment variable ``$VAULTIC_FROM_KEY_HINT``.
 
 .. note:: In case the source and destination repository use the same backend,
     the configuration options and environment variables used to configure the
@@ -277,14 +277,14 @@ and/or a comma-separated tag list:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo-copy copy --from-repo /srv/restic-repo --host luigi --path /srv --tag foo,bar
+    $ vaultic -r /srv/vaultic-repo-copy copy --from-repo /srv/vaultic-repo --host luigi --path /srv --tag foo,bar
 
 You can also explicitly specify the list of snapshots to copy, in
 which case only these instead of all snapshots will be copied:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo-copy copy --from-repo /srv/restic-repo 410b18a2 4e5d5487 latest
+    $ vaultic -r /srv/vaultic-repo-copy copy --from-repo /srv/vaultic-repo 410b18a2 4e5d5487 latest
 
 .. _copy-deduplication:
 
@@ -295,17 +295,17 @@ Even though the copy command can transfer snapshots between arbitrary repositori
 deduplication between snapshots from the source and destination repository may not work.
 To ensure proper deduplication, both repositories have to use the same parameters for
 splitting large files into smaller chunks, which requires additional setup steps. With
-the same parameters restic will for both repositories split identical files into
+the same parameters vaultic will for both repositories split identical files into
 identical chunks and therefore deduplication also works for snapshots copied between
 these repositories.
 
 The chunker parameters are generated once when creating a new (destination) repository.
-For a copy destination repository, you must instruct restic to initialize it
+For a copy destination repository, you must instruct vaultic to initialize it
 using the same chunker parameters as the source repository:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo-copy init --from-repo /srv/restic-repo --copy-chunker-params
+    $ vaultic -r /srv/vaultic-repo-copy init --from-repo /srv/vaultic-repo --copy-chunker-params
 
 Note that it is not possible to change the chunker parameters of an existing repository.
 
@@ -321,7 +321,7 @@ the unwanted files from affected snapshots by rewriting them using the
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo rewrite --exclude secret-file
+    $ vaultic -r /srv/vaultic-repo rewrite --exclude secret-file
     repository c881945a opened (repository version 2) successfully
 
     snapshot 6160ddb2 of [/home/user/work] at 2022-06-12 16:01:28.406630608 +0200 CEST by user@kasimir
@@ -332,7 +332,7 @@ the unwanted files from affected snapshots by rewriting them using the
 
     modified 1 snapshots
 
-    $ restic -r /srv/restic-repo rewrite --exclude secret-file 6160ddb2
+    $ vaultic -r /srv/vaultic-repo rewrite --exclude secret-file 6160ddb2
     repository c881945a opened (repository version 2) successfully
 
     snapshot 6160ddb2 of [/home/user/work] at 2022-06-12 16:01:28.406630608 +0200 CEST by user@kasimir
@@ -350,7 +350,7 @@ The options ``--include``, ``--include-file``, ``--iinclude`` and
 The ``--include`` variants allow you to reduce an existing snapshot or a set of snapshots
 to those files that you are really interested in. An example could be all pictures
 from a snapshot:
-``restic rewrite -r ... --iinclude "*.jpg" --iinclude "*.jpeg" --iinclude "*.png"``.
+``vaultic rewrite -r ... --iinclude "*.jpg" --iinclude "*.jpeg" --iinclude "*.png"``.
 
 You can rewrite only a subset of snapshots by filtering them the same
 way as for the ``copy`` command, see :ref:`copy-filtering-snapshots`.
@@ -372,16 +372,16 @@ data (just like when having used the ``forget`` command).
 
 In order to preview the changes which ``rewrite`` would make, you can use the
 ``--dry-run`` option. This will simulate the rewriting process without actually
-modifying the repository. Instead restic will only print the actions it would
+modifying the repository. Instead vaultic will only print the actions it would
 perform.
 
 .. note:: The ``rewrite`` command verifies that it does not modify snapshots in
     unexpected ways and otherwise fails with the error ``cannot encode tree at "[...]" without losing information``.
     This can occur when rewriting a snapshot created by a newer
-    version of restic or some third-party implementation.
+    version of vaultic or some third-party implementation.
 
     To convert a snapshot into the format expected by the ``rewrite`` command
-    use ``restic -r /srv/restic-repo repair snapshots <snapshotID>``.
+    use ``vaultic -r /srv/vaultic-repo repair snapshots <snapshotID>``.
 
 Modifying metadata of snapshots
 ===============================
@@ -392,7 +392,7 @@ This is possible using the ``rewrite`` command with the option ``--new-host`` fo
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo rewrite --new-host newhost --new-time "1999-01-01 11:11:11"
+    $ vaultic -r /srv/vaultic-repo rewrite --new-host newhost --new-time "1999-01-01 11:11:11"
 
     repository b7dbade3 opened (version 2, compression level auto)
     [0:00] 100.00%  1 / 1 index files loaded
@@ -417,14 +417,14 @@ malicious data:
 
 .. code-block:: console
 
-    $ echo "boom" > /srv/restic-repo/index/de30f3231ca2e6a59af4aa84216dfe2ef7339c549dc11b09b84000997b139628
+    $ echo "boom" > /srv/vaultic-repo/index/de30f3231ca2e6a59af4aa84216dfe2ef7339c549dc11b09b84000997b139628
 
 Trying to restore a snapshot which has been modified as shown above
 will yield an error:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo --no-cache restore c23e491f --target /tmp/restore-work
+    $ vaultic -r /srv/vaultic-repo --no-cache restore c23e491f --target /tmp/restore-work
     ...
     Fatal: unable to load index de30f323: load <index/de30f3231c>: invalid data returned
 
@@ -442,12 +442,12 @@ detect this and yield the same error as when you tried to restore:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check
+    $ vaultic -r /srv/vaultic-repo check
     ...
     load indexes
     error: error loading index de30f3231ca2e6a59af4aa84216dfe2ef7339c549dc11b09b84000997b139628: LoadRaw(<index/de30f3231c>): invalid data returned
 
-    The repository index is damaged and must be repaired. You must run ``restic repair index`` to correct this.
+    The repository index is damaged and must be repaired. You must run ``vaultic repair index`` to correct this.
 
     Fatal: repository contains errors
 
@@ -460,11 +460,11 @@ detect this and yield the same error as when you tried to restore:
     For instructions how to repair a damaged repository, see the :ref:`troubleshooting`
     section or follow the instructions provided by the ``check`` command.
 
-If the repository structure is intact, restic will show that ``no errors were found``:
+If the repository structure is intact, vaultic will show that ``no errors were found``:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check
+    $ vaultic -r /srv/vaultic-repo check
     ...
     load indexes
     check all packs
@@ -481,12 +481,12 @@ Otherwise, the specified cache directory is used, as described in :ref:`caching`
 
 By default, the ``check`` command does not verify that the actual pack files
 on disk in the repository are unmodified, because doing so requires reading
-a copy of every pack file in the repository. To tell restic to also verify the
+a copy of every pack file in the repository. To tell vaultic to also verify the
 integrity of the pack files in the repository, use the ``--read-data`` flag:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check --read-data
+    $ vaultic -r /srv/vaultic-repo check --read-data
     ...
     load indexes
     check all packs
@@ -514,11 +514,11 @@ over 5 separate invocations:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check --read-data-subset=1/5
-    $ restic -r /srv/restic-repo check --read-data-subset=2/5
-    $ restic -r /srv/restic-repo check --read-data-subset=3/5
-    $ restic -r /srv/restic-repo check --read-data-subset=4/5
-    $ restic -r /srv/restic-repo check --read-data-subset=5/5
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=1/5
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=2/5
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=3/5
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=4/5
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=5/5
 
 Use ``--read-data-subset=x%`` to check a randomly chosen subset of the
 repository pack files. It takes one parameter, ``x``, the percentage of
@@ -529,14 +529,14 @@ floating point value the following command may be used:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check --read-data-subset=2.5%
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=2.5%
 
 When checking bigger subsets you most likely want to specify the percentage
 as an integer:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check --read-data-subset=10%
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=10%
 
 Use ``--read-data-subset=nS`` to check a randomly chosen subset of the
 repository pack files. It takes one parameter, ``nS``, where 'n' is a whole
@@ -548,13 +548,13 @@ a file size value the following command may be used:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo check --read-data-subset=50M
-    $ restic -r /srv/restic-repo check --read-data-subset=10G
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=50M
+    $ vaultic -r /srv/vaultic-repo check --read-data-subset=10G
 
 Finding things in the repository
 ================================
 
-The ``restic find`` command searches for files or directories stored
+The ``vaultic find`` command searches for files or directories stored
 in the repository.
 
 Finding files and directories
@@ -567,13 +567,13 @@ Here is an example:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo find "0/**/7"
+    $ vaultic -r /srv/vaultic-repo find "0/**/7"
     Found matching entries in snapshot 774ebacd from 2026-01-16 09:01:17
-    /srv/restic-repo/restic/testdata/0/0/9/7
+    /srv/vaultic-repo/vaultic/testdata/0/0/9/7
 
 .. warning::
 
-    All positional parameters for ``restic find`` are used as patterns. Quote names with
+    All positional parameters for ``vaultic find`` are used as patterns. Quote names with
     spaces, such as ``"file one.bar"``. If in doubt, use a quoted wildcard like ``"*.txt"``.
 
 If you know that a particular file pattern is located in a specific snapshot or a
@@ -581,9 +581,9 @@ set of snapshots, you can limit the search using the ``--snapshot`` option (may 
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo find --snapshot latest file1.txt
+    $ vaultic -r /srv/vaultic-repo find --snapshot latest file1.txt
     Found matching entries in snapshot caffee11 from 2026-01-16 09:01:17
-    /srv/restic-repo/restic/testdata/0/for_cmd_ls/file1.txt
+    /srv/vaultic-repo/vaultic/testdata/0/for_cmd_ls/file1.txt
 
 .. note::
 
@@ -598,10 +598,10 @@ The following example searches for files which have a modification date in the y
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo find --oldest 2025-01-01 --newest "2025-12-31 23:59:59" "*.txt"
+    $ vaultic -r /srv/vaultic-repo find --oldest 2025-01-01 --newest "2025-12-31 23:59:59" "*.txt"
     Found matching entries in snapshot dd90f84d from 2026-01-17 17:26:41
-    /srv/restic-repo/restic/testdata/0/for_cmd_ls/file1.txt
-    /srv/restic-repo/restic/testdata/0/for_cmd_ls/file2.txt
+    /srv/vaultic-repo/vaultic/testdata/0/for_cmd_ls/file1.txt
+    /srv/vaultic-repo/vaultic/testdata/0/for_cmd_ls/file2.txt
 
 All these commands work in ``--json`` mode as well, for output details for the
 various options please refer to :ref:`find`.
@@ -611,15 +611,15 @@ Finding blobs, trees, or packfiles
 
 The other options of the ``find`` command are devoted to finding blobs, trees and packfiles.
 These are typically not used by the normal user, but can help debugging a problem
-with restic. See :ref:`troubleshooting` for a more automated way to repair repositories.
+with vaultic. See :ref:`troubleshooting` for a more automated way to repair repositories.
 
 Just one quick example: if you are looking for specific data blob(s), you can issue the command:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo find --blob fcd9ec0c
+    $ vaultic -r /srv/vaultic-repo find --blob fcd9ec0c
     Found blob fcd9ec0c99f7992c184666e3040831b919f3375157bd563a2b65cde1c6789847
-     ... in file /srv/restic-repo/restic/testdata/0/0/9/60
+     ... in file /srv/vaultic-repo/vaultic/testdata/0/0/9/60
          (tree 6409bed28d08898b849ecc4fdf338cdb0d67358619c99e6f6c3b402b1895baf8)
      ... in snapshot 774ebacd (2026-01-16 09:01:17)
 
@@ -627,11 +627,11 @@ Just one quick example: if you are looking for specific data blob(s), you can is
 Upgrading the repository format version
 =======================================
 
-Repositories created using earlier restic versions use an older repository
+Repositories created using earlier vaultic versions use an older repository
 format version and have to be upgraded to allow using all new features.
 Upgrading must be done explicitly as a newer repository version increases the
-minimum restic version required to access the repository. For example the
-repository format version 2 is only readable using restic 0.14.0 or newer.
+minimum vaultic version required to access the repository. For example the
+repository format version 2 is only readable using vaultic 0.14.0 or newer.
 
 Upgrading to repository version 2 is a two step process: first run
 ``migrate upgrade_repo_v2`` which will check the repository integrity and

@@ -1,6 +1,6 @@
-# bash completion for restic                               -*- shell-script -*-
+# bash completion for vaultic                              -*- shell-script -*-
 
-__restic_debug()
+__vaultic_debug()
 {
     if [[ -n ${BASH_COMP_DEBUG_FILE:-} ]]; then
         echo "$*" >> "${BASH_COMP_DEBUG_FILE}"
@@ -9,13 +9,13 @@ __restic_debug()
 
 # Homebrew on Macs have version 1.3 of bash-completion which doesn't include
 # _init_completion. This is a very minimal version of that function.
-__restic_init_completion()
+__vaultic_init_completion()
 {
     COMPREPLY=()
     _get_comp_words_by_ref "$@" cur prev words cword
 }
 
-__restic_index_of_word()
+__vaultic_index_of_word()
 {
     local w word=$1
     shift
@@ -27,7 +27,7 @@ __restic_index_of_word()
     index=-1
 }
 
-__restic_contains_word()
+__vaultic_contains_word()
 {
     local w word=$1; shift
     for w in "$@"; do
@@ -36,9 +36,9 @@ __restic_contains_word()
     return 1
 }
 
-__restic_handle_go_custom_completion()
+__vaultic_handle_go_custom_completion()
 {
-    __restic_debug "${FUNCNAME[0]}: cur is ${cur}, words[*] is ${words[*]}, #words[@] is ${#words[@]}"
+    __vaultic_debug "${FUNCNAME[0]}: cur is ${cur}, words[*] is ${words[*]}, #words[@] is ${#words[@]}"
 
     local shellCompDirectiveError=1
     local shellCompDirectiveNoSpace=2
@@ -49,23 +49,23 @@ __restic_handle_go_custom_completion()
     local out requestComp lastParam lastChar comp directive args
 
     # Prepare the command to request completions for the program.
-    # Calling ${words[0]} instead of directly restic allows handling aliases
+    # Calling ${words[0]} instead of directly vaultic allows handling aliases
     args=("${words[@]:1}")
     # Disable ActiveHelp which is not supported for bash completion v1
-    requestComp="RESTIC_ACTIVE_HELP=0 ${words[0]} __completeNoDesc ${args[*]}"
+    requestComp="VAULTIC_ACTIVE_HELP=0 ${words[0]} __completeNoDesc ${args[*]}"
 
     lastParam=${words[$((${#words[@]}-1))]}
     lastChar=${lastParam:$((${#lastParam}-1)):1}
-    __restic_debug "${FUNCNAME[0]}: lastParam ${lastParam}, lastChar ${lastChar}"
+    __vaultic_debug "${FUNCNAME[0]}: lastParam ${lastParam}, lastChar ${lastChar}"
 
     if [ -z "${cur}" ] && [ "${lastChar}" != "=" ]; then
         # If the last parameter is complete (there is a space following it)
         # We add an extra empty parameter so we can indicate this to the go method.
-        __restic_debug "${FUNCNAME[0]}: Adding extra empty parameter"
+        __vaultic_debug "${FUNCNAME[0]}: Adding extra empty parameter"
         requestComp="${requestComp} \"\""
     fi
 
-    __restic_debug "${FUNCNAME[0]}: calling ${requestComp}"
+    __vaultic_debug "${FUNCNAME[0]}: calling ${requestComp}"
     # Use eval to handle any environment variables and such
     out=$(eval "${requestComp}" 2>/dev/null)
 
@@ -77,23 +77,23 @@ __restic_handle_go_custom_completion()
         # There is not directive specified
         directive=0
     fi
-    __restic_debug "${FUNCNAME[0]}: the completion directive is: ${directive}"
-    __restic_debug "${FUNCNAME[0]}: the completions are: ${out}"
+    __vaultic_debug "${FUNCNAME[0]}: the completion directive is: ${directive}"
+    __vaultic_debug "${FUNCNAME[0]}: the completions are: ${out}"
 
     if [ $((directive & shellCompDirectiveError)) -ne 0 ]; then
         # Error code.  No completion.
-        __restic_debug "${FUNCNAME[0]}: received error from custom completion go code"
+        __vaultic_debug "${FUNCNAME[0]}: received error from custom completion go code"
         return
     else
         if [ $((directive & shellCompDirectiveNoSpace)) -ne 0 ]; then
             if [[ $(type -t compopt) = "builtin" ]]; then
-                __restic_debug "${FUNCNAME[0]}: activating no space"
+                __vaultic_debug "${FUNCNAME[0]}: activating no space"
                 compopt -o nospace
             fi
         fi
         if [ $((directive & shellCompDirectiveNoFileComp)) -ne 0 ]; then
             if [[ $(type -t compopt) = "builtin" ]]; then
-                __restic_debug "${FUNCNAME[0]}: activating no file completion"
+                __vaultic_debug "${FUNCNAME[0]}: activating no file completion"
                 compopt +o default
             fi
         fi
@@ -109,7 +109,7 @@ __restic_handle_go_custom_completion()
         done
 
         filteringCmd="_filedir $fullFilter"
-        __restic_debug "File filtering command: $filteringCmd"
+        __vaultic_debug "File filtering command: $filteringCmd"
         $filteringCmd
     elif [ $((directive & shellCompDirectiveFilterDirs)) -ne 0 ]; then
         # File completion for directories only
@@ -117,10 +117,10 @@ __restic_handle_go_custom_completion()
         # Use printf to strip any trailing newline
         subdir=$(printf "%s" "${out}")
         if [ -n "$subdir" ]; then
-            __restic_debug "Listing directories in $subdir"
-            __restic_handle_subdirs_in_dir_flag "$subdir"
+            __vaultic_debug "Listing directories in $subdir"
+            __vaultic_handle_subdirs_in_dir_flag "$subdir"
         else
-            __restic_debug "Listing directories in ."
+            __vaultic_debug "Listing directories in ."
             _filedir -d
         fi
     else
@@ -130,9 +130,9 @@ __restic_handle_go_custom_completion()
     fi
 }
 
-__restic_handle_reply()
+__vaultic_handle_reply()
 {
-    __restic_debug "${FUNCNAME[0]}"
+    __vaultic_debug "${FUNCNAME[0]}"
     local comp
     case $cur in
         -*)
@@ -160,7 +160,7 @@ __restic_handle_reply()
 
                 local index flag
                 flag="${cur%=*}"
-                __restic_index_of_word "${flag}" "${flags_with_completion[@]}"
+                __vaultic_index_of_word "${flag}" "${flags_with_completion[@]}"
                 COMPREPLY=()
                 if [[ ${index} -ge 0 ]]; then
                     PREFIX=""
@@ -184,7 +184,7 @@ __restic_handle_reply()
 
     # check if we are handling a flag with special work handling
     local index
-    __restic_index_of_word "${prev}" "${flags_with_completion[@]}"
+    __vaultic_index_of_word "${prev}" "${flags_with_completion[@]}"
     if [[ ${index} -ge 0 ]]; then
         ${flags_completion[${index}]}
         return
@@ -201,7 +201,7 @@ __restic_handle_reply()
         completions+=("${must_have_one_noun[@]}")
     elif [[ -n "${has_completion_function}" ]]; then
         # if a go completion function is provided, defer to that function
-        __restic_handle_go_custom_completion
+        __vaultic_handle_go_custom_completion
     fi
     if [[ ${#must_have_one_flag[@]} -ne 0 ]]; then
         completions+=("${must_have_one_flag[@]}")
@@ -217,9 +217,9 @@ __restic_handle_reply()
     fi
 
     if [[ ${#COMPREPLY[@]} -eq 0 ]]; then
-        if declare -F __restic_custom_func >/dev/null; then
+        if declare -F __vaultic_custom_func >/dev/null; then
             # try command name qualified custom func
-            __restic_custom_func
+            __vaultic_custom_func
         else
             # otherwise fall back to unqualified for compatibility
             declare -F __custom_func >/dev/null && __custom_func
@@ -239,21 +239,21 @@ __restic_handle_reply()
 }
 
 # The arguments should be in the form "ext1|ext2|extn"
-__restic_handle_filename_extension_flag()
+__vaultic_handle_filename_extension_flag()
 {
     local ext="$1"
     _filedir "@(${ext})"
 }
 
-__restic_handle_subdirs_in_dir_flag()
+__vaultic_handle_subdirs_in_dir_flag()
 {
     local dir="$1"
     pushd "${dir}" >/dev/null 2>&1 && _filedir -d && popd >/dev/null 2>&1 || return
 }
 
-__restic_handle_flag()
+__vaultic_handle_flag()
 {
-    __restic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
+    __vaultic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
 
     # if a command required a flag, and we found it, unset must_have_one_flag()
     local flagname=${words[c]}
@@ -264,13 +264,13 @@ __restic_handle_flag()
         flagname=${flagname%=*} # strip everything after the =
         flagname="${flagname}=" # but put the = back
     fi
-    __restic_debug "${FUNCNAME[0]}: looking for ${flagname}"
-    if __restic_contains_word "${flagname}" "${must_have_one_flag[@]}"; then
+    __vaultic_debug "${FUNCNAME[0]}: looking for ${flagname}"
+    if __vaultic_contains_word "${flagname}" "${must_have_one_flag[@]}"; then
         must_have_one_flag=()
     fi
 
     # if you set a flag which only applies to this command, don't show subcommands
-    if __restic_contains_word "${flagname}" "${local_nonpersistent_flags[@]}"; then
+    if __vaultic_contains_word "${flagname}" "${local_nonpersistent_flags[@]}"; then
       commands=()
     fi
 
@@ -287,8 +287,8 @@ __restic_handle_flag()
     fi
 
     # skip the argument to a two word flag
-    if [[ ${words[c]} != *"="* ]] && __restic_contains_word "${words[c]}" "${two_word_flags[@]}"; then
-        __restic_debug "${FUNCNAME[0]}: found a flag ${words[c]}, skip the next argument"
+    if [[ ${words[c]} != *"="* ]] && __vaultic_contains_word "${words[c]}" "${two_word_flags[@]}"; then
+        __vaultic_debug "${FUNCNAME[0]}: found a flag ${words[c]}, skip the next argument"
         c=$((c+1))
         # if we are looking for a flags value, don't show commands
         if [[ $c -eq $cword ]]; then
@@ -300,13 +300,13 @@ __restic_handle_flag()
 
 }
 
-__restic_handle_noun()
+__vaultic_handle_noun()
 {
-    __restic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
+    __vaultic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
 
-    if __restic_contains_word "${words[c]}" "${must_have_one_noun[@]}"; then
+    if __vaultic_contains_word "${words[c]}" "${must_have_one_noun[@]}"; then
         must_have_one_noun=()
-    elif __restic_contains_word "${words[c]}" "${noun_aliases[@]}"; then
+    elif __vaultic_contains_word "${words[c]}" "${noun_aliases[@]}"; then
         must_have_one_noun=()
     fi
 
@@ -314,55 +314,55 @@ __restic_handle_noun()
     c=$((c+1))
 }
 
-__restic_handle_command()
+__vaultic_handle_command()
 {
-    __restic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
+    __vaultic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
 
     local next_command
     if [[ -n ${last_command} ]]; then
         next_command="_${last_command}_${words[c]//:/__}"
     else
         if [[ $c -eq 0 ]]; then
-            next_command="_restic_root_command"
+            next_command="_vaultic_root_command"
         else
             next_command="_${words[c]//:/__}"
         fi
     fi
     c=$((c+1))
-    __restic_debug "${FUNCNAME[0]}: looking for ${next_command}"
+    __vaultic_debug "${FUNCNAME[0]}: looking for ${next_command}"
     declare -F "$next_command" >/dev/null && $next_command
 }
 
-__restic_handle_word()
+__vaultic_handle_word()
 {
     if [[ $c -ge $cword ]]; then
-        __restic_handle_reply
+        __vaultic_handle_reply
         return
     fi
-    __restic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
+    __vaultic_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
     if [[ "${words[c]}" == -* ]]; then
-        __restic_handle_flag
-    elif __restic_contains_word "${words[c]}" "${commands[@]}"; then
-        __restic_handle_command
+        __vaultic_handle_flag
+    elif __vaultic_contains_word "${words[c]}" "${commands[@]}"; then
+        __vaultic_handle_command
     elif [[ $c -eq 0 ]]; then
-        __restic_handle_command
-    elif __restic_contains_word "${words[c]}" "${command_aliases[@]}"; then
+        __vaultic_handle_command
+    elif __vaultic_contains_word "${words[c]}" "${command_aliases[@]}"; then
         # aliashash variable is an associative array which is only supported in bash > 3.
         if [[ -z "${BASH_VERSION:-}" || "${BASH_VERSINFO[0]:-}" -gt 3 ]]; then
             words[c]=${aliashash[${words[c]}]}
-            __restic_handle_command
+            __vaultic_handle_command
         else
-            __restic_handle_noun
+            __vaultic_handle_noun
         fi
     else
-        __restic_handle_noun
+        __vaultic_handle_noun
     fi
-    __restic_handle_word
+    __vaultic_handle_word
 }
 
-_restic_backup()
+_vaultic_backup()
 {
-    last_command="restic_backup"
+    last_command="vaultic_backup"
 
     command_aliases=()
 
@@ -386,6 +386,8 @@ _restic_backup()
     local_nonpersistent_flags+=("-e")
     flags+=("--exclude-caches")
     local_nonpersistent_flags+=("--exclude-caches")
+    flags+=("--exclude-cloud-files")
+    local_nonpersistent_flags+=("--exclude-cloud-files")
     flags+=("--exclude-file=")
     two_word_flags+=("--exclude-file")
     local_nonpersistent_flags+=("--exclude-file")
@@ -528,9 +530,9 @@ _restic_backup()
     noun_aliases=()
 }
 
-_restic_cache()
+_vaultic_cache()
 {
-    last_command="restic_cache"
+    last_command="vaultic_cache"
 
     command_aliases=()
 
@@ -606,9 +608,9 @@ _restic_cache()
     noun_aliases=()
 }
 
-_restic_cat()
+_vaultic_cat()
 {
-    last_command="restic_cat"
+    last_command="vaultic_cat"
 
     command_aliases=()
 
@@ -685,9 +687,9 @@ _restic_cat()
     noun_aliases=()
 }
 
-_restic_check()
+_vaultic_check()
 {
-    last_command="restic_check"
+    last_command="vaultic_check"
 
     command_aliases=()
 
@@ -777,9 +779,9 @@ _restic_check()
     noun_aliases=()
 }
 
-_restic_copy()
+_vaultic_copy()
 {
-    last_command="restic_copy"
+    last_command="vaultic_copy"
 
     command_aliases=()
 
@@ -883,9 +885,9 @@ _restic_copy()
     noun_aliases=()
 }
 
-_restic_diff()
+_vaultic_diff()
 {
-    last_command="restic_diff"
+    last_command="vaultic_diff"
 
     command_aliases=()
 
@@ -955,9 +957,9 @@ _restic_diff()
     noun_aliases=()
 }
 
-_restic_dump()
+_vaultic_dump()
 {
-    last_command="restic_dump"
+    last_command="vaultic_dump"
 
     command_aliases=()
 
@@ -1051,9 +1053,9 @@ _restic_dump()
     noun_aliases=()
 }
 
-_restic_features()
+_vaultic_features()
 {
-    last_command="restic_features"
+    last_command="vaultic_features"
 
     command_aliases=()
 
@@ -1121,9 +1123,9 @@ _restic_features()
     noun_aliases=()
 }
 
-_restic_find()
+_vaultic_find()
 {
-    last_command="restic_find"
+    last_command="vaultic_find"
 
     command_aliases=()
 
@@ -1245,9 +1247,9 @@ _restic_find()
     noun_aliases=()
 }
 
-_restic_forget()
+_vaultic_forget()
 {
-    last_command="restic_forget"
+    last_command="vaultic_forget"
 
     command_aliases=()
 
@@ -1425,9 +1427,9 @@ _restic_forget()
     noun_aliases=()
 }
 
-_restic_generate()
+_vaultic_generate()
 {
-    last_command="restic_generate"
+    last_command="vaultic_generate"
 
     command_aliases=()
 
@@ -1515,9 +1517,9 @@ _restic_generate()
     noun_aliases=()
 }
 
-_restic_help()
+_vaultic_help()
 {
-    last_command="restic_help"
+    last_command="vaultic_help"
 
     command_aliases=()
 
@@ -1582,9 +1584,9 @@ _restic_help()
     noun_aliases=()
 }
 
-_restic_init()
+_vaultic_init()
 {
-    last_command="restic_init"
+    last_command="vaultic_init"
 
     command_aliases=()
 
@@ -1680,9 +1682,9 @@ _restic_init()
     noun_aliases=()
 }
 
-_restic_key_add()
+_vaultic_key_add()
 {
-    last_command="restic_key_add"
+    last_command="vaultic_key_add"
 
     command_aliases=()
 
@@ -1764,9 +1766,9 @@ _restic_key_add()
     noun_aliases=()
 }
 
-_restic_key_help()
+_vaultic_key_help()
 {
-    last_command="restic_key_help"
+    last_command="vaultic_key_help"
 
     command_aliases=()
 
@@ -1831,9 +1833,9 @@ _restic_key_help()
     noun_aliases=()
 }
 
-_restic_key_list()
+_vaultic_key_list()
 {
-    last_command="restic_key_list"
+    last_command="vaultic_key_list"
 
     command_aliases=()
 
@@ -1901,9 +1903,9 @@ _restic_key_list()
     noun_aliases=()
 }
 
-_restic_key_passwd()
+_vaultic_key_passwd()
 {
-    last_command="restic_key_passwd"
+    last_command="vaultic_key_passwd"
 
     command_aliases=()
 
@@ -1985,9 +1987,9 @@ _restic_key_passwd()
     noun_aliases=()
 }
 
-_restic_key_remove()
+_vaultic_key_remove()
 {
-    last_command="restic_key_remove"
+    last_command="vaultic_key_remove"
 
     command_aliases=()
 
@@ -2055,9 +2057,9 @@ _restic_key_remove()
     noun_aliases=()
 }
 
-_restic_key()
+_vaultic_key()
 {
-    last_command="restic_key"
+    last_command="vaultic_key"
 
     command_aliases=()
 
@@ -2130,9 +2132,9 @@ _restic_key()
     noun_aliases=()
 }
 
-_restic_list()
+_vaultic_list()
 {
-    last_command="restic_list"
+    last_command="vaultic_list"
 
     command_aliases=()
 
@@ -2206,9 +2208,9 @@ _restic_list()
     noun_aliases=()
 }
 
-_restic_ls()
+_vaultic_ls()
 {
-    last_command="restic_ls"
+    last_command="vaultic_ls"
 
     command_aliases=()
 
@@ -2308,9 +2310,9 @@ _restic_ls()
     noun_aliases=()
 }
 
-_restic_migrate()
+_vaultic_migrate()
 {
-    last_command="restic_migrate"
+    last_command="vaultic_migrate"
 
     command_aliases=()
 
@@ -2382,9 +2384,9 @@ _restic_migrate()
     noun_aliases=()
 }
 
-_restic_mount()
+_vaultic_mount()
 {
-    last_command="restic_mount"
+    last_command="vaultic_mount"
 
     command_aliases=()
 
@@ -2480,9 +2482,9 @@ _restic_mount()
     noun_aliases=()
 }
 
-_restic_options()
+_vaultic_options()
 {
-    last_command="restic_options"
+    last_command="vaultic_options"
 
     command_aliases=()
 
@@ -2550,9 +2552,9 @@ _restic_options()
     noun_aliases=()
 }
 
-_restic_prune()
+_vaultic_prune()
 {
-    last_command="restic_prune"
+    last_command="vaultic_prune"
 
     command_aliases=()
 
@@ -2644,9 +2646,9 @@ _restic_prune()
     noun_aliases=()
 }
 
-_restic_recover()
+_vaultic_recover()
 {
-    last_command="restic_recover"
+    last_command="vaultic_recover"
 
     command_aliases=()
 
@@ -2714,9 +2716,9 @@ _restic_recover()
     noun_aliases=()
 }
 
-_restic_repair_help()
+_vaultic_repair_help()
 {
-    last_command="restic_repair_help"
+    last_command="vaultic_repair_help"
 
     command_aliases=()
 
@@ -2781,9 +2783,9 @@ _restic_repair_help()
     noun_aliases=()
 }
 
-_restic_repair_index()
+_vaultic_repair_index()
 {
-    last_command="restic_repair_index"
+    last_command="vaultic_repair_index"
 
     command_aliases=()
 
@@ -2853,9 +2855,9 @@ _restic_repair_index()
     noun_aliases=()
 }
 
-_restic_repair_packs()
+_vaultic_repair_packs()
 {
-    last_command="restic_repair_packs"
+    last_command="vaultic_repair_packs"
 
     command_aliases=()
 
@@ -2923,9 +2925,9 @@ _restic_repair_packs()
     noun_aliases=()
 }
 
-_restic_repair_snapshots()
+_vaultic_repair_snapshots()
 {
-    last_command="restic_repair_snapshots"
+    last_command="vaultic_repair_snapshots"
 
     command_aliases=()
 
@@ -3013,9 +3015,9 @@ _restic_repair_snapshots()
     noun_aliases=()
 }
 
-_restic_repair()
+_vaultic_repair()
 {
-    last_command="restic_repair"
+    last_command="vaultic_repair"
 
     command_aliases=()
 
@@ -3087,9 +3089,9 @@ _restic_repair()
     noun_aliases=()
 }
 
-_restic_restore()
+_vaultic_restore()
 {
-    last_command="restic_restore"
+    last_command="vaultic_restore"
 
     command_aliases=()
 
@@ -3235,9 +3237,9 @@ _restic_restore()
     noun_aliases=()
 }
 
-_restic_rewrite()
+_vaultic_rewrite()
 {
-    last_command="restic_rewrite"
+    last_command="vaultic_rewrite"
 
     command_aliases=()
 
@@ -3373,83 +3375,9 @@ _restic_rewrite()
     noun_aliases=()
 }
 
-_restic_self-update()
+_vaultic_snapshots()
 {
-    last_command="restic_self-update"
-
-    command_aliases=()
-
-    commands=()
-
-    flags=()
-    two_word_flags=()
-    local_nonpersistent_flags=()
-    flags_with_completion=()
-    flags_completion=()
-
-    flags+=("--help")
-    flags+=("-h")
-    local_nonpersistent_flags+=("--help")
-    local_nonpersistent_flags+=("-h")
-    flags+=("--output=")
-    two_word_flags+=("--output")
-    local_nonpersistent_flags+=("--output")
-    local_nonpersistent_flags+=("--output=")
-    flags+=("--cacert=")
-    two_word_flags+=("--cacert")
-    flags+=("--cache-dir=")
-    two_word_flags+=("--cache-dir")
-    flags+=("--cleanup-cache")
-    flags+=("--compression=")
-    two_word_flags+=("--compression")
-    flags+=("--http-user-agent=")
-    two_word_flags+=("--http-user-agent")
-    flags+=("--insecure-no-password")
-    flags+=("--insecure-tls")
-    flags+=("--json")
-    flags+=("--key-hint=")
-    two_word_flags+=("--key-hint")
-    flags+=("--limit-download=")
-    two_word_flags+=("--limit-download")
-    flags+=("--limit-upload=")
-    two_word_flags+=("--limit-upload")
-    flags+=("--no-cache")
-    flags+=("--no-extra-verify")
-    flags+=("--no-lock")
-    flags+=("--option=")
-    two_word_flags+=("--option")
-    two_word_flags+=("-o")
-    flags+=("--pack-size=")
-    two_word_flags+=("--pack-size")
-    flags+=("--password-command=")
-    two_word_flags+=("--password-command")
-    flags+=("--password-file=")
-    two_word_flags+=("--password-file")
-    two_word_flags+=("-p")
-    flags+=("--quiet")
-    flags+=("-q")
-    flags+=("--repo=")
-    two_word_flags+=("--repo")
-    two_word_flags+=("-r")
-    flags+=("--repository-file=")
-    two_word_flags+=("--repository-file")
-    flags+=("--retry-lock=")
-    two_word_flags+=("--retry-lock")
-    flags+=("--stuck-request-timeout=")
-    two_word_flags+=("--stuck-request-timeout")
-    flags+=("--tls-client-cert=")
-    two_word_flags+=("--tls-client-cert")
-    flags+=("--verbose")
-    flags+=("-v")
-
-    must_have_one_flag=()
-    must_have_one_noun=()
-    noun_aliases=()
-}
-
-_restic_snapshots()
-{
-    last_command="restic_snapshots"
+    last_command="vaultic_snapshots"
 
     command_aliases=()
 
@@ -3545,9 +3473,9 @@ _restic_snapshots()
     noun_aliases=()
 }
 
-_restic_stats()
+_vaultic_stats()
 {
-    last_command="restic_stats"
+    last_command="vaultic_stats"
 
     command_aliases=()
 
@@ -3572,7 +3500,7 @@ _restic_stats()
     flags+=("--mode=")
     two_word_flags+=("--mode")
     flags_with_completion+=("--mode")
-    flags_completion+=("__restic_handle_go_custom_completion")
+    flags_completion+=("__vaultic_handle_go_custom_completion")
     local_nonpersistent_flags+=("--mode")
     local_nonpersistent_flags+=("--mode=")
     flags+=("--path=")
@@ -3635,9 +3563,9 @@ _restic_stats()
     noun_aliases=()
 }
 
-_restic_tag()
+_vaultic_tag()
 {
-    last_command="restic_tag"
+    last_command="vaultic_tag"
 
     command_aliases=()
 
@@ -3731,9 +3659,9 @@ _restic_tag()
     noun_aliases=()
 }
 
-_restic_unlock()
+_vaultic_unlock()
 {
-    last_command="restic_unlock"
+    last_command="vaultic_unlock"
 
     command_aliases=()
 
@@ -3803,9 +3731,9 @@ _restic_unlock()
     noun_aliases=()
 }
 
-_restic_version()
+_vaultic_version()
 {
-    last_command="restic_version"
+    last_command="vaultic_version"
 
     command_aliases=()
 
@@ -3873,9 +3801,9 @@ _restic_version()
     noun_aliases=()
 }
 
-_restic_root_command()
+_vaultic_root_command()
 {
-    last_command="restic"
+    last_command="vaultic"
 
     command_aliases=()
 
@@ -3904,7 +3832,6 @@ _restic_root_command()
     commands+=("repair")
     commands+=("restore")
     commands+=("rewrite")
-    commands+=("self-update")
     commands+=("snapshots")
     commands+=("stats")
     commands+=("tag")
@@ -3973,7 +3900,7 @@ _restic_root_command()
     noun_aliases=()
 }
 
-__start_restic()
+__start_vaultic()
 {
     local cur prev words cword split
     declare -A flaghash 2>/dev/null || :
@@ -3981,7 +3908,7 @@ __start_restic()
     if declare -F _init_completion >/dev/null 2>&1; then
         _init_completion -s || return
     else
-        __restic_init_completion -n "=" || return
+        __vaultic_init_completion -n "=" || return
     fi
 
     local c=0
@@ -3991,7 +3918,7 @@ __start_restic()
     local local_nonpersistent_flags=()
     local flags_with_completion=()
     local flags_completion=()
-    local commands=("restic")
+    local commands=("vaultic")
     local command_aliases=()
     local must_have_one_flag=()
     local must_have_one_noun=()
@@ -4000,13 +3927,13 @@ __start_restic()
     local nouns=()
     local noun_aliases=()
 
-    __restic_handle_word
+    __vaultic_handle_word
 }
 
 if [[ $(type -t compopt) = "builtin" ]]; then
-    complete -o default -F __start_restic restic
+    complete -o default -F __start_vaultic vaultic
 else
-    complete -o default -o nospace -F __start_restic restic
+    complete -o default -o nospace -F __start_vaultic vaultic
 fi
 
 # ex: ts=4 sw=4 et filetype=sh

@@ -4,8 +4,8 @@ go 1.25.8
 
 toolchain go1.25.10
 
-// keep the old behavior for reparse points on windows until handling reparse points has been improved in restic
-// https://forum.restic.net/t/windows-junction-backup-with-go1-23-or-later/8940
+// keep the old behavior for reparse points on windows until handling reparse points has been improved in vaultic
+// https://forum.vaultic.net/t/windows-junction-backup-with-go1-23-or-later/8940
 godebug winsymlink=0
 
 require (

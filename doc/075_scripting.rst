@@ -15,41 +15,41 @@ Scripting
 #########################
 
 This section covers environment variables and how certain tasks may be accomplished
-when you use restic via scripts.
+when you use vaultic via scripts.
 
 .. _environment-variables:
 
 Environment variables
 *********************
 
-In addition to command-line options, restic supports passing various options in
+In addition to command-line options, vaultic supports passing various options in
 environment variables, which are listed below.
 
 .. code-block:: console
 
-    RESTIC_REPOSITORY_FILE              Name of file containing the repository location (replaces --repository-file)
-    RESTIC_REPOSITORY                   Location of repository (replaces -r)
-    RESTIC_PASSWORD_FILE                Location of password file (replaces --password-file)
-    RESTIC_PASSWORD                     The actual password for the repository
-    RESTIC_PASSWORD_COMMAND             Command printing the password for the repository to stdout
-    RESTIC_KEY_HINT                     ID of key to try decrypting first, before other keys
-    RESTIC_CACERT                       Location(s) of certificate file(s), comma separated if multiple (replaces --cacert)
-    RESTIC_TLS_CLIENT_CERT              Location of TLS client certificate and private key (replaces --tls-client-cert)
-    RESTIC_CACHE_DIR                    Location of the cache directory
-    RESTIC_COMPRESSION                  Compression mode (only available for repository format version 2)
-    RESTIC_HOST                         Only consider snapshots for this host / Set the hostname for the snapshot manually (replaces --host)
-    RESTIC_PROGRESS_FPS                 Frames per second by which the progress bar is updated
-    RESTIC_PACK_SIZE                    Target size for pack files
-    RESTIC_READ_CONCURRENCY             Concurrency for file reads
-    RESTIC_IGNORE_CTIME                 Ignore ctime changes when comparing files (replaces --ignore-ctime)
-    RESTIC_IGNORE_INODE                 Ignore inode changes when comparing files (replaces --ignore-inode)
+    VAULTIC_REPOSITORY_FILE              Name of file containing the repository location (replaces --repository-file)
+    VAULTIC_REPOSITORY                   Location of repository (replaces -r)
+    VAULTIC_PASSWORD_FILE                Location of password file (replaces --password-file)
+    VAULTIC_PASSWORD                     The actual password for the repository
+    VAULTIC_PASSWORD_COMMAND             Command printing the password for the repository to stdout
+    VAULTIC_KEY_HINT                     ID of key to try decrypting first, before other keys
+    VAULTIC_CACERT                       Location(s) of certificate file(s), comma separated if multiple (replaces --cacert)
+    VAULTIC_TLS_CLIENT_CERT              Location of TLS client certificate and private key (replaces --tls-client-cert)
+    VAULTIC_CACHE_DIR                    Location of the cache directory
+    VAULTIC_COMPRESSION                  Compression mode (only available for repository format version 2)
+    VAULTIC_HOST                         Only consider snapshots for this host / Set the hostname for the snapshot manually (replaces --host)
+    VAULTIC_PROGRESS_FPS                 Frames per second by which the progress bar is updated
+    VAULTIC_PACK_SIZE                    Target size for pack files
+    VAULTIC_READ_CONCURRENCY             Concurrency for file reads
+    VAULTIC_IGNORE_CTIME                 Ignore ctime changes when comparing files (replaces --ignore-ctime)
+    VAULTIC_IGNORE_INODE                 Ignore inode changes when comparing files (replaces --ignore-inode)
 
-    RESTIC_FROM_REPOSITORY              Source repository for copy (replaces --from-repo)
-    RESTIC_FROM_REPOSITORY_FILE         File containing source repository for copy (replaces --from-repository-file)
-    RESTIC_FROM_PASSWORD                Password for the source repository (copy)
-    RESTIC_FROM_PASSWORD_FILE           Password file for the source repository (replaces --from-password-file)
-    RESTIC_FROM_PASSWORD_COMMAND        Command to obtain source repository password (replaces --from-password-command)
-    RESTIC_FROM_KEY_HINT                Key ID to try first when opening the source repository (replaces --from-key-hint)
+    VAULTIC_FROM_REPOSITORY              Source repository for copy (replaces --from-repo)
+    VAULTIC_FROM_REPOSITORY_FILE         File containing source repository for copy (replaces --from-repository-file)
+    VAULTIC_FROM_PASSWORD                Password for the source repository (copy)
+    VAULTIC_FROM_PASSWORD_FILE           Password file for the source repository (replaces --from-password-file)
+    VAULTIC_FROM_PASSWORD_COMMAND        Command to obtain source repository password (replaces --from-password-command)
+    VAULTIC_FROM_KEY_HINT                Key ID to try first when opening the source repository (replaces --from-key-hint)
 
     TMPDIR                              Location for temporary files (except Windows)
     TMP                                 Location for temporary files (only Windows)
@@ -60,12 +60,12 @@ environment variables, which are listed below.
     AWS_DEFAULT_REGION                  Amazon S3 default region
     AWS_PROFILE                         Amazon credentials profile (alternative to specifying key and region)
     AWS_SHARED_CREDENTIALS_FILE         Location of the AWS CLI shared credentials file (default: ~/.aws/credentials)
-    RESTIC_AWS_ASSUME_ROLE_ARN          Amazon IAM Role ARN to assume using discovered credentials
-    RESTIC_AWS_ASSUME_ROLE_SESSION_NAME Session Name to use with the role assumption
-    RESTIC_AWS_ASSUME_ROLE_EXTERNAL_ID  External ID to use with the role assumption
-    RESTIC_AWS_ASSUME_ROLE_POLICY       Inline Amazon IAM session policy
-    RESTIC_AWS_ASSUME_ROLE_REGION       Region to use for IAM calls for the role assumption (default: us-east-1)
-    RESTIC_AWS_ASSUME_ROLE_STS_ENDPOINT URL to the STS endpoint (default is determined based on RESTIC_AWS_ASSUME_ROLE_REGION). You generally do not need to set this, advanced use only.
+    VAULTIC_AWS_ASSUME_ROLE_ARN          Amazon IAM Role ARN to assume using discovered credentials
+    VAULTIC_AWS_ASSUME_ROLE_SESSION_NAME Session Name to use with the role assumption
+    VAULTIC_AWS_ASSUME_ROLE_EXTERNAL_ID  External ID to use with the role assumption
+    VAULTIC_AWS_ASSUME_ROLE_POLICY       Inline Amazon IAM session policy
+    VAULTIC_AWS_ASSUME_ROLE_REGION       Region to use for IAM calls for the role assumption (default: us-east-1)
+    VAULTIC_AWS_ASSUME_ROLE_STS_ENDPOINT URL to the STS endpoint (default is determined based on VAULTIC_AWS_ASSUME_ROLE_REGION). You generally do not need to set this, advanced use only.
 
     AZURE_ACCOUNT_NAME                  Account name for Azure
     AZURE_ACCOUNT_KEY                   Account key for Azure
@@ -77,7 +77,7 @@ environment variables, which are listed below.
     B2_ACCOUNT_KEY                      Account Key or applicationKey for Backblaze B2
 
     GOOGLE_PROJECT_ID                   Project ID for Google Cloud Storage
-    GOOGLE_APPLICATION_CREDENTIALS      Application Credentials for Google Cloud Storage (e.g. $HOME/.config/gs-secret-restic-key.json)
+    GOOGLE_APPLICATION_CREDENTIALS      Application Credentials for Google Cloud Storage (e.g. $HOME/.config/gs-secret-vaultic-key.json)
     GOOGLE_ACCESS_TOKEN                 Bearer access token for Google Cloud Storage (alternative to default application credentials)
 
     OS_AUTH_URL                         Auth URL for keystone authentication
@@ -104,17 +104,17 @@ environment variables, which are listed below.
 
     RCLONE_BWLIMIT                      rclone bandwidth limit
 
-    RESTIC_REST_USERNAME                Restic REST Server username
-    RESTIC_REST_PASSWORD                Restic REST Server password
+    VAULTIC_REST_USERNAME                Vaultic REST Server username
+    VAULTIC_REST_PASSWORD                Vaultic REST Server password
 
     ST_AUTH                             Auth URL for keystone v1 authentication
     ST_USER                             Username for keystone v1 authentication
     ST_KEY                              Password for keystone v1 authentication
 
 See :ref:`caching` for the rules concerning cache locations when
-``RESTIC_CACHE_DIR`` is not set.
+``VAULTIC_CACHE_DIR`` is not set.
 
-The external programs that restic may execute include ``rclone`` (for rclone
+The external programs that vaultic may execute include ``rclone`` (for rclone
 backends) and ``ssh`` (for the SFTP backend). These may respond to further
 environment variables and configuration files; see their respective manuals.
 
@@ -128,16 +128,16 @@ repositories). The command ``cat config`` may be used for this purpose:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo cat config
-    Fatal: repository does not exist: unable to open config file: stat /srv/restic-repo/config: no such file or directory
+    $ vaultic -r /srv/vaultic-repo cat config
+    Fatal: repository does not exist: unable to open config file: stat /srv/vaultic-repo/config: no such file or directory
     Is there a repository at the following location?
-    /srv/restic-repo
+    /srv/vaultic-repo
 
-If a repository does not exist, restic (since 0.17.0) will return exit code ``10``
+If a repository does not exist, vaultic (since 0.17.0) will return exit code ``10``
 and print a corresponding error message. Older versions return exit code ``1``.
-Note that restic will also return exit code ``1`` if a different error is encountered
+Note that vaultic will also return exit code ``1`` if a different error is encountered
 (e.g.: incorrect password to ``cat config``) and it may print a different error message.
-If there are no errors, restic will return a zero exit code and print the repository
+If there are no errors, vaultic will return a zero exit code and print the repository
 metadata.
 
 .. _exit-codes:
@@ -145,7 +145,7 @@ metadata.
 Exit codes
 **********
 
-Restic commands return an exit code that signals whether the command was successful.
+Vaultic commands return an exit code that signals whether the command was successful.
 The following table provides a general description, see the help of each command for
 a more specific description.
 
@@ -163,11 +163,11 @@ a more specific description.
 | 3   | ``backup`` could not read some source data, or     |
 |     | ``forget`` could not remove one or more snapshots  |
 +-----+----------------------------------------------------+
-| 10  | Repository does not exist (since restic 0.17.0)    |
+| 10  | Repository does not exist (since vaultic 0.17.0)    |
 +-----+----------------------------------------------------+
-| 11  | Failed to lock repository (since restic 0.17.0)    |
+| 11  | Failed to lock repository (since vaultic 0.17.0)    |
 +-----+----------------------------------------------------+
-| 12  | Wrong password (since restic 0.17.1)               |
+| 12  | Wrong password (since vaultic 0.17.1)               |
 +-----+----------------------------------------------------+
 | 130 | Command was cancelled (e.g. SIGINT or SIGTERM)     |
 +-----+----------------------------------------------------+
@@ -177,9 +177,9 @@ a more specific description.
 JSON output
 ***********
 
-Restic outputs JSON data to ``stdout`` if requested with the ``--json`` flag.
+Vaultic outputs JSON data to ``stdout`` if requested with the ``--json`` flag.
 The structure of that data varies depending on the circumstance. The
-JSON output of most restic commands is documented here.
+JSON output of most vaultic commands is documented here.
 
 .. note::
     Not all commands support JSON output.  If a command does not support JSON output,
@@ -245,7 +245,7 @@ messages. You can determine the nature of the message using the ``message_type``
 
 Messages with type ``status`` are emitted at a regular interval while the command runs,
 by default about ten times per second, regardless of whether the output is a terminal
-or a pipe. Passing ``--quiet`` disables them. The ``RESTIC_PROGRESS_FPS`` environment
+or a pipe. Passing ``--quiet`` disables them. The ``VAULTIC_PROGRESS_FPS`` environment
 variable overrides both: it sets the number of status updates per second and re-enables
 them even when ``--quiet`` is set. Values below 1 are allowed, for example ``0.0166``
 results in roughly one status message per minute, which is useful when capturing logs.
@@ -290,7 +290,7 @@ These errors are printed on ``stderr``.
 +-------------------+-------------------------------------------+--------+
 | ``error.message`` | Error message                             | string |
 +-------------------+-------------------------------------------+--------+
-| ``during``        | What restic was trying to do              | string |
+| ``during``        | What vaultic was trying to do              | string |
 +-------------------+-------------------------------------------+--------+
 | ``item``          | Usually, the path of the problematic file | string |
 +-------------------+-------------------------------------------+--------+
@@ -395,11 +395,11 @@ Summary
 +--------------------------+------------------------------------------------------------------------------------------------+----------+
 | ``num_errors``           | Number of errors                                                                               | int64    |
 +--------------------------+------------------------------------------------------------------------------------------------+----------+
-| ``broken_packs``         | Run "restic repair packs ID..." and "restic repair snapshots --forget" to remove damaged files | []string |
+| ``broken_packs``         | Run "vaultic repair packs ID..." and "vaultic repair snapshots --forget" to remove damaged files | []string |
 +--------------------------+------------------------------------------------------------------------------------------------+----------+
-| ``suggest_repair_index`` | Run "restic repair index"                                                                      | bool     |
+| ``suggest_repair_index`` | Run "vaultic repair index"                                                                      | bool     |
 +--------------------------+------------------------------------------------------------------------------------------------+----------+
-| ``suggest_prune``        | Run "restic prune"                                                                             | bool     |
+| ``suggest_prune``        | Run "vaultic prune"                                                                             | bool     |
 +--------------------------+------------------------------------------------------------------------------------------------+----------+
 
 Error
@@ -410,7 +410,7 @@ These errors are printed on ``stderr``.
 +------------------+---------------------------------------------------------------------+--------+
 | ``message_type`` | Always "error"                                                      | string |
 +------------------+---------------------------------------------------------------------+--------+
-| ``message``      | Error message. May change in arbitrary ways across restic versions. | string |
+| ``message``      | Error message. May change in arbitrary ways across vaultic versions. | string |
 +------------------+---------------------------------------------------------------------+--------+
 
 
@@ -596,7 +596,7 @@ Snapshot object
 +---------------------+--------------------------------------------------+---------------------------+
 | ``tags``            | List of tags for the snapshot in question        | []string                  |
 +---------------------+--------------------------------------------------+---------------------------+
-| ``program_version`` | restic version used to create snapshot           | string                    |
+| ``program_version`` | vaultic version used to create snapshot           | string                    |
 +---------------------+--------------------------------------------------+---------------------------+
 | ``summary``         | Snapshot statistics                              | `SnapshotSummary object`_ |
 +---------------------+--------------------------------------------------+---------------------------+
@@ -778,7 +778,7 @@ snapshot
 +---------------------+--------------------------------------------------+---------------------------+
 | ``tags``            | List of tags for the snapshot in question        | []string                  |
 +---------------------+--------------------------------------------------+---------------------------+
-| ``program_version`` | restic version used to create snapshot           | string                    |
+| ``program_version`` | vaultic version used to create snapshot           | string                    |
 +---------------------+--------------------------------------------------+---------------------------+
 | ``summary``         | Snapshot statistics                              | `SnapshotSummary object`_ |
 +---------------------+--------------------------------------------------+---------------------------+
@@ -933,7 +933,7 @@ The snapshots command returns a single JSON array with objects of the structure 
 +---------------------+--------------------------------------------------+---------------------------+
 | ``tags``            | List of tags for the snapshot in question        | []string                  |
 +---------------------+--------------------------------------------------+---------------------------+
-| ``program_version`` | restic version used to create snapshot           | string                    |
+| ``program_version`` | vaultic version used to create snapshot           | string                    |
 +---------------------+--------------------------------------------------+---------------------------+
 | ``summary``         | Snapshot statistics                              | `SnapshotSummary object`_ |
 +---------------------+--------------------------------------------------+---------------------------+
@@ -1037,7 +1037,7 @@ The version command returns a single JSON object.
 +------------------+--------------------+--------+
 | ``message_type`` | Always "version"   | string |
 +------------------+--------------------+--------+
-| ``version``      | restic version     | string |
+| ``version``      | vaultic version     | string |
 +------------------+--------------------+--------+
 | ``go_version``   | Go compile version | string |
 +------------------+--------------------+--------+

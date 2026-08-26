@@ -23,7 +23,7 @@ to extract certain data from a repository.
 Listing different file types in the repository
 ==============================================
 
-The ``restic list`` command allows listing objects in the repository based on type.
+The ``vaultic list`` command allows listing objects in the repository based on type.
 The allowed types are (in alphabetic order):
 
 - :ref:`list_blobs`
@@ -42,27 +42,27 @@ The output for ``blobs`` contains one or more lines of output of the form
 ``blob-type blob-ID``, where ``blob-type`` is either ``data`` or ``tree``, and ``blob-ID``
 is the ``sha256sum`` of the ``blob``.
 
-The output of the ``restic list 'type-plural'`` is most commonly used for the
-:ref:`restic cat 'type' <view-repository-objects>`
+The output of the ``vaultic list 'type-plural'`` is most commonly used for the
+:ref:`vaultic cat 'type' <view-repository-objects>`
 command to study a ``type`` object with an ``ID`` in more detail. The only exception to
-this singular/plural ``type`` is ``index``, which is used in both commands ``restic list index`` and
-``restic cat index <ID>``.
+this singular/plural ``type`` is ``index``, which is used in both commands ``vaultic list index`` and
+``vaultic cat index <ID>``.
 
-The examples below are using part of the standard file structure for testing restic itself.
+The examples below are using part of the standard file structure for testing vaultic itself.
 Here is the ``ls`` output of the one and only snapshot in this test repository:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo ls 4254d65c
-    snapshot 4254d65c of [/srv/restic-repo/testdata/0/for_cmd_ls] at 2026-01-17 17:26:41.972899252 +0000 UTC by user@kasimir filtered by []:
-    /srv/restic-repo/testdata
-    /srv/restic-repo/testdata/0
-    /srv/restic-repo/testdata/0/for_cmd_ls
-    /srv/restic-repo/testdata/0/for_cmd_ls/file1.txt
-    /srv/restic-repo/testdata/0/for_cmd_ls/file2.txt
-    /srv/restic-repo/testdata/0/for_cmd_ls/python.py
+    $ vaultic -r /srv/vaultic-repo ls 4254d65c
+    snapshot 4254d65c of [/srv/vaultic-repo/testdata/0/for_cmd_ls] at 2026-01-17 17:26:41.972899252 +0000 UTC by user@kasimir filtered by []:
+    /srv/vaultic-repo/testdata
+    /srv/vaultic-repo/testdata/0
+    /srv/vaultic-repo/testdata/0/for_cmd_ls
+    /srv/vaultic-repo/testdata/0/for_cmd_ls/file1.txt
+    /srv/vaultic-repo/testdata/0/for_cmd_ls/file2.txt
+    /srv/vaultic-repo/testdata/0/for_cmd_ls/python.py
 
-Inspecting this repository with ``restic list snapshots`` produces:
+Inspecting this repository with ``vaultic list snapshots`` produces:
 
 .. _list_snapshots:
 
@@ -71,9 +71,9 @@ snapshots
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo list snapshots -q
+    $ vaultic -r /srv/vaultic-repo list snapshots -q
     4254d65c92208eda22b852b390bd5401ca4c500be7a022c70e7c33de68ca2143
-    $ restic -r /srv/restic-repo cat snapshot 4254d65c92208eda22b852b390bd5401ca4c500be7a022c70e7c33de68ca2143 -q
+    $ vaultic -r /srv/vaultic-repo cat snapshot 4254d65c92208eda22b852b390bd5401ca4c500be7a022c70e7c33de68ca2143 -q
     {
       "time": "2026-01-17T17:26:41.972899252Z",
       "tree": "db9e90f7f1761ab892b3ae25e3838bbd697499b985e9b47d3a1da09e0bd8ca68",
@@ -94,9 +94,9 @@ The index contains 2 packfiles, one for trees and one for the actual file data:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo list index -q
+    $ vaultic -r /srv/vaultic-repo list index -q
     a1828d209e760f0fd143aa79e530de0a377d7affd1cd0964d9cb2ad3c77e0d8b
-    $ restic -r /srv/restic-repo cat index a1828d209e760f0fd143aa79e530de0a377d7affd1cd0964d9cb2ad3c77e0d8b | jq
+    $ vaultic -r /srv/vaultic-repo cat index a1828d209e760f0fd143aa79e530de0a377d7affd1cd0964d9cb2ad3c77e0d8b | jq
     {
       "packs": [
         {
@@ -134,12 +134,12 @@ The index contains 2 packfiles, one for trees and one for the actual file data:
 blobs
 -----
 
-``restic list blobs`` which produces 2 columns of output, first the type,
+``vaultic list blobs`` which produces 2 columns of output, first the type,
 followed by the ID:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo list blobs -q
+    $ vaultic -r /srv/vaultic-repo list blobs -q
     data 124323c57d74fb8944c98fb69ce67a41a107cb6d2ed304cf50c8529cc137aafd
     data 37cc0b45af245d93abaecba73a600a8d577b39e4a1fdc2dcdf93ad63b1e167bd
     data 5dfb8bc8a35175bf011d10ac7bc3a6b8d42b7743ac188be8c1bf0b215f9b7bf5
@@ -157,7 +157,7 @@ Here is an example which lists all the packs in the repository:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo list packs -q
+    $ vaultic -r /srv/vaultic-repo list packs -q
     953e5381138bdc44da23740a83065809dd4021f45ce4e351b577dc4c07f81314
     75bca8556f47d16362e58e757ea89a34b28fb96aedcc314bea35d468e5cb665c
 
@@ -166,7 +166,7 @@ If you want to list all packfiles which are part of a snapshot, use the command
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo list packs latest -q
+    $ vaultic -r /srv/vaultic-repo list packs latest -q
     ae92415f79c281330159ed590db2a973048c886aacfa4fabfa0eaac10b396b8f
     dc25893d422a71af41aaaa843cd7121708cd88679bf3885f94a32900ac068e84
 
@@ -178,7 +178,7 @@ This will give you the list of all packfiles, sorted in ID ascending order.
 Inspecting repository objects
 =============================
 
-The ``restic cat`` shows details of the different objects in the repository based on type.
+The ``vaultic cat`` shows details of the different objects in the repository based on type.
 The allowed types are (in alphabetic order):
 
 - :ref:`blob <cat_blob>`
@@ -194,7 +194,7 @@ The allowed types are (in alphabetic order):
 The ``cat`` command is used to inspect and print internal repository objects to stdout.
 This is primarily useful for debugging, understanding repository structure, or
 recovering data from a damaged repository. The command supports the object types described
-below. To get a list of objects of a given type, use the :ref:`restic list <list_list>` command
+below. To get a list of objects of a given type, use the :ref:`vaultic list <list_list>` command
 as described in the previous section.
 
 For details about the individual data structures, see the :ref:`repository-format` section.
@@ -218,7 +218,7 @@ No additional ID argument is required.
 
 Example::
 
-    $ restic -r /srv/restic-repo cat masterkey
+    $ vaultic -r /srv/vaultic-repo cat masterkey
     repository c528f271 opened (version 2, compression level auto)
     {
       "mac": {
@@ -238,7 +238,7 @@ the repository version and chunker polynomial. No additional ID argument is requ
 
 Example::
 
-    $ restic -r /srv/restic-repo cat config
+    $ vaultic -r /srv/vaultic-repo cat config
     repository c528f271 opened (version 2, compression level auto)
     {
       "version": 2,
@@ -258,7 +258,7 @@ and a number of additional fields.
 
 Example::
 
-    $ restic -r /srv/restic-repo cat snapshot 251c2e58
+    $ vaultic -r /srv/vaultic-repo cat snapshot 251c2e58
     repository c528f271 opened (version 2, compression level auto)
     {
       "time": "2026-02-19T22:44:34.833377676-08:00",
@@ -274,7 +274,7 @@ Example::
       "tags": [
         "assets"
       ],
-      "program_version": "restic 0.18.1",
+      "program_version": "vaultic 0.18.1",
       "summary": {
         "backup_start": "2026-02-19T22:44:34.833377676-08:00",
         "backup_end": "2026-02-19T22:44:35.510749043-08:00",
@@ -301,13 +301,13 @@ tree snapshot[:subfolder]
 Prints the root tree of a snapshot or a specific subfolder if specified.
 This outputs the tree in JSON format. The tree contains nodes representing files
 and directories. To view the tree structure in a human-readable format, you can
-use the ``restic ls`` command instead. For better readability, pipe the output
+use the ``vaultic ls`` command instead. For better readability, pipe the output
 to ``jq``.
 
 Example::
 
     # Print the root tree of a snapshot
-    $ restic -r /srv/restic-repo cat tree 251c2e584489c16e19f3c4544a0ef23e3ebf65a7cc23c68f31035ddf885d92ad | jq .
+    $ vaultic -r /srv/vaultic-repo cat tree 251c2e584489c16e19f3c4544a0ef23e3ebf65a7cc23c68f31035ddf885d92ad | jq .
     {
       "nodes": [
         {
@@ -330,7 +330,7 @@ Example::
     }
 
     # Print a specific subfolder within a snapshot
-    $ restic -r /srv/restic-repo cat tree 251c2e584489c16e19f3c4544a0ef23e3ebf65a7cc23c68f31035ddf885d92ad:subfolder/path | jq .
+    $ vaultic -r /srv/vaultic-repo cat tree 251c2e584489c16e19f3c4544a0ef23e3ebf65a7cc23c68f31035ddf885d92ad:subfolder/path | jq .
     {
       "nodes": [
         {
@@ -385,7 +385,7 @@ readable JSON.
 Example::
 
     # Print a tree blob and view as JSON (requires jq)
-    $ restic -r /srv/restic-repo cat blob 2f15b17652357a2be758e58a76549eda0f7fb155d9a7bf3081234d8a028601ac | jq .
+    $ vaultic -r /srv/vaultic-repo cat blob 2f15b17652357a2be758e58a76549eda0f7fb155d9a7bf3081234d8a028601ac | jq .
     {
       "nodes": [
         {
@@ -428,13 +428,13 @@ Example::
     }
 
     # Print a data blob
-    $ restic -r /srv/restic-repo cat blob 0499644cc8e5f947be5df73c15b673b96067631d213c751b51951d65fad7b3f4
+    $ vaultic -r /srv/vaultic-repo cat blob 0499644cc8e5f947be5df73c15b673b96067631d213c751b51951d65fad7b3f4
     repository c528f271 opened (version 2, compression level auto)
     [0:00] 100.00%  1 / 1 index files loaded
     [blob contents]
 
     # Print a data blob and verify the hash
-    $ restic -r /srv/restic-repo cat blob 0499644cc8e5f947be5df73c15b673b96067631d213c751b51951d65fad7b3f4 | sha256sum
+    $ vaultic -r /srv/vaultic-repo cat blob 0499644cc8e5f947be5df73c15b673b96067631d213c751b51951d65fad7b3f4 | sha256sum
     0499644cc8e5f947be5df73c15b673b96067631d213c751b51951d65fad7b3f4  -
 
 .. _cat_index:
@@ -447,7 +447,7 @@ that contain them.
 
 Example::
 
-    $ restic -r /srv/restic-repo cat index c3c0855e22febcfbd3897a2b8bd84c2c0d0356fffe93744c5a853bf453f3e921 | jq .
+    $ vaultic -r /srv/vaultic-repo cat index c3c0855e22febcfbd3897a2b8bd84c2c0d0356fffe93744c5a853bf453f3e921 | jq .
     {
       "packs": [
         {
@@ -503,7 +503,7 @@ creation time, username, hostname, and the encrypted master key data.
 
 Example::
 
-    $ restic -r /srv/restic-repo cat key 33aa6685814c417df6eca8dfd5cbf7e0000dd197cdda223aa9443190b619e5c7
+    $ vaultic -r /srv/vaultic-repo cat key 33aa6685814c417df6eca8dfd5cbf7e0000dd197cdda223aa9443190b619e5c7
     repository c528f271 opened (version 2, compression level auto)
     {
       "created": "2026-02-19T22:16:30.938425666-08:00",
@@ -527,7 +527,7 @@ during repository operations to prevent concurrent access.
 
 Example::
 
-    $ restic -r /srv/restic-repo cat lock 623da7f58063e4acd52a9995049e96b83a7ab39d158304ec83e3554c33bcbf63
+    $ vaultic -r /srv/vaultic-repo cat lock 623da7f58063e4acd52a9995049e96b83a7ab39d158304ec83e3554c33bcbf63
     repository c528f271 opened (version 2, compression level auto)
     {
       "time": "2026-02-19T22:37:46.85328066-08:00",
@@ -545,10 +545,10 @@ pack ID
 -------
 
 Prints the raw binary content of a pack file. Pack files contain multiple
-encrypted blobs and are the fundamental storage unit in restic. The command
+encrypted blobs and are the fundamental storage unit in vaultic. The command
 will verify the hash and warn if it doesn't match the pack ID.
 
 Example::
 
-    $ restic -r /srv/restic-repo cat pack fe975e242e458b2c18bd00538ae16eaba3077fe1b615b00366294c0c3a52c664
+    $ vaultic -r /srv/vaultic-repo cat pack fe975e242e458b2c18bd00538ae16eaba3077fe1b615b00366294c0c3a52c664
     [binary output]

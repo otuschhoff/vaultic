@@ -5,15 +5,15 @@ Reproducible Builds
 *******************
 
 This section describes how to reproduce the official released binaries for
-restic for version 0.10.0 and later. For restic versions down to 0.9.3 please
+vaultic for version 0.10.0 and later. For vaultic versions down to 0.9.3 please
 refer to the documentation for the respective version. The binary produced
 depends on the following things:
 
 * The source code for the release
-* The exact version of the official `Go compiler <https://go.dev>`__ used to produce the binaries (running ``restic version`` will print this)
+* The exact version of the official `Go compiler <https://go.dev>`__ used to produce the binaries (running ``vaultic version`` will print this)
 * The architecture and operating system the Go compiler runs on (Linux, ``amd64``)
 * The build tags (for official binaries, it's the tag ``selfupdate``)
-* The path where the source code is extracted to (``/restic``)
+* The path where the source code is extracted to (``/vaultic``)
 * The path to the Go compiler (``/usr/local/go``)
 * The path to the Go workspace (``GOPATH=/home/build/go``)
 * Other environment variables (mostly ``$GOOS``, ``$GOARCH``, ``$CGO_ENABLED``)
@@ -23,25 +23,25 @@ timestamp and filename of the binary contained in it. In order to reproduce the
 exact same ZIP file every time, we update the timestamp of the file ``VERSION``
 in the source code archive and set the timezone to Europe/Berlin.
 
-In the following example, we'll use the file ``restic-0.14.0.tar.gz`` and Go
+In the following example, we'll use the file ``vaultic-0.14.0.tar.gz`` and Go
 1.19 to reproduce the released binaries.
 
 1. Determine the Go compiler version used to build the released binaries, then download and extract the Go compiler into ``/usr/local/go``:
 
 .. code::
 
-    $ restic version
-    restic 0.14.0 compiled with go1.19 on linux/amd64
+    $ vaultic version
+    vaultic 0.14.0 compiled with go1.19 on linux/amd64
     $ cd /usr/local
     $ curl -L https://dl.google.com/go/go1.19.linux-amd64.tar.gz | tar xz
 
-2. Extract the restic source code into ``/restic``
+2. Extract the vaultic source code into ``/vaultic``
 
 .. code::
 
-    $ mkdir /restic
-    $ cd /restic
-    $ TZ=Europe/Berlin curl -L https://github.com/vaultic/vaultic/releases/download/v0.14.0/restic-0.14.0.tar.gz | tar xz --strip-components=1
+    $ mkdir /vaultic
+    $ cd /vaultic
+    $ TZ=Europe/Berlin curl -L https://github.com/vaultic/vaultic/releases/download/v0.14.0/vaultic-0.14.0.tar.gz | tar xz --strip-components=1
 
 3. Build the binaries for Windows and Linux:
 
@@ -52,21 +52,21 @@ In the following example, we'll use the file ``restic-0.14.0.tar.gz`` and Go
     $ go version
     go version go1.19 linux/amd64
 
-    $ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags selfupdate,disable_grpc_modules -o restic_linux_amd64 ./cmd/restic
-    $ bzip2 restic_linux_amd64
+    $ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags selfupdate,disable_grpc_modules -o vaultic_linux_amd64 ./cmd/vaultic
+    $ bzip2 vaultic_linux_amd64
 
-    $ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags selfupdate,disable_grpc_modules -o restic_0.14.0_windows_amd64.exe ./cmd/restic
-    $ touch --reference VERSION restic_0.14.0_windows_amd64.exe
-    $ TZ=Europe/Berlin zip -q -X restic_0.14.0_windows_amd64.zip restic_0.14.0_windows_amd64.exe
+    $ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags selfupdate,disable_grpc_modules -o vaultic_0.14.0_windows_amd64.exe ./cmd/vaultic
+    $ touch --reference VERSION vaultic_0.14.0_windows_amd64.exe
+    $ TZ=Europe/Berlin zip -q -X vaultic_0.14.0_windows_amd64.zip vaultic_0.14.0_windows_amd64.exe
 
 Building the Official Binaries
 ******************************
 
-The released binaries for restic are built using a Docker container. You can
-find it on `Docker Hub <https://hub.docker.com/r/restic/builder>`__ as
-``restic/builder``, the ``Dockerfile`` and instructions on how to build the
+The released binaries for vaultic are built using a Docker container. You can
+find it on `Docker Hub <https://hub.docker.com/r/vaultic/builder>`__ as
+``vaultic/builder``, the ``Dockerfile`` and instructions on how to build the
 container can be found in the `GitHub repository
-<https://github.com/restic/builder>`__.
+<https://github.com/vaultic/builder>`__.
 
 The container serves the following goals:
 * Have a very controlled environment which is independent from the local system
@@ -75,17 +75,17 @@ The container serves the following goals:
 
 The following steps are necessary to build the binaries:
 
-1. Either build the container (see the instructions in the `repository's README <https://github.com/restic/builder>`__). Alternatively, download the container from the hub:
+1. Either build the container (see the instructions in the `repository's README <https://github.com/vaultic/builder>`__). Alternatively, download the container from the hub:
 
 .. code::
 
-    docker pull restic/builder
+    docker pull vaultic/builder
 
 2. Extract the source code somewhere:
 
 .. code::
 
-    tar xvzf restic-0.14.0.tar.gz
+    tar xvzf vaultic-0.14.0.tar.gz
 
 3. Create a directory to place the resulting binaries in:
 
@@ -98,9 +98,9 @@ The following steps are necessary to build the binaries:
 .. code::
 
     docker run --rm \
-        --volume "$PWD/restic-0.14.0:/restic" \
+        --volume "$PWD/vaultic-0.14.0:/vaultic" \
         --volume "$PWD/output:/output" \
-        restic/builder \
+        vaultic/builder \
         go run helpers/build-release-binaries/main.go --version 0.14.0
 
 5. If anything goes wrong, you can enable debug output like this:
@@ -108,9 +108,9 @@ The following steps are necessary to build the binaries:
 .. code::
 
     docker run --rm \
-        --volume "$PWD/restic-0.14.0:/restic" \
+        --volume "$PWD/vaultic-0.14.0:/vaultic" \
         --volume "$PWD/output:/output" \
-        restic/builder \
+        vaultic/builder \
         go run helpers/build-release-binaries/main.go --version 0.14.0 --verbose
 
 Verifying SLSA Provenance for GHCR Docker Images
@@ -144,18 +144,18 @@ Verifying the Official Binaries
 *******************************
 
 To verify the official binaries, you can either build them yourself using the above
-instructions or use the ``helpers/verify-release-binaries.sh`` script from the restic
-repository. Run it as ``helpers/verify-release-binaries.sh $restic_version $go_version``.
+instructions or use the ``helpers/verify-release-binaries.sh`` script from the vaultic
+repository. Run it as ``helpers/verify-release-binaries.sh $vaultic_version $go_version``.
 The specified go compiler version must match the one used to build the official
-binaries. For example, for restic 0.16.2 the command would be
+binaries. For example, for vaultic 0.16.2 the command would be
 ``helpers/verify-release-binaries.sh 0.16.2 1.21.3``.
 
 The script requires bash, curl, docker (version >= 25.0), git, gpg, shasum and tar.
 
 The script first downloads all release binaries, checks the ``SHA256SUMS`` file and its
-signature. Afterwards it checks that the tarball matches the restic git repository
+signature. Afterwards it checks that the tarball matches the vaultic git repository
 contents, before first reproducing the builder docker container and finally the
-restic binaries. As final step, the restic binary in both the docker hub images
+vaultic binaries. As final step, the vaultic binary in both the docker hub images
 and the GitHub container registry is verified. If any step fails, then the script
 will issue a warning.
 
@@ -163,7 +163,7 @@ will issue a warning.
 Prepare a New Release
 *********************
 
-Publishing a new release of restic requires many different steps. We've
+Publishing a new release of vaultic requires many different steps. We've
 automated this in the Go program ``helpers/prepare-release/main.go`` which also
 includes checking that e.g. the changelog is correctly generated. The only
 required argument is the new version number (in `Semantic Versioning

@@ -1,12 +1,12 @@
-.PHONY: all clean test restic
+.PHONY: all clean test vaultic
 
-all: restic
+all: vaultic
 
-restic:
+vaultic:
 	go run build.go
 
 clean:
-	rm -f restic
+	rm -f vaultic
 
 test:
 	go test ./cmd/... ./internal/...

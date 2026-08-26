@@ -1,8 +1,8 @@
 {{- range $changes := . }}{{ with $changes -}}
-Changelog for restic {{ .Version }} ({{ .Date }})
+Changelog for vaultic {{ .Version }} ({{ .Date }})
 =======================================
 
-The following sections list the changes in restic {{ .Version }} relevant to restic users. The changes are ordered by importance.
+The following sections list the changes in vaultic {{ .Version }} relevant to vaultic users. The changes are ordered by importance.
 
 Summary
 -------
@@ -18,10 +18,10 @@ Details
 {{ indent 3 $par }}
 {{ end }}
    {{ range $id := .Issues -}}
-{{ ` ` }}[#{{ $id }}](https://github.com/restic/restic/issues/{{ $id -}})
+{{ ` ` }}[#{{ $id }}](https://github.com/vaultic/vaultic/issues/{{ $id -}})
 {{- end -}}
 {{ range $id := .PRs -}}
-{{ ` ` }}[#{{ $id }}](https://github.com/restic/restic/pull/{{ $id -}})
+{{ ` ` }}[#{{ $id }}](https://github.com/vaultic/vaultic/pull/{{ $id -}})
 {{- end -}}
 {{ ` ` }}{{ range $url := .OtherURLs -}}
 {{ $url -}}

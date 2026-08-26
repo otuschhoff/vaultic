@@ -1,16 +1,16 @@
-# powershell completion for restic                               -*- shell-script -*-
+# powershell completion for vaultic                              -*- shell-script -*-
 
-function __restic_debug {
+function __vaultic_debug {
     if ($env:BASH_COMP_DEBUG_FILE) {
         "$args" | Out-File -Append -FilePath "$env:BASH_COMP_DEBUG_FILE"
     }
 }
 
-filter __restic_escapeStringWithSpecialChars {
+filter __vaultic_escapeStringWithSpecialChars {
     $_ -replace '\s|#|@|\$|;|,|''|\{|\}|\(|\)|"|`|\||<|>|&','`$&'
 }
 
-[scriptblock]${__resticCompleterBlock} = {
+[scriptblock]${__vaulticCompleterBlock} = {
     param(
             $WordToComplete,
             $CommandAst,
@@ -21,9 +21,9 @@ filter __restic_escapeStringWithSpecialChars {
     $Command = $CommandAst.CommandElements
     $Command = "$Command"
 
-    __restic_debug ""
-    __restic_debug "========= starting completion logic =========="
-    __restic_debug "WordToComplete: $WordToComplete Command: $Command CursorPosition: $CursorPosition"
+    __vaultic_debug ""
+    __vaultic_debug "========= starting completion logic =========="
+    __vaultic_debug "WordToComplete: $WordToComplete Command: $Command CursorPosition: $CursorPosition"
 
     # The user could have moved the cursor backwards on the command-line.
     # We need to trigger completion from the $CursorPosition location, so we need
@@ -33,7 +33,7 @@ filter __restic_escapeStringWithSpecialChars {
     if ($Command.Length -gt $CursorPosition) {
         $Command=$Command.Substring(0,$CursorPosition)
     }
-    __restic_debug "Truncated command: $Command"
+    __vaultic_debug "Truncated command: $Command"
 
     $ShellCompDirectiveError=1
     $ShellCompDirectiveNoSpace=2
@@ -47,7 +47,7 @@ filter __restic_escapeStringWithSpecialChars {
     $Program,$Arguments = $Command.Split(" ",2)
 
     $RequestComp="$Program __completeNoDesc $Arguments"
-    __restic_debug "RequestComp: $RequestComp"
+    __vaultic_debug "RequestComp: $RequestComp"
 
     # we cannot use $WordToComplete because it
     # has the wrong values if the cursor was moved
@@ -55,13 +55,13 @@ filter __restic_escapeStringWithSpecialChars {
     if ($WordToComplete -ne "" ) {
         $WordToComplete = $Arguments.Split(" ")[-1]
     }
-    __restic_debug "New WordToComplete: $WordToComplete"
+    __vaultic_debug "New WordToComplete: $WordToComplete"
 
 
     # Check for flag with equal sign
     $IsEqualFlag = ($WordToComplete -Like "--*=*" )
     if ( $IsEqualFlag ) {
-        __restic_debug "Completing equal sign flag"
+        __vaultic_debug "Completing equal sign flag"
         # Remove the flag part
         $Flag,$WordToComplete = $WordToComplete.Split("=",2)
     }
@@ -69,7 +69,7 @@ filter __restic_escapeStringWithSpecialChars {
     if ( $WordToComplete -eq "" -And ( -Not $IsEqualFlag )) {
         # If the last parameter is complete (there is a space following it)
         # We add an extra empty parameter so we can indicate this to the go method.
-        __restic_debug "Adding extra empty parameter"
+        __vaultic_debug "Adding extra empty parameter"
         # PowerShell 7.2+ changed the way how the arguments are passed to executables,
         # so for pre-7.2 or when Legacy argument passing is enabled we need to use
         # `"`" to pass an empty argument, a "" or '' does not work!!!
@@ -83,9 +83,9 @@ filter __restic_escapeStringWithSpecialChars {
         }
     }
 
-    __restic_debug "Calling $RequestComp"
+    __vaultic_debug "Calling $RequestComp"
     # First disable ActiveHelp which is not supported for Powershell
-    ${env:RESTIC_ACTIVE_HELP}=0
+    ${env:VAULTIC_ACTIVE_HELP}=0
 
     #call the command store the output in $out and redirect stderr and stdout to null
     # $Out is an array contains each line per element
@@ -97,15 +97,15 @@ filter __restic_escapeStringWithSpecialChars {
         # There is no directive specified
         $Directive = 0
     }
-    __restic_debug "The completion directive is: $Directive"
+    __vaultic_debug "The completion directive is: $Directive"
 
     # remove directive (last element) from out
     $Out = $Out | Where-Object { $_ -ne $Out[-1] }
-    __restic_debug "The completions are: $Out"
+    __vaultic_debug "The completions are: $Out"
 
     if (($Directive -band $ShellCompDirectiveError) -ne 0 ) {
         # Error code.  No completion.
-        __restic_debug "Received error from custom completion go code"
+        __vaultic_debug "Received error from custom completion go code"
         return
     }
 
@@ -113,7 +113,7 @@ filter __restic_escapeStringWithSpecialChars {
     [Array]$Values = $Out | ForEach-Object {
         #Split the output in name and description
         $Name, $Description = $_.Split("`t",2)
-        __restic_debug "Name: $Name Description: $Description"
+        __vaultic_debug "Name: $Name Description: $Description"
 
         # Look for the longest completion so that we can format things nicely
         if ($Longest -lt $Name.Length) {
@@ -135,13 +135,13 @@ filter __restic_escapeStringWithSpecialChars {
     $Space = " "
     if (($Directive -band $ShellCompDirectiveNoSpace) -ne 0 ) {
         # remove the space here
-        __restic_debug "ShellCompDirectiveNoSpace is called"
+        __vaultic_debug "ShellCompDirectiveNoSpace is called"
         $Space = ""
     }
 
     if ((($Directive -band $ShellCompDirectiveFilterFileExt) -ne 0 ) -or
        (($Directive -band $ShellCompDirectiveFilterDirs) -ne 0 ))  {
-        __restic_debug "ShellCompDirectiveFilterFileExt ShellCompDirectiveFilterDirs are not supported"
+        __vaultic_debug "ShellCompDirectiveFilterFileExt ShellCompDirectiveFilterDirs are not supported"
 
         # return here to prevent the completion of the extensions
         return
@@ -153,7 +153,7 @@ filter __restic_escapeStringWithSpecialChars {
 
         # Join the flag back if we have an equal sign flag
         if ( $IsEqualFlag ) {
-            __restic_debug "Join the equal sign flag back to the completion value"
+            __vaultic_debug "Join the equal sign flag back to the completion value"
             $_.Name = $Flag + "=" + $_.Name
         }
     }
@@ -164,7 +164,7 @@ filter __restic_escapeStringWithSpecialChars {
     }
 
     if (($Directive -band $ShellCompDirectiveNoFileComp) -ne 0 ) {
-        __restic_debug "ShellCompDirectiveNoFileComp is called"
+        __vaultic_debug "ShellCompDirectiveNoFileComp is called"
 
         if ($Values.Length -eq 0) {
             # Just print an empty string here so the
@@ -178,7 +178,7 @@ filter __restic_escapeStringWithSpecialChars {
 
     # Get the current mode
     $Mode = (Get-PSReadLineKeyHandler | Where-Object {$_.Key -eq "Tab" }).Function
-    __restic_debug "Mode: $Mode"
+    __vaultic_debug "Mode: $Mode"
 
     $Values | ForEach-Object {
 
@@ -203,10 +203,10 @@ filter __restic_escapeStringWithSpecialChars {
             "Complete" {
 
                 if ($Values.Length -eq 1) {
-                    __restic_debug "Only one completion left"
+                    __vaultic_debug "Only one completion left"
 
                     # insert space after value
-                    $CompletionText = $($comp.Name | __restic_escapeStringWithSpecialChars) + $Space
+                    $CompletionText = $($comp.Name | __vaultic_escapeStringWithSpecialChars) + $Space
                     if ($ExecutionContext.SessionState.LanguageMode -eq "FullLanguage"){
                         [System.Management.Automation.CompletionResult]::new($CompletionText, "$($comp.Name)", 'ParameterValue', "$($comp.Description)")
                     } else {
@@ -241,7 +241,7 @@ filter __restic_escapeStringWithSpecialChars {
                 # MenuComplete will automatically show the ToolTip of
                 # the highlighted value at the bottom of the suggestions.
 
-                $CompletionText = $($comp.Name | __restic_escapeStringWithSpecialChars) + $Space
+                $CompletionText = $($comp.Name | __vaultic_escapeStringWithSpecialChars) + $Space
                 if ($ExecutionContext.SessionState.LanguageMode -eq "FullLanguage"){
                     [System.Management.Automation.CompletionResult]::new($CompletionText, "$($comp.Name)", 'ParameterValue', "$($comp.Description)")
                 } else {
@@ -255,7 +255,7 @@ filter __restic_escapeStringWithSpecialChars {
                 # the user need to press space anyway to get the completion.
                 # Description will not be shown because that's not possible with TabCompleteNext
 
-                $CompletionText = $($comp.Name | __restic_escapeStringWithSpecialChars)
+                $CompletionText = $($comp.Name | __vaultic_escapeStringWithSpecialChars)
                 if ($ExecutionContext.SessionState.LanguageMode -eq "FullLanguage"){
                     [System.Management.Automation.CompletionResult]::new($CompletionText, "$($comp.Name)", 'ParameterValue', "$($comp.Description)")
                 } else {
@@ -267,4 +267,4 @@ filter __restic_escapeStringWithSpecialChars {
     }
 }
 
-Register-ArgumentCompleter -CommandName 'restic' -ScriptBlock ${__resticCompleterBlock}
+Register-ArgumentCompleter -CommandName 'vaultic' -ScriptBlock ${__vaulticCompleterBlock}

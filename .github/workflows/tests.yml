@@ -121,11 +121,11 @@ jobs:
 
           # install exactly these versions of tar and the libraries, other combinations might not work!
 
-          Invoke-WebRequest https://github.com/restic/test-assets/raw/master/tar-1.13-1-bin.zip -OutFile tar.zip
+          Invoke-WebRequest https://github.com/vaultic/test-assets/raw/master/tar-1.13-1-bin.zip -OutFile tar.zip
           unzip tar.zip
-          Invoke-WebRequest https://github.com/restic/test-assets/raw/master/libintl-0.11.5-2-bin.zip -OutFile libintl.zip
+          Invoke-WebRequest https://github.com/vaultic/test-assets/raw/master/libintl-0.11.5-2-bin.zip -OutFile libintl.zip
           unzip libintl.zip
-          Invoke-WebRequest https://github.com/restic/test-assets/raw/master/libiconv-1.8-1-bin.zip -OutFile libiconv.zip
+          Invoke-WebRequest https://github.com/vaultic/test-assets/raw/master/libiconv-1.8-1-bin.zip -OutFile libiconv.zip
           unzip libiconv.zip
 
           # add $USERPROFILE/tar/bin to path
@@ -139,66 +139,66 @@ jobs:
       - name: Minimal test
         timeout-minutes: 3
         run: |
-          ./restic init
-          ./restic backup .
+          ./vaultic init
+          ./vaultic backup .
         env:
-          RESTIC_REPOSITORY: ../testrepo
-          RESTIC_PASSWORD: password
-          RESTIC_DEBUG_STACKTRACE_SIGINT: "true"
+          VAULTIC_REPOSITORY: ../testrepo
+          VAULTIC_PASSWORD: password
+          VAULTIC_DEBUG_STACKTRACE_SIGINT: "true"
 
       - name: Run local Tests
         env:
-          RESTIC_TEST_FUSE: ${{ matrix.test_fuse }}
+          VAULTIC_TEST_FUSE: ${{ matrix.test_fuse }}
         run: |
           go test -cover ${{matrix.test_opts}} ./...
 
       - name: Test cloud backends
         env:
-          RESTIC_TEST_S3_KEY: ${{ secrets.RESTIC_TEST_S3_KEY }}
-          RESTIC_TEST_S3_SECRET: ${{ secrets.RESTIC_TEST_S3_SECRET }}
-          RESTIC_TEST_S3_REPOSITORY: ${{ secrets.RESTIC_TEST_S3_REPOSITORY }}
-          RESTIC_TEST_AZURE_ACCOUNT_NAME: ${{ secrets.RESTIC_TEST_AZURE_ACCOUNT_NAME }}
-          RESTIC_TEST_AZURE_ACCOUNT_KEY: ${{ secrets.RESTIC_TEST_AZURE_ACCOUNT_KEY }}
-          RESTIC_TEST_AZURE_REPOSITORY: ${{ secrets.RESTIC_TEST_AZURE_REPOSITORY }}
-          RESTIC_TEST_B2_ACCOUNT_ID: ${{ secrets.RESTIC_TEST_B2_ACCOUNT_ID }}
-          RESTIC_TEST_B2_ACCOUNT_KEY: ${{ secrets.RESTIC_TEST_B2_ACCOUNT_KEY }}
-          RESTIC_TEST_B2_REPOSITORY: ${{ secrets.RESTIC_TEST_B2_REPOSITORY }}
-          RESTIC_TEST_GS_REPOSITORY: ${{ secrets.RESTIC_TEST_GS_REPOSITORY }}
-          RESTIC_TEST_GS_PROJECT_ID: ${{ secrets.RESTIC_TEST_GS_PROJECT_ID }}
+          VAULTIC_TEST_S3_KEY: ${{ secrets.RESTIC_TEST_S3_KEY }}
+          VAULTIC_TEST_S3_SECRET: ${{ secrets.RESTIC_TEST_S3_SECRET }}
+          VAULTIC_TEST_S3_REPOSITORY: ${{ secrets.RESTIC_TEST_S3_REPOSITORY }}
+          VAULTIC_TEST_AZURE_ACCOUNT_NAME: ${{ secrets.RESTIC_TEST_AZURE_ACCOUNT_NAME }}
+          VAULTIC_TEST_AZURE_ACCOUNT_KEY: ${{ secrets.RESTIC_TEST_AZURE_ACCOUNT_KEY }}
+          VAULTIC_TEST_AZURE_REPOSITORY: ${{ secrets.RESTIC_TEST_AZURE_REPOSITORY }}
+          VAULTIC_TEST_B2_ACCOUNT_ID: ${{ secrets.RESTIC_TEST_B2_ACCOUNT_ID }}
+          VAULTIC_TEST_B2_ACCOUNT_KEY: ${{ secrets.RESTIC_TEST_B2_ACCOUNT_KEY }}
+          VAULTIC_TEST_B2_REPOSITORY: ${{ secrets.RESTIC_TEST_B2_REPOSITORY }}
+          VAULTIC_TEST_GS_REPOSITORY: ${{ secrets.RESTIC_TEST_GS_REPOSITORY }}
+          VAULTIC_TEST_GS_PROJECT_ID: ${{ secrets.RESTIC_TEST_GS_PROJECT_ID }}
           GOOGLE_PROJECT_ID: ${{ secrets.RESTIC_TEST_GS_PROJECT_ID }}
-          RESTIC_TEST_GS_APPLICATION_CREDENTIALS_B64: ${{ secrets.RESTIC_TEST_GS_APPLICATION_CREDENTIALS_B64 }}
-          RESTIC_TEST_OS_AUTH_URL: ${{ secrets.RESTIC_TEST_OS_AUTH_URL }}
-          RESTIC_TEST_OS_TENANT_NAME: ${{ secrets.RESTIC_TEST_OS_TENANT_NAME }}
-          RESTIC_TEST_OS_USERNAME: ${{ secrets.RESTIC_TEST_OS_USERNAME }}
-          RESTIC_TEST_OS_PASSWORD: ${{ secrets.RESTIC_TEST_OS_PASSWORD }}
-          RESTIC_TEST_OS_REGION_NAME: ${{ secrets.RESTIC_TEST_OS_REGION_NAME }}
-          RESTIC_TEST_SWIFT: ${{ secrets.RESTIC_TEST_SWIFT }}
+          VAULTIC_TEST_GS_APPLICATION_CREDENTIALS_B64: ${{ secrets.RESTIC_TEST_GS_APPLICATION_CREDENTIALS_B64 }}
+          VAULTIC_TEST_OS_AUTH_URL: ${{ secrets.RESTIC_TEST_OS_AUTH_URL }}
+          VAULTIC_TEST_OS_TENANT_NAME: ${{ secrets.RESTIC_TEST_OS_TENANT_NAME }}
+          VAULTIC_TEST_OS_USERNAME: ${{ secrets.RESTIC_TEST_OS_USERNAME }}
+          VAULTIC_TEST_OS_PASSWORD: ${{ secrets.RESTIC_TEST_OS_PASSWORD }}
+          VAULTIC_TEST_OS_REGION_NAME: ${{ secrets.RESTIC_TEST_OS_REGION_NAME }}
+          VAULTIC_TEST_SWIFT: ${{ secrets.RESTIC_TEST_SWIFT }}
           # fail if any of the following tests cannot be run
-          RESTIC_TEST_DISALLOW_SKIP: "restic/backend/rest.TestBackendREST,\
-            restic/backend/sftp.TestBackendSFTP,\
-            restic/backend/s3.TestBackendMinio,\
-            restic/backend/rclone.TestBackendRclone,\
-            restic/backend/s3.TestBackendS3,\
-            restic/backend/swift.TestBackendSwift,\
-            restic/backend/b2.TestBackendB2,\
-            restic/backend/gs.TestBackendGS,\
-            restic/backend/azure.TestBackendAzure"
+          VAULTIC_TEST_DISALLOW_SKIP: "vaultic/backend/rest.TestBackendREST,\
+            vaultic/backend/sftp.TestBackendSFTP,\
+            vaultic/backend/s3.TestBackendMinio,\
+            vaultic/backend/rclone.TestBackendRclone,\
+            vaultic/backend/s3.TestBackendS3,\
+            vaultic/backend/swift.TestBackendSwift,\
+            vaultic/backend/b2.TestBackendB2,\
+            vaultic/backend/gs.TestBackendGS,\
+            vaultic/backend/azure.TestBackendAzure"
         run: |
           # prepare credentials for Google Cloud Storage tests in a temp file
-          export GOOGLE_APPLICATION_CREDENTIALS=$(mktemp --tmpdir restic-gcs-auth-XXXXXXX)
-          echo $RESTIC_TEST_GS_APPLICATION_CREDENTIALS_B64 | base64 -d > $GOOGLE_APPLICATION_CREDENTIALS
+          export GOOGLE_APPLICATION_CREDENTIALS=$(mktemp --tmpdir vaultic-gcs-auth-XXXXXXX)
+          echo $VAULTIC_TEST_GS_APPLICATION_CREDENTIALS_B64 | base64 -d > $GOOGLE_APPLICATION_CREDENTIALS
           go test -cover -parallel 5 -timeout 15m ./internal/backend/...
 
         # only run cloud backend tests for pull requests from and pushes to our
         # own repo, otherwise the secrets are not available
         # Skip for Dependabot pull requests as these are run without secrets
         # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/automating-dependabot-with-github-actions#responding-to-events
-        if: ((github.repository == 'restic/restic' && github.event_name == 'push') || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor != 'dependabot[bot]') && matrix.test_cloud_backends
+        if: ((github.repository == 'vaultic/vaultic' && github.event_name == 'push') || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor != 'dependabot[bot]') && matrix.test_cloud_backends
 
       - name: Check changelog files with calens
         run: |
           echo "install calens"
-          go install github.com/restic/calens@latest
+          go install github.com/vaultic/calens@latest
 
           echo "check changelog files"
           calens
@@ -297,7 +297,7 @@ jobs:
         with:
           # list of Docker images to use as base name for tags
           images: |
-            restic/restic
+            vaultic/vaultic
           # generate Docker tags based on the following events/attributes
           tags: |
             type=schedule

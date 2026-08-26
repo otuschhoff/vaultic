@@ -14,7 +14,7 @@
 Removing backup snapshots
 #########################
 
-All backup space is finite, so restic allows removing old snapshots. This can
+All backup space is finite, so vaultic allows removing old snapshots. This can
 be done either manually (by specifying a snapshot ID to remove) or by using a
 policy that describes which snapshots to forget. For all remove operations, two
 commands need to be called in sequence: ``forget`` to remove snapshots, and
@@ -28,7 +28,7 @@ repository is locked and backups cannot be completed. Please plan your
 pruning so that there's time to complete it and it doesn't interfere with
 regular backup runs.
 
-It is advisable to run ``restic check`` after pruning, to make sure
+It is advisable to run ``vaultic check`` after pruning, to make sure
 you are alerted, should the internal data structures of the repository
 be damaged.
 
@@ -40,7 +40,7 @@ repository like this:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots
+    $ vaultic -r /srv/vaultic-repo snapshots
     enter password for repository:
     ID        Date                 Host      Tags  Directory
     ----------------------------------------------------------------------
@@ -55,7 +55,7 @@ command and specify the snapshot ID on the command line:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo forget bdbd3439
+    $ vaultic -r /srv/vaultic-repo forget bdbd3439
     enter password for repository:
     removed snapshot bdbd3439
 
@@ -63,7 +63,7 @@ Afterwards this snapshot is removed:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo snapshots
+    $ vaultic -r /srv/vaultic-repo snapshots
     enter password for repository:
     ID        Date                 Host     Tags  Directory
     ----------------------------------------------------------------------
@@ -78,7 +78,7 @@ command must be run:
 
 .. code-block:: console
 
-    $ restic -r /srv/restic-repo prune
+    $ vaultic -r /srv/vaultic-repo prune
     enter password for repository:
     repository 33002c5e opened successfully
     loading all snapshots...
@@ -113,7 +113,7 @@ to ``forget``:
 
 .. code-block:: console
 
-    $ restic forget --keep-last 1 --prune
+    $ vaultic forget --keep-last 1 --prune
     snapshots for host mopped, directories /home/user/work:
 
     keep 1 snapshots:
@@ -155,7 +155,7 @@ to ``forget``:
 Removing snapshots according to a policy
 ****************************************
 
-Removing snapshots manually is tedious and error-prone, therefore restic allows
+Removing snapshots manually is tedious and error-prone, therefore vaultic allows
 specifying a policy (one or more ``--keep-*`` options) for which snapshots to
 keep. You can for example define how many hourly, daily, weekly, monthly and
 yearly snapshots to keep, and any other snapshots will be removed.
@@ -165,7 +165,7 @@ yearly snapshots to keep, and any other snapshots will be removed.
     section below for more information.
 
 .. note:: You can always use the ``--dry-run`` option of the ``forget`` command,
-    which instructs restic to not remove anything but instead just print what
+    which instructs vaultic to not remove anything but instead just print what
     actions would be performed.
 
 The ``forget`` command accepts the following policy options:
@@ -222,7 +222,7 @@ The ``forget`` command accepts the following policy options:
 
 .. note:: Specifying ``--keep-tag ''`` will match untagged snapshots only.
 
-When ``forget`` is run with a policy, restic first loads the list of all snapshots
+When ``forget`` is run with a policy, vaultic first loads the list of all snapshots
 and groups them by their host name and paths. The grouping options can be set with
 ``--group-by``, e.g. using ``--group-by paths,tags`` to instead group snapshots by
 paths and tags. The policy is then applied to each group of snapshots individually.
@@ -242,28 +242,28 @@ removes all but the latest snapshot of all snapshots that have the tag ``foo``:
 
 .. code-block:: console
 
-   $ restic forget --tag foo --keep-last 1
+   $ vaultic forget --tag foo --keep-last 1
 
 This command removes all but the last snapshot of all snapshots that have
 either the ``foo`` or ``bar`` tag set:
 
 .. code-block:: console
 
-   $ restic forget --tag foo --tag bar --keep-last 1
+   $ vaultic forget --tag foo --tag bar --keep-last 1
 
 To only keep the last snapshot of all snapshots with both the tag ``foo`` and
 ``bar`` set use:
 
 .. code-block:: console
 
-   $ restic forget --tag foo,bar --keep-last 1
+   $ vaultic forget --tag foo,bar --keep-last 1
 
 To ensure only untagged snapshots are considered, specify the empty string '' as
 the tag.
 
 .. code-block:: console
 
-   $ restic forget --tag '' --keep-last 1
+   $ vaultic forget --tag '' --keep-last 1
 
 For example, suppose you make one backup every day for 100 years. Then ``forget
 --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --keep-yearly 75`` would keep
@@ -293,7 +293,7 @@ and on Fridays, you make an additional backup:
 
 .. code-block:: console
 
-   $ restic snapshots
+   $ vaultic snapshots
    repository f00c6e2a opened successfully
    ID        Time                 Host        Tags        Paths
    ---------------------------------------------------------------
@@ -317,7 +317,7 @@ five days that had a snapshot and remove the other snapshots:
 
 .. code-block:: console
 
-   $ restic forget --keep-daily 5 --dry-run
+   $ vaultic forget --keep-daily 5 --dry-run
    repository f00c6e2a opened successfully
    Applying Policy: keep 5 daily snapshots
    keep 5 snapshots:
@@ -350,7 +350,7 @@ regardless of how many backups exist in the second week:
 
 .. code-block:: console
 
-   $ restic forget --keep-within-daily 7d --dry-run
+   $ vaultic forget --keep-within-daily 7d --dry-run
    repository f00c6e2a opened successfully
    Applying Policy: keep daily snapshots within 7d
    keep 4 snapshots:
@@ -379,13 +379,13 @@ regardless of how many backups exist in the second week:
 Removing all snapshots
 ======================
 
-For safety reasons, restic refuses to act on an "empty" policy. For example,
+For safety reasons, vaultic refuses to act on an "empty" policy. For example,
 if one were to specify ``--keep-last 0`` to forget *all* snapshots in the
-repository, restic will respond that no snapshots will be removed. To delete
+repository, vaultic will respond that no snapshots will be removed. To delete
 all snapshots, use ``--keep-last 1`` and then finally remove the last snapshot
 manually (by passing the ID to ``forget``).
 
-Since restic 0.17.0, it is possible to delete all snapshots for a specific
+Since vaultic 0.17.0, it is possible to delete all snapshots for a specific
 host, tag or path using the ``--unsafe-allow-remove-all`` option. The option
 must always be combined with a snapshot filter (by host, path or tag).
 For example the command ``forget --tag example --unsafe-allow-remove-all``
@@ -402,7 +402,7 @@ To prevent a compromised backup client from deleting its backups (for example
 due to a ransomware infection), a repository service/backend can serve the
 repository in a so-called append-only mode. This means that the repository is
 served in such a way that it can only be written to and read from, while delete
-and overwrite operations are denied. Restic's `rest-server`_ features an
+and overwrite operations are denied. Vaultic's `rest-server`_ features an
 append-only mode, but few other standard backends do. To support append-only
 with such backends, you can use `rclone`_ as a complement in between the backup
 client and the backend service.
@@ -453,13 +453,13 @@ To understand the custom options, this section first explains how the pruning pr
 
 1. All snapshots and directories within snapshots are scanned to determine
    which data is still in use.
-2. For all files in the repository, restic finds out if the file is fully
+2. For all files in the repository, vaultic finds out if the file is fully
    used, partly used or completely unused.
 3. Completely unused files are marked for deletion. Fully used files are kept.
    A partially used file is either kept or marked for repacking depending on user
    options.
 
-   Note that for repacking, restic must download the file from the repository
+   Note that for repacking, vaultic must download the file from the repository
    storage and re-upload the needed data in the repository. This can be very
    time-consuming for remote repositories.
 4. After deciding what to do, ``prune`` will actually perform the repack, modify
@@ -468,7 +468,7 @@ To understand the custom options, this section first explains how the pruning pr
 The ``prune`` command accepts the following options:
 
 -  ``--max-unused limit`` allow unused data up to the specified limit within the repository.
-   This allows restic to keep partly used files instead of repacking them.
+   This allows vaultic to keep partly used files instead of repacking them.
 
    The limit can be specified in several ways:
 
@@ -480,11 +480,11 @@ The ``prune`` command accepts the following options:
       50MB may be unused.
     * If the string ``unlimited`` is passed, there is no limit for partly
       unused files. This means that as long as some data is still used within
-      a file stored in the repo, restic will just leave it there. Use this if
+      a file stored in the repo, vaultic will just leave it there. Use this if
       you want to minimize the time and bandwidth used by the ``prune``
       operation. Note that metadata will still be repacked.
 
-   Restic tries to repack as little data as possible while still ensuring this
+   Vaultic tries to repack as little data as possible while still ensuring this
    limit for unused data. The default value is 5%.
 
 - ``--max-repack-size size`` if set limits the total size of files to repack.
@@ -519,7 +519,7 @@ that a repository remains usable no matter at which point the command is interru
 However, this also means that ``prune`` requires some scratch space to work.
 
 In most cases it is sufficient to instruct ``prune`` to use as little scratch space as
-possible by running it as ``prune --max-repack-size 0``. Note that for restic versions
+possible by running it as ``prune --max-repack-size 0``. Note that for vaultic versions
 before 0.13.0 ``prune --max-repack-size 1`` must be used. Obviously, this can only work
 if several snapshots have been removed using ``forget`` before. This then allows the
 ``prune`` command to actually remove data from the repository. If the command succeeds,
@@ -531,7 +531,7 @@ space. However, a **failed** ``prune`` run can cause the repository to become
 **temporarily unusable**. Therefore, make sure that you have a stable connection to the
 repository storage, before running this command. In case the command fails, it may become
 necessary to manually remove all files from the ``index/`` folder of the repository and
-run ``restic repair index`` afterwards.
+run ``vaultic repair index`` afterwards.
 
 To prevent accidental usages of the ``--unsafe-recover-no-free-space`` option it is
 necessary to first run ``prune --unsafe-recover-no-free-space SOME-ID`` and then replace

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# restic documentation build configuration file, created by
+# vaultic documentation build configuration file, created by
 # sphinx-quickstart on Fri Apr 14 22:44:43 2017.
 #
 # This file is execfile()d with the current directory set to its
@@ -36,8 +36,8 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = 'restic'
-copyright = '2023, restic authors'
+project = 'vaultic'
+copyright = '2023, vaultic authors'
 author = 'fd0'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -86,7 +86,7 @@ todo_include_todos = False
 html_theme = 'sphinx_rtd_theme'
 
 html_css_files = [
-    'css/restic.css',
+    'css/vaultic.css',
 ]
 
 html_logo = 'logo/logo.png'
@@ -102,8 +102,8 @@ html_static_path = ['_static']
 
 html_context = {
   'display_github': True,
-  'github_user': 'restic',
-  'github_repo': 'restic',
+  'github_user': 'vaultic',
+  'github_repo': 'vaultic',
   'github_version': 'master/doc/',
 }
 

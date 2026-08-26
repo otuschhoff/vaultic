@@ -3,11 +3,11 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 restic_version go_version"
+    echo "Usage: $0 vaultic_version go_version"
     exit 1
 fi
 
-restic_version="$1"
+vaultic_version="$1"
 go_version="$2"
 
 # invalid if zero
@@ -30,90 +30,90 @@ highlight() {
 
 highlight "Verifying release self-consistency"
 
-curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/restic-${restic_version}.tar.gz.asc
+curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/vaultic-${vaultic_version}.tar.gz.asc
 # tarball is downloaded while processing the SHA256SUMS
-curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/SHA256SUMS.asc
-curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/SHA256SUMS
+curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/SHA256SUMS.asc
+curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/SHA256SUMS
 
 export GNUPGHOME=$PWD/gnupg
 mkdir -p 700 $GNUPGHOME
-curl -OLSs https://restic.net/gpg-key-alex.asc
+curl -OLSs https://vaultic.net/gpg-key-alex.asc
 gpg --import gpg-key-alex.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
 
 for i in $(cat SHA256SUMS | cut -d " "  -f 3 ) ; do
     echo "Downloading $i"
-    curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${restic_version}/"$i"
+    curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/"$i"
 done
 shasum -a256 -c SHA256SUMS || set_invalid "WARNING: RELEASE BINARIES DO NOT MATCH SHA256SUMS!"
-gpg --verify restic-${restic_version}.tar.gz.asc restic-${restic_version}.tar.gz
+gpg --verify vaultic-${vaultic_version}.tar.gz.asc vaultic-${vaultic_version}.tar.gz
 # TODO verify that the release does not contain any unexpected files
 
 
 highlight "Verifying tarball matches tagged commit"
 
-tar xzf "restic-${restic_version}.tar.gz"
-git clone -b "v${restic_version}" https://github.com/vaultic/vaultic.git
-rm -rf restic/.git
-diff -r restic restic-${restic_version}
+tar xzf "vaultic-${vaultic_version}.tar.gz"
+git clone -b "v${vaultic_version}" https://github.com/vaultic/vaultic.git
+rm -rf vaultic/.git
+diff -r vaultic vaultic-${vaultic_version}
 
 
 highlight "Regenerating builder container"
 
-git clone https://github.com/restic/builder.git
+git clone https://github.com/vaultic/builder.git
 docker pull debian:stable
-docker build --no-cache -t restic/builder:tmp --build-arg GO_VERSION=${go_version} builder
+docker build --no-cache -t vaultic/builder:tmp --build-arg GO_VERSION=${go_version} builder
 
 
 highlight "Reproducing release binaries"
 
 mkdir output
 docker run --rm \
-    --volume "$PWD/restic-${restic_version}:/restic" \
+    --volume "$PWD/vaultic-${vaultic_version}:/vaultic" \
     --volume "$PWD/output:/output" \
-    restic/builder:tmp \
-    go run helpers/build-release-binaries/main.go --version "${restic_version}"
+    vaultic/builder:tmp \
+    go run helpers/build-release-binaries/main.go --version "${vaultic_version}"
 
-cp "restic-${restic_version}.tar.gz" output
+cp "vaultic-${vaultic_version}.tar.gz" output
 cp SHA256SUMS output
 
 # check that all release binaries have been reproduced successfully
 (cd output && shasum -a256 -c SHA256SUMS) || set_invalid "WARNING: REPRODUCED BINARIES DO NOT MATCH RELEASE BINARIES!"
 # and that the SHA256SUMS files does not miss binaries
-for i in output/restic* ; do grep "$(basename "$i")" SHA256SUMS > /dev/null || set_invalid "WARNING: $i MISSING FROM RELEASE SHA256SUMS FILE!" ; done
+for i in output/vaultic* ; do grep "$(basename "$i")" SHA256SUMS > /dev/null || set_invalid "WARNING: $i MISSING FROM RELEASE SHA256SUMS FILE!" ; done
 
 
 extract_docker() {
     image=$1
     docker_platform=$2
-    restic_platform=$3
-    out=restic_${restic_version}_linux_${restic_platform}.bz2
+    vaultic_platform=$3
+    out=vaultic_${vaultic_version}_linux_${vaultic_platform}.bz2
 
     # requires at least docker 25.0
-    docker image pull --platform "linux/${docker_platform}" ${image}:${restic_version} > /dev/null
-    docker image save ${image}:${restic_version} -o docker.tar
+    docker image pull --platform "linux/${docker_platform}" ${image}:${vaultic_version} > /dev/null
+    docker image save ${image}:${vaultic_version} -o docker.tar
 
     mkdir img
     tar xvf docker.tar -C img --wildcards blobs/sha256/\* > /dev/null
     rm docker.tar
     for i in img/blobs/sha256/*; do
-        tar -xvf "$i" -C img usr/bin/restic 2> /dev/null 1>&2 || true
-        if [[ -f img/usr/bin/restic ]]; then
-            if [[ -f restic-docker ]]; then
+        tar -xvf "$i" -C img usr/bin/vaultic 2> /dev/null 1>&2 || true
+        if [[ -f img/usr/bin/vaultic ]]; then
+            if [[ -f vaultic-docker ]]; then
                 set_invalid "WARNING: CONTAINER CONTAINS MULTIPLE RESTIC BINARIES"
             fi
-            mv img/usr/bin/restic restic-docker
+            mv img/usr/bin/vaultic vaultic-docker
         fi
     done
     
     rm -rf img
-    bzip2 restic-docker
-    mv restic-docker.bz2 docker/${out}
+    bzip2 vaultic-docker
+    mv vaultic-docker.bz2 docker/${out}
     grep ${out} SHA256SUMS >> docker/SHA256SUMS
 }
 
 ctr=0
-for img in restic/restic ghcr.io/restic/restic; do
+for img in vaultic/vaultic ghcr.io/vaultic/vaultic; do
     highlight "Verifying binaries in docker containers from $img"
     mkdir docker
 

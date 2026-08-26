@@ -15,14 +15,14 @@
 Talks
 #####
 
-The following talks will be or have been given about restic:
+The following talks will be or have been given about vaultic:
 
--  2021-04-02: `The Changelog: Restic has your backup 
+-  2021-04-02: `The Changelog: Vaultic has your backup 
    (Podcast) <https://changelog.com/podcast/434>`__
 -  2016-01-31: Lightning Talk at the Go Devroom at FOSDEM 2016,
    Brussels, Belgium
--  2016-01-29: `restic - Backups mal
-   richtig <https://media.ccc.de/v/c4.openchaos.2016.01.restic>`__:
+-  2016-01-29: `vaultic - Backups mal
+   richtig <https://media.ccc.de/v/c4.openchaos.2016.01.vaultic>`__:
    Public lecture in German at `CCC Cologne
    e.V. <https://koeln.ccc.de>`__ in Cologne, Germany
 -  2015-08-23: `A Solution to the Backup
@@ -31,6 +31,6 @@ The following talks will be or have been given about restic:
 -  2015-02-01: `Lightning Talk at FOSDEM
    2015 <https://www.youtube.com/watch?v=oM-MfeflUZ8&t=11m40s>`__: A
    short introduction (with slightly outdated command line)
--  2015-01-27: `Talk about restic at CCC
+-  2015-01-27: `Talk about vaultic at CCC
    Aachen <https://video.fsmpi.rwth-aachen.de/cccac/4442>`__
    (in German)

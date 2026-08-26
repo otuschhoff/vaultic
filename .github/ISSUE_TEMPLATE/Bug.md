@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with restic to help us resolve it and improve
+about: Report a problem with vaultic to help us resolve it and improve
 ---
 
 <!--
@@ -10,7 +10,7 @@ Welcome! - We kindly ask that you:
   1. Fill out the issue template below - not doing so needs a good reason.
   2. Use the forum if you have a question rather than a bug or feature request.
 
-The forum is at: https://forum.restic.net
+The forum is at: https://forum.vaultic.net
 
 NOTE: Not filling out the issue template needs a good reason, as otherwise it
 may take a lot longer to find the problem, not to mention it can take up a lot
@@ -18,7 +18,7 @@ more time which can otherwise be spent on development. Please also take the
 time to help us debug the issue by collecting relevant information, even if
 it doesn't seem to be relevant to you. Thanks!
 
-The forum is a better place for questions about restic or general suggestions
+The forum is a better place for questions about vaultic or general suggestions
 and topics, e.g. usage or documentation questions! This issue tracker is mainly
 for tracking bugs and feature requests directly relating to the development of
 the software itself, rather than the project.
@@ -28,7 +28,7 @@ Thanks for understanding, and for contributing to the project!
 -->
 
 
-Output of `restic version`
+Output of `vaultic version`
 --------------------------
 
 
@@ -44,12 +44,12 @@ Problem description / Steps to reproduce
 <!--
 This section should include at least:
 
- * A description of the problem you are having with restic.
+ * A description of the problem you are having with vaultic.
 
  * The complete command line and any environment variables you used to
-   configure restic's backend access. Make sure to replace sensitive values!
+   configure vaultic's backend access. Make sure to replace sensitive values!
 
- * The output of the commands, what restic prints gives may give us much
+ * The output of the commands, what vaultic prints gives may give us much
    information to diagnose the problem!
 
  * The more time you spend describing an easy way to reproduce the behavior (if
@@ -61,7 +61,7 @@ Expected behavior
 -----------------
 
 <!--
-Describe what you'd like restic to do differently.
+Describe what you'd like vaultic to do differently.
 -->
 
 Actual behavior
@@ -80,7 +80,7 @@ Did something noteworthy happen on your system, Internet connection, backend ser
 -->
 
 
-Did restic help you today? Did it make you happy in any way?
+Did vaultic help you today? Did it make you happy in any way?
 ------------------------------------------------------------
 
 <!--

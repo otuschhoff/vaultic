@@ -1,14 +1,14 @@
 # Table of Contents
 
 {{ range . -}}
-  * [Changelog for {{ .Version }}](#changelog-for-restic-{{ .Version | replace "." ""}}-{{ .Date | lower -}})
+  * [Changelog for {{ .Version }}](#changelog-for-vaultic-{{ .Version | replace "." ""}}-{{ .Date | lower -}})
 {{ end -}}
 
 {{- range $changes := . }}{{ with $changes }}
 
-# Changelog for restic {{ .Version }} ({{ .Date }})
-The following sections list the changes in restic {{ .Version }} relevant to
-restic users. The changes are ordered by importance.
+# Changelog for vaultic {{ .Version }} ({{ .Date }})
+The following sections list the changes in vaultic {{ .Version }} relevant to
+vaultic users. The changes are ordered by importance.
 
 ## Summary
 {{ range $entry := .Entries }}{{ with $entry }}

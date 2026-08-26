@@ -1,52 +1,52 @@
 FAQ
 ===
 
-This is the list of Frequently Asked Questions for restic.
+This is the list of Frequently Asked Questions for vaultic.
 
-Will restic resume an interrupted backup?
+Will vaultic resume an interrupted backup?
 -----------------------------------------
 
-Yes, restic will resume interrupted backups when they are re-run.
+Yes, vaultic will resume interrupted backups when they are re-run.
 
-When backing up, restic periodically writes index files to keep a record of
+When backing up, vaultic periodically writes index files to keep a record of
 the uploaded data. Even if there's no snapshot created in the end (due to the
 backup being interrupted), these indexes are stored in the repository for the
-data that has been uploaded so far. Next time restic runs, it is then able to
+data that has been uploaded so far. Next time vaultic runs, it is then able to
 find the uploaded data through these indexes, and thereby reference it again
 without having to upload it a second time. This effectively makes it continue
 from where it saved the last index, which should be up to a few minutes ago.
 
 It does not matter if the backup was interrupted by the user or if it was due
 to unforeseen circumstances such as connectivity issues, power loss, etc.
-Simply re-run the backup again and restic should only upload what it needs to
+Simply re-run the backup again and vaultic should only upload what it needs to
 in order to complete the interrupted backup and create a snapshot.
 
 Note however that during the initial backup run and any re-tries, until there
 has been a first snapshot created for the backup set (list of files and
-directories to be backed up), restic will need to re-scan the files on disk as
+directories to be backed up), vaultic will need to re-scan the files on disk as
 there is no parent snapshot to compare the filesystem with to determine which
 files have changed. This process should however be far quicker than the
-uploading, and it's normal to see restic scan the files again when re-running
+uploading, and it's normal to see vaultic scan the files again when re-running
 the backup.
 
-``restic check`` reports packs that aren't referenced in any index, is my repository broken?
+``vaultic check`` reports packs that aren't referenced in any index, is my repository broken?
 --------------------------------------------------------------------------------------------
 
-When ``restic check`` reports that there are pack files in the
+When ``vaultic check`` reports that there are pack files in the
 repository that are not referenced in any index, that's (in contrast to
-what restic reports at the moment) not a source for concern. The output
+what vaultic reports at the moment) not a source for concern. The output
 looks like this:
 
 ::
 
-    $ restic check
+    $ vaultic check
     create exclusive lock for repository
     load indexes
     check all packs
     pack 819a9a52e4f51230afa89aefbf90df37fb70996337ae57e6f7a822959206a85e: not referenced in any index
     pack de299e69fb075354a3775b6b045d152387201f1cdc229c31d1caa34c3b340141: not referenced in any index
     2 additional files were found in the repo, which likely contain duplicate data.
-    You can run ``restic prune`` to correct this.
+    You can run ``vaultic prune`` to correct this.
     check snapshots, trees and blobs
     [0:00] 100.00%  16 / 16 snapshots
     no errors were found
@@ -54,34 +54,34 @@ looks like this:
 The message means that there is more data stored in the repository than
 strictly necessary. This is uncritical. With high probability this is duplicate data
 caused by an interrupted backup run or upload operation. In
-order to clean it up, the command ``restic prune`` can be used.
+order to clean it up, the command ``vaultic prune`` can be used.
 
-I ran a ``restic`` command but it is not working as intended, what do I do now?
+I ran a ``vaultic`` command but it is not working as intended, what do I do now?
 -------------------------------------------------------------------------------
 
-If you are running a restic command and it is not working as you hoped it would,
+If you are running a vaultic command and it is not working as you hoped it would,
 there is an easy way of checking how your shell interpreted the command you are trying to run.
 
 Here is an example of a mistake in a backup command that results in the command not working as expected.
-A user wants to run the following ``restic backup`` command
+A user wants to run the following ``vaultic backup`` command
 
 ::
 
-$ restic backup --exclude "~/documents" ~
+$ vaultic backup --exclude "~/documents" ~
 
 .. important:: This command contains an intentional user error described in this paragraph.
 
 This command will result in a complete backup of the current logged in user's home directory and it won't exclude the folder ``~/documents/`` - which is not what the user wanted to achieve.
-The problem is how the path to ``~/documents`` is passed to restic.
+The problem is how the path to ``~/documents`` is passed to vaultic.
 
-In order to spot an issue like this, you can make use of the following ruby command preceding your restic command.
+In order to spot an issue like this, you can make use of the following ruby command preceding your vaultic command.
 
 ::
 
-    $ ruby -e 'puts ARGV.inspect' restic backup --exclude "~/documents" ~
-    ["restic", "backup", "--exclude", "~/documents", "/home/john"]
+    $ ruby -e 'puts ARGV.inspect' vaultic backup --exclude "~/documents" ~
+    ["vaultic", "backup", "--exclude", "~/documents", "/home/john"]
 
-As you can see, the command outputs every argument you have passed to the shell. This is what restic sees when you run your command.
+As you can see, the command outputs every argument you have passed to the shell. This is what vaultic sees when you run your command.
 The error here is that the tilde ``~`` in ``"~/documents"`` didn't get expanded as it is quoted.
 
 ::
@@ -95,27 +95,27 @@ The error here is that the tilde ``~`` in ``"~/documents"`` didn't get expanded 
     $ echo "$HOME/documents"
     /home/john/documents
 
-Restic handles globbing and expansion in the following ways:
+Vaultic handles globbing and expansion in the following ways:
 
 -  Globbing is only expanded for lines read via ``--files-from``
 -  Environment variables are not expanded in the file read via ``--files-from``
 -  ``*`` is expanded for paths read via ``--files-from``
--  e.g. For backup sources given to restic as arguments on the shell, neither glob expansion nor shell variable replacement is done. If restic is called as ``restic backup '*' '$HOME'``, it will try to backup the literal file(s)/dir(s) ``*`` and ``$HOME``
+-  e.g. For backup sources given to vaultic as arguments on the shell, neither glob expansion nor shell variable replacement is done. If vaultic is called as ``vaultic backup '*' '$HOME'``, it will try to backup the literal file(s)/dir(s) ``*`` and ``$HOME``
 -  Double-asterisk ``**`` matches across zero or more subdirectories in exclude/include patterns (not ``--files-from``) when it is a complete path component (e.g. ``foo/**/bar``, not ``foo**`` or ``foo/**bar``). This is a custom extension beyond Go's ``filepath.Match``; make sure the shell does not expand it (e.g. by quoting the pattern). See :ref:`backup-excluding-files` for details
 
 
 How can I specify encryption passwords automatically?
 -----------------------------------------------------
 
-When you run ``restic backup``, you need to enter the passphrase on
+When you run ``vaultic backup``, you need to enter the passphrase on
 the console. This is not very convenient for automated backups, so you
 can also provide the password through the ``--password-file`` option, or one of
-the environment variables: ``RESTIC_PASSWORD``, ``RESTIC_PASSWORD_FILE``,
-or ``RESTIC_PASSWORD_COMMAND``.
+the environment variables: ``VAULTIC_PASSWORD``, ``VAULTIC_PASSWORD_FILE``,
+or ``VAULTIC_PASSWORD_COMMAND``.
 
 .. important:: Be careful how you set the environment; using the env
                command, a `system()` call or using inline shell
-               scripts (e.g. `RESTIC_PASSWORD=password restic ...`)
+               scripts (e.g. `VAULTIC_PASSWORD=password vaultic ...`)
                might expose the credentials in the process list
                directly and they will be readable to all users on a
                system. Using export in a shell script file should be
@@ -123,7 +123,7 @@ or ``RESTIC_PASSWORD_COMMAND``.
                `accessible only to that user`_. Please make sure that
                the permissions on the files where the password is
                eventually stored are safe (e.g. `0600` and owned by
-               root). Note also that ``RESTIC_PASSWORD_COMMAND`` is
+               root). Note also that ``VAULTIC_PASSWORD_COMMAND`` is
                safe because it does not export the password itself to
                the environment.
 
@@ -134,32 +134,32 @@ user can add and then dynamically retrieve passwords, cloud credentials,
 repository paths, or any other data deemed sensitive. Here's an example of
 part of a shell script using the `built-in`_ ``security`` command on macOS
 to retrieve credentials from the system's Keychain before running various
-``restic`` commands:
+``vaultic`` commands:
 
 .. _built-in: https://ss64.com/mac/security.html
 
 ::
 
-    export GOOGLE_PROJECT_ID=$(security find-generic-password -a resticGCS -s restic_project_ID -w)
+    export GOOGLE_PROJECT_ID=$(security find-generic-password -a vaulticGCS -s vaultic_project_ID -w)
 
-    export GOOGLE_APPLICATION_CREDENTIALS=$(security find-generic-password -a resticGCS -s restic_key -w)
+    export GOOGLE_APPLICATION_CREDENTIALS=$(security find-generic-password -a vaulticGCS -s vaultic_key -w)
 
-    export RESTIC_REPOSITORY=$(security find-generic-password -a resticGCS -s restic_repo_path -w)
+    export VAULTIC_REPOSITORY=$(security find-generic-password -a vaulticGCS -s vaultic_repo_path -w)
 
-    export RESTIC_PASSWORD_COMMAND='security find-generic-password -a resticGCS -s restic_pwd -w' 
+    export VAULTIC_PASSWORD_COMMAND='security find-generic-password -a vaulticGCS -s vaultic_pwd -w' 
 
 
 
-How to prioritize restic's IO and CPU time
+How to prioritize vaultic's IO and CPU time
 ------------------------------------------
 
-If you'd like to change the **IO priority** of restic, run it in the following way
+If you'd like to change the **IO priority** of vaultic, run it in the following way
 
 ::
 
-$ ionice -c2 -n0 ./restic -r /media/your/backup/ backup /home
+$ ionice -c2 -n0 ./vaultic -r /media/your/backup/ backup /home
 
-This runs ``restic`` in the so-called best *effort class* (``-c2``),
+This runs ``vaultic`` in the so-called best *effort class* (``-c2``),
 with the highest possible priority (``-n0``).
 
 Take a look at the `ionice manpage`_ to learn about the other classes.
@@ -172,7 +172,7 @@ value, you would run:
 
 ::
 
-$ nice --10 ./restic -r /media/your/backup/ backup /home
+$ nice --10 ./vaultic -r /media/your/backup/ backup /home
 
 Again, the `nice manpage`_ has more information.
 
@@ -182,9 +182,9 @@ You can also **combine IO and CPU scheduling priority**:
 
 ::
 
-$ ionice -c2 nice -n19 ./restic -r /media/your/backup/ backup /home
+$ ionice -c2 nice -n19 ./vaultic -r /media/your/backup/ backup /home
 
-This example puts restic in the IO class 2 (best effort) and tells the CPU
+This example puts vaultic in the IO class 2 (best effort) and tells the CPU
 scheduling algorithm to give it the least favorable niceness (19).
 
 The above example makes sure that the system the backup runs on
@@ -193,17 +193,17 @@ is not slowed down, which is particularly useful for servers.
 Creating new repository on a Synology NAS via sftp fails
 --------------------------------------------------------
 
-For using restic with a Synology NAS via sftp, please make sure that the
+For using vaultic with a Synology NAS via sftp, please make sure that the
 specified path is absolute, it must start with a slash (``/``).
 
-Sometimes creating a new restic repository on a Synology NAS via sftp fails
+Sometimes creating a new vaultic repository on a Synology NAS via sftp fails
 with an error similar to the following:
 
 ::
 
-    $ restic -r sftp:user@nas:/volume1/restic-repo init
-    create backend at sftp:user@nas:/volume1/restic-repo/ failed:
-        mkdirAll(/volume1/restic-repo/index): unable to create directories: [...]
+    $ vaultic -r sftp:user@nas:/volume1/vaultic-repo init
+    create backend at sftp:user@nas:/volume1/vaultic-repo/ failed:
+        mkdirAll(/volume1/vaultic-repo/index): unable to create directories: [...]
 
 Although you can log into the NAS via SSH and see that the directory structure
 is there.
@@ -221,17 +221,17 @@ The following may work:
 
 ::
 
-    $ restic -r sftp:user@nas:/restic-repo init
+    $ vaultic -r sftp:user@nas:/vaultic-repo init
 
-Why does restic perform so poorly on Windows?
+Why does vaultic perform so poorly on Windows?
 ---------------------------------------------
 
 In some cases the real-time protection of antivirus software can interfere with
-restic's operations. If you are experiencing bad performance you can try to
+vaultic's operations. If you are experiencing bad performance you can try to
 temporarily disable your antivirus software to find out if it is the cause for
 your performance problems. If you are certain that the antivirus software is
 the cause for this and you want to gain maximum performance, you have to add
-the restic binary to an exclusions list within the antivirus software.
+the vaultic binary to an exclusions list within the antivirus software.
 
 How do I choose a strong password?
 ----------------------------------
@@ -245,17 +245,17 @@ be a very strong password, if not for being in this documentation.
 There are plenty of tools out there, such as OpenSSL, pwgen or KeePass that can
 generate a sufficiently complex, random and long password.
 
-Restic backup command fails to find a valid file in Windows
+Vaultic backup command fails to find a valid file in Windows
 -----------------------------------------------------------
 
-If the name of a file in Windows contains an invalid character, Restic will not be
+If the name of a file in Windows contains an invalid character, Vaultic will not be
 able to read the file. To solve this issue, consider renaming the particular file.
 
 What can I do in case of "request timeout" errors?
 --------------------------------------------------
 
-Restic monitors connections to the backend to detect stuck requests. If a request
-does not return any data within five minutes, restic assumes the request is stuck and
+Vaultic monitors connections to the backend to detect stuck requests. If a request
+does not return any data within five minutes, vaultic assumes the request is stuck and
 retries it. However, for large repositories it sometimes takes longer than that to
 collect a list of all files, causing the following error:
 
@@ -268,14 +268,14 @@ In this case you can increase the timeout using the ``--stuck-request-timeout`` 
 Are "cold storages" supported?
 ------------------------------
 
-Generally, restic does not natively support "cold storage" solutions. However,
+Generally, vaultic does not natively support "cold storage" solutions. However,
 experimental support for restoring from **S3 Glacier** and **S3 Glacier Deep
 Archive** storage classes is available:
 
 .. code-block:: console
 
-   $ restic backup -o s3.storage-class=GLACIER somedir/
-   $ RESTIC_FEATURES=s3-restore restic restore -o s3.enable-restore=1 -o s3.restore-days=7 -o s3.restore-timeout=24h latest
+   $ vaultic backup -o s3.storage-class=GLACIER somedir/
+   $ VAULTIC_FEATURES=s3-restore vaultic restore -o s3.enable-restore=1 -o s3.restore-days=7 -o s3.restore-timeout=24h latest
 
 **Notes:**
 
@@ -285,7 +285,7 @@ Archive** storage classes is available:
   class, provider and luck. Restores from cold storages are known to be
   time-consuming. You may need to adjust the ``s3.restore-timeout`` option if a restore
   operation takes more than 24 hours.
-- Restic will prevent sending metadata files (such as config files, lock files
+- Vaultic will prevent sending metadata files (such as config files, lock files
   or tree blobs) to Glacier or Deep Archive. Standard class is used instead to
   ensure normal and fast operations for most tasks.
 - Currently, only the following commands are known to work:
