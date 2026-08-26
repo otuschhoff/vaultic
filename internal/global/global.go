@@ -437,13 +437,20 @@ func createRepositoryInstance(be backend.Backend, gopts Options) (*repository.Re
 	return s, nil
 }
 
+// flagChanged reports whether the given flag was explicitly set on the CLI.
+// It tolerates a nil flag (e.g. when Options was built without AddFlags, as
+// in tests), treating it as "not set".
+func flagChanged(f *pflag.Flag) bool {
+	return f != nil && f.Changed
+}
+
 // applyRepoConfig merges the in-repo config into the repository options,
 // honoring the precedence CLI flag > environment > repo config > default.
 func applyRepoConfig(s *repository.Repository, gopts Options) error {
 	cfg := s.Config()
 
 	// compression: repo config is a zstd level (-7..22); CLI/env use named modes
-	if cfg.Compression != nil && !gopts.compressionFlag.Changed && !gopts.compressionFromEnv {
+	if cfg.Compression != nil && !flagChanged(gopts.compressionFlag) && !gopts.compressionFromEnv {
 		c, err := compressionFromLevel(*cfg.Compression)
 		if err != nil {
 			return err
@@ -452,7 +459,7 @@ func applyRepoConfig(s *repository.Repository, gopts Options) error {
 	}
 
 	// extra verification (default on; config can disable it, CLI --no-extra-verify wins)
-	if !cfg.ExtraVerifyEnabled() && !gopts.noExtraVerifyFlag.Changed {
+	if !cfg.ExtraVerifyEnabled() && !flagChanged(gopts.noExtraVerifyFlag) {
 		s.SetNoExtraVerify(true)
 	}
 
