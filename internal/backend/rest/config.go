@@ -2,10 +2,10 @@ package rest
 
 import (
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/errors"
 	"github.com/vaultic/vaultic/internal/options"
 )
@@ -82,8 +82,8 @@ func (cfg *Config) ApplyEnvironment(prefix string) {
 
 	// Only apply env variable values if neither username nor password are provided.
 	if username == "" && !pwdSet {
-		envName := os.Getenv(prefix + "VAULTIC_REST_USERNAME")
-		envPwd := os.Getenv(prefix + "VAULTIC_REST_PASSWORD")
+		envName := env.GetPrefixed(prefix, "REST_USERNAME")
+		envPwd := env.GetPrefixed(prefix, "REST_PASSWORD")
 
 		cfg.URL.User = url.UserPassword(envName, envPwd)
 	}

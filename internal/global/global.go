@@ -21,6 +21,7 @@ import (
 	"github.com/vaultic/vaultic/internal/backend/retry"
 	"github.com/vaultic/vaultic/internal/backend/sema"
 	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/options"
 	"github.com/vaultic/vaultic/internal/repository"
 	"github.com/vaultic/vaultic/internal/textfile"
@@ -117,35 +118,35 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.HTTPUserAgent, "http-user-agent", "", "set a http user agent for outgoing http requests")
 	f.DurationVar(&opts.StuckRequestTimeout, "stuck-request-timeout", 5*time.Minute, "`duration` after which to retry stuck requests")
 
-	opts.Repo = os.Getenv("VAULTIC_REPOSITORY")
-	opts.RepositoryFile = os.Getenv("VAULTIC_REPOSITORY_FILE")
-	opts.PasswordFile = os.Getenv("VAULTIC_PASSWORD_FILE")
-	opts.KeyHint = os.Getenv("VAULTIC_KEY_HINT")
-	opts.PasswordCommand = os.Getenv("VAULTIC_PASSWORD_COMMAND")
-	if os.Getenv("VAULTIC_CACERT") != "" {
-		opts.RootCertFilenames = strings.Split(os.Getenv("VAULTIC_CACERT"), ",")
+	opts.Repo = env.Get("REPOSITORY")
+	opts.RepositoryFile = env.Get("REPOSITORY_FILE")
+	opts.PasswordFile = env.Get("PASSWORD_FILE")
+	opts.KeyHint = env.Get("KEY_HINT")
+	opts.PasswordCommand = env.Get("PASSWORD_COMMAND")
+	if v := env.Get("CACERT"); v != "" {
+		opts.RootCertFilenames = strings.Split(v, ",")
 	}
-	opts.TLSClientCertKeyFilename = os.Getenv("VAULTIC_TLS_CLIENT_CERT")
+	opts.TLSClientCertKeyFilename = env.Get("TLS_CLIENT_CERT")
 	opts.packSizeFlag = f.Lookup(packSizeFlag)
 	opts.compressionFlag = f.Lookup(compressionFlag)
 
-	if os.Getenv("VAULTIC_HTTP_USER_AGENT") != "" {
-		opts.HTTPUserAgent = os.Getenv("VAULTIC_HTTP_USER_AGENT")
+	if v := env.Get("HTTP_USER_AGENT"); v != "" {
+		opts.HTTPUserAgent = v
 	}
 }
 
 func (opts *Options) PreRun(needsPassword bool) error {
-	if envVal := os.Getenv("VAULTIC_PACK_SIZE"); envVal != "" && !opts.packSizeFlag.Changed {
+	if envVal := env.Get("PACK_SIZE"); envVal != "" && !opts.packSizeFlag.Changed {
 		targetPackSize, err := strconv.ParseUint(envVal, 10, 32)
 		if err != nil {
 			// Failing fast here keeps backups from running for a long time with the wrong pack size.
-			return errors.Fatalf("invalid value for VAULTIC_PACK_SIZE %q: %v", envVal, err)
+			return errors.Fatalf("invalid value for VAULTIC_PACK_SIZE (legacy: RESTIC_PACK_SIZE) %q: %v", envVal, err)
 		}
 		opts.PackSize = uint(targetPackSize)
 	}
-	if envVal := os.Getenv("VAULTIC_COMPRESSION"); envVal != "" && !opts.compressionFlag.Changed {
+	if envVal := env.Get("COMPRESSION"); envVal != "" && !opts.compressionFlag.Changed {
 		if err := opts.Compression.Set(envVal); err != nil {
-			return errors.Fatalf("invalid value for VAULTIC_COMPRESSION %q: %v", envVal, err)
+			return errors.Fatalf("invalid value for VAULTIC_COMPRESSION (legacy: RESTIC_COMPRESSION) %q: %v", envVal, err)
 		}
 	}
 
@@ -203,11 +204,17 @@ func resolvePassword(opts *Options, envStr string) (string, error) {
 		return LoadPasswordFromFile(opts.PasswordFile)
 	}
 
-	if pwd := os.Getenv(envStr); pwd != "" {
+	if pwd := resolvePasswordEnv(envStr); pwd != "" {
 		return pwd, nil
 	}
 
 	return "", nil
+}
+
+// resolvePasswordEnv reads the password from the environment variable named
+// envStr (a VAULTIC_* name), accepting the legacy RESTIC_* name as fallback.
+func resolvePasswordEnv(envStr string) string {
+	return env.Get(strings.TrimPrefix(envStr, env.PrimaryPrefix))
 }
 
 // LoadPasswordFromFile loads a password from a file while stripping a BOM and

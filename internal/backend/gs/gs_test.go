@@ -8,6 +8,7 @@ import (
 
 	"github.com/vaultic/vaultic/internal/backend/gs"
 	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/env"
 	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
@@ -18,12 +19,12 @@ func newGSTestSuite() *test.Suite[gs.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*gs.Config, error) {
-			cfg, err := gs.ParseConfig(os.Getenv("VAULTIC_TEST_GS_REPOSITORY"))
+			cfg, err := gs.ParseConfig(env.Get("TEST_GS_REPOSITORY"))
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.ProjectID = os.Getenv("VAULTIC_TEST_GS_PROJECT_ID")
+			cfg.ProjectID = env.Get("TEST_GS_PROJECT_ID")
 			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
 			return cfg, nil
 		},

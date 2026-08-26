@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/env"
 )
 
 func createGlobalContext(stderr io.Writer) context.Context {
@@ -28,7 +29,7 @@ func cleanupHandler(c <-chan os.Signal, cancel context.CancelFunc, stderr io.Wri
 	// ignore error as there's no good way to handle it
 	_, _ = fmt.Fprintf(stderr, "\rsignal %v received, cleaning up \n", s)
 
-	if val, _ := os.LookupEnv("VAULTIC_DEBUG_STACKTRACE_SIGINT"); val != "" {
+	if val, _ := env.Lookup("DEBUG_STACKTRACE_SIGINT"); val != "" {
 		_, _ = stderr.Write([]byte("\n--- STACKTRACE START ---\n\n"))
 		_, _ = stderr.Write([]byte(debug.DumpStacktrace()))
 		_, _ = stderr.Write([]byte("\n--- STACKTRACE END ---\n"))

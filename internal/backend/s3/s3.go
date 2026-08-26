@@ -18,6 +18,7 @@ import (
 	"github.com/vaultic/vaultic/internal/backend/location"
 	"github.com/vaultic/vaultic/internal/backend/util"
 	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/errors"
 	"github.com/vaultic/vaultic/internal/feature"
 
@@ -149,19 +150,19 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 		return nil, fmt.Errorf("no credentials found. Use `-o s3.unsafe-anonymous-auth=true` for anonymous authentication")
 	}
 
-	roleArn := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_ARN")
+	roleArn := env.Get("AWS_ASSUME_ROLE_ARN")
 	if roleArn != "" {
 		// use the region provided by the configuration by default
 		awsRegion := cfg.Region
 		// allow the region to be overridden if for some reason it is required
-		if os.Getenv("VAULTIC_AWS_ASSUME_ROLE_REGION") != "" {
-			awsRegion = os.Getenv("VAULTIC_AWS_ASSUME_ROLE_REGION")
+		if v := env.Get("AWS_ASSUME_ROLE_REGION"); v != "" {
+			awsRegion = v
 		}
 
-		sessionName := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_SESSION_NAME")
-		externalID := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_EXTERNAL_ID")
-		policy := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_POLICY")
-		stsEndpoint := os.Getenv("VAULTIC_AWS_ASSUME_ROLE_STS_ENDPOINT")
+		sessionName := env.Get("AWS_ASSUME_ROLE_SESSION_NAME")
+		externalID := env.Get("AWS_ASSUME_ROLE_EXTERNAL_ID")
+		policy := env.Get("AWS_ASSUME_ROLE_POLICY")
+		stsEndpoint := env.Get("AWS_ASSUME_ROLE_STS_ENDPOINT")
 
 		if stsEndpoint == "" {
 			if awsRegion != "" {

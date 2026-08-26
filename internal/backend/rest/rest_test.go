@@ -15,6 +15,7 @@ import (
 
 	"github.com/vaultic/vaultic/internal/backend/rest"
 	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/env"
 	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
@@ -180,7 +181,7 @@ func TestBackendREST(t *testing.T) {
 }
 
 func TestBackendRESTExternalServer(t *testing.T) {
-	repostr := os.Getenv("VAULTIC_TEST_REST_REPOSITORY")
+	repostr := env.Get("TEST_REST_REPOSITORY")
 	if repostr == "" {
 		t.Skipf("environment variable %v not set", "VAULTIC_TEST_REST_REPOSITORY")
 	}

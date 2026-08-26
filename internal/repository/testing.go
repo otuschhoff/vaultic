@@ -12,6 +12,7 @@ import (
 	"github.com/vaultic/vaultic/internal/backend/local"
 	"github.com/vaultic/vaultic/internal/backend/mem"
 	"github.com/vaultic/vaultic/internal/backend/retry"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/repository/crypto"
 	"github.com/vaultic/vaultic/internal/test"
 	"github.com/vaultic/vaultic/internal/vaultic"
@@ -89,7 +90,7 @@ func TestRepository(t testing.TB) *Repository {
 
 func TestRepositoryWithVersion(t testing.TB, version uint) (*Repository, vaultic.Unpacked[vaultic.FileType], backend.Backend) {
 	t.Helper()
-	dir := os.Getenv("VAULTIC_TEST_REPO")
+	dir := env.Get("TEST_REPO")
 	opts := Options{}
 	var repo *Repository
 	var be backend.Backend

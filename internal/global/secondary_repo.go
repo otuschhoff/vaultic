@@ -2,9 +2,9 @@ package global
 
 import (
 	"context"
-	"os"
 
 	"github.com/spf13/pflag"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/errors"
 )
 
@@ -39,11 +39,11 @@ func (opts *SecondaryRepoOptions) AddFlags(f *pflag.FlagSet, repoPrefix string, 
 	_ = f.MarkHidden("key-hint2")
 	_ = f.MarkHidden("password-command2")
 
-	opts.LegacyRepo = os.Getenv("VAULTIC_REPOSITORY2")
-	opts.LegacyRepositoryFile = os.Getenv("VAULTIC_REPOSITORY_FILE2")
-	opts.LegacyPasswordFile = os.Getenv("VAULTIC_PASSWORD_FILE2")
-	opts.LegacyKeyHint = os.Getenv("VAULTIC_KEY_HINT2")
-	opts.LegacyPasswordCommand = os.Getenv("VAULTIC_PASSWORD_COMMAND2")
+	opts.LegacyRepo = env.Get("REPOSITORY2")
+	opts.LegacyRepositoryFile = env.Get("REPOSITORY_FILE2")
+	opts.LegacyPasswordFile = env.Get("PASSWORD_FILE2")
+	opts.LegacyKeyHint = env.Get("KEY_HINT2")
+	opts.LegacyPasswordCommand = env.Get("PASSWORD_COMMAND2")
 
 	f.StringVarP(&opts.Repo, "from-repo", "", "", "source `repository` "+repoUsage+" (default: $VAULTIC_FROM_REPOSITORY)")
 	f.StringVarP(&opts.RepositoryFile, "from-repository-file", "", "", "`file` from which to read the source repository location "+repoUsage+" (default: $VAULTIC_FROM_REPOSITORY_FILE)")
@@ -52,11 +52,11 @@ func (opts *SecondaryRepoOptions) AddFlags(f *pflag.FlagSet, repoPrefix string, 
 	f.StringVarP(&opts.PasswordCommand, "from-password-command", "", "", "shell `command` to obtain the source repository password from (default: $VAULTIC_FROM_PASSWORD_COMMAND)")
 	f.BoolVar(&opts.InsecureNoPassword, "from-insecure-no-password", false, "use an empty password for the source repository (insecure)")
 
-	opts.Repo = os.Getenv("VAULTIC_FROM_REPOSITORY")
-	opts.RepositoryFile = os.Getenv("VAULTIC_FROM_REPOSITORY_FILE")
-	opts.PasswordFile = os.Getenv("VAULTIC_FROM_PASSWORD_FILE")
-	opts.KeyHint = os.Getenv("VAULTIC_FROM_KEY_HINT")
-	opts.PasswordCommand = os.Getenv("VAULTIC_FROM_PASSWORD_COMMAND")
+	opts.Repo = env.Get("FROM_REPOSITORY")
+	opts.RepositoryFile = env.Get("FROM_REPOSITORY_FILE")
+	opts.PasswordFile = env.Get("FROM_PASSWORD_FILE")
+	opts.KeyHint = env.Get("FROM_KEY_HINT")
+	opts.PasswordCommand = env.Get("FROM_PASSWORD_COMMAND")
 }
 
 func (opts *SecondaryRepoOptions) FillGlobalOpts(ctx context.Context, gopts Options, repoPrefix string) (Options, bool, error) {

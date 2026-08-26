@@ -1,10 +1,9 @@
 package main
 
 import (
-	"os"
-
 	"github.com/spf13/pflag"
 	"github.com/vaultic/vaultic/internal/data"
+	"github.com/vaultic/vaultic/internal/env"
 )
 
 // initMultiSnapshotFilter is used for commands that work on multiple snapshots
@@ -34,7 +33,7 @@ func initSingleSnapshotFilter(flags *pflag.FlagSet, filt *data.SnapshotFilter) {
 func finalizeSnapshotFilter(filt *data.SnapshotFilter) {
 	// Only apply VAULTIC_HOST default if the --host flag wasn't changed by the user
 	if filt.Hosts == nil {
-		if host := os.Getenv("VAULTIC_HOST"); host != "" {
+		if host := env.Get("HOST"); host != "" {
 			filt.Hosts = []string{host}
 		}
 	}

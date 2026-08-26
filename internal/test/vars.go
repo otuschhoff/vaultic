@@ -5,36 +5,40 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/vaultic/vaultic/internal/env"
 )
 
 var (
-	TestPassword                = getStringVar("VAULTIC_TEST_PASSWORD", "geheim")
-	TestCleanupTempDirs         = getBoolVar("VAULTIC_TEST_CLEANUP", true)
-	TestTempDir                 = getStringVar("VAULTIC_TEST_TMPDIR", "")
-	RunIntegrationTest          = getBoolVar("VAULTIC_TEST_INTEGRATION", true)
-	RunFuseTest                 = getBoolVar("VAULTIC_TEST_FUSE", true)
-	TestSFTPPath                = getStringVar("VAULTIC_TEST_SFTPPATH", "/usr/lib/ssh:/usr/lib/openssh:/usr/libexec")
-	BenchArchiveDirectory       = getStringVar("VAULTIC_BENCH_DIR", ".")
-	testIntegrationDisallowSkip = getStringVar("VAULTIC_TEST_DISALLOW_SKIP", "")
+	TestPassword                = getStringVar("TEST_PASSWORD", "geheim")
+	TestCleanupTempDirs         = getBoolVar("TEST_CLEANUP", true)
+	TestTempDir                 = getStringVar("TEST_TMPDIR", "")
+	RunIntegrationTest          = getBoolVar("TEST_INTEGRATION", true)
+	RunFuseTest                 = getBoolVar("TEST_FUSE", true)
+	TestSFTPPath                = getStringVar("TEST_SFTPPATH", "/usr/lib/ssh:/usr/lib/openssh:/usr/libexec")
+	BenchArchiveDirectory       = getStringVar("BENCH_DIR", ".")
+	testIntegrationDisallowSkip = getStringVar("TEST_DISALLOW_SKIP", "")
 )
 
+// getStringVar reads VAULTIC_<name>, falling back to the legacy RESTIC_<name>.
 func getStringVar(name, defaultValue string) string {
-	if e := os.Getenv(name); e != "" {
+	if e := env.Get(name); e != "" {
 		return e
 	}
 
 	return defaultValue
 }
 
+// getBoolVar reads VAULTIC_<name>, falling back to the legacy RESTIC_<name>.
 func getBoolVar(name string, defaultValue bool) bool {
-	if e := os.Getenv(name); e != "" {
+	if e := env.Get(name); e != "" {
 		switch e {
 		case "1", "true":
 			return true
 		case "0", "false":
 			return false
 		default:
-			fmt.Fprintf(os.Stderr, "invalid value for variable %q, using default\n", name)
+			fmt.Fprintf(os.Stderr, "invalid value for variable %q, using default\n", env.PrimaryPrefix+name)
 		}
 	}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/vaultic/vaultic/internal/archiver"
 	"github.com/vaultic/vaultic/internal/data"
 	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/errors"
 	"github.com/vaultic/vaultic/internal/filter"
 	"github.com/vaultic/vaultic/internal/fs"
@@ -144,20 +145,20 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	opts.readConcurrencyFlag = f.Lookup("read-concurrency")
 
 	// parse read inode and ctime from env, on error the default value will be used
-	opts.IgnoreInode, _ = strconv.ParseBool(os.Getenv("VAULTIC_IGNORE_INODE"))
-	opts.IgnoreCtime, _ = strconv.ParseBool(os.Getenv("VAULTIC_IGNORE_CTIME"))
+	opts.IgnoreInode, _ = strconv.ParseBool(env.Get("IGNORE_INODE"))
+	opts.IgnoreCtime, _ = strconv.ParseBool(env.Get("IGNORE_CTIME"))
 
 	// parse host from env, if not exists or empty the default value will be used
-	if host := os.Getenv("VAULTIC_HOST"); host != "" {
+	if host := env.Get("HOST"); host != "" {
 		opts.Host = host
 	}
 }
 
 func (opts *BackupOptions) Finalize() error {
-	if envVal := os.Getenv("VAULTIC_READ_CONCURRENCY"); envVal != "" && !opts.readConcurrencyFlag.Changed {
+	if envVal := env.Get("READ_CONCURRENCY"); envVal != "" && !opts.readConcurrencyFlag.Changed {
 		n, err := strconv.ParseUint(envVal, 10, 32)
 		if err != nil {
-			return errors.Fatalf("invalid value for VAULTIC_READ_CONCURRENCY %q: %v", envVal, err)
+			return errors.Fatalf("invalid value for VAULTIC_READ_CONCURRENCY (legacy: RESTIC_READ_CONCURRENCY) %q: %v", envVal, err)
 		}
 		opts.ReadConcurrency = uint(n)
 	}

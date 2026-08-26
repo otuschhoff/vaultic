@@ -2,13 +2,13 @@ package swift_test
 
 import (
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/vaultic/vaultic/internal/backend"
 	"github.com/vaultic/vaultic/internal/backend/swift"
 	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/env"
 	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
@@ -35,12 +35,13 @@ func newSwiftTestSuite(t testing.TB) *test.Suite[swift.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*swift.Config, error) {
-			cfg, err := swift.ParseConfig(os.Getenv("VAULTIC_TEST_SWIFT"))
+			cfg, err := swift.ParseConfig(env.Get("TEST_SWIFT"))
 			if err != nil {
 				return nil, err
 			}
 
 			cfg.ApplyEnvironment("VAULTIC_TEST_")
+			cfg.ApplyEnvironment("RESTIC_TEST_") // legacy prefix fallback
 			cfg.Prefix += fmt.Sprintf("/test-%d", time.Now().UnixNano())
 			t.Logf("using prefix %v", cfg.Prefix)
 			return cfg, nil
@@ -57,7 +58,7 @@ func TestBackendSwift(t *testing.T) {
 		}
 	}()
 
-	if os.Getenv("VAULTIC_TEST_SWIFT") == "" {
+	if env.Get("TEST_SWIFT") == "" {
 		t.Skip("VAULTIC_TEST_SWIFT unset, skipping test")
 		return
 	}
@@ -67,7 +68,7 @@ func TestBackendSwift(t *testing.T) {
 }
 
 func BenchmarkBackendSwift(t *testing.B) {
-	if os.Getenv("VAULTIC_TEST_SWIFT") == "" {
+	if env.Get("TEST_SWIFT") == "" {
 		t.Skip("VAULTIC_TEST_SWIFT unset, skipping test")
 		return
 	}

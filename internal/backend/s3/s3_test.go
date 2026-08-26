@@ -18,6 +18,7 @@ import (
 	"github.com/vaultic/vaultic/internal/backend/location"
 	"github.com/vaultic/vaultic/internal/backend/s3"
 	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/options"
 	rtest "github.com/vaultic/vaultic/internal/test"
 )
@@ -176,13 +177,13 @@ func newS3TestSuite() *test.Suite[s3.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*s3.Config, error) {
-			cfg, err := s3.ParseConfig(os.Getenv("VAULTIC_TEST_S3_REPOSITORY"))
+			cfg, err := s3.ParseConfig(env.Get("TEST_S3_REPOSITORY"))
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.KeyID = os.Getenv("VAULTIC_TEST_S3_KEY")
-			cfg.Secret = options.NewSecretString(os.Getenv("VAULTIC_TEST_S3_SECRET"))
+			cfg.KeyID = env.Get("TEST_S3_KEY")
+			cfg.Secret = options.NewSecretString(env.Get("TEST_S3_SECRET"))
 			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
 			return cfg, nil
 		},

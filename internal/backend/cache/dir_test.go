@@ -4,12 +4,13 @@ import (
 	"os"
 	"testing"
 
+	"github.com/vaultic/vaultic/internal/env"
 	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 // DefaultDir should honor VAULTIC_CACHE_DIR on all platforms.
 func TestCacheDirEnv(t *testing.T) {
-	cachedir := os.Getenv("VAULTIC_CACHE_DIR")
+	cachedir := env.Get("CACHE_DIR")
 
 	if cachedir == "" {
 		cachedir = "/doesnt/exist"

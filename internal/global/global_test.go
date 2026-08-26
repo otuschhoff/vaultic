@@ -76,6 +76,30 @@ func TestPackSizeEnvApplied(t *testing.T) {
 	rtest.Equals(t, uint(64), gopts.PackSize)
 }
 
+func TestPackSizeLegacyEnvFallback(t *testing.T) {
+	// the legacy RESTIC_* variable is still honored
+	t.Setenv("RESTIC_PACK_SIZE", "128")
+
+	var gopts Options
+	gopts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+
+	err := gopts.PreRun(false)
+	rtest.OK(t, err)
+	rtest.Equals(t, uint(128), gopts.PackSize)
+}
+
+func TestPackSizeEnvPrimaryWinsOverLegacy(t *testing.T) {
+	t.Setenv("VAULTIC_PACK_SIZE", "64")
+	t.Setenv("RESTIC_PACK_SIZE", "128")
+
+	var gopts Options
+	gopts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+
+	err := gopts.PreRun(false)
+	rtest.OK(t, err)
+	rtest.Equals(t, uint(64), gopts.PackSize)
+}
+
 func TestPackSizeEnvIgnoredWhenFlagSet(t *testing.T) {
 	t.Setenv("VAULTIC_PACK_SIZE", "64MiB")
 

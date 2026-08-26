@@ -16,6 +16,7 @@ import (
 
 	"github.com/vaultic/vaultic/internal/backend/all"
 	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/errors"
 	"github.com/vaultic/vaultic/internal/feature"
 	"github.com/vaultic/vaultic/internal/global"
@@ -165,7 +166,7 @@ func main() {
 	logBuffer := bytes.NewBuffer(nil)
 	log.SetOutput(logBuffer)
 
-	err := feature.Flag.Apply(os.Getenv("VAULTIC_FEATURES"), func(s string) {
+	err := feature.Flag.Apply(env.Get("FEATURES"), func(s string) {
 		_, _ = fmt.Fprintln(os.Stderr, s)
 	})
 	if err != nil {

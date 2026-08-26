@@ -2,10 +2,10 @@ package progress
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/ui"
 	"github.com/vaultic/vaultic/internal/vaultic"
 )
@@ -15,7 +15,7 @@ import (
 // for non-interactive terminals or when run using the --quiet flag
 func CalculateProgressInterval(show bool, json bool, canUpdateStatus bool) time.Duration {
 	interval := time.Second / 10
-	fps, err := strconv.ParseFloat(os.Getenv("VAULTIC_PROGRESS_FPS"), 64)
+	fps, err := strconv.ParseFloat(env.Get("PROGRESS_FPS"), 64)
 	if err == nil && fps > 0 {
 		if fps > 60 {
 			fps = 60

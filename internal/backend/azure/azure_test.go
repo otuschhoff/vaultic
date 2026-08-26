@@ -11,6 +11,7 @@ import (
 	"github.com/vaultic/vaultic/internal/backend"
 	"github.com/vaultic/vaultic/internal/backend/azure"
 	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/options"
 	rtest "github.com/vaultic/vaultic/internal/test"
 	"github.com/vaultic/vaultic/internal/vaultic"
@@ -23,12 +24,13 @@ func newAzureTestSuite() *test.Suite[azure.Config] {
 
 		// NewConfig returns a config for a new temporary backend that will be used in tests.
 		NewConfig: func() (*azure.Config, error) {
-			cfg, err := azure.ParseConfig(os.Getenv("VAULTIC_TEST_AZURE_REPOSITORY"))
+			cfg, err := azure.ParseConfig(env.Get("TEST_AZURE_REPOSITORY"))
 			if err != nil {
 				return nil, err
 			}
 
 			cfg.ApplyEnvironment("VAULTIC_TEST_")
+			cfg.ApplyEnvironment("RESTIC_TEST_") // legacy prefix fallback
 			cfg.Prefix = fmt.Sprintf("test-%d", time.Now().UnixNano())
 			return cfg, nil
 		},
@@ -101,13 +103,13 @@ func TestBackendAzureAccountToken(t *testing.T) {
 
 	ctx := t.Context()
 
-	cfg, err := azure.ParseConfig(os.Getenv("VAULTIC_TEST_AZURE_REPOSITORY"))
+	cfg, err := azure.ParseConfig(env.Get("TEST_AZURE_REPOSITORY"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	cfg.AccountName = os.Getenv("VAULTIC_TEST_AZURE_ACCOUNT_NAME")
-	cfg.AccountSAS = options.NewSecretString(os.Getenv("VAULTIC_TEST_AZURE_ACCOUNT_SAS"))
+	cfg.AccountName = env.Get("TEST_AZURE_ACCOUNT_NAME")
+	cfg.AccountSAS = options.NewSecretString(env.Get("TEST_AZURE_ACCOUNT_SAS"))
 
 	tr, err := backend.Transport(backend.TransportOptions{})
 	if err != nil {
@@ -143,13 +145,13 @@ func TestBackendAzureContainerToken(t *testing.T) {
 
 	ctx := t.Context()
 
-	cfg, err := azure.ParseConfig(os.Getenv("VAULTIC_TEST_AZURE_REPOSITORY"))
+	cfg, err := azure.ParseConfig(env.Get("TEST_AZURE_REPOSITORY"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	cfg.AccountName = os.Getenv("VAULTIC_TEST_AZURE_ACCOUNT_NAME")
-	cfg.AccountSAS = options.NewSecretString(os.Getenv("VAULTIC_TEST_AZURE_CONTAINER_SAS"))
+	cfg.AccountName = env.Get("TEST_AZURE_ACCOUNT_NAME")
+	cfg.AccountSAS = options.NewSecretString(env.Get("TEST_AZURE_CONTAINER_SAS"))
 
 	tr, err := backend.Transport(backend.TransportOptions{})
 	if err != nil {
@@ -163,25 +165,25 @@ func TestBackendAzureContainerToken(t *testing.T) {
 }
 
 func TestUploadLargeFile(t *testing.T) {
-	if os.Getenv("VAULTIC_AZURE_TEST_LARGE_UPLOAD") == "" {
+	if env.Get("AZURE_TEST_LARGE_UPLOAD") == "" {
 		t.Skip("set VAULTIC_AZURE_TEST_LARGE_UPLOAD=1 to test large uploads")
 		return
 	}
 
 	ctx := t.Context()
 
-	if os.Getenv("VAULTIC_TEST_AZURE_REPOSITORY") == "" {
+	if env.Get("TEST_AZURE_REPOSITORY") == "" {
 		t.Skipf("environment variables not available")
 		return
 	}
 
-	cfg, err := azure.ParseConfig(os.Getenv("VAULTIC_TEST_AZURE_REPOSITORY"))
+	cfg, err := azure.ParseConfig(env.Get("TEST_AZURE_REPOSITORY"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	cfg.AccountName = os.Getenv("VAULTIC_TEST_AZURE_ACCOUNT_NAME")
-	cfg.AccountKey = options.NewSecretString(os.Getenv("VAULTIC_TEST_AZURE_ACCOUNT_KEY"))
+	cfg.AccountName = env.Get("TEST_AZURE_ACCOUNT_NAME")
+	cfg.AccountKey = options.NewSecretString(env.Get("TEST_AZURE_ACCOUNT_KEY"))
 	cfg.Prefix = fmt.Sprintf("test-upload-large-%d", time.Now().UnixNano())
 
 	tr, err := backend.Transport(backend.TransportOptions{})

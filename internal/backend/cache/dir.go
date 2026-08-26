@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/vaultic/vaultic/internal/env"
 )
 
-// EnvDir return $VAULTIC_CACHE_DIR env
+// EnvDir returns the cache directory configured via the environment
+// ($VAULTIC_CACHE_DIR, legacy fallback $RESTIC_CACHE_DIR).
 func EnvDir() string {
-	return os.Getenv("VAULTIC_CACHE_DIR")
+	return env.Get("CACHE_DIR")
 }
 
 // DefaultDir returns $VAULTIC_CACHE_DIR, or the default cache directory
