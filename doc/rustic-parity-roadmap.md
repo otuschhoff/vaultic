@@ -139,39 +139,39 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 ### 5.4 Concurrency & prune
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
 | F18 | Lock-free operations | no lock files; safe concurrent clients; additive index writes | P1 | XL | WS-E | ⚠️ partial: lock-free reads and tested local/cross-process gates; append writes retain shared locks; MinIO/S3/mixed-client gates pending |
 | F19 | Two-phase prune | repack+upload first, delete later; prune parallel to backups | P1 | L | WS-E | ⚠️ partial: minimal-lock local implementation complete; eventual-consistency, destructive cross-process, and mixed-client gates pending |
 | F20 | Prune extras | `--fast-repack`, `--keep-pack`, `--max-repack` (size/%/unlimited), `--repack-all`, `--early-delete-index` | P2 | M | WS-E | ⚠️ partial: all except `--keep-pack`; backend `FileInfo` has no modification time |
 
 ### 5.5 UX, configuration & observability
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
-| F21 | TOML config profiles | `vaultic.toml`, search paths, `-P profile`, `use-profiles` inheritance, env overrides; `[repository] [forget] [backup] [[backup.snapshots]]` | P0 | L | WS-F | ✅ |
-| F22 | Hooks | run-before/after/failed/finally at global/repo/backup/snapshot scope, env context, on-failure policy | P1 | M | WS-F | ✅ |
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
+| F21 | TOML config profiles | `vaultic.toml`, search paths, `-P profile`, `use-profiles` inheritance, env overrides; `[repository] [forget] [backup] [[backup.snapshots]]` | P0 | L | WS-F | ⚠️ substantially complete: core rustic-compatible profiles, inheritance, precedence, and backup jobs implemented; full schema interop remains unexhaustive |
+| F22 | Hooks | run-before/after/failed/finally at global/repo/backup/snapshot scope, env context, on-failure policy | P1 | M | WS-F | ⚠️ substantially complete: all listed scopes and failure policies implemented and tested; full rustic cross-client hook interop remains unexhaustive |
 | F23 | Log to file + log levels | `--log-file`, `--log-level(-*)` | P1 | S | WS-H | ⚠️ partial: log file works; `--log-level` validates but does not route/filter logger output |
 | F24 | Progress control | `--no-progress`, `--progress-interval` as real flags (env exists today) | P2 | S | WS-H | ✅ |
 | F25 | Telemetry | `--prometheus(+user/pass)` push metrics, `--opentelemetry` tracing (backup first) | P2 | M | WS-H | ⚠️ partial: Pushgateway/Influx backup metrics work; OTel is command-span skeleton only |
-| F26 | Interactive TUI | integrated terminal UI (stats live, selection) | P3 | XL | WS-J |
+| F26 | Interactive TUI | integrated terminal UI (stats live, selection) | P3 | XL | WS-J | Deferred — not implemented |
 
 ### 5.6 Backends & sources
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
-| F27 | New backends | dropbox, ftp, gdrive, onedrive, pcloud (rustic: via opendal; WebDAV excluded) | P2 | L | WS-G |
-| F28 | Remote backup sources | back up *from* S3/cloud storage | P3 | XL | WS-I |
-| F29 | Built-in sftp (no ssh binary) | rustic uses opendal sftp; vaultic shells out to ssh | P3 | M | WS-G |
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
+| F27 | New backends | dropbox, ftp, gdrive, onedrive, pcloud (rustic: via opendal; WebDAV excluded) | P2 | L | WS-G | Deferred — not implemented; rclone remains an available external route where supported |
+| F28 | Remote backup sources | back up *from* S3/cloud storage | P3 | XL | WS-I | Deferred — not implemented |
+| F29 | Built-in sftp (no ssh binary) | rustic uses opendal sftp; vaultic shells out to ssh | P3 | M | WS-G | Deferred — vaultic uses the existing SSH/SFTP path |
 
 ### 5.7 Commands
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
-| F30 | `merge` command | merge snapshots | P1 | M | §7 | ✅ |
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
+| F30 | `merge` command | merge snapshots | P1 | M | §7 | ✅ implemented; full rustic cross-client interop is not exhaustively tested |
 | F31 | `webdav` command | serve repo over WebDAV for browsing/restore | P2 | L | §7 | Deferred — explicitly out of scope |
-| F32 | `repoinfo` command | repo statistics summary | P2 | S | §7 | ✅ |
-| F33–F60 | Command enhancements | see per-command tables in Section 7 | mixed | mixed | §7 |
+| F32 | `repoinfo` command | repo statistics summary | P2 | S | §7 | ✅ implemented; full rustic cross-client output parity is not exhaustively tested |
+| F33–F60 | Command enhancements | see per-command tables in Section 7 | mixed | mixed | §7 | Mixed/deferred by command |
 
 ## 6. Foundation workstreams
 
@@ -871,9 +871,10 @@ graph TD
   is correctly *refused* by rustic ("hot repository! use --repo-hot") and
   tolerated by restic.
 - Deferred: `prune --keep-pack <duration>` (cold minimum-holding period) needs
-  pack mtimes, i.e. a `FileInfo`/backend interface change — moved to Phase 6.
+  pack mtimes, i.e. a `FileInfo`/backend interface change — retained in the
+  deferred backend-compatibility backlog.
 
-### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20) — ⚠️ substantially complete, external gates pending (branch `rustic-parity`, 2026-08-26)
+### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20) — ⚠️ substantially complete, external gates pending (branch `rustic-parity`, 2026-08-27)
 
 - Deliverables: `LockPolicy` per command, additive index discipline,
   two-phase prune with `--keep-delete`/`--instant-delete`, prune extras.
@@ -893,6 +894,8 @@ graph TD
   lock-free read no-lock-file regression, writable append/no-lock regressions,
   an append-lock-presence regression, and a race-enabled backup ∥ prune ∥
   dry-run forget soak.
+  Fresh focused and race-enabled local tests pass; S3/MinIO eventual
+  consistency and mixed rustic/vaultic destructive-client tests remain open.
 - **F19 minimal-lock deferred-delete prune** — `PrunePlan.Execute` splits storage lifecycle
   into phase 1 (repack +
   write new index) and phase 2 (delete superseded packs + old index files)
@@ -930,7 +933,7 @@ graph TD
   The detailed remaining stages are specified in
   [WS-E's locking parity roadmap](#locking-parity-roadmap-remaining-work).
 
-### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25) — ⚠️ substantially complete (branch `rustic-parity`, 2026-08-26)
+### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25) — ⚠️ substantially complete; F23/F25 gaps remain (branch `rustic-parity`, 2026-08-27)
 
 - **F21 profiles** — new [internal/configfile](../internal/configfile) parses
   TOML with repeatable ``-P/--use-profile``, recursive ``use-profiles``
@@ -942,11 +945,14 @@ graph TD
   ``set-compression``, ``packsize-default``, ``packsize-tree``, global
   ``group-by``, and backup/job ``globs`` (``!`` exclusions). The provided NAS
   profile schema is covered by an automated parser test and a CLI smoke run.
+  Core behavior is implemented; exhaustive rustic schema and cross-client
+  profile interop coverage remains open.
 - **F22 hooks** — [internal/hooks](../internal/hooks) implements
   ``run-before``, ``run-after``, ``run-failed``, and ``run-finally`` across
   global, repository, command, and per-snapshot-job scopes. Hooks run without
   an implicit shell, honor ``error|warn|ignore``, and export VAULTIC_ plus
-  RUSTIC_ context variables.
+  RUSTIC_ context variables. Core scopes and failure policies are covered by
+  tests; exhaustive rustic cross-client hook interop remains open.
 - **F23/F24 controls** — ``--log-file``, validated (but not yet filtering)
   ``--log-level``,
   ``--no-progress``, and ``--progress-interval`` are global, environment-aware,
@@ -964,15 +970,18 @@ graph TD
   coverage, and a CLI smoke test for a profile job, hook, label, no-progress,
   and log file. See [052_profiles_automation.rst](052_profiles_automation.rst).
 
-### Phase 6 — Command parity batch (§7; F30–F32 + enhancements) — ⚠️ selected high-value work complete (branch `rustic-parity`, 2026-08-26)
+### Phase 6 — Command parity batch (§7; F30–F32 + enhancements) — ⚠️ selected high-value work complete; cross-client output parity remains open (branch `rustic-parity`, 2026-08-27)
 
 - **F30 merge** — `merge` recursively unions snapshot trees, resolving
   conflicts in favor of the newest source node. It creates one new snapshot,
   records source IDs in additive ``merged_snapshots`` metadata, and uses an
   append lock only: it never rewrites or deletes source repository objects.
+  Local integration coverage passes; exhaustive rustic merge metadata and
+  mixed-client interop coverage remains open.
 - **F32 repoinfo** — `repoinfo` is a read-only, lock-free-feature-compatible
   aggregate of data/key/snapshot/index object counts and stored sizes, with
-  JSON and text output.
+  JSON and text output. Local command coverage passes; exhaustive rustic
+  cross-client output parity remains open.
 - **Enhancements delivered** — `backup --ls`/`--init`, minutely,
   quarterly-yearly, half-yearly and matching ``keep-within-*`` retention,
   ``--keep-none``, dump ``tar.gz`` plus target-extension ``auto``, diff
@@ -981,10 +990,12 @@ graph TD
   implemented. The remaining large §7 work remains explicitly deferred to a
   later command batch rather than receiving partial or unsafe implementations.
 
-### Phase 7 — Long tail (WS-G, WS-I, WS-J; F26–F29)
+### Phase 7 — Long tail (WS-G, WS-I, WS-J; F26–F29) — ⏳ deferred
 
-- Remaining cloud backends (excluding WebDAV, which is out of scope), remote
-  sources, and TUI.
+- F26 interactive TUI, F27 additional built-in cloud backends, F28 remote
+  backup sources, and F29 built-in opendal-style SFTP remain deferred.
+  Vaultic currently uses existing backends, rclone where supported, and its
+  SSH/SFTP path instead of claiming rustic-native implementations.
 - Exit criteria: parity matrix re-issued with remaining deltas documented as
   intentional (e.g. features covered via rclone).
 
