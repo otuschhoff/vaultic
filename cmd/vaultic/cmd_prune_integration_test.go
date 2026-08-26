@@ -3,15 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
 )
 
 func testRunPrune(t testing.TB, gopts global.Options, opts PruneOptions) {
@@ -376,20 +381,26 @@ func TestPruneConcurrencySoak(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
+	// withTestEnvironment uses a zero lock double-check delay to speed normal
+	// tests. This deliberate concurrent-exclusive scenario must exercise the
+	// production visibility safeguard instead.
+	repository.TestSetLockTimeout(t, 50*time.Millisecond)
 
 	// seed a few snapshots so forget/prune have something to work with
 	for i := 0; i < 3; i++ {
 		testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
 	}
+	env.gopts.BackendTestHook = nil
 
 	var wg sync.WaitGroup
+	backupResult := make(chan error, 1)
 
 	// concurrent lock-free backup (append-only; must never corrupt the repo)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runBackup(ctx, BackupOptions{}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0", "0", "9", "2")})
+		backupResult <- withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+			return runBackup(ctx, BackupOptions{Host: "lock-free-soak"}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0", "0", "9", "2")})
 		})
 	}()
 
@@ -402,17 +413,100 @@ func TestPruneConcurrencySoak(t *testing.T) {
 		})
 	}()
 
-	// concurrent forget (exclusive lock; may conflict with prune — tolerated)
+	// Concurrent forget policy evaluation. Keep it dry-run: prune is the sole
+	// destructive operation in this lock-contract soak, while forget still
+	// exercises its exclusive acquisition and snapshot selection path.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = testRunForgetMayFail(t, env.gopts, ForgetOptions{Last: 1})
+		_ = testRunForgetMayFail(t, env.gopts, ForgetOptions{Last: 1, DryRun: true})
 	}()
 
 	wg.Wait()
+	backupErr := <-backupResult
+	if backupErr != nil && !repository.IsAlreadyLocked(backupErr) {
+		t.Fatalf("append backup failed unexpectedly: %v", backupErr)
+	}
 
 	// A concurrent prune/forget may legitimately conflict with the backup or
 	// each other; the repository must remain consistent regardless. We only
-	// require that a final check passes.
+	// require that a final check passes. The backup's separate host group must
+	// also have a durable snapshot; this catches accidental dry-run behavior
+	// without assuming how many seeded snapshots concurrent forget retains.
+	var backupSnapshots int
+	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		filter := data.SnapshotFilter{Hosts: []string{"lock-free-soak"}}
+		return filter.FindAll(ctx, repo, repo, nil, func(_ string, _ *data.Snapshot, err error) error {
+			if err == nil {
+				backupSnapshots++
+			}
+			return err
+		})
+	}))
+	if backupErr == nil {
+		rtest.Equals(t, 1, backupSnapshots)
+	} else {
+		rtest.Equals(t, 0, backupSnapshots)
+	}
 	testRunCheck(t, env.gopts)
+}
+
+func TestLockFreeFeatureBackupRemainsWritable(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, true)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, env)
+	env.gopts.BackendTestHook = nil
+
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, BackupOptions{}, env.gopts)
+	testListSnapshots(t, env.gopts, 2)
+}
+
+func TestLockFreeReadSkipsLockFile(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, true)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, env)
+	env.gopts.BackendTestHook = nil
+	before, err := os.ReadDir(filepath.Join(env.repo, "locks"))
+	rtest.OK(t, err)
+
+	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
+		_, _, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		entries, err := os.ReadDir(filepath.Join(env.repo, "locks"))
+		if err != nil {
+			return err
+		}
+		if len(entries) != len(before) {
+			return fmt.Errorf("lock-free read changed lock file count from %d to %d", len(before), len(entries))
+		}
+		return nil
+	}))
+}
+
+func TestNoLockBackupWritesSnapshot(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, false)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, env)
+	env.gopts.BackendTestHook = nil
+	env.gopts.NoLock = true
+
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
+	testListSnapshots(t, env.gopts, 1)
 }

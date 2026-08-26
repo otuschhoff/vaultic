@@ -13,10 +13,9 @@ const (
 	SafeForgetKeepTags      FlagName = "safe-forget-keep-tags"
 	S3Restore               FlagName = "s3-restore"
 	WarmupCommand           FlagName = "warmup-command"
-	// LockFree makes read-only and append-only commands (backup, restore,
-	// snapshots, ls, copy, ...) operate without creating lock files. Index
-	// writes are additive, so concurrent lock-free writers cannot corrupt the
-	// repository. Exclusive commands (prune, forget, repair, ...) still lock.
+	// LockFree makes read-only commands operate without creating lock files.
+	// Append commands retain a non-exclusive lock until prune can safely
+	// revalidate concurrent writes. Exclusive commands always lock.
 	LockFree FlagName = "lock-free"
 	// TwoPhasePrune enables the --keep-delete / --instant-delete prune flags.
 	// With --keep-delete, prune performs only the repack+index phase and defers
@@ -34,7 +33,7 @@ func init() {
 		ExplicitS3AnonymousAuth: {Type: Stable, Description: "forbid anonymous S3 authentication unless `-o s3.unsafe-anonymous-auth=true` is set"},
 		SafeForgetKeepTags:      {Type: Stable, Description: "prevent deleting all snapshots if the tag passed to `forget --keep-tags tagname` does not exist"},
 		S3Restore:               {Type: Alpha, Description: "restore S3 objects from cold storage classes when `-o s3.enable-restore=true` is set"}, WarmupCommand: {Type: Beta, Description: "run the --warm-up-command to warm up cold storage before reading packs"},
-		LockFree:      {Type: Alpha, Description: "let read-only and append-only commands (backup, restore, snapshots, ls, copy, ...) run without lock files; exclusive commands still lock. Opt-in (VAULTIC_FEATURES=lock-free=true): lock-free reorders backend list operations, which is unsafe on eventually-consistent backends unless clients coordinate, so it is disabled by default."},
+		LockFree:      {Type: Alpha, Description: "let read-only commands (restore, snapshots, ls, find, ...) run without lock files; append operations retain non-exclusive locks until concurrent prune revalidation is available. Opt-in (VAULTIC_FEATURES=lock-free=true): lock-free reorders backend list operations, which is unsafe on eventually-consistent backends unless clients coordinate, so it is disabled by default."},
 		TwoPhasePrune: {Type: Alpha, Description: "enable two-phase prune via --keep-delete/--instant-delete; defer deletion of superseded packs/indexes to a later prune run to shorten the exclusive window"},
 	})
 }

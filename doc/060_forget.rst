@@ -558,9 +558,8 @@ Two-phase prune
 
 By default ``prune`` runs in a single phase: it repacks data, writes the new
 index, and deletes the superseded pack and index files, all while holding an
-exclusive lock. To shorten the window in which files are deleted (and to allow
-the expensive repack phase to overlap with concurrent backups), vaultic offers
-a *two-phase prune*, gated behind the ``two-phase-prune`` feature flag
+exclusive lock. Vaultic also offers a *deferred-delete prune*, gated behind the
+``two-phase-prune`` feature flag
 (``VAULTIC_FEATURES=two-phase-prune=true``):
 
 - ``--keep-delete`` performs only the first phase: it repacks and writes the
@@ -571,11 +570,12 @@ a *two-phase prune*, gated behind the ``two-phase-prune`` feature flag
 - ``--instant-delete`` (the default) keeps the single-phase behavior: superseded
    files are deleted in the same run.
 
-A typical two-phase workflow is to run ``prune --keep-delete`` during normal
-operation (short exclusive window, no deletions) and a plain ``prune``
-(instant-delete) later to reclaim the space. Safety invariant: ``prune`` only
-ever deletes files that were part of its own plan, so a concurrent ``backup``
-is never affected. Note that after a ``--keep-delete`` run, ``check`` reports
+A typical deferred-delete workflow is to run ``prune --keep-delete`` during
+normal operation (no pack/index deletion) and a plain ``prune``
+(instant-delete) later to reclaim the space. The repack and index-writing phase
+still holds an exclusive lock, so it does not yet run in parallel with backups.
+Safety invariant: ``prune`` only ever deletes files that were part of its own
+plan. Note that after a ``--keep-delete`` run, ``check`` reports
 the non-critical "pack contained in several indexes" condition until the
 delete phase runs; this is expected and not a sign of corruption.
 
@@ -583,25 +583,29 @@ Lock-free operations
 ********************
 
 Normally every vaultic command creates a lock file in the repository so that
-operations that modify or read the repository do not interfere. For read-only
-and append-only commands (``backup``, ``restore``, ``snapshots``, ``ls``,
-``copy``, …) vaultic offers a *lock-free* mode, enabled with the ``lock-free``
-feature flag (``VAULTIC_FEATURES=lock-free=true``). In lock-free mode these
-commands do not create lock files but remain fully writable. Because index
-writes are additive, concurrent lock-free writers cannot corrupt the
-repository, and stale lock files no longer block routine backups.
+operations do not interfere. Vaultic offers an opt-in *lock-free read mode*
+through ``VAULTIC_FEATURES=lock-free=true``. Read-only commands (``restore``,
+``snapshots``, ``ls``, ``find``, ``dump``, ``repoinfo``, …) then skip lock-file
+creation, so stale locks do not block normal inspection or restoration.
+
+Append operations (``backup``, ``copy`` destination, ``merge``, ``key add``)
+still take a non-exclusive lock. This is intentional: the current prune
+implementation can delete packs selected before a concurrent unlocked backup
+finishes. Retaining the shared lock makes append writes wait or retry around
+exclusive ``prune``/``forget`` work and prevents that race. ``--no-lock`` is an
+explicit operator override for non-exclusive operations and should only be
+used when the caller coordinates repository access.
 
 Commands that modify existing data (``prune``, ``forget``, ``repair``, ``key``,
 ``config``, ``tag``, ``rewrite``, …) always take an exclusive lock regardless
 of this flag.
 
 .. note::
-    Lock-free mode is opt-in (Alpha). It changes the order in which the backend
-    is listed, which is only safe on eventually-consistent storage (such as S3)
-    if all clients accessing the repository coordinate. Do not mix lock-free
-    vaultic with restic/rustic clients holding classic lock files during this
-    phase, and prefer keeping the default (locking) behavior unless you need
-    concurrent lock-free clients.
+   Lock-free read mode is opt-in (Alpha). It changes the order in which the
+   backend is listed, which is only safe on eventually-consistent storage
+   (such as S3) if all clients accessing the repository coordinate. Do not
+   mix it with restic/rustic clients holding classic lock files during this
+   phase, and prefer the default locking behavior for writers.
 
 To prevent accidental usages of the ``--unsafe-recover-no-free-space`` option it is
 necessary to first run ``prune --unsafe-recover-no-free-space SOME-ID`` and then replace

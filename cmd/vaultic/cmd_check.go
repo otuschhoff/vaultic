@@ -244,6 +244,8 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	if !gopts.NoLock {
 		printer.P("create exclusive lock for repository\n")
 	}
+	// Check needs a coherent repository view across indexes, packs, and
+	// snapshots. Keep its exclusive lock even though its cache writes are local.
 	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, gopts.NoLock, printer)
 	if err != nil {
 		return summary, err

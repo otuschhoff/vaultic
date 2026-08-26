@@ -165,7 +165,7 @@ func runDebugExamine(ctx context.Context, gopts global.Options, opts DebugExamin
 		return fmt.Errorf("--extract-pack and --no-lock are mutually exclusive")
 	}
 
-	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, false, printer)
 	if err != nil {
 		return err
 	}

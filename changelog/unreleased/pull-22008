@@ -1,0 +1,19 @@
+Bugfix: correct lock-free and minimal-lock safety
+
+The Alpha `lock-free` feature no longer turns append operations into dry runs.
+`backup`, `copy` destination writes, `merge`, and other append operations now
+remain writable and retain their non-exclusive repository lock, so they either
+serialize with exclusive `prune`/`forget` work or, with `--retry-lock`, wait and
+retry instead of racing pack deletion.
+
+The feature now intentionally applies only to read-only operations (restore,
+snapshots, ls, find, dump, repoinfo, ...), which skip lock-file creation.
+`--no-lock` remains an explicit operator override for non-exclusive operations.
+`check` now uses a read lock because it does not modify repository objects.
+
+The concurrency soak test now requires a durable append snapshot and passes
+under `-race`; direct lock-free-read and writable `--no-lock` regressions cover
+the corrected behavior. The roadmap accurately marks full rustic-grade
+lock-free append / prune-parallel operation as still incomplete.
+
+https://github.com/otuschhoff/vaultic/pull/22008
