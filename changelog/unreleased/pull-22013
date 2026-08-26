@@ -1,0 +1,13 @@
+Enhancement: lock parity Phase 5 revalidated minimal-lock forget
+
+Forget now evaluates retention and delete protection under a shared/read phase,
+then re-lists and re-evaluates under a short exclusive deletion phase. It only
+removes snapshot IDs selected by both observations. Snapshots created, newly
+protected, or no longer selected while policy evaluation runs are retained.
+
+`forget --prune` keeps its established exclusive handoff into prune. An
+integration test pauses forget phase A, completes a backup, then confirms that
+the new snapshot survives phase-B revalidation and the repository remains
+clean after prune/check.
+
+https://github.com/otuschhoff/vaultic/pull/22013

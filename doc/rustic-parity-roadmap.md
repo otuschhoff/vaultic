@@ -495,11 +495,15 @@ feature flag.
   ``--keep-delete`` runs A and retains the ready plan for a later B.
   ``--keep-pack`` remains dependent on backend file mtimes.
 
-5. **Revisit forget independently.** Keep destructive forget exclusive until
-   it has an analogous short delete phase: evaluate policy without a lock,
-   re-list/revalidate snapshots under an exclusive lock, and delete only
-   snapshots still selected by that revalidated policy. Do not combine fully
-   unlocked destructive forget and prune until both protocols are proven.
+5. **✅ Revalidated minimal-lock forget (implemented).** Forget now evaluates
+  policy and delete protection under a shared/read phase, releases that lock,
+  then re-lists/re-evaluates under a short exclusive delete phase. It deletes
+  only snapshot IDs selected by both observations, so snapshots created,
+  protected, or retained after phase A are never deleted by phase B. The
+  existing ``forget --prune`` flow remains within that exclusive delete phase
+  to retain its snapshot-to-prune handoff semantics. An integration test
+  pauses phase A, completes a backup, and proves the new snapshot survives
+  revalidation before a final prune/check.
 
 6. **Graduate only through explicit test gates.** Each stage must pass:
 

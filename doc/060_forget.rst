@@ -553,6 +553,21 @@ repository storage, before running this command. In case the command fails, it m
 necessary to manually remove all files from the ``index/`` folder of the repository and
 run ``vaultic repair index`` afterwards.
 
+Minimal-lock forget
+*******************
+
+Normal ``forget`` evaluates its retention policy under a shared read phase,
+then releases that lock before taking a short exclusive deletion lock. Under
+the exclusive phase it lists and evaluates snapshots again and deletes only
+snapshot IDs selected by *both* evaluations. A backup, tag update, or delete
+protection change completed during policy evaluation therefore cannot cause a
+newly created, newly retained, or newly protected snapshot to be deleted.
+
+``forget --prune`` retains its existing exclusive handoff from snapshot
+deletion into prune, so the prune plan sees the snapshots just removed. Use
+``--dry-run`` to inspect the current policy result without entering the
+exclusive deletion phase.
+
 Two-phase prune
 ***************
 
