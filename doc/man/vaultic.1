@@ -34,6 +34,10 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 	compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)
 
 .PP
+\fB--data-pack-size\fP=0
+	set target data pack size in MiB (profile/runtime override)
+
+.PP
 \fB-h\fP, \fB--help\fP[=false]
 	help for vaultic
 
@@ -180,6 +184,10 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 .PP
 \fB--tls-client-cert\fP=""
 	path to a \fBfile\fR containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)
+
+.PP
+\fB--tree-pack-size\fP=0
+	set target tree pack size in MiB (profile/runtime override)
 
 .PP
 \fB-P\fP, \fB--use-profile\fP=[]

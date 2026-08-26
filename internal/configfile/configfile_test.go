@@ -67,3 +67,61 @@ func TestLoadRejectsIncludeCycle(t *testing.T) {
 		t.Fatal("Load succeeded for include cycle")
 	}
 }
+
+func TestRusticStyleRepositoryAndBackupProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rustic.toml")
+	profile := `[repository]
+repository = "/volume/repo"
+password-file = "/volume/password"
+cache-dir = "/volume/cache"
+set-compression = 3
+packsize-default = "128MiB"
+packsize-tree = "8MiB"
+
+[forget]
+keep-daily = 7
+keep-weekly = 4
+
+[global]
+group-by = "paths"
+
+[backup]
+host = "ncl1-1-ps"
+exclude-if-present = ["CACHEDIR.TAG", ".nobackup"]
+globs = ["!**/.snapshot/**", "!**/lost+found/**"]
+
+[[backup.snapshots]]
+name = "cdot"
+sources = ["/volume/a", "/volume/b"]
+one-file-system = true
+`
+	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Sections["repository"]["repo"]; got != "/volume/repo" {
+		t.Fatalf("repository alias = %#v", got)
+	}
+	if got := p.Sections["repository"]["compression"]; got != "auto" {
+		t.Fatalf("set-compression alias = %#v", got)
+	}
+	if got := p.Sections["repository"]["pack-size"]; got != uint64(128) {
+		t.Fatalf("packsize-default alias = %#v", got)
+	}
+	if got := p.Sections["repository"]["tree-pack-size"]; got != uint64(8) {
+		t.Fatalf("packsize-tree alias = %#v", got)
+	}
+	if got := p.Sections["backup"]["group-by"]; got != "paths" {
+		t.Fatalf("global group-by propagation = %#v", got)
+	}
+	if len(p.Snapshots) != 1 || len(p.Snapshots[0].Sources) != 2 || p.Snapshots[0].Values["one-file-system"] != true {
+		t.Fatalf("unexpected named backup job: %#v", p.Snapshots)
+	}
+	excludes, ok := p.Sections["backup"]["exclude"].([]any)
+	if !ok || len(excludes) != 2 || excludes[0] != "**/.snapshot/**" {
+		t.Fatalf("globs were not translated: %#v", p.Sections["backup"]["exclude"])
+	}
+}

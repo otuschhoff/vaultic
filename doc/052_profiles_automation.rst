@@ -35,6 +35,22 @@ table uses the command's flag names:
    [forget]
    keep-last = 14
 
+Rustic-style aliases are accepted for existing deployment profiles:
+``[repository].repository`` maps to ``--repo``;
+``set-compression = N`` maps its zstd level to vaultic's closest runtime
+compression mode; ``packsize-default = "128MiB"`` maps to ``--pack-size``;
+and ``packsize-tree = "8MiB"`` maps to ``--tree-pack-size``. These pack-size
+profile settings are runtime overrides for the invoking command; use
+``vaultic config --set-*`` when the values must be persisted in repository
+configuration. A ``[global].group-by`` value is applied to backup, forget, and
+snapshots, which own that flag.
+
+In ``[backup]`` and ``[[backup.snapshots]]``, rustic ``globs`` are accepted.
+Entries beginning with ``!`` are translated to vaultic exclusion patterns, so
+for example ``"!**/.snapshot/**"`` excludes NetApp snapshot directories.
+TOML arrays map to repeated command flags; this applies to
+``exclude-if-present``, ``globs``, and similar array-valued options.
+
 Named backup jobs
 -----------------
 

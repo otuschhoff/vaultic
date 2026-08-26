@@ -78,6 +78,8 @@ type Options struct {
 	CleanupCache       bool
 	Compression        repository.CompressionMode
 	PackSize           uint
+	TreePackSize       uint
+	DataPackSize       uint
 	NoExtraVerify      bool
 	InsecureNoPassword bool
 
@@ -181,6 +183,8 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.IntVar(&opts.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
 	const packSizeFlag = "pack-size"
 	f.UintVar(&opts.PackSize, packSizeFlag, 0, "set target pack `size` in MiB, created pack files may be larger (default: $VAULTIC_PACK_SIZE)")
+	f.UintVar(&opts.TreePackSize, "tree-pack-size", 0, "set target tree pack size in MiB (profile/runtime override)")
+	f.UintVar(&opts.DataPackSize, "data-pack-size", 0, "set target data pack size in MiB (profile/runtime override)")
 	f.StringSliceVarP(&opts.Options, "option", "o", []string{}, "set extended option (`key=value`, can be specified multiple times)")
 	f.StringVar(&opts.HTTPUserAgent, "http-user-agent", "", "set a http user agent for outgoing http requests")
 	f.DurationVar(&opts.StuckRequestTimeout, "stuck-request-timeout", 5*time.Minute, "`duration` after which to retry stuck requests")
@@ -511,6 +515,8 @@ func createRepositoryInstance(be backend.Backend, gopts Options) (*repository.Re
 	s, err := repository.New(be, repository.Options{
 		Compression:   gopts.Compression,
 		PackSize:      gopts.PackSize * 1024 * 1024,
+		TreePackSize:  uint64(gopts.TreePackSize) * 1024 * 1024,
+		DataPackSize:  uint64(gopts.DataPackSize) * 1024 * 1024,
 		NoExtraVerify: gopts.NoExtraVerify,
 	})
 	if err != nil {
@@ -554,6 +560,12 @@ func applyRepoConfig(s *repository.Repository, gopts Options) error {
 	}
 	if cfg.DataPackSizeBytes != 0 {
 		s.SetDataPackSize(dataSize, dataLimit)
+	}
+	if gopts.TreePackSize != 0 {
+		s.SetTreePackSize(uint64(gopts.TreePackSize)*1024*1024, 0)
+	}
+	if gopts.DataPackSize != 0 {
+		s.SetDataPackSize(uint64(gopts.DataPackSize)*1024*1024, 0)
 	}
 	return nil
 }

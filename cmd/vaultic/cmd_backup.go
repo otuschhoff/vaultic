@@ -190,23 +190,29 @@ func runProfileBackupJobs(ctx context.Context, base BackupOptions, gopts global.
 		}
 		found[job.Name] = true
 
-		jobOpts := base
+		var jobOpts BackupOptions
 		jobFlags := pflag.NewFlagSet("profile backup", pflag.ContinueOnError)
 		jobFlags.SetInterspersed(true)
 		jobOpts.AddFlags(jobFlags)
-		// AddFlags initializes defaults. Restore the already merged CLI/profile
-		// values, then overlay only job-specific settings.
-		jobOpts = base
 		envOverrides := func(name string) bool {
-			if commandFlags.Lookup(name) != nil && commandFlags.Lookup(name).Changed {
-				return true
-			}
 			_, ok := env.Lookup(strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
 			return ok
+		}
+		// Apply parsed [backup] settings directly. This preserves TOML arrays
+		// such as exclude-if-present and globs without pflag's display format.
+		if err := configfile.ApplyValues(profile.Sections["backup"], jobFlags, envOverrides); err != nil {
+			return err
 		}
 		if err := configfile.ApplyValues(job.Values, jobFlags, envOverrides); err != nil {
 			return err
 		}
+		// Profile application intentionally preserves pflag.Changed. Copy only
+		// explicit CLI scalar values last so CLI > job > [backup] precedence.
+		commandFlags.Visit(func(flag *pflag.Flag) {
+			if jobFlags.Lookup(flag.Name) != nil && flag.Value.Type() != "stringArray" {
+				_ = jobFlags.Set(flag.Name, flag.Value.String())
+			}
+		})
 		if err := jobOpts.Finalize(); err != nil {
 			return err
 		}

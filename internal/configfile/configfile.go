@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -106,15 +107,138 @@ func (p *Profile) load(path string, stack []string) error {
 		if !ok {
 			return fmt.Errorf("profile %q: section %q must be a table", path, name)
 		}
+		if err := normalizeSection(name, section); err != nil {
+			return fmt.Errorf("profile %q: %w", path, err)
+		}
 		if name == "backup" {
 			if err := p.extractBackup(section); err != nil {
 				return fmt.Errorf("profile %q: %w", path, err)
+			}
+		}
+		if name == "global" {
+			if value, ok := section["group-by"]; ok {
+				for _, command := range []string{"backup", "forget", "snapshots"} {
+					if p.Sections[command] == nil {
+						p.Sections[command] = make(map[string]any)
+					}
+					if _, set := p.Sections[command]["group-by"]; !set {
+						p.Sections[command]["group-by"] = value
+					}
+				}
+				delete(section, "group-by")
 			}
 		}
 		p.mergeSection(name, section)
 	}
 	p.Files = append(p.Files, path)
 	return nil
+}
+
+// normalizeSection accepts the rustic TOML spelling used by established
+// profiles and translates it to vaultic's flag names. Values not represented
+// by a vaultic flag are rejected by ApplyValues instead of being ignored.
+func normalizeSection(name string, values map[string]any) error {
+	alias := func(from, to string) {
+		if value, ok := values[from]; ok {
+			if _, exists := values[to]; !exists {
+				values[to] = value
+			}
+			delete(values, from)
+		}
+	}
+	switch name {
+	case "repository":
+		alias("repository", "repo")
+		if value, ok := values["set-compression"]; ok {
+			level, err := integer(value)
+			if err != nil {
+				return fmt.Errorf("repository.set-compression: %w", err)
+			}
+			values["compression"] = compressionMode(level)
+			delete(values, "set-compression")
+		}
+		if value, ok := values["packsize-default"]; ok {
+			mib, err := packSizeMiB(value)
+			if err != nil {
+				return fmt.Errorf("repository.packsize-default: %w", err)
+			}
+			values["pack-size"] = mib
+			delete(values, "packsize-default")
+		}
+		if value, ok := values["packsize-tree"]; ok {
+			mib, err := packSizeMiB(value)
+			if err != nil {
+				return fmt.Errorf("repository.packsize-tree: %w", err)
+			}
+			values["tree-pack-size"] = mib
+			delete(values, "packsize-tree")
+		}
+	case "backup":
+		if globs, ok := values["globs"]; ok {
+			patterns, err := stringSlice(globs)
+			if err != nil {
+				return fmt.Errorf("backup.globs: %w", err)
+			}
+			for i, pattern := range patterns {
+				// rustic's !glob convention denotes an exclusion. vaultic's
+				// --exclude list contains reject patterns directly.
+				patterns[i] = strings.TrimPrefix(pattern, "!")
+			}
+			values["exclude"] = stringsToAny(patterns)
+			delete(values, "globs")
+		}
+	}
+	return nil
+}
+
+func integer(value any) (int, error) {
+	switch value := value.(type) {
+	case int64:
+		return int(value), nil
+	case string:
+		return strconv.Atoi(value)
+	default:
+		return 0, fmt.Errorf("must be an integer")
+	}
+}
+
+func compressionMode(level int) string {
+	switch {
+	case level == 0:
+		return "off"
+	case level < 0:
+		return "fastest"
+	case level <= 3:
+		return "auto"
+	case level <= 9:
+		return "better"
+	default:
+		return "max"
+	}
+}
+
+func packSizeMiB(value any) (uint64, error) {
+	s, ok := value.(string)
+	if !ok {
+		return 0, fmt.Errorf("must be a size string such as 128MiB")
+	}
+	s = strings.TrimSpace(strings.ToLower(s))
+	if !strings.HasSuffix(s, "mib") {
+		return 0, fmt.Errorf("must use a MiB value")
+	}
+	valueMiB, err := strconv.ParseUint(strings.TrimSuffix(s, "mib"), 10, 32)
+	if err != nil || valueMiB == 0 {
+		return 0, fmt.Errorf("invalid MiB size %q", s)
+	}
+	return valueMiB, nil
+}
+
+func stringsToAny(values []string) []any {
+	result := make([]any, len(values))
+	for i, value := range values {
+		result[i] = value
+	}
+	return result
 }
 
 func (p *Profile) mergeSection(name string, values map[string]any) {
@@ -144,6 +268,9 @@ func (p *Profile) extractBackup(section map[string]any) error {
 		return fmt.Errorf("backup.snapshots must be an array of tables")
 	}
 	for _, values := range list {
+		if err := normalizeSection("backup", values); err != nil {
+			return err
+		}
 		name, _ := values["name"].(string)
 		sources, err := stringSlice(values["sources"])
 		if err != nil {
@@ -205,14 +332,29 @@ func (p *Profile) ApplyFlags(section string, flags *pflag.FlagSet, envLookup fun
 func ApplyValues(values map[string]any, flags *pflag.FlagSet, envLookup func(string) bool) error {
 	for key, value := range values {
 		flag := flags.Lookup(key)
-		if flag == nil || flag.Changed || envLookup(key) {
+		if flag == nil {
+			return fmt.Errorf("option %s is not supported by this command", key)
+		}
+		if flag.Changed || envLookup(key) {
+			continue
+		}
+		if values, ok := value.([]any); ok && flag.Value.Type() == "stringArray" {
+			for _, value := range values {
+				text, err := flagValue(value)
+				if err != nil {
+					return fmt.Errorf("option %s: %w", key, err)
+				}
+				if err := flag.Value.Set(text); err != nil {
+					return fmt.Errorf("option %s: %w", key, err)
+				}
+			}
 			continue
 		}
 		text, err := flagValue(value)
 		if err != nil {
 			return fmt.Errorf("option %s: %w", key, err)
 		}
-		if err := flags.Set(key, text); err != nil {
+		if err := flag.Value.Set(text); err != nil {
 			return fmt.Errorf("option %s: %w", key, err)
 		}
 	}
@@ -223,7 +365,7 @@ func flagValue(value any) (string, error) {
 	switch value := value.(type) {
 	case string:
 		return value, nil
-	case bool, int64, float64:
+	case bool, int, int64, uint, uint64, float64:
 		return fmt.Sprint(value), nil
 	case []any:
 		parts := make([]string, len(value))

@@ -1,0 +1,11 @@
+Bugfix: accept rustic-style TOML profile aliases
+
+Vaultic TOML profiles now accept the rustic deployment spelling used by common
+repository configurations: `[repository].repository`, `set-compression`,
+`packsize-default`, and `packsize-tree`; `[global].group-by`; and backup/job
+`globs` with `!` exclusion entries. TOML arrays are applied as repeated flags,
+so `exclude-if-present` and glob exclusions work as expected for named backup
+jobs. Named jobs also correctly preserve the documented precedence of explicit
+CLI scalar flags over per-job and shared backup profile values.
+
+https://github.com/otuschhoff/vaultic/pull/22007

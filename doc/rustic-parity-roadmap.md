@@ -804,7 +804,10 @@ graph TD
   precedence. ``[global]``, ``[repository]``, and command sections apply to
   unchanged flags. ``[[backup.snapshots]]`` supports named no-argument backup
   jobs; ``backup --name`` selects jobs and ``backup --init`` initializes a
-  missing repository.
+  missing repository. Rustic deployment aliases are accepted: ``repository``,
+  ``set-compression``, ``packsize-default``, ``packsize-tree``, global
+  ``group-by``, and backup/job ``globs`` (``!`` exclusions). The provided NAS
+  profile schema is covered by an automated parser test and a CLI smoke run.
 - **F22 hooks** — [internal/hooks](../internal/hooks) implements
   ``run-before``, ``run-after``, ``run-failed``, and ``run-finally`` across
   global, repository, command, and per-snapshot-job scopes. Hooks run without
