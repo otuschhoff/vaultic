@@ -284,6 +284,27 @@ scenario_prune() {
 		diff -r "$WORKDIR/src-$writer" "$target$SRC"
 }
 
+# scenario_config: vaultic writes extension config into a repo; restic and
+# rustic must still open, back up to and check it. Only runs when vaultic is
+# among the clients.
+scenario_config() {
+	REPO="$WORKDIR/repos/config"
+	local logf="$LOGDIR/config.log"
+	log "=== config extensions (vaultic writes, restic/rustic read) ==="
+	create_fixtures
+	step "$logf" "vaultic init" run vaultic init
+	step "$logf" "vaultic config --set-*" run vaultic config \
+		--set-compression 19 --set-datapack-size 33554432 \
+		--set-treepack-size 4194304 --set-extra-verify false \
+		--set-min-packsize-tolerate-percent 80
+	for client in $CLIENTS; do
+		[ "$client" = "vaultic" ] && continue
+		step "$logf" "$client snapshots on configured repo" run "$client" snapshots
+		step "$logf" "$client backup on configured repo" run "$client" backup "$SRC"
+		step "$logf" "$client check on configured repo" run "$client" check
+	done
+}
+
 # --- main -------------------------------------------------------------------
 
 main() {
@@ -305,6 +326,9 @@ main() {
 			scenario_prune "$client" "$writer"
 		done
 	done
+	case " $CLIENTS " in
+	*" vaultic "*) scenario_config ;;
+	esac
 
 	log "----------------------------------------"
 	log "steps: $STEPS, failed: $FAILED"

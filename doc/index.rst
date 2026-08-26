@@ -10,6 +10,7 @@ Vaultic Documentation
    040_backup
    045_working_with_repos
    047_tuning_parameters
+   048_in_repo_config
    050_restore
    060_forget
    070_encryption

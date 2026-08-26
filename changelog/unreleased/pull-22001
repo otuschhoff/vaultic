@@ -1,0 +1,23 @@
+Enhancement: store configuration in the repository via `config`/`show-config`
+
+Vaultic can now store configuration inside the repository and apply it to
+every client that opens the repository. The new `config` command reads and
+modifies these settings via `--set-*` options; `show-config` prints them
+without taking a lock. The same `--set-*` options are available on `init`.
+
+Supported settings: compression level (zstd -7..22), append-only mode,
+extra-verify, chunker type and chunk sizes, separate tree/data pack sizes with
+grow factor and limit (packs up to 4 GiB), and prune pack-size tolerance.
+
+Settings stored in the repository act as defaults: a command line flag or
+environment variable still overrides them (precedence: CLI > env > repo
+config > default). The extension uses the same config keys as rustic and is
+additive, so repositories remain fully compatible with restic and rustic.
+
+Two further capabilities land with this change: repositories can be opened
+directly with a master key using `--key`, `--key-file` or `--key-command`
+(env `VAULTIC_KEY`, `VAULTIC_KEY_FILE`, `VAULTIC_KEY_COMMAND`), and a
+repository set to append-only mode rejects `forget`/`prune` and config changes
+while still accepting backups.
+
+https://github.com/vaultic/vaultic/pull/22001

@@ -61,6 +61,18 @@ Exit status is 12 if the password is incorrect.
 	set output mode to JSON for commands that support it
 
 .PP
+\fB--key\fP=""
+	master \fBkey\fR (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)
+
+.PP
+\fB--key-command\fP=""
+	shell \fBcommand\fR to obtain the master key from (default: $VAULTIC_KEY_COMMAND)
+
+.PP
+\fB--key-file\fP=""
+	\fBfile\fR containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)
+
+.PP
 \fB--key-hint\fP=""
 	\fBkey\fR ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)
 

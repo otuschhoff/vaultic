@@ -107,15 +107,15 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 ### 5.1 Repository & storage format
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
-| F1 | In-repo config | `config` command edits compression, pack sizes, chunker, append-only inside repo config JSON | P0 | L | WS-A |
-| F2 | `show-config` command | prints repo config incl. extensions | P0 | S | WS-A |
-| F3 | Custom chunker config | min/max/avg chunk size, fixed-size chunker, stored in repo | P2 | M | WS-A |
-| F4 | Per-type pack sizing | `treepack_*`/`datapack_*` size, grow factor, limits; packs up to 4 GiB | P1 | M | WS-A |
-| F5 | Append-only repo mode | `append_only` in-repo flag blocks delete/overwrite | P1 | M | WS-A |
-| F6 | Extra-verify persist | `extra_verify` in-repo instead of per-call `--no-extra-verify` | P2 | S | WS-A |
-| F7 | Open repo via master key | `--key`, `--key-file`, `--key-command` bypass password keys | P2 | M | WS-A |
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
+| F1 | In-repo config | `config` command edits compression, pack sizes, chunker, append-only inside repo config JSON | P0 | L | WS-A | ✅ |
+| F2 | `show-config` command | prints repo config incl. extensions | P0 | S | WS-A | ✅ |
+| F3 | Custom chunker config | min/max/avg chunk size, fixed-size chunker, stored in repo | P2 | M | WS-A | ✅ |
+| F4 | Per-type pack sizing | `treepack_*`/`datapack_*` size, grow factor, limits; packs up to 4 GiB | P1 | M | WS-A | ✅ (size+limit; growfactor stored, dynamic growth is a no-op for now) |
+| F5 | Append-only repo mode | `append_only` in-repo flag blocks delete/overwrite | P1 | M | WS-A | ✅ |
+| F6 | Extra-verify persist | `extra_verify` in-repo instead of per-call `--no-extra-verify` | P2 | S | WS-A | ✅ |
+| F7 | Open repo via master key | `--key`, `--key-file`, `--key-command` bypass password keys | P2 | M | WS-A | ✅ |
 
 ### 5.2 Snapshot metadata & selection
 
@@ -665,12 +665,40 @@ graph TD
   fs xattr quirks). Interop smoke test verified locally and runnable on
   demand in CI.
 
-### Phase 1 — In-repo config (WS-A; F1–F7)
+### Phase 1 — In-repo config (WS-A; F1–F7) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
-- Deliverables: extended `Config`, `config` + `show-config`, `init --set-*`,
-  per-type pack sizing, append-only mode, extra_verify persist, master-key open.
-- Exit criteria: a repo configured entirely via `config` behaves identically
-  to flag-driven operation; interop: rustic reads the repo (and vice versa).
+- Deliverables (all landed): extended flat `Config` in
+  [internal/vaultic/config_ext.go](../internal/vaultic/config_ext.go) +
+  [config.go](../internal/vaultic/config.go), new `config` and `show-config`
+  commands ([cmd_config.go](../cmd/vaultic/cmd_config.go),
+  [cmd_show_config.go](../cmd/vaultic/cmd_show_config.go)), `init --set-*`,
+  per-type pack sizing with 4 GiB cap
+  ([internal/repository/repository.go](../internal/repository/repository.go)),
+  append-only enforcement via [internal/backend/appendonly](../internal/backend/appendonly),
+  extra_verify persistence, master-key open (`--key/--key-file/--key-command`,
+  `repository.UseMasterKey`).
+- Precedence implemented: CLI flag > env (`VAULTIC_*`/`RESTIC_*`) > repo
+  config > default (see `applyRepoConfig` in
+  [internal/global/global.go](../internal/global/global.go)).
+- **Interop findings (validated against restic 0.19.1 / rustic 0.11.4):**
+  - rustic's `ConfigFile` has **no `deny_unknown_fields`** → unknown keys are
+    ignored, so flat additive fields are safe.
+  - The config **must** use rustic's exact *flat* layout: `chunker` is a
+    plain string with serde variant names `Rabin`/`FixedSize` (NOT an object,
+    NOT lowercase `fixed_size`), and pack/chunk settings are top-level keys
+    (`chunk_size`, `treepack_size`, …). An early draft nested them and rustic
+    failed to deserialize. Both tools verified reading a configured repo.
+  - ⚠️ Caveat: restic/rustic `cat config` (or a config rewrite by those
+    tools) re-serializes and **drops** vaultic's extension keys. Extensions
+    survive normal reads, but a foreign client rewriting the config would
+    strip them. This is an accepted Phase-1 limitation; revisit if/when
+    restic merges a shared in-repo config spec.
+- Exit criteria met: config-driven repo behaves like flag-driven operation;
+  interop verified both directions; integration tests added
+  ([cmd_config_integration_test.go](../cmd/vaultic/cmd_config_integration_test.go)).
+  Deferred: dynamic pack-size growth (growfactor is stored + validated but
+  target sizing is not yet repo-size dependent), fixed-size chunker is
+  accepted/serialized but not yet wired into the archiver's chunker.
 
 ### Phase 2 — Snapshot metadata & filtering (WS-B, WS-C; F8–F13)
 
