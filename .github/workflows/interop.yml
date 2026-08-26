@@ -1,0 +1,53 @@
+# Interoperability tests: vaultic <-> restic <-> rustic
+#
+# This workflow is triggered manually (workflow_dispatch). The job is allowed
+# to fail (continue-on-error) while the rustic parity work is in progress;
+# see doc/rustic-parity-roadmap.md, Phase 0 and Section 9.
+
+name: interop
+
+on:
+  workflow_dispatch:
+    inputs:
+      restic_version:
+        description: "restic version to test against"
+        required: false
+        default: "0.19.1"
+      rustic_version:
+        description: "rustic version to test against"
+        required: false
+        default: "0.11.4"
+
+permissions:
+  contents: read
+
+jobs:
+  local-matrix:
+    name: "interop: local backend matrix"
+    runs-on: ubuntu-latest
+    # allowed to fail until the parity work lands; results are informational
+    continue-on-error: true
+    env:
+      RESTIC_VERSION: ${{ inputs.restic_version || '0.19.1' }}
+      RUSTIC_VERSION: ${{ inputs.rustic_version || '0.11.4' }}
+      INTEROP_WORKDIR: /tmp/vaultic-interop
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Run interop matrix
+        run: helpers/interop/interop.sh --keep
+
+      - name: Upload interop logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs
+          path: /tmp/vaultic-interop/logs
+          if-no-files-found: ignore
