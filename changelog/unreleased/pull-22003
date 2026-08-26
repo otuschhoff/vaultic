@@ -1,0 +1,23 @@
+Enhancement: cold storage support (hot/cold repositories and warm-up)
+
+Vaultic now supports cold-storage backends such as S3 Glacier or OVH Cold
+Archive, in two complementary ways (mirroring rustic):
+
+Hot/cold repositories split a repository over a cold location (all data packs;
+a complete repository on its own) and a hot location (all metadata plus the
+tree packs), so normal operations never touch the cold storage. Set it up with
+`--repo-hot` and `init --hot-only`; the new `check --check-hot-cold` verifies
+that both parts agree.
+
+To read data packs from cold storage, vaultic runs a user-supplied warm-up
+program: `--warm-up-command` (with `%id`/`%path`/`%ids`/`%paths` substitution),
+`--warm-up-batch`, `--warm-up-wait` and `--warm-up-wait-command` (env
+`VAULTIC_WARM_UP_*`). The program can report progress as JSON Lines
+(`{"type":"pack-progress","warm":N}`). Warm-up runs before `restore`, `check`
+and `prune` reads.
+
+Both parts stay fully compatible with restic and rustic: the cold part is a
+normal repository they can read, and the hot part is correctly recognized as a
+hot repository by rustic.
+
+https://github.com/vaultic/vaultic/pull/22003

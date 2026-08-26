@@ -119,6 +119,10 @@ Exit status is 12 if the password is incorrect.
 	\fBrepository\fR to backup to or restore from (default: $VAULTIC_REPOSITORY)
 
 .PP
+\fB--repo-hot\fP=""
+	hot part of a hot/cold \fBrepository\fR (cold storage; default: $VAULTIC_REPO_HOT)
+
+.PP
 \fB--repository-file\fP=""
 	\fBfile\fR to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)
 
@@ -137,6 +141,22 @@ Exit status is 12 if the password is incorrect.
 .PP
 \fB-v\fP, \fB--verbose\fP[=0]
 	be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)
+
+.PP
+\fB--warm-up-batch\fP=1
+	warm-up \fBbatch\fR size: packs per %ids invocation or parallel %id invocations (default: $VAULTIC_WARM_UP_BATCH)
+
+.PP
+\fB--warm-up-command\fP=""
+	warm-up \fBcommand\fR for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)
+
+.PP
+\fB--warm-up-wait\fP=0s
+	max \fBduration\fR to wait for warm-up to take effect (default: $VAULTIC_WARM_UP_WAIT)
+
+.PP
+\fB--warm-up-wait-command\fP=""
+	\fBcommand\fR to wait for warmed-up data (default: $VAULTIC_WARM_UP_WAIT_COMMAND)
 
 
 .SH SEE ALSO

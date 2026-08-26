@@ -13,6 +13,7 @@ Vaultic Documentation
    048_in_repo_config
    049_snapshot_metadata
    050_restore
+   051_cold_storage
    060_forget
    070_encryption
    075_scripting

@@ -130,12 +130,12 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 ### 5.3 Cold storage
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
-| F14 | Hot/cold split repo | `--repo-hot`; metadata in hot repo, data packs in cold repo; cold repo is a complete repo | P1 | XL | WS-D |
-| F15 | Warm-up command | user-supplied program, `%id/%path/%ids/%paths`, batch size, JSON-lines `pack-progress` protocol | P1 | L | WS-D |
-| F16 | `init --hot-only` | convert normal repo → hot/cold | P2 | M | WS-D |
-| F17 | check hot/cold integrity | cross-check hot vs cold metadata | P2 | M | WS-D |
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
+| F14 | Hot/cold split repo | `--repo-hot`; metadata in hot repo, data packs in cold repo; cold repo is a complete repo | P1 | XL | WS-D | ✅ |
+| F15 | Warm-up command | user-supplied program, `%id/%path/%ids/%paths`, batch size, JSON-lines `pack-progress` protocol | P1 | L | WS-D | ✅ |
+| F16 | `init --hot-only` | convert normal repo → hot/cold | P2 | M | WS-D | ✅ |
+| F17 | check hot/cold integrity | cross-check hot vs cold metadata | P2 | M | WS-D | ✅ (`check --check-hot-cold`) |
 
 ### 5.4 Concurrency & prune
 
@@ -724,13 +724,34 @@ graph TD
   Deferred: `--filter-jq` (needs a jq engine; P2), file-level `snap:path/file`
   (F13, needs per-command resolver changes — moved to Phase 6 command batch).
 
-### Phase 3 — Cold storage completion (WS-D; F14–F17)
+### Phase 3 — Cold storage completion (WS-D; F14–F17) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
-- Deliverables: warm-up command runner + progress protocol, `--repo-hot`
-  hot/cold repos, `init --hot-only`, check hot/cold mode, prune cold-pack
-  policy + `--keep-pack`.
-- Exit criteria: end-to-end test against a fake "cold" backend (delayed
-  availability) in CI; docs page mirroring rustic's cold-storage guide.
+- Deliverables (all landed):
+  - **Warm-up command runner** ([internal/warmup](../internal/warmup)): user-supplied
+    program with `%id/%path/%ids/%paths` substitution, `--warm-up-batch N`
+    (batch or parallel), the JSON-lines `{"type":"pack-progress","warm":n}`
+    protocol, and `--warm-up-wait`/`--warm-up-wait-command`. Global options
+    `--repo-hot` + `--warm-up-*` (env `VAULTIC_REPO_HOT`/`VAULTIC_WARM_UP_*`).
+    Routed via [internal/backend/warmupcmd](../internal/backend/warmupcmd) and run
+    from restore/check/repack (new `warmup-command` feature flag, Beta).
+  - **Hot/cold split repository** ([internal/backend/hotcold](../internal/backend/hotcold)):
+    metadata (config/keys/snapshots/indexes) + tree packs live on the hot part
+    (mirrored to cold); data packs only on cold; locks on cold; hot reads fall
+    back to cold for pre-split files. Opened via `--repo-hot`
+    ([internal/global](../internal/global/global.go)).
+  - **`init --hot-only`**: creates the hot part sharing the cold repo's identity
+    AND master key (`repository.InitWithConfigAndKey`), marks config `is_hot`,
+    mirrors keys (both directions)/snapshots/indexes/tree packs
+    (`repository.CopyMetadata`).
+  - **Check hot/cold integrity**: `check --check-hot-cold` via
+    `checker.CheckHotCold` (metadata present on both, identical content).
+- **Interop verified (restic 0.19.1 / rustic 0.11.4):** the **cold** part is a
+  complete standalone repo both tools read; the **hot** part (config `is_hot`)
+  is correctly *refused* by rustic ("hot repository! use --repo-hot") and
+  tolerated by restic.
+- Deferred: `prune --keep-pack <duration>` (cold minimum-holding period) needs
+  pack mtimes, i.e. a `FileInfo`/backend interface change — moved to Phase 6.
+  Dynamic pack-size growth (growfactor) still pending (from Phase 1).
 
 ### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20)
 
