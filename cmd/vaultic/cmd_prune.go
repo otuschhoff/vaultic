@@ -243,21 +243,86 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	}
 
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun && gopts.NoLock, printer)
+
+	// Unsafe recovery, dry-run, and early-index deletion retain the established
+	// all-exclusive execution path. Their semantics either intentionally break
+	// normal ordering or need immediate deletion to free space.
+	if opts.UnsafeNoSpaceRecovery != "" || opts.DryRun || opts.EarlyDeleteIndex {
+		ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun && gopts.NoLock, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if opts.UnsafeNoSpaceRecovery != "" {
+			repoID := repo.Config().ID
+			if opts.UnsafeNoSpaceRecovery != repoID {
+				return errors.Fatalf("must pass id '%s' to --unsafe-recover-no-free-space", repoID)
+			}
+			opts.unsafeRecovery = true
+		}
+		return runPruneWithRepo(ctx, opts, gopts, repo, vaultic.NewIDSet(), printer)
+	}
+
+	// Claim phase A under a short exclusive lock. The pending durable marker
+	// prevents another prune from starting its own shared phase A while ordinary
+	// append writers may proceed after this lock is released.
+	baseCtx := ctx
+	ctx, repo, unlock, err := openWithExclusiveLock(baseCtx, gopts, false, printer)
+	if err != nil {
+		return err
+	}
+	if repo.Config().PrunePlan != nil {
+		if opts.KeepDelete {
+			unlock()
+			return errors.Fatal("repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first")
+		}
+		err := repo.FinalizePrunePlan(ctx, printer)
+		unlock()
+		return err
+	}
+	marker, err := repo.BeginPrunePlan(ctx)
+	unlock()
+	if err != nil {
+		return err
+	}
+
+	// Phase A is additive: plan, repack, upload replacement packs/indexes, and
+	// atomically promote the claimed marker under a shared append lock.
+	ctx, repo, unlock, err = openWithLockPolicy(baseCtx, gopts, LockShared, lockOpenOptions{}, printer)
+	if err != nil {
+		return err
+	}
+	if repo.Config().PrunePlan == nil || repo.Config().PrunePlan.ID != marker.ID {
+		unlock()
+		return errors.Fatal("prune phase A claim changed before additive work began")
+	}
+	phaseAOpts := opts
+	phaseAOpts.KeepDelete = true
+	err = runPrunePhaseAWithRepo(ctx, phaseAOpts, gopts, repo, vaultic.NewIDSet(), marker.ID, printer)
+	unlock()
+	if err != nil || opts.KeepDelete {
+		return err
+	}
+	if repo.Config().PrunePlan == nil {
+		// Phase A had no obsolete objects and cleared its initial claim.
+		return nil
+	}
+
+	// Phase B is the only exclusive window: re-open, revalidate the durable
+	// marker against current indexes, and delete only marker-listed candidates.
+	return finalizePrunePhaseB(baseCtx, gopts, printer)
+}
+
+func finalizePrunePhaseB(ctx context.Context, gopts global.Options, printer vaultic.Printer) error {
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	if opts.UnsafeNoSpaceRecovery != "" {
-		repoID := repo.Config().ID
-		if opts.UnsafeNoSpaceRecovery != repoID {
-			return errors.Fatalf("must pass id '%s' to --unsafe-recover-no-free-space", repoID)
-		}
-		opts.unsafeRecovery = true
+	if repo.Config().PrunePlan == nil {
+		return errors.Fatal("prune phase B has no durable plan to finalize")
 	}
-
-	return runPruneWithRepo(ctx, opts, gopts, repo, vaultic.NewIDSet(), printer)
+	return repo.FinalizePrunePlan(ctx, printer)
 }
 
 func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots vaultic.IDSet, printer vaultic.Printer) error {
@@ -325,6 +390,58 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 	runtime.GC()
 
 	return plan.Execute(ctx, printer)
+}
+
+// runPrunePhaseAWithRepo runs the additive phase of a minimal-lock prune. It
+// is separate from runPruneWithRepo because forget --prune already owns an
+// exclusive lock and intentionally retains the classic single-window flow.
+func runPrunePhaseAWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots vaultic.IDSet, markerID string, printer vaultic.Printer) error {
+	if repo.Cache() == nil && !gopts.JSON {
+		printer.S("warning: running prune without a cache, this may be very slow!")
+	}
+	if err := repo.LoadIndex(ctx, printer); err != nil {
+		return err
+	}
+
+	popts := repository.PruneOptions{
+		DryRun:              false,
+		MaxUnusedBytes:      opts.maxUnusedBytes,
+		MaxRepackBytes:      opts.MaxRepackBytes,
+		SmallPackBytes:      opts.SmallPackBytes,
+		RepackCacheableOnly: opts.RepackCacheableOnly,
+		RepackUncompressed:  opts.RepackUncompressed,
+		RepackAll:           opts.RepackAll,
+		FastRepack:          opts.FastRepack,
+		MaxRepackPercent:    opts.maxRepackPercent,
+		KeepDelete:          true,
+	}
+	plan, err := repository.PlanPrune(ctx, popts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
+		return getUsedBlobs(ctx, repo, usedBlobs, ignoreSnapshots, printer)
+	}, printer)
+	if err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	plan.BindPrunePlan(markerID)
+	if !gopts.JSON {
+		if err := printPruneStats(printer, plan.Stats()); err != nil {
+			return err
+		}
+	} else {
+		gopts.Term.Print(ui.ToJSONString(plan.Stats()))
+	}
+	runtime.GC()
+	if err := plan.Execute(ctx, printer); err != nil {
+		return err
+	}
+	if marker := repo.Config().PrunePlan; marker != nil && marker.ID == markerID && marker.State == "phase_a" {
+		// No index rewrite occurred, so there is nothing to defer. Clear the
+		// initial claim now instead of making a later prune finalize a no-op.
+		return repo.FinalizePrunePlan(ctx, printer)
+	}
+	return nil
 }
 
 // printPruneStats prints out the statistics

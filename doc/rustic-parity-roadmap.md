@@ -484,13 +484,16 @@ feature flag.
   reject missing replacement indexes and referenced packs, and integration
   tests verify marker persistence after phase A and clearing after phase B.
 
-4. **Make prune genuinely minimal-lock.** Move phase A outside the exclusive
-   lock: read a consistent planning view, repack, upload replacement packs,
-   upload additive replacement indexes, persist the plan. Take a short
-   exclusive lock only for phase B: reload/revalidate plan candidates, delete
-   revalidated obsolete objects, and retire the completed marker.
-   ``--instant-delete`` runs A then B; ``--keep-delete`` runs A and retains the
-   plan for a later B. ``--keep-pack`` remains dependent on backend file mtimes.
+4. **✅ Make prune genuinely minimal-lock (implemented).** A short exclusive
+  claim writes a pending durable marker, then phase A runs under ``LockShared``:
+  read the planning view, repack, upload replacement packs and additive
+  indexes, and atomically promote the marker to ready. The shared lock is
+  released before phase B takes a short exclusive lock to reload/revalidate
+  candidates, delete only marker-listed obsolete objects, and retire the
+  completed marker. A blocked-index integration test proves an append backup
+  can finish while phase A is active. ``--instant-delete`` runs A then B;
+  ``--keep-delete`` runs A and retains the ready plan for a later B.
+  ``--keep-pack`` remains dependent on backend file mtimes.
 
 5. **Revisit forget independently.** Keep destructive forget exclusive until
    it has an analogous short delete phase: evaluate policy without a lock,
@@ -877,14 +880,15 @@ graph TD
   lock-free read no-lock-file regression, writable append/no-lock regressions,
   an append-lock-presence regression, and a race-enabled backup ∥ prune ∥
   dry-run forget soak.
-- **F19 deferred-delete prune** — `PrunePlan.Execute` splits storage lifecycle
+- **F19 minimal-lock deferred-delete prune** — `PrunePlan.Execute` splits storage lifecycle
   into phase 1 (repack +
   write new index) and phase 2 (delete superseded packs + old index files)
   behind the `two-phase-prune` Alpha flag. `--keep-delete` runs only phase 1
   and defers deletion (leftover files are unreferenced; a later default prune
   removes them); `--instant-delete` (default) keeps today's single-phase
-  behavior. **The expensive phase still runs under an exclusive lock**, so
-  backup-parallel rustic-grade prune is not yet complete. New
+  behavior. A short exclusive claim precedes phase A, which then runs under a
+  shared append lock; phase B reacquires exclusive only to revalidate and
+  delete exact marker candidates. New
   `MasterIndexRewriteOpts.SkipObsoleteDelete`/`ObsoleteIndexFunc`
   defers superseded-index deletion to the caller
   ([internal/repository/index/master_index.go](../internal/repository/index/master_index.go),

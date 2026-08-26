@@ -575,10 +575,13 @@ exclusive lock. Vaultic also offers a *deferred-delete prune*, gated behind the
 
 A typical deferred-delete workflow is to run ``prune --keep-delete`` during
 normal operation (no pack/index deletion) and a plain ``prune``
-(instant-delete) later to reclaim the space. The repack and index-writing phase
-still holds an exclusive lock, so it does not yet run in parallel with backups.
-Safety invariant: ``prune`` only ever deletes files that were part of its own
-plan. Note that after a ``--keep-delete`` run, ``check`` reports
+(instant-delete) later to reclaim the space. Vaultic takes a short exclusive
+lock to claim the prune, releases it for the repack/index-upload phase under a
+shared append lock, then takes another short exclusive lock only to revalidate
+and delete marker-listed objects. Append backups can therefore proceed during
+the expensive phase A work. Safety invariant: ``prune`` only ever deletes files
+that were part of its durable plan and still pass revalidation. Note that after
+a ``--keep-delete`` run, ``check`` reports
 the non-critical "pack contained in several indexes" condition until the
 delete phase runs; this is expected and not a sign of corruption.
 

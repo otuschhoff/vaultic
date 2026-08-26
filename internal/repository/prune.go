@@ -108,6 +108,8 @@ type PrunePlan struct {
 	repo  *Repository
 	stats PruneStats
 	opts  PruneOptions
+	// prunePlanID is set by minimal-lock phase A after a short exclusive claim.
+	prunePlanID string
 }
 
 type packInfo struct {
@@ -623,6 +625,12 @@ func (plan *PrunePlan) Stats() PruneStats {
 	return plan.stats
 }
 
+// BindPrunePlan binds a short-exclusive phase-A claim to this plan. Execute
+// will atomically promote that marker after replacement indexes are saved.
+func (plan *PrunePlan) BindPrunePlan(id string) {
+	plan.prunePlanID = id
+}
+
 // Execute does the actual pruning:
 // - remove unreferenced packs first
 // - repack given pack files while keeping the given blobs
@@ -698,16 +706,29 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 		if err != nil {
 			return errors.Fatalf("%s", err)
 		}
-	} else if len(plan.ignorePacks) != 0 {
+	} else if !plan.opts.UnsafeRecovery {
 		observedIndexes := repo.idx.IDs()
 		obsoleteIndexes := vaultic.NewIDSet()
 		requiredIndexes := vaultic.NewIDSet()
-		if err := rewriteIndexFilesOpt(ctx, repo, plan.ignorePacks, nil, nil, &obsoleteIndexes, &requiredIndexes, printer); err != nil {
-			return errors.Fatalf("%s", err)
+		if len(plan.ignorePacks) != 0 {
+			if err := rewriteIndexFilesOpt(ctx, repo, plan.ignorePacks, nil, nil, &obsoleteIndexes, &requiredIndexes, printer); err != nil {
+				return errors.Fatalf("%s", err)
+			}
 		}
 		packIDs := plan.removePacksFirst.Clone()
 		packIDs.Merge(plan.removePacks)
-		marker, err := repo.PersistPrunePlan(ctx, observedIndexes, requiredIndexes, obsoleteIndexes, packIDs)
+		if len(obsoleteIndexes) == 0 && len(packIDs) == 0 {
+			repo.clearIndex()
+			printer.P("done\n")
+			return nil
+		}
+		var marker *vaultic.PrunePlan
+		var err error
+		if plan.prunePlanID != "" {
+			marker, err = repo.CompletePrunePlan(ctx, plan.prunePlanID, observedIndexes, requiredIndexes, obsoleteIndexes, packIDs)
+		} else {
+			marker, err = repo.PersistPrunePlan(ctx, observedIndexes, requiredIndexes, obsoleteIndexes, packIDs)
+		}
 		if err != nil {
 			return err
 		}

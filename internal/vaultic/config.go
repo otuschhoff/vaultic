@@ -69,8 +69,11 @@ type Config struct {
 // replacement indexes. Deletion code must revalidate RequiredIndexes, remove
 // only IndexIDs, reload the index, and then remove only PackIDs.
 type PrunePlan struct {
-	Version         uint      `json:"version"`
-	ID              string    `json:"id"`
+	Version uint   `json:"version"`
+	ID      string `json:"id"`
+	// State is "phase_a" while a shared-lock prune is building replacement
+	// objects and "ready" once exact deletion candidates are durable.
+	State           string    `json:"state"`
 	CreatedAt       time.Time `json:"created_at"`
 	ObservedIndexes IDs       `json:"observed_indexes"`
 	RequiredIndexes IDs       `json:"required_indexes"`

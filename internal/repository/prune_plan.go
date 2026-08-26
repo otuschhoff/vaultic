@@ -12,17 +12,52 @@ import (
 
 const prunePlanVersion = 1
 
+const (
+	prunePlanPhaseA = "phase_a"
+	prunePlanReady  = "ready"
+)
+
+// BeginPrunePlan claims the short exclusive phase before additive prune work.
+// A pending marker prevents another prune from entering phase A concurrently
+// while allowing ordinary shared append writers to proceed once the caller
+// releases its exclusive lock.
+func (r *Repository) BeginPrunePlan(ctx context.Context) (*vaultic.PrunePlan, error) {
+	if r.Config().PrunePlan != nil {
+		return nil, errors.Fatal("repository already contains a prune plan; finalize or clear it before starting another prune")
+	}
+	plan := &vaultic.PrunePlan{
+		Version:   prunePlanVersion,
+		ID:        vaultic.NewRandomID().String(),
+		State:     prunePlanPhaseA,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := r.UpdateConfigAtomically(ctx, func(cfg *vaultic.Config) error {
+		cfg.PrunePlan = plan
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
 // PersistPrunePlan stores the exact cleanup candidates after replacement index
 // files have been uploaded. The marker is an additive encrypted config field,
 // which restic and rustic tolerate as an unknown extension.
 func (r *Repository) PersistPrunePlan(ctx context.Context, observedIndexes, requiredIndexes, indexIDs, packIDs vaultic.IDSet) (*vaultic.PrunePlan, error) {
-	if r.Config().PrunePlan != nil {
-		return nil, errors.Fatal("repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first")
+	plan, err := r.BeginPrunePlan(ctx)
+	if err != nil {
+		return nil, err
 	}
+	return r.CompletePrunePlan(ctx, plan.ID, observedIndexes, requiredIndexes, indexIDs, packIDs)
+}
 
+// CompletePrunePlan atomically promotes a pending phase-A claim to a ready
+// marker containing the exact deletion candidates.
+func (r *Repository) CompletePrunePlan(ctx context.Context, id string, observedIndexes, requiredIndexes, indexIDs, packIDs vaultic.IDSet) (*vaultic.PrunePlan, error) {
 	plan := &vaultic.PrunePlan{
 		Version:         prunePlanVersion,
-		ID:              vaultic.NewRandomID().String(),
+		ID:              id,
+		State:           prunePlanReady,
 		CreatedAt:       time.Now().UTC(),
 		ObservedIndexes: observedIndexes.List(),
 		RequiredIndexes: requiredIndexes.List(),
@@ -30,6 +65,9 @@ func (r *Repository) PersistPrunePlan(ctx context.Context, observedIndexes, requ
 		PackIDs:         packIDs.List(),
 	}
 	if err := r.UpdateConfigAtomically(ctx, func(cfg *vaultic.Config) error {
+		if cfg.PrunePlan == nil || cfg.PrunePlan.ID != id || cfg.PrunePlan.State != prunePlanPhaseA {
+			return errors.Fatal("prune plan changed while phase A was running")
+		}
 		cfg.PrunePlan = plan
 		return nil
 	}); err != nil {
@@ -49,6 +87,15 @@ func (r *Repository) FinalizePrunePlan(ctx context.Context, printer vaultic.Prin
 	}
 	if plan.Version != prunePlanVersion || plan.ID == "" {
 		return errors.Fatal("repository contains an unsupported deferred prune plan")
+	}
+	if plan.State == prunePlanPhaseA {
+		// Phase A was interrupted before its replacement indexes and exact
+		// candidates became durable. Nothing may be deleted; discard only the
+		// claim. Uploaded packs, if any, are harmless unreferenced leftovers.
+		return r.clearPendingPrunePlan(ctx, plan.ID)
+	}
+	if plan.State != prunePlanReady {
+		return errors.Fatal("repository contains an invalid deferred prune plan state")
 	}
 
 	// Config is the durable phase-A commit. Start phase B from a fresh backend
@@ -138,7 +185,7 @@ func (r *Repository) FinalizePrunePlanLoaded(ctx context.Context, printer vaulti
 	if plan == nil {
 		return nil
 	}
-	if plan.Version != prunePlanVersion || plan.ID == "" {
+	if plan.Version != prunePlanVersion || plan.ID == "" || plan.State != prunePlanReady {
 		return errors.Fatal("repository contains an unsupported deferred prune plan")
 	}
 
@@ -184,4 +231,14 @@ func (r *Repository) FinalizePrunePlanLoaded(ctx context.Context, printer vaulti
 	}
 	r.clearIndex()
 	return nil
+}
+
+func (r *Repository) clearPendingPrunePlan(ctx context.Context, id string) error {
+	return r.UpdateConfigAtomically(ctx, func(cfg *vaultic.Config) error {
+		if cfg.PrunePlan == nil || cfg.PrunePlan.ID != id || cfg.PrunePlan.State != prunePlanPhaseA {
+			return errors.Fatal("pending prune plan changed while it was being cleared")
+		}
+		cfg.PrunePlan = nil
+		return nil
+	})
 }

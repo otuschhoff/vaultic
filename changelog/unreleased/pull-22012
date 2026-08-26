@@ -1,0 +1,14 @@
+Enhancement: lock parity Phase 4 genuine minimal-lock prune
+
+Normal prune now uses a short exclusive claim to create a pending durable plan,
+runs planning/repack/replacement-index upload under a shared append lock, then
+reopens with a short exclusive lock to revalidate and delete only the durable
+plan's exact candidates. `--keep-delete` leaves the ready plan for a later
+revalidated cleanup; immediate prune performs both phases.
+
+An integration test pauses phase A during replacement-index upload and proves a
+backup can complete concurrently before phase B takes its exclusive deletion
+lock. Unsafe recovery, dry runs, and early-index deletion retain their
+established all-exclusive behavior.
+
+https://github.com/otuschhoff/vaultic/pull/22012

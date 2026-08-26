@@ -550,6 +550,69 @@ func TestLockFreeReadSkipsLockFile(t *testing.T) {
 	}))
 }
 
+type blockFirstIndexSaveBackend struct {
+	backend.Backend
+	once    *sync.Once
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (b *blockFirstIndexSaveBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+	if h.Type == backend.IndexFile {
+		blocked := false
+		b.once.Do(func() {
+			blocked = true
+			close(b.entered)
+		})
+		if blocked {
+			select {
+			case <-b.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return b.Backend.Save(ctx, h, rd)
+}
+
+// TestPrunePhaseAAllowsBackup proves the minimal-lock boundary: after the
+// short exclusive claim is released, phase A holds only a shared lock while it
+// uploads replacement indexes, so an append backup can complete before phase B
+// takes its short exclusive deletion lock.
+func TestPrunePhaseAAllowsBackup(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	createPrunableRepo(t, env)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	env.gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
+		return &blockFirstIndexSaveBackend{Backend: r, once: &once, entered: entered, release: release}, nil
+	}
+
+	pruneResult := make(chan error, 1)
+	go func() {
+		pruneResult <- withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+			return runPrune(ctx, PruneOptions{MaxUnused: "0%"}, gopts, gopts.Term)
+		})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prune phase A did not begin index upload")
+	}
+
+	backupErr := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		return runBackup(ctx, BackupOptions{Host: "phase-a-backup"}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0", "0", "9", "2")})
+	})
+	rtest.OK(t, backupErr)
+	close(release)
+	rtest.OK(t, <-pruneResult)
+	testRunCheck(t, env.gopts)
+}
+
 func TestNoLockBackupWritesSnapshot(t *testing.T) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, false)()
 
