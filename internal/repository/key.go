@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -190,6 +191,39 @@ func searchKey(ctx context.Context, s *Repository, password string, maxKeys int,
 	}
 
 	return k, nil
+}
+
+// UseMasterKey opens the repository using a master key directly, bypassing
+// the password-based key files. masterKeyJSON is the base64-encoded JSON
+// representation of the master key (as printed by `vaultic cat masterkey`).
+//
+// This is the vaultic equivalent of rustic's `--key` option. Handle the key
+// with care: anyone in possession of it can decrypt the whole repository.
+func (r *Repository) UseMasterKey(ctx context.Context, masterKeyJSON string) error {
+	raw, err := base64.StdEncoding.DecodeString(masterKeyJSON)
+	if err != nil {
+		return errors.Fatalf("invalid master key (expected base64-encoded JSON): %v", err)
+	}
+
+	key := &crypto.Key{}
+	if err := json.Unmarshal(raw, key); err != nil {
+		return errors.Fatalf("invalid master key (expected JSON): %v", err)
+	}
+	if !key.Valid() {
+		return errors.Fatal("invalid master key")
+	}
+
+	r.key = key
+	// no key file is associated with a master key; use a zero ID
+	r.keyID = vaultic.ID{}
+
+	cfg, err := vaultic.LoadConfig(ctx, r)
+	if err != nil {
+		return fmt.Errorf("config cannot be loaded: %w", err)
+	}
+	r.setConfig(cfg)
+	r.ApplyRepoSettings()
+	return nil
 }
 
 // LoadKey loads a key from the backend.

@@ -12,6 +12,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/restic/chunker"
 	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/vaultic/vaultic/internal/backend/appendonly"
 	"github.com/vaultic/vaultic/internal/backend/cache"
 	"github.com/vaultic/vaultic/internal/backend/dryrun"
 	"github.com/vaultic/vaultic/internal/debug"
@@ -26,7 +27,9 @@ import (
 
 const MinPackSize = 4 * 1024 * 1024
 const DefaultPackSize = 16 * 1024 * 1024
-const MaxPackSize = 128 * 1024 * 1024
+
+// MaxPackSize is the largest supported target pack size (4 GiB, matching rustic).
+const MaxPackSize = 4 * 1024 * 1024 * 1024
 
 // Repository is used to access a repository in a backend.
 type Repository struct {
@@ -65,6 +68,15 @@ type Options struct {
 	Compression   CompressionMode
 	PackSize      uint
 	NoExtraVerify bool
+
+	// TreePackSize and DataPackSize optionally override PackSize for tree and
+	// data packs respectively (from the in-repo config). Zero means PackSize.
+	TreePackSize uint64
+	DataPackSize uint64
+	// TreePackSizeLimit and DataPackSizeLimit cap the per-type pack size
+	// (0 = no extra limit beyond MaxPackSize).
+	TreePackSizeLimit uint64
+	DataPackSizeLimit uint64
 }
 
 // CompressionMode configures if data should be compressed.
@@ -137,6 +149,19 @@ func New(be backend.Backend, opts Options) (*Repository, error) {
 		return nil, fmt.Errorf("pack size smaller than minimum of %v MiB", MinPackSize/1024/1024)
 	}
 
+	// validate per-type pack sizes
+	for _, ps := range []struct {
+		name  string
+		value uint64
+	}{
+		{"tree", opts.TreePackSize},
+		{"data", opts.DataPackSize},
+	} {
+		if ps.value != 0 && (ps.value < MinPackSize || ps.value > MaxPackSize) {
+			return nil, fmt.Errorf("%s pack size %v MiB out of range (%v-%v MiB)", ps.name, ps.value/1024/1024, MinPackSize/1024/1024, MaxPackSize/1024/1024)
+		}
+	}
+
 	repo := &Repository{
 		be:          be,
 		opts:        opts,
@@ -160,6 +185,48 @@ func (r *Repository) Config() vaultic.Config {
 // PackSize return the target size of a pack file when uploading
 func (r *Repository) PackSize() uint {
 	return r.opts.PackSize
+}
+
+// SetCompression changes the compression mode (used to apply the in-repo config).
+func (r *Repository) SetCompression(c CompressionMode) {
+	r.opts.Compression = c
+}
+
+// SetNoExtraVerify changes whether data is verified before upload (used to
+// apply the in-repo config).
+func (r *Repository) SetNoExtraVerify(v bool) {
+	r.opts.NoExtraVerify = v
+}
+
+// SetTreePackSize sets the target size and optional size limit for tree packs.
+func (r *Repository) SetTreePackSize(size, limit uint64) {
+	r.opts.TreePackSize = size
+	r.opts.TreePackSizeLimit = limit
+}
+
+// SetDataPackSize sets the target size and optional size limit for data packs.
+func (r *Repository) SetDataPackSize(size, limit uint64) {
+	r.opts.DataPackSize = size
+	r.opts.DataPackSizeLimit = limit
+}
+
+// TreePackSizeBytes returns the effective target size for tree packs.
+func (r *Repository) TreePackSizeBytes() uint64 {
+	if r.opts.TreePackSize != 0 {
+		return r.opts.TreePackSize
+	}
+	return uint64(r.opts.PackSize)
+}
+
+// DataPackSizeBytes returns the effective target size for data packs.
+// The pack managers are created on demand (when the first blob is saved),
+// so applying the in-repo config after opening the repository still takes
+// effect for new packs.
+func (r *Repository) DataPackSizeBytes() uint64 {
+	if r.opts.DataPackSize != 0 {
+		return r.opts.DataPackSize
+	}
+	return uint64(r.opts.PackSize)
 }
 
 // UseCache replaces the backend with the wrapped cache.
@@ -609,8 +676,8 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 	innerWg, ctx := errgroup.WithContext(ctx)
 	r.packerWg = innerWg
 	r.uploader = newPackerUploader(ctx, innerWg, r, r.Connections())
-	r.treePM = newPackerManager(r.key, vaultic.TreeBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
-	r.dataPM = newPackerManager(r.key, vaultic.DataBlob, r.PackSize(), r.packerCount, r.uploader.QueuePacker)
+	r.treePM = newPackerManager(r.key, vaultic.TreeBlob, uint(r.TreePackSizeBytes()), r.packerCount, r.uploader.QueuePacker)
+	r.dataPM = newPackerManager(r.key, vaultic.DataBlob, uint(r.DataPackSizeBytes()), r.packerCount, r.uploader.QueuePacker)
 
 	wg.Go(func() error {
 		return innerWg.Wait()
@@ -887,7 +954,17 @@ func (r *Repository) SearchKey(ctx context.Context, password string, maxKeys int
 	}
 
 	r.setConfig(cfg)
+	r.ApplyRepoSettings()
 	return nil
+}
+
+// ApplyRepoSettings applies repository-config behavior that must be enforced
+// by the repository itself (as opposed to the CLI layer). Currently this
+// enforces append-only mode by wrapping the backend.
+func (r *Repository) ApplyRepoSettings() {
+	if r.cfg.AppendOnly() {
+		r.be = appendonly.New(r.be)
+	}
 }
 
 // Init creates a new master key with the supplied password, initializes and

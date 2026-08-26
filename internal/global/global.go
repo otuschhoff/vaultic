@@ -44,11 +44,15 @@ type BackendWrapper func(r backend.Backend) (backend.Backend, error)
 
 // Options hold all global options for vaultic.
 type Options struct {
-	Repo               string
-	RepositoryFile     string
-	PasswordFile       string
-	PasswordCommand    string
-	KeyHint            string
+	Repo            string
+	RepositoryFile  string
+	PasswordFile    string
+	PasswordCommand string
+	KeyHint         string
+	// MasterKey* open the repository directly with a master key (no password).
+	MasterKey          string
+	MasterKeyFile      string
+	MasterKeyCommand   string
 	Quiet              bool
 	Verbose            int
 	NoLock             bool
@@ -86,6 +90,12 @@ type Options struct {
 	// Lookup cannot return nil as the flags are added to the same FlagSet just above.
 	packSizeFlag    *pflag.Flag
 	compressionFlag *pflag.Flag
+	// noExtraVerifyFlag detects if --no-extra-verify was set on the CLI.
+	noExtraVerifyFlag *pflag.Flag
+	// packSizeFromEnv / compressionFromEnv record whether the value came from
+	// the environment (VAULTIC_/RESTIC_), which overrides the in-repo config.
+	packSizeFromEnv    bool
+	compressionFromEnv bool
 }
 
 func (opts *Options) AddFlags(f *pflag.FlagSet) {
@@ -94,6 +104,9 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
 	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
 	f.StringVarP(&opts.PasswordCommand, "password-command", "", "", "shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)")
+	f.StringVar(&opts.MasterKey, "key", "", "master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)")
+	f.StringVar(&opts.MasterKeyFile, "key-file", "", "`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)")
+	f.StringVar(&opts.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
 	f.BoolVarP(&opts.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
 	// use empty parameter name as `-v, --verbose n` instead of the correct `--verbose=n` is confusing
 	f.CountVarP(&opts.Verbose, "verbose", "v", "be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)")
@@ -110,6 +123,7 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	const compressionFlag = "compression"
 	f.Var(&opts.Compression, compressionFlag, "compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)")
 	f.BoolVar(&opts.NoExtraVerify, "no-extra-verify", false, "skip additional verification of data before upload (see documentation)")
+	opts.noExtraVerifyFlag = f.Lookup("no-extra-verify")
 	f.IntVar(&opts.Limits.UploadKb, "limit-upload", 0, "limits uploads to a maximum `rate` in KiB/s. (default: unlimited)")
 	f.IntVar(&opts.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
 	const packSizeFlag = "pack-size"
@@ -123,6 +137,9 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	opts.PasswordFile = env.Get("PASSWORD_FILE")
 	opts.KeyHint = env.Get("KEY_HINT")
 	opts.PasswordCommand = env.Get("PASSWORD_COMMAND")
+	opts.MasterKey = env.Get("KEY")
+	opts.MasterKeyFile = env.Get("KEY_FILE")
+	opts.MasterKeyCommand = env.Get("KEY_COMMAND")
 	if v := env.Get("CACERT"); v != "" {
 		opts.RootCertFilenames = strings.Split(v, ",")
 	}
@@ -143,11 +160,13 @@ func (opts *Options) PreRun(needsPassword bool) error {
 			return errors.Fatalf("invalid value for VAULTIC_PACK_SIZE (legacy: RESTIC_PACK_SIZE) %q: %v", envVal, err)
 		}
 		opts.PackSize = uint(targetPackSize)
+		opts.packSizeFromEnv = true
 	}
 	if envVal := env.Get("COMPRESSION"); envVal != "" && !opts.compressionFlag.Changed {
 		if err := opts.Compression.Set(envVal); err != nil {
 			return errors.Fatalf("invalid value for VAULTIC_COMPRESSION (legacy: RESTIC_COMPRESSION) %q: %v", envVal, err)
 		}
+		opts.compressionFromEnv = true
 	}
 
 	// set verbosity, default is one
@@ -225,6 +244,44 @@ func LoadPasswordFromFile(pwdFile string) (string, error) {
 		return "", errors.Fatalf("%s does not exist", pwdFile)
 	}
 	return strings.TrimSpace(string(s)), errors.Wrap(err, "Readfile")
+}
+
+// resolveMasterKey determines the master key (if any) from the --key,
+// --key-file and --key-command options (or their environment equivalents).
+// The options are mutually exclusive.
+func resolveMasterKey(gopts Options) (string, error) {
+	set := 0
+	for _, v := range []string{gopts.MasterKey, gopts.MasterKeyFile, gopts.MasterKeyCommand} {
+		if v != "" {
+			set++
+		}
+	}
+	if set == 0 {
+		return "", nil
+	}
+	if set > 1 {
+		return "", errors.Fatal("--key, --key-file and --key-command are mutually exclusive")
+	}
+
+	if gopts.MasterKey != "" {
+		return gopts.MasterKey, nil
+	}
+	if gopts.MasterKeyFile != "" {
+		return LoadPasswordFromFile(gopts.MasterKeyFile)
+	}
+
+	// --key-command
+	args, err := backend.SplitShellStrings(gopts.MasterKeyCommand)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stderr = os.Stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 // readPassword reads the password from a password file, the environment
@@ -330,6 +387,12 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		return nil, err
 	}
 
+	// apply the in-repo config (compression, pack sizes, extra verify);
+	// CLI flags and environment variables take precedence
+	if err := applyRepoConfig(s, gopts); err != nil {
+		return nil, err
+	}
+
 	printRepositoryInfo(s, gopts, printer)
 
 	if gopts.NoCache {
@@ -374,8 +437,71 @@ func createRepositoryInstance(be backend.Backend, gopts Options) (*repository.Re
 	return s, nil
 }
 
+// applyRepoConfig merges the in-repo config into the repository options,
+// honoring the precedence CLI flag > environment > repo config > default.
+func applyRepoConfig(s *repository.Repository, gopts Options) error {
+	cfg := s.Config()
+
+	// compression: repo config is a zstd level (-7..22); CLI/env use named modes
+	if cfg.Compression != nil && !gopts.compressionFlag.Changed && !gopts.compressionFromEnv {
+		c, err := compressionFromLevel(*cfg.Compression)
+		if err != nil {
+			return err
+		}
+		s.SetCompression(c)
+	}
+
+	// extra verification (default on; config can disable it, CLI --no-extra-verify wins)
+	if !cfg.ExtraVerifyEnabled() && !gopts.noExtraVerifyFlag.Changed {
+		s.SetNoExtraVerify(true)
+	}
+
+	// per-type pack sizes from the config (CLI --pack-size / env override the
+	// generic target but not an explicit per-type config value)
+	treeSize, treeLimit, _ := cfg.TreePackSize()
+	dataSize, dataLimit, _ := cfg.DataPackSize()
+	if cfg.TreePack.Size != 0 {
+		s.SetTreePackSize(treeSize, treeLimit)
+	}
+	if cfg.DataPack.Size != 0 {
+		s.SetDataPackSize(dataSize, dataLimit)
+	}
+	return nil
+}
+
+// compressionFromLevel maps a zstd compression level from the repo config
+// onto the closest named CompressionMode.
+func compressionFromLevel(level int) (repository.CompressionMode, error) {
+	switch {
+	case level == 0:
+		return repository.CompressionOff, nil
+	case level < 0:
+		return repository.CompressionFastest, nil
+	case level <= 3:
+		// zstd default levels map to "auto"
+		return repository.CompressionAuto, nil
+	case level <= 9:
+		return repository.CompressionBetter, nil
+	case level <= 22:
+		return repository.CompressionMax, nil
+	default:
+		return repository.CompressionInvalid, errors.Fatalf("invalid compression level %d in repository config", level)
+	}
+}
+
 // decryptRepository handles password reading and decrypts the repository.
 func decryptRepository(ctx context.Context, s *repository.Repository, gopts *Options, printer vaultic.Printer) error {
+	// opening via a master key bypasses the password-based key files
+	if mk, err := resolveMasterKey(*gopts); err != nil {
+		return err
+	} else if mk != "" {
+		err := s.UseMasterKey(ctx, mk)
+		if err != nil {
+			return errors.Fatalf("%s", err)
+		}
+		return nil
+	}
+
 	passwordTriesLeft := 1
 	if gopts.Term.InputIsTerminal() && gopts.Password == "" && !gopts.InsecureNoPassword {
 		passwordTriesLeft = 3
