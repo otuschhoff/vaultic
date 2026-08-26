@@ -1,0 +1,16 @@
+Enhancement: lock parity Phase 3 durable prune plans
+
+Prune now persists an encrypted additive `prune_plan` config extension after
+replacement indexes are uploaded and before normal deletion. The marker records
+the exact old index/pack candidates and replacement indexes. Deferred cleanup
+(`prune --keep-delete`) is finalized by a later plain `prune` only after vaultic
+revalidates that all replacement indexes exist and no surviving current index
+references a candidate pack.
+
+Deletion is restricted to IDs explicitly stored in the marker. Immediate prune
+uses the same marker and rewrite-captured index IDs before cleanup. Durable plan
+storage requires atomic config replacement; unsupported backends fail safely
+instead of risking a missing config singleton. Restic and rustic ignore the
+additive config extension.
+
+https://github.com/otuschhoff/vaultic/pull/22011

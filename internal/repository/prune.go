@@ -645,8 +645,9 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 	// make sure the plan can only be used once
 	plan.repo = nil
 
-	// unreferenced packs can be safely deleted first
-	if len(plan.removePacksFirst) != 0 {
+	// Unsafe recovery retains its historical deletion order. Normal prune plans
+	// every deletion first, then persists and revalidates that exact plan.
+	if plan.opts.UnsafeRecovery && len(plan.removePacksFirst) != 0 {
 		printer.P("deleting unreferenced packs\n")
 		// ignoring errors is fine here as keeping too many packs cannot damage the repository
 		_ = deleteFiles(ctx, true, &internalRepository{repo}, plan.removePacksFirst, vaultic.PackFile, printer)
@@ -698,47 +699,33 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 			return errors.Fatalf("%s", err)
 		}
 	} else if len(plan.ignorePacks) != 0 {
-		switch {
-		case plan.opts.KeepDelete:
-			// Two-phase prune, phase 1 only: write the new index but keep the
-			// superseded index files (and, below, the superseded packs). They
-			// are unreferenced after the new index is written; a later
-			// --instant-delete prune removes them.
-			var deferredIndexes vaultic.IDSet
-			err := rewriteIndexFilesOpt(ctx, repo, plan.ignorePacks, nil, nil, &deferredIndexes, printer)
-			if err != nil {
-				return errors.Fatalf("%s", err)
-			}
-			printer.P("two-phase prune: phase 1 complete; %d superseded index files and %d packs kept for a later delete phase\n", len(deferredIndexes), len(plan.removePacks))
-		case plan.opts.EarlyDeleteIndex:
-			// Rebuild the index but defer deleting the superseded index files;
-			// delete them right after the new index is in place, before the
-			// now-unreferenced packs are removed, to free index space earlier.
-			var earlyIndexes vaultic.IDSet
-			err := rewriteIndexFilesOpt(ctx, repo, plan.ignorePacks, nil, nil, &earlyIndexes, printer)
-			if err != nil {
-				return errors.Fatalf("%s", err)
-			}
-			if len(earlyIndexes) != 0 {
-				printer.P("early-deleting %d superseded index files\n", len(earlyIndexes))
-				// ignoring errors is fine here as keeping too many index files
-				// cannot damage the repository (they are superseded)
-				_ = deleteFiles(ctx, true, &internalRepository{repo}, earlyIndexes, vaultic.IndexFile, printer)
-			}
-		default:
-			err := rewriteIndexFiles(ctx, repo, plan.ignorePacks, nil, nil, printer)
-			if err != nil {
-				return errors.Fatalf("%s", err)
-			}
+		observedIndexes := repo.idx.IDs()
+		obsoleteIndexes := vaultic.NewIDSet()
+		requiredIndexes := vaultic.NewIDSet()
+		if err := rewriteIndexFilesOpt(ctx, repo, plan.ignorePacks, nil, nil, &obsoleteIndexes, &requiredIndexes, printer); err != nil {
+			return errors.Fatalf("%s", err)
+		}
+		packIDs := plan.removePacksFirst.Clone()
+		packIDs.Merge(plan.removePacks)
+		marker, err := repo.PersistPrunePlan(ctx, observedIndexes, requiredIndexes, obsoleteIndexes, packIDs)
+		if err != nil {
+			return err
+		}
+		if plan.opts.KeepDelete {
+			printer.P("deferred prune plan %s saved; %d index files and %d packs kept for later revalidated deletion\n", marker.ID, len(obsoleteIndexes), len(packIDs))
+			repo.clearIndex()
+			printer.P("done\n")
+			return nil
+		}
+		if err := repo.FinalizePrunePlanLoaded(ctx, printer); err != nil {
+			return err
 		}
 	}
 
-	if plan.opts.KeepDelete {
-		// two-phase prune: skip phase 2 (deletion of superseded packs). The
-		// packs are unreferenced now and will be removed by a later prune.
-	} else if len(plan.removePacks) != 0 {
+	if plan.opts.UnsafeRecovery && len(plan.removePacks) != 0 {
 		printer.P("removing %d old packs", len(plan.removePacks))
-		// ignoring errors is fine here as keeping too many packs cannot damage the repository
+		// Unsafe recovery deliberately retains its established best-effort pack
+		// deletion behavior; it does not create a durable prune marker.
 		_ = deleteFiles(ctx, true, &internalRepository{repo}, plan.removePacks, vaultic.PackFile, printer)
 	}
 	if ctx.Err() != nil {

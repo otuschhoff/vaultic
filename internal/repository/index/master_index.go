@@ -366,6 +366,10 @@ type MasterIndexRewriteOpts struct {
 	SaveProgress   vaultic.Counter
 	DeleteProgress func() vaultic.Counter
 	DeleteReport   func(id vaultic.ID, err error)
+	// SavedIndexFunc receives each newly saved replacement index ID. It is used
+	// by prune to persist the exact indexes required before old ones may be
+	// deleted, without issuing another eventually-consistent backend List.
+	SavedIndexFunc func(id vaultic.ID)
 
 	// SkipObsoleteDelete, when set, does NOT delete the superseded index files
 	// at the end of the rewrite. Instead the obsolete index IDs are reported via
@@ -550,8 +554,17 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaulti
 			if len(idx.packs) == 0 {
 				return nil
 			}
-			_, err := idx.SaveIndex(wgCtx, repo)
-			return err
+			id, err := idx.SaveIndex(wgCtx, repo)
+			if err != nil {
+				return err
+			}
+			// Retain the current rewritten view for callers that immediately
+			// revalidate a prune plan under the same exclusive lock.
+			mi.Insert(idx)
+			if opts.SavedIndexFunc != nil {
+				opts.SavedIndexFunc(id)
+			}
+			return nil
 		})
 	}
 

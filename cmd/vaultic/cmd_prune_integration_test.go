@@ -346,6 +346,18 @@ func TestPruneTwoPhase(t *testing.T) {
 
 	// phase 1: repack + write new index, defer deletion
 	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", KeepDelete: true})
+	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if repo.Config().PrunePlan == nil {
+			return fmt.Errorf("deferred prune marker was not persisted")
+		}
+		return nil
+	}))
 	// After phase 1 the superseded index files are kept alongside the new one,
 	// so 'check' reports non-critical "pack contained in several indexes". This
 	// is the expected, safe intermediate state of two-phase prune (no data is
@@ -355,6 +367,18 @@ func TestPruneTwoPhase(t *testing.T) {
 
 	// phase 2: default instant-delete removes the deferred packs/indexes
 	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%"})
+	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if repo.Config().PrunePlan != nil {
+			return fmt.Errorf("deferred prune marker was not cleared")
+		}
+		return nil
+	}))
 	// now the duplicate index entries are gone and the repo must be clean
 	testRunCheck(t, env.gopts)
 }

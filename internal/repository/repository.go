@@ -1051,6 +1051,16 @@ func (r *Repository) UpdateConfig(ctx context.Context, fn func(*vaultic.Config) 
 	return nil
 }
 
+// UpdateConfigAtomically is UpdateConfig for state that must survive a crash
+// without a window where the singleton config is absent. It is used by durable
+// prune plans and intentionally refuses backends without atomic replacement.
+func (r *Repository) UpdateConfigAtomically(ctx context.Context, fn func(*vaultic.Config) error) error {
+	if !r.be.Properties().HasAtomicReplace {
+		return errors.Fatal("durable prune plans require a backend with atomic config replacement")
+	}
+	return r.UpdateConfig(ctx, fn)
+}
+
 // Init creates a new master key with the supplied password, initializes and
 // saves the repository config.
 func (r *Repository) Init(ctx context.Context, version uint, password string, chunkerPolynomial *chunker.Pol) error {

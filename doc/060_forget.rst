@@ -565,7 +565,10 @@ exclusive lock. Vaultic also offers a *deferred-delete prune*, gated behind the
 - ``--keep-delete`` performs only the first phase: it repacks and writes the
    new index, but *keeps* the superseded pack and index files instead of
    deleting them. Those files are unreferenced after the new index is written,
-   so a later ``prune`` removes them.
+   so a later ``prune`` removes them. Vaultic stores an encrypted durable prune
+   marker in the repository config with the exact candidate and replacement IDs.
+   The later invocation reloads/revalidates that marker before deleting anything;
+   it never deletes a file that was not named by the original plan.
 
 - ``--instant-delete`` (the default) keeps the single-phase behavior: superseded
    files are deleted in the same run.
@@ -578,6 +581,13 @@ Safety invariant: ``prune`` only ever deletes files that were part of its own
 plan. Note that after a ``--keep-delete`` run, ``check`` reports
 the non-critical "pack contained in several indexes" condition until the
 delete phase runs; this is expected and not a sign of corruption.
+
+.. note::
+   Durable prune plans require a backend with atomic config replacement. Local,
+   S3, B2, Azure, Google Cloud Storage, and Swift backends provide this. Vaultic
+   refuses ``--keep-delete`` on a backend that cannot replace the singleton
+   repository config atomically rather than risk losing the marker after a
+   crash.
 
 Lock-free operations
 ********************

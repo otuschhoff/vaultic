@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
 
@@ -56,6 +57,25 @@ type Config struct {
 	MaxPacksizeToleratePercent *uint32 `json:"max_packsize_tolerate_percent,omitempty"`
 	// ExtraVerify controls verification of data before upload (default true).
 	ExtraVerify *bool `json:"extra_verify,omitempty"`
+
+	// PrunePlan is a durable deferred-cleanup marker. It is an additive config
+	// extension: restic and rustic ignore unknown config fields, while vaultic
+	// uses it to revalidate exactly which indexes and packs a prior prune may
+	// delete. It is intentionally optional and never required to open a repo.
+	PrunePlan *PrunePlan `json:"prune_plan,omitempty"`
+}
+
+// PrunePlan records the immutable candidates produced after prune has uploaded
+// replacement indexes. Deletion code must revalidate RequiredIndexes, remove
+// only IndexIDs, reload the index, and then remove only PackIDs.
+type PrunePlan struct {
+	Version         uint      `json:"version"`
+	ID              string    `json:"id"`
+	CreatedAt       time.Time `json:"created_at"`
+	ObservedIndexes IDs       `json:"observed_indexes"`
+	RequiredIndexes IDs       `json:"required_indexes"`
+	IndexIDs        IDs       `json:"index_ids"`
+	PackIDs         IDs       `json:"pack_ids"`
 }
 
 const MinRepoVersion = 1

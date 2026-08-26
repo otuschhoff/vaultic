@@ -84,7 +84,7 @@ func (be *MemoryBackend) Save(ctx context.Context, h backend.Handle, rd backend.
 		h.Name = ""
 	}
 
-	if _, ok := be.data[h]; ok {
+	if _, ok := be.data[h]; ok && h.Type != backend.ConfigFile {
 		return errors.New("file already exists")
 	}
 
@@ -220,8 +220,10 @@ func (be *MemoryBackend) List(ctx context.Context, t backend.FileType, fn func(b
 
 func (be *MemoryBackend) Properties() backend.Properties {
 	return backend.Properties{
-		Connections:      connectionCount,
-		HasAtomicReplace: false,
+		Connections: connectionCount,
+		// The map assignment performed by Save is atomic while holding be.m,
+		// including replacement of the singleton config file.
+		HasAtomicReplace: true,
 	}
 }
 

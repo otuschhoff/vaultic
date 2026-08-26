@@ -34,6 +34,14 @@ func TestConfigExtensionsRoundTrip(t *testing.T) {
 	cfg.TreePackSizeLimitBytes = 128 * 1024 * 1024
 	cfg.DataPackSizeBytes = 32 * 1024 * 1024
 	cfg.MinPacksizeToleratePercent = &minTol
+	cfg.PrunePlan = &vaultic.PrunePlan{
+		Version:         1,
+		ID:              "test-plan",
+		ObservedIndexes: vaultic.IDs{vaultic.NewTestID(1)},
+		RequiredIndexes: vaultic.IDs{vaultic.NewTestID(2)},
+		IndexIDs:        vaultic.IDs{vaultic.NewTestID(3)},
+		PackIDs:         vaultic.IDs{vaultic.NewTestID(4)},
+	}
 
 	rtest.OK(t, cfg.ValidateExtensions())
 	rtest.OK(t, vaultic.SaveConfig(context.TODO(), saver{save}, cfg))

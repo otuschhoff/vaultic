@@ -265,7 +265,17 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}
 
-	// loading the index before the snapshots is ok, as we use an exclusive lock here
+	if repo.Config().PrunePlan != nil {
+		if opts.KeepDelete {
+			return errors.Fatal("repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first")
+		}
+		// Deferred cleanup is intentionally a standalone invocation: it gets
+		// one fresh index observation for revalidation, then deletes only the
+		// marker's exact candidates. A later prune can create a new plan.
+		return repo.FinalizePrunePlan(ctx, printer)
+	}
+
+	// Loading the index before snapshots is safe under this exclusive lock.
 	err := repo.LoadIndex(ctx, printer)
 	if err != nil {
 		return err

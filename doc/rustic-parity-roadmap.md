@@ -463,17 +463,26 @@ feature flag.
   Append writers still retain a shared lock while prune is classic; this stage
   does **not** authorize feature-driven lock-free append writes.
 
-3. **Persist and validate prune plans.** Add a durable prune plan containing
-   the observed index set/generation, candidate old pack IDs, candidate old
-   index IDs, replacement index IDs, and immutable plan ID. Plan markers must
-   be stored in an interop-safe location: first prove that restic/rustic ignore
-   the chosen representation; do not add an unknown top-level directory
-   without that proof. Before every deletion, reload current indexes and prove:
+3. **✅ Persist and validate prune plans (implemented).** A durable encrypted
+  ``prune_plan`` config extension now records the observed index IDs, exact
+  candidate old pack/index IDs, replacement index IDs captured from successful
+  index writes, immutable plan ID, and creation timestamp. Config extensions
+  are verified to be ignored by restic/rustic; config replacement is required
+  to be atomic, so unsupported backends refuse durable plans rather than risk
+  a missing singleton config. Before every deferred deletion, vaultic loads
+  one fresh current index view and proves:
 
    - the candidate was in the original plan;
    - the candidate is still obsolete in the current index view;
    - no index/snapshot written after plan creation references it;
    - unknown/new objects are never deleted.
+
+  Immediate ``--instant-delete`` persists the marker before cleanup and
+  revalidates using rewrite-captured replacement index IDs without a second
+  backend index list. ``--keep-delete`` retains the marker; a later normal
+  ``prune`` finalizes that marker as its own one-list invocation. Unit tests
+  reject missing replacement indexes and referenced packs, and integration
+  tests verify marker persistence after phase A and clearing after phase B.
 
 4. **Make prune genuinely minimal-lock.** Move phase A outside the exclusive
    lock: read a consistent planning view, repack, upload replacement packs,
@@ -882,6 +891,10 @@ graph TD
   [internal/repository/repair_index.go](../internal/repository/repair_index.go)).
   The phase-1 intermediate state intentionally leaves duplicate index entries
   (non-critical per `check`), resolved by phase 2.
+  Phase 3 adds a durable encrypted ``prune_plan`` config marker and exact
+  index/pack revalidation before deletion; plan persistence requires atomic
+  config replacement and refuses unsupported backends rather than weakening
+  crash safety.
 - **F20 prune extras** ([cmd/vaultic/cmd_prune.go](../cmd/vaultic/cmd_prune.go),
   [internal/repository/prune.go](../internal/repository/prune.go)):
   `--max-repack` accepts an absolute size, a percentage of the repo size

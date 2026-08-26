@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"sync"
 
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
@@ -106,10 +107,10 @@ func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions,
 // is non-nil the superseded index files are NOT deleted here; instead their IDs
 // are returned via the *earlyDelete set so the caller can delete them earlier.
 func rewriteIndexFiles(ctx context.Context, repo *Repository, removePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, printer vaultic.Printer) error {
-	return rewriteIndexFilesOpt(ctx, repo, removePacks, oldIndexes, extraObsolete, nil, printer)
+	return rewriteIndexFilesOpt(ctx, repo, removePacks, oldIndexes, extraObsolete, nil, nil, printer)
 }
 
-func rewriteIndexFilesOpt(ctx context.Context, repo *Repository, removePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, earlyDelete *vaultic.IDSet, printer vaultic.Printer) error {
+func rewriteIndexFilesOpt(ctx context.Context, repo *Repository, removePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, earlyDelete *vaultic.IDSet, savedIndexes *vaultic.IDSet, printer vaultic.Printer) error {
 	printer.P("rebuilding index\n")
 
 	bar := printer.NewCounter("indexes processed")
@@ -130,6 +131,14 @@ func rewriteIndexFilesOpt(ctx context.Context, repo *Repository, removePacks vau
 		opts.SkipObsoleteDelete = true
 		opts.ObsoleteIndexFunc = func(obsolete vaultic.IDSet) {
 			*earlyDelete = obsolete
+		}
+	}
+	if savedIndexes != nil {
+		var savedIndexesMutex sync.Mutex
+		opts.SavedIndexFunc = func(id vaultic.ID) {
+			savedIndexesMutex.Lock()
+			defer savedIndexesMutex.Unlock()
+			savedIndexes.Insert(id)
 		}
 	}
 	return repo.idx.Rewrite(ctx, &internalRepository{repo}, removePacks, oldIndexes, extraObsolete, opts)
