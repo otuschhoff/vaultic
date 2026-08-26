@@ -67,7 +67,7 @@ func repack(
 
 	wg, wgCtx := errgroup.WithContext(ctx)
 
-	if feature.Flag.Enabled(feature.S3Restore) {
+	if feature.Flag.Enabled(feature.S3Restore) || feature.Flag.Enabled(feature.WarmupCommand) {
 		job, err := repo.StartWarmup(ctx, packs)
 		if err != nil {
 			return err

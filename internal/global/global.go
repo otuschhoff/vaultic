@@ -20,6 +20,7 @@ import (
 	"github.com/vaultic/vaultic/internal/backend/logger"
 	"github.com/vaultic/vaultic/internal/backend/retry"
 	"github.com/vaultic/vaultic/internal/backend/sema"
+	"github.com/vaultic/vaultic/internal/backend/warmupcmd"
 	"github.com/vaultic/vaultic/internal/debug"
 	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/options"
@@ -27,6 +28,7 @@ import (
 	"github.com/vaultic/vaultic/internal/textfile"
 	"github.com/vaultic/vaultic/internal/ui"
 	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/vaultic/vaultic/internal/warmup"
 
 	"github.com/vaultic/vaultic/internal/errors"
 )
@@ -65,6 +67,16 @@ type Options struct {
 	PackSize           uint
 	NoExtraVerify      bool
 	InsecureNoPassword bool
+
+	// RepoHot is the location of the hot part of a hot/cold repository
+	// (empty for a normal repository).
+	RepoHot string
+
+	// Warm-up (cold storage) options; see internal/warmup.
+	WarmUpCommand     string
+	WarmUpBatch       int
+	WarmUpWait        time.Duration
+	WarmUpWaitCommand string
 
 	backend.TransportOptions
 	limiter.Limits
@@ -107,6 +119,12 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.MasterKey, "key", "", "master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)")
 	f.StringVar(&opts.MasterKeyFile, "key-file", "", "`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)")
 	f.StringVar(&opts.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
+
+	f.StringVar(&opts.RepoHot, "repo-hot", "", "hot part of a hot/cold `repository` (cold storage; default: $VAULTIC_REPO_HOT)")
+	f.StringVar(&opts.WarmUpCommand, "warm-up-command", "", "warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)")
+	f.IntVar(&opts.WarmUpBatch, "warm-up-batch", 1, "warm-up `batch` size: packs per %ids invocation or parallel %id invocations (default: $VAULTIC_WARM_UP_BATCH)")
+	f.DurationVar(&opts.WarmUpWait, "warm-up-wait", 0, "max `duration` to wait for warm-up to take effect (default: $VAULTIC_WARM_UP_WAIT)")
+	f.StringVar(&opts.WarmUpWaitCommand, "warm-up-wait-command", "", "`command` to wait for warmed-up data (default: $VAULTIC_WARM_UP_WAIT_COMMAND)")
 	f.BoolVarP(&opts.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
 	// use empty parameter name as `-v, --verbose n` instead of the correct `--verbose=n` is confusing
 	f.CountVarP(&opts.Verbose, "verbose", "v", "be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)")
@@ -140,6 +158,19 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	opts.MasterKey = env.Get("KEY")
 	opts.MasterKeyFile = env.Get("KEY_FILE")
 	opts.MasterKeyCommand = env.Get("KEY_COMMAND")
+	opts.RepoHot = env.Get("REPO_HOT")
+	opts.WarmUpCommand = env.Get("WARM_UP_COMMAND")
+	if v := env.Get("WARM_UP_BATCH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			opts.WarmUpBatch = n
+		}
+	}
+	if v := env.Get("WARM_UP_WAIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			opts.WarmUpWait = d
+		}
+	}
+	opts.WarmUpWaitCommand = env.Get("WARM_UP_WAIT_COMMAND")
 	if v := env.Get("CACERT"); v != "" {
 		opts.RootCertFilenames = strings.Split(v, ",")
 	}
@@ -731,6 +762,17 @@ func createOrOpenBackend(ctx context.Context, scheme string, cfg any, rt http.Ro
 func wrapBackend(be backend.Backend, gopts Options, printer vaultic.Printer) (backend.Backend, error) {
 	// wrap with debug logging and connection limiting
 	be = logger.New(sema.NewBackend(be))
+
+	// route warm-up to the user-supplied warm-up command if configured
+	if gopts.WarmUpCommand != "" {
+		runner := warmup.New(warmup.Options{
+			Command:     gopts.WarmUpCommand,
+			Batch:       gopts.WarmUpBatch,
+			Wait:        gopts.WarmUpWait,
+			WaitCommand: gopts.WarmUpWaitCommand,
+		}, nil, func(msg string) { printer.V("%s", msg) })
+		be = warmupcmd.NewWarmupCommandBackend(be, runner, nil)
+	}
 
 	// wrap backend if a test specified an inner hook
 	if gopts.BackendInnerTestHook != nil {

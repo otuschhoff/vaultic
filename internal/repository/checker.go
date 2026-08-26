@@ -265,7 +265,7 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[vaultic.I
 		packSet.Insert(pack)
 	}
 
-	if feature.Flag.Enabled(feature.S3Restore) {
+	if feature.Flag.Enabled(feature.S3Restore) || feature.Flag.Enabled(feature.WarmupCommand) {
 		job, err := c.repo.StartWarmup(ctx, packSet)
 		if err != nil {
 			errChan <- err

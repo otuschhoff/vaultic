@@ -201,7 +201,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 	// drop no longer necessary file list
 	r.files = nil
 
-	if feature.Flag.Enabled(feature.S3Restore) {
+	if feature.Flag.Enabled(feature.S3Restore) || feature.Flag.Enabled(feature.WarmupCommand) {
 		warmupJob, err := r.startWarmup(ctx, vaultic.NewIDSet(packOrder...))
 		if err != nil {
 			return err
