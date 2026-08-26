@@ -553,13 +553,13 @@ func applyRepoConfig(s *repository.Repository, gopts Options) error {
 
 	// per-type pack sizes from the config (CLI --pack-size / env override the
 	// generic target but not an explicit per-type config value)
-	treeSize, treeLimit, _ := cfg.TreePackSize()
-	dataSize, dataLimit, _ := cfg.DataPackSize()
-	if cfg.TreePackSizeBytes != 0 {
-		s.SetTreePackSize(treeSize, treeLimit)
+	treeSize, treeLimit, treeGrow := cfg.TreePackSize()
+	dataSize, dataLimit, dataGrow := cfg.DataPackSize()
+	if cfg.TreePackSizeBytes != 0 || cfg.TreePackGrowFactor != nil || cfg.TreePackSizeLimitBytes != 0 {
+		s.SetTreePackSizeConfig(treeSize, treeLimit, treeGrow)
 	}
-	if cfg.DataPackSizeBytes != 0 {
-		s.SetDataPackSize(dataSize, dataLimit)
+	if cfg.DataPackSizeBytes != 0 || cfg.DataPackGrowFactor != nil || cfg.DataPackSizeLimitBytes != 0 {
+		s.SetDataPackSizeConfig(dataSize, dataLimit, dataGrow)
 	}
 	if gopts.TreePackSize != 0 {
 		s.SetTreePackSize(uint64(gopts.TreePackSize)*1024*1024, 0)

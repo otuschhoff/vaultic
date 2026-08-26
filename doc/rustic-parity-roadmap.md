@@ -76,7 +76,7 @@ the conventions in Section 12.
 | Warm-up plumbing | [internal/warmup](../internal/warmup), [internal/backend/warmupcmd](../internal/backend/warmupcmd) | warm-up command, batching, wait protocol, and hot/cold integration implemented |
 | Locking | [internal/repository/lock.go](../internal/repository/lock.go), [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) | typed `None`/`Shared`/`Exclusive` policy; lock-free reads Alpha; minimal-lock prune/forget with external graduation gates pending |
 | Prune | [internal/repository/prune.go](../internal/repository/prune.go), [prune_plan.go](../internal/repository/prune_plan.go) | durable/revalidated minimal-lock plan phases; S3/MinIO and mixed-client graduation pending |
-| Packer / pack size | [internal/repository/packer_manager.go](../internal/repository/packer_manager.go) | tree/data target sizing and limits; dynamic growfactor is stored but unused |
+| Packer / pack size | [internal/repository/packer_manager.go](../internal/repository/packer_manager.go), [pack_sizer.go](../internal/repository/pack_sizer.go) | tree/data target sizing, square-root growth, explicit limits, and 4 GiB cap |
 | Global options | [internal/global/global.go](../internal/global/global.go), [internal/configfile](../internal/configfile) | TOML profiles, environment fallback, log/progress/telemetry options implemented |
 | Backends | [internal/backend](../internal/backend) | local, sftp, rest, s3, swift, b2, azure, gs, rclone |
 | Feature flags | [internal/feature](../internal/feature) | alpha/beta/stable registry, env-driven |
@@ -112,7 +112,7 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 | F1 | In-repo config | `config` command edits compression, pack sizes, chunker, append-only inside repo config JSON | P0 | L | WS-A | ✅ |
 | F2 | `show-config` command | prints repo config incl. extensions | P0 | S | WS-A | ✅ |
 | F3 | Custom chunker config | min/max/avg chunk size, fixed-size chunker, stored in repo | P2 | M | WS-A | ✅ |
-| F4 | Per-type pack sizing | `treepack_*`/`datapack_*` size, grow factor, limits; packs up to 4 GiB | P1 | M | WS-A | ⚠️ partial: size+limit work; dynamic growfactor is stored but unused |
+| F4 | Per-type pack sizing | `treepack_*`/`datapack_*` size, grow factor, limits; packs up to 4 GiB | P1 | M | WS-A | ✅ |
 | F5 | Append-only repo mode | `append_only` in-repo flag blocks delete/overwrite | P1 | M | WS-A | ✅ |
 | F6 | Extra-verify persist | `extra_verify` in-repo instead of per-call `--no-extra-verify` | P2 | S | WS-A | ✅ |
 | F7 | Open repo via master key | `--key`, `--key-file`, `--key-command` bypass password keys | P2 | M | WS-A | ✅ |
@@ -817,8 +817,8 @@ graph TD
 - Exit criteria met: config-driven repo behaves like flag-driven operation;
   interop verified both directions; integration tests added
   ([cmd_config_integration_test.go](../cmd/vaultic/cmd_config_integration_test.go)).
-  Remaining parity gap: dynamic pack-size growth (growfactor is stored +
-  validated but target sizing is not repo-size dependent).
+  Per-type pack sizing is runtime-applied, including rustic-compatible
+  square-root growth from indexed packed bytes and explicit size limits.
 
 ### Phase 2 — Snapshot metadata & filtering (WS-B, WS-C; F8–F13) — ⚠️ substantially complete (branch `rustic-parity`, 2026-08-26)
 
@@ -871,7 +871,6 @@ graph TD
   tolerated by restic.
 - Deferred: `prune --keep-pack <duration>` (cold minimum-holding period) needs
   pack mtimes, i.e. a `FileInfo`/backend interface change — moved to Phase 6.
-  Dynamic pack-size growth (growfactor) still pending (from Phase 1).
 
 ### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20) — ⚠️ substantially complete, external gates pending (branch `rustic-parity`, 2026-08-26)
 

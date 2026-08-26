@@ -105,8 +105,10 @@ type Options struct {
 
 	// TreePackSize and DataPackSize optionally override PackSize for tree and
 	// data packs respectively (from the in-repo config). Zero means PackSize.
-	TreePackSize uint64
-	DataPackSize uint64
+	TreePackSize       uint64
+	DataPackSize       uint64
+	TreePackGrowFactor uint32
+	DataPackGrowFactor uint32
 	// TreePackSizeLimit and DataPackSizeLimit cap the per-type pack size
 	// (0 = no extra limit beyond MaxPackSize).
 	TreePackSizeLimit uint64
@@ -238,18 +240,30 @@ func (r *Repository) SetTreePackSize(size, limit uint64) {
 	r.opts.TreePackSizeLimit = limit
 }
 
+// SetTreePackSizeConfig applies the complete in-repo tree pack sizing policy.
+func (r *Repository) SetTreePackSizeConfig(size, limit uint64, growFactor uint32) {
+	r.opts.TreePackSize = size
+	r.opts.TreePackSizeLimit = limit
+	r.opts.TreePackGrowFactor = growFactor
+}
+
 // SetDataPackSize sets the target size and optional size limit for data packs.
 func (r *Repository) SetDataPackSize(size, limit uint64) {
 	r.opts.DataPackSize = size
 	r.opts.DataPackSizeLimit = limit
 }
 
+// SetDataPackSizeConfig applies the complete in-repo data pack sizing policy.
+func (r *Repository) SetDataPackSizeConfig(size, limit uint64, growFactor uint32) {
+	r.opts.DataPackSize = size
+	r.opts.DataPackSizeLimit = limit
+	r.opts.DataPackGrowFactor = growFactor
+}
+
 // TreePackSizeBytes returns the effective target size for tree packs.
 func (r *Repository) TreePackSizeBytes() uint64 {
-	if r.opts.TreePackSize != 0 {
-		return r.opts.TreePackSize
-	}
-	return uint64(r.opts.PackSize)
+	size, _, _ := r.packSizing(vaultic.TreeBlob)
+	return size
 }
 
 // DataPackSizeBytes returns the effective target size for data packs.
@@ -257,10 +271,60 @@ func (r *Repository) TreePackSizeBytes() uint64 {
 // so applying the in-repo config after opening the repository still takes
 // effect for new packs.
 func (r *Repository) DataPackSizeBytes() uint64 {
-	if r.opts.DataPackSize != 0 {
-		return r.opts.DataPackSize
+	size, _, _ := r.packSizing(vaultic.DataBlob)
+	return size
+}
+
+func (r *Repository) packSizing(t vaultic.BlobType) (size, limit uint64, growFactor uint32) {
+	cfg := r.Config()
+	switch t {
+	case vaultic.TreeBlob:
+		if r.opts.TreePackSize != 0 {
+			return r.opts.TreePackSize, r.opts.TreePackSizeLimit, r.opts.TreePackGrowFactor
+		}
+		if cfg.TreePackSizeBytes != 0 || cfg.TreePackGrowFactor != nil || cfg.TreePackSizeLimitBytes != 0 {
+			return cfg.TreePackSize()
+		}
+		if r.opts.PackSize != DefaultPackSize {
+			return uint64(r.opts.PackSize), 0, 0
+		}
+		return cfg.TreePackSize()
+	case vaultic.DataBlob:
+		if r.opts.DataPackSize != 0 {
+			return r.opts.DataPackSize, r.opts.DataPackSizeLimit, r.opts.DataPackGrowFactor
+		}
+		if cfg.DataPackSizeBytes != 0 || cfg.DataPackGrowFactor != nil || cfg.DataPackSizeLimitBytes != 0 {
+			return cfg.DataPackSize()
+		}
+		if r.opts.PackSize != DefaultPackSize {
+			return uint64(r.opts.PackSize), 0, 0
+		}
+		return cfg.DataPackSize()
 	}
-	return uint64(r.opts.PackSize)
+	return uint64(r.opts.PackSize), 0, 0
+}
+
+func (r *Repository) currentBlobSize(t vaultic.BlobType) uint64 {
+	types := make(map[vaultic.ID]vaultic.BlobType)
+	for blob := range r.idx.Values() {
+		packID := blob.PackID()
+		if previous, ok := types[packID]; !ok {
+			types[packID] = blob.Handle().Type
+		} else if previous != vaultic.NumBlobTypes && previous != blob.Handle().Type {
+			types[packID] = vaultic.NumBlobTypes
+		}
+	}
+	packSizes, err := pack.Size(context.Background(), r, false)
+	if err != nil {
+		return 0
+	}
+	var size uint64
+	for packID, packType := range types {
+		if packType == t {
+			size += uint64(packSizes[packID])
+		}
+	}
+	return size
 }
 
 // UseCache replaces the backend with the wrapped cache.
@@ -738,8 +802,10 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 	innerWg, ctx := errgroup.WithContext(ctx)
 	r.packerWg = innerWg
 	r.uploader = newPackerUploader(ctx, innerWg, r, r.Connections())
-	r.treePM = newPackerManager(r.key, vaultic.TreeBlob, uint(r.TreePackSizeBytes()), r.packerCount, r.uploader.QueuePacker)
-	r.dataPM = newPackerManager(r.key, vaultic.DataBlob, uint(r.DataPackSizeBytes()), r.packerCount, r.uploader.QueuePacker)
+	treeSize, treeLimit, treeGrow := r.packSizing(vaultic.TreeBlob)
+	dataSize, dataLimit, dataGrow := r.packSizing(vaultic.DataBlob)
+	r.treePM = newConfiguredPackerManager(r.key, vaultic.TreeBlob, treeSize, treeLimit, r.currentBlobSize(vaultic.TreeBlob), treeGrow, r.packerCount, r.uploader.QueuePacker)
+	r.dataPM = newConfiguredPackerManager(r.key, vaultic.DataBlob, dataSize, dataLimit, r.currentBlobSize(vaultic.DataBlob), dataGrow, r.packerCount, r.uploader.QueuePacker)
 
 	wg.Go(func() error {
 		return innerWg.Wait()

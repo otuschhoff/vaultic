@@ -216,6 +216,15 @@ func (p *Packer) Size() uint {
 	return p.bytes
 }
 
+// PackSize returns the calculated size of the finalized pack, including its
+// encrypted header and header entries.
+func (p *Packer) PackSize() uint {
+	p.m.Lock()
+	defer p.m.Unlock()
+
+	return p.bytes + uint(CalculateHeaderSize(p.blobs))
+}
+
 // Count returns the number of blobs in this packer.
 func (p *Packer) Count() int {
 	p.m.Lock()

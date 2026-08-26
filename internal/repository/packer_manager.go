@@ -34,9 +34,9 @@ type packerManager struct {
 	key     *crypto.Key
 	queueFn func(ctx context.Context, t vaultic.BlobType, p *packer) error
 
-	pm       sync.Mutex
-	packers  []*packer
-	packSize uint
+	pm        sync.Mutex
+	packers   []*packer
+	packSizer packSizer
 }
 
 const defaultPackerCount = 2
@@ -45,11 +45,21 @@ const defaultPackerCount = 2
 // to a temporary directory
 func newPackerManager(key *crypto.Key, tpe vaultic.BlobType, packSize uint, packerCount int, queueFn func(ctx context.Context, t vaultic.BlobType, p *packer) error) *packerManager {
 	return &packerManager{
-		tpe:      tpe,
-		key:      key,
-		queueFn:  queueFn,
-		packers:  make([]*packer, packerCount),
-		packSize: packSize,
+		tpe:       tpe,
+		key:       key,
+		queueFn:   queueFn,
+		packers:   make([]*packer, packerCount),
+		packSizer: newPackSizer(packSize, 0, packSize, 0),
+	}
+}
+
+func newConfiguredPackerManager(key *crypto.Key, tpe vaultic.BlobType, defaultSize, sizeLimit, currentSize uint64, growFactor uint32, packerCount int, queueFn func(context.Context, vaultic.BlobType, *packer) error) *packerManager {
+	return &packerManager{
+		tpe:       tpe,
+		key:       key,
+		queueFn:   queueFn,
+		packers:   make([]*packer, packerCount),
+		packSizer: newPackSizer(uint(defaultSize), uint(growFactor), uint(sizeLimit), currentSize),
 	}
 }
 
@@ -64,6 +74,7 @@ func (r *packerManager) Flush(ctx context.Context) error {
 
 	for _, packer := range pendingPackers {
 		debug.Log("manually flushing pending pack")
+		r.addPackSize(packer)
 		err := r.queueFn(ctx, r.tpe, packer)
 		if err != nil {
 			return err
@@ -87,7 +98,7 @@ func (r *packerManager) mergePackers() ([]*packer, error) {
 		r.packers[i] = nil
 		if p == nil {
 			p = packer
-		} else if p.Size()+packer.Size() < r.packSize {
+		} else if p.Size()+packer.Size() < r.packSizer.target() {
 			// merge if the result stays below the target pack size
 			err := packer.bufWr.Flush()
 			if err != nil {
@@ -130,13 +141,14 @@ func (r *packerManager) SaveBlob(ctx context.Context, t vaultic.BlobType, id vau
 	}
 
 	// if the pack and header is not full enough, put back to the list
-	if packer.Size() < r.packSize && !packer.HeaderFull() {
+	if packer.Size() < r.packSizer.target() && !packer.HeaderFull() {
 		debug.Log("pack is not full enough (%d bytes)", packer.Size())
 		return size, nil
 	}
 
 	// forget full packer
 	r.forgetPacker(packer)
+	r.addPackSize(packer)
 
 	// call while holding lock to prevent findPacker from creating new packers if the uploaders are busy
 	// else write the pack to the backend
@@ -163,7 +175,7 @@ func (r *packerManager) pickPacker(ciphertextLen int) (*packer, error) {
 	// use separate packer if compressed length is larger than the packsize
 	// this speeds up the garbage collection of oversized blobs and reduces the cache size
 	// as the oversize blobs are only downloaded if necessary
-	if ciphertextLen >= int(r.packSize) {
+	if ciphertextLen >= int(r.packSizer.target()) {
 		return r.newPacker()
 	}
 
@@ -186,6 +198,10 @@ func (r *packerManager) pickPacker(ciphertextLen int) (*packer, error) {
 		r.packers[idx] = packer
 	}
 	return packer, nil
+}
+
+func (r *packerManager) addPackSize(packer *packer) {
+	r.packSizer.currentSize += uint64(packer.PackSize())
 }
 
 // forgetPacker drops the given packer from the internal list. This is used to forget full packers.
