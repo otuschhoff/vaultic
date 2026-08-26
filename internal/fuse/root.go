@@ -5,10 +5,10 @@ package fuse
 import (
 	"os"
 
-	"github.com/vaultic/vaultic/internal/bloblru"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/bloblru"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/anacrolix/fuse/fs"
 )

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/fs"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // TestSnapshot creates a new snapshot of path.

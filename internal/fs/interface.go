@@ -3,7 +3,7 @@ package fs
 import (
 	"io"
 
-	"github.com/vaultic/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/data"
 )
 
 // FS bundles all methods needed for a file system.

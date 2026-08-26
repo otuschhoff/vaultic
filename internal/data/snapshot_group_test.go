@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestGroupByOptions(t *testing.T) {

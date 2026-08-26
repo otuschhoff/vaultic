@@ -4,7 +4,7 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 	"golang.org/x/sys/windows"
 )
 

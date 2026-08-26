@@ -649,7 +649,7 @@ graph TD
 ### Phase 0 — Hygiene & interop harness (prereq, S–M) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
 - ~~Complete the vaultic rename~~ — **done**: module path
-  `github.com/vaultic/vaultic`, binary `vaultic`, `cmd/vaultic`,
+  `github.com/otuschhoff/vaultic`, binary `vaultic`, `cmd/vaultic`,
   `internal/vaultic`, docs, docker, release helpers. Environment variables
   are read as `VAULTIC_*` with transparent `RESTIC_*` fallback
   (see [internal/env](../internal/env)).

@@ -13,14 +13,14 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/klauspost/compress/zstd"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/mem"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type mapcache map[backend.Handle]bool

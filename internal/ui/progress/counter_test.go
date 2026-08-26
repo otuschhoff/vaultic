@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
 )
 
 func TestCounter(t *testing.T) {

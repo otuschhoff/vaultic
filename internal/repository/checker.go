@@ -9,14 +9,14 @@ import (
 	"io"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/feature"
-	"github.com/vaultic/vaultic/internal/repository/hashing"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
+	"github.com/otuschhoff/vaultic/internal/repository/hashing"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 

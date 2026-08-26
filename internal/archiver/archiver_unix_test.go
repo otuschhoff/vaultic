@@ -5,10 +5,10 @@ package archiver
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/feature"
-	"github.com/vaultic/vaultic/internal/fs"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/feature"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func statAndSnapshot(t *testing.T, repo archiverRepo, name string) (*data.Node, *data.Node) {

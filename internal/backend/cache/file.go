@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/util"
+	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/pkg/errors"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/util"
-	"github.com/vaultic/vaultic/internal/debug"
 )
 
 func (c *Cache) filename(h backend.Handle) string {

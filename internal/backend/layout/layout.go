@@ -1,7 +1,7 @@
 package layout
 
 import (
-	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend"
 )
 
 // Layout computes paths for file name storage.

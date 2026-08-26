@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/test"
 	"golang.org/x/sync/errgroup"
 )
 

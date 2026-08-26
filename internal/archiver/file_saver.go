@@ -6,11 +6,11 @@ import (
 	"io"
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 

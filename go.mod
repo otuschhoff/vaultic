@@ -1,4 +1,4 @@
-module github.com/vaultic/vaultic
+module github.com/otuschhoff/vaultic
 
 go 1.25.8
 

@@ -6,9 +6,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func saveRandomFile(t testing.TB, be backend.Backend, length int) ([]byte, backend.Handle) {

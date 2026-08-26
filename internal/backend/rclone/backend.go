@@ -18,13 +18,13 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/limiter"
-	"github.com/vaultic/vaultic/internal/backend/location"
-	"github.com/vaultic/vaultic/internal/backend/rest"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/terminal"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/limiter"
+	"github.com/otuschhoff/vaultic/internal/backend/location"
+	"github.com/otuschhoff/vaultic/internal/backend/rest"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/terminal"
 	"golang.org/x/net/http2"
 )
 

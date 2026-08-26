@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func internalOpenWithLocked(ctx context.Context, gopts global.Options, dryRun bool, exclusive bool, printer vaultic.Printer) (context.Context, *repository.Repository, func(), error) {

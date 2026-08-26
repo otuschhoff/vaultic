@@ -5,8 +5,8 @@ import (
 	"io"
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/debug"
 )
 
 // cacheBackend wraps a vaultic.cacheBackend and adds a cache.

@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/pkg/errors"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/debug"
 )
 
 // Cache manages a local cache.

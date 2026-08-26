@@ -3,7 +3,7 @@ package backend
 import (
 	"unicode"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // shellSplitter splits a command string into separated arguments. It supports

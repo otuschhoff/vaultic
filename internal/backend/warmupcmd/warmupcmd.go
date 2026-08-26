@@ -3,9 +3,9 @@ package warmupcmd
 import (
 	"context"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/warmup"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/warmup"
 )
 
 // WarmupCommandBackend wraps a backend.Backend and routes Warmup/WarmupWait to

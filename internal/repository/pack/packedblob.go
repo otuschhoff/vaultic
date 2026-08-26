@@ -1,6 +1,6 @@
 package pack
 
-import "github.com/vaultic/vaultic/internal/vaultic"
+import "github.com/otuschhoff/vaultic/internal/vaultic"
 
 // PackedBlob is one index entry for a blob in a pack (may be duplicate across indexes).
 type PackedBlob struct {

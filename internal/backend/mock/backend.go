@@ -5,8 +5,8 @@ import (
 	"hash"
 	"io"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // Backend implements a mock backend.

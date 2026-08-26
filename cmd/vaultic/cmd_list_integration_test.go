@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/global"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/global"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func testRunList(t testing.TB, gopts global.Options, params ...string) vaultic.IDs {

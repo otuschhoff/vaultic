@@ -14,16 +14,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/cache"
-	"github.com/vaultic/vaultic/internal/backend/local"
-	"github.com/vaultic/vaultic/internal/backend/mem"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/cache"
+	"github.com/otuschhoff/vaultic/internal/backend/local"
+	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 var testSizes = []int{5, 23, 2<<18 + 23, 1 << 20}

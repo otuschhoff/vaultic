@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/mock"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/mock"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestWarmupRepository(t *testing.T) {

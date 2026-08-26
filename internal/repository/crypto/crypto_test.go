@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 
 	"github.com/restic/chunker"
 )

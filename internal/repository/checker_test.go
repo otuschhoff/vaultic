@@ -11,13 +11,13 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/feature"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 var checkerTestData = filepath.Join("..", "checker", "testdata", "checker-test-repo.tar.gz")

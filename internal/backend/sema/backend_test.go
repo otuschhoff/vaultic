@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/mock"
-	"github.com/vaultic/vaultic/internal/backend/sema"
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/mock"
+	"github.com/otuschhoff/vaultic/internal/backend/sema"
+	"github.com/otuschhoff/vaultic/internal/test"
 	"golang.org/x/sync/errgroup"
 )
 

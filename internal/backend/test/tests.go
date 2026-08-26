@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/test"
 
-	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend"
 )
 
 func seedRand(t testing.TB) *rand.Rand {

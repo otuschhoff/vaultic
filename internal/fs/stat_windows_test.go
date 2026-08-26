@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/fs"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"golang.org/x/sys/windows"
 )
 

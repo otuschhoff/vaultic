@@ -8,10 +8,10 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository"
 
 	"github.com/pkg/profile"
 )
@@ -31,7 +31,7 @@ func RegisterProfiling(cmd *cobra.Command, stderr io.Writer) {
 
 	// Once https://github.com/spf13/cobra/issues/1893 is fixed,
 	// this could use PersistentPostRunE instead of OnFinalize,
-	// reverting https://github.com/vaultic/vaultic/pull/5373.
+	// reverting https://github.com/otuschhoff/vaultic/pull/5373.
 	cobra.OnFinalize(func() {
 		profiler.Stop()
 	})

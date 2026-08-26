@@ -30,13 +30,13 @@ your time and add more commits. If you're done and ready for review, please
 check the last box. Enable a checkbox by replacing [ ] with [x].
 
 Please always follow these steps:
-- Read the [contribution guidelines](https://github.com/vaultic/vaultic/blob/master/CONTRIBUTING.md#providing-patches).
+- Read the [contribution guidelines](https://github.com/otuschhoff/vaultic/blob/master/CONTRIBUTING.md#providing-patches).
 - Enable [maintainer edits](https://help.github.com/en/github/collaborating-with-issues-and-pull-requests/allowing-changes-to-a-pull-request-branch-created-from-a-fork).
 - Run `gofmt` on the code in all commits.
-- Format all commit messages in the same style as [the other commits in the repository](https://github.com/vaultic/vaultic/blob/master/CONTRIBUTING.md#git-commits).
+- Format all commit messages in the same style as [the other commits in the repository](https://github.com/otuschhoff/vaultic/blob/master/CONTRIBUTING.md#git-commits).
 -->
 
 - [ ] I have added tests for all code changes, see [writing tests](https://vaultic.readthedocs.io/en/stable/090_participating.html#writing-tests)
 - [ ] I have added documentation for relevant changes (in the manual).
-- [ ] There's a new file in `changelog/unreleased/` that describes the changes for our users (see [template](https://github.com/vaultic/vaultic/blob/master/changelog/TEMPLATE)).
+- [ ] There's a new file in `changelog/unreleased/` that describes the changes for our users (see [template](https://github.com/otuschhoff/vaultic/blob/master/changelog/TEMPLATE)).
 - [ ] I'm done! This pull request is ready for review.

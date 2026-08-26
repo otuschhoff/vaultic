@@ -4,10 +4,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/archiver"
-	"github.com/vaultic/vaultic/internal/ui"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // jsonProgress reports progress for the `backup` command in JSON.

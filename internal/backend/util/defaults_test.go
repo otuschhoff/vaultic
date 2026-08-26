@@ -5,11 +5,11 @@ import (
 	"io"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/util"
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/util"
+	"github.com/otuschhoff/vaultic/internal/errors"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 type mockReader struct {

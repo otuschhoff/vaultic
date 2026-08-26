@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/otuschhoff/vaultic/internal/global"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/global"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // testRunConfig runs the config command with the given --set-* arguments.

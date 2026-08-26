@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend/gs"
-	"github.com/vaultic/vaultic/internal/backend/test"
-	"github.com/vaultic/vaultic/internal/env"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend/gs"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/env"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func newGSTestSuite() *test.Suite[gs.Config] {

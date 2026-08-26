@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // TestCheckRepo runs the checker on repo.

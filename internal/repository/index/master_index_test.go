@@ -9,15 +9,15 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/vaultic/vaultic/internal/checker"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/checker"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestMasterIndex(t *testing.T) {

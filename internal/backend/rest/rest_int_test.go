@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/rest"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/rest"
 )
 
 func TestListAPI(t *testing.T) {

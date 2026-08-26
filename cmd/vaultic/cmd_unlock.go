@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/ui"
-	"github.com/vaultic/vaultic/internal/ui/progress"
 )
 
 func newUnlockCommand(globalOptions *global.Options) *cobra.Command {

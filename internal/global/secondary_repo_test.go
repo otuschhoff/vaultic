@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 // TestFillSecondaryGlobalOpts tests valid and invalid data on fillSecondaryGlobalOpts-function

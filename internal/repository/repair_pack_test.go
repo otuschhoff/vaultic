@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	backendtest "github.com/vaultic/vaultic/internal/backend/test"
-	"github.com/vaultic/vaultic/internal/repository"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	backendtest "github.com/otuschhoff/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func listBlobs(repo vaultic.Repository) vaultic.BlobSet {

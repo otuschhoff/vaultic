@@ -4,9 +4,9 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend/rclone"
-	"github.com/vaultic/vaultic/internal/backend/test"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend/rclone"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func newTestSuite(t testing.TB) *test.Suite[rclone.Config] {

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/restic/chunker"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 // fakeFile returns a reader which yields deterministic pseudo-random data.

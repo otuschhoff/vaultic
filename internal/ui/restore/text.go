@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/restorer"
-	"github.com/vaultic/vaultic/internal/ui"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/restorer"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type textPrinter struct {

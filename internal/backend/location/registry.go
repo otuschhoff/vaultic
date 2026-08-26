@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/limiter"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/limiter"
 )
 
 type Registry struct {

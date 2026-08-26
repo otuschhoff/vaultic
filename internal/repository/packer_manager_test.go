@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func randomID(rd io.Reader) vaultic.ID {

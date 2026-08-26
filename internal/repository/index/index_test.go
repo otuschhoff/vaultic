@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestIndexSerialize(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 // Regression test for #2979: no snapshots should print as [], not null.

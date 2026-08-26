@@ -3,9 +3,9 @@ package global
 import (
 	"context"
 
+	"github.com/otuschhoff/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/env"
-	"github.com/vaultic/vaultic/internal/errors"
 )
 
 type SecondaryRepoOptions struct {

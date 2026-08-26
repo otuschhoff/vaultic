@@ -3,9 +3,9 @@ package main
 import (
 	"testing"
 
+	"github.com/otuschhoff/vaultic/internal/data"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/data"
-	rtest "github.com/vaultic/vaultic/internal/test"
 )
 
 func TestSnapshotFilter(t *testing.T) {

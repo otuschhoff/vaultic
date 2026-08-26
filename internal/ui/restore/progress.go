@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/restorer"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/restorer"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type State struct {

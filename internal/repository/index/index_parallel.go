@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // ForAllIndexes loads all index files in parallel and calls the given callback.

@@ -12,7 +12,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // Assert fails the test if the condition is false.

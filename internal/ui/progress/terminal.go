@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/env"
-	"github.com/vaultic/vaultic/internal/ui"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // CalculateProgressInterval returns the interval configured via VAULTIC_PROGRESS_FPS

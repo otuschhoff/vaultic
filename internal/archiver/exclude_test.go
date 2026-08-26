@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestIsExcludedByFile(t *testing.T) {

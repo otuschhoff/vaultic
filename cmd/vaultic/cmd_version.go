@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"runtime"
 
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/spf13/cobra"
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/ui/progress"
 )
 
 func newVersionCommand(globalOptions *global.Options) *cobra.Command {

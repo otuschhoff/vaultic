@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	backendtest "github.com/otuschhoff/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/pkg/errors"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/mem"
-	backendtest "github.com/vaultic/vaultic/internal/backend/test"
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func loadAndCompare(t testing.TB, be backend.Backend, h backend.Handle, data []byte) {

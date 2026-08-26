@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // Snapshot is the state of a resource at one point in time.

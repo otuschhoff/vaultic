@@ -3,8 +3,8 @@ package repository
 import (
 	"context"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type warmupJob struct {

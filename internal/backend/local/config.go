@@ -3,8 +3,8 @@ package local
 import (
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/options"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/options"
 )
 
 // Config holds all information needed to open a local repository.

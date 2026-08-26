@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // TestPruneMaxUnusedDuplicate checks that MaxUnused correctly accounts for duplicates.

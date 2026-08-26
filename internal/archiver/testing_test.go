@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/repository"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 // MockT passes through all logging functions from T, but catches Fail(),

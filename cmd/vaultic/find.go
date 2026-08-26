@@ -1,9 +1,9 @@
 package main
 
 import (
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/env"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/env"
 )
 
 // initMultiSnapshotFilter is used for commands that work on multiple snapshots

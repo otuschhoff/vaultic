@@ -2,8 +2,8 @@
 package sema
 
 import (
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // A semaphore limits access to a restricted resource.

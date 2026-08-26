@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/backend/cache"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/ui/table"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/backend/cache"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/ui"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/ui/table"
 )
 
 func newCacheCommand(globalOptions *global.Options) *cobra.Command {

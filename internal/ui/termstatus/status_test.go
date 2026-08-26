@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	tty "github.com/vaultic/vaultic/internal/terminal"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	tty "github.com/otuschhoff/vaultic/internal/terminal"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestSetStatus(t *testing.T) {

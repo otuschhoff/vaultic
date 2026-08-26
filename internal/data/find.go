@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // FindUsedBlobs traverses the tree ID and adds all seen blobs (trees and data

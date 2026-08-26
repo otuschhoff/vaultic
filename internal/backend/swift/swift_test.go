@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/swift"
-	"github.com/vaultic/vaultic/internal/backend/test"
-	"github.com/vaultic/vaultic/internal/env"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/swift"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/env"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func newSwiftTestSuite(t testing.TB) *test.Suite[swift.Config] {

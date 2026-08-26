@@ -12,15 +12,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/bloblru"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/bloblru"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/anacrolix/fuse"
 	"github.com/anacrolix/fuse/fs"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func testRead(t testing.TB, f fs.Handle, offset, length int, data []byte) {

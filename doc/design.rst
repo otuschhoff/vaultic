@@ -765,7 +765,7 @@ An adversary with read access to your backup storage location could:
    This has been mitigated in vaultic 0.18.0 by randomly assigning chunks to
    pack files, which prevents an attacker from learning the chunk sizes as the
    attacker can no longer determine to which file and which part of it a chunk belongs.
-   See `#5295 <https://github.com/vaultic/vaultic/pull/5295>`_ for more details
+   See `#5295 <https://github.com/otuschhoff/vaultic/pull/5295>`_ for more details
    on the mitigation.
 
 An adversary with network access could:

@@ -6,12 +6,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 func newConfigCommand(globalOptions *global.Options) *cobra.Command {

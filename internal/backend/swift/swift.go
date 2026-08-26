@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/layout"
-	"github.com/vaultic/vaultic/internal/backend/location"
-	"github.com/vaultic/vaultic/internal/backend/util"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/feature"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/layout"
+	"github.com/otuschhoff/vaultic/internal/backend/location"
+	"github.com/otuschhoff/vaultic/internal/backend/util"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
 
 	"github.com/ncw/swift/v2"
 )

@@ -8,10 +8,10 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/hashicorp/golang-lru/v2/simplelru"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/fileio"
-	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/fileio"
+	"github.com/otuschhoff/vaultic/internal/fs"
 )
 
 // writes blobs to target files.

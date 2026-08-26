@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/env"
 )
 
 var (

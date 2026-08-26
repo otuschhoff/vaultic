@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestReaddirnamesFifo(t *testing.T) {

@@ -3,8 +3,8 @@ package index
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestMergeIndex(t testing.TB, mi *MasterIndex) ([]*Index, int, vaultic.IDSet) {

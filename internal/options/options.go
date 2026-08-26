@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // Options holds options in the form key=value.

@@ -3,7 +3,7 @@ package local
 import (
 	"os"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // Can't explicitly flush directory changes on Windows.

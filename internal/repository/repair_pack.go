@@ -6,8 +6,8 @@ import (
 	"io"
 	"slices"
 
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func RepairPacks(ctx context.Context, repo *Repository, ids vaultic.IDSet, printer vaultic.Printer) error {

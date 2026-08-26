@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/location"
-	"github.com/vaultic/vaultic/internal/backend/s3"
-	"github.com/vaultic/vaultic/internal/backend/test"
-	"github.com/vaultic/vaultic/internal/env"
-	"github.com/vaultic/vaultic/internal/options"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/location"
+	"github.com/otuschhoff/vaultic/internal/backend/s3"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/options"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func mkdir(t testing.TB, dir string) {

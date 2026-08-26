@@ -6,7 +6,7 @@ import (
 	"os/user"
 	"strconv"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // UidGidInt returns uid, gid of the user as a number.

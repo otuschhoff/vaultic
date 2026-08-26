@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
 )
 
 func parseURL(s string) *url.URL {

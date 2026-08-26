@@ -8,14 +8,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/local"
-	"github.com/vaultic/vaultic/internal/backend/mem"
-	"github.com/vaultic/vaultic/internal/backend/retry"
-	"github.com/vaultic/vaultic/internal/env"
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/local"
+	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/backend/retry"
+	"github.com/otuschhoff/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/restic/chunker"
 )

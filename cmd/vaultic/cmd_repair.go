@@ -1,8 +1,8 @@
 package main
 
 import (
+	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/spf13/cobra"
-	"github.com/vaultic/vaultic/internal/global"
 )
 
 func newRepairCommand(globalOptions *global.Options) *cobra.Command {

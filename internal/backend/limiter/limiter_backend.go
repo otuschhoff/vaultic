@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend"
 )
 
 func WrapBackendConstructor[B backend.Backend, C any](constructor func(ctx context.Context, cfg C, errorLog func(string, ...any)) (B, error)) func(ctx context.Context, cfg C, lim Limiter, errorLog func(string, ...any)) (backend.Backend, error) {

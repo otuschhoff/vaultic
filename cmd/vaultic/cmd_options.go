@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/options"
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/options"
 
 	"github.com/spf13/cobra"
 )

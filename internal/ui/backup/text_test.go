@@ -3,9 +3,9 @@ package backup
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui"
 )
 
 func createTextProgress() (*ui.MockTerminal, ProgressPrinter) {

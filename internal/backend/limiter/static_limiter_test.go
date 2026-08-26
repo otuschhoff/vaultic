@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/test"
 	"golang.org/x/time/rate"
 )
 

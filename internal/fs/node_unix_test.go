@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/errors"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func stat(t testing.TB, filename string) (fi os.FileInfo, ok bool) {

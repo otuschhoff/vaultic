@@ -3,7 +3,7 @@ package backend
 import (
 	"fmt"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // FileType is the type of a file in the backend.

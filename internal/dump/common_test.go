@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/archiver"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/repository"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func prepareTempdirRepoSrc(t testing.TB, src archiver.TestDir) (string, vaultic.Repository, backend.Backend) {

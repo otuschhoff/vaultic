@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend"
 )
 
 // DefaultLoad implements Backend.Load using lower-level openReader func

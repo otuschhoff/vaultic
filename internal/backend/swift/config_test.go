@@ -3,7 +3,7 @@ package swift
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
 )
 
 var configTests = []test.ConfigTestData[Config]{

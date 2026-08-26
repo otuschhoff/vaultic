@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // Options configures the warm-up command.

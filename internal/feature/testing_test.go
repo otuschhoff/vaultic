@@ -3,8 +3,8 @@ package feature_test
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/feature"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/feature"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestSetFeatureFlag(t *testing.T) {

@@ -4,7 +4,7 @@ package fs
 
 import (
 	"github.com/Microsoft/go-winio"
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 var processPrivileges = []string{

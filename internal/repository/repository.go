@@ -10,17 +10,17 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/appendonly"
+	"github.com/otuschhoff/vaultic/internal/backend/cache"
+	"github.com/otuschhoff/vaultic/internal/backend/dryrun"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/restic/chunker"
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/appendonly"
-	"github.com/vaultic/vaultic/internal/backend/cache"
-	"github.com/vaultic/vaultic/internal/backend/dryrun"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	"github.com/vaultic/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -503,7 +503,7 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t vaultic.BlobType, dat
 
 	if err := r.verifyCiphertext(ciphertext, uncompressedLength, id); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return 0, fmt.Errorf("Detected data corruption while saving blob %v: %w\nCorrupted blobs are either caused by hardware issues or software bugs. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting.", id, err)
+		return 0, fmt.Errorf("Detected data corruption while saving blob %v: %w\nCorrupted blobs are either caused by hardware issues or software bugs. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting.", id, err)
 	}
 
 	// find suitable packer and add blob
@@ -608,7 +608,7 @@ func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf [
 
 	if err := r.verifyUnpacked(ciphertext, t, buf); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return vaultic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting.", t, err)
+		return vaultic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting.", t, err)
 	}
 
 	if t == vaultic.ConfigFile {

@@ -4,9 +4,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/options"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/options"
 )
 
 // Config contains basic configuration needed to specify swift location for a swift server

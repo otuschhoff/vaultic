@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/global"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/global"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func testRunTag(t testing.TB, opts TagOptions, gopts global.Options) {

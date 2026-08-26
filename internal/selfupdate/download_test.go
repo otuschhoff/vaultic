@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestExtractToFileZip(t *testing.T) {

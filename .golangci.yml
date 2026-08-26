@@ -35,20 +35,20 @@ linters:
             - "!**/internal/backend/test/**"
             - "!**/*_test.go"
           deny:
-            - pkg: "github.com/vaultic/vaultic/internal/vaultic"
+            - pkg: "github.com/otuschhoff/vaultic/internal/vaultic"
               desc: "internal/vaultic should not be imported to keep the architectural layers intact"
-            - pkg: "github.com/vaultic/vaultic/internal/repository"
+            - pkg: "github.com/otuschhoff/vaultic/internal/repository"
               desc: "internal/repository should not be imported to keep the architectural layers intact"
         repository-internals:
           files:
             - "**"
             - "!**/internal/repository/**"
           deny:
-            - pkg: "github.com/vaultic/vaultic/internal/repository/"
+            - pkg: "github.com/otuschhoff/vaultic/internal/repository/"
               desc: "packages below internal/repository should not be imported to not depend on repository internals"
     importas:
       alias:
-        - pkg: github.com/vaultic/vaultic/internal/test
+        - pkg: github.com/otuschhoff/vaultic/internal/test
           alias: rtest
     staticcheck:
       checks:

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui"
 )
 
 // Table contains data for a table to be printed.

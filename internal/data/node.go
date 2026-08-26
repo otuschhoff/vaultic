@@ -12,10 +12,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
-	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/debug"
 )
 
 // ExtendedAttribute is a tuple storing the xattr name and value for various filesystems.

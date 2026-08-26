@@ -3,7 +3,7 @@ package layout
 import (
 	"encoding/hex"
 
-	"github.com/vaultic/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend"
 )
 
 // disablePackSubdirs is used to disable the creation of pack subdirectories.

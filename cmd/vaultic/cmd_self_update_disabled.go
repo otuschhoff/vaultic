@@ -3,8 +3,8 @@
 package main
 
 import (
+	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/spf13/cobra"
-	"github.com/vaultic/vaultic/internal/global"
 )
 
 func registerSelfUpdateCommand(_ *cobra.Command, _ *global.Options) {

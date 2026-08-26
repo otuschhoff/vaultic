@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestReadRepo(t *testing.T) {

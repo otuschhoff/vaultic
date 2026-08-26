@@ -3,7 +3,7 @@ package migrations
 import (
 	"context"
 
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // Migration implements a data migration.

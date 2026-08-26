@@ -8,11 +8,11 @@ import (
 	"io"
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
-	"github.com/vaultic/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 )
 
 // ErrBroken is returned by Add and Finalize after a write error. The packer
@@ -110,7 +110,7 @@ func (p *Packer) Finalize() error {
 
 	if err := verifyHeader(p.k, encryptedHeader, p.blobs); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return fmt.Errorf("Detected data corruption while writing pack-file header: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting.", err)
+		return fmt.Errorf("Detected data corruption while writing pack-file header: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting.", err)
 	}
 
 	// append the header

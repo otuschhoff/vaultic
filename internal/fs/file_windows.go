@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/data"
 	"golang.org/x/sys/windows"
 )
 

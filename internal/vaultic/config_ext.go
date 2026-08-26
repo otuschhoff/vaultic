@@ -3,7 +3,7 @@ package vaultic
 import (
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // This file contains the vaultic extensions to the repository config file.

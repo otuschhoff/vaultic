@@ -5,9 +5,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/data"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // TestTree is used to construct a list of trees for testing the walker.

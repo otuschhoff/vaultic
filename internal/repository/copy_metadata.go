@@ -4,8 +4,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // CopyMetadata mirrors the metadata files (keys, snapshots, indexes) of src

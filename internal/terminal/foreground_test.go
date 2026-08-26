@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/terminal"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/terminal"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestForeground(t *testing.T) {

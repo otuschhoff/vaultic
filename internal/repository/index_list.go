@@ -4,9 +4,9 @@ import (
 	"context"
 	"iter"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // IndexBlob is one blob handle from an on-disk index file, or an error from loading/decoding

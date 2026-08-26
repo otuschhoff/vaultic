@@ -7,8 +7,8 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/debug"
 
 	"github.com/anacrolix/fuse"
 	"github.com/anacrolix/fuse/fs"

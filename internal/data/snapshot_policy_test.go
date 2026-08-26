@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/vaultic/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/data"
 )
 
 func parseTimeUTC(s string) time.Time {

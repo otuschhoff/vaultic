@@ -8,7 +8,7 @@ From the root of this repository run:
 ./docker/build.sh
 ```
 
-image name will be `vaultic/vaultic:latest`
+image name will be `otuschhoff/vaultic:latest`
 
 ## Run
 
@@ -20,7 +20,7 @@ docker run --rm --hostname my-host -ti \
     -v $HOME/.vaultic/passfile:/pass \
     -v $HOME/importantdirectory:/data \
     -e VAULTIC_REPOSITORY=rest:https://user:pass@hostname/ \
-    vaultic/vaultic -p /pass backup /data
+    otuschhoff/vaultic -p /pass backup /data
 ```
 
 Vaultic relies on the hostname for various operations. Make sure to set a static

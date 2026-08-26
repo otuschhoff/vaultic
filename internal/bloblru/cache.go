@@ -3,8 +3,8 @@ package bloblru
 import (
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 )

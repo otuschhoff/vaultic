@@ -5,7 +5,7 @@ import (
 	"iter"
 	"math"
 
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // An indexMap is a chained hash table that maps blob IDs to indexEntries.

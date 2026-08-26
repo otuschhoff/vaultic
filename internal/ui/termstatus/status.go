@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	tty "github.com/vaultic/vaultic/internal/terminal"
-	"github.com/vaultic/vaultic/internal/ui"
+	tty "github.com/otuschhoff/vaultic/internal/terminal"
+	"github.com/otuschhoff/vaultic/internal/ui"
 )
 
 var _ ui.Terminal = &terminal{}

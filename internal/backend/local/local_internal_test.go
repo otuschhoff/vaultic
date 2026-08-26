@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 
 	"github.com/cenkalti/backoff/v4"
 )

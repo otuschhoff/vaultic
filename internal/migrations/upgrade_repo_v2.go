@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func init() {

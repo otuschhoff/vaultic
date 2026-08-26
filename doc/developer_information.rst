@@ -41,7 +41,7 @@ In the following example, we'll use the file ``vaultic-0.14.0.tar.gz`` and Go
 
     $ mkdir /vaultic
     $ cd /vaultic
-    $ TZ=Europe/Berlin curl -L https://github.com/vaultic/vaultic/releases/download/v0.14.0/vaultic-0.14.0.tar.gz | tar xz --strip-components=1
+    $ TZ=Europe/Berlin curl -L https://github.com/otuschhoff/vaultic/releases/download/v0.14.0/vaultic-0.14.0.tar.gz | tar xz --strip-components=1
 
 3. Build the binaries for Windows and Linux:
 
@@ -128,7 +128,7 @@ To verify this provenance:
    .. code-block:: console
 
       $ slsa-verifier verify-image \
-        --source-uri github.com/vaultic/vaultic \
+        --source-uri github.com/otuschhoff/vaultic \
         <image-name>@<digest>
 
    Replace `<image-name>` with the full name of the Docker image (including the registry),

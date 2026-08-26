@@ -205,7 +205,7 @@ Stable releases
 ===============
 
 You can download the latest stable release versions of vaultic from the `vaultic
-release page <https://github.com/vaultic/vaultic/releases/latest>`__. These builds
+release page <https://github.com/otuschhoff/vaultic/releases/latest>`__. These builds
 are considered stable and releases are made regularly in a controlled manner.
 
 There are both pre-compiled binaries for different platforms as well as the source
@@ -272,13 +272,13 @@ binary is available; you can get it with ``docker pull`` like this:
 
 .. code-block:: console
 
-    $ docker pull vaultic/vaultic
+    $ docker pull otuschhoff/vaultic
 
 The container is also available on the GitHub Container Registry:
 
 .. code-block:: console
 
-    $ docker pull ghcr.io/vaultic/vaultic
+    $ docker pull ghcr.io/otuschhoff/vaultic
 
 Vaultic relies on the hostname for various operations. Make sure to set a static
 hostname using ``--hostname`` when creating a Docker container, otherwise Docker
@@ -296,7 +296,7 @@ The following example runs vaultic such that other CPU and IO requests have high
 
 .. code-block:: console
 
-    # docker run -e NICE=20 -e IONICE_CLASS=2 -e IONICE_PRIORITY=7 ghcr.io/vaultic/vaultic
+    # docker run -e NICE=20 -e IONICE_CLASS=2 -e IONICE_PRIORITY=7 ghcr.io/otuschhoff/vaultic
 
 *Remember* that this invocation is explicitly telling your CPU and IO scheduler to deprioritize vaultic.  This typically will result in a longer runtime.  For a system with heavy load, this can be drastically longer.
 
@@ -314,7 +314,7 @@ In order to build vaultic from source, execute the following steps:
 
 .. code-block:: console
 
-    $ git clone https://github.com/vaultic/vaultic
+    $ git clone https://github.com/otuschhoff/vaultic
     [...]
 
     $ cd vaultic

@@ -4,7 +4,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/global"
 )
 
 // TestFlags checks for double defined flags, the commands will panic on

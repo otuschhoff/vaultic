@@ -1,8 +1,8 @@
 package repository
 
 import (
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/restic/chunker"
-	"github.com/vaultic/vaultic/internal/vaultic"
 )
 
 type baseChunker struct {

@@ -3,8 +3,8 @@ package pack
 import (
 	"fmt"
 
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // Blob is one part of a file or a tree with pack layout information.

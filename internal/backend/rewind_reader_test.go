@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestByteReader(t *testing.T) {

@@ -30,10 +30,10 @@ highlight() {
 
 highlight "Verifying release self-consistency"
 
-curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/vaultic-${vaultic_version}.tar.gz.asc
+curl -OLSs https://github.com/otuschhoff/vaultic/releases/download/v${vaultic_version}/vaultic-${vaultic_version}.tar.gz.asc
 # tarball is downloaded while processing the SHA256SUMS
-curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/SHA256SUMS.asc
-curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/SHA256SUMS
+curl -OLSs https://github.com/otuschhoff/vaultic/releases/download/v${vaultic_version}/SHA256SUMS.asc
+curl -OLSs https://github.com/otuschhoff/vaultic/releases/download/v${vaultic_version}/SHA256SUMS
 
 export GNUPGHOME=$PWD/gnupg
 mkdir -p 700 $GNUPGHOME
@@ -43,7 +43,7 @@ gpg --verify SHA256SUMS.asc SHA256SUMS
 
 for i in $(cat SHA256SUMS | cut -d " "  -f 3 ) ; do
     echo "Downloading $i"
-    curl -OLSs https://github.com/vaultic/vaultic/releases/download/v${vaultic_version}/"$i"
+    curl -OLSs https://github.com/otuschhoff/vaultic/releases/download/v${vaultic_version}/"$i"
 done
 shasum -a256 -c SHA256SUMS || set_invalid "WARNING: RELEASE BINARIES DO NOT MATCH SHA256SUMS!"
 gpg --verify vaultic-${vaultic_version}.tar.gz.asc vaultic-${vaultic_version}.tar.gz
@@ -53,7 +53,7 @@ gpg --verify vaultic-${vaultic_version}.tar.gz.asc vaultic-${vaultic_version}.ta
 highlight "Verifying tarball matches tagged commit"
 
 tar xzf "vaultic-${vaultic_version}.tar.gz"
-git clone -b "v${vaultic_version}" https://github.com/vaultic/vaultic.git
+git clone -b "v${vaultic_version}" https://github.com/otuschhoff/vaultic.git
 rm -rf vaultic/.git
 diff -r vaultic vaultic-${vaultic_version}
 
@@ -113,7 +113,7 @@ extract_docker() {
 }
 
 ctr=0
-for img in vaultic/vaultic ghcr.io/vaultic/vaultic; do
+for img in otuschhoff/vaultic ghcr.io/otuschhoff/vaultic; do
     highlight "Verifying binaries in docker containers from $img"
     mkdir docker
 

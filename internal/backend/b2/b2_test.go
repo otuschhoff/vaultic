@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend/b2"
-	"github.com/vaultic/vaultic/internal/backend/test"
-	"github.com/vaultic/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/backend/b2"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/env"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func newB2TestSuite() *test.Suite[b2.Config] {

@@ -94,7 +94,7 @@ new feature. This way, duplicate work is prevented and we can discuss
 your ideas and design first.
 
 More information and a description of the development environment can be
-found in `CONTRIBUTING.md <https://github.com/vaultic/vaultic/blob/master/CONTRIBUTING.md>`__.
+found in `CONTRIBUTING.md <https://github.com/otuschhoff/vaultic/blob/master/CONTRIBUTING.md>`__.
 A document describing the design of vaultic and the data structures stored on the
 back end is contained in :ref:`repository-format`.
 
@@ -103,7 +103,7 @@ what to do, have a look at this great article by Dave Cheney:
 `Suggestions for contributing to an Open Source
 project <https://dave.cheney.net/2016/03/12/suggestions-for-contributing-to-an-open-source-project>`__.
 A few issues have been tagged with the label ``help wanted``, you can
-start looking at `those <https://github.com/vaultic/vaultic/labels/help%3A%20wanted>`_.
+start looking at `those <https://github.com/otuschhoff/vaultic/labels/help%3A%20wanted>`_.
 
 
 *************
@@ -197,7 +197,7 @@ Example: this is a typical setup for a backup / find scenario
  import (
    ... // all your other imports here
 
-   rtest "github.com/vaultic/vaultic/internal/test"
+   rtest "github.com/otuschhoff/vaultic/internal/test"
  )
 
  // setup test

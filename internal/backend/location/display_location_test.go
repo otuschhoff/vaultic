@@ -3,9 +3,9 @@ package location_test
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/backend/location"
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/location"
+	"github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestStripPassword(t *testing.T) {

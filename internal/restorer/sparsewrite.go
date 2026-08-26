@@ -1,7 +1,7 @@
 package restorer
 
 import (
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // WriteAt writes p to f.File at offset. It tries to do a sparse write

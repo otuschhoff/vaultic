@@ -3,7 +3,7 @@ package pack
 import (
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestBlobsSort(t *testing.T) {

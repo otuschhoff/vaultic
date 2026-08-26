@@ -4,7 +4,7 @@ import (
 	"context"
 	"iter"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // ErrInvalidData is used to report that a file is corrupted

@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/fileio"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/fileio"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestTempFile(t *testing.T) {

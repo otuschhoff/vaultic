@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
 )
 
 func newTestConfig(cfg Config) Config {

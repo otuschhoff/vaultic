@@ -1,6 +1,6 @@
 [![Documentation](https://readthedocs.org/projects/vaultic/badge/?version=latest)](https://vaultic.readthedocs.io/en/latest/?badge=latest)
-[![Build Status](https://github.com/vaultic/vaultic/workflows/test/badge.svg)](https://github.com/vaultic/vaultic/actions?query=workflow%3Atest)
-[![Go Report Card](https://goreportcard.com/badge/github.com/vaultic/vaultic)](https://goreportcard.com/report/github.com/vaultic/vaultic)
+[![Build Status](https://github.com/otuschhoff/vaultic/workflows/test/badge.svg)](https://github.com/otuschhoff/vaultic/actions?query=workflow%3Atest)
+[![Go Report Card](https://goreportcard.com/badge/github.com/otuschhoff/vaultic)](https://goreportcard.com/report/github.com/otuschhoff/vaultic)
 
 # Introduction
 

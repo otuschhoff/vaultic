@@ -3,7 +3,7 @@ package vaultic
 import (
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestIDsString(t *testing.T) {

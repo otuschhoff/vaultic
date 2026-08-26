@@ -13,15 +13,15 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/vaultic/vaultic/internal/backend/cache"
-	"github.com/vaultic/vaultic/internal/checker"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/ui"
-	"github.com/vaultic/vaultic/internal/ui/progress"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend/cache"
+	"github.com/otuschhoff/vaultic/internal/checker"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func newCheckCommand(globalOptions *global.Options) *cobra.Command {
@@ -414,13 +414,13 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 			summary.BrokenPacks = append(summary.BrokenPacks, id.String())
 		}
 		printer.E("vaultic repair packs %v\nrestic repair snapshots --forget\n\n", strings.Join(summary.BrokenPacks, " "))
-		printer.E("Damaged pack files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting!\n")
+		printer.E("Damaged pack files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
 	}
 
 	if len(brokenSnapshots) > 0 {
 		printer.E("\nThe repository contains damaged snapshot files. These damaged files must be removed to repair the repository. This can be done using the following commands. Please read the troubleshooting guide at https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
 		printer.E("vaultic repair snapshots --forget %s\n\n", strings.Join(brokenSnapshots, " "))
-		printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/vaultic/vaultic/issues/new/choose for further troubleshooting!\n")
+		printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
 	}
 
 	if ctx.Err() != nil {

@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestPreallocate(t *testing.T) {

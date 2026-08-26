@@ -4,7 +4,7 @@ package location
 import (
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // Location specifies the location of a repository, including the method of

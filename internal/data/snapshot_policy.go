@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/debug"
 )
 
 // ExpirePolicy configures which snapshots should be automatically removed.

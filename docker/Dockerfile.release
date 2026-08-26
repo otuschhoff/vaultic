@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.title="vaultic"
 LABEL org.opencontainers.image.description="Fast, secure, efficient backup program"
 LABEL org.opencontainers.image.url="https://vaultic.net"
 LABEL org.opencontainers.image.documentation="https://vaultic.readthedocs.io"
-LABEL org.opencontainers.image.source="https://github.com/vaultic/vaultic"
+LABEL org.opencontainers.image.source="https://github.com/otuschhoff/vaultic"
 
 COPY --from=helper /output/vaultic /usr/bin
 COPY ./docker/entrypoint.sh /entrypoint.sh

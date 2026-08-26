@@ -1,11 +1,11 @@
 package main
 
 import (
-	"github.com/vaultic/vaultic/internal/archiver"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/fs"
-	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/repository"
 )
 
 // rejectResticCache returns a RejectByNameFunc that rejects the vaultic cache

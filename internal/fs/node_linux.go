@@ -1,7 +1,7 @@
 package fs
 
 import (
-	"github.com/vaultic/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/data"
 	"golang.org/x/sys/unix"
 )
 

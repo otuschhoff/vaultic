@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/debug"
 )
 
 // StdioConn implements a net.Conn via stdin/stdout.

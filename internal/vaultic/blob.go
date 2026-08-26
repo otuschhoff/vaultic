@@ -3,7 +3,7 @@ package vaultic
 import (
 	"fmt"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // PackBlob is one index entry for a blob in a pack file.

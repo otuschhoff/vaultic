@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/global"
-	"github.com/vaultic/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/ui"
 )
 
 func formatNodeOutput(n lsNodeOutput, long bool, human bool) string {

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestConfigExtensionsRoundTrip(t *testing.T) {

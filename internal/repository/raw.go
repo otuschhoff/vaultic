@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // LoadRaw reads all data stored in the backend for the file with id and filetype t.

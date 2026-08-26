@@ -1,8 +1,8 @@
 package debug_test
 
 import (
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"testing"
 )

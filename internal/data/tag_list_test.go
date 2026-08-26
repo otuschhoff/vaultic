@@ -3,7 +3,7 @@ package data
 import (
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestTagLists_Flatten(t *testing.T) {

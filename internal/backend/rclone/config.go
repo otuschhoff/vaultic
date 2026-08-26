@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/options"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/options"
 )
 
 // Config contains all configuration necessary to start rclone.

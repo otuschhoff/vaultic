@@ -7,7 +7,7 @@ import (
 	"io"
 	"os/exec"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // commandReader wraps a command such that its standard output can be read using

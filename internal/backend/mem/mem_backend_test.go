@@ -3,8 +3,8 @@ package mem_test
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/backend/mem"
-	"github.com/vaultic/vaultic/internal/backend/test"
+	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/backend/test"
 )
 
 func newTestSuite() *test.Suite[struct{}] {

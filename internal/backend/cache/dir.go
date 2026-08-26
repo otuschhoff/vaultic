@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vaultic/vaultic/internal/env"
+	"github.com/otuschhoff/vaultic/internal/env"
 )
 
 // EnvDir returns the cache directory configured via the environment

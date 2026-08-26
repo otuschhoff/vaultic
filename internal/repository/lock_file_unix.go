@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/vaultic/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/debug"
 )
 
 // listen for incoming SIGHUP and ignore

@@ -5,8 +5,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/options"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/options"
 )
 
 // Config collects all information required to connect to an sftp server.

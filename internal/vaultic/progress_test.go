@@ -3,7 +3,7 @@ package vaultic_test
 import (
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestNoopCounter(_ *testing.T) {

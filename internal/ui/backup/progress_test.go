@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/archiver"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type mockPrinter struct {

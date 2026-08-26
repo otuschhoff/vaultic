@@ -10,15 +10,15 @@ import (
 	"os"
 	"sync"
 
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository/hashing"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository/hashing"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/fileio"
-	"github.com/vaultic/vaultic/internal/repository/crypto"
-	"github.com/vaultic/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/fileio"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 )
 
 // packer holds a pack.packer together with a hash writer.
@@ -170,7 +170,7 @@ func (r *packerManager) pickPacker(ciphertextLen int) (*packer, error) {
 	// randomly distribute blobs onto multiple packer instances. This makes it harder for
 	// an attacker to learn at which points a file was chunked and therefore mitigates the attack described in
 	// https://www.daemonology.net/blog/chunking-attacks.pdf .
-	// See https://github.com/vaultic/vaultic/issues/5291#issuecomment-2746146193 for details on the mitigation.
+	// See https://github.com/otuschhoff/vaultic/issues/5291#issuecomment-2746146193 for details on the mitigation.
 	idx, err := randomInt(len(r.packers))
 	if err != nil {
 		return nil, err

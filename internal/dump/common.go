@@ -5,10 +5,10 @@ import (
 	"io"
 	"path"
 
-	"github.com/vaultic/vaultic/internal/bloblru"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/vaultic"
-	"github.com/vaultic/vaultic/internal/walker"
+	"github.com/otuschhoff/vaultic/internal/bloblru"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/walker"
 	"golang.org/x/sync/errgroup"
 )
 

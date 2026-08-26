@@ -1,8 +1,8 @@
 package repository
 
 import (
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // BlobsInPack returns index entries for blobs stored in packID, sorted by offset.

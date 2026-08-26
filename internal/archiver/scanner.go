@@ -4,8 +4,8 @@ import (
 	"context"
 	"sort"
 
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/fs"
 )
 
 // Scanner  traverses the targets and calls the function Result with cumulated

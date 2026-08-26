@@ -7,7 +7,7 @@ import (
 	"path"
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestBackendRESTWithUnixSocket(t *testing.T) {

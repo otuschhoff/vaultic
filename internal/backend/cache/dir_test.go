@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/env"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/env"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 // DefaultDir should honor VAULTIC_CACHE_DIR on all platforms.

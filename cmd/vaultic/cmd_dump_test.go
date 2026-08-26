@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	rtest "github.com/vaultic/vaultic/internal/test"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestDumpSplitPath(t *testing.T) {

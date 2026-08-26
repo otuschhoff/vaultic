@@ -5,7 +5,7 @@ import (
 	"hash"
 	"io"
 
-	"github.com/vaultic/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
 // RewindReader allows resetting the Reader to the beginning of the data.

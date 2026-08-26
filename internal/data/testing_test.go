@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/checker"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/repository"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/checker"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 var testSnapshotTime = time.Unix(1460289341, 207401672)

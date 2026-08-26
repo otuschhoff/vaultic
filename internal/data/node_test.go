@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/test"
 )
 
 func parseTimeNano(t testing.TB, s string) time.Time {

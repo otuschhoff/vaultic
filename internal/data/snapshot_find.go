@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // ErrNoSnapshotFound is returned when no snapshot for the given criteria could be found.

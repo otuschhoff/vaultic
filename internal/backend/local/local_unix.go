@@ -34,7 +34,7 @@ func fsyncDir(dir string) error {
 // The ExFAT driver on some versions of macOS can return ENOTTY,
 // "inappropriate ioctl for device", for fsync.
 //
-// https://github.com/vaultic/vaultic/issues/4016
+// https://github.com/otuschhoff/vaultic/issues/4016
 // https://github.com/realm/realm-core/issues/5789
 func isMacENOTTY(err error) bool {
 	return runtime.GOOS == "darwin" && errors.Is(err, syscall.ENOTTY)

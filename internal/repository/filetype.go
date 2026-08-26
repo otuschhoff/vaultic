@@ -1,8 +1,8 @@
 package repository
 
 import (
-	"github.com/vaultic/vaultic/internal/backend"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // Compile-time checks that vaultic and backend FileType constants match. A constant mismatch

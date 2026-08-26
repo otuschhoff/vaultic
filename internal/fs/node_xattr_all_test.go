@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/filter"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/filter"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func setAndVerifyXattr(t *testing.T, file string, attrs []data.ExtendedAttribute) {

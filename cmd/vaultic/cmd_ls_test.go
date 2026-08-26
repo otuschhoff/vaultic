@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vaultic/vaultic/internal/data"
-	rtest "github.com/vaultic/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/data"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 type lsTestNode struct {

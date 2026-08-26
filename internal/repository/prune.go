@@ -8,11 +8,11 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/repository/index"
-	"github.com/vaultic/vaultic/internal/repository/pack"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 var ErrIndexIncomplete = errors.Fatal("index is not complete")
@@ -211,7 +211,7 @@ func packInfoFromIndex(ctx context.Context, idx vaultic.ListBlobser, usedBlobs *
 			"Integrity check failed: Data seems to be missing.\n"+
 			"Will not start prune to prevent (additional) data loss!\n"+
 			"Please report this error (along with the output of the 'prune' run) at\n"+
-			"https://github.com/vaultic/vaultic/issues/new/choose", missingBlobs)
+			"https://github.com/otuschhoff/vaultic/issues/new/choose", missingBlobs)
 		return nil, nil, ErrIndexIncomplete
 	}
 
@@ -638,7 +638,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 			printer.E("%v was not repacked\n\n"+
 				"Integrity check failed.\n"+
 				"Please report this error (along with the output of the 'prune' run) at\n"+
-				"https://github.com/vaultic/vaultic/issues/new/choose", plan.keepBlobs)
+				"https://github.com/otuschhoff/vaultic/issues/new/choose", plan.keepBlobs)
 			return errors.Fatal("internal error: blobs were not repacked")
 		}
 

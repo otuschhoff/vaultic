@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/peterbourgon/unixtransport"
-	"github.com/vaultic/vaultic/internal/debug"
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/feature"
 	"golang.org/x/net/http2"
 )
 

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/spf13/pflag"
-	"github.com/vaultic/vaultic/internal/data"
-	"github.com/vaultic/vaultic/internal/errors"
 )
 
 // This file holds the pflag.Value adapters that populate the extended fields

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 var samples = vaultic.IDs{

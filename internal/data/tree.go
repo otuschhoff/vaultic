@@ -12,8 +12,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/vaultic/vaultic/internal/errors"
-	"github.com/vaultic/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // For documentation purposes only:

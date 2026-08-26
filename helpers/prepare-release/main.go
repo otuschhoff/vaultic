@@ -429,7 +429,7 @@ func updateDocker(sourceDir, version string) string {
 	run("sh", "-c", buildCmd+" --no-cache")
 
 	var publishCmds strings.Builder
-	for _, tag := range []string{"vaultic/vaultic:latest", "vaultic/vaultic:" + version} {
+	for _, tag := range []string{"otuschhoff/vaultic:latest", "otuschhoff/vaultic:" + version} {
 		publishCmds.WriteString(buildCmd + fmt.Sprintf(" --tag %q --push\n", tag))
 	}
 	return publishCmds.String() + "\ndocker buildx rm " + builderName
