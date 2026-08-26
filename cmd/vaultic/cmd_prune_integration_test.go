@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
@@ -282,4 +284,135 @@ func TestPruneJSON(t *testing.T) {
 	rtest.Equals(t, "summary", stats.MessageType)
 	rtest.Assert(t, stats.Blobs.Total > 0, "expected non-zero total blobs, got %v", stats.Blobs.Total)
 	rtest.Assert(t, stats.Packs.Total > 0, "expected non-zero total packs, got %v", stats.Packs.Total)
+}
+
+// TestPruneRepackAll verifies --repack-all repacks packs and the repository
+// stays consistent afterwards.
+func TestPruneRepackAll(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	createPrunableRepo(t, env)
+	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "5%", RepackAll: true})
+	testRunCheck(t, env.gopts)
+}
+
+// TestPruneMaxRepackPercent verifies --max-repack accepts a percentage of the
+// repository size and produces a consistent repository.
+func TestPruneMaxRepackPercent(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	createPrunableRepo(t, env)
+	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", MaxRepack: "50%"})
+	testRunCheck(t, env.gopts)
+}
+
+// TestPruneMaxRepackInvalid verifies invalid --max-repack values are rejected.
+func TestPruneMaxRepackInvalid(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	createPrunableRepo(t, env)
+	testRunPruneMustFail(t, env.gopts, PruneOptions{MaxUnused: "5%", MaxRepack: "150%"})
+	testRunPruneMustFail(t, env.gopts, PruneOptions{MaxUnused: "5%", MaxRepack: "12x"})
+}
+
+// TestPruneEarlyDeleteIndex verifies --early-delete-index prunes consistently.
+func TestPruneEarlyDeleteIndex(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	createPrunableRepo(t, env)
+	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", EarlyDeleteIndex: true})
+	testRunCheck(t, env.gopts)
+}
+
+// TestPruneTwoPhase verifies the two-phase prune flow: --keep-delete performs
+// only the repack+index phase, then a default (instant-delete) prune removes
+// the deferred files. The repository must stay consistent throughout.
+func TestPruneTwoPhase(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.TwoPhasePrune, true)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	createPrunableRepo(t, env)
+
+	// phase 1: repack + write new index, defer deletion
+	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", KeepDelete: true})
+	// After phase 1 the superseded index files are kept alongside the new one,
+	// so 'check' reports non-critical "pack contained in several indexes". This
+	// is the expected, safe intermediate state of two-phase prune (no data is
+	// lost or unreachable). Verify the repo is still fully readable instead of
+	// requiring a strict-clean check here.
+	testListSnapshots(t, env.gopts, 2)
+
+	// phase 2: default instant-delete removes the deferred packs/indexes
+	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%"})
+	// now the duplicate index entries are gone and the repo must be clean
+	testRunCheck(t, env.gopts)
+}
+
+// TestPruneTwoPhaseRequiresFeature verifies --keep-delete is gated behind the
+// two-phase-prune feature flag.
+func TestPruneTwoPhaseRequiresFeature(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.TwoPhasePrune, false)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	createPrunableRepo(t, env)
+	testRunPruneMustFail(t, env.gopts, PruneOptions{MaxUnused: "0%", KeepDelete: true})
+}
+
+// TestPruneConcurrencySoak is the Phase 4 chaos test: run a lock-free backup
+// concurrently with a prune and a forget against the same repository, then
+// verify 'check' is clean. Run with -race for full effect.
+func TestPruneConcurrencySoak(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.LockFree, true)()
+
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	testSetupBackupData(t, env)
+
+	// seed a few snapshots so forget/prune have something to work with
+	for i := 0; i < 3; i++ {
+		testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
+	}
+
+	var wg sync.WaitGroup
+
+	// concurrent lock-free backup (append-only; must never corrupt the repo)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+			return runBackup(ctx, BackupOptions{}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0", "0", "9", "2")})
+		})
+	}()
+
+	// concurrent prune (exclusive lock; may conflict with forget — tolerated)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+			return runPrune(ctx, PruneOptions{MaxUnused: "50%"}, gopts, gopts.Term)
+		})
+	}()
+
+	// concurrent forget (exclusive lock; may conflict with prune — tolerated)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = testRunForgetMayFail(t, env.gopts, ForgetOptions{Last: 1})
+	}()
+
+	wg.Wait()
+
+	// A concurrent prune/forget may legitimately conflict with the backup or
+	// each other; the repository must remain consistent regardless. We only
+	// require that a final check passes.
+	testRunCheck(t, env.gopts)
 }

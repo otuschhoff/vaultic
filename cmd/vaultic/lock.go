@@ -16,12 +16,14 @@ func internalOpenWithLocked(ctx context.Context, gopts global.Options, dryRun bo
 	}
 
 	unlock := func() {}
-	// Lock-free mode (default): read-only and append-only operations skip the
-	// lock file entirely (but remain writable). Index writes are additive, so
-	// concurrent lock-free writers cannot corrupt the repository; stale locks
-	// therefore no longer block routine backups or reads. Exclusive operations
-	// (prune, forget, repair, ...) always take an exclusive lock regardless of
-	// this flag.
+	// Lock-free mode (opt-in via the lock-free feature flag): read-only and
+	// append-only operations skip the lock file entirely (but remain writable).
+	// Index writes are additive, so concurrent lock-free writers cannot corrupt
+	// the repository; stale locks therefore no longer block routine backups or
+	// reads. Exclusive operations (prune, forget, repair, ...) always take an
+	// exclusive lock regardless of this flag. Lock-free is opt-in (Alpha)
+	// because it reorders backend list operations, which requires coordinated
+	// clients on eventually-consistent backends.
 	skipLock := !exclusive && feature.Flag.Enabled(feature.LockFree)
 	if !dryRun && !skipLock {
 		unlock, ctx, err = repository.LockRepo(ctx, repo, exclusive, gopts.RetryLock, func(msg string) {

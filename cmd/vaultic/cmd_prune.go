@@ -10,6 +10,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
@@ -75,6 +76,11 @@ type PruneOptions struct {
 	// EarlyDeleteIndex removes old index files before deleting packs
 	// (helps repositories running out of free space).
 	EarlyDeleteIndex bool
+	// KeepDelete (two-phase prune) runs only the repack+index phase and defers
+	// deletion of superseded files to a later prune. InstantDelete is the
+	// default (current single-phase behavior).
+	KeepDelete    bool
+	InstantDelete bool
 
 	SmallPackSize  string
 	SmallPackBytes uint64
@@ -97,6 +103,8 @@ func (opts *PruneOptions) AddLimitedFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.RepackAll, "repack-all", false, "repack all packs (e.g. to change pack size or compression)")
 	f.BoolVar(&opts.FastRepack, "fast-repack", false, "skip re-reading pack contents, trust the index (faster, needs an intact index)")
 	f.BoolVar(&opts.EarlyDeleteIndex, "early-delete-index", false, "remove old index files before deleting packs (helps when the repository is out of free space)")
+	f.BoolVar(&opts.KeepDelete, "keep-delete", false, "two-phase prune: only repack and write the new index now; defer deleting superseded packs/indexes to a later prune (requires the two-phase-prune feature)")
+	f.BoolVar(&opts.InstantDelete, "instant-delete", true, "delete superseded packs/indexes in the same prune run (current behavior; the default)")
 	f.StringVar(&opts.SmallPackSize, "repack-smaller-than", "", "pack `below-limit` packfiles (allowed suffixes: m/M)")
 
 	err := f.MarkDeprecated("repack-small", "small files are automatically repacked. Use --repack-smaller-than to specify a minimum size")
@@ -179,6 +187,18 @@ func verifyPruneOptions(opts *PruneOptions) error {
 			return errors.Fatalf("--repack-smaller-than must be larger than zero")
 		}
 		opts.SmallPackBytes = uint64(size)
+	}
+
+	if opts.KeepDelete {
+		if !feature.Flag.Enabled(feature.TwoPhasePrune) {
+			return errors.Fatalf("--keep-delete requires the two-phase-prune feature (set VAULTIC_FEATURES=two-phase-prune=true)")
+		}
+		if opts.EarlyDeleteIndex {
+			return errors.Fatalf("--keep-delete and --early-delete-index are mutually exclusive")
+		}
+		if len(opts.UnsafeNoSpaceRecovery) > 0 {
+			return errors.Fatalf("--keep-delete and --unsafe-recover-no-free-space are mutually exclusive")
+		}
 	}
 
 	return nil
@@ -265,6 +285,7 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 		FastRepack:          opts.FastRepack,
 		EarlyDeleteIndex:    opts.EarlyDeleteIndex,
 		MaxRepackPercent:    opts.maxRepackPercent,
+		KeepDelete:          opts.KeepDelete,
 	}
 
 	plan, err := repository.PlanPrune(ctx, popts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {

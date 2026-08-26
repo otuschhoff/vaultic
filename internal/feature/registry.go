@@ -18,6 +18,11 @@ const (
 	// writes are additive, so concurrent lock-free writers cannot corrupt the
 	// repository. Exclusive commands (prune, forget, repair, ...) still lock.
 	LockFree FlagName = "lock-free"
+	// TwoPhasePrune enables the --keep-delete / --instant-delete prune flags.
+	// With --keep-delete, prune performs only the repack+index phase and defers
+	// deletion of superseded files to a later run, shortening the exclusive
+	// window. Alpha while the two-phase path matures.
+	TwoPhasePrune FlagName = "two-phase-prune"
 )
 
 func init() {
@@ -29,6 +34,7 @@ func init() {
 		ExplicitS3AnonymousAuth: {Type: Stable, Description: "forbid anonymous S3 authentication unless `-o s3.unsafe-anonymous-auth=true` is set"},
 		SafeForgetKeepTags:      {Type: Stable, Description: "prevent deleting all snapshots if the tag passed to `forget --keep-tags tagname` does not exist"},
 		S3Restore:               {Type: Alpha, Description: "restore S3 objects from cold storage classes when `-o s3.enable-restore=true` is set"}, WarmupCommand: {Type: Beta, Description: "run the --warm-up-command to warm up cold storage before reading packs"},
-		LockFree: {Type: Beta, Description: "let read-only and append-only commands (backup, restore, snapshots, ls, copy, ...) run without lock files; exclusive commands still lock. Disable with `--no-lock`-independent `VAULTIC_FEATURES=lock-free=false` to restore strict locking."},
+		LockFree:      {Type: Alpha, Description: "let read-only and append-only commands (backup, restore, snapshots, ls, copy, ...) run without lock files; exclusive commands still lock. Opt-in (VAULTIC_FEATURES=lock-free=true): lock-free reorders backend list operations, which is unsafe on eventually-consistent backends unless clients coordinate, so it is disabled by default."},
+		TwoPhasePrune: {Type: Alpha, Description: "enable two-phase prune via --keep-delete/--instant-delete; defer deletion of superseded packs/indexes to a later prune run to shorten the exclusive window"},
 	})
 }
