@@ -73,3 +73,33 @@ func TestPrunePlanRequiresAtomicConfigReplacement(t *testing.T) {
 		rtest.Assert(t, repo.Config().PrunePlan == nil, "non-atomic backend stored a plan")
 	})
 }
+
+func TestPendingPrunePlanClearsWithoutDeletion(t *testing.T) {
+	TestAllVersions(t, func(t *testing.T, version uint) {
+		repo, _, _ := TestRepositoryWithVersion(t, version)
+		var packID vaultic.ID
+		rtest.OK(t, repo.WithBlobUploader(context.Background(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+			_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, []byte("survives interrupted phase A"), vaultic.ID{}, false)
+			return err
+		}))
+		rtest.OK(t, repo.LoadIndex(context.Background(), vaultic.NoopTerminalCounterFactory))
+		packID = repo.idx.Packs(nil).List()[0]
+
+		_, err := repo.BeginPrunePlan(context.Background())
+		rtest.OK(t, err)
+		rtest.Assert(t, repo.Config().PrunePlan != nil, "pending plan was not persisted")
+		rtest.Equals(t, "phase_a", repo.Config().PrunePlan.State)
+
+		// Simulates cancellation/crash after the exclusive claim but before
+		// replacement indexes/candidates are durable. Finalization must clear
+		// only the pending marker and never delete existing data.
+		rtest.OK(t, repo.FinalizePrunePlan(context.Background(), vaultic.NewNoopPrinter()))
+		rtest.Assert(t, repo.Config().PrunePlan == nil, "pending plan was not cleared")
+		found := false
+		rtest.OK(t, repo.List(context.Background(), vaultic.PackFile, func(id vaultic.ID, _ int64) error {
+			found = found || id == packID
+			return nil
+		}))
+		rtest.Assert(t, found, "pending-plan recovery deleted pack %s", packID.Str())
+	})
+}

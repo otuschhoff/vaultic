@@ -1,0 +1,13 @@
+Enhancement: lock parity Phase 6 local graduation gates
+
+Vaultic now has OS-process locking tests in addition to in-process race tests.
+They cover concurrent append backups and a backup racing a retrying
+minimal-lock prune, with a final repository check. Durable prune-plan recovery
+also verifies that a crash/interruption after the phase-A exclusive claim clears
+only the pending marker and does not delete data.
+
+The locking roadmap records these completed local gates and explicitly leaves
+MinIO/S3 eventual-consistency, destructive cross-process, mixed-client, and
+long-running soak gates pending before any Alpha behavior is promoted.
+
+https://github.com/otuschhoff/vaultic/pull/22014

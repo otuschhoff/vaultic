@@ -505,19 +505,28 @@ feature flag.
   pauses phase A, completes a backup, and proves the new snapshot survives
   revalidation before a final prune/check.
 
-6. **Graduate only through explicit test gates.** Each stage must pass:
+6. **⚠️ Graduation test gates (local/cross-process subset implemented).**
+   Completed gates:
 
-   - lock-free read tests: no new lock files and stale classic locks do not
-     block the supported read commands;
-   - append tests: backup ∥ backup, backup ∥ copy, backup ∥ merge, then
-     ``check --read-data``;
-   - prune tests: backup ∥ ``prune --instant-delete`` and backup ∥
-     ``prune --keep-delete`` across local and MinIO/S3 backends;
-   - destructive tests: prune ∥ forget, prune ∥ repair, cancellation/crash at
-     every prune phase boundary, and later restic/rustic/vaultic reopen + check;
-   - cross-process CLI subprocess tests, not only in-process goroutines;
-   - repeated ``-race`` soaks with durable-snapshot assertions, rather than
-     merely successful command exits.
+   - lock-free read tests prove no new repository lock is written;
+   - append tests cover backup ∥ backup ∥ merge and backup ∥ copy, followed
+     by ``check --read-data``;
+   - repeated ``-race`` tests cover backup during minimal-lock prune phase A
+     and backup during minimal-lock forget phase A;
+   - pending prune-plan recovery proves an interrupted phase-A claim clears
+     without deleting a pack;
+   - separate OS-process CLI tests cover concurrent append backups and backup
+     versus retrying minimal-lock prune, followed by a clean ``check``.
+
+   Remaining mandatory graduation gates before promoting Alpha behavior:
+
+   - MinIO/S3 tests for backup ∥ ``prune --instant-delete`` and backup ∥
+     ``prune --keep-delete`` under eventual-consistency/listing behavior;
+   - destructive cross-process tests: prune ∥ forget, prune ∥ repair, then
+     cancellation/crash at every prune phase boundary and
+     restic/rustic/vaultic reopen + check;
+   - mixed-client lock behavior tests against restic/rustic writers;
+   - repeated long-running ``-race`` soaks with durable-snapshot assertions.
 
 **Graduation policy.** Keep lock-free reads Alpha until cross-process and
 eventual-consistency tests pass. Promote append concurrency separately, then
