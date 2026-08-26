@@ -215,6 +215,11 @@ func PrintSnapshots(stdout io.Writer, list data.Snapshots, reasons []data.KeepRe
 	for _, sn := range list {
 		hasSize = hasSize || (sn.Summary != nil)
 	}
+	// show a Label column if any snapshot has a label
+	hasLabel := false
+	for _, sn := range list {
+		hasLabel = hasLabel || (sn.Label != "")
+	}
 
 	// always sort the snapshots so that the newer ones are listed last
 	sort.SliceStable(list, func(i, j int) bool {
@@ -248,6 +253,9 @@ func PrintSnapshots(stdout io.Writer, list data.Snapshots, reasons []data.KeepRe
 		tab.AddColumn("ID", "{{ .ID }}")
 		tab.AddColumn("Time", "{{ .Timestamp }}")
 		tab.AddColumn("Host      ", "{{ .Hostname }}")
+		if hasLabel {
+			tab.AddColumn("Label     ", "{{ .Label }}")
+		}
 		tab.AddColumn("Tags      ", `{{ join .Tags "," }}`)
 		if len(reasons) > 0 {
 			tab.AddColumn("Reasons", `{{ join .Reasons "\n" }}`)
@@ -262,6 +270,7 @@ func PrintSnapshots(stdout io.Writer, list data.Snapshots, reasons []data.KeepRe
 		ID        string
 		Timestamp string
 		Hostname  string
+		Label     string
 		Tags      []string
 		Reasons   []string
 		Paths     []string
@@ -274,6 +283,7 @@ func PrintSnapshots(stdout io.Writer, list data.Snapshots, reasons []data.KeepRe
 			ID:        sn.ID().Str(),
 			Timestamp: sn.Time.Local().Format(global.TimeFormat),
 			Hostname:  sn.Hostname,
+			Label:     sn.Label,
 			Tags:      sn.Tags,
 			Paths:     sn.Paths,
 		}

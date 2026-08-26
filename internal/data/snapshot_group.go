@@ -8,9 +8,10 @@ import (
 )
 
 type SnapshotGroupByOptions struct {
-	Tag  bool
-	Host bool
-	Path bool
+	Tag   bool
+	Host  bool
+	Path  bool
+	Label bool
 }
 
 func splitSnapshotGroupBy(s string) (SnapshotGroupByOptions, error) {
@@ -23,6 +24,8 @@ func splitSnapshotGroupBy(s string) (SnapshotGroupByOptions, error) {
 			l.Path = true
 		case "tag", "tags":
 			l.Tag = true
+		case "label", "labels":
+			l.Label = true
 		case "":
 		default:
 			return SnapshotGroupByOptions{}, fmt.Errorf("unknown grouping option: %q", option)
@@ -35,6 +38,9 @@ func (l SnapshotGroupByOptions) String() string {
 	var parts []string
 	if l.Host {
 		parts = append(parts, "host")
+	}
+	if l.Label {
+		parts = append(parts, "label")
 	}
 	if l.Path {
 		parts = append(parts, "paths")
@@ -62,6 +68,7 @@ func (l *SnapshotGroupByOptions) Type() string {
 // snapshot list. This is used by GroupSnapshots()
 type SnapshotGroupKey struct {
 	Hostname string   `json:"hostname"`
+	Label    string   `json:"label,omitempty"`
 	Paths    []string `json:"paths"`
 	Tags     []string `json:"tags"`
 }
@@ -70,6 +77,9 @@ func (s *SnapshotGroupKey) String() string {
 	var parts []string
 	if s.Hostname != "" {
 		parts = append(parts, fmt.Sprintf("host %v", s.Hostname))
+	}
+	if s.Label != "" {
+		parts = append(parts, fmt.Sprintf("label %v", s.Label))
 	}
 	if len(s.Paths) != 0 {
 		parts = append(parts, fmt.Sprintf("path %v", s.Paths))
@@ -91,6 +101,7 @@ func GroupSnapshots(snapshots Snapshots, groupBy SnapshotGroupByOptions) (map[st
 		var tags []string
 		var hostname string
 		var paths []string
+		var label string
 
 		if groupBy.Tag {
 			tags = sn.Tags
@@ -98,6 +109,9 @@ func GroupSnapshots(snapshots Snapshots, groupBy SnapshotGroupByOptions) (map[st
 		}
 		if groupBy.Host {
 			hostname = sn.Hostname
+		}
+		if groupBy.Label {
+			label = sn.Label
 		}
 		if groupBy.Path {
 			paths = sn.Paths
@@ -107,7 +121,7 @@ func GroupSnapshots(snapshots Snapshots, groupBy SnapshotGroupByOptions) (map[st
 		var k []byte
 		var err error
 
-		k, err = json.Marshal(SnapshotGroupKey{Tags: tags, Hostname: hostname, Paths: paths})
+		k, err = json.Marshal(SnapshotGroupKey{Tags: tags, Hostname: hostname, Label: label, Paths: paths})
 
 		if err != nil {
 			return nil, false, err
@@ -115,5 +129,5 @@ func GroupSnapshots(snapshots Snapshots, groupBy SnapshotGroupByOptions) (map[st
 		snapshotGroups[string(k)] = append(snapshotGroups[string(k)], sn)
 	}
 
-	return snapshotGroups, groupBy.Tag || groupBy.Host || groupBy.Path, nil
+	return snapshotGroups, groupBy.Tag || groupBy.Host || groupBy.Path || groupBy.Label, nil
 }
