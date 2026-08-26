@@ -441,8 +441,8 @@ feature flag.
    | Policy | Commands | Initial behavior |
    |---|---|---|
    | ``None`` | restore, snapshots, ls, find, dump, stats, repoinfo, cat | Alpha lock-free reads |
-   | ``Shared`` | backup, copy destination, merge, key add | classic non-exclusive backend lock; process RW read lock |
-   | ``Exclusive`` | prune, forget, repair, recover, config, tag, key remove/passwd, rewrite, migrate, check | backend exclusive lock; process RW write lock |
+  | ``Shared`` | backup, copy destination, merge | classic non-exclusive backend lock; process RW read lock |
+  | ``Exclusive`` | prune, forget, repair, recover, config, tag, key add/remove/passwd, rewrite, migrate, check | backend exclusive lock; process RW write lock |
 
    Preserve ``--no-lock`` only as an explicit override of ``None``/``Shared``;
    never let it silently install a dry-run backend. Keep command-specific
@@ -451,14 +451,17 @@ feature flag.
   ``openWithExclusiveLock`` now map to these typed policies; policy unit tests
   and runtime lock-file tests enforce the mapping.
 
-2. **Prove append-only writer safety.** Audit backup, copy destination, merge,
-   and key add so every repository mutation is additive and ordered as:
+2. **✅ Prove append-only writer safety (implemented).** Audited backup, copy
+  destination, merge, and key add. Backup/copy/merge now receive a restricted
+  ``AppendRepository`` transaction capability that exposes blob loads,
+  pack/index upload, and snapshot save but deliberately omits removal APIs.
+  Their repository mutations are additive and ordered as:
    packs/tree blobs uploaded -> additive index written -> snapshot written.
-   Introduce a repository-level append transaction interface that does not
-   expose remove/rewrite APIs. Verify that no writer performs read-modify-write
-   against shared repository objects. Only after this audit, permit concurrent
-   vaultic append writers; they may still retain a shared lock while prune is
-   classic.
+  ``key add`` remains exclusive because validation can remove a newly-created
+  broken key. Concurrent ``backup ∥ backup ∥ merge`` and
+  ``backup ∥ copy-to-destination`` race tests pass with a final ``check``.
+  Append writers still retain a shared lock while prune is classic; this stage
+  does **not** authorize feature-driven lock-free append writes.
 
 3. **Persist and validate prune plans.** Add a durable prune plan containing
    the observed index set/generation, candidate old pack IDs, candidate old

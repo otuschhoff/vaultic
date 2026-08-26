@@ -62,7 +62,9 @@ func runKeyAdd(ctx context.Context, gopts global.Options, opts KeyAddOptions, ar
 	}
 
 	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, false, printer)
+	// Key validation may remove a newly-created broken key. It is therefore not
+	// an append-only transaction and must use the exclusive lock policy.
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
 	if err != nil {
 		return err
 	}

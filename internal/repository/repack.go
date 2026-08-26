@@ -32,7 +32,7 @@ type LogFunc func(msg string, args ...any)
 func CopyBlobs(
 	ctx context.Context,
 	repo *Repository,
-	dstRepo vaultic.Repository,
+	dstRepo vaultic.AppendRepository,
 	dstUploader vaultic.BlobSaverWithAsync,
 	packs vaultic.IDSet,
 	keepBlobs repackBlobSet,
@@ -57,7 +57,7 @@ func CopyBlobs(
 func repack(
 	ctx context.Context,
 	repo *Repository,
-	dstRepo vaultic.Repository,
+	dstRepo vaultic.AppendRepository,
 	uploader vaultic.BlobSaverWithAsync,
 	packs vaultic.IDSet,
 	keepBlobs repackBlobSet,

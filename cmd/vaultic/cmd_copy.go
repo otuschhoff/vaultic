@@ -177,7 +177,7 @@ func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args [
 
 	selectedSnapshots := collectAllSnapshots(ctx, opts, srcSnapshotLister, srcRepo, dstSnapshotByOriginal, args, printer)
 
-	if err := copyTreeBatched(ctx, srcRepo, dstRepo, selectedSnapshots, printer); err != nil {
+	if err := copyTreeBatched(ctx, srcRepo, dstRepo.AppendTransaction(), selectedSnapshots, printer); err != nil {
 		return err
 	}
 
@@ -205,7 +205,7 @@ func similarSnapshots(sna *data.Snapshot, snb *data.Snapshot) bool {
 
 // copyTreeBatched copies multiple snapshots in one go. Snapshots are written after
 // data equivalent to at least 10 packfiles was written.
-func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRepo vaultic.Repository,
+func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRepo vaultic.AppendRepository,
 	selectedSnapshots iter.Seq2[*data.Snapshot, error], printer vaultic.Printer) error {
 
 	// remember already processed trees across all snapshots
@@ -273,7 +273,7 @@ func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRep
 	return nil
 }
 
-func copyTree(ctx context.Context, srcRepo *repository.Repository, dstRepo vaultic.Repository,
+func copyTree(ctx context.Context, srcRepo *repository.Repository, dstRepo vaultic.AppendRepository,
 	visitedTrees vaultic.AssociatedBlobSet, rootTreeID vaultic.ID, printer vaultic.Printer, uploader vaultic.BlobSaverWithAsync) (uint64, error) {
 
 	copyBlobs := srcRepo.NewAssociatedBlobSet()
@@ -348,7 +348,7 @@ func copyStats(srcRepo vaultic.Repository, copyBlobs vaultic.AssociatedBlobSet, 
 	return sizeBlobs
 }
 
-func copySaveSnapshot(ctx context.Context, sn *data.Snapshot, dstRepo vaultic.Repository, printer vaultic.Printer) error {
+func copySaveSnapshot(ctx context.Context, sn *data.Snapshot, dstRepo vaultic.AppendRepository, printer vaultic.Printer) error {
 	sn.Parent = nil // Parent does not have relevance in the new repo.
 	// Use Original as a persistent snapshot ID
 	if sn.Original == nil {

@@ -1,0 +1,14 @@
+Enhancement: lock parity Phase 2 append transaction boundary
+
+Backup, merge, and copy destination writes now use a restricted append-only
+repository transaction capability. It permits blob/tree/pack/index uploads and
+snapshot saves but does not expose any remove API, making accidental deletion
+from these workflows a compile-time error. `key add` now correctly uses the
+exclusive lock policy because its key validation may remove a broken new key.
+
+Concurrent `backup` + `backup` + `merge` and `backup` + `copy` destination
+integration tests pass under `-race`, followed by `check`. Append writers keep
+their non-exclusive lock while classic prune has no deletion revalidation; they
+are not yet feature-driven lock-free.
+
+https://github.com/otuschhoff/vaultic/pull/22010

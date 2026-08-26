@@ -75,8 +75,9 @@ func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args
 	}
 	sort.SliceStable(snapshots, func(i, j int) bool { return snapshots[i].Time.Before(snapshots[j].Time) })
 
+	appendRepo := repo.AppendTransaction()
 	var treeID vaultic.ID
-	err = repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+	err = appendRepo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		trees := make([]vaultic.ID, 0, len(snapshots))
 		for _, snapshot := range snapshots {
 			if snapshot.Tree == nil {
@@ -85,7 +86,7 @@ func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args
 			trees = append(trees, *snapshot.Tree)
 		}
 		var err error
-		treeID, err = mergeTrees(ctx, repo, uploader, trees)
+		treeID, err = mergeTrees(ctx, appendRepo, uploader, trees)
 		return err
 	})
 	if err != nil {
@@ -104,7 +105,7 @@ func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args
 	if opts.Label != "" {
 		newest.Label = opts.Label
 	}
-	id, err := data.SaveSnapshot(ctx, repo, &newest)
+	id, err := data.SaveSnapshot(ctx, appendRepo, &newest)
 	if err != nil {
 		return err
 	}
@@ -115,7 +116,7 @@ func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args
 	return nil
 }
 
-func mergeTrees(ctx context.Context, repo vaultic.BlobLoader, saver vaultic.BlobSaver, trees []vaultic.ID) (vaultic.ID, error) {
+func mergeTrees(ctx context.Context, repo vaultic.AppendRepository, saver vaultic.BlobSaver, trees []vaultic.ID) (vaultic.ID, error) {
 	nodes := make(map[string]*data.Node)
 	for _, id := range trees {
 		tree, err := data.LoadTree(ctx, repo, id)

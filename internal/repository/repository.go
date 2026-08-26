@@ -64,6 +64,40 @@ type internalRepository struct {
 	*Repository
 }
 
+// appendTransaction exposes only additive repository capabilities. It does
+// not own locking; commands must acquire the Shared lock policy before asking
+// for one. Keeping RemoveUnpacked out of this type makes accidental deletion
+// by an append workflow a compile-time error.
+type appendTransaction struct {
+	repo *Repository
+}
+
+var _ vaultic.AppendRepository = (*appendTransaction)(nil)
+
+// AppendTransaction returns the restricted capability for an append-only
+// operation such as backup, copy destination writes, or merge.
+func (r *Repository) AppendTransaction() vaultic.AppendRepository {
+	return &appendTransaction{repo: r}
+}
+
+func (tx *appendTransaction) Connections() uint { return tx.repo.Connections() }
+func (tx *appendTransaction) LoadBlob(ctx context.Context, h vaultic.BlobHandle, buf []byte) ([]byte, error) {
+	return tx.repo.LoadBlob(ctx, h, buf)
+}
+func (tx *appendTransaction) LookupBlobSize(h vaultic.BlobHandle) (uint, bool) {
+	return tx.repo.LookupBlobSize(h)
+}
+func (tx *appendTransaction) WithBlobUploader(ctx context.Context, fn func(context.Context, vaultic.BlobSaverWithAsync) error) error {
+	return tx.repo.WithBlobUploader(ctx, fn)
+}
+func (tx *appendTransaction) SaveUnpacked(ctx context.Context, t vaultic.WriteableFileType, buf []byte) (vaultic.ID, error) {
+	return tx.repo.SaveUnpacked(ctx, t, buf)
+}
+func (tx *appendTransaction) PackSize() uint { return tx.repo.PackSize() }
+func (tx *appendTransaction) ChunkerFactory() vaultic.ChunkerFactory {
+	return tx.repo.ChunkerFactory()
+}
+
 type Options struct {
 	Compression   CompressionMode
 	PackSize      uint

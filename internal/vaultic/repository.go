@@ -60,6 +60,22 @@ type Repository interface {
 	StartWarmup(ctx context.Context, packs IDSet) (WarmupJob, error)
 }
 
+// AppendRepository is the capability required by operations that add new
+// packs, indexes, trees, or snapshots but must never remove or rewrite existing
+// repository objects. It deliberately does not expose RemoveUnpacked.
+//
+// Callers obtain this capability only after selecting the Shared lock policy.
+// It is the boundary used by backup, copy destination writes, and merge while
+// append concurrency is audited for future lock-free operation.
+type AppendRepository interface {
+	Loader
+	WithBlobUploader
+	SaverUnpacked[WriteableFileType]
+
+	PackSize() uint
+	ChunkerFactory() ChunkerFactory
+}
+
 // LoaderUnpacked allows loading a blob not stored in a pack file
 type LoaderUnpacked interface {
 	// Connections returns the maximum number of concurrent backend operations
