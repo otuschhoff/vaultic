@@ -93,6 +93,10 @@ Exit status is 12 if the password is incorrect.
 	allow deleting all snapshots of a snapshot group
 
 .PP
+\fB--override-delete-protection\fP[=false]
+	remove snapshots even if they are marked delete-protected (delete_never/delete_after)
+
+.PP
 \fB--host\fP=[]
 	only consider snapshots for this \fBhost\fR (can be specified multiple times, use empty string to unset default value) (default: $VAULTIC_HOST)
 
@@ -103,6 +107,38 @@ Exit status is 12 if the password is incorrect.
 .PP
 \fB--path\fP=[]
 	only consider snapshots including this (absolute) \fBpath\fR (can be specified multiple times, snapshots must include all specified paths)
+
+.PP
+\fB--filter-label\fP=[]
+	only consider snapshots with this \fBlabel\fR (can be specified multiple times)
+
+.PP
+\fB--filter-paths-exact\fP=
+	only consider snapshots whose paths exactly match this \fBpath[,path,...]\fR list (can be specified multiple times)
+
+.PP
+\fB--filter-tags-exact\fP=
+	only consider snapshots whose tags exactly match this \fBtag[,tag,...]\fR list (can be specified multiple times)
+
+.PP
+\fB--filter-after\fP=
+	only consider snapshots taken at or after \fBtime\fR (e.g. 2024-01-01 or RFC3339)
+
+.PP
+\fB--filter-before\fP=
+	only consider snapshots taken before \fBtime\fR (e.g. 2024-01-01 or RFC3339)
+
+.PP
+\fB--filter-size\fP=
+	only consider snapshots with a total size within \fBmin[:max]\fR (suffixes k/m/g/t allowed)
+
+.PP
+\fB--filter-size-added\fP=
+	only consider snapshots adding within \fBmin[:max]\fR to the repository
+
+.PP
+\fB--filter-last\fP=0
+	only consider the newest \fBn\fR matching snapshots
 
 .PP
 \fB-c\fP, \fB--compact\fP[=false]

@@ -26,6 +26,38 @@ Exit status is 12 if the password is incorrect.
 	use compact output format
 
 .PP
+\fB--filter-after\fP=
+	only consider snapshots taken at or after \fBtime\fR (e.g. 2024-01-01 or RFC3339)
+
+.PP
+\fB--filter-before\fP=
+	only consider snapshots taken before \fBtime\fR (e.g. 2024-01-01 or RFC3339)
+
+.PP
+\fB--filter-label\fP=[]
+	only consider snapshots with this \fBlabel\fR (can be specified multiple times)
+
+.PP
+\fB--filter-last\fP=0
+	only consider the newest \fBn\fR matching snapshots
+
+.PP
+\fB--filter-paths-exact\fP=
+	only consider snapshots whose paths exactly match this \fBpath[,path,...]\fR list (can be specified multiple times)
+
+.PP
+\fB--filter-size\fP=
+	only consider snapshots with a total size within \fBmin[:max]\fR (suffixes k/m/g/t allowed)
+
+.PP
+\fB--filter-size-added\fP=
+	only consider snapshots adding within \fBmin[:max]\fR to the repository
+
+.PP
+\fB--filter-tags-exact\fP=
+	only consider snapshots whose tags exactly match this \fBtag[,tag,...]\fR list (can be specified multiple times)
+
+.PP
 \fB-g\fP, \fB--group-by\fP=
 	\fBgroup\fR snapshots by host, paths and/or tags, separated by comma
 

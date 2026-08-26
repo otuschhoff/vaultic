@@ -1,0 +1,20 @@
+Enhancement: snapshot labels, descriptions, delete protection and rich filters
+
+Snapshots can now carry a `label`, a `description`, and delete protection.
+`backup` sets them via `--label`, `--description`/`--description-from` and
+`--delete-never`/`--delete-after <duration>`; `tag` can change them afterwards
+with `--set-label`, `--set-description` and `--set-delete never|none|<dur>`.
+The metadata uses the same JSON keys as rustic, so both tools agree on it.
+
+`forget`/`prune` keep delete-protected snapshots regardless of the retention
+policy (a count of kept snapshots is printed); the new
+`--override-delete-protection` flag removes them anyway.
+
+All snapshot-selecting commands gained the rustic-compatible extended filters
+`--filter-label`, `--filter-paths-exact`, `--filter-tags-exact`,
+`--filter-after`/`--filter-before`, `--filter-size`, `--filter-size-added` and
+`--filter-last`, and snapshot references now accept the `latest~N` syntax to
+address the N-th latest matching snapshot. `snapshots` shows a `Label` column
+for labeled snapshots and `label` is available as a `--group-by` key.
+
+https://github.com/vaultic/vaultic/pull/22002

@@ -119,14 +119,14 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 ### 5.2 Snapshot metadata & selection
 
-| # | Feature | Rustic behavior | Priority | Effort | Workstream |
-|---|---|---|---|---|---|
-| F8 | Snapshot label | `--label`, grouping/filtering by label | P0 | S | WS-B |
-| F9 | Snapshot description | `--description`, `--description-from` | P1 | S | WS-B |
-| F10 | Delete protection | `--delete-never`, `--delete-after`; forget/prune respect it | P1 | M | WS-B |
-| F11 | Rich snapshot filters | `--filter-host/label/paths/paths-exact/tags/tags-exact/before/after/size/size-added/jq/last` on all snapshot-taking commands | P1 | M | WS-C |
-| F12 | `latest~N` syntax | resolve N-th latest snapshot | P2 | S | WS-C |
-| F13 | `<snap>:<path>/file` | sub-path file selection in restore/diff/dump | P2 | S | WS-C |
+| # | Feature | Rustic behavior | Priority | Effort | Workstream | Status |
+|---|---|---|---|---|---|---|
+| F8 | Snapshot label | `--label`, grouping/filtering by label | P0 | S | WS-B | ✅ |
+| F9 | Snapshot description | `--description`, `--description-from` | P1 | S | WS-B | ✅ |
+| F10 | Delete protection | `--delete-never`, `--delete-after`; forget/prune respect it | P1 | M | WS-B | ✅ |
+| F11 | Rich snapshot filters | `--filter-host/label/paths/paths-exact/tags/tags-exact/before/after/size/size-added/jq/last` on all snapshot-taking commands | P1 | M | WS-C | ✅ (all except `--filter-jq`, deferred) |
+| F12 | `latest~N` syntax | resolve N-th latest snapshot | P2 | S | WS-C | ✅ |
+| F13 | `<snap>:<path>/file` | sub-path file selection in restore/diff/dump | P2 | S | WS-C | ⏳ deferred to Phase 6 (file-level resolve needs per-command resolver changes) |
 
 ### 5.3 Cold storage
 
@@ -700,13 +700,29 @@ graph TD
   target sizing is not yet repo-size dependent), fixed-size chunker is
   accepted/serialized but not yet wired into the archiver's chunker.
 
-### Phase 2 — Snapshot metadata & filtering (WS-B, WS-C; F8–F13)
+### Phase 2 — Snapshot metadata & filtering (WS-B, WS-C; F8–F13) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
-- Deliverables: label/description/delete-protection end-to-end
-  (backup → snapshots/ls/find → forget), shared `--filter-*` on all
-  snapshot-selecting commands, `latest~N`, file-level `snap:path`.
-- Exit criteria: `forget` respects delete protection; filter flags behave
-  identically across commands (shared test table).
+- Deliverables (all landed): label/description/delete-protection end-to-end
+  (backup flags → archiver `SnapshotOptions` → snapshot JSON; `snapshots`
+  Label column + `--group-by label`; `tag --set-label/-set-description/-set-delete`;
+  `forget` respects protection + `--override-delete-protection`), shared
+  `--filter-*` flags on every snapshot-selecting command via
+  `initExtendedSnapshotFilter` ([filter_flags.go](../cmd/vaultic/filter_flags.go)),
+  and `latest~N` resolution in
+  [internal/data/snapshot_find.go](../internal/data/snapshot_find.go).
+- **Interop findings (validated against rustic 0.11.4 / restic 0.19.1):**
+  - Snapshot `label` is a plain string, `description` optional; both read
+    cross-tool.
+  - `delete` is a serde **externally-tagged enum**: `"Never"` (bare string) or
+    `{"After": "<jiff Zoned>"}`. The After timestamp **requires** the
+    `[IANA/Zone]` suffix (jiff Zoned) — plain RFC3339 is rejected by rustic.
+    [internal/data/delete_option.go](../internal/data/delete_option.go) writes
+    the jiff format and reads both. Verified: rustic reads vaultic-written
+    `Never` and `After` snapshots; restic ignores the unknown keys.
+- Exit criteria met: `forget` keeps delete-protected snapshots (integration
+  test), filters behave identically across commands (single shared flag set).
+  Deferred: `--filter-jq` (needs a jq engine; P2), file-level `snap:path/file`
+  (F13, needs per-command resolver changes — moved to Phase 6 command batch).
 
 ### Phase 3 — Cold storage completion (WS-D; F14–F17)
 

@@ -24,6 +24,22 @@ Exit status is 12 if the password is incorrect.
 
 
 .SH OPTIONS
+\fB--delete-after\fP=""
+	mark the snapshot as not deletable before a \fBduration\fR from now (e.g. 10d; delete protection)
+
+.PP
+\fB--delete-never\fP[=false]
+	mark the snapshot as never deletable by forget (delete protection)
+
+.PP
+\fB--description\fP=""
+	add a \fBdescription\fR to the new snapshot
+
+.PP
+\fB--description-from\fP=""
+	read the snapshot description from \fBfile\fR
+
+.PP
 \fB-n\fP, \fB--dry-run\fP[=false]
 	do not upload or write any data, just show what would be done
 
@@ -94,6 +110,10 @@ Exit status is 12 if the password is incorrect.
 .PP
 \fB--ignore-inode\fP[=false]
 	ignore inode number and ctime changes when checking for modified files (default: $VAULTIC_IGNORE_INODE or false)
+
+.PP
+\fB--label\fP=""
+	set a \fBlabel\fR for the new snapshot (for grouping/filtering)
 
 .PP
 \fB--no-scan\fP[=false]
