@@ -165,12 +165,36 @@ Exit status is 12 if the password is incorrect.
 	stop after repacking this much data in total (allowed suffixes for \fBsize\fR: k/K, m/M, g/G, t/T)
 
 .PP
+\fB--max-repack\fP=""
+	stop after repacking this much data: a \fBsize\fR (k/m/g/t), a percentage of the repo size (e.g. '10%') or 'unlimited'
+
+.PP
 \fB--repack-cacheable-only\fP[=false]
 	only repack packs which are cacheable
 
 .PP
 \fB--repack-uncompressed\fP[=false]
 	repack all uncompressed data
+
+.PP
+\fB--repack-all\fP[=false]
+	repack all packs (e.g. to change pack size or compression)
+
+.PP
+\fB--fast-repack\fP[=false]
+	skip re-reading pack contents, trust the index (faster, needs an intact index)
+
+.PP
+\fB--early-delete-index\fP[=false]
+	remove old index files before deleting packs (helps when the repository is out of free space)
+
+.PP
+\fB--keep-delete\fP[=false]
+	two-phase prune: only repack and write the new index now; defer deleting superseded packs/indexes to a later prune (requires the two-phase-prune feature)
+
+.PP
+\fB--instant-delete\fP[=true]
+	delete superseded packs/indexes in the same prune run (current behavior; the default)
 
 .PP
 \fB--repack-smaller-than\fP=""

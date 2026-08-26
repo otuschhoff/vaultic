@@ -492,6 +492,26 @@ The ``prune`` command accepts the following options:
   this option might be handy if you expect many files to be repacked and fear to run low
   on storage.
 
+- ``--max-repack`` is a superset of ``--max-repack-size``. It accepts an
+   absolute ``size`` (with suffixes k/m/g/t), a percentage of the repository
+   size (e.g. ``10%``), or the word ``unlimited``. Use it to cap how much data
+   a single ``prune`` run repacks, for example ``prune --max-repack 10%``.
+
+- ``--repack-all`` repacks every pack file, not only the ones selected by the
+   unused-data heuristics. This is useful to change the pack size or the
+   compression of the whole repository.
+
+- ``--fast-repack`` declares that the index is trusted for repack planning and
+   pack contents need not be re-read for validation. vaultic already plans
+   repacking purely from the index, so this flag currently only documents that
+   intent; it is accepted for compatibility with rustic.
+
+- ``--early-delete-index`` removes the superseded index files right after the
+   new index has been written, but before the now-unreferenced pack files are
+   deleted. This frees index space earlier and can help repositories that are
+   running out of free space, without the risks of
+   ``--unsafe-recover-no-free-space``.
+
 - ``--repack-cacheable-only`` if set to true only files which contain
   metadata and would be stored in the cache are repacked. Other pack files are
   not repacked if this option is set. This allows a very fast repacking
@@ -532,6 +552,56 @@ space. However, a **failed** ``prune`` run can cause the repository to become
 repository storage, before running this command. In case the command fails, it may become
 necessary to manually remove all files from the ``index/`` folder of the repository and
 run ``vaultic repair index`` afterwards.
+
+Two-phase prune
+***************
+
+By default ``prune`` runs in a single phase: it repacks data, writes the new
+index, and deletes the superseded pack and index files, all while holding an
+exclusive lock. To shorten the window in which files are deleted (and to allow
+the expensive repack phase to overlap with concurrent backups), vaultic offers
+a *two-phase prune*, gated behind the ``two-phase-prune`` feature flag
+(``VAULTIC_FEATURES=two-phase-prune=true``):
+
+- ``--keep-delete`` performs only the first phase: it repacks and writes the
+   new index, but *keeps* the superseded pack and index files instead of
+   deleting them. Those files are unreferenced after the new index is written,
+   so a later ``prune`` removes them.
+
+- ``--instant-delete`` (the default) keeps the single-phase behavior: superseded
+   files are deleted in the same run.
+
+A typical two-phase workflow is to run ``prune --keep-delete`` during normal
+operation (short exclusive window, no deletions) and a plain ``prune``
+(instant-delete) later to reclaim the space. Safety invariant: ``prune`` only
+ever deletes files that were part of its own plan, so a concurrent ``backup``
+is never affected. Note that after a ``--keep-delete`` run, ``check`` reports
+the non-critical "pack contained in several indexes" condition until the
+delete phase runs; this is expected and not a sign of corruption.
+
+Lock-free operations
+********************
+
+Normally every vaultic command creates a lock file in the repository so that
+operations that modify or read the repository do not interfere. For read-only
+and append-only commands (``backup``, ``restore``, ``snapshots``, ``ls``,
+``copy``, …) vaultic offers a *lock-free* mode, enabled with the ``lock-free``
+feature flag (``VAULTIC_FEATURES=lock-free=true``). In lock-free mode these
+commands do not create lock files but remain fully writable. Because index
+writes are additive, concurrent lock-free writers cannot corrupt the
+repository, and stale lock files no longer block routine backups.
+
+Commands that modify existing data (``prune``, ``forget``, ``repair``, ``key``,
+``config``, ``tag``, ``rewrite``, …) always take an exclusive lock regardless
+of this flag.
+
+.. note::
+    Lock-free mode is opt-in (Alpha). It changes the order in which the backend
+    is listed, which is only safe on eventually-consistent storage (such as S3)
+    if all clients accessing the repository coordinate. Do not mix lock-free
+    vaultic with restic/rustic clients holding classic lock files during this
+    phase, and prefer keeping the default (locking) behavior unless you need
+    concurrent lock-free clients.
 
 To prevent accidental usages of the ``--unsafe-recover-no-free-space`` option it is
 necessary to first run ``prune --unsafe-recover-no-free-space SOME-ID`` and then replace

@@ -1,0 +1,30 @@
+Enhancement: lock-free operations and two-phase prune
+
+Vaultic gains the final rustic-parity concurrency and prune features:
+
+Lock-free operations (opt-in via `VAULTIC_FEATURES=lock-free=true`): read-only
+and append-only commands (`backup`, `restore`, `snapshots`, `ls`, `copy`, ...)
+no longer create lock files but remain writable. Because index writes are
+additive, concurrent lock-free clients cannot corrupt the repository, and stale
+lock files no longer block routine backups. Commands that modify existing data
+(`prune`, `forget`, `repair`, `key`, `config`, `tag`, `rewrite`, ...) always
+take an exclusive lock regardless. Lock-free is opt-in because it reorders
+backend list operations, which requires coordinated clients on
+eventually-consistent storage.
+
+Two-phase prune (via `VAULTIC_FEATURES=two-phase-prune=true`): `prune
+--keep-delete` performs only the repack and index-writing phase and defers
+deletion of superseded pack/index files to a later run, shortening the
+exclusive window and letting the repack phase overlap with concurrent backups.
+`--instant-delete` (the default) keeps the single-phase behavior. Prune never
+deletes files that were not part of its own plan, so concurrent backups are
+unaffected.
+
+Prune extras: `--max-repack` accepts an absolute size, a percentage of the
+repository size (e.g. `10%`), or `unlimited` (superset of `--max-repack-size`);
+`--repack-all` repacks every pack (to change pack size or compression);
+`--fast-repack` documents index-trusted repack planning; and
+`--early-delete-index` removes superseded index files before the pack files are
+deleted, freeing index space earlier.
+
+https://github.com/otuschhoff/vaultic/pull/22004

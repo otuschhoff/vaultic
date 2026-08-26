@@ -141,9 +141,9 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 | # | Feature | Rustic behavior | Priority | Effort | Workstream |
 |---|---|---|---|---|---|
-| F18 | Lock-free operations | no lock files; safe concurrent clients; additive index writes | P1 | XL | WS-E |
-| F19 | Two-phase prune | repack+upload first, delete later; prune parallel to backups | P1 | L | WS-E |
-| F20 | Prune extras | `--fast-repack`, `--keep-pack`, `--max-repack` (size/%/unlimited), `--repack-all`, `--early-delete-index` | P2 | M | WS-E |
+| F18 | Lock-free operations | no lock files; safe concurrent clients; additive index writes | P1 | XL | WS-E | ✅ (opt-in Alpha; see Phase 4 notes) |
+| F19 | Two-phase prune | repack+upload first, delete later; prune parallel to backups | P1 | L | WS-E | ✅ (`--keep-delete`/`--instant-delete`, Alpha) |
+| F20 | Prune extras | `--fast-repack`, `--keep-pack`, `--max-repack` (size/%/unlimited), `--repack-all`, `--early-delete-index` | P2 | M | WS-E | ✅ (all except `--keep-pack`, deferred to Phase 6) |
 
 ### 5.5 UX, configuration & observability
 
@@ -753,12 +753,52 @@ graph TD
   pack mtimes, i.e. a `FileInfo`/backend interface change — moved to Phase 6.
   Dynamic pack-size growth (growfactor) still pending (from Phase 1).
 
-### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20)
+### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20) — ✅ done (branch `rustic-parity`, 2026-09-01)
 
 - Deliverables: `LockPolicy` per command, additive index discipline,
   two-phase prune with `--keep-delete`/`--instant-delete`, prune extras.
 - Exit criteria: chaos test — concurrent backup + prune + forget on one repo,
   `check` clean afterwards; graduation plan for `lock-free` flag.
+
+**Implemented (commits `WS-E/F18`, `WS-E/F19`, `WS-E/F20`):**
+
+- **F18 lock-free** — new `lock-free` feature flag
+  ([internal/feature/registry.go](../internal/feature/registry.go)). When
+  enabled, read-only and append-only commands (backup, restore, snapshots,
+  ls, copy, …) skip lock files but stay writable
+  ([cmd/vaultic/lock.go](../cmd/vaultic/lock.go)); exclusive commands
+  (prune, forget, repair, key, config, tag, rewrite, …) always lock. **It is
+  opt-in Alpha, not default-on as originally sketched:** default-on lock-free
+  reorders backend list operations, which the strict `orderedListOnceBackend`
+  test double (modelling S3 eventual consistency) rejects — flipping the
+  default would be unsafe on eventually-consistent backends without
+  coordinated clients. Opt in with `VAULTIC_FEATURES=lock-free=true`. Verified
+  with two concurrent lock-free backups + clean `check`.
+- **F19 two-phase prune** — `PrunePlan.Execute` split into phase 1 (repack +
+  write new index) and phase 2 (delete superseded packs + old index files)
+  behind the `two-phase-prune` Alpha flag. `--keep-delete` runs only phase 1
+  and defers deletion (leftover files are unreferenced; a later default prune
+  removes them); `--instant-delete` (default) keeps today's single-phase
+  behavior. Safety invariant: prune never deletes files that were not in its
+  own plan. New `MasterIndexRewriteOpts.SkipObsoleteDelete`/`ObsoleteIndexFunc`
+  defers superseded-index deletion to the caller
+  ([internal/repository/index/master_index.go](../internal/repository/index/master_index.go),
+  [internal/repository/repair_index.go](../internal/repository/repair_index.go)).
+  The phase-1 intermediate state intentionally leaves duplicate index entries
+  (non-critical per `check`), resolved by phase 2.
+- **F20 prune extras** ([cmd/vaultic/cmd_prune.go](../cmd/vaultic/cmd_prune.go),
+  [internal/repository/prune.go](../internal/repository/prune.go)):
+  `--max-repack` accepts an absolute size, a percentage of the repo size
+  (resolved against `stats.Size.Total` in `PlanPrune`) or `unlimited`;
+  `--repack-all` repacks every pack; `--fast-repack` is accepted (vaultic
+  already plans purely from the index, so it documents index-trusted intent);
+  `--early-delete-index` deletes superseded index files right after the new
+  index is written, before pack removal, to free index space earlier.
+  `--keep-pack` is deferred to Phase 6 (needs backend FileInfo mtime).
+- **Concurrency soak** — `TestPruneConcurrencySoak`
+  ([cmd/vaultic/cmd_prune_integration_test.go](../cmd/vaultic/cmd_prune_integration_test.go))
+  runs a lock-free backup concurrently with prune and forget under `-race`,
+  then requires a clean `check`. Interop matrix re-run: 107/107.
 
 ### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25)
 
