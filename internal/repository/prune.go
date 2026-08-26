@@ -26,10 +26,26 @@ type PruneOptions struct {
 
 	MaxUnusedBytes func(used uint64) (unused uint64) // calculates the number of unused bytes after repacking, according to MaxUnused
 	MaxRepackBytes uint64
-	SmallPackBytes uint64
+	// MaxRepackPercent, when > 0, caps the total repacked bytes at this
+	// percentage of the repository's total size (resolved in PlanPrune).
+	MaxRepackPercent float64
+	SmallPackBytes   uint64
 
 	RepackCacheableOnly bool
 	RepackUncompressed  bool
+
+	// RepackAll repacks every pack (useful to change pack size or compression).
+	RepackAll bool
+	// FastRepack indicates the index is trusted for repack planning and pack
+	// contents need not be re-read for validation during planning. vaultic
+	// already plans repacking purely from the index, so this flag currently
+	// changes no behavior; it is accepted for rustic CLI compatibility and to
+	// document the index-trusted planning intent.
+	FastRepack bool
+	// EarlyDeleteIndex removes old index files before the packs are deleted
+	// (helps repositories that are out of free space; equivalent to the
+	// --unsafe-recover-no-free-space flow but without disabling repacking).
+	EarlyDeleteIndex bool
 }
 
 type PruneStats struct {
@@ -130,6 +146,14 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 	keepBlobs, indexPack, err := packInfoFromIndex(ctx, repo, usedBlobs, &stats, printer)
 	if err != nil {
 		return nil, err
+	}
+
+	// resolve a --max-repack percentage against the repository's total size
+	if opts.MaxRepackPercent > 0 && stats.Size.Total > 0 {
+		cap := uint64(opts.MaxRepackPercent / 100 * float64(stats.Size.Total))
+		if cap < opts.MaxRepackBytes {
+			opts.MaxRepackBytes = cap
+		}
 	}
 
 	printer.P("collecting packs for deletion and repacking\n")
@@ -447,6 +471,10 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 			// if this is a data pack and --repack-cacheable-only is set => keep pack!
 			stats.Packs.Keep++
 
+		case opts.RepackAll && p.usedBlobs != 0:
+			// --repack-all: repack every pack that still has used blobs
+			repackCandidates = append(repackCandidates, packInfoWithID{ID: id, packInfo: p, mustCompress: mustCompress})
+
 		case p.unusedBlobs == 0 && p.tpe != vaultic.InvalidBlob && !mustCompress:
 			if packSize >= int64(targetPackSize) {
 				// All blobs in pack are used and not mixed => keep pack!
@@ -660,9 +688,26 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 			return errors.Fatalf("%s", err)
 		}
 	} else if len(plan.ignorePacks) != 0 {
-		err := rewriteIndexFiles(ctx, repo, plan.ignorePacks, nil, nil, printer)
-		if err != nil {
-			return errors.Fatalf("%s", err)
+		if plan.opts.EarlyDeleteIndex {
+			// Rebuild the index but defer deleting the superseded index files;
+			// delete them right after the new index is in place, before the
+			// now-unreferenced packs are removed, to free index space earlier.
+			var earlyIndexes vaultic.IDSet
+			err := rewriteIndexFilesOpt(ctx, repo, plan.ignorePacks, nil, nil, &earlyIndexes, printer)
+			if err != nil {
+				return errors.Fatalf("%s", err)
+			}
+			if len(earlyIndexes) != 0 {
+				printer.P("early-deleting %d superseded index files\n", len(earlyIndexes))
+				// ignoring errors is fine here as keeping too many index files
+				// cannot damage the repository (they are superseded)
+				_ = deleteFiles(ctx, true, &internalRepository{repo}, earlyIndexes, vaultic.IndexFile, printer)
+			}
+		} else {
+			err := rewriteIndexFiles(ctx, repo, plan.ignorePacks, nil, nil, printer)
+			if err != nil {
+				return errors.Fatalf("%s", err)
+			}
 		}
 	}
 

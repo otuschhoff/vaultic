@@ -62,9 +62,19 @@ type PruneOptions struct {
 
 	MaxRepackSize  string
 	MaxRepackBytes uint64
+	// MaxRepack accepts a size (k/m/g/t), a percentage of the repository size
+	// (e.g. "10%") or "unlimited"; superset of --max-repack-size.
+	MaxRepack        string
+	maxRepackPercent float64
 
 	RepackCacheableOnly bool
 	RepackUncompressed  bool
+	RepackAll           bool
+	// FastRepack trusts the index instead of re-reading pack contents.
+	FastRepack bool
+	// EarlyDeleteIndex removes old index files before deleting packs
+	// (helps repositories running out of free space).
+	EarlyDeleteIndex bool
 
 	SmallPackSize  string
 	SmallPackBytes uint64
@@ -80,9 +90,13 @@ func (opts *PruneOptions) AddLimitedFlags(f *pflag.FlagSet) {
 	var unused bool
 	f.StringVar(&opts.MaxUnused, "max-unused", "5%", "tolerate given `limit` of unused data (absolute value in bytes with suffixes k/K, m/M, g/G, t/T, a value in % or the word 'unlimited')")
 	f.StringVar(&opts.MaxRepackSize, "max-repack-size", "", "stop after repacking this much data in total (allowed suffixes for `size`: k/K, m/M, g/G, t/T)")
+	f.StringVar(&opts.MaxRepack, "max-repack", "", "stop after repacking this much data: a `size` (k/m/g/t), a percentage of the repo size (e.g. '10%') or 'unlimited'")
 	f.BoolVar(&opts.RepackCacheableOnly, "repack-cacheable-only", false, "only repack packs which are cacheable")
 	f.BoolVar(&unused, "repack-small", false, "deprecated. Use --repack-smaller-than to specify a minimum size")
 	f.BoolVar(&opts.RepackUncompressed, "repack-uncompressed", false, "repack all uncompressed data")
+	f.BoolVar(&opts.RepackAll, "repack-all", false, "repack all packs (e.g. to change pack size or compression)")
+	f.BoolVar(&opts.FastRepack, "fast-repack", false, "skip re-reading pack contents, trust the index (faster, needs an intact index)")
+	f.BoolVar(&opts.EarlyDeleteIndex, "early-delete-index", false, "remove old index files before deleting packs (helps when the repository is out of free space)")
 	f.StringVar(&opts.SmallPackSize, "repack-smaller-than", "", "pack `below-limit` packfiles (allowed suffixes: m/M)")
 
 	err := f.MarkDeprecated("repack-small", "small files are automatically repacked. Use --repack-smaller-than to specify a minimum size")
@@ -100,6 +114,15 @@ func verifyPruneOptions(opts *PruneOptions) error {
 			return err
 		}
 		opts.MaxRepackBytes = uint64(size)
+	}
+	// --max-repack supersedes --max-repack-size (size, %, or unlimited)
+	if len(opts.MaxRepack) > 0 {
+		bytes, pct, err := parseMaxRepack(opts.MaxRepack)
+		if err != nil {
+			return err
+		}
+		opts.MaxRepackBytes = bytes
+		opts.maxRepackPercent = pct
 	}
 	if opts.UnsafeNoSpaceRecovery != "" {
 		// prevent repacking data to make sure users cannot get stuck.
@@ -161,6 +184,30 @@ func verifyPruneOptions(opts *PruneOptions) error {
 	return nil
 }
 
+// parseMaxRepack parses --max-repack: "unlimited", a percentage of the
+// repository size ("10%"), or an absolute size with k/m/g/t suffixes. It
+// returns the absolute byte cap (MaxUint64 if not an absolute size) and the
+// percentage (>0 if a percentage was given; resolved against the repo size in
+// repository.PlanPrune).
+func parseMaxRepack(s string) (bytes uint64, percent float64, err error) {
+	s = strings.TrimSpace(s)
+	if s == "unlimited" || s == "" {
+		return math.MaxUint64, 0, nil
+	}
+	if strings.HasSuffix(s, "%") {
+		p, err := strconv.ParseFloat(strings.TrimSuffix(s, "%"), 64)
+		if err != nil || p < 0 || p > 100 {
+			return 0, 0, errors.Fatalf("invalid percentage %q for --max-repack", s)
+		}
+		return math.MaxUint64, p, nil
+	}
+	size, err := ui.ParseBytes(s)
+	if err != nil {
+		return 0, 0, errors.Fatalf("invalid size %q for --max-repack: %v", s, err)
+	}
+	return uint64(size), 0, nil
+}
+
 func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term ui.Terminal) error {
 	err := verifyPruneOptions(&opts)
 	if err != nil {
@@ -214,6 +261,10 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 
 		RepackCacheableOnly: opts.RepackCacheableOnly,
 		RepackUncompressed:  opts.RepackUncompressed,
+		RepackAll:           opts.RepackAll,
+		FastRepack:          opts.FastRepack,
+		EarlyDeleteIndex:    opts.EarlyDeleteIndex,
+		MaxRepackPercent:    opts.maxRepackPercent,
 	}
 
 	plan, err := repository.PlanPrune(ctx, popts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {

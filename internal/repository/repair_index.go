@@ -102,11 +102,18 @@ func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions,
 	return nil
 }
 
+// rewriteIndexFiles rebuilds the index, excluding removePacks. When earlyDelete
+// is non-nil the superseded index files are NOT deleted here; instead their IDs
+// are returned via the *earlyDelete set so the caller can delete them earlier.
 func rewriteIndexFiles(ctx context.Context, repo *Repository, removePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, printer vaultic.Printer) error {
+	return rewriteIndexFilesOpt(ctx, repo, removePacks, oldIndexes, extraObsolete, nil, printer)
+}
+
+func rewriteIndexFilesOpt(ctx context.Context, repo *Repository, removePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, earlyDelete *vaultic.IDSet, printer vaultic.Printer) error {
 	printer.P("rebuilding index\n")
 
 	bar := printer.NewCounter("indexes processed")
-	return repo.idx.Rewrite(ctx, &internalRepository{repo}, removePacks, oldIndexes, extraObsolete, index.MasterIndexRewriteOpts{
+	opts := index.MasterIndexRewriteOpts{
 		SaveProgress: bar,
 		DeleteProgress: func() vaultic.Counter {
 			return printer.NewCounter("old indexes deleted")
@@ -118,5 +125,12 @@ func rewriteIndexFiles(ctx context.Context, repo *Repository, removePacks vaulti
 				printer.VV("removed index %v\n", id.String())
 			}
 		},
-	})
+	}
+	if earlyDelete != nil {
+		opts.SkipObsoleteDelete = true
+		opts.ObsoleteIndexFunc = func(obsolete vaultic.IDSet) {
+			*earlyDelete = obsolete
+		}
+	}
+	return repo.idx.Rewrite(ctx, &internalRepository{repo}, removePacks, oldIndexes, extraObsolete, opts)
 }

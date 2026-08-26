@@ -366,6 +366,18 @@ type MasterIndexRewriteOpts struct {
 	SaveProgress   vaultic.Counter
 	DeleteProgress func() vaultic.Counter
 	DeleteReport   func(id vaultic.ID, err error)
+
+	// SkipObsoleteDelete, when set, does NOT delete the superseded index files
+	// at the end of the rewrite. Instead the obsolete index IDs are reported via
+	// ObsoleteIndexFunc. The caller is responsible for deleting them (e.g.
+	// prune's --early-delete-index deletes them right after the new index is in
+	// place, but before the now-unreferenced packs are removed, to free space
+	// earlier). When SkipObsoleteDelete is false (the default), the superseded
+	// index files are deleted at the end of Rewrite as before.
+	SkipObsoleteDelete bool
+	// ObsoleteIndexFunc is called (once) with the set of obsolete index IDs when
+	// SkipObsoleteDelete is set.
+	ObsoleteIndexFunc func(obsolete vaultic.IDSet)
 }
 
 // Rewrite removes packs whose ID is in excludePacks from all known indexes.
@@ -556,6 +568,12 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaulti
 		p = opts.DeleteProgress()
 	}
 	defer p.Done()
+	if opts.SkipObsoleteDelete {
+		if opts.ObsoleteIndexFunc != nil {
+			opts.ObsoleteIndexFunc(obsolete.Clone())
+		}
+		return nil
+	}
 	return vaultic.ParallelRemove(ctx, repo, obsolete, vaultic.IndexFile, func(id vaultic.ID, err error) error {
 		if opts.DeleteReport != nil {
 			opts.DeleteReport(id, err)
