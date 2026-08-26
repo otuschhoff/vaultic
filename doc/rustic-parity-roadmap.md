@@ -410,6 +410,99 @@ type). **Flags:** `lock-free` (Alpha), `two-phase-prune` (Alpha).
 **Effort:** XL + L. **Depends on:** WS-A. **Risk:** highest in this roadmap —
 see Section 11.
 
+#### Locking parity roadmap (remaining work)
+
+**Current safe baseline (implemented).** The Alpha ``lock-free`` feature skips
+lock-file creation for read-only commands only (restore, snapshots, ls, find,
+dump, repoinfo, etc.). Append writers (backup, copy destination, merge, key
+add) retain a non-exclusive lock; destructive/coherent-view commands (prune,
+forget, repair, recover, config, tag, key mutation, rewrite, migrate, check)
+retain an exclusive lock. ``--no-lock`` remains an explicit operator override
+for non-exclusive operations, not a blanket safe concurrency guarantee.
+
+The command wrapper also has a process-wide reader/writer guard: append
+operations share it and exclusive operations serialize through it. This closes
+same-process goroutine races; backend lock files remain the cross-process
+guard. Deferred-delete prune (``--keep-delete``) is implemented, but its
+planning, repack, and new-index phase still holds an exclusive lock.
+
+**Why append writers are not lock-free yet.** Index files and snapshot files
+are additive, but a prune planned before an unlocked backup can select and
+delete an old pack/index that the backup still needs. Removing the append lock
+without deletion revalidation caused a real backup ∥ prune corruption in the
+race soak. Therefore the following stages are mandatory before widening the
+feature flag.
+
+1. **Introduce explicit command lock policies.** Replace overloaded
+   ``dryRun``/``noLock`` booleans in
+   [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) with
+   ``LockPolicy{None, Shared, Exclusive}``:
+
+   | Policy | Commands | Initial behavior |
+   |---|---|---|
+   | ``None`` | restore, snapshots, ls, find, dump, stats, repoinfo, cat | Alpha lock-free reads |
+   | ``Shared`` | backup, copy destination, merge, key add | classic non-exclusive backend lock; process RW read lock |
+   | ``Exclusive`` | prune, forget, repair, recover, config, tag, key remove/passwd, rewrite, migrate, check | backend exclusive lock; process RW write lock |
+
+   Preserve ``--no-lock`` only as an explicit override of ``None``/``Shared``;
+   never let it silently install a dry-run backend. Keep command-specific
+   validation for dangerous combinations (for example destructive prune).
+
+2. **Prove append-only writer safety.** Audit backup, copy destination, merge,
+   and key add so every repository mutation is additive and ordered as:
+   packs/tree blobs uploaded -> additive index written -> snapshot written.
+   Introduce a repository-level append transaction interface that does not
+   expose remove/rewrite APIs. Verify that no writer performs read-modify-write
+   against shared repository objects. Only after this audit, permit concurrent
+   vaultic append writers; they may still retain a shared lock while prune is
+   classic.
+
+3. **Persist and validate prune plans.** Add a durable prune plan containing
+   the observed index set/generation, candidate old pack IDs, candidate old
+   index IDs, replacement index IDs, and immutable plan ID. Plan markers must
+   be stored in an interop-safe location: first prove that restic/rustic ignore
+   the chosen representation; do not add an unknown top-level directory
+   without that proof. Before every deletion, reload current indexes and prove:
+
+   - the candidate was in the original plan;
+   - the candidate is still obsolete in the current index view;
+   - no index/snapshot written after plan creation references it;
+   - unknown/new objects are never deleted.
+
+4. **Make prune genuinely minimal-lock.** Move phase A outside the exclusive
+   lock: read a consistent planning view, repack, upload replacement packs,
+   upload additive replacement indexes, persist the plan. Take a short
+   exclusive lock only for phase B: reload/revalidate plan candidates, delete
+   revalidated obsolete objects, and retire the completed marker.
+   ``--instant-delete`` runs A then B; ``--keep-delete`` runs A and retains the
+   plan for a later B. ``--keep-pack`` remains dependent on backend file mtimes.
+
+5. **Revisit forget independently.** Keep destructive forget exclusive until
+   it has an analogous short delete phase: evaluate policy without a lock,
+   re-list/revalidate snapshots under an exclusive lock, and delete only
+   snapshots still selected by that revalidated policy. Do not combine fully
+   unlocked destructive forget and prune until both protocols are proven.
+
+6. **Graduate only through explicit test gates.** Each stage must pass:
+
+   - lock-free read tests: no new lock files and stale classic locks do not
+     block the supported read commands;
+   - append tests: backup ∥ backup, backup ∥ copy, backup ∥ merge, then
+     ``check --read-data``;
+   - prune tests: backup ∥ ``prune --instant-delete`` and backup ∥
+     ``prune --keep-delete`` across local and MinIO/S3 backends;
+   - destructive tests: prune ∥ forget, prune ∥ repair, cancellation/crash at
+     every prune phase boundary, and later restic/rustic/vaultic reopen + check;
+   - cross-process CLI subprocess tests, not only in-process goroutines;
+   - repeated ``-race`` soaks with durable-snapshot assertions, rather than
+     merely successful command exits.
+
+**Graduation policy.** Keep lock-free reads Alpha until cross-process and
+eventual-consistency tests pass. Promote append concurrency separately, then
+minimal-lock prune, then destructive forget. Do not make append writes
+lock-free or enable lock-free by default until the prune revalidation protocol
+and crash/MinIO test gates are complete.
+
 ### WS-F — Local config profiles (TOML) & hooks
 
 **Goal.** `vaultic backup` / `vaultic forget` with zero flags, driven by TOML
@@ -796,6 +889,8 @@ graph TD
   runs append backup concurrently with destructive prune and dry-run forget
   under `-race`, then requires a clean `check`. Repeated race runs cover
   lock-free reads, writable append/no-lock behavior, and append/prune safety.
+  The detailed remaining stages are specified in
+  [WS-E's locking parity roadmap](#locking-parity-roadmap-remaining-work).
 
 ### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
@@ -864,9 +959,11 @@ graph TD
 3. **Interop CI job** (`helpers/interop/`): matrix of {vaultic, restic,
    rustic} × {init/backup/restore/check/forget/prune} on shared local and
    minio-S3 repos. Allowed-to-fail until Phase 1 exit, then required.
-4. **Mixed-client locking:** document that lock-free vaultic ignores classic
-   lock files; restic clients still honor them. Recommend not mixing lock-free
-   prune with classic clients during Phase 4 Beta.
+4. **Mixed-client locking:** lock-free **reads** ignore classic lock files;
+  append and destructive vaultic commands still honor backend locks. Do not
+  mix future lock-free append/minimal-lock prune modes with classic restic or
+  rustic writers until their cross-client revalidation behavior is explicitly
+  tested and documented.
 5. Env var compatibility: accept `RESTIC_*` for every new `VAULTIC_*` var.
 
 ## 10. Testing strategy
