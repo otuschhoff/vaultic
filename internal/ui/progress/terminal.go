@@ -3,6 +3,7 @@ package progress
 import (
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/env"
@@ -10,10 +11,29 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+var intervalOverride struct {
+	set   atomic.Bool
+	nanos atomic.Int64
+}
+
+// SetIntervalOverride sets a process-wide interval used by progress
+// constructors. It is configured from the global CLI flag during PreRun.
+func SetIntervalOverride(interval time.Duration) {
+	intervalOverride.nanos.Store(int64(interval))
+	intervalOverride.set.Store(true)
+}
+
+// ClearIntervalOverride restores normal environment and terminal-based
+// interval calculation.
+func ClearIntervalOverride() { intervalOverride.set.Store(false) }
+
 // CalculateProgressInterval returns the interval configured via VAULTIC_PROGRESS_FPS
 // or if unset returns an interval for 60fps on interactive terminals and 0 (=disabled)
 // for non-interactive terminals or when run using the --quiet flag
 func CalculateProgressInterval(show bool, json bool, canUpdateStatus bool) time.Duration {
+	if intervalOverride.set.Load() {
+		return time.Duration(intervalOverride.nanos.Load())
+	}
 	interval := time.Second / 10
 	fps, err := strconv.ParseFloat(env.Get("PROGRESS_FPS"), 64)
 	if err == nil && fps > 0 {

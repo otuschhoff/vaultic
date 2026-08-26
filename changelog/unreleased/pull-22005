@@ -1,0 +1,22 @@
+Enhancement: TOML profiles, hooks, observability, and backup telemetry
+
+Vaultic can now load local TOML profiles with `-P` / `--use-profile`. Profiles
+support recursive `use-profiles` inheritance, normal command sections, and
+named `[[backup.snapshots]]` jobs, so `vaultic backup` can run configured jobs
+without paths. Command-line options override `VAULTIC_*`/`RESTIC_*` environment
+variables, which override later and then earlier profiles. `backup --init`
+initializes a missing repository before running.
+
+Profile hooks run before, after, on failure, and finally at global, repository,
+command, and per-job scope. Hook commands never use a shell implicitly and
+receive VAULTIC_* and RUSTIC_* context variables. Hook failures can stop,
+warn, or be ignored.
+
+New global controls include `--log-file`, `--log-level`, `--no-progress`,
+`--progress-interval`, and `--opentelemetry`. Successful backups can publish
+metrics to a Prometheus Pushgateway (`--prometheus`) or any InfluxDB v2+
+compatible server (`--influxdb-url`, token, org, bucket). InfluxDB publishing
+uses the native v2 line-protocol API; telemetry outages warn but do not fail an
+already completed backup.
+
+https://github.com/otuschhoff/vaultic/pull/22005

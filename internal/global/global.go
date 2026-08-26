@@ -20,6 +20,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/retry"
 	"github.com/otuschhoff/vaultic/internal/backend/sema"
 	"github.com/otuschhoff/vaultic/internal/backend/warmupcmd"
+	"github.com/otuschhoff/vaultic/internal/configfile"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
 	"github.com/otuschhoff/vaultic/internal/options"
@@ -27,6 +28,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/otuschhoff/vaultic/internal/warmup"
 	"github.com/restic/chunker"
@@ -48,6 +50,11 @@ type BackendWrapper func(r backend.Backend) (backend.Backend, error)
 
 // Options hold all global options for vaultic.
 type Options struct {
+	// UseProfiles selects local TOML profiles. Profiles are loaded by the root
+	// command after Cobra has parsed flags and before command pre-runs execute.
+	UseProfiles []string
+	Profile     *configfile.Profile
+
 	Repo            string
 	RepositoryFile  string
 	PasswordFile    string
@@ -59,6 +66,10 @@ type Options struct {
 	MasterKeyCommand   string
 	Quiet              bool
 	Verbose            int
+	LogFile            string
+	LogLevel           string
+	NoProgress         bool
+	ProgressInterval   time.Duration
 	NoLock             bool
 	RetryLock          time.Duration
 	JSON               bool
@@ -79,6 +90,15 @@ type Options struct {
 	WarmUpBatch       int
 	WarmUpWait        time.Duration
 	WarmUpWaitCommand string
+
+	PrometheusURL  string
+	PrometheusUser string
+	PrometheusPass string
+	InfluxURL      string
+	InfluxToken    string
+	InfluxOrg      string
+	InfluxBucket   string
+	OpenTelemetry  bool
 
 	backend.TransportOptions
 	limiter.Limits
@@ -113,6 +133,7 @@ type Options struct {
 }
 
 func (opts *Options) AddFlags(f *pflag.FlagSet) {
+	f.StringSliceVarP(&opts.UseProfiles, "use-profile", "P", nil, "load TOML `profile` (repeatable; default: vaultic.toml)")
 	f.StringVarP(&opts.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $VAULTIC_REPOSITORY)")
 	f.StringVarP(&opts.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)")
 	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
@@ -128,6 +149,10 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.DurationVar(&opts.WarmUpWait, "warm-up-wait", 0, "max `duration` to wait for warm-up to take effect (default: $VAULTIC_WARM_UP_WAIT)")
 	f.StringVar(&opts.WarmUpWaitCommand, "warm-up-wait-command", "", "`command` to wait for warmed-up data (default: $VAULTIC_WARM_UP_WAIT_COMMAND)")
 	f.BoolVarP(&opts.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
+	f.StringVar(&opts.LogFile, "log-file", env.Get("LOG_FILE"), "write library log messages to `file` (default: $VAULTIC_LOG_FILE)")
+	f.StringVar(&opts.LogLevel, "log-level", env.Get("LOG_LEVEL"), "minimum log `level` (debug, info, warn, error; default: $VAULTIC_LOG_LEVEL)")
+	f.BoolVar(&opts.NoProgress, "no-progress", false, "disable live progress output")
+	f.DurationVar(&opts.ProgressInterval, "progress-interval", 0, "refresh live progress every `duration` (default: $VAULTIC_PROGRESS_INTERVAL)")
 	// use empty parameter name as `-v, --verbose n` instead of the correct `--verbose=n` is confusing
 	f.CountVarP(&opts.Verbose, "verbose", "v", "be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)")
 	f.BoolVar(&opts.NoLock, "no-lock", false, "do not lock the repository, this allows some operations on read-only repositories")
@@ -143,6 +168,14 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	const compressionFlag = "compression"
 	f.Var(&opts.Compression, compressionFlag, "compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)")
 	f.BoolVar(&opts.NoExtraVerify, "no-extra-verify", false, "skip additional verification of data before upload (see documentation)")
+	f.StringVar(&opts.PrometheusURL, "prometheus", env.Get("PROMETHEUS"), "Pushgateway `URL` for successful backup metrics (default: $VAULTIC_PROMETHEUS)")
+	f.StringVar(&opts.PrometheusUser, "prometheus-user", env.Get("PROMETHEUS_USER"), "Pushgateway username (default: $VAULTIC_PROMETHEUS_USER)")
+	f.StringVar(&opts.PrometheusPass, "prometheus-pass", env.Get("PROMETHEUS_PASS"), "Pushgateway password (default: $VAULTIC_PROMETHEUS_PASS)")
+	f.StringVar(&opts.InfluxURL, "influxdb-url", env.Get("INFLUXDB_URL"), "InfluxDB v2-compatible server `URL` for successful backup metrics (default: $VAULTIC_INFLUXDB_URL)")
+	f.StringVar(&opts.InfluxToken, "influxdb-token", env.Get("INFLUXDB_TOKEN"), "InfluxDB API token (default: $VAULTIC_INFLUXDB_TOKEN)")
+	f.StringVar(&opts.InfluxOrg, "influxdb-org", env.Get("INFLUXDB_ORG"), "InfluxDB organization (default: $VAULTIC_INFLUXDB_ORG)")
+	f.StringVar(&opts.InfluxBucket, "influxdb-bucket", env.Get("INFLUXDB_BUCKET"), "InfluxDB bucket (default: $VAULTIC_INFLUXDB_BUCKET)")
+	f.BoolVar(&opts.OpenTelemetry, "opentelemetry", false, "emit OpenTelemetry spans through the configured global provider")
 	opts.noExtraVerifyFlag = f.Lookup("no-extra-verify")
 	f.IntVar(&opts.Limits.UploadKb, "limit-upload", 0, "limits uploads to a maximum `rate` in KiB/s. (default: unlimited)")
 	f.IntVar(&opts.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
@@ -186,6 +219,22 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 }
 
 func (opts *Options) PreRun(needsPassword bool) error {
+	progress.ClearIntervalOverride()
+	if opts.NoProgress && opts.ProgressInterval > 0 {
+		return errors.Fatal("--no-progress and --progress-interval cannot be used together")
+	}
+	if opts.NoProgress {
+		progress.SetIntervalOverride(0)
+	} else if opts.ProgressInterval > 0 {
+		progress.SetIntervalOverride(opts.ProgressInterval)
+	}
+	if opts.LogLevel != "" {
+		switch opts.LogLevel {
+		case "debug", "info", "warn", "error":
+		default:
+			return errors.Fatalf("invalid --log-level %q (expected debug, info, warn, or error)", opts.LogLevel)
+		}
+	}
 	if envVal := env.Get("PACK_SIZE"); envVal != "" && !opts.packSizeFlag.Changed {
 		targetPackSize, err := strconv.ParseUint(envVal, 10, 32)
 		if err != nil {

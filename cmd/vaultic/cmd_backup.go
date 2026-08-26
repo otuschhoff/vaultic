@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/configfile"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
@@ -27,7 +28,9 @@ import (
 	"github.com/otuschhoff/vaultic/internal/filter"
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/hooks"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/backup"
@@ -60,6 +63,9 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 && globalOptions.Profile != nil && len(globalOptions.Profile.Snapshots) != 0 {
+				return runProfileBackupJobs(cmd.Context(), opts, *globalOptions, globalOptions.Term, cmd.Flags())
+			}
 			return runBackup(cmd.Context(), opts, *globalOptions, globalOptions.Term, args)
 		},
 	}
@@ -102,6 +108,8 @@ type BackupOptions struct {
 	ReadConcurrency   uint
 	NoScan            bool
 	SkipIfUnchanged   bool
+	ProfileNames      []string
+	Init              bool
 
 	readConcurrencyFlag *pflag.Flag
 }
@@ -151,6 +159,8 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 		f.BoolVar(&opts.ExcludeCloudFiles, "exclude-cloud-files", false, "excludes online-only cloud files (such as OneDrive, iCloud drive, …)")
 	}
 	f.BoolVar(&opts.SkipIfUnchanged, "skip-if-unchanged", false, "skip snapshot creation if identical to parent snapshot")
+	f.StringSliceVar(&opts.ProfileNames, "name", nil, "run named [[backup.snapshots]] profile job (repeatable)")
+	f.BoolVar(&opts.Init, "init", false, "initialize the repository if it does not exist")
 
 	opts.readConcurrencyFlag = f.Lookup("read-concurrency")
 
@@ -162,6 +172,69 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	if host := env.Get("HOST"); host != "" {
 		opts.Host = host
 	}
+}
+
+func runProfileBackupJobs(ctx context.Context, base BackupOptions, gopts global.Options, term ui.Terminal, commandFlags *pflag.FlagSet) error {
+	profile := gopts.Profile
+	selected := make(map[string]bool, len(base.ProfileNames))
+	for _, name := range base.ProfileNames {
+		selected[name] = true
+	}
+	found := make(map[string]bool, len(selected))
+
+	for _, job := range profile.Snapshots {
+		if len(selected) != 0 && !selected[job.Name] {
+			continue
+		}
+		found[job.Name] = true
+
+		jobOpts := base
+		jobFlags := pflag.NewFlagSet("profile backup", pflag.ContinueOnError)
+		jobFlags.SetInterspersed(true)
+		jobOpts.AddFlags(jobFlags)
+		// AddFlags initializes defaults. Restore the already merged CLI/profile
+		// values, then overlay only job-specific settings.
+		jobOpts = base
+		envOverrides := func(name string) bool {
+			if commandFlags.Lookup(name) != nil && commandFlags.Lookup(name).Changed {
+				return true
+			}
+			_, ok := env.Lookup(strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
+			return ok
+		}
+		if err := configfile.ApplyValues(job.Values, jobFlags, envOverrides); err != nil {
+			return err
+		}
+		if err := jobOpts.Finalize(); err != nil {
+			return err
+		}
+
+		values := hooks.Context{Action: "backup", BackupLabel: jobOpts.Label, BackupSources: job.Sources, BackupTags: jobOpts.Tags.Flatten()}
+		runner := hooks.Runner{Stdout: term.OutputWriter(), Stderr: term.OutputWriter(), Warn: func(format string, args ...any) { term.Error(fmt.Sprintf(format, args...)) }}
+		if err := runner.Run(ctx, hooks.Before, []configfile.Hooks{job.Hooks}, values); err != nil {
+			return err
+		}
+		err := runBackup(ctx, jobOpts, gopts, term, job.Sources)
+		phase := hooks.After
+		if err != nil {
+			phase = hooks.Failed
+		}
+		if hookErr := runner.Run(ctx, phase, []configfile.Hooks{job.Hooks}, values); hookErr != nil && err == nil {
+			err = hookErr
+		}
+		if hookErr := runner.Run(ctx, hooks.Finally, []configfile.Hooks{job.Hooks}, values); hookErr != nil && err == nil {
+			err = hookErr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	for name := range selected {
+		if !found[name] {
+			return errors.Fatalf("profile backup job %q was not found", name)
+		}
+	}
+	return nil
 }
 
 func (opts *BackupOptions) Finalize() error {
@@ -548,6 +621,16 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	if gopts.Verbosity >= 2 && !gopts.JSON {
 		printer.P("open repository")
 	}
+	if opts.Init {
+		_, err := global.OpenRepository(ctx, gopts, printer)
+		if errors.Is(err, global.ErrNoRepository) {
+			if _, err := global.CreateRepository(ctx, gopts, vaultic.StableRepoVersion, nil, printer); err != nil {
+				return errors.Fatalf("initialize repository: %v", err)
+			}
+		} else if err != nil {
+			return err
+		}
+	}
 
 	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, opts.DryRun, printer)
 	if err != nil {
@@ -748,6 +831,23 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		return ErrInvalidSourceData
 	}
 
-	// Return error if any
-	return werr
+	// Return errors before publishing telemetry: metrics represent only fully
+	// successful backups with a durable snapshot.
+	if werr != nil {
+		return werr
+	}
+	if err := telemetry.Publish(ctx, telemetry.Config{
+		PrometheusURL:  gopts.PrometheusURL,
+		PrometheusUser: gopts.PrometheusUser,
+		PrometheusPass: gopts.PrometheusPass,
+		InfluxURL:      gopts.InfluxURL,
+		InfluxToken:    gopts.InfluxToken,
+		InfluxOrg:      gopts.InfluxOrg,
+		InfluxBucket:   gopts.InfluxBucket,
+	}, telemetry.Backup{Repository: gopts.Repo, SnapshotID: id.String(), Label: snapshotOpts.Label, Summary: summary}); err != nil {
+		// The snapshot is already durable. Observability outages must not turn a
+		// completed backup into a failed one.
+		printer.E("telemetry publish failed: %v\n", err)
+	}
+	return nil
 }

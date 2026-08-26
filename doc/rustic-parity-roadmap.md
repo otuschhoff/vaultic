@@ -149,11 +149,11 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 | # | Feature | Rustic behavior | Priority | Effort | Workstream |
 |---|---|---|---|---|---|
-| F21 | TOML config profiles | `vaultic.toml`, search paths, `-P profile`, `use-profiles` inheritance, env overrides; `[repository] [forget] [backup] [[backup.snapshots]]` | P0 | L | WS-F |
-| F22 | Hooks | run-before/after/failed/finally at global/repo/backup/snapshot scope, env context, on-failure policy | P1 | M | WS-F |
-| F23 | Log to file + log levels | `--log-file`, `--log-level(-*)` | P1 | S | WS-H |
-| F24 | Progress control | `--no-progress`, `--progress-interval` as real flags (env exists today) | P2 | S | WS-H |
-| F25 | Telemetry | `--prometheus(+user/pass)` push metrics, `--opentelemetry` tracing (backup first) | P2 | M | WS-H |
+| F21 | TOML config profiles | `vaultic.toml`, search paths, `-P profile`, `use-profiles` inheritance, env overrides; `[repository] [forget] [backup] [[backup.snapshots]]` | P0 | L | WS-F | ✅ |
+| F22 | Hooks | run-before/after/failed/finally at global/repo/backup/snapshot scope, env context, on-failure policy | P1 | M | WS-F | ✅ |
+| F23 | Log to file + log levels | `--log-file`, `--log-level(-*)` | P1 | S | WS-H | ✅ (`--log-file`, validated `--log-level`) |
+| F24 | Progress control | `--no-progress`, `--progress-interval` as real flags (env exists today) | P2 | S | WS-H | ✅ |
+| F25 | Telemetry | `--prometheus(+user/pass)` push metrics, `--opentelemetry` tracing (backup first) | P2 | M | WS-H | ✅ (Pushgateway, InfluxDB v2+, OTel command spans) |
 | F26 | Interactive TUI | integrated terminal UI (stats live, selection) | P3 | XL | WS-J |
 
 ### 5.6 Backends & sources
@@ -800,13 +800,34 @@ graph TD
   runs a lock-free backup concurrently with prune and forget under `-race`,
   then requires a clean `check`. Interop matrix re-run: 107/107.
 
-### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25)
+### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
-- Deliverables: TOML profiles + inheritance, hooks at all scopes,
-  `--log-file`/`--log-level`, `--no-progress`/`--progress-interval`,
-  prometheus push for backup, OTel tracing skeleton.
-- Exit criteria: rustic example configs (config/ dir of rustic repo) run
-  against vaultic with documented deltas.
+- **F21 profiles** — new [internal/configfile](../internal/configfile) parses
+  TOML with repeatable ``-P/--use-profile``, recursive ``use-profiles``
+  includes with cycle detection, requested search paths, and deterministic
+  precedence. ``[global]``, ``[repository]``, and command sections apply to
+  unchanged flags. ``[[backup.snapshots]]`` supports named no-argument backup
+  jobs; ``backup --name`` selects jobs and ``backup --init`` initializes a
+  missing repository.
+- **F22 hooks** — [internal/hooks](../internal/hooks) implements
+  ``run-before``, ``run-after``, ``run-failed``, and ``run-finally`` across
+  global, repository, command, and per-snapshot-job scopes. Hooks run without
+  an implicit shell, honor ``error|warn|ignore``, and export VAULTIC_ plus
+  RUSTIC_ context variables.
+- **F23/F24 controls** — ``--log-file``, validated ``--log-level``,
+  ``--no-progress``, and ``--progress-interval`` are global, environment-aware,
+  and profile-settable. The progress override is shared by every existing
+  progress reporter.
+- **F25 telemetry** — successful backups publish Pushgateway metrics via
+  ``--prometheus``/credentials or InfluxDB v2-compatible line protocol via
+  ``--influxdb-url``, token, org, and bucket. Telemetry failures warn but do
+  not invalidate durable snapshots. ``--opentelemetry`` emits command spans
+  through the configured global provider. InfluxDB support uses direct HTTP to
+  avoid a version-bound client SDK.
+- **Tests/verification** — profile include/precedence/cycle tests, hook
+  context/failure-policy tests, a real-backup Influx v2 HTTP test, auto-init
+  coverage, and a CLI smoke test for a profile job, hook, label, no-progress,
+  and log file. See [052_profiles_automation.rst](052_profiles_automation.rst).
 
 ### Phase 6 — Command parity batch (§7; F30–F32 + enhancements)
 

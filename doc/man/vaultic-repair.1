@@ -40,6 +40,22 @@ rebuild the index, salvage damaged pack files, and repair broken snapshots.
 	set a http user agent for outgoing http requests
 
 .PP
+\fB--influxdb-bucket\fP=""
+	InfluxDB bucket (default: $VAULTIC_INFLUXDB_BUCKET)
+
+.PP
+\fB--influxdb-org\fP=""
+	InfluxDB organization (default: $VAULTIC_INFLUXDB_ORG)
+
+.PP
+\fB--influxdb-token\fP=""
+	InfluxDB API token (default: $VAULTIC_INFLUXDB_TOKEN)
+
+.PP
+\fB--influxdb-url\fP=""
+	InfluxDB v2-compatible server \fBURL\fR for successful backup metrics (default: $VAULTIC_INFLUXDB_URL)
+
+.PP
 \fB--insecure-no-password\fP[=false]
 	use an empty password for the repository, must be passed to every vaultic command (insecure)
 
@@ -76,6 +92,14 @@ rebuild the index, salvage damaged pack files, and repair broken snapshots.
 	limits uploads to a maximum \fBrate\fR in KiB/s. (default: unlimited)
 
 .PP
+\fB--log-file\fP=""
+	write library log messages to \fBfile\fR (default: $VAULTIC_LOG_FILE)
+
+.PP
+\fB--log-level\fP=""
+	minimum log \fBlevel\fR (debug, info, warn, error; default: $VAULTIC_LOG_LEVEL)
+
+.PP
 \fB--no-cache\fP[=false]
 	do not use a local cache
 
@@ -86,6 +110,14 @@ rebuild the index, salvage damaged pack files, and repair broken snapshots.
 .PP
 \fB--no-lock\fP[=false]
 	do not lock the repository, this allows some operations on read-only repositories
+
+.PP
+\fB--no-progress\fP[=false]
+	disable live progress output
+
+.PP
+\fB--opentelemetry\fP[=false]
+	emit OpenTelemetry spans through the configured global provider
 
 .PP
 \fB-o\fP, \fB--option\fP=[]
@@ -102,6 +134,22 @@ rebuild the index, salvage damaged pack files, and repair broken snapshots.
 .PP
 \fB-p\fP, \fB--password-file\fP=""
 	\fBfile\fR to read the repository password from (default: $VAULTIC_PASSWORD_FILE)
+
+.PP
+\fB--progress-interval\fP=0s
+	refresh live progress every \fBduration\fR (default: $VAULTIC_PROGRESS_INTERVAL)
+
+.PP
+\fB--prometheus\fP=""
+	Pushgateway \fBURL\fR for successful backup metrics (default: $VAULTIC_PROMETHEUS)
+
+.PP
+\fB--prometheus-pass\fP=""
+	Pushgateway password (default: $VAULTIC_PROMETHEUS_PASS)
+
+.PP
+\fB--prometheus-user\fP=""
+	Pushgateway username (default: $VAULTIC_PROMETHEUS_USER)
 
 .PP
 \fB-q\fP, \fB--quiet\fP[=false]
@@ -130,6 +178,10 @@ rebuild the index, salvage damaged pack files, and repair broken snapshots.
 .PP
 \fB--tls-client-cert\fP=""
 	path to a \fBfile\fR containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)
+
+.PP
+\fB-P\fP, \fB--use-profile\fP=[]
+	load TOML \fBprofile\fR (repeatable; default: vaultic.toml)
 
 .PP
 \fB-v\fP, \fB--verbose\fP[=0]

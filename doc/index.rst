@@ -14,6 +14,7 @@ Vaultic Documentation
    049_snapshot_metadata
    050_restore
    051_cold_storage
+   052_profiles_automation
    060_forget
    070_encryption
    075_scripting

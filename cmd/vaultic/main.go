@@ -6,20 +6,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"runtime"
 	godebug "runtime/debug"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.uber.org/automaxprocs/maxprocs"
 
 	"github.com/otuschhoff/vaultic/internal/backend/all"
+	"github.com/otuschhoff/vaultic/internal/configfile"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/hooks"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui/termstatus"
 )
@@ -53,7 +59,13 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 			case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
 				return nil
 			}
-			return globalOptions.PreRun(needsPassword(c.Name()))
+			if err := applyProfile(c, globalOptions); err != nil {
+				return err
+			}
+			if err := globalOptions.PreRun(needsPassword(c.Name())); err != nil {
+				return err
+			}
+			return configureLogging(*globalOptions)
 		},
 	}
 
@@ -111,8 +123,106 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 	registerMountCommand(cmd, globalOptions)
 	registerSelfUpdateCommand(cmd, globalOptions)
 	global.RegisterProfiling(cmd, os.Stderr)
+	wrapProfileHooks(cmd, globalOptions)
 
 	return cmd
+}
+
+func configureLogging(gopts global.Options) error {
+	if gopts.LogFile == "" {
+		return nil
+	}
+	f, err := os.OpenFile(gopts.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("open log file %q: %w", gopts.LogFile, err)
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	return nil
+}
+
+func wrapProfileHooks(root *cobra.Command, gopts *global.Options) {
+	for _, cmd := range root.Commands() {
+		wrapProfileHooks(cmd, gopts)
+	}
+	if root.RunE == nil {
+		return
+	}
+
+	run := root.RunE
+	root.RunE = func(cmd *cobra.Command, args []string) (err error) {
+		ctx, span := observability.StartCommand(cmd.Context(), gopts.OpenTelemetry, cmd.Name())
+		defer span.End()
+		cmd.SetContext(ctx)
+
+		profile := gopts.Profile
+		if profile == nil {
+			return run(cmd, args)
+		}
+
+		label, _ := cmd.Flags().GetString("label")
+		tags, _ := cmd.Flags().GetStringSlice("tag")
+		values := hooks.Context{
+			Action:        cmd.Name(),
+			BackupLabel:   label,
+			BackupSources: args,
+			BackupTags:    tags,
+		}
+		runner := hooks.Runner{
+			Stdout: gopts.Term.OutputWriter(),
+			Stderr: gopts.Term.OutputWriter(),
+			Warn: func(format string, args ...any) {
+				gopts.Term.Error(fmt.Sprintf(format, args...))
+			},
+		}
+		scopes := []configfile.Hooks{profile.Hooks["global"], profile.Hooks["repository"], profile.Hooks[cmd.Name()]}
+		if err := runner.Run(cmd.Context(), hooks.Before, scopes, values); err != nil {
+			return err
+		}
+		defer func() {
+			phase := hooks.After
+			if err != nil {
+				phase = hooks.Failed
+			}
+			if hookErr := runner.Run(cmd.Context(), phase, scopes, values); hookErr != nil && err == nil {
+				err = hookErr
+			}
+			if hookErr := runner.Run(cmd.Context(), hooks.Finally, scopes, values); hookErr != nil && err == nil {
+				err = hookErr
+			}
+		}()
+		return run(cmd, args)
+	}
+}
+
+func applyProfile(cmd *cobra.Command, gopts *global.Options) error {
+	profile, err := configfile.Load(gopts.UseProfiles)
+	if err != nil {
+		return err
+	}
+	gopts.Profile = profile
+
+	// Profile values are defaults. Explicit CLI flags and VAULTIC_/RESTIC_
+	// environment variables take precedence over them.
+	envOverrides := func(name string) bool {
+		name = strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		_, ok := env.Lookup(name)
+		return ok
+	}
+	apply := func(section string, flags *pflag.FlagSet) error {
+		if flags == nil {
+			return nil
+		}
+		return profile.ApplyFlags(section, flags, envOverrides)
+	}
+
+	persistentFlags := cmd.Root().PersistentFlags()
+	if err := apply("global", persistentFlags); err != nil {
+		return err
+	}
+	if err := apply("repository", persistentFlags); err != nil {
+		return err
+	}
+	return apply(cmd.Name(), cmd.Flags())
 }
 
 // Distinguish commands that need the password from those that work without,
