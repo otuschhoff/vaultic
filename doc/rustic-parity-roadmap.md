@@ -70,14 +70,14 @@ the conventions in Section 12.
 
 | Area | Location | Notes for this roadmap |
 |---|---|---|
-| Repo config (JSON) | [internal/restic/config.go](../internal/restic/config.go) | `Config` = version, id, chunker_polynomial only |
-| Snapshot model | [internal/data/snapshot.go](../internal/data/snapshot.go) | lacks label / description / delete-protection |
-| Snapshot find/filter | [internal/data/snapshot_find.go](../internal/data/snapshot_find.go), [cmd/vaultic/find.go](../cmd/vaultic/find.go) | host/paths/tags only |
-| Warm-up plumbing | [internal/repository/warmup.go](../internal/repository/warmup.go), [internal/backend/backend.go](../internal/backend/backend.go) | `Warmup`/`WarmupWait` implemented by all backends; wired into restorer/checker/repack behind `feature.S3Restore` |
-| Locking | [internal/repository/lock.go](../internal/repository/lock.go), [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) | exclusive/non-exclusive lock files; `--no-lock` exists but is unsafe-opt-out |
-| Prune | [internal/repository/prune.go](../internal/repository/prune.go), [cmd/vaultic/cmd_prune.go](../cmd/vaultic/cmd_prune.go) | single-phase, requires exclusive lock |
-| Packer / pack size | [internal/repository/packer_manager.go](../internal/repository/packer_manager.go) | single pack-size target |
-| Global options | [internal/global/global.go](../internal/global/global.go), [internal/options](../internal/options) | no config-file support |
+| Repo config (JSON) | [internal/vaultic/config.go](../internal/vaultic/config.go), [config_ext.go](../internal/vaultic/config_ext.go) | flat additive rustic-compatible config extensions; foreign config rewrites can strip vaultic-only keys |
+| Snapshot model | [internal/data/snapshot.go](../internal/data/snapshot.go) | label, description, delete protection, merge provenance, and summaries implemented |
+| Snapshot find/filter | [internal/data/snapshot_find.go](../internal/data/snapshot_find.go), [cmd/vaultic/filter_flags.go](../cmd/vaultic/filter_flags.go) | rich filters and `latest~N`; jq and file-level resolution remain missing |
+| Warm-up plumbing | [internal/warmup](../internal/warmup), [internal/backend/warmupcmd](../internal/backend/warmupcmd) | warm-up command, batching, wait protocol, and hot/cold integration implemented |
+| Locking | [internal/repository/lock.go](../internal/repository/lock.go), [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) | typed `None`/`Shared`/`Exclusive` policy; lock-free reads Alpha; minimal-lock prune/forget with external graduation gates pending |
+| Prune | [internal/repository/prune.go](../internal/repository/prune.go), [prune_plan.go](../internal/repository/prune_plan.go) | durable/revalidated minimal-lock plan phases; S3/MinIO and mixed-client graduation pending |
+| Packer / pack size | [internal/repository/packer_manager.go](../internal/repository/packer_manager.go) | tree/data target sizing and limits; dynamic growfactor is stored but unused |
+| Global options | [internal/global/global.go](../internal/global/global.go), [internal/configfile](../internal/configfile) | TOML profiles, environment fallback, log/progress/telemetry options implemented |
 | Backends | [internal/backend](../internal/backend) | local, sftp, rest, s3, swift, b2, azure, gs, rclone |
 | Feature flags | [internal/feature](../internal/feature) | alpha/beta/stable registry, env-driven |
 | CLI | [cmd/vaultic](../cmd/vaultic) | cobra commands, one file per command |
@@ -112,7 +112,7 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 | F1 | In-repo config | `config` command edits compression, pack sizes, chunker, append-only inside repo config JSON | P0 | L | WS-A | ✅ |
 | F2 | `show-config` command | prints repo config incl. extensions | P0 | S | WS-A | ✅ |
 | F3 | Custom chunker config | min/max/avg chunk size, fixed-size chunker, stored in repo | P2 | M | WS-A | ✅ |
-| F4 | Per-type pack sizing | `treepack_*`/`datapack_*` size, grow factor, limits; packs up to 4 GiB | P1 | M | WS-A | ✅ (size+limit; growfactor stored, dynamic growth is a no-op for now) |
+| F4 | Per-type pack sizing | `treepack_*`/`datapack_*` size, grow factor, limits; packs up to 4 GiB | P1 | M | WS-A | ⚠️ partial: size+limit work; dynamic growfactor is stored but unused |
 | F5 | Append-only repo mode | `append_only` in-repo flag blocks delete/overwrite | P1 | M | WS-A | ✅ |
 | F6 | Extra-verify persist | `extra_verify` in-repo instead of per-call `--no-extra-verify` | P2 | S | WS-A | ✅ |
 | F7 | Open repo via master key | `--key`, `--key-file`, `--key-command` bypass password keys | P2 | M | WS-A | ✅ |
@@ -124,9 +124,9 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 | F8 | Snapshot label | `--label`, grouping/filtering by label | P0 | S | WS-B | ✅ |
 | F9 | Snapshot description | `--description`, `--description-from` | P1 | S | WS-B | ✅ |
 | F10 | Delete protection | `--delete-never`, `--delete-after`; forget/prune respect it | P1 | M | WS-B | ✅ |
-| F11 | Rich snapshot filters | `--filter-host/label/paths/paths-exact/tags/tags-exact/before/after/size/size-added/jq/last` on all snapshot-taking commands | P1 | M | WS-C | ✅ (all except `--filter-jq`, deferred) |
+| F11 | Rich snapshot filters | `--filter-host/label/paths/paths-exact/tags/tags-exact/before/after/size/size-added/jq/last` on all snapshot-taking commands | P1 | M | WS-C | ⚠️ partial: all listed filters except `--filter-jq` |
 | F12 | `latest~N` syntax | resolve N-th latest snapshot | P2 | S | WS-C | ✅ |
-| F13 | `<snap>:<path>/file` | sub-path file selection in restore/diff/dump | P2 | S | WS-C | ⏳ deferred to Phase 6 (file-level resolve needs per-command resolver changes) |
+| F13 | `<snap>:<path>/file` | sub-path file selection in restore/diff/dump | P2 | S | WS-C | ⏳ deferred: dump tree paths work; restore/diff file-level resolver missing |
 
 ### 5.3 Cold storage
 
@@ -141,9 +141,9 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 
 | # | Feature | Rustic behavior | Priority | Effort | Workstream |
 |---|---|---|---|---|---|
-| F18 | Lock-free operations | no lock files; safe concurrent clients; additive index writes | P1 | XL | WS-E | ⚠️ partial: lock-free reads only; append writes retain shared locks |
-| F19 | Two-phase prune | repack+upload first, delete later; prune parallel to backups | P1 | L | WS-E | ⚠️ partial: deferred deletion works, but repack still holds exclusive lock |
-| F20 | Prune extras | `--fast-repack`, `--keep-pack`, `--max-repack` (size/%/unlimited), `--repack-all`, `--early-delete-index` | P2 | M | WS-E | ✅ (all except `--keep-pack`, deferred to Phase 6) |
+| F18 | Lock-free operations | no lock files; safe concurrent clients; additive index writes | P1 | XL | WS-E | ⚠️ partial: lock-free reads and tested local/cross-process gates; append writes retain shared locks; MinIO/S3/mixed-client gates pending |
+| F19 | Two-phase prune | repack+upload first, delete later; prune parallel to backups | P1 | L | WS-E | ⚠️ partial: minimal-lock local implementation complete; eventual-consistency, destructive cross-process, and mixed-client gates pending |
+| F20 | Prune extras | `--fast-repack`, `--keep-pack`, `--max-repack` (size/%/unlimited), `--repack-all`, `--early-delete-index` | P2 | M | WS-E | ⚠️ partial: all except `--keep-pack`; backend `FileInfo` has no modification time |
 
 ### 5.5 UX, configuration & observability
 
@@ -151,16 +151,16 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 |---|---|---|---|---|---|
 | F21 | TOML config profiles | `vaultic.toml`, search paths, `-P profile`, `use-profiles` inheritance, env overrides; `[repository] [forget] [backup] [[backup.snapshots]]` | P0 | L | WS-F | ✅ |
 | F22 | Hooks | run-before/after/failed/finally at global/repo/backup/snapshot scope, env context, on-failure policy | P1 | M | WS-F | ✅ |
-| F23 | Log to file + log levels | `--log-file`, `--log-level(-*)` | P1 | S | WS-H | ✅ (`--log-file`, validated `--log-level`) |
+| F23 | Log to file + log levels | `--log-file`, `--log-level(-*)` | P1 | S | WS-H | ⚠️ partial: log file works; `--log-level` validates but does not route/filter logger output |
 | F24 | Progress control | `--no-progress`, `--progress-interval` as real flags (env exists today) | P2 | S | WS-H | ✅ |
-| F25 | Telemetry | `--prometheus(+user/pass)` push metrics, `--opentelemetry` tracing (backup first) | P2 | M | WS-H | ✅ (Pushgateway, InfluxDB v2+, OTel command spans) |
+| F25 | Telemetry | `--prometheus(+user/pass)` push metrics, `--opentelemetry` tracing (backup first) | P2 | M | WS-H | ⚠️ partial: Pushgateway/Influx backup metrics work; OTel is command-span skeleton only |
 | F26 | Interactive TUI | integrated terminal UI (stats live, selection) | P3 | XL | WS-J |
 
 ### 5.6 Backends & sources
 
 | # | Feature | Rustic behavior | Priority | Effort | Workstream |
 |---|---|---|---|---|---|
-| F27 | New backends | webdav, dropbox, ftp, gdrive, onedrive, pcloud (rustic: via opendal) | P2 | L | WS-G |
+| F27 | New backends | dropbox, ftp, gdrive, onedrive, pcloud (rustic: via opendal; WebDAV excluded) | P2 | L | WS-G |
 | F28 | Remote backup sources | back up *from* S3/cloud storage | P3 | XL | WS-I |
 | F29 | Built-in sftp (no ssh binary) | rustic uses opendal sftp; vaultic shells out to ssh | P3 | M | WS-G |
 
@@ -686,10 +686,11 @@ flag spelling as hidden aliases (migration aid only).
 
 ### 7.5 `prune` ([cmd_prune.go](../cmd/vaultic/cmd_prune.go))
 
-Covered by WS-E: two-phase, `--fast-repack`, `--keep-pack`, `--keep-delete`,
+Covered by WS-E: two-phase, `--fast-repack`, `--keep-delete`,
 `--instant-delete`, `--max-repack` (size/%/unlimited), `--repack-all`,
 `--early-delete-index`, tree/data pack sizing from repo config (WS-A),
-cold-pack handling (WS-D). Also: keep `min_packsize_tolerate_percent` /
+cold-pack handling (WS-D). Deferred: ``--keep-pack`` needs generic backend
+mtime support; keep `min_packsize_tolerate_percent` /
 `max_packsize_tolerate_percent` configurable in-repo (today hardcoded /
 `--repack-smaller-than` in [internal/repository/prune.go](../internal/repository/prune.go)).
 
@@ -776,7 +777,7 @@ graph TD
 - ~~Stand up an **interop test harness**~~ — **done**:
   [helpers/interop](../helpers/interop/interop.sh) runs a 3×3 writer×reader
   matrix (vaultic × restic 0.19.1 × rustic 0.11.4) covering
-  init/backup/snapshots/ls/restore/check/forget/prune; 99/99 steps pass.
+  init/backup/snapshots/ls/restore/check/forget/prune; 107/107 steps pass.
   CI: `.github/workflows/interop.yml` (workflow_dispatch, continue-on-error
   until Phase 1 lands).
 - Exit criteria met: `go build ./...`, `go vet ./...` clean; unit tests green
@@ -785,7 +786,7 @@ graph TD
   fs xattr quirks). Interop smoke test verified locally and runnable on
   demand in CI.
 
-### Phase 1 — In-repo config (WS-A; F1–F7) — ✅ done (branch `rustic-parity`, 2026-08-26)
+### Phase 1 — In-repo config (WS-A; F1–F7) — ⚠️ substantially complete (branch `rustic-parity`, 2026-08-26)
 
 - Deliverables (all landed): extended flat `Config` in
   [internal/vaultic/config_ext.go](../internal/vaultic/config_ext.go) +
@@ -816,11 +817,10 @@ graph TD
 - Exit criteria met: config-driven repo behaves like flag-driven operation;
   interop verified both directions; integration tests added
   ([cmd_config_integration_test.go](../cmd/vaultic/cmd_config_integration_test.go)).
-  Deferred: dynamic pack-size growth (growfactor is stored + validated but
-  target sizing is not yet repo-size dependent), fixed-size chunker is
-  accepted/serialized but not yet wired into the archiver's chunker.
+  Remaining parity gap: dynamic pack-size growth (growfactor is stored +
+  validated but target sizing is not repo-size dependent).
 
-### Phase 2 — Snapshot metadata & filtering (WS-B, WS-C; F8–F13) — ✅ done (branch `rustic-parity`, 2026-08-26)
+### Phase 2 — Snapshot metadata & filtering (WS-B, WS-C; F8–F13) — ⚠️ substantially complete (branch `rustic-parity`, 2026-08-26)
 
 - Deliverables (all landed): label/description/delete-protection end-to-end
   (backup flags → archiver `SnapshotOptions` → snapshot JSON; `snapshots`
@@ -841,8 +841,8 @@ graph TD
     `Never` and `After` snapshots; restic ignores the unknown keys.
 - Exit criteria met: `forget` keeps delete-protected snapshots (integration
   test), filters behave identically across commands (single shared flag set).
-  Deferred: `--filter-jq` (needs a jq engine; P2), file-level `snap:path/file`
-  (F13, needs per-command resolver changes — moved to Phase 6 command batch).
+  Remaining parity gaps: `--filter-jq` (needs a jq engine) and file-level
+  `snap:path/file` resolution for restore/diff (dump tree paths already work).
 
 ### Phase 3 — Cold storage completion (WS-D; F14–F17) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
@@ -873,7 +873,7 @@ graph TD
   pack mtimes, i.e. a `FileInfo`/backend interface change — moved to Phase 6.
   Dynamic pack-size growth (growfactor) still pending (from Phase 1).
 
-### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20) — ⚠️ partial (branch `rustic-parity`, 2026-08-26)
+### Phase 4 — Lock-free & two-phase prune (WS-E; F18–F20) — ⚠️ substantially complete, external gates pending (branch `rustic-parity`, 2026-08-26)
 
 - Deliverables: `LockPolicy` per command, additive index discipline,
   two-phase prune with `--keep-delete`/`--instant-delete`, prune extras.
@@ -920,7 +920,8 @@ graph TD
   already plans purely from the index, so it documents index-trusted intent);
   `--early-delete-index` deletes superseded index files right after the new
   index is written, before pack removal, to free index space earlier.
-  `--keep-pack` is deferred to Phase 6 (needs backend FileInfo mtime).
+  `--keep-pack` remains deferred: the generic backend ``FileInfo`` contract
+  carries only name/size, not modification time.
 - **Concurrency soak** — `TestPruneConcurrencySoak`
   ([cmd/vaultic/cmd_prune_integration_test.go](../cmd/vaultic/cmd_prune_integration_test.go))
   runs append backup concurrently with destructive prune and dry-run forget
@@ -929,7 +930,7 @@ graph TD
   The detailed remaining stages are specified in
   [WS-E's locking parity roadmap](#locking-parity-roadmap-remaining-work).
 
-### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25) — ✅ done (branch `rustic-parity`, 2026-08-26)
+### Phase 5 — Profiles, hooks, observability (WS-F, WS-H; F21–F25) — ⚠️ substantially complete (branch `rustic-parity`, 2026-08-26)
 
 - **F21 profiles** — new [internal/configfile](../internal/configfile) parses
   TOML with repeatable ``-P/--use-profile``, recursive ``use-profiles``
@@ -946,22 +947,24 @@ graph TD
   global, repository, command, and per-snapshot-job scopes. Hooks run without
   an implicit shell, honor ``error|warn|ignore``, and export VAULTIC_ plus
   RUSTIC_ context variables.
-- **F23/F24 controls** — ``--log-file``, validated ``--log-level``,
+- **F23/F24 controls** — ``--log-file``, validated (but not yet filtering)
+  ``--log-level``,
   ``--no-progress``, and ``--progress-interval`` are global, environment-aware,
   and profile-settable. The progress override is shared by every existing
   progress reporter.
 - **F25 telemetry** — successful backups publish Pushgateway metrics via
   ``--prometheus``/credentials or InfluxDB v2-compatible line protocol via
   ``--influxdb-url``, token, org, and bucket. Telemetry failures warn but do
-  not invalidate durable snapshots. ``--opentelemetry`` emits command spans
-  through the configured global provider. InfluxDB support uses direct HTTP to
-  avoid a version-bound client SDK.
+  not invalidate durable snapshots. ``--opentelemetry`` currently emits
+  command spans only through the configured global provider; backend/index/
+  pack spans remain deferred. InfluxDB support uses direct HTTP to avoid a
+  version-bound client SDK.
 - **Tests/verification** — profile include/precedence/cycle tests, hook
   context/failure-policy tests, a real-backup Influx v2 HTTP test, auto-init
   coverage, and a CLI smoke test for a profile job, hook, label, no-progress,
   and log file. See [052_profiles_automation.rst](052_profiles_automation.rst).
 
-### Phase 6 — Command parity batch (§7; F30–F32 + enhancements) — ✅ done (branch `rustic-parity`, 2026-08-26)
+### Phase 6 — Command parity batch (§7; F30–F32 + enhancements) — ⚠️ selected high-value work complete (branch `rustic-parity`, 2026-08-26)
 
 - **F30 merge** — `merge` recursively unions snapshot trees, resolving
   conflicts in favor of the newest source node. It creates one new snapshot,
@@ -980,7 +983,8 @@ graph TD
 
 ### Phase 7 — Long tail (WS-G, WS-I, WS-J; F26–F29)
 
-- webdav backend first, then remaining cloud backends; remote sources; TUI.
+- Remaining cloud backends (excluding WebDAV, which is out of scope), remote
+  sources, and TUI.
 - Exit criteria: parity matrix re-issued with remaining deltas documented as
   intentional (e.g. features covered via rclone).
 
