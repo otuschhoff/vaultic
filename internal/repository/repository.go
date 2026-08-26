@@ -243,6 +243,12 @@ func (r *Repository) Cache() *cache.Cache {
 	return r.cache
 }
 
+// Backend returns the backend used by the repository (used for internal
+// plumbing such as hot/cold metadata mirroring).
+func (r *Repository) Backend() backend.Backend {
+	return r.be
+}
+
 // SetDryRun sets the repo backend into dry-run mode.
 func (r *Repository) SetDryRun() {
 	r.be = dryrun.New(r.be)
@@ -1031,6 +1037,39 @@ func (r *Repository) Init(ctx context.Context, version uint, password string, ch
 	}
 
 	return r.init(ctx, password, cfg)
+}
+
+// InitWithConfig initializes the repository with the given config. Unlike Init
+// it does not generate a new repository ID; this is used to create the hot
+// part of a hot/cold repository, which shares the cold part's identity (and
+// chunker parameters) so that keys/snapshots/indexes are interchangeable.
+func (r *Repository) InitWithConfig(ctx context.Context, password string, cfg vaultic.Config) error {
+	if cfg.Version > vaultic.MaxRepoVersion || cfg.Version < vaultic.MinRepoVersion {
+		return fmt.Errorf("repository version %v out of range", cfg.Version)
+	}
+	return r.init(ctx, password, cfg)
+}
+
+// InitWithConfigAndKey initializes the repository with the given config and an
+// existing master key (instead of generating a new one). This is used for the
+// hot part of a hot/cold repository so that data written by either part can be
+// read with the same master key.
+func (r *Repository) InitWithConfigAndKey(ctx context.Context, password string, cfg vaultic.Config, masterKey *crypto.Key) error {
+	if cfg.Version > vaultic.MaxRepoVersion || cfg.Version < vaultic.MinRepoVersion {
+		return fmt.Errorf("repository version %v out of range", cfg.Version)
+	}
+	if masterKey == nil {
+		return r.init(ctx, password, cfg)
+	}
+
+	key, err := AddKey(ctx, r, password, "", "", masterKey)
+	if err != nil {
+		return err
+	}
+	r.key = key.master
+	r.keyID = key.ID()
+	r.setConfig(cfg)
+	return vaultic.SaveConfig(ctx, &internalRepository{r}, cfg)
 }
 
 // init creates a new master key with the supplied password and uses it to save

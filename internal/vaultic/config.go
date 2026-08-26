@@ -34,6 +34,8 @@ type Config struct {
 
 	// AppendOnlyFlag marks the repository as append-only.
 	AppendOnlyFlag bool `json:"append_only,omitempty"`
+	// IsHot marks this repository as the hot part of a hot/cold repository.
+	IsHot bool `json:"is_hot,omitempty"`
 	// Compression is the zstd compression level (-7..22; 0 = off). Nil means
 	// "auto" (decided per repository version).
 	Compression *int `json:"compression,omitempty"`

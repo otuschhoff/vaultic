@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/vaultic/vaultic/internal/backend"
 	"github.com/vaultic/vaultic/internal/backend/cache"
+	"github.com/vaultic/vaultic/internal/backend/hotcold"
 	"github.com/vaultic/vaultic/internal/backend/limiter"
 	"github.com/vaultic/vaultic/internal/backend/location"
 	"github.com/vaultic/vaultic/internal/backend/logger"
@@ -25,6 +26,7 @@ import (
 	"github.com/vaultic/vaultic/internal/env"
 	"github.com/vaultic/vaultic/internal/options"
 	"github.com/vaultic/vaultic/internal/repository"
+	"github.com/vaultic/vaultic/internal/repository/crypto"
 	"github.com/vaultic/vaultic/internal/textfile"
 	"github.com/vaultic/vaultic/internal/ui"
 	"github.com/vaultic/vaultic/internal/vaultic"
@@ -666,6 +668,41 @@ func CreateRepository(ctx context.Context, gopts Options, version uint, chunkerP
 	return s, nil
 }
 
+// CreateRepositoryWithConfig initializes a repository at gopts.Repo with the
+// given (already populated) config instead of a freshly generated one. Used to
+// create the hot part of a hot/cold repository (shared repository ID). If
+// masterKey is non-nil it is reused instead of generating a new one (shared
+// master key between hot and cold parts).
+func CreateRepositoryWithConfig(ctx context.Context, gopts Options, cfg vaultic.Config, masterKey *crypto.Key, printer vaultic.Printer) (*repository.Repository, error) {
+	repo, err := readRepo(gopts)
+	if err != nil {
+		return nil, err
+	}
+
+	gopts.Password, err = ReadPasswordTwice(ctx, gopts,
+		"enter password for new repository: ",
+		"enter password again: ")
+	if err != nil {
+		return nil, err
+	}
+
+	be, err := innerOpenBackend(ctx, repo, gopts, gopts.Extended, true, printer)
+	if err != nil {
+		return nil, errors.Fatalf("create repository at %s failed: %v", location.StripPassword(gopts.Backends, repo), err)
+	}
+
+	s, err := createRepositoryInstance(be, gopts)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.InitWithConfigAndKey(ctx, gopts.Password, cfg, masterKey); err != nil {
+		return nil, errors.Fatalf("create key in repository at %s failed: %v", location.StripPassword(gopts.Backends, repo), err)
+	}
+
+	return s, nil
+}
+
 func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options.Options, create bool, printer vaultic.Printer) (backend.Backend, error) {
 	debug.Log("parsing location %v", location.StripPassword(gopts.Backends, s))
 
@@ -687,6 +724,19 @@ func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options
 	be, err = wrapBackend(be, gopts, printer)
 	if err != nil {
 		return nil, err
+	}
+
+	// for a hot/cold repository, also open the hot part and combine both;
+	// `s` is the cold (complete) repository, RepoHot the metadata cache
+	if gopts.RepoHot != "" {
+		hotGopts := gopts
+		hotGopts.RepoHot = "" // open the hot part as a plain repository
+		hotBe, err := innerOpenBackend(ctx, gopts.RepoHot, hotGopts, hotGopts.Extended, create, printer)
+		if err != nil {
+			return nil, errors.Errorf("unable to open hot repository %v: %v", location.StripPassword(gopts.Backends, gopts.RepoHot), err)
+		}
+		debug.Log("using hot/cold repository (hot: %v)", location.StripPassword(gopts.Backends, gopts.RepoHot))
+		be = hotcold.New(hotBe, be)
 	}
 
 	return be, nil

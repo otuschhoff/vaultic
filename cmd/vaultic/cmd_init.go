@@ -60,6 +60,11 @@ type InitOptions struct {
 	SetChunkMaxSize string
 	SetTreePackSize string
 	SetDataPackSize string
+
+	// HotOnly initializes only the hot part of a hot/cold repository
+	// (requires --repo-hot): the cold repository must already exist; only
+	// metadata is copied to the hot part.
+	HotOnly bool
 }
 
 func (opts *InitOptions) AddFlags(f *pflag.FlagSet) {
@@ -76,6 +81,7 @@ func (opts *InitOptions) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.SetChunkMaxSize, "set-chunk-max-size", "", "set maximum chunk `size` in bytes")
 	f.StringVar(&opts.SetTreePackSize, "set-treepack-size", "", "set target tree pack `size` in bytes")
 	f.StringVar(&opts.SetDataPackSize, "set-datapack-size", "", "set target data pack `size` in bytes")
+	f.BoolVar(&opts.HotOnly, "hot-only", false, "only initialize the hot part of a hot/cold repository (requires --repo-hot; the cold repository must exist)")
 }
 
 func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args []string, term ui.Terminal) error {
@@ -84,6 +90,10 @@ func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args [
 	}
 
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+
+	if opts.HotOnly {
+		return runInitHotOnly(ctx, opts, gopts, printer)
+	}
 
 	var version uint
 	switch opts.RepositoryVersion {
@@ -133,6 +143,50 @@ func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args [
 		return json.NewEncoder(gopts.Term.OutputWriter()).Encode(status)
 	}
 
+	return nil
+}
+
+// runInitHotOnly initializes only the hot part of a hot/cold repository. The
+// cold repository (gopts.Repo) must already exist; the hot part
+// (gopts.RepoHot) is created and receives the metadata (config marked is_hot,
+// keys, snapshots, indexes).
+func runInitHotOnly(ctx context.Context, opts InitOptions, gopts global.Options, printer vaultic.Printer) error {
+	if gopts.RepoHot == "" {
+		return errors.Fatal("--hot-only requires --repo-hot to be set")
+	}
+
+	// open the existing cold repository to read its config (chunker params)
+	coldGopts := gopts
+	coldGopts.RepoHot = "" // open the cold repo as a normal repository
+	cold, err := global.OpenRepository(ctx, coldGopts, printer)
+	if err != nil {
+		return errors.Fatalf("unable to open cold repository (must exist for --hot-only): %v", err)
+	}
+
+	// the hot part shares the cold repository's identity, chunker parameters and
+	// master key; only metadata is mirrored. Mark it as is_hot.
+	hotCfg := cold.Config()
+	hotCfg.IsHot = true
+	masterKey := cold.Key()
+	defer func() { _ = cold.Close() }()
+
+	// create the hot repository at RepoHot with the cold repo's config and key
+	hotGopts := gopts
+	hotGopts.Repo = gopts.RepoHot
+	hotGopts.RepoHot = ""
+	hot, err := global.CreateRepositoryWithConfig(ctx, hotGopts, hotCfg, masterKey, printer)
+	if err != nil {
+		return err
+	}
+
+	// mirror existing metadata (keys, snapshots, indexes) into the hot part
+	if err := repository.CopyMetadata(ctx, cold, hot); err != nil {
+		return err
+	}
+
+	printer.P("initialized hot repository %v at %s (cold repository: %s)",
+		hot.Config().ID[:10], location.StripPassword(gopts.Backends, gopts.RepoHot),
+		location.StripPassword(gopts.Backends, gopts.Repo))
 	return nil
 }
 
