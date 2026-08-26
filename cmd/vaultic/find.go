@@ -27,7 +27,7 @@ func initSingleSnapshotFilter(flags *pflag.FlagSet, filt *data.SnapshotFilter) {
 	flags.StringArrayVarP(&filt.Hosts, "host", "H", nil, "only consider snapshots for this `host`, when snapshot ID \"latest\" is given (can be specified multiple times, use empty string to unset default value) (default: $VAULTIC_HOST)")
 	flags.Var(&filt.Tags, "tag", "only consider snapshots including `tag[,tag,...]`, when snapshot ID \"latest\" is given (can be specified multiple times)")
 	flags.StringArrayVar(&filt.Paths, "path", nil, "only consider snapshots including this (absolute) `path`, when snapshot ID \"latest\" is given (can be specified multiple times, snapshots must include all specified paths)")
-	initExtendedSnapshotFilter(flags, filt, false)
+	initExtendedSnapshotFilter(flags, filt, true)
 }
 
 // finalizeSnapshotFilter applies VAULTIC_HOST default only if --host flag wasn't explicitly set.

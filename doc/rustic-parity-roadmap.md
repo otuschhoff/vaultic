@@ -72,7 +72,7 @@ the conventions in Section 12.
 |---|---|---|
 | Repo config (JSON) | [internal/vaultic/config.go](../internal/vaultic/config.go), [config_ext.go](../internal/vaultic/config_ext.go) | flat additive rustic-compatible config extensions; foreign config rewrites can strip vaultic-only keys |
 | Snapshot model | [internal/data/snapshot.go](../internal/data/snapshot.go) | label, description, delete protection, merge provenance, and summaries implemented |
-| Snapshot find/filter | [internal/data/snapshot_find.go](../internal/data/snapshot_find.go), [cmd/vaultic/filter_flags.go](../cmd/vaultic/filter_flags.go) | rich filters and `latest~N`; jq and file-level resolution remain missing |
+| Snapshot find/filter | [internal/data/snapshot_find.go](../internal/data/snapshot_find.go), [cmd/vaultic/filter_flags.go](../cmd/vaultic/filter_flags.go) | rustic-compatible structured filters and jq; file-level resolution remains missing |
 | Warm-up plumbing | [internal/warmup](../internal/warmup), [internal/backend/warmupcmd](../internal/backend/warmupcmd) | warm-up command, batching, wait protocol, and hot/cold integration implemented |
 | Locking | [internal/repository/lock.go](../internal/repository/lock.go), [cmd/vaultic/lock.go](../cmd/vaultic/lock.go) | typed `None`/`Shared`/`Exclusive` policy; lock-free reads Alpha; minimal-lock prune/forget with external graduation gates pending |
 | Prune | [internal/repository/prune.go](../internal/repository/prune.go), [prune_plan.go](../internal/repository/prune_plan.go) | durable/revalidated minimal-lock plan phases; S3/MinIO and mixed-client graduation pending |
@@ -124,7 +124,7 @@ value, P2 = nice to have, P3 = experimental/long-tail.
 | F8 | Snapshot label | `--label`, grouping/filtering by label | P0 | S | WS-B | ✅ |
 | F9 | Snapshot description | `--description`, `--description-from` | P1 | S | WS-B | ✅ |
 | F10 | Delete protection | `--delete-never`, `--delete-after`; forget/prune respect it | P1 | M | WS-B | ✅ |
-| F11 | Rich snapshot filters | `--filter-host/label/paths/paths-exact/tags/tags-exact/before/after/size/size-added/jq/last` on all snapshot-taking commands | P1 | M | WS-C | ⚠️ partial: all listed filters except `--filter-jq` |
+| F11 | Rich snapshot filters | `--filter-host/label/paths/paths-exact/tags/tags-exact/before/after/size/size-added/jq/last` on all snapshot-taking commands | P1 | M | WS-C | ✅ |
 | F12 | `latest~N` syntax | resolve N-th latest snapshot | P2 | S | WS-C | ✅ |
 | F13 | `<snap>:<path>/file` | sub-path file selection in restore/diff/dump | P2 | S | WS-C | ⏳ deferred: dump tree paths work; restore/diff file-level resolver missing |
 
@@ -840,9 +840,10 @@ graph TD
     the jiff format and reads both. Verified: rustic reads vaultic-written
     `Never` and `After` snapshots; restic ignores the unknown keys.
 - Exit criteria met: `forget` keeps delete-protected snapshots (integration
-  test), filters behave identically across commands (single shared flag set).
-  Remaining parity gaps: `--filter-jq` (needs a jq engine) and file-level
-  `snap:path/file` resolution for restore/diff (dump tree paths already work).
+  test), filters behave identically across commands (single shared flag set),
+  and rustic-compatible jq expressions are evaluated against snapshot JSON.
+  Remaining parity gap: `snap:path/file` resolution for restore/diff (dump tree
+  paths already work).
 
 ### Phase 3 — Cold storage completion (WS-D; F14–F17) — ✅ done (branch `rustic-parity`, 2026-08-26)
 
@@ -1030,7 +1031,7 @@ graph TD
 | Lock-free mixed-client confusion | index bloat, failed prune | docs + `check` detection of foreign locks; conservative defaults |
 | Scope creep (60+ items) | roadmap stalls | phases are independently shippable; P2/P3 items may be deferred without blocking releases |
 | Module-path rename churn | merge conflicts | do once, early (Phase 0), mechanical |
-| jq filter dependency weight | binary size | make `--filter-jq` a build tag or accept size; gojq is pure Go |
+| jq filter dependency weight | binary size | gojq is a pure-Go runtime dependency; retain it for built-in `--filter-jq` parity |
 | WebDAV server security surface | exposure | read-only by default, explicit auth flags, localhost default bind |
 
 ## 12. Implementation conventions (for every PR)

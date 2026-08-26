@@ -2,14 +2,17 @@ package data
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/itchyny/gojq"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
@@ -30,7 +33,10 @@ type SnapshotFilter struct {
 	// Extended filters (rustic --filter-* equivalents). All are optional.
 
 	// Labels matches snapshots whose Label is in the list.
-	Labels []string
+	Labels      []string
+	FilterHosts []string
+	FilterPaths [][]string
+	FilterTags  TagLists
 	// PathsExact matches snapshots whose Paths equal exactly one of the given
 	// path lists (no subset matching).
 	PathsExact [][]string
@@ -41,18 +47,20 @@ type SnapshotFilter struct {
 	After time.Time
 	// SizeMin/SizeMax bound the snapshot's TotalBytesProcessed. Zero disables.
 	SizeMin, SizeMax uint64
-	// SizeAddedMin/SizeAddedMax bound the snapshot's DataAddedPacked. Zero disables.
+	// SizeAddedMin/SizeAddedMax bound the snapshot's DataAdded. Zero disables.
 	SizeAddedMin, SizeAddedMax uint64
 	// FilterLast, when > 0, keeps only the newest FilterLast snapshots of the
 	// otherwise-matching set (per group when used with grouping).
 	FilterLast int
+	// FilterJQ is a jq expression that must return a boolean for each snapshot.
+	FilterJQ string
 }
 
 func (f *SnapshotFilter) Empty() bool {
-	return len(f.Hosts)+len(f.Tags)+len(f.Paths)+len(f.Labels)+len(f.PathsExact)+len(f.TagsExact) == 0 &&
+	return len(f.Hosts)+len(f.Tags)+len(f.Paths)+len(f.Labels)+len(f.FilterHosts)+len(f.FilterPaths)+len(f.FilterTags)+len(f.PathsExact)+len(f.TagsExact) == 0 &&
 		f.TimestampLimit.IsZero() && f.After.IsZero() &&
 		f.SizeMin == 0 && f.SizeMax == 0 && f.SizeAddedMin == 0 && f.SizeAddedMax == 0 &&
-		f.FilterLast == 0
+		f.FilterLast == 0 && f.FilterJQ == ""
 }
 
 // matches reports whether sn satisfies all configured filter criteria.
@@ -60,11 +68,40 @@ func (f *SnapshotFilter) matches(sn *Snapshot) bool {
 	return sn.HasHostname(f.Hosts) &&
 		sn.HasTagList(f.Tags) &&
 		sn.HasPaths(f.Paths) &&
+		(sn.HasHostname(f.FilterHosts) || len(f.FilterHosts) == 0) &&
+		(matchesStringLists(sn.Paths, f.FilterPaths)) &&
+		(sn.HasTagList(f.FilterTags) || len(f.FilterTags) == 0) &&
 		f.matchesLabel(sn) &&
 		f.matchesPathsExact(sn) &&
 		f.matchesTagsExact(sn) &&
 		f.matchesTime(sn) &&
-		f.matchesSize(sn)
+		f.matchesSize(sn) &&
+		f.matchesJQ(sn)
+}
+
+func matchesStringLists(values []string, filters [][]string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	for _, filter := range filters {
+		if snHasAll(values, filter) {
+			return true
+		}
+	}
+	return false
+}
+
+func snHasAll(values, wanted []string) bool {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	for _, value := range wanted {
+		if _, ok := set[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *SnapshotFilter) matchesLabel(sn *Snapshot) bool {
@@ -99,10 +136,10 @@ func (f *SnapshotFilter) matchesTagsExact(sn *Snapshot) bool {
 }
 
 func (f *SnapshotFilter) matchesTime(sn *Snapshot) bool {
-	if !f.After.IsZero() && sn.Time.Before(f.After) {
+	if !f.After.IsZero() && !sn.Time.After(f.After) {
 		return false
 	}
-	if !f.TimestampLimit.IsZero() && sn.Time.After(f.TimestampLimit) {
+	if !f.TimestampLimit.IsZero() && !sn.Time.Before(f.TimestampLimit) {
 		return false
 	}
 	return true
@@ -123,7 +160,7 @@ func (f *SnapshotFilter) matchesSize(sn *Snapshot) bool {
 	if f.SizeMax != 0 && total > f.SizeMax {
 		return false
 	}
-	added := sn.Summary.DataAddedPacked
+	added := sn.Summary.DataAdded
 	if f.SizeAddedMin != 0 && added < f.SizeAddedMin {
 		return false
 	}
@@ -133,19 +170,72 @@ func (f *SnapshotFilter) matchesSize(sn *Snapshot) bool {
 	return true
 }
 
+func (f *SnapshotFilter) matchesJQ(sn *Snapshot) bool {
+	if f.FilterJQ == "" {
+		return true
+	}
+	code, err := snapshotJQCode(f.FilterJQ)
+	if err != nil {
+		return false
+	}
+	encoded, err := json.Marshal(sn)
+	if err != nil {
+		return false
+	}
+	var input any
+	if err := json.Unmarshal(encoded, &input); err != nil {
+		return false
+	}
+	result, ok := code.Run(input).Next()
+	if !ok {
+		return false
+	}
+	matched, ok := result.(bool)
+	return ok && matched
+}
+
+var snapshotJQCache = struct {
+	sync.RWMutex
+	codes map[string]*gojq.Code
+}{codes: make(map[string]*gojq.Code)}
+
+func snapshotJQCode(expression string) (*gojq.Code, error) {
+	snapshotJQCache.RLock()
+	code := snapshotJQCache.codes[expression]
+	snapshotJQCache.RUnlock()
+	if code != nil {
+		return code, nil
+	}
+	query, err := gojq.Parse(expression)
+	if err != nil {
+		return nil, err
+	}
+	code, err = gojq.Compile(query)
+	if err != nil {
+		return nil, err
+	}
+	snapshotJQCache.Lock()
+	snapshotJQCache.codes[expression] = code
+	snapshotJQCache.Unlock()
+	return code, nil
+}
+
 // stringSlicesEqualUnordered reports whether a and b contain the same set of
 // strings, ignoring order.
 func stringSlicesEqualUnordered(a, b []string) bool {
-	if len(a) != len(b) {
+	setA := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		setA[s] = struct{}{}
+	}
+	setB := make(map[string]struct{}, len(b))
+	for _, s := range b {
+		setB[s] = struct{}{}
+	}
+	if len(setA) != len(setB) {
 		return false
 	}
-	m := make(map[string]int, len(a))
-	for _, s := range a {
-		m[s]++
-	}
-	for _, s := range b {
-		m[s]--
-		if m[s] < 0 {
+	for s := range setA {
+		if _, ok := setB[s]; !ok {
 			return false
 		}
 	}

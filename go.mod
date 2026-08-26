@@ -19,10 +19,12 @@ require (
 	github.com/anacrolix/fuse v0.3.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/dustin/go-humanize v1.0.1
 	github.com/elithrar/simple-scrypt v1.4.1
 	github.com/go-ole/go-ole v1.3.0
 	github.com/google/go-cmp v0.7.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/itchyny/gojq v0.12.17
 	github.com/klauspost/compress v1.18.7
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/ncw/swift/v2 v2.0.5
@@ -63,7 +65,6 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.57.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/felixge/fgprof v0.9.3 // indirect
@@ -78,6 +79,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.19 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/itchyny/timefmt-go v0.1.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/kr/fs v0.1.0 // indirect
