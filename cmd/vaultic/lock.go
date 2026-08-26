@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -15,7 +16,14 @@ func internalOpenWithLocked(ctx context.Context, gopts global.Options, dryRun bo
 	}
 
 	unlock := func() {}
-	if !dryRun {
+	// Lock-free mode (default): read-only and append-only operations skip the
+	// lock file entirely (but remain writable). Index writes are additive, so
+	// concurrent lock-free writers cannot corrupt the repository; stale locks
+	// therefore no longer block routine backups or reads. Exclusive operations
+	// (prune, forget, repair, ...) always take an exclusive lock regardless of
+	// this flag.
+	skipLock := !exclusive && feature.Flag.Enabled(feature.LockFree)
+	if !dryRun && !skipLock {
 		unlock, ctx, err = repository.LockRepo(ctx, repo, exclusive, gopts.RetryLock, func(msg string) {
 			if !gopts.JSON {
 				printer.P("%s", msg)

@@ -13,6 +13,11 @@ const (
 	SafeForgetKeepTags      FlagName = "safe-forget-keep-tags"
 	S3Restore               FlagName = "s3-restore"
 	WarmupCommand           FlagName = "warmup-command"
+	// LockFree makes read-only and append-only commands (backup, restore,
+	// snapshots, ls, copy, ...) operate without creating lock files. Index
+	// writes are additive, so concurrent lock-free writers cannot corrupt the
+	// repository. Exclusive commands (prune, forget, repair, ...) still lock.
+	LockFree FlagName = "lock-free"
 )
 
 func init() {
@@ -23,5 +28,7 @@ func init() {
 		DeviceIDForHardlinks:    {Type: Alpha, Description: "store deviceID only for hardlinks to reduce metadata changes for example when using btrfs subvolumes. Will be removed in a future vaultic version after repository format 3 is available"},
 		ExplicitS3AnonymousAuth: {Type: Stable, Description: "forbid anonymous S3 authentication unless `-o s3.unsafe-anonymous-auth=true` is set"},
 		SafeForgetKeepTags:      {Type: Stable, Description: "prevent deleting all snapshots if the tag passed to `forget --keep-tags tagname` does not exist"},
-		S3Restore:               {Type: Alpha, Description: "restore S3 objects from cold storage classes when `-o s3.enable-restore=true` is set"}, WarmupCommand: {Type: Beta, Description: "run the --warm-up-command to warm up cold storage before reading packs"}})
+		S3Restore:               {Type: Alpha, Description: "restore S3 objects from cold storage classes when `-o s3.enable-restore=true` is set"}, WarmupCommand: {Type: Beta, Description: "run the --warm-up-command to warm up cold storage before reading packs"},
+		LockFree: {Type: Beta, Description: "let read-only and append-only commands (backup, restore, snapshots, ls, copy, ...) run without lock files; exclusive commands still lock. Disable with `--no-lock`-independent `VAULTIC_FEATURES=lock-free=false` to restore strict locking."},
+	})
 }
