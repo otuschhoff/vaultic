@@ -857,6 +857,16 @@ or small commit series so it can be reviewed or reverted independently.
 **Goal:** make the Rust/SlateDB dependency reproducible without touching
 vaultic runtime behavior.
 
+**Current implementation state (2026-08-27):** the `vaulticd` crate scaffold,
+versioned protobuf contract, Unix/TCP transport configuration, singleton lock,
+private socket permissions, fail-fast protobuf generator, and musl build script
+are present on branch `kvdb`. Generated Go bindings are checked in under
+`internal/index/proto/vaulticd/v1`, the host daemon compiles against the pinned
+SlateDB revision, and the native self-test plus Unix-socket RPC smoke test pass.
+The Linux musl artifact remains an environment/CI prerequisite: this host does
+not have the `x86_64-unknown-linux-musl` target installed. Phase 0 is not
+complete until the CI/native-toolchain job builds and runs the musl artifact.
+
 **Implementation steps:**
 
 1. Pin the SlateDB Rust crate commit and record the official

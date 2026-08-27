@@ -1,0 +1,18 @@
+[package]
+name = "vaulticd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "BSD-2-Clause"
+description = "Vaultic SlateDB metadata service"
+
+[dependencies]
+anyhow = "1.0"
+prost = "0.13"
+slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "ae07acd4498068d1b9ba799cc9f6c9824e6f6251" }
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tonic = { version = "0.12", features = ["transport"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[build-dependencies]
+tonic-build = "0.12"

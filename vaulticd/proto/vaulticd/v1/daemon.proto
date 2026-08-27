@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package vaulticd.v1;
+
+option go_package = "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdv1;vaulticdv1";
+
+message Empty {}
+
+message HealthRequest {
+  string repository_id = 1;
+}
+
+message HealthResponse {
+  string daemon_id = 1;
+  string protocol_version = 2;
+  string schema_version = 3;
+  string repository_id = 4;
+  string slate_db_revision = 5;
+  bool ready = 6;
+}
+
+message CapabilitiesRequest {
+  string repository_id = 1;
+}
+
+message CapabilitiesResponse {
+  string daemon_id = 1;
+  string protocol_version = 2;
+  string schema_version = 3;
+  string repository_id = 4;
+  bool unix_socket = 5;
+  bool tcp_enabled = 6;
+  uint32 max_batch_items = 7;
+  uint32 max_message_bytes = 8;
+}
+
+service VaulticDaemon {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc Drain(Empty) returns (Empty);
+  rpc Shutdown(Empty) returns (Empty);
+}
