@@ -857,15 +857,15 @@ or small commit series so it can be reviewed or reverted independently.
 **Goal:** make the Rust/SlateDB dependency reproducible without touching
 vaultic runtime behavior.
 
-**Current implementation state (2026-08-27):** the `vaulticd` crate scaffold,
-versioned protobuf contract, Unix/TCP transport configuration, singleton lock,
+**Current implementation state (2026-08-27):** **complete.** The `vaulticd`
+crate scaffold, versioned protobuf contract, Unix/TCP transport configuration,
 private socket permissions, fail-fast protobuf generator, and musl build script
 are present on branch `kvdb`. Generated Go bindings are checked in under
-`internal/index/proto/vaulticd/v1`, the host daemon compiles against the pinned
-SlateDB revision, and the native self-test plus Unix-socket RPC smoke test pass.
-The Linux musl artifact remains an environment/CI prerequisite: this host does
-not have the `x86_64-unknown-linux-musl` target installed. Phase 0 is not
-complete until the CI/native-toolchain job builds and runs the musl artifact.
+`internal/index/proto/vaulticd/v1`. The host daemon compiles against the pinned
+SlateDB revision; its native self-test and Unix-socket RPC smoke test pass. A
+local `cargo zigbuild --target x86_64-unknown-linux-musl --release` also
+produced `vaulticd`, verified as a statically linked, stripped x86-64 Linux ELF
+artifact (SHA-256 `7eb16913b78fd69702792e3094a24c5ae331fd6b468b8f5a3306f7cd28d4dd88`).
 
 **Implementation steps:**
 
@@ -891,6 +891,64 @@ that remains usable when `vaulticd` is absent.
 ### Phase 1: Protocol contract and daemon lifecycle
 
 **Goal:** establish a secure, versioned process boundary before metadata logic.
+
+**Current implementation state (2026-08-27):** **in progress.** The generated,
+versioned protobuf contract includes lifecycle, request-context, error,
+batch, scan, and transaction envelopes; the service exposes only
+`Health`, `Capabilities`, `Drain`, and `Shutdown`, so it cannot mutate
+SlateDB. The Go client can attach to and validate a compatible Unix daemon or
+start one on demand. It now supplies explicit TCP transport, CIDR allowlist,
+and bearer-token configuration when starting an opt-in TCP daemon. The Rust
+daemon has a process-lifetime advisory endpoint lock, allowing a stale socket
+to be removed only after exclusive ownership is established; it also creates
+PID/capability metadata, private Unix socket directories, bounded gRPC message
+handling, CIDR admission, and authenticated TCP lifecycle requests.
+
+Local verification currently covers protocol compatibility, basic Unix client
+attachment, Unix RPC smoke/shutdown cleanup, the native SlateDB smoke path,
+advisory-lock recovery, repository-scoped endpoints, stale-socket recovery,
+Unix permission checks, compiled-daemon startup, and four-client startup races
+under Go's race detector. Lifecycle handlers now require a request ID and
+reject expired request deadlines. CI builds through `cargo zigbuild` and runs
+the resulting musl binary's native smoke path on Linux. Phase 1 is **not
+complete**: TCP allowlist/authentication, cancellation, message-limit,
+paging/streaming, and backpressure still lack automated integration coverage;
+`Drain` remains a no-op because no storage RPC exists yet.
+
+**Requirements to complete Phase 1:**
+
+1. Enforce `RequestContext`: reject expired `deadline_unix_ms` values before
+  handler work begins, require or generate request IDs for structured
+  diagnostics, and honor gRPC cancellation consistently.
+2. Define lifecycle state: make `Drain` transition the service from ready to
+  draining, reject new non-lifecycle work, expose the state through `Health`,
+  and make `Shutdown` drain and terminate within a bounded deadline. Remove
+  PID/capability metadata on bind/startup errors as well as normal shutdown and
+  signals.
+3. Harden endpoint lifecycle: derive default runtime/socket paths from the
+  repository identity; validate socket ownership and permissions before
+  attaching; acquire the endpoint lock and verify that no compatible daemon is
+  serving before removing a stale socket; and prove concurrent `Ensure` calls
+  and crash recovery converge on one daemon.
+4. Complete TCP policy: test Go-launched TCP daemons; prove that a listener is
+  impossible without both a non-empty CIDR allowlist and bearer token; test
+  allowlist rejection and missing/wrong-token rejection on every lifecycle
+  RPC; and verify `Capabilities` reports the selected transport accurately.
+5. Bound runtime work: test the advertised 16 MiB gRPC message limit; validate
+  advertised page and batch limits in the request envelopes before storage RPCs
+  exist; and add bounded concurrency/backpressure behavior for both Unix and
+  TCP transports.
+
+**Required Phase 1 tests:** use the compiled `vaulticd` process, rather than
+only in-process mocks, to cover two racing `Ensure` clients, compatible reuse,
+protocol/schema/repository mismatch rejection, stale socket/metadata/lock
+recovery, Unix `0700` directory and `0600` socket permissions, startup timeout
+and cancellation cleanup, TCP default/allowlist/authentication behavior,
+expired deadlines, oversized requests, and `Drain`/`Shutdown` state
+transitions. CI must build through `cargo zigbuild --target
+x86_64-unknown-linux-musl --release`, matching the verified artifact path, and
+run the resulting Linux musl binary in addition to static-link inspection while
+retaining the no-CGO legacy vaultic build and core regression tests.
 
 **Implementation steps:**
 

@@ -30,18 +30,22 @@ func main() {
 	defer conn.Close()
 
 	client := vaulticdv1.NewVaulticDaemonClient(conn)
-	health, err := client.Health(ctx, &vaulticdv1.HealthRequest{})
+	requestContext := &vaulticdv1.RequestContext{
+		RequestId:      "vaulticd-smoke",
+		DeadlineUnixMs: time.Now().Add(10 * time.Second).UnixMilli(),
+	}
+	health, err := client.Health(ctx, &vaulticdv1.HealthRequest{Context: requestContext})
 	if err != nil {
 		panic(err)
 	}
-	capabilities, err := client.Capabilities(ctx, &vaulticdv1.CapabilitiesRequest{})
+	capabilities, err := client.Capabilities(ctx, &vaulticdv1.CapabilitiesRequest{Context: requestContext})
 	if err != nil {
 		panic(err)
 	}
 	if !health.GetReady() || capabilities.GetProtocolVersion() != "vaulticd.v1" {
 		panic("vaulticd returned invalid health or capability response")
 	}
-	if _, err := client.Shutdown(ctx, &vaulticdv1.Empty{}); err != nil {
+	if _, err := client.Shutdown(ctx, &vaulticdv1.Empty{Context: requestContext}); err != nil {
 		panic(err)
 	}
 	fmt.Printf("vaulticd smoke ok: daemon=%s protocol=%s schema=%s\n", health.GetDaemonId(), health.GetProtocolVersion(), health.GetSchemaVersion())

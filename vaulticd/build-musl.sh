@@ -16,6 +16,12 @@ rustup run "$toolchain" cargo --version >/dev/null 2>&1 || {
     exit 1
 }
 
+command -v cargo-zigbuild >/dev/null 2>&1 || {
+    echo "vaulticd: cargo-zigbuild is required for the musl build" >&2
+    echo "install it with: cargo install cargo-zigbuild" >&2
+    exit 1
+}
+
 if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
     echo "vaulticd: Rust target $target is not installed" >&2
     echo "install it with: rustup target add $target" >&2
@@ -24,7 +30,7 @@ fi
 
 mkdir -p "$out_dir"
 CARGO_NET_OFFLINE=${CARGO_NET_OFFLINE:-false} \
-    rustup run "$toolchain" cargo build --manifest-path "$repo_root/vaulticd/Cargo.toml" \
+    RUSTUP_TOOLCHAIN="$toolchain" cargo-zigbuild zigbuild --manifest-path "$repo_root/vaulticd/Cargo.toml" \
     --target "$target" --release
 
 cp "$repo_root/vaulticd/target/$target/release/vaulticd" "$out_dir/vaulticd"

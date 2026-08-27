@@ -21,15 +21,68 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type RequestContext struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RequestId      string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	DeadlineUnixMs int64                  `protobuf:"varint,2,opt,name=deadline_unix_ms,json=deadlineUnixMs,proto3" json:"deadline_unix_ms,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RequestContext) Reset() {
+	*x = RequestContext{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestContext) ProtoMessage() {}
+
+func (x *RequestContext) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestContext.ProtoReflect.Descriptor instead.
+func (*RequestContext) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *RequestContext) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *RequestContext) GetDeadlineUnixMs() int64 {
+	if x != nil {
+		return x.DeadlineUnixMs
+	}
+	return 0
+}
+
 type Empty struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Empty) Reset() {
 	*x = Empty{}
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[0]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -41,7 +94,7 @@ func (x *Empty) String() string {
 func (*Empty) ProtoMessage() {}
 
 func (x *Empty) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[0]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -54,19 +107,423 @@ func (x *Empty) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Empty.ProtoReflect.Descriptor instead.
 func (*Empty) Descriptor() ([]byte, []int) {
-	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{0}
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Empty) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+type ErrorDetail struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	Retryable     bool                   `protobuf:"varint,3,opt,name=retryable,proto3" json:"retryable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ErrorDetail) Reset() {
+	*x = ErrorDetail{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ErrorDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ErrorDetail) ProtoMessage() {}
+
+func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ErrorDetail.ProtoReflect.Descriptor instead.
+func (*ErrorDetail) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ErrorDetail) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *ErrorDetail) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *ErrorDetail) GetRetryable() bool {
+	if x != nil {
+		return x.Retryable
+	}
+	return false
+}
+
+type BatchLimits struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MaxItems      uint32                 `protobuf:"varint,1,opt,name=max_items,json=maxItems,proto3" json:"max_items,omitempty"`
+	MaxBytes      uint32                 `protobuf:"varint,2,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchLimits) Reset() {
+	*x = BatchLimits{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchLimits) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchLimits) ProtoMessage() {}
+
+func (x *BatchLimits) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchLimits.ProtoReflect.Descriptor instead.
+func (*BatchLimits) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *BatchLimits) GetMaxItems() uint32 {
+	if x != nil {
+		return x.MaxItems
+	}
+	return 0
+}
+
+func (x *BatchLimits) GetMaxBytes() uint32 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
+type KeyValue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           []byte                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KeyValue) Reset() {
+	*x = KeyValue{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KeyValue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KeyValue) ProtoMessage() {}
+
+func (x *KeyValue) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KeyValue.ProtoReflect.Descriptor instead.
+func (*KeyValue) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *KeyValue) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *KeyValue) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+type WriteBatchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	Puts          []*KeyValue            `protobuf:"bytes,2,rep,name=puts,proto3" json:"puts,omitempty"`
+	Deletes       [][]byte               `protobuf:"bytes,3,rep,name=deletes,proto3" json:"deletes,omitempty"`
+	AwaitDurable  bool                   `protobuf:"varint,4,opt,name=await_durable,json=awaitDurable,proto3" json:"await_durable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteBatchRequest) Reset() {
+	*x = WriteBatchRequest{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteBatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteBatchRequest) ProtoMessage() {}
+
+func (x *WriteBatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteBatchRequest.ProtoReflect.Descriptor instead.
+func (*WriteBatchRequest) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *WriteBatchRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *WriteBatchRequest) GetPuts() []*KeyValue {
+	if x != nil {
+		return x.Puts
+	}
+	return nil
+}
+
+func (x *WriteBatchRequest) GetDeletes() [][]byte {
+	if x != nil {
+		return x.Deletes
+	}
+	return nil
+}
+
+func (x *WriteBatchRequest) GetAwaitDurable() bool {
+	if x != nil {
+		return x.AwaitDurable
+	}
+	return false
+}
+
+type ScanRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	Prefix        []byte                 `protobuf:"bytes,2,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	PageSize      uint32                 `protobuf:"varint,3,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScanRequest) Reset() {
+	*x = ScanRequest{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScanRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScanRequest) ProtoMessage() {}
+
+func (x *ScanRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScanRequest.ProtoReflect.Descriptor instead.
+func (*ScanRequest) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ScanRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *ScanRequest) GetPrefix() []byte {
+	if x != nil {
+		return x.Prefix
+	}
+	return nil
+}
+
+func (x *ScanRequest) GetPageSize() uint32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+type ScanResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*KeyValue            `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	Done          bool                   `protobuf:"varint,2,opt,name=done,proto3" json:"done,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScanResponse) Reset() {
+	*x = ScanResponse{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScanResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScanResponse) ProtoMessage() {}
+
+func (x *ScanResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScanResponse.ProtoReflect.Descriptor instead.
+func (*ScanResponse) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ScanResponse) GetEntries() []*KeyValue {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *ScanResponse) GetDone() bool {
+	if x != nil {
+		return x.Done
+	}
+	return false
+}
+
+type TransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	TransactionId string                 `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransactionRequest) Reset() {
+	*x = TransactionRequest{}
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionRequest) ProtoMessage() {}
+
+func (x *TransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionRequest.ProtoReflect.Descriptor instead.
+func (*TransactionRequest) Descriptor() ([]byte, []int) {
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *TransactionRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *TransactionRequest) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
 }
 
 type HealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RepositoryId  string                 `protobuf:"bytes,1,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	Context       *RequestContext        `protobuf:"bytes,2,opt,name=context,proto3" json:"context,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[1]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -78,7 +535,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[1]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -91,7 +548,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{1}
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *HealthRequest) GetRepositoryId() string {
@@ -99,6 +556,13 @@ func (x *HealthRequest) GetRepositoryId() string {
 		return x.RepositoryId
 	}
 	return ""
+}
+
+func (x *HealthRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
 }
 
 type HealthResponse struct {
@@ -115,7 +579,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[2]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -127,7 +591,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[2]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -140,7 +604,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{2}
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *HealthResponse) GetDaemonId() string {
@@ -188,13 +652,14 @@ func (x *HealthResponse) GetReady() bool {
 type CapabilitiesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RepositoryId  string                 `protobuf:"bytes,1,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	Context       *RequestContext        `protobuf:"bytes,2,opt,name=context,proto3" json:"context,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CapabilitiesRequest) Reset() {
 	*x = CapabilitiesRequest{}
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[3]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -206,7 +671,7 @@ func (x *CapabilitiesRequest) String() string {
 func (*CapabilitiesRequest) ProtoMessage() {}
 
 func (x *CapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[3]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -219,7 +684,7 @@ func (x *CapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*CapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{3}
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CapabilitiesRequest) GetRepositoryId() string {
@@ -227,6 +692,13 @@ func (x *CapabilitiesRequest) GetRepositoryId() string {
 		return x.RepositoryId
 	}
 	return ""
+}
+
+func (x *CapabilitiesRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
 }
 
 type CapabilitiesResponse struct {
@@ -245,7 +717,7 @@ type CapabilitiesResponse struct {
 
 func (x *CapabilitiesResponse) Reset() {
 	*x = CapabilitiesResponse{}
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[4]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -257,7 +729,7 @@ func (x *CapabilitiesResponse) String() string {
 func (*CapabilitiesResponse) ProtoMessage() {}
 
 func (x *CapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticd_v1_daemon_proto_msgTypes[4]
+	mi := &file_vaulticd_v1_daemon_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -270,7 +742,7 @@ func (x *CapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*CapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{4}
+	return file_vaulticd_v1_daemon_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CapabilitiesResponse) GetDaemonId() string {
@@ -333,19 +805,51 @@ var File_vaulticd_v1_daemon_proto protoreflect.FileDescriptor
 
 const file_vaulticd_v1_daemon_proto_rawDesc = "" +
 	"\n" +
-	"\x18vaulticd/v1/daemon.proto\x12\vvaulticd.v1\"\a\n" +
-	"\x05Empty\"4\n" +
+	"\x18vaulticd/v1/daemon.proto\x12\vvaulticd.v1\"Y\n" +
+	"\x0eRequestContext\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12(\n" +
+	"\x10deadline_unix_ms\x18\x02 \x01(\x03R\x0edeadlineUnixMs\">\n" +
+	"\x05Empty\x125\n" +
+	"\acontext\x18\x01 \x01(\v2\x1b.vaulticd.v1.RequestContextR\acontext\"Y\n" +
+	"\vErrorDetail\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1c\n" +
+	"\tretryable\x18\x03 \x01(\bR\tretryable\"G\n" +
+	"\vBatchLimits\x12\x1b\n" +
+	"\tmax_items\x18\x01 \x01(\rR\bmaxItems\x12\x1b\n" +
+	"\tmax_bytes\x18\x02 \x01(\rR\bmaxBytes\"2\n" +
+	"\bKeyValue\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\fR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\"\xb4\x01\n" +
+	"\x11WriteBatchRequest\x125\n" +
+	"\acontext\x18\x01 \x01(\v2\x1b.vaulticd.v1.RequestContextR\acontext\x12)\n" +
+	"\x04puts\x18\x02 \x03(\v2\x15.vaulticd.v1.KeyValueR\x04puts\x12\x18\n" +
+	"\adeletes\x18\x03 \x03(\fR\adeletes\x12#\n" +
+	"\rawait_durable\x18\x04 \x01(\bR\fawaitDurable\"y\n" +
+	"\vScanRequest\x125\n" +
+	"\acontext\x18\x01 \x01(\v2\x1b.vaulticd.v1.RequestContextR\acontext\x12\x16\n" +
+	"\x06prefix\x18\x02 \x01(\fR\x06prefix\x12\x1b\n" +
+	"\tpage_size\x18\x03 \x01(\rR\bpageSize\"S\n" +
+	"\fScanResponse\x12/\n" +
+	"\aentries\x18\x01 \x03(\v2\x15.vaulticd.v1.KeyValueR\aentries\x12\x12\n" +
+	"\x04done\x18\x02 \x01(\bR\x04done\"r\n" +
+	"\x12TransactionRequest\x125\n" +
+	"\acontext\x18\x01 \x01(\v2\x1b.vaulticd.v1.RequestContextR\acontext\x12%\n" +
+	"\x0etransaction_id\x18\x02 \x01(\tR\rtransactionId\"k\n" +
 	"\rHealthRequest\x12#\n" +
-	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\"\xe6\x01\n" +
+	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x125\n" +
+	"\acontext\x18\x02 \x01(\v2\x1b.vaulticd.v1.RequestContextR\acontext\"\xe6\x01\n" +
 	"\x0eHealthResponse\x12\x1b\n" +
 	"\tdaemon_id\x18\x01 \x01(\tR\bdaemonId\x12)\n" +
 	"\x10protocol_version\x18\x02 \x01(\tR\x0fprotocolVersion\x12%\n" +
 	"\x0eschema_version\x18\x03 \x01(\tR\rschemaVersion\x12#\n" +
 	"\rrepository_id\x18\x04 \x01(\tR\frepositoryId\x12*\n" +
 	"\x11slate_db_revision\x18\x05 \x01(\tR\x0fslateDbRevision\x12\x14\n" +
-	"\x05ready\x18\x06 \x01(\bR\x05ready\":\n" +
+	"\x05ready\x18\x06 \x01(\bR\x05ready\"q\n" +
 	"\x13CapabilitiesRequest\x12#\n" +
-	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\"\xc0\x02\n" +
+	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x125\n" +
+	"\acontext\x18\x02 \x01(\v2\x1b.vaulticd.v1.RequestContextR\acontext\"\xc0\x02\n" +
 	"\x14CapabilitiesResponse\x12\x1b\n" +
 	"\tdaemon_id\x18\x01 \x01(\tR\bdaemonId\x12)\n" +
 	"\x10protocol_version\x18\x02 \x01(\tR\x0fprotocolVersion\x12%\n" +
@@ -375,28 +879,44 @@ func file_vaulticd_v1_daemon_proto_rawDescGZIP() []byte {
 	return file_vaulticd_v1_daemon_proto_rawDescData
 }
 
-var file_vaulticd_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_vaulticd_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_vaulticd_v1_daemon_proto_goTypes = []any{
-	(*Empty)(nil),                // 0: vaulticd.v1.Empty
-	(*HealthRequest)(nil),        // 1: vaulticd.v1.HealthRequest
-	(*HealthResponse)(nil),       // 2: vaulticd.v1.HealthResponse
-	(*CapabilitiesRequest)(nil),  // 3: vaulticd.v1.CapabilitiesRequest
-	(*CapabilitiesResponse)(nil), // 4: vaulticd.v1.CapabilitiesResponse
+	(*RequestContext)(nil),       // 0: vaulticd.v1.RequestContext
+	(*Empty)(nil),                // 1: vaulticd.v1.Empty
+	(*ErrorDetail)(nil),          // 2: vaulticd.v1.ErrorDetail
+	(*BatchLimits)(nil),          // 3: vaulticd.v1.BatchLimits
+	(*KeyValue)(nil),             // 4: vaulticd.v1.KeyValue
+	(*WriteBatchRequest)(nil),    // 5: vaulticd.v1.WriteBatchRequest
+	(*ScanRequest)(nil),          // 6: vaulticd.v1.ScanRequest
+	(*ScanResponse)(nil),         // 7: vaulticd.v1.ScanResponse
+	(*TransactionRequest)(nil),   // 8: vaulticd.v1.TransactionRequest
+	(*HealthRequest)(nil),        // 9: vaulticd.v1.HealthRequest
+	(*HealthResponse)(nil),       // 10: vaulticd.v1.HealthResponse
+	(*CapabilitiesRequest)(nil),  // 11: vaulticd.v1.CapabilitiesRequest
+	(*CapabilitiesResponse)(nil), // 12: vaulticd.v1.CapabilitiesResponse
 }
 var file_vaulticd_v1_daemon_proto_depIdxs = []int32{
-	1, // 0: vaulticd.v1.VaulticDaemon.Health:input_type -> vaulticd.v1.HealthRequest
-	3, // 1: vaulticd.v1.VaulticDaemon.Capabilities:input_type -> vaulticd.v1.CapabilitiesRequest
-	0, // 2: vaulticd.v1.VaulticDaemon.Drain:input_type -> vaulticd.v1.Empty
-	0, // 3: vaulticd.v1.VaulticDaemon.Shutdown:input_type -> vaulticd.v1.Empty
-	2, // 4: vaulticd.v1.VaulticDaemon.Health:output_type -> vaulticd.v1.HealthResponse
-	4, // 5: vaulticd.v1.VaulticDaemon.Capabilities:output_type -> vaulticd.v1.CapabilitiesResponse
-	0, // 6: vaulticd.v1.VaulticDaemon.Drain:output_type -> vaulticd.v1.Empty
-	0, // 7: vaulticd.v1.VaulticDaemon.Shutdown:output_type -> vaulticd.v1.Empty
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: vaulticd.v1.Empty.context:type_name -> vaulticd.v1.RequestContext
+	0,  // 1: vaulticd.v1.WriteBatchRequest.context:type_name -> vaulticd.v1.RequestContext
+	4,  // 2: vaulticd.v1.WriteBatchRequest.puts:type_name -> vaulticd.v1.KeyValue
+	0,  // 3: vaulticd.v1.ScanRequest.context:type_name -> vaulticd.v1.RequestContext
+	4,  // 4: vaulticd.v1.ScanResponse.entries:type_name -> vaulticd.v1.KeyValue
+	0,  // 5: vaulticd.v1.TransactionRequest.context:type_name -> vaulticd.v1.RequestContext
+	0,  // 6: vaulticd.v1.HealthRequest.context:type_name -> vaulticd.v1.RequestContext
+	0,  // 7: vaulticd.v1.CapabilitiesRequest.context:type_name -> vaulticd.v1.RequestContext
+	9,  // 8: vaulticd.v1.VaulticDaemon.Health:input_type -> vaulticd.v1.HealthRequest
+	11, // 9: vaulticd.v1.VaulticDaemon.Capabilities:input_type -> vaulticd.v1.CapabilitiesRequest
+	1,  // 10: vaulticd.v1.VaulticDaemon.Drain:input_type -> vaulticd.v1.Empty
+	1,  // 11: vaulticd.v1.VaulticDaemon.Shutdown:input_type -> vaulticd.v1.Empty
+	10, // 12: vaulticd.v1.VaulticDaemon.Health:output_type -> vaulticd.v1.HealthResponse
+	12, // 13: vaulticd.v1.VaulticDaemon.Capabilities:output_type -> vaulticd.v1.CapabilitiesResponse
+	1,  // 14: vaulticd.v1.VaulticDaemon.Drain:output_type -> vaulticd.v1.Empty
+	1,  // 15: vaulticd.v1.VaulticDaemon.Shutdown:output_type -> vaulticd.v1.Empty
+	12, // [12:16] is the sub-list for method output_type
+	8,  // [8:12] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_vaulticd_v1_daemon_proto_init() }
@@ -410,7 +930,7 @@ func file_vaulticd_v1_daemon_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vaulticd_v1_daemon_proto_rawDesc), len(file_vaulticd_v1_daemon_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
