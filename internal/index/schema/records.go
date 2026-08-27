@@ -1,0 +1,664 @@
+package schema
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"fmt"
+	"sort"
+)
+
+type BlobType byte
+
+const (
+	BlobData BlobType = iota + 1
+	BlobTree
+)
+
+type BlobLocation struct {
+	PackID           ID
+	Offset           uint64
+	Length           uint32
+	UncompressedSize uint32
+	Type             BlobType
+}
+
+type BlobRecord struct{ Locations []BlobLocation }
+
+func (record BlobRecord) MarshalBinary() ([]byte, error) {
+	if len(record.Locations) == 0 {
+		return nil, fmt.Errorf("%w: blob has no locations", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u32(uint32(len(record.Locations)))
+	for _, location := range record.Locations {
+		if location.Type != BlobData && location.Type != BlobTree {
+			return nil, fmt.Errorf("%w: invalid blob type", ErrMalformed)
+		}
+		e.id(location.PackID)
+		e.u64(location.Offset)
+		e.u32(location.Length)
+		e.u32(location.UncompressedSize)
+		e.u8(byte(location.Type))
+	}
+	return e.finish()
+}
+func UnmarshalBlobRecord(data []byte) (BlobRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return BlobRecord{}, err
+	}
+	count, err := d.u32()
+	if err != nil || count == 0 || uint64(count)*49 > uint64(len(data)) {
+		return BlobRecord{}, fmt.Errorf("%w: invalid blob location count", ErrMalformed)
+	}
+	record := BlobRecord{Locations: make([]BlobLocation, count)}
+	for index := range record.Locations {
+		location := &record.Locations[index]
+		if location.PackID, err = d.id(); err != nil {
+			return BlobRecord{}, err
+		}
+		if location.Offset, err = d.u64(); err != nil {
+			return BlobRecord{}, err
+		}
+		if location.Length, err = d.u32(); err != nil {
+			return BlobRecord{}, err
+		}
+		if location.UncompressedSize, err = d.u32(); err != nil {
+			return BlobRecord{}, err
+		}
+		value, readErr := d.u8()
+		if readErr != nil {
+			return BlobRecord{}, readErr
+		}
+		location.Type = BlobType(value)
+		if location.Type != BlobData && location.Type != BlobTree {
+			return BlobRecord{}, fmt.Errorf("%w: invalid blob type", ErrMalformed)
+		}
+	}
+	return record, d.done()
+}
+
+type PackType byte
+
+const (
+	PackData PackType = iota + 1
+	PackTree
+	PackMixed
+	PackUnknown
+)
+
+type PackLifecycle byte
+
+const (
+	PackImported PackLifecycle = iota + 1
+	PackPublished
+	PackExportPending
+	PackDeletePending
+	PackDeleted
+	PackOrphaned
+	PackStateUnknown
+)
+
+type PackRecord struct {
+	Type                                             PackType
+	PhysicalSize, PayloadSize, HeaderSize, BlobCount uint64
+	CreationTime                                     int64
+	CreationTimeKnown                                bool
+	Lifecycle                                        PackLifecycle
+	SourceIndexIDs                                   []ID
+}
+
+func (record PackRecord) MarshalBinary() ([]byte, error) {
+	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
+		return nil, fmt.Errorf("%w: invalid pack classification", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u8(byte(record.Type))
+	e.u64(record.PhysicalSize)
+	e.u64(record.PayloadSize)
+	e.u64(record.HeaderSize)
+	e.u64(record.BlobCount)
+	e.i64(record.CreationTime)
+	e.bool(record.CreationTimeKnown)
+	e.u8(byte(record.Lifecycle))
+	e.u32(uint32(len(record.SourceIndexIDs)))
+	for _, id := range record.SourceIndexIDs {
+		e.id(id)
+	}
+	return e.finish()
+}
+func UnmarshalPackRecord(data []byte) (PackRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PackRecord{}, err
+	}
+	var record PackRecord
+	value, err := d.u8()
+	record.Type = PackType(value)
+	if err != nil {
+		return record, err
+	}
+	if record.PhysicalSize, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.PayloadSize, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.HeaderSize, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.BlobCount, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.CreationTime, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.CreationTimeKnown, err = d.bool(); err != nil {
+		return record, err
+	}
+	value, err = d.u8()
+	record.Lifecycle = PackLifecycle(value)
+	if err != nil {
+		return record, err
+	}
+	count, err := d.u32()
+	if err != nil || uint64(count)*32 > uint64(len(data)) {
+		return record, fmt.Errorf("%w: invalid provenance count", ErrMalformed)
+	}
+	record.SourceIndexIDs = make([]ID, count)
+	for index := range record.SourceIndexIDs {
+		if record.SourceIndexIDs[index], err = d.id(); err != nil {
+			return PackRecord{}, err
+		}
+	}
+	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
+		return PackRecord{}, fmt.Errorf("%w: invalid pack classification", ErrMalformed)
+	}
+	return record, d.done()
+}
+func validPackType(value PackType) bool { return value >= PackData && value <= PackUnknown }
+func validPackLifecycle(value PackLifecycle) bool {
+	return value >= PackImported && value <= PackStateUnknown
+}
+
+type PackAggregate struct{ PackCount, PhysicalSize, PayloadSize, HeaderSize, BlobCount, UpdateSequence uint64 }
+
+func (record PackAggregate) MarshalBinary() ([]byte, error) {
+	e := newEncoder()
+	e.u64(record.PackCount)
+	e.u64(record.PhysicalSize)
+	e.u64(record.PayloadSize)
+	e.u64(record.HeaderSize)
+	e.u64(record.BlobCount)
+	e.u64(record.UpdateSequence)
+	return e.finish()
+}
+func UnmarshalPackAggregate(data []byte) (PackAggregate, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PackAggregate{}, err
+	}
+	values := []*uint64{}
+	record := PackAggregate{}
+	values = append(values, &record.PackCount, &record.PhysicalSize, &record.PayloadSize, &record.HeaderSize, &record.BlobCount, &record.UpdateSequence)
+	for _, value := range values {
+		if *value, err = d.u64(); err != nil {
+			return PackAggregate{}, err
+		}
+	}
+	return record, d.done()
+}
+
+type CurrentPointer struct {
+	Revision  uint64
+	RecordKey []byte
+}
+
+func (record CurrentPointer) MarshalBinary() ([]byte, error) {
+	if record.Revision == 0 {
+		return nil, fmt.Errorf("%w: zero revision", ErrMalformed)
+	}
+	parsed, err := ParseKey(record.RecordKey)
+	if err != nil || (parsed.Kind != KeyInodeRevision && parsed.Kind != KeyDirectoryRevision) || parsed.Revision != record.Revision {
+		return nil, fmt.Errorf("%w: current pointer target mismatch", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u64(record.Revision)
+	if err := e.bytes(record.RecordKey); err != nil {
+		return nil, err
+	}
+	return e.finish()
+}
+func UnmarshalCurrentPointer(data []byte) (CurrentPointer, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return CurrentPointer{}, err
+	}
+	revision, err := d.u64()
+	if err != nil || revision == 0 {
+		return CurrentPointer{}, fmt.Errorf("%w: invalid current revision", ErrMalformed)
+	}
+	key, err := d.bytes()
+	if err != nil {
+		return CurrentPointer{}, err
+	}
+	parsed, err := ParseKey(key)
+	if err != nil || (parsed.Kind != KeyInodeRevision && parsed.Kind != KeyDirectoryRevision) || parsed.Revision != revision {
+		return CurrentPointer{}, fmt.Errorf("%w: current pointer target mismatch", ErrMalformed)
+	}
+	return CurrentPointer{Revision: revision, RecordKey: key}, d.done()
+}
+
+type ContentMode byte
+
+const (
+	ContentNone ContentMode = iota
+	ContentInline
+	ContentManifestRef
+)
+
+const MaxInlineContentIDs = 128
+
+type Freshness byte
+
+const (
+	FreshnessUnknown Freshness = iota
+	FreshnessImported
+	FreshnessVerified
+)
+const (
+	KnownMTime uint16 = 1 << iota
+	KnownCTime
+	KnownSize
+	KnownMode
+	KnownUID
+	KnownGID
+	KnownParent
+	KnownPath
+)
+
+const knownFieldMask = KnownMTime | KnownCTime | KnownSize | KnownMode | KnownUID | KnownGID | KnownParent | KnownPath
+
+type InodeRevision struct {
+	ParentInode       uint64
+	MTime, CTime      int64
+	Size              uint64
+	Mode, UID, GID    uint32
+	Known             uint16
+	ContentMode       ContentMode
+	ContentIDs        []ID
+	ContentManifestID ID
+	ContentCount      uint32
+	FileContentHash   ID
+	HashKnown         bool
+	SourcePath        string
+	Freshness         Freshness
+}
+
+func (record InodeRevision) MarshalBinary() ([]byte, error) {
+	if record.Freshness > FreshnessVerified || record.ContentMode > ContentManifestRef || record.Known & ^knownFieldMask != 0 {
+		return nil, fmt.Errorf("%w: invalid inode state", ErrMalformed)
+	}
+	if !validContentState(record.ContentMode, record.ContentCount, record.ContentIDs, record.ContentManifestID) {
+		return nil, fmt.Errorf("%w: invalid inode content state", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u64(record.ParentInode)
+	e.i64(record.MTime)
+	e.i64(record.CTime)
+	e.u64(record.Size)
+	e.u32(record.Mode)
+	e.u32(record.UID)
+	e.u32(record.GID)
+	e.u32(uint32(record.Known))
+	e.u8(byte(record.ContentMode))
+	e.u32(record.ContentCount)
+	if record.ContentMode == ContentInline {
+		for _, id := range record.ContentIDs {
+			e.id(id)
+		}
+	} else if record.ContentMode == ContentManifestRef {
+		e.id(record.ContentManifestID)
+	}
+	e.id(record.FileContentHash)
+	e.bool(record.HashKnown)
+	if err := e.string(record.SourcePath); err != nil {
+		return nil, err
+	}
+	e.u8(byte(record.Freshness))
+	return e.finish()
+}
+func UnmarshalInodeRevision(data []byte) (InodeRevision, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return InodeRevision{}, err
+	}
+	var record InodeRevision
+	if record.ParentInode, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.MTime, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.CTime, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.Size, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Mode, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.UID, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.GID, err = d.u32(); err != nil {
+		return record, err
+	}
+	known, err := d.u32()
+	if err != nil || known & ^uint32(knownFieldMask) != 0 {
+		return record, fmt.Errorf("%w: invalid known-field mask", ErrMalformed)
+	}
+	record.Known = uint16(known)
+	mode, err := d.u8()
+	record.ContentMode = ContentMode(mode)
+	if err != nil {
+		return record, err
+	}
+	if record.ContentCount, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.ContentMode == ContentInline {
+		if record.ContentCount == 0 || record.ContentCount > MaxInlineContentIDs || uint64(record.ContentCount)*32 > uint64(len(data)) {
+			return record, fmt.Errorf("%w: invalid inline content count", ErrMalformed)
+		}
+		record.ContentIDs = make([]ID, record.ContentCount)
+		for index := range record.ContentIDs {
+			if record.ContentIDs[index], err = d.id(); err != nil {
+				return InodeRevision{}, err
+			}
+		}
+	} else if record.ContentMode == ContentManifestRef {
+		if record.ContentManifestID, err = d.id(); err != nil {
+			return record, err
+		}
+	} else if record.ContentMode != ContentNone {
+		return record, fmt.Errorf("%w: invalid content mode", ErrMalformed)
+	}
+	if !validContentState(record.ContentMode, record.ContentCount, record.ContentIDs, record.ContentManifestID) {
+		return record, fmt.Errorf("%w: invalid inode content state", ErrMalformed)
+	}
+	if record.FileContentHash, err = d.id(); err != nil {
+		return record, err
+	}
+	if record.HashKnown, err = d.bool(); err != nil {
+		return record, err
+	}
+	if record.SourcePath, err = d.string(); err != nil {
+		return record, err
+	}
+	freshness, err := d.u8()
+	record.Freshness = Freshness(freshness)
+	if err != nil || record.Freshness > FreshnessVerified {
+		return record, fmt.Errorf("%w: invalid freshness", ErrMalformed)
+	}
+	return record, d.done()
+}
+
+func validContentState(mode ContentMode, count uint32, ids []ID, manifestID ID) bool {
+	switch mode {
+	case ContentNone:
+		return count == 0 && len(ids) == 0 && manifestID == (ID{})
+	case ContentInline:
+		return count > 0 && count <= MaxInlineContentIDs && int(count) == len(ids) && manifestID == (ID{})
+	case ContentManifestRef:
+		return count > MaxInlineContentIDs && len(ids) == 0 && manifestID != (ID{})
+	default:
+		return false
+	}
+}
+
+type NodeType byte
+
+const (
+	NodeFile NodeType = iota + 1
+	NodeDirectory
+	NodeSymlink
+	NodeOther
+)
+
+type DirectoryChild struct {
+	Name        string
+	Inode       uint64
+	Type        NodeType
+	MetadataKey []byte
+}
+type DirectoryRevision struct {
+	ParentInode uint64
+	Children    []DirectoryChild
+}
+
+func (record DirectoryRevision) MarshalBinary() ([]byte, error) {
+	children := append([]DirectoryChild(nil), record.Children...)
+	sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
+	e := newEncoder()
+	e.u64(record.ParentInode)
+	e.u32(uint32(len(children)))
+	previous := ""
+	for index, child := range children {
+		if child.Name == "" || (index > 0 && child.Name == previous) || child.Type < NodeFile || child.Type > NodeOther {
+			return nil, fmt.Errorf("%w: invalid directory child", ErrMalformed)
+		}
+		previous = child.Name
+		if err := e.string(child.Name); err != nil {
+			return nil, err
+		}
+		e.u64(child.Inode)
+		e.u8(byte(child.Type))
+		if err := e.bytes(child.MetadataKey); err != nil {
+			return nil, err
+		}
+		parsed, err := ParseKey(child.MetadataKey)
+		if err != nil || !validChildMetadataKind(child.Type, parsed.Kind) || parsed.Inode != child.Inode {
+			return nil, fmt.Errorf("%w: child metadata reference mismatch", ErrMalformed)
+		}
+	}
+	return e.finish()
+}
+func UnmarshalDirectoryRevision(data []byte) (DirectoryRevision, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return DirectoryRevision{}, err
+	}
+	var record DirectoryRevision
+	if record.ParentInode, err = d.u64(); err != nil {
+		return record, err
+	}
+	count, err := d.u32()
+	if err != nil || uint64(count)*13 > uint64(len(data)) {
+		return record, fmt.Errorf("%w: invalid child count", ErrMalformed)
+	}
+	record.Children = make([]DirectoryChild, count)
+	previous := ""
+	for index := range record.Children {
+		child := &record.Children[index]
+		if child.Name, err = d.string(); err != nil {
+			return record, err
+		}
+		if child.Name == "" || (index > 0 && child.Name <= previous) {
+			return record, fmt.Errorf("%w: children are not uniquely sorted", ErrMalformed)
+		}
+		previous = child.Name
+		if child.Inode, err = d.u64(); err != nil {
+			return record, err
+		}
+		value, readErr := d.u8()
+		child.Type = NodeType(value)
+		if readErr != nil || child.Type < NodeFile || child.Type > NodeOther {
+			return record, fmt.Errorf("%w: invalid child type", ErrMalformed)
+		}
+		if child.MetadataKey, err = d.bytes(); err != nil {
+			return record, err
+		}
+		parsed, parseErr := ParseKey(child.MetadataKey)
+		if parseErr != nil || !validChildMetadataKind(child.Type, parsed.Kind) || parsed.Inode != child.Inode {
+			return record, fmt.Errorf("%w: child metadata reference mismatch", ErrMalformed)
+		}
+	}
+	return record, d.done()
+}
+
+func validChildMetadataKind(nodeType NodeType, keyKind KeyKind) bool {
+	if nodeType == NodeDirectory {
+		return keyKind == KeyDirectoryRevision
+	}
+	return nodeType >= NodeFile && nodeType <= NodeOther && keyKind == KeyInodeRevision
+}
+
+type SnapshotRecord struct {
+	CommitSequence          uint64
+	RootFSID                uint32
+	RootInode, RootRevision uint64
+	OriginalJSON            []byte
+	JSONHash                ID
+}
+
+func (record SnapshotRecord) MarshalBinary() ([]byte, error) {
+	if record.CommitSequence == 0 || record.RootRevision == 0 {
+		return nil, fmt.Errorf("%w: invalid snapshot scope", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u64(record.CommitSequence)
+	e.u32(record.RootFSID)
+	e.u64(record.RootInode)
+	e.u64(record.RootRevision)
+	if err := e.bytes(record.OriginalJSON); err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(record.OriginalJSON)
+	if record.JSONHash != (ID{}) && record.JSONHash != hash {
+		return nil, fmt.Errorf("%w: snapshot JSON hash mismatch", ErrMalformed)
+	}
+	e.id(hash)
+	return e.finish()
+}
+func UnmarshalSnapshotRecord(data []byte) (SnapshotRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return SnapshotRecord{}, err
+	}
+	var record SnapshotRecord
+	if record.CommitSequence, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.RootFSID, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.RootInode, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.RootRevision, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.OriginalJSON, err = d.bytes(); err != nil {
+		return record, err
+	}
+	if record.JSONHash, err = d.id(); err != nil {
+		return record, err
+	}
+	if record.CommitSequence == 0 || record.RootRevision == 0 || ID(sha256.Sum256(record.OriginalJSON)) != record.JSONHash {
+		return SnapshotRecord{}, fmt.Errorf("%w: invalid snapshot scope or hash", ErrMalformed)
+	}
+	return record, d.done()
+}
+
+type ContentManifest struct {
+	TotalCount   uint32
+	Segment      uint32
+	SegmentCount uint32
+	ContentIDs   []ID
+}
+
+const (
+	MaxContentIDs            uint32 = 1_000_000
+	MaxContentSegmentIDs     uint32 = (MaxEncodedValueBytes - 17) / 32
+	DefaultContentSegmentIDs        = 4_096
+)
+
+func (record ContentManifest) MarshalBinary() ([]byte, error) {
+	if record.TotalCount > MaxContentIDs || record.SegmentCount == 0 || record.Segment >= record.SegmentCount || len(record.ContentIDs) == 0 || len(record.ContentIDs) > int(MaxContentSegmentIDs) || uint64(len(record.ContentIDs)) > uint64(record.TotalCount) {
+		return nil, fmt.Errorf("%w: invalid content segment", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u32(record.TotalCount)
+	e.u32(record.Segment)
+	e.u32(record.SegmentCount)
+	e.u32(uint32(len(record.ContentIDs)))
+	for _, id := range record.ContentIDs {
+		e.id(id)
+	}
+	return e.finish()
+}
+func UnmarshalContentManifest(data []byte) (ContentManifest, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return ContentManifest{}, err
+	}
+	var record ContentManifest
+	if record.TotalCount, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.Segment, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.SegmentCount, err = d.u32(); err != nil {
+		return record, err
+	}
+	count, err := d.u32()
+	if err != nil || uint64(count)*32 > uint64(len(data)) {
+		return record, fmt.Errorf("%w: invalid content count", ErrMalformed)
+	}
+	record.ContentIDs = make([]ID, count)
+	for index := range record.ContentIDs {
+		if record.ContentIDs[index], err = d.id(); err != nil {
+			return ContentManifest{}, err
+		}
+	}
+	if record.TotalCount > MaxContentIDs || record.SegmentCount == 0 || record.Segment >= record.SegmentCount || count == 0 || count > MaxContentSegmentIDs || count > record.TotalCount {
+		return ContentManifest{}, fmt.Errorf("%w: invalid content segment", ErrMalformed)
+	}
+	return record, d.done()
+}
+func ContentManifestID(ids []ID) ID {
+	hash := sha256.New()
+	hash.Write([]byte{Version})
+	for _, id := range ids {
+		hash.Write(id[:])
+	}
+	var result ID
+	copy(result[:], hash.Sum(nil))
+	return result
+}
+func SegmentContent(ids []ID, maxPerSegment int) (ID, []ContentManifest, error) {
+	if len(ids) == 0 || len(ids) > int(MaxContentIDs) || maxPerSegment <= 0 || maxPerSegment > int(MaxContentSegmentIDs) {
+		return ID{}, nil, fmt.Errorf("%w: invalid content segmentation", ErrMalformed)
+	}
+	id := ContentManifestID(ids)
+	count := (len(ids) + maxPerSegment - 1) / maxPerSegment
+	records := make([]ContentManifest, count)
+	for segment := range count {
+		start := segment * maxPerSegment
+		end := min(start+maxPerSegment, len(ids))
+		records[segment] = ContentManifest{TotalCount: uint32(len(ids)), Segment: uint32(segment), SegmentCount: uint32(count), ContentIDs: append([]ID(nil), ids[start:end]...)}
+	}
+	return id, records, nil
+}
+
+func EqualIDs(left, right []ID) bool { return bytes.Equal(flattenIDs(left), flattenIDs(right)) }
+func flattenIDs(ids []ID) []byte {
+	result := make([]byte, 0, len(ids)*32)
+	for _, id := range ids {
+		result = append(result, id[:]...)
+	}
+	return result
+}

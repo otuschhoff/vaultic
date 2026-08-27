@@ -23,6 +23,13 @@ const (
 	VaulticDB_Capabilities_FullMethodName = "/vaulticdb.v1.VaulticDB/Capabilities"
 	VaulticDB_Drain_FullMethodName        = "/vaulticdb.v1.VaulticDB/Drain"
 	VaulticDB_Shutdown_FullMethodName     = "/vaulticdb.v1.VaulticDB/Shutdown"
+	VaulticDB_Get_FullMethodName          = "/vaulticdb.v1.VaulticDB/Get"
+	VaulticDB_MultiGet_FullMethodName     = "/vaulticdb.v1.VaulticDB/MultiGet"
+	VaulticDB_Scan_FullMethodName         = "/vaulticdb.v1.VaulticDB/Scan"
+	VaulticDB_WriteBatch_FullMethodName   = "/vaulticdb.v1.VaulticDB/WriteBatch"
+	VaulticDB_Begin_FullMethodName        = "/vaulticdb.v1.VaulticDB/Begin"
+	VaulticDB_Commit_FullMethodName       = "/vaulticdb.v1.VaulticDB/Commit"
+	VaulticDB_Rollback_FullMethodName     = "/vaulticdb.v1.VaulticDB/Rollback"
 )
 
 // VaulticDBClient is the client API for VaulticDB service.
@@ -33,6 +40,13 @@ type VaulticDBClient interface {
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*CapabilitiesResponse, error)
 	Drain(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	Shutdown(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
+	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
+	MultiGet(ctx context.Context, in *MultiGetRequest, opts ...grpc.CallOption) (*MultiGetResponse, error)
+	Scan(ctx context.Context, in *ScanRequest, opts ...grpc.CallOption) (*ScanResponse, error)
+	WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error)
+	Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error)
+	Commit(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*CommitResponse, error)
+	Rollback(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type vaulticDBClient struct {
@@ -83,6 +97,76 @@ func (c *vaulticDBClient) Shutdown(ctx context.Context, in *Empty, opts ...grpc.
 	return out, nil
 }
 
+func (c *vaulticDBClient) Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_Get_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) MultiGet(ctx context.Context, in *MultiGetRequest, opts ...grpc.CallOption) (*MultiGetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MultiGetResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_MultiGet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) Scan(ctx context.Context, in *ScanRequest, opts ...grpc.CallOption) (*ScanResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScanResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_Scan_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriteBatchResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_WriteBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_Begin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) Commit(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*CommitResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_Commit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) Rollback(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, VaulticDB_Rollback_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VaulticDBServer is the server API for VaulticDB service.
 // All implementations must embed UnimplementedVaulticDBServer
 // for forward compatibility.
@@ -91,6 +175,13 @@ type VaulticDBServer interface {
 	Capabilities(context.Context, *CapabilitiesRequest) (*CapabilitiesResponse, error)
 	Drain(context.Context, *Empty) (*Empty, error)
 	Shutdown(context.Context, *Empty) (*Empty, error)
+	Get(context.Context, *GetRequest) (*GetResponse, error)
+	MultiGet(context.Context, *MultiGetRequest) (*MultiGetResponse, error)
+	Scan(context.Context, *ScanRequest) (*ScanResponse, error)
+	WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error)
+	Begin(context.Context, *Empty) (*BeginResponse, error)
+	Commit(context.Context, *TransactionRequest) (*CommitResponse, error)
+	Rollback(context.Context, *TransactionRequest) (*Empty, error)
 	mustEmbedUnimplementedVaulticDBServer()
 }
 
@@ -112,6 +203,27 @@ func (UnimplementedVaulticDBServer) Drain(context.Context, *Empty) (*Empty, erro
 }
 func (UnimplementedVaulticDBServer) Shutdown(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Shutdown not implemented")
+}
+func (UnimplementedVaulticDBServer) Get(context.Context, *GetRequest) (*GetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
+}
+func (UnimplementedVaulticDBServer) MultiGet(context.Context, *MultiGetRequest) (*MultiGetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MultiGet not implemented")
+}
+func (UnimplementedVaulticDBServer) Scan(context.Context, *ScanRequest) (*ScanResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Scan not implemented")
+}
+func (UnimplementedVaulticDBServer) WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method WriteBatch not implemented")
+}
+func (UnimplementedVaulticDBServer) Begin(context.Context, *Empty) (*BeginResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Begin not implemented")
+}
+func (UnimplementedVaulticDBServer) Commit(context.Context, *TransactionRequest) (*CommitResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Commit not implemented")
+}
+func (UnimplementedVaulticDBServer) Rollback(context.Context, *TransactionRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Rollback not implemented")
 }
 func (UnimplementedVaulticDBServer) mustEmbedUnimplementedVaulticDBServer() {}
 func (UnimplementedVaulticDBServer) testEmbeddedByValue()                   {}
@@ -206,6 +318,132 @@ func _VaulticDB_Shutdown_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VaulticDB_Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).Get(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_Get_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).Get(ctx, req.(*GetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_MultiGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MultiGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).MultiGet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_MultiGet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).MultiGet(ctx, req.(*MultiGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_Scan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScanRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).Scan(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_Scan_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).Scan(ctx, req.(*ScanRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_WriteBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriteBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).WriteBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_WriteBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).WriteBatch(ctx, req.(*WriteBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_Begin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).Begin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_Begin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).Begin(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_Commit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).Commit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_Commit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).Commit(ctx, req.(*TransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_Rollback_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).Rollback(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_Rollback_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).Rollback(ctx, req.(*TransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VaulticDB_ServiceDesc is the grpc.ServiceDesc for VaulticDB service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,6 +466,34 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Shutdown",
 			Handler:    _VaulticDB_Shutdown_Handler,
+		},
+		{
+			MethodName: "Get",
+			Handler:    _VaulticDB_Get_Handler,
+		},
+		{
+			MethodName: "MultiGet",
+			Handler:    _VaulticDB_MultiGet_Handler,
+		},
+		{
+			MethodName: "Scan",
+			Handler:    _VaulticDB_Scan_Handler,
+		},
+		{
+			MethodName: "WriteBatch",
+			Handler:    _VaulticDB_WriteBatch_Handler,
+		},
+		{
+			MethodName: "Begin",
+			Handler:    _VaulticDB_Begin_Handler,
+		},
+		{
+			MethodName: "Commit",
+			Handler:    _VaulticDB_Commit_Handler,
+		},
+		{
+			MethodName: "Rollback",
+			Handler:    _VaulticDB_Rollback_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

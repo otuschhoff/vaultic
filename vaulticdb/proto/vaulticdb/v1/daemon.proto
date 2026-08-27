@@ -29,17 +29,46 @@ message KeyValue {
   bytes value = 2;
 }
 
+message GetRequest {
+  RequestContext context = 1;
+  bytes key = 2;
+  string transaction_id = 3;
+}
+
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+  bytes key = 3;
+}
+
+message MultiGetRequest {
+  RequestContext context = 1;
+  repeated bytes keys = 2;
+  string transaction_id = 3;
+}
+
+message MultiGetResponse {
+  repeated GetResponse results = 1;
+}
+
 message WriteBatchRequest {
   RequestContext context = 1;
   repeated KeyValue puts = 2;
   repeated bytes deletes = 3;
   bool await_durable = 4;
+  string transaction_id = 5;
+}
+
+message WriteBatchResponse {
+  bool durable = 1;
 }
 
 message ScanRequest {
   RequestContext context = 1;
   bytes prefix = 2;
   uint32 page_size = 3;
+  bytes after_key = 4;
+  string transaction_id = 5;
 }
 
 message ScanResponse {
@@ -50,6 +79,14 @@ message ScanResponse {
 message TransactionRequest {
   RequestContext context = 1;
   string transaction_id = 2;
+}
+
+message BeginResponse {
+  string transaction_id = 1;
+}
+
+message CommitResponse {
+  bool durable = 1;
 }
 
 message HealthRequest {
@@ -89,4 +126,11 @@ service VaulticDB {
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
   rpc Drain(Empty) returns (Empty);
   rpc Shutdown(Empty) returns (Empty);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc MultiGet(MultiGetRequest) returns (MultiGetResponse);
+  rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
+  rpc Begin(Empty) returns (BeginResponse);
+  rpc Commit(TransactionRequest) returns (CommitResponse);
+  rpc Rollback(TransactionRequest) returns (Empty);
 }

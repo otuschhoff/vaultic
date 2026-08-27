@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -8,16 +9,400 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	options := Options{Socket: testSocket(t), RepositoryID: "phase3-storage", DaemonPath: daemonBinary(t), DataDir: dataDir}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	puts := []Mutation{{Key: []byte("b:a"), Value: []byte("one")}, {Key: []byte("b:b"), Value: []byte("two")}, {Key: []byte("b:c"), Value: []byte("three")}}
+	durable, err := client.WriteBatch(ctx, puts, nil, true, "")
+	if err != nil || !durable {
+		t.Fatalf("durable write = %t, %v", durable, err)
+	}
+	values, found, err := client.MultiGet(ctx, [][]byte{[]byte("b:a"), []byte("missing"), []byte("b:c")}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found[0] || found[1] || !found[2] || string(values[2].Value) != "three" {
+		t.Fatalf("unexpected multi-get: %#v %#v", values, found)
+	}
+	first, done, err := client.ScanPage(ctx, []byte("b:"), nil, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done || len(first) != 2 {
+		t.Fatalf("first page = %#v, done=%t", first, done)
+	}
+	second, done, err := client.ScanPage(ctx, []byte("b:"), first[len(first)-1].Key, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done || len(second) != 1 || string(second[0].Key) != "b:c" {
+		t.Fatalf("second page = %#v, done=%t", second, done)
+	}
+	empty, done, err := client.ScanPage(ctx, []byte("empty:"), nil, 2, "")
+	if err != nil || !done || len(empty) != 0 {
+		t.Fatalf("empty page = %#v, done=%t, err=%v", empty, done, err)
+	}
+
+	transaction, err := client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: []byte("tx:rollback"), Value: []byte("hidden")}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if value, found, err := transaction.Get(ctx, []byte("tx:rollback")); err != nil || !found || string(value) != "hidden" {
+		t.Fatalf("transaction read = %q, %t, %v", value, found, err)
+	}
+	if _, found, err := client.Get(ctx, []byte("tx:rollback"), ""); err != nil || found {
+		t.Fatalf("uncommitted value visible: %t, %v", found, err)
+	}
+	if err := transaction.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err = client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := transaction.Rollback(canceled); status.Code(err) != codes.Canceled {
+		t.Fatalf("canceled rollback returned %v", err)
+	}
+	if err := transaction.Rollback(ctx); err != nil {
+		t.Fatalf("retry rollback: %v", err)
+	}
+	transaction, err = client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceledCommit, cancelCommit := context.WithCancel(ctx)
+	cancelCommit()
+	if err := transaction.Commit(canceledCommit); status.Code(err) != codes.Canceled {
+		t.Fatalf("canceled commit returned %v", err)
+	}
+	if err := transaction.Commit(ctx); err == nil || !strings.Contains(err.Error(), "already closed") {
+		t.Fatalf("ambiguous commit retry returned %v", err)
+	}
+	if err := transaction.Rollback(ctx); err != nil {
+		t.Fatalf("rollback after ambiguous commit: %v", err)
+	}
+	transaction, err = client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: []byte("tx:commit"), Value: []byte("visible")}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	value, foundAfterRestart, err := client.Get(ctx, []byte("tx:commit"), "")
+	if err != nil || !foundAfterRestart || string(value) != "visible" {
+		t.Fatalf("restart read = %q, %t, %v", value, foundAfterRestart, err)
+	}
+}
+
+func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
+	options := Options{Socket: testSocket(t), RepositoryID: "phase3-schema", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	const count = 24
+	revisions := make([]uint64, count)
+	errs := make([]error, count)
+	var group sync.WaitGroup
+	for index := range count {
+		group.Add(1)
+		go func(index int) { defer group.Done(); revisions[index], errs[index] = store.AllocateRevision(ctx) }(index)
+	}
+	group.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sort.Slice(revisions, func(i, j int) bool { return revisions[i] < revisions[j] })
+	for index, revision := range revisions {
+		if revision != uint64(index+1) {
+			t.Fatalf("revision[%d] = %d", index, revision)
+		}
+	}
+
+	revision := revisions[len(revisions)-1]
+	key := schema.InodeRevisionKey(1, 2, revision)
+	record := schema.InodeRevision{ParentInode: 1, Known: schema.KnownParent, Freshness: schema.FreshnessImported}
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateImmutable(ctx, key, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateImmutable(ctx, key, encoded); err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]byte(nil), encoded...)
+	changed[len(changed)-1] ^= 1
+	if err := store.CreateImmutable(ctx, key, changed); err == nil {
+		t.Fatal("immutable overwrite was accepted")
+	}
+	if err := store.Put(ctx, key, encoded, true); err == nil || !strings.Contains(err.Error(), "dedicated transactional") {
+		t.Fatalf("generic immutable write returned %v", err)
+	}
+	if err := store.Put(ctx, schema.PackKey(schema.ID{}), []byte("invalid"), true); err == nil {
+		t.Fatal("generic write accepted an invalid pack value")
+	}
+	packKey := schema.PackKey(daemonTestID(9))
+	aggregateKey := schema.PackAggregateKey(schema.AggregateAll)
+	packValue := encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, Lifecycle: schema.PackImported})
+	aggregateValue := encodeSchemaRecord(t, schema.PackAggregate{PackCount: 1, UpdateSequence: revision})
+	if err := store.WriteMutableBatch(ctx, []Mutation{{Key: packKey, Value: packValue}, {Key: aggregateKey, Value: aggregateValue}}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	batchValues, batchFound, err := client.MultiGet(ctx, [][]byte{packKey, aggregateKey}, "")
+	if err != nil || !batchFound[0] || !batchFound[1] || !bytes.Equal(batchValues[0].Value, packValue) || !bytes.Equal(batchValues[1].Value, aggregateValue) {
+		t.Fatalf("mutable schema batch = %#v, %#v, %v", batchValues, batchFound, err)
+	}
+	blobKey := schema.BlobKey(daemonTestID(8))
+	blobValue := encodeSchemaRecord(t, schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: daemonTestID(9), Type: schema.BlobData}}})
+	packValue2 := encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 2, Lifecycle: schema.PackPublished})
+	if err := store.PublishSchemaBatch(ctx, []Mutation{{Key: blobKey, Value: blobValue}, {Key: packKey, Value: packValue2}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	conflictingBlob := append([]byte(nil), blobValue...)
+	conflictingBlob[44] ^= 1
+	if err := store.PublishSchemaBatch(ctx, []Mutation{{Key: blobKey, Value: conflictingBlob}, {Key: packKey, Value: packValue}}, nil); err == nil {
+		t.Fatal("mixed schema batch accepted conflicting immutable record")
+	}
+	packAfterConflict, foundAfterConflict, err := store.Get(ctx, packKey)
+	if err != nil || !foundAfterConflict || !bytes.Equal(packAfterConflict, packValue2) {
+		t.Fatalf("mixed schema batch was not atomic: %q, %t, %v", packAfterConflict, foundAfterConflict, err)
+	}
+	if err := store.WriteMutableBatch(ctx, nil, [][]byte{packKey}, true); err == nil || !strings.Contains(err.Error(), "remain visible") {
+		t.Fatalf("pack deletion returned %v", err)
+	}
+	if err := store.WriteMutableBatch(ctx, []Mutation{{Key: aggregateKey, Value: aggregateValue}}, [][]byte{aggregateKey}, true); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate mutable mutation returned %v", err)
+	}
+	if err := store.Put(ctx, schema.NextRevisionKey(), mustNextRevision(t, 100), true); err == nil || !strings.Contains(err.Error(), "AllocateRevision") {
+		t.Fatalf("generic revision-sequence write returned %v", err)
+	}
+	content := []schema.ID{daemonTestID(1), daemonTestID(2), daemonTestID(3)}
+	manifestID := schema.ContentManifestID(content)
+	reverseManifestKey := schema.ReverseManifestKey(content[0], manifestID)
+	reverseManifestValue := encodeSchemaRecord(t, schema.ReverseManifestRecord{State: schema.ReferenceCurrent})
+	manifestID, err = store.PublishContentManifest(ctx, content, []Mutation{{Key: reverseManifestKey, Value: reverseManifestValue}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryID, err := store.CreateContentManifest(ctx, content); err != nil || retryID != manifestID {
+		t.Fatalf("content manifest retry = %x, %v", retryID, err)
+	}
+	if _, found, err := store.Get(ctx, reverseManifestKey); err != nil || !found {
+		t.Fatalf("content manifest reverse reference: %t, %v", found, err)
+	}
+	currentKey := schema.CurrentInodeKey(1, 2)
+	reverseInodeKey := schema.ReverseInodeKey(content[0], 1, 2)
+	reverseInodeValue := encodeSchemaRecord(t, schema.ReverseInodeRecord{LatestRevision: revision, State: schema.ReferenceCurrent})
+	if err := store.PublishRevisionBatch(ctx, currentKey, key, encoded, revision, []Mutation{{Key: reverseInodeKey, Value: reverseInodeValue}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	pointerBytes, found, err := store.Get(ctx, currentKey)
+	if err != nil || !found {
+		t.Fatalf("current pointer: %t, %v", found, err)
+	}
+	pointer, err := schema.UnmarshalCurrentPointer(pointerBytes)
+	if err != nil || pointer.Revision != revision || !bytes.Equal(pointer.RecordKey, key) {
+		t.Fatalf("current pointer = %#v, %v", pointer, err)
+	}
+	if _, found, err := store.Get(ctx, reverseInodeKey); err != nil || !found {
+		t.Fatalf("revision reverse reference: %t, %v", found, err)
+	}
+	if err := store.PublishRevision(ctx, currentKey, key, []byte("different"), revision); err == nil {
+		t.Fatal("conflicting revision publication was accepted")
+	}
+	if err := store.PublishRevision(ctx, currentKey, schema.InodeRevisionKey(1, 2, revision-1), encoded, revision-1); err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("current-pointer regression returned %v", err)
+	}
+	if err := store.PublishRevision(ctx, currentKey, schema.InodeRevisionKey(1, 2, revision+1), []byte("invalid"), revision+1); err == nil {
+		t.Fatal("revision publication accepted invalid record bytes")
+	}
+	if err := store.PublishRevision(ctx, schema.BlobKey(schema.ID{}), key, encoded, revision); err == nil {
+		t.Fatal("non-current key accepted as current pointer")
+	}
+}
+
+func TestManifestBatchingRespectsNegotiatedLimits(t *testing.T) {
+	keys := make([][]byte, 200)
+	values := make([][]byte, len(keys))
+	for index := range keys {
+		keys[index] = make([]byte, 39)
+		values[index] = make([]byte, 128*1024)
+	}
+	limits := Limits{MaxBatchItems: 10_000, MaxMessageBytes: 16 * 1024 * 1024}
+	batches := 0
+	for start := 0; start < len(keys); batches++ {
+		end, err := manifestBatchEnd(limits, keys, values, start)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if end <= start || end > len(keys) {
+			t.Fatalf("manifest batch %d made invalid progress %d -> %d", batches, start, end)
+		}
+		start = end
+	}
+	if batches < 2 {
+		t.Fatalf("expected multiple manifest batches, got %d", batches)
+	}
+}
+
+func TestS3CompatibleStorageRoundTrip(t *testing.T) {
+	if os.Getenv("VAULTICDB_TEST_S3_ENDPOINT") == "" {
+		t.Skip("VAULTICDB_TEST_S3_ENDPOINT is not configured")
+	}
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "phase3-s3", DaemonPath: daemonBinary(t),
+		ObjectStore: "s3", S3Bucket: os.Getenv("VAULTICDB_TEST_S3_BUCKET"), S3Prefix: "phase3/roundtrip",
+	}
+	if options.S3Bucket == "" {
+		options.S3Bucket = "vaulticdb-phase3"
+	}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	durable, err := client.WriteBatch(ctx, []Mutation{{Key: []byte("s3:key"), Value: []byte("s3-value")}}, nil, true, "")
+	if err != nil || !durable {
+		t.Fatalf("S3 write = %t, %v", durable, err)
+	}
+	value, found, err := client.Get(ctx, []byte("s3:key"), "")
+	if err != nil || !found || string(value) != "s3-value" {
+		t.Fatalf("S3 read = %q, %t, %v", value, found, err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	options.Socket = testSocket(t)
+	options.RepositoryID = "phase3-s3-other"
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	if value, found, err := client.Get(ctx, []byte("s3:key"), ""); err != nil || found {
+		t.Fatalf("S3 repository isolation read = %q, %t, %v", value, found, err)
+	}
+}
+
+type schemaRecord interface{ MarshalBinary() ([]byte, error) }
+
+func daemonTestID(value byte) schema.ID { var id schema.ID; id[0], id[31] = value, value; return id }
+func encodeSchemaRecord(t *testing.T, record schemaRecord) []byte {
+	t.Helper()
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func mustNextRevision(t *testing.T, next uint64) []byte {
+	t.Helper()
+	encoded, err := schema.MarshalNextRevision(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func TestEverySchemaRecordPersistsByteForByteAcrossRestart(t *testing.T) {
+	options := Options{Socket: testSocket(t), RepositoryID: "phase3-all-records", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	ctx := context.Background()
+	id1, id2, id3 := daemonTestID(1), daemonTestID(2), daemonTestID(3)
+	inodeKey := schema.InodeRevisionKey(1, 2, 1)
+	directoryKey := schema.DirectoryRevisionKey(1, 1, 1)
+	inodePointer, _ := (schema.CurrentPointer{Revision: 1, RecordKey: inodeKey}).MarshalBinary()
+	directoryPointer, _ := (schema.CurrentPointer{Revision: 1, RecordKey: directoryKey}).MarshalBinary()
+	nextRevision, _ := schema.MarshalNextRevision(2)
+	records := []Mutation{
+		{Key: schema.BlobKey(id1), Value: encodeSchemaRecord(t, schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: id2, Offset: 1, Length: 2, UncompressedSize: 3, Type: schema.BlobData}}})},
+		{Key: schema.PackKey(id2), Value: encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 3, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, Lifecycle: schema.PackPublished})},
+		{Key: schema.PackAggregateKey(schema.AggregateAll), Value: encodeSchemaRecord(t, schema.PackAggregate{PackCount: 1, PhysicalSize: 3, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, UpdateSequence: 1})},
+		{Key: schema.CurrentInodeKey(1, 2), Value: inodePointer},
+		{Key: inodeKey, Value: encodeSchemaRecord(t, schema.InodeRevision{ParentInode: 1, Known: schema.KnownParent, ContentMode: schema.ContentInline, ContentIDs: []schema.ID{id1}, ContentCount: 1, Freshness: schema.FreshnessVerified})},
+		{Key: schema.CurrentDirectoryKey(1, 1), Value: directoryPointer},
+		{Key: directoryKey, Value: encodeSchemaRecord(t, schema.DirectoryRevision{Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: inodeKey}}})},
+		{Key: schema.SnapshotKey(id3), Value: encodeSchemaRecord(t, schema.SnapshotRecord{CommitSequence: 1, RootFSID: 1, RootInode: 1, RootRevision: 1, OriginalJSON: []byte("{}")})},
+		{Key: schema.ContentManifestKey(id3, 0), Value: encodeSchemaRecord(t, schema.ContentManifest{TotalCount: 1, SegmentCount: 1, ContentIDs: []schema.ID{id1}})},
+		{Key: schema.ReverseManifestKey(id1, id3), Value: encodeSchemaRecord(t, schema.ReverseManifestRecord{State: schema.ReferenceCurrent})},
+		{Key: schema.ReverseInodeKey(id1, 1, 2), Value: encodeSchemaRecord(t, schema.ReverseInodeRecord{LatestRevision: 1, State: schema.ReferenceCurrent})},
+		{Key: schema.ReferenceCountKey(id1), Value: encodeSchemaRecord(t, schema.ReferenceCountRecord{TotalReferences: 2, DistinctInodes: 1, DistinctRevisions: 1, DistinctManifests: 1, ReachableSnapshots: 1, UpdateSequence: 1})},
+		{Key: schema.GarbageCollectionKey(schema.GCBlob, id1), Value: encodeSchemaRecord(t, schema.GarbageCollectionRecord{State: schema.GCCandidate, ObservedCommit: 1})},
+		{Key: schema.CrawlDebtKey(id3, id2), Value: encodeSchemaRecord(t, schema.CrawlDebtRecord{PathOrTree: []byte("tree"), Reason: schema.DebtMissingDirectory, Status: schema.DebtPending})},
+		{Key: schema.NextRevisionKey(), Value: nextRevision},
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, err := client.WriteBatch(ctx, records, nil, true, "")
+	if err != nil || !durable {
+		t.Fatalf("write all records = %t, %v", durable, err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	keys := make([][]byte, len(records))
+	for index := range records {
+		keys[index] = records[index].Key
+	}
+	values, found, err := client.MultiGet(ctx, keys, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range records {
+		if !found[index] || !bytes.Equal(values[index].Value, records[index].Value) {
+			t.Fatalf("record %d changed across restart", index)
+		}
+	}
+}
 
 type testService struct {
 	vaulticdbv1.UnimplementedVaulticDBServer
@@ -25,6 +410,7 @@ type testService struct {
 	schema        string
 	repo          string
 	blockShutdown bool
+	corruptKeys   bool
 }
 
 func testSocket(t *testing.T) string {
@@ -71,7 +457,10 @@ func (s testService) Health(_ context.Context, request *vaulticdbv1.HealthReques
 }
 
 func (s testService) Capabilities(_ context.Context, request *vaulticdbv1.CapabilitiesRequest) (*vaulticdbv1.CapabilitiesResponse, error) {
-	return &vaulticdbv1.CapabilitiesResponse{ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId()}, nil
+	return &vaulticdbv1.CapabilitiesResponse{
+		ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId(),
+		MaxBatchItems: 10_000, MaxMessageBytes: 16 * 1024 * 1024, MaxPageItems: 1_000,
+	}, nil
 }
 
 func (s testService) Shutdown(ctx context.Context, _ *vaulticdbv1.Empty) (*vaulticdbv1.Empty, error) {
@@ -82,10 +471,40 @@ func (s testService) Shutdown(ctx context.Context, _ *vaulticdbv1.Empty) (*vault
 	return &vaulticdbv1.Empty{}, nil
 }
 
+func (s testService) Get(_ context.Context, request *vaulticdbv1.GetRequest) (*vaulticdbv1.GetResponse, error) {
+	key := request.GetKey()
+	if s.corruptKeys {
+		key = []byte("wrong-key")
+	}
+	return &vaulticdbv1.GetResponse{Found: true, Key: key, Value: []byte("value")}, nil
+}
+
+func (s testService) MultiGet(_ context.Context, request *vaulticdbv1.MultiGetRequest) (*vaulticdbv1.MultiGetResponse, error) {
+	results := make([]*vaulticdbv1.GetResponse, len(request.GetKeys()))
+	for index, requestKey := range request.GetKeys() {
+		key := requestKey
+		if s.corruptKeys {
+			key = []byte("wrong-key")
+		}
+		results[index] = &vaulticdbv1.GetResponse{Found: true, Key: key, Value: []byte("value")}
+	}
+	return &vaulticdbv1.MultiGetResponse{Results: results}, nil
+}
+
 func TestOptionsDefaults(t *testing.T) {
 	options := (Options{}).withDefaults()
 	if options.Socket != DefaultSocket("") || options.StartTimeout != 10*time.Second || options.RetryInterval != 25*time.Millisecond {
 		t.Fatalf("unexpected defaults: %#v", options)
+	}
+}
+
+func TestDefaultRPCContextHasDeadline(t *testing.T) {
+	ctx, cancel := withDefaultRPCDeadline(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	remaining := time.Until(deadline)
+	if !ok || remaining <= 0 || remaining > defaultRPCDeadline {
+		t.Fatalf("default RPC deadline = %v, %t", deadline, ok)
 	}
 }
 
@@ -119,6 +538,37 @@ func TestConnectValidatesDaemon(t *testing.T) {
 	}
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientRejectsWrongResponseKeys(t *testing.T) {
+	socket := testSocket(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.Chmod(filepath.Dir(socket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	vaulticdbv1.RegisterVaulticDBServer(server, testService{protocol: ProtocolVersion, schema: SchemaVersion, corruptKeys: true})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := Connect(context.Background(), Options{Socket: socket, RepositoryID: "test-repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	if _, _, err := client.Get(context.Background(), []byte("requested-key"), ""); err == nil || !strings.Contains(err.Error(), "wrong key") {
+		t.Fatalf("expected wrong point-read key error, got %v", err)
+	}
+	if _, _, err := client.MultiGet(context.Background(), [][]byte{[]byte("first"), []byte("second")}, ""); err == nil || !strings.Contains(err.Error(), "out-of-order") {
+		t.Fatalf("expected out-of-order multi-get error, got %v", err)
 	}
 }
 
@@ -232,6 +682,14 @@ func TestEnsureRejectsInsecureTCPConfiguration(t *testing.T) {
 	if _, err := Ensure(context.Background(), base); err == nil || !strings.Contains(err.Error(), "token") {
 		t.Fatalf("expected missing token error, got %v", err)
 	}
+	base.TCPAllowlist = []string{"not-a-network"}
+	base.AuthToken = "token"
+	if _, err := Ensure(context.Background(), base); err == nil || !strings.Contains(err.Error(), "invalid TCP allowlist") {
+		t.Fatalf("expected invalid allowlist error, got %v", err)
+	}
+	if _, err := Ensure(context.Background(), Options{ObjectStore: "s3", DaemonPath: daemonBinary(t)}); err == nil || !strings.Contains(err.Error(), "bucket") {
+		t.Fatalf("expected missing S3 bucket error, got %v", err)
+	}
 }
 
 func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
@@ -289,6 +747,34 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 				_, err := rpc.Shutdown(context.Background(), &vaulticdbv1.Empty{Context: requestContext(context.Background())})
 				return err
 			},
+			"get": func() error {
+				_, err := rpc.Get(context.Background(), &vaulticdbv1.GetRequest{Context: requestContext(context.Background()), Key: []byte("key")})
+				return err
+			},
+			"multi-get": func() error {
+				_, err := rpc.MultiGet(context.Background(), &vaulticdbv1.MultiGetRequest{Context: requestContext(context.Background()), Keys: [][]byte{[]byte("key")}})
+				return err
+			},
+			"scan": func() error {
+				_, err := rpc.Scan(context.Background(), &vaulticdbv1.ScanRequest{Context: requestContext(context.Background()), Prefix: []byte("k"), PageSize: 1})
+				return err
+			},
+			"write-batch": func() error {
+				_, err := rpc.WriteBatch(context.Background(), &vaulticdbv1.WriteBatchRequest{Context: requestContext(context.Background()), Puts: []*vaulticdbv1.KeyValue{{Key: []byte("key"), Value: []byte("value")}}})
+				return err
+			},
+			"begin": func() error {
+				_, err := rpc.Begin(context.Background(), &vaulticdbv1.Empty{Context: requestContext(context.Background())})
+				return err
+			},
+			"commit": func() error {
+				_, err := rpc.Commit(context.Background(), &vaulticdbv1.TransactionRequest{Context: requestContext(context.Background()), TransactionId: "unknown"})
+				return err
+			},
+			"rollback": func() error {
+				_, err := rpc.Rollback(context.Background(), &vaulticdbv1.TransactionRequest{Context: requestContext(context.Background()), TransactionId: "unknown"})
+				return err
+			},
 		}
 		for rpcName, check := range checks {
 			if err := check(); status.Code(err) != codes.Unauthenticated {
@@ -328,6 +814,9 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 	}
 	if health.GetReady() {
 		t.Fatal("daemon remained ready after drain")
+	}
+	if _, _, err := client.Get(context.Background(), []byte("after-drain"), ""); status.Code(err) != codes.Unavailable {
+		t.Fatalf("storage request after drain returned %v", err)
 	}
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatal(err)

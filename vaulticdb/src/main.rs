@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::{
     env,
     fs::File,
@@ -35,9 +37,14 @@ pub mod proto {
 
 use proto::{
     vaultic_db_server::{VaulticDb, VaulticDbServer},
-    CapabilitiesRequest, CapabilitiesResponse, Empty, HealthRequest, HealthResponse,
-    RequestContext, ScanRequest, WriteBatchRequest,
+    BeginResponse, CapabilitiesRequest, CapabilitiesResponse, CommitResponse, Empty, GetRequest,
+    GetResponse, HealthRequest, HealthResponse, MultiGetRequest, MultiGetResponse, RequestContext,
+    ScanRequest, ScanResponse, TransactionRequest, WriteBatchRequest, WriteBatchResponse,
 };
+
+mod storage;
+
+use storage::{repeated_message_encoded_len, Storage};
 
 const PROTOCOL_VERSION: &str = "vaulticdb.v1";
 const SCHEMA_VERSION: &str = "0";
@@ -60,6 +67,7 @@ struct DaemonState {
 struct Service {
     state: DaemonState,
     shutdown: watch::Sender<bool>,
+    storage: Arc<Storage>,
 }
 
 #[tonic::async_trait]
@@ -122,6 +130,110 @@ impl VaulticDb for Service {
         let _ = self.shutdown.send(true);
         Ok(Response::new(Empty { context: None }))
     }
+
+    async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        let request = request.into_inner();
+        Ok(Response::new(
+            self.storage
+                .get(&request.key, &request.transaction_id)
+                .await?,
+        ))
+    }
+
+    async fn multi_get(
+        &self,
+        request: Request<MultiGetRequest>,
+    ) -> Result<Response<MultiGetResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        if request.get_ref().keys.len() > MAX_BATCH_ITEMS as usize {
+            return Err(Status::resource_exhausted("multi-get item limit exceeded"));
+        }
+        let request = request.into_inner();
+        let mut results = Vec::with_capacity(request.keys.len());
+        let mut response_bytes = 0usize;
+        for key in request.keys {
+            let result = self.storage.get(&key, &request.transaction_id).await?;
+            response_bytes = response_bytes
+                .checked_add(repeated_message_encoded_len(result.encoded_len()))
+                .ok_or_else(|| Status::resource_exhausted("multi-get response size overflow"))?;
+            if response_bytes > MAX_MESSAGE_BYTES as usize {
+                return Err(Status::resource_exhausted(
+                    "multi-get response byte limit exceeded",
+                ));
+            }
+            results.push(result);
+        }
+        Ok(Response::new(MultiGetResponse { results }))
+    }
+
+    async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        validate_scan(request.get_ref())?;
+        let request = request.into_inner();
+        Ok(Response::new(
+            self.storage
+                .scan(
+                    &request.prefix,
+                    &request.after_key,
+                    request.page_size as usize,
+                    &request.transaction_id,
+                )
+                .await?,
+        ))
+    }
+
+    async fn write_batch(
+        &self,
+        request: Request<WriteBatchRequest>,
+    ) -> Result<Response<WriteBatchResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        validate_write_batch(request.get_ref())?;
+        let durable = self.storage.write_batch(request.get_ref()).await?;
+        Ok(Response::new(WriteBatchResponse { durable }))
+    }
+
+    async fn begin(&self, request: Request<Empty>) -> Result<Response<BeginResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        Ok(Response::new(BeginResponse {
+            transaction_id: self.storage.begin().await?,
+        }))
+    }
+
+    async fn commit(
+        &self,
+        request: Request<TransactionRequest>,
+    ) -> Result<Response<CommitResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        self.storage
+            .commit(&request.get_ref().transaction_id)
+            .await?;
+        Ok(Response::new(CommitResponse { durable: true }))
+    }
+
+    async fn rollback(
+        &self,
+        request: Request<TransactionRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        self.storage
+            .rollback(&request.get_ref().transaction_id)
+            .await?;
+        Ok(Response::new(Empty { context: None }))
+    }
+}
+
+fn check_storage_request<T>(
+    state: &DaemonState,
+    request: &Request<T>,
+    context: Option<&RequestContext>,
+) -> Result<(), Status> {
+    check_request(state, request, "")?;
+    check_context(context)?;
+    if state.draining.load(Ordering::Acquire) {
+        return Err(Status::unavailable("vaulticdb is draining"));
+    }
+    Ok(())
 }
 
 fn check_context(context: Option<&RequestContext>) -> Result<(), Status> {
@@ -241,6 +353,15 @@ fn default_socket_path(repository_id: &str) -> String {
     format!("{runtime_dir}/{digest:x}.sock")
 }
 
+fn repository_key(repository_id: &str) -> String {
+    let digest = Sha256::digest(if repository_id.is_empty() {
+        b"default"
+    } else {
+        repository_id.as_bytes()
+    });
+    format!("{digest:x}")
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     if env::var_os("VAULTICDB_NATIVE_SMOKE").is_some() {
@@ -264,9 +385,6 @@ async fn main() -> Result<()> {
     };
     let tcp_enabled = matches!(transport, Transport::Tcp(_, _));
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let service = VaulticDbServer::new(Service { state, shutdown })
-        .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
-        .max_encoding_message_size(MAX_MESSAGE_BYTES as usize);
 
     match transport {
         Transport::Unix(path) => {
@@ -291,16 +409,20 @@ async fn main() -> Result<()> {
                 remove_runtime_metadata(&path);
                 return Err(error);
             }
+            let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            let service = storage_service(state.clone(), shutdown.clone(), storage.clone());
             let stream = UnixListenerStream::new(listener);
             let result = Server::builder()
                 .concurrency_limit_per_connection(MAX_CONCURRENT_REQUESTS)
                 .add_service(service)
                 .serve_with_incoming_shutdown(stream, shutdown_signal(shutdown_rx))
                 .await;
+            let close_result = storage.close().await;
             drop(_lock);
             let _ = tokio::fs::remove_file(&path).await;
             remove_runtime_metadata(&path);
             result?;
+            close_result?;
         }
         Transport::Tcp(addr, allowlist) => {
             let metadata_path = env::var("VAULTICDB_TCP_METADATA")
@@ -317,7 +439,11 @@ async fn main() -> Result<()> {
                 tokio::fs::create_dir_all(parent).await?;
                 set_private_directory_permissions(parent)?;
             }
+            let lock_path = metadata_path.with_extension("lock");
+            let _lock = acquire_singleton_lock(&lock_path)?;
             write_runtime_metadata(&metadata_path, tcp_enabled)?;
+            let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            let service = storage_service(state, shutdown, storage.clone());
             let (sender, receiver) = mpsc::channel(64);
             tokio::spawn(accept_allowed_tcp(listener, allowlist, sender));
             let result = Server::builder()
@@ -328,11 +454,27 @@ async fn main() -> Result<()> {
                     shutdown_signal(shutdown_rx),
                 )
                 .await;
+            let close_result = storage.close().await;
             remove_runtime_metadata(&metadata_path);
             result?;
+            close_result?;
         }
     }
     Ok(())
+}
+
+fn storage_service(
+    state: DaemonState,
+    shutdown: watch::Sender<bool>,
+    storage: Arc<Storage>,
+) -> VaulticDbServer<Service> {
+    VaulticDbServer::new(Service {
+        state,
+        shutdown,
+        storage,
+    })
+    .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
+    .max_encoding_message_size(MAX_MESSAGE_BYTES as usize)
 }
 
 fn write_runtime_metadata(socket: &Path, tcp_enabled: bool) -> Result<()> {
@@ -498,7 +640,7 @@ mod tests {
             unsafe { env::remove_var(key) };
         }
         assert!(
-            matches!(parse_transport("").unwrap(), Transport::Unix(path) if path == PathBuf::from(default_socket_path("")))
+            matches!(parse_transport("").unwrap(), Transport::Unix(path) if path == PathBuf::from(default_socket_path("")).as_path())
         );
     }
 
@@ -539,8 +681,10 @@ mod tests {
 
     #[test]
     fn future_storage_envelopes_enforce_advertised_limits() {
-        let mut batch = WriteBatchRequest::default();
-        batch.deletes = vec![Vec::new(); MAX_BATCH_ITEMS as usize];
+        let mut batch = WriteBatchRequest {
+            deletes: vec![Vec::new(); MAX_BATCH_ITEMS as usize],
+            ..Default::default()
+        };
         assert!(validate_write_batch(&batch).is_ok());
         batch.deletes.push(Vec::new());
         assert_eq!(
