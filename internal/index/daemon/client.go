@@ -15,22 +15,22 @@ import (
 	"sync/atomic"
 	"time"
 
-	vaulticdv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticd/v1"
+	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
 const (
-	ProtocolVersion = "vaulticd.v1"
+	ProtocolVersion = "vaulticdb.v1"
 	SchemaVersion   = "0"
 )
 
-var ErrUnavailable = errors.New("vaulticd unavailable")
+var ErrUnavailable = errors.New("vaulticdb unavailable")
 
 var requestSequence atomic.Uint64
 
-// Options controls how a vaultic process connects to or starts vaulticd.
+// Options controls how a vaultic process connects to or starts vaulticdb.
 type Options struct {
 	Socket           string
 	TCPAddress       string
@@ -62,13 +62,13 @@ func DefaultSocket(repositoryID string) string {
 		repositoryID = "default"
 	}
 	digest := sha256.Sum256([]byte(repositoryID))
-	return filepath.Join("/tmp/vaulticd", hex.EncodeToString(digest[:])+".sock")
+	return filepath.Join("/tmp/vaulticdb", hex.EncodeToString(digest[:])+".sock")
 }
 
-// Client is a validated connection to one vaulticd endpoint.
+// Client is a validated connection to one vaulticdb endpoint.
 type Client struct {
 	conn    *grpc.ClientConn
-	rpc     vaulticdv1.VaulticDaemonClient
+	rpc     vaulticdbv1.VaulticDBClient
 	process *exec.Cmd
 	options Options
 }
@@ -100,17 +100,17 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 
 	cmd := exec.Command(options.DaemonPath)
 	cmd.Env = append(os.Environ(),
-		"VAULTICD_SOCKET="+options.Socket,
-		"VAULTICD_REPOSITORY_ID="+options.RepositoryID,
+		"VAULTICDB_SOCKET="+options.Socket,
+		"VAULTICDB_REPOSITORY_ID="+options.RepositoryID,
 	)
 	if options.AuthToken != "" {
-		cmd.Env = append(cmd.Env, "VAULTICD_TCP_AUTH_TOKEN="+options.AuthToken)
+		cmd.Env = append(cmd.Env, "VAULTICDB_TCP_AUTH_TOKEN="+options.AuthToken)
 	}
 	if options.TCPAddress != "" {
 		cmd.Env = append(cmd.Env,
-			"VAULTICD_TRANSPORT=tcp",
-			"VAULTICD_TCP_ADDR="+options.TCPAddress,
-			"VAULTICD_TCP_ALLOWLIST="+strings.Join(options.TCPAllowlist, ","),
+			"VAULTICDB_TRANSPORT=tcp",
+			"VAULTICDB_TCP_ADDR="+options.TCPAddress,
+			"VAULTICDB_TCP_ALLOWLIST="+strings.Join(options.TCPAllowlist, ","),
 		)
 	}
 	if err := cmd.Start(); err != nil {
@@ -119,7 +119,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		if client, dialErr := retryDial(ctx, options); dialErr == nil {
 			return client, nil
 		}
-		return nil, fmt.Errorf("start vaulticd: %w", err)
+		return nil, fmt.Errorf("start vaulticdb: %w", err)
 	}
 
 	client, err := retryDial(ctx, options)
@@ -150,7 +150,7 @@ func daemonOwnsProcess(socket string, processID int) bool {
 }
 
 func dial(ctx context.Context, options Options) (*Client, error) {
-	target := "passthrough:///vaulticd"
+	target := "passthrough:///vaulticdb"
 	dialer := unixDialer(options.Socket)
 	if options.TCPAddress == "" {
 		if err := validateUnixEndpoint(options.Socket); err != nil {
@@ -172,9 +172,9 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{conn: conn, rpc: vaulticdv1.NewVaulticDaemonClient(conn), options: options}
+	client := &Client{conn: conn, rpc: vaulticdbv1.NewVaulticDBClient(conn), options: options}
 	if options.AuthToken != "" {
-		client.rpc = &authenticatedClient{VaulticDaemonClient: client.rpc, token: options.AuthToken}
+		client.rpc = &authenticatedClient{VaulticDBClient: client.rpc, token: options.AuthToken}
 	}
 	if err := client.validate(ctx); err != nil {
 		_ = conn.Close()
@@ -189,37 +189,37 @@ func validateUnixEndpoint(socket string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
-		return fmt.Errorf("unsafe vaulticd socket permissions at %s", socket)
+		return fmt.Errorf("unsafe vaulticdb socket permissions at %s", socket)
 	}
 	directory, err := os.Stat(filepath.Dir(socket))
 	if err != nil {
 		return err
 	}
 	if !directory.IsDir() || directory.Mode().Perm() != 0o700 {
-		return fmt.Errorf("unsafe vaulticd runtime directory permissions at %s", filepath.Dir(socket))
+		return fmt.Errorf("unsafe vaulticdb runtime directory permissions at %s", filepath.Dir(socket))
 	}
 	return nil
 }
 
 type authenticatedClient struct {
-	vaulticdv1.VaulticDaemonClient
+	vaulticdbv1.VaulticDBClient
 	token string
 }
 
-func (c *authenticatedClient) Health(ctx context.Context, in *vaulticdv1.HealthRequest, opts ...grpc.CallOption) (*vaulticdv1.HealthResponse, error) {
-	return c.VaulticDaemonClient.Health(withAuth(ctx, c.token), in, opts...)
+func (c *authenticatedClient) Health(ctx context.Context, in *vaulticdbv1.HealthRequest, opts ...grpc.CallOption) (*vaulticdbv1.HealthResponse, error) {
+	return c.VaulticDBClient.Health(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Capabilities(ctx context.Context, in *vaulticdv1.CapabilitiesRequest, opts ...grpc.CallOption) (*vaulticdv1.CapabilitiesResponse, error) {
-	return c.VaulticDaemonClient.Capabilities(withAuth(ctx, c.token), in, opts...)
+func (c *authenticatedClient) Capabilities(ctx context.Context, in *vaulticdbv1.CapabilitiesRequest, opts ...grpc.CallOption) (*vaulticdbv1.CapabilitiesResponse, error) {
+	return c.VaulticDBClient.Capabilities(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Drain(ctx context.Context, in *vaulticdv1.Empty, opts ...grpc.CallOption) (*vaulticdv1.Empty, error) {
-	return c.VaulticDaemonClient.Drain(withAuth(ctx, c.token), in, opts...)
+func (c *authenticatedClient) Drain(ctx context.Context, in *vaulticdbv1.Empty, opts ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+	return c.VaulticDBClient.Drain(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Shutdown(ctx context.Context, in *vaulticdv1.Empty, opts ...grpc.CallOption) (*vaulticdv1.Empty, error) {
-	return c.VaulticDaemonClient.Shutdown(withAuth(ctx, c.token), in, opts...)
+func (c *authenticatedClient) Shutdown(ctx context.Context, in *vaulticdbv1.Empty, opts ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+	return c.VaulticDBClient.Shutdown(withAuth(ctx, c.token), in, opts...)
 }
 
 func withAuth(ctx context.Context, token string) context.Context {
@@ -254,7 +254,7 @@ func unixDialer(socket string) func(context.Context, string) (net.Conn, error) {
 }
 
 func (c *Client) validate(ctx context.Context) error {
-	health, err := c.rpc.Health(ctx, &vaulticdv1.HealthRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	health, err := c.rpc.Health(ctx, &vaulticdbv1.HealthRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
 	if err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ func (c *Client) validate(ctx context.Context) error {
 	if health.GetRepositoryId() != "" && health.GetRepositoryId() != c.options.RepositoryID {
 		return fmt.Errorf("daemon repository identity %q does not match %q", health.GetRepositoryId(), c.options.RepositoryID)
 	}
-	capabilities, err := c.rpc.Capabilities(ctx, &vaulticdv1.CapabilitiesRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	capabilities, err := c.rpc.Capabilities(ctx, &vaulticdbv1.CapabilitiesRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
 	if err != nil {
 		return err
 	}
@@ -277,13 +277,13 @@ func (c *Client) validate(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) RPC() vaulticdv1.VaulticDaemonClient { return c.rpc }
+func (c *Client) RPC() vaulticdbv1.VaulticDBClient { return c.rpc }
 
 // Close closes the RPC connection and shuts down only a daemon started by this client.
 func (c *Client) Close(ctx context.Context) error {
 	var result error
 	if c.process != nil {
-		_, err := c.rpc.Shutdown(ctx, &vaulticdv1.Empty{Context: requestContext(ctx)})
+		_, err := c.rpc.Shutdown(ctx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
 		if err != nil {
 			result = err
 		}
@@ -300,12 +300,12 @@ func (c *Client) Close(ctx context.Context) error {
 	return result
 }
 
-func requestContext(ctx context.Context) *vaulticdv1.RequestContext {
+func requestContext(ctx context.Context) *vaulticdbv1.RequestContext {
 	deadline := time.Now().Add(10 * time.Second)
 	if value, ok := ctx.Deadline(); ok {
 		deadline = value
 	}
-	return &vaulticdv1.RequestContext{
+	return &vaulticdbv1.RequestContext{
 		RequestId:      fmt.Sprintf("vaultic-%d", requestSequence.Add(1)),
 		DeadlineUnixMs: deadline.UnixMilli(),
 	}

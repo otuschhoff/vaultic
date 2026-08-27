@@ -29,16 +29,16 @@ use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{transport::Server, Request, Response, Status};
 
 pub mod proto {
-    tonic::include_proto!("vaulticd.v1");
+    tonic::include_proto!("vaulticdb.v1");
 }
 
 use proto::{
-    vaultic_daemon_server::{VaulticDaemon, VaulticDaemonServer},
+    vaultic_db_server::{VaulticDb, VaulticDbServer},
     CapabilitiesRequest, CapabilitiesResponse, Empty, HealthRequest, HealthResponse,
     RequestContext,
 };
 
-const PROTOCOL_VERSION: &str = "vaulticd.v1";
+const PROTOCOL_VERSION: &str = "vaulticdb.v1";
 const SCHEMA_VERSION: &str = "0";
 const MAX_BATCH_ITEMS: u32 = 10_000;
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
@@ -60,7 +60,7 @@ struct Service {
 }
 
 #[tonic::async_trait]
-impl VaulticDaemon for Service {
+impl VaulticDb for Service {
     async fn health(
         &self,
         request: Request<HealthRequest>,
@@ -154,7 +154,7 @@ fn check_request<T>(
             .and_then(|value| value.to_str().ok())
             != Some(expected.as_str())
         {
-            return Err(Status::unauthenticated("invalid vaulticd authorization"));
+            return Err(Status::unauthenticated("invalid vaulticdb authorization"));
         }
     }
     check_repository(state, repository_id)
@@ -167,43 +167,43 @@ enum Transport {
 }
 
 fn parse_transport(repository_id: &str) -> Result<Transport> {
-    let transport = env::var("VAULTICD_TRANSPORT").unwrap_or_else(|_| "unix".to_owned());
+    let transport = env::var("VAULTICDB_TRANSPORT").unwrap_or_else(|_| "unix".to_owned());
     match transport.as_str() {
         "unix" => Ok(Transport::Unix(PathBuf::from(
-            env::var("VAULTICD_SOCKET").unwrap_or_else(|_| default_socket_path(repository_id)),
+            env::var("VAULTICDB_SOCKET").unwrap_or_else(|_| default_socket_path(repository_id)),
         ))),
         "tcp" => {
-            if env::var("VAULTICD_TCP_ALLOWLIST")
+            if env::var("VAULTICDB_TCP_ALLOWLIST")
                 .unwrap_or_default()
                 .trim()
                 .is_empty()
             {
-                bail!("VAULTICD_TCP_ALLOWLIST is required when TCP transport is enabled")
+                bail!("VAULTICDB_TCP_ALLOWLIST is required when TCP transport is enabled")
             }
-            if env::var("VAULTICD_TCP_AUTH_TOKEN")
+            if env::var("VAULTICDB_TCP_AUTH_TOKEN")
                 .unwrap_or_default()
                 .is_empty()
             {
-                bail!("VAULTICD_TCP_AUTH_TOKEN is required when TCP transport is enabled")
+                bail!("VAULTICDB_TCP_AUTH_TOKEN is required when TCP transport is enabled")
             }
             let addr =
-                env::var("VAULTICD_TCP_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_owned());
-            let allowlist = env::var("VAULTICD_TCP_ALLOWLIST")?
+                env::var("VAULTICDB_TCP_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_owned());
+            let allowlist = env::var("VAULTICDB_TCP_ALLOWLIST")?
                 .split(',')
                 .map(|value| value.trim().parse().context("invalid IP allowlist entry"))
                 .collect::<Result<Vec<IpNet>>>()?;
             Ok(Transport::Tcp(
-                addr.parse().context("invalid VAULTICD_TCP_ADDR")?,
+                addr.parse().context("invalid VAULTICDB_TCP_ADDR")?,
                 allowlist,
             ))
         }
-        other => bail!("unsupported VAULTICD_TRANSPORT {other:?}; expected unix or tcp"),
+        other => bail!("unsupported VAULTICDB_TRANSPORT {other:?}; expected unix or tcp"),
     }
 }
 
 fn default_socket_path(repository_id: &str) -> String {
     let runtime_dir =
-        env::var("VAULTICD_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticd".to_owned());
+        env::var("VAULTICDB_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticdb".to_owned());
     let digest = Sha256::digest(if repository_id.is_empty() {
         b"default"
     } else {
@@ -214,18 +214,18 @@ fn default_socket_path(repository_id: &str) -> String {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    if env::var_os("VAULTICD_NATIVE_SMOKE").is_some() {
+    if env::var_os("VAULTICDB_NATIVE_SMOKE").is_some() {
         return native_smoke().await;
     }
 
-    let repository_id = env::var("VAULTICD_REPOSITORY_ID").unwrap_or_default();
+    let repository_id = env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default();
     let transport = parse_transport(&repository_id)?;
-    let auth_token = env::var("VAULTICD_TCP_AUTH_TOKEN")
+    let auth_token = env::var("VAULTICDB_TCP_AUTH_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
     let state = DaemonState {
         daemon_id: Arc::from(
-            env::var("VAULTICD_DAEMON_ID").unwrap_or_else(|_| "vaulticd-dev".to_owned()),
+            env::var("VAULTICDB_DAEMON_ID").unwrap_or_else(|_| "vaulticdb-dev".to_owned()),
         ),
         repository_id: Arc::from(repository_id),
         auth_token: auth_token.map(Arc::from),
@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
     };
     let tcp_enabled = matches!(transport, Transport::Tcp(_, _));
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let service = VaulticDaemonServer::new(Service { state, shutdown })
+    let service = VaulticDbServer::new(Service { state, shutdown })
         .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
         .max_encoding_message_size(MAX_MESSAGE_BYTES as usize);
 
@@ -273,9 +273,9 @@ async fn main() -> Result<()> {
         }
         Transport::Tcp(addr, allowlist) => {
             let metadata_path = PathBuf::from(
-                env::var("VAULTICD_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticd".to_owned()),
+                env::var("VAULTICDB_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticdb".to_owned()),
             )
-            .join("vaulticd-tcp");
+            .join("vaulticdb-tcp");
             let listener = TcpListener::bind(addr).await.context("bind TCP listener")?;
             if let Some(parent) = metadata_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -324,7 +324,7 @@ async fn remove_stale_socket(path: &Path) -> Result<()> {
         bail!("refusing to replace non-socket endpoint {}", path.display());
     }
     match tokio::net::UnixStream::connect(path).await {
-        Ok(_) => bail!("vaulticd endpoint {} is already active", path.display()),
+        Ok(_) => bail!("vaulticdb endpoint {} is already active", path.display()),
         Err(_) => {
             tokio::fs::remove_file(path).await?;
             Ok(())
@@ -355,7 +355,7 @@ async fn accept_allowed_tcp(
 
 async fn native_smoke() -> Result<()> {
     let object_store = Arc::new(InMemory::new());
-    let db = Db::open("vaulticd-phase0-smoke", object_store.clone()).await?;
+    let db = Db::open("vaulticdb-phase0-smoke", object_store.clone()).await?;
 
     let mut batch = WriteBatch::new();
     batch.put(b"phase0/key", b"phase0/value");
@@ -368,7 +368,7 @@ async fn native_smoke() -> Result<()> {
         ..Default::default()
     };
     let reader = DbReader::open(
-        "vaulticd-phase0-smoke",
+        "vaulticdb-phase0-smoke",
         object_store,
         DbReaderMode::FollowLatest,
         reader_options,
@@ -379,7 +379,7 @@ async fn native_smoke() -> Result<()> {
         bail!("native SlateDB smoke read returned an unexpected value")
     }
     reader.close().await?;
-    println!("vaulticd native SlateDB smoke ok");
+    println!("vaulticdb native SlateDB smoke ok");
     Ok(())
 }
 
@@ -402,9 +402,9 @@ fn acquire_singleton_lock(path: &Path) -> Result<File> {
                 Err(error)
             }
         })
-        .with_context(|| format!("open vaulticd singleton lock {}", path.display()))?;
+        .with_context(|| format!("open vaulticdb singleton lock {}", path.display()))?;
     lock.try_lock_exclusive()
-        .with_context(|| format!("acquire vaulticd singleton lock {}", path.display()))?;
+        .with_context(|| format!("acquire vaulticdb singleton lock {}", path.display()))?;
     Ok(lock)
 }
 
@@ -452,10 +452,10 @@ mod tests {
     fn unix_is_the_default_transport() {
         let _guard = transport_environment_lock().lock().unwrap();
         for key in [
-            "VAULTICD_TRANSPORT",
-            "VAULTICD_SOCKET",
-            "VAULTICD_TCP_ALLOWLIST",
-            "VAULTICD_TCP_AUTH_TOKEN",
+            "VAULTICDB_TRANSPORT",
+            "VAULTICDB_SOCKET",
+            "VAULTICDB_TCP_ALLOWLIST",
+            "VAULTICDB_TCP_AUTH_TOKEN",
         ] {
             unsafe { env::remove_var(key) };
         }
@@ -467,20 +467,20 @@ mod tests {
     #[test]
     fn tcp_requires_authentication_and_allowlist() {
         let _guard = transport_environment_lock().lock().unwrap();
-        unsafe { env::set_var("VAULTICD_TRANSPORT", "tcp") };
-        unsafe { env::remove_var("VAULTICD_TCP_ALLOWLIST") };
-        unsafe { env::remove_var("VAULTICD_TCP_AUTH_TOKEN") };
+        unsafe { env::set_var("VAULTICDB_TRANSPORT", "tcp") };
+        unsafe { env::remove_var("VAULTICDB_TCP_ALLOWLIST") };
+        unsafe { env::remove_var("VAULTICDB_TCP_AUTH_TOKEN") };
         assert!(parse_transport("").is_err());
-        unsafe { env::set_var("VAULTICD_TCP_ALLOWLIST", "127.0.0.1/32,::1/128") };
+        unsafe { env::set_var("VAULTICDB_TCP_ALLOWLIST", "127.0.0.1/32,::1/128") };
         assert!(parse_transport("").is_err());
-        unsafe { env::set_var("VAULTICD_TCP_AUTH_TOKEN", "test-token") };
+        unsafe { env::set_var("VAULTICDB_TCP_AUTH_TOKEN", "test-token") };
         assert!(
             matches!(parse_transport("").unwrap(), Transport::Tcp(_, networks) if networks.len() == 2)
         );
         for key in [
-            "VAULTICD_TRANSPORT",
-            "VAULTICD_TCP_ALLOWLIST",
-            "VAULTICD_TCP_AUTH_TOKEN",
+            "VAULTICDB_TRANSPORT",
+            "VAULTICDB_TCP_ALLOWLIST",
+            "VAULTICDB_TCP_AUTH_TOKEN",
         ] {
             unsafe { env::remove_var(key) };
         }
@@ -488,10 +488,10 @@ mod tests {
 
     #[test]
     fn singleton_lock_recovers_after_previous_process_exit() {
-        let directory = env::temp_dir().join(format!("vaulticd-lock-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("vaulticdb-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("vaulticd.lock");
+        let path = directory.join("vaulticdb.lock");
         let first = acquire_singleton_lock(&path).unwrap();
         assert!(acquire_singleton_lock(&path).is_err());
         drop(first);

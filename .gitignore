@@ -1,7 +1,8 @@
 /.idea
 /vaultic
 /vaultic.exe
-/vaulticd/target
-/dist/vaulticd
+/vaulticdb/target
+/dist/vaulticdb
 /.vagrant
 /.vscode
+/dist/vaultic

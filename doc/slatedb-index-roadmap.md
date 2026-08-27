@@ -1,19 +1,19 @@
-# Vaultic SlateDB Metadata Service (`vaulticd`) Roadmap
+# Vaultic SlateDB Metadata Service (`vaulticdb`) Roadmap
 
 ## 1. Purpose
 
-Integrate SlateDB through a separate Rust `vaulticd` metadata service. There is
+Integrate SlateDB through a separate Rust `vaulticdb` metadata service. There is
 one SlateDB database per vaultic repository. The official Go UniFFI binding is
 the reference for the supported API surface, but the daemon should use
 SlateDB's native Rust crate directly. Vaultic remains responsible for repository
 semantics, legacy Restic JSON compatibility, import/export, crawl policy, and
-the CLI. `vaulticd` is responsible only for SlateDB access and performance
+the CLI. `vaulticdb` is responsible only for SlateDB access and performance
 mechanics: caching, batching, write-back, scans, and transactions.
 
 The design target is a repository containing approximately 1.4 billion inodes
 and 500+ TB of data on NetApp NFS with pack data and metadata replicated to S3.
 The existing JSON index path must remain independent of SlateDB, Rust, and CGO
-when `vaulticd` is absent.
+when `vaulticdb` is absent.
 
 ### Non-negotiable guarantees
 
@@ -31,10 +31,10 @@ when `vaulticd` is absent.
   for Restic/Rustic readers.
 - No operation silently deletes legacy indexes while SlateDB parity is being
   established.
-- Vaultic processes communicate with `vaulticd` over protobuf RPC. Unix domain
+- Vaultic processes communicate with `vaulticdb` over protobuf RPC. Unix domain
   sockets are the default transport; TCP is disabled unless explicitly enabled
   and protected by an IP allowlist and authentication policy.
-- There is at most one `vaulticd` instance per configured repository/SlateDB
+- There is at most one `vaulticdb` instance per configured repository/SlateDB
   endpoint.
   Vaultic may start it on demand, then reuse an already-running compatible
   daemon.
@@ -66,14 +66,14 @@ crate-type = ["cdylib", "staticlib"]
 ```
 
 The binding's checked-in CGO declaration currently links with
-`-lslatedb_uniffi`. Because `vaulticd` is Rust, production code should link the
+`-lslatedb_uniffi`. Because `vaulticdb` is Rust, production code should link the
 native SlateDB crate directly and avoid loading UniFFI into either vaultic or
 the daemon. Keep a binding smoke test only where it validates API compatibility.
 
 ### Build requirements
 
 - Pin a SlateDB release or commit and record it in the daemon build metadata.
-- Build `vaulticd` statically for Linux with the musl target, linking the
+- Build `vaulticdb` statically for Linux with the musl target, linking the
   native SlateDB crate and Rust dependencies into the daemon binary.
 - The main vaultic CLI uses protobuf RPC and can remain `CGO_ENABLED=0`.
 - Keep a legacy-only vaultic binary path available when no daemon artifact is
@@ -89,8 +89,8 @@ the daemon. Keep a binding smoke test only where it validates API compatibility.
 
 ```text
 third_party/slatedb/<version>/<target>/libslatedb.a
-vaulticd/                            Rust daemon crate
-vaulticd/proto/                      generated Rust protobuf code
+vaulticdb/                            Rust daemon crate
+vaulticdb/proto/                      generated Rust protobuf code
 internal/index/proto/                generated Go protobuf client
 ```
 
@@ -109,14 +109,14 @@ vaultic CLI processes
         | protobuf RPC over Unix socket by default
         | optional authenticated TCP + IP allowlist
         v
-vaulticd (Rust, singleton per repository/SlateDB endpoint)
+vaulticdb (Rust, singleton per repository/SlateDB endpoint)
         |
         | native SlateDB / UniFFI crate
         v
 SlateDB object store and local cache
 ```
 
-### `vaulticd` responsibilities
+### `vaulticdb` responsibilities
 
 - Own `Db`, `DbReader`, and `DbSnapshot` handles.
 - Resolve local, S3, and S3-compatible SlateDB object stores.
@@ -129,7 +129,7 @@ SlateDB object store and local cache
   manifest refresh.
 - Expose health, capabilities, schema version, and daemon instance identity.
 
-`vaulticd` must not parse Restic JSON indexes, decide import policy, generate
+`vaulticdb` must not parse Restic JSON indexes, decide import policy, generate
 legacy JSON indexes, crawl NFS, or decide whether a file is safe to reuse.
 
 ### Vaultic responsibilities
@@ -148,15 +148,15 @@ legacy JSON indexes, crawl NFS, or decide whether a file is safe to reuse.
 Use a per-endpoint runtime directory containing:
 
 ```text
-vaulticd.sock       Unix socket
-vaulticd.pid        advisory process metadata
-vaulticd.lock       singleton acquisition lock
-vaulticd.cap        protocol/schema/capability record
+vaulticdb.sock       Unix socket
+vaulticdb.pid        advisory process metadata
+vaulticdb.lock       singleton acquisition lock
+vaulticdb.cap        protocol/schema/capability record
 ```
 
 When vaultic needs SlateDB, it first connects and validates an existing daemon.
 If no compatible daemon is available, it acquires the endpoint lock and starts
-`vaulticd`. A losing starter waits for readiness and connects to the winner.
+`vaulticdb`. A losing starter waits for readiness and connects to the winner.
 Vaultic may shut down a daemon only when it started that daemon and no active
 clients remain, unless persistent service mode was requested.
 
@@ -221,7 +221,7 @@ handled correctly.
 ### Engine interface
 
 Create `internal/index/engine.go` with a narrow interface owned by vaultic,
-not by SlateDB. The SlateDB implementation is an RPC client to `vaulticd`,
+not by SlateDB. The SlateDB implementation is an RPC client to `vaulticdb`,
 not a direct UniFFI or CGO wrapper in the vaultic process:
 
 ```go
@@ -312,7 +312,7 @@ value: next uint64 revision sequence
 ```
 
 The revision sequence is fixed-width big-endian `uint64`. It is allocated
-transactionally by `vaulticd` and must never be derived from wall-clock time,
+transactionally by `vaulticdb` and must never be derived from wall-clock time,
 process-local counters, or the number of currently visible snapshots. Keys
 must be fixed-width or length-delimited so prefixes cannot be ambiguous.
 
@@ -673,9 +673,9 @@ precedence over avoiding that scan.
 - Make each work item idempotent so retries cannot duplicate directory entries.
 - Expose counters for scanned, reused, changed, deferred, failed, and
   reconciled records.
-- Send metadata mutations to `vaulticd` through bounded `WriteBatch` RPCs;
+- Send metadata mutations to `vaulticdb` through bounded `WriteBatch` RPCs;
   scanner workers must never call SlateDB or CGO directly.
-- Let `vaulticd` coalesce batches and apply write-back asynchronously only when
+- Let `vaulticdb` coalesce batches and apply write-back asynchronously only when
   the caller has selected an explicit non-durable mode; normal backup commits
   wait for the daemon durability acknowledgement.
 
@@ -687,7 +687,7 @@ legacy JSON index remains a compatibility projection.
 ### Write ordering
 
 1. Upload data and tree packs.
-2. Send blob locations to `vaulticd` as a bounded write batch.
+2. Send blob locations to `vaulticdb` as a bounded write batch.
 3. Send snapshot/tree/inode changes, including parent inodes, and resolve crawl
   debt through the daemon transaction or write batch.
 4. Wait for the daemon's requested durability acknowledgement.
@@ -769,7 +769,7 @@ It must also classify pack-catalog issues as `missing_pack`, `pack_metadata_mism
 ## 10. CLI command group
 
 Add an `index` command group without changing existing `list index` behavior.
-Each command resolves or starts the singleton `vaulticd` only when the
+Each command resolves or starts the singleton `vaulticdb` only when the
 repository has a valid SlateDB manifest. Import, export, and check logic stays
 in vaultic; the daemon is used only for storage operations and performance
 services.
@@ -820,7 +820,7 @@ comparison and exit-code decision.
 ## 11. Locking and failure recovery
 
 The daemon boundary does not replace vaultic's repository lock policy
-automatically. `vaulticd` is a singleton for one endpoint, not a substitute for
+automatically. `vaulticdb` is a singleton for one endpoint, not a substitute for
 cross-tool repository locks.
 
 - Legacy JSON writes continue to use existing vaultic lock behavior.
@@ -857,36 +857,36 @@ or small commit series so it can be reviewed or reverted independently.
 **Goal:** make the Rust/SlateDB dependency reproducible without touching
 vaultic runtime behavior.
 
-**Current implementation state (2026-08-27):** **complete.** The `vaulticd`
+**Current implementation state (2026-08-27):** **complete.** The `vaulticdb`
 crate scaffold, versioned protobuf contract, Unix/TCP transport configuration,
 private socket permissions, fail-fast protobuf generator, and musl build script
 are present on branch `kvdb`. Generated Go bindings are checked in under
-`internal/index/proto/vaulticd/v1`. The host daemon compiles against the pinned
+`internal/index/proto/vaulticdb/v1`. The host daemon compiles against the pinned
 SlateDB revision; its native self-test and Unix-socket RPC smoke test pass. A
 local `cargo zigbuild --target x86_64-unknown-linux-musl --release` also
-produced `vaulticd`, verified as a statically linked, stripped x86-64 Linux ELF
+produced `vaulticdb`, verified as a statically linked, stripped x86-64 Linux ELF
 artifact (SHA-256 `7eb16913b78fd69702792e3094a24c5ae331fd6b468b8f5a3306f7cd28d4dd88`).
 
 **Implementation steps:**
 
 1. Pin the SlateDB Rust crate commit and record the official
   `slatedb.io/slatedb-go` binding revision used as the API reference.
-2. Add the `vaulticd` Rust crate, protobuf generation inputs, and a reproducible
+2. Add the `vaulticdb` Rust crate, protobuf generation inputs, and a reproducible
   musl Linux build script.
-3. Build the native SlateDB dependency and statically link it into `vaulticd`.
+3. Build the native SlateDB dependency and statically link it into `vaulticdb`.
 4. Add macOS development linking and Linux musl CI jobs; retain the existing
   no-CGO vaultic build.
 5. Add a daemon smoke binary that opens `Db`, opens the read-only equivalent,
   writes a `WriteBatch`, scans with `NextBatch`, and shuts down cleanly.
 
-**Files/artifacts:** `vaulticd/`, `proto/`, build scripts, CI workflow, pinned
+**Files/artifacts:** `vaulticdb/`, `proto/`, build scripts, CI workflow, pinned
 dependency metadata.
 
 **Tests:** native build, binding API smoke test, static-link inspection, and a
 legacy `go test ./...` run with no daemon installed.
 
-**Exit criterion:** a reproducible `vaulticd` binary and a legacy vaultic build
-that remains usable when `vaulticd` is absent.
+**Exit criterion:** a reproducible `vaulticdb` binary and a legacy vaultic build
+that remains usable when `vaulticdb` is absent.
 
 ### Phase 1: Protocol contract and daemon lifecycle
 
@@ -939,7 +939,7 @@ paging/streaming, and backpressure still lack automated integration coverage;
   exist; and add bounded concurrency/backpressure behavior for both Unix and
   TCP transports.
 
-**Required Phase 1 tests:** use the compiled `vaulticd` process, rather than
+**Required Phase 1 tests:** use the compiled `vaulticdb` process, rather than
 only in-process mocks, to cover two racing `Ensure` clients, compatible reuse,
 protocol/schema/repository mismatch rejection, stale socket/metadata/lock
 recovery, Unix `0700` directory and `0600` socket permissions, startup timeout
@@ -963,7 +963,7 @@ retaining the no-CGO legacy vaultic build and core regression tests.
 6. Add request deadlines, cancellation, request IDs, bounded message sizes,
   streaming/page limits, and server backpressure.
 
-**Files/artifacts:** `internal/index/proto/`, `vaulticd/src/rpc/`, daemon
+**Files/artifacts:** `internal/index/proto/`, `vaulticdb/src/rpc/`, daemon
 launcher/client packages.
 
 **Tests:** two clients racing to start one daemon, compatible daemon reuse,
@@ -994,7 +994,7 @@ unsupported manifest errors, concurrent legacy lookups, and existing repository
 index tests.
 
 **Exit criterion:** legacy repositories behave unchanged and engine resolution
-is deterministic without requiring `vaulticd`.
+is deterministic without requiring `vaulticdb`.
 
 ### Phase 3: Versioned schema and daemon storage adapter
 
@@ -1254,7 +1254,7 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
 ## 16. Known constraints
 
 - The official Go binding is CGO-based and generated from UniFFI, but it is
-  isolated inside the Rust `vaulticd` build rather than loaded by vaultic.
+  isolated inside the Rust `vaulticdb` build rather than loaded by vaultic.
 - The native binding API and generated files must be pinned together.
 - Static linking must be verified per target platform and toolchain.
 - SlateDB's object-store consistency and fencing behavior must be tested with
@@ -1265,7 +1265,7 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
   blob-index facts, while the next backup crawl fills metadata blanks.
 - The existing vaultic index model and lock behavior must remain the fallback
   until SlateDB authority has passed interop and recovery acceptance tests.
-- `vaulticd` is an operational dependency only for SlateDB-authoritative
+- `vaulticdb` is an operational dependency only for SlateDB-authoritative
   repositories. Legacy repositories continue to work without Rust, CGO,
   protobuf services, or a running daemon.
 - A daemon must not be shared across repositories or object-store endpoints

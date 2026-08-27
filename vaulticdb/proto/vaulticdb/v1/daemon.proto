@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package vaulticd.v1;
+package vaulticdb.v1;
 
-option go_package = "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdv1;vaulticdv1";
+option go_package = "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdbv1;vaulticdbv1";
 
 message RequestContext {
   string request_id = 1;
@@ -82,7 +82,7 @@ message CapabilitiesResponse {
   uint32 max_message_bytes = 8;
 }
 
-service VaulticDaemon {
+service VaulticDB {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
   rpc Drain(Empty) returns (Empty);

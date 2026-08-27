@@ -1,21 +1,21 @@
-name: vaulticd
+name: vaulticdb
 
 on:
   push:
     branches: ["**"]
     paths:
-      - ".github/workflows/vaulticd.yml"
-      - "vaulticd/**"
+      - ".github/workflows/vaulticdb.yml"
+      - "vaulticdb/**"
       - "internal/index/proto/**"
-      - "cmd/vaulticd-smoke/**"
+      - "cmd/vaulticdb-smoke/**"
       - "go.mod"
       - "go.sum"
   pull_request:
     paths:
-      - ".github/workflows/vaulticd.yml"
-      - "vaulticd/**"
+      - ".github/workflows/vaulticdb.yml"
+      - "vaulticdb/**"
       - "internal/index/proto/**"
-      - "cmd/vaulticd-smoke/**"
+      - "cmd/vaulticdb-smoke/**"
       - "go.mod"
       - "go.sum"
   workflow_dispatch:
@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 jobs:
-  vaulticd:
+  vaulticdb:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,35 +52,35 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Verify generated protobuf bindings
-        run: ./vaulticd/generate-proto.sh && git diff --exit-code -- internal/index/proto
+        run: ./vaulticdb/generate-proto.sh && git diff --exit-code -- internal/index/proto
 
-      - name: Check and test vaulticd
-        run: cargo test --manifest-path vaulticd/Cargo.toml
+      - name: Check and test vaulticdb
+        run: cargo test --manifest-path vaulticdb/Cargo.toml
 
       - name: Run native SlateDB smoke test
-        run: VAULTICD_NATIVE_SMOKE=1 cargo run --manifest-path vaulticd/Cargo.toml --quiet
+        run: VAULTICDB_NATIVE_SMOKE=1 cargo run --manifest-path vaulticdb/Cargo.toml --quiet
 
-      - name: Build static musl vaulticd
-        run: ./vaulticd/build-musl.sh
+      - name: Build static musl vaulticdb
+        run: ./vaulticdb/build-musl.sh
 
       - name: Verify static daemon artifact
         run: |
-          file dist/vaulticd/linux-amd64/vaulticd
-          test "$(file dist/vaulticd/linux-amd64/vaulticd | grep -c 'statically linked')" -eq 1
+          file dist/vaulticdb/linux-amd64/vaulticdb
+          test "$(file dist/vaulticdb/linux-amd64/vaulticdb | grep -c 'statically linked')" -eq 1
 
       - name: Run musl daemon native smoke test
-        run: VAULTICD_NATIVE_SMOKE=1 dist/vaulticd/linux-amd64/vaulticd
+        run: VAULTICDB_NATIVE_SMOKE=1 dist/vaulticdb/linux-amd64/vaulticdb
 
       - name: Verify Unix RPC smoke test
         run: |
-          cargo build --manifest-path vaulticd/Cargo.toml --quiet
-          VAULTICD_SOCKET=/tmp/vaulticd/ci.sock vaulticd/target/debug/vaulticd &
+          cargo build --manifest-path vaulticdb/Cargo.toml --quiet
+          VAULTICDB_SOCKET=/tmp/vaulticdb/ci.sock vaulticdb/target/debug/vaulticdb &
           daemon_pid=$!
           trap 'kill "$daemon_pid" 2>/dev/null || true' EXIT
-          VAULTICD_SOCKET=/tmp/vaulticd/ci.sock go run ./cmd/vaulticd-smoke
+          VAULTICDB_SOCKET=/tmp/vaulticdb/ci.sock go run ./cmd/vaulticdb-smoke
 
       - name: Verify legacy vaultic build
         run: go build ./cmd/vaultic
 
       - name: Test vaultic daemon client
-        run: VAULTICD_TEST_BINARY="$PWD/vaulticd/target/debug/vaulticd" go test ./internal/index/daemon -race
+        run: VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb" go test ./internal/index/daemon -race

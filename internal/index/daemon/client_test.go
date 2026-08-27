@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	vaulticdv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticd/v1"
+	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"google.golang.org/grpc"
 )
 
 type testService struct {
-	vaulticdv1.UnimplementedVaulticDaemonServer
+	vaulticdbv1.UnimplementedVaulticDBServer
 	protocol string
 	schema   string
 	repo     string
@@ -33,26 +33,26 @@ func testSocket(t *testing.T) string {
 
 func daemonBinary(t *testing.T) string {
 	t.Helper()
-	if binary := os.Getenv("VAULTICD_TEST_BINARY"); binary != "" {
+	if binary := os.Getenv("VAULTICDB_TEST_BINARY"); binary != "" {
 		return binary
 	}
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate test source")
 	}
-	binary := filepath.Join(filepath.Dir(source), "..", "..", "..", "vaulticd", "target", "debug", "vaulticd")
+	binary := filepath.Join(filepath.Dir(source), "..", "..", "..", "vaulticdb", "target", "debug", "vaulticdb")
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("compiled vaulticd unavailable: %v", err)
+		t.Skipf("compiled vaulticdb unavailable: %v", err)
 	}
 	return binary
 }
 
-func (s testService) Health(_ context.Context, request *vaulticdv1.HealthRequest) (*vaulticdv1.HealthResponse, error) {
-	return &vaulticdv1.HealthResponse{Ready: true, ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId()}, nil
+func (s testService) Health(_ context.Context, request *vaulticdbv1.HealthRequest) (*vaulticdbv1.HealthResponse, error) {
+	return &vaulticdbv1.HealthResponse{Ready: true, ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId()}, nil
 }
 
-func (s testService) Capabilities(_ context.Context, request *vaulticdv1.CapabilitiesRequest) (*vaulticdv1.CapabilitiesResponse, error) {
-	return &vaulticdv1.CapabilitiesResponse{ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId()}, nil
+func (s testService) Capabilities(_ context.Context, request *vaulticdbv1.CapabilitiesRequest) (*vaulticdbv1.CapabilitiesResponse, error) {
+	return &vaulticdbv1.CapabilitiesResponse{ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId()}, nil
 }
 
 func TestOptionsDefaults(t *testing.T) {
@@ -82,7 +82,7 @@ func TestConnectValidatesDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := grpc.NewServer()
-	vaulticdv1.RegisterVaulticDaemonServer(server, testService{protocol: ProtocolVersion, schema: SchemaVersion})
+	vaulticdbv1.RegisterVaulticDBServer(server, testService{protocol: ProtocolVersion, schema: SchemaVersion})
 	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 
@@ -109,7 +109,7 @@ func TestConnectRejectsIncompatibleDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := grpc.NewServer()
-	vaulticdv1.RegisterVaulticDaemonServer(server, testService{protocol: "vaulticd.v0", schema: SchemaVersion})
+	vaulticdbv1.RegisterVaulticDBServer(server, testService{protocol: "vaulticdb.v0", schema: SchemaVersion})
 	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 
@@ -120,7 +120,7 @@ func TestConnectRejectsIncompatibleDaemon(t *testing.T) {
 
 func TestSocketDir(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "runtime", "vaulticd.sock")
+	socket := filepath.Join(dir, "runtime", "vaulticdb.sock")
 	if got, want := SocketDir(socket), filepath.Join(dir, "runtime"); got != want {
 		t.Fatalf("SocketDir() = %q, want %q", got, want)
 	}
