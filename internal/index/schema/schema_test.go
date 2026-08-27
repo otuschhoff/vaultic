@@ -48,7 +48,8 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
 		{ReverseInodeKey(id, 3, 4), KeyReverseInode}, {ReferenceCountKey(id), KeyReferenceCount},
 		{GarbageCollectionKey(GCBlob, id), KeyGarbageCollection}, {GarbageCollectionKey(GCPack, id), KeyGarbageCollection},
-		{CrawlDebtKey(id, second), KeyCrawlDebt}, {NextRevisionKey(), KeyNextRevision},
+		{CrawlDebtKey(id, second), KeyCrawlDebt}, {ImportCheckpointKey(id), KeyImportCheckpoint},
+		{SnapshotImportCheckpointKey(id), KeySnapshotImportCheckpoint}, {NextRevisionKey(), KeyNextRevision},
 	}
 	for _, test := range keys {
 		parsed, err := ParseKey(test.key)
@@ -167,7 +168,36 @@ func TestEncodedValuesStayWithinTransportLimit(t *testing.T) {
 func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	id1, id2, id3 := testID(1), testID(2), testID(3)
 	roundTrip(t, BlobRecord{Locations: []BlobLocation{{PackID: id1, Offset: 9, Length: 10, UncompressedSize: 11, Type: BlobData}, {PackID: id2, Offset: 12, Length: 13, UncompressedSize: 14, Type: BlobTree}}}, UnmarshalBlobRecord)
-	roundTrip(t, PackRecord{Type: PackMixed, PhysicalSize: 100, PayloadSize: 80, HeaderSize: 20, BlobCount: 2, CreationTime: 123, CreationTimeKnown: true, Lifecycle: PackPublished, SourceIndexIDs: []ID{id1, id2}}, UnmarshalPackRecord)
+	packRecord := PackRecord{Type: PackMixed, PhysicalSize: 100, PhysicalSizeKnown: true, PayloadSize: 80, HeaderSize: 20, BlobCount: 2, CreationTime: 123, CreationTimeKnown: true, Lifecycle: PackPublished, SourceIndexIDs: []ID{id1, id2}}
+	encodedPack, err := packRecord.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedPack, err := UnmarshalPackRecord(encodedPack)
+	if err != nil || !reflect.DeepEqual(decodedPack, packRecord) {
+		t.Fatalf("pack round trip = %#v, %v", decodedPack, err)
+	}
+	legacyPack, err := UnmarshalPackRecord(encodedPack[:len(encodedPack)-1])
+	if err != nil || !legacyPack.PhysicalSizeKnown || !reflect.DeepEqual(legacyPack, packRecord) {
+		t.Fatalf("legacy pack decode = %#v, %v", legacyPack, err)
+	}
+	for size := range len(encodedPack) - 1 {
+		if _, err := UnmarshalPackRecord(encodedPack[:size]); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("pack truncation at %d returned %v", size, err)
+		}
+	}
+	if _, err := UnmarshalPackRecord(append(encodedPack, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("pack trailing data returned %v", err)
+	}
+	for _, invalid := range []PackRecord{
+		{Type: PackData, PhysicalSize: 10, PayloadSize: 8, HeaderSize: 2, Lifecycle: PackImported},
+		{Type: PackData, PhysicalSize: 7, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 1, Lifecycle: PackImported},
+		{Type: PackData, PhysicalSize: 10, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 1, Lifecycle: PackImported},
+	} {
+		if _, err := invalid.MarshalBinary(); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("invalid pack size state %#v returned %v", invalid, err)
+		}
+	}
 	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6}, UnmarshalPackAggregate)
 	roundTrip(t, CurrentPointer{Revision: 7, RecordKey: InodeRevisionKey(2, 3, 7)}, UnmarshalCurrentPointer)
 	roundTrip(t, InodeRevision{ParentInode: 1, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
@@ -181,6 +211,8 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	roundTrip(t, ReferenceCountRecord{TotalReferences: 1, DistinctInodes: 2, DistinctRevisions: 3, DistinctManifests: 4, ReachableSnapshots: 5, UpdateSequence: 6}, UnmarshalReferenceCountRecord)
 	roundTrip(t, GarbageCollectionRecord{State: GCPendingRevalidation, ObservedCommit: 3, DiscoveredUnixNano: -4, RevalidatedCommit: 5}, UnmarshalGarbageCollectionRecord)
 	roundTrip(t, CrawlDebtRecord{SourceIndexOrPack: id1, SourceKnown: true, PathOrTree: []byte("path"), Reason: DebtUnknownFreshness, RetryCount: 2, LastAttemptUnixNano: 3, Status: DebtPending, ErrorClass: "temporary"}, UnmarshalCrawlDebtRecord)
+	roundTrip(t, ImportCheckpointRecord{PacksImported: 2, BlobsImported: 3, ErrorsSeen: 4}, UnmarshalImportCheckpointRecord)
+	roundTrip(t, SnapshotImportCheckpointRecord{TreesVisited: 2, NodesImported: 3, DebtsCreated: 4}, UnmarshalSnapshotImportCheckpointRecord)
 	encoded, err := MarshalNextRevision(42)
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +316,7 @@ func TestPackClassificationAggregatesAndReverseCounts(t *testing.T) {
 	if _, err := (PackRecord{Type: PackData, Lifecycle: 99}).MarshalBinary(); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("invalid lifecycle returned %v", err)
 	}
-	records := []PackRecord{{Type: PackData, PhysicalSize: 10, PayloadSize: 8, HeaderSize: 2, BlobCount: 1, Lifecycle: PackImported}, {Type: PackMixed, PhysicalSize: 20, PayloadSize: 15, HeaderSize: 5, BlobCount: 2, Lifecycle: PackPublished}}
+	records := []PackRecord{{Type: PackData, PhysicalSize: 10, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 2, BlobCount: 1, Lifecycle: PackImported}, {Type: PackMixed, PhysicalSize: 20, PhysicalSizeKnown: true, PayloadSize: 15, HeaderSize: 5, BlobCount: 2, Lifecycle: PackPublished}}
 	aggregates, err := RebuildPackAggregates(records, 7)
 	if err != nil {
 		t.Fatal(err)

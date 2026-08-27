@@ -249,6 +249,70 @@ func UnmarshalCrawlDebtRecord(data []byte) (CrawlDebtRecord, error) {
 	return record, d.done()
 }
 
+type ImportCheckpointRecord struct {
+	PacksImported uint64
+	BlobsImported uint64
+	ErrorsSeen    uint64
+}
+
+func (record ImportCheckpointRecord) MarshalBinary() ([]byte, error) {
+	e := newEncoder()
+	e.u64(record.PacksImported)
+	e.u64(record.BlobsImported)
+	e.u64(record.ErrorsSeen)
+	return e.finish()
+}
+
+func UnmarshalImportCheckpointRecord(data []byte) (ImportCheckpointRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return ImportCheckpointRecord{}, err
+	}
+	var record ImportCheckpointRecord
+	if record.PacksImported, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.BlobsImported, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.ErrorsSeen, err = d.u64(); err != nil {
+		return record, err
+	}
+	return record, d.done()
+}
+
+type SnapshotImportCheckpointRecord struct {
+	TreesVisited  uint64
+	NodesImported uint64
+	DebtsCreated  uint64
+}
+
+func (record SnapshotImportCheckpointRecord) MarshalBinary() ([]byte, error) {
+	e := newEncoder()
+	e.u64(record.TreesVisited)
+	e.u64(record.NodesImported)
+	e.u64(record.DebtsCreated)
+	return e.finish()
+}
+
+func UnmarshalSnapshotImportCheckpointRecord(data []byte) (SnapshotImportCheckpointRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return SnapshotImportCheckpointRecord{}, err
+	}
+	var record SnapshotImportCheckpointRecord
+	if record.TreesVisited, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.NodesImported, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.DebtsCreated, err = d.u64(); err != nil {
+		return record, err
+	}
+	return record, d.done()
+}
+
 func MarshalNextRevision(next uint64) ([]byte, error) {
 	if next == 0 {
 		return nil, fmt.Errorf("%w: next revision must be non-zero", ErrMalformed)
@@ -314,6 +378,10 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalGarbageCollectionRecord(value)
 	case KeyCrawlDebt:
 		_, err = UnmarshalCrawlDebtRecord(value)
+	case KeyImportCheckpoint:
+		_, err = UnmarshalImportCheckpointRecord(value)
+	case KeySnapshotImportCheckpoint:
+		_, err = UnmarshalSnapshotImportCheckpointRecord(value)
 	case KeyNextRevision:
 		_, err = UnmarshalNextRevision(value)
 	default:

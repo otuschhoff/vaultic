@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -19,6 +20,15 @@ const revisionAllocationAttempts = 128
 // the bounded daemon client.
 type SchemaStore struct{ client *Client }
 
+type LegacyPackImport struct {
+	SourceIndex schema.ID
+	PackID      schema.ID
+	Record      schema.PackRecord
+	Blobs       map[schema.ID]schema.BlobRecord
+	DebtKey     []byte
+	Debt        *schema.CrawlDebtRecord
+}
+
 func NewSchemaStore(client *Client) *SchemaStore { return &SchemaStore{client: client} }
 
 func (store *SchemaStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
@@ -26,6 +36,360 @@ func (store *SchemaStore) Get(ctx context.Context, key []byte) ([]byte, bool, er
 		return nil, false, err
 	}
 	return store.client.Get(ctx, key, "")
+}
+
+// ImportLegacyPack atomically merges one legacy pack's blob locations,
+// provenance, catalog record, aggregates, and optional pack-stat debt.
+func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyPackImport) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.importLegacyPackOnce(ctx, imported)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("import legacy pack: %w", errors.New("transaction conflict retry limit exceeded"))
+}
+
+func (store *SchemaStore) importLegacyPackOnce(ctx context.Context, imported LegacyPackImport) error {
+	if imported.SourceIndex == (schema.ID{}) || imported.PackID == (schema.ID{}) {
+		return fmt.Errorf("legacy pack import requires source and pack identities")
+	}
+	if imported.Record.Lifecycle != schema.PackImported {
+		return fmt.Errorf("legacy pack import requires imported lifecycle")
+	}
+	locationTypes := make([]schema.BlobType, 0, imported.Record.BlobCount)
+	var locationCount uint64
+	for blobID, blob := range imported.Blobs {
+		blob = canonicalBlobRecord(blob)
+		imported.Blobs[blobID] = blob
+		for _, location := range blob.Locations {
+			if location.PackID != imported.PackID {
+				return fmt.Errorf("legacy blob location belongs to a different pack")
+			}
+			locationTypes = append(locationTypes, location.Type)
+			locationCount++
+		}
+	}
+	if locationCount != imported.Record.BlobCount || schema.ClassifyPack(locationTypes) != imported.Record.Type {
+		return fmt.Errorf("legacy pack record does not match its blob locations")
+	}
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+
+	packKey := schema.PackKey(imported.PackID)
+	packValue, packFound, err := transaction.Get(ctx, packKey)
+	if err != nil {
+		return fail(err)
+	}
+	var oldRecord *schema.PackRecord
+	if packFound {
+		record, decodeErr := schema.UnmarshalPackRecord(packValue)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		oldRecord = &record
+		imported.Record = mergeImportedPackRecord(record, imported.Record, imported.SourceIndex)
+	} else {
+		imported.Record.SourceIndexIDs = appendUniqueID(imported.Record.SourceIndexIDs, imported.SourceIndex)
+	}
+	sort.Slice(imported.Record.SourceIndexIDs, func(left, right int) bool {
+		return bytes.Compare(imported.Record.SourceIndexIDs[left][:], imported.Record.SourceIndexIDs[right][:]) < 0
+	})
+
+	puts := make([]Mutation, 0, len(imported.Blobs)+7)
+	var newLocationCount, newPayloadSize uint64
+	for blobID, incoming := range imported.Blobs {
+		key := schema.BlobKey(blobID)
+		value, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if found {
+			existing, decodeErr := schema.UnmarshalBlobRecord(value)
+			if decodeErr != nil {
+				return fail(decodeErr)
+			}
+			for _, location := range incoming.Locations {
+				if !containsPhysicalLocation(existing.Locations, location) {
+					newLocationCount++
+					if math.MaxUint64-newPayloadSize < uint64(location.Length) {
+						return fail(fmt.Errorf("pack payload size overflow"))
+					}
+					newPayloadSize += uint64(location.Length)
+				}
+			}
+			incoming = mergeBlobRecords(existing, incoming)
+		} else {
+			newLocationCount += uint64(len(incoming.Locations))
+			for _, location := range incoming.Locations {
+				if math.MaxUint64-newPayloadSize < uint64(location.Length) {
+					return fail(fmt.Errorf("pack payload size overflow"))
+				}
+				newPayloadSize += uint64(location.Length)
+			}
+		}
+		incoming = canonicalBlobRecord(incoming)
+		encoded, encodeErr := incoming.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+	}
+	if oldRecord != nil {
+		if math.MaxUint64-oldRecord.BlobCount < newLocationCount || math.MaxUint64-oldRecord.PayloadSize < newPayloadSize {
+			return fail(fmt.Errorf("pack catalog size overflow"))
+		}
+		imported.Record.BlobCount = oldRecord.BlobCount + newLocationCount
+		imported.Record.PayloadSize = oldRecord.PayloadSize + newPayloadSize
+	}
+	if imported.Record.PhysicalSizeKnown {
+		if imported.Record.PhysicalSize < imported.Record.PayloadSize {
+			imported.Record.HeaderSize = 0
+		} else {
+			imported.Record.HeaderSize = imported.Record.PhysicalSize - imported.Record.PayloadSize
+		}
+	}
+	encodedPack, err := imported.Record.MarshalBinary()
+	if err != nil {
+		return fail(err)
+	}
+	puts = append(puts, Mutation{Key: packKey, Value: encodedPack})
+
+	aggregates, err := updatePackAggregates(ctx, transaction, oldRecord, imported.Record)
+	if err != nil {
+		return fail(err)
+	}
+	puts = append(puts, aggregates...)
+	if imported.Debt != nil {
+		if len(imported.DebtKey) == 0 {
+			return fail(fmt.Errorf("legacy pack debt requires a key"))
+		}
+		debtValue, encodeErr := imported.Debt.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		if encodeErr = schema.ValidateValue(imported.DebtKey, debtValue); encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: imported.DebtKey, Value: debtValue})
+	} else {
+		debtKey := schema.CrawlDebtKey(schema.ID{}, imported.PackID)
+		debtValue, found, getErr := transaction.Get(ctx, debtKey)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if found {
+			debt, decodeErr := schema.UnmarshalCrawlDebtRecord(debtValue)
+			if decodeErr != nil {
+				return fail(decodeErr)
+			}
+			if debt.Reason == schema.DebtUnavailablePack && debt.Status != schema.DebtResolved {
+				debt.Status = schema.DebtResolved
+				debt.ErrorClass = ""
+				debt.LastAttemptUnixNano = time.Now().UnixNano()
+				encoded, encodeErr := debt.MarshalBinary()
+				if encodeErr != nil {
+					return fail(encodeErr)
+				}
+				puts = append(puts, Mutation{Key: debtKey, Value: encoded})
+			}
+		}
+	}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
+}
+
+func mergeBlobRecords(existing, incoming schema.BlobRecord) schema.BlobRecord {
+	result := schema.BlobRecord{Locations: append([]schema.BlobLocation(nil), existing.Locations...)}
+	for _, candidate := range incoming.Locations {
+		found := false
+		for index, location := range result.Locations {
+			if samePhysicalLocation(location, candidate) {
+				if candidate.UncompressedSize > location.UncompressedSize {
+					result.Locations[index].UncompressedSize = candidate.UncompressedSize
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			result.Locations = append(result.Locations, candidate)
+		}
+	}
+	return canonicalBlobRecord(result)
+}
+
+func canonicalBlobRecord(record schema.BlobRecord) schema.BlobRecord {
+	canonical := make([]schema.BlobLocation, 0, len(record.Locations))
+	for _, candidate := range record.Locations {
+		merged := false
+		for index, location := range canonical {
+			if samePhysicalLocation(location, candidate) {
+				if candidate.UncompressedSize > location.UncompressedSize {
+					canonical[index].UncompressedSize = candidate.UncompressedSize
+				}
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			canonical = append(canonical, candidate)
+		}
+	}
+	record.Locations = canonical
+	sort.Slice(record.Locations, func(left, right int) bool {
+		leftLocation, rightLocation := record.Locations[left], record.Locations[right]
+		if comparison := bytes.Compare(leftLocation.PackID[:], rightLocation.PackID[:]); comparison != 0 {
+			return comparison < 0
+		}
+		if leftLocation.Type != rightLocation.Type {
+			return leftLocation.Type < rightLocation.Type
+		}
+		if leftLocation.Offset != rightLocation.Offset {
+			return leftLocation.Offset < rightLocation.Offset
+		}
+		if leftLocation.Length != rightLocation.Length {
+			return leftLocation.Length < rightLocation.Length
+		}
+		return leftLocation.UncompressedSize < rightLocation.UncompressedSize
+	})
+	return record
+}
+
+func samePhysicalLocation(left, right schema.BlobLocation) bool {
+	return left.PackID == right.PackID && left.Offset == right.Offset && left.Length == right.Length && left.Type == right.Type
+}
+
+func containsPhysicalLocation(locations []schema.BlobLocation, candidate schema.BlobLocation) bool {
+	for _, location := range locations {
+		if samePhysicalLocation(location, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUniqueID(ids []schema.ID, candidate schema.ID) []schema.ID {
+	for _, id := range ids {
+		if id == candidate {
+			return ids
+		}
+	}
+	return append(ids, candidate)
+}
+
+func mergeImportedPackRecord(existing, incoming schema.PackRecord, source schema.ID) schema.PackRecord {
+	result := existing
+	result.SourceIndexIDs = appendUniqueID(result.SourceIndexIDs, source)
+	for _, sourceIndex := range incoming.SourceIndexIDs {
+		result.SourceIndexIDs = appendUniqueID(result.SourceIndexIDs, sourceIndex)
+	}
+	if incoming.PhysicalSizeKnown {
+		result.PhysicalSize = incoming.PhysicalSize
+		result.HeaderSize = incoming.HeaderSize
+		result.PhysicalSizeKnown = true
+	}
+	if result.Type != incoming.Type {
+		result.Type = schema.PackMixed
+	}
+	if existing.Type == schema.PackUnknown {
+		result.Type = incoming.Type
+	}
+	if incoming.Type == schema.PackUnknown {
+		result.Type = existing.Type
+	}
+	sort.Slice(result.SourceIndexIDs, func(left, right int) bool {
+		return bytes.Compare(result.SourceIndexIDs[left][:], result.SourceIndexIDs[right][:]) < 0
+	})
+	return result
+}
+
+func updatePackAggregates(ctx context.Context, transaction *Transaction, old *schema.PackRecord, current schema.PackRecord) ([]Mutation, error) {
+	keys := make([][]byte, 0, 5)
+	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
+		keys = append(keys, schema.PackAggregateKey(kind))
+	}
+	values, found, err := transaction.MultiGet(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	puts := make([]Mutation, 0, len(keys))
+	for offset, key := range keys {
+		kind := schema.AggregateKind(offset) + schema.AggregateData
+		aggregate := schema.PackAggregate{}
+		if found[offset] {
+			aggregate, err = schema.UnmarshalPackAggregate(values[offset].Value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if old != nil && (kind == schema.AggregateAll || aggregateKind(old.Type) == kind) {
+			if err := subtractPackAggregate(&aggregate, *old); err != nil {
+				return nil, err
+			}
+		}
+		if kind == schema.AggregateAll || aggregateKind(current.Type) == kind {
+			if err := addPackAggregate(&aggregate, current); err != nil {
+				return nil, err
+			}
+		}
+		aggregate.UpdateSequence++
+		encoded, err := aggregate.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+	}
+	return puts, nil
+}
+
+func aggregateKind(packType schema.PackType) schema.AggregateKind {
+	return schema.AggregateKind(packType)
+}
+
+func subtractPackAggregate(aggregate *schema.PackAggregate, record schema.PackRecord) error {
+	if aggregate.PackCount == 0 || aggregate.PhysicalSize < record.PhysicalSize || aggregate.PayloadSize < record.PayloadSize || aggregate.HeaderSize < record.HeaderSize || aggregate.BlobCount < record.BlobCount {
+		return fmt.Errorf("pack aggregate underflow")
+	}
+	aggregate.PackCount--
+	aggregate.PhysicalSize -= record.PhysicalSize
+	aggregate.PayloadSize -= record.PayloadSize
+	aggregate.HeaderSize -= record.HeaderSize
+	aggregate.BlobCount -= record.BlobCount
+	return nil
+}
+
+func addPackAggregate(aggregate *schema.PackAggregate, record schema.PackRecord) error {
+	if aggregate.PackCount == math.MaxUint64 || math.MaxUint64-aggregate.PhysicalSize < record.PhysicalSize || math.MaxUint64-aggregate.PayloadSize < record.PayloadSize || math.MaxUint64-aggregate.HeaderSize < record.HeaderSize || math.MaxUint64-aggregate.BlobCount < record.BlobCount {
+		return fmt.Errorf("pack aggregate overflow")
+	}
+	aggregate.PackCount++
+	aggregate.PhysicalSize += record.PhysicalSize
+	aggregate.PayloadSize += record.PayloadSize
+	aggregate.HeaderSize += record.HeaderSize
+	aggregate.BlobCount += record.BlobCount
+	return nil
 }
 
 func (store *SchemaStore) Put(ctx context.Context, key, value []byte, durable bool) error {
@@ -132,7 +496,7 @@ func (store *SchemaStore) PublishSchemaBatch(ctx context.Context, puts []Mutatio
 	if len(remainingPuts) == 0 && len(deletes) == 0 {
 		return transaction.Rollback(ctx)
 	}
-	if err := transaction.WriteBatch(ctx, remainingPuts, deletes); err != nil {
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), remainingPuts, deletes); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
@@ -150,7 +514,8 @@ func validateMutableKey(key []byte) error {
 	}
 	switch parsed.Kind {
 	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
-		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt:
+		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
+		schema.KeySnapshotImportCheckpoint:
 		return nil
 	case schema.KeyNextRevision:
 		return fmt.Errorf("revision sequence requires AllocateRevision")
@@ -181,7 +546,8 @@ func validatePublishKey(key []byte) (bool, error) {
 	case schema.KeyBlob, schema.KeyInodeRevision, schema.KeyDirectoryRevision, schema.KeySnapshot:
 		return true, nil
 	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
-		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt:
+		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
+		schema.KeySnapshotImportCheckpoint:
 		return false, nil
 	case schema.KeyContentManifest:
 		return false, fmt.Errorf("content manifests require CreateContentManifest")
@@ -302,7 +668,7 @@ func (store *SchemaStore) PublishContentManifest(ctx context.Context, ids []sche
 		start = end
 	}
 	if len(relatedPuts) > 0 || len(relatedDeletes) > 0 {
-		if err := transaction.WriteBatch(ctx, relatedPuts, relatedDeletes); err != nil {
+		if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), relatedPuts, relatedDeletes); err != nil {
 			rollbackTransaction(ctx, transaction)
 			return schema.ID{}, err
 		}
@@ -402,7 +768,7 @@ func (store *SchemaStore) PublishRevisionBatch(ctx context.Context, currentKey, 
 		puts = append(puts, Mutation{Key: revisionKey, Value: revisionValue})
 	}
 	puts = append(puts, relatedPuts...)
-	if err := transaction.WriteBatch(ctx, puts, relatedDeletes); err != nil {
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, relatedDeletes); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
@@ -429,6 +795,58 @@ func validateRelatedMutations(puts []Mutation, deletes [][]byte) error {
 		if err := validateMutableDeleteKey(key); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func writeTransactionBatches(ctx context.Context, transaction *Transaction, limits Limits, puts []Mutation, deletes [][]byte) error {
+	if limits.MaxBatchItems == 0 || limits.MaxMessageBytes < 1024 {
+		return fmt.Errorf("vaulticdb advertised insufficient transaction batch limits")
+	}
+	maxBytes := uint64(limits.MaxMessageBytes) - 512
+	for putStart := 0; putStart < len(puts); {
+		used := uint64(128)
+		putEnd := putStart
+		for putEnd < len(puts) && uint64(putEnd-putStart) < uint64(limits.MaxBatchItems) {
+			size := uint64(len(puts[putEnd].Key)+len(puts[putEnd].Value)) + 32
+			if size > maxBytes {
+				return fmt.Errorf("schema mutation exceeds daemon message limit")
+			}
+			if used+size > maxBytes {
+				break
+			}
+			used += size
+			putEnd++
+		}
+		if putEnd == putStart {
+			return fmt.Errorf("schema mutation batch made no progress")
+		}
+		if err := transaction.WriteBatch(ctx, puts[putStart:putEnd], nil); err != nil {
+			return err
+		}
+		putStart = putEnd
+	}
+	for deleteStart := 0; deleteStart < len(deletes); {
+		used := uint64(128)
+		deleteEnd := deleteStart
+		for deleteEnd < len(deletes) && uint64(deleteEnd-deleteStart) < uint64(limits.MaxBatchItems) {
+			size := uint64(len(deletes[deleteEnd])) + 16
+			if size > maxBytes {
+				return fmt.Errorf("schema delete exceeds daemon message limit")
+			}
+			if used+size > maxBytes {
+				break
+			}
+			used += size
+			deleteEnd++
+		}
+		if deleteEnd == deleteStart {
+			return fmt.Errorf("schema delete batch made no progress")
+		}
+		if err := transaction.WriteBatch(ctx, nil, deletes[deleteStart:deleteEnd]); err != nil {
+			return err
+		}
+		deleteStart = deleteEnd
 	}
 	return nil
 }

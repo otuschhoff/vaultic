@@ -102,6 +102,7 @@ const (
 type PackRecord struct {
 	Type                                             PackType
 	PhysicalSize, PayloadSize, HeaderSize, BlobCount uint64
+	PhysicalSizeKnown                                bool
 	CreationTime                                     int64
 	CreationTimeKnown                                bool
 	Lifecycle                                        PackLifecycle
@@ -111,6 +112,11 @@ type PackRecord struct {
 func (record PackRecord) MarshalBinary() ([]byte, error) {
 	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
 		return nil, fmt.Errorf("%w: invalid pack classification", ErrMalformed)
+	}
+	if (!record.PhysicalSizeKnown && (record.PhysicalSize != 0 || record.HeaderSize != 0)) ||
+		(record.PhysicalSizeKnown && record.PhysicalSize >= record.PayloadSize && record.HeaderSize != record.PhysicalSize-record.PayloadSize) ||
+		(record.PhysicalSizeKnown && record.PhysicalSize < record.PayloadSize && record.HeaderSize != 0) {
+		return nil, fmt.Errorf("%w: invalid pack size state", ErrMalformed)
 	}
 	e := newEncoder()
 	e.u8(byte(record.Type))
@@ -125,6 +131,7 @@ func (record PackRecord) MarshalBinary() ([]byte, error) {
 	for _, id := range record.SourceIndexIDs {
 		e.id(id)
 	}
+	e.bool(record.PhysicalSizeKnown)
 	return e.finish()
 }
 func UnmarshalPackRecord(data []byte) (PackRecord, error) {
@@ -171,8 +178,20 @@ func UnmarshalPackRecord(data []byte) (PackRecord, error) {
 			return PackRecord{}, err
 		}
 	}
+	if d.at < len(d.data) {
+		if record.PhysicalSizeKnown, err = d.bool(); err != nil {
+			return PackRecord{}, err
+		}
+	} else {
+		record.PhysicalSizeKnown = record.PhysicalSize != 0
+	}
 	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
 		return PackRecord{}, fmt.Errorf("%w: invalid pack classification", ErrMalformed)
+	}
+	if (!record.PhysicalSizeKnown && (record.PhysicalSize != 0 || record.HeaderSize != 0)) ||
+		(record.PhysicalSizeKnown && record.PhysicalSize >= record.PayloadSize && record.HeaderSize != record.PhysicalSize-record.PayloadSize) ||
+		(record.PhysicalSizeKnown && record.PhysicalSize < record.PayloadSize && record.HeaderSize != 0) {
+		return PackRecord{}, fmt.Errorf("%w: invalid pack size state", ErrMalformed)
 	}
 	return record, d.done()
 }

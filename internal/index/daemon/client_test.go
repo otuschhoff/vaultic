@@ -196,7 +196,7 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 	blobKey := schema.BlobKey(daemonTestID(8))
 	blobValue := encodeSchemaRecord(t, schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: daemonTestID(9), Type: schema.BlobData}}})
-	packValue2 := encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 2, Lifecycle: schema.PackPublished})
+	packValue2 := encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 2, PhysicalSizeKnown: true, HeaderSize: 2, Lifecycle: schema.PackPublished})
 	if err := store.PublishSchemaBatch(ctx, []Mutation{{Key: blobKey, Value: blobValue}, {Key: packKey, Value: packValue2}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +260,135 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 	if err := store.PublishRevision(ctx, schema.BlobKey(schema.ID{}), key, encoded, revision); err == nil {
 		t.Fatal("non-current key accepted as current pointer")
+	}
+}
+
+func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
+	options := Options{Socket: testSocket(t), RepositoryID: "phase4-pack-import", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	source1, source2 := daemonTestID(1), daemonTestID(2)
+	pack1, pack2, blobID := daemonTestID(3), daemonTestID(4), daemonTestID(5)
+	location := func(packID schema.ID, offset uint64) map[schema.ID]schema.BlobRecord {
+		return map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Offset: offset, Length: 8, UncompressedSize: 7, Type: schema.BlobData}}}}
+	}
+	debtKey := schema.CrawlDebtKey(schema.ID{}, pack1)
+	debt := schema.CrawlDebtRecord{SourceIndexOrPack: pack1, SourceKnown: true, Reason: schema.DebtUnavailablePack, Status: schema.DebtPending, ErrorClass: "offline"}
+	first := LegacyPackImport{
+		SourceIndex: source1, PackID: pack1,
+		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 8, BlobCount: 1, Lifecycle: schema.PackImported},
+		Blobs:  location(pack1, 1), DebtKey: debtKey, Debt: &debt,
+	}
+	if err := store.ImportLegacyPack(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	first.Record.PhysicalSize, first.Record.HeaderSize, first.Record.PhysicalSizeKnown, first.Debt = 10, 2, true, nil
+	if err := store.ImportLegacyPack(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	first.SourceIndex = source2
+	if err := store.ImportLegacyPack(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	second := LegacyPackImport{
+		SourceIndex: source2, PackID: pack2,
+		Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 12, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 4, BlobCount: 1, Lifecycle: schema.PackImported},
+		Blobs:  location(pack2, 2),
+	}
+	if err := store.ImportLegacyPack(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+
+	blobValue, found, err := store.Get(ctx, schema.BlobKey(blobID))
+	if err != nil || !found {
+		t.Fatalf("read imported blob: found=%t err=%v", found, err)
+	}
+	blob, err := schema.UnmarshalBlobRecord(blobValue)
+	if err != nil || len(blob.Locations) != 2 || blob.Locations[0].PackID != pack1 || blob.Locations[1].PackID != pack2 {
+		t.Fatalf("imported blob locations = %#v, err=%v", blob.Locations, err)
+	}
+	packValue, found, err := store.Get(ctx, schema.PackKey(pack1))
+	if err != nil || !found {
+		t.Fatalf("read imported pack: found=%t err=%v", found, err)
+	}
+	packRecord, err := schema.UnmarshalPackRecord(packValue)
+	if err != nil || len(packRecord.SourceIndexIDs) != 2 || packRecord.SourceIndexIDs[0] != source1 || packRecord.SourceIndexIDs[1] != source2 || packRecord.PhysicalSize != 10 {
+		t.Fatalf("imported pack = %#v, err=%v", packRecord, err)
+	}
+	aggregateValue, found, err := store.Get(ctx, schema.PackAggregateKey(schema.AggregateAll))
+	if err != nil || !found {
+		t.Fatalf("read aggregate: found=%t err=%v", found, err)
+	}
+	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
+	if err != nil || aggregate.PackCount != 2 || aggregate.PhysicalSize != 22 || aggregate.PayloadSize != 16 || aggregate.HeaderSize != 6 || aggregate.BlobCount != 2 {
+		t.Fatalf("imported aggregate = %#v, err=%v", aggregate, err)
+	}
+	debtValue, found, err := store.Get(ctx, debtKey)
+	if err != nil || !found {
+		t.Fatalf("read pack debt: found=%t err=%v", found, err)
+	}
+	resolvedDebt, err := schema.UnmarshalCrawlDebtRecord(debtValue)
+	if err != nil || resolvedDebt.Status != schema.DebtResolved || resolvedDebt.ErrorClass != "" {
+		t.Fatalf("resolved pack debt = %#v, err=%v", resolvedDebt, err)
+	}
+}
+
+func TestSchemaStoreImportsSameLegacyPackConcurrently(t *testing.T) {
+	options := Options{Socket: testSocket(t), RepositoryID: "phase4-concurrent-pack", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	packID := daemonTestID(20)
+	imports := []LegacyPackImport{
+		{
+			SourceIndex: daemonTestID(21), PackID: packID,
+			Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 20, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 12, BlobCount: 1, Lifecycle: schema.PackImported},
+			Blobs:  map[schema.ID]schema.BlobRecord{daemonTestID(22): {Locations: []schema.BlobLocation{{PackID: packID, Offset: 0, Length: 8, Type: schema.BlobData}}}},
+		},
+		{
+			SourceIndex: daemonTestID(23), PackID: packID,
+			Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 20, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 12, BlobCount: 1, Lifecycle: schema.PackImported},
+			Blobs:  map[schema.ID]schema.BlobRecord{daemonTestID(24): {Locations: []schema.BlobLocation{{PackID: packID, Offset: 8, Length: 8, Type: schema.BlobData}}}},
+		},
+	}
+	errors := make([]error, len(imports))
+	var group sync.WaitGroup
+	for index := range imports {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			errors[index] = store.ImportLegacyPack(context.Background(), imports[index])
+		}(index)
+	}
+	group.Wait()
+	for _, err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	packValue, found, err := store.Get(context.Background(), schema.PackKey(packID))
+	if err != nil || !found {
+		t.Fatalf("read pack: found=%t err=%v", found, err)
+	}
+	record, err := schema.UnmarshalPackRecord(packValue)
+	if err != nil || record.BlobCount != 2 || record.PayloadSize != 16 || record.HeaderSize != 4 || len(record.SourceIndexIDs) != 2 {
+		t.Fatalf("concurrent pack record = %#v, err=%v", record, err)
+	}
+	aggregateValue, found, err := store.Get(context.Background(), schema.PackAggregateKey(schema.AggregateAll))
+	if err != nil || !found {
+		t.Fatalf("read aggregate: found=%t err=%v", found, err)
+	}
+	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
+	if err != nil || aggregate.PackCount != 1 || aggregate.PayloadSize != 16 || aggregate.BlobCount != 2 || aggregate.PhysicalSize != 20 {
+		t.Fatalf("concurrent aggregate = %#v, err=%v", aggregate, err)
 	}
 }
 
@@ -356,9 +485,11 @@ func TestEverySchemaRecordPersistsByteForByteAcrossRestart(t *testing.T) {
 	inodePointer, _ := (schema.CurrentPointer{Revision: 1, RecordKey: inodeKey}).MarshalBinary()
 	directoryPointer, _ := (schema.CurrentPointer{Revision: 1, RecordKey: directoryKey}).MarshalBinary()
 	nextRevision, _ := schema.MarshalNextRevision(2)
+	indexCheckpoint := encodeSchemaRecord(t, schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 2})
+	snapshotCheckpoint := encodeSchemaRecord(t, schema.SnapshotImportCheckpointRecord{TreesVisited: 1, NodesImported: 2, DebtsCreated: 3})
 	records := []Mutation{
 		{Key: schema.BlobKey(id1), Value: encodeSchemaRecord(t, schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: id2, Offset: 1, Length: 2, UncompressedSize: 3, Type: schema.BlobData}}})},
-		{Key: schema.PackKey(id2), Value: encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 3, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, Lifecycle: schema.PackPublished})},
+		{Key: schema.PackKey(id2), Value: encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 3, PhysicalSizeKnown: true, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, Lifecycle: schema.PackPublished})},
 		{Key: schema.PackAggregateKey(schema.AggregateAll), Value: encodeSchemaRecord(t, schema.PackAggregate{PackCount: 1, PhysicalSize: 3, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, UpdateSequence: 1})},
 		{Key: schema.CurrentInodeKey(1, 2), Value: inodePointer},
 		{Key: inodeKey, Value: encodeSchemaRecord(t, schema.InodeRevision{ParentInode: 1, Known: schema.KnownParent, ContentMode: schema.ContentInline, ContentIDs: []schema.ID{id1}, ContentCount: 1, Freshness: schema.FreshnessVerified})},
@@ -371,6 +502,8 @@ func TestEverySchemaRecordPersistsByteForByteAcrossRestart(t *testing.T) {
 		{Key: schema.ReferenceCountKey(id1), Value: encodeSchemaRecord(t, schema.ReferenceCountRecord{TotalReferences: 2, DistinctInodes: 1, DistinctRevisions: 1, DistinctManifests: 1, ReachableSnapshots: 1, UpdateSequence: 1})},
 		{Key: schema.GarbageCollectionKey(schema.GCBlob, id1), Value: encodeSchemaRecord(t, schema.GarbageCollectionRecord{State: schema.GCCandidate, ObservedCommit: 1})},
 		{Key: schema.CrawlDebtKey(id3, id2), Value: encodeSchemaRecord(t, schema.CrawlDebtRecord{PathOrTree: []byte("tree"), Reason: schema.DebtMissingDirectory, Status: schema.DebtPending})},
+		{Key: schema.ImportCheckpointKey(id1), Value: indexCheckpoint},
+		{Key: schema.SnapshotImportCheckpointKey(id3), Value: snapshotCheckpoint},
 		{Key: schema.NextRevisionKey(), Value: nextRevision},
 	}
 	client, err := Ensure(ctx, options)
