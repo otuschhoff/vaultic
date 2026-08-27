@@ -431,7 +431,7 @@ func validContentState(mode ContentMode, count uint32, ids []ID, manifestID ID) 
 	case ContentInline:
 		return count > 0 && count <= MaxInlineContentIDs && int(count) == len(ids) && manifestID == (ID{})
 	case ContentManifestRef:
-		return count > MaxInlineContentIDs && len(ids) == 0 && manifestID != (ID{})
+		return count > MaxInlineContentIDs && count <= MaxContentIDs && len(ids) == 0 && manifestID != (ID{})
 	default:
 		return false
 	}
@@ -455,9 +455,21 @@ type DirectoryChild struct {
 type DirectoryRevision struct {
 	ParentInode uint64
 	Children    []DirectoryChild
+	MTime       int64
+	CTime       int64
+	Size        uint64
+	Mode        uint32
+	UID         uint32
+	GID         uint32
+	Known       uint16
+	SourcePath  string
+	Freshness   Freshness
 }
 
 func (record DirectoryRevision) MarshalBinary() ([]byte, error) {
+	if record.Freshness > FreshnessVerified || record.Known & ^knownFieldMask != 0 {
+		return nil, fmt.Errorf("%w: invalid directory state", ErrMalformed)
+	}
 	children := append([]DirectoryChild(nil), record.Children...)
 	sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
 	e := newEncoder()
@@ -482,6 +494,17 @@ func (record DirectoryRevision) MarshalBinary() ([]byte, error) {
 			return nil, fmt.Errorf("%w: child metadata reference mismatch", ErrMalformed)
 		}
 	}
+	e.i64(record.MTime)
+	e.i64(record.CTime)
+	e.u64(record.Size)
+	e.u32(record.Mode)
+	e.u32(record.UID)
+	e.u32(record.GID)
+	e.u32(uint32(record.Known))
+	if err := e.string(record.SourcePath); err != nil {
+		return nil, err
+	}
+	e.u8(byte(record.Freshness))
 	return e.finish()
 }
 func UnmarshalDirectoryRevision(data []byte) (DirectoryRevision, error) {
@@ -524,6 +547,42 @@ func UnmarshalDirectoryRevision(data []byte) (DirectoryRevision, error) {
 			return record, fmt.Errorf("%w: child metadata reference mismatch", ErrMalformed)
 		}
 	}
+	// Directory metadata was appended to schema version 0. Values written by
+	// earlier releases end after the child list and remain unknown/imported.
+	if d.at == len(d.data) {
+		return record, nil
+	}
+	if record.MTime, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.CTime, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.Size, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Mode, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.UID, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.GID, err = d.u32(); err != nil {
+		return record, err
+	}
+	known, readErr := d.u32()
+	if readErr != nil || known & ^uint32(knownFieldMask) != 0 {
+		return record, fmt.Errorf("%w: invalid directory known-field mask", ErrMalformed)
+	}
+	record.Known = uint16(known)
+	if record.SourcePath, err = d.string(); err != nil {
+		return record, err
+	}
+	freshness, readErr := d.u8()
+	if readErr != nil || Freshness(freshness) > FreshnessVerified {
+		return record, fmt.Errorf("%w: invalid directory freshness", ErrMalformed)
+	}
+	record.Freshness = Freshness(freshness)
 	return record, d.done()
 }
 

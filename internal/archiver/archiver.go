@@ -116,6 +116,15 @@ type Archiver struct {
 	// goroutines!
 	CompleteItem func(item string, action ItemAction, s ItemStats, d time.Duration)
 
+	// ReconcileNode is called after a file or directory has been processed and
+	// its final metadata and content references are available. Implementations
+	// must copy retained data and return promptly; calls may be concurrent.
+	ReconcileNode func(snapshotPath, sourcePath string, node *data.Node)
+
+	// ReuseNode can reject the legacy unchanged-file fast path when an
+	// additional metadata authority requires the file to be read again.
+	ReuseNode func(snapshotPath, sourcePath string, info *fs.ExtendedFileInfo, previous *data.Node) bool
+
 	// StartFile is called when a file is being processed by a worker.
 	StartFile func(filename string)
 
@@ -183,10 +192,12 @@ func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
 		FS:           filesystem,
 		Options:      opts.applyDefaults(),
 
-		CompleteItem: func(string, ItemAction, ItemStats, time.Duration) {},
-		StartFile:    func(string) {},
-		CompleteBlob: func(uint64) {},
-		ExcludedItem: func(string) {},
+		CompleteItem:  func(string, ItemAction, ItemStats, time.Duration) {},
+		ReconcileNode: func(string, string, *data.Node) {},
+		ReuseNode:     func(string, string, *fs.ExtendedFileInfo, *data.Node) bool { return true },
+		StartFile:     func(string) {},
+		CompleteBlob:  func(uint64) {},
+		ExcludedItem:  func(string) {},
 	}
 
 	return arch
@@ -244,6 +255,12 @@ func (arch *Archiver) trackItem(item string, previous, current *data.Node, s Ite
 		arch.summary.Files.Unchanged++
 	case ActionFileModified:
 		arch.summary.Files.Changed++
+	}
+}
+
+func (arch *Archiver) reconcileNode(snapshotPath, sourcePath string, node *data.Node) {
+	if node != nil {
+		arch.ReconcileNode(snapshotPath, sourcePath, node)
 	}
 }
 
@@ -524,7 +541,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 
 		// check if the file has not changed before performing a fopen operation (more expensive, specially
 		// in network filesystems)
-		if previous != nil && !fileChanged(fi, previous, arch.ChangeIgnoreFlags) {
+		if previous != nil && arch.ReuseNode(snPath, target, fi, previous) && !fileChanged(fi, previous, arch.ChangeIgnoreFlags) {
 			if arch.allBlobsPresent(previous) {
 				debug.Log("%v hasn't changed, using old list of blobs", target)
 				arch.trackItem(snPath, previous, previous, ItemStats{}, time.Since(start))
@@ -536,6 +553,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 
 				// copy list of blobs
 				node.Content = previous.Content
+				arch.reconcileNode(snPath, target, node)
 
 				fn = newFutureNodeWithResult(futureNodeResult{
 					snPath: snPath,
@@ -582,6 +600,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		}, func() {
 			arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
 		}, func(node *data.Node, stats ItemStats) {
+			arch.reconcileNode(snPath, target, node)
 			arch.trackItem(snPath, previous, node, stats, time.Since(start))
 		})
 
@@ -599,6 +618,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 
 		fn, err = arch.saveDir(ctx, snPath, target, meta, oldSubtree,
 			func(node *data.Node, stats ItemStats) {
+				arch.reconcileNode(snPath, target, node)
 				arch.trackItem(snItem, previous, node, stats, time.Since(start))
 			})
 		if err != nil {
@@ -617,6 +637,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		if err != nil {
 			return futureNode{}, false, err
 		}
+		arch.reconcileNode(snPath, target, node)
 		fn = newFutureNodeWithResult(futureNodeResult{
 			snPath: snPath,
 			target: target,

@@ -180,7 +180,30 @@ func (importer *treeImporter) importNode(node *data.Node, parent *nodeIdentity, 
 		if !identityKnown || !parentKnown || !complete {
 			return schema.DirectoryChild{}, false, nil
 		}
-		record := schema.DirectoryRevision{ParentInode: parent.inode, Children: children}
+		record := schema.DirectoryRevision{
+			ParentInode: parent.inode, Children: children, Size: node.Size, Mode: uint32(node.Mode), UID: node.UID, GID: node.GID,
+			Known: schema.KnownParent | schema.KnownPath, SourcePath: nodePath, Freshness: schema.FreshnessImported,
+		}
+		if !node.ModTime.IsZero() {
+			record.MTime = node.ModTime.UnixNano()
+			record.Known |= schema.KnownMTime
+		}
+		if !node.ChangeTime.IsZero() {
+			record.CTime = node.ChangeTime.UnixNano()
+			record.Known |= schema.KnownCTime
+		}
+		if node.Mode != 0 {
+			record.Known |= schema.KnownMode
+		}
+		if node.Size != 0 {
+			record.Known |= schema.KnownSize
+		}
+		if node.UID != 0 {
+			record.Known |= schema.KnownUID
+		}
+		if node.GID != 0 {
+			record.Known |= schema.KnownGID
+		}
 		value, err := record.MarshalBinary()
 		if err != nil {
 			return schema.DirectoryChild{}, false, err

@@ -124,6 +124,7 @@ func TestSchemaRejectsSemanticKeyAndStateMismatches(t *testing.T) {
 		{ContentMode: ContentInline, ContentCount: 1, ContentIDs: []ID{id}, ContentManifestID: id},
 		{ContentMode: ContentManifestRef, ContentCount: MaxInlineContentIDs, ContentManifestID: id},
 		{ContentMode: ContentManifestRef, ContentCount: MaxInlineContentIDs + 1},
+		{ContentMode: ContentManifestRef, ContentCount: MaxContentIDs + 1, ContentManifestID: id},
 	}
 	for _, inode := range invalidContent {
 		if _, err := inode.MarshalBinary(); !errors.Is(err, ErrMalformed) {
@@ -201,8 +202,35 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6}, UnmarshalPackAggregate)
 	roundTrip(t, CurrentPointer{Revision: 7, RecordKey: InodeRevisionKey(2, 3, 7)}, UnmarshalCurrentPointer)
 	roundTrip(t, InodeRevision{ParentInode: 1, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
-	directory := DirectoryRevision{ParentInode: 1, Children: []DirectoryChild{{Name: "a", Inode: 8, Type: NodeFile, MetadataKey: InodeRevisionKey(2, 8, 9)}, {Name: "b", Inode: 9, Type: NodeDirectory, MetadataKey: DirectoryRevisionKey(2, 9, 10)}}}
-	roundTrip(t, directory, UnmarshalDirectoryRevision)
+	directory := DirectoryRevision{
+		ParentInode: 1, Children: []DirectoryChild{{Name: "a", Inode: 8, Type: NodeFile, MetadataKey: InodeRevisionKey(2, 8, 9)}, {Name: "b", Inode: 9, Type: NodeDirectory, MetadataKey: DirectoryRevisionKey(2, 9, 10)}},
+		MTime: -2, CTime: 3, Mode: 0o755, UID: 5, GID: 6, Known: KnownMTime | KnownCTime | KnownMode | KnownUID | KnownGID | KnownParent | KnownPath,
+		SourcePath: "dir", Freshness: FreshnessVerified,
+	}
+	encodedDirectory, err := directory.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedDirectory, err := UnmarshalDirectoryRevision(encodedDirectory)
+	if err != nil || !reflect.DeepEqual(decodedDirectory, directory) {
+		t.Fatalf("directory round trip = %#v, %v", decodedDirectory, err)
+	}
+	legacyDirectory := legacyDirectoryEncoding(t, directory)
+	decodedLegacyDirectory, err := UnmarshalDirectoryRevision(legacyDirectory)
+	if err != nil || decodedLegacyDirectory.Freshness != FreshnessUnknown || decodedLegacyDirectory.Known != 0 || !reflect.DeepEqual(decodedLegacyDirectory.Children, directory.Children) {
+		t.Fatalf("legacy directory decode = %#v, %v", decodedLegacyDirectory, err)
+	}
+	for size := range len(encodedDirectory) {
+		if size == len(legacyDirectory) {
+			continue
+		}
+		if _, err := UnmarshalDirectoryRevision(encodedDirectory[:size]); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("directory truncation at %d returned %v", size, err)
+		}
+	}
+	if _, err := UnmarshalDirectoryRevision(append(encodedDirectory, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("directory trailing data returned %v", err)
+	}
 	json := []byte(`{"time":"now"}`)
 	roundTrip(t, SnapshotRecord{CommitSequence: 11, RootFSID: 2, RootInode: 9, RootRevision: 10, OriginalJSON: json, JSONHash: ID(sha256.Sum256(json))}, UnmarshalSnapshotRecord)
 	roundTrip(t, ContentManifest{TotalCount: 2, Segment: 0, SegmentCount: 1, ContentIDs: []ID{id1, id2}}, UnmarshalContentManifest)
@@ -221,6 +249,28 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	if err != nil || next != 42 {
 		t.Fatalf("next revision = %d, %v", next, err)
 	}
+}
+
+func legacyDirectoryEncoding(t *testing.T, record DirectoryRevision) []byte {
+	t.Helper()
+	encoder := newEncoder()
+	encoder.u64(record.ParentInode)
+	encoder.u32(uint32(len(record.Children)))
+	for _, child := range record.Children {
+		if err := encoder.string(child.Name); err != nil {
+			t.Fatal(err)
+		}
+		encoder.u64(child.Inode)
+		encoder.u8(byte(child.Type))
+		if err := encoder.bytes(child.MetadataKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+	encoded, err := encoder.finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func TestContentSegmentationIsOrderedImmutableAndDeterministic(t *testing.T) {

@@ -29,6 +29,15 @@ type LegacyPackImport struct {
 	Debt        *schema.CrawlDebtRecord
 }
 
+type ReconciledRevision struct {
+	CurrentKey    []byte
+	RevisionKey   []byte
+	RevisionValue []byte
+	Revision      uint64
+	ContentIDs    []schema.ID
+	DebtKeys      [][]byte
+}
+
 func NewSchemaStore(client *Client) *SchemaStore { return &SchemaStore{client: client} }
 
 func (store *SchemaStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
@@ -36,6 +45,170 @@ func (store *SchemaStore) Get(ctx context.Context, key []byte) ([]byte, bool, er
 		return nil, false, err
 	}
 	return store.client.Get(ctx, key, "")
+}
+
+// MultiGet reads a bounded set of schema records in request order.
+func (store *SchemaStore) MultiGet(ctx context.Context, keys [][]byte) ([]KeyValue, []bool, error) {
+	for _, key := range keys {
+		if _, err := schema.ParseKey(key); err != nil {
+			return nil, nil, err
+		}
+	}
+	return store.client.MultiGet(ctx, keys, "")
+}
+
+// ScanPrefix reads one bounded schema page for an exact key prefix.
+func (store *SchemaStore) ScanPrefix(ctx context.Context, prefix, afterKey []byte, pageSize uint32) ([]KeyValue, bool, error) {
+	if pageSize > store.client.Limits().MaxPageItems {
+		pageSize = store.client.Limits().MaxPageItems
+	}
+	return store.client.ScanPage(ctx, prefix, afterKey, pageSize, "")
+}
+
+// RecordCrawlDebtFailure leaves debt pending while atomically recording a
+// failed reconciliation attempt for each existing debt key.
+func (store *SchemaStore) RecordCrawlDebtFailure(ctx context.Context, keys [][]byte, errorClass string) error {
+	if errorClass == "" {
+		errorClass = "reconciliation-failed"
+	}
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.recordCrawlDebtFailureOnce(ctx, keys, errorClass)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("record crawl-debt failure: transaction conflict retry limit exceeded")
+}
+
+// ResolveCrawlDebt atomically marks existing debt records resolved without
+// creating an otherwise identical metadata revision.
+func (store *SchemaStore) ResolveCrawlDebt(ctx context.Context, keys [][]byte) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.resolveCrawlDebtOnce(ctx, keys)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("resolve crawl debt: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) resolveCrawlDebtOnce(ctx context.Context, keys [][]byte) error {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	puts := make([]Mutation, 0, len(keys))
+	for _, key := range keys {
+		parsed, parseErr := schema.ParseKey(key)
+		if parseErr != nil || parsed.Kind != schema.KeyCrawlDebt {
+			rollbackTransaction(ctx, transaction)
+			return fmt.Errorf("invalid crawl-debt key")
+		}
+		value, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			rollbackTransaction(ctx, transaction)
+			return getErr
+		}
+		if !found {
+			continue
+		}
+		debt, decodeErr := schema.UnmarshalCrawlDebtRecord(value)
+		if decodeErr != nil {
+			rollbackTransaction(ctx, transaction)
+			return decodeErr
+		}
+		if debt.Status == schema.DebtResolved {
+			continue
+		}
+		debt.Status = schema.DebtResolved
+		debt.ErrorClass = ""
+		debt.LastAttemptUnixNano = time.Now().UnixNano()
+		encoded, encodeErr := debt.MarshalBinary()
+		if encodeErr != nil {
+			rollbackTransaction(ctx, transaction)
+			return encodeErr
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+	}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
+}
+
+func (store *SchemaStore) recordCrawlDebtFailureOnce(ctx context.Context, keys [][]byte, errorClass string) error {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	puts := make([]Mutation, 0, len(keys))
+	for _, key := range keys {
+		parsed, parseErr := schema.ParseKey(key)
+		if parseErr != nil || parsed.Kind != schema.KeyCrawlDebt {
+			rollbackTransaction(ctx, transaction)
+			return fmt.Errorf("invalid crawl-debt key")
+		}
+		value, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			rollbackTransaction(ctx, transaction)
+			return getErr
+		}
+		if !found {
+			continue
+		}
+		debt, decodeErr := schema.UnmarshalCrawlDebtRecord(value)
+		if decodeErr != nil {
+			rollbackTransaction(ctx, transaction)
+			return decodeErr
+		}
+		if debt.Status == schema.DebtResolved {
+			continue
+		}
+		if debt.RetryCount < math.MaxUint32 {
+			debt.RetryCount++
+		}
+		debt.Status = schema.DebtPending
+		debt.LastAttemptUnixNano = time.Now().UnixNano()
+		debt.ErrorClass = errorClass
+		encoded, encodeErr := debt.MarshalBinary()
+		if encodeErr != nil {
+			rollbackTransaction(ctx, transaction)
+			return encodeErr
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+	}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
 }
 
 // ImportLegacyPack atomically merges one legacy pack's blob locations,
@@ -777,6 +950,366 @@ func (store *SchemaStore) PublishRevisionBatch(ctx context.Context, currentKey, 
 		return err
 	}
 	return nil
+}
+
+// PublishReconciledRevision atomically publishes a verified metadata revision,
+// content manifests, reverse references, reference counters, and debt
+// resolution. Serializable conflicts retry the complete read/modify/write.
+func (store *SchemaStore) PublishReconciledRevision(ctx context.Context, reconciled ReconciledRevision) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.publishReconciledRevisionOnce(ctx, reconciled)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("publish reconciled revision: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, reconciled ReconciledRevision) error {
+	currentValue, err := (schema.CurrentPointer{Revision: reconciled.Revision, RecordKey: reconciled.RevisionKey}).MarshalBinary()
+	if err != nil {
+		return err
+	}
+	currentParsed, err := schema.ParseKey(reconciled.CurrentKey)
+	if err != nil {
+		return err
+	}
+	revisionParsed, err := schema.ParseKey(reconciled.RevisionKey)
+	if err != nil || reconciled.Revision == 0 || revisionParsed.Revision != reconciled.Revision ||
+		currentParsed.FSID != revisionParsed.FSID || currentParsed.Inode != revisionParsed.Inode ||
+		!((currentParsed.Kind == schema.KeyCurrentInode && revisionParsed.Kind == schema.KeyInodeRevision) ||
+			(currentParsed.Kind == schema.KeyCurrentDirectory && revisionParsed.Kind == schema.KeyDirectoryRevision)) {
+		return fmt.Errorf("reconciled revision key mismatch")
+	}
+	if err := schema.ValidateValue(reconciled.RevisionKey, reconciled.RevisionValue); err != nil {
+		return err
+	}
+	if currentParsed.Kind == schema.KeyCurrentDirectory && len(reconciled.ContentIDs) != 0 {
+		return fmt.Errorf("directory reconciliation cannot contain file content")
+	}
+	for _, key := range reconciled.DebtKeys {
+		parsed, parseErr := schema.ParseKey(key)
+		if parseErr != nil || parsed.Kind != schema.KeyCrawlDebt {
+			return fmt.Errorf("reconciliation debt key is invalid")
+		}
+	}
+
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	existingRevision, revisionFound, err := transaction.Get(ctx, reconciled.RevisionKey)
+	if err != nil {
+		return fail(err)
+	}
+	if revisionFound && !bytes.Equal(existingRevision, reconciled.RevisionValue) {
+		return fail(fmt.Errorf("immutable revision already exists with different data"))
+	}
+
+	var oldContent []schema.ID
+	var oldManifestID schema.ID
+	oldCurrent, currentFound, err := transaction.Get(ctx, reconciled.CurrentKey)
+	if err != nil {
+		return fail(err)
+	}
+	if currentFound {
+		pointer, decodeErr := schema.UnmarshalCurrentPointer(oldCurrent)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		if revisionFound && pointer.Revision == reconciled.Revision && bytes.Equal(pointer.RecordKey, reconciled.RevisionKey) {
+			return transaction.Rollback(ctx)
+		}
+		if pointer.Revision > reconciled.Revision {
+			return fail(fmt.Errorf("current revision %d is newer than %d", pointer.Revision, reconciled.Revision))
+		}
+		if currentParsed.Kind == schema.KeyCurrentInode {
+			value, found, getErr := transaction.Get(ctx, pointer.RecordKey)
+			if getErr != nil {
+				return fail(getErr)
+			}
+			if !found {
+				return fail(fmt.Errorf("current inode revision is missing"))
+			}
+			record, decodeErr := schema.UnmarshalInodeRevision(value)
+			if decodeErr != nil {
+				return fail(decodeErr)
+			}
+			oldContent, err = transactionContentIDs(ctx, transaction, record)
+			if err != nil {
+				return fail(err)
+			}
+			if record.ContentMode == schema.ContentManifestRef {
+				oldManifestID = record.ContentManifestID
+			}
+		}
+	}
+
+	puts := map[string]Mutation{string(reconciled.CurrentKey): {Key: reconciled.CurrentKey, Value: currentValue}}
+	if !revisionFound {
+		puts[string(reconciled.RevisionKey)] = Mutation{Key: reconciled.RevisionKey, Value: reconciled.RevisionValue}
+	}
+	manifestID, segments, err := reconciledManifest(reconciled.ContentIDs)
+	if err != nil {
+		return fail(err)
+	}
+	for index, segment := range segments {
+		key := schema.ContentManifestKey(manifestID, uint32(index))
+		encoded, encodeErr := segment.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		existing, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if found && !bytes.Equal(existing, encoded) {
+			return fail(fmt.Errorf("immutable content manifest segment already exists with different data"))
+		}
+		if !found {
+			puts[string(key)] = Mutation{Key: key, Value: encoded}
+		}
+	}
+
+	oldUnique := uniqueSchemaIDs(oldContent)
+	newUnique := uniqueSchemaIDs(reconciled.ContentIDs)
+	newSet := make(map[schema.ID]struct{}, len(newUnique))
+	for _, id := range newUnique {
+		newSet[id] = struct{}{}
+	}
+	for _, id := range oldUnique {
+		if _, remains := newSet[id]; remains {
+			continue
+		}
+		key := schema.ReverseInodeKey(id, currentParsed.FSID, currentParsed.Inode)
+		value, encodeErr := (schema.ReverseInodeRecord{LatestRevision: reconciled.Revision, State: schema.ReferenceHistorical}).MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts[string(key)] = Mutation{Key: key, Value: value}
+		countKey := schema.ReferenceCountKey(id)
+		count, countErr := transactionReferenceCount(ctx, transaction, puts, countKey)
+		if countErr != nil {
+			return fail(countErr)
+		}
+		count.UpdateSequence = reconciled.Revision
+		encoded, encodeErr := count.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts[string(countKey)] = Mutation{Key: countKey, Value: encoded}
+	}
+	if oldManifestID != (schema.ID{}) && oldManifestID != manifestID {
+		for _, id := range oldUnique {
+			key := schema.ReverseManifestKey(id, oldManifestID)
+			value, found, getErr := transaction.Get(ctx, key)
+			if getErr != nil {
+				return fail(getErr)
+			}
+			if !found {
+				continue
+			}
+			reverse, decodeErr := schema.UnmarshalReverseManifestRecord(value)
+			if decodeErr != nil {
+				return fail(decodeErr)
+			}
+			reverse.State = schema.ReferenceHistorical
+			encoded, encodeErr := reverse.MarshalBinary()
+			if encodeErr != nil {
+				return fail(encodeErr)
+			}
+			puts[string(key)] = Mutation{Key: key, Value: encoded}
+		}
+	}
+	for _, id := range newUnique {
+		key := schema.ReverseInodeKey(id, currentParsed.FSID, currentParsed.Inode)
+		_, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		value, encodeErr := (schema.ReverseInodeRecord{LatestRevision: reconciled.Revision, State: schema.ReferenceCurrent}).MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts[string(key)] = Mutation{Key: key, Value: value}
+		countKey := schema.ReferenceCountKey(id)
+		count, countErr := transactionReferenceCount(ctx, transaction, puts, countKey)
+		if countErr != nil {
+			return fail(countErr)
+		}
+		occurrences := countID(reconciled.ContentIDs, id)
+		if math.MaxUint64-count.TotalReferences < occurrences || count.DistinctRevisions == math.MaxUint64 || (!found && count.DistinctInodes == math.MaxUint64) {
+			return fail(fmt.Errorf("reference count overflow"))
+		}
+		count.TotalReferences += occurrences
+		count.DistinctRevisions++
+		if !found {
+			count.DistinctInodes++
+		}
+		count.UpdateSequence = reconciled.Revision
+		encoded, encodeErr := count.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts[string(countKey)] = Mutation{Key: countKey, Value: encoded}
+	}
+
+	if len(segments) > 0 {
+		segmentByID := make(map[schema.ID]uint32, len(newUnique))
+		for index, id := range reconciled.ContentIDs {
+			if _, found := segmentByID[id]; !found {
+				segmentByID[id] = uint32(index / schema.DefaultContentSegmentIDs)
+			}
+		}
+		for id, segment := range segmentByID {
+			key := schema.ReverseManifestKey(id, manifestID)
+			_, found, getErr := transaction.Get(ctx, key)
+			if getErr != nil {
+				return fail(getErr)
+			}
+			value, encodeErr := (schema.ReverseManifestRecord{Segment: segment, State: schema.ReferenceCurrent}).MarshalBinary()
+			if encodeErr != nil {
+				return fail(encodeErr)
+			}
+			puts[string(key)] = Mutation{Key: key, Value: value}
+			if !found {
+				countKey := schema.ReferenceCountKey(id)
+				count, countErr := transactionReferenceCount(ctx, transaction, puts, countKey)
+				if countErr != nil {
+					return fail(countErr)
+				}
+				if count.TotalReferences == math.MaxUint64 || count.DistinctManifests == math.MaxUint64 {
+					return fail(fmt.Errorf("reference count overflow"))
+				}
+				count.TotalReferences++
+				count.DistinctManifests++
+				count.UpdateSequence = reconciled.Revision
+				encoded, encodeErr := count.MarshalBinary()
+				if encodeErr != nil {
+					return fail(encodeErr)
+				}
+				puts[string(countKey)] = Mutation{Key: countKey, Value: encoded}
+			}
+		}
+	}
+
+	for _, key := range reconciled.DebtKeys {
+		value, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if !found {
+			continue
+		}
+		debt, decodeErr := schema.UnmarshalCrawlDebtRecord(value)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		debt.Status = schema.DebtResolved
+		debt.ErrorClass = ""
+		debt.LastAttemptUnixNano = time.Now().UnixNano()
+		encoded, encodeErr := debt.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts[string(key)] = Mutation{Key: key, Value: encoded}
+	}
+
+	mutations := make([]Mutation, 0, len(puts))
+	for _, mutation := range puts {
+		mutations = append(mutations, mutation)
+	}
+	sort.Slice(mutations, func(left, right int) bool { return bytes.Compare(mutations[left].Key, mutations[right].Key) < 0 })
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), mutations, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
+}
+
+func reconciledManifest(ids []schema.ID) (schema.ID, []schema.ContentManifest, error) {
+	if len(ids) <= schema.MaxInlineContentIDs {
+		return schema.ID{}, nil, nil
+	}
+	return schema.SegmentContent(ids, schema.DefaultContentSegmentIDs)
+}
+
+func transactionContentIDs(ctx context.Context, transaction *Transaction, record schema.InodeRevision) ([]schema.ID, error) {
+	switch record.ContentMode {
+	case schema.ContentNone:
+		return nil, nil
+	case schema.ContentInline:
+		return append([]schema.ID(nil), record.ContentIDs...), nil
+	case schema.ContentManifestRef:
+		segmentCount := (uint64(record.ContentCount) + schema.DefaultContentSegmentIDs - 1) / schema.DefaultContentSegmentIDs
+		segments := make([]schema.ContentManifest, segmentCount)
+		for index := range segments {
+			value, found, err := transaction.Get(ctx, schema.ContentManifestKey(record.ContentManifestID, uint32(index)))
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				return nil, fmt.Errorf("content manifest segment is missing")
+			}
+			segments[index], err = schema.UnmarshalContentManifest(value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return schema.AssembleContent(record.ContentManifestID, segments)
+	default:
+		return nil, fmt.Errorf("invalid content mode")
+	}
+}
+
+func transactionReferenceCount(ctx context.Context, transaction *Transaction, puts map[string]Mutation, key []byte) (schema.ReferenceCountRecord, error) {
+	if mutation, found := puts[string(key)]; found {
+		return schema.UnmarshalReferenceCountRecord(mutation.Value)
+	}
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil || !found {
+		return schema.ReferenceCountRecord{}, err
+	}
+	return schema.UnmarshalReferenceCountRecord(value)
+}
+
+func uniqueSchemaIDs(ids []schema.ID) []schema.ID {
+	seen := make(map[schema.ID]struct{}, len(ids))
+	result := make([]schema.ID, 0, len(ids))
+	for _, id := range ids {
+		if _, found := seen[id]; found {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func countID(ids []schema.ID, target schema.ID) uint64 {
+	var count uint64
+	for _, id := range ids {
+		if id == target {
+			count++
+		}
+	}
+	return count
 }
 
 func validateRelatedMutations(puts []Mutation, deletes [][]byte) error {

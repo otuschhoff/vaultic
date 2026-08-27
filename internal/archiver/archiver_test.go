@@ -1507,6 +1507,51 @@ func TestArchiverSnapshot(t *testing.T) {
 	}
 }
 
+func TestArchiverReconcileNodeReceivesFinalNodes(t *testing.T) {
+	repo := repository.TestRepository(t)
+	testFS := fs.NewLocal()
+	workingDirectory := t.TempDir()
+	oldWorkingDirectory, err := os.Getwd()
+	rtest.OK(t, err)
+	rtest.OK(t, os.Chdir(workingDirectory))
+	t.Cleanup(func() { rtest.OK(t, os.Chdir(oldWorkingDirectory)) })
+	rtest.OK(t, os.Mkdir("dir", 0o755))
+	rtest.OK(t, os.WriteFile(filepath.Join("dir", "file"), []byte("phase5"), 0o644))
+
+	arch := New(repo, testFS, Options{})
+	type observedNode struct {
+		snapshotPath string
+		sourcePath   string
+		node         data.Node
+	}
+	var mu sync.Mutex
+	var observed []observedNode
+	arch.ReconcileNode = func(snapshotPath, sourcePath string, node *data.Node) {
+		mu.Lock()
+		defer mu.Unlock()
+		copyNode := *node
+		copyNode.Content = append(vaultic.IDs(nil), node.Content...)
+		observed = append(observed, observedNode{snapshotPath: snapshotPath, sourcePath: sourcePath, node: copyNode})
+	}
+	_, _, _, err = arch.Snapshot(context.Background(), []string{"dir"}, SnapshotOptions{Time: time.Now()})
+	rtest.OK(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawFile, sawDirectory bool
+	for _, item := range observed {
+		switch item.node.Type {
+		case data.NodeTypeFile:
+			sawFile = item.snapshotPath == "/dir/file" && filepath.Clean(item.sourcePath) == filepath.Clean("dir/file") && len(item.node.Content) > 0
+		case data.NodeTypeDir:
+			sawDirectory = item.snapshotPath == "/dir" && filepath.Clean(item.sourcePath) == "dir" && item.node.Subtree != nil
+		}
+	}
+	if !sawFile || !sawDirectory {
+		t.Fatalf("final reconciliation nodes: file=%t directory=%t observed=%#v", sawFile, sawDirectory, observed)
+	}
+}
+
 func TestResolveRelativeTargetsSpecial(t *testing.T) {
 	var tests = []struct {
 		name     string

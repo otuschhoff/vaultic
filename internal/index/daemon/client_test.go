@@ -263,6 +263,109 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 }
 
+func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
+	options := Options{Socket: testSocket(t), RepositoryID: "phase5-reconcile", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	content := make([]schema.ID, schema.MaxInlineContentIDs+1)
+	for index := range content {
+		content[index] = daemonTestID(byte(index + 1))
+	}
+	manifestID := schema.ContentManifestID(content)
+	revision, err := store.AllocateRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := schema.InodeRevision{
+		ParentInode: 7, Known: schema.KnownParent | schema.KnownPath,
+		ContentMode: schema.ContentManifestRef, ContentManifestID: manifestID, ContentCount: uint32(len(content)),
+		SourcePath: "dir/file", Freshness: schema.FreshnessVerified,
+	}
+	currentKey := schema.CurrentInodeKey(3, 9)
+	revisionKey := schema.InodeRevisionKey(3, 9, revision)
+	debtKey := schema.CrawlDebtKey(daemonTestID(240), daemonTestID(241))
+	debtValue := encodeSchemaRecord(t, schema.CrawlDebtRecord{PathOrTree: []byte("dir/file"), Reason: schema.DebtUnknownFreshness, Status: schema.DebtPending})
+	if err := store.Put(ctx, debtKey, debtValue, true); err != nil {
+		t.Fatal(err)
+	}
+	reconciled := ReconciledRevision{
+		CurrentKey: currentKey, RevisionKey: revisionKey, RevisionValue: encodeSchemaRecord(t, record),
+		Revision: revision, ContentIDs: content, DebtKeys: [][]byte{debtKey},
+	}
+	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	for _, key := range [][]byte{
+		currentKey, revisionKey, schema.ContentManifestKey(manifestID, 0),
+		schema.ReverseManifestKey(content[0], manifestID), schema.ReverseInodeKey(content[0], 3, 9),
+		schema.ReferenceCountKey(content[0]), debtKey,
+	} {
+		if _, found, getErr := store.Get(ctx, key); getErr != nil || !found {
+			t.Fatalf("reconciled key %q: found=%t err=%v", key, found, getErr)
+		}
+	}
+	countValue, _, err := store.Get(ctx, schema.ReferenceCountKey(content[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := schema.UnmarshalReferenceCountRecord(countValue)
+	if err != nil || count.TotalReferences != 2 || count.DistinctInodes != 1 || count.DistinctRevisions != 1 || count.DistinctManifests != 1 || count.UpdateSequence != revision {
+		t.Fatalf("reference count = %#v, err=%v", count, err)
+	}
+	resolvedValue, _, err := store.Get(ctx, debtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := schema.UnmarshalCrawlDebtRecord(resolvedValue)
+	if err != nil || resolved.Status != schema.DebtResolved {
+		t.Fatalf("resolved debt = %#v, err=%v", resolved, err)
+	}
+
+	secondContent := append([]schema.ID(nil), content...)
+	secondContent[0] = daemonTestID(239)
+	secondManifestID := schema.ContentManifestID(secondContent)
+	secondRevision, err := store.AllocateRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRecord := record
+	secondRecord.ContentManifestID = secondManifestID
+	secondKey := schema.InodeRevisionKey(3, 9, secondRevision)
+	if err := store.PublishReconciledRevision(ctx, ReconciledRevision{
+		CurrentKey: currentKey, RevisionKey: secondKey, RevisionValue: encodeSchemaRecord(t, secondRecord),
+		Revision: secondRevision, ContentIDs: secondContent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldReverseValue, found, err := store.Get(ctx, schema.ReverseManifestKey(content[0], manifestID))
+	if err != nil || !found {
+		t.Fatalf("old manifest edge: found=%t err=%v", found, err)
+	}
+	oldReverse, err := schema.UnmarshalReverseManifestRecord(oldReverseValue)
+	if err != nil || oldReverse.State != schema.ReferenceHistorical {
+		t.Fatalf("old manifest edge = %#v, err=%v", oldReverse, err)
+	}
+	newReverseValue, found, err := store.Get(ctx, schema.ReverseManifestKey(secondContent[0], secondManifestID))
+	if err != nil || !found {
+		t.Fatalf("new manifest edge: found=%t err=%v", found, err)
+	}
+	newReverse, err := schema.UnmarshalReverseManifestRecord(newReverseValue)
+	if err != nil || newReverse.State != schema.ReferenceCurrent {
+		t.Fatalf("new manifest edge = %#v, err=%v", newReverse, err)
+	}
+	if _, found, err := store.Get(ctx, revisionKey); err != nil || !found {
+		t.Fatalf("historical inode revision: found=%t err=%v", found, err)
+	}
+}
+
 func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	options := Options{Socket: testSocket(t), RepositoryID: "phase4-pack-import", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
 	client, err := Ensure(context.Background(), options)
