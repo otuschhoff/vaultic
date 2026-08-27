@@ -702,17 +702,19 @@ func (x *CapabilitiesRequest) GetContext() *RequestContext {
 }
 
 type CapabilitiesResponse struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	DaemonId        string                 `protobuf:"bytes,1,opt,name=daemon_id,json=daemonId,proto3" json:"daemon_id,omitempty"`
-	ProtocolVersion string                 `protobuf:"bytes,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
-	SchemaVersion   string                 `protobuf:"bytes,3,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
-	RepositoryId    string                 `protobuf:"bytes,4,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
-	UnixSocket      bool                   `protobuf:"varint,5,opt,name=unix_socket,json=unixSocket,proto3" json:"unix_socket,omitempty"`
-	TcpEnabled      bool                   `protobuf:"varint,6,opt,name=tcp_enabled,json=tcpEnabled,proto3" json:"tcp_enabled,omitempty"`
-	MaxBatchItems   uint32                 `protobuf:"varint,7,opt,name=max_batch_items,json=maxBatchItems,proto3" json:"max_batch_items,omitempty"`
-	MaxMessageBytes uint32                 `protobuf:"varint,8,opt,name=max_message_bytes,json=maxMessageBytes,proto3" json:"max_message_bytes,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	DaemonId              string                 `protobuf:"bytes,1,opt,name=daemon_id,json=daemonId,proto3" json:"daemon_id,omitempty"`
+	ProtocolVersion       string                 `protobuf:"bytes,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	SchemaVersion         string                 `protobuf:"bytes,3,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	RepositoryId          string                 `protobuf:"bytes,4,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	UnixSocket            bool                   `protobuf:"varint,5,opt,name=unix_socket,json=unixSocket,proto3" json:"unix_socket,omitempty"`
+	TcpEnabled            bool                   `protobuf:"varint,6,opt,name=tcp_enabled,json=tcpEnabled,proto3" json:"tcp_enabled,omitempty"`
+	MaxBatchItems         uint32                 `protobuf:"varint,7,opt,name=max_batch_items,json=maxBatchItems,proto3" json:"max_batch_items,omitempty"`
+	MaxMessageBytes       uint32                 `protobuf:"varint,8,opt,name=max_message_bytes,json=maxMessageBytes,proto3" json:"max_message_bytes,omitempty"`
+	MaxPageItems          uint32                 `protobuf:"varint,9,opt,name=max_page_items,json=maxPageItems,proto3" json:"max_page_items,omitempty"`
+	MaxConcurrentRequests uint32                 `protobuf:"varint,10,opt,name=max_concurrent_requests,json=maxConcurrentRequests,proto3" json:"max_concurrent_requests,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *CapabilitiesResponse) Reset() {
@@ -801,6 +803,20 @@ func (x *CapabilitiesResponse) GetMaxMessageBytes() uint32 {
 	return 0
 }
 
+func (x *CapabilitiesResponse) GetMaxPageItems() uint32 {
+	if x != nil {
+		return x.MaxPageItems
+	}
+	return 0
+}
+
+func (x *CapabilitiesResponse) GetMaxConcurrentRequests() uint32 {
+	if x != nil {
+		return x.MaxConcurrentRequests
+	}
+	return 0
+}
+
 var File_vaulticdb_v1_daemon_proto protoreflect.FileDescriptor
 
 const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
@@ -849,7 +865,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x05ready\x18\x06 \x01(\bR\x05ready\"r\n" +
 	"\x13CapabilitiesRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
-	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xc0\x02\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\x9e\x03\n" +
 	"\x14CapabilitiesResponse\x12\x1b\n" +
 	"\tdaemon_id\x18\x01 \x01(\tR\bdaemonId\x12)\n" +
 	"\x10protocol_version\x18\x02 \x01(\tR\x0fprotocolVersion\x12%\n" +
@@ -860,7 +876,10 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\vtcp_enabled\x18\x06 \x01(\bR\n" +
 	"tcpEnabled\x12&\n" +
 	"\x0fmax_batch_items\x18\a \x01(\rR\rmaxBatchItems\x12*\n" +
-	"\x11max_message_bytes\x18\b \x01(\rR\x0fmaxMessageBytes2\x90\x02\n" +
+	"\x11max_message_bytes\x18\b \x01(\rR\x0fmaxMessageBytes\x12$\n" +
+	"\x0emax_page_items\x18\t \x01(\rR\fmaxPageItems\x126\n" +
+	"\x17max_concurrent_requests\x18\n" +
+	" \x01(\rR\x15maxConcurrentRequests2\x90\x02\n" +
 	"\tVaulticDB\x12C\n" +
 	"\x06Health\x12\x1b.vaulticdb.v1.HealthRequest\x1a\x1c.vaulticdb.v1.HealthResponse\x12U\n" +
 	"\fCapabilities\x12!.vaulticdb.v1.CapabilitiesRequest\x1a\".vaulticdb.v1.CapabilitiesResponse\x121\n" +

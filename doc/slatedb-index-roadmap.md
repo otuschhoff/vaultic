@@ -176,10 +176,10 @@ the Go client and Rust server from the same source. RPC groups should include:
 - bounded/pageable `ExportScan`
 
 Unix sockets are the default transport and must use a private runtime directory
-with mode `0600`. TCP is disabled by default. An opt-in TCP listener must bind
-only to a configured address, require a non-empty IP allowlist, and use mutual
-authentication or an equivalent authenticated channel. Missing authentication
-or an allowlist is a startup error.
+with mode `0700` and a socket with mode `0600`. TCP is disabled by default. An
+opt-in TCP listener must bind only to a configured address, require a non-empty
+IP allowlist, and use mutual authentication or an equivalent authenticated
+channel. Missing authentication or an allowlist is a startup error.
 
 Every RPC needs request IDs, deadlines, cancellation, bounded message sizes,
 and backpressure. Large scans and batches must stream or page rather than use
@@ -892,28 +892,33 @@ that remains usable when `vaulticdb` is absent.
 
 **Goal:** establish a secure, versioned process boundary before metadata logic.
 
-**Current implementation state (2026-08-27):** **in progress.** The generated,
+**Current implementation state (2026-08-27):** **complete.** The generated,
 versioned protobuf contract includes lifecycle, request-context, error,
 batch, scan, and transaction envelopes; the service exposes only
 `Health`, `Capabilities`, `Drain`, and `Shutdown`, so it cannot mutate
 SlateDB. The Go client can attach to and validate a compatible Unix daemon or
 start one on demand. It now supplies explicit TCP transport, CIDR allowlist,
-and bearer-token configuration when starting an opt-in TCP daemon. The Rust
-daemon has a process-lifetime advisory endpoint lock, allowing a stale socket
-to be removed only after exclusive ownership is established; it also creates
-PID/capability metadata, private Unix socket directories, bounded gRPC message
-handling, CIDR admission, and authenticated TCP lifecycle requests.
+and bearer-token configuration when starting an opt-in TCP daemon, uses bounded
+connection attempts, records endpoint-specific ownership, and forcibly reaps
+owned children on startup or shutdown deadlines. The Rust daemon has a
+process-lifetime advisory endpoint lock, allowing a stale socket to be removed
+only after exclusive ownership is established; it also creates PID/capability
+metadata, private Unix socket directories, bounded gRPC message handling,
+per-connection concurrency limits, CIDR admission, and authenticated TCP
+lifecycle requests.
 
-Local verification currently covers protocol compatibility, basic Unix client
-attachment, Unix RPC smoke/shutdown cleanup, the native SlateDB smoke path,
-advisory-lock recovery, repository-scoped endpoints, stale-socket recovery,
-Unix permission checks, compiled-daemon startup, and four-client startup races
-under Go's race detector. Lifecycle handlers now require a request ID and
-reject expired request deadlines. CI builds through `cargo zigbuild` and runs
-the resulting musl binary's native smoke path on Linux. Phase 1 is **not
-complete**: TCP allowlist/authentication, cancellation, message-limit,
-paging/streaming, and backpressure still lack automated integration coverage;
-`Drain` remains a no-op because no storage RPC exists yet.
+Local verification covers protocol compatibility, Unix and TCP attachment,
+Unix RPC smoke/shutdown cleanup, native SlateDB smoke, advisory-lock recovery,
+repository-scoped endpoints, stale-socket recovery, Unix permission checks,
+compiled-daemon startup, and concurrent Unix/TCP startup races under Go's race
+detector. Process tests cover missing and incorrect authentication on every
+lifecycle RPC, CIDR rejection, truthful transport and work-limit capabilities,
+required request IDs, expired deadlines, oversized messages, cancellation
+cleanup, bounded shutdown, and the `Drain` ready-to-draining transition. Pure
+Rust validators enforce the advertised batch and scan-page limits before those
+envelopes are connected to storage RPCs. CI builds through `cargo zigbuild`,
+runs the Linux musl native smoke path, retains the no-CGO vaultic build, and
+runs the compiled-daemon Go race suite.
 
 **Requirements to complete Phase 1:**
 

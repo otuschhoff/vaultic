@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	vaulticfs "github.com/otuschhoff/vaultic/internal/fs"
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -88,7 +89,10 @@ func Connect(ctx context.Context, options Options) (*Client, error) {
 // daemon's singleton lock successfully starts it; other callers retry attach.
 func Ensure(ctx context.Context, options Options) (*Client, error) {
 	options = options.withDefaults()
-	if client, err := Connect(ctx, options); err == nil {
+	probeCtx, cancelProbe := context.WithTimeout(ctx, dialAttemptTimeout(options))
+	client, connectErr := Connect(probeCtx, options)
+	cancelProbe()
+	if connectErr == nil {
 		return client, nil
 	}
 	if options.DaemonPath == "" {
@@ -96,6 +100,9 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	}
 	if options.TCPAddress != "" && len(options.TCPAllowlist) == 0 {
 		return nil, fmt.Errorf("%w: TCP allowlist is not configured", ErrUnavailable)
+	}
+	if options.TCPAddress != "" && options.AuthToken == "" {
+		return nil, fmt.Errorf("%w: TCP authentication token is not configured", ErrUnavailable)
 	}
 
 	cmd := exec.Command(options.DaemonPath)
@@ -111,6 +118,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 			"VAULTICDB_TRANSPORT=tcp",
 			"VAULTICDB_TCP_ADDR="+options.TCPAddress,
 			"VAULTICDB_TCP_ALLOWLIST="+strings.Join(options.TCPAllowlist, ","),
+			"VAULTICDB_TCP_METADATA="+tcpMetadataPath(options.TCPAddress),
 		)
 	}
 	if err := cmd.Start(); err != nil {
@@ -126,9 +134,14 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("%w: wait for daemon readiness: %v", ErrUnavailable, err)
+		cleanupOwnedArtifacts(options, cmd.Process.Pid)
+		return nil, fmt.Errorf("%w: wait for daemon readiness: %w", ErrUnavailable, err)
 	}
-	if options.TCPAddress == "" && !daemonOwnsProcess(options.Socket, cmd.Process.Pid) {
+	metadataPath := options.Socket
+	if options.TCPAddress != "" {
+		metadataPath = tcpMetadataPath(options.TCPAddress)
+	}
+	if !daemonOwnsProcess(metadataPath, cmd.Process.Pid) {
 		_ = cmd.Wait()
 		cmd = nil
 	}
@@ -139,14 +152,40 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	return client, nil
 }
 
+func tcpMetadataPath(address string) string {
+	digest := sha256.Sum256([]byte(address))
+	return filepath.Join("/tmp/vaulticdb", "tcp-"+hex.EncodeToString(digest[:]))
+}
+
 func daemonOwnsProcess(socket string, processID int) bool {
-	pidPath := strings.TrimSuffix(filepath.Clean(socket), filepath.Ext(socket)) + ".pid"
+	pidPath := metadataPath(socket, ".pid")
 	contents, err := os.ReadFile(pidPath)
 	if err != nil {
 		return false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(contents)))
 	return err == nil && pid == processID
+}
+
+func cleanupOwnedArtifacts(options Options, processID int) {
+	base := options.Socket
+	if options.TCPAddress != "" {
+		base = tcpMetadataPath(options.TCPAddress)
+	}
+	if !daemonOwnsProcess(base, processID) {
+		return
+	}
+	_ = os.Remove(metadataPath(base, ".pid"))
+	_ = os.Remove(metadataPath(base, ".cap"))
+	if options.TCPAddress == "" {
+		if info, err := os.Lstat(options.Socket); err == nil && info.Mode()&os.ModeSocket != 0 {
+			_ = os.Remove(options.Socket)
+		}
+	}
+}
+
+func metadataPath(base, extension string) string {
+	return strings.TrimSuffix(filepath.Clean(base), filepath.Ext(base)) + extension
 }
 
 func dial(ctx context.Context, options Options) (*Client, error) {
@@ -191,12 +230,18 @@ func validateUnixEndpoint(socket string) error {
 	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
 		return fmt.Errorf("unsafe vaulticdb socket permissions at %s", socket)
 	}
+	if vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid()) {
+		return fmt.Errorf("unsafe vaulticdb socket owner at %s", socket)
+	}
 	directory, err := os.Stat(filepath.Dir(socket))
 	if err != nil {
 		return err
 	}
 	if !directory.IsDir() || directory.Mode().Perm() != 0o700 {
 		return fmt.Errorf("unsafe vaulticdb runtime directory permissions at %s", filepath.Dir(socket))
+	}
+	if vaulticfs.ExtendedStat(directory).UID != uint32(os.Geteuid()) {
+		return fmt.Errorf("unsafe vaulticdb runtime directory owner at %s", filepath.Dir(socket))
 	}
 	return nil
 }
@@ -229,7 +274,17 @@ func withAuth(ctx context.Context, token string) context.Context {
 func retryDial(ctx context.Context, options Options) (*Client, error) {
 	deadline := time.Now().Add(options.StartTimeout)
 	for {
-		client, err := dial(ctx, options)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+		attemptTimeout := dialAttemptTimeout(options)
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+		client, err := dial(attemptCtx, options)
+		cancelAttempt()
 		if err == nil {
 			return client, nil
 		}
@@ -244,6 +299,13 @@ func retryDial(ctx context.Context, options Options) (*Client, error) {
 		case <-timer.C:
 		}
 	}
+}
+
+func dialAttemptTimeout(options Options) time.Duration {
+	if options.RetryInterval > 250*time.Millisecond {
+		return options.RetryInterval
+	}
+	return 250 * time.Millisecond
 }
 
 func unixDialer(socket string) func(context.Context, string) (net.Conn, error) {
@@ -282,18 +344,39 @@ func (c *Client) RPC() vaulticdbv1.VaulticDBClient { return c.rpc }
 // Close closes the RPC connection and shuts down only a daemon started by this client.
 func (c *Client) Close(ctx context.Context) error {
 	var result error
+	shutdownCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		shutdownCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
+	}
+	defer cancel()
 	if c.process != nil {
-		_, err := c.rpc.Shutdown(ctx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
+		_, err := c.rpc.Shutdown(shutdownCtx, &vaulticdbv1.Empty{Context: requestContext(shutdownCtx)})
 		if err != nil {
 			result = err
+			if shutdownCtx.Err() != nil {
+				result = shutdownCtx.Err()
+			}
+			_ = c.process.Process.Kill()
 		}
 	}
 	if err := c.conn.Close(); err != nil && result == nil {
 		result = err
 	}
 	if c.process != nil {
-		if err := c.process.Wait(); err != nil && result == nil {
-			result = err
+		wait := make(chan error, 1)
+		go func() { wait <- c.process.Wait() }()
+		select {
+		case err := <-wait:
+			if err != nil && result == nil {
+				result = err
+			}
+		case <-shutdownCtx.Done():
+			_ = c.process.Process.Kill()
+			<-wait
+			if result == nil {
+				result = shutdownCtx.Err()
+			}
 		}
 		c.process = nil
 	}

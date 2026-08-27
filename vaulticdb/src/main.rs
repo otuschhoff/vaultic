@@ -16,6 +16,7 @@ use std::os::unix::fs::FileTypeExt;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use ipnet::IpNet;
+use prost::Message;
 use sha2::{Digest, Sha256};
 use slatedb::config::DbReaderOptions;
 use slatedb::object_store::memory::InMemory;
@@ -35,13 +36,15 @@ pub mod proto {
 use proto::{
     vaultic_db_server::{VaulticDb, VaulticDbServer},
     CapabilitiesRequest, CapabilitiesResponse, Empty, HealthRequest, HealthResponse,
-    RequestContext,
+    RequestContext, ScanRequest, WriteBatchRequest,
 };
 
 const PROTOCOL_VERSION: &str = "vaulticdb.v1";
 const SCHEMA_VERSION: &str = "0";
 const MAX_BATCH_ITEMS: u32 = 10_000;
+const MAX_PAGE_ITEMS: u32 = 1_000;
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
+const MAX_CONCURRENT_REQUESTS: usize = 128;
 
 #[derive(Clone)]
 struct DaemonState {
@@ -100,6 +103,8 @@ impl VaulticDb for Service {
             tcp_enabled: self.state.tcp_enabled,
             max_batch_items: MAX_BATCH_ITEMS,
             max_message_bytes: MAX_MESSAGE_BYTES,
+            max_page_items: MAX_PAGE_ITEMS,
+            max_concurrent_requests: MAX_CONCURRENT_REQUESTS as u32,
         }))
     }
 
@@ -130,6 +135,30 @@ fn check_context(context: Option<&RequestContext>) -> Result<(), Status> {
         .as_millis() as i64;
     if context.deadline_unix_ms > 0 && context.deadline_unix_ms <= now {
         return Err(Status::deadline_exceeded("request deadline has expired"));
+    }
+    Ok(())
+}
+
+pub fn validate_write_batch(request: &WriteBatchRequest) -> Result<(), Status> {
+    let item_count = request
+        .puts
+        .len()
+        .checked_add(request.deletes.len())
+        .ok_or_else(|| Status::resource_exhausted("batch item count overflow"))?;
+    if item_count > MAX_BATCH_ITEMS as usize {
+        return Err(Status::resource_exhausted("batch item limit exceeded"));
+    }
+    if request.encoded_len() > MAX_MESSAGE_BYTES as usize {
+        return Err(Status::resource_exhausted("batch byte limit exceeded"));
+    }
+    Ok(())
+}
+
+pub fn validate_scan(request: &ScanRequest) -> Result<(), Status> {
+    if request.page_size == 0 || request.page_size > MAX_PAGE_ITEMS {
+        return Err(Status::invalid_argument(
+            "scan page size is outside the supported range",
+        ));
     }
     Ok(())
 }
@@ -263,19 +292,26 @@ async fn main() -> Result<()> {
                 return Err(error);
             }
             let stream = UnixListenerStream::new(listener);
-            Server::builder()
+            let result = Server::builder()
+                .concurrency_limit_per_connection(MAX_CONCURRENT_REQUESTS)
                 .add_service(service)
                 .serve_with_incoming_shutdown(stream, shutdown_signal(shutdown_rx))
-                .await?;
+                .await;
             drop(_lock);
             let _ = tokio::fs::remove_file(&path).await;
             remove_runtime_metadata(&path);
+            result?;
         }
         Transport::Tcp(addr, allowlist) => {
-            let metadata_path = PathBuf::from(
-                env::var("VAULTICDB_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticdb".to_owned()),
-            )
-            .join("vaulticdb-tcp");
+            let metadata_path = env::var("VAULTICDB_TCP_METADATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    PathBuf::from(
+                        env::var("VAULTICDB_RUNTIME_DIR")
+                            .unwrap_or_else(|_| "/tmp/vaulticdb".to_owned()),
+                    )
+                    .join("vaulticdb-tcp")
+                });
             let listener = TcpListener::bind(addr).await.context("bind TCP listener")?;
             if let Some(parent) = metadata_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -284,14 +320,16 @@ async fn main() -> Result<()> {
             write_runtime_metadata(&metadata_path, tcp_enabled)?;
             let (sender, receiver) = mpsc::channel(64);
             tokio::spawn(accept_allowed_tcp(listener, allowlist, sender));
-            Server::builder()
+            let result = Server::builder()
+                .concurrency_limit_per_connection(MAX_CONCURRENT_REQUESTS)
                 .add_service(service)
                 .serve_with_incoming_shutdown(
                     ReceiverStream::new(receiver),
                     shutdown_signal(shutdown_rx),
                 )
-                .await?;
+                .await;
             remove_runtime_metadata(&metadata_path);
+            result?;
         }
     }
     Ok(())
@@ -497,5 +535,37 @@ mod tests {
         drop(first);
         assert!(acquire_singleton_lock(&path).is_ok());
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn future_storage_envelopes_enforce_advertised_limits() {
+        let mut batch = WriteBatchRequest::default();
+        batch.deletes = vec![Vec::new(); MAX_BATCH_ITEMS as usize];
+        assert!(validate_write_batch(&batch).is_ok());
+        batch.deletes.push(Vec::new());
+        assert_eq!(
+            validate_write_batch(&batch).unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+
+        let oversized = WriteBatchRequest {
+            deletes: vec![vec![0; MAX_MESSAGE_BYTES as usize]],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_write_batch(&oversized).unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+        assert!(validate_scan(&ScanRequest {
+            page_size: MAX_PAGE_ITEMS,
+            ..Default::default()
+        })
+        .is_ok());
+        assert!(validate_scan(&ScanRequest::default()).is_err());
+        assert!(validate_scan(&ScanRequest {
+            page_size: MAX_PAGE_ITEMS + 1,
+            ..Default::default()
+        })
+        .is_err());
     }
 }

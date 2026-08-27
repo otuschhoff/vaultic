@@ -80,6 +80,8 @@ message CapabilitiesResponse {
   bool tcp_enabled = 6;
   uint32 max_batch_items = 7;
   uint32 max_message_bytes = 8;
+  uint32 max_page_items = 9;
+  uint32 max_concurrent_requests = 10;
 }
 
 service VaulticDB {

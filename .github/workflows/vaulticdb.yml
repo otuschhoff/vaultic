@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/workflows/vaulticdb.yml"
       - "vaulticdb/**"
+      - "internal/index/daemon/**"
       - "internal/index/proto/**"
       - "cmd/vaulticdb-smoke/**"
       - "go.mod"
@@ -14,6 +15,7 @@ on:
     paths:
       - ".github/workflows/vaulticdb.yml"
       - "vaulticdb/**"
+      - "internal/index/daemon/**"
       - "internal/index/proto/**"
       - "cmd/vaulticdb-smoke/**"
       - "go.mod"
