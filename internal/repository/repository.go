@@ -16,6 +16,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/dryrun"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
@@ -33,12 +34,13 @@ const MaxPackSize = 4 * 1024 * 1024 * 1024
 
 // Repository is used to access a repository in a backend.
 type Repository struct {
-	be    backend.Backend
-	cfg   vaultic.Config
-	key   *crypto.Key
-	keyID vaultic.ID
-	idx   *index.MasterIndex
-	cache *cache.Cache
+	be     backend.Backend
+	cfg    vaultic.Config
+	key    *crypto.Key
+	keyID  vaultic.ID
+	idx    *index.MasterIndex
+	engine enginepkg.Engine
+	cache  *cache.Cache
 
 	opts Options
 
@@ -204,6 +206,7 @@ func New(be backend.Backend, opts Options) (*Repository, error) {
 		idx:         index.NewMasterIndex(),
 		packerCount: defaultPackerCount,
 	}
+	repo.engine = enginepkg.NewLegacyEngine(repo.idx)
 
 	return repo, nil
 }
@@ -216,6 +219,49 @@ func (r *Repository) setConfig(cfg vaultic.Config) {
 // Config returns the repository configuration.
 func (r *Repository) Config() vaultic.Config {
 	return r.cfg
+}
+
+// Engine returns the currently selected metadata engine.
+func (r *Repository) Engine() enginepkg.Engine {
+	if r == nil {
+		return nil
+	}
+	if r.engine == nil {
+		r.engine = enginepkg.NewLegacyEngine(r.idx)
+	}
+	return r.engine
+}
+
+// SetEngine replaces the active engine for this repository.
+func (r *Repository) SetEngine(engine enginepkg.Engine) {
+	if engine == nil {
+		r.engine = enginepkg.NewLegacyEngine(r.idx)
+		return
+	}
+	r.engine = engine
+}
+
+func (r *Repository) legacyIndexEngine() enginepkg.LegacyIndexEngine {
+	engine, ok := r.Engine().(enginepkg.LegacyIndexEngine)
+	if !ok {
+		panic("repository operation requires the legacy index engine")
+	}
+	return engine
+}
+
+// ResolveEngineFromBackend validates the authoritative manifest through the
+// backend abstraction and selects the corresponding engine.
+func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.Engine, error) {
+	resolution, err := enginepkg.Resolve(ctx, r.be, r.cfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	if resolution.Mode == enginepkg.ModeSlateDB {
+		return nil, fmt.Errorf("repository %s requires slatedb schema %s: %w", r.cfg.ID, resolution.Manifest.SchemaVersion, enginepkg.ErrUnavailable)
+	}
+	engine := enginepkg.NewLegacyEngine(r.idx)
+	r.SetEngine(engine)
+	return engine, nil
 }
 
 // PackSize return the target size of a pack file when uploading
@@ -306,7 +352,7 @@ func (r *Repository) packSizing(t vaultic.BlobType) (size, limit uint64, growFac
 
 func (r *Repository) currentBlobSize(t vaultic.BlobType) uint64 {
 	types := make(map[vaultic.ID]vaultic.BlobType)
-	for blob := range r.idx.Values() {
+	for blob := range r.legacyIndexEngine().Values() {
 		packID := blob.PackID()
 		if previous, ok := types[packID]; !ok {
 			types[packID] = blob.Handle().Type
@@ -442,7 +488,7 @@ func (r *Repository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []
 	debug.Log("load %v (buf len %v, cap %d)", bh, len(buf), cap(buf))
 
 	// lookup packs
-	blobs := r.idx.Lookup(bh)
+	blobs := r.legacyIndexEngine().Lookup(bh)
 	if len(blobs) == 0 {
 		debug.Log("id %v not found in index", bh.ID)
 		return nil, errors.Errorf("id %v not found in repository", bh.ID)
@@ -833,7 +879,7 @@ func (r *Repository) flush(ctx context.Context) error {
 		return err
 	}
 
-	return r.idx.Flush(ctx, &internalRepository{r})
+	return r.legacyIndexEngine().Flush(ctx, &internalRepository{r})
 }
 
 func (r *Repository) flushBlobSaver() {
@@ -874,7 +920,7 @@ func (r *Repository) Connections() uint {
 }
 
 func (r *Repository) LookupBlob(bh vaultic.BlobHandle) []vaultic.PackBlob {
-	entries := r.idx.Lookup(bh)
+	entries := r.legacyIndexEngine().Lookup(bh)
 	out := make([]vaultic.PackBlob, len(entries))
 	for i, e := range entries {
 		out[i] = e
@@ -884,13 +930,13 @@ func (r *Repository) LookupBlob(bh vaultic.BlobHandle) []vaultic.PackBlob {
 
 // LookupBlobSize returns the size of blob id. Also returns pending blobs.
 func (r *Repository) LookupBlobSize(bh vaultic.BlobHandle) (uint, bool) {
-	return r.idx.LookupSize(bh)
+	return r.legacyIndexEngine().LookupSize(bh)
 }
 
 // ListBlobs runs fn on all blobs known to the index. When the context is cancelled,
 // the index iteration returns immediately with ctx.Err(). This blocks any modification of the index.
 func (r *Repository) ListBlobs(ctx context.Context, fn func(vaultic.PackBlob)) error {
-	for blob := range r.idx.Values() {
+	for blob := range r.legacyIndexEngine().Values() {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -901,11 +947,12 @@ func (r *Repository) ListBlobs(ctx context.Context, fn func(vaultic.PackBlob)) e
 
 // listPacksFromIndex returns index entries for the given packs, grouped by pack file.
 func (r *Repository) listPacksFromIndex(ctx context.Context, packs vaultic.IDSet) <-chan index.PackBlobs {
-	return r.idx.ListPacks(ctx, packs)
+	return r.legacyIndexEngine().ListPacks(ctx, packs)
 }
 
 func (r *Repository) clearIndex() {
 	r.idx = index.NewMasterIndex()
+	r.engine = enginepkg.NewLegacyEngine(r.idx)
 }
 
 // LoadIndex loads all index files from the backend in parallel and stores them
@@ -919,7 +966,7 @@ func (r *Repository) loadIndexWithCallback(ctx context.Context, p vaultic.Termin
 
 	bar := p.NewCounterTerminalOnly("index files loaded")
 
-	err := r.idx.Load(ctx, r, bar, cb)
+	err := r.legacyIndexEngine().Load(ctx, r, bar, cb)
 	if err != nil {
 		return err
 	}
@@ -933,7 +980,7 @@ func (r *Repository) loadIndexWithCallback(ctx context.Context, p vaultic.Termin
 		defer cancel()
 
 		invalidIndex := false
-		for blob := range r.idx.Values() {
+		for blob := range r.legacyIndexEngine().Values() {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -993,7 +1040,7 @@ func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[vaul
 				m.Lock()
 				invalid = append(invalid, fi.ID)
 				m.Unlock()
-			} else if err := r.idx.StorePack(wgCtx, fi.ID, entries, &internalRepository{r}); err != nil {
+			} else if err := r.legacyIndexEngine().StorePack(wgCtx, fi.ID, entries, &internalRepository{r}); err != nil {
 				return err
 			}
 			p.Add(1)
@@ -1309,7 +1356,7 @@ func (r *Repository) saveBlob(ctx context.Context, t vaultic.BlobType, buf []byt
 	}
 
 	// first try to add to pending blobs; if not successful, this blob is already known
-	known = !r.idx.AddPending(vaultic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
+	known = !r.legacyIndexEngine().AddPending(vaultic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
 
 	// only save when needed or explicitly told
 	if !known || storeDuplicate {
@@ -1355,7 +1402,7 @@ func (r *Repository) blobsInPack(packID vaultic.ID, handles []vaultic.BlobHandle
 	blobs := make(pack.Blobs, 0, len(handles))
 	for _, h := range handles {
 		found := false
-		for _, pb := range r.idx.Lookup(h) {
+		for _, pb := range r.legacyIndexEngine().Lookup(h) {
 			if pb.PackID().Equal(packID) {
 				blobs = append(blobs, pb.Blob)
 				found = true

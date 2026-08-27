@@ -3,8 +3,8 @@ package repository
 import (
 	"testing"
 
-	"github.com/otuschhoff/vaultic/internal/vaultic"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestChunkerFactoryFixedSizeUsesRepoConfig(t *testing.T) {

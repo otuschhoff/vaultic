@@ -50,7 +50,10 @@ func (l *RESTLayout) Filename(h backend.Handle) string {
 
 // Paths returns all directory names
 func (l *RESTLayout) Paths() (dirs []string) {
-	for _, p := range restLayoutPaths {
+	for fileType, p := range restLayoutPaths {
+		if fileType == backend.SlateDBFile {
+			continue
+		}
 		dirs = append(dirs, l.url+path.Join("/", p))
 	}
 	return dirs

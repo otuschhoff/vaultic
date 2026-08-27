@@ -484,7 +484,7 @@ func checkPackInner(ctx context.Context, r *Repository, id vaultic.ID, blobs pac
 	for _, blob := range blobs {
 		// Check if blob is contained in index and position is correct
 		idxHas := false
-		for _, pb := range r.idx.Lookup(blob.BlobHandle) {
+		for _, pb := range r.legacyIndexEngine().Lookup(blob.BlobHandle) {
 			if pb.PackID().Equal(id) && pb.Blob == blob {
 				idxHas = true
 				break

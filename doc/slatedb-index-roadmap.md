@@ -218,27 +218,71 @@ A repository configuration field may cache the selected mode, but the manifest
 check remains authoritative so copied repositories and external tooling are
 handled correctly.
 
+The implemented Phase 2 marker is the backend object `slatedb/manifest`. It is
+bounded to 64 KiB and decoded as strict JSON with these required fields:
+
+```json
+{
+  "format_version": 1,
+  "schema_version": "0",
+  "repository_id": "<repository config ID>",
+  "authoritative": true
+}
+```
+
+The dedicated backend file type maps to the `slatedb` namespace but is omitted
+from repository initialization paths, so creating or opening a legacy
+repository does not create an empty directory or otherwise change its layout.
+The namespace is created on demand when a manifest is saved. Unknown fields,
+trailing JSON, oversized or unreadable payloads, repository-ID mismatches, and
+non-authoritative markers are corrupt states. Unsupported format or schema
+versions are reported separately and never fall back to the legacy engine.
+
 ### Engine interface
 
-Create `internal/index/engine.go` with a narrow interface owned by vaultic,
-not by SlateDB. The SlateDB implementation is an RPC client to `vaulticdb`,
-not a direct UniFFI or CGO wrapper in the vaultic process:
+Phase 2 implements `internal/index/engine.go` with interfaces owned by vaultic,
+not by SlateDB. Lifecycle and capability interfaces are separate so callers can
+request only the operations they need:
 
 ```go
 type Engine interface {
     Mode() Mode
-    Get(ctx context.Context, key []byte) ([]byte, error)
-    MultiGet(ctx context.Context, keys [][]byte) ([][]byte, error)
-    ScanPrefix(ctx context.Context, prefix []byte, fn func(KeyValue) error) error
-    Begin(ctx context.Context, writable bool) (Transaction, error)
-    ExportLegacy(ctx context.Context, dst LegacySink) error
     Close() error
+}
+
+type ReadEngine interface {
+  Engine
+  Lookup(vaultic.BlobHandle) []*pack.PackedBlob
+  LookupSize(vaultic.BlobHandle) (uint, bool)
+}
+
+type ScanEngine interface {
+  Engine
+  Values() iter.Seq[*pack.PackedBlob]
+  ListPacks(context.Context, vaultic.IDSet) <-chan legacyindex.PackBlobs
+}
+
+type WriteEngine interface {
+  Engine
+  AddPending(vaultic.BlobHandle, uint) bool
+  StorePack(context.Context, vaultic.ID, pack.Blobs,
+    vaultic.SaverUnpacked[vaultic.FileType]) error
+  Load(context.Context, vaultic.ListerLoaderUnpacked, vaultic.Counter,
+    func(vaultic.ID, *legacyindex.Index, error) error) error
+  Flush(context.Context, vaultic.SaverUnpacked[vaultic.FileType]) error
+}
+
+type ExportEngine interface {
+  Engine
+  ExportLegacy(context.Context, LegacySink) error
 }
 ```
 
-The exact interface should be split into read, write, and export capabilities
-so read-only commands cannot acquire a writable SlateDB handle. The legacy
-adapter should wrap the existing `MasterIndex` and JSON index operations.
+`LegacyIndexEngine` composes these capabilities and delegates to the existing
+`MasterIndex`, retaining its locks, data types, JSON encoding, duplicate
+handling, and incremental-load behavior. Phase 3 will add daemon RPC-oriented
+point-read, multi-get, prefix-scan, batch, and transaction capabilities without
+putting SlateDB or CGO into the vaultic process.
 
 Do not replace the existing index package in one step. First route repository
 operations through a legacy adapter, then add the daemon client as an alternate
@@ -983,6 +1027,32 @@ daemon, and no RPC path can mutate SlateDB yet.
 
 **Goal:** introduce one vaultic-owned metadata interface while preserving the
 existing JSON engine byte-for-byte.
+
+**Current implementation state (2026-08-27):** **complete.** Vaultic owns
+separate lifecycle, read, scan, write/load, and export capability interfaces
+under `internal/index`. The legacy adapter delegates normal lookup, size lookup,
+iteration, pending-blob registration, pack publication, JSON index load/flush,
+pack scans, and export to the repository's existing concurrency-safe
+`MasterIndex`; prune and repair retain their specialized direct rewrite APIs.
+`Repository.ListBlobs` is the read-only diagnostic operation routed through the
+scan adapter.
+
+Normal repository open now resolves the engine after decrypting the config and
+before applying repository options. Resolution uses only backend `Stat`, `Load`,
+and `List` operations against the dedicated `slatedb` namespace. An absent
+namespace selects the legacy adapter without starting `vaulticdb`; partial,
+unreadable, malformed, mismatched, non-authoritative, oversized, and unsupported
+manifests fail closed. A valid authoritative manifest is recognized as SlateDB
+mode and currently returns the explicit unavailable-engine error until the
+Phase 3 RPC storage adapter is implemented, rather than silently hiding a
+daemon outage behind legacy data.
+
+Verification includes backend/layout compatibility, absent/partial/malformed/
+unreadable/unsupported/valid manifest states, repository mismatch, a shared live
+`MasterIndex`, concurrent lookups under the race detector, complete blob-record
+export, existing repository index behavior, a workspace-wide compile, and a
+workspace-wide `CGO_ENABLED=0` compile. Legacy repository initialization retains
+its prior directory set byte-for-byte.
 
 **Implementation steps:**
 

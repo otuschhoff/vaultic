@@ -21,6 +21,7 @@ func TestHandleValid(t *testing.T) {
 		{Handle{Type: ConfigFile, Name: ""}, true},
 		{Handle{Type: PackFile, Name: ""}, false},
 		{Handle{Type: LockFile, Name: "010203040506"}, true},
+		{Handle{Type: SlateDBFile, Name: "manifest"}, true},
 	}
 
 	for i, test := range handleTests {

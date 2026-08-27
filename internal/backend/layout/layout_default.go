@@ -25,6 +25,7 @@ var defaultLayoutPaths = map[backend.FileType]string{
 	backend.IndexFile:    "index",
 	backend.LockFile:     "locks",
 	backend.KeyFile:      "keys",
+	backend.SlateDBFile:  "slatedb",
 }
 
 func NewDefaultLayout(path string, join func(...string) string) *DefaultLayout {
@@ -66,7 +67,10 @@ func (l *DefaultLayout) Filename(h backend.Handle) string {
 
 // Paths returns all directory names needed for a repo.
 func (l *DefaultLayout) Paths() (dirs []string) {
-	for _, p := range defaultLayoutPaths {
+	for fileType, p := range defaultLayoutPaths {
+		if fileType == backend.SlateDBFile {
+			continue
+		}
 		dirs = append(dirs, l.join(l.path, p))
 	}
 

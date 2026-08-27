@@ -473,6 +473,10 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		return nil, err
 	}
 
+	if _, err := s.ResolveEngineFromBackend(ctx); err != nil {
+		return nil, errors.Fatalf("resolve repository metadata engine: %v", err)
+	}
+
 	// apply the in-repo config (compression, pack sizes, extra verify);
 	// CLI flags and environment variables take precedence
 	if err := applyRepoConfig(s, gopts); err != nil {

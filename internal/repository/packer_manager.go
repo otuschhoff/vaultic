@@ -290,5 +290,5 @@ func (r *Repository) savePacker(ctx context.Context, t vaultic.BlobType, p *pack
 
 	// update blobs in the index
 	debug.Log("  updating blobs %v to pack %v", p.Packer.Blobs(), id)
-	return r.idx.StorePack(ctx, id, p.Packer.Blobs(), &internalRepository{r})
+	return r.legacyIndexEngine().StorePack(ctx, id, p.Packer.Blobs(), &internalRepository{r})
 }

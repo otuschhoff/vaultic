@@ -18,6 +18,7 @@ const (
 	SnapshotFile
 	IndexFile
 	ConfigFile
+	SlateDBFile
 )
 
 // Keep in sync with vaultic.FileType.String().
@@ -37,6 +38,8 @@ func (t FileType) String() string {
 		s = "index"
 	case ConfigFile:
 		s = "config"
+	case SlateDBFile:
+		s = "slatedb"
 	}
 	return s
 }
@@ -65,6 +68,7 @@ func (h Handle) Valid() error {
 	case SnapshotFile:
 	case IndexFile:
 	case ConfigFile:
+	case SlateDBFile:
 	default:
 		return errors.Errorf("invalid Type %d", h.Type)
 	}
