@@ -30,14 +30,14 @@ type LegacyPackImport struct {
 }
 
 type ReconciledRevision struct {
-	CurrentKey    []byte
-	RevisionKey   []byte
-	RevisionValue []byte
-	Revision      uint64
-	ContentIDs    []schema.ID
-	DebtKeys      [][]byte
-	ParentCount     uint16
-	HardlinkParents []schema.HardlinkParentRef
+	CurrentKey         []byte
+	RevisionKey        []byte
+	RevisionValue      []byte
+	Revision           uint64
+	ContentIDs         []schema.ID
+	DebtKeys           [][]byte
+	HasMultipleParents bool
+	HardlinkParents    []schema.HardlinkParentRef
 }
 
 func NewSchemaStore(client *Client) *SchemaStore { return &SchemaStore{client: client} }
@@ -1230,8 +1230,8 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 		puts[string(key)] = Mutation{Key: key, Value: encoded}
 	}
 
-	// Publish hardlink reference records for multi-parent inodes
-	if reconciled.ParentCount > 1 && len(reconciled.HardlinkParents) > 0 {
+	// Publish hardlink reference records for multi-parent inodes.
+	if reconciled.HasMultipleParents && len(reconciled.HardlinkParents) > 0 {
 		hrRec := schema.HardlinkRefsRecord{
 			FSID: revisionParsed.FSID, Inode: revisionParsed.Inode, Revision: reconciled.Revision,
 			Parents: reconciled.HardlinkParents, Freshness: schema.FreshnessVerified,

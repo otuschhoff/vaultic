@@ -299,20 +299,20 @@ const (
 const knownFieldMask = KnownMTime | KnownCTime | KnownSize | KnownMode | KnownUID | KnownGID | KnownParent | KnownPath
 
 type InodeRevision struct {
-	ParentInode       uint64
-	ParentCount       uint16
-	MTime, CTime      int64
-	Size              uint64
-	Mode, UID, GID    uint32
-	Known             uint16
-	ContentMode       ContentMode
-	ContentIDs        []ID
-	ContentManifestID ID
-	ContentCount      uint32
-	FileContentHash   ID
-	HashKnown         bool
-	SourcePath        string
-	Freshness         Freshness
+	ParentInode        uint64
+	HasMultipleParents bool
+	MTime, CTime       int64
+	Size               uint64
+	Mode, UID, GID     uint32
+	Known              uint16
+	ContentMode        ContentMode
+	ContentIDs         []ID
+	ContentManifestID  ID
+	ContentCount       uint32
+	FileContentHash    ID
+	HashKnown          bool
+	SourcePath         string
+	Freshness          Freshness
 }
 
 func (record InodeRevision) MarshalBinary() ([]byte, error) {
@@ -324,7 +324,7 @@ func (record InodeRevision) MarshalBinary() ([]byte, error) {
 	}
 	e := newEncoder()
 	e.u64(record.ParentInode)
-	e.u16(record.ParentCount)
+	e.bool(record.HasMultipleParents)
 	e.i64(record.MTime)
 	e.i64(record.CTime)
 	e.u64(record.Size)
@@ -358,10 +358,8 @@ func UnmarshalInodeRevision(data []byte) (InodeRevision, error) {
 	if record.ParentInode, err = d.u64(); err != nil {
 		return record, err
 	}
-	// ParentCount: defaults to 1 for old records without this field
-	if record.ParentCount, err = d.u16(); err != nil {
-		// Old records didn't have ParentCount, so default to 1
-		record.ParentCount = 1
+	if record.HasMultipleParents, err = d.bool(); err != nil {
+		return record, err
 	}
 	if record.MTime, err = d.i64(); err != nil {
 		return record, err

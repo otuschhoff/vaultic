@@ -201,7 +201,7 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}
 	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6}, UnmarshalPackAggregate)
 	roundTrip(t, CurrentPointer{Revision: 7, RecordKey: InodeRevisionKey(2, 3, 7)}, UnmarshalCurrentPointer)
-	roundTrip(t, InodeRevision{ParentInode: 1, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
+	roundTrip(t, InodeRevision{ParentInode: 1, HasMultipleParents: true, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
 	directory := DirectoryRevision{
 		ParentInode: 1, Children: []DirectoryChild{{Name: "a", Inode: 8, Type: NodeFile, MetadataKey: InodeRevisionKey(2, 8, 9)}, {Name: "b", Inode: 9, Type: NodeDirectory, MetadataKey: DirectoryRevisionKey(2, 9, 10)}},
 		MTime: -2, CTime: 3, Mode: 0o755, UID: 5, GID: 6, Known: KnownMTime | KnownCTime | KnownMode | KnownUID | KnownGID | KnownParent | KnownPath,
