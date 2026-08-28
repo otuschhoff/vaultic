@@ -93,6 +93,8 @@ type preparedItem struct {
 	debtKeys   [][]byte
 	deferred   bool
 	prepareErr error
+	ParentCount     uint16
+	HardlinkParents []schema.HardlinkParentRef
 }
 
 type publishedItem struct {
@@ -420,6 +422,15 @@ func (reconciler *Reconciler) publishHardlinks(hardlinks map[identity][]prepared
 			continue
 		}
 		links[0].debtKeys = mergeDebtKeys(links)
+		// Compute multi-parent inode metadata
+		links[0].ParentCount = uint16(len(links))
+		links[0].HardlinkParents = make([]schema.HardlinkParentRef, 0, len(links))
+		for _, link := range links {
+			links[0].HardlinkParents = append(links[0].HardlinkParents, schema.HardlinkParentRef{
+				ParentInode: link.parent.inode,
+				Name:        normalizeSnapshotPath(link.snapshotPath),
+			})
+		}
 		key, err := reconciler.publishInodeRecord(links[0], true)
 		if err != nil {
 			for _, item := range links {
@@ -538,6 +549,11 @@ func (reconciler *Reconciler) publishInodeRecord(item preparedItem, hardlink boo
 		Known:      schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode | schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath,
 		SourcePath: normalizeSnapshotPath(item.snapshotPath), Freshness: schema.FreshnessVerified,
 	}
+	// Set ParentCount (defaults to 1 for single-parent files)
+	record.ParentCount = item.ParentCount
+	if item.ParentCount == 0 {
+		record.ParentCount = 1
+	}
 	if hardlink {
 		record.ParentInode = 0
 		record.SourcePath = ""
@@ -620,6 +636,7 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 	if err := reconciler.store.PublishReconciledRevision(reconciler.ctx, daemon.ReconciledRevision{
 		CurrentKey: currentKey, RevisionKey: revisionKey, RevisionValue: value, Revision: revision,
 		ContentIDs: content, DebtKeys: item.debtKeys,
+		ParentCount: item.ParentCount, HardlinkParents: item.HardlinkParents,
 	}); err != nil {
 		return nil, false, err
 	}

@@ -300,6 +300,7 @@ const knownFieldMask = KnownMTime | KnownCTime | KnownSize | KnownMode | KnownUI
 
 type InodeRevision struct {
 	ParentInode       uint64
+	ParentCount       uint16
 	MTime, CTime      int64
 	Size              uint64
 	Mode, UID, GID    uint32
@@ -323,6 +324,7 @@ func (record InodeRevision) MarshalBinary() ([]byte, error) {
 	}
 	e := newEncoder()
 	e.u64(record.ParentInode)
+	e.u16(record.ParentCount)
 	e.i64(record.MTime)
 	e.i64(record.CTime)
 	e.u64(record.Size)
@@ -355,6 +357,11 @@ func UnmarshalInodeRevision(data []byte) (InodeRevision, error) {
 	var record InodeRevision
 	if record.ParentInode, err = d.u64(); err != nil {
 		return record, err
+	}
+	// ParentCount: defaults to 1 for old records without this field
+	if record.ParentCount, err = d.u16(); err != nil {
+		// Old records didn't have ParentCount, so default to 1
+		record.ParentCount = 1
 	}
 	if record.MTime, err = d.i64(); err != nil {
 		return record, err
@@ -591,6 +598,80 @@ func validChildMetadataKind(nodeType NodeType, keyKind KeyKind) bool {
 		return keyKind == KeyDirectoryRevision
 	}
 	return nodeType >= NodeFile && nodeType <= NodeOther && keyKind == KeyInodeRevision
+}
+
+type HardlinkParentRef struct {
+	ParentInode uint64
+	Name        string
+}
+
+type HardlinkRefsRecord struct {
+	FSID      uint32
+	Inode     uint64
+	Revision  uint64
+	Parents   []HardlinkParentRef
+	Freshness Freshness
+}
+
+func (record HardlinkRefsRecord) MarshalBinary() ([]byte, error) {
+	if record.Freshness > FreshnessVerified || len(record.Parents) < 2 || len(record.Parents) > 65535 {
+		return nil, fmt.Errorf("%w: invalid hardlink state", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u32(record.FSID)
+	e.u64(record.Inode)
+	e.u64(record.Revision)
+	e.u16(uint16(len(record.Parents)))
+	for _, parent := range record.Parents {
+		e.u64(parent.ParentInode)
+		if err := e.string(parent.Name); err != nil {
+			return nil, err
+		}
+	}
+	e.u8(byte(record.Freshness))
+	return e.finish()
+}
+
+func UnmarshalHardlinkRefsRecord(data []byte) (HardlinkRefsRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return HardlinkRefsRecord{}, err
+	}
+	var record HardlinkRefsRecord
+	if record.FSID, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.Inode, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Revision, err = d.u64(); err != nil {
+		return record, err
+	}
+	count, err := d.u16()
+	if err != nil || count < 2 || uint64(count)*20 > uint64(len(data)) {
+		return record, fmt.Errorf("%w: invalid hardlink parent count", ErrMalformed)
+	}
+	record.Parents = make([]HardlinkParentRef, count)
+	previous := ""
+	for index := range record.Parents {
+		parent := &record.Parents[index]
+		if parent.ParentInode, err = d.u64(); err != nil {
+			return record, err
+		}
+		if parent.Name, err = d.string(); err != nil {
+			return record, err
+		}
+		if parent.Name == "" || (index > 0 && parent.Name <= previous) {
+			return record, fmt.Errorf("%w: hardlink parents are not uniquely sorted", ErrMalformed)
+		}
+		previous = parent.Name
+	}
+	freshness, err := d.u8()
+	record.Freshness = Freshness(freshness)
+	if err != nil || record.Freshness > FreshnessVerified {
+		return record, fmt.Errorf("%w: invalid hardlink freshness", ErrMalformed)
+	}
+	return record, d.done()
 }
 
 type SnapshotRecord struct {

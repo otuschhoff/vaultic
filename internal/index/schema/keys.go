@@ -34,6 +34,7 @@ const (
 	KeyImportCheckpoint
 	KeySnapshotImportCheckpoint
 	KeyNextRevision
+	KeyHardlinkRefs
 )
 
 type AggregateKind byte
@@ -80,6 +81,9 @@ func InodeRevisionKey(fsid uint32, inode, revision uint64) []byte {
 }
 func DirectoryRevisionKey(fsid uint32, inode, revision uint64) []byte {
 	return revisionKey("dv:", fsid, inode, revision)
+}
+func HardlinkRefsKey(fsid uint32, inode, revision uint64) []byte {
+	return revisionKey("hr:", fsid, inode, revision)
 }
 func ContentManifestKey(id ID, segment uint32) []byte {
 	key := make([]byte, 3+32+4)
@@ -156,6 +160,8 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		parsed.Kind, parsed.FSID, parsed.Inode, parsed.Revision = KeyInodeRevision, binary.BigEndian.Uint32(key[3:7]), binary.BigEndian.Uint64(key[7:15]), binary.BigEndian.Uint64(key[15:])
 	case len(key) == 23 && string(key[:3]) == "dv:":
 		parsed.Kind, parsed.FSID, parsed.Inode, parsed.Revision = KeyDirectoryRevision, binary.BigEndian.Uint32(key[3:7]), binary.BigEndian.Uint64(key[7:15]), binary.BigEndian.Uint64(key[15:])
+	case len(key) == 23 && string(key[:3]) == "hr:":
+		parsed.Kind, parsed.FSID, parsed.Inode, parsed.Revision = KeyHardlinkRefs, binary.BigEndian.Uint32(key[3:7]), binary.BigEndian.Uint64(key[7:15]), binary.BigEndian.Uint64(key[15:])
 	case len(key) == 39 && string(key[:3]) == "cm:":
 		parsed.Kind, parsed.Segment = KeyContentManifest, binary.BigEndian.Uint32(key[35:])
 		copy(parsed.ID[:], key[3:35])

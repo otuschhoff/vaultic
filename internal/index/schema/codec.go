@@ -25,6 +25,9 @@ func (e *encoder) bool(value bool) {
 func (e *encoder) u32(value uint32) {
 	e.data = binary.BigEndian.AppendUint32(e.data, value)
 }
+func (e *encoder) u16(value uint16) {
+	e.data = binary.BigEndian.AppendUint16(e.data, value)
+}
 func (e *encoder) u64(value uint64) {
 	e.data = binary.BigEndian.AppendUint64(e.data, value)
 }
@@ -88,6 +91,13 @@ func (d *decoder) u32() (uint32, error) {
 		return 0, err
 	}
 	return binary.BigEndian.Uint32(value), nil
+}
+func (d *decoder) u16() (uint16, error) {
+	value, err := d.take(2)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint16(value), nil
 }
 func (d *decoder) u64() (uint64, error) {
 	value, err := d.take(8)

@@ -36,6 +36,8 @@ type ReconciledRevision struct {
 	Revision      uint64
 	ContentIDs    []schema.ID
 	DebtKeys      [][]byte
+	ParentCount     uint16
+	HardlinkParents []schema.HardlinkParentRef
 }
 
 func NewSchemaStore(client *Client) *SchemaStore { return &SchemaStore{client: client} }
@@ -1226,6 +1228,20 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 			return fail(encodeErr)
 		}
 		puts[string(key)] = Mutation{Key: key, Value: encoded}
+	}
+
+	// Publish hardlink reference records for multi-parent inodes
+	if reconciled.ParentCount > 1 && len(reconciled.HardlinkParents) > 0 {
+		hrRec := schema.HardlinkRefsRecord{
+			FSID: revisionParsed.FSID, Inode: revisionParsed.Inode, Revision: reconciled.Revision,
+			Parents: reconciled.HardlinkParents, Freshness: schema.FreshnessVerified,
+		}
+		hrEncoded, hrErr := hrRec.MarshalBinary()
+		if hrErr != nil {
+			return fail(hrErr)
+		}
+		hrKey := schema.HardlinkRefsKey(revisionParsed.FSID, revisionParsed.Inode, reconciled.Revision)
+		puts[string(hrKey)] = Mutation{Key: hrKey, Value: hrEncoded}
 	}
 
 	mutations := make([]Mutation, 0, len(puts))
