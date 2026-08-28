@@ -611,6 +611,185 @@ func (store *SchemaStore) markPackPublishedOnce(ctx context.Context, packID sche
 	return nil
 }
 
+// MarkPackDeletePending begins the two-phase deletion of a pack that GC has
+// confirmed is wholly unreachable. It is idempotent and retried on conflict.
+func (store *SchemaStore) MarkPackDeletePending(ctx context.Context, packID schema.ID) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.markPackDeletePendingOnce(ctx, packID)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("mark pack delete-pending: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) markPackDeletePendingOnce(ctx context.Context, packID schema.ID) error {
+	key := schema.PackKey(packID)
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil {
+		return fail(err)
+	}
+	if !found {
+		return fail(fmt.Errorf("pack to delete is missing"))
+	}
+	record, err := schema.UnmarshalPackRecord(value)
+	if err != nil {
+		return fail(err)
+	}
+	if record.Lifecycle == schema.PackDeletePending {
+		return transaction.Rollback(ctx)
+	}
+	if record.Lifecycle != schema.PackPublished {
+		return fail(fmt.Errorf("pack cannot transition from lifecycle %d to delete-pending", record.Lifecycle))
+	}
+	record.Lifecycle = schema.PackDeletePending
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		return fail(err)
+	}
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: key, Value: encoded}}, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
+}
+
+// MarkPackDeleted completes two-phase deletion after the backend object has
+// been physically removed. It purges the pack catalog record, strips this
+// pack's locations from every member blob (deleting blobs left with none),
+// decrements aggregates, and removes stale GC bookkeeping. memberBlobIDs must
+// be the exact set of blob IDs that had a location in this pack.
+func (store *SchemaStore) MarkPackDeleted(ctx context.Context, packID schema.ID, memberBlobIDs []schema.ID) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.markPackDeletedOnce(ctx, packID, memberBlobIDs)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("mark pack deleted: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) markPackDeletedOnce(ctx context.Context, packID schema.ID, memberBlobIDs []schema.ID) error {
+	packKey := schema.PackKey(packID)
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	packValue, found, err := transaction.Get(ctx, packKey)
+	if err != nil {
+		return fail(err)
+	}
+	if !found {
+		return fail(fmt.Errorf("pack to delete is missing"))
+	}
+	record, err := schema.UnmarshalPackRecord(packValue)
+	if err != nil {
+		return fail(err)
+	}
+	if record.Lifecycle != schema.PackDeletePending {
+		return fail(fmt.Errorf("pack cannot be deleted from lifecycle %d", record.Lifecycle))
+	}
+
+	deletes := make([][]byte, 0, len(memberBlobIDs)+2)
+	puts := make([]Mutation, 0, len(memberBlobIDs)+5)
+	deletes = append(deletes, packKey)
+
+	for _, blobID := range memberBlobIDs {
+		blobKey := schema.BlobKey(blobID)
+		value, blobFound, getErr := transaction.Get(ctx, blobKey)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if !blobFound {
+			continue
+		}
+		blob, decodeErr := schema.UnmarshalBlobRecord(value)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		remaining := make([]schema.BlobLocation, 0, len(blob.Locations))
+		for _, location := range blob.Locations {
+			if location.PackID != packID {
+				remaining = append(remaining, location)
+			}
+		}
+		switch {
+		case len(remaining) == 0:
+			deletes = append(deletes, blobKey)
+		case len(remaining) != len(blob.Locations):
+			blob.Locations = remaining
+			encoded, encodeErr := blob.MarshalBinary()
+			if encodeErr != nil {
+				return fail(encodeErr)
+			}
+			puts = append(puts, Mutation{Key: blobKey, Value: encoded})
+		}
+	}
+
+	aggregatePuts, err := removePackAggregates(ctx, transaction, record)
+	if err != nil {
+		return fail(err)
+	}
+	puts = append(puts, aggregatePuts...)
+
+	staleGCKeys := make([][]byte, 0, len(memberBlobIDs)+1)
+	staleGCKeys = append(staleGCKeys, schema.GarbageCollectionKey(schema.GCPack, packID))
+	for _, blobID := range memberBlobIDs {
+		staleGCKeys = append(staleGCKeys, schema.GarbageCollectionKey(schema.GCBlob, blobID))
+	}
+	for _, key := range staleGCKeys {
+		_, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if found {
+			deletes = append(deletes, key)
+		}
+	}
+
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, deletes); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
+}
+
 func mergeBlobRecords(existing, incoming schema.BlobRecord) schema.BlobRecord {
 	result := schema.BlobRecord{Locations: append([]schema.BlobLocation(nil), existing.Locations...)}
 	for _, candidate := range incoming.Locations {
@@ -746,6 +925,43 @@ func updatePackAggregates(ctx context.Context, transaction *Transaction, old *sc
 			if err := addPackAggregate(&aggregate, current); err != nil {
 				return nil, err
 			}
+		}
+		aggregate.UpdateSequence++
+		encoded, err := aggregate.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+	}
+	return puts, nil
+}
+
+// removePackAggregates subtracts a deleted pack's totals from the relevant
+// per-type and all-packs aggregates without adding any replacement record.
+func removePackAggregates(ctx context.Context, transaction *Transaction, record schema.PackRecord) ([]Mutation, error) {
+	keys := make([][]byte, 0, 5)
+	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
+		keys = append(keys, schema.PackAggregateKey(kind))
+	}
+	values, found, err := transaction.MultiGet(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	puts := make([]Mutation, 0, len(keys))
+	for offset, key := range keys {
+		kind := schema.AggregateKind(offset) + schema.AggregateData
+		if !found[offset] {
+			return nil, fmt.Errorf("pack aggregate %d is missing", kind)
+		}
+		if kind != schema.AggregateAll && aggregateKind(record.Type) != kind {
+			continue
+		}
+		aggregate, err := schema.UnmarshalPackAggregate(values[offset].Value)
+		if err != nil {
+			return nil, err
+		}
+		if err := subtractPackAggregate(&aggregate, record); err != nil {
+			return nil, err
 		}
 		aggregate.UpdateSequence++
 		encoded, err := aggregate.MarshalBinary()
@@ -923,7 +1139,7 @@ func validateMutableDeleteKey(key []byte) error {
 		return err
 	}
 	switch parsed.Kind {
-	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount:
+	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyExportIndexCheckpoint:
 		return nil
 	default:
 		return fmt.Errorf("schema key must remain visible and cannot be deleted")

@@ -309,7 +309,7 @@ func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSi
 		return daemon.PublishedPack{}, fmt.Errorf("published pack %s contains no blobs", id.Str())
 	}
 	record := schema.PackRecord{BlobCount: uint64(len(blobs)), Lifecycle: schema.PackExportPending}
-	published := daemon.PublishedPack{PackID: schema.ID(id), Record: record, Blobs: make(map[schema.ID]schema.BlobRecord, len(blobs))}
+	published := daemon.PublishedPack{PackID: schema.ID(id), Blobs: make(map[schema.ID]schema.BlobRecord, len(blobs))}
 	types := make([]schema.BlobType, 0, len(blobs))
 	for _, blob := range blobs {
 		if uint64(blob.Length) > math.MaxUint32 || uint64(blob.UncompressedLength) > math.MaxUint32 {
@@ -336,14 +336,15 @@ func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSi
 		})
 		published.Blobs[blobID] = blobRecord
 	}
-	published.Record.Type = schema.ClassifyPack(types)
+	record.Type = schema.ClassifyPack(types)
 	if physicalSizeKnown {
-		if physicalSize < published.Record.PayloadSize {
+		if physicalSize < record.PayloadSize {
 			return daemon.PublishedPack{}, fmt.Errorf("published pack %s is smaller than its payload", id.Str())
 		}
-		published.Record.PhysicalSize = physicalSize
-		published.Record.HeaderSize = physicalSize - published.Record.PayloadSize
-		published.Record.PhysicalSizeKnown = true
+		record.PhysicalSize = physicalSize
+		record.HeaderSize = physicalSize - record.PayloadSize
+		record.PhysicalSizeKnown = true
 	}
+	published.Record = record
 	return published, nil
 }

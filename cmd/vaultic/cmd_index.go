@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/global"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
@@ -115,6 +116,7 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexExportCommand(globalOptions),
 		newIndexCheckCommand(globalOptions),
 		newIndexRebuildPackStatsCommand(globalOptions),
+		newIndexGCCommand(globalOptions),
 	)
 	return command
 }
@@ -418,4 +420,90 @@ func runIndexRebuildPackStats(ctx context.Context, options indexRebuildPackStats
 		printer.P("scanned %d packs; changed %d aggregate records\n", result.PacksScanned, result.AggregatesChanged)
 	}
 	return result, err
+}
+
+type indexGCOptions struct {
+	Daemon          indexDaemonOptions
+	DryRun          bool
+	DiscoverOnly    bool
+	MinCandidateAge time.Duration
+}
+
+func newIndexGCCommand(globalOptions *global.Options) *cobra.Command {
+	var options indexGCOptions
+	command := &cobra.Command{
+		Use: "gc", Short: "Discover, revalidate, and sweep unreachable SlateDB packs",
+		Long: "Discover GC candidates from reverse references and the pack catalog, re-walk every " +
+			"retained snapshot root to confirm reachability, then delete wholly unreachable packs and " +
+			"repack packs that mix live and unreachable blobs. A failed physical deletion leaves the " +
+			"pack visible as delete-pending and is retried on the next run. Any freed or repacked pack " +
+			"automatically triggers a full re-export and removes now-stale legacy JSON indexes, so " +
+			"compatibility artifacts never reference a deleted pack. --discover-only records " +
+			"candidates cheaply from reverse references without the snapshot walk or any deletion." + indexExitStatus,
+		Args: cobra.NoArgs, DisableAutoGenTag: true,
+		RunE: func(command *cobra.Command, _ []string) error {
+			result, err := runIndexGC(command.Context(), options, *globalOptions, globalOptions.Term)
+			if globalOptions.JSON {
+				globalOptions.Term.Print(ui.ToJSONString(result))
+			}
+			return err
+		},
+	}
+	options.Daemon.AddFlags(command.Flags())
+	command.Flags().BoolVar(&options.DryRun, "dry-run", false, "report the GC plan without repacking or deleting anything")
+	command.Flags().BoolVar(&options.DiscoverOnly, "discover-only", false, "record candidate blobs from reverse references without the snapshot walk or any deletion")
+	command.Flags().DurationVar(&options.MinCandidateAge, "min-candidate-age", 0, "require a candidate to have been continuously unreachable for at least this long before sweeping it")
+	return command
+}
+
+func runIndexGC(ctx context.Context, options indexGCOptions, globalOptions global.Options, term ui.Terminal) (repository.GCStats, error) {
+	var result repository.GCStats
+	config, err := options.Daemon.config("")
+	if err != nil {
+		return result, err
+	}
+	ctx = repository.WithDaemonOptions(ctx, config)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
+	if !options.DiscoverOnly {
+		if err := repo.LoadIndex(ctx, printer); err != nil {
+			return result, fmt.Errorf("load legacy index for reachability walk: %w", err)
+		}
+	}
+	plan, err := repository.PlanGC(ctx, repository.GCOptions{
+		DryRun: options.DryRun, DiscoverOnly: options.DiscoverOnly, MinCandidateAge: options.MinCandidateAge,
+	}, repo, printer)
+	if err != nil {
+		return result, err
+	}
+	if err := plan.Execute(ctx, printer); err != nil {
+		return plan.Stats, err
+	}
+	result = plan.Stats
+	if !options.DryRun && (result.PacksDeleted != 0 || result.PacksRepacked != 0) {
+		store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
+		if err != nil {
+			return result, fmt.Errorf("refresh legacy compatibility projection: %w", err)
+		}
+		defer closeStore()
+		if _, err := maintenance.Export(ctx, store, repo, maintenance.ExportOptions{Full: true}); err != nil {
+			return result, fmt.Errorf("refresh legacy compatibility projection: %w", err)
+		}
+		if _, err := repository.PruneStaleLegacyIndexes(ctx, repo); err != nil {
+			return result, fmt.Errorf("prune stale legacy indexes: %w", err)
+		}
+	}
+	if !globalOptions.JSON {
+		printer.P("scanned %d packs and %d blobs; whole=%d mixed=%d pending-age=%d pending-retries=%d; deleted=%d (of which retried=%d) repacked=%d retry-failed=%d\n",
+			result.PacksScanned, result.BlobsScanned, result.WholePackCandidates, result.MixedPackCandidates, result.PendingAge, result.PendingRetries,
+			result.PacksDeleted, result.PacksRetried, result.PacksRepacked, result.PacksRetryFailed)
+	}
+	if result.PacksRetryFailed != 0 {
+		return result, fmt.Errorf("%w: %d packs remain delete-pending after a failed retry", errIndexIncomplete, result.PacksRetryFailed)
+	}
+	return result, nil
 }

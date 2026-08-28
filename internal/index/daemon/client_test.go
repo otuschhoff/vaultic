@@ -400,6 +400,109 @@ func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.
 	}
 }
 
+func TestSchemaStoreTwoPhasePackDeletion(t *testing.T) {
+	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase8-gc-delete", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	blobShared, blobOnlyB, packA, packB := daemonTestID(40), daemonTestID(41), daemonTestID(42), daemonTestID(43)
+	for _, published := range []PublishedPack{
+		{PackID: packA, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 5, BlobCount: 1, Lifecycle: schema.PackExportPending},
+			Blobs: map[schema.ID]schema.BlobRecord{blobShared: {Locations: []schema.BlobLocation{{PackID: packA, Length: 5, Type: schema.BlobData}}}}},
+		{PackID: packB, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 12, BlobCount: 2, Lifecycle: schema.PackExportPending},
+			Blobs: map[schema.ID]schema.BlobRecord{
+				blobShared: {Locations: []schema.BlobLocation{{PackID: packB, Offset: 7, Length: 5, Type: schema.BlobData}}},
+				blobOnlyB:  {Locations: []schema.BlobLocation{{PackID: packB, Length: 7, Type: schema.BlobData}}},
+			}},
+	} {
+		if err := store.PublishPack(ctx, published); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.MarkPackPublished(ctx, packA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPackPublished(ctx, packB); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pack that has not been published cannot enter delete-pending.
+	if err := store.MarkPackDeletePending(ctx, blobOnlyB); err == nil {
+		t.Fatal("delete-pending accepted a nonexistent pack")
+	}
+	if err := store.MarkPackDeleted(ctx, packB, nil); err == nil {
+		t.Fatal("deletion accepted a pack that is not delete-pending")
+	}
+
+	if err := store.MarkPackDeletePending(ctx, packB); err != nil {
+		t.Fatal(err)
+	}
+	// Idempotent: repeating delete-pending on an already delete-pending pack is a no-op.
+	if err := store.MarkPackDeletePending(ctx, packB); err != nil {
+		t.Fatalf("repeated delete-pending: %v", err)
+	}
+	pendingValue, found, err := store.Get(ctx, schema.PackKey(packB))
+	if err != nil || !found {
+		t.Fatalf("delete-pending pack: found=%t err=%v", found, err)
+	}
+	pendingRecord, err := schema.UnmarshalPackRecord(pendingValue)
+	if err != nil || pendingRecord.Lifecycle != schema.PackDeletePending {
+		t.Fatalf("delete-pending lifecycle = %#v, err=%v", pendingRecord, err)
+	}
+
+	// Seed stale GC bookkeeping that deletion must clean up.
+	gcValue, err := (schema.GarbageCollectionRecord{State: schema.GCRevalidated, ObservedCommit: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteMutableBatch(ctx, []Mutation{
+		{Key: schema.GarbageCollectionKey(schema.GCPack, packB), Value: gcValue},
+		{Key: schema.GarbageCollectionKey(schema.GCBlob, blobOnlyB), Value: gcValue},
+	}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MarkPackDeleted(ctx, packB, []schema.ID{blobShared, blobOnlyB}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Get(ctx, schema.PackKey(packB)); err != nil || found {
+		t.Fatalf("deleted pack still present: found=%t err=%v", found, err)
+	}
+	if _, found, err := store.Get(ctx, schema.BlobKey(blobOnlyB)); err != nil || found {
+		t.Fatalf("blob unique to deleted pack still present: found=%t err=%v", found, err)
+	}
+	sharedValue, found, err := store.Get(ctx, schema.BlobKey(blobShared))
+	if err != nil || !found {
+		t.Fatalf("shared blob missing: found=%t err=%v", found, err)
+	}
+	sharedRecord, err := schema.UnmarshalBlobRecord(sharedValue)
+	if err != nil || len(sharedRecord.Locations) != 1 || sharedRecord.Locations[0].PackID != packA {
+		t.Fatalf("shared blob locations = %#v, err=%v", sharedRecord.Locations, err)
+	}
+	if _, found, err := store.Get(ctx, schema.GarbageCollectionKey(schema.GCPack, packB)); err != nil || found {
+		t.Fatalf("stale pack GC record survived deletion: found=%t err=%v", found, err)
+	}
+	if _, found, err := store.Get(ctx, schema.GarbageCollectionKey(schema.GCBlob, blobOnlyB)); err != nil || found {
+		t.Fatalf("stale blob GC record survived deletion: found=%t err=%v", found, err)
+	}
+	aggregateValue, found, err := store.Get(ctx, schema.PackAggregateKey(schema.AggregateAll))
+	if err != nil || !found {
+		t.Fatalf("aggregate: found=%t err=%v", found, err)
+	}
+	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
+	if err != nil || aggregate.PackCount != 1 || aggregate.BlobCount != 1 || aggregate.PayloadSize != 5 {
+		t.Fatalf("aggregate after deletion = %#v, err=%v", aggregate, err)
+	}
+
+	// Re-deleting the same (now absent) pack fails closed rather than silently succeeding.
+	if err := store.MarkPackDeleted(ctx, packB, nil); err == nil {
+		t.Fatal("deletion accepted an already-deleted pack")
+	}
+}
+
 func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase6-snapshot", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
 	if err != nil {

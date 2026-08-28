@@ -9,7 +9,7 @@ import (
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
