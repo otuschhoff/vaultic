@@ -19,6 +19,7 @@ var ErrLimitReached = errors.New("legacy import limit reached")
 type Options struct {
 	Resume             bool
 	DryRun             bool
+	BatchSize          uint32
 	MaxErrors          uint64
 	WorkBudget         uint64
 	SnapshotDepth      uint
@@ -37,6 +38,9 @@ type Result struct {
 	IndexesResumed    uint64    `json:"indexes_resumed"`
 	PacksImported     uint64    `json:"packs_imported"`
 	BlobsImported     uint64    `json:"blobs_imported"`
+	RecordsSeen       uint64    `json:"records_seen"`
+	RecordsImported   uint64    `json:"records_imported"`
+	RecordsSkipped    uint64    `json:"records_skipped"`
 	CrawlDebtCreated  uint64    `json:"crawl_debt_created"`
 	SnapshotsSeen     uint64    `json:"snapshots_seen"`
 	SnapshotsImported uint64    `json:"snapshots_imported"`
@@ -44,7 +48,9 @@ type Result struct {
 	TreesVisited      uint64    `json:"trees_visited"`
 	NodesVisited      uint64    `json:"nodes_visited"`
 	NodesImported     uint64    `json:"nodes_imported"`
-	ErrorsSeen        uint64    `json:"errors_seen"`
+	WarningsSeen      uint64    `json:"warnings"`
+	ErrorsSeen        uint64    `json:"errors"`
+	Checkpoint        string    `json:"checkpoint,omitempty"`
 	Findings          []Finding `json:"findings,omitempty"`
 }
 
@@ -82,6 +88,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 					return fmt.Errorf("decode import checkpoint for %s: %w", indexID.Str(), err)
 				}
 				result.IndexesResumed++
+				result.Checkpoint = indexID.String()
 				return nil
 			}
 		}
@@ -97,6 +104,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 				return ErrLimitReached
 			}
 			workUsed += work
+			result.RecordsSeen += work
 			imported, debt, err := buildPackImport(ctx, statter, schemaIndexID, indexedPack)
 			if err != nil {
 				return err
@@ -104,6 +112,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 			if debt != nil {
 				result.CrawlDebtCreated++
 			}
+			imported.BatchSize = options.BatchSize
 			if !options.DryRun {
 				if err := store.ImportLegacyPack(ctx, imported); err != nil {
 					return fmt.Errorf("import pack %s from index %s: %w", indexedPack.PackID.Str(), indexID.Str(), err)
@@ -111,13 +120,14 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 			}
 			result.PacksImported++
 			result.BlobsImported += imported.Record.BlobCount
+			result.RecordsImported += imported.Record.BlobCount
+			result.RecordsSkipped += work - imported.Record.BlobCount
 			checkpoint.PacksImported++
 			checkpoint.BlobsImported += imported.Record.BlobCount
 			if debt != nil {
 				checkpoint.ErrorsSeen++
-				if err := recordFinding(&result, options, indexID, "stat-pack", errors.New(debt.ErrorClass)); err != nil {
-					return err
-				}
+				result.WarningsSeen++
+				result.Findings = append(result.Findings, Finding{SourceID: indexID, Stage: "stat-pack", Error: debt.ErrorClass})
 			}
 		}
 		if !options.DryRun {
@@ -128,6 +138,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 			if err := store.Put(ctx, schema.ImportCheckpointKey(schemaIndexID), encoded, true); err != nil {
 				return fmt.Errorf("publish import checkpoint for %s: %w", indexID.Str(), err)
 			}
+			result.Checkpoint = indexID.String()
 		}
 		result.IndexesImported++
 		return nil

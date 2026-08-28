@@ -1,6 +1,9 @@
 package schema
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
 type ReferenceState byte
 
@@ -395,6 +398,57 @@ func MarshalNextRevision(next uint64) ([]byte, error) {
 	return marshalNextRevision(next), nil
 }
 
+type ExportIndexCheckpointRecord struct {
+	Sequence uint64
+	PackIDs  []ID
+}
+
+func (record ExportIndexCheckpointRecord) MarshalBinary() ([]byte, error) {
+	if record.Sequence == 0 || len(record.PackIDs) == 0 {
+		return nil, fmt.Errorf("%w: invalid export index checkpoint", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u64(record.Sequence)
+	e.u32(uint32(len(record.PackIDs)))
+	previous := ID{}
+	for index, id := range record.PackIDs {
+		if id == (ID{}) || (index > 0 && bytes.Compare(previous[:], id[:]) >= 0) {
+			return nil, fmt.Errorf("%w: export pack IDs are not uniquely sorted", ErrMalformed)
+		}
+		e.id(id)
+		previous = id
+	}
+	return e.finish()
+}
+
+func UnmarshalExportIndexCheckpointRecord(data []byte) (ExportIndexCheckpointRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return ExportIndexCheckpointRecord{}, err
+	}
+	var record ExportIndexCheckpointRecord
+	if record.Sequence, err = d.u64(); err != nil || record.Sequence == 0 {
+		return record, fmt.Errorf("%w: invalid export sequence", ErrMalformed)
+	}
+	count, err := d.u32()
+	if err != nil || count == 0 {
+		return record, fmt.Errorf("%w: invalid export pack count", ErrMalformed)
+	}
+	record.PackIDs = make([]ID, count)
+	for index := range record.PackIDs {
+		if record.PackIDs[index], err = d.id(); err != nil {
+			return record, err
+		}
+		if record.PackIDs[index] == (ID{}) || (index > 0 && bytes.Compare(record.PackIDs[index-1][:], record.PackIDs[index][:]) >= 0) {
+			return record, fmt.Errorf("%w: export pack IDs are not uniquely sorted", ErrMalformed)
+		}
+	}
+	return record, d.done()
+}
+
+func MarshalNextExportSequence(next uint64) ([]byte, error)   { return MarshalNextRevision(next) }
+func UnmarshalNextExportSequence(data []byte) (uint64, error) { return UnmarshalNextRevision(data) }
+
 // ValidateValue verifies that a value is canonical for its schema key.
 func ValidateValue(key []byte, value []byte) error {
 	parsed, err := ParseKey(key)
@@ -459,10 +513,14 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalSnapshotImportCheckpointRecord(value)
 	case KeyExportCheckpoint:
 		_, err = UnmarshalExportCheckpointRecord(value)
+	case KeyExportIndexCheckpoint:
+		_, err = UnmarshalExportIndexCheckpointRecord(value)
 	case KeyHardlinkRefs:
 		_, err = UnmarshalHardlinkRefsRecord(value)
 	case KeyNextRevision:
 		_, err = UnmarshalNextRevision(value)
+	case KeyNextExportSequence:
+		_, err = UnmarshalNextExportSequence(value)
 	default:
 		err = fmt.Errorf("%w: unsupported schema key", ErrMalformed)
 	}

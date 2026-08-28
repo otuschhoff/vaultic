@@ -68,6 +68,14 @@ type snapshotAuthority interface {
 	MarkSnapshotFailed(context.Context, vaultic.ID, error) error
 }
 
+type daemonOptionsContextKey struct{}
+
+// WithDaemonOptions configures metadata daemon attachment for operator
+// workflows that must open an already-authoritative repository.
+func WithDaemonOptions(ctx context.Context, options daemon.Options) context.Context {
+	return context.WithValue(ctx, daemonOptionsContextKey{}, options)
+}
+
 // internalRepository allows using SaveUnpacked and RemoveUnpacked with all FileTypes
 type internalRepository struct {
 	*Repository
@@ -267,7 +275,15 @@ func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.En
 		if !feature.Flag.Enabled(feature.SlateDBAuthoritative) {
 			return nil, fmt.Errorf("repository %s requires the slatedb-authoritative feature: %w", r.cfg.ID, enginepkg.ErrUnavailable)
 		}
-		client, connectErr := daemon.Connect(ctx, daemon.Options{RepositoryID: r.cfg.ID})
+		options, _ := ctx.Value(daemonOptionsContextKey{}).(daemon.Options)
+		options.RepositoryID = r.cfg.ID
+		var client *daemon.Client
+		var connectErr error
+		if options.DaemonPath != "" {
+			client, connectErr = daemon.Ensure(ctx, options)
+		} else {
+			client, connectErr = daemon.Connect(ctx, options)
+		}
 		if connectErr != nil {
 			return nil, fmt.Errorf("connect authoritative metadata daemon for repository %s: %w: %w", r.cfg.ID, enginepkg.ErrUnavailable, connectErr)
 		}
@@ -1004,6 +1020,11 @@ func (r *Repository) clearIndex() {
 // LoadIndex loads all index files from the backend in parallel and stores them
 func (r *Repository) LoadIndex(ctx context.Context, p vaultic.TerminalCounterFactory) error {
 	return r.loadIndexWithCallback(ctx, p, nil)
+}
+
+// SaveLegacyIndex writes one canonical JSON index for metadata export tools.
+func (r *Repository) SaveLegacyIndex(ctx context.Context, index *index.Index) (vaultic.ID, error) {
+	return index.SaveIndex(ctx, &internalRepository{Repository: r})
 }
 
 // loadIndexWithCallback loads all index files from the backend in parallel and stores them

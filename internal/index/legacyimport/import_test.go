@@ -166,7 +166,7 @@ func TestImportDryRunAndWorkBudget(t *testing.T) {
 	}
 }
 
-func TestImportRecordsUnavailablePackDebtAndHonorsMaxErrors(t *testing.T) {
+func TestImportRecordsUnavailablePackDebtAsWarning(t *testing.T) {
 	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
 	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}}
 	store := newMemoryStore()
@@ -174,12 +174,12 @@ func TestImportRecordsUnavailablePackDebtAndHonorsMaxErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.CrawlDebtCreated != 1 || result.ErrorsSeen != 1 || store.imports[0].Debt == nil {
+	if result.CrawlDebtCreated != 1 || result.WarningsSeen != 1 || result.ErrorsSeen != 0 || store.imports[0].Debt == nil {
 		t.Fatalf("missing pack debt: %#v", result)
 	}
 	_, err = Import(context.Background(), source, fixedStatter{err: errors.New("offline")}, newMemoryStore(), Options{MaxErrors: 1})
-	if !errors.Is(err, ErrLimitReached) {
-		t.Fatalf("max errors returned %v", err)
+	if err != nil {
+		t.Fatalf("warning counted against max errors: %v", err)
 	}
 }
 
@@ -191,7 +191,7 @@ func TestImportRecordsKnownPackSmallerThanIndexedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.CrawlDebtCreated != 1 || result.ErrorsSeen != 1 || len(store.imports) != 1 {
+	if result.CrawlDebtCreated != 1 || result.WarningsSeen != 1 || result.ErrorsSeen != 0 || len(store.imports) != 1 {
 		t.Fatalf("missing inconsistent-size debt: %#v", result)
 	}
 	record := store.imports[0].Record

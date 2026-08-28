@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -25,6 +26,7 @@ type LegacyPackImport struct {
 	PackID      schema.ID
 	Record      schema.PackRecord
 	Blobs       map[schema.ID]schema.BlobRecord
+	BatchSize   uint32
 	DebtKey     []byte
 	Debt        *schema.CrawlDebtRecord
 }
@@ -428,7 +430,11 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 			}
 		}
 	}
-	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+	limits := store.client.Limits()
+	if imported.BatchSize > 0 && imported.BatchSize < limits.MaxBatchItems {
+		limits.MaxBatchItems = imported.BatchSize
+	}
+	if err := writeTransactionBatches(ctx, transaction, limits, puts, nil); err != nil {
 		return fail(err)
 	}
 	if err := transaction.Commit(ctx); err != nil {
@@ -439,30 +445,170 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 }
 
 func (store *SchemaStore) MarkPackPublished(ctx context.Context, packID schema.ID) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.markPackPublishedOnce(ctx, packID)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("mark pack published: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) MarkIndexPublished(ctx context.Context, indexID schema.ID, packIDs []schema.ID) (uint64, error) {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		sequence, err := store.markIndexPublishedOnce(ctx, indexID, packIDs)
+		if status.Code(err) != codes.Aborted {
+			return sequence, err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return 0, fmt.Errorf("mark index published: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) markIndexPublishedOnce(ctx context.Context, indexID schema.ID, packIDs []schema.ID) (uint64, error) {
+	if indexID == (schema.ID{}) || len(packIDs) == 0 {
+		return 0, fmt.Errorf("export index and pack IDs are required")
+	}
+	packIDs = append([]schema.ID(nil), packIDs...)
+	sort.Slice(packIDs, func(left, right int) bool { return bytes.Compare(packIDs[left][:], packIDs[right][:]) < 0 })
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	fail := func(err error) (uint64, error) {
+		rollbackTransaction(ctx, transaction)
+		return 0, err
+	}
+	checkpointKey := schema.ExportIndexCheckpointKey(indexID)
+	checkpointValue, found, err := transaction.Get(ctx, checkpointKey)
+	if err != nil {
+		return fail(err)
+	}
+	var checkpoint schema.ExportIndexCheckpointRecord
+	puts := make([]Mutation, 0, len(packIDs)+2)
+	if found {
+		checkpoint, err = schema.UnmarshalExportIndexCheckpointRecord(checkpointValue)
+		if err != nil || !slices.Equal(checkpoint.PackIDs, packIDs) {
+			return fail(fmt.Errorf("export index checkpoint conflicts with pack provenance"))
+		}
+	} else {
+		nextValue, nextFound, getErr := transaction.Get(ctx, schema.NextExportSequenceKey())
+		if getErr != nil {
+			return fail(getErr)
+		}
+		next := uint64(1)
+		if nextFound {
+			next, err = schema.UnmarshalNextExportSequence(nextValue)
+			if err != nil {
+				return fail(err)
+			}
+		}
+		if next == math.MaxUint64 {
+			return fail(fmt.Errorf("export sequence overflow"))
+		}
+		checkpoint = schema.ExportIndexCheckpointRecord{Sequence: next, PackIDs: packIDs}
+		checkpointValue, err = checkpoint.MarshalBinary()
+		if err != nil {
+			return fail(err)
+		}
+		encodedNext, encodeErr := schema.MarshalNextExportSequence(next + 1)
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: checkpointKey, Value: checkpointValue}, Mutation{Key: schema.NextExportSequenceKey(), Value: encodedNext})
+	}
+	for _, packID := range packIDs {
+		key := schema.PackKey(packID)
+		value, packFound, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if !packFound {
+			return fail(fmt.Errorf("published pack is missing"))
+		}
+		record, decodeErr := schema.UnmarshalPackRecord(value)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		if record.Lifecycle != schema.PackPublished {
+			if record.Lifecycle != schema.PackExportPending && record.Lifecycle != schema.PackImported {
+				return fail(fmt.Errorf("pack cannot transition from lifecycle %d to published", record.Lifecycle))
+			}
+			record.Lifecycle = schema.PackPublished
+			encoded, encodeErr := record.MarshalBinary()
+			if encodeErr != nil {
+				return fail(encodeErr)
+			}
+			puts = append(puts, Mutation{Key: key, Value: encoded})
+		}
+	}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return 0, err
+	}
+	return checkpoint.Sequence, nil
+}
+
+func (store *SchemaStore) markPackPublishedOnce(ctx context.Context, packID schema.ID) error {
 	key := schema.PackKey(packID)
-	value, found, err := store.Get(ctx, key)
+	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
 	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil {
+		return fail(err)
+	}
 	if !found {
-		return fmt.Errorf("published pack is missing")
+		return fail(fmt.Errorf("published pack is missing"))
 	}
 	record, err := schema.UnmarshalPackRecord(value)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if record.Lifecycle == schema.PackPublished {
-		return nil
+		return transaction.Rollback(ctx)
 	}
-	if record.Lifecycle != schema.PackExportPending {
-		return fmt.Errorf("pack cannot transition from lifecycle %d to published", record.Lifecycle)
+	if record.Lifecycle != schema.PackExportPending && record.Lifecycle != schema.PackImported {
+		return fail(fmt.Errorf("pack cannot transition from lifecycle %d to published", record.Lifecycle))
 	}
 	record.Lifecycle = schema.PackPublished
 	encoded, err := record.MarshalBinary()
 	if err != nil {
+		return fail(err)
+	}
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: key, Value: encoded}}, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
 		return err
 	}
-	return store.Put(ctx, key, encoded, true)
+	return nil
 }
 
 func mergeBlobRecords(existing, incoming schema.BlobRecord) schema.BlobRecord {

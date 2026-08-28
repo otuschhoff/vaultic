@@ -36,6 +36,8 @@ const (
 	KeyNextRevision
 	KeyHardlinkRefs
 	KeyExportCheckpoint
+	KeyExportIndexCheckpoint
+	KeyNextExportSequence
 )
 
 type AggregateKind byte
@@ -130,6 +132,7 @@ func CrawlDebtKey(snapshot, work ID) []byte {
 func ImportCheckpointKey(index ID) []byte            { return idKey("meta:import-index:", index) }
 func SnapshotImportCheckpointKey(snapshot ID) []byte { return idKey("meta:import-snapshot:", snapshot) }
 func ExportCheckpointKey(snapshot ID) []byte         { return idKey("meta:export-snapshot:", snapshot) }
+func ExportIndexCheckpointKey(index ID) []byte       { return idKey("meta:export-index:", index) }
 func PackAggregateKey(kind AggregateKind) []byte {
 	name := map[AggregateKind]string{
 		AggregateData: "data", AggregateTree: "tree", AggregateMixed: "mixed",
@@ -137,7 +140,8 @@ func PackAggregateKey(kind AggregateKind) []byte {
 	}[kind]
 	return []byte("a:pack:" + name)
 }
-func NextRevisionKey() []byte { return []byte("meta:next-revision-seq") }
+func NextRevisionKey() []byte       { return []byte("meta:next-revision-seq") }
+func NextExportSequenceKey() []byte { return []byte("meta:next-export-seq") }
 
 func ParseKey(key []byte) (ParsedKey, error) {
 	var parsed ParsedKey
@@ -187,6 +191,9 @@ func ParseKey(key []byte) (ParsedKey, error) {
 	case len(key) == 53 && string(key[:21]) == "meta:export-snapshot:":
 		parsed.Kind = KeyExportCheckpoint
 		copy(parsed.ID[:], key[21:])
+	case len(key) == 50 && string(key[:18]) == "meta:export-index:":
+		parsed.Kind = KeyExportIndexCheckpoint
+		copy(parsed.ID[:], key[18:])
 	case len(key) == 37 && (string(key[:5]) == "gc:b:" || string(key[:5]) == "gc:p:"):
 		parsed.Kind, parsed.GCTarget = KeyGarbageCollection, GCBlob
 		if key[3] == 'p' {
@@ -195,6 +202,8 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		copy(parsed.ID[:], key[5:])
 	case string(key) == "meta:next-revision-seq":
 		parsed.Kind = KeyNextRevision
+	case string(key) == "meta:next-export-seq":
+		parsed.Kind = KeyNextExportSequence
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind

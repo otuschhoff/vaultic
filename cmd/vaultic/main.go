@@ -100,6 +100,7 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 		newForgetCommand(globalOptions),
 		newGenerateCommand(globalOptions),
 		newInitCommand(globalOptions),
+		newIndexCommand(globalOptions),
 		newKeyCommand(globalOptions),
 		newListCommand(globalOptions),
 		newLsCommand(globalOptions),
@@ -332,28 +333,33 @@ func main() {
 		}
 	}
 
-	var exitCode int
-	switch {
-	case err == nil:
-		exitCode = 0
-	case err == ErrInvalidSourceData:
-		exitCode = 3
-	case errors.Is(err, ErrFailedToRemoveOneOrMoreSnapshots):
-		exitCode = 3
-	case errors.Is(err, global.ErrNoRepository):
-		exitCode = 10
-	case repository.IsAlreadyLocked(err):
-		exitCode = 11
-	case errors.Is(err, repository.ErrNoKeyFound):
-		exitCode = 12
-	case errors.Is(err, context.Canceled):
-		exitCode = 130
-	default:
-		exitCode = 1
-	}
+	exitCode := exitCodeForError(err)
 
 	if exitCode != 0 {
 		printExitError(globalOptions, exitCode, exitMessage)
 	}
 	Exit(exitCode)
+}
+
+func exitCodeForError(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case err == ErrInvalidSourceData:
+		return 3
+	case errors.Is(err, errIndexDifferences), errors.Is(err, errIndexIncomplete):
+		return 2
+	case errors.Is(err, ErrFailedToRemoveOneOrMoreSnapshots):
+		return 3
+	case errors.Is(err, global.ErrNoRepository):
+		return 10
+	case repository.IsAlreadyLocked(err):
+		return 11
+	case errors.Is(err, repository.ErrNoKeyFound):
+		return 12
+	case errors.Is(err, context.Canceled):
+		return 130
+	default:
+		return 1
+	}
 }

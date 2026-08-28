@@ -493,6 +493,17 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	if err != nil || len(packRecord.SourceIndexIDs) != 2 || packRecord.SourceIndexIDs[0] != source1 || packRecord.SourceIndexIDs[1] != source2 || packRecord.PhysicalSize != 10 {
 		t.Fatalf("imported pack = %#v, err=%v", packRecord, err)
 	}
+	if err := store.MarkPackPublished(ctx, pack1); err != nil {
+		t.Fatalf("mark imported pack published: %v", err)
+	}
+	packValue, found, err = store.Get(ctx, schema.PackKey(pack1))
+	if err != nil || !found {
+		t.Fatalf("read published pack: found=%t err=%v", found, err)
+	}
+	packRecord, err = schema.UnmarshalPackRecord(packValue)
+	if err != nil || packRecord.Lifecycle != schema.PackPublished || len(packRecord.SourceIndexIDs) != 2 || packRecord.PhysicalSize != 10 {
+		t.Fatalf("published imported pack = %#v, err=%v", packRecord, err)
+	}
 	aggregateValue, found, err := store.Get(ctx, schema.PackAggregateKey(schema.AggregateAll))
 	if err != nil || !found {
 		t.Fatalf("read aggregate: found=%t err=%v", found, err)
@@ -562,6 +573,38 @@ func TestSchemaStoreImportsSameLegacyPackConcurrently(t *testing.T) {
 	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
 	if err != nil || aggregate.PackCount != 1 || aggregate.PayloadSize != 16 || aggregate.BlobCount != 2 || aggregate.PhysicalSize != 20 {
 		t.Fatalf("concurrent aggregate = %#v, err=%v", aggregate, err)
+	}
+}
+
+func TestSchemaStoreImportsLargeLegacyPackAcrossBatches(t *testing.T) {
+	options := Options{Socket: testSocket(t), RepositoryID: "phase7-large-pack", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	packID := daemonTestID(100)
+	blobs := make(map[schema.ID]schema.BlobRecord, 73)
+	for index := range 73 {
+		blobID := daemonTestID(byte(index + 101))
+		blobs[blobID] = schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: packID, Offset: uint64(index), Length: 1, Type: schema.BlobData}}}
+	}
+	imported := LegacyPackImport{
+		SourceIndex: daemonTestID(99), PackID: packID,
+		Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 73, PhysicalSizeKnown: true, PayloadSize: 73, BlobCount: 73, Lifecycle: schema.PackImported},
+		Blobs:  blobs, BatchSize: 1,
+	}
+	if err := store.ImportLegacyPack(context.Background(), imported); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Get(context.Background(), schema.PackKey(packID)); err != nil || !found {
+		t.Fatalf("read pack after batched import: found=%t err=%v", found, err)
+	}
+	for blobID := range blobs {
+		if _, found, err := store.Get(context.Background(), schema.BlobKey(blobID)); err != nil || !found {
+			t.Fatalf("read blob %x after batched import: found=%t err=%v", blobID, found, err)
+		}
 	}
 }
 

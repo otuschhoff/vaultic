@@ -49,7 +49,8 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{ReverseInodeKey(id, 3, 4), KeyReverseInode}, {ReferenceCountKey(id), KeyReferenceCount},
 		{GarbageCollectionKey(GCBlob, id), KeyGarbageCollection}, {GarbageCollectionKey(GCPack, id), KeyGarbageCollection},
 		{CrawlDebtKey(id, second), KeyCrawlDebt}, {ImportCheckpointKey(id), KeyImportCheckpoint},
-		{SnapshotImportCheckpointKey(id), KeySnapshotImportCheckpoint}, {ExportCheckpointKey(id), KeyExportCheckpoint}, {NextRevisionKey(), KeyNextRevision},
+		{SnapshotImportCheckpointKey(id), KeySnapshotImportCheckpoint}, {ExportCheckpointKey(id), KeyExportCheckpoint}, {ExportIndexCheckpointKey(id), KeyExportIndexCheckpoint},
+		{NextRevisionKey(), KeyNextRevision}, {NextExportSequenceKey(), KeyNextExportSequence},
 	}
 	for _, test := range keys {
 		parsed, err := ParseKey(test.key)
@@ -202,6 +203,7 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6}, UnmarshalPackAggregate)
 	roundTrip(t, CurrentPointer{Revision: 7, RecordKey: InodeRevisionKey(2, 3, 7)}, UnmarshalCurrentPointer)
 	roundTrip(t, ExportCheckpointRecord{State: ExportComplete, CommitSequence: 8, Attempts: 1, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalExportCheckpointRecord)
+	roundTrip(t, ExportIndexCheckpointRecord{Sequence: 9, PackIDs: []ID{id1, id2}}, UnmarshalExportIndexCheckpointRecord)
 	roundTrip(t, InodeRevision{ParentInode: 1, HasMultipleParents: true, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
 	directory := DirectoryRevision{
 		ParentInode: 1, Children: []DirectoryChild{{Name: "a", Inode: 8, Type: NodeFile, MetadataKey: InodeRevisionKey(2, 8, 9)}, {Name: "b", Inode: 9, Type: NodeDirectory, MetadataKey: DirectoryRevisionKey(2, 9, 10)}},
