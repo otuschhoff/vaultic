@@ -10,6 +10,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -132,6 +133,9 @@ type packInfoWithID struct {
 // PlanPrune selects which files to rewrite and which to delete and which blobs to keep.
 // Also some summary statistics are returned.
 func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsedBlobs func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error, printer vaultic.Printer) (*PrunePlan, error) {
+	if repo.Engine().Mode() == metadataindex.ModeSlateDB {
+		return nil, fmt.Errorf("prune is disabled for SlateDB-authoritative repositories until SlateDB-aware revalidation is implemented")
+	}
 	stats := PruneStats{MessageType: "summary"}
 
 	if opts.UnsafeRecovery {

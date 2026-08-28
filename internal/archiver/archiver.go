@@ -120,6 +120,9 @@ type Archiver struct {
 	// its final metadata and content references are available. Implementations
 	// must copy retained data and return promptly; calls may be concurrent.
 	ReconcileNode func(snapshotPath, sourcePath string, node *data.Node)
+	// BeforeSnapshot runs after all packs and final nodes are durable but before
+	// the snapshot object is saved.
+	BeforeSnapshot func() error
 
 	// ReuseNode can reject the legacy unchanged-file fast path when an
 	// additional metadata authority requires the file to be read again.
@@ -192,12 +195,13 @@ func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
 		FS:           filesystem,
 		Options:      opts.applyDefaults(),
 
-		CompleteItem:  func(string, ItemAction, ItemStats, time.Duration) {},
-		ReconcileNode: func(string, string, *data.Node) {},
-		ReuseNode:     func(string, string, *fs.ExtendedFileInfo, *data.Node) bool { return true },
-		StartFile:     func(string) {},
-		CompleteBlob:  func(uint64) {},
-		ExcludedItem:  func(string) {},
+		CompleteItem:   func(string, ItemAction, ItemStats, time.Duration) {},
+		ReconcileNode:  func(string, string, *data.Node) {},
+		BeforeSnapshot: func() error { return nil },
+		ReuseNode:      func(string, string, *fs.ExtendedFileInfo, *data.Node) bool { return true },
+		StartFile:      func(string) {},
+		CompleteBlob:   func(uint64) {},
+		ExcludedItem:   func(string) {},
 	}
 
 	return arch
@@ -1012,6 +1016,9 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		TotalBytesProcessed: arch.summary.ProcessedBytes,
 	}
 
+	if err := arch.BeforeSnapshot(); err != nil {
+		return nil, vaultic.ID{}, nil, err
+	}
 	id, err := data.SaveSnapshot(ctx, arch.Repo, sn)
 	if err != nil {
 		return nil, vaultic.ID{}, nil, err

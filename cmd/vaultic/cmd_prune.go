@@ -271,6 +271,10 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	if err != nil {
 		return err
 	}
+	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
+		unlock()
+		return err
+	}
 	if repo.Config().PrunePlan != nil {
 		if opts.KeepDelete {
 			unlock()
@@ -319,6 +323,9 @@ func finalizePrunePhaseB(ctx context.Context, gopts global.Options, printer vaul
 		return err
 	}
 	defer unlock()
+	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
+		return err
+	}
 	if repo.Config().PrunePlan == nil {
 		return errors.Fatal("prune phase B has no durable plan to finalize")
 	}
@@ -326,6 +333,9 @@ func finalizePrunePhaseB(ctx context.Context, gopts global.Options, printer vaul
 }
 
 func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots vaultic.IDSet, printer vaultic.Printer) error {
+	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
+		return err
+	}
 	if repo.Cache() == nil && !gopts.JSON {
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}
@@ -396,6 +406,9 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 // is separate from runPruneWithRepo because forget --prune already owns an
 // exclusive lock and intentionally retains the classic single-window flow.
 func runPrunePhaseAWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots vaultic.IDSet, markerID string, printer vaultic.Printer) error {
+	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
+		return err
+	}
 	if repo.Cache() == nil && !gopts.JSON {
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}

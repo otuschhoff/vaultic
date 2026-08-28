@@ -29,6 +29,8 @@ import (
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/hooks"
+	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/textfile"
@@ -773,6 +775,24 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	arch.CompleteBlob = progressReporter.CompleteBlob
 	arch.ExcludedItem = progressReporter.ExcludedItem
 
+	var reconciler *reconcile.Reconciler
+	var authoritativeEngine *enginepkg.DaemonEngine
+	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
+		authoritativeEngine = engine
+		reconciler, err = reconcile.New(cancelCtx, targetFS, engine.SchemaStore(), reconcile.Options{})
+		if err != nil {
+			return fmt.Errorf("start authoritative metadata reconciliation: %w", err)
+		}
+		reconcile.Attach(arch, reconciler)
+		arch.BeforeSnapshot = func() error {
+			if err := reconciler.Close(); err != nil {
+				return err
+			}
+			authoritativeEngine.SetNextSnapshotRoot(reconciler.RootKey())
+			return nil
+		}
+	}
+
 	if opts.IgnoreInode {
 		// --ignore-inode implies --ignore-ctime: on FUSE, the ctime is not
 		// reliable either.
@@ -821,6 +841,18 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		printer.V("start backup on %v", targets)
 	}
 	_, id, summary, err := arch.Snapshot(ctx, targets, snapshotOpts)
+	if reconciler != nil {
+		if reconcileErr := reconciler.Close(); reconcileErr != nil && err == nil {
+			err = fmt.Errorf("reconcile authoritative snapshot metadata: %w", reconcileErr)
+		} else if err == nil && !id.IsNull() {
+			rootKey := reconciler.RootKey()
+			if len(rootKey) == 0 {
+				err = fmt.Errorf("reconcile authoritative snapshot metadata: missing snapshot root")
+			} else if publishErr := authoritativeEngine.PublishSnapshotScope(ctx, id, rootKey); publishErr != nil {
+				err = fmt.Errorf("publish authoritative snapshot scope: %w", publishErr)
+			}
+		}
+	}
 
 	// cleanly shutdown all running goroutines
 	cancel()

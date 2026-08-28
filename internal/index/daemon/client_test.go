@@ -366,6 +366,76 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	}
 }
 
+func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.T) {
+	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase6-packs", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	blobID, packOne, packTwo := daemonTestID(31), daemonTestID(32), daemonTestID(33)
+	for _, published := range []PublishedPack{
+		{PackID: packOne, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 10, BlobCount: 1, Lifecycle: schema.PackExportPending}, Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packOne, Length: 10, Type: schema.BlobData}}}}},
+		{PackID: packTwo, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 10, BlobCount: 1, Lifecycle: schema.PackExportPending}, Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packTwo, Length: 10, Type: schema.BlobData}}}}},
+	} {
+		if err := store.PublishPack(context.Background(), published); err != nil {
+			t.Fatal(err)
+		}
+	}
+	value, found, err := store.Get(context.Background(), schema.BlobKey(blobID))
+	if err != nil || !found {
+		t.Fatalf("blob record: found=%t err=%v", found, err)
+	}
+	record, err := schema.UnmarshalBlobRecord(value)
+	if err != nil || len(record.Locations) != 2 {
+		t.Fatalf("blob locations = %#v, err=%v", record.Locations, err)
+	}
+	aggregateValue, found, err := store.Get(context.Background(), schema.PackAggregateKey(schema.AggregateAll))
+	if err != nil || !found {
+		t.Fatalf("aggregate: found=%t err=%v", found, err)
+	}
+	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
+	if err != nil || aggregate.PackCount != 2 || aggregate.BlobCount != 2 || aggregate.PayloadSize != 20 {
+		t.Fatalf("aggregate = %#v, err=%v", aggregate, err)
+	}
+}
+
+func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
+	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase6-snapshot", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	revision, err := store.AllocateRevision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootKey := schema.DirectoryRevisionKey(0, 0, revision)
+	rootValue := encodeSchemaRecord(t, schema.DirectoryRevision{Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, 2, 1)}}, SourcePath: "/", Known: schema.KnownPath, Freshness: schema.FreshnessVerified})
+	if err := store.PublishRevision(context.Background(), schema.CurrentDirectoryKey(0, 0), rootKey, rootValue, revision); err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := daemonTestID(41)
+	if err := store.MarkExportPending(context.Background(), snapshotID, rootKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishSnapshotScope(context.Background(), SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"tree":"test"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointValue, found, err := store.Get(context.Background(), schema.ExportCheckpointKey(snapshotID))
+	if err != nil || !found {
+		t.Fatalf("checkpoint: found=%t err=%v", found, err)
+	}
+	checkpoint, err := schema.UnmarshalExportCheckpointRecord(checkpointValue)
+	if err != nil || checkpoint.State != schema.ExportComplete || checkpoint.CommitSequence == 0 || !bytes.Equal(checkpoint.RootKey, rootKey) {
+		t.Fatalf("checkpoint = %#v, err=%v", checkpoint, err)
+	}
+	if _, found, err := store.Get(context.Background(), schema.SnapshotKey(snapshotID)); err != nil || !found {
+		t.Fatalf("snapshot scope: found=%t err=%v", found, err)
+	}
+}
+
 func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	options := Options{Socket: testSocket(t), RepositoryID: "phase4-pack-import", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
 	client, err := Ensure(context.Background(), options)

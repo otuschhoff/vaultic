@@ -60,6 +60,9 @@ func runRepairPacks(ctx context.Context, gopts global.Options, term ui.Terminal,
 		return err
 	}
 	defer unlock()
+	if err := requireLegacyMetadataMutation(repo, "repair packs"); err != nil {
+		return err
+	}
 
 	err = repo.LoadIndex(ctx, printer)
 	if err != nil {

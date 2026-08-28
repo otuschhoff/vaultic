@@ -117,6 +117,9 @@ func runRepairSnapshots(ctx context.Context, gopts global.Options, opts RepairOp
 		return err
 	}
 	defer unlock()
+	if err := requireLegacyMetadataMutation(repo, "repair snapshots"); err != nil {
+		return err
+	}
 
 	snapshotLister, err := vaultic.MemorizeList(ctx, repo, vaultic.SnapshotFile)
 	if err != nil {

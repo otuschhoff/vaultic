@@ -78,6 +78,9 @@ func runRebuildIndex(ctx context.Context, opts RepairIndexOptions, gopts global.
 		return err
 	}
 	defer unlock()
+	if err := requireLegacyMetadataMutation(repo, "repair index"); err != nil {
+		return err
+	}
 
 	err = repository.RepairIndex(ctx, repo, repository.RepairIndexOptions{
 		ReadAllPacks: opts.ReadAllPacks,

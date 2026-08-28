@@ -239,3 +239,27 @@ func Resolve(ctx context.Context, be backend.Backend, repositoryID string) (Reso
 	}
 	return Resolution{Mode: ModeSlateDB, State: ManifestValid, Manifest: &manifest}, nil
 }
+
+// Activate writes the authoritative marker last. It is idempotent for an
+// already-valid manifest and refuses to overwrite any conflicting namespace.
+func Activate(ctx context.Context, be backend.Backend, repositoryID string) error {
+	if repositoryID == "" {
+		return fmt.Errorf("slatedb authority requires a repository identity")
+	}
+	resolution, err := Resolve(ctx, be, repositoryID)
+	if err == nil && resolution.Mode == ModeSlateDB {
+		return nil
+	}
+	if err != nil || resolution.State != ManifestAbsent {
+		return fmt.Errorf("cannot activate slatedb authority over existing namespace: %w", err)
+	}
+	payload, err := json.Marshal(Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: repositoryID, Authoritative: true})
+	if err != nil {
+		return err
+	}
+	handle := backend.Handle{Type: backend.SlateDBFile, Name: ManifestName, IsMetadata: true}
+	if err := be.Save(ctx, handle, backend.NewByteReader(payload, be.Hasher())); err != nil {
+		return fmt.Errorf("save slatedb authority manifest: %w", err)
+	}
+	return nil
+}

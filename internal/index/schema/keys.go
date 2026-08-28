@@ -35,6 +35,7 @@ const (
 	KeySnapshotImportCheckpoint
 	KeyNextRevision
 	KeyHardlinkRefs
+	KeyExportCheckpoint
 )
 
 type AggregateKind byte
@@ -128,6 +129,7 @@ func CrawlDebtKey(snapshot, work ID) []byte {
 }
 func ImportCheckpointKey(index ID) []byte            { return idKey("meta:import-index:", index) }
 func SnapshotImportCheckpointKey(snapshot ID) []byte { return idKey("meta:import-snapshot:", snapshot) }
+func ExportCheckpointKey(snapshot ID) []byte         { return idKey("meta:export-snapshot:", snapshot) }
 func PackAggregateKey(kind AggregateKind) []byte {
 	name := map[AggregateKind]string{
 		AggregateData: "data", AggregateTree: "tree", AggregateMixed: "mixed",
@@ -181,6 +183,9 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		copy(parsed.ID[:], key[18:])
 	case len(key) == 53 && string(key[:21]) == "meta:import-snapshot:":
 		parsed.Kind = KeySnapshotImportCheckpoint
+		copy(parsed.ID[:], key[21:])
+	case len(key) == 53 && string(key[:21]) == "meta:export-snapshot:":
+		parsed.Kind = KeyExportCheckpoint
 		copy(parsed.ID[:], key[21:])
 	case len(key) == 37 && (string(key[:5]) == "gc:b:" || string(key[:5]) == "gc:p:"):
 		parsed.Kind, parsed.GCTarget = KeyGarbageCollection, GCBlob

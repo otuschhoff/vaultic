@@ -8,6 +8,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/feature"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
@@ -73,6 +74,43 @@ func TestResolveEngineFromBackendUsesLiveLegacyMasterIndex(t *testing.T) {
 }
 
 func TestResolveEngineFromBackendFailsClosedForSlateDBManifest(t *testing.T) {
+	be := mem.New()
+	repo := newEngineTestRepository(t, be)
+	saveEngineManifest(t, be, enginepkg.Manifest{
+		FormatVersion: enginepkg.ManifestFormatVersion,
+		SchemaVersion: enginepkg.ManifestSchemaVersion,
+		RepositoryID:  repo.Config().ID,
+		Authoritative: true,
+	})
+
+	_, err := repo.ResolveEngineFromBackend(context.Background())
+	if !errors.Is(err, enginepkg.ErrUnavailable) {
+		t.Fatalf("ResolveEngineFromBackend error = %v, want ErrUnavailable", err)
+	}
+	if repo.Engine().Mode() != enginepkg.ModeLegacy {
+		t.Fatalf("failed resolution changed engine mode to %q", repo.Engine().Mode())
+	}
+}
+
+func TestResolveEngineFromBackendRequiresSlateDBAuthorityGate(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, false)()
+	be := mem.New()
+	repo := newEngineTestRepository(t, be)
+	saveEngineManifest(t, be, enginepkg.Manifest{
+		FormatVersion: enginepkg.ManifestFormatVersion,
+		SchemaVersion: enginepkg.ManifestSchemaVersion,
+		RepositoryID:  repo.Config().ID,
+		Authoritative: true,
+	})
+
+	_, err := repo.ResolveEngineFromBackend(context.Background())
+	if !errors.Is(err, enginepkg.ErrUnavailable) {
+		t.Fatalf("ResolveEngineFromBackend error = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestResolveEngineFromBackendFailsClosedWhenAuthoritativeDaemonUnavailable(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	be := mem.New()
 	repo := newEngineTestRepository(t, be)
 	saveEngineManifest(t, be, enginepkg.Manifest{

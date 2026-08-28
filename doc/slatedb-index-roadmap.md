@@ -1297,6 +1297,27 @@ graph and never skips a file solely because imported data exists.
 **Goal:** make SlateDB authoritative only after the crawl path is correct while
 keeping Restic/Rustic compatibility.
 
+**Current implementation state (2026-08-27):** **complete.** Authority is
+explicitly gated and requires a validated repository-scoped manifest; once
+selected, daemon unavailability fails closed. Pack catalog entries, blob
+locations, duplicate locations, aggregate deltas, reconciled revisions,
+reverse references, hardlink references, and synthetic snapshot roots are
+published through bounded daemon operations. Snapshot scope and its commit
+sequence are committed atomically only after the referenced metadata and
+legacy pack indexes are durable.
+
+The archiver remains the compatibility projection boundary: it serializes the
+canonical Restic tree, including each ordered file `content` array, before the
+same array is encoded by reconciliation as inline IDs or deterministic `cm:`
+segments. This avoids reconstructing legacy trees from a lossy metadata view
+while guaranteeing that manifest-backed authoritative files have identical
+expanded legacy content. Pack lifecycle records expose pending JSON index
+exports and startup reconstructs pending packs as flushable legacy indexes.
+Snapshot checkpoints durably distinguish pending, complete, and failed backend
+writes, retain the exact immutable root key, and recover publishable pending
+scopes after restart. Prune and repair fail closed in authoritative mode;
+`PlanPrune` also enforces this at the repository API boundary.
+
 **Implementation steps:**
 
 1. Add an explicit feature gate and repository capability for SlateDB authority.

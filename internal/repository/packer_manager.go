@@ -244,6 +244,10 @@ func (r *Repository) savePacker(ctx context.Context, t vaultic.BlobType, p *pack
 	if err != nil {
 		return err
 	}
+	packInfo, err := p.tmpfile.Stat()
+	if err != nil {
+		return err
+	}
 
 	// calculate sha256 hash in a second pass
 	var rd io.Reader
@@ -290,5 +294,10 @@ func (r *Repository) savePacker(ctx context.Context, t vaultic.BlobType, p *pack
 
 	// update blobs in the index
 	debug.Log("  updating blobs %v to pack %v", p.Packer.Blobs(), id)
+	if engine, ok := r.Engine().(interface {
+		StorePackSized(context.Context, vaultic.ID, pack.Blobs, vaultic.SaverUnpacked[vaultic.FileType], uint64) error
+	}); ok {
+		return engine.StorePackSized(ctx, id, p.Packer.Blobs(), &internalRepository{r}, uint64(packInfo.Size()))
+	}
 	return r.legacyIndexEngine().StorePack(ctx, id, p.Packer.Blobs(), &internalRepository{r})
 }

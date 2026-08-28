@@ -112,6 +112,18 @@ func (store *fakeStore) AllocateRevision(context.Context) (uint64, error) {
 	return store.next, nil
 }
 
+func (store *fakeStore) PublishRevision(_ context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	pointer, err := (schema.CurrentPointer{Revision: revision, RecordKey: revisionKey}).MarshalBinary()
+	if err != nil {
+		return err
+	}
+	store.values[string(currentKey)] = pointer
+	store.values[string(revisionKey)] = append([]byte(nil), revisionValue...)
+	return nil
+}
+
 func (store *fakeStore) PublishReconciledRevision(_ context.Context, request daemon.ReconciledRevision) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -261,15 +273,27 @@ func TestMetadataAndContentChangesPreserveRevisions(t *testing.T) {
 	store := newFakeStore()
 	filesystem := testFilesystem()
 	runFile(t, filesystem, store, testVaulticID(1))
-	first := store.next
+	firstPointer, err := schema.UnmarshalCurrentPointer(store.values[string(schema.CurrentInodeKey(1, 11))])
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstPointer.Revision
 	filesystem.entries["/root/file"] = fileInfo(1, 11, 8, 2)
 	runFile(t, filesystem, store, testVaulticID(1))
-	metadataRevision := store.next
+	metadataPointer, err := schema.UnmarshalCurrentPointer(store.values[string(schema.CurrentInodeKey(1, 11))])
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataRevision := metadataPointer.Revision
 	if metadataRevision <= first {
 		t.Fatal("metadata-only change did not allocate a revision")
 	}
 	runFile(t, filesystem, store, testVaulticID(2))
-	if store.next <= metadataRevision {
+	contentPointer, err := schema.UnmarshalCurrentPointer(store.values[string(schema.CurrentInodeKey(1, 11))])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentPointer.Revision <= metadataRevision {
 		t.Fatal("content change did not allocate a revision")
 	}
 	if _, found := store.values[string(schema.InodeRevisionKey(1, 11, first))]; !found {

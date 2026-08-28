@@ -63,6 +63,7 @@ type Store interface {
 	MultiGet(context.Context, [][]byte) ([]daemon.KeyValue, []bool, error)
 	ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error)
 	AllocateRevision(context.Context) (uint64, error)
+	PublishRevision(context.Context, []byte, []byte, []byte, uint64) error
 	PublishReconciledRevision(context.Context, daemon.ReconciledRevision) error
 	RecordCrawlDebtFailure(context.Context, [][]byte, string) error
 	ResolveCrawlDebt(context.Context, [][]byte) error
@@ -117,6 +118,7 @@ type Reconciler struct {
 	closeOnce  sync.Once
 	mu         sync.Mutex
 	errors     []error
+	rootKey    []byte
 	debtByPath map[string][][]byte
 
 	scanned    atomic.Uint64
@@ -191,6 +193,14 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		Scanned: reconciler.scanned.Load(), Reused: reconciler.reused.Load(), Changed: reconciler.changed.Load(),
 		Deferred: reconciler.deferred.Load(), Failed: reconciler.failed.Load(), Reconciled: reconciler.reconciled.Load(),
 	}
+}
+
+// RootKey returns the immutable synthetic directory revision representing the
+// archive root. It is available after Close completes.
+func (reconciler *Reconciler) RootKey() []byte {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	return append([]byte(nil), reconciler.rootKey...)
 }
 
 // CanReuse permits the archiver fast path only for a complete verified inode
@@ -374,6 +384,40 @@ func (reconciler *Reconciler) writer() {
 	}
 	reconciler.publishHardlinks(hardlinks, published)
 	reconciler.publishDirectories(directories, published)
+	if err := reconciler.publishSnapshotRoot(published); err != nil {
+		reconciler.recordError(err)
+	}
+}
+
+func (reconciler *Reconciler) publishSnapshotRoot(published map[string]publishedItem) error {
+	children := make([]schema.DirectoryChild, 0)
+	for _, item := range published {
+		name := strings.TrimPrefix(normalizeSnapshotPath(item.snapshotPath), "/")
+		if name == "" || strings.Contains(name, "/") {
+			continue
+		}
+		children = append(children, schema.DirectoryChild{Name: name, Inode: item.identity.inode, Type: item.typeID, MetadataKey: item.key})
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	record := schema.DirectoryRevision{Children: children, SourcePath: "/", Known: schema.KnownPath, Freshness: schema.FreshnessVerified}
+	value, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	revision, err := reconciler.store.AllocateRevision(reconciler.ctx)
+	if err != nil {
+		return err
+	}
+	key := schema.DirectoryRevisionKey(0, 0, revision)
+	if err := reconciler.store.PublishRevision(reconciler.ctx, schema.CurrentDirectoryKey(0, 0), key, value, revision); err != nil {
+		return err
+	}
+	reconciler.mu.Lock()
+	reconciler.rootKey = append([]byte(nil), key...)
+	reconciler.mu.Unlock()
+	return nil
 }
 
 func (reconciler *Reconciler) processBatch(batch []preparedItem, directories *[]preparedItem, hardlinks map[identity][]preparedItem, published map[string]publishedItem) {

@@ -16,7 +16,9 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/dryrun"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
@@ -59,6 +61,11 @@ type Repository struct {
 
 	zeroChunkOnce sync.Once
 	zeroChunkID   vaultic.ID
+}
+
+type snapshotAuthority interface {
+	MarkSnapshotPending(context.Context, vaultic.ID, []byte) error
+	MarkSnapshotFailed(context.Context, vaultic.ID, error) error
 }
 
 // internalRepository allows using SaveUnpacked and RemoveUnpacked with all FileTypes
@@ -257,11 +264,36 @@ func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.En
 		return nil, err
 	}
 	if resolution.Mode == enginepkg.ModeSlateDB {
-		return nil, fmt.Errorf("repository %s requires slatedb schema %s: %w", r.cfg.ID, resolution.Manifest.SchemaVersion, enginepkg.ErrUnavailable)
+		if !feature.Flag.Enabled(feature.SlateDBAuthoritative) {
+			return nil, fmt.Errorf("repository %s requires the slatedb-authoritative feature: %w", r.cfg.ID, enginepkg.ErrUnavailable)
+		}
+		client, connectErr := daemon.Connect(ctx, daemon.Options{RepositoryID: r.cfg.ID})
+		if connectErr != nil {
+			return nil, fmt.Errorf("connect authoritative metadata daemon for repository %s: %w: %w", r.cfg.ID, enginepkg.ErrUnavailable, connectErr)
+		}
+		engine := enginepkg.NewDaemonEngine(client, enginepkg.NewLegacyEngine(r.idx))
+		r.SetEngine(engine)
+		return engine, nil
 	}
 	engine := enginepkg.NewLegacyEngine(r.idx)
 	r.SetEngine(engine)
 	return engine, nil
+}
+
+// EnableSlateDBAuthority activates a validated daemon-backed metadata engine.
+// Daemon connection/start configuration remains an operator workflow concern.
+func (r *Repository) EnableSlateDBAuthority(ctx context.Context, client *daemon.Client) error {
+	if !feature.Flag.Enabled(feature.SlateDBAuthoritative) {
+		return fmt.Errorf("slatedb authority requires the slatedb-authoritative feature")
+	}
+	if client == nil {
+		return fmt.Errorf("slatedb authority requires a validated daemon client")
+	}
+	if err := enginepkg.Activate(ctx, r.be, r.cfg.ID); err != nil {
+		return err
+	}
+	r.SetEngine(enginepkg.NewDaemonEngine(client, enginepkg.NewLegacyEngine(r.idx)))
+	return nil
 }
 
 // PackSize return the target size of a pack file when uploading
@@ -761,9 +793,23 @@ func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf [
 		id = vaultic.Hash(ciphertext)
 	}
 	h := backend.Handle{Type: backend.FileType(t), Name: id.String()}
+	if t == vaultic.SnapshotFile {
+		if authority, ok := r.Engine().(snapshotAuthority); ok {
+			if err := authority.MarkSnapshotPending(ctx, id, buf); err != nil {
+				return vaultic.ID{}, fmt.Errorf("mark snapshot compatibility export pending: %w", err)
+			}
+		}
+	}
 
 	err = r.be.Save(ctx, h, backend.NewByteReader(ciphertext, r.be.Hasher()))
 	if err != nil {
+		if t == vaultic.SnapshotFile {
+			if authority, ok := r.Engine().(snapshotAuthority); ok {
+				if checkpointErr := authority.MarkSnapshotFailed(ctx, id, err); checkpointErr != nil {
+					err = errors.Join(err, fmt.Errorf("mark snapshot compatibility export failed: %w", checkpointErr))
+				}
+			}
+		}
 		debug.Log("error saving blob %v: %v", h, err)
 		return vaultic.ID{}, err
 	}
@@ -1325,7 +1371,7 @@ func (r *Repository) Delete(ctx context.Context) error {
 
 // Close closes the repository by closing the backend.
 func (r *Repository) Close() error {
-	return r.be.Close()
+	return errors.Join(r.Engine().Close(), r.be.Close())
 }
 
 // saveBlob saves a blob of type t into the repository.

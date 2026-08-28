@@ -287,6 +287,81 @@ type SnapshotImportCheckpointRecord struct {
 	DebtsCreated  uint64
 }
 
+type ExportState byte
+
+const (
+	ExportPending ExportState = iota + 1
+	ExportComplete
+	ExportFailed
+)
+
+// ExportCheckpointRecord makes compatibility-projection lag visible. A
+// pending record is written before the legacy snapshot object and is completed
+// atomically with its authoritative snapshot scope, or failed if that write fails.
+type ExportCheckpointRecord struct {
+	State          ExportState
+	CommitSequence uint64
+	Attempts       uint32
+	RootKey        []byte
+	LastError      string
+}
+
+func (record ExportCheckpointRecord) MarshalBinary() ([]byte, error) {
+	if record.State < ExportPending || record.State > ExportFailed ||
+		(record.State == ExportPending && record.CommitSequence != 0) ||
+		(record.State == ExportComplete && (record.CommitSequence == 0 || record.LastError != "")) ||
+		(record.State == ExportFailed && (record.CommitSequence != 0 || record.LastError == "")) || !validExportRoot(record.RootKey) {
+		return nil, fmt.Errorf("%w: invalid export checkpoint", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u8(byte(record.State))
+	e.u64(record.CommitSequence)
+	e.u32(record.Attempts)
+	if err := e.bytes(record.RootKey); err != nil {
+		return nil, err
+	}
+	if err := e.string(record.LastError); err != nil {
+		return nil, err
+	}
+	return e.finish()
+}
+
+func UnmarshalExportCheckpointRecord(data []byte) (ExportCheckpointRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return ExportCheckpointRecord{}, err
+	}
+	state, err := d.u8()
+	if err != nil {
+		return ExportCheckpointRecord{}, err
+	}
+	record := ExportCheckpointRecord{State: ExportState(state)}
+	if record.CommitSequence, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Attempts, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.RootKey, err = d.bytes(); err != nil {
+		return record, err
+	}
+	if record.LastError, err = d.string(); err != nil {
+		return record, err
+	}
+	if record.State < ExportPending || record.State > ExportFailed ||
+		(record.State == ExportPending && record.CommitSequence != 0) ||
+		(record.State == ExportComplete && (record.CommitSequence == 0 || record.LastError != "")) ||
+		(record.State == ExportFailed && (record.CommitSequence != 0 || record.LastError == "")) || !validExportRoot(record.RootKey) {
+		return ExportCheckpointRecord{}, fmt.Errorf("%w: invalid export checkpoint", ErrMalformed)
+	}
+	return record, d.done()
+}
+
+func validExportRoot(key []byte) bool {
+	parsed, err := ParseKey(key)
+	return err == nil && parsed.Kind == KeyDirectoryRevision && parsed.Revision != 0
+}
+
 func (record SnapshotImportCheckpointRecord) MarshalBinary() ([]byte, error) {
 	e := newEncoder()
 	e.u64(record.TreesVisited)
@@ -354,7 +429,7 @@ func ValidateValue(key []byte, value []byte) error {
 		if err == nil {
 			for _, child := range directory.Children {
 				childKey, parseErr := ParseKey(child.MetadataKey)
-				if parseErr != nil || childKey.FSID != parsed.FSID {
+				if parseErr != nil || (parsed.FSID != 0 && childKey.FSID != parsed.FSID) {
 					err = fmt.Errorf("%w: directory child crosses filesystem boundary", ErrMalformed)
 					break
 				}
@@ -382,6 +457,10 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalImportCheckpointRecord(value)
 	case KeySnapshotImportCheckpoint:
 		_, err = UnmarshalSnapshotImportCheckpointRecord(value)
+	case KeyExportCheckpoint:
+		_, err = UnmarshalExportCheckpointRecord(value)
+	case KeyHardlinkRefs:
+		_, err = UnmarshalHardlinkRefsRecord(value)
 	case KeyNextRevision:
 		_, err = UnmarshalNextRevision(value)
 	default:
