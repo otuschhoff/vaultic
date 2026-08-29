@@ -383,11 +383,23 @@ value: versioned directory record
 ```
 
 Each directory record must contain its `parent_inode`, including the root record
-(whose parent is an explicit sentinel such as `0`). Each child entry should
-contain a stable name, inode number, node type, and reference to the file
-metadata key. Child entries must be sorted by name in the serialized value to
-make exports deterministic. Reconciliation must reject cycles and conflicting
-parent ownership.
+(whose parent is an explicit sentinel such as `0`). Each child entry contains a
+stable name, inode number, node type, and a **complete versioned metadata key**
+for the child: `dv:<fsid>:<inode>:<revision-seq>` when the child is a directory,
+`iv:<fsid>:<inode>:<revision-seq>` otherwise. The revision sequence is part of
+the stored reference and is never omitted.
+
+This is a correctness requirement, not a convenience. A child entry that carried
+only an inode number would force a historical traversal to consult the `d:` or
+`i:` current pointer to find the child record, which resolves an old snapshot
+against present-day state. Directory revisions must be walkable using only the
+keys they contain, so that a snapshot root reaches exactly the revision graph
+that snapshot committed. The child reference must therefore be validated against
+both the node type and the child inode when a record is encoded and decoded.
+
+Child entries must be sorted by name in the serialized value to make exports
+deterministic. Reconciliation must reject cycles and conflicting parent
+ownership.
 
 ### File metadata
 
@@ -572,6 +584,63 @@ without losing additive vaultic metadata.
 The snapshot record must reference the root directory revision and define the
 commit sequence used for all historical inode and directory lookups. A current
 pointer alone is never sufficient to restore an older snapshot.
+
+`s:` is keyed by public snapshot ID, so it answers "what is in this snapshot"
+but not "which snapshot corresponds to this commit sequence". Maintain a second,
+commit-ordered index over the same records:
+
+```text
+key:   sc:<8-byte commit-seq>:<32-byte snapshot identifier>
+value: schema version, snapshot time, root directory revision
+```
+
+The key is fixed width and time-ordered by construction, so enumerating
+snapshots in commit order, bounding a scan to a commit range, or finding the
+first snapshot at or after a given revision are range scans rather than a full
+scan of `s:`. The record is derived: it is written in the same transaction that
+publishes the snapshot scope, and it must be rebuildable from `s:` records by
+`index check`. It is never the authority for snapshot content.
+
+### Path history index
+
+The inode namespaces answer "what happened to this file object". They cannot
+answer "what happened at this path", because a path may be unlinked and
+recreated as a different inode, and an inode may move between paths. Maintain an
+explicit versioned binding from path to inode:
+
+```text
+key:   pv:<4-byte filesystem id><path bytes><0x00><8-byte revision-seq>
+value: schema version
+       binding state (bound, tombstone)
+       node type
+       inode (8 bytes)
+       metadata revision-seq (8 bytes)
+```
+
+This is the only variable-length key in the schema. It is length-delimited by an
+explicit `0x00` terminator, which is unambiguous because POSIX path components
+cannot contain a NUL byte. The terminator must be present even though the
+revision suffix is fixed width, because without it `/a/b` and `/a/bc` would
+produce overlapping prefixes.
+
+The resulting order is the useful one. All revisions of one path are contiguous,
+and because `0x00` sorts below `/`, a path's own revisions sort before any of its
+descendants. A prefix scan of `pv:<fsid>` plus a path yields that path's complete
+binding history; a prefix scan of a path plus `/` yields every descendant across
+all time.
+
+A record is written only when the binding changes: create, delete, rename, or
+replacement of a path by a different inode. Content and metadata changes do not
+write here, because they do not change which inode the path resolves to; they
+are already recorded as `iv:` revisions reachable from the binding. Entries are
+deletable together with the snapshots that reference them, so the namespace is
+bounded by the retention window rather than growing without limit.
+
+`pv:` is an accelerator, exactly like the reverse-reference and aggregate
+namespaces. It is never the authority for snapshot membership: a binding that
+exists at a commit sequence does not prove the path was reachable from a given
+snapshot root. Membership is resolved through directory revisions, and
+`index check` must be able to rebuild `pv:` from them.
 
 ### Crawl-debt records
 
@@ -861,6 +930,16 @@ Read-only check mode should use a daemon `DbReader` through the RPC client and
 the existing read-lock policy. Vaultic remains the owner of the differential
 comparison and exit-code decision.
 
+### Introspection commands
+
+`vaultic index stats`, `vaultic index packs`, `vaultic index history`,
+`vaultic index history prune`, and `vaultic index backends` are specified in
+section 12.2 and implemented in Phase 11.
+
+`vaultic index file-history` and `vaultic index path-at` are specified in
+section 13.2 and implemented in Phases 13 and 14. Note that `index history`
+reports pack lifecycle history, not file history; the two are unrelated.
+
 ## 11. Locking and failure recovery
 
 The daemon boundary does not replace vaultic's repository lock policy
@@ -888,7 +967,614 @@ cross-tool repository locks.
 - TCP remains disabled unless both configuration and daemon startup policy
   explicitly enable it.
 
-## 12. Execution-oriented phased implementation plan
+## 12. Tiered storage policy, pack history, and backend introspection
+
+### 12.1 Objective
+
+Vaultic already supports hot/cold repositories: the hot backend holds metadata
+and tree packs, the cold backend holds data packs, and reads of cold data
+require a warm-up step. Prune, however, is tier-blind. Every repack and delete
+decision is evaluated with one global policy, so the operator must tune for the
+strictest tier. Cold storage is the strict tier: repacking pays egress, request,
+and early-deletion charges, and objects usually carry a minimum retention period
+(commonly 180 days) during which deletion saves nothing. Tuning for cold
+therefore forfeits the one place where defragmentation is genuinely cheap, which
+is the hot tier.
+
+The objective of this work is to make tier a first-class property of the pack
+catalog so that:
+
+1. Hot and cold packs are governed by two independent policies while the blob
+   index keeps exactly one authoritative pack location per blob.
+2. Cold repack and delete decisions are driven by an explicit cost and
+   retention model rather than by a fixed unused-ratio threshold.
+3. Pack lifetime facts are recorded durably instead of being inferred from
+   backend object metadata, which does not reliably carry a creation time.
+4. Operators can query repository composition and growth over time from the
+   CLI without scanning the backend or loading a full index.
+
+Non-goals: changing the on-backend repository format, changing the hot/cold
+split rule (tree packs hot, data packs cold), or making SlateDB required for
+hot/cold repositories. Legacy JSON repositories keep today's tier-blind prune.
+
+### 12.2 Methodology
+
+#### Invariant: one authoritative location per blob
+
+Tier is a property of a pack, not of a blob. A blob resolves to exactly one
+authoritative pack, and that pack's tier determines where the bytes live. Two
+policies do not imply two copies, and no dual `hot pack id` / `cold pack id`
+tracking is introduced. The existing multi-location capability of the blob
+record stays reserved for legacy duplicate semantics and for the optional hot
+data cache described below, where the extra location is explicitly non
+authoritative.
+
+If a hot data cache is later introduced, the asymmetry is what keeps it
+tractable:
+
+- the cold location is authoritative and obeys the cold policy;
+- a hot data-pack copy is an evictable cache and may be deleted at any time
+  because it is never the last copy;
+- reads prefer the hot location and fall back to cold plus warm-up;
+- `check --check-hot-cold` asserts that every blob has at least one cold
+  location.
+
+#### Tier as a pack catalog attribute
+
+Extend the pack record of section 5 with tier and lifetime fields:
+
+```text
+key:   p:<32-byte pack ID>
+value: versioned pack metadata
+  ... existing fields ...
+  tier (hot, cold, mirrored, unknown)
+  storage class (backend-reported, free-form, optional)
+  created-at and creation-time-known flag
+  min-retention-until and retention-source (config, backend, unknown)
+  used-payload-bytes
+  unused-payload-bytes
+  delete-after
+```
+
+`tier` is derived at publish time from the pack type and the configured
+hot/cold routing, and recorded rather than recomputed, so that a repository that
+later stops using `--repo-hot` can still explain where a pack came from.
+`min_retention_until` is `created_at + configured tier retention`; it is only
+trustworthy when `creation_time_known` is true. Imported legacy packs without a
+trustworthy timestamp keep `creation_time_known = false` and are treated as
+retention-unknown, which means conservative: never eligible for early deletion
+savings claims, always eligible for ordinary reachability-based deletion once
+the operator opts in.
+
+`used_payload_bytes` and `unused_payload_bytes` are maintained incrementally as
+reachability changes, so prune planning reads a pre-computed number instead of
+recomputing usage from a full index sweep.
+
+Aggregate records gain a tier dimension alongside the existing type dimension:
+
+```text
+key:   a:tier:hot
+key:   a:tier:cold
+key:   a:tier:mirrored
+```
+
+#### Two policies, one planner
+
+`decidePackAction` becomes tier-parameterised rather than duplicated. The
+policy set is resolved per pack from its tier:
+
+| | hot / tree | cold / data |
+| --- | --- | --- |
+| repack trigger | unused ratio above a low threshold, small-pack merging, free defragmentation | only when the cost model below is satisfied; default off |
+| delete trigger | wholly unreachable, delete now | wholly unreachable **and** past `min_retention_until` |
+| repack budget | `--max-repack` applied to the hot subtotal | separate `--cold-max-repack`, default `0` |
+| target pack size | current defaults | substantially larger, to reduce future fragmentation |
+
+The existing tier-blind flags keep their meaning for legacy repositories and for
+repositories without a hot part. `--repack-cacheable-only` remains the coarse
+equivalent of "hot policy only, never touch cold", and stays supported.
+
+#### Cost model for cold repacking
+
+A cold pack is repacked only when the projected storage saving over a horizon
+exceeds the cost of moving it, including the retention charge that is still
+owed on the object being replaced:
+
+```text
+saving = unused_payload_bytes * price_per_gb_month * horizon_months
+cost   = egress(physical_size) + request_cost
+       + physical_size * price_per_gb_month * remaining_retention_months
+repack if saving > cost
+```
+
+Prices, horizon, and retention are operator inputs (`--cold-price-per-gb-month`,
+`--cold-egress-per-gb`, `--cold-request-cost`, `--cold-horizon`,
+`--cold-min-retention`), defaulting to values that make the predicate false. The
+point of the model is not to guess a cloud bill accurately; it is to degrade
+gracefully into "do not repack cold" instead of hard-coding a refusal, and to
+make the reason auditable in `--json` output.
+
+#### Retention-aware deferred deletion
+
+Two-phase prune already supports deferring deletion by a fixed duration. Tier
+awareness generalises the deadline:
+
+```text
+delete_after = max(now + keep_delete, min_retention_until)
+```
+
+Packs entering `delete_pending` are additionally indexed by deadline so the
+sweep is a range scan rather than a catalog scan:
+
+```text
+key:   dq:<8-byte delete-after unix seconds>:<32-byte pack ID>
+value: tier, physical size, reason, originating run ID
+```
+
+Any later `prune`, `index gc`, or dedicated sweep collects the expired key
+prefix. Cold packs therefore linger until their retention expires and are then
+collected on a routine run, with no operator arithmetic and no early-deletion
+charge. This is the single largest practical benefit of having a metadata
+service: a time-ordered deletion queue is not expressible in the JSON index.
+
+#### Preventing cold fragmentation instead of repairing it
+
+Because cold defragmentation is the expensive operation, the cheaper lever is
+write-time placement. Cold packing should group blobs whose expected lifetime is
+similar (same snapshot cohort, same source path class, same retention class) so
+that cold packs tend to become wholly unreachable at once, plus a larger cold
+target pack size. In steady state this drives cold repacking toward zero and the
+cost model rarely fires at all.
+
+#### Pack history: recording every change, including to deleted packs
+
+The pack catalog only describes the present. Growth rates, churn, and
+"what did this repository look like six months ago" require history, and the
+history must survive the deletion of the pack it describes.
+
+The decision here is deliberate: **yes, record every pack lifecycle transition,
+but as an append-only event log in its own key namespace, not by retaining full
+pack records forever.** A pack record is a mutable current-state object with
+provenance, sizes, and reference accounting; keeping every historical version of
+it would grow with reachability churn rather than with real events, and would
+entangle statistics retention with index correctness. An event log is bounded by
+the number of transitions, is independent of the catalog's own compaction, and
+can be pruned on its own schedule without ever affecting restorability.
+
+```text
+key:   ph:<8-byte event unix seconds>:<8-byte event seq>:<32-byte pack ID>
+value: schema version, event type, tier, pack type,
+       physical size, payload size, used/unused deltas,
+       predecessor pack IDs (for repack lineage), run ID, reason code
+```
+
+Event types: `created`, `imported`, `published`, `tier_changed`,
+`usage_changed` (coalesced, not per blob), `repacked_from`, `repacked_into`,
+`delete_pending`, `deleted`, `delete_failed`, `orphan_detected`.
+
+The event key is time-ordered, so histograms and growth queries are range scans
+with no catalog access, and events for packs that no longer exist remain
+readable. `repacked_from`/`repacked_into` preserve lineage, so churn can be
+distinguished from genuine growth: a repack that rewrites 100 GiB is not 100 GiB
+of new data, and any growth-rate answer that cannot tell those apart is
+misleading.
+
+**Retention and downsampling.** Raw events are pruned, but not by simply
+dropping them: they are first rolled up into fixed time buckets that are cheap
+enough to keep effectively forever.
+
+```text
+key:   pb:<bucket-granularity>:<8-byte bucket start>:<tier>:<pack type>
+value: packs created, packs deleted, packs repacked,
+       bytes added, bytes deleted, bytes repacked,
+       end-of-bucket pack count and physical/payload totals,
+       coverage flag (complete, partial, reconstructed)
+```
+
+Granularities: hourly, daily, monthly. The rollup is a pure function of the raw
+events in the bucket, so it is idempotent and rebuildable while the raw events
+still exist. Default retention: raw events kept for a bounded window, hourly
+buckets for a longer window, daily buckets for years, monthly buckets
+indefinitely. A monthly bucket per tier and pack type is a handful of records
+per month; the storage cost is negligible against a 500 TB repository.
+
+Two rules keep this honest:
+
+- A bucket is only marked `complete` if the roll-up ran over a fully retained
+  raw range. Buckets covering a period before history collection was enabled,
+  or reconstructed from an import, are flagged `partial` or `reconstructed`, and
+  every CLI and JSON output surfaces that flag. Statistics must not silently
+  present an incomplete series as authoritative.
+- History is strictly derived and advisory. `index check` may report history
+  gaps or drift against the pack catalog, but a missing or corrupt history
+  record is never an error that blocks backup, restore, prune, or GC, and
+  history is never an input to a destructive decision. Retention decisions read
+  `min_retention_until` from the pack record, not from the event log.
+
+History pruning itself is a normal maintenance operation with a dry-run mode,
+and it emits its own coverage marker so a later query can tell that the raw
+range was intentionally truncated rather than lost.
+
+#### Backend introspection commands
+
+Add read-only commands to the existing `index` group. They resolve the daemon
+when the repository is SlateDB-authoritative; for legacy repositories they
+either operate in a reduced mode from the JSON index or fail with an explicit
+message, never with a partially populated answer presented as complete.
+
+`vaultic index stats` — constant-time repository composition from the aggregate
+records.
+
+- `--by tier|type|state|tier,type` grouping
+- `--tier hot|cold|mirrored`, `--type data|tree|mixed|unknown`
+- `--verify` recompute from `p:` records and report drift
+- `--rebuild` rewrite aggregates from `p:` records
+- `--json`
+
+Reports pack count, physical size, payload size, header size, blob count, used
+and unused payload bytes, unused ratio, and mixed/unknown counts. Unknown-tier
+and unknown-type packs are always reported explicitly rather than folded into a
+total.
+
+`vaultic index packs` — query the pack catalog.
+
+- filters: `--tier`, `--type`, `--state`, `--created-before`, `--created-after`,
+  `--min-size`, `--max-size`, `--unused-ratio-above`, `--retention-expired`,
+  `--retention-unknown`, `--delete-pending`
+- `--sort size|created|unused|unused-ratio|delete-after`, `--limit`,
+  `--count-only`
+- `--json`
+
+`vaultic index history` — time-series and histograms over the event log and
+rollups.
+
+- `--metric packs|bytes|created|deleted|repacked|net-growth|unused`
+- `--bucket hour|day|week|month`
+- `--since`, `--until`
+- `--by tier|type`
+- `--histogram` render a distribution of pack creation or last-change times
+- `--forecast` project growth from the retained series, always annotated with
+  the coverage flags of the buckets used
+- `--json`
+
+Repack churn is reported separately from net growth by default. `--forecast`
+refuses to extrapolate from a series whose buckets are `partial` or
+`reconstructed` unless `--allow-incomplete` is given.
+
+`vaultic index history prune` — retention for the event log.
+
+- `--keep-raw`, `--keep-hourly`, `--keep-daily`, `--keep-monthly`
+- `--dry-run`, `--json`
+
+`vaultic index backends` — per-tier backend view for hot/cold repositories.
+
+- reports, per backend: configured location, object count and bytes by file
+  type, storage class where the backend exposes it, configured minimum
+  retention, warm-up configuration in effect
+- `--compare` cross-check backend listing against the pack catalog and report
+  packs present in the catalog but missing on the backend, and objects present
+  on the backend but unknown to the catalog
+- `--no-list` answer from the catalog only, without paying for a backend
+  listing
+- `--json`
+
+`--compare` performs a full backend listing and is explicitly opt-in, because on
+a cold tier a listing has a real cost.
+
+Implementation phases for this section are Phases 9 to 12 of the plan below.
+
+## 13. Path and inode history queries
+
+### 13.1 Objective
+
+The schema already retains immutable inode and directory revisions, so a
+repository physically contains the answer to "how did this file change over
+time". None of that is queryable today. An operator asking the obvious support
+question — *when did `/home/x/report.odt` change, and which backup captured each
+version* — has no command to run, and no index that makes the question cheap.
+
+Three capabilities are missing, and they are not the same problem:
+
+1. **Path resolution.** Nothing maps a path to an inode. Paths are only
+   discoverable by walking directory revisions from a snapshot root, one lookup
+   per component.
+2. **Snapshot attribution.** `s:` maps a snapshot to a commit sequence, but
+   there is no reverse index, so a revision cannot be attributed to the snapshot
+   that captured it without scanning every snapshot record.
+3. **Path identity over time.** Inode history follows the file object through
+   renames but loses the path; path history must additionally capture unlink and
+   recreation, where the same path becomes a different inode.
+
+The objective is to answer path and inode history questions from the CLI, in
+time proportional to the number of changes reported rather than to the number of
+snapshots retained or the size of the repository, without weakening the rule
+that snapshot membership is resolved through immutable directory revisions.
+
+Non-goals: changing restore, making history a required input to any destructive
+decision, exposing history for legacy JSON repositories beyond what the JSON
+index already contains, or replacing `diff` for whole-snapshot comparison.
+
+### 13.2 Methodology
+
+#### Three questions, three costs
+
+The commands must not conflate these, because they give different answers
+whenever a path is recreated or a file is renamed:
+
+| question | mechanism | cost |
+|---|---|---|
+| revisions of an inode | prefix scan `iv:<fsid>:<inode>:` | proportional to revisions |
+| revisions at a path | resolve path per snapshot, or scan `pv:` | see below |
+| which snapshot captured a revision | commit-order lookup via `sc:` | proportional to results |
+
+Only the first is answerable today, and it is already cheap: `revision-seq` is
+fixed-width big-endian, so a single bounded prefix scan returns every revision of
+an inode in chronological order.
+
+#### Resolution by walking, without new keys
+
+Path history is answerable from the existing schema. For each snapshot, read its
+root directory revision from `s:`, then resolve the path one component at a time
+through the child entries of each `dv:` record, following the versioned child
+reference. Each snapshot yields either absent or a resolved
+`(inode, metadata revision-seq)` pair. Coalescing consecutive identical pairs
+across snapshots in commit order produces the change list:
+
+| transition | meaning |
+|---|---|
+| revision-seq changes, inode unchanged | modified in place |
+| inode changes | path rebound to a different file object |
+| present to absent | deleted, **or** outside this snapshot's backup set |
+| absent to present | created, **or** newly included in the backup set |
+
+The last two rows are ambiguous by nature and must be disambiguated against the
+snapshot's `paths` scope before being reported; a path that was never in scope
+must never be presented as a deletion.
+
+Because a directory revision is immutable, two snapshots that share a directory
+revision along the path share the entire remainder of the walk. Memoizing on the
+child revision key collapses most of the work: the root revision differs whenever
+anything anywhere in the tree changed, but sharing appears within a level or two
+below it, so the practical cost is a small number of lookups per snapshot rather
+than full path depth. Lookups across snapshots are independent and must be issued
+through `MultiGet` rather than serially.
+
+This approach is exactly correct, requires no new namespace, and is the reference
+implementation against which any index is validated. Its floor is
+**O(retained snapshots)**, because every snapshot root must be consulted before
+it can be excluded. That is acceptable for hundreds of snapshots and not for tens
+of thousands.
+
+#### Commit-ordered snapshot index
+
+`sc:` (section 5) removes the scan over `s:` and gives the walk its iteration
+order. It is small, bounded by snapshot count, and is worth adding regardless of
+whether the path index is adopted, since it also serves any other query that
+needs snapshots in commit order.
+
+#### Versioned path index
+
+`pv:` (section 5) makes path history a single prefix scan, bounded by the number
+of times that path's binding changed. It is the only structure that answers the
+recreation case directly, and the only one whose cost is proportional to the
+answer rather than to the repository's snapshot count.
+
+It must remain derived and rebuildable. A path query resolves the candidate
+revision range from `pv:`, then confirms membership per snapshot through the
+directory walk. Skipping that confirmation would report a binding as present in a
+snapshot that never contained the path.
+
+#### Path-keyed, not hash-keyed
+
+A hashed path key (`pv:<fsid>:<path-hash>:<revision-seq>`) is the obvious way to
+keep keys fixed width and match the rest of the schema. It is the wrong trade
+here, for a reason that is easy to miss: hashing destroys sort locality.
+
+With a hash key, adjacent entries are unrelated paths, so keys gain no prefix
+compression, path strings in values do not compress against their neighbours, and
+the path must be stored in the value anyway because a hash cannot be reversed for
+listing. Subtree queries become impossible. Collisions additionally force a wide
+hash: at 1.4 billion paths, a 64-bit hash has roughly a 5% birthday collision
+probability, so 128 bits would be the minimum.
+
+Storing the path as the key costs variable-length keys but wins on every other
+axis, including size once block prefix compression and zstd are accounted for.
+Order-of-magnitude estimates for the 1.4 billion path baseline, assuming a
+100-byte average path:
+
+| encoding | raw bytes/entry | baseline |
+|---|---|---|
+| hash key, full path in value | ~149 | ~210 GB |
+| hash key, parent inode plus name | ~73 | ~105 GB |
+| hash key, no path stored | ~49 | ~70 GB |
+| **path-keyed, length-delimited** | ~134 raw, **~40 effective** | **~56 GB** |
+
+Incremental cost is driven by binding churn, not repository size. At daily
+backups and the path-keyed encoding: roughly 20 GB/year at 0.1% daily churn,
+100 GB/year at 0.5%, 200 GB/year at 1%.
+
+Against an estimated 350 to 400 GB baseline for the rest of the schema at this
+scale, the path-keyed encoding adds roughly 15%, where the naive hashed encoding
+would add over 50%. These figures are estimates whose dominant inputs are average
+path length and real churn rate; both must be measured on a representative
+filesystem before the namespace is enabled by default, and the measurement is an
+explicit exit criterion below.
+
+#### Hardlinks
+
+A hardlinked inode has several paths, and the schema already records this: `hr:`
+holds the full set of parent and name edges for an inode revision, and
+reconciliation deliberately does not invent a single parent. Path history and
+inode history therefore diverge legitimately for hardlinks, and both are correct.
+
+Every path of a hardlinked inode receives its own `pv:` binding. Inode history
+for such an inode must report all known paths at each revision rather than
+choosing one, and path history must not present a shared inode's changes as
+exclusive to the queried path.
+
+#### Time semantics
+
+Three different times exist and must never be merged into one column. The
+revision sequence is monotonic but explicitly not derived from wall-clock time,
+so it orders changes without dating them. Backup time comes from the snapshot
+record. Filesystem `mtime` and `ctime` come from the source and, for imported
+records, may be unknown or unverified.
+
+Output must therefore report backup time as the time a change was *captured*,
+report filesystem times separately, and preserve the existing distinction between
+unknown and zero-valued fields. An imported record must never be rendered as
+though its metadata were verified.
+
+#### Commands
+
+Add to the existing `index` group. `index history` is already the pack history
+command from section 12.2, so file history takes a distinct verb.
+
+`vaultic index file-history <path>` — binding and revision history for a path.
+
+- `--fsid` select the filesystem when the repository spans several
+- `--since`, `--until` bound the commit range
+- `--follow` continue across renames by tracking the inode when a binding ends
+- `--inode` query by `<fsid>:<inode>` instead of a path
+- `--snapshots` annotate each change with the snapshots that captured it
+- `--content` report content-manifest identity changes, distinguishing metadata
+  only changes from content changes
+- `--verify` resolve every reported revision through the directory walk and
+  report any disagreement with `pv:`
+- `--json`
+
+`vaultic index path-at <path> --snapshot <id>` — resolve one path within one
+snapshot, reporting the resolved inode, revision, and the directory revision
+chain used. This is the primitive the walk exposes, and it is the diagnostic used
+when `--verify` reports a disagreement.
+
+Both commands are read-only, use the daemon `DbReader` path, and must fail
+explicitly on legacy repositories rather than answering from current state.
+
+Implementation phases for this section are Phases 13 and 14 of the plan below.
+
+## 14. Data growth, churn, per-user/group attribution, and GDPR compliance
+
+### 14.1 Objective
+
+Repository growth and churn are not uniform across time, paths, or users. In an enterprise setting with hundreds of users and massive shared storage (e.g., 500+ TB, 1.4B inodes), operators and compliance officers need answers to specific operational and regulatory questions:
+
+1. **Growth & Churn Time Series:** When is data growing or churning (per week, per month, per year) across the overall repository and within major subdirectories or explicitly tracked paths?
+2. **User & Group Attribution:** Which users or groups are driving storage growth or generating the highest churn?
+3. **GDPR / Compliance Audit:** Which user-produced or user-owned data (files, revisions, blobs, and cold storage packs) currently exists in the vaultic repository?
+
+The objective is to implement time-bucketed rollups, path-prefix rollups, POSIX UID/GID attribution, and user-data indices in `vaulticdb` with negligible processing and storage overhead, making these insights instantly queryable via the CLI without scanning full backup trees or cold storage packs.
+
+### 14.2 Methodology
+
+#### Invariant & Metadata Source
+
+POSIX `stat()` calls during backup crawls already supply file `uid`, `gid`, `size`, and modification times. Inode records (`iv:<fsid>:<inode>:<revision-seq>`) already persist `uid` and `gid`. By aggregating these fields at backup reconciliation time, vaultic maintains user and path attribution incrementally without additional filesystem I/O.
+
+#### Time-Bucket & Path Churn Rollups
+
+To answer growth and churn questions per week, month, year, or tracked path, `vaulticdb` maintains rollup time-series records:
+
+```text
+key:   g:time:<granularity>:<timestamp>:<tier>
+value: bytes_added, bytes_deleted, net_change, files_added, files_deleted
+
+key:   g:path:<path_prefix>:<granularity>:<timestamp>
+value: bytes_added, bytes_deleted, net_change, files_added, files_deleted
+```
+
+Granularities: `week`, `month`, `year`.
+`path_prefix` is normalized (e.g. `/home`, `/data/projects`, `/var/log` or paths specified via `--track-path`).
+Rollups are updated atomically in the same transaction that commits new inode revisions or reconciles deleted snapshots.
+
+#### Per-User and Per-Group Ownership Aggregates
+
+Maintain real-time current storage state and time-series churn per UID and GID:
+
+```text
+key:   u:summary:<uid>
+value: active_bytes, active_files, unique_blobs_count, unique_blobs_bytes
+
+key:   g:summary:<gid>
+value: active_bytes, active_files, unique_blobs_count, unique_blobs_bytes
+
+key:   u:churn:<uid>:<granularity>:<timestamp>
+value: bytes_added, bytes_deleted, files_modified, files_deleted
+```
+
+- **Active Bytes:** Total uncompressed size of active files currently owned by `uid` across active snapshots.
+- **Unique Blobs Bytes:** Attributed storage footprint accounting for deduplication. Deduplicated blobs can be attributed equally across referencing UIDs or attributed to `first_seen_uid`.
+- **User Churn:** Incremental delta recorded per backup run / snapshot purge window.
+
+#### User-to-Data Links for GDPR Auditing
+
+To answer GDPR "Right of Access" and "Right to be Forgotten / Erasure" queries (*"Which data produced by User X is in the vault?"*), SlateDB maintains secondary lookup mappings:
+
+```text
+key:   u:inodes:<uid>:<fsid>:<inode>
+value: latest_revision_seq, path_sample
+
+key:   u:blobs:<uid>:<blob_hash>
+value: ref_count, first_seen_timestamp
+```
+
+- **GDPR Inspection:** A query for UID `1042` performs a prefix scan on `u:inodes:1042:` and `u:blobs:1042:`. It instantly yields all active paths, inode revisions, blob hashes, and the cold/hot pack IDs where UID 1042's data resides.
+- **GDPR Erasure / Policy Handling:** Shows which snapshots hold UID 1042's data and which packs contain those blobs. If a retention lock prevents immediate cold pack deletion, the compliance report explicitly details when the retention window expires (`min_retention_until`).
+
+### 14.3 Processing & Storage Overhead Analysis
+
+#### Storage Overhead
+
+In a 500+ TB repository with 1.4 billion inodes and 100M blobs:
+
+1. **User/Group Summaries (`u:summary`, `g:summary`):**
+   - ~64 bytes per user/group record.
+   - For 10,000 users across an enterprise: **~640 KB total** (negligible).
+2. **User Monthly Churn Time-Series (`u:churn`):**
+   - ~48 bytes per user per month.
+   - For 10,000 users over 5 years (60 months): **~2.88 MB total**.
+3. **User Blob Index (`u:blobs` for exact GDPR lookup):**
+   - ~36 bytes per `(uid, blob_hash)` mapping.
+   - For 100 million unique blobs distributed across users: **~3.6 GB total**.
+   - Against a 500 TB data repository, 3.6 GB is **~0.0007%** (less than 1 thousandth of one percent) of overall storage footprint.
+
+#### Processing Overhead
+
+1. **Backup Phase:**
+   - `lstat()` already reads file `uid` and `gid`.
+   - In-memory aggregation during the scanner phase adds an $O(1)$ map lookup per file.
+   - Updating `u:summary` and `u:churn` in the daemon's `WriteBatch` adds < 1% CPU overhead to backup reconciliation and zero additional disk/network I/O calls.
+2. **Prune / Forget Phase:**
+   - When snapshots are purged, the daemon computes user deltas by reading deleted revision trees via fast SlateDB range iterators.
+
+### 14.4 CLI Command Surface
+
+`vaultic index growth` — Query growth and churn over time and subdirectories.
+
+- `--granularity week|month|year`
+- `--path <prefix>` filter or group by major subdirectories
+- `--since`, `--until`
+- `--json`
+
+`vaultic index user-stats` — Query user/group storage usage and churn rankings.
+
+- `--top-storage` rank users/groups by total active stored bytes
+- `--top-churn` rank users/groups by churn (`bytes_added + bytes_deleted`) over a time window
+- `--since`, `--until` (e.g., `--since 2m` for the last 2 months)
+- `--group-by user|group`
+- `--limit N` (e.g., `--limit 10`)
+- `--json`
+
+`vaultic index gdpr audit` — GDPR compliance inspection tool.
+
+- `--uid <uid>` or `--username <name>`
+- `--gid <gid>`
+- `--detail` include exact file paths, inode revisions, blob hashes, and pack IDs
+- `--json`
+
+Outputs a complete audit report listing active paths, referenced blob IDs, target storage packs (hot vs cold), and retention expiry dates (`min_retention_until`).
+
+## 15. Execution-oriented phased implementation plan
 
 Each phase below is an independently executable change set. An implementation
 phase must end with its listed tests passing, a documented artifact or API
@@ -1476,7 +2162,277 @@ loads) requires dedicated infrastructure beyond this environment; the tunable
 surface it needs (daemon transaction batch size, scan page size, snapshot
 work budgets) is already wired through Phase 7 and Phase 8's CLI options.
 
-## 13. Testing strategy
+### Phase 9: Pack tier model and lifetime facts
+
+**Goal:** make tier, creation time, retention deadline, and usage accounting
+durable properties of the pack catalog, without changing any policy yet.
+
+**Implementation steps:**
+
+1. Extend the versioned pack record with `tier`, `storage_class`, `created_at`
+  plus `creation_time_known`, `min_retention_until` plus `retention_source`,
+  `used_payload_bytes`, `unused_payload_bytes`, and `delete_after`. Bump the
+  record schema version; older records decode with `tier = unknown` and
+  `retention_source = unknown`.
+2. Record the tier at pack publish time from the pack type and the configured
+  hot/cold routing, rather than deriving it on read.
+3. Add `a:tier:*` aggregates and update them atomically with pack records.
+4. Maintain `used_payload_bytes`/`unused_payload_bytes` incrementally where
+  reachability already changes (forget, GC discovery), and make them
+  rebuildable from the blob index.
+5. Populate `created_at` for packs written by vaultic; leave imported legacy
+  packs `creation_time_known = false`. Do not synthesize a timestamp.
+6. Teach `index check` to rebuild tier aggregates and report drift,
+  unknown-tier packs, and retention-unknown packs.
+
+**Tests:** schema round trip including forward/backward compatibility with
+Phase 3 records; tier assignment for data, tree, and mixed packs in a hot/cold
+repository and in a single-backend repository; aggregate atomicity and rebuild;
+usage accounting matching a full recomputation after forget and GC; import of a
+legacy repository leaving every pack retention-unknown.
+
+**Exit criterion:** a hot/cold repository reports correct per-tier totals, and
+`index check` rebuilds them from `p:` records with zero drift.
+
+### Phase 10: Pack history event log and rollups
+
+**Goal:** durable, append-only history of pack lifecycle transitions that
+survives deletion of the packs it describes.
+
+**Implementation steps:**
+
+1. Add the `ph:` event namespace and write an event in the same transaction as
+  every pack catalog transition: create, import, publish, tier change,
+  coalesced usage change, repack lineage, delete-pending, delete, delete
+  failure, orphan detection.
+2. Record `predecessor_pack_ids` on repack events so churn is distinguishable
+  from growth.
+3. Coalesce `usage_changed` events per pack per run; never emit one per blob.
+4. Add the `pb:` rollup namespace with hourly, daily, and monthly
+  granularities, computed idempotently from retained raw events, each bucket
+  carrying a `complete`/`partial`/`reconstructed` coverage flag.
+5. Implement history retention: roll up, then truncate raw events, writing a
+  coverage marker for the truncated range.
+6. Guarantee history is advisory: a missing, truncated, or corrupt history
+  record must never fail or alter backup, restore, prune, or GC. Add a
+  fault-injection test that corrupts history and asserts all data paths still
+  succeed.
+7. Mark buckets covering periods before history collection was enabled, or
+  produced by legacy import, as `reconstructed`.
+
+**Tests:** event ordering and key uniqueness under concurrent writers; rollup
+idempotence and equality against a direct scan of raw events; coverage flags
+after enabling history on an existing repository and after a retention run;
+events for deleted packs still readable; repack lineage reconstructable across
+several generations; corrupted-history fault injection leaving every data path
+green.
+
+**Exit criterion:** a repository that has been backed up, repacked, and pruned
+can report its full pack history, including for packs no longer present, with
+correct coverage flags.
+
+### Phase 11: Introspection CLI
+
+**Goal:** answer composition and growth questions from the CLI without a
+backend listing or a full index load.
+
+**Implementation steps:**
+
+1. Add `vaultic index stats` with grouping, filtering, `--verify`, `--rebuild`,
+  and `--json`.
+2. Add `vaultic index packs` with catalog filters, sorting, `--count-only`, and
+  `--json`.
+3. Add `vaultic index history` with metric, bucket, range, grouping,
+  `--histogram`, and `--forecast`. Report repack churn separately from net
+  growth. Refuse to forecast from incomplete series unless
+  `--allow-incomplete` is passed.
+4. Add `vaultic index history prune` with per-granularity retention and
+  `--dry-run`.
+5. Add `vaultic index backends` with per-tier reporting, opt-in `--compare`
+  backend listing, and `--no-list`.
+6. Define stable JSON output schemas for all of the above and version them; the
+  human-readable output may change, the JSON contract may not without a version
+  bump.
+7. Ensure every output surfaces unknown tier, unknown type, retention-unknown,
+  and incomplete-coverage counts explicitly instead of folding them into
+  totals.
+8. Legacy repositories: run in a documented reduced mode or fail explicitly.
+  Never present a partial answer as complete.
+
+**Tests:** golden JSON output tests for each command; filter and sort coverage;
+histogram bucketing across timezone and DST boundaries; `--compare` against a
+backend with a deliberately missing object and a deliberately extra object;
+`--no-list` performing zero backend requests; forecast refusal on incomplete
+series; behavior on a legacy repository.
+
+**Exit criterion:** an operator can obtain pack counts, sizes, per-tier
+composition, and a creation/change histogram with growth rate for a repository
+whose cold tier is never listed.
+
+### Phase 12: Tier-aware prune and cold cost model
+
+**Goal:** two independent policies driven by the Phase 9 facts, with
+retention-aware deferred deletion.
+
+**Implementation steps:**
+
+1. Parameterise `decidePackAction` by a resolved per-tier policy instead of one
+  global policy. Preserve today's behavior exactly when the repository has no
+  hot part or is legacy.
+2. Add hot-tier options (aggressive defaults) and cold-tier options
+  (`--cold-max-repack`, defaulting to zero) with separate repack budgets.
+3. Implement the cold cost model with `--cold-price-per-gb-month`,
+  `--cold-egress-per-gb`, `--cold-request-cost`, `--cold-horizon`, and
+  `--cold-min-retention`, defaulting so the predicate is false. Emit the
+  decision inputs and outcome in `--json`.
+4. Compute `delete_after = max(now + keep_delete, min_retention_until)` and add
+  the `dq:` deadline-ordered deletion queue; make prune, `index gc`, and a
+  dedicated sweep collect the expired prefix by range scan.
+5. Treat retention-unknown packs conservatively: eligible for ordinary
+  reachability-based deletion, never credited with early-deletion savings in
+  the cost model.
+6. Add tier-aware write-time placement: a larger cold target pack size and
+  lifetime-based grouping of cold blobs.
+7. Warm up cold packs before any cold repack read, reusing the existing warm-up
+  path, and abort the cold repack rather than block indefinitely when warm-up
+  fails.
+8. Documentation: extend the cold storage and forget documentation with the
+  per-tier policy table, the cost model, and the retention-aware deletion
+  deadline.
+
+**Tests:** unit coverage for tier policy resolution and cost-model boundary
+cases including zero, unknown, and expired retention; deletion-queue ordering,
+crash between enqueue and sweep, and convergence on a repeated run; an
+end-to-end hot/cold test proving that a default-configured prune repacks hot
+packs and performs no cold reads at all; a test proving a cold pack past its
+retention deadline is collected on a routine run without any extra operator
+action; an explicit regression test that a non-hot/cold repository's prune
+decisions are byte-for-byte unchanged.
+
+**Exit criterion:** on a hot/cold repository, default prune defragments the hot
+tier, issues zero cold-tier reads, and defers cold deletions until retention
+expiry, with every decision explainable from `--json` output.
+
+### Phase 13: Historical path resolution and file-history CLI
+
+**Goal:** answer path and inode history questions correctly from the existing
+schema, before adding any new per-path storage.
+
+This phase deliberately ships the feature with no growth in the largest
+namespaces. It establishes the reference semantics, and it produces the churn
+measurement that decides whether Phase 14 is worth its storage cost.
+
+**Implementation steps:**
+
+1. Add the `sc:` commit-ordered snapshot index. Write it in the same transaction
+  that publishes snapshot scope, and add an `index check` rebuild that derives it
+  from `s:` records and reports drift.
+2. Implement a historical path resolver that walks a path from a snapshot root
+  through versioned directory child references only. It must never read `i:` or
+  `d:` current pointers, and must fail closed if a child reference is missing a
+  revision rather than falling back to current state.
+3. Memoize the walk on child revision keys across snapshots, and batch
+  cross-snapshot lookups through `MultiGet` with the negotiated page limits.
+4. Resolve a path across a commit range into a coalesced change list,
+  classifying modified, rebound, created, and deleted transitions.
+5. Disambiguate absence against the snapshot's `paths` scope so an out-of-scope
+  path is reported as not covered, never as deleted.
+6. Report hardlinked inodes with their full `hr:` path set rather than a single
+  parent.
+7. Add `vaultic index file-history` and `vaultic index path-at` with the options
+  in section 13.2, a versioned JSON schema, and explicit failure on legacy
+  repositories.
+8. Separate the three time sources in all output, and preserve the
+  unknown-versus-zero distinction for imported records.
+9. Instrument the resolver to record binding-change counts and average path
+  length during normal backups, so Phase 14 sizing rests on measurements from a
+  real filesystem rather than on the estimates in section 13.2.
+
+**Files/artifacts:** path resolver package under `internal/index`, `sc:` key
+support in `internal/index/schema`, `index file-history` and `index path-at`
+commands, versioned JSON output schemas.
+
+**Tests:** resolution of a path that was renamed, deleted, recreated as a
+different inode, and replaced by a directory; a path outside a snapshot's scope
+reported as not covered rather than deleted; hardlinked inode reporting every
+path; correct resolution of an old snapshot after later revisions changed current
+pointers, asserting the resolver never reads a current pointer; memoization
+producing results identical to an unmemoized walk; `sc:` rebuild and drift
+detection; golden JSON output; explicit failure on a legacy repository.
+
+**Exit criterion:** file history is correct against a repository containing
+renames, recreations, and hardlinks, resolved entirely through immutable
+revisions, and a measured binding-churn rate and average path length are recorded
+for the target filesystem.
+
+### Phase 14: Versioned path index
+
+**Goal:** make path history proportional to the number of changes reported rather
+than to the number of retained snapshots.
+
+**Precondition:** Phase 13 complete, and its churn measurement shows the walk's
+`O(retained snapshots)` floor is actually a problem for the target repository.
+If the measured cost is acceptable, this phase should not be started.
+
+**Implementation steps:**
+
+1. Add the `pv:` namespace with the path-keyed, `0x00`-terminated encoding from
+  section 5. Extend key parsing to handle a variable-length key by prefix rather
+  than by exact length, which no existing namespace requires.
+2. Bound the maximum indexed path length explicitly and record an overflow marker
+  rather than truncating a path into a colliding key.
+3. Write bindings only on create, delete, rename, and rebinding, in the same
+  transaction as the metadata revision that caused the change. Never write on a
+  content-only or metadata-only change.
+4. Write one binding per path for hardlinked inodes, derived from `hr:`.
+5. Serve `index file-history` from `pv:` when present, then confirm membership
+  per snapshot through the Phase 13 walk before reporting. Keep the pure walk
+  reachable as `--verify` and as the fallback when the namespace is absent or
+  incomplete.
+6. Add an `index check` rebuild that regenerates `pv:` from directory revisions
+  and reports drift, and make a rebuild required after any repair that rewrites
+  directory revisions.
+7. Prune bindings together with the snapshots that reference them, so the
+  namespace is bounded by the retention window.
+8. Make the namespace opt-in per repository, with a documented storage estimate
+  derived from the Phase 13 measurement, and a command to build it for an
+  existing repository incrementally.
+
+**Files/artifacts:** `pv:` key and record support, variable-length key parsing,
+binding writer in the reconciliation transaction, rebuild and prune paths.
+
+**Tests:** `pv:` results identical to the Phase 13 walk across the full rename,
+recreation, hardlink, and out-of-scope corpus; no binding written for
+content-only or metadata-only changes; key ordering placing a path's revisions
+before its descendants and grouping subtrees contiguously; paths differing only
+by a terminator boundary such as `/a/b` and `/a/bc` not colliding; overflow
+marker for over-long paths; rebuild from directory revisions matching incremental
+writes; pruning with snapshot forget; incremental build on an existing
+repository; measured storage growth compared against the documented estimate.
+
+**Exit criterion:** path history for a repository with tens of thousands of
+snapshots is answered in time proportional to the changes reported, `pv:` is
+rebuildable from directory revisions with zero drift, and measured storage growth
+matches the documented estimate within its stated tolerance.
+
+### Phase 15: Growth, churn, per-user/group attribution, and GDPR audit CLI
+
+**Goal:** expose growth time series, major subdirectory churn, top user/group storage ranking, and GDPR compliance inspection tools via the CLI.
+
+**Implementation steps:**
+
+1. Implement `g:time:*` and `g:path:*` rollup updates in the backup reconciliation transaction.
+2. Implement `u:summary:*`, `g:summary:*`, `u:churn:*`, `u:inodes:*`, and `u:blobs:*` updates during backup reconciliation and snapshot purge transactions.
+3. Implement `vaultic index growth` with time bucket granularities (`week`, `month`, `year`) and path prefix filters.
+4. Implement `vaultic index user-stats` with `--top-storage` and `--top-churn` rankings, `--since` time bounds, and `--limit`.
+5. Implement `vaultic index gdpr audit --uid <uid>` returning active paths, inode revisions, referenced blob hashes, and storage pack locations with retention expiry dates.
+6. Add `index check` validation for user/group summaries and time-series rollups, with automated rebuild capabilities.
+
+**Tests:** growth rollup accuracy across simulated weekly/monthly backup series; user storage ranking accuracy against raw file sizes; top churner query results over 2-month window; GDPR inspection returning exact paths and cold storage pack retention dates for a given UID; aggregate rebuild after user stats drift.
+
+**Exit criterion:** operators can query top churners, top storage consumers, growth by subdirectory, and complete GDPR user-data location reports instantly from the CLI.
+
+## 16. Testing strategy
 
 ### Unit tests
 
@@ -1488,9 +2444,24 @@ work budgets) is already wired through Phase 7 and Phase 8's CLI options.
 - Large content manifests remain bounded, immutable, and deduplicated
 - Current-pointer updates never mutate historical records
 - Snapshot manifests resolve the correct root and historical version scope
+- Directory child references carry a complete versioned metadata key, and a
+  child reference lacking a revision is rejected rather than resolved against
+  current pointers
+- Historical path resolution walks only immutable revisions, including after
+  later changes to current pointers
+- Path change classification for rename, delete, recreation as a different
+  inode, and replacement of a file by a directory
+- Out-of-scope paths reported as not covered rather than deleted
+- `pv:` key ordering: a path's revisions precede its descendants, subtrees are
+  contiguous, and terminator-boundary paths do not collide
+- `sc:` and `pv:` rebuild from authoritative records with zero drift
 - Duplicate blob-location preservation
 - Pack catalog deduplication across multiple source indexes
 - Data/tree/mixed/unknown pack classification and physical/payload size totals
+- Tier assignment, per-tier aggregates, and retention-deadline computation
+- Pack history event ordering, rollup idempotence, and coverage flagging
+- Tier policy resolution and cold cost-model boundary cases
+- Deletion-queue deadline ordering and expired-prefix sweeps
 - Aggregate rebuild and drift detection after import, backup, export, and prune
 - Reverse-edge creation, deduplicated inode counts, reachability candidates,
   and counter rebuilds
@@ -1510,6 +2481,9 @@ work budgets) is already wired through Phase 7 and Phase 8's CLI options.
 - Crash during import batch
 - Local object store and S3-compatible object store
 - Read-only `DbReader` operations while a writer is active
+- File history across a repository containing renames, recreations, hardlinks,
+  and snapshots with differing backup scopes
+- `pv:`-served history agreeing with the pure directory walk over that corpus
 - Daemon startup races, singleton reuse, stale socket recovery, and protocol
   mismatch rejection
 - Unix-socket permissions and TCP-disabled-by-default behavior
@@ -1526,6 +2500,8 @@ work budgets) is already wired through Phase 7 and Phase 8's CLI options.
 - Content-manifest lookup, segmentation, deduplication, and restore memory at
   small, medium, and very large file sizes
 - Reverse-reference index size, hot-key behavior, and reachability-scan cost
+- Path-resolution cost as retained snapshot count grows, with and without `pv:`
+- `pv:` size growth against measured binding churn and average path length
 - Compaction and reader lag under sustained backup writes
 
 ### Safety tests
@@ -1540,7 +2516,7 @@ Run with `-race` where applicable and test:
 - legacy fallback when SlateDB is absent
 - hard failure when SlateDB is present but corrupt
 
-## 14. Operational observability
+## 17. Operational observability
 
 Expose metrics and structured events for:
 
@@ -1556,10 +2532,21 @@ Expose metrics and structured events for:
 - pending JSON exports
 - differential-check discrepancies
 - pack counts and physical/payload/header/blob totals by type
+- pack counts and totals by tier, plus unknown-tier and retention-unknown counts
+- pack history events written, rollup runs, and history retention truncations
+- history coverage state per granularity (complete, partial, reconstructed)
+- cold cost-model evaluations, accepted and rejected repack decisions
+- deletion-queue depth, oldest and nearest deadline, and expired-prefix sweep
+  counts
+- warm-up invocations, batches, and wait time attributable to prune or GC
 - mixed and unknown pack counts
 - aggregate drift and pack-catalog repair counts
 - distinct inode, inode-revision, manifest, and retained-snapshot reference
   counts per blob class
+- path-binding changes written per backup, and average indexed path length
+- path-resolution lookups, memoization hit rate, and snapshots consulted per
+  file-history query
+- `pv:` and `sc:` record counts, rebuild runs, and detected drift
 - logical-to-unique-content deduplication ratio and physical pack amplification
 - GC candidate, revalidation, repack, delete-pending, and deletion-failure
   counts
@@ -1570,7 +2557,7 @@ Expose metrics and structured events for:
 
 Never log inode paths, access tokens, or raw repository keys at normal verbosity.
 
-## 15. Rollout and rollback
+## 18. Rollout and rollback
 
 1. Ship the legacy adapter and detection code disabled by default.
 2. Enable schema and import commands for operators without making SlateDB
@@ -1585,7 +2572,7 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
 9. Do not remove legacy JSON indexes until a separately approved migration
    policy exists.
 
-## 16. Known constraints
+## 19. Known constraints
 
 - The official Go binding is CGO-based and generated from UniFFI, but it is
   isolated inside the Rust `vaulticdb` build rather than loaded by vaultic.
@@ -1595,6 +2582,28 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
   the actual S3/MinIO/NetApp deployment model.
 - Legacy JSON indexes cannot by themselves reconstruct all inode and directory
   metadata.
+- Backend `FileInfo` does not carry a reliable creation or modification time,
+  so pack creation time must be recorded by vaultic at publish time. Packs
+  inherited from a legacy repository stay retention-unknown permanently, and no
+  timestamp may be invented for them.
+- Cold cost-model inputs are operator-supplied estimates, not billing data. The
+  model exists to make the decision explicit and auditable, not to predict a
+  cloud invoice.
+- Pack history is advisory and derived. It must never gate or influence a
+  destructive decision, and a history gap must never fail a data path.
+- Path and inode history are likewise derived and advisory. `sc:` and `pv:` are
+  accelerators that must be rebuildable from snapshot and directory records, and
+  snapshot membership is always confirmed through immutable directory revisions
+  rather than from a binding record alone.
+- `pv:` is the only variable-length key in the schema. Its `0x00` terminator is
+  safe only because POSIX path components cannot contain a NUL byte, and key
+  parsing must match it by prefix rather than by exact length.
+- Path history cost without `pv:` has a floor proportional to the number of
+  retained snapshots, because every snapshot root must be consulted before it can
+  be excluded. Memoization reduces the constant, not the floor.
+- Hardlinked inodes legitimately have several paths. Path history and inode
+  history diverge for them by design, and neither view may present a shared
+  inode's changes as exclusive to one path.
 - Partial import is therefore intentional: JSON import recovers all available
   blob-index facts, while the next backup crawl fills metadata blanks.
 - The existing vaultic index model and lock behavior must remain the fallback
