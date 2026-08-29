@@ -1109,6 +1109,8 @@ than against hard-coded names:
 backend:
   id                      stable identifier, recorded in placements
   role                    metadata, primary, archival, cache
+  ingest                  boolean; true permits new pack placement, false makes backend read-only
+  read_enabled            boolean; true permits read/restore/warmup operations
   offsite                 boolean
   failure_domain          opaque label; two backends sharing one are not
                           independent copies
