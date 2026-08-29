@@ -1,0 +1,31 @@
+Enhancement: Track pack placement per backend in SlateDB metadata
+
+SlateDB metadata previously recorded only a pack-level storage tier, which could
+not describe repositories with several backends or different retention rules per
+copy.
+
+Vaultic now records each pack placement separately in the SlateDB metadata. The
+repository config can declare placement backends with roles, offsite status,
+failure domains, capacity and cost hints, minimum retention, retrieval class,
+bandwidth ceiling, and object overhead. Existing single-backend and hot/cold
+repositories resolve to the same behavior when no explicit placement registry is
+configured.
+
+`vaultic index check` now validates placement records, backend reverse indexes,
+derived tier summaries, and the durability predicate. `vaultic index
+rebuild-pack-stats` migrates known Phase 9 tier summaries into initial placement
+records, rebuilds the derived tier summary, rebuilds pack and tier aggregates,
+and rebuilds the backend reverse index.
+
+`vaultic index stats` and `vaultic index packs` now use schema version 2 JSON and
+can filter or group by backend and storage class. `index packs` also supports
+`--not-offsite`, `--promotion-due`, and sorting by `offsite-deadline`.
+
+SlateDB GC records placement eviction state and per-backend delete deadlines, so
+a placement whose backend still enforces minimum retention can remain queued
+while eligible placements are handled by later runs. Repack reads are warmed
+through the existing warm-up path before reading archival packs, and constrained
+placements use the configured cost model to decide whether repacking is worth
+performing.
+
+https://github.com/vaultic/vaultic/pull/22016

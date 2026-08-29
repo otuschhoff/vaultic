@@ -63,6 +63,59 @@ func blobsOfType(t *testing.T, types ...vaultic.BlobType) pack.Blobs {
 	return blobs
 }
 
+func TestSchemaPackDerivesPlacementRecordsFromTier(t *testing.T) {
+	policy := TierPolicy{Resolved: true, HotCold: true, Backends: []PlacementBackendPolicy{
+		{ID: "hot", Hash: 1, Role: "primary"},
+		{ID: "cold", Hash: 2, Role: "archival", StorageClass: "GLACIER", MinRetention: 180 * 24 * time.Hour},
+	}}
+
+	data, err := schemaPack(vaultic.NewRandomID(), blobsOfType(t, vaultic.DataBlob), 100, true, policy, testPublishTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Placements) != 1 {
+		t.Fatalf("data pack placements = %#v, want cold only", data.Placements)
+	}
+	cold := data.Placements[2]
+	if cold.State != schema.PlacementLive || cold.Bytes != 100 || cold.StorageClass != "GLACIER" {
+		t.Fatalf("cold placement = %#v", cold)
+	}
+	if cold.RetentionSource != schema.RetentionConfig || cold.MinRetentionUntil != testPublishTime.Add(180*24*time.Hour).UnixNano() {
+		t.Fatalf("cold retention = %#v", cold)
+	}
+	if data.Record.RetentionSource != schema.RetentionUnknown || data.Record.MinRetentionUntil != 0 {
+		t.Fatalf("pack-level retention was not moved to placement: %#v", data.Record)
+	}
+
+	tree, err := schemaPack(vaultic.NewRandomID(), blobsOfType(t, vaultic.TreeBlob), 100, true, policy, testPublishTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Placements) != 2 {
+		t.Fatalf("tree pack placements = %#v, want hot+cold", tree.Placements)
+	}
+	if _, ok := tree.Placements[1]; !ok {
+		t.Fatalf("tree pack lacks hot placement: %#v", tree.Placements)
+	}
+	if _, ok := tree.Placements[2]; !ok {
+		t.Fatalf("tree pack lacks cold placement: %#v", tree.Placements)
+	}
+}
+
+func TestSchemaPackDoesNotInventUnknownPlacements(t *testing.T) {
+	policy := TierPolicy{Backends: []PlacementBackendPolicy{{ID: "single", Hash: 1, Role: "primary"}}}
+	published, err := schemaPack(vaultic.NewRandomID(), blobsOfType(t, vaultic.DataBlob), 100, true, policy, testPublishTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.Record.Tier != schema.TierUnknown {
+		t.Fatalf("unresolved policy recorded tier %#v", published.Record.Tier)
+	}
+	if len(published.Placements) != 0 {
+		t.Fatalf("unresolved policy invented placements: %#v", published.Placements)
+	}
+}
+
 // TestTierIsRecordedFromActualRouting pins the tier assigned at publish time
 // for every pack type, in both repository layouts.
 //

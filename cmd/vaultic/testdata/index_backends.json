@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "hot_cold": true,
   "reduced_mode": false,
   "backends": [

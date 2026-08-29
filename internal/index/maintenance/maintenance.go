@@ -55,29 +55,35 @@ type ExportResult struct {
 }
 
 type CheckResult struct {
-	LegacyIndexes         uint64 `json:"legacy_indexes"`
-	LegacySnapshots       uint64 `json:"legacy_snapshots"`
-	SlateDBSnapshots      uint64 `json:"slatedb_snapshots"`
-	LegacyLocations       uint64 `json:"legacy_locations"`
-	SlateDBLocations      uint64 `json:"slatedb_locations"`
-	MissingInSlateDB      uint64 `json:"missing_in_slatedb"`
-	MissingInLegacy       uint64 `json:"missing_in_legacy"`
-	MissingPacks          uint64 `json:"missing_packs"`
-	InvalidPacks          uint64 `json:"invalid_packs"`
-	AggregateMismatch     uint64 `json:"aggregate_mismatches"`
-	ReverseEdgeMismatch   uint64 `json:"reverse_edge_mismatches"`
-	UnresolvedReferences  uint64 `json:"unresolved_references"`
-	SnapshotMismatch      uint64 `json:"snapshot_mismatches"`
-	UnresolvedSnapshots   uint64 `json:"unresolved_snapshots"`
-	PendingCrawlDebt      uint64 `json:"pending_crawl_debt"`
-	PendingExports        uint64 `json:"pending_exports"`
-	FailedExports         uint64 `json:"failed_exports"`
-	ExportCheckpoints     uint64 `json:"export_checkpoints"`
-	MixedPacks            uint64 `json:"mixed_packs"`
-	UnknownPacks          uint64 `json:"unknown_packs"`
-	UnknownTierPacks      uint64 `json:"unknown_tier_packs"`
-	RetentionUnknownPacks uint64 `json:"retention_unknown_packs"`
-	UsageUnaccountedPacks uint64 `json:"usage_unaccounted_packs"`
+	LegacyIndexes             uint64 `json:"legacy_indexes"`
+	LegacySnapshots           uint64 `json:"legacy_snapshots"`
+	SlateDBSnapshots          uint64 `json:"slatedb_snapshots"`
+	LegacyLocations           uint64 `json:"legacy_locations"`
+	SlateDBLocations          uint64 `json:"slatedb_locations"`
+	MissingInSlateDB          uint64 `json:"missing_in_slatedb"`
+	MissingInLegacy           uint64 `json:"missing_in_legacy"`
+	MissingPacks              uint64 `json:"missing_packs"`
+	InvalidPacks              uint64 `json:"invalid_packs"`
+	AggregateMismatch         uint64 `json:"aggregate_mismatches"`
+	ReverseEdgeMismatch       uint64 `json:"reverse_edge_mismatches"`
+	UnresolvedReferences      uint64 `json:"unresolved_references"`
+	SnapshotMismatch          uint64 `json:"snapshot_mismatches"`
+	UnresolvedSnapshots       uint64 `json:"unresolved_snapshots"`
+	PendingCrawlDebt          uint64 `json:"pending_crawl_debt"`
+	PendingExports            uint64 `json:"pending_exports"`
+	FailedExports             uint64 `json:"failed_exports"`
+	ExportCheckpoints         uint64 `json:"export_checkpoints"`
+	MixedPacks                uint64 `json:"mixed_packs"`
+	UnknownPacks              uint64 `json:"unknown_packs"`
+	UnknownTierPacks          uint64 `json:"unknown_tier_packs"`
+	RetentionUnknownPacks     uint64 `json:"retention_unknown_packs"`
+	UsageUnaccountedPacks     uint64 `json:"usage_unaccounted_packs"`
+	PlacementRecordsMalformed uint64 `json:"placement_records_malformed"`
+	MissingPlacementRecords   uint64 `json:"missing_placement_records"`
+	BackendPackMismatch       uint64 `json:"backend_pack_mismatches"`
+	DerivedTierMismatch       uint64 `json:"derived_tier_mismatches"`
+	PacksBelowDurability      uint64 `json:"packs_below_durability"`
+	UnknownPlacementBackends  uint64 `json:"unknown_placement_backends"`
 	// TierAggregatesUnbuilt marks a repository written before the tier
 	// dimension existed. It is a pending rebuild, not drift.
 	TierAggregatesUnbuilt bool `json:"tier_aggregates_unbuilt,omitempty"`
@@ -91,7 +97,7 @@ type CheckResult struct {
 }
 
 func (result CheckResult) Clean() bool {
-	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.FailedExports == 0
+	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0
 }
 
 func (result CheckResult) HasWarnings() bool { return result.Warnings != 0 }
@@ -101,6 +107,7 @@ type CheckOptions struct {
 	SlateDBOnly      bool
 	IncludeCrawlDebt bool
 	MaxFindings      uint
+	PlacementModel   PlacementModel
 }
 
 type Finding struct {
@@ -111,10 +118,13 @@ type Finding struct {
 }
 
 type RebuildResult struct {
-	PacksScanned      uint64           `json:"packs_scanned"`
-	AggregatesChanged uint64           `json:"aggregates_changed"`
-	UpdateSequence    uint64           `json:"update_sequence"`
-	Deltas            []AggregateDelta `json:"deltas,omitempty"`
+	PacksScanned              uint64           `json:"packs_scanned"`
+	AggregatesChanged         uint64           `json:"aggregates_changed"`
+	PlacementRecordsChanged   uint64           `json:"placement_records_changed"`
+	BackendPackRecordsChanged uint64           `json:"backend_pack_records_changed"`
+	TierSummaryChanged        uint64           `json:"tier_summary_changed"`
+	UpdateSequence            uint64           `json:"update_sequence"`
+	Deltas                    []AggregateDelta `json:"deltas,omitempty"`
 }
 
 type AggregateDelta struct {
@@ -297,6 +307,9 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 		return result, err
 	}
 	checkPackLifetime(packs, &result)
+	if err := checkPlacementRecords(ctx, store, packs, options.PlacementModel, &result, options.MaxFindings); err != nil {
+		return result, err
+	}
 	checkPackHistory(ctx, store, &result)
 	if err := checkOperationalState(ctx, store, options, packs, &result); err != nil {
 		return result, err

@@ -2879,6 +2879,60 @@ pack's placement set durably, refuses any eviction that would breach the
 durability predicate, and makes prune and delete decisions from the properties
 of the backend actually holding each copy.
 
+**Current implementation state (2026-08-29): complete for the Phase 12 schema,
+policy, and GC/prune decision layer.** Repository config now has an additive
+backend registry (`placement_backends`) and durability policy
+(`placement_policy`). Repositories with no declaration resolve to the existing
+single-backend or hot/cold behavior, and a single declared backend resolves to
+the same primary-backend posture.
+
+The SlateDB schema now has `pl:` placement records, `bp:` reverse backend-pack
+records, and `dq:` per-placement delete queue keys. New SlateDB publishes write
+`pl:` and `bp:` in the same transaction as the pack catalog transition. New
+placement-aware publishes leave pack-level retention fields unknown and record
+minimum retention on the placement instead. Existing Phase 9 tier summaries can
+be migrated with `vaultic index rebuild-pack-stats`: known tiers seed initial
+placements (`mirrored` -> primary+archival, `cold` -> archival, `single` ->
+primary), while `unknown` remains unplaced and must be reconciled from a real
+backend listing rather than invented.
+
+`index check` resolves the real placement model, validates `pl:` against `bp:`,
+reports stale or missing reverse records, detects tier-summary drift from the
+placement set, and reports packs below the durability predicate. The predicate
+counts live placements only, counts distinct failure domains rather than
+backend count, and treats pending placements as not yet protective.
+
+The rebuild path now repairs the derived state in the right order: migrate
+missing placement records, rebuild the tier summary from `pl:`, rebuild pack
+and tier aggregates from the repaired pack records, then rebuild `bp:` from
+`pl:` including deletion of stale reverse records. The `index stats` and
+`index packs` JSON contract is version 2 and reports the placement/backend
+dimension; `--backend`, `--class`, `--not-offsite`, `--promotion-due`, and the
+`offsite-deadline` sort key are active.
+
+SlateDB GC now marks placement records `evicting`, writes per-backend `dq:`
+records with `delete_after = max(now, min_retention_until)`, and skips physical
+pack deletion until every evicting placement's deadline has passed. Repacked
+source packs are warmed before being read, using the existing backend warm-up
+path and the caller's context. Mixed-pack classification invokes the
+placement-aware cost model for constrained placements; configured archival
+prices, egress, request cost, object overhead, and remaining retention can veto
+a repack when savings do not exceed movement and remaining-retention cost. With
+no costs declared the model degrades conservatively and does not invent savings
+for retention-unknown placements.
+
+**Verification performed:** tests cover the `pl:`, `bp:`, and `dq:` key codecs
+and value codecs; config registry round-trip and validation; publish-time
+placement derivation and atomic `pl:`/`bp:` persistence; delete-pending
+transition to `evicting`, `dq:` creation, and final cleanup; migration from
+every Phase 9 tier value including the no-invented-placement rule for
+`unknown`; durability boundary cases for shared failure domains, pending
+placements, and eviction refusal; true `bp:` rebuild including stale-key
+deletion; derived tier-summary repair; `index check` placement drift reporting;
+GC delete-deadline deferral; production GC classification using the cost model;
+and unchanged legacy/single-backend focused workflows. The versioned golden JSON
+contracts were refreshed to schema version 2.
+
 ### Phase 13: Historical path resolution and file-history CLI
 
 **Goal:** answer path and inode history questions correctly from the existing

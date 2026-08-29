@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scanned": 3,
   "matched": 3,
   "returned": 3,
@@ -61,6 +61,8 @@
     }
   ],
   "unknown_tier_packs": 1,
+  "unknown_placement_packs": 3,
+  "placement_records_malformed": 0,
   "unknown_type_packs": 1,
   "retention_unknown_packs": 1,
   "usage_unaccounted_packs": 1,

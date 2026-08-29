@@ -17,9 +17,9 @@ import (
 // incremented whenever the JSON shape or the meaning of a field changes, so a
 // consumer can detect the change instead of silently misreading it.
 //
-// Version 1 reports the Phase 9 tier dimension. When the placement model of
-// Phase 12 replaces tiers with backends, this becomes version 2.
-const IntrospectSchemaVersion = 1
+// Version 1 reported the Phase 9 tier dimension. Version 2 reports the Phase 12
+// backend placement dimension and keeps tier only as a derived summary.
+const IntrospectSchemaVersion = 2
 
 // ErrLegacyRepository is returned by introspection commands that have no
 // meaningful answer without a SlateDB pack catalog. Reporting a partial answer
@@ -38,16 +38,19 @@ const (
 
 // StatsOptions selects and groups repository composition.
 type StatsOptions struct {
-	// GroupBy names the dimensions to break totals down by: tier, type, or
-	// state. Grouping by state requires a catalog scan because no aggregate
-	// carries the lifecycle dimension.
-	GroupBy []string
-	Tier    string
-	Type    string
-	State   string
-	Verify  bool
-	Rebuild bool
-	DryRun  bool
+	// GroupBy names the dimensions to break totals down by: backend, type,
+	// state, class, or tier. Backend, state, class, and tier require a catalog
+	// scan because the aggregate records only carry the type dimension.
+	GroupBy        []string
+	Backend        string
+	Class          string
+	Tier           string
+	Type           string
+	State          string
+	PlacementModel PlacementModel
+	Verify         bool
+	Rebuild        bool
+	DryRun         bool
 }
 
 // StatsGroup is one row of composition totals.
@@ -77,10 +80,12 @@ type StatsResult struct {
 	StoredPhysicalSize uint64       `json:"stored_physical_size"`
 	Groups             []StatsGroup `json:"groups,omitempty"`
 
-	UnknownTierPacks      uint64 `json:"unknown_tier_packs"`
-	UnknownTypePacks      uint64 `json:"unknown_type_packs"`
-	MixedTypePacks        uint64 `json:"mixed_type_packs"`
-	RetentionUnknownPacks uint64 `json:"retention_unknown_packs"`
+	UnknownPlacementPacks     uint64 `json:"unknown_placement_packs"`
+	PlacementRecordsMalformed uint64 `json:"placement_records_malformed"`
+	UnknownTierPacks          uint64 `json:"unknown_tier_packs"`
+	UnknownTypePacks          uint64 `json:"unknown_type_packs"`
+	MixedTypePacks            uint64 `json:"mixed_type_packs"`
+	RetentionUnknownPacks     uint64 `json:"retention_unknown_packs"`
 	// CreationTimeUnknownPacks and PhysicalSizeUnknownPacks are the coverage
 	// gaps of the two facts that the size and history answers rest on. A pack
 	// with no creation time is invisible to every time filter, and a pack with
@@ -119,8 +124,9 @@ func Stats(ctx context.Context, store Store, options StatsOptions) (StatsResult,
 
 	// A filter, a state grouping, or verification all need per-pack facts that
 	// the aggregates cannot answer.
-	needsCatalog := options.Verify || options.Tier != "" || options.Type != "" || options.State != "" ||
-		containsDimension(options.GroupBy, "state")
+	needsCatalog := options.Verify || options.Backend != "" || options.Class != "" || options.Tier != "" || options.Type != "" || options.State != "" ||
+		containsDimension(options.GroupBy, "backend") || containsDimension(options.GroupBy, "class") ||
+		containsDimension(options.GroupBy, "tier") || containsDimension(options.GroupBy, "state")
 	if !needsCatalog {
 		if err := statsFromAggregates(ctx, store, options, &result); err != nil {
 			return result, err
@@ -133,7 +139,12 @@ func Stats(ctx context.Context, store Store, options StatsOptions) (StatsResult,
 	if err != nil {
 		return result, err
 	}
-	if err := statsFromCatalog(packs, options, &result); err != nil {
+	placements, malformed, err := loadPlacements(ctx, store)
+	if err != nil {
+		return result, err
+	}
+	result.PlacementRecordsMalformed = malformed
+	if err := statsFromCatalog(packs, placements, options, &result); err != nil {
 		return result, err
 	}
 	if options.Verify {
@@ -158,10 +169,13 @@ func Stats(ctx context.Context, store Store, options StatsOptions) (StatsResult,
 func validateStatsOptions(options StatsOptions) error {
 	for _, dimension := range options.GroupBy {
 		switch dimension {
-		case "tier", "type", "state":
+		case "backend", "type", "state", "class", "tier":
 		default:
-			return fmt.Errorf("unsupported grouping %q; supported: tier, type, state", dimension)
+			return fmt.Errorf("unsupported grouping %q; supported: backend, type, state, class, tier", dimension)
 		}
+	}
+	if options.Backend != "" && backendHashForName(options.Backend, options.PlacementModel) == 0 {
+		return fmt.Errorf("unknown backend %q", options.Backend)
 	}
 	if options.Tier != "" && parseTierName(options.Tier) == 0 {
 		return fmt.Errorf("unknown tier %q; supported: unknown, hot, cold, mirrored, single", options.Tier)
@@ -242,26 +256,34 @@ func statsFromAggregates(ctx context.Context, store Store, options StatsOptions,
 	return nil
 }
 
-func statsFromCatalog(packs map[vaultic.ID]schema.PackRecord, options StatsOptions, result *StatsResult) error {
+func statsFromCatalog(packs map[vaultic.ID]schema.PackRecord, placements map[vaultic.ID]placementSet, options StatsOptions, result *StatsResult) error {
 	groups := map[string]map[string]*StatsGroup{}
 	for _, dimension := range options.GroupBy {
 		groups[dimension] = map[string]*StatsGroup{}
 	}
-	for _, record := range packs {
-		if !packMatchesStatsFilter(record, options) {
+	for id, record := range packs {
+		packPlacements := placements[id]
+		if !packMatchesStatsFilter(record, packPlacements, options) {
 			continue
 		}
 		accumulateStatsGroup(&result.Totals, record)
-		result.StoredPhysicalSize += record.PhysicalSize
+		stored, hasPlacement := storedPlacementBytes(packPlacements)
+		if hasPlacement {
+			result.StoredPhysicalSize += stored
+		} else {
+			result.UnknownPlacementPacks++
+			result.StoredPhysicalSize += record.PhysicalSize
+		}
 		countPackFacts(record, result)
 		for dimension, buckets := range groups {
-			key := statsDimensionKey(dimension, record)
-			bucket, ok := buckets[key]
-			if !ok {
-				bucket = &StatsGroup{Dimension: dimension, Key: key}
-				buckets[key] = bucket
+			for _, key := range statsDimensionKeys(dimension, record, packPlacements, options.PlacementModel) {
+				bucket, ok := buckets[key]
+				if !ok {
+					bucket = &StatsGroup{Dimension: dimension, Key: key}
+					buckets[key] = bucket
+				}
+				accumulateStatsGroup(bucket, record)
 			}
-			accumulateStatsGroup(bucket, record)
 		}
 	}
 	result.Totals.Dimension, result.Totals.Key = "all", "all"
@@ -283,7 +305,17 @@ func statsFromCatalog(packs map[vaultic.ID]schema.PackRecord, options StatsOptio
 	return nil
 }
 
-func packMatchesStatsFilter(record schema.PackRecord, options StatsOptions) bool {
+func packMatchesStatsFilter(record schema.PackRecord, placements placementSet, options StatsOptions) bool {
+	if options.Backend != "" {
+		backend := backendHashForName(options.Backend, options.PlacementModel)
+		placement, ok := placements[backend]
+		if !ok || placement.State == schema.PlacementEvicted {
+			return false
+		}
+	}
+	if options.Class != "" && !placementClassMatches(placements, options.Class) {
+		return false
+	}
 	if options.Tier != "" && normalizedTier(record) != parseTierName(options.Tier) {
 		return false
 	}
@@ -357,6 +389,49 @@ func finishRatio(group *StatsGroup) {
 	group.UnusedRatio = float64(group.UnusedPayloadBytes) / float64(accounted)
 }
 
+func statsDimensionKeys(dimension string, record schema.PackRecord, placements placementSet, model PlacementModel) []string {
+	switch dimension {
+	case "backend":
+		keys := make([]string, 0, len(placements))
+		for backend, placement := range placements {
+			if placement.State == schema.PlacementEvicted {
+				continue
+			}
+			keys = append(keys, backendName(backend, model))
+		}
+		if len(keys) == 0 {
+			return []string{"unknown"}
+		}
+		sort.Strings(keys)
+		return keys
+	case "class":
+		keys := make([]string, 0, len(placements))
+		for _, placement := range placements {
+			if placement.State == schema.PlacementEvicted {
+				continue
+			}
+			class := placement.StorageClass
+			if class == "" {
+				class = "unknown"
+			}
+			keys = append(keys, class)
+		}
+		if len(keys) == 0 {
+			return []string{"unknown"}
+		}
+		sort.Strings(keys)
+		return keys
+	case "tier":
+		return []string{normalizedTier(record).String()}
+	case "type":
+		return []string{packTypeName(record.Type)}
+	case "state":
+		return []string{lifecycleName(record.Lifecycle)}
+	default:
+		return []string{"unknown"}
+	}
+}
+
 func aggregateToGroup(dimension, key string, aggregate schema.PackAggregate) StatsGroup {
 	group := StatsGroup{
 		Dimension: dimension, Key: key,
@@ -367,6 +442,31 @@ func aggregateToGroup(dimension, key string, aggregate schema.PackAggregate) Sta
 	}
 	finishRatio(&group)
 	return group
+}
+
+func storedPlacementBytes(placements placementSet) (uint64, bool) {
+	var total uint64
+	var any bool
+	for _, placement := range placements {
+		if placement.State == schema.PlacementEvicted {
+			continue
+		}
+		any = true
+		total += placement.Bytes
+	}
+	return total, any
+}
+
+func placementClassMatches(placements placementSet, class string) bool {
+	for _, placement := range placements {
+		if placement.State == schema.PlacementEvicted {
+			continue
+		}
+		if placement.StorageClass == class || (placement.StorageClass == "" && class == "unknown") {
+			return true
+		}
+	}
+	return false
 }
 
 func readAggregate(ctx context.Context, store Store, key []byte) (schema.PackAggregate, bool, error) {
@@ -386,6 +486,8 @@ func readAggregate(ctx context.Context, store Store, key []byte) (schema.PackAgg
 
 // PackFilter selects and orders pack catalog entries.
 type PackFilter struct {
+	Backend          string
+	Class            string
 	Tier             string
 	Type             string
 	State            string
@@ -397,34 +499,51 @@ type PackFilter struct {
 	RetentionExpired bool
 	RetentionUnknown bool
 	DeletePending    bool
+	NotOffsite       bool
+	PromotionDue     bool
 	Sort             string
 	Limit            uint
 	CountOnly        bool
+	PlacementModel   PlacementModel
 	// Now anchors retention-expiry evaluation and is overridable for tests.
 	Now time.Time
 }
 
+type PlacementEntry struct {
+	Backend            string `json:"backend"`
+	State              string `json:"state"`
+	StorageClass       string `json:"storage_class,omitempty"`
+	PlacedAt           int64  `json:"placed_at,omitempty"`
+	PlacementTimeKnown bool   `json:"placement_time_known"`
+	Bytes              uint64 `json:"bytes"`
+	MinRetentionUntil  int64  `json:"min_retention_until,omitempty"`
+	RetentionSource    string `json:"retention_source"`
+	DeleteAfter        int64  `json:"delete_after,omitempty"`
+	LastVerifiedAt     int64  `json:"last_verified_at,omitempty"`
+}
+
 // PackEntry describes one catalog pack in the JSON contract.
 type PackEntry struct {
-	ID                 string  `json:"id"`
-	Type               string  `json:"type"`
-	Tier               string  `json:"tier"`
-	State              string  `json:"state"`
-	PhysicalSize       uint64  `json:"physical_size"`
-	PhysicalSizeKnown  bool    `json:"physical_size_known"`
-	PayloadSize        uint64  `json:"payload_size"`
-	HeaderSize         uint64  `json:"header_size"`
-	BlobCount          uint64  `json:"blob_count"`
-	UsageKnown         bool    `json:"usage_known"`
-	UsedPayloadBytes   uint64  `json:"used_payload_bytes"`
-	UnusedPayloadBytes uint64  `json:"unused_payload_bytes"`
-	UnusedRatio        float64 `json:"unused_ratio"`
-	CreatedAt          int64   `json:"created_at,omitempty"`
-	CreationTimeKnown  bool    `json:"creation_time_known"`
-	MinRetentionUntil  int64   `json:"min_retention_until,omitempty"`
-	RetentionSource    string  `json:"retention_source"`
-	DeleteAfter        int64   `json:"delete_after,omitempty"`
-	StorageClass       string  `json:"storage_class,omitempty"`
+	ID                 string           `json:"id"`
+	Type               string           `json:"type"`
+	Tier               string           `json:"tier"`
+	State              string           `json:"state"`
+	PhysicalSize       uint64           `json:"physical_size"`
+	PhysicalSizeKnown  bool             `json:"physical_size_known"`
+	PayloadSize        uint64           `json:"payload_size"`
+	HeaderSize         uint64           `json:"header_size"`
+	BlobCount          uint64           `json:"blob_count"`
+	UsageKnown         bool             `json:"usage_known"`
+	UsedPayloadBytes   uint64           `json:"used_payload_bytes"`
+	UnusedPayloadBytes uint64           `json:"unused_payload_bytes"`
+	UnusedRatio        float64          `json:"unused_ratio"`
+	CreatedAt          int64            `json:"created_at,omitempty"`
+	CreationTimeKnown  bool             `json:"creation_time_known"`
+	MinRetentionUntil  int64            `json:"min_retention_until,omitempty"`
+	RetentionSource    string           `json:"retention_source"`
+	DeleteAfter        int64            `json:"delete_after,omitempty"`
+	StorageClass       string           `json:"storage_class,omitempty"`
+	Placements         []PlacementEntry `json:"placements,omitempty"`
 }
 
 // PacksResult is the versioned JSON contract of `index packs`.
@@ -435,10 +554,12 @@ type PacksResult struct {
 	Returned      uint64      `json:"returned"`
 	Packs         []PackEntry `json:"packs,omitempty"`
 
-	UnknownTierPacks      uint64 `json:"unknown_tier_packs"`
-	UnknownTypePacks      uint64 `json:"unknown_type_packs"`
-	RetentionUnknownPacks uint64 `json:"retention_unknown_packs"`
-	UsageUnaccountedPacks uint64 `json:"usage_unaccounted_packs"`
+	UnknownTierPacks          uint64 `json:"unknown_tier_packs"`
+	UnknownPlacementPacks     uint64 `json:"unknown_placement_packs"`
+	PlacementRecordsMalformed uint64 `json:"placement_records_malformed"`
+	UnknownTypePacks          uint64 `json:"unknown_type_packs"`
+	RetentionUnknownPacks     uint64 `json:"retention_unknown_packs"`
+	UsageUnaccountedPacks     uint64 `json:"usage_unaccounted_packs"`
 
 	// Undecidable counts packs that a filter could neither include nor exclude
 	// on the evidence available, because the fact the filter asks about was
@@ -464,11 +585,20 @@ func QueryPacks(ctx context.Context, store Store, filter PackFilter) (PacksResul
 	if err != nil {
 		return result, err
 	}
+	placements, malformed, err := loadPlacements(ctx, store)
+	if err != nil {
+		return result, err
+	}
+	result.PlacementRecordsMalformed = malformed
 	result.Scanned = uint64(len(packs))
 
 	entries := make([]PackEntry, 0, len(packs))
 	for id, record := range packs {
-		if !packMatchesFilter(id, record, filter, now) {
+		packPlacements := placements[id]
+		if len(packPlacements) == 0 {
+			result.UnknownPlacementPacks++
+		}
+		if !packMatchesFilter(id, record, packPlacements, filter, now) {
 			countUndecidable(record, filter, &result)
 			continue
 		}
@@ -477,7 +607,7 @@ func QueryPacks(ctx context.Context, store Store, filter PackFilter) (PacksResul
 		if filter.CountOnly {
 			continue
 		}
-		entries = append(entries, packEntry(id, record))
+		entries = append(entries, packEntry(id, record, packPlacements, filter.PlacementModel))
 	}
 	if filter.CountOnly {
 		return result, nil
@@ -493,9 +623,12 @@ func QueryPacks(ctx context.Context, store Store, filter PackFilter) (PacksResul
 
 func validatePackFilter(filter PackFilter) error {
 	switch filter.Sort {
-	case "", "size", "created", "unused", "unused-ratio", "delete-after", "id":
+	case "", "size", "created", "unused", "unused-ratio", "delete-after", "offsite-deadline", "id":
 	default:
-		return fmt.Errorf("unsupported sort %q; supported: id, size, created, unused, unused-ratio, delete-after", filter.Sort)
+		return fmt.Errorf("unsupported sort %q; supported: id, size, created, unused, unused-ratio, delete-after, offsite-deadline", filter.Sort)
+	}
+	if filter.Backend != "" && backendHashForName(filter.Backend, filter.PlacementModel) == 0 {
+		return fmt.Errorf("unknown backend %q", filter.Backend)
 	}
 	if filter.Tier != "" && parseTierName(filter.Tier) == 0 {
 		return fmt.Errorf("unknown tier %q", filter.Tier)
@@ -512,8 +645,24 @@ func validatePackFilter(filter PackFilter) error {
 	return nil
 }
 
-func packMatchesFilter(id vaultic.ID, record schema.PackRecord, filter PackFilter, now time.Time) bool {
+func packMatchesFilter(id vaultic.ID, record schema.PackRecord, placements placementSet, filter PackFilter, now time.Time) bool {
 	_ = id
+	if filter.Backend != "" {
+		backend := backendHashForName(filter.Backend, filter.PlacementModel)
+		placement, ok := placements[backend]
+		if !ok || placement.State == schema.PlacementEvicted {
+			return false
+		}
+	}
+	if filter.Class != "" && !placementClassMatches(placements, filter.Class) {
+		return false
+	}
+	if filter.NotOffsite && hasOffsitePlacement(placements, filter.PlacementModel) {
+		return false
+	}
+	if filter.PromotionDue && !promotionDue(record, placements, filter.PlacementModel, now) {
+		return false
+	}
 	if filter.Tier != "" && normalizedTier(record) != parseTierName(filter.Tier) {
 		return false
 	}
@@ -608,7 +757,19 @@ func entryUnusedRatio(record schema.PackRecord) float64 {
 	return float64(record.UnusedPayloadBytes) / float64(accounted)
 }
 
-func packEntry(id vaultic.ID, record schema.PackRecord) PackEntry {
+func packEntry(id vaultic.ID, record schema.PackRecord, placements placementSet, model PlacementModel) PackEntry {
+	placementEntries := make([]PlacementEntry, 0, len(placements))
+	for backend, placement := range placements {
+		placementEntries = append(placementEntries, PlacementEntry{
+			Backend: backendName(backend, model), State: placementStateName(placement.State),
+			StorageClass: placement.StorageClass, PlacedAt: placement.PlacedAt,
+			PlacementTimeKnown: placement.PlacementTimeKnown, Bytes: placement.Bytes,
+			MinRetentionUntil: placement.MinRetentionUntil,
+			RetentionSource:   retentionSourceName(placement.RetentionSource),
+			DeleteAfter:       placement.DeleteAfter, LastVerifiedAt: placement.LastVerifiedAt,
+		})
+	}
+	sort.Slice(placementEntries, func(i, j int) bool { return placementEntries[i].Backend < placementEntries[j].Backend })
 	return PackEntry{
 		ID: id.String(), Type: packTypeName(record.Type), Tier: normalizedTier(record).String(),
 		State: lifecycleName(record.Lifecycle), PhysicalSize: record.PhysicalSize,
@@ -619,6 +780,45 @@ func packEntry(id vaultic.ID, record schema.PackRecord) PackEntry {
 		CreatedAt: record.CreationTime, CreationTimeKnown: record.CreationTimeKnown,
 		MinRetentionUntil: record.MinRetentionUntil, RetentionSource: retentionSourceName(record.RetentionSource),
 		DeleteAfter: record.DeleteAfter, StorageClass: record.StorageClass,
+		Placements: placementEntries,
+	}
+}
+
+func hasOffsitePlacement(placements placementSet, model PlacementModel) bool {
+	for backendHash, placement := range placements {
+		if placement.State == schema.PlacementEvicted {
+			continue
+		}
+		for _, backend := range model.Backends {
+			if backend.Hash == backendHash && backend.Offsite {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func promotionDue(record schema.PackRecord, placements placementSet, model PlacementModel, now time.Time) bool {
+	if model.Policy.MinOffsite == 0 || !record.CreationTimeKnown || hasOffsitePlacement(placements, model) {
+		return false
+	}
+	return now.UnixNano() >= record.CreationTime
+}
+
+func placementStateName(state schema.PlacementState) string {
+	switch state {
+	case schema.PlacementPending:
+		return "pending"
+	case schema.PlacementLive:
+		return "live"
+	case schema.PlacementEvicting:
+		return "evicting"
+	case schema.PlacementEvicted:
+		return "evicted"
+	case schema.PlacementFailed:
+		return "failed"
+	default:
+		return "unknown"
 	}
 }
 
@@ -662,8 +862,33 @@ func sortPackEntries(entries []PackEntry, order string) {
 			}
 			return left.ID < right.ID
 		}
+	case "offsite-deadline":
+		less = func(left, right PackEntry) bool {
+			leftDeadline, rightDeadline := earliestPlacementDeadline(left), earliestPlacementDeadline(right)
+			if leftDeadline != rightDeadline {
+				return leftDeadline < rightDeadline
+			}
+			return left.ID < right.ID
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return less(entries[i], entries[j]) })
+}
+
+func earliestPlacementDeadline(entry PackEntry) int64 {
+	var deadline int64
+	for _, placement := range entry.Placements {
+		candidate := placement.DeleteAfter
+		if candidate == 0 {
+			candidate = placement.MinRetentionUntil
+		}
+		if candidate == 0 {
+			continue
+		}
+		if deadline == 0 || candidate < deadline {
+			deadline = candidate
+		}
+	}
+	return deadline
 }
 
 func normalizedTier(record schema.PackRecord) schema.PackTier {
@@ -706,6 +931,24 @@ func parseTierName(name string) schema.PackTier {
 		}
 	}
 	return 0
+}
+
+func backendHashForName(name string, model PlacementModel) uint64 {
+	for _, backend := range model.Backends {
+		if backend.ID == name || fmt.Sprintf("%016x", backend.Hash) == name {
+			return backend.Hash
+		}
+	}
+	return 0
+}
+
+func backendName(hash uint64, model PlacementModel) string {
+	for _, backend := range model.Backends {
+		if backend.Hash == hash {
+			return backend.ID
+		}
+	}
+	return fmt.Sprintf("%016x", hash)
 }
 
 var lifecycleNames = map[schema.PackLifecycle]string{

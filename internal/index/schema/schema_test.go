@@ -67,6 +67,8 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{NextEventSequenceKey(), KeyNextEventSequence},
 		{HistoryRawFloorKey(), KeyHistoryRawFloor},
 		{HistoryEnabledAtKey(), KeyHistoryEnabledAt},
+		{PackPlacementKey(id, 42), KeyPackPlacement}, {BackendPackKey(42, id), KeyBackendPack},
+		{PlacementDeleteQueueKey(1700000000, id, 42), KeyPlacementDeleteQueue},
 		{CurrentInodeKey(3, 4), KeyCurrentInode}, {InodeRevisionKey(3, 4, 5), KeyInodeRevision},
 		{CurrentDirectoryKey(3, 4), KeyCurrentDirectory}, {DirectoryRevisionKey(3, 4, 5), KeyDirectoryRevision},
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
@@ -89,6 +91,43 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		if _, err := ParseKey(malformed); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("ParseKey(%x) = %v", malformed, err)
 		}
+	}
+}
+
+func TestPlacementKeysPreservePackBackendAndDeadline(t *testing.T) {
+	id := testID(7)
+	placement, err := ParseKey(PackPlacementKey(id, 0x0102030405060708))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placement.Kind != KeyPackPlacement || placement.ID != id || placement.Backend != 0x0102030405060708 {
+		t.Fatalf("placement key parsed as %#v", placement)
+	}
+	if prefix := PackPlacementPrefix(id); len(prefix) != 36 || string(prefix[:3]) != "pl:" || prefix[35] != ':' {
+		t.Fatalf("bad placement prefix %x", prefix)
+	}
+
+	reverse, err := ParseKey(BackendPackKey(0x0102030405060708, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reverse.Kind != KeyBackendPack || reverse.ID != id || reverse.Backend != 0x0102030405060708 {
+		t.Fatalf("backend-pack key parsed as %#v", reverse)
+	}
+	if prefix := BackendPackPrefix(0x0102030405060708); len(prefix) != 12 || string(prefix[:3]) != "bp:" || prefix[11] != ':' {
+		t.Fatalf("bad backend-pack prefix %x", prefix)
+	}
+
+	deadline := int64(1_700_000_000)
+	queued, err := ParseKey(PlacementDeleteQueueKey(deadline, id, 0x0102030405060708))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Kind != KeyPlacementDeleteQueue || queued.ID != id || queued.Backend != 0x0102030405060708 || queued.DeleteAfter != deadline {
+		t.Fatalf("delete queue key parsed as %#v", queued)
+	}
+	if prefix := PlacementDeleteQueuePrefix(deadline); len(prefix) != 11 || string(prefix[:3]) != "dq:" {
+		t.Fatalf("bad delete queue prefix %x", prefix)
 	}
 }
 
@@ -314,6 +353,29 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 		EndPackCount: 9, EndPhysicalSize: 10, EndPayloadSize: 11,
 		Coverage: CoveragePartial, EventsObserved: 12,
 	}, UnmarshalPackHistoryBucket)
+	roundTrip(t, PlacementRecord{
+		State: PlacementEvicting, StorageClass: "GLACIER", PlacedAt: 123,
+		PlacementTimeKnown: true, Bytes: 456, MinRetentionUntil: 789,
+		RetentionSource: RetentionBackend, DeleteAfter: 999, LastVerifiedAt: 1001,
+	}, UnmarshalPlacementRecord)
+	roundTrip(t, BackendPackRecord{State: PlacementLive, Bytes: 456, PlacedAt: 123}, UnmarshalBackendPackRecord)
+	roundTrip(t, PlacementDeleteRecord{Backend: 42, PhysicalSize: 456, Reason: "retention", RunID: id3}, UnmarshalPlacementDeleteRecord)
+	for _, invalid := range []PlacementRecord{
+		{State: PlacementState(99)},
+		{State: PlacementLive, PlacedAt: 1},
+		{State: PlacementLive, RetentionSource: RetentionUnknown, MinRetentionUntil: 1},
+		{State: PlacementLive, DeleteAfter: 1},
+	} {
+		if _, err := invalid.MarshalBinary(); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("invalid placement record %#v returned %v", invalid, err)
+		}
+	}
+	if _, err := (BackendPackRecord{State: PlacementState(99)}).MarshalBinary(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("invalid backend-pack record returned %v", err)
+	}
+	if _, err := (PlacementDeleteRecord{}).MarshalBinary(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("invalid placement delete record returned %v", err)
+	}
 	roundTrip(t, HistoryMarker{UnixSeconds: 1700000000}, UnmarshalHistoryMarker)
 	roundTrip(t, ExportCheckpointRecord{State: ExportComplete, CommitSequence: 8, Attempts: 1, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalExportCheckpointRecord)
 	roundTrip(t, ExportIndexCheckpointRecord{Sequence: 9, PackIDs: []ID{id1, id2}}, UnmarshalExportIndexCheckpointRecord)

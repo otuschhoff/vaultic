@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
@@ -31,6 +32,118 @@ func readAggregate(t *testing.T, store *SchemaStore, ctx context.Context, key []
 		t.Fatal(err)
 	}
 	return aggregate, true
+}
+
+func TestPublishWritesPlacementAndBackendPackAtomically(t *testing.T) {
+	store, ctx := tierTestStore(t, "phase12-placement-publish")
+	packID, blobID := daemonTestID(210), daemonTestID(211)
+	placement := schema.PlacementRecord{
+		State: schema.PlacementLive, PlacedAt: 123, PlacementTimeKnown: true,
+		Bytes: 55, RetentionSource: schema.RetentionConfig, MinRetentionUntil: 456,
+	}
+	published := PublishedPack{
+		PackID: packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PhysicalSize: 55, PhysicalSizeKnown: true,
+			PayloadSize: 5, HeaderSize: 50, BlobCount: 1,
+			Lifecycle: schema.PackExportPending, Tier: schema.TierCold,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 5, Type: schema.BlobData}}},
+		},
+		Placements: map[uint64]schema.PlacementRecord{42: placement},
+	}
+	if err := store.PublishPack(ctx, published); err != nil {
+		t.Fatal(err)
+	}
+
+	value, found, err := store.Get(ctx, schema.PackPlacementKey(packID, 42))
+	if err != nil || !found {
+		t.Fatalf("placement record missing: found=%v err=%v", found, err)
+	}
+	decoded, err := schema.UnmarshalPlacementRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != placement {
+		t.Fatalf("placement = %#v, want %#v", decoded, placement)
+	}
+	value, found, err = store.Get(ctx, schema.BackendPackKey(42, packID))
+	if err != nil || !found {
+		t.Fatalf("backend-pack record missing: found=%v err=%v", found, err)
+	}
+	reverse, err := schema.UnmarshalBackendPackRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reverse.State != placement.State || reverse.Bytes != placement.Bytes || reverse.PlacedAt != placement.PlacedAt {
+		t.Fatalf("backend-pack = %#v, want state/bytes/time from %#v", reverse, placement)
+	}
+}
+
+func TestDeletePendingWritesPerPlacementDeleteQueue(t *testing.T) {
+	store, ctx := tierTestStore(t, "phase12-placement-delete-pending")
+	packID, blobID := daemonTestID(212), daemonTestID(213)
+	placement := schema.PlacementRecord{
+		State: schema.PlacementLive, PlacedAt: 123, PlacementTimeKnown: true,
+		Bytes: 55, RetentionSource: schema.RetentionBackend, MinRetentionUntil: time.Now().Add(time.Hour).UnixNano(),
+	}
+	published := PublishedPack{
+		PackID: packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PhysicalSize: 55, PhysicalSizeKnown: true,
+			PayloadSize: 5, HeaderSize: 50, BlobCount: 1,
+			Lifecycle: schema.PackExportPending, Tier: schema.TierCold,
+		},
+		Blobs:      map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 5, Type: schema.BlobData}}}},
+		Placements: map[uint64]schema.PlacementRecord{42: placement},
+	}
+	if err := store.PublishPack(ctx, published); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPackPublished(ctx, packID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPackDeletePending(ctx, packID); err != nil {
+		t.Fatal(err)
+	}
+	value, found, err := store.Get(ctx, schema.PackPlacementKey(packID, 42))
+	if err != nil || !found {
+		t.Fatalf("placement missing: found=%v err=%v", found, err)
+	}
+	updated, err := schema.UnmarshalPlacementRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != schema.PlacementEvicting {
+		t.Fatalf("placement state = %v, want evicting", updated.State)
+	}
+	if updated.DeleteAfter != placement.MinRetentionUntil {
+		t.Fatalf("delete-after = %d, want retention %d", updated.DeleteAfter, placement.MinRetentionUntil)
+	}
+	if _, found, err := store.Get(ctx, schema.PlacementDeleteQueueKey(updated.DeleteAfter, packID, 42)); err != nil || !found {
+		t.Fatalf("delete queue missing: found=%v err=%v", found, err)
+	}
+	if value, found, err := store.Get(ctx, schema.BackendPackKey(42, packID)); err != nil || !found {
+		t.Fatalf("backend-pack missing: found=%v err=%v", found, err)
+	} else if reverse, decodeErr := schema.UnmarshalBackendPackRecord(value); decodeErr != nil || reverse.State != schema.PlacementEvicting {
+		t.Fatalf("backend-pack state = %#v err=%v, want evicting", reverse, decodeErr)
+	}
+
+	if err := store.MarkPackDeleted(ctx, packID, []schema.ID{blobID}); err != nil {
+		t.Fatal(err)
+	}
+	for name, key := range map[string][]byte{
+		"placement":    schema.PackPlacementKey(packID, 42),
+		"backend-pack": schema.BackendPackKey(42, packID),
+		"delete-queue": schema.PlacementDeleteQueueKey(updated.DeleteAfter, packID, 42),
+		"pack catalog": schema.PackKey(packID),
+		"member blob":  schema.BlobKey(blobID),
+	} {
+		if _, found, err := store.Get(ctx, key); err != nil || found {
+			t.Fatalf("%s survived deletion: found=%v err=%v", name, found, err)
+		}
+	}
 }
 
 // TestPublishMaintainsTierAggregatesAtomically verifies that publishing packs

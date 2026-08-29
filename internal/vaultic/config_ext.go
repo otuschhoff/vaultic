@@ -179,6 +179,19 @@ func (c Config) ValidateExtensions() error {
 	if c.MaxPacksizeToleratePercent != nil && *c.MaxPacksizeToleratePercent > 100 {
 		return errors.Errorf("max_packsize_tolerate_percent must be <= 100, got %d", *c.MaxPacksizeToleratePercent)
 	}
+	seenBackends := map[string]struct{}{}
+	for _, backend := range c.PlacementBackends {
+		if backend.ID == "" {
+			return errors.New("placement backend id must not be empty")
+		}
+		if _, ok := seenBackends[backend.ID]; ok {
+			return errors.Errorf("duplicate placement backend id %q", backend.ID)
+		}
+		seenBackends[backend.ID] = struct{}{}
+	}
+	if c.PlacementPolicy.MinOffsite > c.PlacementPolicy.MinCopies && c.PlacementPolicy.MinCopies != 0 {
+		return errors.New("placement min_offsite must not exceed min_copies")
+	}
 	return nil
 }
 

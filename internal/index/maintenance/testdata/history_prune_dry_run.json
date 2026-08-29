@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "raw_events_removed": 0,
   "buckets_removed": 0,
   "new_raw_floor": 0,

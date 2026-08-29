@@ -359,13 +359,20 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 		}
 	}
 	defer closeStore()
-	result, err = maintenance.CheckWithOptions(ctx, repo, store, maintenance.CheckOptions{LegacyOnly: options.LegacyOnly, SlateDBOnly: options.SlateDBOnly, IncludeCrawlDebt: options.IncludeCrawlDebt, MaxFindings: options.MaxFindings})
+	placementModel, err := indexMaintenancePlacementModel(repo)
+	if err != nil {
+		return result, err
+	}
+	result, err = maintenance.CheckWithOptions(ctx, repo, store, maintenance.CheckOptions{LegacyOnly: options.LegacyOnly, SlateDBOnly: options.SlateDBOnly, IncludeCrawlDebt: options.IncludeCrawlDebt, MaxFindings: options.MaxFindings, PlacementModel: placementModel})
 	if err != nil {
 		return result, err
 	}
 	if !globalOptions.JSON {
 		printer.P("legacy locations: %d; SlateDB locations: %d; differences: %d; aggregate mismatches: %d\n", result.LegacyLocations, result.SlateDBLocations, result.MissingInSlateDB+result.MissingInLegacy, result.AggregateMismatch)
 		printer.P("packs: unknown tier %d; retention unknown %d; usage unaccounted %d\n", result.UnknownTierPacks, result.RetentionUnknownPacks, result.UsageUnaccountedPacks)
+		printer.P("placements: missing %d; reverse mismatches %d; tier mismatches %d; below durability %d; unknown backends %d\n",
+			result.MissingPlacementRecords, result.BackendPackMismatch, result.DerivedTierMismatch,
+			result.PacksBelowDurability, result.UnknownPlacementBackends)
 		if result.TierAggregatesUnbuilt {
 			printer.P("per-tier aggregates have not been built for this repository yet; run 'vaultic index rebuild-pack-stats'\n")
 		}
@@ -381,6 +388,28 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 		return result, errIndexDifferences
 	}
 	return result, nil
+}
+
+func indexMaintenancePlacementModel(repo *repository.Repository) (maintenance.PlacementModel, error) {
+	model, err := repo.PlacementModel()
+	if err != nil {
+		return maintenance.PlacementModel{}, err
+	}
+	converted := maintenance.PlacementModel{
+		Policy: maintenance.DurabilityPolicy{
+			MinCopies:  model.Policy.MinCopies,
+			MinDomains: model.Policy.MinDomains,
+			MinOffsite: model.Policy.MinOffsite,
+		},
+	}
+	converted.Backends = make([]maintenance.PlacementBackend, 0, len(model.Backends))
+	for _, backend := range model.Backends {
+		converted.Backends = append(converted.Backends, maintenance.PlacementBackend{
+			ID: backend.ID, Hash: backend.Hash, Role: backend.Role,
+			Offsite: backend.Offsite, FailureDomain: backend.FailureDomain,
+		})
+	}
+	return converted, nil
 }
 
 type indexRebuildPackStatsOptions struct {
@@ -423,9 +452,31 @@ func runIndexRebuildPackStats(ctx context.Context, options indexRebuildPackStats
 		return result, err
 	}
 	defer closeStore()
+	placementModel, err := indexMaintenancePlacementModel(repo)
+	if err != nil {
+		return result, err
+	}
+	result.PlacementRecordsChanged, err = maintenance.RebuildPlacementRecords(ctx, store, placementModel, options.DryRun)
+	if err != nil {
+		return result, err
+	}
+	result.TierSummaryChanged, err = maintenance.RebuildDerivedTierSummary(ctx, store, placementModel, options.DryRun)
+	if err != nil {
+		return result, err
+	}
+	placementChanged := result.PlacementRecordsChanged
+	tierSummaryChanged := result.TierSummaryChanged
 	result, err = maintenance.RebuildPackAggregates(ctx, store, options.DryRun)
+	if err != nil {
+		return result, err
+	}
+	result.PlacementRecordsChanged = placementChanged
+	result.TierSummaryChanged = tierSummaryChanged
+	result.BackendPackRecordsChanged, err = maintenance.RebuildBackendPackIndex(ctx, store, options.DryRun)
 	if err == nil && !globalOptions.JSON {
-		printer.P("scanned %d packs; changed %d aggregate records\n", result.PacksScanned, result.AggregatesChanged)
+		printer.P("scanned %d packs; changed %d aggregate records, %d placement records, %d tier summaries, %d backend-pack records\n",
+			result.PacksScanned, result.AggregatesChanged, result.PlacementRecordsChanged,
+			result.TierSummaryChanged, result.BackendPackRecordsChanged)
 		for _, delta := range result.Deltas {
 			printer.P("  %s: packs %d, payload %d\n", delta.Key, delta.After.PackCount, delta.After.PayloadSize)
 		}

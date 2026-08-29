@@ -319,8 +319,26 @@ func (r *Repository) EnableSlateDBAuthority(ctx context.Context, client *daemon.
 // so tier is recorded from how bytes are really placed rather than from a
 // separate configuration that could drift from it.
 func (r *Repository) tierPolicy() enginepkg.TierPolicy {
-	_, _, hotCold := r.HotCold()
-	return enginepkg.TierPolicy{Resolved: true, HotCold: hotCold}
+	model, err := r.PlacementModel()
+	if err != nil {
+		_, _, hotCold := r.HotCold()
+		return enginepkg.TierPolicy{Resolved: true, HotCold: hotCold}
+	}
+	policy := enginepkg.TierPolicy{Resolved: true, HotCold: model.HotCold}
+	policy.Backends = make([]enginepkg.PlacementBackendPolicy, 0, len(model.Backends))
+	for _, backend := range model.Backends {
+		policy.Backends = append(policy.Backends, enginepkg.PlacementBackendPolicy{
+			ID: backend.ID, Hash: backend.Hash, Role: backend.Role,
+			Offsite: backend.Offsite, FailureDomain: backend.FailureDomain,
+			MinRetention:        backend.MinRetention(),
+			PricePerGBMonth:     backend.PricePerGBMonth,
+			PricePerGBEgress:    backend.PricePerGBEgress,
+			PricePer1KRequests:  backend.PricePer1KRequests,
+			MaxBandwidthBytes:   backend.MaxBandwidthBytes,
+			ObjectOverheadBytes: backend.ObjectOverheadBytes,
+		})
+	}
+	return policy
 }
 
 // PackSize return the target size of a pack file when uploading

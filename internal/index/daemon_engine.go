@@ -37,6 +37,24 @@ type TierPolicy struct {
 	// StorageClass is the backend-reported class, when the operator supplied
 	// one. It is free-form and advisory.
 	StorageClass string
+	// Backends is the resolved placement registry. When absent, the policy
+	// falls back to the Phase 9 tier-only behaviour and no placement is claimed.
+	Backends []PlacementBackendPolicy
+}
+
+type PlacementBackendPolicy struct {
+	ID                  string
+	Hash                uint64
+	Role                string
+	Offsite             bool
+	FailureDomain       string
+	StorageClass        string
+	MinRetention        time.Duration
+	PricePerGBMonth     float64
+	PricePerGBEgress    float64
+	PricePer1KRequests  float64
+	MaxBandwidthBytes   uint64
+	ObjectOverheadBytes uint64
 }
 
 // tierFor maps a pack type onto the tier its bytes were actually routed to.
@@ -73,6 +91,9 @@ func (policy TierPolicy) applyTo(record *schema.PackRecord, now time.Time) {
 	// Unknown is stated explicitly rather than left as the zero value, so an
 	// in-memory record carries the same facts as the persisted one.
 	record.RetentionSource, record.MinRetentionUntil = schema.RetentionUnknown, 0
+	if len(policy.Backends) != 0 {
+		return
+	}
 	if policy.MinRetention <= 0 {
 		return
 	}
@@ -83,6 +104,68 @@ func (policy TierPolicy) applyTo(record *schema.PackRecord, now time.Time) {
 	}
 	record.MinRetentionUntil = now.Add(policy.MinRetention).UnixNano()
 	record.RetentionSource = schema.RetentionConfig
+}
+
+func (policy TierPolicy) placementRecords(record schema.PackRecord, now time.Time) map[uint64]schema.PlacementRecord {
+	if len(policy.Backends) == 0 || record.Tier == schema.TierUnknown {
+		return nil
+	}
+	selected := make([]PlacementBackendPolicy, 0, len(policy.Backends))
+	switch record.Tier {
+	case schema.TierSingle:
+		if backend, ok := policy.backendByRole("primary"); ok {
+			selected = append(selected, backend)
+		} else {
+			selected = append(selected, policy.Backends[0])
+		}
+	case schema.TierCold:
+		if backend, ok := policy.backendByRole("archival"); ok {
+			selected = append(selected, backend)
+		} else {
+			selected = append(selected, policy.Backends[len(policy.Backends)-1])
+		}
+	case schema.TierMirrored:
+		if backend, ok := policy.backendByRole("primary"); ok {
+			selected = append(selected, backend)
+		}
+		if backend, ok := policy.backendByRole("archival"); ok {
+			selected = append(selected, backend)
+		}
+		if len(selected) == 0 {
+			selected = append(selected, policy.Backends...)
+		}
+	case schema.TierHot:
+		if backend, ok := policy.backendByRole("primary"); ok {
+			selected = append(selected, backend)
+		}
+	}
+	placements := make(map[uint64]schema.PlacementRecord, len(selected))
+	for _, backend := range selected {
+		if backend.Hash == 0 {
+			continue
+		}
+		placement := schema.PlacementRecord{
+			State: schema.PlacementLive, StorageClass: backend.StorageClass,
+			PlacedAt: now.UnixNano(), PlacementTimeKnown: true,
+			Bytes:           record.PhysicalSize,
+			RetentionSource: schema.RetentionUnknown,
+		}
+		if backend.MinRetention > 0 {
+			placement.MinRetentionUntil = now.Add(backend.MinRetention).UnixNano()
+			placement.RetentionSource = schema.RetentionConfig
+		}
+		placements[backend.Hash] = placement
+	}
+	return placements
+}
+
+func (policy TierPolicy) backendByRole(role string) (PlacementBackendPolicy, bool) {
+	for _, backend := range policy.Backends {
+		if backend.Role == role {
+			return backend, true
+		}
+	}
+	return PlacementBackendPolicy{}, false
 }
 
 // DaemonEngine keeps the legacy index as a synchronous compatibility
@@ -466,5 +549,6 @@ func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSi
 		record.PhysicalSizeKnown = true
 	}
 	published.Record = record
+	published.Placements = policy.placementRecords(record, now)
 	return published, nil
 }

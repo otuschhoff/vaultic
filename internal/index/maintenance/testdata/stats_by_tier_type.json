@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "source": "aggregates",
+  "schema_version": 2,
+  "source": "catalog",
   "totals": {
     "dimension": "all",
     "key": "all",
@@ -18,15 +18,15 @@
   "groups": [
     {
       "dimension": "tier",
-      "key": "unknown",
+      "key": "cold",
       "pack_count": 1,
-      "physical_size": 0,
-      "payload_size": 500,
-      "header_size": 0,
-      "blob_count": 1,
-      "used_payload_bytes": 0,
+      "physical_size": 2000,
+      "payload_size": 1800,
+      "header_size": 200,
+      "blob_count": 5,
+      "used_payload_bytes": 1800,
       "unused_payload_bytes": 0,
-      "accounted_pack_count": 0,
+      "accounted_pack_count": 1,
       "unused_ratio": 0
     },
     {
@@ -44,15 +44,15 @@
     },
     {
       "dimension": "tier",
-      "key": "cold",
+      "key": "unknown",
       "pack_count": 1,
-      "physical_size": 2000,
-      "payload_size": 1800,
-      "header_size": 200,
-      "blob_count": 5,
-      "used_payload_bytes": 1800,
+      "physical_size": 0,
+      "payload_size": 500,
+      "header_size": 0,
+      "blob_count": 1,
+      "used_payload_bytes": 0,
       "unused_payload_bytes": 0,
-      "accounted_pack_count": 1,
+      "accounted_pack_count": 0,
       "unused_ratio": 0
     },
     {
@@ -95,12 +95,14 @@
       "unused_ratio": 0
     }
   ],
+  "unknown_placement_packs": 3,
+  "placement_records_malformed": 0,
   "unknown_tier_packs": 1,
   "unknown_type_packs": 1,
   "mixed_type_packs": 0,
-  "retention_unknown_packs": 0,
-  "creation_time_unknown_packs": 0,
-  "physical_size_unknown_packs": 0,
-  "retention_counted": false,
+  "retention_unknown_packs": 1,
+  "creation_time_unknown_packs": 1,
+  "physical_size_unknown_packs": 1,
+  "retention_counted": true,
   "usage_unaccounted_packs": 1
 }

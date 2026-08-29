@@ -470,6 +470,12 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalPackHistoryBucket(value)
 	case KeyHistoryRawFloor, KeyHistoryEnabledAt:
 		_, err = UnmarshalHistoryMarker(value)
+	case KeyPackPlacement:
+		_, err = UnmarshalPlacementRecord(value)
+	case KeyBackendPack:
+		_, err = UnmarshalBackendPackRecord(value)
+	case KeyPlacementDeleteQueue:
+		_, err = UnmarshalPlacementDeleteRecord(value)
 	case KeyNextEventSequence:
 		_, err = UnmarshalNextEventSequence(value)
 	case KeyCurrentInode, KeyCurrentDirectory:

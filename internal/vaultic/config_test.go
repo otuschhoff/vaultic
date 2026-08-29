@@ -2,6 +2,7 @@ package vaultic_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	rtest "github.com/otuschhoff/vaultic/internal/test"
@@ -60,6 +61,6 @@ func TestConfig(t *testing.T) {
 	cfg2, err := vaultic.LoadConfig(context.TODO(), loader{load})
 	rtest.OK(t, err)
 
-	rtest.Assert(t, cfg1 == cfg2,
+	rtest.Assert(t, reflect.DeepEqual(cfg1, cfg2),
 		"configs aren't equal: %v != %v", cfg1, cfg2)
 }

@@ -73,6 +73,78 @@ func (store *fakeGCStore) MarkPackDeleted(context.Context, schema.ID, []schema.I
 	return nil
 }
 
+func TestGCPhysicalDeletionWaitsForPlacementDeadline(t *testing.T) {
+	store := newFakeGCStore()
+	packID := vaultic.NewRandomID()
+	plan := &GCPlan{store: store}
+
+	ready, err := plan.packReadyForPhysicalDeletion(context.Background(), packID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("pack without placement records should use legacy immediate deletion behavior")
+	}
+
+	store.set(t, schema.PackPlacementKey(schema.ID(packID), 42), schema.PlacementRecord{
+		State: schema.PlacementEvicting, DeleteAfter: time.Now().Add(time.Hour).UnixNano(),
+		Bytes: 10, RetentionSource: schema.RetentionUnknown,
+	})
+	ready, err = plan.packReadyForPhysicalDeletion(context.Background(), packID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("future placement delete_after was ignored")
+	}
+
+	store.set(t, schema.PackPlacementKey(schema.ID(packID), 42), schema.PlacementRecord{
+		State: schema.PlacementEvicting, DeleteAfter: time.Now().Add(-time.Hour).UnixNano(),
+		Bytes: 10, RetentionSource: schema.RetentionUnknown,
+	})
+	ready, err = plan.packReadyForPhysicalDeletion(context.Background(), packID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("expired placement delete_after blocked deletion")
+	}
+}
+
+func TestGCClassificationUsesPlacementCostModel(t *testing.T) {
+	packID := vaultic.NewRandomID()
+	liveBlob, deadBlob := vaultic.NewRandomID(), vaultic.NewRandomID()
+	now := time.Now()
+	packs := map[vaultic.ID]schema.PackRecord{packID: {
+		Type: schema.PackData, PhysicalSize: 100 << 20, PhysicalSizeKnown: true,
+		PayloadSize: 100 << 20, BlobCount: 2, Lifecycle: schema.PackPublished,
+		Tier: schema.TierCold, CreationTime: now.Add(-time.Hour).UnixNano(), CreationTimeKnown: true,
+	}}
+	members := map[vaultic.ID][]vaultic.ID{packID: {liveBlob, deadBlob}}
+	memberBytes := map[vaultic.ID]map[vaultic.ID]uint64{packID: {liveBlob: 50 << 20, deadBlob: 50 << 20}}
+	types := map[vaultic.ID]schema.BlobType{liveBlob: schema.BlobData, deadBlob: schema.BlobData}
+	unreachable := map[vaultic.ID]struct{}{deadBlob: {}}
+	placements := map[vaultic.ID]map[uint64]schema.PlacementRecord{packID: {7: {
+		State: schema.PlacementLive, Bytes: 100 << 20,
+		RetentionSource: schema.RetentionBackend, MinRetentionUntil: now.Add(90 * 24 * time.Hour).UnixNano(),
+	}}}
+	model := PlacementModel{Backends: []PlacementBackend{{
+		PlacementBackend: vaultic.PlacementBackend{ID: "archive", Role: PlacementRoleArchival, FailureDomain: "cloud", Offsite: true, PricePerGBMonth: 1, MinRetentionSeconds: 90 * 24 * 3600},
+		Hash:             7,
+	}}}
+
+	classification, err := classifyPacksWithPlacement(packs, members, memberBytes, types, unreachable, nil, placements, model, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := classification.mixedPacks[packID]; ok {
+		t.Fatal("constrained archival placement was repacked despite default-false cost model")
+	}
+	if classification.pendingAge != 1 {
+		t.Fatalf("skipped constrained repack was not surfaced as pending: %#v", classification)
+	}
+}
+
 // UpdatePackUsage applies the same invariants as the real store: a split that
 // disagrees with the recorded payload size is skipped rather than written.
 func (store *fakeGCStore) UpdatePackUsage(_ context.Context, usage map[schema.ID]daemon.PackUsage) (uint64, error) {

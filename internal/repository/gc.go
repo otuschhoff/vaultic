@@ -183,8 +183,16 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 	if err != nil {
 		return nil, err
 	}
+	placements, err := scanGCPlacements(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	model, err := repo.PlacementModel()
+	if err != nil {
+		return nil, err
+	}
 
-	classification, err := classifyPacks(packs, packMembers, blobTypes, unreachable, existing, time.Now(), opts.MinCandidateAge)
+	classification, err := classifyPacksWithPlacement(packs, packMembers, packMemberBytes, blobTypes, unreachable, existing, placements, model, time.Now(), opts.MinCandidateAge)
 	if err != nil {
 		return nil, err
 	}
@@ -236,6 +244,21 @@ func classifyPacks(
 	blobTypes map[vaultic.ID]schema.BlobType,
 	unreachable map[vaultic.ID]struct{},
 	existing map[string]int64,
+	now time.Time,
+	minAge time.Duration,
+) (gcClassification, error) {
+	return classifyPacksWithPlacement(packs, packMembers, nil, blobTypes, unreachable, existing, nil, PlacementModel{}, now, minAge)
+}
+
+func classifyPacksWithPlacement(
+	packs map[vaultic.ID]schema.PackRecord,
+	packMembers map[vaultic.ID][]vaultic.ID,
+	packMemberBytes map[vaultic.ID]map[vaultic.ID]uint64,
+	blobTypes map[vaultic.ID]schema.BlobType,
+	unreachable map[vaultic.ID]struct{},
+	existing map[string]int64,
+	placements map[vaultic.ID]map[uint64]schema.PlacementRecord,
+	model PlacementModel,
 	now time.Time,
 	minAge time.Duration,
 ) (gcClassification, error) {
@@ -303,7 +326,7 @@ func classifyPacks(
 		} else {
 			result.mixedPackCandidates++
 			result.packBytes[packID] = record.PhysicalSize
-			if ready {
+			if ready && mixedPackRepackAllowed(record, packMemberBytes[packID], unreachable, placements[packID], model, now) {
 				result.mixedPacks[packID] = keep
 				result.mixedPackMembers[packID] = members
 			} else {
@@ -335,6 +358,13 @@ func (plan *GCPlan) Execute(ctx context.Context, printer vaultic.Printer) error 
 
 func (plan *GCPlan) retryPendingDeletions(ctx context.Context, printer vaultic.Printer) error {
 	for packID, members := range plan.retryPacks {
+		ready, err := plan.packReadyForPhysicalDeletion(ctx, packID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			continue
+		}
 		if err := plan.deletePackObjectAndCatalog(ctx, packID, members); err != nil {
 			plan.Stats.PacksRetryFailed++
 			printer.E("retry deleting pack %s: %v\n", packID.Str(), err)
@@ -359,11 +389,21 @@ func (plan *GCPlan) repackMixedPacks(ctx context.Context, printer vaultic.Printe
 		}
 	}
 	bar := printer.NewCounter("packs repacked")
+	warmup, err := plan.repo.StartWarmup(ctx, packSet)
+	if err != nil {
+		return fmt.Errorf("warm up packs before repack: %w", err)
+	}
+	if warmup.HandleCount() != 0 {
+		printer.P("warming up %d packs before repack\n", warmup.HandleCount())
+		if err := warmup.Wait(ctx); err != nil {
+			return fmt.Errorf("wait for repack warm-up: %w", err)
+		}
+	}
 	// Declare the sources so every pack written by the copy records that it is
 	// a rewrite of them rather than newly backed-up data.
 	sources := toSchemaIDs(packSet.List())
 	plan.engine.SetRepackContext(schema.ID(plan.runID), sources)
-	err := plan.repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+	err = plan.repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		return CopyBlobs(ctx, plan.repo, plan.repo, uploader, packSet, keep, bar, printer.P)
 	})
 	plan.engine.ClearRepackContext()
@@ -394,6 +434,13 @@ func (plan *GCPlan) repackMixedPacks(ctx context.Context, printer vaultic.Printe
 			printer.E("mark repacked pack %s delete-pending: %v\n", packID.Str(), err)
 			continue
 		}
+		ready, err := plan.packReadyForPhysicalDeletion(ctx, packID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			continue
+		}
 		if err := plan.deletePackObjectAndCatalog(ctx, packID, plan.mixedPackMembers[packID]); err != nil {
 			printer.E("deleting repacked pack %s: %v\n", packID.Str(), err)
 			continue
@@ -409,6 +456,13 @@ func (plan *GCPlan) deleteWholePacks(ctx context.Context, printer vaultic.Printe
 			printer.E("mark pack %s delete-pending: %v\n", packID.Str(), err)
 			continue
 		}
+		ready, err := plan.packReadyForPhysicalDeletion(ctx, packID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			continue
+		}
 		if err := plan.deletePackObjectAndCatalog(ctx, packID, members); err != nil {
 			printer.E("deleting pack %s: %v\n", packID.Str(), err)
 			plan.recordDeleteFailure(ctx, packID, err, printer)
@@ -416,6 +470,36 @@ func (plan *GCPlan) deleteWholePacks(ctx context.Context, printer vaultic.Printe
 		}
 	}
 	return nil
+}
+
+func (plan *GCPlan) packReadyForPhysicalDeletion(ctx context.Context, packID vaultic.ID) (bool, error) {
+	deadline := time.Now().UnixNano()
+	var sawPlacement bool
+	err := gcScan(ctx, plan.store, schema.PackPlacementPrefix(schema.ID(packID)), func(entry daemon.KeyValue) error {
+		parsed, err := schema.ParseKey(entry.Key)
+		if err != nil || parsed.Kind != schema.KeyPackPlacement {
+			return fmt.Errorf("invalid placement key %q", entry.Key)
+		}
+		placement, err := schema.UnmarshalPlacementRecord(entry.Value)
+		if err != nil {
+			return err
+		}
+		if placement.State != schema.PlacementEvicting {
+			return nil
+		}
+		sawPlacement = true
+		if placement.DeleteAfter > deadline {
+			deadline = placement.DeleteAfter
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !sawPlacement {
+		return true, nil
+	}
+	return deadline <= time.Now().UnixNano(), nil
 }
 
 // recordDeleteFailure notes that a physical removal failed. The pack stays
@@ -708,6 +792,74 @@ func computePackUsage(
 		updates[schema.ID(packID)] = daemon.PackUsage{Used: used, Unused: unused}
 	}
 	return updates, inconsistent
+}
+
+func scanGCPlacements(ctx context.Context, store GCStore) (map[vaultic.ID]map[uint64]schema.PlacementRecord, error) {
+	placements := map[vaultic.ID]map[uint64]schema.PlacementRecord{}
+	if err := gcScan(ctx, store, []byte("pl:"), func(entry daemon.KeyValue) error {
+		parsed, err := schema.ParseKey(entry.Key)
+		if err != nil || parsed.Kind != schema.KeyPackPlacement {
+			return fmt.Errorf("invalid placement key %q", entry.Key)
+		}
+		record, err := schema.UnmarshalPlacementRecord(entry.Value)
+		if err != nil {
+			return err
+		}
+		packID := vaultic.ID(parsed.ID)
+		if placements[packID] == nil {
+			placements[packID] = map[uint64]schema.PlacementRecord{}
+		}
+		placements[packID][parsed.Backend] = record
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return placements, nil
+}
+
+func mixedPackRepackAllowed(record schema.PackRecord, memberBytes map[vaultic.ID]uint64, unreachable map[vaultic.ID]struct{}, placements map[uint64]schema.PlacementRecord, model PlacementModel, now time.Time) bool {
+	if len(placements) == 0 || len(model.Backends) == 0 {
+		return true
+	}
+	backends := map[uint64]PlacementBackend{}
+	for _, backend := range model.Backends {
+		backends[backend.Hash] = backend
+	}
+	var unused uint64
+	for blobID, size := range memberBytes {
+		if _, gone := unreachable[blobID]; gone {
+			unused += size
+		}
+	}
+	for backendHash, placement := range placements {
+		backend, ok := backends[backendHash]
+		if !ok || placement.State != schema.PlacementLive {
+			continue
+		}
+		remainingRetention := time.Duration(0)
+		if placement.RetentionSource != schema.RetentionUnknown && placement.MinRetentionUntil > now.UnixNano() {
+			remainingRetention = time.Duration(placement.MinRetentionUntil - now.UnixNano())
+		}
+		constrained := backend.PricePerGBMonth > 0 || backend.PricePerGBEgress > 0 || backend.PricePer1KRequests > 0 || backend.MinRetention() > 0 || placement.RetentionSource != schema.RetentionUnknown
+		if !constrained {
+			continue
+		}
+		decision := placementRepackDecision(PlacementDecisionInputs{
+			PhysicalSize: record.PhysicalSize, UnusedPayloadBytes: unused,
+			PricePerGBMonth:     backend.PricePerGBMonth,
+			PricePerGBEgress:    backend.PricePerGBEgress,
+			PricePer1KRequests:  backend.PricePer1KRequests,
+			RemainingRetention:  remainingRetention,
+			RetentionSource:     placement.RetentionSource,
+			ObjectOverheadBytes: backend.ObjectOverheadBytes,
+			Requests:            2,
+			Horizon:             180 * 24 * time.Hour,
+		})
+		if !decision.Repack {
+			return false
+		}
+	}
+	return true
 }
 
 func loadExistingGCTimestamps(ctx context.Context, store GCStore) (map[string]int64, error) {

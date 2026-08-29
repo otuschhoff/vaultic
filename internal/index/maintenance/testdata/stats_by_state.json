@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "catalog",
   "totals": {
     "dimension": "all",
@@ -43,6 +43,8 @@
       "unused_ratio": 0.1111111111111111
     }
   ],
+  "unknown_placement_packs": 3,
+  "placement_records_malformed": 0,
   "unknown_tier_packs": 1,
   "unknown_type_packs": 1,
   "mixed_type_packs": 0,

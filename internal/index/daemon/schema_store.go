@@ -26,6 +26,7 @@ type LegacyPackImport struct {
 	PackID      schema.ID
 	Record      schema.PackRecord
 	Blobs       map[schema.ID]schema.BlobRecord
+	Placements  map[uint64]schema.PlacementRecord
 	BatchSize   uint32
 	DebtKey     []byte
 	Debt        *schema.CrawlDebtRecord
@@ -41,6 +42,10 @@ type PublishedPack struct {
 	PackID schema.ID
 	Record schema.PackRecord
 	Blobs  map[schema.ID]schema.BlobRecord
+	// Placements records where the pack bytes physically live, keyed by backend
+	// hash. These are written atomically with the pack transition that produced
+	// them.
+	Placements map[uint64]schema.PlacementRecord
 	// PredecessorPackIDs carries repack lineage when this pack replaces others,
 	// so a reader can tell a rewrite from genuine new data.
 	PredecessorPackIDs []schema.ID
@@ -264,6 +269,7 @@ func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyP
 func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPack) error {
 	imported := LegacyPackImport{
 		PackID: published.PackID, Record: published.Record, Blobs: published.Blobs,
+		Placements:         published.Placements,
 		PredecessorPackIDs: published.PredecessorPackIDs, RunID: published.RunID,
 	}
 	backoff := 100 * time.Microsecond
@@ -401,6 +407,11 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 		return fail(err)
 	}
 	puts = append(puts, Mutation{Key: packKey, Value: encodedPack})
+	placementPuts, err := placementMutations(imported.PackID, imported.Placements)
+	if err != nil {
+		return fail(err)
+	}
+	puts = append(puts, placementPuts...)
 
 	aggregates, err := updatePackAggregates(ctx, transaction, oldRecord, imported.Record)
 	if err != nil {
@@ -670,6 +681,53 @@ func (store *SchemaStore) markPackPublishedOnce(ctx context.Context, packID sche
 	return nil
 }
 
+func placementMutations(packID schema.ID, placements map[uint64]schema.PlacementRecord) ([]Mutation, error) {
+	if len(placements) == 0 {
+		return nil, nil
+	}
+	puts := make([]Mutation, 0, 2*len(placements))
+	for backend, placement := range placements {
+		if backend == 0 {
+			return nil, fmt.Errorf("pack placement requires a backend")
+		}
+		value, err := placement.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		puts = append(puts, Mutation{Key: schema.PackPlacementKey(packID, backend), Value: value})
+		backendValue, err := (schema.BackendPackRecord{
+			State: placement.State, Bytes: placement.Bytes, PlacedAt: placement.PlacedAt,
+		}).MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		puts = append(puts, Mutation{Key: schema.BackendPackKey(backend, packID), Value: backendValue})
+	}
+	return puts, nil
+}
+
+func (store *SchemaStore) packPlacementKeys(ctx context.Context, packID schema.ID) ([][]byte, error) {
+	prefix := schema.PackPlacementPrefix(packID)
+	keys := make([][]byte, 0)
+	var after []byte
+	for {
+		entries, done, err := store.client.ScanPage(ctx, prefix, after, store.client.Limits().MaxPageItems, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			keys = append(keys, append([]byte(nil), entry.Key...))
+			after = append(after[:0], entry.Key...)
+		}
+		if done {
+			return keys, nil
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("scan placement keys made no progress")
+		}
+	}
+}
+
 // MarkPackDeletePending begins the two-phase deletion of a pack that GC has
 // confirmed is wholly unreachable. It is idempotent and retried on conflict.
 func (store *SchemaStore) MarkPackDeletePending(ctx context.Context, packID schema.ID) error {
@@ -693,6 +751,10 @@ func (store *SchemaStore) MarkPackDeletePending(ctx context.Context, packID sche
 
 func (store *SchemaStore) markPackDeletePendingOnce(ctx context.Context, packID schema.ID) error {
 	key := schema.PackKey(packID)
+	placementKeys, err := store.packPlacementKeys(ctx, packID)
+	if err != nil {
+		return err
+	}
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
@@ -724,6 +786,47 @@ func (store *SchemaStore) markPackDeletePendingOnce(ctx context.Context, packID 
 		return fail(err)
 	}
 	puts := []Mutation{{Key: key, Value: encoded}}
+	now := time.Now().UnixNano()
+	for _, placementKey := range placementKeys {
+		value, found, getErr := transaction.Get(ctx, placementKey)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if !found {
+			continue
+		}
+		parsed, parseErr := schema.ParseKey(placementKey)
+		if parseErr != nil || parsed.Kind != schema.KeyPackPlacement {
+			return fail(fmt.Errorf("invalid placement key %q", placementKey))
+		}
+		placement, decodeErr := schema.UnmarshalPlacementRecord(value)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		if placement.State != schema.PlacementLive && placement.State != schema.PlacementPending {
+			continue
+		}
+		placement.State = schema.PlacementEvicting
+		placement.DeleteAfter = now
+		if placement.RetentionSource != schema.RetentionUnknown && placement.MinRetentionUntil > placement.DeleteAfter {
+			placement.DeleteAfter = placement.MinRetentionUntil
+		}
+		encodedPlacement, encodeErr := placement.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: placementKey, Value: encodedPlacement})
+		backendValue, encodeErr := (schema.BackendPackRecord{State: placement.State, Bytes: placement.Bytes, PlacedAt: placement.PlacedAt}).MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: schema.BackendPackKey(parsed.Backend, packID), Value: backendValue})
+		queueValue, encodeErr := (schema.PlacementDeleteRecord{Backend: parsed.Backend, PhysicalSize: placement.Bytes, Reason: "gc", RunID: schema.ID{}}).MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: schema.PlacementDeleteQueueKey(placement.DeleteAfter, packID, parsed.Backend), Value: queueValue})
+	}
 	history, err := packHistoryMutations(ctx, transaction, []PackEvent{{
 		PackID: packID,
 		Record: schema.PackHistoryEvent{
@@ -770,6 +873,10 @@ func (store *SchemaStore) MarkPackDeleted(ctx context.Context, packID schema.ID,
 
 func (store *SchemaStore) markPackDeletedOnce(ctx context.Context, packID schema.ID, memberBlobIDs []schema.ID) error {
 	packKey := schema.PackKey(packID)
+	placementKeys, err := store.packPlacementKeys(ctx, packID)
+	if err != nil {
+		return err
+	}
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
@@ -793,9 +900,30 @@ func (store *SchemaStore) markPackDeletedOnce(ctx context.Context, packID schema
 		return fail(fmt.Errorf("pack cannot be deleted from lifecycle %d", record.Lifecycle))
 	}
 
-	deletes := make([][]byte, 0, len(memberBlobIDs)+2)
+	deletes := make([][]byte, 0, len(memberBlobIDs)+2+3*len(placementKeys))
 	puts := make([]Mutation, 0, len(memberBlobIDs)+5)
 	deletes = append(deletes, packKey)
+	for _, placementKey := range placementKeys {
+		parsed, parseErr := schema.ParseKey(placementKey)
+		if parseErr != nil || parsed.Kind != schema.KeyPackPlacement {
+			return fail(fmt.Errorf("invalid placement key %q", placementKey))
+		}
+		deletes = append(deletes, placementKey, schema.BackendPackKey(parsed.Backend, packID))
+		value, found, getErr := transaction.Get(ctx, placementKey)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if !found {
+			continue
+		}
+		placement, decodeErr := schema.UnmarshalPlacementRecord(value)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		if placement.DeleteAfter != 0 {
+			deletes = append(deletes, schema.PlacementDeleteQueueKey(placement.DeleteAfter, packID, parsed.Backend))
+		}
+	}
 
 	for _, blobID := range memberBlobIDs {
 		blobKey := schema.BlobKey(blobID)
@@ -1515,7 +1643,8 @@ func validateMutableKey(key []byte) error {
 	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyTierAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
-		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt:
+		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue:
 		return nil
 	case schema.KeyPackHistory:
 		// The event log is append-only: entries are written by the catalog
@@ -1535,7 +1664,8 @@ func validateMutableDeleteKey(key []byte) error {
 	}
 	switch parsed.Kind {
 	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyExportIndexCheckpoint,
-		schema.KeyPackHistory, schema.KeyPackHistoryBucket:
+		schema.KeyPackHistory, schema.KeyPackHistoryBucket,
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue:
 		// History is explicitly prunable: it is derived, advisory, and retained
 		// on its own schedule.
 		return nil
@@ -1555,7 +1685,8 @@ func validatePublishKey(key []byte) (bool, error) {
 	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyTierAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
-		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt:
+		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue:
 		return false, nil
 	case schema.KeyPackHistory:
 		return true, nil

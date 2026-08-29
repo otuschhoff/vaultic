@@ -44,6 +44,9 @@ const (
 	KeyNextEventSequence
 	KeyHistoryRawFloor
 	KeyHistoryEnabledAt
+	KeyPackPlacement
+	KeyBackendPack
+	KeyPlacementDeleteQueue
 )
 
 // HistoryGranularity names a rollup bucket width. The values are part of the
@@ -107,6 +110,7 @@ type ParsedKey struct {
 	Granularity HistoryGranularity
 	Backend     uint64
 	PackType    PackType
+	DeleteAfter int64
 }
 
 func BlobKey(id ID) []byte           { return idKey("b:", id) }
@@ -252,6 +256,60 @@ func PackHistoryBucketPrefix(granularity HistoryGranularity) []byte {
 	return []byte{'p', 'b', ':', byte(granularity)}
 }
 
+// PackPlacementKey identifies one physical placement of a pack on one
+// configured backend.
+func PackPlacementKey(pack ID, backend uint64) []byte {
+	key := make([]byte, 3+32+1+8)
+	copy(key, "pl:")
+	copy(key[3:], pack[:])
+	key[35] = ':'
+	binary.BigEndian.PutUint64(key[36:], backend)
+	return key
+}
+
+func PackPlacementPrefix(pack ID) []byte {
+	key := make([]byte, 3+32+1)
+	copy(key, "pl:")
+	copy(key[3:], pack[:])
+	key[35] = ':'
+	return key
+}
+
+func BackendPackKey(backend uint64, pack ID) []byte {
+	key := make([]byte, 3+8+1+32)
+	copy(key, "bp:")
+	binary.BigEndian.PutUint64(key[3:], backend)
+	key[11] = ':'
+	copy(key[12:], pack[:])
+	return key
+}
+
+func BackendPackPrefix(backend uint64) []byte {
+	key := make([]byte, 3+8+1)
+	copy(key, "bp:")
+	binary.BigEndian.PutUint64(key[3:], backend)
+	key[11] = ':'
+	return key
+}
+
+func PlacementDeleteQueueKey(deleteAfter int64, pack ID, backend uint64) []byte {
+	key := make([]byte, 3+8+1+32+1+8)
+	copy(key, "dq:")
+	binary.BigEndian.PutUint64(key[3:], uint64(deleteAfter))
+	key[11] = ':'
+	copy(key[12:], pack[:])
+	key[44] = ':'
+	binary.BigEndian.PutUint64(key[45:], backend)
+	return key
+}
+
+func PlacementDeleteQueuePrefix(before int64) []byte {
+	key := make([]byte, 3+8)
+	copy(key, "dq:")
+	binary.BigEndian.PutUint64(key[3:], uint64(before))
+	return key
+}
+
 func NextEventSequenceKey() []byte { return []byte("meta:next-event-seq") }
 
 // HistoryRawFloorKey records the earliest raw event time still retained, so a
@@ -345,6 +403,19 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		if !validHistoryGranularity(parsed.Granularity) || !validPackType(parsed.PackType) {
 			return ParsedKey{}, fmt.Errorf("%w: invalid history bucket key", ErrMalformed)
 		}
+	case len(key) == 44 && string(key[:3]) == "pl:" && key[35] == ':':
+		parsed.Kind = KeyPackPlacement
+		copy(parsed.ID[:], key[3:35])
+		parsed.Backend = binary.BigEndian.Uint64(key[36:])
+	case len(key) == 44 && string(key[:3]) == "bp:" && key[11] == ':':
+		parsed.Kind = KeyBackendPack
+		parsed.Backend = binary.BigEndian.Uint64(key[3:11])
+		copy(parsed.ID[:], key[12:])
+	case len(key) == 53 && string(key[:3]) == "dq:" && key[11] == ':' && key[44] == ':':
+		parsed.Kind = KeyPlacementDeleteQueue
+		parsed.DeleteAfter = int64(binary.BigEndian.Uint64(key[3:11]))
+		copy(parsed.ID[:], key[12:44])
+		parsed.Backend = binary.BigEndian.Uint64(key[45:])
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind

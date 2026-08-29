@@ -155,11 +155,12 @@ func TestStatsUsesAggregatesUntilAQuestionNeedsTheCatalog(t *testing.T) {
 	if source := fixture.stats(t, StatsOptions{}).Source; source != SourceAggregates {
 		t.Fatalf("unfiltered stats scanned the catalog: %s", source)
 	}
-	if source := fixture.stats(t, StatsOptions{GroupBy: []string{"tier"}}).Source; source != SourceAggregates {
-		t.Fatalf("tier grouping is an aggregate dimension but scanned the catalog: %s", source)
+	if source := fixture.stats(t, StatsOptions{GroupBy: []string{"type"}}).Source; source != SourceAggregates {
+		t.Fatalf("type grouping is an aggregate dimension but scanned the catalog: %s", source)
 	}
 	for name, options := range map[string]StatsOptions{
 		"state grouping": {GroupBy: []string{"state"}},
+		"tier grouping":  {GroupBy: []string{"tier"}},
 		"tier filter":    {Tier: "hot"},
 		"type filter":    {Type: "data"},
 		"verify":         {Verify: true},
@@ -377,7 +378,7 @@ func TestLimitCapsReturnedWithoutDistortingMatched(t *testing.T) {
 func TestStatsRejectsUnknownDimensions(t *testing.T) {
 	fixture := newIntrospectFixture(t)
 	for name, options := range map[string]StatsOptions{
-		"grouping": {GroupBy: []string{"backend"}},
+		"grouping": {GroupBy: []string{"placement"}},
 		"tier":     {Tier: "glacier"},
 		"type":     {Type: "blob"},
 		"state":    {State: "archived"},

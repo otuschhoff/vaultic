@@ -33,6 +33,8 @@ func requireSlateDBRepository(repo *repository.Repository) error {
 type indexStatsOptions struct {
 	Daemon  indexDaemonOptions
 	GroupBy []string
+	Backend string
+	Class   string
 	Tier    string
 	Type    string
 	State   string
@@ -58,7 +60,9 @@ func newIndexStatsCommand(globalOptions *global.Options) *cobra.Command {
 		},
 	}
 	options.Daemon.AddFlags(command.Flags())
-	command.Flags().StringSliceVar(&options.GroupBy, "by", nil, "group totals by tier, type, or state")
+	command.Flags().StringSliceVar(&options.GroupBy, "by", nil, "group totals by backend, type, state, class, or tier")
+	command.Flags().StringVar(&options.Backend, "backend", "", "only packs placed on this backend")
+	command.Flags().StringVar(&options.Class, "class", "", "only packs with this placement storage class")
 	command.Flags().StringVar(&options.Tier, "tier", "", "only packs in this tier")
 	command.Flags().StringVar(&options.Type, "type", "", "only packs of this type: data, tree, mixed, unknown")
 	command.Flags().StringVar(&options.State, "state", "", "only packs in this lifecycle state")
@@ -98,9 +102,15 @@ func runIndexStats(ctx context.Context, options indexStatsOptions, globalOptions
 	}
 	defer closeStore()
 
+	placementModel, err := indexMaintenancePlacementModel(repo)
+	if err != nil {
+		return result, err
+	}
 	result, err = maintenance.Stats(ctx, store, maintenance.StatsOptions{
-		GroupBy: options.GroupBy, Tier: options.Tier, Type: options.Type, State: options.State,
-		Verify: options.Verify, Rebuild: options.Rebuild, DryRun: options.DryRun,
+		GroupBy: options.GroupBy, Backend: options.Backend, Class: options.Class,
+		Tier: options.Tier, Type: options.Type, State: options.State,
+		PlacementModel: placementModel,
+		Verify:         options.Verify, Rebuild: options.Rebuild, DryRun: options.DryRun,
 	})
 	if err != nil {
 		return result, err
@@ -154,6 +164,8 @@ func printStats(printer vaultic.Printer, result maintenance.StatsResult) {
 
 type indexPacksOptions struct {
 	Daemon           indexDaemonOptions
+	Backend          string
+	Class            string
 	Tier             string
 	Type             string
 	State            string
@@ -165,6 +177,8 @@ type indexPacksOptions struct {
 	RetentionExpired bool
 	RetentionUnknown bool
 	DeletePending    bool
+	NotOffsite       bool
+	PromotionDue     bool
 	Sort             string
 	Limit            uint
 	CountOnly        bool
@@ -187,6 +201,8 @@ func newIndexPacksCommand(globalOptions *global.Options) *cobra.Command {
 		},
 	}
 	options.Daemon.AddFlags(command.Flags())
+	command.Flags().StringVar(&options.Backend, "backend", "", "only packs placed on this backend")
+	command.Flags().StringVar(&options.Class, "class", "", "only packs with this placement storage class")
 	command.Flags().StringVar(&options.Tier, "tier", "", "only packs in this tier")
 	command.Flags().StringVar(&options.Type, "type", "", "only packs of this type")
 	command.Flags().StringVar(&options.State, "state", "", "only packs in this lifecycle state")
@@ -198,7 +214,9 @@ func newIndexPacksCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().BoolVar(&options.RetentionExpired, "retention-expired", false, "only packs whose known minimum retention has passed")
 	command.Flags().BoolVar(&options.RetentionUnknown, "retention-unknown", false, "only packs with no trustworthy retention deadline")
 	command.Flags().BoolVar(&options.DeletePending, "delete-pending", false, "only packs awaiting physical deletion")
-	command.Flags().StringVar(&options.Sort, "sort", "id", "order by id, size, created, unused, unused-ratio, or delete-after")
+	command.Flags().BoolVar(&options.NotOffsite, "not-offsite", false, "only packs with no offsite placement")
+	command.Flags().BoolVar(&options.PromotionDue, "promotion-due", false, "only packs whose placement policy requires an offsite copy")
+	command.Flags().StringVar(&options.Sort, "sort", "id", "order by id, size, created, unused, unused-ratio, delete-after, or offsite-deadline")
 	command.Flags().UintVar(&options.Limit, "limit", 0, "return at most this many packs (zero is unlimited)")
 	command.Flags().BoolVar(&options.CountOnly, "count-only", false, "report only how many packs matched")
 	return command
@@ -207,10 +225,12 @@ func newIndexPacksCommand(globalOptions *global.Options) *cobra.Command {
 func runIndexPacks(ctx context.Context, options indexPacksOptions, globalOptions global.Options, term ui.Terminal) (maintenance.PacksResult, error) {
 	var result maintenance.PacksResult
 	filter := maintenance.PackFilter{
+		Backend: options.Backend, Class: options.Class,
 		Tier: options.Tier, Type: options.Type, State: options.State,
 		MinSize: options.MinSize, MaxSize: options.MaxSize,
 		UnusedRatioAbove: options.UnusedRatioAbove, RetentionExpired: options.RetentionExpired,
 		RetentionUnknown: options.RetentionUnknown, DeletePending: options.DeletePending,
+		NotOffsite: options.NotOffsite, PromotionDue: options.PromotionDue,
 		Sort: options.Sort, Limit: options.Limit, CountOnly: options.CountOnly,
 	}
 	var err error
@@ -233,6 +253,10 @@ func runIndexPacks(ctx context.Context, options indexPacksOptions, globalOptions
 	}
 	defer unlock()
 	if err := requireSlateDBRepository(repo); err != nil {
+		return result, err
+	}
+	filter.PlacementModel, err = indexMaintenancePlacementModel(repo)
+	if err != nil {
 		return result, err
 	}
 	store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
@@ -570,6 +594,11 @@ func runIndexBackends(ctx context.Context, options indexBackendsOptions, globalO
 		return result, err
 	}
 	result.Backends = reports
+	if options.NoList && slateDB {
+		if err := fillBackendReportsFromPlacements(ctx, repo, options, &result); err != nil {
+			return result, err
+		}
+	}
 
 	if options.Compare {
 		if err := compareBackendToCatalog(ctx, repo, options, &result); err != nil {
@@ -645,27 +674,67 @@ func countBackendObjects(ctx context.Context, target backendLister) ([]BackendFi
 	return counts, nil
 }
 
+func fillBackendReportsFromPlacements(ctx context.Context, repo *repository.Repository, options indexBackendsOptions, result *BackendsResult) error {
+	store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	model, err := indexMaintenancePlacementModel(repo)
+	if err != nil {
+		return err
+	}
+	placements, err := maintenance.BackendPlacementCounts(ctx, store, model)
+	if err != nil {
+		return err
+	}
+	for index := range result.Backends {
+		backend := result.Backends[index].Role
+		for _, reportBackend := range model.Backends {
+			if reportBackend.Role == result.Backends[index].Role {
+				backend = reportBackend.ID
+				break
+			}
+		}
+		count := placements[backend]
+		if count.Objects != 0 || count.Bytes != 0 {
+			result.Backends[index].FileTypes = []BackendFileTypeCount{{FileType: "pack", Objects: count.Objects, Bytes: count.Bytes}}
+		}
+	}
+	return nil
+}
+
 func compareBackendToCatalog(ctx context.Context, repo *repository.Repository, options indexBackendsOptions, result *BackendsResult) error {
 	store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
 	if err != nil {
 		return err
 	}
 	defer closeStore()
-
-	catalog, err := maintenance.QueryPacks(ctx, store, maintenance.PackFilter{})
+	model, err := indexMaintenancePlacementModel(repo)
 	if err != nil {
 		return err
 	}
-	known := make(map[string]struct{}, len(catalog.Packs))
-	var expectedAbsent uint64
-	for _, entry := range catalog.Packs {
-		if !packShouldExistOnBackend(entry.State) {
-			expectedAbsent++
-			continue
-		}
-		known[entry.ID] = struct{}{}
+	known, expectedAbsent, err := maintenance.ExpectedBackendPackIDs(ctx, store, model)
+	if err != nil {
+		return err
 	}
-	result.CatalogPacks = uint64(len(known))
+	catalog, err := maintenance.QueryPacks(ctx, store, maintenance.PackFilter{PlacementModel: model})
+	if err != nil {
+		return err
+	}
+	knownCatalogPack := make(map[string]struct{}, len(catalog.Packs))
+	for _, entry := range catalog.Packs {
+		if packShouldExistOnBackend(entry.State) {
+			knownCatalogPack[entry.ID] = struct{}{}
+		}
+	}
+	if len(known) == 0 {
+		known = make(map[string]struct{}, len(knownCatalogPack))
+		for id := range knownCatalogPack {
+			known[id] = struct{}{}
+		}
+	}
+	result.CatalogPacks = uint64(len(knownCatalogPack))
 	result.ExpectedAbsent = expectedAbsent
 
 	present := make(map[string]struct{}, len(known))
@@ -680,6 +749,14 @@ func compareBackendToCatalog(ctx context.Context, repo *repository.Repository, o
 	result.Compared = true
 
 	result.MissingOnBackend, result.UnknownToCatalog = diffCatalogAgainstListing(known, present)
+	filteredUnknown := result.UnknownToCatalog[:0]
+	for _, id := range result.UnknownToCatalog {
+		if _, found := knownCatalogPack[id]; found {
+			continue
+		}
+		filteredUnknown = append(filteredUnknown, id)
+	}
+	result.UnknownToCatalog = filteredUnknown
 	result.MissingOnBackendNum = uint64(len(result.MissingOnBackend))
 	result.UnknownToCatalogNum = uint64(len(result.UnknownToCatalog))
 	return nil

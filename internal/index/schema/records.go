@@ -131,6 +131,204 @@ const (
 	RetentionBackend
 )
 
+type PlacementState byte
+
+const (
+	PlacementPending PlacementState = iota + 1
+	PlacementLive
+	PlacementEvicting
+	PlacementEvicted
+	PlacementFailed
+)
+
+func validPlacementState(value PlacementState) bool {
+	return value >= PlacementPending && value <= PlacementFailed
+}
+
+type PlacementRecord struct {
+	State              PlacementState
+	StorageClass       string
+	PlacedAt           int64
+	PlacementTimeKnown bool
+	Bytes              uint64
+	MinRetentionUntil  int64
+	RetentionSource    RetentionSource
+	DeleteAfter        int64
+	LastVerifiedAt     int64
+}
+
+func (record PlacementRecord) normalized() PlacementRecord {
+	if record.RetentionSource == 0 {
+		record.RetentionSource = RetentionUnknown
+	}
+	return record
+}
+
+func (record PlacementRecord) validate() error {
+	record = record.normalized()
+	if !validPlacementState(record.State) || !validRetentionSource(record.RetentionSource) {
+		return fmt.Errorf("%w: invalid placement state", ErrMalformed)
+	}
+	if !record.PlacementTimeKnown && record.PlacedAt != 0 {
+		return fmt.Errorf("%w: placement time without a known flag", ErrMalformed)
+	}
+	if record.RetentionSource == RetentionUnknown && record.MinRetentionUntil != 0 {
+		return fmt.Errorf("%w: placement retention deadline without a source", ErrMalformed)
+	}
+	if record.DeleteAfter != 0 && record.State != PlacementEvicting && record.State != PlacementEvicted {
+		return fmt.Errorf("%w: placement delete deadline without evicting state", ErrMalformed)
+	}
+	return nil
+}
+
+func (record PlacementRecord) MarshalBinary() ([]byte, error) {
+	record = record.normalized()
+	if err := record.validate(); err != nil {
+		return nil, err
+	}
+	e := newEncoder()
+	e.u8(byte(record.State))
+	if err := e.string(record.StorageClass); err != nil {
+		return nil, err
+	}
+	e.i64(record.PlacedAt)
+	e.bool(record.PlacementTimeKnown)
+	e.u64(record.Bytes)
+	e.i64(record.MinRetentionUntil)
+	e.u8(byte(record.RetentionSource))
+	e.i64(record.DeleteAfter)
+	e.i64(record.LastVerifiedAt)
+	return e.finish()
+}
+
+func UnmarshalPlacementRecord(data []byte) (PlacementRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PlacementRecord{}, err
+	}
+	var record PlacementRecord
+	value, err := d.u8()
+	record.State = PlacementState(value)
+	if err != nil {
+		return record, err
+	}
+	if record.StorageClass, err = d.string(); err != nil {
+		return record, err
+	}
+	if record.PlacedAt, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.PlacementTimeKnown, err = d.bool(); err != nil {
+		return record, err
+	}
+	if record.Bytes, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.MinRetentionUntil, err = d.i64(); err != nil {
+		return record, err
+	}
+	value, err = d.u8()
+	record.RetentionSource = RetentionSource(value)
+	if err != nil {
+		return record, err
+	}
+	if record.DeleteAfter, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.LastVerifiedAt, err = d.i64(); err != nil {
+		return record, err
+	}
+	if err := record.validate(); err != nil {
+		return PlacementRecord{}, err
+	}
+	return record, d.done()
+}
+
+type BackendPackRecord struct {
+	State    PlacementState
+	Bytes    uint64
+	PlacedAt int64
+}
+
+func (record BackendPackRecord) MarshalBinary() ([]byte, error) {
+	if !validPlacementState(record.State) {
+		return nil, fmt.Errorf("%w: invalid backend-pack state", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u8(byte(record.State))
+	e.u64(record.Bytes)
+	e.i64(record.PlacedAt)
+	return e.finish()
+}
+
+func UnmarshalBackendPackRecord(data []byte) (BackendPackRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return BackendPackRecord{}, err
+	}
+	var record BackendPackRecord
+	value, err := d.u8()
+	record.State = PlacementState(value)
+	if err != nil {
+		return record, err
+	}
+	if record.Bytes, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.PlacedAt, err = d.i64(); err != nil {
+		return record, err
+	}
+	if !validPlacementState(record.State) {
+		return BackendPackRecord{}, fmt.Errorf("%w: invalid backend-pack state", ErrMalformed)
+	}
+	return record, d.done()
+}
+
+type PlacementDeleteRecord struct {
+	Backend      uint64
+	PhysicalSize uint64
+	Reason       string
+	RunID        ID
+}
+
+func (record PlacementDeleteRecord) MarshalBinary() ([]byte, error) {
+	if record.Backend == 0 {
+		return nil, fmt.Errorf("%w: placement delete queue without backend", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u64(record.Backend)
+	e.u64(record.PhysicalSize)
+	if err := e.string(record.Reason); err != nil {
+		return nil, err
+	}
+	e.id(record.RunID)
+	return e.finish()
+}
+
+func UnmarshalPlacementDeleteRecord(data []byte) (PlacementDeleteRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PlacementDeleteRecord{}, err
+	}
+	var record PlacementDeleteRecord
+	if record.Backend, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.PhysicalSize, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Reason, err = d.string(); err != nil {
+		return record, err
+	}
+	if record.RunID, err = d.id(); err != nil {
+		return record, err
+	}
+	if record.Backend == 0 {
+		return PlacementDeleteRecord{}, fmt.Errorf("%w: placement delete queue without backend", ErrMalformed)
+	}
+	return record, d.done()
+}
+
 type PackRecord struct {
 	Type                                             PackType
 	PhysicalSize, PayloadSize, HeaderSize, BlobCount uint64

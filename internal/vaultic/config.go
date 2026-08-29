@@ -58,11 +58,42 @@ type Config struct {
 	// ExtraVerify controls verification of data before upload (default true).
 	ExtraVerify *bool `json:"extra_verify,omitempty"`
 
+	// PlacementBackends declares the durable placement model. Empty means the
+	// repository uses the existing single-backend or hot/cold behavior inferred
+	// from how it was opened. A single declared backend must resolve to the same
+	// behavior as an empty declaration in a non-hot/cold repository.
+	PlacementBackends []PlacementBackend `json:"placement_backends,omitempty"`
+	// PlacementPolicy describes how many independent live placements a pack must
+	// retain before an eviction can proceed.
+	PlacementPolicy PlacementPolicy `json:"placement_policy,omitempty"`
+
 	// PrunePlan is a durable deferred-cleanup marker. It is an additive config
 	// extension: restic and rustic ignore unknown config fields, while vaultic
 	// uses it to revalidate exactly which indexes and packs a prior prune may
 	// delete. It is intentionally optional and never required to open a repo.
 	PrunePlan *PrunePlan `json:"prune_plan,omitempty"`
+}
+
+type PlacementBackend struct {
+	ID                  string  `json:"id"`
+	Role                string  `json:"role,omitempty"`
+	Offsite             bool    `json:"offsite,omitempty"`
+	FailureDomain       string  `json:"failure_domain,omitempty"`
+	CapacityBytes       uint64  `json:"capacity_bytes,omitempty"`
+	PricePerGBMonth     float64 `json:"price_per_gb_month,omitempty"`
+	PricePerGBEgress    float64 `json:"price_per_gb_egress,omitempty"`
+	PricePer1KRequests  float64 `json:"price_per_1k_requests,omitempty"`
+	MinRetentionSeconds uint64  `json:"min_retention_seconds,omitempty"`
+	RetrievalClass      string  `json:"retrieval_class,omitempty"`
+	MaxBandwidthBytes   uint64  `json:"max_bandwidth_bytes,omitempty"`
+	ObjectOverheadBytes uint64  `json:"object_overhead_bytes,omitempty"`
+}
+
+type PlacementPolicy struct {
+	MinCopies       uint  `json:"min_copies,omitempty"`
+	MinDomains      uint  `json:"min_domains,omitempty"`
+	MinOffsite      uint  `json:"min_offsite,omitempty"`
+	OffsiteDeadline int64 `json:"offsite_deadline_seconds,omitempty"`
 }
 
 // PrunePlan records the immutable candidates produced after prune has uploaded
