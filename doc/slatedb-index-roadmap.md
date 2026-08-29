@@ -518,6 +518,54 @@ are acceleration structures, not the sole source of truth. `index check` must
 be able to rebuild them from `p:` records and report drift, missing records,
 and mixed/unknown packs rather than silently excluding them from totals.
 
+### Pack placement
+
+Where a pack's bytes physically live is a set that changes over the pack's
+lifetime, not a single attribute of the pack. A pack may be live on local
+storage while still being uploaded offsite and already evicted from a third
+backend. Placement is therefore recorded per `(pack, backend)` with its own
+lifecycle:
+
+```text
+key:   pl:<32-byte pack ID>:<8-byte backend ID hash>
+value: schema version
+       state (pending, live, evicting, evicted, failed)
+       storage class (backend-reported, free-form, optional)
+       placed-at and placement-time-known flag
+       bytes
+       min-retention-until and retention-source (config, backend, unknown)
+       delete-after
+       last-verified-at
+```
+
+Eviction planning, capacity accounting, and reconciliation against a backend
+listing all need the opposite direction, so it is a separate range-scannable
+namespace rather than a scan of every pack:
+
+```text
+key:   bp:<8-byte backend ID hash>:<32-byte pack ID>
+value: state, bytes, placed-at
+```
+
+Both records are written in the same transaction as the transition that
+produced them. `bp:` is derived and must be rebuildable from `pl:` by
+`index check`.
+
+Minimum retention, retention source, and the deletion deadline belong here
+rather than on the pack record, because they differ per backend: a local copy
+usually has no minimum retention while an archival copy has one measured in
+months. A single pack-level field cannot express both, and collapsing them
+would either invent a retention obligation for local storage or discard a real
+one for archival storage. The pack record keeps `created_at`, usage accounting,
+and a denormalised summary of the current placement set for fast filtering; the
+summary is always rebuildable from `pl:`.
+
+The blob index is unchanged. A blob still resolves to exactly one pack, and the
+existing multi-location capability of the blob record remains reserved for
+legacy duplicate semantics. Two copies of one pack on two backends are one
+logical location with two placements, never two blob locations. Section 12
+defines the durability predicate that governs when a placement may be removed.
+
 ### Reverse references and reachability
 
 Keep `b:<blob-hash>` focused on physical pack locations. Do not append a
@@ -934,7 +982,9 @@ comparison and exit-code decision.
 
 `vaultic index stats`, `vaultic index packs`, `vaultic index history`,
 `vaultic index history prune`, and `vaultic index backends` are specified in
-section 12.2 and implemented in Phase 11.
+section 12.2 and implemented in Phase 11. `vaultic index placement` is specified
+in the same section and implemented in Phase 16, because it reports on machinery
+that phase introduces.
 
 `vaultic index file-history` and `vaultic index path-at` are specified in
 section 13.2 and implemented in Phases 13 and 14. Note that `index history`
@@ -967,118 +1017,317 @@ cross-tool repository locks.
 - TCP remains disabled unless both configuration and daemon startup policy
   explicitly enable it.
 
-## 12. Tiered storage policy, pack history, and backend introspection
+## 12. Storage placement policy, pack history, and backend introspection
 
 ### 12.1 Objective
 
 Vaultic already supports hot/cold repositories: the hot backend holds metadata
 and tree packs, the cold backend holds data packs, and reads of cold data
-require a warm-up step. Prune, however, is tier-blind. Every repack and delete
-decision is evaluated with one global policy, so the operator must tune for the
-strictest tier. Cold storage is the strict tier: repacking pays egress, request,
-and early-deletion charges, and objects usually carry a minimum retention period
-(commonly 180 days) during which deletion saves nothing. Tuning for cold
-therefore forfeits the one place where defragmentation is genuinely cheap, which
-is the hot tier.
+require a warm-up step. Two problems follow from that model.
 
-The objective of this work is to make tier a first-class property of the pack
-catalog so that:
+First, prune is tier-blind. Every repack and delete decision is evaluated with
+one global policy, so the operator must tune for the strictest tier. Cold
+storage is the strict tier: repacking pays egress, request, and early-deletion
+charges. Tuning for cold forfeits the one place where defragmentation is
+genuinely cheap, which is the hot tier.
 
-1. Hot and cold packs are governed by two independent policies while the blob
-   index keeps exactly one authoritative pack location per blob.
-2. Cold repack and delete decisions are driven by an explicit cost and
-   retention model rather than by a fixed unused-ratio threshold.
-3. Pack lifetime facts are recorded durably instead of being inferred from
-   backend object metadata, which does not reliably carry a creation time.
-4. Operators can query repository composition and growth over time from the
-   CLI without scanning the backend or loading a full index.
+Second, and more expensive, the cold backend is unconditionally authoritative.
+Every pack must therefore be committed to archival storage as soon as it is
+written, before anything is known about whether the data will survive. Archival
+classes bill a minimum retention period — commonly 180 days — so a pack that
+becomes unreachable after three days is still charged for six months. For a
+backup workload, where a large fraction of each run is volatile data that the
+retention policy will discard within days, this is not a rounding error: it is
+the dominant cost of the cold tier, and it is paid on data the operator already
+deleted.
 
-Non-goals: changing the on-backend repository format, changing the hot/cold
-split rule (tree packs hot, data packs cold), or making SlateDB required for
-hot/cold repositories. Legacy JSON repositories keep today's tier-blind prune.
+The root cause is that one decision is being used to answer two questions:
+*where must a second durable copy exist, and how soon* (a durability
+requirement), and *does this data deserve cheap long-term storage* (an
+economic judgement that depends on how long the data actually lives). Those are
+independent, and conflating them forces the archival commitment to be made at
+the one moment when the information needed to make it does not yet exist.
+
+The objective of this work is to replace the fixed hot/cold split with an
+explicit placement model, so that:
+
+1. A repository may use several backends, each declaring its own properties and
+   constraints, rather than exactly one hot and one cold part.
+2. A pack's location is a *set* of placements that changes over its lifetime,
+   governed by an explicit durability predicate rather than by which backend was
+   declared authoritative.
+3. Offsite durability is expressed as a deadline the operator can state and the
+   system can measure, instead of being an implicit side effect of writing to
+   the cold backend synchronously.
+4. Archival commitment is deferred until survival has been observed, so
+   short-lived data never pays an archival minimum-retention floor.
+5. Repack, delete, and promote decisions are driven by explicit cost, retention,
+   and reachability facts rather than a fixed unused-ratio threshold.
+6. Pack lifetime and placement facts are recorded durably instead of being
+   inferred from backend object metadata, which does not reliably carry a
+   creation time.
+7. Operators can query repository composition, placement, and growth from the
+   CLI without scanning a backend or loading a full index.
+
+Non-goals: changing the on-backend repository format, requiring more than one
+backend, building a general cost-optimising constraint solver, or making SlateDB
+required for hot/cold repositories. A repository that declares one backend
+behaves exactly as it does today, and legacy JSON repositories keep today's
+tier-blind prune.
 
 ### 12.2 Methodology
 
-#### Invariant: one authoritative location per blob
+#### Invariant: one authoritative pack per blob, many placements
 
-Tier is a property of a pack, not of a blob. A blob resolves to exactly one
-authoritative pack, and that pack's tier determines where the bytes live. Two
-policies do not imply two copies, and no dual `hot pack id` / `cold pack id`
-tracking is introduced. The existing multi-location capability of the blob
-record stays reserved for legacy duplicate semantics and for the optional hot
-data cache described below, where the extra location is explicitly non
-authoritative.
-
-If a hot data cache is later introduced, the asymmetry is what keeps it
-tractable:
-
-- the cold location is authoritative and obeys the cold policy;
-- a hot data-pack copy is an evictable cache and may be deleted at any time
-  because it is never the last copy;
-- reads prefer the hot location and fall back to cold plus warm-up;
-- `check --check-hot-cold` asserts that every blob has at least one cold
-  location.
-
-#### Tier as a pack catalog attribute
-
-Extend the pack record of section 5 with tier and lifetime fields:
+The invariant worth preserving from the hot/cold model is *one authoritative
+pack per blob*, not *one authoritative location*. A blob resolves to exactly one
+pack ID; the blob index is unchanged and no dual `hot pack id` / `cold pack id`
+tracking is introduced. What becomes a set is the mapping from that pack to the
+backends currently holding its bytes.
 
 ```text
-key:   p:<32-byte pack ID>
-value: versioned pack metadata
-  ... existing fields ...
-  tier (hot, cold, mirrored, unknown)
-  storage class (backend-reported, free-form, optional)
-  created-at and creation-time-known flag
-  min-retention-until and retention-source (config, backend, unknown)
-  used-payload-bytes
-  unused-payload-bytes
-  delete-after
+blob -> exactly one pack            (unchanged, authoritative)
+pack -> a set of placements         (new, changes over the pack's lifetime)
 ```
 
-`tier` is derived at publish time from the pack type and the configured
-hot/cold routing, and recorded rather than recomputed, so that a repository that
-later stops using `--repo-hot` can still explain where a pack came from.
-`min_retention_until` is `created_at + configured tier retention`; it is only
-trustworthy when `creation_time_known` is true. Imported legacy packs without a
-trustworthy timestamp keep `creation_time_known = false` and are treated as
-retention-unknown, which means conservative: never eligible for early deletion
-savings claims, always eligible for ordinary reachability-based deletion once
-the operator opts in.
+This keeps the expensive part of the index untouched: the 500 TB-scale blob
+namespace gains nothing, while placement is tracked once per pack, of which
+there are orders of magnitude fewer.
 
-`used_payload_bytes` and `unused_payload_bytes` are maintained incrementally as
-reachability changes, so prune planning reads a pre-computed number instead of
-recomputing usage from a full index sweep.
+The existing multi-location capability of the blob record stays reserved for
+legacy duplicate semantics. It must not be repurposed to express placement; two
+copies of one pack on two backends are one logical location with two
+placements, not two blob locations.
 
-Aggregate records gain a tier dimension alongside the existing type dimension:
+#### Backend registry
+
+A repository declares its backends in configuration, not per pack. Each entry
+states what the backend *is*, so policy can be written against properties rather
+than against hard-coded names:
 
 ```text
-key:   a:tier:hot
-key:   a:tier:cold
-key:   a:tier:mirrored
+backend:
+  id                      stable identifier, recorded in placements
+  role                    metadata, primary, archival, cache
+  offsite                 boolean
+  failure_domain          opaque label; two backends sharing one are not
+                          independent copies
+  capacity_bytes          optional ceiling for eviction planning
+  price_per_gb_month
+  price_per_gb_egress
+  price_per_1k_requests
+  min_retention           minimum billable object lifetime, zero when none
+  retrieval_class         instant, minutes, hours
+  max_bandwidth           optional scheduler rate limit
+  object_overhead_bytes   per-object billing overhead, where the class has one
 ```
 
-#### Two policies, one planner
+`failure_domain` is the field that makes the offsite guarantee meaningful. Two
+buckets in one provider account, or a Synology and a laptop in the same room,
+are not independent; the durability predicate below counts copies per distinct
+domain, not per backend.
 
-`decidePackAction` becomes tier-parameterised rather than duplicated. The
-policy set is resolved per pack from its tier:
+Prices and limits are operator-supplied estimates, exactly as in the cold cost
+model. They exist to make placement decisions explicit and auditable, not to
+predict an invoice.
 
-| | hot / tree | cold / data |
+#### Placement records
+
+Placement is per `(pack, backend)` and has its own lifecycle, because a pack may
+be live on one backend while still being written to another and already evicted
+from a third:
+
+```text
+key:   pl:<32-byte pack ID>:<8-byte backend ID hash>
+value: schema version
+       state (pending, live, evicting, evicted, failed)
+       storage class (backend-reported, free-form, optional)
+       placed_at and placement-time-known flag
+       bytes
+       min_retention_until and retention_source
+       delete_after
+       last_verified_at
+```
+
+The reverse direction is needed for eviction planning, capacity accounting, and
+reconciling a backend listing against the catalog, so it is a separate
+range-scannable namespace rather than a scan of every pack:
+
+```text
+key:   bp:<8-byte backend ID hash>:<32-byte pack ID>
+value: state, bytes, placed_at
+```
+
+Both records are written in the same transaction as the placement transition
+that produced them, and `index check` must be able to rebuild `bp:` from `pl:`.
+
+**This supersedes part of the Phase 9 pack record.** `min_retention_until`,
+`retention_source`, and `delete_after` were specified and implemented as pack
+attributes. They are properties of a *placement*: the on-premises copy has no
+minimum retention while the archival copy has 180 days, and a single pack-level
+field cannot express both. They move to `pl:`. The pack record keeps
+`created_at`/`creation_time_known`, usage accounting, and a derived summary of
+its current placement set for fast filtering.
+
+`tier` likewise becomes derived rather than stored: it is a projection of the
+placement set, retained on the pack record only as a denormalised summary for
+`index packs` filters, and always rebuildable from `pl:`.
+
+#### Durability predicate and the offsite deadline
+
+Placement policy is expressed as a predicate over the placement set, not as a
+designated authoritative backend:
+
+```text
+durable(pack) :=
+      count(live placements)                                   >= min_copies
+  AND count(distinct failure domains among live placements)     >= min_domains
+  AND count(live placements on offsite backends)                >= min_offsite
+
+satisfied_by_deadline(pack) :=
+      durable(pack)
+   OR age(pack) < offsite_deadline
+```
+
+Two rules follow, and they are the ones a bug is most likely to violate:
+
+- **No eviction may reduce the placement set below `durable`.** Every removal
+  is evaluated against the state that would result, never against the state
+  before it. A pack whose other placements are `pending` is not yet protected by
+  them.
+- **A pack that fails `satisfied_by_deadline` is an operational alarm, not a
+  silent state.** It means the repository has data whose offsite guarantee has
+  lapsed.
+
+`offsite_deadline` is the recovery-point objective, stated by the operator
+(for example "a second offsite copy within four hours of the backup"). It exists
+because placement is asynchronous: bandwidth ceilings and API rate limits make
+synchronous replication to every backend impractical, so a backup completes
+before every placement is live. That window must be explicit and measured rather
+than assumed to be zero.
+
+Packs not yet satisfying the predicate are tracked in a deadline-ordered queue,
+reusing the deletion-queue pattern below so the scheduler and any alarm are
+range scans rather than catalog scans:
+
+```text
+key:   rq:<8-byte offsite deadline unix seconds>:<32-byte pack ID>
+value: required placement classes, attempts, last error class
+```
+
+#### Deferring archival commitment
+
+An archival class with a minimum retention bills a floor per object regardless
+of how long the object is kept. Committing a pack to that class before knowing
+whether it survives means paying the floor on data the retention policy will
+discard within days.
+
+Order-of-magnitude figures for one common provider, to show the shape of the
+trade rather than to predict a bill:
+
+| class | rate | minimum | effective floor |
+|---|---|---|---|
+| standard | ~$0.023/GB-month | none | ~$0.00077/GB-day |
+| deep archive | ~$0.00099/GB-month | 180 days | ~$0.0059/GB, always |
+
+The crossover is where the archival floor equals the standard-class cost of the
+same period: roughly **eight days**. A pack that becomes unreachable sooner is
+strictly cheaper in a standard class; a pack that lives for years is roughly
+twenty times cheaper in the archival class. Neither class is wrong. Committing
+before the outcome is known is what is wrong.
+
+The promotion trigger should therefore be derived from the retention policy
+rather than from a fixed timer, because the retention policy is what actually
+determines a pack's lifetime. A pack lives as long as the longest-lived snapshot
+referencing it, so the rule is:
+
+> Promote a pack to the archival class when its surviving blobs are reachable
+> only from snapshots that the configured forget policy will retain for longer
+> than the archival minimum retention.
+
+For a typical `--keep-daily 7 --keep-weekly 4 --keep-monthly 12` policy, that is
+the point at which a pack's last daily-only reference has expired and it is held
+by a monthly. This is computable from data vaultic already has: the forget
+policy and the reachability result. The eight-day crossover is retained only as
+a floor below which promotion is never correct, for repositories whose retention
+policy cannot supply a horizon.
+
+Deferral is not a durability compromise, because it is a decision about
+*archival class*, not about *how many copies exist*. The offsite deadline is
+satisfied independently, by a placement on a cheap non-archival offsite backend.
+Conflating the two is the failure this section exists to remove.
+
+#### Promotion is a repack, not a copy
+
+A pack must not be promoted by copying the object from one class to another.
+Promotion is a repack, and the moment of promotion is the best opportunity the
+system ever gets to write a well-formed archival pack:
+
+- survival is now *observed* rather than predicted, so the repack can include
+  only blobs that actually lived, and packs written this way tend to become
+  wholly unreachable at once;
+- the source bytes are still on fast local storage, so the read is cheap and
+  needs no warm-up;
+- the target object size can be chosen freely, which matters because archival
+  classes bill a fixed per-object overhead. At 8 MiB packs a terabyte is roughly
+  130,000 objects; at 512 MiB it is roughly 2,000. The overhead difference is
+  several gigabytes of pure billing surface.
+
+This supersedes write-time lifetime grouping as the primary defence against cold
+fragmentation. Grouping by predicted lifetime at write time remains a useful
+secondary heuristic, but it guesses; promotion-time repacking measures. In
+steady state, archival repacking after promotion should approach zero, because
+the packs were assembled from data already known to be long-lived.
+
+Promotion must be crash-safe in the same way as any other repack: write the new
+archival pack, make its placement live, update the blob index, and only then
+allow the superseded placements to be evicted. A crash at any point leaves
+either the old or the new pack fully reachable, never neither.
+
+#### Placement classes and the scheduler
+
+Per-pack cost optimisation is a research project and is explicitly out of scope.
+Policy is expressed as a small number of named placement classes, and every pack
+is assigned exactly one:
+
+| class | typical target | rationale |
+|---|---|---|
+| `metadata` | every backend, never archival | indexes, trees, and snapshots must stay readable to plan any restore |
+| `recent-data` | on-premises primary plus a cheap offsite standard class | satisfies the offsite deadline without an archival minimum |
+| `archival-data` | archival offsite, on-premises copy optional | entered only by promotion, once survival is observed |
+| `cache` | on-premises only, evictable at any time | never the last copy, so eviction is always safe |
+
+The scheduler resolves each pack's class to a target placement set, then works
+to close the difference between target and actual, subject to per-backend
+bandwidth and request-rate limits. It is a background, resumable worker: every
+transition is durable, every action is idempotent, and an interrupted run
+resumes from the placement records rather than from memory.
+
+Ordering is by urgency, not by arrival: packs approaching their offsite deadline
+precede promotions, which precede evictions. Eviction runs last because it is
+the only action that can reduce durability, and it is gated on the predicate.
+
+The existing tier-blind flags keep their meaning for repositories that declare a
+single backend, and `--repack-cacheable-only` remains supported as the coarse
+equivalent of "act on on-premises placements only".
+
+#### Prune and repack policy per backend
+
+`decidePackAction` is parameterised by the properties of the backend holding the
+placement being considered, rather than by a hard-coded tier:
+
+| | cheap, no minimum retention | expensive, minimum retention |
 | --- | --- | --- |
-| repack trigger | unused ratio above a low threshold, small-pack merging, free defragmentation | only when the cost model below is satisfied; default off |
-| delete trigger | wholly unreachable, delete now | wholly unreachable **and** past `min_retention_until` |
-| repack budget | `--max-repack` applied to the hot subtotal | separate `--cold-max-repack`, default `0` |
-| target pack size | current defaults | substantially larger, to reduce future fragmentation |
+| repack trigger | unused ratio above a low threshold, small-pack merging | only when the cost model below is satisfied; default off |
+| delete trigger | wholly unreachable, delete now | wholly unreachable **and** past that placement's `min_retention_until` |
+| repack budget | `--max-repack` applied to that backend's subtotal | separate per-backend budget, default `0` |
+| target pack size | current defaults | substantially larger |
 
-The existing tier-blind flags keep their meaning for legacy repositories and for
-repositories without a hot part. `--repack-cacheable-only` remains the coarse
-equivalent of "hot policy only, never touch cold", and stays supported.
+#### Cost model for repacking a constrained placement
 
-#### Cost model for cold repacking
-
-A cold pack is repacked only when the projected storage saving over a horizon
-exceeds the cost of moving it, including the retention charge that is still
-owed on the object being replaced:
+A placement on a backend with egress or minimum-retention charges is repacked
+only when the projected storage saving over a horizon exceeds the cost of moving
+it, including the retention charge still owed on the object being replaced:
 
 ```text
 saving = unused_payload_bytes * price_per_gb_month * horizon_months
@@ -1087,44 +1336,42 @@ cost   = egress(physical_size) + request_cost
 repack if saving > cost
 ```
 
-Prices, horizon, and retention are operator inputs (`--cold-price-per-gb-month`,
-`--cold-egress-per-gb`, `--cold-request-cost`, `--cold-horizon`,
-`--cold-min-retention`), defaulting to values that make the predicate false. The
-point of the model is not to guess a cloud bill accurately; it is to degrade
-gracefully into "do not repack cold" instead of hard-coding a refusal, and to
-make the reason auditable in `--json` output.
+Prices, horizon, and retention come from the backend registry, overridable per
+run (`--cold-price-per-gb-month`, `--cold-egress-per-gb`,
+`--cold-request-cost`, `--cold-horizon`, `--cold-min-retention`), defaulting to
+values that make the predicate false. The point of the model is not to guess a
+cloud bill accurately; it is to degrade gracefully into "do not repack" instead
+of hard-coding a refusal, and to make the reason auditable in `--json` output.
+
+The same inputs drive the promote decision, with `remaining_retention_months`
+taken from the *target* class rather than the source.
 
 #### Retention-aware deferred deletion
 
-Two-phase prune already supports deferring deletion by a fixed duration. Tier
-awareness generalises the deadline:
+Two-phase prune already supports deferring deletion by a fixed duration.
+Placement awareness generalises the deadline, and computes it per placement
+rather than per pack:
 
 ```text
-delete_after = max(now + keep_delete, min_retention_until)
+delete_after(placement) = max(now + keep_delete,
+                              placement.min_retention_until)
 ```
 
-Packs entering `delete_pending` are additionally indexed by deadline so the
-sweep is a range scan rather than a catalog scan:
+Placements entering `evicting` are additionally indexed by deadline so the sweep
+is a range scan rather than a catalog scan:
 
 ```text
-key:   dq:<8-byte delete-after unix seconds>:<32-byte pack ID>
-value: tier, physical size, reason, originating run ID
+key:   dq:<8-byte delete-after unix seconds>:<32-byte pack ID>:<8-byte backend ID hash>
+value: backend, physical size, reason, originating run ID
 ```
 
 Any later `prune`, `index gc`, or dedicated sweep collects the expired key
-prefix. Cold packs therefore linger until their retention expires and are then
-collected on a routine run, with no operator arithmetic and no early-deletion
-charge. This is the single largest practical benefit of having a metadata
-service: a time-ordered deletion queue is not expressible in the JSON index.
-
-#### Preventing cold fragmentation instead of repairing it
-
-Because cold defragmentation is the expensive operation, the cheaper lever is
-write-time placement. Cold packing should group blobs whose expected lifetime is
-similar (same snapshot cohort, same source path class, same retention class) so
-that cold packs tend to become wholly unreachable at once, plus a larger cold
-target pack size. In steady state this drives cold repacking toward zero and the
-cost model rarely fires at all.
+prefix. An archival placement therefore lingers until its retention expires and
+is then collected on a routine run, with no operator arithmetic and no
+early-deletion charge, while the on-premises placement of the same pack is freed
+immediately. This is the single largest practical benefit of having a metadata
+service: a time-ordered, per-placement deletion queue is not expressible in the
+JSON index.
 
 #### Pack history: recording every change, including to deleted packs
 
@@ -1143,14 +1390,20 @@ can be pruned on its own schedule without ever affecting restorability.
 
 ```text
 key:   ph:<8-byte event unix seconds>:<8-byte event seq>:<32-byte pack ID>
-value: schema version, event type, tier, pack type,
+value: schema version, event type, backend ID, pack type,
        physical size, payload size, used/unused deltas,
        predecessor pack IDs (for repack lineage), run ID, reason code
 ```
 
-Event types: `created`, `imported`, `published`, `tier_changed`,
-`usage_changed` (coalesced, not per blob), `repacked_from`, `repacked_into`,
-`delete_pending`, `deleted`, `delete_failed`, `orphan_detected`.
+Event types: `created`, `imported`, `published`, `placed`, `placement_failed`,
+`promoted`, `evicted`, `usage_changed` (coalesced, not per blob),
+`repacked_from`, `repacked_into`, `delete_pending`, `deleted`, `delete_failed`,
+`orphan_detected`.
+
+Placement transitions carry the backend ID, so the log answers where a pack has
+lived over time and not merely that it existed. `promoted` records the class
+change with both predecessor and successor pack IDs, because promotion is a
+repack and produces a new pack rather than moving an object.
 
 The event key is time-ordered, so histograms and growth queries are range scans
 with no catalog access, and events for packs that no longer exist remain
@@ -1164,9 +1417,9 @@ dropping them: they are first rolled up into fixed time buckets that are cheap
 enough to keep effectively forever.
 
 ```text
-key:   pb:<bucket-granularity>:<8-byte bucket start>:<tier>:<pack type>
-value: packs created, packs deleted, packs repacked,
-       bytes added, bytes deleted, bytes repacked,
+key:   pb:<bucket-granularity>:<8-byte bucket start>:<backend ID>:<pack type>
+value: packs created, packs deleted, packs repacked, packs promoted,
+       bytes added, bytes deleted, bytes repacked, bytes promoted,
        end-of-bucket pack count and physical/payload totals,
        coverage flag (complete, partial, reconstructed)
 ```
@@ -1205,63 +1458,89 @@ message, never with a partially populated answer presented as complete.
 `vaultic index stats` — constant-time repository composition from the aggregate
 records.
 
-- `--by tier|type|state|tier,type` grouping
-- `--tier hot|cold|mirrored`, `--type data|tree|mixed|unknown`
-- `--verify` recompute from `p:` records and report drift
-- `--rebuild` rewrite aggregates from `p:` records
+- `--by backend|type|state|class|backend,type` grouping
+- `--backend <id>`, `--class metadata|recent-data|archival-data|cache`,
+  `--type data|tree|mixed|unknown`
+- `--verify` recompute from `p:`/`pl:` records and report drift
+- `--rebuild` rewrite aggregates from `p:`/`pl:` records
 - `--json`
 
 Reports pack count, physical size, payload size, header size, blob count, used
-and unused payload bytes, unused ratio, and mixed/unknown counts. Unknown-tier
-and unknown-type packs are always reported explicitly rather than folded into a
-total.
+and unused payload bytes, unused ratio, and mixed/unknown counts. Unplaced,
+unknown-class, and unknown-type packs are always reported explicitly rather than
+folded into a total. Because a pack may hold several placements, per-backend
+byte totals sum to more than the repository's logical size; the report states
+both the logical total and the stored total so the difference is never mistaken
+for drift.
 
 `vaultic index packs` — query the pack catalog.
 
-- filters: `--tier`, `--type`, `--state`, `--created-before`, `--created-after`,
-  `--min-size`, `--max-size`, `--unused-ratio-above`, `--retention-expired`,
-  `--retention-unknown`, `--delete-pending`
-- `--sort size|created|unused|unused-ratio|delete-after`, `--limit`,
-  `--count-only`
+- filters: `--backend`, `--class`, `--type`, `--state`, `--created-before`,
+  `--created-after`, `--min-size`, `--max-size`, `--unused-ratio-above`,
+  `--retention-expired`, `--retention-unknown`, `--delete-pending`,
+  `--not-offsite`, `--promotion-due`
+- `--sort size|created|unused|unused-ratio|delete-after|offsite-deadline`,
+  `--limit`, `--count-only`
 - `--json`
 
 `vaultic index history` — time-series and histograms over the event log and
 rollups.
 
-- `--metric packs|bytes|created|deleted|repacked|net-growth|unused`
+- `--metric packs|bytes|created|deleted|repacked|promoted|net-growth|unused`
 - `--bucket hour|day|week|month`
 - `--since`, `--until`
-- `--by tier|type`
+- `--by backend|type`
 - `--histogram` render a distribution of pack creation or last-change times
 - `--forecast` project growth from the retained series, always annotated with
   the coverage flags of the buckets used
 - `--json`
 
-Repack churn is reported separately from net growth by default. `--forecast`
-refuses to extrapolate from a series whose buckets are `partial` or
-`reconstructed` unless `--allow-incomplete` is given.
+Repack churn is reported separately from net growth by default, and promotion is
+reported separately from both, because a promoted pack is neither new data nor
+ordinary churn. `--forecast` refuses to extrapolate from a series whose buckets
+are `partial` or `reconstructed` unless `--allow-incomplete` is given.
 
 `vaultic index history prune` — retention for the event log.
 
 - `--keep-raw`, `--keep-hourly`, `--keep-daily`, `--keep-monthly`
 - `--dry-run`, `--json`
 
-`vaultic index backends` — per-tier backend view for hot/cold repositories.
+`vaultic index placement` — placement state and durability posture.
 
-- reports, per backend: configured location, object count and bytes by file
-  type, storage class where the backend exposes it, configured minimum
-  retention, warm-up configuration in effect
-- `--compare` cross-check backend listing against the pack catalog and report
-  packs present in the catalog but missing on the backend, and objects present
-  on the backend but unknown to the catalog
+- default output: per backend, the number of packs and bytes `pending`, `live`,
+  and `evicting`; the count of packs not yet meeting the durability predicate;
+  and the age of the oldest unsatisfied offsite deadline
+- `--unsatisfied` list packs failing `durable`, ordered by deadline
+- `--overdue` restrict to packs past `offsite_deadline`
+- `--pending-promotion` list packs whose retention horizon now justifies
+  archival placement
+- `--explain <pack ID>` show that pack's placement set, its class, the target
+  set, and which rule produced each difference
+- `--json`
+
+This command is the operator-facing form of the offsite guarantee. It must be
+usable as a monitoring probe, so the JSON output includes the oldest unsatisfied
+deadline as an absolute timestamp and an age, and exits non-zero when any pack is
+past its deadline unless `--no-fail` is given.
+
+`vaultic index backends` — per-backend view.
+
+- reports, per backend: configured location and declared properties, object
+  count and bytes by file type, storage class where the backend exposes it,
+  configured minimum retention, capacity headroom where a ceiling is declared,
+  and warm-up configuration in effect
+- `--compare` cross-check backend listing against the placement records and
+  report packs placed in the catalog but missing on the backend, and objects
+  present on the backend but unknown to the catalog
 - `--no-list` answer from the catalog only, without paying for a backend
   listing
 - `--json`
 
 `--compare` performs a full backend listing and is explicitly opt-in, because on
-a cold tier a listing has a real cost.
+an archival backend a listing has a real cost.
 
-Implementation phases for this section are Phases 9 to 12 of the plan below.
+Implementation phases for this section are Phases 9, 12, and 16 of the plan
+below.
 
 ## 13. Path and inode history queries
 
@@ -2167,6 +2446,19 @@ work budgets) is already wired through Phase 7 and Phase 8's CLI options.
 **Goal:** make tier, creation time, retention deadline, and usage accounting
 durable properties of the pack catalog, without changing any policy yet.
 
+**Superseded in part by Phase 12.** Section 12 was revised after this phase
+shipped to replace the fixed hot/cold split with a multi-backend placement
+model. Three fields implemented here — `min_retention_until`,
+`retention_source`, and `delete_after` — are properties of a *placement*, not of
+a pack, because a local copy and an archival copy of the same pack have
+different retention obligations. Phase 12 moves them to `pl:` records and turns
+`tier` into a derived summary of the placement set. Everything else this phase
+established stands: recorded-rather-than-derived facts, creation-time handling,
+usage accounting, aggregates as rebuildable accelerators, the unknown-versus-zero
+discipline, and the treatment of imported packs as permanently unknown. The
+recorded tier values migrate directly into initial placement sets, so this
+phase's data seeds the new model rather than being discarded.
+
 **Current implementation state (2026-08-29):** **complete.** The pack record
 carries `tier`, `storage_class`, `created_at`/`creation_time_known`,
 `min_retention_until`/`retention_source`, `used_payload_bytes`/
@@ -2321,10 +2613,17 @@ correct coverage flags.
 **Goal:** answer composition and growth questions from the CLI without a
 backend listing or a full index load.
 
+If Phase 12 has already landed, these commands report the placement dimension;
+if it has not, they report the Phase 9 tier dimension and the grouping flags
+name tiers rather than backends. The JSON contract is versioned, so the change
+from one to the other is a version bump rather than a silent reinterpretation.
+
 **Implementation steps:**
 
 1. Add `vaultic index stats` with grouping, filtering, `--verify`, `--rebuild`,
-  and `--json`.
+  and `--json`. Where a pack has several placements, report the logical total
+  and the stored total separately so their difference is never mistaken for
+  drift.
 2. Add `vaultic index packs` with catalog filters, sorting, `--count-only`, and
   `--json`.
 3. Add `vaultic index history` with metric, bucket, range, grouping,
@@ -2333,14 +2632,14 @@ backend listing or a full index load.
   `--allow-incomplete` is passed.
 4. Add `vaultic index history prune` with per-granularity retention and
   `--dry-run`.
-5. Add `vaultic index backends` with per-tier reporting, opt-in `--compare`
+5. Add `vaultic index backends` with per-backend reporting, opt-in `--compare`
   backend listing, and `--no-list`.
 6. Define stable JSON output schemas for all of the above and version them; the
   human-readable output may change, the JSON contract may not without a version
   bump.
-7. Ensure every output surfaces unknown tier, unknown type, retention-unknown,
-  and incomplete-coverage counts explicitly instead of folding them into
-  totals.
+7. Ensure every output surfaces unknown placement or tier, unknown type,
+  retention-unknown, and incomplete-coverage counts explicitly instead of
+  folding them into totals.
 8. Legacy repositories: run in a documented reduced mode or fail explicitly.
   Never present a partial answer as complete.
 
@@ -2350,53 +2649,75 @@ backend with a deliberately missing object and a deliberately extra object;
 `--no-list` performing zero backend requests; forecast refusal on incomplete
 series; behavior on a legacy repository.
 
-**Exit criterion:** an operator can obtain pack counts, sizes, per-tier
+**Exit criterion:** an operator can obtain pack counts, sizes, per-backend
 composition, and a creation/change histogram with growth rate for a repository
-whose cold tier is never listed.
+whose archival backend is never listed.
 
-### Phase 12: Tier-aware prune and cold cost model
+### Phase 12: Backend registry, placement records, and per-backend prune
 
-**Goal:** two independent policies driven by the Phase 9 facts, with
-retention-aware deferred deletion.
+**Goal:** replace the fixed hot/cold split with the durable placement model, and
+make prune and delete decisions per backend, without yet adding the active
+scheduler.
+
+This phase is the schema and policy half of section 12; Phase 16 adds the
+machinery that moves bytes between backends.
 
 **Implementation steps:**
 
-1. Parameterise `decidePackAction` by a resolved per-tier policy instead of one
-  global policy. Preserve today's behavior exactly when the repository has no
-  hot part or is legacy.
-2. Add hot-tier options (aggressive defaults) and cold-tier options
-  (`--cold-max-repack`, defaulting to zero) with separate repack budgets.
-3. Implement the cold cost model with `--cold-price-per-gb-month`,
-  `--cold-egress-per-gb`, `--cold-request-cost`, `--cold-horizon`, and
-  `--cold-min-retention`, defaulting so the predicate is false. Emit the
-  decision inputs and outcome in `--json`.
-4. Compute `delete_after = max(now + keep_delete, min_retention_until)` and add
-  the `dq:` deadline-ordered deletion queue; make prune, `index gc`, and a
-  dedicated sweep collect the expired prefix by range scan.
-5. Treat retention-unknown packs conservatively: eligible for ordinary
-  reachability-based deletion, never credited with early-deletion savings in
-  the cost model.
-6. Add tier-aware write-time placement: a larger cold target pack size and
-  lifetime-based grouping of cold blobs.
-7. Warm up cold packs before any cold repack read, reusing the existing warm-up
-  path, and abort the cold repack rather than block indefinitely when warm-up
+1. Add the backend registry to repository configuration: identifier, role,
+  offsite flag, failure domain, capacity, prices, minimum retention, retrieval
+  class, bandwidth ceiling, and per-object overhead. A repository declaring one
+  backend must resolve to today's behavior exactly.
+2. Add the `pl:` and `bp:` namespaces of section 5, written in the same
+  transaction as the transition that produced them, with `bp:` rebuildable from
+  `pl:` by `index check`.
+3. Migrate Phase 9's recorded tier into initial placement sets: `mirrored`
+  becomes a placement on each of the hot and cold backends, `cold` a placement
+  on the cold backend, `single` a placement on the sole backend, and `unknown`
+  an unplaced pack that a reconciliation pass resolves against a backend
+  listing. No placement may be invented for a pack whose tier was unknown.
+4. Move `min_retention_until`, `retention_source`, and `delete_after` from the
+  pack record to `pl:`, and turn `tier` into a derived summary that is
+  rebuildable from the placement set. Keep decoding the Phase 9 fields so
+  existing records migrate rather than failing.
+5. Implement the durability predicate over the placement set, counting distinct
+  failure domains rather than backends, and gate every eviction on the state
+  that would result from it.
+6. Parameterise `decidePackAction` by the properties of the backend holding the
+  placement under consideration, instead of by a hard-coded tier.
+7. Generalise the cost model to any placement whose backend declares egress or
+  minimum-retention charges, sourcing inputs from the registry with per-run
+  overrides, defaulting so the predicate is false.
+8. Compute `delete_after` per placement and extend the `dq:` queue key with the
+  backend, so one pack's local placement can be freed immediately while its
+  archival placement waits out its retention.
+9. Treat retention-unknown placements conservatively: eligible for ordinary
+  reachability-based deletion, never credited with early-deletion savings.
+10. Warm up an archival placement before any repack read of it, reusing the
+  existing warm-up path, and abort rather than block indefinitely when warm-up
   fails.
-8. Documentation: extend the cold storage and forget documentation with the
-  per-tier policy table, the cost model, and the retention-aware deletion
-  deadline.
+11. Teach `index check` to validate placement records against the durability
+  predicate, report packs below it, and rebuild `bp:` and the derived tier
+  summary.
 
-**Tests:** unit coverage for tier policy resolution and cost-model boundary
-cases including zero, unknown, and expired retention; deletion-queue ordering,
-crash between enqueue and sweep, and convergence on a repeated run; an
-end-to-end hot/cold test proving that a default-configured prune repacks hot
-packs and performs no cold reads at all; a test proving a cold pack past its
-retention deadline is collected on a routine run without any extra operator
-action; an explicit regression test that a non-hot/cold repository's prune
-decisions are byte-for-byte unchanged.
+**Files/artifacts:** backend registry configuration and validation, `pl:`/`bp:`
+schema support, placement-aware prune policy, migration from the Phase 9 tier
+field.
 
-**Exit criterion:** on a hot/cold repository, default prune defragments the hot
-tier, issues zero cold-tier reads, and defers cold deletions until retention
-expiry, with every decision explainable from `--json` output.
+**Tests:** migration from every Phase 9 tier value into the expected placement
+set, including that an unknown tier produces no invented placement; durability
+predicate boundary cases including two backends sharing a failure domain,
+pending placements not counting as live, and an eviction refused because it
+would drop the pack below the predicate; per-placement retention producing
+different deadlines for the same pack; `dq:` ordering with the backend in the
+key; cost-model boundary cases including zero, unknown, and expired retention;
+`bp:` and tier-summary rebuild with zero drift; an explicit regression test that
+a single-backend repository's prune decisions are byte-for-byte unchanged.
+
+**Exit criterion:** a repository with several declared backends records every
+pack's placement set durably, refuses any eviction that would breach the
+durability predicate, and makes prune and delete decisions from the properties
+of the backend actually holding each copy.
 
 ### Phase 13: Historical path resolution and file-history CLI
 
@@ -2517,6 +2838,78 @@ matches the documented estimate within its stated tolerance.
 
 **Exit criterion:** operators can query top churners, top storage consumers, growth by subdirectory, and complete GDPR user-data location reports instantly from the CLI.
 
+### Phase 16: Placement scheduler, offsite RPO, and promotion
+
+**Goal:** move bytes between backends according to the Phase 12 placement model,
+meet a stated offsite deadline, and defer archival commitment until survival is
+observed.
+
+This is the phase that realises the cost saving: short-lived data never reaches
+an archival class, so it never pays a minimum-retention floor.
+
+**Implementation steps:**
+
+1. Define placement classes (`metadata`, `recent-data`, `archival-data`,
+  `cache`) and the rules resolving a pack's class to a target placement set.
+  Classes are named policy, not per-pack optimisation; a general cost-optimising
+  solver is explicitly out of scope.
+2. Implement the scheduler as a background, resumable worker that closes the
+  difference between target and actual placement, honouring each backend's
+  bandwidth and request-rate limits. Every transition is durable and every
+  action idempotent, so an interrupted run resumes from `pl:` rather than from
+  memory.
+3. Order work by urgency: packs approaching their offsite deadline first, then
+  promotions, then evictions. Eviction runs last because it is the only action
+  that can reduce durability, and it is gated on the durability predicate.
+4. Add the `rq:` deadline-ordered queue of packs not yet satisfying the
+  predicate, and expose the oldest unsatisfied deadline as a metric and as a
+  non-zero exit from `vaultic index placement`.
+5. Implement promotion as a repack, never as an object copy: read the surviving
+  blobs from the cheapest live placement, write a new pack sized for the
+  archival backend, make its placement live, update the blob index, and only
+  then permit the superseded placements to be evicted. A crash at any point must
+  leave either the old or the new pack fully reachable.
+6. Derive the promotion trigger from the forget policy: promote when a pack's
+  surviving blobs are reachable only from snapshots retained longer than the
+  target backend's minimum retention. Apply the crossover period as a floor
+  below which promotion is never correct, for policies that cannot supply a
+  horizon.
+7. Route reads to the cheapest live placement by retrieval class, falling back
+  on failure, and warm up only when the chosen placement requires it.
+8. Add `vaultic index placement` with `--unsatisfied`, `--overdue`,
+  `--pending-promotion`, and `--explain`, and make its JSON output usable as a
+  monitoring probe.
+9. Emit `placed`, `placement_failed`, `promoted`, and `evicted` events into the
+  Phase 10 history log with their backend IDs, so placement history survives the
+  packs it describes.
+10. Documentation: describe the backend registry, the durability predicate, the
+  offsite deadline, and the promotion rule, including the explicit statement
+  that a pack which dies before promotion never reaches the archival backend
+  and that this is the intended behavior.
+
+**Files/artifacts:** scheduler worker, placement class rules, `rq:` queue,
+promotion repack path, read routing, `index placement` command.
+
+**Tests:** a pack that becomes unreachable before its promotion trigger is
+proven never to have been placed on the archival backend; a pack that survives
+past the trigger is promoted, and the promotion is verified to be a repack
+producing a new pack ID rather than a copied object; crash injection at each
+promotion step leaves either the old or the new pack fully reachable and never
+neither; an eviction that would breach the durability predicate is refused;
+the offsite deadline is met under a bandwidth limit low enough to force
+queuing, and the unsatisfied-deadline metric is proven to rise and then fall;
+a backend outage leaves packs queued and retried rather than failing the backup;
+read routing prefers the cheaper live placement and falls back when it is
+unavailable; scheduler restart mid-run resumes from placement records and
+converges; a single-backend repository performs no scheduling work at all.
+
+**Exit criterion:** on a repository declaring on-premises, warm offsite, and
+archival backends, a backup meets its stated offsite deadline without writing to
+the archival backend, data discarded by the forget policy before its promotion
+trigger never reaches archival storage at all, and surviving data is promoted by
+repack into archival-sized packs, with every placement decision explainable from
+`--json` output.
+
 ## 16. Testing strategy
 
 ### Unit tests
@@ -2544,6 +2937,12 @@ matches the documented estimate within its stated tolerance.
 - Pack catalog deduplication across multiple source indexes
 - Data/tree/mixed/unknown pack classification and physical/payload size totals
 - Tier assignment, per-tier aggregates, and retention-deadline computation
+- Placement set transitions, and the durability predicate over them, including
+  two backends sharing one failure domain and pending placements not counting
+  as live
+- An eviction that would drop a pack below the durability predicate is refused
+- Per-placement retention producing different deadlines for one pack
+- Promotion triggered from the forget policy horizon, not from a timer
 - Pack history event ordering, rollup idempotence, and coverage flagging
 - Tier policy resolution and cold cost-model boundary cases
 - Deletion-queue deadline ordering and expired-prefix sweeps
@@ -2565,6 +2964,12 @@ matches the documented estimate within its stated tolerance.
 - Crash after SlateDB commit and before JSON export
 - Crash during import batch
 - Local object store and S3-compatible object store
+- A repository declaring on-premises, warm offsite, and archival backends:
+  offsite deadline met under a bandwidth limit that forces queuing, data
+  discarded before its promotion trigger never reaching the archival backend,
+  and surviving data promoted by repack
+- Backend outage leaving placements queued and retried rather than failing the
+  backup, and scheduler restart converging from placement records
 - Read-only `DbReader` operations while a writer is active
 - File history across a repository containing renames, recreations, hardlinks,
   and snapshots with differing backup scopes
@@ -2587,6 +2992,8 @@ matches the documented estimate within its stated tolerance.
 - Reverse-reference index size, hot-key behavior, and reachability-scan cost
 - Path-resolution cost as retained snapshot count grows, with and without `pv:`
 - `pv:` size growth against measured binding churn and average path length
+- Placement scheduler throughput against a constrained backend, and the offsite
+  deadline under a backlog large enough to require queuing across runs
 - Compaction and reader lag under sustained backup writes
 
 ### Safety tests
@@ -2618,6 +3025,14 @@ Expose metrics and structured events for:
 - differential-check discrepancies
 - pack counts and physical/payload/header/blob totals by type
 - pack counts and totals by tier, plus unknown-tier and retention-unknown counts
+- per-backend placement counts and bytes by state (pending, live, evicting)
+- packs below the durability predicate, and the age of the oldest unsatisfied
+  offsite deadline
+- placement attempts, failures, retries, and bytes transferred per backend
+- scheduler queue depth by urgency class, and bandwidth utilisation per backend
+- promotions evaluated, deferred, and performed, with bytes promoted and bytes
+  never promoted because the data expired first
+- capacity headroom per backend where a ceiling is declared
 - pack history events written, rollup runs, and history retention truncations
 - history coverage state per granularity (complete, partial, reconstructed)
 - cold cost-model evaluations, accepted and rejected repack decisions
@@ -2656,6 +3071,11 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
    namespace, and resumes from legacy JSON indexes.
 9. Do not remove legacy JSON indexes until a separately approved migration
    policy exists.
+10. Introduce a new backend by declaring it in the registry and letting the
+   scheduler converge, verifying with `index placement` and
+   `index backends --compare` before any policy depends on it. Never begin
+   evicting from an existing backend until the new one reports its placements
+   live and the durability predicate holds without it.
 
 ## 19. Known constraints
 
@@ -2683,6 +3103,19 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
 - Cold cost-model inputs are operator-supplied estimates, not billing data. The
   model exists to make the decision explicit and auditable, not to predict a
   cloud invoice.
+- Placement is asynchronous, so a backup completes before every copy is live.
+  The resulting window is the offsite recovery-point objective; it is bounded by
+  a stated deadline and measured, never assumed to be zero.
+- Deferring archival commitment means a pack that becomes unreachable before its
+  promotion trigger never reaches the archival backend. That is the intended
+  saving, and it is safe only because the offsite deadline is satisfied
+  independently by a non-archival offsite placement. The two requirements must
+  never be collapsed back into one.
+- Independence of copies is a property of failure domains, not of backend count.
+  Two buckets in one account, or two devices in one building, are one domain and
+  count once toward the durability predicate.
+- Metadata is never placed in an archival class. Indexes, trees, and snapshots
+  must stay directly readable, because planning any restore requires them.
 - Pack history is advisory and derived. It must never gate or influence a
   destructive decision, and a history gap must never fail a data path.
 - Path and inode history are likewise derived and advisory. `sc:` and `pv:` are
