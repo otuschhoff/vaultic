@@ -3378,6 +3378,22 @@ repack into archival-sized packs, with every placement decision explainable from
 
 **Exit criterion:** backup crawls achieve linear scaling with `cwalk` concurrency, selective `pathdiff` crawls skip unchanged subtrees when 100% event coverage is verified, and any coverage gap or topology mismatch falls back safely to a full `cwalk` crawl.
 
+### Phase 19: Multi-provider cold storage pool and replicated metadata store
+
+**Goal:** implement multi-backend cold storage pools ($K$-of-$M$ durability quorums across arbitrary active cold providers with read-only legacy backends) and multi-cloud replicated metadata stores for `vaulticdb`.
+
+**Implementation steps:**
+
+1. Implement `ingest` and `read_enabled` flag evaluation in the backend registry (`placement_backends`): mark legacy cold backends (`ingest: false`, `read_enabled: true`) as read-only pools, and route all new pack allocations exclusively to active ingesting backends (`ingest: true`).
+2. Implement $K$-of-$M$ multi-provider cold placement scheduling: evaluate the durability predicate (`min_copies`, `min_domains`, `min_offsite`) over the active ingesting backend pool (e.g. 2-of-3 active cold backends), writing parallel placements (`pl:<pack-id>:<backend-id>`) during backup jobs.
+3. Implement `ReplicatedObjectStore` wrapper in `vaulticdb` Rust layer for synchronous parallel writes of SlateDB metadata (SSTs, WALs, manifests) across multiple cloud providers (e.g. AWS S3 + Azure Blob / Cloudflare R2) with primary provider read routing, transparent failover, and epoch-based fencing.
+4. Implement zero-egress natural drain for legacy backends (`ingest: false`): allow old cold packs to linger on legacy backends until expired by retention policy (`min_retention_until`), purge unreachable packs directly via deletion queue (`dq:`), and route defragmentation repacks into new packs written to the active ingesting pool.
+5. Expose CLI backend management commands: `vaultic index backends` status showing `ingest`/`read_enabled` flags per pool, `vaultic index placement` showing $K$-of-$M$ quorum compliance per pack, and `vaultic index placement migrate-pool` options.
+
+**Tests:** multi-provider cold placement test verifying new packs are placed on $K$ of $M$ active backends while legacy backends receive 0 new writes; legacy backend read and warm-up test confirming restore requests route to old backends via `pl:` records; zero-egress natural drain test verifying old packs are deleted from legacy backends when retention expires and repacked blobs write to active ingesting backends; `ReplicatedObjectStore` unit test verifying synchronous multi-cloud write, transient provider outage handling, and primary-to-secondary read failover.
+
+**Exit criterion:** new data packs are durably multi-homed across $K$-of-$M$ active cold providers, legacy cold backends receive zero new writes and naturally drain as retention expires, and `vaulticdb` metadata is synchronously replicated across multi-cloud storage.
+
 ## 16. Testing strategy
 
 ### Unit tests
