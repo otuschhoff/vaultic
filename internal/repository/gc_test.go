@@ -72,6 +72,34 @@ func (store *fakeGCStore) MarkPackDeleted(context.Context, schema.ID, []schema.I
 	return nil
 }
 
+// UpdatePackUsage applies the same invariants as the real store: a split that
+// disagrees with the recorded payload size is skipped rather than written.
+func (store *fakeGCStore) UpdatePackUsage(_ context.Context, usage map[schema.ID]daemon.PackUsage) (uint64, error) {
+	var applied uint64
+	for id, split := range usage {
+		key := schema.PackKey(id)
+		value, found := store.values[string(key)]
+		if !found {
+			continue
+		}
+		record, err := schema.UnmarshalPackRecord(value)
+		if err != nil {
+			return applied, err
+		}
+		if split.Used > record.PayloadSize || split.Used+split.Unused != record.PayloadSize {
+			continue
+		}
+		record.UsageKnown, record.UsedPayloadBytes, record.UnusedPayloadBytes = true, split.Used, split.Unused
+		encoded, err := record.MarshalBinary()
+		if err != nil {
+			return applied, err
+		}
+		store.values[string(key)] = encoded
+		applied++
+	}
+	return applied, nil
+}
+
 var _ GCStore = (*fakeGCStore)(nil)
 
 func TestScanReferencedDataBlobsCollectsAnyReferenceState(t *testing.T) {
@@ -104,7 +132,7 @@ func TestScanBlobCatalogBuildsPackMembership(t *testing.T) {
 	store.set(t, schema.BlobKey(schema.ID(blobOnlyA)), schema.BlobRecord{Locations: []schema.BlobLocation{
 		{PackID: schema.ID(packA), Offset: 10, Length: 3, Type: schema.BlobTree},
 	}})
-	blobTypes, packMembers, err := scanBlobCatalog(context.Background(), store)
+	blobTypes, packMembers, _, err := scanBlobCatalog(context.Background(), store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +777,7 @@ func TestPruneStaleLegacyIndexesRemovesCheckpointsReferencingDeletedPacks(t *tes
 	if len(packs) != 2 {
 		t.Fatalf("expected exactly two packs, got %d", len(packs))
 	}
-	_, packMembers, err := scanBlobCatalog(context.Background(), store)
+	_, packMembers, _, err := scanBlobCatalog(context.Background(), store)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -183,6 +183,52 @@ func TestImportRecordsUnavailablePackDebtAsWarning(t *testing.T) {
 	}
 }
 
+// TestImportLeavesEveryPackTierAndRetentionUnknown pins the Phase 9 rule for
+// inherited packs: a legacy index carries no routing or creation time, so no
+// tier, timestamp, or retention deadline may be synthesized for it. A pack
+// imported this way stays retention-unknown permanently, which is what keeps
+// it out of any early-deletion savings claim.
+func TestImportLeavesEveryPackTierAndRetentionUnknown(t *testing.T) {
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}}
+	store := newMemoryStore()
+	if _, err := Import(context.Background(), source, fixedStatter{size: 10}, store, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.imports) != 1 {
+		t.Fatalf("imports = %d", len(store.imports))
+	}
+	record := store.imports[0].Record
+	if record.Tier != 0 && record.Tier != schema.TierUnknown {
+		t.Fatalf("imported pack was assigned tier %v", record.Tier)
+	}
+	if record.RetentionSource != 0 && record.RetentionSource != schema.RetentionUnknown {
+		t.Fatalf("imported pack was assigned retention source %v", record.RetentionSource)
+	}
+	if record.CreationTimeKnown || record.CreationTime != 0 {
+		t.Fatalf("imported pack invented a creation time: %d/%t", record.CreationTime, record.CreationTimeKnown)
+	}
+	if record.MinRetentionUntil != 0 || record.DeleteAfter != 0 {
+		t.Fatalf("imported pack invented a deadline: %#v", record)
+	}
+	if record.UsageKnown {
+		t.Fatal("imported pack claimed usage accounting")
+	}
+	// The persisted form must also read back as explicitly unknown, rather
+	// than as a zero value that a later reader could misinterpret.
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := schema.UnmarshalPackRecord(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Tier != schema.TierUnknown || decoded.RetentionSource != schema.RetentionUnknown {
+		t.Fatalf("persisted imported pack = %#v", decoded)
+	}
+}
+
 func TestImportRecordsKnownPackSmallerThanIndexedPayload(t *testing.T) {
 	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
 	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}}

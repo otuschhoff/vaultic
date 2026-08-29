@@ -38,6 +38,7 @@ const (
 	KeyExportCheckpoint
 	KeyExportIndexCheckpoint
 	KeyNextExportSequence
+	KeyTierAggregate
 )
 
 type AggregateKind byte
@@ -66,6 +67,7 @@ type ParsedKey struct {
 	Revision  uint64
 	Segment   uint32
 	Aggregate AggregateKind
+	Tier      PackTier
 	GCTarget  GCTarget
 }
 
@@ -140,6 +142,28 @@ func PackAggregateKey(kind AggregateKind) []byte {
 	}[kind]
 	return []byte("a:pack:" + name)
 }
+
+// tierAggregateNames is the single source of truth for the a:tier: namespace.
+// The type dimension (a:pack:*) already carries the repository total, so the
+// tier dimension has no "all" record.
+var tierAggregateNames = map[PackTier]string{
+	TierUnknown: "unknown", TierHot: "hot", TierCold: "cold",
+	TierMirrored: "mirrored", TierSingle: "single",
+}
+
+func TierAggregateKey(tier PackTier) []byte {
+	name, ok := tierAggregateNames[tier]
+	if !ok {
+		return nil
+	}
+	return []byte("a:tier:" + name)
+}
+
+// TierAggregateKinds returns every tier in a deterministic order so callers
+// iterate, rebuild, and compare aggregates identically.
+func TierAggregateKinds() []PackTier {
+	return []PackTier{TierUnknown, TierHot, TierCold, TierMirrored, TierSingle}
+}
 func NextRevisionKey() []byte       { return []byte("meta:next-revision-seq") }
 func NextExportSequenceKey() []byte { return []byte("meta:next-export-seq") }
 
@@ -207,6 +231,8 @@ func ParseKey(key []byte) (ParsedKey, error) {
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind
+		} else if tier, ok := parseTierAggregate(key); ok {
+			parsed.Kind, parsed.Tier = KeyTierAggregate, tier
 		} else {
 			return ParsedKey{}, fmt.Errorf("%w: unknown or incorrectly sized key", ErrMalformed)
 		}
@@ -242,6 +268,15 @@ func parseAggregate(key []byte) (AggregateKind, bool) {
 	} {
 		if string(key) == "a:pack:"+name {
 			return kind, true
+		}
+	}
+	return 0, false
+}
+
+func parseTierAggregate(key []byte) (PackTier, bool) {
+	for tier, name := range tierAggregateNames {
+		if string(key) == "a:tier:"+name {
+			return tier, true
 		}
 	}
 	return 0, false

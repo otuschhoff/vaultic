@@ -12,7 +12,11 @@ func testID(value byte) ID { var id ID; id[0] = value; id[31] = value; return id
 
 type binaryRecord interface{ MarshalBinary() ([]byte, error) }
 
-func roundTrip[T any](t *testing.T, input T, decode func([]byte) (T, error)) {
+// roundTrip asserts encode/decode symmetry and that every truncation is
+// rejected. legacyLengths lists prefix lengths that are valid on purpose,
+// because a record whose tail was appended in a later phase must still decode
+// from its earlier layout.
+func roundTrip[T any](t *testing.T, input T, decode func([]byte) (T, error), legacyLengths ...int) {
 	t.Helper()
 	encoded, err := any(input).(binaryRecord).MarshalBinary()
 	if err != nil {
@@ -25,7 +29,17 @@ func roundTrip[T any](t *testing.T, input T, decode func([]byte) (T, error)) {
 	if !reflect.DeepEqual(output, input) {
 		t.Fatalf("round trip mismatch:\n got %#v\nwant %#v", output, input)
 	}
+	valid := make(map[int]bool, len(legacyLengths))
+	for _, length := range legacyLengths {
+		valid[length] = true
+		if _, err := decode(encoded[:length]); err != nil {
+			t.Fatalf("legacy length %d failed to decode: %v", length, err)
+		}
+	}
 	for size := range len(encoded) {
+		if valid[size] {
+			continue
+		}
 		if _, err := decode(encoded[:size]); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("truncation at %d returned %v", size, err)
 		}
@@ -43,6 +57,9 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 	}{
 		{BlobKey(id), KeyBlob}, {PackKey(id), KeyPack}, {PackAggregateKey(AggregateData), KeyPackAggregate},
 		{PackAggregateKey(AggregateTree), KeyPackAggregate}, {PackAggregateKey(AggregateMixed), KeyPackAggregate}, {PackAggregateKey(AggregateUnknown), KeyPackAggregate}, {PackAggregateKey(AggregateAll), KeyPackAggregate},
+		{TierAggregateKey(TierUnknown), KeyTierAggregate}, {TierAggregateKey(TierHot), KeyTierAggregate},
+		{TierAggregateKey(TierCold), KeyTierAggregate}, {TierAggregateKey(TierMirrored), KeyTierAggregate},
+		{TierAggregateKey(TierSingle), KeyTierAggregate},
 		{CurrentInodeKey(3, 4), KeyCurrentInode}, {InodeRevisionKey(3, 4, 5), KeyInodeRevision},
 		{CurrentDirectoryKey(3, 4), KeyCurrentDirectory}, {DirectoryRevisionKey(3, 4, 5), KeyDirectoryRevision},
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
@@ -167,10 +184,46 @@ func TestEncodedValuesStayWithinTransportLimit(t *testing.T) {
 	}
 }
 
+// legacyPackEncodings reproduces the two historical pack record formats so the
+// decoder's backward compatibility is tested against the real byte layouts
+// rather than against an arbitrary truncation of the current one.
+func legacyPackEncodings(t *testing.T, record PackRecord) (phase3, prePhysicalSize []byte) {
+	t.Helper()
+	e := newEncoder()
+	e.u8(byte(record.Type))
+	e.u64(record.PhysicalSize)
+	e.u64(record.PayloadSize)
+	e.u64(record.HeaderSize)
+	e.u64(record.BlobCount)
+	e.i64(record.CreationTime)
+	e.bool(record.CreationTimeKnown)
+	e.u8(byte(record.Lifecycle))
+	e.u32(uint32(len(record.SourceIndexIDs)))
+	for _, id := range record.SourceIndexIDs {
+		e.id(id)
+	}
+	withoutFlag, err := e.finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prePhysicalSize = append([]byte(nil), withoutFlag...)
+	e.bool(record.PhysicalSizeKnown)
+	phase3, err = e.finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return phase3, prePhysicalSize
+}
+
 func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	id1, id2, id3 := testID(1), testID(2), testID(3)
 	roundTrip(t, BlobRecord{Locations: []BlobLocation{{PackID: id1, Offset: 9, Length: 10, UncompressedSize: 11, Type: BlobData}, {PackID: id2, Offset: 12, Length: 13, UncompressedSize: 14, Type: BlobTree}}}, UnmarshalBlobRecord)
-	packRecord := PackRecord{Type: PackMixed, PhysicalSize: 100, PhysicalSizeKnown: true, PayloadSize: 80, HeaderSize: 20, BlobCount: 2, CreationTime: 123, CreationTimeKnown: true, Lifecycle: PackPublished, SourceIndexIDs: []ID{id1, id2}}
+	packRecord := PackRecord{
+		Type: PackMixed, PhysicalSize: 100, PhysicalSizeKnown: true, PayloadSize: 80, HeaderSize: 20, BlobCount: 2,
+		CreationTime: 123, CreationTimeKnown: true, Lifecycle: PackPublished, SourceIndexIDs: []ID{id1, id2},
+		Tier: TierCold, StorageClass: "GLACIER", MinRetentionUntil: 456, RetentionSource: RetentionConfig,
+		UsageKnown: true, UsedPayloadBytes: 50, UnusedPayloadBytes: 30, DeleteAfter: 789,
+	}
 	encodedPack, err := packRecord.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
@@ -179,11 +232,49 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(decodedPack, packRecord) {
 		t.Fatalf("pack round trip = %#v, %v", decodedPack, err)
 	}
-	legacyPack, err := UnmarshalPackRecord(encodedPack[:len(encodedPack)-1])
-	if err != nil || !legacyPack.PhysicalSizeKnown || !reflect.DeepEqual(legacyPack, packRecord) {
-		t.Fatalf("legacy pack decode = %#v, %v", legacyPack, err)
+	// A record that never specified a tier must decode as explicitly unknown
+	// rather than as tier zero, so an unconsidered pack is never mistaken for
+	// a routed one.
+	unspecified, err := (PackRecord{Type: PackData, Lifecycle: PackImported}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
+	decodedUnspecified, err := UnmarshalPackRecord(unspecified)
+	if err != nil || decodedUnspecified.Tier != TierUnknown || decodedUnspecified.RetentionSource != RetentionUnknown {
+		t.Fatalf("unspecified tier decode = %#v, %v", decodedUnspecified, err)
+	}
+	// Phase 3 and pre-PhysicalSizeKnown records must still decode, and must
+	// decode as tier-unknown and retention-unknown.
+	phase3, prePhysical := legacyPackEncodings(t, packRecord)
+	for name, encoded := range map[string][]byte{"phase3": phase3, "pre-physical-size": prePhysical} {
+		legacyPack, decodeErr := UnmarshalPackRecord(encoded)
+		if decodeErr != nil {
+			t.Fatalf("%s pack decode failed: %v", name, decodeErr)
+		}
+		if legacyPack.Tier != TierUnknown || legacyPack.RetentionSource != RetentionUnknown {
+			t.Fatalf("%s pack decoded tier %v/%v", name, legacyPack.Tier, legacyPack.RetentionSource)
+		}
+		if legacyPack.UsageKnown || legacyPack.UsedPayloadBytes != 0 || legacyPack.UnusedPayloadBytes != 0 || legacyPack.DeleteAfter != 0 || legacyPack.StorageClass != "" {
+			t.Fatalf("%s pack invented lifetime facts: %#v", name, legacyPack)
+		}
+		if !legacyPack.PhysicalSizeKnown {
+			t.Fatalf("%s pack lost the physical size state", name)
+		}
+		want := packRecord
+		want.Tier, want.RetentionSource = TierUnknown, RetentionUnknown
+		want.StorageClass, want.MinRetentionUntil = "", 0
+		want.UsageKnown, want.UsedPayloadBytes, want.UnusedPayloadBytes, want.DeleteAfter = false, 0, 0, 0
+		if !reflect.DeepEqual(legacyPack, want) {
+			t.Fatalf("%s pack decode = %#v", name, legacyPack)
+		}
+	}
+	// Every truncation is malformed except the two legacy record boundaries,
+	// which are valid by design.
+	valid := map[int]bool{len(phase3): true, len(prePhysical): true}
 	for size := range len(encodedPack) - 1 {
+		if valid[size] {
+			continue
+		}
 		if _, err := UnmarshalPackRecord(encodedPack[:size]); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("pack truncation at %d returned %v", size, err)
 		}
@@ -200,7 +291,10 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 			t.Fatalf("invalid pack size state %#v returned %v", invalid, err)
 		}
 	}
-	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6}, UnmarshalPackAggregate)
+	// The Phase 3 aggregate ended after UpdateSequence; that prefix length is
+	// still a valid record.
+	const phase3AggregateLength = 1 + 6*8
+	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6, UsedPayloadBytes: 7, UnusedPayloadBytes: 8, AccountedPackCount: 1}, UnmarshalPackAggregate, phase3AggregateLength)
 	roundTrip(t, CurrentPointer{Revision: 7, RecordKey: InodeRevisionKey(2, 3, 7)}, UnmarshalCurrentPointer)
 	roundTrip(t, ExportCheckpointRecord{State: ExportComplete, CommitSequence: 8, Attempts: 1, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalExportCheckpointRecord)
 	roundTrip(t, ExportIndexCheckpointRecord{Sequence: 9, PackIDs: []ID{id1, id2}}, UnmarshalExportIndexCheckpointRecord)

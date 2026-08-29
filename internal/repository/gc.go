@@ -19,6 +19,7 @@ type GCStore interface {
 	Get(context.Context, []byte) ([]byte, bool, error)
 	ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error)
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
+	UpdatePackUsage(context.Context, map[schema.ID]daemon.PackUsage) (uint64, error)
 	MarkPackDeletePending(context.Context, schema.ID) error
 	MarkPackDeleted(context.Context, schema.ID, []schema.ID) error
 }
@@ -66,6 +67,13 @@ type GCStats struct {
 	PacksRetryFailed uint64 `json:"packs_retry_failed"`
 	BlobsFreed       uint64 `json:"blobs_freed"`
 	BytesFreed       uint64 `json:"bytes_freed"`
+	// PacksAccounted is how many pack records had their used/unused payload
+	// split refreshed from this run's reachability result.
+	PacksAccounted uint64 `json:"packs_accounted"`
+	// PacksUnaccountable is how many packs were left with unknown usage
+	// because their blob index membership did not sum to the catalog payload
+	// size. No split is invented for them.
+	PacksUnaccountable uint64 `json:"packs_unaccountable"`
 }
 
 // GCPlan is the result of discovery and revalidation, ready for Execute.
@@ -121,7 +129,7 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 	}
 
 	printer.P("scanning blob catalog...\n")
-	blobTypes, packMembers, err := scanBlobCatalog(ctx, store)
+	blobTypes, packMembers, packMemberBytes, err := scanBlobCatalog(ctx, store)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +192,18 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 		if err := store.WriteMutableBatch(ctx, classification.gcPuts, nil, true); err != nil {
 			return nil, fmt.Errorf("record GC bookkeeping: %w", err)
 		}
+	}
+
+	// Reachability was just recomputed, so this is the point where usage
+	// accounting can be refreshed without a second full sweep.
+	usage, inconsistent := computePackUsage(packs, packMemberBytes, unreachable)
+	plan.Stats.PacksUnaccountable = inconsistent
+	if len(usage) != 0 && !opts.DryRun {
+		applied, err := store.UpdatePackUsage(ctx, usage)
+		if err != nil {
+			return nil, fmt.Errorf("record pack usage accounting: %w", err)
+		}
+		plan.Stats.PacksAccounted = applied
 	}
 	return plan, nil
 }
@@ -546,9 +566,13 @@ func loadExportIndexCheckpointKeys(ctx context.Context, store GCStore) (map[vaul
 	return checkpoints, err
 }
 
-func scanBlobCatalog(ctx context.Context, store GCStore) (map[vaultic.ID]schema.BlobType, map[vaultic.ID][]vaultic.ID, error) {
+// scanBlobCatalog reads the blob index once and returns blob types, pack
+// membership, and the payload bytes each blob contributes to each pack. The
+// byte map is what makes pack usage rebuildable from the blob index alone.
+func scanBlobCatalog(ctx context.Context, store GCStore) (map[vaultic.ID]schema.BlobType, map[vaultic.ID][]vaultic.ID, map[vaultic.ID]map[vaultic.ID]uint64, error) {
 	blobTypes := make(map[vaultic.ID]schema.BlobType)
 	packMembers := make(map[vaultic.ID][]vaultic.ID)
+	packMemberBytes := make(map[vaultic.ID]map[vaultic.ID]uint64)
 	seen := make(map[[2]vaultic.ID]struct{})
 	err := gcScan(ctx, store, []byte("b:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
@@ -569,10 +593,58 @@ func scanBlobCatalog(ctx context.Context, store GCStore) (map[vaultic.ID]schema.
 			}
 			seen[membership] = struct{}{}
 			packMembers[packID] = append(packMembers[packID], blobID)
+			if packMemberBytes[packID] == nil {
+				packMemberBytes[packID] = make(map[vaultic.ID]uint64)
+			}
+			packMemberBytes[packID][blobID] = uint64(location.Length)
 		}
 		return nil
 	})
-	return blobTypes, packMembers, err
+	return blobTypes, packMembers, packMemberBytes, err
+}
+
+// computePackUsage splits each pack's payload into reachable and unreachable
+// bytes from the blob index and the confirmed-unreachable set. It returns only
+// the records whose accounting changed, plus the number of packs whose member
+// bytes did not sum to the catalog payload size and were therefore left
+// unaccounted rather than recorded with a fabricated split.
+func computePackUsage(
+	packs map[vaultic.ID]schema.PackRecord,
+	packMemberBytes map[vaultic.ID]map[vaultic.ID]uint64,
+	unreachable map[vaultic.ID]struct{},
+) (map[schema.ID]daemon.PackUsage, uint64) {
+	updates := make(map[schema.ID]daemon.PackUsage)
+	var inconsistent uint64
+	for packID, record := range packs {
+		if record.Lifecycle == schema.PackDeleted {
+			continue
+		}
+		members, ok := packMemberBytes[packID]
+		if !ok {
+			continue
+		}
+		var used, unused, total uint64
+		for blobID, length := range members {
+			total += length
+			if _, gone := unreachable[blobID]; gone {
+				unused += length
+				continue
+			}
+			used += length
+		}
+		// The catalog payload size is authoritative. If the blob index does
+		// not agree with it, the split cannot be trusted, so usage stays
+		// unknown instead of being recorded as measured.
+		if total != record.PayloadSize {
+			inconsistent++
+			continue
+		}
+		if record.UsageKnown && record.UsedPayloadBytes == used && record.UnusedPayloadBytes == unused {
+			continue
+		}
+		updates[schema.ID(packID)] = daemon.PackUsage{Used: used, Unused: unused}
+	}
+	return updates, inconsistent
 }
 
 func loadExistingGCTimestamps(ctx context.Context, store GCStore) (map[string]int64, error) {

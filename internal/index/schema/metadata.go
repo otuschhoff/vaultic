@@ -460,7 +460,7 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalBlobRecord(value)
 	case KeyPack:
 		_, err = UnmarshalPackRecord(value)
-	case KeyPackAggregate:
+	case KeyPackAggregate, KeyTierAggregate:
 		_, err = UnmarshalPackAggregate(value)
 	case KeyCurrentInode, KeyCurrentDirectory:
 		var pointer CurrentPointer

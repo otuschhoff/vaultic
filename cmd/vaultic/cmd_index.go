@@ -361,6 +361,10 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	}
 	if !globalOptions.JSON {
 		printer.P("legacy locations: %d; SlateDB locations: %d; differences: %d; aggregate mismatches: %d\n", result.LegacyLocations, result.SlateDBLocations, result.MissingInSlateDB+result.MissingInLegacy, result.AggregateMismatch)
+		printer.P("packs: unknown tier %d; retention unknown %d; usage unaccounted %d\n", result.UnknownTierPacks, result.RetentionUnknownPacks, result.UsageUnaccountedPacks)
+		if result.TierAggregatesUnbuilt {
+			printer.P("per-tier aggregates have not been built for this repository yet; run 'vaultic index rebuild-pack-stats'\n")
+		}
 		for _, finding := range result.Findings {
 			printer.E("%s %s", finding.Kind, finding.Key)
 			if finding.Want != "" || finding.Got != "" {
@@ -418,6 +422,9 @@ func runIndexRebuildPackStats(ctx context.Context, options indexRebuildPackStats
 	result, err = maintenance.RebuildPackAggregates(ctx, store, options.DryRun)
 	if err == nil && !globalOptions.JSON {
 		printer.P("scanned %d packs; changed %d aggregate records\n", result.PacksScanned, result.AggregatesChanged)
+		for _, delta := range result.Deltas {
+			printer.P("  %s: packs %d, payload %d\n", delta.Key, delta.After.PackCount, delta.After.PayloadSize)
+		}
 	}
 	return result, err
 }
@@ -501,6 +508,9 @@ func runIndexGC(ctx context.Context, options indexGCOptions, globalOptions globa
 		printer.P("scanned %d packs and %d blobs; whole=%d mixed=%d pending-age=%d pending-retries=%d; deleted=%d (of which retried=%d) repacked=%d retry-failed=%d\n",
 			result.PacksScanned, result.BlobsScanned, result.WholePackCandidates, result.MixedPackCandidates, result.PendingAge, result.PendingRetries,
 			result.PacksDeleted, result.PacksRetried, result.PacksRepacked, result.PacksRetryFailed)
+		if result.PacksAccounted != 0 || result.PacksUnaccountable != 0 {
+			printer.P("refreshed usage accounting for %d packs; %d left unaccounted\n", result.PacksAccounted, result.PacksUnaccountable)
+		}
 	}
 	if result.PacksRetryFailed != 0 {
 		return result, fmt.Errorf("%w: %d packs remain delete-pending after a failed retry", errIndexIncomplete, result.PacksRetryFailed)

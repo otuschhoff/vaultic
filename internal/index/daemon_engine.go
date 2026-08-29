@@ -7,6 +7,7 @@ import (
 	"iter"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -14,6 +15,75 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+// TierPolicy describes how a repository routes packs to storage tiers. It is
+// applied at publish time and recorded, never recomputed on read, so a
+// repository that later stops using --repo-hot can still explain where a pack
+// came from.
+//
+// The zero value is deliberately "routing not established", which records
+// tier-unknown. Claiming a single-backend layout by default would state a fact
+// that is wrong for every hot/cold repository whose engine was wired without a
+// policy.
+type TierPolicy struct {
+	// Resolved reports that the repository's backend layout was actually
+	// inspected. Without it no tier is recorded.
+	Resolved bool
+	// HotCold reports whether the repository was opened with a hot/cold split.
+	HotCold bool
+	// MinRetention is the operator-configured minimum retention for cold
+	// storage. Zero leaves packs retention-unknown; no deadline is invented.
+	MinRetention time.Duration
+	// StorageClass is the backend-reported class, when the operator supplied
+	// one. It is free-form and advisory.
+	StorageClass string
+}
+
+// tierFor maps a pack type onto the tier its bytes were actually routed to.
+//
+// A tree pack in a hot/cold repository is mirrored, not hot: hotcold.Save
+// writes every hot file to the hot backend and then mirrors it to the cold
+// backend, so a hot-only pack does not exist. Mixed and unclassified packs are
+// never routed by vaultic itself, so their tier stays unknown rather than
+// being guessed.
+func (policy TierPolicy) tierFor(packType schema.PackType) schema.PackTier {
+	if !policy.Resolved || packType == schema.PackUnknown {
+		return schema.TierUnknown
+	}
+	if !policy.HotCold {
+		return schema.TierSingle
+	}
+	switch packType {
+	case schema.PackTree:
+		return schema.TierMirrored
+	case schema.PackData:
+		return schema.TierCold
+	default:
+		return schema.TierUnknown
+	}
+}
+
+// applyTo records tier and lifetime facts on a pack vaultic is publishing.
+// The creation time is known precisely because vaultic is writing the pack
+// now; imported packs never reach this path.
+func (policy TierPolicy) applyTo(record *schema.PackRecord, now time.Time) {
+	record.Tier = policy.tierFor(record.Type)
+	record.StorageClass = policy.StorageClass
+	record.CreationTime, record.CreationTimeKnown = now.UnixNano(), true
+	// Unknown is stated explicitly rather than left as the zero value, so an
+	// in-memory record carries the same facts as the persisted one.
+	record.RetentionSource, record.MinRetentionUntil = schema.RetentionUnknown, 0
+	if policy.MinRetention <= 0 {
+		return
+	}
+	// Retention applies to bytes held in cold storage. A mirrored pack has a
+	// cold copy, so it carries the deadline too.
+	if record.Tier != schema.TierCold && record.Tier != schema.TierMirrored {
+		return
+	}
+	record.MinRetentionUntil = now.Add(policy.MinRetention).UnixNano()
+	record.RetentionSource = schema.RetentionConfig
+}
 
 // DaemonEngine keeps the legacy index as a synchronous compatibility
 // projection while making the daemon's schema catalog durable first.
@@ -30,6 +100,8 @@ type DaemonEngine struct {
 	pendingSnapshots map[vaultic.ID][]byte
 	nextSnapshotRoot []byte
 	pendingPacks     map[vaultic.ID]struct{}
+	tier             TierPolicy
+	now              func() time.Time
 }
 
 var _ LegacyIndexEngine = (*DaemonEngine)(nil)
@@ -41,7 +113,22 @@ func NewDaemonEngine(client *daemon.Client, legacy ...*LegacyEngine) *DaemonEngi
 	if len(legacy) > 0 && legacy[0] != nil {
 		projection = legacy[0]
 	}
-	return &DaemonEngine{legacy: projection, client: client, store: daemon.NewSchemaStore(client), pendingSnapshots: make(map[vaultic.ID][]byte), pendingPacks: make(map[vaultic.ID]struct{})}
+	return &DaemonEngine{legacy: projection, client: client, store: daemon.NewSchemaStore(client), pendingSnapshots: make(map[vaultic.ID][]byte), pendingPacks: make(map[vaultic.ID]struct{}), now: time.Now}
+}
+
+// SetTierPolicy records how this repository routes packs. It must be called
+// before the first pack is published; packs published without it are recorded
+// as tier-unknown rather than being assigned a guessed tier.
+func (engine *DaemonEngine) SetTierPolicy(policy TierPolicy) {
+	engine.mu.Lock()
+	engine.tier = policy
+	engine.mu.Unlock()
+}
+
+func (engine *DaemonEngine) tierPolicy() TierPolicy {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	return engine.tier
 }
 
 func (engine *DaemonEngine) SchemaStore() *daemon.SchemaStore { return engine.store }
@@ -119,7 +206,11 @@ func (engine *DaemonEngine) StorePackSized(ctx context.Context, id vaultic.ID, b
 }
 
 func (engine *DaemonEngine) storePack(ctx context.Context, id vaultic.ID, blobs pack.Blobs, repo vaultic.SaverUnpacked[vaultic.FileType], physicalSize uint64, physicalSizeKnown bool) error {
-	published, err := schemaPack(id, blobs, physicalSize, physicalSizeKnown)
+	clock := engine.now
+	if clock == nil {
+		clock = time.Now
+	}
+	published, err := schemaPack(id, blobs, physicalSize, physicalSizeKnown, engine.tierPolicy(), clock())
 	if err != nil {
 		return err
 	}
@@ -304,7 +395,7 @@ func (engine *DaemonEngine) Close() error {
 	return errors.Join(engine.legacy.Close(), engine.client.Close(context.Background()))
 }
 
-func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSizeKnown bool) (daemon.PublishedPack, error) {
+func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSizeKnown bool, policy TierPolicy, now time.Time) (daemon.PublishedPack, error) {
 	if len(blobs) == 0 {
 		return daemon.PublishedPack{}, fmt.Errorf("published pack %s contains no blobs", id.Str())
 	}
@@ -337,6 +428,7 @@ func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSi
 		published.Blobs[blobID] = blobRecord
 	}
 	record.Type = schema.ClassifyPack(types)
+	policy.applyTo(&record, now)
 	if physicalSizeKnown {
 		if physicalSize < record.PayloadSize {
 			return daemon.PublishedPack{}, fmt.Errorf("published pack %s is smaller than its payload", id.Str())

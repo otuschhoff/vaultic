@@ -55,29 +55,35 @@ type ExportResult struct {
 }
 
 type CheckResult struct {
-	LegacyIndexes        uint64    `json:"legacy_indexes"`
-	LegacySnapshots      uint64    `json:"legacy_snapshots"`
-	SlateDBSnapshots     uint64    `json:"slatedb_snapshots"`
-	LegacyLocations      uint64    `json:"legacy_locations"`
-	SlateDBLocations     uint64    `json:"slatedb_locations"`
-	MissingInSlateDB     uint64    `json:"missing_in_slatedb"`
-	MissingInLegacy      uint64    `json:"missing_in_legacy"`
-	MissingPacks         uint64    `json:"missing_packs"`
-	InvalidPacks         uint64    `json:"invalid_packs"`
-	AggregateMismatch    uint64    `json:"aggregate_mismatches"`
-	ReverseEdgeMismatch  uint64    `json:"reverse_edge_mismatches"`
-	UnresolvedReferences uint64    `json:"unresolved_references"`
-	SnapshotMismatch     uint64    `json:"snapshot_mismatches"`
-	UnresolvedSnapshots  uint64    `json:"unresolved_snapshots"`
-	PendingCrawlDebt     uint64    `json:"pending_crawl_debt"`
-	PendingExports       uint64    `json:"pending_exports"`
-	FailedExports        uint64    `json:"failed_exports"`
-	ExportCheckpoints    uint64    `json:"export_checkpoints"`
-	MixedPacks           uint64    `json:"mixed_packs"`
-	UnknownPacks         uint64    `json:"unknown_packs"`
-	GCCandidates         uint64    `json:"gc_candidates"`
-	Warnings             uint64    `json:"warnings"`
-	Findings             []Finding `json:"findings,omitempty"`
+	LegacyIndexes         uint64 `json:"legacy_indexes"`
+	LegacySnapshots       uint64 `json:"legacy_snapshots"`
+	SlateDBSnapshots      uint64 `json:"slatedb_snapshots"`
+	LegacyLocations       uint64 `json:"legacy_locations"`
+	SlateDBLocations      uint64 `json:"slatedb_locations"`
+	MissingInSlateDB      uint64 `json:"missing_in_slatedb"`
+	MissingInLegacy       uint64 `json:"missing_in_legacy"`
+	MissingPacks          uint64 `json:"missing_packs"`
+	InvalidPacks          uint64 `json:"invalid_packs"`
+	AggregateMismatch     uint64 `json:"aggregate_mismatches"`
+	ReverseEdgeMismatch   uint64 `json:"reverse_edge_mismatches"`
+	UnresolvedReferences  uint64 `json:"unresolved_references"`
+	SnapshotMismatch      uint64 `json:"snapshot_mismatches"`
+	UnresolvedSnapshots   uint64 `json:"unresolved_snapshots"`
+	PendingCrawlDebt      uint64 `json:"pending_crawl_debt"`
+	PendingExports        uint64 `json:"pending_exports"`
+	FailedExports         uint64 `json:"failed_exports"`
+	ExportCheckpoints     uint64 `json:"export_checkpoints"`
+	MixedPacks            uint64 `json:"mixed_packs"`
+	UnknownPacks          uint64 `json:"unknown_packs"`
+	UnknownTierPacks      uint64 `json:"unknown_tier_packs"`
+	RetentionUnknownPacks uint64 `json:"retention_unknown_packs"`
+	UsageUnaccountedPacks uint64 `json:"usage_unaccounted_packs"`
+	// TierAggregatesUnbuilt marks a repository written before the tier
+	// dimension existed. It is a pending rebuild, not drift.
+	TierAggregatesUnbuilt bool      `json:"tier_aggregates_unbuilt,omitempty"`
+	GCCandidates          uint64    `json:"gc_candidates"`
+	Warnings              uint64    `json:"warnings"`
+	Findings              []Finding `json:"findings,omitempty"`
 }
 
 func (result CheckResult) Clean() bool {
@@ -108,7 +114,9 @@ type RebuildResult struct {
 }
 
 type AggregateDelta struct {
-	Kind   schema.AggregateKind  `json:"kind"`
+	Kind   schema.AggregateKind  `json:"kind,omitempty"`
+	Tier   schema.PackTier       `json:"tier,omitempty"`
+	Key    string                `json:"key"`
 	Before *schema.PackAggregate `json:"before,omitempty"`
 	After  schema.PackAggregate  `json:"after"`
 }
@@ -284,6 +292,7 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 	if err := checkAggregates(ctx, store, packs, &result, options.MaxFindings); err != nil {
 		return result, err
 	}
+	checkPackLifetime(packs, &result)
 	if err := checkOperationalState(ctx, store, options, packs, &result); err != nil {
 		return result, err
 	}
@@ -299,6 +308,34 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 		return result, err
 	}
 	return result, nil
+}
+
+// aggregateTarget is one aggregate record to compare and rewrite. Type
+// aggregates always exist once a repository has any pack; tier aggregates are
+// only materialized for tiers that actually hold packs, so an absent record
+// for an empty tier is correct rather than drift.
+type aggregateTarget struct {
+	key      []byte
+	delta    AggregateDelta
+	expected schema.PackAggregate
+	optional bool
+}
+
+// typeAggregateCount is how many aggregate targets belong to the type
+// dimension; the remainder are the tier dimension.
+const typeAggregateCount = int(schema.AggregateAll - schema.AggregateData + 1)
+
+func aggregateTargets(rebuilt map[schema.AggregateKind]schema.PackAggregate, tiers map[schema.PackTier]schema.PackAggregate) []aggregateTarget {
+	targets := make([]aggregateTarget, 0, len(rebuilt)+len(tiers))
+	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
+		key := schema.PackAggregateKey(kind)
+		targets = append(targets, aggregateTarget{key: key, expected: rebuilt[kind], delta: AggregateDelta{Kind: kind, Key: string(key)}})
+	}
+	for _, tier := range schema.TierAggregateKinds() {
+		key := schema.TierAggregateKey(tier)
+		targets = append(targets, aggregateTarget{key: key, expected: tiers[tier], delta: AggregateDelta{Tier: tier, Key: string(key)}, optional: true})
+	}
+	return targets
 }
 
 func RebuildPackAggregates(ctx context.Context, store Store, dryRun bool) (RebuildResult, error) {
@@ -318,11 +355,17 @@ func RebuildPackAggregates(ctx context.Context, store Store, dryRun bool) (Rebui
 	if err != nil {
 		return RebuildResult{}, err
 	}
+	rebuiltTiers, err := schema.RebuildTierAggregates(records, sequence)
+	if err != nil {
+		return RebuildResult{}, err
+	}
+	targets := aggregateTargets(rebuilt, rebuiltTiers)
+
 	result := RebuildResult{PacksScanned: uint64(len(records)), UpdateSequence: sequence}
 	needsRebuild := false
-	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
-		key := schema.PackAggregateKey(kind)
-		current, found, getErr := store.Get(ctx, key)
+	write := make([]bool, len(targets))
+	for index, target := range targets {
+		current, found, getErr := store.Get(ctx, target.key)
 		if getErr != nil {
 			return result, getErr
 		}
@@ -336,34 +379,47 @@ func RebuildPackAggregates(ctx context.Context, store Store, dryRun bool) (Rebui
 				found = false
 			}
 		}
-		expected := rebuilt[kind]
-		comparisonCurrent, comparisonExpected := currentRecord, expected
+		write[index] = found || !target.optional || !emptyAggregate(target.expected)
+		comparisonCurrent, comparisonExpected := currentRecord, target.expected
 		comparisonCurrent.UpdateSequence, comparisonExpected.UpdateSequence = 0, 0
-		if !found || comparisonCurrent != comparisonExpected {
-			result.AggregatesChanged++
-			needsRebuild = true
-			delta := AggregateDelta{Kind: kind, After: expected}
-			if found {
-				delta.Before = &currentRecord
-			}
-			result.Deltas = append(result.Deltas, delta)
+		if found && comparisonCurrent == comparisonExpected {
+			continue
 		}
+		if !found && target.optional && emptyAggregate(target.expected) {
+			continue
+		}
+		result.AggregatesChanged++
+		needsRebuild = true
+		delta := target.delta
+		delta.After = target.expected
+		if found {
+			stored := currentRecord
+			delta.Before = &stored
+		}
+		result.Deltas = append(result.Deltas, delta)
 	}
 	if needsRebuild && !dryRun {
-		puts := make([]daemon.Mutation, 0, 5)
-		for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
-			key := schema.PackAggregateKey(kind)
-			encoded, encodeErr := rebuilt[kind].MarshalBinary()
+		puts := make([]daemon.Mutation, 0, len(targets))
+		for index, target := range targets {
+			if !write[index] {
+				continue
+			}
+			encoded, encodeErr := target.expected.MarshalBinary()
 			if encodeErr != nil {
 				return result, encodeErr
 			}
-			puts = append(puts, daemon.Mutation{Key: key, Value: encoded})
+			puts = append(puts, daemon.Mutation{Key: target.key, Value: encoded})
 		}
 		if err := store.WriteMutableBatch(ctx, puts, nil, true); err != nil {
 			return result, fmt.Errorf("write pack aggregates: %w", err)
 		}
 	}
 	return result, nil
+}
+
+func emptyAggregate(aggregate schema.PackAggregate) bool {
+	aggregate.UpdateSequence = 0
+	return aggregate == schema.PackAggregate{}
 }
 
 func loadPacks(ctx context.Context, store Store) (map[vaultic.ID]schema.PackRecord, error) {
@@ -698,37 +754,90 @@ func checkAggregates(ctx context.Context, store Store, packs map[vaultic.ID]sche
 	if err != nil {
 		return err
 	}
-	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
-		value, found, getErr := store.Get(ctx, schema.PackAggregateKey(kind))
+	wantTiers, err := schema.RebuildTierAggregates(records, 0)
+	if err != nil {
+		return err
+	}
+	targets := aggregateTargets(want, wantTiers)
+	stored := make([]schema.PackAggregate, len(targets))
+	found := make([]bool, len(targets))
+	malformed := make([]error, len(targets))
+	for index, target := range targets {
+		value, ok, getErr := store.Get(ctx, target.key)
 		if getErr != nil {
 			return getErr
 		}
-		var got schema.PackAggregate
-		if found {
-			got, getErr = schema.UnmarshalPackAggregate(value)
+		if ok {
+			stored[index], getErr = schema.UnmarshalPackAggregate(value)
 			if getErr != nil {
 				if !errors.Is(getErr, schema.ErrMalformed) {
 					return getErr
 				}
-				result.AggregateMismatch++
-				addFinding(result, maxFindings, Finding{Kind: "aggregate_drift", Key: string(schema.PackAggregateKey(kind)), Got: getErr.Error()})
-				continue
+				malformed[index] = getErr
 			}
 		}
-		expected := want[kind]
-		got.UpdateSequence, expected.UpdateSequence = 0, 0
-		if !found || got != expected {
+		found[index] = ok
+	}
+	for index, target := range targets {
+		if malformed[index] != nil {
 			result.AggregateMismatch++
-			addFinding(result, maxFindings, Finding{Kind: "aggregate_drift", Key: string(schema.PackAggregateKey(kind)), Want: fmt.Sprintf("%+v", expected), Got: fmt.Sprintf("%+v", got)})
+			addFinding(result, maxFindings, Finding{Kind: "aggregate_drift", Key: target.delta.Key, Got: malformed[index].Error()})
+			continue
 		}
+		expected, got := target.expected, stored[index]
+		got.UpdateSequence, expected.UpdateSequence = 0, 0
+		if found[index] && got == expected {
+			continue
+		}
+		// An absent tier record is a pending rebuild rather than drift: the
+		// repository may predate the tier dimension, and the dimension is an
+		// accelerator that index check can rebuild. A tier record that exists
+		// but disagrees with the catalog is real drift and is reported below.
+		if target.optional && !found[index] {
+			if !emptyAggregate(expected) {
+				result.TierAggregatesUnbuilt = true
+			}
+			continue
+		}
+		result.AggregateMismatch++
+		addFinding(result, maxFindings, Finding{Kind: "aggregate_drift", Key: target.delta.Key, Want: fmt.Sprintf("%+v", expected), Got: fmt.Sprintf("%+v", got)})
 	}
 	return nil
 }
 
+// checkPackLifetime reports how much of the catalog carries trustworthy tier
+// and lifetime facts. These are counts rather than findings: packs inherited
+// from a legacy import are legitimately tier-unknown and retention-unknown
+// forever, so they must neither fail an otherwise clean check nor crowd out
+// real findings on a repository with millions of packs.
+func checkPackLifetime(packs map[vaultic.ID]schema.PackRecord, result *CheckResult) {
+	for _, record := range packs {
+		if record.Tier == 0 || record.Tier == schema.TierUnknown {
+			result.UnknownTierPacks++
+		}
+		if record.RetentionSource == 0 || record.RetentionSource == schema.RetentionUnknown {
+			result.RetentionUnknownPacks++
+		}
+		if !record.UsageKnown {
+			result.UsageUnaccountedPacks++
+		}
+	}
+}
+
 func nextAggregateSequence(ctx context.Context, store Store) (uint64, error) {
 	var maximum uint64
+	keys := make([][]byte, 0, typeAggregateCount+len(schema.TierAggregateKinds()))
 	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
-		value, found, err := store.Get(ctx, schema.PackAggregateKey(kind))
+		keys = append(keys, schema.PackAggregateKey(kind))
+	}
+	// The tier dimension is maintained incrementally too, so its sequence can
+	// already exceed the type dimension's. Ignoring it would let a rebuild
+	// write a sequence lower than one already published.
+	for _, tier := range schema.TierAggregateKinds() {
+		keys = append(keys, schema.TierAggregateKey(tier))
+	}
+	for _, key := range keys {
+		value, found, err := store.Get(ctx, key)
 		if err != nil {
 			return 0, err
 		}

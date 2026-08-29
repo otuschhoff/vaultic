@@ -384,6 +384,7 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 			imported.Record.HeaderSize = imported.Record.PhysicalSize - imported.Record.PayloadSize
 		}
 	}
+	clearStalePackUsage(&imported.Record)
 	encodedPack, err := imported.Record.MarshalBinary()
 	if err != nil {
 		return fail(err)
@@ -891,24 +892,184 @@ func mergeImportedPackRecord(existing, incoming schema.PackRecord, source schema
 	if incoming.Type == schema.PackUnknown {
 		result.Type = existing.Type
 	}
+	applyPackLifetime(&result, existing, incoming)
 	sort.Slice(result.SourceIndexIDs, func(left, right int) bool {
 		return bytes.Compare(result.SourceIndexIDs[left][:], result.SourceIndexIDs[right][:]) < 0
 	})
 	return result
 }
 
-func updatePackAggregates(ctx context.Context, transaction *Transaction, old *schema.PackRecord, current schema.PackRecord) ([]Mutation, error) {
-	keys := make([][]byte, 0, 5)
-	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
-		keys = append(keys, schema.PackAggregateKey(kind))
+// applyPackLifetime resolves tier and lifetime facts when a pack is seen
+// again, leaving every other field of result untouched. A known fact is never
+// replaced by an unknown one, and an unknown fact is never synthesized: a
+// second legacy index reporting the same pack cannot turn an unknown creation
+// time into a known one.
+func applyPackLifetime(result *schema.PackRecord, existing, incoming schema.PackRecord) {
+	if !existing.CreationTimeKnown && incoming.CreationTimeKnown {
+		result.CreationTime, result.CreationTimeKnown = incoming.CreationTime, true
 	}
+	if isUnknownTier(existing.Tier) && !isUnknownTier(incoming.Tier) {
+		result.Tier = incoming.Tier
+	}
+	if existing.StorageClass == "" {
+		result.StorageClass = incoming.StorageClass
+	}
+	if isUnknownRetention(existing.RetentionSource) && !isUnknownRetention(incoming.RetentionSource) && result.CreationTimeKnown {
+		result.RetentionSource, result.MinRetentionUntil = incoming.RetentionSource, incoming.MinRetentionUntil
+	}
+	if incoming.DeleteAfter != 0 {
+		result.DeleteAfter = incoming.DeleteAfter
+	}
+	if incoming.UsageKnown {
+		result.UsageKnown, result.UsedPayloadBytes, result.UnusedPayloadBytes = true, incoming.UsedPayloadBytes, incoming.UnusedPayloadBytes
+	}
+}
+
+func isUnknownTier(tier schema.PackTier) bool {
+	return tier == 0 || tier == schema.TierUnknown
+}
+
+func isUnknownRetention(source schema.RetentionSource) bool {
+	return source == 0 || source == schema.RetentionUnknown
+}
+
+// clearStalePackUsage drops usage accounting whose payload basis changed.
+// Usage is recomputed by GC discovery; keeping a stale split would both fail
+// the record invariant and misreport reclaimable bytes.
+func clearStalePackUsage(record *schema.PackRecord) {
+	if !record.UsageKnown {
+		record.UsedPayloadBytes, record.UnusedPayloadBytes = 0, 0
+		return
+	}
+	if record.UsedPayloadBytes > record.PayloadSize ||
+		record.UsedPayloadBytes+record.UnusedPayloadBytes != record.PayloadSize {
+		record.UsageKnown, record.UsedPayloadBytes, record.UnusedPayloadBytes = false, 0, 0
+	}
+}
+
+// PackUsage is the reachable/unreachable payload split computed for one pack.
+type PackUsage struct{ Used, Unused uint64 }
+
+// UpdatePackUsage records refreshed usage accounting for packs whose
+// reachability was just recomputed.
+//
+// It runs as a transaction per batch so the pack record and both aggregate
+// dimensions move together, and so a concurrent publish is resolved by
+// conflict retry rather than by clobbering its aggregate increment. A pack
+// whose payload size no longer matches the caller's split is skipped: the
+// caller's reachability view is stale for that pack and usage stays unknown
+// rather than being recorded wrongly.
+func (store *SchemaStore) UpdatePackUsage(ctx context.Context, usage map[schema.ID]PackUsage) (uint64, error) {
+	ids := make([]schema.ID, 0, len(usage))
+	for id := range usage {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(left, right int) bool { return bytes.Compare(ids[left][:], ids[right][:]) < 0 })
+	var applied uint64
+	for start := 0; start < len(ids); start += packUsageBatchSize {
+		batch := ids[start:min(start+packUsageBatchSize, len(ids))]
+		count, err := store.updatePackUsageBatch(ctx, batch, usage)
+		if err != nil {
+			return applied, err
+		}
+		applied += count
+	}
+	return applied, nil
+}
+
+const packUsageBatchSize = 256
+
+func (store *SchemaStore) updatePackUsageBatch(ctx context.Context, ids []schema.ID, usage map[schema.ID]PackUsage) (uint64, error) {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		count, err := store.updatePackUsageOnce(ctx, ids, usage)
+		if status.Code(err) != codes.Aborted {
+			return count, err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return 0, fmt.Errorf("update pack usage: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) updatePackUsageOnce(ctx context.Context, ids []schema.ID, usage map[schema.ID]PackUsage) (uint64, error) {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	fail := func(err error) (uint64, error) {
+		rollbackTransaction(ctx, transaction)
+		return 0, err
+	}
+	puts := make([]Mutation, 0, len(ids)+len(aggregateKeys()))
+	changes := make([]packChange, 0, len(ids))
+	for _, id := range ids {
+		key := schema.PackKey(id)
+		value, found, getErr := transaction.Get(ctx, key)
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if !found {
+			continue
+		}
+		current, decodeErr := schema.UnmarshalPackRecord(value)
+		if decodeErr != nil {
+			return fail(decodeErr)
+		}
+		split := usage[id]
+		if split.Used > current.PayloadSize || split.Used+split.Unused != current.PayloadSize {
+			continue
+		}
+		if current.UsageKnown && current.UsedPayloadBytes == split.Used && current.UnusedPayloadBytes == split.Unused {
+			continue
+		}
+		updated := current
+		updated.UsageKnown, updated.UsedPayloadBytes, updated.UnusedPayloadBytes = true, split.Used, split.Unused
+		encoded, encodeErr := updated.MarshalBinary()
+		if encodeErr != nil {
+			return fail(encodeErr)
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+		changes = append(changes, packChange{old: current, current: updated})
+	}
+	if len(changes) == 0 {
+		rollbackTransaction(ctx, transaction)
+		return 0, nil
+	}
+	aggregates, err := applyPackAggregateDeltas(ctx, transaction, changes)
+	if err != nil {
+		return fail(err)
+	}
+	puts = append(puts, aggregates...)
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fail(err)
+	}
+	return uint64(len(changes)), nil
+}
+
+type packChange struct{ old, current schema.PackRecord }
+
+// applyPackAggregateDeltas folds several pack changes into one read-modify-write
+// of each aggregate. Calling updatePackAggregates per pack inside a single
+// transaction would be wrong: the reads would not observe the pending puts from
+// earlier packs, so every delta but the last would be lost.
+func applyPackAggregateDeltas(ctx context.Context, transaction *Transaction, changes []packChange) ([]Mutation, error) {
+	keys := aggregateKeys()
 	values, found, err := transaction.MultiGet(ctx, keys)
 	if err != nil {
 		return nil, err
 	}
 	puts := make([]Mutation, 0, len(keys))
 	for offset, key := range keys {
-		kind := schema.AggregateKind(offset) + schema.AggregateData
 		aggregate := schema.PackAggregate{}
 		if found[offset] {
 			aggregate, err = schema.UnmarshalPackAggregate(values[offset].Value)
@@ -916,15 +1077,27 @@ func updatePackAggregates(ctx context.Context, transaction *Transaction, old *sc
 				return nil, err
 			}
 		}
-		if old != nil && (kind == schema.AggregateAll || aggregateKind(old.Type) == kind) {
-			if err := subtractPackAggregate(&aggregate, *old); err != nil {
-				return nil, err
+		touched := false
+		for _, change := range changes {
+			if aggregateAppliesTo(offset, change.old) {
+				if found[offset] || !isTierAggregateOffset(offset) {
+					if err := subtractPackAggregate(&aggregate, change.old); err != nil {
+						return nil, err
+					}
+					touched = true
+				}
+			}
+			if aggregateAppliesTo(offset, change.current) {
+				if err := addPackAggregate(&aggregate, change.current); err != nil {
+					return nil, err
+				}
+				touched = true
 			}
 		}
-		if kind == schema.AggregateAll || aggregateKind(current.Type) == kind {
-			if err := addPackAggregate(&aggregate, current); err != nil {
-				return nil, err
-			}
+		// An aggregate that gained and lost nothing is unchanged, so it is
+		// left untouched rather than rewritten with a bumped sequence.
+		if !touched {
+			continue
 		}
 		aggregate.UpdateSequence++
 		encoded, err := aggregate.MarshalBinary()
@@ -936,25 +1109,113 @@ func updatePackAggregates(ctx context.Context, transaction *Transaction, old *sc
 	return puts, nil
 }
 
-// removePackAggregates subtracts a deleted pack's totals from the relevant
-// per-type and all-packs aggregates without adding any replacement record.
-func removePackAggregates(ctx context.Context, transaction *Transaction, record schema.PackRecord) ([]Mutation, error) {
-	keys := make([][]byte, 0, 5)
-	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
-		keys = append(keys, schema.PackAggregateKey(kind))
-	}
+func updatePackAggregates(ctx context.Context, transaction *Transaction, old *schema.PackRecord, current schema.PackRecord) ([]Mutation, error) {
+	keys := aggregateKeys()
 	values, found, err := transaction.MultiGet(ctx, keys)
 	if err != nil {
 		return nil, err
 	}
 	puts := make([]Mutation, 0, len(keys))
 	for offset, key := range keys {
-		kind := schema.AggregateKind(offset) + schema.AggregateData
-		if !found[offset] {
-			return nil, fmt.Errorf("pack aggregate %d is missing", kind)
+		aggregate := schema.PackAggregate{}
+		if found[offset] {
+			aggregate, err = schema.UnmarshalPackAggregate(values[offset].Value)
+			if err != nil {
+				return nil, err
+			}
 		}
-		if kind != schema.AggregateAll && aggregateKind(record.Type) != kind {
+		touched := false
+		if old != nil && aggregateAppliesTo(offset, *old) {
+			// A pack whose tier was unknown and is now known moves between tier
+			// records. On a repository that predates the tier dimension the record
+			// it is leaving does not exist, and there is nothing to subtract.
+			// Failing here would block the publish outright; the pending rebuild
+			// reconciles the dimension instead.
+			if found[offset] || !isTierAggregateOffset(offset) {
+				if err := subtractPackAggregate(&aggregate, *old); err != nil {
+					return nil, err
+				}
+				touched = true
+			}
+		}
+		if aggregateAppliesTo(offset, current) {
+			if err := addPackAggregate(&aggregate, current); err != nil {
+				return nil, err
+			}
+			touched = true
+		}
+		// Type aggregates always exist once anything has been published. Only
+		// the tier dimension is sparse: a tier that neither gained nor lost a
+		// pack is left alone so publishing one pack does not materialize a
+		// record for every tier the repository does not use.
+		if !touched && isTierAggregateOffset(offset) && !found[offset] {
 			continue
+		}
+		aggregate.UpdateSequence++
+		encoded, err := aggregate.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded})
+	}
+	return puts, nil
+}
+
+// aggregateKeys returns the type dimension followed by the tier dimension, in
+// the fixed order aggregateAppliesTo decodes offsets against.
+func aggregateKeys() [][]byte {
+	keys := make([][]byte, 0, 5+len(schema.TierAggregateKinds()))
+	for kind := schema.AggregateData; kind <= schema.AggregateAll; kind++ {
+		keys = append(keys, schema.PackAggregateKey(kind))
+	}
+	for _, tier := range schema.TierAggregateKinds() {
+		keys = append(keys, schema.TierAggregateKey(tier))
+	}
+	return keys
+}
+
+func aggregateAppliesTo(offset int, record schema.PackRecord) bool {
+	if !isTierAggregateOffset(offset) {
+		kind := schema.AggregateKind(offset) + schema.AggregateData
+		return kind == schema.AggregateAll || aggregateKind(record.Type) == kind
+	}
+	tier := record.Tier
+	if tier == 0 {
+		tier = schema.TierUnknown
+	}
+	return schema.TierAggregateKinds()[offset-typeAggregateCount] == tier
+}
+
+// typeAggregateCount is how many entries of aggregateKeys() belong to the type
+// dimension; the remainder are the tier dimension.
+const typeAggregateCount = int(schema.AggregateAll - schema.AggregateData + 1)
+
+func isTierAggregateOffset(offset int) bool { return offset >= typeAggregateCount }
+
+// removePackAggregates subtracts a deleted pack's totals from the relevant
+// per-type, all-packs, and per-tier aggregates without adding any replacement
+// record.
+func removePackAggregates(ctx context.Context, transaction *Transaction, record schema.PackRecord) ([]Mutation, error) {
+	keys := aggregateKeys()
+	values, found, err := transaction.MultiGet(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	puts := make([]Mutation, 0, len(keys))
+	for offset, key := range keys {
+		if !aggregateAppliesTo(offset, record) {
+			continue
+		}
+		if !found[offset] {
+			// A type aggregate must exist once anything was published, so
+			// its absence is corruption. An absent tier aggregate only means
+			// this repository predates the tier dimension; deleting a pack
+			// must not fail for that reason. The pending rebuild reported by
+			// index check materializes the dimension later.
+			if isTierAggregateOffset(offset) {
+				continue
+			}
+			return nil, fmt.Errorf("pack aggregate %q is missing", key)
 		}
 		aggregate, err := schema.UnmarshalPackAggregate(values[offset].Value)
 		if err != nil {
@@ -981,11 +1242,19 @@ func subtractPackAggregate(aggregate *schema.PackAggregate, record schema.PackRe
 	if aggregate.PackCount == 0 || aggregate.PhysicalSize < record.PhysicalSize || aggregate.PayloadSize < record.PayloadSize || aggregate.HeaderSize < record.HeaderSize || aggregate.BlobCount < record.BlobCount {
 		return fmt.Errorf("pack aggregate underflow")
 	}
+	if record.UsageKnown && (aggregate.AccountedPackCount == 0 || aggregate.UsedPayloadBytes < record.UsedPayloadBytes || aggregate.UnusedPayloadBytes < record.UnusedPayloadBytes) {
+		return fmt.Errorf("pack aggregate usage underflow")
+	}
 	aggregate.PackCount--
 	aggregate.PhysicalSize -= record.PhysicalSize
 	aggregate.PayloadSize -= record.PayloadSize
 	aggregate.HeaderSize -= record.HeaderSize
 	aggregate.BlobCount -= record.BlobCount
+	if record.UsageKnown {
+		aggregate.AccountedPackCount--
+		aggregate.UsedPayloadBytes -= record.UsedPayloadBytes
+		aggregate.UnusedPayloadBytes -= record.UnusedPayloadBytes
+	}
 	return nil
 }
 
@@ -993,11 +1262,19 @@ func addPackAggregate(aggregate *schema.PackAggregate, record schema.PackRecord)
 	if aggregate.PackCount == math.MaxUint64 || math.MaxUint64-aggregate.PhysicalSize < record.PhysicalSize || math.MaxUint64-aggregate.PayloadSize < record.PayloadSize || math.MaxUint64-aggregate.HeaderSize < record.HeaderSize || math.MaxUint64-aggregate.BlobCount < record.BlobCount {
 		return fmt.Errorf("pack aggregate overflow")
 	}
+	if record.UsageKnown && (aggregate.AccountedPackCount == math.MaxUint64 || math.MaxUint64-aggregate.UsedPayloadBytes < record.UsedPayloadBytes || math.MaxUint64-aggregate.UnusedPayloadBytes < record.UnusedPayloadBytes) {
+		return fmt.Errorf("pack aggregate usage overflow")
+	}
 	aggregate.PackCount++
 	aggregate.PhysicalSize += record.PhysicalSize
 	aggregate.PayloadSize += record.PayloadSize
 	aggregate.HeaderSize += record.HeaderSize
 	aggregate.BlobCount += record.BlobCount
+	if record.UsageKnown {
+		aggregate.AccountedPackCount++
+		aggregate.UsedPayloadBytes += record.UsedPayloadBytes
+		aggregate.UnusedPayloadBytes += record.UnusedPayloadBytes
+	}
 	return nil
 }
 
@@ -1122,7 +1399,7 @@ func validateMutableKey(key []byte) error {
 		return err
 	}
 	switch parsed.Kind {
-	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
+	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyTierAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint:
 		return nil
@@ -1154,7 +1431,7 @@ func validatePublishKey(key []byte) (bool, error) {
 	switch parsed.Kind {
 	case schema.KeyBlob, schema.KeyInodeRevision, schema.KeyDirectoryRevision, schema.KeySnapshot:
 		return true, nil
-	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
+	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyTierAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint:
 		return false, nil

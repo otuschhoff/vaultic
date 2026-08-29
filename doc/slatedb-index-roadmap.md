@@ -2167,6 +2167,76 @@ work budgets) is already wired through Phase 7 and Phase 8's CLI options.
 **Goal:** make tier, creation time, retention deadline, and usage accounting
 durable properties of the pack catalog, without changing any policy yet.
 
+**Current implementation state (2026-08-29):** **complete.** The pack record
+carries `tier`, `storage_class`, `created_at`/`creation_time_known`,
+`min_retention_until`/`retention_source`, `used_payload_bytes`/
+`unused_payload_bytes`, and `delete_after`. Records written by Phase 3 and by
+the pre-`physical_size_known` layout still decode, as tier-unknown and
+retention-unknown; both historical layouts are reproduced byte-for-byte in the
+codec tests rather than approximated by truncating a current record.
+
+Tier is applied at publish time by a `TierPolicy` derived from the
+repository's actual backend layout, so the recorded tier reflects how bytes
+were really placed. A tree pack in a hot/cold repository is recorded as
+`mirrored`, not `hot`, because `hotcold.Save` writes hot files to the hot
+backend and then mirrors them to the cold backend; a hot-only pack never
+exists. A repository without a hot/cold split records `single`. Mixed and
+unclassified packs stay `unknown`, because vaultic never routes them itself.
+Packs vaultic writes always carry a known creation time; imported packs never
+do, and no timestamp, tier, or retention deadline is synthesized for them.
+
+The `a:tier:*` aggregates are maintained in the same transaction as the pack
+record and the type aggregates. Only tiers that hold packs are materialized.
+A batch touching several packs folds every delta into one read-modify-write of
+each aggregate, because per-pack updates inside one transaction would not
+observe each other's pending writes and all but the last would be lost.
+
+`used_payload_bytes`/`unused_payload_bytes` are refreshed by GC discovery,
+which is where reachability is actually computed; `forget` deletes snapshots
+without computing reachability, so the accounting follows at the next
+discovery pass. The split is derived from the blob index and is rejected
+rather than recorded when it disagrees with the catalog payload size, so usage
+never contradicts the catalog. `index check` rebuilds both dimensions and
+reports drift, unknown-tier, retention-unknown, and usage-unaccounted counts.
+
+Two states are distinguished deliberately. A tier aggregate that exists but
+disagrees with the catalog is drift and fails the check. A tier aggregate that
+is absent is a pending rebuild, reported as `tier_aggregates_unbuilt` with the
+command to run, because a repository written before this phase has none and
+must not be reported as corrupt. For the same reason a missing tier aggregate
+never blocks pack deletion: an accelerator may not prevent a destructive
+operation from completing correctly.
+
+**Deviations from the plan:** the global schema version byte is *not* bumped.
+It is shared by every record type and `newDecoder` rejects any other value, so
+bumping it would make every Phase 3 record of every type undecodable, which
+directly contradicts the same step's requirement that older records still
+decode as tier-unknown. Backward compatibility wins; the new fields are
+appended and guarded by length, matching how `physical_size_known` was added.
+
+The compatibility is one-way, and deliberately so. A Phase 9 pack record
+carries fields an older decoder does not know, and that decoder requires a
+record to end exactly where it expects, so it rejects the record as having
+trailing data. Downgrading to an older binary against a catalog that Phase 9
+has written is therefore not supported. This matches the rollback path in
+section 18, which resumes from the legacy JSON indexes rather than from an
+older SlateDB build.
+
+Two fields were added beyond the listed set. `usage_known` distinguishes "usage
+has never been computed" from "every byte is unreachable", which the listed
+fields alone cannot express; without it an unaccounted pack is
+indistinguishable from a wholly unused one. `accounted_pack_count` on the
+aggregate records how many packs contributed usage, so a consumer can tell
+partial accounting from a fully reachable repository. Both follow the existing
+`physical_size_known`/`creation_time_known` precedent and the section 5 rule
+that unknown must be distinguishable from zero.
+
+Unknown-tier and retention-unknown packs are reported as counts rather than
+per-pack findings. Imported packs are legitimately unknown forever, so
+per-pack findings would crowd real findings out of the list on a repository
+with millions of packs, and would make a correctly imported repository fail a
+check that is otherwise clean.
+
 **Implementation steps:**
 
 1. Extend the versioned pack record with `tier`, `storage_class`, `created_at`
@@ -2190,6 +2260,21 @@ Phase 3 records; tier assignment for data, tree, and mixed packs in a hot/cold
 repository and in a single-backend repository; aggregate atomicity and rebuild;
 usage accounting matching a full recomputation after forget and GC; import of a
 legacy repository leaving every pack retention-unknown.
+
+**Verification performed:** both historical pack layouts decode as
+tier-unknown/retention-unknown with no invented facts, and every truncation
+except the two legacy record boundaries is still rejected; tier assignment is
+pinned for all six pack-type/layout combinations, with configured retention
+applying only where cold bytes exist; publish and deletion maintain the tier
+dimension against a real daemon, including deletion on a catalog with no tier
+aggregates at all; a usage batch spanning several packs is proven to fold every
+delta rather than only the last; usage is verified against an independent naive
+recomputation from the blob index, and is refused when it disagrees with the
+catalog payload size; a real backup, forget, and GC sequence records usage at
+the run that computes reachability and is idempotent on the next run; a legacy
+import leaves every pack tier-, retention-, creation-time-, and
+usage-unknown. Full suites pass under `-race`, and the `CGO_ENABLED=0` build is
+retained.
 
 **Exit criterion:** a hot/cold repository reports correct per-tier totals, and
 `index check` rebuilds them from `p:` records with zero drift.
@@ -2586,6 +2671,15 @@ Never log inode paths, access tokens, or raw repository keys at normal verbosity
   so pack creation time must be recorded by vaultic at publish time. Packs
   inherited from a legacy repository stay retention-unknown permanently, and no
   timestamp may be invented for them.
+- Record compatibility is forward-only. A newer build reads records written by
+  an older one, but an older build rejects records carrying fields it does not
+  know, because a record must end exactly where its decoder expects. Rolling
+  back to an older binary means resuming from the legacy JSON indexes, not
+  reopening a SlateDB catalog a newer build has written.
+- A repository predating a derived namespace has none of its records. That is a
+  pending rebuild, not corruption: it must not fail `index check`, and a
+  missing accelerator must never block a destructive operation from completing
+  correctly.
 - Cold cost-model inputs are operator-supplied estimates, not billing data. The
   model exists to make the decision explicit and auditable, not to predict a
   cloud invoice.

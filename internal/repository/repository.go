@@ -288,6 +288,7 @@ func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.En
 			return nil, fmt.Errorf("connect authoritative metadata daemon for repository %s: %w: %w", r.cfg.ID, enginepkg.ErrUnavailable, connectErr)
 		}
 		engine := enginepkg.NewDaemonEngine(client, enginepkg.NewLegacyEngine(r.idx))
+		engine.SetTierPolicy(r.tierPolicy())
 		r.SetEngine(engine)
 		return engine, nil
 	}
@@ -308,8 +309,18 @@ func (r *Repository) EnableSlateDBAuthority(ctx context.Context, client *daemon.
 	if err := enginepkg.Activate(ctx, r.be, r.cfg.ID); err != nil {
 		return err
 	}
-	r.SetEngine(enginepkg.NewDaemonEngine(client, enginepkg.NewLegacyEngine(r.idx)))
+	engine := enginepkg.NewDaemonEngine(client, enginepkg.NewLegacyEngine(r.idx))
+	engine.SetTierPolicy(r.tierPolicy())
+	r.SetEngine(engine)
 	return nil
+}
+
+// tierPolicy derives pack routing from the repository's actual backend layout,
+// so tier is recorded from how bytes are really placed rather than from a
+// separate configuration that could drift from it.
+func (r *Repository) tierPolicy() enginepkg.TierPolicy {
+	_, _, hotCold := r.HotCold()
+	return enginepkg.TierPolicy{Resolved: true, HotCold: hotCold}
 }
 
 // PackSize return the target size of a pack file when uploading

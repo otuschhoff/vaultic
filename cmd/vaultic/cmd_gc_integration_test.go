@@ -114,6 +114,15 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 		if stats.PacksDeleted != 0 || stats.PacksRepacked != 0 {
 			t.Fatalf("aged gate did not prevent sweeping: %#v", stats)
 		}
+		// This is the first run that actually computes reachability, so it is
+		// where usage accounting is established. Postponing the sweep must not
+		// postpone the accounting.
+		if stats.PacksAccounted == 0 {
+			t.Fatalf("reachability was computed but no usage was recorded: %#v", stats)
+		}
+		if stats.PacksUnaccountable != 0 {
+			t.Fatalf("packs left unaccountable: %#v", stats)
+		}
 		return runErr
 	})
 	if err != nil {
@@ -132,6 +141,14 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	}
 	if stats.PacksDeleted == 0 && stats.PacksRepacked == 0 {
 		t.Fatalf("gc freed nothing: %#v", stats)
+	}
+	// Reachability is unchanged since the aged-gate run recorded it, so this
+	// run must find nothing to re-account and still leave nothing unaccountable.
+	if stats.PacksAccounted != 0 {
+		t.Fatalf("usage accounting was rewritten without a reachability change: %#v", stats)
+	}
+	if stats.PacksUnaccountable != 0 {
+		t.Fatalf("gc left %d packs unaccountable: %#v", stats.PacksUnaccountable, stats)
 	}
 
 	packsAfter := listPacks(env.gopts, t)

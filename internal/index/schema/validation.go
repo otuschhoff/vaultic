@@ -33,27 +33,15 @@ func ClassifyPack(types []BlobType) PackType {
 func RebuildPackAggregates(records []PackRecord, updateSequence uint64) (map[AggregateKind]PackAggregate, error) {
 	result := map[AggregateKind]PackAggregate{}
 	for _, record := range records {
+		record = record.normalized()
 		if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
 			return nil, fmt.Errorf("%w: invalid pack record", ErrMalformed)
 		}
 		kind := map[PackType]AggregateKind{PackData: AggregateData, PackTree: AggregateTree, PackMixed: AggregateMixed, PackUnknown: AggregateUnknown}[record.Type]
 		for _, aggregateKind := range []AggregateKind{kind, AggregateAll} {
 			aggregate := result[aggregateKind]
-			var ok bool
-			if aggregate.PackCount, ok = add(aggregate.PackCount, 1); !ok {
-				return nil, fmt.Errorf("%w: aggregate overflow", ErrMalformed)
-			}
-			if aggregate.PhysicalSize, ok = add(aggregate.PhysicalSize, record.PhysicalSize); !ok {
-				return nil, fmt.Errorf("%w: aggregate overflow", ErrMalformed)
-			}
-			if aggregate.PayloadSize, ok = add(aggregate.PayloadSize, record.PayloadSize); !ok {
-				return nil, fmt.Errorf("%w: aggregate overflow", ErrMalformed)
-			}
-			if aggregate.HeaderSize, ok = add(aggregate.HeaderSize, record.HeaderSize); !ok {
-				return nil, fmt.Errorf("%w: aggregate overflow", ErrMalformed)
-			}
-			if aggregate.BlobCount, ok = add(aggregate.BlobCount, record.BlobCount); !ok {
-				return nil, fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+			if err := accumulatePackAggregate(&aggregate, record); err != nil {
+				return nil, err
 			}
 			aggregate.UpdateSequence = updateSequence
 			result[aggregateKind] = aggregate
@@ -65,6 +53,69 @@ func RebuildPackAggregates(records []PackRecord, updateSequence uint64) (map[Agg
 		result[kind] = aggregate
 	}
 	return result, nil
+}
+
+// RebuildTierAggregates recomputes the tier dimension from pack records. Every
+// tier is present in the result, including tiers with no packs, so a rebuild
+// can overwrite a stale record rather than leaving it behind.
+func RebuildTierAggregates(records []PackRecord, updateSequence uint64) (map[PackTier]PackAggregate, error) {
+	result := map[PackTier]PackAggregate{}
+	for _, record := range records {
+		record = record.normalized()
+		if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
+			return nil, fmt.Errorf("%w: invalid pack record", ErrMalformed)
+		}
+		if !validPackTier(record.Tier) {
+			return nil, fmt.Errorf("%w: invalid pack tier", ErrMalformed)
+		}
+		aggregate := result[record.Tier]
+		if err := accumulatePackAggregate(&aggregate, record); err != nil {
+			return nil, err
+		}
+		aggregate.UpdateSequence = updateSequence
+		result[record.Tier] = aggregate
+	}
+	for _, tier := range TierAggregateKinds() {
+		aggregate := result[tier]
+		aggregate.UpdateSequence = updateSequence
+		result[tier] = aggregate
+	}
+	return result, nil
+}
+
+// accumulatePackAggregate adds one pack's totals to an aggregate. Usage bytes
+// are only accumulated for packs whose usage is known, so an unaccounted pack
+// never contributes zero used bytes as though it were wholly unreachable.
+func accumulatePackAggregate(aggregate *PackAggregate, record PackRecord) error {
+	var ok bool
+	if aggregate.PackCount, ok = add(aggregate.PackCount, 1); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if aggregate.PhysicalSize, ok = add(aggregate.PhysicalSize, record.PhysicalSize); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if aggregate.PayloadSize, ok = add(aggregate.PayloadSize, record.PayloadSize); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if aggregate.HeaderSize, ok = add(aggregate.HeaderSize, record.HeaderSize); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if aggregate.BlobCount, ok = add(aggregate.BlobCount, record.BlobCount); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if !record.UsageKnown {
+		return nil
+	}
+	if aggregate.UsedPayloadBytes, ok = add(aggregate.UsedPayloadBytes, record.UsedPayloadBytes); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if aggregate.UnusedPayloadBytes, ok = add(aggregate.UnusedPayloadBytes, record.UnusedPayloadBytes); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	if aggregate.AccountedPackCount, ok = add(aggregate.AccountedPackCount, 1); !ok {
+		return fmt.Errorf("%w: aggregate overflow", ErrMalformed)
+	}
+	return nil
 }
 
 func add(left, right uint64) (uint64, bool) {

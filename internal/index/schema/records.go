@@ -99,6 +99,38 @@ const (
 	PackStateUnknown
 )
 
+// PackTier records where a pack was routed at publish time. It is recorded
+// rather than recomputed so a repository that later stops using --repo-hot can
+// still explain where a pack came from.
+//
+// TierMirrored, not TierHot, is the correct tier for a tree pack in a hot/cold
+// repository: hotcold.Save writes every hot file to the hot backend and then
+// mirrors it to the cold backend, so a hot-only pack never exists. TierHot is
+// retained for repositories that route without mirroring.
+type PackTier byte
+
+const (
+	// TierUnknown covers imported packs and any pack whose routing could not
+	// be established. It is never synthesized into a concrete tier.
+	TierUnknown PackTier = iota + 1
+	TierHot
+	TierCold
+	TierMirrored
+	// TierSingle is a repository without a hot/cold split, where the sole
+	// backend holds every pack.
+	TierSingle
+)
+
+// RetentionSource records where min-retention came from. A deadline is only
+// trustworthy when it was derived from a known creation time.
+type RetentionSource byte
+
+const (
+	RetentionUnknown RetentionSource = iota + 1
+	RetentionConfig
+	RetentionBackend
+)
+
 type PackRecord struct {
 	Type                                             PackType
 	PhysicalSize, PayloadSize, HeaderSize, BlobCount uint64
@@ -107,9 +139,60 @@ type PackRecord struct {
 	CreationTimeKnown                                bool
 	Lifecycle                                        PackLifecycle
 	SourceIndexIDs                                   []ID
+	Tier                                             PackTier
+	StorageClass                                     string
+	MinRetentionUntil                                int64
+	RetentionSource                                  RetentionSource
+	UsedPayloadBytes, UnusedPayloadBytes             uint64
+	// UsageKnown distinguishes "reachability has never been computed" from
+	// "every byte is reachable". Without it an unaccounted pack is
+	// indistinguishable from a wholly unused one.
+	UsageKnown  bool
+	DeleteAfter int64
+}
+
+// normalized maps unset tier and retention enums to their explicit unknown
+// values. A caller that never considered tier must record "unknown", never a
+// synthesized tier.
+func (record PackRecord) normalized() PackRecord {
+	if record.Tier == 0 {
+		record.Tier = TierUnknown
+	}
+	if record.RetentionSource == 0 {
+		record.RetentionSource = RetentionUnknown
+	}
+	return record
+}
+
+// validatePackLifetime enforces the invariants that keep unknown facts from
+// being presented as measured ones.
+func (record PackRecord) validatePackLifetime() error {
+	if !validPackTier(record.Tier) || !validRetentionSource(record.RetentionSource) {
+		return fmt.Errorf("%w: invalid pack tier state", ErrMalformed)
+	}
+	if record.RetentionSource == RetentionUnknown && record.MinRetentionUntil != 0 {
+		return fmt.Errorf("%w: retention deadline without a source", ErrMalformed)
+	}
+	if record.RetentionSource != RetentionUnknown && !record.CreationTimeKnown {
+		return fmt.Errorf("%w: retention deadline without a known creation time", ErrMalformed)
+	}
+	if !record.CreationTimeKnown && record.CreationTime != 0 {
+		return fmt.Errorf("%w: creation time without a known flag", ErrMalformed)
+	}
+	if !record.UsageKnown && (record.UsedPayloadBytes != 0 || record.UnusedPayloadBytes != 0) {
+		return fmt.Errorf("%w: usage accounting without a known flag", ErrMalformed)
+	}
+	if record.UsageKnown {
+		total, ok := add(record.UsedPayloadBytes, record.UnusedPayloadBytes)
+		if !ok || total != record.PayloadSize {
+			return fmt.Errorf("%w: usage accounting does not sum to the payload size", ErrMalformed)
+		}
+	}
+	return nil
 }
 
 func (record PackRecord) MarshalBinary() ([]byte, error) {
+	record = record.normalized()
 	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
 		return nil, fmt.Errorf("%w: invalid pack classification", ErrMalformed)
 	}
@@ -117,6 +200,9 @@ func (record PackRecord) MarshalBinary() ([]byte, error) {
 		(record.PhysicalSizeKnown && record.PhysicalSize >= record.PayloadSize && record.HeaderSize != record.PhysicalSize-record.PayloadSize) ||
 		(record.PhysicalSizeKnown && record.PhysicalSize < record.PayloadSize && record.HeaderSize != 0) {
 		return nil, fmt.Errorf("%w: invalid pack size state", ErrMalformed)
+	}
+	if err := record.validatePackLifetime(); err != nil {
+		return nil, err
 	}
 	e := newEncoder()
 	e.u8(byte(record.Type))
@@ -132,6 +218,16 @@ func (record PackRecord) MarshalBinary() ([]byte, error) {
 		e.id(id)
 	}
 	e.bool(record.PhysicalSizeKnown)
+	e.u8(byte(record.Tier))
+	if err := e.string(record.StorageClass); err != nil {
+		return nil, err
+	}
+	e.i64(record.MinRetentionUntil)
+	e.u8(byte(record.RetentionSource))
+	e.bool(record.UsageKnown)
+	e.u64(record.UsedPayloadBytes)
+	e.u64(record.UnusedPayloadBytes)
+	e.i64(record.DeleteAfter)
 	return e.finish()
 }
 func UnmarshalPackRecord(data []byte) (PackRecord, error) {
@@ -185,6 +281,39 @@ func UnmarshalPackRecord(data []byte) (PackRecord, error) {
 	} else {
 		record.PhysicalSizeKnown = record.PhysicalSize != 0
 	}
+	// Phase 3 records end here. They decode as tier-unknown and
+	// retention-unknown rather than being assigned a synthesized tier.
+	record.Tier, record.RetentionSource = TierUnknown, RetentionUnknown
+	if d.at < len(d.data) {
+		value, err = d.u8()
+		record.Tier = PackTier(value)
+		if err != nil {
+			return PackRecord{}, err
+		}
+		if record.StorageClass, err = d.string(); err != nil {
+			return PackRecord{}, err
+		}
+		if record.MinRetentionUntil, err = d.i64(); err != nil {
+			return PackRecord{}, err
+		}
+		value, err = d.u8()
+		record.RetentionSource = RetentionSource(value)
+		if err != nil {
+			return PackRecord{}, err
+		}
+		if record.UsageKnown, err = d.bool(); err != nil {
+			return PackRecord{}, err
+		}
+		if record.UsedPayloadBytes, err = d.u64(); err != nil {
+			return PackRecord{}, err
+		}
+		if record.UnusedPayloadBytes, err = d.u64(); err != nil {
+			return PackRecord{}, err
+		}
+		if record.DeleteAfter, err = d.i64(); err != nil {
+			return PackRecord{}, err
+		}
+	}
 	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
 		return PackRecord{}, fmt.Errorf("%w: invalid pack classification", ErrMalformed)
 	}
@@ -193,14 +322,27 @@ func UnmarshalPackRecord(data []byte) (PackRecord, error) {
 		(record.PhysicalSizeKnown && record.PhysicalSize < record.PayloadSize && record.HeaderSize != 0) {
 		return PackRecord{}, fmt.Errorf("%w: invalid pack size state", ErrMalformed)
 	}
+	if err := record.validatePackLifetime(); err != nil {
+		return PackRecord{}, err
+	}
 	return record, d.done()
 }
 func validPackType(value PackType) bool { return value >= PackData && value <= PackUnknown }
 func validPackLifecycle(value PackLifecycle) bool {
 	return value >= PackImported && value <= PackStateUnknown
 }
+func validPackTier(value PackTier) bool { return value >= TierUnknown && value <= TierSingle }
+func validRetentionSource(value RetentionSource) bool {
+	return value >= RetentionUnknown && value <= RetentionBackend
+}
 
-type PackAggregate struct{ PackCount, PhysicalSize, PayloadSize, HeaderSize, BlobCount, UpdateSequence uint64 }
+type PackAggregate struct {
+	PackCount, PhysicalSize, PayloadSize, HeaderSize, BlobCount, UpdateSequence uint64
+	// UsedPayloadBytes and UnusedPayloadBytes only sum packs whose usage has
+	// been computed. AccountedPackCount records how many that was, so a
+	// consumer can tell partial accounting from a fully reachable repository.
+	UsedPayloadBytes, UnusedPayloadBytes, AccountedPackCount uint64
+}
 
 func (record PackAggregate) MarshalBinary() ([]byte, error) {
 	e := newEncoder()
@@ -210,6 +352,9 @@ func (record PackAggregate) MarshalBinary() ([]byte, error) {
 	e.u64(record.HeaderSize)
 	e.u64(record.BlobCount)
 	e.u64(record.UpdateSequence)
+	e.u64(record.UsedPayloadBytes)
+	e.u64(record.UnusedPayloadBytes)
+	e.u64(record.AccountedPackCount)
 	return e.finish()
 }
 func UnmarshalPackAggregate(data []byte) (PackAggregate, error) {
@@ -223,6 +368,14 @@ func UnmarshalPackAggregate(data []byte) (PackAggregate, error) {
 	for _, value := range values {
 		if *value, err = d.u64(); err != nil {
 			return PackAggregate{}, err
+		}
+	}
+	// Phase 3 aggregates end here and carry no usage accounting.
+	if d.at < len(d.data) {
+		for _, value := range []*uint64{&record.UsedPayloadBytes, &record.UnusedPayloadBytes, &record.AccountedPackCount} {
+			if *value, err = d.u64(); err != nil {
+				return PackAggregate{}, err
+			}
 		}
 	}
 	return record, d.done()
