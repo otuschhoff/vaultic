@@ -1852,9 +1852,137 @@ In a 500+ TB repository with 1.4 billion inodes and 100M blobs:
 - `--uid <uid>` or `--username <name>`
 - `--gid <gid>`
 - `--detail` include exact file paths, inode revisions, blob hashes, and pack IDs
+- `--explain-surviving-chunks` show per-chunk breakdown explaining which non-scoped files reference each chunk
 - `--json`
 
-Outputs a complete audit report listing active paths, referenced blob IDs, target storage packs (hot vs cold), and retention expiry dates (`min_retention_until`).
+Outputs a complete audit report listing active paths, referenced blob IDs, target storage packs (hot vs cold), retention expiry dates (`min_retention_until`), and an analysis of chunks that would survive deletion due to external deduplication references.
+
+`vaultic index gdpr execute-forget` — Execute GDPR user data erasure.
+
+- `--uid <uid>`
+- `--confirm`
+- `--json`
+
+Purges user file references and inode revisions across active snapshots, re-evaluates chunk reference counts, enqueues unreferenced chunks/packs into the deletion queue (`dq:`), and outputs a cryptographic erasure certificate.
+
+`vaultic index gdpr set-policy` — Configure backup exclusion policies.
+
+- `--exclude-uid <uid>`
+- `--remove-exclusion <uid>`
+- `--json`
+
+Configures persistent UID blocklist rules (`u:policy:blocklist:<uid>`) preventing the archiver and reconciliation engine from backing up files owned by erased users in future crawls.
+
+### 14.5 Azure Key Vault Option A (Secret Store Integration)
+
+#### Architecture & Rationale
+
+To comply with **ISO 27001 Control A.8.24** (Cryptography and Key Management), `vaultic` supports fetching repository key passphrases directly from **Azure Key Vault** (`https://<vault-name>.vault.azure.net/secrets/<secret-name>`) using Azure Arc Managed Identities or `DefaultAzureCredential`.
+
+Option A (Secret Store / Passphrase Vaulting) is selected over Option B (Managed HSM Key Unwrap) because:
+1. **Unmodified Cryptographic Format:** `vaultic` retains restic-compatible keyfile format (`/keys/<key_id>`), decrypted via Argon2id/Scrypt and AES-256-CTR + Poly1305.
+2. **SIEM Audit Logging:** Every key fetch generates an immutable `SecretGet` audit event in Azure Key Vault diagnostic logs, forwarded directly to Microsoft Sentinel.
+3. **WAN & Network Fault Tolerance:** The passphrase is fetched **once** at process startup (1 API request). Long-running 500 TB backups or multi-hour crawls are completely immune to mid-job Azure WAN disconnects or rate limits.
+
+```text
+vaultic process startup
+  │
+  ├─► Authenticate via Azure Arc Managed Identity (http://localhost:40342/...)
+  ├─► GET https://<vault>.vault.azure.net/secrets/<secret-name> (SecretGet)
+  ├─► Decrypt /keys/<key_id> in host memory
+  └─► Proceed with local backup/index operations (no further WAN calls)
+```
+
+### 14.6 Multi-Target Syslog Exporter & Filtered Event Routing
+
+#### Architecture & Rationale
+
+To comply with **ISO 27001 (A.8.15 & A.8.16)** and **GDPR (Art. 30 & Art. 32)**, `vaultic` and `vaulticdb` provide a multi-target syslog exporter supporting:
+- **Transports:** UDP, TCP, TLS (syslog-over-TLS per RFC 5424 / RFC 3164), and local Unix domain socket (`/dev/log`, `/var/run/syslog`).
+- **Granular Event Routing Rules:** Filter and route structured JSON/syslog events based on severity, facility, component, and category:
+  - `auth`: Authentication attempts, mTLS drops, CIDR rejections, key vault fetches.
+  - `integrity`: Index check failures, hash mismatches, corrupt packs, SlateDB fencing/epoch mismatches.
+  - `gdpr`: `gdpr audit` queries, `gdpr execute-forget` executions, UID blocklist matches.
+  - `restore`: Dataset restore start/complete, warm-up executions.
+  - `lifecycle`: Pack creation, promotion, deletion-queue enqueuing, physical deletion.
+
+```text
+[ vaultic / vaulticdb ]
+  │
+  ├── Filter: category == "auth" | "integrity" ──► Target 1: TLS Syslog (Microsoft Sentinel / SIEM)
+  ├── Filter: category == "gdpr"              ──► Target 2: TLS Syslog (Compliance Audit Log)
+  └── Filter: category == "lifecycle"         ──► Target 3: Local Unix Socket / Syslog (Ops Monitoring)
+```
+
+### 14.7 Advanced GDPR "Right to be Forgotten" & Per-Chunk Deduplication Analysis
+
+#### Per-Chunk Survival Analysis
+
+When responding to a GDPR Article 17 erasure request, Data Protection Officers (DPOs) need to know not only which files belong to a user, but also **which underlying data chunks will survive** a deletion request due to content-defined deduplication (CDC) references from other files.
+
+`vaultic index gdpr audit --uid <uid> --explain-surviving-chunks` analyzes all chunks referenced by `<uid>`'s files and categorizes them into two sets:
+1. **Exclusive Chunks:** Chunks referenced *only* by `<uid>`'s files. These chunks will be enqueued for physical deletion immediately upon executing `vaultic index gdpr execute-forget`.
+2. **Surviving Chunks:** Chunks referenced by `<uid>`'s files *and* by other files outside the GDPR audit scope. For each surviving chunk, the report details:
+   - **External File Sample:** Paths, snapshot IDs, and owner UIDs of non-scoped files referencing the chunk (e.g. shared OS binaries, zero-blocks, common templates, or multi-user documents).
+   - **External Reference Count:** Total reference count outside `<uid>`'s scope.
+   - **Assessment Hint:** Classifies whether the chunk is likely generic/shared data (e.g., high ref-count, common OS file) or potential residual user PII.
+
+#### Erasure Execution & Future Backup Exclusion Policy
+
+1. **Erasure Execution (`vaultic index gdpr execute-forget --uid <uid>`):**
+   - Atomically removes `<uid>`'s inode revisions (`iv:`) and directory edges (`dv:`).
+   - Decrements reference counts on associated blobs (`rc:`).
+   - Enqueues zero-reference packs into the retention deletion queue (`dq:`).
+   - Generates a cryptographically signed deletion certificate containing purged reference hashes, timestamp, and retention expiry schedule.
+2. **Future Backup Exclusion (`--exclude-uid <uid>`):**
+   - Writes persistent policy rule `u:policy:blocklist:<uid>`.
+   - Archiver and backup reconciliation pipeline check file ownership (`lstat.uid`) against the blocklist; files owned by blocked UIDs are skipped automatically during future backup crawls.
+
+### 14.8 Attribute-Based & Sampled Storage Verification
+
+#### Architecture & Rationale
+
+Verifying storage integrity across 500+ TB and cold Glacier archives requires targeted, sample-based verification to balance security confidence against API and egress costs.
+
+`vaultic index verify-storage` / `vaultic verify-packs` provides query attribute filters and statistical sampling controls:
+
+1. **Query Attribute Filters:**
+   - `--tier hot|cold|mirrored|archival`: Filter candidate packs by storage tier.
+   - `--backend <id>` / `--storage-class <class>`: Filter by specific backend or cloud storage class.
+   - `--created-after <date>` / `--created-before <date>`: Filter by pack creation time range.
+   - `--retention-status expired|active`: Filter by Glacier retention status.
+   - `--pack-type data|tree`: Filter by pack content type.
+2. **Sampling Controls:**
+   - `--all`: Verify 100% of matched candidate packs.
+   - `--sample-count N`: Uniformly sample exactly $N$ candidate packs.
+   - `--sample-percent P%`: Uniformly sample $P\%$ of matched candidate packs using pseudo-random seed selection.
+3. **Verification Levels & Cold Warm-up:**
+   - **Level 1 (`header`):** Verify backend object existence, size, and pack header decryption.
+   - **Level 2 (`checksum`):** Verify backend byte checksum / ETag / SHA-256 against pack catalog records.
+   - **Level 3 (`full` / `unpack`):** Full payload decryption and chunk inflation validation.
+   - **Cold Warm-up Integration:** For cold/Glacier packs requiring Level 2 or 3 checks, automatically triggers `--warm-up-command` with batching, wait timeouts, and worker concurrency controls (`--concurrency N`).
+
+### 14.9 Crawl Optimization with `cwalk` and `pathdiff`
+
+#### Architecture & Rationale
+
+Crawling datasets containing 1.5+ billion inodes across high-performance enterprise storage (e.g. NetApp NFS volumes) requires maximizing filesystem traversal throughput while minimizing redundant directory `stat()` calls. To achieve maximum crawl performance, `vaultic` incorporates two complementary optimization mechanisms:
+
+1. **High-Concurrency Traversal via `cwalk` (`github.com/otuschhoff/cwalk`):**
+   - Replaces or enhances standard directory walking in the archiver with `cwalk` for parallel, multi-threaded directory traversal.
+   - Provides configurable and scalable concurrency (`--cwalk-concurrency N`, queue capacity, work-stealing) to fully saturate network storage IOPS without thrashing host memory.
+   - Streams discovered file entries directly to the reconciliation scanner pipeline and `vaulticdb` SlateDB batch writers.
+
+2. **Selective Change-Path Acceleration via `pathdiff` (`github.com/otuschhoff/pathdiff`):**
+   - Uses storage system change event feeds (`pathdiff`) to selectively identify subdirectories and target paths that have experienced changes since the timestamp of the last successful backup crawl/snapshot.
+   - **Guaranteed Event Coverage Requirement:** `pathdiff` acceleration is enabled **only when 100% event coverage** can be strictly verified since the last snapshot timestamp (i.e. contiguous event log sequence numbers with zero buffer overflows, missing event windows, or service restarts). If 100% coverage cannot be guaranteed, `vaultic` automatically falls back safely to a full `cwalk` directory traversal.
+   - **Volume & Topology Semantic Matching:**
+     - Maps `vaultic` source paths (e.g., `/mnt/nfs_finance/dept_a`) to `pathdiff`'s `volume + subpath` model.
+     - Resolves storage volume IDs to canonical volume names.
+     - Resolves `vaultic` source paths to storage volumes via target host LIF (Logical Interface) IP/hostname $\rightarrow$ SVM (Storage Virtual Machine) $\rightarrow$ volume mapping.
+   - **`pathdiff` Enhancements & In-Tree Import:**
+     - Making necessary enhancements to `pathdiff` to support volume ID-to-name resolution, LIF $\rightarrow$ SVM volume matching, and contiguous event coverage verification is explicitly within scope.
+     - `pathdiff` may be imported directly into `vaultic` (e.g., under `internal/pathdiff` or as an embedded module) to eliminate RPC latency, streamline volume/SVM matching, and ensure zero-copy event validation.
 
 ## 15. Execution-oriented phased implementation plan
 
@@ -3126,24 +3254,7 @@ golden JSON output. The storage estimate remains the measured `bytes_written`
 reported by `index path-index`, checked against the documented sizing table
 above.
 
-### Phase 15: Growth, churn, per-user/group attribution, and GDPR audit CLI
-
-**Goal:** expose growth time series, major subdirectory churn, top user/group storage ranking, and GDPR compliance inspection tools via the CLI.
-
-**Implementation steps:**
-
-1. Implement `g:time:*` and `g:path:*` rollup updates in the backup reconciliation transaction.
-2. Implement `u:summary:*`, `g:summary:*`, `u:churn:*`, `u:inodes:*`, and `u:blobs:*` updates during backup reconciliation and snapshot purge transactions.
-3. Implement `vaultic index growth` with time bucket granularities (`week`, `month`, `year`) and path prefix filters.
-4. Implement `vaultic index user-stats` with `--top-storage` and `--top-churn` rankings, `--since` time bounds, and `--limit`.
-5. Implement `vaultic index gdpr audit --uid <uid>` returning active paths, inode revisions, referenced blob hashes, and storage pack locations with retention expiry dates.
-6. Add `index check` validation for user/group summaries and time-series rollups, with automated rebuild capabilities.
-
-**Tests:** growth rollup accuracy across simulated weekly/monthly backup series; user storage ranking accuracy against raw file sizes; top churner query results over 2-month window; GDPR inspection returning exact paths and cold storage pack retention dates for a given UID; aggregate rebuild after user stats drift.
-
-**Exit criterion:** operators can query top churners, top storage consumers, growth by subdirectory, and complete GDPR user-data location reports instantly from the CLI.
-
-### Phase 16: Placement scheduler, offsite RPO, and promotion
+### Phase 15: Placement scheduler, offsite RPO, and promotion
 
 **Goal:** move bytes between backends according to the Phase 12 placement model,
 meet a stated offsite deadline, and defer archival commitment until survival is
@@ -3215,6 +3326,56 @@ trigger never reaches archival storage at all, and surviving data is promoted by
 repack into archival-sized packs, with every placement decision explainable from
 `--json` output.
 
+### Phase 16: Growth, churn, per-user/group attribution, and GDPR audit CLI
+
+**Goal:** expose growth time series, major subdirectory churn, top user/group storage ranking, and GDPR compliance inspection tools via the CLI.
+
+**Implementation steps:**
+
+1. Implement `g:time:*` and `g:path:*` rollup updates in the backup reconciliation transaction.
+2. Implement `u:summary:*`, `g:summary:*`, `u:churn:*`, `u:inodes:*`, and `u:blobs:*` updates during backup reconciliation and snapshot purge transactions.
+3. Implement `vaultic index growth` with time bucket granularities (`week`, `month`, `year`) and path prefix filters.
+4. Implement `vaultic index user-stats` with `--top-storage` and `--top-churn` rankings, `--since` time bounds, and `--limit`.
+5. Implement `vaultic index gdpr audit --uid <uid>` returning active paths, inode revisions, referenced blob hashes, and storage pack locations with retention expiry dates.
+6. Add `index check` validation for user/group summaries and time-series rollups, with automated rebuild capabilities.
+
+**Tests:** growth rollup accuracy across simulated weekly/monthly backup series; user storage ranking accuracy against raw file sizes; top churner query results over 2-month window; GDPR inspection returning exact paths and cold storage pack retention dates for a given UID; aggregate rebuild after user stats drift.
+
+**Exit criterion:** operators can query top churners, top storage consumers, growth by subdirectory, and complete GDPR user-data location reports instantly from the CLI.
+
+### Phase 17: ISO27001 & GDPR compliance, Azure Key Vault, Syslog, and Storage Verification
+
+**Goal:** provide enterprise compliance features including Azure Key Vault Option A passphrase vaulting, multi-target syslog event routing, advanced GDPR "Right to be forgotten" erasure & chunk survival analysis, UID backup exclusion policies, and attribute/sample-based storage verification across hot and cold tiers.
+
+**Implementation steps:**
+
+1. Implement Azure Key Vault Option A (Secret Store) integration using Azure Arc Managed Identity / `DefaultAzureCredential` to fetch repository key passphrases at startup (`SecretGet`) without modifying restic keyfile formats or requiring mid-job WAN connections.
+2. Implement multi-target syslog exporter supporting UDP, TCP, TLS (syslog-over-TLS RFC 5424/3164), and local Unix domain sockets, with event routing filters by category (`auth`, `integrity`, `gdpr`, `restore`, `lifecycle`) and severity.
+3. Expand `vaultic index gdpr audit` with `--explain-surviving-chunks` to report per-chunk deduplication survival and external non-scoped file references.
+4. Implement `vaultic index gdpr execute-forget --uid <uid>` to purge user file references/inodes, re-evaluate blob reference counts, enqueue unreferenced packs into the deletion queue (`dq:`), and issue a cryptographic deletion certificate.
+5. Implement `vaultic index gdpr set-policy --exclude-uid <uid>` writing persistent blocklist rules (`u:policy:blocklist:<uid>`) enforced by archiver/reconciliation during backup crawls.
+6. Implement `vaultic index verify-storage` / `vaultic verify-packs` supporting attribute filters (tier, backend, age, retention, size, pack type), sampling controls (`--all`, `--sample-count`, `--sample-percent`), verification levels (header, checksum, full unpack), and automatic cold pack warm-up.
+
+**Tests:** Azure Key Vault SecretGet mock integration test verifying single startup fetch and restic keyfile decryption; syslog multi-target exporter test verifying TLS/UDP socket sending and category filter routing; GDPR audit `--explain-surviving-chunks` test confirming accurate identification of exclusive vs shared chunks and external file reference listings; GDPR `execute-forget` end-to-end test verifying inode reference removal, blob reference count decrements, `dq:` enqueuing, and deletion certificate generation; UID blocklist policy test verifying archiver skips files owned by blocked UIDs during subsequent backup crawls; sampled storage verification test verifying uniform random percentage selection, attribute filtering, level 1/2/3 checks, and automated cold pack warm-up invocation.
+
+**Exit criterion:** enterprise operators can manage keys via Azure Key Vault, route structured audit events to SIEM/syslog targets, execute verifiable GDPR erasure with survival analysis and UID exclusion policies, and run sampled integrity checks across hot and cold storage tiers.
+
+### Phase 18: Crawl optimization with `cwalk` and `pathdiff`
+
+**Goal:** accelerate backup crawls across 1.5+ billion inode storage targets using `cwalk` concurrent directory traversal and `pathdiff` selective change-path crawling with guaranteed event coverage and SVM/volume topology mapping.
+
+**Implementation steps:**
+
+1. Integrate `cwalk` (`github.com/otuschhoff/cwalk`) into the archiver and reconciliation scanner pipeline, replacing sequential traversal with parallel, multi-threaded directory walking with configurable concurrency (`--cwalk-concurrency N`) and queue capacity bounds.
+2. Import `pathdiff` (`github.com/otuschhoff/pathdiff`) into `vaultic` (e.g. `internal/pathdiff`), making in-scope enhancements to support volume ID-to-name resolution, target host LIF (Logical Interface) $\rightarrow$ SVM (Storage Virtual Machine) $\rightarrow$ volume mapping, and event sequence continuity checks.
+3. Implement 100% event-coverage verification: query `pathdiff` for contiguous change events since the last snapshot timestamp of the source path; verify zero sequence gaps, buffer overflows, or unmonitored windows.
+4. Implement selective change-path crawl execution: if 100% event coverage is verified, crawl only the modified subtrees identified by `pathdiff`; if event coverage is incomplete or unverified, fall back automatically to a full `cwalk` traversal.
+5. Expose CLI crawl options: `--use-cwalk`, `--cwalk-concurrency N`, `--use-pathdiff`, `--pathdiff-endpoint`, `--pathdiff-require-coverage`, and `--pathdiff-svm-map`.
+
+**Tests:** `cwalk` high-concurrency directory traversal correctness test comparing results against standard traversal; `pathdiff` volume ID resolution and target host LIF $\rightarrow$ SVM $\rightarrow$ volume topology matching test; event coverage gap detection test verifying automatic fallback to full `cwalk` scan when event logs are truncated; selective change-path crawl integration benchmark demonstrating subtree skipping when changes are sparse; imported `pathdiff` module unit tests.
+
+**Exit criterion:** backup crawls achieve linear scaling with `cwalk` concurrency, selective `pathdiff` crawls skip unchanged subtrees when 100% event coverage is verified, and any coverage gap or topology mismatch falls back safely to a full `cwalk` crawl.
+
 ## 16. Testing strategy
 
 ### Unit tests
@@ -3284,10 +3445,15 @@ repack into archival-sized packs, with every placement decision explainable from
 - Unix-socket permissions and TCP-disabled-by-default behavior
 - TCP allowlist and authentication rejection/acceptance cases
 - Restic/Rustic reading vaultic-exported JSON indexes
+- `cwalk` parallel directory traversal producing results identical to standard walking
+- `pathdiff` volume ID resolution, target host LIF $\rightarrow$ SVM $\rightarrow$ volume topology matching, and 100% event coverage validation
+- Fallback from selective `pathdiff` crawl to full `cwalk` scan when event coverage sequence gaps or buffer overflows are detected
 
 ### Scale tests
 
 - 128 scanner workers against a synthetic NFS-like filesystem
+- `cwalk` traversal throughput and memory bounds under high worker concurrency against synthetic 1.5B inode file trees
+- Selective `pathdiff` crawl duration vs full crawl on large volumes with sparse churn
 - 50,000-item result queue saturation
 - 5,000 and 10,000 item SlateDB batches
 - MultiGet latency and allocation profile
@@ -3360,6 +3526,13 @@ Expose metrics and structured events for:
 - RPC latency, queue depth, batch size, write-back delay, and rejected requests
 - daemon fencing, restart, and native SlateDB health state
 - reader lag and compaction status
+- syslog events dispatched, delivered, and dropped by severity/category and target endpoint
+- Azure Key Vault secret fetch requests, latency, and token acquisition events
+- GDPR audit queries, chunk survival analysis calculations, and erasure executions
+- UID backup blocklist policy matches and excluded file counts during backup crawls
+- storage verification requests, candidate matches, sample selection counts, verification level results (header/checksum/unpack), and failed pack detections
+- `cwalk` traversal throughput, active worker concurrency, and directory queue saturation
+- `pathdiff` query latency, changed paths returned, event coverage validation status (verified/fallback), volume/SVM resolution hits, and subtrees skipped
 
 Never log inode paths, access tokens, or raw repository keys at normal verbosity.
 
