@@ -44,7 +44,7 @@ per-scenario logs) in that case.
 The `interop` GitHub workflow runs this harness on demand
 (`workflow_dispatch`). The job is marked `continue-on-error` — it is allowed
 to fail while the parity work is in progress (see
-`doc/rustic-parity-roadmap.md`, Phase 0).
+`doc/vaultic/05-rustic-parity/04-phased-roadmap.md`, Phase 0).
 
 ## Extending
 

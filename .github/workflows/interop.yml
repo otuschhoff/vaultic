@@ -2,7 +2,8 @@
 #
 # This workflow is triggered manually (workflow_dispatch). The job is allowed
 # to fail (continue-on-error) while the rustic parity work is in progress;
-# see doc/rustic-parity-roadmap.md, Phase 0 and Section 9.
+# see doc/vaultic/05-rustic-parity/04-phased-roadmap.md, Phase 0, and
+# doc/vaultic/05-rustic-parity/05-strategy-and-appendices.md, Section 9.
 
 name: interop
 

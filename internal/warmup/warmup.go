@@ -4,7 +4,8 @@
 // "warmed up" (restored) before they can be read. There is no vendor-neutral
 // protocol for that, so vaultic invokes a user-supplied warm-up program for the
 // pack files it is about to read. This mirrors rustic's --warm-up-* options
-// (see doc/rustic-parity-roadmap.md, workstream WS-D / Appendix A).
+// (see doc/vaultic/05-rustic-parity/02-workstreams.md, workstream WS-D, and
+// doc/vaultic/05-rustic-parity/05-strategy-and-appendices.md, Appendix A).
 package warmup
 
 import (

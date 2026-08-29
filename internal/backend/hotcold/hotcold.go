@@ -1,7 +1,7 @@
 // Package hotcold implements a hot/cold composite backend.
 //
 // A hot/cold repository splits a repository over two storage locations
-// (rustic's hot/cold support, see doc/rustic-parity-roadmap.md WS-D):
+// (rustic's hot/cold support, see doc/vaultic/05-rustic-parity/02-workstreams.md WS-D):
 //
 //   - the "cold" backend holds everything and is a complete repository on its
 //     own (when fully warmed up). Data packs live only here.

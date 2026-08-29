@@ -1,5 +1,7 @@
 # Enterprise Backup Architecture Comparison: Vaultic vs. Rubrik
 
+[← Back to index](../README.md)
+
 ## 1. Executive Summary
 
 This document presents a comprehensive technical and financial comparison between **vaultic** (with its native Rust metadata daemon **`vaulticdb`**) and **Rubrik** (Rubrik Security Cloud / Cloud Data Management - CDM) for backing up, indexing, and archiving an enterprise dataset of **500 TB logical data** containing **1.5 billion inodes**.

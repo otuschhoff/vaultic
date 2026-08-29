@@ -1,5 +1,7 @@
 # EU GDPR (Regulation 2016/679) Compliance Assessment: Vaultic & VaulticDB
 
+[← Back to compliance index](00-overview.md)
+
 ## 1. Executive Summary
 
 This document evaluates the compliance posture of **vaultic** and **`vaulticdb`** under the European Union General Data Protection Regulation (**EU GDPR 2016/679**).

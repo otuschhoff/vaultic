@@ -16,7 +16,7 @@ var ErrAppendOnly = errors.Fatal("repository is in append-only mode")
 // Remove, Delete and overwriting existing files are rejected.
 //
 // This is used for repositories whose config sets append_only (see
-// doc/rustic-parity-roadmap.md, workstream WS-A / feature F5).
+// doc/vaultic/05-rustic-parity/02-workstreams.md, workstream WS-A / feature F5).
 type Backend struct {
 	backend.Backend
 }
