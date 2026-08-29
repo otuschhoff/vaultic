@@ -123,6 +123,7 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexBackendsCommand(globalOptions),
 		newIndexFileHistoryCommand(globalOptions),
 		newIndexPathAtCommand(globalOptions),
+		newIndexPathIndexCommand(globalOptions),
 	)
 	return command
 }
@@ -316,6 +317,7 @@ type indexCheckOptions struct {
 	SlateDBOnly      bool
 	IncludeCrawlDebt bool
 	FailOnWarning    bool
+	PathIndexPaths   []string
 }
 
 func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
@@ -336,6 +338,7 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().BoolVar(&options.SlateDBOnly, "slatedb-only", false, "validate only SlateDB metadata")
 	command.Flags().BoolVar(&options.IncludeCrawlDebt, "include-crawl-debt", false, "include individual pending crawl-debt findings")
 	command.Flags().BoolVar(&options.FailOnWarning, "fail-on-warning", false, "return exit status 2 for expected incompleteness warnings")
+	command.Flags().StringSliceVar(&options.PathIndexPaths, "path-index", nil, "validate pv path-index entries for these paths")
 	return command
 }
 
@@ -365,7 +368,9 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	if err != nil {
 		return result, err
 	}
-	result, err = maintenance.CheckWithOptions(ctx, repo, store, maintenance.CheckOptions{LegacyOnly: options.LegacyOnly, SlateDBOnly: options.SlateDBOnly, IncludeCrawlDebt: options.IncludeCrawlDebt, MaxFindings: options.MaxFindings, PlacementModel: placementModel})
+	pathIndexPaths := append([]string(nil), repo.Config().PathIndexPaths...)
+	pathIndexPaths = append(pathIndexPaths, options.PathIndexPaths...)
+	result, err = maintenance.CheckWithOptions(ctx, repo, store, maintenance.CheckOptions{LegacyOnly: options.LegacyOnly, SlateDBOnly: options.SlateDBOnly, IncludeCrawlDebt: options.IncludeCrawlDebt, MaxFindings: options.MaxFindings, PlacementModel: placementModel, PathIndexPaths: pathIndexPaths})
 	if err != nil {
 		return result, err
 	}
@@ -415,8 +420,9 @@ func indexMaintenancePlacementModel(repo *repository.Repository) (maintenance.Pl
 }
 
 type indexRebuildPackStatsOptions struct {
-	Daemon indexDaemonOptions
-	DryRun bool
+	Daemon         indexDaemonOptions
+	DryRun         bool
+	PathIndexPaths []string
 }
 
 func newIndexRebuildPackStatsCommand(globalOptions *global.Options) *cobra.Command {
@@ -433,6 +439,7 @@ func newIndexRebuildPackStatsCommand(globalOptions *global.Options) *cobra.Comma
 	}
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().BoolVar(&options.DryRun, "dry-run", false, "calculate aggregate changes without writing them")
+	command.Flags().StringSliceVar(&options.PathIndexPaths, "path-index", nil, "rebuild pv path-index entries for these paths")
 	return command
 }
 
@@ -479,6 +486,13 @@ func runIndexRebuildPackStats(ctx context.Context, options indexRebuildPackStats
 		return result, err
 	}
 	result.SnapshotCommitChanged, err = maintenance.RebuildSnapshotCommitIndex(ctx, store, options.DryRun)
+	if err != nil {
+		return result, err
+	}
+	pathIndexPaths := append([]string(nil), repo.Config().PathIndexPaths...)
+	pathIndexPaths = append(pathIndexPaths, options.PathIndexPaths...)
+	pathResult, err := maintenance.RebuildPathVersionIndex(ctx, store, pathIndexPaths, options.DryRun)
+	result.PathVersionChanged, result.PathVersionOverflow = pathResult.BindingsChanged, pathResult.OverflowPaths
 	if err == nil && !globalOptions.JSON {
 		printer.P("scanned %d packs; changed %d aggregate records, %d placement records, %d tier summaries, %d backend-pack records, %d snapshot-commit records\n",
 			result.PacksScanned, result.AggregatesChanged, result.PlacementRecordsChanged,

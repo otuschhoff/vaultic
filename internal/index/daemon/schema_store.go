@@ -66,6 +66,7 @@ type ReconciledRevision struct {
 	Revision           uint64
 	ContentIDs         []schema.ID
 	DebtKeys           [][]byte
+	RelatedPuts        []Mutation
 	HasMultipleParents bool
 	HardlinkParents    []schema.HardlinkParentRef
 }
@@ -1645,7 +1646,7 @@ func validateMutableKey(key []byte) error {
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
 		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPathVersion:
 		return nil
 	case schema.KeyPackHistory:
 		// The event log is append-only: entries are written by the catalog
@@ -1666,7 +1667,7 @@ func validateMutableDeleteKey(key []byte) error {
 	switch parsed.Kind {
 	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyExportIndexCheckpoint,
 		schema.KeyPackHistory, schema.KeyPackHistoryBucket,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPathVersion:
 		// History is explicitly prunable: it is derived, advisory, and retained
 		// on its own schedule.
 		return nil
@@ -1687,7 +1688,7 @@ func validatePublishKey(key []byte) (bool, error) {
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
 		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPathVersion:
 		return false, nil
 	case schema.KeyPackHistory:
 		return true, nil
@@ -2111,6 +2112,14 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 			return fmt.Errorf("reconciliation debt key is invalid")
 		}
 	}
+	for _, mutation := range reconciled.RelatedPuts {
+		if err := validateMutableKey(mutation.Key); err != nil {
+			return err
+		}
+		if err := schema.ValidateValue(mutation.Key, mutation.Value); err != nil {
+			return err
+		}
+	}
 
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
@@ -2335,6 +2344,9 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 			return fail(encodeErr)
 		}
 		puts[string(key)] = Mutation{Key: key, Value: encoded}
+	}
+	for _, mutation := range reconciled.RelatedPuts {
+		puts[string(mutation.Key)] = mutation
 	}
 
 	// Publish hardlink reference records for multi-parent inodes.

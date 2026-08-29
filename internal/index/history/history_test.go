@@ -360,3 +360,41 @@ func TestGoldenJSONOutputs(t *testing.T) {
 	}
 	goldenJSON(t, "inode_history", inodeHistory)
 }
+
+func TestFileHistoryFromPathIndexFallsBackAndVerifiesMembership(t *testing.T) {
+	store := newMemoryStore()
+	root := schema.DirectoryRevisionKey(0, 0, 1)
+	file := schema.InodeRevisionKey(1, 10, 1)
+	store.set(t, file, inode(10, "a.txt"))
+	store.set(t, root, dir(schema.DirectoryChild{Name: "a.txt", Inode: 10, Type: schema.NodeFile, MetadataKey: file}))
+	addSnapshot(t, store, 1, 91, root, "/")
+
+	if _, ok, err := FileHistoryFromPathIndex(context.Background(), store, "a.txt", Options{}); err != nil || ok {
+		t.Fatalf("empty pv index returned ok=%v err=%v", ok, err)
+	}
+	value, err := (schema.PathVersionRecord{State: schema.PathBound, NodeType: schema.NodeFile, Inode: 10, Revision: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.values[string(schema.PathVersionKey(0, "a.txt", 1))] = value
+	indexed, ok, err := FileHistoryFromPathIndex(context.Background(), store, "a.txt", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || indexed.Source != "path-index" || len(indexed.Changes) != 1 || !indexed.Changes[0].Present {
+		t.Fatalf("indexed file history = %#v ok=%v", indexed, ok)
+	}
+
+	badValue, err := (schema.PathVersionRecord{State: schema.PathBound, NodeType: schema.NodeFile, Inode: 99, Revision: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.values[string(schema.PathVersionKey(0, "a.txt", 1))] = badValue
+	indexed, ok, err = FileHistoryFromPathIndex(context.Background(), store, "a.txt", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || len(indexed.Changes) != 1 || indexed.Changes[0].Present {
+		t.Fatalf("pv membership verification failed: %#v ok=%v", indexed, ok)
+	}
+}

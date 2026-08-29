@@ -1,0 +1,23 @@
+Enhancement: Add optional SlateDB path history index
+
+Vaultic can now maintain an optional `pv:` path history index for selected paths
+or subtrees in SlateDB metadata. The index is keyed by filesystem id, path, and
+commit sequence, so a path's binding changes can be scanned directly instead of
+walking every retained snapshot.
+
+Repositories opt in with `path_index_paths` in the config. During SlateDB-backed
+backups, Vaultic writes path bindings in the same transaction as the metadata
+revision that created, deleted, renamed, or rebound the path. Content-only and
+metadata-only updates do not write path bindings, because the path still points
+at the same inode. Hardlinked inodes write one binding per recorded path.
+
+The new `vaultic index path-index` command builds or refreshes the index for an
+existing repository, reports the number of snapshots scanned, bindings changed,
+overflow paths, and estimated bytes written, and can prune bindings before a
+commit sequence when older snapshots leave the retention window.
+
+`vaultic index file-history` now uses the path index when entries are available
+and confirms every indexed binding through the immutable snapshot walk before
+reporting it. If the index is absent, it falls back to the Phase 13 walk.
+
+https://github.com/vaultic/vaultic/pull/22018

@@ -57,8 +57,8 @@ func newIndexFileHistoryCommand(globalOptions *global.Options) *cobra.Command {
 }
 
 func runIndexFileHistory(ctx context.Context, options indexFileHistoryOptions, target string, globalOptions global.Options, term ui.Terminal) (any, error) {
-	if options.Follow || options.Verify {
-		return nil, fmt.Errorf("--follow and --verify require the Phase 14 path index")
+	if options.Follow {
+		return nil, fmt.Errorf("--follow requires the Phase 14 path index follow implementation")
 	}
 	store, printer, cleanup, err := openHistoryStore(ctx, options.Daemon, globalOptions, term)
 	if err != nil {
@@ -79,8 +79,31 @@ func runIndexFileHistory(ctx context.Context, options indexFileHistoryOptions, t
 		}
 		return result, err
 	}
-	result, err := indexhistory.FileHistory(ctx, store, target, indexhistory.Options{SinceCommit: options.Since, UntilCommit: options.Until, Snapshots: options.Snapshots, Content: options.Content})
-	if err == nil && !globalOptions.JSON {
+	queryOptions := indexhistory.Options{SinceCommit: options.Since, UntilCommit: options.Until, Snapshots: options.Snapshots, Content: options.Content}
+	walk, err := indexhistory.FileHistory(ctx, store, target, queryOptions)
+	if err != nil {
+		return nil, err
+	}
+	result := walk
+	if indexed, ok, indexErr := indexhistory.FileHistoryFromPathIndex(ctx, store, target, queryOptions); indexErr != nil {
+		return nil, indexErr
+	} else if ok {
+		result = indexed
+	}
+	if options.Verify {
+		if result.Source != "path-index" {
+			return nil, fmt.Errorf("--verify requires pv path-index entries for %q", target)
+		}
+		for _, change := range result.Changes {
+			if change.Kind == "bound" && !change.Present {
+				return nil, fmt.Errorf("path-index disagreement at commit %d: binding is not reachable from the snapshot root", change.Commit)
+			}
+		}
+		if len(result.Changes) != len(walk.Changes) {
+			return nil, fmt.Errorf("path-index disagreement: %d indexed changes, %d walked changes", len(result.Changes), len(walk.Changes))
+		}
+	}
+	if !globalOptions.JSON {
 		printer.P("path %s changes: %d\n", result.Path, len(result.Changes))
 		for _, change := range result.Changes {
 			printer.P("  commit %d %s inode=%d revision=%d present=%v covered=%v\n", change.Commit, change.Kind, change.Inode, change.Revision, change.Present, change.Covered)

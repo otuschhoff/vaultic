@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -113,6 +114,10 @@ func (store *fakeStore) AllocateRevision(context.Context) (uint64, error) {
 }
 
 func (store *fakeStore) PublishRevision(_ context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64) error {
+	return store.PublishRevisionBatch(context.Background(), currentKey, revisionKey, revisionValue, revision, nil, nil)
+}
+
+func (store *fakeStore) PublishRevisionBatch(_ context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64, relatedPuts []daemon.Mutation, relatedDeletes [][]byte) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	pointer, err := (schema.CurrentPointer{Revision: revision, RecordKey: revisionKey}).MarshalBinary()
@@ -121,6 +126,12 @@ func (store *fakeStore) PublishRevision(_ context.Context, currentKey, revisionK
 	}
 	store.values[string(currentKey)] = pointer
 	store.values[string(revisionKey)] = append([]byte(nil), revisionValue...)
+	for _, put := range relatedPuts {
+		store.values[string(put.Key)] = append([]byte(nil), put.Value...)
+	}
+	for _, key := range relatedDeletes {
+		delete(store.values, string(key))
+	}
 	return nil
 }
 
@@ -161,6 +172,9 @@ func (store *fakeStore) PublishReconciledRevision(_ context.Context, request dae
 			return decodeErr
 		}
 		store.values[string(key)] = value
+	}
+	for _, put := range request.RelatedPuts {
+		store.values[string(put.Key)] = append([]byte(nil), put.Value...)
 	}
 	store.published = append(store.published, request)
 	return nil
@@ -266,6 +280,94 @@ func TestImportedFileBecomesVerifiedAndThenReuses(t *testing.T) {
 	}
 	if metrics := reconciler.Metrics(); metrics.Reused != 1 || metrics.Changed != 0 {
 		t.Fatalf("reuse metrics = %#v", metrics)
+	}
+}
+
+func TestReconcileWritesPathVersionForOptedInBindingChanges(t *testing.T) {
+	store := newFakeStore()
+	filesystem := testFilesystem()
+	reconciler, err := New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Observe("/file", "/root/file", fileNode("file", 1))
+	if err := reconciler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pointer, err := schema.UnmarshalCurrentPointer(store.values[string(schema.CurrentInodeKey(1, 11))])
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := schema.PathVersionKey(0, "file", pointer.Revision)
+	value, found := store.values[string(key)]
+	if !found {
+		t.Fatalf("path-version key %x was not written", key)
+	}
+	binding, err := schema.UnmarshalPathVersionRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.State != schema.PathBound || binding.Inode != 11 || binding.Revision != pointer.Revision {
+		t.Fatalf("binding = %#v, pointer revision %d", binding, pointer.Revision)
+	}
+
+	filesystem.entries["/root/file"] = fileInfo(1, 11, 8, 2)
+	reconciler, err = New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Observe("/file", "/root/file", fileNode("file", 2))
+	if err := reconciler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var pvCount int
+	for key := range store.values {
+		if strings.HasPrefix(key, "pv:") {
+			pvCount++
+		}
+	}
+	if pvCount != 1 {
+		t.Fatalf("unchanged file wrote %d path-version records, want 1", pvCount)
+	}
+}
+
+func TestReconcileWritesPathVersionTombstoneForDeletedIndexedPath(t *testing.T) {
+	store := newFakeStore()
+	filesystem := testFilesystem()
+	reconciler, err := New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Observe("/file", "/root/file", fileNode("file", 1))
+	reconciler.Observe("/", "/root", &data.Node{Name: "root", Type: data.NodeTypeDir})
+	if err := reconciler.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	delete(filesystem.entries, "/root/file")
+	reconciler, err = New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Observe("/", "/root", &data.Node{Name: "root", Type: data.NodeTypeDir})
+	if err := reconciler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var tombstones int
+	for key, value := range store.values {
+		if !strings.HasPrefix(key, "pv:") {
+			continue
+		}
+		record, err := schema.UnmarshalPathVersionRecord(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.State == schema.PathTombstone {
+			tombstones++
+		}
+	}
+	if tombstones != 1 {
+		t.Fatalf("tombstones = %d, want 1", tombstones)
 	}
 }
 

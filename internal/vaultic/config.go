@@ -66,6 +66,9 @@ type Config struct {
 	// PlacementPolicy describes how many independent live placements a pack must
 	// retain before an eviction can proceed.
 	PlacementPolicy PlacementPolicy `json:"placement_policy,omitempty"`
+	// PathIndexPaths opts selected paths or subtrees into the derived pv: path
+	// history index. Empty means Phase 13's immutable walk remains the source.
+	PathIndexPaths []string `json:"path_index_paths,omitempty"`
 
 	// PrunePlan is a durable deferred-cleanup marker. It is an additive config
 	// extension: restic and rustic ignore unknown config fields, while vaultic

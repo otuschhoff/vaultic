@@ -21,6 +21,7 @@ const scanPageSize = 10_000
 
 type Store interface {
 	Get(context.Context, []byte) ([]byte, bool, error)
+	MultiGet(context.Context, [][]byte) ([]daemon.KeyValue, []bool, error)
 	ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error)
 	MarkIndexPublished(context.Context, schema.ID, []schema.ID) (uint64, error)
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
@@ -69,6 +70,7 @@ type CheckResult struct {
 	UnresolvedReferences      uint64 `json:"unresolved_references"`
 	SnapshotMismatch          uint64 `json:"snapshot_mismatches"`
 	SnapshotCommitMismatch    uint64 `json:"snapshot_commit_mismatches"`
+	PathVersionMismatch       uint64 `json:"path_version_mismatches"`
 	UnresolvedSnapshots       uint64 `json:"unresolved_snapshots"`
 	PendingCrawlDebt          uint64 `json:"pending_crawl_debt"`
 	PendingExports            uint64 `json:"pending_exports"`
@@ -98,7 +100,7 @@ type CheckResult struct {
 }
 
 func (result CheckResult) Clean() bool {
-	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0
+	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0
 }
 
 func (result CheckResult) HasWarnings() bool { return result.Warnings != 0 }
@@ -109,6 +111,7 @@ type CheckOptions struct {
 	IncludeCrawlDebt bool
 	MaxFindings      uint
 	PlacementModel   PlacementModel
+	PathIndexPaths   []string
 }
 
 type Finding struct {
@@ -125,6 +128,8 @@ type RebuildResult struct {
 	BackendPackRecordsChanged uint64           `json:"backend_pack_records_changed"`
 	TierSummaryChanged        uint64           `json:"tier_summary_changed"`
 	SnapshotCommitChanged     uint64           `json:"snapshot_commit_changed"`
+	PathVersionChanged        uint64           `json:"path_version_changed"`
+	PathVersionOverflow       uint64           `json:"path_version_overflow"`
 	UpdateSequence            uint64           `json:"update_sequence"`
 	Deltas                    []AggregateDelta `json:"deltas,omitempty"`
 }
@@ -325,6 +330,9 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 		return result, err
 	}
 	if err := checkSnapshots(ctx, store, legacySnapshots, options.SlateDBOnly, &result, options.MaxFindings); err != nil {
+		return result, err
+	}
+	if err := checkPathVersionIndex(ctx, store, options.PathIndexPaths, &result, options.MaxFindings); err != nil {
 		return result, err
 	}
 	return result, nil

@@ -50,6 +50,19 @@ func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, erro
 	return append([]byte(nil), value...), found, nil
 }
 
+func (store *memoryStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.KeyValue, []bool, error) {
+	values := make([]daemon.KeyValue, len(keys))
+	found := make([]bool, len(keys))
+	for index, key := range keys {
+		value, ok, err := store.Get(ctx, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		values[index], found[index] = daemon.KeyValue{Key: key, Value: value}, ok
+	}
+	return values, found, nil
+}
+
 func (store *memoryStore) ScanPrefix(_ context.Context, prefix, after []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
 	keys := make([]string, 0)
 	for key := range store.values {

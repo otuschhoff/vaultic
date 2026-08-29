@@ -29,6 +29,14 @@ type Options struct {
 	Content     bool
 }
 
+type Binding struct {
+	Covered  bool
+	Present  bool
+	Inode    uint64
+	Revision uint64
+	NodeType schema.NodeType
+}
+
 type SnapshotPoint struct {
 	SnapshotID string `json:"snapshot_id"`
 	Commit     uint64 `json:"commit"`
@@ -83,6 +91,7 @@ type Metrics struct {
 type FileHistoryResult struct {
 	SchemaVersion int      `json:"schema_version"`
 	Path          string   `json:"path"`
+	Source        string   `json:"source"`
 	Changes       []Change `json:"changes"`
 	Metrics       Metrics  `json:"metrics"`
 }
@@ -173,6 +182,21 @@ func PathAt(ctx context.Context, store Store, targetPath, snapshotID string) (Pa
 	return PathAtResult{}, fmt.Errorf("snapshot %q is not present in the snapshot commit index", snapshotID)
 }
 
+func ResolvePathAtCommit(ctx context.Context, store Store, targetPath string, commit uint64) (Binding, error) {
+	snapshots, err := loadSnapshots(ctx, store, commit, commit+1)
+	if err != nil {
+		return Binding{}, err
+	}
+	if len(snapshots) == 0 {
+		return Binding{}, fmt.Errorf("commit %d is not present in the snapshot commit index", commit)
+	}
+	resolved, err := newResolver(store).resolve(ctx, snapshots[0], cleanTargetPath(targetPath))
+	if err != nil {
+		return Binding{}, err
+	}
+	return Binding{Covered: resolved.covered, Present: resolved.present, Inode: resolved.inode, Revision: resolved.revision, NodeType: resolved.nodeType}, nil
+}
+
 func FileHistory(ctx context.Context, store Store, targetPath string, options Options) (FileHistoryResult, error) {
 	targetPath = cleanTargetPath(targetPath)
 	snapshots, err := loadSnapshots(ctx, store, options.SinceCommit, options.UntilCommit)
@@ -195,7 +219,50 @@ func FileHistory(ctx context.Context, store Store, targetPath string, options Op
 	if metrics.SnapshotsScanned != 0 {
 		metrics.AveragePathComponents = float64(metrics.PathComponents) / float64(metrics.SnapshotsScanned)
 	}
-	return FileHistoryResult{SchemaVersion: SchemaVersion, Path: targetPath, Changes: changes, Metrics: metrics}, nil
+	return FileHistoryResult{SchemaVersion: SchemaVersion, Path: targetPath, Source: "walk", Changes: changes, Metrics: metrics}, nil
+}
+
+func FileHistoryFromPathIndex(ctx context.Context, store Store, targetPath string, options Options) (FileHistoryResult, bool, error) {
+	targetPath = cleanTargetPath(targetPath)
+	changes := make([]Change, 0)
+	err := scan(ctx, store, schema.PathVersionPrefix(0, targetPath), func(kv daemon.KeyValue) error {
+		parsed, err := schema.ParseKey(kv.Key)
+		if err != nil || parsed.Kind != schema.KeyPathVersion {
+			return fmt.Errorf("invalid path-version key %q", kv.Key)
+		}
+		if options.SinceCommit != 0 && parsed.Revision < options.SinceCommit {
+			return nil
+		}
+		if options.UntilCommit != 0 && parsed.Revision >= options.UntilCommit {
+			return nil
+		}
+		record, err := schema.UnmarshalPathVersionRecord(kv.Value)
+		if err != nil {
+			return err
+		}
+		binding, err := ResolvePathAtCommit(ctx, store, targetPath, parsed.Revision)
+		if err != nil {
+			return err
+		}
+		present := record.State == schema.PathBound && binding.Present && binding.Inode == record.Inode && binding.Revision == record.Revision
+		change := Change{Path: targetPath, Commit: parsed.Revision, Covered: binding.Covered, Present: present}
+		if record.State == schema.PathOverflow {
+			change.Kind = "overflow"
+		} else if !binding.Covered {
+			change.Kind = "not-covered"
+		} else if record.State == schema.PathTombstone {
+			change.Kind = "deleted"
+		} else {
+			change.Kind = "bound"
+			change.Inode, change.Revision, change.NodeType = record.Inode, record.Revision, nodeTypeName(record.NodeType)
+		}
+		changes = append(changes, change)
+		return nil
+	})
+	if err != nil || len(changes) == 0 {
+		return FileHistoryResult{}, false, err
+	}
+	return FileHistoryResult{SchemaVersion: SchemaVersion, Path: targetPath, Source: "path-index", Changes: changes, Metrics: Metrics{BindingChanges: uint64(len(changes))}}, true, nil
 }
 
 func loadSnapshots(ctx context.Context, store Store, since, until uint64) ([]snapshotEntry, error) {

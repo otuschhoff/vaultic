@@ -53,6 +53,10 @@ func TestIntrospectionRefusesLegacyRepositoriesExplicitly(t *testing.T) {
 			_, err := runIndexPathAt(ctx, indexPathAtOptions{Snapshot: vaultic.NewRandomID().String()}, "a.txt", gopts, gopts.Term)
 			return err
 		},
+		"path-index": func(ctx context.Context, gopts global.Options) error {
+			_, err := runIndexPathIndex(ctx, indexPathIndexOptions{Paths: []string{"a.txt"}}, gopts, gopts.Term)
+			return err
+		},
 	} {
 		err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
 			return run(ctx, gopts)

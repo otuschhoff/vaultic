@@ -43,6 +43,7 @@ func TestConfigExtensionsRoundTrip(t *testing.T) {
 		RetrievalClass: "hours", MaxBandwidthBytes: 10 << 20, ObjectOverheadBytes: 4096,
 	}}
 	cfg.PlacementPolicy = vaultic.PlacementPolicy{MinCopies: 2, MinDomains: 2, MinOffsite: 1, OffsiteDeadline: int64(4 * 3600)}
+	cfg.PathIndexPaths = []string{"/home", "/srv/share"}
 	cfg.PrunePlan = &vaultic.PrunePlan{
 		Version:         1,
 		ID:              "test-plan",

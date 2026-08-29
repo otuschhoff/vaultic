@@ -1023,6 +1023,85 @@ func UnmarshalHardlinkRefsRecord(data []byte) (HardlinkRefsRecord, error) {
 	return record, d.done()
 }
 
+type PathBindingState byte
+
+const (
+	PathBound PathBindingState = iota + 1
+	PathTombstone
+	PathOverflow
+)
+
+func validPathBindingState(value PathBindingState) bool {
+	return value >= PathBound && value <= PathOverflow
+}
+
+type PathVersionRecord struct {
+	State    PathBindingState
+	NodeType NodeType
+	Inode    uint64
+	Revision uint64
+	Path     string
+}
+
+func (record PathVersionRecord) MarshalBinary() ([]byte, error) {
+	if !validPathBindingState(record.State) {
+		return nil, fmt.Errorf("%w: invalid path binding state", ErrMalformed)
+	}
+	if record.State == PathBound {
+		if record.NodeType < NodeFile || record.NodeType > NodeOther || record.Inode == 0 || record.Revision == 0 {
+			return nil, fmt.Errorf("%w: invalid bound path record", ErrMalformed)
+		}
+	} else if record.NodeType != 0 || record.Inode != 0 || record.Revision != 0 {
+		return nil, fmt.Errorf("%w: non-bound path record carries binding", ErrMalformed)
+	}
+	if record.State != PathOverflow && record.Path != "" {
+		return nil, fmt.Errorf("%w: non-overflow path record carries overflow path", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u8(byte(record.State))
+	e.u8(byte(record.NodeType))
+	e.u64(record.Inode)
+	e.u64(record.Revision)
+	if err := e.string(record.Path); err != nil {
+		return nil, err
+	}
+	return e.finish()
+}
+
+func UnmarshalPathVersionRecord(data []byte) (PathVersionRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PathVersionRecord{}, err
+	}
+	var record PathVersionRecord
+	state, err := d.u8()
+	if err != nil {
+		return record, err
+	}
+	record.State = PathBindingState(state)
+	nodeType, err := d.u8()
+	if err != nil {
+		return record, err
+	}
+	record.NodeType = NodeType(nodeType)
+	if record.Inode, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Revision, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Path, err = d.string(); err != nil {
+		return record, err
+	}
+	if err := d.done(); err != nil {
+		return record, err
+	}
+	if _, err := record.MarshalBinary(); err != nil {
+		return PathVersionRecord{}, err
+	}
+	return record, nil
+}
+
 type SnapshotRecord struct {
 	CommitSequence          uint64
 	RootFSID                uint32

@@ -3,12 +3,17 @@
 package schema
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const Version byte = 0
+
+const MaxPathIndexPathBytes = 4096
 
 var ErrMalformed = errors.New("malformed slatedb schema record")
 
@@ -48,6 +53,7 @@ const (
 	KeyBackendPack
 	KeyPlacementDeleteQueue
 	KeySnapshotCommit
+	KeyPathVersion
 )
 
 // HistoryGranularity names a rollup bucket width. The values are part of the
@@ -112,6 +118,7 @@ type ParsedKey struct {
 	Backend     uint64
 	PackType    PackType
 	DeleteAfter int64
+	Path        string
 }
 
 func BlobKey(id ID) []byte           { return idKey("b:", id) }
@@ -127,6 +134,51 @@ func SnapshotCommitKey(commitSequence uint64, snapshot ID) []byte {
 	return key
 }
 func SnapshotCommitPrefix() []byte { return []byte("sc:") }
+
+func PathVersionKey(fsid uint32, path string, revision uint64) []byte {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || len(path) > MaxPathIndexPathBytes || strings.IndexByte(path, 0) >= 0 {
+		return nil
+	}
+	key := make([]byte, 3+4+len(path)+1+8)
+	copy(key, "pv:")
+	binary.BigEndian.PutUint32(key[3:], fsid)
+	copy(key[7:], path)
+	key[7+len(path)] = 0
+	binary.BigEndian.PutUint64(key[8+len(path):], revision)
+	return key
+}
+
+func PathVersionPrefix(fsid uint32, path string) []byte {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || len(path) > MaxPathIndexPathBytes || strings.IndexByte(path, 0) >= 0 {
+		return nil
+	}
+	key := make([]byte, 3+4+len(path)+1)
+	copy(key, "pv:")
+	binary.BigEndian.PutUint32(key[3:], fsid)
+	copy(key[7:], path)
+	key[7+len(path)] = 0
+	return key
+}
+
+func PathVersionSubtreePrefix(fsid uint32, path string) []byte {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || len(path) >= MaxPathIndexPathBytes || strings.IndexByte(path, 0) >= 0 {
+		return nil
+	}
+	key := make([]byte, 3+4+len(path)+1)
+	copy(key, "pv:")
+	binary.BigEndian.PutUint32(key[3:], fsid)
+	copy(key[7:], path)
+	key[7+len(path)] = '/'
+	return key
+}
+
+func PathOverflowKey(fsid uint32, path string, revision uint64) []byte {
+	sum := sha256.Sum256([]byte(path))
+	return PathVersionKey(fsid, "overflow/"+hex.EncodeToString(sum[:16]), revision)
+}
 func CurrentInodeKey(fsid uint32, inode uint64) []byte {
 	return inodeKey("i:", fsid, inode)
 }
@@ -355,6 +407,24 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		parsed.Kind = KeySnapshotCommit
 		parsed.Revision = binary.BigEndian.Uint64(key[3:11])
 		copy(parsed.ID[:], key[12:])
+	case len(key) > 3+4+1+8 && string(key[:3]) == "pv:":
+		terminator := -1
+		for offset := 7; offset < len(key)-8; offset++ {
+			if key[offset] == 0 {
+				terminator = offset
+				break
+			}
+		}
+		if terminator <= 7 || terminator != len(key)-9 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid path-version key", ErrMalformed)
+		}
+		parsed.Kind = KeyPathVersion
+		parsed.FSID = binary.BigEndian.Uint32(key[3:7])
+		parsed.Path = string(key[7:terminator])
+		parsed.Revision = binary.BigEndian.Uint64(key[terminator+1:])
+		if parsed.Revision == 0 || len(parsed.Path) > MaxPathIndexPathBytes {
+			return ParsedKey{}, fmt.Errorf("%w: invalid path-version key", ErrMalformed)
+		}
 	case len(key) == 35 && string(key[:3]) == "rc:":
 		parsed.Kind = KeyReferenceCount
 		copy(parsed.ID[:], key[3:])

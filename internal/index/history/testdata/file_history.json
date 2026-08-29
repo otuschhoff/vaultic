@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "path": "a.txt",
+  "source": "walk",
   "changes": [
     {
       "kind": "created",

@@ -1,10 +1,12 @@
 package schema
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -55,7 +57,7 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		key  []byte
 		kind KeyKind
 	}{
-		{BlobKey(id), KeyBlob}, {PackKey(id), KeyPack}, {SnapshotCommitKey(9, id), KeySnapshotCommit}, {PackAggregateKey(AggregateData), KeyPackAggregate},
+		{BlobKey(id), KeyBlob}, {PackKey(id), KeyPack}, {SnapshotCommitKey(9, id), KeySnapshotCommit}, {PathVersionKey(1, "a/b", 9), KeyPathVersion}, {PackAggregateKey(AggregateData), KeyPackAggregate},
 		{PackAggregateKey(AggregateTree), KeyPackAggregate}, {PackAggregateKey(AggregateMixed), KeyPackAggregate}, {PackAggregateKey(AggregateUnknown), KeyPackAggregate}, {PackAggregateKey(AggregateAll), KeyPackAggregate},
 		{TierAggregateKey(TierUnknown), KeyTierAggregate}, {TierAggregateKey(TierHot), KeyTierAggregate},
 		{TierAggregateKey(TierCold), KeyTierAggregate}, {TierAggregateKey(TierMirrored), KeyTierAggregate},
@@ -142,6 +144,33 @@ func TestSnapshotCommitKeyPreservesCommitAndSnapshot(t *testing.T) {
 	}
 	if string(SnapshotCommitPrefix()) != "sc:" {
 		t.Fatalf("snapshot commit prefix = %q", SnapshotCommitPrefix())
+	}
+}
+
+func TestPathVersionKeyOrderingAndTerminators(t *testing.T) {
+	self1 := PathVersionKey(1, "a/b", 1)
+	self2 := PathVersionKey(1, "/a/b", 2)
+	child := PathVersionKey(1, "a/b/c", 1)
+	sibling := PathVersionKey(1, "a/bc", 1)
+	if self1 == nil || self2 == nil || child == nil || sibling == nil {
+		t.Fatal("valid path-version key returned nil")
+	}
+	parsed, err := ParseKey(self1)
+	if err != nil || parsed.Kind != KeyPathVersion || parsed.FSID != 1 || parsed.Path != "a/b" || parsed.Revision != 1 {
+		t.Fatalf("path-version key parsed as %#v err=%v", parsed, err)
+	}
+	ordered := [][]byte{self1, self2, child, sibling}
+	if !(bytes.Compare(ordered[0], ordered[1]) < 0 && bytes.Compare(ordered[1], ordered[2]) < 0 && bytes.Compare(ordered[2], ordered[3]) < 0) {
+		t.Fatalf("path-version ordering is wrong: %x %x %x %x", self1, self2, child, sibling)
+	}
+	if prefix := PathVersionPrefix(1, "a/b"); !bytes.HasPrefix(self1, prefix) || bytes.HasPrefix(sibling, prefix) {
+		t.Fatalf("path prefix collides with sibling: prefix=%x sibling=%x", prefix, sibling)
+	}
+	if subtree := PathVersionSubtreePrefix(1, "a/b"); !bytes.HasPrefix(child, subtree) || bytes.HasPrefix(sibling, subtree) {
+		t.Fatalf("subtree prefix collides with sibling: subtree=%x sibling=%x", subtree, sibling)
+	}
+	if key := PathVersionKey(1, strings.Repeat("x", MaxPathIndexPathBytes+1), 1); key != nil {
+		t.Fatalf("overlong path produced key %x", key)
 	}
 }
 
@@ -393,6 +422,9 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	roundTrip(t, HistoryMarker{UnixSeconds: 1700000000}, UnmarshalHistoryMarker)
 	roundTrip(t, ExportCheckpointRecord{State: ExportComplete, CommitSequence: 8, Attempts: 1, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalExportCheckpointRecord)
 	roundTrip(t, SnapshotCommitRecord{SnapshotTimeUnixNano: 123, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalSnapshotCommitRecord)
+	roundTrip(t, PathVersionRecord{State: PathBound, NodeType: NodeFile, Inode: 2, Revision: 3}, UnmarshalPathVersionRecord)
+	roundTrip(t, PathVersionRecord{State: PathTombstone}, UnmarshalPathVersionRecord)
+	roundTrip(t, PathVersionRecord{State: PathOverflow}, UnmarshalPathVersionRecord)
 	roundTrip(t, ExportIndexCheckpointRecord{Sequence: 9, PackIDs: []ID{id1, id2}}, UnmarshalExportIndexCheckpointRecord)
 	roundTrip(t, InodeRevision{ParentInode: 1, HasMultipleParents: true, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
 	directory := DirectoryRevision{

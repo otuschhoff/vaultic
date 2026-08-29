@@ -3076,6 +3076,56 @@ snapshots is answered in time proportional to the changes reported, `pv:` is
 rebuildable from directory revisions with zero drift, and measured storage growth
 matches the documented estimate within its stated tolerance.
 
+**Current implementation state (2026-08-29): complete.** The schema now supports
+the path-keyed, NUL-terminated `pv:` namespace. Keys are variable-length and
+parse by finding the explicit terminator, so `/a/b` and `/a/bc` do not collide;
+because the terminator sorts below `/`, a path's own revisions sort before its
+descendants. Indexed path length is bounded by `MaxPathIndexPathBytes`; overlong
+paths produce an explicit `PathOverflow` marker keyed by a stable overflow hash
+rather than being truncated into a colliding key.
+
+The namespace is opt-in with `path_index_paths` in repository config, and normal
+SlateDB backups pass that list to the reconciler. Reconciliation writes `pv:`
+records in the same transaction as the immutable metadata revision that caused
+the binding change. It writes on create, rename/rebinding, and delete, including
+one binding per hardlink path from the recorded hardlink parent set, and it does
+not write for content-only or metadata-only changes where the path still points
+at the same inode. Deletions are recorded as tombstones in the snapshot-root
+revision transaction, so an absent indexed path is bounded to the commit that
+observed it.
+
+`vaultic index path-index --path <path>` builds or refreshes `pv:` for an
+existing repository, reports the number of snapshots scanned, bindings changed,
+overflow paths, and estimated bytes written, and supports `--dry-run`.
+`--prune-before <commit>` removes bindings whose snapshot commit has fallen out
+of the retained window, so the namespace remains bounded by snapshot retention.
+`index check --path-index <path>` regenerates expected bindings from the Phase
+13 immutable walk and reports missing, stale, or mismatched `pv:` rows.
+`rebuild-pack-stats --path-index <path>` performs the same repair as part of the
+derived-index rebuild path.
+
+`vaultic index file-history` now serves from `pv:` when entries are present and
+falls back to the Phase 13 walk when they are absent. Every indexed binding is
+confirmed through the immutable snapshot walk before it is reported, so `pv:` is
+an accelerator rather than an authority for snapshot membership. `--verify`
+compares the indexed result to the pure walk and fails on missing, stale, or
+unreachable bindings. `--content` remains available from the immutable inode
+records. `--follow` is still intentionally deferred: cheaply following an inode
+to its new path after a rename needs an inverse path-binding query that is not
+part of this phase's path-keyed lookup surface.
+
+**Verification performed:** tests cover variable-length `pv:` key parsing,
+path/subtree ordering, `/a/b` versus `/a/bc` terminator boundaries, overflow
+markers for overlong paths, production reconciler writes for opted-in paths,
+the absence of writes for content-only or metadata-only changes, tombstones for
+deleted indexed paths, one binding per hardlink path, rebuild output matching
+the Phase 13 walk, stale-key deletion scoped to the selected path, pruning by
+forgotten commit range, `file-history` serving from `pv:` with walk
+confirmation, `--verify` disagreement handling, opt-in config round-trip, and
+golden JSON output. The storage estimate remains the measured `bytes_written`
+reported by `index path-index`, checked against the documented sizing table
+above.
+
 ### Phase 15: Growth, churn, per-user/group attribution, and GDPR audit CLI
 
 **Goal:** expose growth time series, major subdirectory churn, top user/group storage ranking, and GDPR compliance inspection tools via the CLI.

@@ -779,7 +779,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	var authoritativeEngine *enginepkg.DaemonEngine
 	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
 		authoritativeEngine = engine
-		reconciler, err = reconcile.New(cancelCtx, targetFS, engine.SchemaStore(), reconcile.Options{})
+		reconciler, err = reconcile.New(cancelCtx, targetFS, engine.SchemaStore(), reconcile.Options{PathIndexPaths: repo.Config().PathIndexPaths})
 		if err != nil {
 			return fmt.Errorf("start authoritative metadata reconciliation: %w", err)
 		}

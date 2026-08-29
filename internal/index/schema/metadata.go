@@ -520,6 +520,8 @@ func ValidateValue(key []byte, value []byte) error {
 				err = fmt.Errorf("%w: snapshot commit root mismatch", ErrMalformed)
 			}
 		}
+	case KeyPathVersion:
+		_, err = UnmarshalPathVersionRecord(value)
 	case KeyNextEventSequence:
 		_, err = UnmarshalNextEventSequence(value)
 	case KeyCurrentInode, KeyCurrentDirectory:

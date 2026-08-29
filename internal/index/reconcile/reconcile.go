@@ -28,9 +28,10 @@ const (
 )
 
 type Options struct {
-	Workers    int
-	QueueDepth int
-	BatchSize  int
+	Workers        int
+	QueueDepth     int
+	BatchSize      int
+	PathIndexPaths []string
 }
 
 func (options Options) withDefaults() (Options, error) {
@@ -64,6 +65,7 @@ type Store interface {
 	ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error)
 	AllocateRevision(context.Context) (uint64, error)
 	PublishRevision(context.Context, []byte, []byte, []byte, uint64) error
+	PublishRevisionBatch(context.Context, []byte, []byte, []byte, uint64, []daemon.Mutation, [][]byte) error
 	PublishReconciledRevision(context.Context, daemon.ReconciledRevision) error
 	RecordCrawlDebtFailure(context.Context, [][]byte, string) error
 	ResolveCrawlDebt(context.Context, [][]byte) error
@@ -398,7 +400,7 @@ func (reconciler *Reconciler) publishSnapshotRoot(published map[string]published
 		}
 		children = append(children, schema.DirectoryChild{Name: name, Inode: item.identity.inode, Type: item.typeID, MetadataKey: item.key})
 	}
-	if len(children) == 0 {
+	if len(children) == 0 && len(reconciler.options.PathIndexPaths) == 0 {
 		return nil
 	}
 	record := schema.DirectoryRevision{Children: children, SourcePath: "/", Known: schema.KnownPath, Freshness: schema.FreshnessVerified}
@@ -411,13 +413,83 @@ func (reconciler *Reconciler) publishSnapshotRoot(published map[string]published
 		return err
 	}
 	key := schema.DirectoryRevisionKey(0, 0, revision)
-	if err := reconciler.store.PublishRevision(reconciler.ctx, schema.CurrentDirectoryKey(0, 0), key, value, revision); err != nil {
+	tombstones, err := reconciler.pathDeletionMutations(published, revision)
+	if err != nil {
+		return err
+	}
+	if err := reconciler.store.PublishRevisionBatch(reconciler.ctx, schema.CurrentDirectoryKey(0, 0), key, value, revision, tombstones, nil); err != nil {
 		return err
 	}
 	reconciler.mu.Lock()
 	reconciler.rootKey = append([]byte(nil), key...)
 	reconciler.mu.Unlock()
 	return nil
+}
+
+func (reconciler *Reconciler) pathDeletionMutations(published map[string]publishedItem, revision uint64) ([]daemon.Mutation, error) {
+	if len(reconciler.options.PathIndexPaths) == 0 {
+		return nil, nil
+	}
+	present := map[string]struct{}{}
+	for _, item := range published {
+		present[normalizeSnapshotPath(item.snapshotPath)] = struct{}{}
+	}
+	mutations := make([]daemon.Mutation, 0)
+	for _, configured := range reconciler.options.PathIndexPaths {
+		configured = normalizeSnapshotPath(configured)
+		if _, ok := present[configured]; ok {
+			continue
+		}
+		latest, found, err := reconciler.latestPathBinding(configured)
+		if err != nil {
+			return nil, err
+		}
+		if !found || latest.State == schema.PathTombstone {
+			continue
+		}
+		path := strings.TrimPrefix(configured, "/")
+		key := schema.PathVersionKey(0, path, revision)
+		if key == nil {
+			key = schema.PathOverflowKey(0, path, revision)
+		}
+		value, err := (schema.PathVersionRecord{State: schema.PathTombstone}).MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		mutations = append(mutations, daemon.Mutation{Key: key, Value: value})
+	}
+	return mutations, nil
+}
+
+func (reconciler *Reconciler) latestPathBinding(snapshotPath string) (schema.PathVersionRecord, bool, error) {
+	path := strings.TrimPrefix(normalizeSnapshotPath(snapshotPath), "/")
+	prefix := schema.PathVersionPrefix(0, path)
+	if prefix == nil {
+		return schema.PathVersionRecord{}, false, nil
+	}
+	var latest schema.PathVersionRecord
+	foundLatest := false
+	var after []byte
+	for {
+		entries, done, err := reconciler.store.ScanPrefix(reconciler.ctx, prefix, after, 10_000)
+		if err != nil {
+			return schema.PathVersionRecord{}, false, err
+		}
+		for _, entry := range entries {
+			record, err := schema.UnmarshalPathVersionRecord(entry.Value)
+			if err != nil {
+				return schema.PathVersionRecord{}, false, err
+			}
+			latest, foundLatest = record, true
+			after = append(after[:0], entry.Key...)
+		}
+		if done {
+			return latest, foundLatest, nil
+		}
+		if len(entries) == 0 {
+			return schema.PathVersionRecord{}, false, fmt.Errorf("path binding scan made no progress")
+		}
+	}
 }
 
 func (reconciler *Reconciler) processBatch(batch []preparedItem, directories *[]preparedItem, hardlinks map[identity][]preparedItem, published map[string]publishedItem) {
@@ -637,6 +709,7 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 	if err != nil {
 		return nil, false, err
 	}
+	writePathBinding := !found[0]
 	if found[0] {
 		pointer, decodeErr := schema.UnmarshalCurrentPointer(values[0].Value)
 		if decodeErr != nil {
@@ -645,6 +718,19 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 		existing, valueFound, getErr := reconciler.store.MultiGet(reconciler.ctx, [][]byte{pointer.RecordKey})
 		if getErr != nil {
 			return nil, false, getErr
+		}
+		if valueFound[0] {
+			previousPath := ""
+			if directory {
+				if previous, decodeErr := schema.UnmarshalDirectoryRevision(existing[0].Value); decodeErr == nil {
+					previousPath = previous.SourcePath
+				}
+			} else if previous, decodeErr := schema.UnmarshalInodeRevision(existing[0].Value); decodeErr == nil {
+				previousPath = previous.SourcePath
+			}
+			if previousPath != "" && normalizeSnapshotPath(previousPath) != normalizeSnapshotPath(item.snapshotPath) {
+				writePathBinding = true
+			}
 		}
 		if valueFound[0] && bytes.Equal(existing[0].Value, value) {
 			if directory {
@@ -673,14 +759,66 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 	if directory {
 		revisionKey = schema.DirectoryRevisionKey(item.identity.fsid, item.identity.inode, revision)
 	}
+	pathPuts, err := reconciler.pathVersionMutations(item, revisionKey, revision, nodeType(item.node.Type), directory, writePathBinding)
+	if err != nil {
+		return nil, false, err
+	}
 	if err := reconciler.store.PublishReconciledRevision(reconciler.ctx, daemon.ReconciledRevision{
 		CurrentKey: currentKey, RevisionKey: revisionKey, RevisionValue: value, Revision: revision,
-		ContentIDs: content, DebtKeys: item.debtKeys,
+		ContentIDs: content, DebtKeys: item.debtKeys, RelatedPuts: pathPuts,
 		HasMultipleParents: item.HasMultipleParents, HardlinkParents: item.HardlinkParents,
 	}); err != nil {
 		return nil, false, err
 	}
 	return revisionKey, false, nil
+}
+
+func (reconciler *Reconciler) pathVersionMutations(item preparedItem, revisionKey []byte, revision uint64, nodeType schema.NodeType, directory bool, writeBinding bool) ([]daemon.Mutation, error) {
+	if !writeBinding {
+		return nil, nil
+	}
+	paths := []string{item.snapshotPath}
+	if item.HasMultipleParents && len(item.HardlinkParents) != 0 {
+		paths = paths[:0]
+		for _, parent := range item.HardlinkParents {
+			paths = append(paths, parent.Name)
+		}
+	}
+	mutations := make([]daemon.Mutation, 0, len(paths))
+	for _, candidate := range paths {
+		if !reconciler.pathIndexEnabled(candidate) {
+			continue
+		}
+		path := strings.TrimPrefix(normalizeSnapshotPath(candidate), "/")
+		key := schema.PathVersionKey(0, path, revision)
+		record := schema.PathVersionRecord{State: schema.PathOverflow}
+		if key != nil {
+			record = schema.PathVersionRecord{State: schema.PathBound, NodeType: nodeType, Inode: item.identity.inode, Revision: revision}
+		}
+		value, err := record.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		if key == nil {
+			key = schema.PathOverflowKey(0, path, revision)
+		}
+		mutations = append(mutations, daemon.Mutation{Key: key, Value: value})
+	}
+	return mutations, nil
+}
+
+func (reconciler *Reconciler) pathIndexEnabled(snapshotPath string) bool {
+	if len(reconciler.options.PathIndexPaths) == 0 {
+		return false
+	}
+	path := normalizeSnapshotPath(snapshotPath)
+	for _, configured := range reconciler.options.PathIndexPaths {
+		configured = normalizeSnapshotPath(configured)
+		if configured == "/" || path == configured || strings.HasPrefix(path, configured+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func equalSchemaIDs(left, right []schema.ID) bool {
