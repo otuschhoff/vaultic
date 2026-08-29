@@ -117,6 +117,10 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexCheckCommand(globalOptions),
 		newIndexRebuildPackStatsCommand(globalOptions),
 		newIndexGCCommand(globalOptions),
+		newIndexStatsCommand(globalOptions),
+		newIndexPacksCommand(globalOptions),
+		newIndexHistoryCommand(globalOptions),
+		newIndexBackendsCommand(globalOptions),
 	)
 	return command
 }

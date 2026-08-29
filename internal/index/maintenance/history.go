@@ -258,6 +258,7 @@ type HistoryRetentionOptions struct {
 
 // HistoryRetentionResult summarises one retention pass.
 type HistoryRetentionResult struct {
+	SchemaVersion    int          `json:"schema_version"`
 	RawEventsRemoved uint64       `json:"raw_events_removed"`
 	BucketsRemoved   uint64       `json:"buckets_removed"`
 	NewRawFloor      uint64       `json:"new_raw_floor"`
@@ -269,7 +270,7 @@ type HistoryRetentionResult struct {
 // describe, and the raw floor it records is what later marks the affected
 // buckets partial rather than silently complete.
 func PruneHistory(ctx context.Context, store Store, options HistoryRetentionOptions) (HistoryRetentionResult, error) {
-	var result HistoryRetentionResult
+	result := HistoryRetentionResult{SchemaVersion: IntrospectSchemaVersion}
 	now := options.Now
 	if now.IsZero() {
 		now = time.Now()

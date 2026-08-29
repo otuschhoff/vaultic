@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "metric": "bytes",
+  "bucket": "day",
+  "points": [
+    {
+      "bucket_start": 1699920000,
+      "value": 1000,
+      "coverage": "complete",
+      "events_observed": 3
+    },
+    {
+      "bucket_start": 1700006400,
+      "value": 1900,
+      "coverage": "complete",
+      "events_observed": 4
+    },
+    {
+      "bucket_start": 1700092800,
+      "value": 2800,
+      "coverage": "complete",
+      "events_observed": 5
+    },
+    {
+      "bucket_start": 1700179200,
+      "value": 3700,
+      "coverage": "complete",
+      "events_observed": 6
+    }
+  ],
+  "bytes_repacked": 200,
+  "packs_repacked": 4,
+  "bytes_promoted": 0,
+  "packs_promoted": 0,
+  "complete_buckets": 4,
+  "partial_buckets": 0,
+  "reconstructed_buckets": 0,
+  "histogram": [
+    {
+      "lower_bound": 1000,
+      "upper_bound": 1270,
+      "count": 1
+    },
+    {
+      "lower_bound": 1270,
+      "upper_bound": 1540,
+      "count": 0
+    },
+    {
+      "lower_bound": 1540,
+      "upper_bound": 1810,
+      "count": 0
+    },
+    {
+      "lower_bound": 1810,
+      "upper_bound": 2080,
+      "count": 1
+    },
+    {
+      "lower_bound": 2080,
+      "upper_bound": 2350,
+      "count": 0
+    },
+    {
+      "lower_bound": 2350,
+      "upper_bound": 2620,
+      "count": 0
+    },
+    {
+      "lower_bound": 2620,
+      "upper_bound": 2890,
+      "count": 1
+    },
+    {
+      "lower_bound": 2890,
+      "upper_bound": 3160,
+      "count": 0
+    },
+    {
+      "lower_bound": 3160,
+      "upper_bound": 3430,
+      "count": 0
+    },
+    {
+      "lower_bound": 3430,
+      "upper_bound": 3700,
+      "count": 1
+    }
+  ],
+  "forecast": {
+    "per_bucket": 900,
+    "next_bucket_value": 4600,
+    "buckets_used": 4,
+    "incomplete_input": false,
+    "projection_amount": 4600
+  }
+}

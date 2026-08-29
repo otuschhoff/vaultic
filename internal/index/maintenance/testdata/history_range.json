@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "metric": "bytes",
+  "bucket": "day",
+  "points": [
+    {
+      "bucket_start": 1700006400,
+      "value": 1900,
+      "coverage": "complete",
+      "events_observed": 4
+    },
+    {
+      "bucket_start": 1700092800,
+      "value": 2800,
+      "coverage": "complete",
+      "events_observed": 5
+    }
+  ],
+  "bytes_repacked": 100,
+  "packs_repacked": 2,
+  "bytes_promoted": 0,
+  "packs_promoted": 0,
+  "complete_buckets": 2,
+  "partial_buckets": 0,
+  "reconstructed_buckets": 0
+}

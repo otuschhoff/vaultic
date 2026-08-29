@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "hot_cold": true,
+  "reduced_mode": false,
+  "backends": [
+    {
+      "role": "hot",
+      "location": "hot:/x",
+      "connections": 2,
+      "listed": true,
+      "file_types": [
+        {
+          "file_type": "pack",
+          "objects": 1,
+          "bytes": 10
+        }
+      ],
+      "min_retention_known": false
+    },
+    {
+      "role": "cold",
+      "location": "cold:/y",
+      "connections": 2,
+      "listed": false,
+      "min_retention_known": false
+    }
+  ],
+  "compared": true,
+  "catalog_packs": 2,
+  "backend_packs": 2,
+  "missing_on_backend": [
+    "deliberately-missing"
+  ],
+  "unknown_to_catalog": [
+    "deliberately-extra"
+  ],
+  "missing_on_backend_count": 1,
+  "unknown_to_catalog_count": 1,
+  "expected_absent": 0
+}

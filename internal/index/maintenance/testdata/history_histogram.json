@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "metric": "created",
+  "bucket": "day",
+  "points": [
+    {
+      "bucket_start": 1699920000,
+      "value": 2,
+      "coverage": "complete",
+      "events_observed": 3
+    },
+    {
+      "bucket_start": 1700006400,
+      "value": 3,
+      "coverage": "complete",
+      "events_observed": 4
+    },
+    {
+      "bucket_start": 1700092800,
+      "value": 4,
+      "coverage": "complete",
+      "events_observed": 5
+    },
+    {
+      "bucket_start": 1700179200,
+      "value": 5,
+      "coverage": "complete",
+      "events_observed": 6
+    }
+  ],
+  "bytes_repacked": 200,
+  "packs_repacked": 4,
+  "bytes_promoted": 0,
+  "packs_promoted": 0,
+  "complete_buckets": 4,
+  "partial_buckets": 0,
+  "reconstructed_buckets": 0,
+  "histogram": [
+    {
+      "lower_bound": 2,
+      "upper_bound": 3,
+      "count": 1
+    },
+    {
+      "lower_bound": 3,
+      "upper_bound": 4,
+      "count": 1
+    },
+    {
+      "lower_bound": 4,
+      "upper_bound": 5,
+      "count": 1
+    },
+    {
+      "lower_bound": 5,
+      "upper_bound": 6,
+      "count": 1
+    },
+    {
+      "lower_bound": 6,
+      "upper_bound": 7,
+      "count": 0
+    },
+    {
+      "lower_bound": 7,
+      "upper_bound": 8,
+      "count": 0
+    },
+    {
+      "lower_bound": 8,
+      "upper_bound": 9,
+      "count": 0
+    },
+    {
+      "lower_bound": 9,
+      "upper_bound": 10,
+      "count": 0
+    },
+    {
+      "lower_bound": 10,
+      "upper_bound": 11,
+      "count": 0
+    },
+    {
+      "lower_bound": 11,
+      "upper_bound": 5,
+      "count": 0
+    }
+  ]
+}

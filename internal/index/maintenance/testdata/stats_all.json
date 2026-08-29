@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source": "aggregates",
+  "totals": {
+    "dimension": "all",
+    "key": "all",
+    "pack_count": 3,
+    "physical_size": 3000,
+    "payload_size": 3200,
+    "header_size": 300,
+    "blob_count": 9,
+    "used_payload_bytes": 2400,
+    "unused_payload_bytes": 300,
+    "accounted_pack_count": 2,
+    "unused_ratio": 0.1111111111111111
+  },
+  "stored_physical_size": 3000,
+  "unknown_tier_packs": 1,
+  "unknown_type_packs": 1,
+  "mixed_type_packs": 0,
+  "retention_unknown_packs": 0,
+  "creation_time_unknown_packs": 0,
+  "physical_size_unknown_packs": 0,
+  "retention_counted": false,
+  "usage_unaccounted_packs": 1
+}

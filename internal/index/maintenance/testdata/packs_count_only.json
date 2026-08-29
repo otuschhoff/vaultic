@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "scanned": 3,
+  "matched": 3,
+  "returned": 0,
+  "unknown_tier_packs": 1,
+  "unknown_type_packs": 1,
+  "retention_unknown_packs": 1,
+  "usage_unaccounted_packs": 1,
+  "undecidable": 0,
+  "undecidable_creation_time": 0,
+  "undecidable_retention": 0,
+  "undecidable_usage": 0
+}

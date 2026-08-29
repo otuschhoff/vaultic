@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "metric": "created",
+  "bucket": "week",
+  "points": [
+    {
+      "bucket_start": 1699833600,
+      "value": 14,
+      "coverage": "complete",
+      "events_observed": 18
+    }
+  ],
+  "bytes_repacked": 200,
+  "packs_repacked": 4,
+  "bytes_promoted": 0,
+  "packs_promoted": 0,
+  "complete_buckets": 1,
+  "partial_buckets": 0,
+  "reconstructed_buckets": 0
+}

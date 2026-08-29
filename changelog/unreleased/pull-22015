@@ -1,0 +1,32 @@
+Enhancement: Add `index stats`, `index packs`, `index history`, and `index backends`
+
+Answering questions about a repository's composition and growth previously
+required either listing the backend or loading a full index, which is slow on a
+large repository and expensive on an archival backend.
+
+Vaultic now provides four introspection commands for repositories that use
+SlateDB metadata. `vaultic index stats` reports pack counts and sizes, grouped
+by tier, pack type, or lifecycle state, and answers in constant time from the
+aggregate records unless a filter or `--verify` requires reading the catalog.
+`vaultic index packs` filters and sorts the pack catalog. `vaultic index
+history` reports a time series over pack lifecycle events, with `--histogram`
+and `--forecast`, and reports repack and promotion churn separately from net
+growth. `vaultic index backends` reports each configured backend, and with
+`--compare` cross-checks a backend listing against the catalog.
+
+None of these commands lists the backend unless asked to, so a repository whose
+archival backend is never listed can still be fully reported on. `vaultic index
+backends --no-list` answers from the catalog alone, and `--compare`, which does
+perform a listing, is explicitly opt-in.
+
+Values that were never recorded are always reported as unknown rather than
+folded into a total: unknown tier, unknown pack type, unknown retention, and
+unaccounted usage all appear as their own counts. A filter that cannot judge a
+pack, such as `--created-before` on a pack with no recorded creation time,
+reports it as undecidable instead of silently excluding it. `--forecast`
+refuses to extrapolate from a series with incomplete coverage unless
+`--allow-incomplete` is given.
+
+Each command also has a versioned JSON output schema, selected with `--json`.
+
+https://github.com/vaultic/vaultic/pull/22015
