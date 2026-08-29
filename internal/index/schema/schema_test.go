@@ -71,6 +71,9 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{HistoryEnabledAtKey(), KeyHistoryEnabledAt},
 		{PackPlacementKey(id, 42), KeyPackPlacement}, {BackendPackKey(42, id), KeyBackendPack},
 		{PlacementDeleteQueueKey(1700000000, id, 42), KeyPlacementDeleteQueue},
+		{PlacementRequestKey(1700000000, id), KeyPlacementRequest},
+		{RepackLineageKey(id, second), KeyRepackLineage},
+		{PromotionEligibilityKey(id), KeyPromotionEligibility},
 		{CurrentInodeKey(3, 4), KeyCurrentInode}, {InodeRevisionKey(3, 4, 5), KeyInodeRevision},
 		{CurrentDirectoryKey(3, 4), KeyCurrentDirectory}, {DirectoryRevisionKey(3, 4, 5), KeyDirectoryRevision},
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
@@ -403,6 +406,12 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}, UnmarshalPlacementRecord)
 	roundTrip(t, BackendPackRecord{State: PlacementLive, Bytes: 456, PlacedAt: 123}, UnmarshalBackendPackRecord)
 	roundTrip(t, PlacementDeleteRecord{Backend: 42, PhysicalSize: 456, Reason: "retention", RunID: id3}, UnmarshalPlacementDeleteRecord)
+	roundTrip(t, PlacementRequestRecord{
+		Classes: []string{"recent-data", "archival-data"}, Operation: PlacementRequestPlace,
+		TargetBackend: 42, Attempts: 2, LastAttempt: 100, NotBefore: 200, LastError: "temporary",
+	}, UnmarshalPlacementRequestRecord)
+	roundTrip(t, RepackLineageRecord{RunID: id3, Kind: LineagePromotion}, UnmarshalRepackLineageRecord)
+	roundTrip(t, PromotionEligibilityRecord{SurvivalUntil: 500, EvaluatedAt: 100, Indefinite: false}, UnmarshalPromotionEligibilityRecord)
 	for _, invalid := range []PlacementRecord{
 		{State: PlacementState(99)},
 		{State: PlacementLive, PlacedAt: 1},

@@ -208,6 +208,73 @@ type KeepReason struct {
 	} `json:"counters"`
 }
 
+type RetentionHorizon struct {
+	Until      time.Time
+	Indefinite bool
+}
+
+// PolicyRetentionHorizon returns the time guarantee established by the
+// reasons ApplyPolicy kept a snapshot. Finite count buckets intentionally do
+// not imply a duration because future snapshots can displace them immediately.
+func PolicyRetentionHorizon(reason KeepReason, policy ExpirePolicy) (RetentionHorizon, bool) {
+	if reason.Snapshot == nil {
+		return RetentionHorizon{}, false
+	}
+	for _, tags := range policy.Tags {
+		if reason.Snapshot.HasTags(tags) {
+			return RetentionHorizon{Indefinite: true}, true
+		}
+	}
+	match := func(prefix string) bool {
+		for _, value := range reason.Matches {
+			if strings.HasPrefix(value, prefix) || strings.HasPrefix(value, "oldest "+prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, bucket := range []struct {
+		count  int
+		reason string
+	}{
+		{policy.Last, "last snapshot"}, {policy.Minutely, "minutely snapshot"},
+		{policy.Hourly, "hourly snapshot"}, {policy.Daily, "daily snapshot"},
+		{policy.Weekly, "weekly snapshot"}, {policy.Monthly, "monthly snapshot"},
+		{policy.QuarterYearly, "quarter-yearly snapshot"},
+		{policy.HalfYearly, "half-yearly snapshot"}, {policy.Yearly, "yearly snapshot"},
+	} {
+		if bucket.count == -1 && match(bucket.reason) {
+			return RetentionHorizon{Indefinite: true}, true
+		}
+	}
+	var horizon RetentionHorizon
+	setDuration := func(duration Duration) {
+		until := reason.Snapshot.Time.AddDate(duration.Years, duration.Months, duration.Days).
+			Add(time.Duration(duration.Hours) * time.Hour)
+		if until.After(horizon.Until) {
+			horizon.Until = until
+		}
+	}
+	if !policy.Within.Zero() && match("within ") {
+		setDuration(policy.Within)
+	}
+	for _, bucket := range []struct {
+		duration Duration
+		reason   string
+	}{
+		{policy.WithinMinutely, "minutely within"}, {policy.WithinHourly, "hourly within"},
+		{policy.WithinDaily, "daily within"}, {policy.WithinWeekly, "weekly within"},
+		{policy.WithinMonthly, "monthly within"},
+		{policy.WithinQuarterYearly, "quarter-yearly within"},
+		{policy.WithinHalfYearly, "half-yearly within"}, {policy.WithinYearly, "yearly within"},
+	} {
+		if !bucket.duration.Zero() && match(bucket.reason) {
+			setDuration(bucket.duration)
+		}
+	}
+	return horizon, !horizon.Until.IsZero()
+}
+
 // ApplyPolicy returns the snapshots from list that are to be kept and removed
 // according to the policy p. list is sorted in the process. reasons contains
 // the reasons to keep each snapshot, it is in the same order as keep.

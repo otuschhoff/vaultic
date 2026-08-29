@@ -12,17 +12,24 @@ import (
 )
 
 type PlacementBackend struct {
-	ID            string
-	Hash          uint64
-	Role          string
-	Offsite       bool
-	FailureDomain string
+	ID                   string
+	Hash                 uint64
+	Role                 string
+	Offsite              bool
+	FailureDomain        string
+	RetrievalClass       string
+	PricePerGBEgress     float64
+	MinRetentionSeconds  uint64
+	MaxBandwidthBytes    uint64
+	MaxRequestsPerSecond uint64
 }
 
 type DurabilityPolicy struct {
-	MinCopies  uint
-	MinDomains uint
-	MinOffsite uint
+	MinCopies                 uint
+	MinDomains                uint
+	MinOffsite                uint
+	OffsiteDeadline           int64
+	PromotionCrossoverSeconds int64
 }
 
 type PlacementModel struct {

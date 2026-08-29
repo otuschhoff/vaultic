@@ -511,6 +511,12 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalBackendPackRecord(value)
 	case KeyPlacementDeleteQueue:
 		_, err = UnmarshalPlacementDeleteRecord(value)
+	case KeyPlacementRequest:
+		_, err = UnmarshalPlacementRequestRecord(value)
+	case KeyRepackLineage:
+		_, err = UnmarshalRepackLineageRecord(value)
+	case KeyPromotionEligibility:
+		_, err = UnmarshalPromotionEligibilityRecord(value)
 	case KeySnapshotCommit:
 		var record SnapshotCommitRecord
 		record, err = UnmarshalSnapshotCommitRecord(value)

@@ -30,6 +30,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/hooks"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
@@ -875,6 +876,20 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	// successful backups with a durable snapshot.
 	if werr != nil {
 		return werr
+	}
+	if authoritativeEngine != nil && !opts.DryRun {
+		model, placementErr := indexMaintenancePlacementModel(repo)
+		if placementErr == nil {
+			_, placementErr = maintenance.PlanPlacement(ctx, authoritativeEngine.SchemaStore(), maintenance.PlacementSchedulerOptions{Model: model, Now: time.Now()})
+		}
+		if placementErr == nil {
+			_, placementErr = maintenance.ExecutePlacement(ctx, authoritativeEngine.SchemaStore(), repositoryPlacementActions{repo: repo, printer: printer}, maintenance.PlacementWorkerOptions{
+				Model: model, Now: time.Now(), MaxRequests: 1,
+			})
+		}
+		if placementErr != nil {
+			printer.E("placement scheduler tick failed: %v\n", placementErr)
+		}
 	}
 	if err := telemetry.Publish(ctx, telemetry.Config{
 		PrometheusURL:  gopts.PrometheusURL,

@@ -78,25 +78,29 @@ type Config struct {
 }
 
 type PlacementBackend struct {
-	ID                  string  `json:"id"`
-	Role                string  `json:"role,omitempty"`
-	Offsite             bool    `json:"offsite,omitempty"`
-	FailureDomain       string  `json:"failure_domain,omitempty"`
-	CapacityBytes       uint64  `json:"capacity_bytes,omitempty"`
-	PricePerGBMonth     float64 `json:"price_per_gb_month,omitempty"`
-	PricePerGBEgress    float64 `json:"price_per_gb_egress,omitempty"`
-	PricePer1KRequests  float64 `json:"price_per_1k_requests,omitempty"`
-	MinRetentionSeconds uint64  `json:"min_retention_seconds,omitempty"`
-	RetrievalClass      string  `json:"retrieval_class,omitempty"`
-	MaxBandwidthBytes   uint64  `json:"max_bandwidth_bytes,omitempty"`
-	ObjectOverheadBytes uint64  `json:"object_overhead_bytes,omitempty"`
+	ID                   string  `json:"id"`
+	Location             string  `json:"location,omitempty"`
+	Role                 string  `json:"role,omitempty"`
+	Offsite              bool    `json:"offsite,omitempty"`
+	FailureDomain        string  `json:"failure_domain,omitempty"`
+	CapacityBytes        uint64  `json:"capacity_bytes,omitempty"`
+	PricePerGBMonth      float64 `json:"price_per_gb_month,omitempty"`
+	PricePerGBEgress     float64 `json:"price_per_gb_egress,omitempty"`
+	PricePer1KRequests   float64 `json:"price_per_1k_requests,omitempty"`
+	MinRetentionSeconds  uint64  `json:"min_retention_seconds,omitempty"`
+	RetrievalClass       string  `json:"retrieval_class,omitempty"`
+	MaxBandwidthBytes    uint64  `json:"max_bandwidth_bytes,omitempty"`
+	MaxRequestsPerSecond uint64  `json:"max_requests_per_second,omitempty"`
+	ObjectOverheadBytes  uint64  `json:"object_overhead_bytes,omitempty"`
+	TargetPackSizeBytes  uint64  `json:"target_pack_size_bytes,omitempty"`
 }
 
 type PlacementPolicy struct {
-	MinCopies       uint  `json:"min_copies,omitempty"`
-	MinDomains      uint  `json:"min_domains,omitempty"`
-	MinOffsite      uint  `json:"min_offsite,omitempty"`
-	OffsiteDeadline int64 `json:"offsite_deadline_seconds,omitempty"`
+	MinCopies                 uint  `json:"min_copies,omitempty"`
+	MinDomains                uint  `json:"min_domains,omitempty"`
+	MinOffsite                uint  `json:"min_offsite,omitempty"`
+	OffsiteDeadline           int64 `json:"offsite_deadline_seconds,omitempty"`
+	PromotionCrossoverSeconds int64 `json:"promotion_crossover_seconds,omitempty"`
 }
 
 // PrunePlan records the immutable candidates produced after prune has uploaded

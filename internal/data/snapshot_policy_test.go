@@ -300,3 +300,22 @@ func TestApplyPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyRetentionHorizon(t *testing.T) {
+	snapshot := &data.Snapshot{Time: time.Date(2025, 1, 2, 3, 0, 0, 0, time.UTC)}
+	reason := data.KeepReason{Snapshot: snapshot, Matches: []string{"last snapshot", "daily within 180d"}}
+	horizon, known := data.PolicyRetentionHorizon(reason, data.ExpirePolicy{Last: 5, WithinDaily: data.Duration{Days: 180}})
+	if !known || horizon.Indefinite || !horizon.Until.Equal(snapshot.Time.AddDate(0, 0, 180)) {
+		t.Fatalf("horizon = %#v, known=%v", horizon, known)
+	}
+
+	reason.Matches = []string{"last snapshot"}
+	if _, known = data.PolicyRetentionHorizon(reason, data.ExpirePolicy{Last: 5}); known {
+		t.Fatal("finite count policy produced a time guarantee")
+	}
+
+	horizon, known = data.PolicyRetentionHorizon(reason, data.ExpirePolicy{Last: -1})
+	if !known || !horizon.Indefinite {
+		t.Fatalf("unlimited horizon = %#v, known=%v", horizon, known)
+	}
+}

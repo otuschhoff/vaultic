@@ -36,13 +36,15 @@ const MaxPackSize = 4 * 1024 * 1024 * 1024
 
 // Repository is used to access a repository in a backend.
 type Repository struct {
-	be     backend.Backend
-	cfg    vaultic.Config
-	key    *crypto.Key
-	keyID  vaultic.ID
-	idx    *index.MasterIndex
-	engine enginepkg.Engine
-	cache  *cache.Cache
+	be                     backend.Backend
+	cfg                    vaultic.Config
+	key                    *crypto.Key
+	keyID                  vaultic.ID
+	idx                    *index.MasterIndex
+	engine                 enginepkg.Engine
+	cache                  *cache.Cache
+	placementBackends      map[uint64]backend.Backend
+	ownedPlacementBackends []backend.Backend
 
 	opts Options
 
@@ -216,10 +218,11 @@ func New(be backend.Backend, opts Options) (*Repository, error) {
 	}
 
 	repo := &Repository{
-		be:          be,
-		opts:        opts,
-		idx:         index.NewMasterIndex(),
-		packerCount: defaultPackerCount,
+		be:                be,
+		opts:              opts,
+		idx:               index.NewMasterIndex(),
+		packerCount:       defaultPackerCount,
+		placementBackends: make(map[uint64]backend.Backend),
 	}
 	repo.engine = enginepkg.NewLegacyEngine(repo.idx)
 
@@ -330,12 +333,13 @@ func (r *Repository) tierPolicy() enginepkg.TierPolicy {
 		policy.Backends = append(policy.Backends, enginepkg.PlacementBackendPolicy{
 			ID: backend.ID, Hash: backend.Hash, Role: backend.Role,
 			Offsite: backend.Offsite, FailureDomain: backend.FailureDomain,
-			MinRetention:        backend.MinRetention(),
-			PricePerGBMonth:     backend.PricePerGBMonth,
-			PricePerGBEgress:    backend.PricePerGBEgress,
-			PricePer1KRequests:  backend.PricePer1KRequests,
-			MaxBandwidthBytes:   backend.MaxBandwidthBytes,
-			ObjectOverheadBytes: backend.ObjectOverheadBytes,
+			MinRetention:         backend.MinRetention(),
+			PricePerGBMonth:      backend.PricePerGBMonth,
+			PricePerGBEgress:     backend.PricePerGBEgress,
+			PricePer1KRequests:   backend.PricePer1KRequests,
+			MaxBandwidthBytes:    backend.MaxBandwidthBytes,
+			MaxRequestsPerSecond: backend.MaxRequestsPerSecond,
+			ObjectOverheadBytes:  backend.ObjectOverheadBytes,
 		})
 	}
 	return policy
@@ -468,6 +472,21 @@ func (r *Repository) Cache() *cache.Cache {
 // plumbing such as hot/cold metadata mirroring).
 func (r *Repository) Backend() backend.Backend {
 	return r.be
+}
+
+// AttachPlacementBackend makes a configured placement location addressable by
+// the scheduler and read router. The repository owns and closes the backend.
+func (r *Repository) AttachPlacementBackend(hash uint64, placement backend.Backend) {
+	if hash == 0 || placement == nil {
+		return
+	}
+	r.placementBackends[hash] = placement
+	r.ownedPlacementBackends = append(r.ownedPlacementBackends, placement)
+}
+
+func (r *Repository) placementBackend(hash uint64) (backend.Backend, bool) {
+	placement, found := r.placementBackends[hash]
+	return placement, found
 }
 
 // HotCold returns the hot and cold backends if this repository is a hot/cold
@@ -603,7 +622,7 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 			buf = buf[:blob.Blob.Length]
 		}
 
-		_, err := backend.ReadAt(ctx, r.be, h, int64(blob.Blob.Offset), buf)
+		_, err := r.readPackAtFromPlacements(ctx, h, int64(blob.Blob.Offset), buf)
 		if err != nil {
 			debug.Log("error loading blob %v: %v", blob, err)
 			lastError = err
@@ -1421,7 +1440,11 @@ func (r *Repository) Delete(ctx context.Context) error {
 
 // Close closes the repository by closing the backend.
 func (r *Repository) Close() error {
-	return errors.Join(r.Engine().Close(), r.be.Close())
+	errs := []error{r.Engine().Close(), r.be.Close()}
+	for _, placement := range r.ownedPlacementBackends {
+		errs = append(errs, placement.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // saveBlob saves a blob of type t into the repository.
@@ -1513,7 +1536,7 @@ func (r *Repository) blobsInPack(packID vaultic.ID, handles []vaultic.BlobHandle
 }
 
 func (r *Repository) loadBlobsFromPack(ctx context.Context, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
-	return streamPack(ctx, r.be.Load, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
+	return streamPack(ctx, r.loadPackFromPlacements, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
 }
 
 func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {

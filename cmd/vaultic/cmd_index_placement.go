@@ -1,0 +1,160 @@
+package main
+
+import (
+	"context"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/ui"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
+)
+
+type indexPlacementOptions struct {
+	Daemon           indexDaemonOptions
+	Unsatisfied      bool
+	Overdue          bool
+	PendingPromotion bool
+	Explain          string
+	NoFail           bool
+	DryRun           bool
+	Execute          bool
+	MaxRequests      uint64
+	MaxBytes         uint64
+}
+
+func newIndexPlacementCommand(globalOptions *global.Options) *cobra.Command {
+	var options indexPlacementOptions
+	command := &cobra.Command{
+		Use:               "placement",
+		Short:             "Report placement durability and scheduler queue state",
+		Long:              "Report pack placement state, unsatisfied durability, overdue offsite deadlines, and pending promotions. The JSON output is intended for monitoring probes." + indexExitStatus,
+		Args:              cobra.NoArgs,
+		DisableAutoGenTag: true,
+		RunE: func(command *cobra.Command, _ []string) error {
+			result, err := runIndexPlacement(command.Context(), options, *globalOptions, globalOptions.Term)
+			if globalOptions.JSON {
+				globalOptions.Term.Print(ui.ToJSONString(result))
+			}
+			return err
+		},
+	}
+	options.Daemon.AddFlags(command.Flags())
+	command.Flags().BoolVar(&options.Unsatisfied, "unsatisfied", false, "show only packs below the durability predicate")
+	command.Flags().BoolVar(&options.Overdue, "overdue", false, "show only packs past their offsite deadline")
+	command.Flags().BoolVar(&options.PendingPromotion, "pending-promotion", false, "show only packs that require archival promotion")
+	command.Flags().StringVar(&options.Explain, "explain", "", "show placement reasoning for one pack ID")
+	command.Flags().BoolVar(&options.NoFail, "no-fail", false, "return success even when packs are overdue")
+	command.Flags().BoolVar(&options.DryRun, "dry-run", false, "report scheduler requests without writing rq records")
+	command.Flags().BoolVar(&options.Execute, "execute", false, "process queued placement work after planning")
+	command.Flags().Uint64Var(&options.MaxRequests, "max-requests", 0, "process at most this many placement requests (0 is unlimited)")
+	command.Flags().Uint64Var(&options.MaxBytes, "max-bytes", 0, "move at most this many pack bytes (0 is unlimited)")
+	return command
+}
+
+type repositoryPlacementActions struct {
+	repo    *repository.Repository
+	printer vaultic.Printer
+}
+
+func (actions repositoryPlacementActions) Place(ctx context.Context, packID vaultic.ID, backend maintenance.PlacementBackend) error {
+	return actions.repo.PlacePack(ctx, packID, backend.Hash)
+}
+
+func (actions repositoryPlacementActions) Promote(ctx context.Context, packID vaultic.ID, backend maintenance.PlacementBackend) error {
+	_, err := repository.PromotePack(ctx, actions.repo, packID, backend.Hash, actions.printer)
+	return err
+}
+
+func (actions repositoryPlacementActions) Evict(ctx context.Context, packID vaultic.ID, backend maintenance.PlacementBackend) error {
+	return actions.repo.EvictPack(ctx, packID, backend.Hash)
+}
+
+func runIndexPlacement(ctx context.Context, options indexPlacementOptions, globalOptions global.Options, term ui.Terminal) (maintenance.PlacementSchedulerResult, error) {
+	var result maintenance.PlacementSchedulerResult
+	config, err := options.Daemon.config("")
+	if err != nil {
+		return result, err
+	}
+	ctx = repository.WithDaemonOptions(ctx, config)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	var repo *repository.Repository
+	var unlock func()
+	if options.DryRun {
+		ctx, repo, unlock, err = openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
+	} else {
+		ctx, repo, unlock, err = openWithExclusiveLock(ctx, globalOptions, false, printer)
+	}
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
+	if err := requireSlateDBRepository(repo); err != nil {
+		return result, err
+	}
+	store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
+	if err != nil {
+		return result, err
+	}
+	defer closeStore()
+	model, err := indexMaintenancePlacementModel(repo)
+	if err != nil {
+		return result, err
+	}
+	result, err = maintenance.PlanPlacement(ctx, store, maintenance.PlacementSchedulerOptions{Model: model, Now: time.Now(), DryRun: options.DryRun})
+	if err != nil {
+		return result, err
+	}
+	if options.Execute && !options.DryRun {
+		worker, workerErr := maintenance.ExecutePlacement(ctx, store, repositoryPlacementActions{repo: repo, printer: printer}, maintenance.PlacementWorkerOptions{
+			Model: model, Now: time.Now(), MaxRequests: options.MaxRequests, MaxBytes: options.MaxBytes,
+		})
+		result.Worker = &worker
+		if workerErr != nil {
+			return result, workerErr
+		}
+		result, err = maintenance.PlanPlacement(ctx, store, maintenance.PlacementSchedulerOptions{Model: model, Now: time.Now()})
+		result.Worker = &worker
+		if err != nil {
+			return result, err
+		}
+	}
+	result.Statuses = filterPlacementStatuses(result.Statuses, options)
+	if !globalOptions.JSON {
+		printer.P("packs %d; unsatisfied %d; overdue %d; pending promotion %d; scheduler requests %d\n", result.PacksScanned, result.Unsatisfied, result.Overdue, result.PendingPromotion, result.RequestsWritten)
+		if result.Worker != nil {
+			printer.P("worker attempted %d; placed %d; promoted %d; evicted %d; failed %d; deferred %d\n", result.Worker.Attempted, result.Worker.Placed, result.Worker.Promoted, result.Worker.Evicted, result.Worker.Failed, result.Worker.Deferred)
+		}
+		for _, status := range result.Statuses {
+			printer.P("  %s class=%s durable=%v overdue=%v live=%v missing=%v\n", status.PackID, status.Class, status.Durable, status.Overdue, status.LiveBackends, status.MissingBackends)
+		}
+	}
+	if result.Overdue != 0 && !options.NoFail {
+		return result, errIndexDifferences
+	}
+	return result, nil
+}
+
+func filterPlacementStatuses(input []maintenance.PlacementStatus, options indexPlacementOptions) []maintenance.PlacementStatus {
+	filtered := input[:0]
+	for _, status := range input {
+		if options.Explain != "" && status.PackID != options.Explain {
+			continue
+		}
+		if options.Unsatisfied && status.Durable {
+			continue
+		}
+		if options.Overdue && !status.Overdue {
+			continue
+		}
+		if options.PendingPromotion && !status.PendingPromotion {
+			continue
+		}
+		filtered = append(filtered, status)
+	}
+	return filtered
+}

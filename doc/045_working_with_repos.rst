@@ -15,6 +15,68 @@
 Working with repositories
 #########################
 
+Placement scheduling
+====================
+
+SlateDB-authoritative repositories can declare physical placement backends in
+the repository config. The primary backend may omit ``location`` to reuse the
+repository opened with ``--repo``. Additional locations are opened with the
+same backend registry and environment-based credentials as normal repository
+locations. Do not put credentials in the repository config.
+
+.. code-block:: json
+
+        {
+            "placement_backends": [
+                {"id": "local", "role": "primary", "failure_domain": "office"},
+                {"id": "warm", "location": "s3:s3.example/warm", "role": "primary", "offsite": true, "failure_domain": "cloud-a", "retrieval_class": "standard", "max_bandwidth_bytes": 104857600, "max_requests_per_second": 20},
+                {"id": "archive", "location": "s3:s3.example/archive", "role": "archival", "offsite": true, "failure_domain": "cloud-b", "retrieval_class": "deep-archive", "min_retention_seconds": 15552000, "target_pack_size_bytes": 536870912}
+            ],
+            "placement_policy": {
+                "min_copies": 2,
+                "min_domains": 2,
+                "min_offsite": 1,
+                "offsite_deadline_seconds": 14400,
+                "promotion_crossover_seconds": 691200
+            }
+        }
+
+A pack is durable only when its live placements satisfy all three minima:
+copy count, distinct failure-domain count, and offsite count. Pending and failed
+placements do not count. Eviction is refused when evaluating the placement set
+after removal would violate any minimum.
+
+Every successful backup records missing placement work and performs one bounded
+best-effort scheduler action. A placement outage is recorded for retry and does
+not turn an already durable snapshot into a failed backup. Operators can inspect
+or drain the queue explicitly:
+
+.. code-block:: console
+
+        $ vaultic index placement --unsatisfied --json
+        $ vaultic index placement --overdue --json
+        $ vaultic index placement --pending-promotion --json
+        $ vaultic index placement --explain PACK-ID --json
+        $ vaultic index placement --execute --max-requests 100
+
+The command exits non-zero while an offsite deadline is overdue unless
+``--no-fail`` is supplied. Work is ordered by offsite deadline, then promotion,
+then eviction. Backend request and bandwidth limits defer excess work without
+removing it from the durable queue.
+
+Recent data targets the primary and a non-archival offsite backend. Archival
+commitment is deferred until reachability accounting has observed surviving
+bytes beyond ``promotion_crossover_seconds`` (eight days by default when no
+floor is configured). Promotion decrypts and repacks only retained blobs into a
+new pack ID on the archival backend; it never copies the old pack object. The
+new pack and blob locations are published before the source can become
+delete-pending, and durable lineage makes an interrupted promotion resumable.
+
+A pack that becomes unreachable before its promotion trigger is discarded by
+normal garbage collection and is never written to the archival backend. This is
+intentional: the warm offsite placement supplies durability during the deferral
+window without incurring the archival backend's minimum-retention charge.
+
 Listing all snapshots
 =====================
 

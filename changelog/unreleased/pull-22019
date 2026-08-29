@@ -1,0 +1,28 @@
+Enhancement: Add resumable placement scheduling and archival promotion
+
+Vaultic now schedules pack placement from named metadata, recent-data,
+archival-data, and cache policies. Missing placements are persisted in the
+SlateDB `rq:` deadline queue with concrete target backends, retry state, and
+non-zero overdue monitoring through `vaultic index placement`.
+
+Successful backups enqueue placement work and perform one bounded best-effort
+action without failing the backup when a placement backend is unavailable.
+Operators can drain more work with `index placement --execute`; backend
+bandwidth and request-rate limits defer excess work, and interrupted workers
+resume from durable request and placement records.
+
+Placement backends can declare physical locations, retrieval and cost hints,
+minimum retention, request and bandwidth limits, and target pack sizes. Reads
+prefer the cheapest live placement, warm only the selected backend, and fall
+back to another live placement on failure. Eviction runs last and is refused if
+the resulting placement set would violate copy, failure-domain, or offsite
+requirements.
+
+Surviving data is promoted by decrypting and repacking retained blobs into new,
+archival-sized pack IDs on the archival backend. Successor publication records
+blob locations, placement, typed lineage, and history atomically before the
+source becomes delete-pending. A crash after publication resumes from lineage
+without writing another replacement. Data that becomes unreachable before the
+promotion crossover is never sent to archival storage.
+
+https://github.com/vaultic/vaultic/pull/22019

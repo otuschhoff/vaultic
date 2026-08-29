@@ -16,6 +16,7 @@ const Version byte = 0
 const MaxPathIndexPathBytes = 4096
 
 var ErrMalformed = errors.New("malformed slatedb schema record")
+var ErrPlacementObsolete = errors.New("placement request is obsolete")
 
 type ID [32]byte
 
@@ -54,6 +55,9 @@ const (
 	KeyPlacementDeleteQueue
 	KeySnapshotCommit
 	KeyPathVersion
+	KeyPlacementRequest
+	KeyRepackLineage
+	KeyPromotionEligibility
 )
 
 // HistoryGranularity names a rollup bucket width. The values are part of the
@@ -379,6 +383,37 @@ func PlacementDeleteQueuePrefix(before int64) []byte {
 	return key
 }
 
+func PlacementRequestKey(deadlineUnixSeconds uint64, pack ID) []byte {
+	key := make([]byte, 3+8+1+32)
+	copy(key, "rq:")
+	binary.BigEndian.PutUint64(key[3:], deadlineUnixSeconds)
+	key[11] = ':'
+	copy(key[12:], pack[:])
+	return key
+}
+
+func PlacementRequestPrefix() []byte { return []byte("rq:") }
+
+func RepackLineageKey(source, successor ID) []byte {
+	key := make([]byte, 3+32+1+32)
+	copy(key, "rl:")
+	copy(key[3:], source[:])
+	key[35] = ':'
+	copy(key[36:], successor[:])
+	return key
+}
+
+func RepackLineagePrefix(source ID) []byte {
+	key := make([]byte, 3+32+1)
+	copy(key, "rl:")
+	copy(key[3:], source[:])
+	key[35] = ':'
+	return key
+}
+
+func PromotionEligibilityKey(pack ID) []byte { return idKey("pe:", pack) }
+func PromotionEligibilityPrefix() []byte     { return []byte("pe:") }
+
 func NextEventSequenceKey() []byte { return []byte("meta:next-event-seq") }
 
 // HistoryRawFloorKey records the earliest raw event time still retained, so a
@@ -507,6 +542,17 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		parsed.DeleteAfter = int64(binary.BigEndian.Uint64(key[3:11]))
 		copy(parsed.ID[:], key[12:44])
 		parsed.Backend = binary.BigEndian.Uint64(key[45:])
+	case len(key) == 44 && string(key[:3]) == "rq:" && key[11] == ':':
+		parsed.Kind = KeyPlacementRequest
+		parsed.EventTime = binary.BigEndian.Uint64(key[3:11])
+		copy(parsed.ID[:], key[12:])
+	case len(key) == 68 && string(key[:3]) == "rl:" && key[35] == ':':
+		parsed.Kind = KeyRepackLineage
+		copy(parsed.ID[:], key[3:35])
+		copy(parsed.SecondID[:], key[36:])
+	case len(key) == 35 && string(key[:3]) == "pe:":
+		parsed.Kind = KeyPromotionEligibility
+		copy(parsed.ID[:], key[3:])
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind

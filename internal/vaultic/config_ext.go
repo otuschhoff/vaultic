@@ -188,9 +188,18 @@ func (c Config) ValidateExtensions() error {
 			return errors.Errorf("duplicate placement backend id %q", backend.ID)
 		}
 		seenBackends[backend.ID] = struct{}{}
+		if backend.Location != "" && strings.TrimSpace(backend.Location) == "" {
+			return errors.Errorf("placement backend %q has an empty location", backend.ID)
+		}
 	}
 	if c.PlacementPolicy.MinOffsite > c.PlacementPolicy.MinCopies && c.PlacementPolicy.MinCopies != 0 {
 		return errors.New("placement min_offsite must not exceed min_copies")
+	}
+	if c.PlacementPolicy.OffsiteDeadline < 0 {
+		return errors.New("placement offsite_deadline_seconds must not be negative")
+	}
+	if c.PlacementPolicy.PromotionCrossoverSeconds < 0 {
+		return errors.New("placement promotion_crossover_seconds must not be negative")
 	}
 	return nil
 }

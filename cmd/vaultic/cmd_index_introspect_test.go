@@ -175,6 +175,46 @@ func TestBackendsGoldenOutput(t *testing.T) {
 	}
 }
 
+func TestPlacementGoldenOutput(t *testing.T) {
+	result := maintenance.PlacementSchedulerResult{
+		SchemaVersion:             maintenance.IntrospectSchemaVersion,
+		PacksScanned:              3,
+		Unsatisfied:               1,
+		Overdue:                   1,
+		PendingPromotion:          1,
+		OldestUnsatisfiedDeadline: 1_700_000_000_000_000_000,
+		RequestsWritten:           2,
+		Worker: &maintenance.PlacementWorkerResult{
+			RequestsScanned: 2, Attempted: 1, Placed: 1, Deferred: 1, BytesMoved: 4096,
+		},
+		Statuses: []maintenance.PlacementStatus{{
+			PackID: "012345", PackType: "data", Class: "recent-data",
+			TargetBackends: []string{"local", "warm"}, LiveBackends: []string{"local"},
+			MissingBackends: []string{"warm"}, Durable: false, Overdue: true,
+			Deadline: 1_700_000_000_000_000_000,
+		}},
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	path := filepath.Join("testdata", "index_placement.json")
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	expected, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden %s (set UPDATE_GOLDEN=1 to create it): %v", path, err)
+	}
+	if string(expected) != string(encoded) {
+		t.Fatalf("golden %s mismatch:\nwant:\n%s\ngot:\n%s", path, expected, encoded)
+	}
+}
+
 // TestLegacyRepositoryErrorIsIdentifiable lets callers and tests distinguish
 // "this repository cannot answer" from an incidental failure.
 func TestLegacyRepositoryErrorIsIdentifiable(t *testing.T) {

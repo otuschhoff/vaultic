@@ -43,18 +43,19 @@ type TierPolicy struct {
 }
 
 type PlacementBackendPolicy struct {
-	ID                  string
-	Hash                uint64
-	Role                string
-	Offsite             bool
-	FailureDomain       string
-	StorageClass        string
-	MinRetention        time.Duration
-	PricePerGBMonth     float64
-	PricePerGBEgress    float64
-	PricePer1KRequests  float64
-	MaxBandwidthBytes   uint64
-	ObjectOverheadBytes uint64
+	ID                   string
+	Hash                 uint64
+	Role                 string
+	Offsite              bool
+	FailureDomain        string
+	StorageClass         string
+	MinRetention         time.Duration
+	PricePerGBMonth      float64
+	PricePerGBEgress     float64
+	PricePer1KRequests   float64
+	MaxBandwidthBytes    uint64
+	MaxRequestsPerSecond uint64
+	ObjectOverheadBytes  uint64
 }
 
 // tierFor maps a pack type onto the tier its bytes were actually routed to.
@@ -159,6 +160,25 @@ func (policy TierPolicy) placementRecords(record schema.PackRecord, now time.Tim
 	return placements
 }
 
+func (policy TierPolicy) placementRecordFor(record schema.PackRecord, backendHash uint64, now time.Time) (schema.PlacementRecord, bool) {
+	for _, backend := range policy.Backends {
+		if backend.Hash != backendHash {
+			continue
+		}
+		placement := schema.PlacementRecord{
+			State: schema.PlacementLive, StorageClass: backend.StorageClass,
+			PlacedAt: now.UnixNano(), PlacementTimeKnown: true,
+			Bytes: record.PhysicalSize, RetentionSource: schema.RetentionUnknown,
+		}
+		if backend.MinRetention > 0 {
+			placement.MinRetentionUntil = now.Add(backend.MinRetention).UnixNano()
+			placement.RetentionSource = schema.RetentionConfig
+		}
+		return placement, true
+	}
+	return schema.PlacementRecord{}, false
+}
+
 func (policy TierPolicy) backendByRole(role string) (PlacementBackendPolicy, bool) {
 	for _, backend := range policy.Backends {
 		if backend.Role == role {
@@ -187,6 +207,8 @@ type DaemonEngine struct {
 	now              func() time.Time
 	runID            schema.ID
 	repackSources    []schema.ID
+	lineageKind      schema.RepackLineageKind
+	promotionTarget  uint64
 }
 
 var _ LegacyIndexEngine = (*DaemonEngine)(nil)
@@ -224,6 +246,16 @@ func (engine *DaemonEngine) SetRepackContext(runID schema.ID, sources []schema.I
 	engine.mu.Lock()
 	engine.runID = runID
 	engine.repackSources = append([]schema.ID(nil), sources...)
+	engine.lineageKind = schema.LineageRepack
+	engine.mu.Unlock()
+}
+
+func (engine *DaemonEngine) SetPromotionContext(runID schema.ID, sources []schema.ID, targetBackend uint64) {
+	engine.mu.Lock()
+	engine.runID = runID
+	engine.repackSources = append([]schema.ID(nil), sources...)
+	engine.lineageKind = schema.LineagePromotion
+	engine.promotionTarget = targetBackend
 	engine.mu.Unlock()
 }
 
@@ -231,14 +263,14 @@ func (engine *DaemonEngine) SetRepackContext(runID schema.ID, sources []schema.I
 // ordinary creations again.
 func (engine *DaemonEngine) ClearRepackContext() {
 	engine.mu.Lock()
-	engine.runID, engine.repackSources = schema.ID{}, nil
+	engine.runID, engine.repackSources, engine.lineageKind, engine.promotionTarget = schema.ID{}, nil, 0, 0
 	engine.mu.Unlock()
 }
 
-func (engine *DaemonEngine) repackContext() (schema.ID, []schema.ID) {
+func (engine *DaemonEngine) repackContext() (schema.ID, []schema.ID, schema.RepackLineageKind, uint64) {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	return engine.runID, append([]schema.ID(nil), engine.repackSources...)
+	return engine.runID, append([]schema.ID(nil), engine.repackSources...), engine.lineageKind, engine.promotionTarget
 }
 
 func (engine *DaemonEngine) SchemaStore() *daemon.SchemaStore { return engine.store }
@@ -324,7 +356,18 @@ func (engine *DaemonEngine) storePack(ctx context.Context, id vaultic.ID, blobs 
 	if err != nil {
 		return err
 	}
-	published.RunID, published.PredecessorPackIDs = engine.repackContext()
+	runID, predecessors, lineageKind, promotionTarget := engine.repackContext()
+	published.RunID = runID
+	published.PredecessorPackIDs = predecessors
+	published.LineageKind = lineageKind
+	if published.LineageKind == schema.LineagePromotion {
+		placement, found := engine.tierPolicy().placementRecordFor(published.Record, promotionTarget, clock())
+		if !found {
+			return fmt.Errorf("promotion target %016x is not in the tier policy", promotionTarget)
+		}
+		published.Record.Tier = schema.TierCold
+		published.Placements = map[uint64]schema.PlacementRecord{promotionTarget: placement}
+	}
 	if err := engine.store.PublishPack(ctx, published); err != nil {
 		return fmt.Errorf("publish pack %s to slatedb: %w", id.Str(), err)
 	}

@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "packs_scanned": 3,
+  "unsatisfied": 1,
+  "overdue": 1,
+  "pending_promotion": 1,
+  "oldest_unsatisfied_deadline": 1700000000000000000,
+  "requests_written": 2,
+  "worker": {
+    "requests_scanned": 2,
+    "attempted": 1,
+    "placed": 1,
+    "promoted": 0,
+    "evicted": 0,
+    "failed": 0,
+    "deferred": 1,
+    "bytes_moved": 4096
+  },
+  "statuses": [
+    {
+      "pack_id": "012345",
+      "pack_type": "data",
+      "class": "recent-data",
+      "target_backends": [
+        "local",
+        "warm"
+      ],
+      "live_backends": [
+        "local"
+      ],
+      "missing_backends": [
+        "warm"
+      ],
+      "durable": false,
+      "overdue": true,
+      "deadline": 1700000000000000000,
+      "pending_promotion": false
+    }
+  ]
+}

@@ -3328,6 +3328,37 @@ trigger never reaches archival storage at all, and surviving data is promoted by
 repack into archival-sized packs, with every placement decision explainable from
 `--json` output.
 
+**Current implementation state (2026-08-29): complete.** The scheduler assigns
+the four named classes, persists concrete retryable work in deadline-ordered
+`rq:` records, and runs a bounded non-fatal tick after successful backups.
+`index placement --execute` drains additional work with backend request and
+bandwidth budgets; unchanged work is not rewritten, outages retain exponential
+retry state, and restarts resume from `rq:` plus `pl:`.
+
+Placement backend entries may name additive physical `location` values opened
+through the normal backend registry. The primary may omit a location to reuse
+the repository backend. Exact-pack warm placement is streamed through a bounded
+temporary file and is idempotent by destination size. Reads rank live,
+addressable placements by retrieval class and egress cost, warm only the chosen
+placement, and fall back on failure.
+
+Promotion is a retained-blob repack through `CopyBlobs`, directed to the target
+archival backend. Successor pack publication atomically records blob locations,
+the archival `pl:`/`bp:` pair, typed `rl:` lineage, and a `promoted` history
+event before the source becomes delete-pending. Typed lineage both keeps the
+successor in `archival-data` and makes a crash after publication idempotently
+resumable without another repack. Packs with unknown reachability or no live
+bytes are never promoted; known survivors become eligible after the configured
+crossover floor (eight days by default), so short-lived forgotten data never
+reaches archival storage.
+
+The monitoring command supports `--unsatisfied`, `--overdue`,
+`--pending-promotion`, `--explain`, and stable golden-tested JSON. Placement
+success, failure, promotion, and eviction emit backend-qualified history events.
+Eviction is queued last, waits out per-placement minimum retention, and is
+rechecked against the post-removal durability predicate immediately before
+physical deletion.
+
 ### Phase 16: Growth, churn, per-user/group attribution, and GDPR audit CLI
 
 **Goal:** expose growth time series, major subdirectory churn, top user/group storage ranking, and GDPR compliance inspection tools via the CLI.

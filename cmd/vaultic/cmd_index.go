@@ -121,6 +121,7 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexPacksCommand(globalOptions),
 		newIndexHistoryCommand(globalOptions),
 		newIndexBackendsCommand(globalOptions),
+		newIndexPlacementCommand(globalOptions),
 		newIndexFileHistoryCommand(globalOptions),
 		newIndexPathAtCommand(globalOptions),
 		newIndexPathIndexCommand(globalOptions),
@@ -404,9 +405,9 @@ func indexMaintenancePlacementModel(repo *repository.Repository) (maintenance.Pl
 	}
 	converted := maintenance.PlacementModel{
 		Policy: maintenance.DurabilityPolicy{
-			MinCopies:  model.Policy.MinCopies,
-			MinDomains: model.Policy.MinDomains,
-			MinOffsite: model.Policy.MinOffsite,
+			MinCopies: model.Policy.MinCopies, MinDomains: model.Policy.MinDomains,
+			MinOffsite: model.Policy.MinOffsite, OffsiteDeadline: model.Policy.OffsiteDeadline,
+			PromotionCrossoverSeconds: model.Policy.PromotionCrossoverSeconds,
 		},
 	}
 	converted.Backends = make([]maintenance.PlacementBackend, 0, len(model.Backends))
@@ -414,6 +415,9 @@ func indexMaintenancePlacementModel(repo *repository.Repository) (maintenance.Pl
 		converted.Backends = append(converted.Backends, maintenance.PlacementBackend{
 			ID: backend.ID, Hash: backend.Hash, Role: backend.Role,
 			Offsite: backend.Offsite, FailureDomain: backend.FailureDomain,
+			RetrievalClass: backend.RetrievalClass, PricePerGBEgress: backend.PricePerGBEgress,
+			MinRetentionSeconds: backend.MinRetentionSeconds,
+			MaxBandwidthBytes:   backend.MaxBandwidthBytes, MaxRequestsPerSecond: backend.MaxRequestsPerSecond,
 		})
 	}
 	return converted, nil

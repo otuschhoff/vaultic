@@ -482,6 +482,19 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if err := applyRepoConfig(s, gopts); err != nil {
 		return nil, err
 	}
+	for _, placement := range s.Config().PlacementBackends {
+		if placement.Location == "" {
+			continue
+		}
+		placementOptions := gopts
+		placementOptions.RepoHot = ""
+		placementBackend, openErr := innerOpenBackend(ctx, placement.Location, placementOptions, placementOptions.Extended, false, printer)
+		if openErr != nil {
+			_ = s.Close()
+			return nil, errors.Fatalf("open placement backend %q: %v", placement.ID, openErr)
+		}
+		s.AttachPlacementBackend(repository.PlacementBackendHash(placement.ID), placementBackend)
+	}
 
 	printRepositoryInfo(s, gopts, printer)
 

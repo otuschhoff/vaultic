@@ -11,6 +11,8 @@ import (
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
+	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -143,6 +145,7 @@ type forgetPlan struct {
 	remove    vaultic.IDSet
 	groups    []*ForgetGroup
 	protected int
+	horizons  map[vaultic.ID]repository.SnapshotRetentionHorizon
 }
 
 func (opts *ForgetOptions) AddFlags(f *pflag.FlagSet) {
@@ -207,7 +210,7 @@ func verifyForgetOptions(opts *ForgetOptions) error {
 // repository. Phase A and the exclusive phase-B revalidation both use this
 // same helper, so phase B can delete only IDs selected by both observations.
 func buildForgetPlan(ctx context.Context, opts ForgetOptions, repo vaultic.Repository, args []string) (forgetPlan, error) {
-	plan := forgetPlan{remove: vaultic.NewIDSet()}
+	plan := forgetPlan{remove: vaultic.NewIDSet(), horizons: make(map[vaultic.ID]repository.SnapshotRetentionHorizon)}
 	var snapshots data.Snapshots
 	now := time.Now()
 	isProtected := func(sn *data.Snapshot) bool {
@@ -269,6 +272,15 @@ func buildForgetPlan(ctx context.Context, opts ForgetOptions, repo vaultic.Repos
 			Reasons: asJSONKeeps(reasons),
 		}
 		plan.groups = append(plan.groups, group)
+		for _, reason := range reasons {
+			horizon, known := data.PolicyRetentionHorizon(reason, policy)
+			if !known {
+				continue
+			}
+			plan.horizons[*reason.Snapshot.ID()] = repository.SnapshotRetentionHorizon{
+				Until: horizon.Until, Indefinite: horizon.Indefinite,
+			}
+		}
 		for _, sn := range remove {
 			plan.remove.Insert(*sn.ID())
 		}
@@ -382,6 +394,11 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 	}
 	if len(failed) != 0 {
 		return ErrFailedToRemoveOneOrMoreSnapshots
+	}
+	if engine, ok := repo.Engine().(*metadataindex.DaemonEngine); ok {
+		if err := repository.RecordPromotionEligibility(ctx, repo, engine.SchemaStore(), plan.horizons, time.Now(), printer); err != nil {
+			return fmt.Errorf("record placement promotion eligibility: %w", err)
+		}
 	}
 
 	if len(plan.remove) != 0 && opts.Prune {

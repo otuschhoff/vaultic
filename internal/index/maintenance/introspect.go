@@ -590,6 +590,10 @@ func QueryPacks(ctx context.Context, store Store, filter PackFilter) (PacksResul
 		return result, err
 	}
 	result.PlacementRecordsMalformed = malformed
+	eligibility, err := loadPromotionEligibility(ctx, store)
+	if err != nil {
+		return result, err
+	}
 	result.Scanned = uint64(len(packs))
 
 	entries := make([]PackEntry, 0, len(packs))
@@ -598,7 +602,7 @@ func QueryPacks(ctx context.Context, store Store, filter PackFilter) (PacksResul
 		if len(packPlacements) == 0 {
 			result.UnknownPlacementPacks++
 		}
-		if !packMatchesFilter(id, record, packPlacements, filter, now) {
+		if !packMatchesFilter(id, record, packPlacements, eligibility[id], filter, now) {
 			countUndecidable(record, filter, &result)
 			continue
 		}
@@ -645,7 +649,7 @@ func validatePackFilter(filter PackFilter) error {
 	return nil
 }
 
-func packMatchesFilter(id vaultic.ID, record schema.PackRecord, placements placementSet, filter PackFilter, now time.Time) bool {
+func packMatchesFilter(id vaultic.ID, record schema.PackRecord, placements placementSet, eligibility schema.PromotionEligibilityRecord, filter PackFilter, now time.Time) bool {
 	_ = id
 	if filter.Backend != "" {
 		backend := backendHashForName(filter.Backend, filter.PlacementModel)
@@ -660,7 +664,7 @@ func packMatchesFilter(id vaultic.ID, record schema.PackRecord, placements place
 	if filter.NotOffsite && hasOffsitePlacement(placements, filter.PlacementModel) {
 		return false
 	}
-	if filter.PromotionDue && !promotionDue(record, placements, filter.PlacementModel, now) {
+	if filter.PromotionDue && !promotionDue(record, placements, eligibility, filter.PlacementModel, now) {
 		return false
 	}
 	if filter.Tier != "" && normalizedTier(record) != parseTierName(filter.Tier) {
@@ -798,11 +802,21 @@ func hasOffsitePlacement(placements placementSet, model PlacementModel) bool {
 	return false
 }
 
-func promotionDue(record schema.PackRecord, placements placementSet, model PlacementModel, now time.Time) bool {
-	if model.Policy.MinOffsite == 0 || !record.CreationTimeKnown || hasOffsitePlacement(placements, model) {
+func promotionDue(record schema.PackRecord, placements placementSet, eligibility schema.PromotionEligibilityRecord, model PlacementModel, now time.Time) bool {
+	if !archivalPromotionDue(record, eligibility, model, now) {
 		return false
 	}
-	return now.UnixNano() >= record.CreationTime
+	for backendHash, placement := range placements {
+		if placement.State != schema.PlacementLive {
+			continue
+		}
+		for _, backend := range model.Backends {
+			if backend.Hash == backendHash && backend.Role == "archival" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func placementStateName(state schema.PlacementState) string {

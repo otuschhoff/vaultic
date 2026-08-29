@@ -329,6 +329,177 @@ func UnmarshalPlacementDeleteRecord(data []byte) (PlacementDeleteRecord, error) 
 	return record, d.done()
 }
 
+type PlacementRequestRecord struct {
+	Classes       []string
+	Operation     PlacementRequestOperation
+	TargetBackend uint64
+	Attempts      uint32
+	LastAttempt   int64
+	NotBefore     int64
+	LastError     string
+}
+
+type RepackLineageRecord struct {
+	RunID ID
+	Kind  RepackLineageKind
+}
+
+type PromotionEligibilityRecord struct {
+	SurvivalUntil int64
+	EvaluatedAt   int64
+	Indefinite    bool
+}
+
+func (record PromotionEligibilityRecord) MarshalBinary() ([]byte, error) {
+	if record.EvaluatedAt <= 0 || (!record.Indefinite && record.SurvivalUntil <= 0) {
+		return nil, fmt.Errorf("%w: invalid promotion eligibility", ErrMalformed)
+	}
+	e := newEncoder()
+	e.i64(record.SurvivalUntil)
+	e.i64(record.EvaluatedAt)
+	e.bool(record.Indefinite)
+	return e.finish()
+}
+
+func UnmarshalPromotionEligibilityRecord(data []byte) (PromotionEligibilityRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PromotionEligibilityRecord{}, err
+	}
+	record := PromotionEligibilityRecord{}
+	if record.SurvivalUntil, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.EvaluatedAt, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.Indefinite, err = d.bool(); err != nil {
+		return record, err
+	}
+	if record.EvaluatedAt <= 0 || (!record.Indefinite && record.SurvivalUntil <= 0) {
+		return PromotionEligibilityRecord{}, fmt.Errorf("%w: invalid promotion eligibility", ErrMalformed)
+	}
+	return record, d.done()
+}
+
+type RepackLineageKind byte
+
+const (
+	LineageRepack RepackLineageKind = iota + 1
+	LineagePromotion
+)
+
+func (record RepackLineageRecord) MarshalBinary() ([]byte, error) {
+	e := newEncoder()
+	e.id(record.RunID)
+	if record.Kind != LineageRepack && record.Kind != LineagePromotion {
+		return nil, fmt.Errorf("%w: invalid repack lineage kind", ErrMalformed)
+	}
+	e.u8(byte(record.Kind))
+	return e.finish()
+}
+
+func UnmarshalRepackLineageRecord(data []byte) (RepackLineageRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return RepackLineageRecord{}, err
+	}
+	record := RepackLineageRecord{}
+	if record.RunID, err = d.id(); err != nil {
+		return record, err
+	}
+	value, err := d.u8()
+	record.Kind = RepackLineageKind(value)
+	if err != nil || (record.Kind != LineageRepack && record.Kind != LineagePromotion) {
+		return RepackLineageRecord{}, fmt.Errorf("%w: invalid repack lineage kind", ErrMalformed)
+	}
+	return record, d.done()
+}
+
+type PlacementRequestOperation byte
+
+const (
+	PlacementRequestPlace PlacementRequestOperation = iota + 1
+	PlacementRequestPromote
+	PlacementRequestEvict
+)
+
+func validPlacementRequestOperation(operation PlacementRequestOperation) bool {
+	return operation >= PlacementRequestPlace && operation <= PlacementRequestEvict
+}
+
+func (record PlacementRequestRecord) MarshalBinary() ([]byte, error) {
+	if len(record.Classes) == 0 {
+		return nil, fmt.Errorf("%w: placement request requires at least one class", ErrMalformed)
+	}
+	if !validPlacementRequestOperation(record.Operation) || record.TargetBackend == 0 {
+		return nil, fmt.Errorf("%w: placement request requires an operation and target backend", ErrMalformed)
+	}
+	e := newEncoder()
+	e.u32(uint32(len(record.Classes)))
+	for _, class := range record.Classes {
+		if class == "" {
+			return nil, fmt.Errorf("%w: empty placement request class", ErrMalformed)
+		}
+		if err := e.string(class); err != nil {
+			return nil, err
+		}
+	}
+	e.u8(byte(record.Operation))
+	e.u64(record.TargetBackend)
+	e.u32(record.Attempts)
+	e.i64(record.LastAttempt)
+	e.i64(record.NotBefore)
+	if err := e.string(record.LastError); err != nil {
+		return nil, err
+	}
+	return e.finish()
+}
+
+func UnmarshalPlacementRequestRecord(data []byte) (PlacementRequestRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return PlacementRequestRecord{}, err
+	}
+	count, err := d.u32()
+	if err != nil || count == 0 || count > 1024 {
+		return PlacementRequestRecord{}, fmt.Errorf("%w: invalid placement request class count", ErrMalformed)
+	}
+	record := PlacementRequestRecord{Classes: make([]string, count)}
+	for index := range record.Classes {
+		if record.Classes[index], err = d.string(); err != nil {
+			return record, err
+		}
+		if record.Classes[index] == "" {
+			return PlacementRequestRecord{}, fmt.Errorf("%w: empty placement request class", ErrMalformed)
+		}
+	}
+	value, err := d.u8()
+	record.Operation = PlacementRequestOperation(value)
+	if err != nil {
+		return record, err
+	}
+	if record.TargetBackend, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Attempts, err = d.u32(); err != nil {
+		return record, err
+	}
+	if record.LastAttempt, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.NotBefore, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.LastError, err = d.string(); err != nil {
+		return record, err
+	}
+	if !validPlacementRequestOperation(record.Operation) || record.TargetBackend == 0 {
+		return PlacementRequestRecord{}, fmt.Errorf("%w: invalid placement request operation or backend", ErrMalformed)
+	}
+	return record, d.done()
+}
+
 type PackRecord struct {
 	Type                                             PackType
 	PhysicalSize, PayloadSize, HeaderSize, BlobCount uint64
