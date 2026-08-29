@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "path": "a.txt",
+  "changes": [
+    {
+      "kind": "created",
+      "path": "a.txt",
+      "commit": 1,
+      "snapshot_id": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+      "covered": true,
+      "present": true,
+      "inode": 10,
+      "revision": 1,
+      "node_type": "file",
+      "snapshots": [
+        {
+          "snapshot_id": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+          "commit": 1,
+          "time": 1
+        }
+      ]
+    }
+  ],
+  "metrics": {
+    "snapshots_scanned": 1,
+    "binding_changes": 1,
+    "path_components": 1,
+    "directory_lookups": 1,
+    "directory_cache_hits": 0,
+    "multi_get_batches": 1,
+    "average_path_components": 1
+  }
+}

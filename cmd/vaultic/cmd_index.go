@@ -121,6 +121,8 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexPacksCommand(globalOptions),
 		newIndexHistoryCommand(globalOptions),
 		newIndexBackendsCommand(globalOptions),
+		newIndexFileHistoryCommand(globalOptions),
+		newIndexPathAtCommand(globalOptions),
 	)
 	return command
 }
@@ -473,10 +475,14 @@ func runIndexRebuildPackStats(ctx context.Context, options indexRebuildPackStats
 	result.PlacementRecordsChanged = placementChanged
 	result.TierSummaryChanged = tierSummaryChanged
 	result.BackendPackRecordsChanged, err = maintenance.RebuildBackendPackIndex(ctx, store, options.DryRun)
+	if err != nil {
+		return result, err
+	}
+	result.SnapshotCommitChanged, err = maintenance.RebuildSnapshotCommitIndex(ctx, store, options.DryRun)
 	if err == nil && !globalOptions.JSON {
-		printer.P("scanned %d packs; changed %d aggregate records, %d placement records, %d tier summaries, %d backend-pack records\n",
+		printer.P("scanned %d packs; changed %d aggregate records, %d placement records, %d tier summaries, %d backend-pack records, %d snapshot-commit records\n",
 			result.PacksScanned, result.AggregatesChanged, result.PlacementRecordsChanged,
-			result.TierSummaryChanged, result.BackendPackRecordsChanged)
+			result.TierSummaryChanged, result.BackendPackRecordsChanged, result.SnapshotCommitChanged)
 		for _, delta := range result.Deltas {
 			printer.P("  %s: packs %d, payload %d\n", delta.Key, delta.After.PackCount, delta.After.PayloadSize)
 		}

@@ -55,7 +55,7 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		key  []byte
 		kind KeyKind
 	}{
-		{BlobKey(id), KeyBlob}, {PackKey(id), KeyPack}, {PackAggregateKey(AggregateData), KeyPackAggregate},
+		{BlobKey(id), KeyBlob}, {PackKey(id), KeyPack}, {SnapshotCommitKey(9, id), KeySnapshotCommit}, {PackAggregateKey(AggregateData), KeyPackAggregate},
 		{PackAggregateKey(AggregateTree), KeyPackAggregate}, {PackAggregateKey(AggregateMixed), KeyPackAggregate}, {PackAggregateKey(AggregateUnknown), KeyPackAggregate}, {PackAggregateKey(AggregateAll), KeyPackAggregate},
 		{TierAggregateKey(TierUnknown), KeyTierAggregate}, {TierAggregateKey(TierHot), KeyTierAggregate},
 		{TierAggregateKey(TierCold), KeyTierAggregate}, {TierAggregateKey(TierMirrored), KeyTierAggregate},
@@ -128,6 +128,20 @@ func TestPlacementKeysPreservePackBackendAndDeadline(t *testing.T) {
 	}
 	if prefix := PlacementDeleteQueuePrefix(deadline); len(prefix) != 11 || string(prefix[:3]) != "dq:" {
 		t.Fatalf("bad delete queue prefix %x", prefix)
+	}
+}
+
+func TestSnapshotCommitKeyPreservesCommitAndSnapshot(t *testing.T) {
+	id := testID(8)
+	parsed, err := ParseKey(SnapshotCommitKey(99, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Kind != KeySnapshotCommit || parsed.Revision != 99 || parsed.ID != id {
+		t.Fatalf("snapshot commit key parsed as %#v", parsed)
+	}
+	if string(SnapshotCommitPrefix()) != "sc:" {
+		t.Fatalf("snapshot commit prefix = %q", SnapshotCommitPrefix())
 	}
 }
 
@@ -378,6 +392,7 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}
 	roundTrip(t, HistoryMarker{UnixSeconds: 1700000000}, UnmarshalHistoryMarker)
 	roundTrip(t, ExportCheckpointRecord{State: ExportComplete, CommitSequence: 8, Attempts: 1, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalExportCheckpointRecord)
+	roundTrip(t, SnapshotCommitRecord{SnapshotTimeUnixNano: 123, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalSnapshotCommitRecord)
 	roundTrip(t, ExportIndexCheckpointRecord{Sequence: 9, PackIDs: []ID{id1, id2}}, UnmarshalExportIndexCheckpointRecord)
 	roundTrip(t, InodeRevision{ParentInode: 1, HasMultipleParents: true, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)
 	directory := DirectoryRevision{

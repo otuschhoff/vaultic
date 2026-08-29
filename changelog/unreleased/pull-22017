@@ -1,0 +1,23 @@
+Enhancement: Add SlateDB file history and path resolution commands
+
+Vaultic can now answer historical path questions from SlateDB metadata without
+falling back to current filesystem pointers or scanning legacy JSON indexes.
+
+The new `vaultic index file-history <path>` command resolves a path through the
+immutable directory revisions captured by each snapshot and reports when the path
+was created, modified, rebound to a different inode, deleted, or not covered by a
+snapshot's backup scope. `--snapshots` annotates changes with the snapshots that
+captured them, `--content` distinguishes content changes from metadata-only
+changes, and `--inode <fsid>:<inode>` reports the revision history of a specific
+inode.
+
+The new `vaultic index path-at <path> --snapshot <id>` command resolves one path
+inside one historical snapshot and reports the inode, revision, node type, and
+directory revision chain used by the immutable walk.
+
+SlateDB metadata now also stores a commit-ordered snapshot index, `sc:`, so
+snapshot history can be scanned in commit order and rebuilt from authoritative
+snapshot records by `vaultic index rebuild-pack-stats`. Legacy repositories fail
+explicitly for these commands rather than returning answers from current state.
+
+https://github.com/vaultic/vaultic/pull/22017

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "fsid": 1,
+  "inode": 10,
+  "revisions": [
+    {
+      "fsid": 1,
+      "inode": 10,
+      "revision": 1,
+      "freshness": "verified",
+      "mtime": 10,
+      "ctime": 11,
+      "size": 10,
+      "metadata_known": [
+        "mtime",
+        "ctime",
+        "size",
+        "path"
+      ]
+    }
+  ]
+}

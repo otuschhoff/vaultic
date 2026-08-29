@@ -10,6 +10,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // TestIntrospectionRefusesLegacyRepositoriesExplicitly is Phase 11 step 8: a
@@ -42,6 +43,14 @@ func TestIntrospectionRefusesLegacyRepositoriesExplicitly(t *testing.T) {
 		},
 		"backends --compare": func(ctx context.Context, gopts global.Options) error {
 			_, err := runIndexBackends(ctx, indexBackendsOptions{Compare: true}, gopts, gopts.Term)
+			return err
+		},
+		"file-history": func(ctx context.Context, gopts global.Options) error {
+			_, err := runIndexFileHistory(ctx, indexFileHistoryOptions{}, "a.txt", gopts, gopts.Term)
+			return err
+		},
+		"path-at": func(ctx context.Context, gopts global.Options) error {
+			_, err := runIndexPathAt(ctx, indexPathAtOptions{Snapshot: vaultic.NewRandomID().String()}, "a.txt", gopts, gopts.Term)
 			return err
 		},
 	} {

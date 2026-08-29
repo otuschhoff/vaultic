@@ -47,6 +47,7 @@ const (
 	KeyPackPlacement
 	KeyBackendPack
 	KeyPlacementDeleteQueue
+	KeySnapshotCommit
 )
 
 // HistoryGranularity names a rollup bucket width. The values are part of the
@@ -117,6 +118,15 @@ func BlobKey(id ID) []byte           { return idKey("b:", id) }
 func PackKey(id ID) []byte           { return idKey("p:", id) }
 func SnapshotKey(id ID) []byte       { return idKey("s:", id) }
 func ReferenceCountKey(id ID) []byte { return idKey("rc:", id) }
+func SnapshotCommitKey(commitSequence uint64, snapshot ID) []byte {
+	key := make([]byte, 3+8+1+32)
+	copy(key, "sc:")
+	binary.BigEndian.PutUint64(key[3:], commitSequence)
+	key[11] = ':'
+	copy(key[12:], snapshot[:])
+	return key
+}
+func SnapshotCommitPrefix() []byte { return []byte("sc:") }
 func CurrentInodeKey(fsid uint32, inode uint64) []byte {
 	return inodeKey("i:", fsid, inode)
 }
@@ -125,6 +135,13 @@ func CurrentDirectoryKey(fsid uint32, inode uint64) []byte {
 }
 func InodeRevisionKey(fsid uint32, inode, revision uint64) []byte {
 	return revisionKey("iv:", fsid, inode, revision)
+}
+func InodeRevisionPrefix(fsid uint32, inode uint64) []byte {
+	key := make([]byte, 3+4+8)
+	copy(key, "iv:")
+	binary.BigEndian.PutUint32(key[3:], fsid)
+	binary.BigEndian.PutUint64(key[7:], inode)
+	return key
 }
 func DirectoryRevisionKey(fsid uint32, inode, revision uint64) []byte {
 	return revisionKey("dv:", fsid, inode, revision)
@@ -334,6 +351,10 @@ func ParseKey(key []byte) (ParsedKey, error) {
 	case len(key) == 34 && string(key[:2]) == "s:":
 		parsed.Kind = KeySnapshot
 		copy(parsed.ID[:], key[2:])
+	case len(key) == 44 && string(key[:3]) == "sc:" && key[11] == ':':
+		parsed.Kind = KeySnapshotCommit
+		parsed.Revision = binary.BigEndian.Uint64(key[3:11])
+		copy(parsed.ID[:], key[12:])
 	case len(key) == 35 && string(key[:3]) == "rc:":
 		parsed.Kind = KeyReferenceCount
 		copy(parsed.ID[:], key[3:])

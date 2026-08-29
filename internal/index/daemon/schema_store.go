@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1802,6 +1803,10 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 	if err != nil {
 		return fail(err)
 	}
+	snapshotCommitValue, err := (schema.SnapshotCommitRecord{SnapshotTimeUnixNano: snapshotTimeUnixNano(scope.OriginalJSON), RootKey: append([]byte(nil), scope.RootKey...)}).MarshalBinary()
+	if err != nil {
+		return fail(err)
+	}
 	checkpointValue, err := (schema.ExportCheckpointRecord{State: schema.ExportComplete, CommitSequence: next, Attempts: 1, RootKey: scope.RootKey}).MarshalBinary()
 	if err != nil {
 		return fail(err)
@@ -1810,7 +1815,11 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 	if err != nil {
 		return fail(err)
 	}
-	puts := []Mutation{{Key: schema.SnapshotKey(scope.SnapshotID), Value: snapshotValue}, {Key: checkpointKey, Value: checkpointValue}, {Key: nextKey, Value: nextValue}}
+	puts := []Mutation{
+		{Key: schema.SnapshotKey(scope.SnapshotID), Value: snapshotValue},
+		{Key: schema.SnapshotCommitKey(next, scope.SnapshotID), Value: snapshotCommitValue},
+		{Key: checkpointKey, Value: checkpointValue}, {Key: nextKey, Value: nextValue},
+	}
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
 		return fail(err)
 	}
@@ -1819,6 +1828,16 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 		return err
 	}
 	return nil
+}
+
+func snapshotTimeUnixNano(originalJSON []byte) int64 {
+	var decoded struct {
+		Time time.Time `json:"time"`
+	}
+	if len(originalJSON) == 0 || json.Unmarshal(originalJSON, &decoded) != nil || decoded.Time.IsZero() {
+		return 0
+	}
+	return decoded.Time.UnixNano()
 }
 
 // CreateImmutable creates a historical record or verifies an identical retry.

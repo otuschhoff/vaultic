@@ -290,6 +290,41 @@ type SnapshotImportCheckpointRecord struct {
 	DebtsCreated  uint64
 }
 
+type SnapshotCommitRecord struct {
+	SnapshotTimeUnixNano int64
+	RootKey              []byte
+}
+
+func (record SnapshotCommitRecord) MarshalBinary() ([]byte, error) {
+	if !validExportRoot(record.RootKey) {
+		return nil, fmt.Errorf("%w: invalid snapshot commit root", ErrMalformed)
+	}
+	e := newEncoder()
+	e.i64(record.SnapshotTimeUnixNano)
+	if err := e.bytes(record.RootKey); err != nil {
+		return nil, err
+	}
+	return e.finish()
+}
+
+func UnmarshalSnapshotCommitRecord(data []byte) (SnapshotCommitRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return SnapshotCommitRecord{}, err
+	}
+	var record SnapshotCommitRecord
+	if record.SnapshotTimeUnixNano, err = d.i64(); err != nil {
+		return record, err
+	}
+	if record.RootKey, err = d.bytes(); err != nil {
+		return record, err
+	}
+	if !validExportRoot(record.RootKey) {
+		return SnapshotCommitRecord{}, fmt.Errorf("%w: invalid snapshot commit root", ErrMalformed)
+	}
+	return record, d.done()
+}
+
 type ExportState byte
 
 const (
@@ -476,6 +511,15 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalBackendPackRecord(value)
 	case KeyPlacementDeleteQueue:
 		_, err = UnmarshalPlacementDeleteRecord(value)
+	case KeySnapshotCommit:
+		var record SnapshotCommitRecord
+		record, err = UnmarshalSnapshotCommitRecord(value)
+		if err == nil {
+			root, parseErr := ParseKey(record.RootKey)
+			if parseErr != nil || root.Kind != KeyDirectoryRevision || root.Revision == 0 {
+				err = fmt.Errorf("%w: snapshot commit root mismatch", ErrMalformed)
+			}
+		}
 	case KeyNextEventSequence:
 		_, err = UnmarshalNextEventSequence(value)
 	case KeyCurrentInode, KeyCurrentDirectory:

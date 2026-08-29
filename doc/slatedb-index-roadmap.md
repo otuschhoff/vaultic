@@ -2985,6 +2985,47 @@ renames, recreations, and hardlinks, resolved entirely through immutable
 revisions, and a measured binding-churn rate and average path length are recorded
 for the target filesystem.
 
+**Current implementation state (2026-08-29): complete.** The schema now has the
+`sc:` commit-ordered snapshot index, written in the same serializable
+transaction that publishes snapshot scope. The record stores snapshot time and
+the immutable root directory revision. `index check` derives `sc:` from `s:` and
+reports missing, stale, or mismatched rows, while `vaultic index
+rebuild-pack-stats` rebuilds it alongside the other derived metadata.
+
+The reference resolver lives in `internal/index/history`. It starts from the
+`sc:` commit order, reads the snapshot record for scope metadata, and walks only
+immutable `dv:` child references down to versioned `iv:`/`dv:` targets. It never
+reads `i:` or `d:` current pointers. A missing child revision is an error rather
+than an absent path, which keeps the resolver fail-closed. Walks are memoized by
+directory revision plus remaining path, and directory revision fetches go
+through `MultiGet`, so shared subtree revisions across snapshots collapse to
+cache hits.
+
+`vaultic index file-history <path>` reports coalesced binding history from the
+pure walk and classifies `created`, `modified`, `rebound`, `deleted`, and
+`not-covered`. Snapshot `paths` scope disambiguates deletion from a path that was
+never covered by that snapshot. `--content` is supported by comparing immutable
+inode revision content identities and reports content changes separately from
+metadata-only changes. `--inode <fsid>:<inode>` uses the cheap `iv:` prefix scan
+for inode revision history. `vaultic index path-at <path> --snapshot <id>`
+exposes the primitive resolver result and reports the directory revision chain
+used. Both commands return versioned JSON and fail explicitly on legacy
+repositories rather than answering from current state.
+
+`--follow` and `--verify` are accepted as flags but fail with an explicit Phase
+14 message. Following a renamed file without rescanning all paths requires the
+future `pv:` binding index, and `--verify` is specifically the Phase 14
+cross-check between `pv:` and this Phase 13 reference walk.
+
+**Verification performed:** tests cover `sc:` key/value codecs, atomic snapshot
+scope publication with `sc:`, drift detection and stale-row rebuild, path
+resolution through rename/delete/recreate/directory replacement, out-of-scope
+paths reported as `not-covered`, old-snapshot resolution after current pointers
+change, fail-closed missing child revisions, hardlink parent-set reporting from
+`hr:`, memoized and batched walks, inode prefix scans, content-vs-metadata
+classification, golden JSON output for `file-history`, `path-at`, and inode
+history, and explicit legacy repository failure for both commands.
+
 ### Phase 14: Versioned path index
 
 **Goal:** make path history proportional to the number of changes reported rather

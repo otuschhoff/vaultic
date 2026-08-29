@@ -523,7 +523,7 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	if err := store.MarkExportPending(context.Background(), snapshotID, rootKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PublishSnapshotScope(context.Background(), SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"tree":"test"}`)}); err != nil {
+	if err := store.PublishSnapshotScope(context.Background(), SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"time":"2026-08-29T12:34:56Z","tree":"test"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	checkpointValue, found, err := store.Get(context.Background(), schema.ExportCheckpointKey(snapshotID))
@@ -536,6 +536,17 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	}
 	if _, found, err := store.Get(context.Background(), schema.SnapshotKey(snapshotID)); err != nil || !found {
 		t.Fatalf("snapshot scope: found=%t err=%v", found, err)
+	}
+	commitValue, found, err := store.Get(context.Background(), schema.SnapshotCommitKey(checkpoint.CommitSequence, snapshotID))
+	if err != nil || !found {
+		t.Fatalf("snapshot commit index: found=%t err=%v", found, err)
+	}
+	commit, err := schema.UnmarshalSnapshotCommitRecord(commitValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(commit.RootKey, rootKey) || commit.SnapshotTimeUnixNano == 0 {
+		t.Fatalf("snapshot commit record = %#v", commit)
 	}
 }
 
