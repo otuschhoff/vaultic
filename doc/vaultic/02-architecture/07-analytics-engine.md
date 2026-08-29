@@ -2,7 +2,7 @@
 
 [← Back to architecture index](00-overview.md)
 
-See also: [Security & Verification Architecture](../03-compliance/04-security-and-verification-architecture.md)
+See also: [Security & Verification Architecture](../03-compliance/08-security-and-verification-architecture.md)
 for the Azure Key Vault, syslog, GDPR erasure, and sampled-verification designs
 that build on these facts.
 

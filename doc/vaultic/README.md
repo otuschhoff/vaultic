@@ -11,7 +11,7 @@ lets a reader start at "why" and drill down to "how" and "when".
 |---|---|---|
 | Strategic | Why does this exist, what must never break, how do we compare to alternatives? | [01-strategy/](01-strategy/) |
 | Architectural | How is the system designed to meet those constraints? | [02-architecture/](02-architecture/) |
-| Regulatory | Does the design satisfy GDPR, ISO/IEC 27001, and NIS2? | [03-compliance/](03-compliance/) |
+| Regulatory | How does the design support privacy, security, resilience, controls, and I&T governance frameworks? | [03-compliance/](03-compliance/) |
 | Tactical | What is the phased plan to build it, in what order, with what exit criteria? | [04-roadmap/](04-roadmap/) |
 | Parity-specific | What is the plan to reach rustic feature parity? | [05-rustic-parity/](05-rustic-parity/) |
 
@@ -36,9 +36,10 @@ creation-analytics engine.
 ## 3. Compliance — [03-compliance/](03-compliance/)
 
 Start at the [compliance overview](03-compliance/00-overview.md). It covers
-the GDPR, ISO/IEC 27001:2022, and NIS2 assessments and the security/verification
-architecture (Azure Key Vault, multi-target syslog, per-chunk GDPR erasure
-analysis, sampled storage verification) that both assessments depend on.
+GDPR, ISO/IEC 27001:2022, NIS2, NIST CSF 2.0, CIS Controls v8.1, and COBIT
+2019 assessments, plus the shared security/verification architecture (Azure
+Key Vault, multi-target syslog, per-chunk GDPR erasure analysis, and sampled
+storage verification).
 
 ## 4. Roadmap — [04-roadmap/](04-roadmap/)
 

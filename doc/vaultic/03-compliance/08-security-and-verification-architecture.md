@@ -4,7 +4,8 @@
 
 This document covers the design sections of the
 [Analytics Engine](../02-architecture/07-analytics-engine.md) that exist specifically
-to satisfy the GDPR, ISO 27001, and NIS2 assessments in this section.
+to support the GDPR, ISO 27001, NIS2, NIST CSF 2.0, CIS Controls v8.1, and
+COBIT 2019 assessments in this section.
 
 ### 14.5 Azure Key Vault Option A (Secret Store Integration)
 
