@@ -115,10 +115,13 @@ func (store *memoryStore) MarkIndexPublished(ctx context.Context, indexID schema
 	return sequence, nil
 }
 
-func (store *memoryStore) WriteMutableBatch(_ context.Context, puts []daemon.Mutation, _ [][]byte, _ bool) error {
+func (store *memoryStore) WriteMutableBatch(_ context.Context, puts []daemon.Mutation, deletes [][]byte, _ bool) error {
 	store.batchWrites++
 	for _, put := range puts {
 		store.values[string(put.Key)] = append([]byte(nil), put.Value...)
+	}
+	for _, key := range deletes {
+		delete(store.values, string(key))
 	}
 	return nil
 }

@@ -10,7 +10,11 @@ import (
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // TestIndexGCDiscoversRevalidatesAndSweepsRealBackup exercises Phase 8 end to
@@ -183,4 +187,114 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	restoreDir := filepath.Join(env.base, "restore-after-gc")
 	testRunRestore(t, env.gopts, restoreDir, retained.String())
 	testRunCheck(t, env.gopts)
+
+	assertPackHistoryAfterGC(t, env, daemonOptions, packsBefore)
+}
+
+// assertPackHistoryAfterGC is the Phase 10 exit criterion: a repository that
+// has been backed up, repacked, and pruned must be able to report its full
+// pack history, including for packs that no longer exist, with correct
+// coverage flags.
+func assertPackHistoryAfterGC(t *testing.T, env *testEnvironment, daemonOptions indexDaemonOptions, packsBefore vaultic.IDSet) {
+	t.Helper()
+	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
+		config, err := daemonOptions.config("")
+		if err != nil {
+			return err
+		}
+		ctx = repository.WithDaemonOptions(ctx, config)
+		ctx, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		store, _, closeStore, err := openIndexStore(ctx, repo, daemonOptions)
+		if err != nil {
+			return err
+		}
+		defer closeStore()
+
+		scanned, err := maintenance.ScanHistory(ctx, store, 0, 0)
+		if err != nil {
+			return err
+		}
+		if len(scanned.Events) == 0 {
+			t.Fatal("no pack history was recorded for a real backup and gc")
+		}
+		if scanned.Malformed != 0 {
+			t.Fatalf("malformed history events = %d", scanned.Malformed)
+		}
+
+		seen := make(map[schema.PackEventType]int)
+		historyPacks := make(map[vaultic.ID]struct{})
+		lineage := 0
+		for _, event := range scanned.Events {
+			seen[event.Record.Type]++
+			historyPacks[event.PackID] = struct{}{}
+			if len(event.Record.PredecessorPackIDs) != 0 {
+				lineage++
+			}
+		}
+		// Packs in this repository originate from a legacy import rather than
+		// from a fresh authoritative backup, so origin is recorded as
+		// imported; either origin event satisfies the requirement.
+		if seen[schema.EventCreated]+seen[schema.EventImported] == 0 {
+			t.Fatalf("no pack origin events recorded: %v", seen)
+		}
+		for _, required := range []schema.PackEventType{
+			schema.EventPublished, schema.EventDeletePending, schema.EventDeleted, schema.EventUsageChanged,
+		} {
+			if seen[required] == 0 {
+				t.Fatalf("no %v events recorded: %v", required, seen)
+			}
+		}
+		// A repack happened, so a destination pack must carry its lineage and
+		// the superseded source must be recorded as repacked from.
+		if lineage == 0 || seen[schema.EventRepackedFrom] == 0 || seen[schema.EventRepackedInto] == 0 {
+			t.Fatalf("repack lineage missing: lineage=%d events=%v", lineage, seen)
+		}
+
+		// History must remain readable for packs that are gone from both the
+		// backend and the catalog.
+		packsNow := listPacks(env.gopts, t)
+		var describedAndGone int
+		for id := range packsBefore {
+			if packsNow.Has(id) {
+				continue
+			}
+			if _, described := historyPacks[id]; described {
+				describedAndGone++
+			}
+		}
+		if describedAndGone == 0 {
+			t.Fatal("history describes no pack that has since been deleted")
+		}
+
+		// Rolling up must produce buckets, and a repeated rollup must be a
+		// no-op over the same raw range.
+		first, err := maintenance.RollupHistory(ctx, store, false)
+		if err != nil {
+			return err
+		}
+		if first.BucketsWritten == 0 {
+			t.Fatalf("rollup produced no buckets: %#v", first)
+		}
+		second, err := maintenance.RollupHistory(ctx, store, false)
+		if err != nil {
+			return err
+		}
+		if second.BucketsWritten != 0 {
+			t.Fatalf("rollup was not idempotent on a real repository: %#v", second)
+		}
+		// This repository imported a legacy history, so its buckets describe
+		// inferred activity and must not claim to be complete.
+		if second.Reconstructed == 0 {
+			t.Fatalf("imported activity was reported as observed: %#v", second)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("pack history assertions: %v", err)
+	}
 }

@@ -448,6 +448,8 @@ func UnmarshalExportIndexCheckpointRecord(data []byte) (ExportIndexCheckpointRec
 
 func MarshalNextExportSequence(next uint64) ([]byte, error)   { return MarshalNextRevision(next) }
 func UnmarshalNextExportSequence(data []byte) (uint64, error) { return UnmarshalNextRevision(data) }
+func MarshalNextEventSequence(next uint64) ([]byte, error)    { return MarshalNextRevision(next) }
+func UnmarshalNextEventSequence(data []byte) (uint64, error)  { return UnmarshalNextRevision(data) }
 
 // ValidateValue verifies that a value is canonical for its schema key.
 func ValidateValue(key []byte, value []byte) error {
@@ -462,6 +464,14 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalPackRecord(value)
 	case KeyPackAggregate, KeyTierAggregate:
 		_, err = UnmarshalPackAggregate(value)
+	case KeyPackHistory:
+		_, err = UnmarshalPackHistoryEvent(value)
+	case KeyPackHistoryBucket:
+		_, err = UnmarshalPackHistoryBucket(value)
+	case KeyHistoryRawFloor, KeyHistoryEnabledAt:
+		_, err = UnmarshalHistoryMarker(value)
+	case KeyNextEventSequence:
+		_, err = UnmarshalNextEventSequence(value)
 	case KeyCurrentInode, KeyCurrentDirectory:
 		var pointer CurrentPointer
 		pointer, err = UnmarshalCurrentPointer(value)

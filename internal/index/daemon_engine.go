@@ -102,6 +102,8 @@ type DaemonEngine struct {
 	pendingPacks     map[vaultic.ID]struct{}
 	tier             TierPolicy
 	now              func() time.Time
+	runID            schema.ID
+	repackSources    []schema.ID
 }
 
 var _ LegacyIndexEngine = (*DaemonEngine)(nil)
@@ -129,6 +131,31 @@ func (engine *DaemonEngine) tierPolicy() TierPolicy {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	return engine.tier
+}
+
+// SetRepackContext marks packs published until it is cleared as the output of
+// a repack of the given source packs, so history records them as a rewrite
+// rather than as new data. The destination pack IDs are chosen inside the
+// copy, which is why the lineage has to be declared out of band.
+func (engine *DaemonEngine) SetRepackContext(runID schema.ID, sources []schema.ID) {
+	engine.mu.Lock()
+	engine.runID = runID
+	engine.repackSources = append([]schema.ID(nil), sources...)
+	engine.mu.Unlock()
+}
+
+// ClearRepackContext ends a repack window. Packs published afterwards are
+// ordinary creations again.
+func (engine *DaemonEngine) ClearRepackContext() {
+	engine.mu.Lock()
+	engine.runID, engine.repackSources = schema.ID{}, nil
+	engine.mu.Unlock()
+}
+
+func (engine *DaemonEngine) repackContext() (schema.ID, []schema.ID) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	return engine.runID, append([]schema.ID(nil), engine.repackSources...)
 }
 
 func (engine *DaemonEngine) SchemaStore() *daemon.SchemaStore { return engine.store }
@@ -214,6 +241,7 @@ func (engine *DaemonEngine) storePack(ctx context.Context, id vaultic.ID, blobs 
 	if err != nil {
 		return err
 	}
+	published.RunID, published.PredecessorPackIDs = engine.repackContext()
 	if err := engine.store.PublishPack(ctx, published); err != nil {
 		return fmt.Errorf("publish pack %s to slatedb: %w", id.Str(), err)
 	}

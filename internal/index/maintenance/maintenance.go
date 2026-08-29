@@ -80,10 +80,14 @@ type CheckResult struct {
 	UsageUnaccountedPacks uint64 `json:"usage_unaccounted_packs"`
 	// TierAggregatesUnbuilt marks a repository written before the tier
 	// dimension existed. It is a pending rebuild, not drift.
-	TierAggregatesUnbuilt bool      `json:"tier_aggregates_unbuilt,omitempty"`
-	GCCandidates          uint64    `json:"gc_candidates"`
-	Warnings              uint64    `json:"warnings"`
-	Findings              []Finding `json:"findings,omitempty"`
+	TierAggregatesUnbuilt bool `json:"tier_aggregates_unbuilt,omitempty"`
+	// HistoryEventsMalformed counts unreadable pack history records. History
+	// is advisory and derived, so this is reported but never makes the check
+	// dirty.
+	HistoryEventsMalformed uint64    `json:"history_events_malformed"`
+	GCCandidates           uint64    `json:"gc_candidates"`
+	Warnings               uint64    `json:"warnings"`
+	Findings               []Finding `json:"findings,omitempty"`
 }
 
 func (result CheckResult) Clean() bool {
@@ -293,6 +297,7 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 		return result, err
 	}
 	checkPackLifetime(packs, &result)
+	checkPackHistory(ctx, store, &result)
 	if err := checkOperationalState(ctx, store, options, packs, &result); err != nil {
 		return result, err
 	}
@@ -803,6 +808,17 @@ func checkAggregates(ctx context.Context, store Store, packs map[vaultic.ID]sche
 		addFinding(result, maxFindings, Finding{Kind: "aggregate_drift", Key: target.delta.Key, Want: fmt.Sprintf("%+v", expected), Got: fmt.Sprintf("%+v", got)})
 	}
 	return nil
+}
+
+// checkPackHistory reports unreadable history records. A corrupt or missing
+// history record must never change the check's verdict: history is derived and
+// advisory, and a gap in it is not repository damage.
+func checkPackHistory(ctx context.Context, store Store, result *CheckResult) {
+	scanned, err := ScanHistory(ctx, store, 0, 0)
+	if err != nil {
+		return
+	}
+	result.HistoryEventsMalformed = scanned.Malformed
 }
 
 // checkPackLifetime reports how much of the catalog carries trustworthy tier

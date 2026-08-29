@@ -17,6 +17,7 @@ import (
 
 type fakeGCStore struct {
 	values map[string][]byte
+	events []daemon.PackEvent
 }
 
 func newFakeGCStore() *fakeGCStore { return &fakeGCStore{values: make(map[string][]byte)} }
@@ -98,6 +99,13 @@ func (store *fakeGCStore) UpdatePackUsage(_ context.Context, usage map[schema.ID
 		applied++
 	}
 	return applied, nil
+}
+
+// RecordPackEvents captures advisory history events so tests can assert on
+// lineage and failure reporting.
+func (store *fakeGCStore) RecordPackEvents(_ context.Context, events []daemon.PackEvent) error {
+	store.events = append(store.events, events...)
+	return nil
 }
 
 var _ GCStore = (*fakeGCStore)(nil)

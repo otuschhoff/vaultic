@@ -18,6 +18,9 @@ import (
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
+	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
@@ -305,6 +308,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	}
 
 	orphanedPacks := 0
+	orphanedIDs := make([]vaultic.ID, 0)
 	errChan := make(chan error)
 
 	printer.P("check all packs\n")
@@ -315,6 +319,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		if errors.As(err, &packErr) {
 			if packErr.Orphaned {
 				orphanedPacks++
+				orphanedIDs = append(orphanedIDs, packErr.ID)
 				printer.V("%v\n", err)
 			} else {
 				if packErr.Truncated || packErr.Missing {
@@ -331,6 +336,7 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	}
 
 	if orphanedPacks > 0 {
+		recordOrphanHistory(ctx, repo, orphanedIDs, printer)
 		summary.HintPrune = true
 		if !errorsFound {
 			// hide notice if repository is damaged
@@ -602,3 +608,29 @@ func (*jsonErrorPrinter) P(_ string, _ ...any)  {}
 func (*jsonErrorPrinter) PT(_ string, _ ...any) {}
 func (*jsonErrorPrinter) V(_ string, _ ...any)  {}
 func (*jsonErrorPrinter) VV(_ string, _ ...any) {}
+
+// recordOrphanHistory notes packs found on the backend that no index
+// references. It only applies to SlateDB-authoritative repositories, where a
+// pack history exists to record them in.
+//
+// History is advisory: a failure to record must never change the outcome of
+// the check that discovered the orphans.
+func recordOrphanHistory(ctx context.Context, repo *repository.Repository, orphaned []vaultic.ID, printer vaultic.Printer) {
+	engine, ok := repo.Engine().(*metadataindex.DaemonEngine)
+	if !ok {
+		return
+	}
+	events := make([]daemon.PackEvent, 0, len(orphaned))
+	for _, id := range orphaned {
+		events = append(events, daemon.PackEvent{
+			PackID: schema.ID(id),
+			Record: schema.PackHistoryEvent{
+				Type: schema.EventOrphanDetected, PackType: schema.PackUnknown,
+				ReasonCode: "not_referenced_by_any_index",
+			},
+		})
+	}
+	if err := engine.SchemaStore().RecordPackEvents(ctx, events); err != nil {
+		printer.V("record orphan history: %v\n", err)
+	}
+}

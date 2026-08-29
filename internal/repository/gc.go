@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,6 +21,7 @@ type GCStore interface {
 	ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error)
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 	UpdatePackUsage(context.Context, map[schema.ID]daemon.PackUsage) (uint64, error)
+	RecordPackEvents(context.Context, []daemon.PackEvent) error
 	MarkPackDeletePending(context.Context, schema.ID) error
 	MarkPackDeleted(context.Context, schema.ID, []schema.ID) error
 }
@@ -78,15 +80,21 @@ type GCStats struct {
 
 // GCPlan is the result of discovery and revalidation, ready for Execute.
 type GCPlan struct {
-	repo  *Repository
-	store GCStore
-	opts  GCOptions
+	repo   *Repository
+	store  GCStore
+	engine *metadataindex.DaemonEngine
+	opts   GCOptions
+	// runID groups every history event this pass emits.
+	runID vaultic.ID
 
 	wholePacks       map[vaultic.ID][]vaultic.ID // pack -> every member blob, ready to sweep now
 	mixedPacks       map[vaultic.ID]*gcBlobSet   // pack -> live blobs to keep, ready to repack now
 	mixedPackMembers map[vaultic.ID][]vaultic.ID // pack -> every member blob (for post-repack deletion)
 	retryPacks       map[vaultic.ID][]vaultic.ID // already delete-pending, retry physical deletion
 	packBytes        map[vaultic.ID]uint64
+	// packRecords keeps the catalog state observed during planning so a
+	// history event can still describe a pack after its record is gone.
+	packRecords map[vaultic.ID]schema.PackRecord
 
 	Stats GCStats
 }
@@ -110,7 +118,7 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 	store := engine.SchemaStore()
 
 	plan := &GCPlan{
-		repo: repo, store: store, opts: opts,
+		repo: repo, store: store, engine: engine, opts: opts, runID: vaultic.NewRandomID(),
 		wholePacks: make(map[vaultic.ID][]vaultic.ID), mixedPacks: make(map[vaultic.ID]*gcBlobSet),
 		mixedPackMembers: make(map[vaultic.ID][]vaultic.ID), retryPacks: make(map[vaultic.ID][]vaultic.ID),
 		packBytes: make(map[vaultic.ID]uint64), Stats: GCStats{MessageType: "gc_summary"},
@@ -127,6 +135,7 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 	if err != nil {
 		return nil, err
 	}
+	plan.packRecords = packs
 
 	printer.P("scanning blob catalog...\n")
 	blobTypes, packMembers, packMemberBytes, err := scanBlobCatalog(ctx, store)
@@ -329,6 +338,7 @@ func (plan *GCPlan) retryPendingDeletions(ctx context.Context, printer vaultic.P
 		if err := plan.deletePackObjectAndCatalog(ctx, packID, members); err != nil {
 			plan.Stats.PacksRetryFailed++
 			printer.E("retry deleting pack %s: %v\n", packID.Str(), err)
+			plan.recordDeleteFailure(ctx, packID, err, printer)
 			continue
 		}
 		plan.Stats.PacksRetried++
@@ -349,14 +359,35 @@ func (plan *GCPlan) repackMixedPacks(ctx context.Context, printer vaultic.Printe
 		}
 	}
 	bar := printer.NewCounter("packs repacked")
+	// Declare the sources so every pack written by the copy records that it is
+	// a rewrite of them rather than newly backed-up data.
+	sources := toSchemaIDs(packSet.List())
+	plan.engine.SetRepackContext(schema.ID(plan.runID), sources)
 	err := plan.repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		return CopyBlobs(ctx, plan.repo, plan.repo, uploader, packSet, keep, bar, printer.P)
 	})
+	plan.engine.ClearRepackContext()
 	if err != nil {
 		return fmt.Errorf("repack mixed packs: %w", err)
 	}
 	if keep.Len() != 0 {
 		return fmt.Errorf("internal error: %d live blobs were not repacked", keep.Len())
+	}
+	sourceEvents := make([]daemon.PackEvent, 0, len(plan.mixedPacks))
+	for packID := range plan.mixedPacks {
+		record := plan.packRecords[packID]
+		sourceEvents = append(sourceEvents, daemon.PackEvent{
+			PackID: schema.ID(packID),
+			Record: schema.PackHistoryEvent{
+				Type: schema.EventRepackedFrom, PackType: record.Type,
+				PhysicalSize: record.PhysicalSize, PayloadSize: record.PayloadSize,
+				RunID: schema.ID(plan.runID), ReasonCode: "mixed_pack_repack",
+			},
+		})
+	}
+	if err := plan.store.RecordPackEvents(ctx, sourceEvents); err != nil {
+		// Advisory: a lost lineage record must not abort the repack.
+		printer.E("record repack lineage: %v\n", err)
 	}
 	for packID := range plan.mixedPacks {
 		if err := plan.store.MarkPackDeletePending(ctx, schema.ID(packID)); err != nil {
@@ -380,10 +411,42 @@ func (plan *GCPlan) deleteWholePacks(ctx context.Context, printer vaultic.Printe
 		}
 		if err := plan.deletePackObjectAndCatalog(ctx, packID, members); err != nil {
 			printer.E("deleting pack %s: %v\n", packID.Str(), err)
+			plan.recordDeleteFailure(ctx, packID, err, printer)
 			continue
 		}
 	}
 	return nil
+}
+
+// recordDeleteFailure notes that a physical removal failed. The pack stays
+// delete-pending for retry; the event exists so a later report can explain why
+// it lingered.
+func (plan *GCPlan) recordDeleteFailure(ctx context.Context, packID vaultic.ID, failure error, printer vaultic.Printer) {
+	record := plan.packRecords[packID]
+	event := daemon.PackEvent{
+		PackID: schema.ID(packID),
+		Record: schema.PackHistoryEvent{
+			Type: schema.EventDeleteFailed, PackType: record.Type,
+			PhysicalSize: record.PhysicalSize, PayloadSize: record.PayloadSize,
+			RunID: schema.ID(plan.runID), ReasonCode: classifyDeleteFailure(failure),
+		},
+	}
+	if err := plan.store.RecordPackEvents(ctx, []daemon.PackEvent{event}); err != nil {
+		printer.E("record delete failure for pack %s: %v\n", packID.Str(), err)
+	}
+}
+
+// classifyDeleteFailure reduces an error to a stable reason code, so history
+// stays queryable without embedding provider-specific messages.
+func classifyDeleteFailure(failure error) string {
+	switch {
+	case failure == nil:
+		return ""
+	case errors.Is(failure, context.Canceled), errors.Is(failure, context.DeadlineExceeded):
+		return "cancelled"
+	default:
+		return "backend_error"
+	}
 }
 
 // deletePackObjectAndCatalog physically removes the pack object and, only on

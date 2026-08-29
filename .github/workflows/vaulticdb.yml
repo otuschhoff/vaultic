@@ -6,18 +6,18 @@ on:
     paths:
       - ".github/workflows/vaulticdb.yml"
       - "vaulticdb/**"
-      - "internal/index/daemon/**"
-      - "internal/index/proto/**"
+      - "internal/index/**"
       - "cmd/vaulticdb-smoke/**"
+      - "cmd/vaultic/cmd_index*.go"
       - "go.mod"
       - "go.sum"
   pull_request:
     paths:
       - ".github/workflows/vaulticdb.yml"
       - "vaulticdb/**"
-      - "internal/index/daemon/**"
-      - "internal/index/proto/**"
+      - "internal/index/**"
       - "cmd/vaulticdb-smoke/**"
+      - "cmd/vaultic/cmd_index*.go"
       - "go.mod"
       - "go.sum"
   workflow_dispatch:
@@ -86,3 +86,45 @@ jobs:
 
       - name: Test vaultic daemon client
         run: VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb" go test ./internal/index/daemon -race
+
+      - name: Start MinIO for S3-compatible metadata storage
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/minio" https://dl.min.io/server/minio/release/linux-amd64/minio
+          chmod +x "$RUNNER_TEMP/minio"
+          # Single-node filesystem mode exposes each top-level directory as a
+          # bucket, so creating it up front avoids installing the mc client.
+          mkdir -p "$RUNNER_TEMP/minio-data/vaulticdb-ci"
+          MINIO_ROOT_USER=vaulticdbci MINIO_ROOT_PASSWORD=vaulticdbci123 \
+            nohup "$RUNNER_TEMP/minio" server --address 127.0.0.1:9100 "$RUNNER_TEMP/minio-data" \
+            > "$RUNNER_TEMP/minio.log" 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9100/minio/health/live >/dev/null 2>&1; then
+              echo "minio ready after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "minio did not become ready" >&2
+          cat "$RUNNER_TEMP/minio.log" >&2
+          exit 1
+
+      # Without these the S3 tests skip silently, leaving the S3-compatible
+      # metadata path unverified by automation.
+      - name: Test S3-compatible metadata storage
+        env:
+          VAULTICDB_TEST_S3_ENDPOINT: http://127.0.0.1:9100
+          VAULTICDB_TEST_S3_BUCKET: vaulticdb-ci
+          AWS_ENDPOINT: http://127.0.0.1:9100
+          AWS_ENDPOINT_URL: http://127.0.0.1:9100
+          AWS_ACCESS_KEY_ID: vaulticdbci
+          AWS_SECRET_ACCESS_KEY: vaulticdbci123
+          AWS_REGION: us-east-1
+          AWS_ALLOW_HTTP: "true"
+        run: |
+          export VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb"
+          go test ./internal/index/daemon -run TestS3CompatibleStorageRoundTrip -v
+          go test ./cmd/vaultic -run TestIndexWorkflowsS3CompatibleMetadata -v
+
+      - name: Dump MinIO log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/minio.log" || true

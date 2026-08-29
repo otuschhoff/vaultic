@@ -60,6 +60,13 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{TierAggregateKey(TierUnknown), KeyTierAggregate}, {TierAggregateKey(TierHot), KeyTierAggregate},
 		{TierAggregateKey(TierCold), KeyTierAggregate}, {TierAggregateKey(TierMirrored), KeyTierAggregate},
 		{TierAggregateKey(TierSingle), KeyTierAggregate},
+		{PackHistoryKey(1700000000, 7, id), KeyPackHistory},
+		{PackHistoryBucketKey(GranularityHourly, 1700000000, 0, PackData), KeyPackHistoryBucket},
+		{PackHistoryBucketKey(GranularityDaily, 1700000000, 3, PackTree), KeyPackHistoryBucket},
+		{PackHistoryBucketKey(GranularityMonthly, 1700000000, 0, PackUnknown), KeyPackHistoryBucket},
+		{NextEventSequenceKey(), KeyNextEventSequence},
+		{HistoryRawFloorKey(), KeyHistoryRawFloor},
+		{HistoryEnabledAtKey(), KeyHistoryEnabledAt},
 		{CurrentInodeKey(3, 4), KeyCurrentInode}, {InodeRevisionKey(3, 4, 5), KeyInodeRevision},
 		{CurrentDirectoryKey(3, 4), KeyCurrentDirectory}, {DirectoryRevisionKey(3, 4, 5), KeyDirectoryRevision},
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
@@ -296,6 +303,18 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	const phase3AggregateLength = 1 + 6*8
 	roundTrip(t, PackAggregate{PackCount: 1, PhysicalSize: 2, PayloadSize: 3, HeaderSize: 4, BlobCount: 5, UpdateSequence: 6, UsedPayloadBytes: 7, UnusedPayloadBytes: 8, AccountedPackCount: 1}, UnmarshalPackAggregate, phase3AggregateLength)
 	roundTrip(t, CurrentPointer{Revision: 7, RecordKey: InodeRevisionKey(2, 3, 7)}, UnmarshalCurrentPointer)
+	roundTrip(t, PackHistoryEvent{
+		Type: EventRepackedInto, PackType: PackData, Backend: 4,
+		PhysicalSize: 100, PayloadSize: 80, UsedDelta: -5, UnusedDelta: 7,
+		PredecessorPackIDs: []ID{id1, id2}, RunID: id3, ReasonCode: "mixed_pack_repack",
+	}, UnmarshalPackHistoryEvent)
+	roundTrip(t, PackHistoryBucket{
+		PacksCreated: 1, PacksDeleted: 2, PacksRepacked: 3, PacksPromoted: 4,
+		BytesAdded: 5, BytesDeleted: 6, BytesRepacked: 7, BytesPromoted: 8,
+		EndPackCount: 9, EndPhysicalSize: 10, EndPayloadSize: 11,
+		Coverage: CoveragePartial, EventsObserved: 12,
+	}, UnmarshalPackHistoryBucket)
+	roundTrip(t, HistoryMarker{UnixSeconds: 1700000000}, UnmarshalHistoryMarker)
 	roundTrip(t, ExportCheckpointRecord{State: ExportComplete, CommitSequence: 8, Attempts: 1, RootKey: DirectoryRevisionKey(0, 0, 7)}, UnmarshalExportCheckpointRecord)
 	roundTrip(t, ExportIndexCheckpointRecord{Sequence: 9, PackIDs: []ID{id1, id2}}, UnmarshalExportIndexCheckpointRecord)
 	roundTrip(t, InodeRevision{ParentInode: 1, HasMultipleParents: true, MTime: -2, CTime: 3, Size: 4, Mode: 0o644, UID: 5, GID: 6, Known: KnownMTime | KnownParent | KnownPath, ContentMode: ContentInline, ContentIDs: []ID{id1, id2}, ContentCount: 2, FileContentHash: id3, HashKnown: true, SourcePath: "dir/file", Freshness: FreshnessVerified}, UnmarshalInodeRevision)

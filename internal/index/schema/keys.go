@@ -39,7 +39,41 @@ const (
 	KeyExportIndexCheckpoint
 	KeyNextExportSequence
 	KeyTierAggregate
+	KeyPackHistory
+	KeyPackHistoryBucket
+	KeyNextEventSequence
+	KeyHistoryRawFloor
+	KeyHistoryEnabledAt
 )
+
+// HistoryGranularity names a rollup bucket width. The values are part of the
+// key, so they must stay stable.
+type HistoryGranularity byte
+
+const (
+	GranularityHourly HistoryGranularity = iota + 1
+	GranularityDaily
+	GranularityMonthly
+)
+
+var historyGranularityNames = map[HistoryGranularity]string{
+	GranularityHourly: "hour", GranularityDaily: "day", GranularityMonthly: "month",
+}
+
+func (granularity HistoryGranularity) String() string {
+	if name, ok := historyGranularityNames[granularity]; ok {
+		return name
+	}
+	return "unknown"
+}
+
+func HistoryGranularities() []HistoryGranularity {
+	return []HistoryGranularity{GranularityHourly, GranularityDaily, GranularityMonthly}
+}
+
+func validHistoryGranularity(value HistoryGranularity) bool {
+	return value >= GranularityHourly && value <= GranularityMonthly
+}
 
 type AggregateKind byte
 
@@ -59,16 +93,20 @@ const (
 )
 
 type ParsedKey struct {
-	Kind      KeyKind
-	ID        ID
-	SecondID  ID
-	FSID      uint32
-	Inode     uint64
-	Revision  uint64
-	Segment   uint32
-	Aggregate AggregateKind
-	Tier      PackTier
-	GCTarget  GCTarget
+	Kind        KeyKind
+	ID          ID
+	SecondID    ID
+	FSID        uint32
+	Inode       uint64
+	Revision    uint64
+	Segment     uint32
+	Aggregate   AggregateKind
+	Tier        PackTier
+	GCTarget    GCTarget
+	EventTime   uint64
+	Granularity HistoryGranularity
+	Backend     uint64
+	PackType    PackType
 }
 
 func BlobKey(id ID) []byte           { return idKey("b:", id) }
@@ -151,6 +189,13 @@ var tierAggregateNames = map[PackTier]string{
 	TierMirrored: "mirrored", TierSingle: "single",
 }
 
+func (tier PackTier) String() string {
+	if name, ok := tierAggregateNames[tier]; ok {
+		return name
+	}
+	return "unknown"
+}
+
 func TierAggregateKey(tier PackTier) []byte {
 	name, ok := tierAggregateNames[tier]
 	if !ok {
@@ -164,6 +209,58 @@ func TierAggregateKey(tier PackTier) []byte {
 func TierAggregateKinds() []PackTier {
 	return []PackTier{TierUnknown, TierHot, TierCold, TierMirrored, TierSingle}
 }
+
+// PackHistoryKey orders events by time, then by a globally monotonic sequence,
+// then by pack. The sequence is what makes the key unique when two writers
+// record events for the same pack within the same second, and what gives the
+// log a total order independent of clock resolution.
+func PackHistoryKey(unixSeconds uint64, sequence uint64, pack ID) []byte {
+	key := make([]byte, 3+8+8+32)
+	copy(key, "ph:")
+	binary.BigEndian.PutUint64(key[3:], unixSeconds)
+	binary.BigEndian.PutUint64(key[11:], sequence)
+	copy(key[19:], pack[:])
+	return key
+}
+
+// PackHistoryTimePrefix bounds a scan to events at or after a point in time.
+func PackHistoryTimePrefix(unixSeconds uint64) []byte {
+	key := make([]byte, 3+8)
+	copy(key, "ph:")
+	binary.BigEndian.PutUint64(key[3:], unixSeconds)
+	return key
+}
+
+// PackHistoryBucketKey identifies one rollup bucket. Backend is zero until the
+// placement model of Phase 12 supplies one; the field exists now so the key
+// does not change when it does.
+func PackHistoryBucketKey(granularity HistoryGranularity, bucketStart uint64, backend uint64, packType PackType) []byte {
+	if !validHistoryGranularity(granularity) {
+		return nil
+	}
+	key := make([]byte, 3+1+8+8+1)
+	copy(key, "pb:")
+	key[3] = byte(granularity)
+	binary.BigEndian.PutUint64(key[4:], bucketStart)
+	binary.BigEndian.PutUint64(key[12:], backend)
+	key[20] = byte(packType)
+	return key
+}
+
+// PackHistoryBucketPrefix bounds a scan to one granularity.
+func PackHistoryBucketPrefix(granularity HistoryGranularity) []byte {
+	return []byte{'p', 'b', ':', byte(granularity)}
+}
+
+func NextEventSequenceKey() []byte { return []byte("meta:next-event-seq") }
+
+// HistoryRawFloorKey records the earliest raw event time still retained, so a
+// later query can tell an intentionally truncated range from a gap.
+func HistoryRawFloorKey() []byte { return []byte("meta:history-raw-floor") }
+
+// HistoryEnabledAtKey records when history collection began, so buckets
+// covering earlier periods are reported as reconstructed rather than complete.
+func HistoryEnabledAtKey() []byte   { return []byte("meta:history-enabled-at") }
 func NextRevisionKey() []byte       { return []byte("meta:next-revision-seq") }
 func NextExportSequenceKey() []byte { return []byte("meta:next-export-seq") }
 
@@ -228,6 +325,26 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		parsed.Kind = KeyNextRevision
 	case string(key) == "meta:next-export-seq":
 		parsed.Kind = KeyNextExportSequence
+	case string(key) == "meta:next-event-seq":
+		parsed.Kind = KeyNextEventSequence
+	case string(key) == "meta:history-raw-floor":
+		parsed.Kind = KeyHistoryRawFloor
+	case string(key) == "meta:history-enabled-at":
+		parsed.Kind = KeyHistoryEnabledAt
+	case len(key) == 51 && string(key[:3]) == "ph:":
+		parsed.Kind = KeyPackHistory
+		parsed.EventTime = binary.BigEndian.Uint64(key[3:11])
+		parsed.Revision = binary.BigEndian.Uint64(key[11:19])
+		copy(parsed.ID[:], key[19:])
+	case len(key) == 21 && string(key[:3]) == "pb:":
+		parsed.Kind = KeyPackHistoryBucket
+		parsed.Granularity = HistoryGranularity(key[3])
+		parsed.EventTime = binary.BigEndian.Uint64(key[4:12])
+		parsed.Backend = binary.BigEndian.Uint64(key[12:20])
+		parsed.PackType = PackType(key[20])
+		if !validHistoryGranularity(parsed.Granularity) || !validPackType(parsed.PackType) {
+			return ParsedKey{}, fmt.Errorf("%w: invalid history bucket key", ErrMalformed)
+		}
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind
