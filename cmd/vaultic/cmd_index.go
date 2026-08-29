@@ -125,6 +125,10 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexFileHistoryCommand(globalOptions),
 		newIndexPathAtCommand(globalOptions),
 		newIndexPathIndexCommand(globalOptions),
+		newIndexAnalyticsCommand(globalOptions),
+		newIndexGrowthCommand(globalOptions),
+		newIndexUserStatsCommand(globalOptions),
+		newIndexGDPRCommand(globalOptions),
 	)
 	return command
 }

@@ -69,6 +69,15 @@ type Config struct {
 	// PathIndexPaths opts selected paths or subtrees into the derived pv: path
 	// history index. Empty means Phase 13's immutable walk remains the source.
 	PathIndexPaths []string `json:"path_index_paths,omitempty"`
+	// AnalyticsConfig supplies deterministic defaults for the optional,
+	// rebuildable creation-analytics index. Its enabled state is stored in the
+	// index database so it can be changed without rewriting repository config.
+	AnalyticsSVMDepth          int      `json:"analytics_svm_depth,omitempty"`
+	AnalyticsVolumeDepth       int      `json:"analytics_volume_depth,omitempty"`
+	AnalyticsPathGroupDepth    int      `json:"analytics_path_group_depth,omitempty"`
+	AnalyticsPathGroupPrefixes []string `json:"analytics_path_group_prefixes,omitempty"`
+	AnalyticsCacheAfter        uint64   `json:"analytics_cache_after,omitempty"`
+	AnalyticsCacheTTLSeconds   int64    `json:"analytics_cache_ttl_seconds,omitempty"`
 
 	// PrunePlan is a durable deferred-cleanup marker. It is an additive config
 	// extension: restic and rustic ignore unknown config fields, while vaultic

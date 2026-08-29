@@ -58,6 +58,9 @@ const (
 	KeyPlacementRequest
 	KeyRepackLineage
 	KeyPromotionEligibility
+	KeyAnalyticsFact
+	KeyAnalyticsCache
+	KeyAnalyticsMetadata
 )
 
 // HistoryGranularity names a rollup bucket width. The values are part of the
@@ -414,6 +417,12 @@ func RepackLineagePrefix(source ID) []byte {
 func PromotionEligibilityKey(pack ID) []byte { return idKey("pe:", pack) }
 func PromotionEligibilityPrefix() []byte     { return []byte("pe:") }
 
+func AnalyticsFactKey(fsid uint32, inode uint64) []byte { return inodeKey("an:", fsid, inode) }
+func AnalyticsFactPrefix() []byte                       { return []byte("an:") }
+func AnalyticsCacheKey(hash ID) []byte                  { return idKey("aq:", hash) }
+func AnalyticsCachePrefix() []byte                      { return []byte("aq:") }
+func AnalyticsMetadataKey() []byte                      { return []byte("meta:analytics") }
+
 func NextEventSequenceKey() []byte { return []byte("meta:next-event-seq") }
 
 // HistoryRawFloorKey records the earliest raw event time still retained, so a
@@ -553,6 +562,13 @@ func ParseKey(key []byte) (ParsedKey, error) {
 	case len(key) == 35 && string(key[:3]) == "pe:":
 		parsed.Kind = KeyPromotionEligibility
 		copy(parsed.ID[:], key[3:])
+	case len(key) == 15 && string(key[:3]) == "an:":
+		parsed.Kind, parsed.FSID, parsed.Inode = KeyAnalyticsFact, binary.BigEndian.Uint32(key[3:7]), binary.BigEndian.Uint64(key[7:])
+	case len(key) == 35 && string(key[:3]) == "aq:":
+		parsed.Kind = KeyAnalyticsCache
+		copy(parsed.ID[:], key[3:])
+	case string(key) == "meta:analytics":
+		parsed.Kind = KeyAnalyticsMetadata
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind

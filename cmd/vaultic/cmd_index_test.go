@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/global"
@@ -9,7 +10,7 @@ import (
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
@@ -18,6 +19,17 @@ func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	command, args, err := root.Find([]string{"list", "index"})
 	if err != nil || command == nil || command.Name() != "list" || len(args) != 1 || args[0] != "index" {
 		t.Fatalf("list index = %v, %v, %v", command, args, err)
+	}
+}
+
+func TestAnalyticsIDConversionRejectsOverflow(t *testing.T) {
+	if values, err := toUint32([]uint{0, math.MaxUint32}); err != nil || len(values) != 2 || values[1] != math.MaxUint32 {
+		t.Fatalf("valid IDs rejected: %v, %v", values, err)
+	}
+	if ^uint(0) > math.MaxUint32 {
+		if _, err := toUint32([]uint{uint(math.MaxUint32) + 1}); err == nil {
+			t.Fatal("overflowing ID accepted")
+		}
 	}
 }
 

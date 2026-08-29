@@ -74,6 +74,8 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{PlacementRequestKey(1700000000, id), KeyPlacementRequest},
 		{RepackLineageKey(id, second), KeyRepackLineage},
 		{PromotionEligibilityKey(id), KeyPromotionEligibility},
+		{AnalyticsFactKey(3, 4), KeyAnalyticsFact}, {AnalyticsCacheKey(id), KeyAnalyticsCache},
+		{AnalyticsMetadataKey(), KeyAnalyticsMetadata},
 		{CurrentInodeKey(3, 4), KeyCurrentInode}, {InodeRevisionKey(3, 4, 5), KeyInodeRevision},
 		{CurrentDirectoryKey(3, 4), KeyCurrentDirectory}, {DirectoryRevisionKey(3, 4, 5), KeyDirectoryRevision},
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
@@ -412,6 +414,8 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}, UnmarshalPlacementRequestRecord)
 	roundTrip(t, RepackLineageRecord{RunID: id3, Kind: LineagePromotion}, UnmarshalRepackLineageRecord)
 	roundTrip(t, PromotionEligibilityRecord{SurvivalUntil: 500, EvaluatedAt: 100, Indefinite: false}, UnmarshalPromotionEligibilityRecord)
+	roundTrip(t, AnalyticsFactRecord{Revision: 1, UID: 2, GID: 3, Known: KnownCTime, CreatedAt: 4, LogicalSize: 5, CalendarYear: 2024, CalendarMonth: 2, ISOYear: 2024, Workweek: 8, SourcePath: "/svm/vol/q/file", SVM: "svm", Volume: "vol", PathGroup: "q", Residency: AnalyticsLive, CreationBasis: AnalyticsCTime}, UnmarshalAnalyticsFactRecord)
+	roundTrip(t, AnalyticsMetadataRecord{Enabled: true, Generation: 1, Facts: 2, BuiltAt: 3}, UnmarshalAnalyticsMetadataRecord)
 	for _, invalid := range []PlacementRecord{
 		{State: PlacementState(99)},
 		{State: PlacementLive, PlacedAt: 1},

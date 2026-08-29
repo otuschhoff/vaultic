@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -191,6 +193,141 @@ func (store *SchemaStore) resolveCrawlDebtOnce(ctx context.Context, keys [][]byt
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
+	return nil
+}
+
+type analyticsConfig struct {
+	SVMDepth          int      `json:"svm_depth,omitempty"`
+	VolumeDepth       int      `json:"volume_depth,omitempty"`
+	PathGroupDepth    int      `json:"path_group_depth,omitempty"`
+	PathGroupPrefixes []string `json:"path_group_prefixes,omitempty"`
+}
+
+func (store *SchemaStore) refreshAnalyticsFact(ctx context.Context, parsed schema.ParsedKey, revisionValue []byte) error {
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err := store.refreshAnalyticsFactOnce(ctx, parsed, revisionValue)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("refresh analytics fact: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) refreshAnalyticsFactOnce(ctx context.Context, parsed schema.ParsedKey, revisionValue []byte) error {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			rollbackTransaction(ctx, transaction)
+		}
+	}()
+	metadataValue, found, err := transaction.Get(ctx, schema.AnalyticsMetadataKey())
+	if err != nil || !found {
+		return err
+	}
+	metadata, err := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
+	if err != nil || !metadata.Enabled {
+		return err
+	}
+	factKey := schema.AnalyticsFactKey(parsed.FSID, parsed.Inode)
+	factValue, factFound, err := transaction.Get(ctx, factKey)
+	if err != nil {
+		return err
+	}
+	var fact schema.AnalyticsFactRecord
+	if factFound {
+		fact, err = schema.UnmarshalAnalyticsFactRecord(factValue)
+		if err != nil {
+			return err
+		}
+		fact.Residency = schema.AnalyticsLive
+	} else {
+		revision, err := schema.UnmarshalInodeRevision(revisionValue)
+		if err != nil {
+			return err
+		}
+		var config analyticsConfig
+		if metadata.ConfigJSON != "" {
+			if err := json.Unmarshal([]byte(metadata.ConfigJSON), &config); err != nil {
+				return err
+			}
+		}
+		if config.SVMDepth == 0 {
+			config.SVMDepth = 1
+		}
+		if config.VolumeDepth == 0 {
+			config.VolumeDepth = 2
+		}
+		if config.PathGroupDepth == 0 {
+			config.PathGroupDepth = 3
+		}
+		fact = schema.AnalyticsFactRecord{Revision: parsed.Revision, UID: revision.UID, GID: revision.GID, Known: revision.Known, LogicalSize: revision.Size, SourcePath: revision.SourcePath, Residency: schema.AnalyticsLive, CreationBasis: schema.AnalyticsTimeUnknown}
+		if revision.Known&schema.KnownCTime != 0 {
+			fact.CreatedAt, fact.CreationBasis = revision.CTime, schema.AnalyticsCTime
+		} else if revision.Known&schema.KnownMTime != 0 {
+			fact.CreatedAt, fact.CreationBasis = revision.MTime, schema.AnalyticsMTime
+		}
+		if fact.CreationBasis != schema.AnalyticsTimeUnknown {
+			created := time.Unix(0, fact.CreatedAt).UTC()
+			fact.CalendarYear, fact.CalendarMonth = int32(created.Year()), uint8(created.Month())
+			isoYear, week := created.ISOWeek()
+			fact.ISOYear, fact.Workweek = int32(isoYear), uint8(week)
+		}
+		if revision.Known&schema.KnownSize != 0 && revision.Size != 0 {
+			fact.SizeLog10 = uint8(math.Floor(math.Log10(float64(revision.Size))))
+		}
+		parts := strings.FieldsFunc(path.Clean(revision.SourcePath), func(r rune) bool { return r == '/' })
+		atDepth := func(depth int) string {
+			if depth > 0 && len(parts) >= depth {
+				return parts[depth-1]
+			}
+			return "unknown"
+		}
+		fact.SVM, fact.Volume, fact.PathGroup = atDepth(config.SVMDepth), atDepth(config.VolumeDepth), atDepth(config.PathGroupDepth)
+		best := ""
+		for _, prefix := range config.PathGroupPrefixes {
+			if (revision.SourcePath == prefix || strings.HasPrefix(revision.SourcePath, prefix+"/")) && len(prefix) > len(best) {
+				best = prefix
+			}
+		}
+		if best != "" {
+			fact.PathGroup = best
+		}
+		metadata.Facts++
+	}
+	factValue, err = fact.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	metadata.Generation++
+	if metadata.Generation == 0 {
+		metadata.Generation = 1
+	}
+	metadata.BuiltAt = time.Now().UnixNano()
+	metadata.CacheEntries = 0
+	metadataValue, err = metadata.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: factKey, Value: factValue}, {Key: schema.AnalyticsMetadataKey(), Value: metadataValue}}, nil); err != nil {
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
@@ -1662,7 +1799,7 @@ func validateMutableKey(key []byte) error {
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
 		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyPathVersion:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyPathVersion:
 		return nil
 	case schema.KeyPackHistory:
 		// The event log is append-only: entries are written by the catalog
@@ -1683,7 +1820,7 @@ func validateMutableDeleteKey(key []byte) error {
 	switch parsed.Kind {
 	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyExportIndexCheckpoint,
 		schema.KeyPackHistory, schema.KeyPackHistoryBucket,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyPathVersion:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyPathVersion:
 		// History is explicitly prunable: it is derived, advisory, and retained
 		// on its own schedule.
 		return nil
@@ -1704,7 +1841,7 @@ func validatePublishKey(key []byte) (bool, error) {
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
 		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyPathVersion:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyPathVersion:
 		return false, nil
 	case schema.KeyPackHistory:
 		return true, nil
@@ -2390,6 +2527,11 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	if err := transaction.Commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
+	}
+	if currentParsed.Kind == schema.KeyCurrentInode {
+		// Analytics is disposable: a missed refresh is repaired by rebuild and
+		// must never turn a committed backup into a failure.
+		_ = store.refreshAnalyticsFact(ctx, revisionParsed, reconciled.RevisionValue)
 	}
 	return nil
 }

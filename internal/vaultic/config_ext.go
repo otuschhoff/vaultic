@@ -1,6 +1,7 @@
 package vaultic
 
 import (
+	"path"
 	"strings"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
@@ -178,6 +179,19 @@ func (c Config) ValidateExtensions() error {
 	}
 	if c.MaxPacksizeToleratePercent != nil && *c.MaxPacksizeToleratePercent > 100 {
 		return errors.Errorf("max_packsize_tolerate_percent must be <= 100, got %d", *c.MaxPacksizeToleratePercent)
+	}
+	for name, depth := range map[string]int{"svm_depth": c.AnalyticsSVMDepth, "volume_depth": c.AnalyticsVolumeDepth, "path_group_depth": c.AnalyticsPathGroupDepth} {
+		if depth < 0 {
+			return errors.Errorf("analytics %s must not be negative", name)
+		}
+	}
+	if c.AnalyticsCacheTTLSeconds < 0 {
+		return errors.New("analytics cache_ttl_seconds must not be negative")
+	}
+	for _, prefix := range c.AnalyticsPathGroupPrefixes {
+		if !strings.HasPrefix(prefix, "/") || path.Clean(prefix) != prefix {
+			return errors.Errorf("analytics path_group_prefix %q must be an absolute clean path", prefix)
+		}
 	}
 	seenBackends := map[string]struct{}{}
 	for _, backend := range c.PlacementBackends {

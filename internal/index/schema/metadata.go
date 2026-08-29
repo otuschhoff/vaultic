@@ -2,6 +2,7 @@ package schema
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 )
 
@@ -517,6 +518,14 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalRepackLineageRecord(value)
 	case KeyPromotionEligibility:
 		_, err = UnmarshalPromotionEligibilityRecord(value)
+	case KeyAnalyticsFact:
+		_, err = UnmarshalAnalyticsFactRecord(value)
+	case KeyAnalyticsCache:
+		if !json.Valid(value) {
+			err = fmt.Errorf("%w: invalid analytics cache JSON", ErrMalformed)
+		}
+	case KeyAnalyticsMetadata:
+		_, err = UnmarshalAnalyticsMetadataRecord(value)
 	case KeySnapshotCommit:
 		var record SnapshotCommitRecord
 		record, err = UnmarshalSnapshotCommitRecord(value)

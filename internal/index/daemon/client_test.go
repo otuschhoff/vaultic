@@ -272,6 +272,10 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
 	ctx := context.Background()
+	analyticsMetadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: time.Now().UnixNano(), ConfigJSON: "{}"}
+	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeSchemaRecord(t, analyticsMetadata), true); err != nil {
+		t.Fatal(err)
+	}
 	content := make([]schema.ID, schema.MaxInlineContentIDs+1)
 	for index := range content {
 		content[index] = daemonTestID(byte(index + 1))
@@ -299,6 +303,14 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	}
 	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
 		t.Fatal(err)
+	}
+	factValue, found, err := store.Get(ctx, schema.AnalyticsFactKey(3, 9))
+	if err != nil || !found {
+		t.Fatalf("incremental analytics fact: found=%t err=%v", found, err)
+	}
+	fact, err := schema.UnmarshalAnalyticsFactRecord(factValue)
+	if err != nil || fact.Revision != revision || fact.Residency != schema.AnalyticsLive {
+		t.Fatalf("incremental analytics fact = %#v, err=%v", fact, err)
 	}
 	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
 		t.Fatalf("idempotent retry: %v", err)
@@ -344,6 +356,14 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 		Revision: secondRevision, ContentIDs: secondContent,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	factValue, _, err = store.Get(ctx, schema.AnalyticsFactKey(3, 9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact, err = schema.UnmarshalAnalyticsFactRecord(factValue)
+	if err != nil || fact.Revision != revision {
+		t.Fatalf("later revision replaced creation fact: %#v, %v", fact, err)
 	}
 	oldReverseValue, found, err := store.Get(ctx, schema.ReverseManifestKey(content[0], manifestID))
 	if err != nil || !found {
