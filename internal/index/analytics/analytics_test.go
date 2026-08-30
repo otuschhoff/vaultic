@@ -1091,7 +1091,7 @@ func TestMaterializedViewsMatchRawAndHaveScopedPhysicalKeys(t *testing.T) {
 	store := newMemoryStore()
 	created := time.Date(2024, 2, 2, 0, 0, 0, 0, time.UTC)
 	for index, size := range []uint64{100, 300} {
-		record := schema.InodeRevision{CTime: created.AddDate(0, index, 0).UnixNano(), Size: size, UID: uint32(600 + index), GID: 700, Known: schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath, SourcePath: fmt.Sprintf("/svm/vol/team/%d", index), Freshness: schema.FreshnessVerified, ContentMode: schema.ContentInline, ContentCount: 1, ContentIDs: []schema.ID{{byte(index + 1)}}}
+		record := schema.InodeRevision{CTime: created.AddDate(0, index, 0).UnixNano(), Size: size, UID: uint32(600 + index), GID: 700, Known: schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath, SourcePath: fmt.Sprintf("/svm/vol/team/%d", index), Freshness: schema.FreshnessVerified, ContentMode: schema.ContentInline, ContentCount: 1, ContentIDs: []schema.ID{{1}}}
 		putRecord(t, store, schema.InodeRevisionKey(1, uint64(index+1), uint64(index+1)), record)
 		putRecord(t, store, schema.CurrentInodeKey(1, uint64(index+1)), schema.CurrentPointer{Revision: uint64(index + 1), RecordKey: schema.InodeRevisionKey(1, uint64(index+1), uint64(index+1))})
 	}
@@ -1149,6 +1149,14 @@ func TestMaterializedViewsMatchRawAndHaveScopedPhysicalKeys(t *testing.T) {
 	if err != nil || audit.Explain.Source != "materialized-view" || len(audit.Inodes) != 1 || len(audit.Blobs) != 1 {
 		t.Fatalf("GDPR did not use scoped views: %+v, %v", audit, err)
 	}
+	explained, err := GDPRAuditWithOptions(ctx, store, 600, GDPRAuditOptions{ExplainSurvivingChunks: true, ExternalSourceLimit: 1})
+	if err != nil || len(explained.Blobs) != 1 || explained.Blobs[0].SurvivingExplanation == nil {
+		t.Fatalf("GDPR survival explanation missing: %+v, %v", explained, err)
+	}
+	survival := explained.Blobs[0].SurvivingExplanation
+	if survival.ScopedReferences != 1 || survival.ExternalReferences != 1 || !survival.WouldSurvive || survival.SourcesTruncated || len(survival.ExternalSources) != 1 || survival.ExternalSources[0].UID != 601 || survival.ExternalSources[0].Path != "/svm/vol/team/1" {
+		t.Fatalf("unexpected GDPR survival explanation: %+v", survival)
+	}
 }
 
 func TestGDPRAuditReportsMappingsLocationsAndRetention(t *testing.T) {
@@ -1159,6 +1167,8 @@ func TestGDPRAuditReportsMappingsLocationsAndRetention(t *testing.T) {
 	packID := schema.ID{2}
 	putRecord(t, store, schema.UserInodeKey(uid, 3, 4), schema.AnalyticsUserInodeRecord{LatestRevision: 5, PathSample: "/home/alice/file"})
 	putRecord(t, store, schema.UserBlobKey(uid, blobID), schema.AnalyticsUserBlobRecord{ReferenceCount: 2, FirstSeen: 3})
+	putRecord(t, store, schema.InodeRevisionKey(3, 4, 5), schema.InodeRevision{UID: uid, Known: schema.KnownUID | schema.KnownPath, ContentMode: schema.ContentInline, ContentCount: 1, ContentIDs: []schema.ID{blobID}, SourcePath: "/home/alice/file", Freshness: schema.FreshnessVerified})
+	putRecord(t, store, schema.InodeRevisionKey(3, 5, 6), schema.InodeRevision{UID: 601, Known: schema.KnownUID | schema.KnownPath, ContentMode: schema.ContentInline, ContentCount: 1, ContentIDs: []schema.ID{blobID}, SourcePath: "/home/bob/shared", Freshness: schema.FreshnessVerified})
 	putRecord(t, store, schema.BlobKey(blobID), schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: packID, Length: 10, UncompressedSize: 10, Type: schema.BlobData}}})
 	putRecord(t, store, schema.PackKey(packID), schema.PackRecord{Type: schema.PackData, PhysicalSize: 10, PayloadSize: 10, BlobCount: 1, PhysicalSizeKnown: true, CreationTime: 1, CreationTimeKnown: true, Lifecycle: schema.PackImported, Tier: schema.TierCold, RetentionSource: schema.RetentionConfig, MinRetentionUntil: 99})
 	putRecord(t, store, schema.PackPlacementKey(packID, 42), schema.PlacementRecord{State: schema.PlacementLive, Bytes: 10, RetentionSource: schema.RetentionBackend, MinRetentionUntil: 100})
@@ -1169,6 +1179,10 @@ func TestGDPRAuditReportsMappingsLocationsAndRetention(t *testing.T) {
 	pack := audit.Blobs[0].Packs[0]
 	if pack.Tier != "cold" || !pack.RetentionAvailable || pack.RetentionUntil != 100 || len(pack.Backends) != 1 || pack.Backends[0] != 42 || len(pack.Placements) != 1 || pack.Placements[0].State != "live" {
 		t.Fatalf("unexpected GDPR pack report: %+v", pack)
+	}
+	explained, err := GDPRAuditWithOptions(ctx, store, uid, GDPRAuditOptions{ExplainSurvivingChunks: true})
+	if err != nil || explained.Blobs[0].SurvivingExplanation == nil || explained.Blobs[0].SurvivingExplanation.ScopedReferences != 1 || explained.Blobs[0].SurvivingExplanation.ExternalReferences != 1 || explained.Blobs[0].SurvivingExplanation.ExternalSources[0].Path != "/home/bob/shared" {
+		t.Fatalf("unexpected authoritative survival explanation: %+v, %v", explained, err)
 	}
 }
 

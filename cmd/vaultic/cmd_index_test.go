@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"math"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
@@ -22,6 +25,29 @@ func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	command, args, err := root.Find([]string{"list", "index"})
 	if err != nil || command == nil || command.Name() != "list" || len(args) != 1 || args[0] != "index" {
 		t.Fatalf("list index = %v, %v, %v", command, args, err)
+	}
+}
+
+func TestVerifyGDPRCertificateRequiresTrustedIdentity(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := schema.DeletionCertificateRecord{UID: 42, ExecutedAt: 100, RunID: schema.ID{1}, SigningAlgorithm: "Ed25519", PublicKey: publicKey}
+	signingBytes, err := certificate.SigningBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate.Signature = ed25519.Sign(privateKey, signingBytes)
+	if err := verifyGDPRCertificate(certificate, publicKey); err != nil {
+		t.Fatalf("trusted certificate rejected: %v", err)
+	}
+	otherPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyGDPRCertificate(certificate, otherPublicKey); err == nil {
+		t.Fatal("certificate signed by an untrusted identity accepted")
 	}
 }
 

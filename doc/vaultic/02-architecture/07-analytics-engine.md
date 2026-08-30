@@ -516,10 +516,9 @@ vaultic index analytics --uid 600 --year 2024 \
 
 `vaultic index gdpr audit` — **Phase 16:** GDPR compliance inspection tool.
 
-- `--uid <uid>` or `--username <name>`
-- `--gid <gid>`
-- `--detail` include exact file paths, inode revisions, blob hashes, and pack IDs
+- `--uid <uid>`
 - `--explain-surviving-chunks` show per-chunk breakdown explaining which non-scoped files reference each chunk
+- `--external-source-limit <n>` bound external reference samples per chunk
 - `--json`
 
 Outputs a complete audit report listing active paths, referenced blob IDs, target storage packs (hot vs cold), retention expiry dates (`min_retention_until`), and an analysis of chunks that would survive deletion due to external deduplication references.
@@ -527,15 +526,17 @@ Outputs a complete audit report listing active paths, referenced blob IDs, targe
 `vaultic index gdpr execute-forget` — **Phase 17:** Execute GDPR user data erasure.
 
 - `--uid <uid>`
+- `--signing-key <path>` operator-held Ed25519 PKCS#8 PEM private key
+- `--run-id <hex>` optional stable replay identity
 - `--confirm`
 - `--json`
 
-Purges user file references and inode revisions across active snapshots, re-evaluates chunk reference counts, enqueues unreferenced chunks/packs into the deletion queue (`dq:`), and outputs a cryptographic erasure certificate.
+Redacts user inode content and identity fields while preserving a valid retained snapshot graph, removes directory/path/hardlink references, re-evaluates chunk reference counts, enqueues wholly unreferenced pack placements into `dq:`, and outputs an operator-signed erasure certificate.
 
 `vaultic index gdpr set-policy` — **Phase 17:** Configure backup exclusion policies.
 
 - `--exclude-uid <uid>`
-- `--remove-exclusion <uid>`
+- `--reason <text>`
 - `--json`
 
 Configures persistent UID blocklist rules (`u:policy:blocklist:<uid>`) preventing the archiver and reconciliation engine from backing up files owned by erased users in future crawls.

@@ -53,6 +53,19 @@ func TestReadEmptyPassword(t *testing.T) {
 	rtest.Assert(t, strings.Contains(err.Error(), "must not be specified together with providing a password via a cli option or environment variable"), "unexpected error message, got %v", err)
 }
 
+func TestAzureKeyVaultPasswordSourceValidation(t *testing.T) {
+	for _, opts := range []Options{
+		{AzureKeyVaultURL: "https://example.vault.azure.net"},
+		{AzureKeyVaultSecret: "vaultic"},
+		{AzureKeyVaultURL: "https://example.vault.azure.net", AzureKeyVaultSecret: "vaultic", PasswordFile: "password"},
+		{AzureKeyVaultURL: "https://example.vault.azure.net", AzureKeyVaultSecret: "vaultic", AzureKeyVaultTimeout: -1},
+	} {
+		if _, err := resolvePassword(&opts, "VAULTIC_PASSWORD"); err == nil {
+			t.Fatalf("expected invalid Key Vault options %#v to fail", opts)
+		}
+	}
+}
+
 func TestPackSizeEnvParseError(t *testing.T) {
 	t.Setenv("VAULTIC_PACK_SIZE", "64MiB")
 

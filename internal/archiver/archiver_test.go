@@ -1852,6 +1852,18 @@ func TestArchiverExplicitBackupTarget(t *testing.T) {
 	}
 }
 
+func TestArchiverMandatorySelectRejectsExplicitTarget(t *testing.T) {
+	ctx := t.Context()
+	tempdir, repo := prepareTempdirRepoSrc(t, TestDir{"blocked": TestFile{Content: "must not be archived"}})
+	arch := New(repo, fs.Track{FS: fs.NewLocal()}, Options{})
+	arch.MandatorySelect = func(string, *fs.ExtendedFileInfo, fs.FS) bool { return false }
+	back := rtest.Chdir(t, tempdir)
+	defer back()
+	if _, _, _, err := arch.Snapshot(ctx, []string{"blocked"}, SnapshotOptions{Time: time.Now()}); err == nil || err.Error() != "snapshot is empty" {
+		t.Fatalf("mandatory policy did not reject explicit target: %v", err)
+	}
+}
+
 // MockFS keeps track which files are read.
 type MockFS struct {
 	fs.FS

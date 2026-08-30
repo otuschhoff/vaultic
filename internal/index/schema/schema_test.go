@@ -562,6 +562,11 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}, UnmarshalPlacementRequestRecord)
 	roundTrip(t, RepackLineageRecord{RunID: id3, Kind: LineagePromotion}, UnmarshalRepackLineageRecord)
 	roundTrip(t, PromotionEligibilityRecord{SurvivalUntil: 500, EvaluatedAt: 100, Indefinite: false}, UnmarshalPromotionEligibilityRecord)
+	roundTrip(t, VerificationStateRecord{LastAttemptAt: 100, LastAttemptLevel: VerificationFull, HeaderVerifiedAt: 100, ChecksumVerifiedAt: 100, FullVerifiedAt: 100, Result: VerificationHealthy, LastRunID: id1}, UnmarshalVerificationStateRecord)
+	roundTrip(t, VerificationStateRecord{LastAttemptAt: 200, LastAttemptLevel: VerificationChecksum, Result: VerificationIntegrityError, OpenFindingID: id2, FindingLevel: VerificationChecksum, Classification: VerificationChecksumMismatch, FirstErrorAt: 190, LastErrorAt: 200, ConsecutiveFailures: 2, LastRunID: id1}, UnmarshalVerificationStateRecord)
+	roundTrip(t, VerificationEventRecord{Type: VerificationDetected, FindingID: id2, RunID: id1, Level: VerificationChecksum, Classification: VerificationChecksumMismatch, FirstDetected: 190, LastDetected: 190, Occurrences: 1, Expected: "abc", Observed: "def"}, UnmarshalVerificationEventRecord)
+	roundTrip(t, UIDExclusionPolicyRecord{Excluded: true, UpdatedAt: 100, RunID: id1, Reason: "gdpr request"}, UnmarshalUIDExclusionPolicyRecord)
+	roundTrip(t, DeletionCertificateRecord{UID: 42, ExecutedAt: 100, RunID: id1, PurgedReferenceHashes: []ID{id1, id2}, PendingDeletion: []DeletionSchedule{{PackID: id1, Backend: 2, DeleteAfter: 300}}, SigningAlgorithm: "Ed25519", PublicKey: []byte{1, 2}, Signature: []byte{3, 4}}, UnmarshalDeletionCertificateRecord)
 	analyticsFact := AnalyticsFactRecord{Revision: 1, UID: 2, GID: 3, Known: KnownCTime, CreatedAt: 4, LogicalSize: 5, CalendarYear: 2024, CalendarMonth: 2, ISOYear: 2024, Workweek: 8, SourcePath: "/svm/vol/q/file", SVM: "svm", Volume: "vol", PathGroup: "q", Residency: AnalyticsLive, CreationBasis: AnalyticsCTime, IdentityGeneration: 42, IdentityContinuity: AnalyticsContinuitySourceGeneration}
 	encodedAnalyticsFact, err := analyticsFact.MarshalBinary()
 	if err != nil {

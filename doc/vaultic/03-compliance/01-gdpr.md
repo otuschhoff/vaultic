@@ -60,9 +60,9 @@ GDPR Article 17 requires the deletion of personal data upon request, whereas ent
 [ DSAR Erasure Request ]
            │
            ▼
-[ vaultic index gdpr execute-forget --uid 1042 ]
+[ vaultic index gdpr execute-forget --uid 1042 --signing-key gdpr-ed25519.pem --confirm ]
            │
-           ├─► Removes UID 1042 inode revisions (iv:) & directory edges (dv:)
+           ├─► Redacts UID 1042 inode revisions (iv:) & removes directory edges (dv:)
            ├─► Decrements blob reference counts (rc:)
            ├─► Issues Cryptographic Erasure Certificate
            └─► Zero-reference packs ──► Retention-Aware Queue (dq:)
@@ -74,10 +74,10 @@ GDPR Article 17 requires the deletion of personal data upon request, whereas ent
 ```
 
 Vaultic reconciles this tension through automated erasure primitives and backup exclusion policies:
-1. **Erasure Execution (`vaultic index gdpr execute-forget --uid <uid>`):** Atomically purges user inode revisions (`iv:`) and directory bindings (`dv:`), decrements blob reference counts (`rc:`), enqueues unreferenced packs into the deletion queue (`dq:`), and outputs a cryptographically signed deletion certificate.
+1. **Erasure Execution (`vaultic index gdpr execute-forget --uid <uid> --signing-key <pem> --confirm`):** Atomically redacts identifying and content fields in user inode revisions (`iv:`), removes directory/path/hardlink bindings, rebuilds blob reference counts (`rc:`), enqueues wholly unreferenced pack placements into the deletion queue (`dq:`), and outputs an Ed25519-signed deletion certificate.
 2. **Future Backup Exclusion Policy (`vaultic index gdpr set-policy --exclude-uid <uid>`):** Configures persistent blocklist rules (`u:policy:blocklist:<uid>`). Archiver and reconciliation crawlers check file ownership (`lstat.uid`) against the blocklist and automatically skip files owned by erased users during future backup crawls.
 3. **Retention-Aware Deletion Queue (`dq:`):** Unreachable packs are not deleted immediately if doing so incurs early-deletion penalties or violates Object Lock. Instead, the deletion deadline is set to:
-   $$\text{delete\_after} = \max(\text{now} + \text{keep\_delete}, \text{min\_retention\_until})$$
+  $$\text{delete\_after} = \max(\text{now}, \text{min\_retention\_until})$$
 4. **Legal Compliance Justification:** Under GDPR Recital 65 and Article 17(3)(b/e), retention of encrypted backup media required for legal compliance or technical integrity is permissible, provided the data is rendered inaccessible (removed from active index scopes) and physically purged once the retention lock expires.
 
 #### Content-Defined Deduplication Handling
@@ -104,7 +104,7 @@ Vaultic reconciles this tension through automated erasure primitives and backup 
   # High-churn users over the past 60 days
   vaultic index user-stats --top-churn --since 2m --limit 10
   ```
-- **Dedicated GDPR Audit Syslog Stream:** Multi-target syslog exporter routes structured `gdpr` category events (`gdpr audit`, `gdpr execute-forget`, blocklist matches) over TLS to compliance SIEM endpoints.
+- **Dedicated GDPR Audit Syslog Stream:** Multi-target syslog exporter routes structured `gdpr` category events (`gdpr audit`, `gdpr execute-forget`, and policy changes) over TLS to compliance SIEM endpoints.
 - **Storage Footprint Overhead:** Attributing 100 million unique blobs across 10,000 users requires **~3.6 GB** of index storage within `vaulticdb`—less than **0.0007%** of a 500 TB repository.
 
 ---
@@ -115,7 +115,8 @@ To maintain full GDPR compliance when operating vaultic in an enterprise environ
 
 1. **DSAR Access Procedure (Art. 15):** Upon receiving a Data Subject Access Request, execute `vaultic index gdpr audit --uid <UID> --explain-surviving-chunks --json` and export the structured report to the Data Protection Officer (DPO).
 2. **DSAR Erasure Procedure (Art. 17):** Upon receiving a Right to be Forgotten request:
-   - Execute erasure: `vaultic index gdpr execute-forget --uid <UID> --confirm --json` and store the generated deletion certificate.
-   - Enforce exclusion: `vaultic index gdpr set-policy --exclude-uid <UID>` to prevent re-importing the user's files during future backup crawls.
+  - Execute erasure: `vaultic index gdpr execute-forget --uid <UID> --signing-key <ED25519_PKCS8_PEM> --confirm --json` and store the generated deletion certificate.
+  - Verify a certificate against the operator trust anchor: `vaultic index gdpr verify-certificate --uid <UID> --executed-at <UNIX_SECONDS> --run-id <RUN_ID> --public-key <ED25519_PKIX_PEM> --json`.
+  - Enforce exclusion: `vaultic index gdpr set-policy --exclude-uid <UID> --reason <BASIS>` to prevent re-importing the user's files during future backup crawls.
    - Run `vaultic index gc` to sweep unreferenced packs.
 3. **Key Management Governance (Art. 32):** Manage repository passphrases via **Azure Key Vault Option A** using Azure Arc Managed Identities (`SecretGet`), keeping repository keys secure and audited in Microsoft Sentinel without storing secrets on host disks.

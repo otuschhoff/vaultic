@@ -35,6 +35,8 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/keyvault"
+	"github.com/otuschhoff/vaultic/internal/observability"
 )
 
 // ErrNoRepository is used to report if opening a repository failed due
@@ -55,11 +57,15 @@ type Options struct {
 	UseProfiles []string
 	Profile     *configfile.Profile
 
-	Repo            string
-	RepositoryFile  string
-	PasswordFile    string
-	PasswordCommand string
-	KeyHint         string
+	Repo                       string
+	RepositoryFile             string
+	PasswordFile               string
+	PasswordCommand            string
+	AzureKeyVaultURL           string
+	AzureKeyVaultSecret        string
+	AzureKeyVaultSecretVersion string
+	AzureKeyVaultTimeout       time.Duration
+	KeyHint                    string
 	// MasterKey* open the repository directly with a master key (no password).
 	MasterKey          string
 	MasterKeyFile      string
@@ -101,6 +107,7 @@ type Options struct {
 	InfluxOrg      string
 	InfluxBucket   string
 	OpenTelemetry  bool
+	SyslogTargets  []string
 
 	backend.TransportOptions
 	limiter.Limits
@@ -141,6 +148,10 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
 	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
 	f.StringVarP(&opts.PasswordCommand, "password-command", "", "", "shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)")
+	f.StringVar(&opts.AzureKeyVaultURL, "azure-key-vault-url", "", "Azure Key Vault `URL` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_URL)")
+	f.StringVar(&opts.AzureKeyVaultSecret, "azure-key-vault-secret", "", "Azure Key Vault secret `name` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_SECRET)")
+	f.StringVar(&opts.AzureKeyVaultSecretVersion, "azure-key-vault-secret-version", "", "optional Azure Key Vault secret `version` (default: $VAULTIC_AZURE_KEY_VAULT_SECRET_VERSION)")
+	f.DurationVar(&opts.AzureKeyVaultTimeout, "azure-key-vault-timeout", 30*time.Second, "startup SecretGet `timeout` (default: $VAULTIC_AZURE_KEY_VAULT_TIMEOUT or 30s)")
 	f.StringVar(&opts.MasterKey, "key", "", "master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)")
 	f.StringVar(&opts.MasterKeyFile, "key-file", "", "`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)")
 	f.StringVar(&opts.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
@@ -178,6 +189,7 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.InfluxOrg, "influxdb-org", env.Get("INFLUXDB_ORG"), "InfluxDB organization (default: $VAULTIC_INFLUXDB_ORG)")
 	f.StringVar(&opts.InfluxBucket, "influxdb-bucket", env.Get("INFLUXDB_BUCKET"), "InfluxDB bucket (default: $VAULTIC_INFLUXDB_BUCKET)")
 	f.BoolVar(&opts.OpenTelemetry, "opentelemetry", false, "emit OpenTelemetry spans through the configured global provider")
+	f.StringSliceVar(&opts.SyslogTargets, "syslog-target", nil, "syslog target `URL` (repeatable; udp, tcp, tls, unix, or unixgram)")
 	opts.noExtraVerifyFlag = f.Lookup("no-extra-verify")
 	f.IntVar(&opts.Limits.UploadKb, "limit-upload", 0, "limits uploads to a maximum `rate` in KiB/s. (default: unlimited)")
 	f.IntVar(&opts.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
@@ -194,6 +206,14 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	opts.PasswordFile = env.Get("PASSWORD_FILE")
 	opts.KeyHint = env.Get("KEY_HINT")
 	opts.PasswordCommand = env.Get("PASSWORD_COMMAND")
+	opts.AzureKeyVaultURL = env.Get("AZURE_KEY_VAULT_URL")
+	opts.AzureKeyVaultSecret = env.Get("AZURE_KEY_VAULT_SECRET")
+	opts.AzureKeyVaultSecretVersion = env.Get("AZURE_KEY_VAULT_SECRET_VERSION")
+	if value := env.Get("AZURE_KEY_VAULT_TIMEOUT"); value != "" {
+		if timeout, err := time.ParseDuration(value); err == nil {
+			opts.AzureKeyVaultTimeout = timeout
+		}
+	}
 	opts.MasterKey = env.Get("KEY")
 	opts.MasterKeyFile = env.Get("KEY_FILE")
 	opts.MasterKeyCommand = env.Get("KEY_COMMAND")
@@ -289,6 +309,27 @@ func (opts *Options) PreRun(needsPassword bool) error {
 
 // resolvePassword determines the password to be used for opening the repository.
 func resolvePassword(opts *Options, envStr string) (string, error) {
+	keyVaultConfigured := opts.AzureKeyVaultURL != "" || opts.AzureKeyVaultSecret != "" || opts.AzureKeyVaultSecretVersion != ""
+	if keyVaultConfigured {
+		if opts.AzureKeyVaultURL == "" || opts.AzureKeyVaultSecret == "" {
+			return "", errors.Fatalf("Azure Key Vault URL and secret name must be specified together")
+		}
+		if opts.PasswordFile != "" || opts.PasswordCommand != "" || resolvePasswordEnv(envStr) != "" {
+			return "", errors.Fatalf("Azure Key Vault and other password sources are mutually exclusive")
+		}
+		if opts.AzureKeyVaultTimeout <= 0 {
+			return "", errors.Fatalf("Azure Key Vault timeout must be positive")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), opts.AzureKeyVaultTimeout)
+		defer cancel()
+		secret, err := keyvault.FetchSecret(ctx, opts.AzureKeyVaultURL, opts.AzureKeyVaultSecret, opts.AzureKeyVaultSecretVersion)
+		if err != nil {
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Error, Category: observability.CategoryAuth, Component: "keyvault", Message: "Azure Key Vault SecretGet failed", Fields: map[string]any{"vault_url": opts.AzureKeyVaultURL, "secret_name": opts.AzureKeyVaultSecret, "version_requested": opts.AzureKeyVaultSecretVersion != ""}})
+			return "", err
+		}
+		_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryAuth, Component: "keyvault", Message: "Azure Key Vault SecretGet completed", Fields: map[string]any{"vault_url": opts.AzureKeyVaultURL, "secret_name": opts.AzureKeyVaultSecret, "version_requested": opts.AzureKeyVaultSecretVersion != ""}})
+		return secret, nil
+	}
 	if opts.PasswordFile != "" && opts.PasswordCommand != "" {
 		return "", errors.Fatalf("Password file and command are mutually exclusive options")
 	}

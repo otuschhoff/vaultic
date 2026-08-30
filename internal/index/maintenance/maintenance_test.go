@@ -19,6 +19,27 @@ type memoryStore struct {
 	batchWrites int
 }
 
+func TestCheckVerificationStateDetectsProjectionDrift(t *testing.T) {
+	ctx := context.Background()
+	store, packID, _ := newMemoryStore(t, schema.PackPublished)
+	pack := schema.ID(packID)
+	backend := uint64(7)
+	placement := schema.PlacementRecord{State: schema.PlacementLive, Bytes: 10, LastVerifiedAt: 100, RetentionSource: schema.RetentionUnknown}
+	state := schema.VerificationStateRecord{LastAttemptAt: 100, LastAttemptLevel: schema.VerificationChecksum, HeaderVerifiedAt: 100, ChecksumVerifiedAt: 100, Result: schema.VerificationHealthy, LastRunID: schema.ID{1}}
+	store.set(t, schema.PackPlacementKey(pack, backend), placement)
+	store.set(t, schema.VerificationStateKey(pack, backend), state)
+	result := CheckResult{}
+	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil || result.VerificationStateMismatch != 0 {
+		t.Fatalf("consistent verification state reported drift: %+v, %v", result, err)
+	}
+	placement.LastVerifiedAt = 99
+	store.set(t, schema.PackPlacementKey(pack, backend), placement)
+	result = CheckResult{}
+	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil || result.VerificationStateMismatch != 1 || result.Clean() {
+		t.Fatalf("verification drift was not dirty: %+v, %v", result, err)
+	}
+}
+
 func newMemoryStore(t *testing.T, lifecycle schema.PackLifecycle) (*memoryStore, vaultic.ID, vaultic.ID) {
 	t.Helper()
 	packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID()

@@ -518,6 +518,14 @@ func ValidateValue(key []byte, value []byte) error {
 		_, err = UnmarshalRepackLineageRecord(value)
 	case KeyPromotionEligibility:
 		_, err = UnmarshalPromotionEligibilityRecord(value)
+	case KeyUIDExclusionPolicy:
+		_, err = UnmarshalUIDExclusionPolicyRecord(value)
+	case KeyDeletionCertificate:
+		_, err = UnmarshalDeletionCertificateRecord(value)
+	case KeyVerificationState:
+		_, err = UnmarshalVerificationStateRecord(value)
+	case KeyVerificationEvent:
+		_, err = UnmarshalVerificationEventRecord(value)
 	case KeyAnalyticsFact:
 		_, err = UnmarshalAnalyticsFactRecord(value)
 	case KeyAnalyticsCache:

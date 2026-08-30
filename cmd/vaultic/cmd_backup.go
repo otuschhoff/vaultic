@@ -30,6 +30,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/hooks"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/analytics"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/repository"
@@ -735,6 +736,20 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	if err != nil {
 		return err
 	}
+	var authoritativeEngine *enginepkg.DaemonEngine
+	var mandatorySelect archiver.SelectFunc
+	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
+		authoritativeEngine = engine
+		excludedUIDs, err := analytics.ExcludedUIDs(ctx, engine.SchemaStore())
+		if err != nil {
+			return fmt.Errorf("load UID exclusion policy: %w", err)
+		}
+		if len(excludedUIDs) > 0 {
+			uidPolicy := archiver.RejectUIDs(excludedUIDs)
+			rejectFuncs = append(rejectFuncs, uidPolicy)
+			mandatorySelect = archiver.CombineRejects([]archiver.RejectFunc{uidPolicy})
+		}
+	}
 
 	selectByNameFilter := archiver.CombineRejectByNames(rejectByNameFuncs)
 	selectFilter := archiver.CombineRejects(rejectFuncs)
@@ -759,6 +774,9 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	arch := archiver.New(repo.AppendTransaction(), targetFS, archiver.Options{ReadConcurrency: opts.ReadConcurrency})
 	arch.SelectByName = selectByNameFilter
 	arch.Select = selectFilter
+	if mandatorySelect != nil {
+		arch.MandatorySelect = mandatorySelect
+	}
 	arch.WithAtime = opts.WithAtime
 
 	arch.Error = func(item string, err error) error {
@@ -777,10 +795,8 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	arch.ExcludedItem = progressReporter.ExcludedItem
 
 	var reconciler *reconcile.Reconciler
-	var authoritativeEngine *enginepkg.DaemonEngine
-	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
-		authoritativeEngine = engine
-		reconciler, err = reconcile.New(cancelCtx, targetFS, engine.SchemaStore(), reconcile.Options{PathIndexPaths: repo.Config().PathIndexPaths})
+	if authoritativeEngine != nil {
+		reconciler, err = reconcile.New(cancelCtx, targetFS, authoritativeEngine.SchemaStore(), reconcile.Options{PathIndexPaths: repo.Config().PathIndexPaths})
 		if err != nil {
 			return fmt.Errorf("start authoritative metadata reconciliation: %w", err)
 		}

@@ -175,7 +175,7 @@ Scaling to **1.5 billion inodes** poses severe challenges for metadata indexing,
 - **Rubrik:** Deleting a specific user's data from immutable backup snapshots is inherently challenging in Rubrik's chunked block store. Data remains in historical snapshots until the SLA retention period expires.
 - **Vaultic:** Provides surgical, compliant GDPR controls:
   1. **Surviving Chunk Analysis (`vaultic index gdpr audit --uid <uid> --explain-surviving-chunks`):** Explains exactly which data chunks belong exclusively to `<uid>` vs. which chunks survive due to external deduplication references (with path samples and reference counts).
-  2. **Erasure Execution (`vaultic index gdpr execute-forget --uid <uid>`):** Purges user metadata references (`iv:`, `dv:`), decrements chunk reference counts (`rc:`), enqueues zero-reference cold packs into `dq:`, and generates a signed erasure certificate.
+  2. **Erasure Execution (`vaultic index gdpr execute-forget --uid <uid> --signing-key <pem> --confirm`):** Redacts user metadata/content references while preserving retained graph structure, rebuilds chunk reference counts (`rc:`), enqueues wholly unreferenced pack placements into `dq:`, and generates an operator-signed erasure certificate.
   3. **Future Backup Exclusion (`vaultic index gdpr set-policy --exclude-uid <uid>`):** Enforces persistent blocklist rules (`u:policy:blocklist:<uid>`) so archiver crawlers automatically skip files owned by erased users during future backup runs.
 
 #### ISO/IEC 27001:2022 Security Controls

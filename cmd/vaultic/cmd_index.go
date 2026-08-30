@@ -129,6 +129,7 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexGrowthCommand(globalOptions),
 		newIndexUserStatsCommand(globalOptions),
 		newIndexGDPRCommand(globalOptions),
+		newIndexVerifyStorageCommand(globalOptions),
 	)
 	return command
 }
@@ -386,6 +387,7 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 		printer.P("placements: missing %d; reverse mismatches %d; tier mismatches %d; below durability %d; unknown backends %d\n",
 			result.MissingPlacementRecords, result.BackendPackMismatch, result.DerivedTierMismatch,
 			result.PacksBelowDurability, result.UnknownPlacementBackends)
+		printer.P("verification state mismatches: %d\n", result.VerificationStateMismatch)
 		if result.TierAggregatesUnbuilt {
 			printer.P("per-tier aggregates have not been built for this repository yet; run 'vaultic index rebuild-pack-stats'\n")
 		}

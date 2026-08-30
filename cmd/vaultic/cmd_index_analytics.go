@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
@@ -12,7 +18,9 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/analytics"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
@@ -429,13 +437,202 @@ func newIndexUserStatsCommand(globalOptions *global.Options) *cobra.Command {
 
 func newIndexGDPRCommand(globalOptions *global.Options) *cobra.Command {
 	command := &cobra.Command{Use: "gdpr", Short: "Inspect retained data by identity", Args: cobra.NoArgs, DisableAutoGenTag: true}
-	command.AddCommand(newIndexGDPRAuditCommand(globalOptions))
+	command.AddCommand(newIndexGDPRAuditCommand(globalOptions), newIndexGDPRExecuteForgetCommand(globalOptions), newIndexGDPRVerifyCertificateCommand(globalOptions), newIndexGDPRSetPolicyCommand(globalOptions))
+	return command
+}
+
+func newIndexGDPRExecuteForgetCommand(globalOptions *global.Options) *cobra.Command {
+	var daemonOptions indexDaemonOptions
+	var uid uint64
+	var runIDValue string
+	var signingKeyFile string
+	var confirm bool
+	command := &cobra.Command{Use: "execute-forget", Short: "Redact a UID and schedule exclusively unreferenced storage", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if !command.Flags().Changed("uid") || uid > math.MaxUint32 {
+			return fmt.Errorf("--uid with a uint32 value is required")
+		}
+		if !confirm {
+			return fmt.Errorf("--confirm is required for irreversible GDPR erasure")
+		}
+		signingKey, err := loadGDPRSigningKey(signingKeyFile)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		runID := schema.ID(sha256.Sum256(fmt.Appendf(nil, "gdpr-forget:%d:%d", uid, now.UnixNano())))
+		if runIDValue != "" {
+			runID, err = parseCommandID("run-id", runIDValue)
+			if err != nil {
+				return err
+			}
+		}
+		base := indexAnalyticsOptions{Daemon: daemonOptions}
+		result, err := withAnalyticsStore(command.Context(), base, *globalOptions, true, func(ctx context.Context, store analytics.Store, _ analytics.Config) (any, error) {
+			eraser, ok := store.(interface {
+				ExecuteGDPRForget(context.Context, daemon.GDPRForgetRequest) (schema.DeletionCertificateRecord, error)
+			})
+			if !ok {
+				return nil, fmt.Errorf("index store does not support transactional GDPR erasure")
+			}
+			return eraser.ExecuteGDPRForget(ctx, daemon.GDPRForgetRequest{UID: uint32(uid), ExecutedAt: now.Unix(), RunID: runID, SigningKey: signingKey})
+		})
+		if err != nil {
+			return err
+		}
+		globalOptions.Term.Print(ui.ToJSONString(result))
+		certificate := result.(schema.DeletionCertificateRecord)
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Notice, Category: observability.CategoryGDPR, Component: "index", Message: "GDPR erasure committed", Fields: map[string]any{"uid": uid, "run_id": hex.EncodeToString(runID[:]), "purged_references": len(certificate.PurgedReferenceHashes), "pending_deletions": len(certificate.PendingDeletion)}})
+		if len(certificate.PendingDeletion) > 0 {
+			_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index", Message: "GDPR erasure scheduled pack placement deletion", Fields: map[string]any{"uid": uid, "run_id": hex.EncodeToString(runID[:]), "pending_deletions": len(certificate.PendingDeletion)}})
+		}
+		return nil
+	}}
+	daemonOptions.AddFlags(command.Flags())
+	command.Flags().Uint64Var(&uid, "uid", 0, "erase references owned by this UID")
+	command.Flags().StringVar(&runIDValue, "run-id", "", "stable 64-character hexadecimal run ID for replay")
+	command.Flags().StringVar(&signingKeyFile, "signing-key", "", "Ed25519 PKCS#8 PEM private key for deletion certificates")
+	command.Flags().BoolVar(&confirm, "confirm", false, "confirm irreversible redaction and deletion scheduling")
+	return command
+}
+
+func newIndexGDPRVerifyCertificateCommand(globalOptions *global.Options) *cobra.Command {
+	var daemonOptions indexDaemonOptions
+	var uid uint64
+	var executedAt uint64
+	var runIDValue string
+	var publicKeyFile string
+	command := &cobra.Command{Use: "verify-certificate", Short: "Verify a persisted GDPR deletion certificate", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if !command.Flags().Changed("uid") || uid > math.MaxUint32 || executedAt == 0 || runIDValue == "" || publicKeyFile == "" {
+			return fmt.Errorf("--uid, --executed-at, --run-id, and --public-key are required")
+		}
+		runID, err := parseCommandID("run-id", runIDValue)
+		if err != nil {
+			return err
+		}
+		publicKey, err := loadGDPRPublicKey(publicKeyFile)
+		if err != nil {
+			return err
+		}
+		base := indexAnalyticsOptions{Daemon: daemonOptions}
+		result, err := withAnalyticsStore(command.Context(), base, *globalOptions, false, func(ctx context.Context, store analytics.Store, _ analytics.Config) (any, error) {
+			value, found, err := store.Get(ctx, schema.DeletionCertificateKey(uint32(uid), executedAt, runID))
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				return nil, fmt.Errorf("deletion certificate not found")
+			}
+			certificate, err := schema.UnmarshalDeletionCertificateRecord(value)
+			if err != nil {
+				return nil, err
+			}
+			if err := verifyGDPRCertificate(certificate, publicKey); err != nil {
+				return nil, err
+			}
+			return map[string]any{"valid": true, "certificate": certificate}, nil
+		})
+		globalOptions.Term.Print(ui.ToJSONString(result))
+		return err
+	}}
+	daemonOptions.AddFlags(command.Flags())
+	command.Flags().Uint64Var(&uid, "uid", 0, "certificate UID")
+	command.Flags().Uint64Var(&executedAt, "executed-at", 0, "certificate execution Unix timestamp")
+	command.Flags().StringVar(&runIDValue, "run-id", "", "certificate 64-character hexadecimal run ID")
+	command.Flags().StringVar(&publicKeyFile, "public-key", "", "trusted Ed25519 PKIX PEM public key")
+	return command
+}
+
+func verifyGDPRCertificate(certificate schema.DeletionCertificateRecord, trustedKey ed25519.PublicKey) error {
+	signingBytes, err := certificate.SigningBytes()
+	if err != nil || certificate.SigningAlgorithm != "Ed25519" || !bytes.Equal(certificate.PublicKey, trustedKey) || len(certificate.Signature) != ed25519.SignatureSize || !ed25519.Verify(trustedKey, signingBytes, certificate.Signature) {
+		return fmt.Errorf("deletion certificate signature or signing identity is invalid")
+	}
+	return nil
+}
+
+func parseCommandID(name, value string) (schema.ID, error) {
+	var id schema.ID
+	decoded, err := hex.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(decoded) != len(id) {
+		return id, fmt.Errorf("invalid --%s: expected 64 hexadecimal characters", name)
+	}
+	copy(id[:], decoded)
+	return id, nil
+}
+
+func loadGDPRSigningKey(path string) (ed25519.PrivateKey, error) {
+	if path == "" {
+		return nil, fmt.Errorf("--signing-key is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read GDPR signing key: %w", err)
+	}
+	block, rest := pem.Decode(data)
+	if block == nil || len(strings.TrimSpace(string(rest))) != 0 || block.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("GDPR signing key must be one PKCS#8 PRIVATE KEY PEM block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse GDPR signing key: %w", err)
+	}
+	key, ok := parsed.(ed25519.PrivateKey)
+	if !ok || len(key) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("GDPR signing key is not Ed25519")
+	}
+	return key, nil
+}
+
+func loadGDPRPublicKey(path string) (ed25519.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read GDPR public key: %w", err)
+	}
+	block, rest := pem.Decode(data)
+	if block == nil || len(strings.TrimSpace(string(rest))) != 0 || block.Type != "PUBLIC KEY" {
+		return nil, fmt.Errorf("GDPR public key must be one PKIX PUBLIC KEY PEM block")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse GDPR public key: %w", err)
+	}
+	key, ok := parsed.(ed25519.PublicKey)
+	if !ok || len(key) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("GDPR public key is not Ed25519")
+	}
+	return key, nil
+}
+
+func newIndexGDPRSetPolicyCommand(globalOptions *global.Options) *cobra.Command {
+	var daemonOptions indexDaemonOptions
+	var excludeUID uint64
+	var reason string
+	command := &cobra.Command{Use: "set-policy", Short: "Persist future-backup UID exclusion policy", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if !command.Flags().Changed("exclude-uid") || excludeUID > math.MaxUint32 {
+			return fmt.Errorf("--exclude-uid with a uint32 value is required")
+		}
+		now := time.Now()
+		runID := schema.ID(sha256.Sum256(fmt.Appendf(nil, "uid-policy:%d:%d", excludeUID, now.UnixNano())))
+		base := indexAnalyticsOptions{Daemon: daemonOptions}
+		_, err := withAnalyticsStore(command.Context(), base, *globalOptions, true, func(ctx context.Context, store analytics.Store, _ analytics.Config) (any, error) {
+			return nil, analytics.SetUIDExclusionPolicy(ctx, store, uint32(excludeUID), true, reason, now, runID)
+		})
+		if err == nil {
+			_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Notice, Category: observability.CategoryGDPR, Component: "index", Message: "UID exclusion policy updated", Fields: map[string]any{"uid": excludeUID, "excluded": true}})
+		}
+		return err
+	}}
+	daemonOptions.AddFlags(command.Flags())
+	command.Flags().Uint64Var(&excludeUID, "exclude-uid", 0, "exclude files owned by this UID from future backups")
+	command.Flags().StringVar(&reason, "reason", "", "audit reason for the policy change")
 	return command
 }
 
 func newIndexGDPRAuditCommand(globalOptions *global.Options) *cobra.Command {
 	var daemonOptions indexDaemonOptions
 	var uid uint64
+	var explainSurvivingChunks bool
+	var externalSourceLimit int
 	command := &cobra.Command{Use: "audit", Short: "Report retained creation data by identity and residency", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
 		if !command.Flags().Changed("uid") {
 			return fmt.Errorf("--uid is required")
@@ -445,13 +642,19 @@ func newIndexGDPRAuditCommand(globalOptions *global.Options) *cobra.Command {
 		}
 		base := indexAnalyticsOptions{Daemon: daemonOptions}
 		result, err := withAnalyticsStore(command.Context(), base, *globalOptions, false, func(ctx context.Context, store analytics.Store, _ analytics.Config) (any, error) {
-			return analytics.GDPRAudit(ctx, store, uint32(uid))
+			return analytics.GDPRAuditWithOptions(ctx, store, uint32(uid), analytics.GDPRAuditOptions{ExplainSurvivingChunks: explainSurvivingChunks, ExternalSourceLimit: externalSourceLimit})
 		})
 		globalOptions.Term.Print(ui.ToJSONString(result))
+		if err == nil {
+			audit := result.(analytics.GDPRAuditResult)
+			_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Notice, Category: observability.CategoryGDPR, Component: "index", Message: "GDPR audit completed", Fields: map[string]any{"uid": uid, "inodes": len(audit.Inodes), "blobs": len(audit.Blobs), "explain_surviving_chunks": explainSurvivingChunks}})
+		}
 		return err
 	}}
 	daemonOptions.AddFlags(command.Flags())
 	command.Flags().Uint64Var(&uid, "uid", 0, "audit this UID")
+	command.Flags().BoolVar(&explainSurvivingChunks, "explain-surviving-chunks", false, "identify references outside the audited UID that keep chunks alive")
+	command.Flags().IntVar(&externalSourceLimit, "external-source-limit", 20, "maximum external source samples per shared chunk")
 	return command
 }
 

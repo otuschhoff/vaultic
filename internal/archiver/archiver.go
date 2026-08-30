@@ -93,8 +93,10 @@ type Archiver struct {
 	Repo         archiverRepo
 	SelectByName SelectByNameFunc
 	Select       SelectFunc
-	FS           fs.FS
-	Options      Options
+	// MandatorySelect applies policy filters even to explicit backup roots.
+	MandatorySelect SelectFunc
+	FS              fs.FS
+	Options         Options
 
 	fileSaver *fileSaver
 	treeSaver *treeSaver
@@ -189,11 +191,12 @@ func (o Options) applyDefaults() Options {
 // New initializes a new archiver.
 func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
 	arch := &Archiver{
-		Repo:         repo,
-		SelectByName: func(_ string) bool { return true },
-		Select:       func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true },
-		FS:           filesystem,
-		Options:      opts.applyDefaults(),
+		Repo:            repo,
+		SelectByName:    func(_ string) bool { return true },
+		Select:          func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true },
+		MandatorySelect: func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true },
+		FS:              filesystem,
+		Options:         opts.applyDefaults(),
 
 		CompleteItem:   func(string, ItemAction, ItemStats, time.Duration) {},
 		ReconcileNode:  func(string, string, *data.Node) {},
@@ -532,6 +535,11 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		debug.Log("lstat() for %v returned error: %v", target, err)
 		// ignore if file disappeared since it was returned by readdir
 		return filterError(filterNotExist(err))
+	}
+	if !arch.MandatorySelect(abstarget, fi, arch.FS) {
+		debug.Log("%v is excluded by mandatory policy", target)
+		arch.ExcludedItem(abstarget)
+		return futureNode{}, true, nil
 	}
 	if !explicit && !arch.Select(abstarget, fi, arch.FS) {
 		debug.Log("%v is excluded", target)

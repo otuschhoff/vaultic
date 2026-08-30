@@ -1694,7 +1694,8 @@ func validateMutableKey(key []byte) error {
 		schema.KeyAnalyticsResidency, schema.KeyAnalyticsWatermark, schema.KeyAnalyticsManifest, schema.KeyAnalyticsQueryResult,
 		schema.KeyAnalyticsQueryHeat, schema.KeyAnalyticsQueryView, schema.KeyAnalyticsQueryJob,
 		schema.KeyGrowthTime, schema.KeyGrowthPath, schema.KeyUserSummary, schema.KeyGroupSummary, schema.KeyUserStats, schema.KeyGroupStats, schema.KeyUserChurn,
-		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion:
+		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion,
+		schema.KeyUIDExclusionPolicy:
 		return nil
 	case schema.KeyPackHistory:
 		// The event log is append-only: entries are written by the catalog
@@ -1721,7 +1722,8 @@ func validateMutableDeleteKey(key []byte) error {
 		schema.KeyAnalyticsResidency, schema.KeyAnalyticsDelta, schema.KeyAnalyticsWatermark, schema.KeyAnalyticsManifest, schema.KeyAnalyticsQueryResult,
 		schema.KeyAnalyticsQueryHeat, schema.KeyAnalyticsQueryView, schema.KeyAnalyticsQueryJob,
 		schema.KeyGrowthTime, schema.KeyGrowthPath, schema.KeyUserSummary, schema.KeyGroupSummary, schema.KeyUserStats, schema.KeyGroupStats, schema.KeyUserChurn,
-		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion:
+		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion,
+		schema.KeyUIDExclusionPolicy:
 		// History is explicitly prunable: it is derived, advisory, and retained
 		// on its own schedule.
 		return nil

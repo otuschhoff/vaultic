@@ -75,6 +75,8 @@ func (e *ErrPackData) Error() string {
 	return fmt.Sprintf("pack %v contains %v errors: %v", e.PackID, len(e.errs), e.errs)
 }
 
+func (e *ErrPackData) Unwrap() []error { return e.errs }
+
 // Checker handles index-related operations for repository checking.
 type Checker struct {
 	repo *Repository
@@ -369,6 +371,10 @@ func checkPack(ctx context.Context, r *Repository, id vaultic.ID, blobs pack.Blo
 }
 
 func checkPackInner(ctx context.Context, r *Repository, id vaultic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
+	return checkPackInnerBackend(ctx, r, r.be, id, blobs, size, bufRd, dec)
+}
+
+func checkPackInnerBackend(ctx context.Context, r *Repository, source backend.Backend, id vaultic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
 
 	type partialReadError struct {
 		error
@@ -405,7 +411,7 @@ func checkPackInner(ctx context.Context, r *Repository, id vaultic.ID, blobs pac
 	// must use a separate slice from `errs` here as we're only interested in the last retry
 	var blobErrors []error
 	h := backend.Handle{Type: backend.PackFile, Name: id.String()}
-	err := r.be.Load(ctx, h, int(size), 0, func(rd io.Reader) error {
+	err := source.Load(ctx, h, int(size), 0, func(rd io.Reader) error {
 		hrd := hashing.NewReader(rd, sha256.New())
 		bufRd.Reset(hrd)
 		// reset blob errors for each retry
@@ -426,7 +432,7 @@ func checkPackInner(ctx context.Context, r *Repository, id vaultic.ID, blobs pac
 			debug.Log("  check blob %v: %v", val.Handle.ID, val.Handle)
 			if val.Err != nil {
 				debug.Log("  error verifying blob %v: %v", val.Handle.ID, val.Err)
-				blobErrors = append(blobErrors, errors.Errorf("blob %v: %v", val.Handle.ID, val.Err))
+				blobErrors = append(blobErrors, fmt.Errorf("blob %v: %w", val.Handle.ID, val.Err))
 			}
 		}
 

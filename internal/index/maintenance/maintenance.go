@@ -88,6 +88,7 @@ type CheckResult struct {
 	DerivedTierMismatch       uint64 `json:"derived_tier_mismatches"`
 	PacksBelowDurability      uint64 `json:"packs_below_durability"`
 	UnknownPlacementBackends  uint64 `json:"unknown_placement_backends"`
+	VerificationStateMismatch uint64 `json:"verification_state_mismatches"`
 	// TierAggregatesUnbuilt marks a repository written before the tier
 	// dimension existed. It is a pending rebuild, not drift.
 	TierAggregatesUnbuilt bool `json:"tier_aggregates_unbuilt,omitempty"`
@@ -102,7 +103,7 @@ type CheckResult struct {
 }
 
 func (result CheckResult) Clean() bool {
-	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0 && result.AnalyticsMismatch == 0
+	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0 && result.VerificationStateMismatch == 0 && result.AnalyticsMismatch == 0
 }
 
 func (result CheckResult) HasWarnings() bool { return result.Warnings != 0 }
@@ -317,6 +318,9 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 	}
 	checkPackLifetime(packs, &result)
 	if err := checkPlacementRecords(ctx, store, packs, options.PlacementModel, &result, options.MaxFindings); err != nil {
+		return result, err
+	}
+	if err := checkVerificationState(ctx, store, packs, &result, options.MaxFindings); err != nil {
 		return result, err
 	}
 	checkPackHistory(ctx, store, &result)

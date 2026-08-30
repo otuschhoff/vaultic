@@ -62,10 +62,13 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 			if err := applyProfile(c, globalOptions); err != nil {
 				return err
 			}
+			if err := configureLogging(*globalOptions); err != nil {
+				return err
+			}
 			if err := globalOptions.PreRun(needsPassword(c.Name())); err != nil {
 				return err
 			}
-			return configureLogging(*globalOptions)
+			return nil
 		},
 	}
 
@@ -120,6 +123,7 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 		newTagCommand(globalOptions),
 		newUnlockCommand(globalOptions),
 		newVersionCommand(globalOptions),
+		newVerifyPacksCommand(globalOptions),
 	)
 
 	registerDebugCommand(cmd, globalOptions)
@@ -132,14 +136,26 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 }
 
 func configureLogging(gopts global.Options) error {
-	if gopts.LogFile == "" {
-		return nil
+	observability.SetDefaultSyslog(nil)
+	if gopts.LogFile != "" {
+		f, err := os.OpenFile(gopts.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("open log file %q: %w", gopts.LogFile, err)
+		}
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
 	}
-	f, err := os.OpenFile(gopts.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("open log file %q: %w", gopts.LogFile, err)
+	if len(gopts.SyslogTargets) > 0 {
+		targets := make([]observability.SyslogTarget, len(gopts.SyslogTargets))
+		for index, spec := range gopts.SyslogTargets {
+			target, err := observability.ParseSyslogTarget(spec)
+			if err != nil {
+				return fmt.Errorf("invalid --syslog-target: %w", err)
+			}
+			targets[index] = target
+		}
+		hostname, _ := os.Hostname()
+		observability.SetDefaultSyslog(observability.NewSyslogExporter(targets, hostname, "vaultic"))
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
 	return nil
 }
 

@@ -24,6 +24,13 @@ type RejectByNameFunc func(path string) bool
 // should be excluded (rejected) from the backup.
 type RejectFunc func(path string, fi *fs.ExtendedFileInfo, fs fs.FS) bool
 
+func RejectUIDs(excluded map[uint32]struct{}) RejectFunc {
+	return func(_ string, info *fs.ExtendedFileInfo, _ fs.FS) bool {
+		_, reject := excluded[info.UID]
+		return reject
+	}
+}
+
 func CombineRejectByNames(funcs []RejectByNameFunc) SelectByNameFunc {
 	return func(item string) bool {
 		for _, reject := range funcs {

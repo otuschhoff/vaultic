@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -356,10 +357,34 @@ type GDPRPlacement struct {
 }
 
 type GDPRBlob struct {
-	Hash           string     `json:"hash"`
-	ReferenceCount uint64     `json:"reference_count"`
-	FirstSeen      int64      `json:"first_seen"`
-	Packs          []GDPRPack `json:"packs"`
+	Hash                 string            `json:"hash"`
+	ReferenceCount       uint64            `json:"reference_count"`
+	FirstSeen            int64             `json:"first_seen"`
+	Packs                []GDPRPack        `json:"packs"`
+	SurvivingExplanation *GDPRBlobSurvival `json:"surviving_explanation,omitempty"`
+}
+
+type GDPRBlobSurvival struct {
+	ScopedReferences   uint64               `json:"scoped_references"`
+	ExternalReferences uint64               `json:"external_references"`
+	WouldSurvive       bool                 `json:"would_survive"`
+	ExternalSources    []GDPRExternalSource `json:"external_sources,omitempty"`
+	SourcesTruncated   bool                 `json:"sources_truncated"`
+}
+
+type GDPRExternalSource struct {
+	UID            uint32 `json:"uid"`
+	FSID           uint32 `json:"fsid"`
+	Inode          uint64 `json:"inode"`
+	Generation     uint64 `json:"generation,omitempty"`
+	LatestRevision uint64 `json:"latest_revision,omitempty"`
+	Path           string `json:"path,omitempty"`
+	References     uint64 `json:"references"`
+}
+
+type GDPRAuditOptions struct {
+	ExplainSurvivingChunks bool
+	ExternalSourceLimit    int
 }
 
 type GDPRAuditResult struct {
@@ -372,7 +397,39 @@ type GDPRAuditResult struct {
 	Explain       Explain       `json:"explain"`
 }
 
+func SetUIDExclusionPolicy(ctx context.Context, store Store, uid uint32, excluded bool, reason string, now time.Time, runID schema.ID) error {
+	record := schema.UIDExclusionPolicyRecord{Excluded: excluded, UpdatedAt: now.Unix(), RunID: runID, Reason: reason}
+	value, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return store.WriteMutableBatch(ctx, []daemon.Mutation{{Key: schema.UIDExclusionPolicyKey(uid), Value: value}}, nil, true)
+}
+
+func ExcludedUIDs(ctx context.Context, store Store) (map[uint32]struct{}, error) {
+	result := make(map[uint32]struct{})
+	err := scan(ctx, store, schema.UIDExclusionPolicyPrefix(), func(kv daemon.KeyValue) error {
+		key, err := schema.ParseKey(kv.Key)
+		if err != nil {
+			return err
+		}
+		record, err := schema.UnmarshalUIDExclusionPolicyRecord(kv.Value)
+		if err != nil {
+			return err
+		}
+		if record.Excluded {
+			result[key.UID] = struct{}{}
+		}
+		return nil
+	})
+	return result, err
+}
+
 func GDPRAudit(ctx context.Context, store Store, uid uint32) (GDPRAuditResult, error) {
+	return GDPRAuditWithOptions(ctx, store, uid, GDPRAuditOptions{})
+}
+
+func GDPRAuditWithOptions(ctx context.Context, store Store, uid uint32, options GDPRAuditOptions) (GDPRAuditResult, error) {
 	result := GDPRAuditResult{SchemaVersion: 1, UID: uid, Unavailable: []string{"retention expiry is omitted when authoritative pack or placement metadata has no deadline"}}
 	generation := uint64(0)
 	scoped := false
@@ -463,6 +520,15 @@ func GDPRAudit(ctx context.Context, store Store, uid uint32) (GDPRAuditResult, e
 	}); err != nil {
 		return GDPRAuditResult{}, err
 	}
+	if options.ExplainSurvivingChunks && scoped {
+		if err := explainBlobSurvival(ctx, store, generation, uid, result.Blobs, options.ExternalSourceLimit); err != nil {
+			return GDPRAuditResult{}, err
+		}
+	} else if options.ExplainSurvivingChunks {
+		if err := explainBlobSurvivalAuthoritative(ctx, store, uid, result.Blobs, options.ExternalSourceLimit); err != nil {
+			return GDPRAuditResult{}, err
+		}
+	}
 	sort.Slice(result.Inodes, func(i, j int) bool {
 		if result.Inodes[i].FSID != result.Inodes[j].FSID {
 			return result.Inodes[i].FSID < result.Inodes[j].FSID
@@ -471,6 +537,162 @@ func GDPRAudit(ctx context.Context, store Store, uid uint32) (GDPRAuditResult, e
 	})
 	sort.Slice(result.Blobs, func(i, j int) bool { return result.Blobs[i].Hash < result.Blobs[j].Hash })
 	return result, nil
+}
+
+func explainBlobSurvival(ctx context.Context, store Store, generation uint64, uid uint32, blobs []GDPRBlob, sourceLimit int) error {
+	if sourceLimit <= 0 {
+		sourceLimit = 20
+	}
+	byID := make(map[schema.ID]*GDPRBlob, len(blobs))
+	for index := range blobs {
+		decoded, err := hex.DecodeString(blobs[index].Hash)
+		if err != nil || len(decoded) != len(schema.ID{}) {
+			if err == nil {
+				err = fmt.Errorf("invalid blob hash length %d", len(decoded))
+			}
+			return err
+		}
+		var id schema.ID
+		copy(id[:], decoded)
+		blobs[index].SurvivingExplanation = &GDPRBlobSurvival{}
+		byID[id] = &blobs[index]
+	}
+	return scanActiveDerivedPrefix(ctx, store, generation, []byte("u:blobv1:"), func(kv daemon.KeyValue) error {
+		key, err := schema.ParseKey(kv.Key)
+		if err != nil {
+			return err
+		}
+		blob, found := byID[key.ID]
+		if !found {
+			return nil
+		}
+		record, err := schema.UnmarshalAnalyticsUserBlobRecord(kv.Value)
+		if err != nil {
+			return err
+		}
+		explanation := blob.SurvivingExplanation
+		if key.UID == uid {
+			explanation.ScopedReferences += record.ReferenceCount
+			return nil
+		}
+		explanation.ExternalReferences += record.ReferenceCount
+		explanation.WouldSurvive = true
+		for index := range explanation.ExternalSources {
+			source := &explanation.ExternalSources[index]
+			if source.UID == key.UID && source.FSID == key.FSID && source.Inode == key.Inode && source.Generation == key.Generation {
+				source.References += record.ReferenceCount
+				return nil
+			}
+		}
+		if len(explanation.ExternalSources) >= sourceLimit {
+			explanation.SourcesTruncated = true
+			return nil
+		}
+		source := GDPRExternalSource{UID: key.UID, FSID: key.FSID, Inode: key.Inode, Generation: key.Generation, References: record.ReferenceCount}
+		value, found, err := store.Get(ctx, schema.AnalyticsDerivedKey(generation, schema.UserInodeKey(key.UID, key.FSID, key.Inode)))
+		if err != nil {
+			return err
+		}
+		if found && !bytes.Equal(value, analyticsDerivedTombstone) {
+			inode, err := schema.UnmarshalAnalyticsUserInodeRecord(value)
+			if err != nil {
+				return err
+			}
+			source.LatestRevision, source.Path = inode.LatestRevision, inode.PathSample
+		}
+		explanation.ExternalSources = append(explanation.ExternalSources, source)
+		return nil
+	})
+}
+
+func explainBlobSurvivalAuthoritative(ctx context.Context, store Store, uid uint32, blobs []GDPRBlob, sourceLimit int) error {
+	if sourceLimit <= 0 {
+		sourceLimit = 20
+	}
+	byID := make(map[schema.ID]*GDPRBlob, len(blobs))
+	for index := range blobs {
+		decoded, err := hex.DecodeString(blobs[index].Hash)
+		if err != nil || len(decoded) != len(schema.ID{}) {
+			return fmt.Errorf("invalid GDPR blob hash %q", blobs[index].Hash)
+		}
+		var id schema.ID
+		copy(id[:], decoded)
+		blobs[index].SurvivingExplanation = &GDPRBlobSurvival{}
+		byID[id] = &blobs[index]
+	}
+	manifestCache := make(map[schema.ID][]schema.ID)
+	return scan(ctx, store, []byte("iv:"), func(kv daemon.KeyValue) error {
+		key, err := schema.ParseKey(kv.Key)
+		if err != nil {
+			return err
+		}
+		revision, err := schema.UnmarshalInodeRevision(kv.Value)
+		if err != nil {
+			return err
+		}
+		content := revision.ContentIDs
+		if revision.ContentMode == schema.ContentManifestRef {
+			content, err = gdprManifestContent(ctx, store, revision.ContentManifestID, manifestCache)
+			if err != nil {
+				return err
+			}
+		}
+		counts := make(map[schema.ID]uint64)
+		for _, id := range content {
+			if _, relevant := byID[id]; relevant {
+				counts[id]++
+			}
+		}
+		for id, count := range counts {
+			explanation := byID[id].SurvivingExplanation
+			if revision.Known&schema.KnownUID != 0 && revision.UID == uid {
+				explanation.ScopedReferences += count
+				continue
+			}
+			explanation.ExternalReferences += count
+			explanation.WouldSurvive = true
+			if len(explanation.ExternalSources) >= sourceLimit {
+				explanation.SourcesTruncated = true
+				continue
+			}
+			explanation.ExternalSources = append(explanation.ExternalSources, GDPRExternalSource{UID: revision.UID, FSID: key.FSID, Inode: key.Inode, LatestRevision: key.Revision, Path: revision.SourcePath, References: count})
+		}
+		return nil
+	})
+}
+
+func gdprManifestContent(ctx context.Context, store Store, id schema.ID, cache map[schema.ID][]schema.ID) ([]schema.ID, error) {
+	if content, found := cache[id]; found {
+		return content, nil
+	}
+	firstValue, found, err := store.Get(ctx, schema.ContentManifestKey(id, 0))
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("content manifest %x is missing", id)
+	}
+	first, err := schema.UnmarshalContentManifest(firstValue)
+	if err != nil {
+		return nil, err
+	}
+	content := append([]schema.ID(nil), first.ContentIDs...)
+	for segment := uint32(1); segment < first.SegmentCount; segment++ {
+		value, found, err := store.Get(ctx, schema.ContentManifestKey(id, segment))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("content manifest %x segment %d is missing", id, segment)
+		}
+		record, err := schema.UnmarshalContentManifest(value)
+		if err != nil {
+			return nil, err
+		}
+		content = append(content, record.ContentIDs...)
+	}
+	cache[id] = content
+	return content, nil
 }
 
 func inodeResidency(ctx context.Context, store Store, generation uint64, fsid uint32, inode uint64) (string, error) {

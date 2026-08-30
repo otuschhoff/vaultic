@@ -87,6 +87,10 @@ const (
 	KeyUserBlobContribution
 	KeyUserStats
 	KeyGroupStats
+	KeyUIDExclusionPolicy
+	KeyDeletionCertificate
+	KeyVerificationState
+	KeyVerificationEvent
 )
 
 type AnalyticsDictionaryKind byte
@@ -420,6 +424,53 @@ func PackPlacementPrefix(pack ID) []byte {
 	copy(key, "pl:")
 	copy(key[3:], pack[:])
 	key[35] = ':'
+	return key
+}
+
+func VerificationStateKey(pack ID, backend uint64) []byte {
+	key := make([]byte, 3+32+8)
+	copy(key, "vr:")
+	copy(key[3:], pack[:])
+	binary.BigEndian.PutUint64(key[35:], backend)
+	return key
+}
+
+func VerificationStatePrefix() []byte { return []byte("vr:") }
+
+func VerificationEventKey(unixSeconds, sequence uint64, pack ID, backend uint64) []byte {
+	key := make([]byte, 3+8+8+32+8)
+	copy(key, "ve:")
+	binary.BigEndian.PutUint64(key[3:], unixSeconds)
+	binary.BigEndian.PutUint64(key[11:], sequence)
+	copy(key[19:], pack[:])
+	binary.BigEndian.PutUint64(key[51:], backend)
+	return key
+}
+
+func VerificationEventPrefix() []byte { return []byte("ve:") }
+
+func UIDExclusionPolicyKey(uid uint32) []byte {
+	key := make([]byte, len("u:policy:blocklist:")+4)
+	copy(key, "u:policy:blocklist:")
+	binary.BigEndian.PutUint32(key[len("u:policy:blocklist:"):], uid)
+	return key
+}
+
+func UIDExclusionPolicyPrefix() []byte { return []byte("u:policy:blocklist:") }
+
+func DeletionCertificateKey(uid uint32, unixSeconds uint64, runID ID) []byte {
+	key := make([]byte, 3+4+8+32)
+	copy(key, "dc:")
+	binary.BigEndian.PutUint32(key[3:], uid)
+	binary.BigEndian.PutUint64(key[7:], unixSeconds)
+	copy(key[15:], runID[:])
+	return key
+}
+
+func DeletionCertificatePrefix(uid uint32) []byte {
+	key := make([]byte, 3+4)
+	copy(key, "dc:")
+	binary.BigEndian.PutUint32(key[3:], uid)
 	return key
 }
 
@@ -933,6 +984,24 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		parsed.Kind = KeyPackPlacement
 		copy(parsed.ID[:], key[3:35])
 		parsed.Backend = binary.BigEndian.Uint64(key[36:])
+	case len(key) == 43 && string(key[:3]) == "vr:":
+		parsed.Kind = KeyVerificationState
+		copy(parsed.ID[:], key[3:35])
+		parsed.Backend = binary.BigEndian.Uint64(key[35:])
+	case len(key) == 59 && string(key[:3]) == "ve:":
+		parsed.Kind = KeyVerificationEvent
+		parsed.EventTime = binary.BigEndian.Uint64(key[3:11])
+		parsed.Revision = binary.BigEndian.Uint64(key[11:19])
+		copy(parsed.ID[:], key[19:51])
+		parsed.Backend = binary.BigEndian.Uint64(key[51:])
+	case len(key) == len("u:policy:blocklist:")+4 && string(key[:len("u:policy:blocklist:")]) == "u:policy:blocklist:":
+		parsed.Kind = KeyUIDExclusionPolicy
+		parsed.UID = binary.BigEndian.Uint32(key[len("u:policy:blocklist:"):])
+	case len(key) == 47 && string(key[:3]) == "dc:":
+		parsed.Kind = KeyDeletionCertificate
+		parsed.UID = binary.BigEndian.Uint32(key[3:7])
+		parsed.EventTime = binary.BigEndian.Uint64(key[7:15])
+		copy(parsed.ID[:], key[15:])
 	case len(key) == 44 && string(key[:3]) == "bp:" && key[11] == ':':
 		parsed.Kind = KeyBackendPack
 		parsed.Backend = binary.BigEndian.Uint64(key[3:11])

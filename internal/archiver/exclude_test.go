@@ -211,6 +211,16 @@ func TestIsExcludedByFileSize(t *testing.T) {
 	}
 }
 
+func TestRejectUIDs(t *testing.T) {
+	reject := RejectUIDs(map[uint32]struct{}{42: {}})
+	if !reject("blocked", &fs.ExtendedFileInfo{UID: 42}, nil) {
+		t.Fatal("blocked UID was accepted")
+	}
+	if reject("allowed", &fs.ExtendedFileInfo{UID: 43}, nil) {
+		t.Fatal("unblocked UID was rejected")
+	}
+}
+
 func TestDeviceMap(t *testing.T) {
 	deviceMap := deviceMap{
 		filepath.FromSlash("/"):          1,

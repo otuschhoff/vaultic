@@ -53,7 +53,12 @@ Expose metrics and structured events for:
 - Azure Key Vault secret fetch requests, latency, and token acquisition events
 - GDPR audit queries, chunk survival analysis calculations, and erasure executions
 - UID backup blocklist policy matches and excluded file counts during backup crawls
-- storage verification requests, candidate matches, sample selection counts, verification level results (header/checksum/unpack), and failed pack detections
+- storage verification requests, candidate matches, sample selection counts,
+  verification level results (header/checksum/unpack), age of the oldest
+  level-specific successful placement verification, current unhealthy
+  placements by operational/integrity classification, newly detected/changed/
+  resolved findings, repeated failures coalesced, and verification error-event
+  delivery or persistence failures
 - `cwalk` traversal throughput, active worker concurrency, and directory queue saturation
 - `pathdiff` query latency, changed paths returned, event coverage validation status (verified/fallback), volume/SVM resolution hits, and subtrees skipped
 
