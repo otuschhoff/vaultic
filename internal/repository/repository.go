@@ -344,6 +344,7 @@ func (r *Repository) tierPolicy() enginepkg.TierPolicy {
 	for _, backend := range model.Backends {
 		policy.Backends = append(policy.Backends, enginepkg.PlacementBackendPolicy{
 			ID: backend.ID, Hash: backend.Hash, Role: backend.Role,
+			Ingest: backend.Ingest, ReadEnabled: backend.ReadEnabled,
 			Offsite: backend.Offsite, FailureDomain: backend.FailureDomain,
 			MinRetention:         backend.MinRetention(),
 			PricePerGBMonth:      backend.PricePerGBMonth,

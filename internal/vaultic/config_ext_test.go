@@ -34,10 +34,12 @@ func TestConfigExtensionsRoundTrip(t *testing.T) {
 	cfg.TreePackSizeLimitBytes = 128 * 1024 * 1024
 	cfg.DataPackSizeBytes = 32 * 1024 * 1024
 	cfg.MinPacksizeToleratePercent = &minTol
+	ingest := false
+	readEnabled := true
 	cfg.PlacementBackends = []vaultic.PlacementBackend{{
 		ID: "local", Role: "primary", FailureDomain: "rack-a",
 	}, {
-		ID: "s3", Role: "archival", Offsite: true, FailureDomain: "aws",
+		ID: "s3", Role: "archival", Ingest: &ingest, ReadEnabled: &readEnabled, Offsite: true, FailureDomain: "aws",
 		CapacityBytes: 1 << 40, PricePerGBMonth: 0.01, PricePerGBEgress: 0.02,
 		PricePer1KRequests: 0.005, MinRetentionSeconds: 90 * 24 * 3600,
 		RetrievalClass: "hours", MaxBandwidthBytes: 10 << 20, ObjectOverheadBytes: 4096,
@@ -115,15 +117,18 @@ func TestConfigRusticFieldNames(t *testing.T) {
 func TestConfigPlacementRegistryValidation(t *testing.T) {
 	rtest.OK(t, vaultic.Config{PlacementBackends: []vaultic.PlacementBackend{{ID: "a"}}}.ValidateExtensions())
 	for name, cfg := range map[string]vaultic.Config{
-		"empty id":     {PlacementBackends: []vaultic.PlacementBackend{{ID: ""}}},
-		"duplicate id": {PlacementBackends: []vaultic.PlacementBackend{{ID: "a"}, {ID: "a"}}},
-		"bad offsite":  {PlacementPolicy: vaultic.PlacementPolicy{MinCopies: 1, MinOffsite: 2}},
+		"empty id":            {PlacementBackends: []vaultic.PlacementBackend{{ID: ""}}},
+		"duplicate id":        {PlacementBackends: []vaultic.PlacementBackend{{ID: "a"}, {ID: "a"}}},
+		"bad offsite":         {PlacementPolicy: vaultic.PlacementPolicy{MinCopies: 1, MinOffsite: 2}},
+		"ingest without read": {PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadEnabled: boolPtr(false)}}},
 	} {
 		if err := cfg.ValidateExtensions(); err == nil {
 			t.Fatalf("%s placement config was accepted", name)
 		}
 	}
 }
+
+func boolPtr(value bool) *bool { return &value }
 
 func TestChunkerValidate(t *testing.T) {
 	rtest.OK(t, vaultic.Config{}.ValidateExtensions())

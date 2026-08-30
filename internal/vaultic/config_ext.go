@@ -205,6 +205,9 @@ func (c Config) ValidateExtensions() error {
 		if backend.Location != "" && strings.TrimSpace(backend.Location) == "" {
 			return errors.Errorf("placement backend %q has an empty location", backend.ID)
 		}
+		if (backend.Ingest == nil || *backend.Ingest) && backend.ReadEnabled != nil && !*backend.ReadEnabled {
+			return errors.Errorf("placement backend %q cannot enable ingest while read_enabled is false", backend.ID)
+		}
 	}
 	if c.PlacementPolicy.MinOffsite > c.PlacementPolicy.MinCopies && c.PlacementPolicy.MinCopies != 0 {
 		return errors.New("placement min_offsite must not exceed min_copies")

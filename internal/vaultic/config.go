@@ -90,6 +90,8 @@ type PlacementBackend struct {
 	ID                   string  `json:"id"`
 	Location             string  `json:"location,omitempty"`
 	Role                 string  `json:"role,omitempty"`
+	Ingest               *bool   `json:"ingest,omitempty"`
+	ReadEnabled          *bool   `json:"read_enabled,omitempty"`
 	Offsite              bool    `json:"offsite,omitempty"`
 	FailureDomain        string  `json:"failure_domain,omitempty"`
 	CapacityBytes        uint64  `json:"capacity_bytes,omitempty"`

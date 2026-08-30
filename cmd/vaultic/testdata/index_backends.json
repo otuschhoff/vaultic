@@ -4,8 +4,11 @@
   "reduced_mode": false,
   "backends": [
     {
+      "id": "hot",
       "role": "hot",
       "location": "hot:/x",
+      "ingest": true,
+      "read_enabled": true,
       "connections": 2,
       "listed": true,
       "file_types": [
@@ -18,8 +21,11 @@
       "min_retention_known": false
     },
     {
+      "id": "cold",
       "role": "cold",
       "location": "cold:/y",
+      "ingest": false,
+      "read_enabled": true,
       "connections": 2,
       "listed": false,
       "min_retention_known": false

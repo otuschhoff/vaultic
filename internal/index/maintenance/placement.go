@@ -15,6 +15,8 @@ type PlacementBackend struct {
 	ID                   string
 	Hash                 uint64
 	Role                 string
+	Ingest               *bool
+	ReadEnabled          *bool
 	Offsite              bool
 	FailureDomain        string
 	RetrievalClass       string
@@ -42,6 +44,14 @@ type placementSet map[uint64]schema.PlacementRecord
 type BackendPlacementCount struct {
 	Objects uint64
 	Bytes   uint64
+}
+
+func (backend PlacementBackend) ingestEnabled() bool {
+	return backend.Ingest == nil || *backend.Ingest
+}
+
+func (backend PlacementBackend) readAllowed() bool {
+	return backend.ReadEnabled == nil || *backend.ReadEnabled
 }
 
 func BackendPlacementCounts(ctx context.Context, store Store, model PlacementModel) (map[string]BackendPlacementCount, error) {

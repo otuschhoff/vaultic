@@ -49,6 +49,7 @@ use proto::{
 use zeroize::Zeroizing;
 
 mod encryption;
+mod replication;
 mod storage;
 
 use storage::{repeated_message_encoded_len, Storage};

@@ -47,3 +47,37 @@ func TestPlacePackCopiesToWarmBackendAndReadFallsBack(t *testing.T) {
 		t.Fatalf("fallback load = %q, err=%v", loaded, err)
 	}
 }
+
+func TestReadDisabledPlacementIsNotUsedAsFallback(t *testing.T) {
+	repo, _, store, packID, blobID := promotionTestRepository(t)
+	readDisabled := false
+	config := repo.Config()
+	config.PlacementBackends = []vaultic.PlacementBackend{
+		{ID: "local", Role: PlacementRolePrimary, FailureDomain: "local", RetrievalClass: "standard"},
+		{ID: "warm", Role: PlacementRolePrimary, Ingest: boolPtr(false), ReadEnabled: &readDisabled, Offsite: true, FailureDomain: "warm", RetrievalClass: "standard"},
+	}
+	repo.setConfig(config)
+	warm := mem.New()
+	localHash, warmHash := PlacementBackendHash("local"), PlacementBackendHash("warm")
+	repo.AttachPlacementBackend(warmHash, warm)
+	if err := repo.PlacePack(context.Background(), packID, warmHash); err != nil {
+		t.Fatal(err)
+	}
+	handle := backend.Handle{Type: backend.PackFile, Name: packID.String()}
+	placementValue, err := (schema.PlacementRecord{State: schema.PlacementLive, Bytes: 1, RetentionSource: schema.RetentionUnknown}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteMutableBatch(context.Background(), []daemon.Mutation{
+		{Key: schema.PackPlacementKey(schema.ID(packID), localHash), Value: placementValue},
+		{Key: schema.PackPlacementKey(schema.ID(packID), warmHash), Value: placementValue},
+	}, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Backend().Remove(context.Background(), handle); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := repo.LoadBlob(context.Background(), vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob}, nil); err == nil {
+		t.Fatalf("read-disabled placement was used, loaded %q", loaded)
+	}
+}

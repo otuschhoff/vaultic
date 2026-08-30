@@ -504,8 +504,11 @@ type BackendFileTypeCount struct {
 
 // BackendReport describes one configured backend.
 type BackendReport struct {
+	ID          string                 `json:"id"`
 	Role        string                 `json:"role"`
 	Location    string                 `json:"location"`
+	Ingest      bool                   `json:"ingest"`
+	ReadEnabled bool                   `json:"read_enabled"`
 	Connections uint                   `json:"connections"`
 	Listed      bool                   `json:"listed"`
 	FileTypes   []BackendFileTypeCount `json:"file_types,omitempty"`
@@ -585,15 +588,23 @@ func runIndexBackends(ctx context.Context, options indexBackendsOptions, globalO
 
 	hot, cold, hotCold := repo.HotCold()
 	result.HotCold = hotCold
-	targets := []backendTarget{{role: "single", lister: repo.Backend()}}
+	targets := []backendTarget{{id: "single", role: "single", ingest: true, readEnabled: true, lister: repo.Backend()}}
 	if hotCold {
-		targets = []backendTarget{{role: "hot", lister: hot}, {role: "cold", lister: cold}}
+		targets = []backendTarget{{id: "hot", role: "hot", ingest: true, readEnabled: true, lister: hot}, {id: "cold", role: "cold", ingest: true, readEnabled: true, lister: cold}}
 	}
-	reports, err := collectBackendReports(ctx, targets, options.NoList)
-	if err != nil {
-		return result, err
+	if options.NoList && len(repo.Config().PlacementBackends) != 0 {
+		model, modelErr := repo.PlacementModel()
+		if modelErr != nil {
+			return result, modelErr
+		}
+		result.Backends = placementBackendReportsNoList(model)
+	} else {
+		reports, err := collectBackendReports(ctx, targets, options.NoList)
+		if err != nil {
+			return result, err
+		}
+		result.Backends = reports
 	}
-	result.Backends = reports
 	if options.NoList && slateDB {
 		if err := fillBackendReportsFromPlacements(ctx, repo, options, &result); err != nil {
 			return result, err
@@ -631,14 +642,17 @@ type backendLister interface {
 }
 
 type backendTarget struct {
-	role   string
-	lister backendLister
+	id          string
+	role        string
+	ingest      bool
+	readEnabled bool
+	lister      backendLister
 }
 
 func collectBackendReports(ctx context.Context, targets []backendTarget, noList bool) ([]BackendReport, error) {
 	reports := make([]BackendReport, 0, len(targets))
 	for _, target := range targets {
-		report := BackendReport{Role: target.role, Connections: target.lister.Properties().Connections}
+		report := BackendReport{ID: target.id, Role: target.role, Ingest: target.ingest, ReadEnabled: target.readEnabled, Connections: target.lister.Properties().Connections}
 		if locator, ok := target.lister.(interface{ Location() string }); ok {
 			report.Location = locator.Location()
 		}
@@ -652,6 +666,17 @@ func collectBackendReports(ctx context.Context, targets []backendTarget, noList 
 		reports = append(reports, report)
 	}
 	return reports, nil
+}
+
+func placementBackendReportsNoList(model repository.PlacementModel) []BackendReport {
+	reports := make([]BackendReport, 0, len(model.Backends))
+	for _, backend := range model.Backends {
+		reports = append(reports, BackendReport{
+			ID: backend.ID, Role: backend.Role, Location: backend.Location,
+			Ingest: backend.IngestEnabled(), ReadEnabled: backend.ReadAllowed(),
+		})
+	}
+	return reports
 }
 
 func countBackendObjects(ctx context.Context, target backendLister) ([]BackendFileTypeCount, error) {
@@ -689,9 +714,12 @@ func fillBackendReportsFromPlacements(ctx context.Context, repo *repository.Repo
 		return err
 	}
 	for index := range result.Backends {
-		backend := result.Backends[index].Role
+		backend := result.Backends[index].ID
+		if backend == "" {
+			backend = result.Backends[index].Role
+		}
 		for _, reportBackend := range model.Backends {
-			if reportBackend.Role == result.Backends[index].Role {
+			if reportBackend.ID == result.Backends[index].ID || (result.Backends[index].ID == "" && reportBackend.Role == result.Backends[index].Role) {
 				backend = reportBackend.ID
 				break
 			}

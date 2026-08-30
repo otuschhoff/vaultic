@@ -48,6 +48,8 @@ type PlacementBackendPolicy struct {
 	ID                   string
 	Hash                 uint64
 	Role                 string
+	Ingest               *bool
+	ReadEnabled          *bool
 	Offsite              bool
 	FailureDomain        string
 	StorageClass         string
@@ -146,7 +148,7 @@ func (policy TierPolicy) placementRecords(record schema.PackRecord, now time.Tim
 	}
 	placements := make(map[uint64]schema.PlacementRecord, len(selected))
 	for _, backend := range selected {
-		if backend.Hash == 0 {
+		if backend.Hash == 0 || !backend.ingestEnabled() {
 			continue
 		}
 		placement := schema.PlacementRecord{
@@ -166,7 +168,7 @@ func (policy TierPolicy) placementRecords(record schema.PackRecord, now time.Tim
 
 func (policy TierPolicy) placementRecordFor(record schema.PackRecord, backendHash uint64, now time.Time) (schema.PlacementRecord, bool) {
 	for _, backend := range policy.Backends {
-		if backend.Hash != backendHash {
+		if backend.Hash != backendHash || !backend.ingestEnabled() {
 			continue
 		}
 		placement := schema.PlacementRecord{
@@ -190,6 +192,10 @@ func (policy TierPolicy) backendByRole(role string) (PlacementBackendPolicy, boo
 		}
 	}
 	return PlacementBackendPolicy{}, false
+}
+
+func (backend PlacementBackendPolicy) ingestEnabled() bool {
+	return backend.Ingest == nil || *backend.Ingest
 }
 
 // DaemonEngine keeps the legacy index as a synchronous compatibility

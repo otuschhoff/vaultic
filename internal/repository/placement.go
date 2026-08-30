@@ -76,6 +76,18 @@ func placementModelFromConfig(entries []vaultic.PlacementBackend, policy vaultic
 		}
 		backends = append(backends, PlacementBackend{PlacementBackend: entry, Hash: PlacementBackendHash(entry.ID)})
 	}
+	if len(entries) > 0 {
+		var ingesting bool
+		for _, backend := range backends {
+			if backend.IngestEnabled() {
+				ingesting = true
+				break
+			}
+		}
+		if !ingesting {
+			return PlacementModel{}, fmt.Errorf("placement model requires at least one ingest-enabled backend")
+		}
+	}
 	if policy.MinCopies == 0 {
 		policy.MinCopies = 1
 	}
@@ -108,4 +120,12 @@ func (model PlacementModel) BackendByIDHash(hash uint64) (PlacementBackend, bool
 
 func (backend PlacementBackend) MinRetention() time.Duration {
 	return time.Duration(backend.MinRetentionSeconds) * time.Second
+}
+
+func (backend PlacementBackend) IngestEnabled() bool {
+	return backend.Ingest == nil || *backend.Ingest
+}
+
+func (backend PlacementBackend) ReadAllowed() bool {
+	return backend.ReadEnabled == nil || *backend.ReadEnabled
 }

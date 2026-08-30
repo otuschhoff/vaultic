@@ -11,6 +11,8 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // countingBackend records every List call so a test can assert that --no-list
@@ -46,7 +48,7 @@ func TestBackendsNoListPerformsZeroBackendRequests(t *testing.T) {
 	cold := &countingBackend{location: "cold:/y", files: map[backend.FileType][]backend.FileInfo{
 		backend.PackFile: {{Name: "bb", Size: 20}},
 	}}
-	targets := []backendTarget{{role: "hot", lister: hot}, {role: "cold", lister: cold}}
+	targets := []backendTarget{{id: "hot", role: "hot", ingest: true, readEnabled: true, lister: hot}, {id: "cold", role: "cold", ingest: true, readEnabled: true, lister: cold}}
 
 	reports, err := collectBackendReports(context.Background(), targets, true)
 	if err != nil {
@@ -76,6 +78,26 @@ func TestBackendsNoListPerformsZeroBackendRequests(t *testing.T) {
 		t.Fatalf("listing was skipped without --no-list: hot=%d cold=%d", hot.listCall, cold.listCall)
 	}
 }
+
+func TestPlacementBackendReportsNoListIncludesIngestAndReadFlags(t *testing.T) {
+	readOnly := false
+	model := repository.PlacementModel{Backends: []repository.PlacementBackend{
+		{PlacementBackend: vaultic.PlacementBackend{ID: "legacy", Role: "archival", Location: "s3:old", Ingest: &readOnly, ReadEnabled: boolPtr(true)}},
+		{PlacementBackend: vaultic.PlacementBackend{ID: "active", Role: "archival", Location: "s3:new"}},
+	}}
+	reports := placementBackendReportsNoList(model)
+	if len(reports) != 2 {
+		t.Fatalf("reports = %#v", reports)
+	}
+	if reports[0].ID != "legacy" || reports[0].Ingest || !reports[0].ReadEnabled {
+		t.Fatalf("legacy report = %#v", reports[0])
+	}
+	if reports[1].ID != "active" || !reports[1].Ingest || !reports[1].ReadEnabled {
+		t.Fatalf("active report = %#v", reports[1])
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
 
 // TestBackendsCompareReportsMissingAndExtraSeparately: a pack the catalog
 // claims but the backend lacks is data loss, while a pack the backend holds
@@ -142,10 +164,10 @@ func TestBackendsGoldenOutput(t *testing.T) {
 		SchemaVersion: maintenance.IntrospectSchemaVersion,
 		HotCold:       true,
 		Backends: []BackendReport{
-			{Role: "hot", Location: "hot:/x", Connections: 2, Listed: true, FileTypes: []BackendFileTypeCount{
+			{ID: "hot", Role: "hot", Location: "hot:/x", Ingest: true, ReadEnabled: true, Connections: 2, Listed: true, FileTypes: []BackendFileTypeCount{
 				{FileType: "pack", Objects: 1, Bytes: 10},
 			}},
-			{Role: "cold", Location: "cold:/y", Connections: 2, Listed: false},
+			{ID: "cold", Role: "cold", Location: "cold:/y", Ingest: false, ReadEnabled: true, Connections: 2, Listed: false},
 		},
 		Compared: true, CatalogPacks: 2, BackendPacks: 2,
 		MissingOnBackend: []string{"deliberately-missing"}, UnknownToCatalog: []string{"deliberately-extra"},

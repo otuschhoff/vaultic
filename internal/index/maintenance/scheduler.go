@@ -46,6 +46,14 @@ type PlacementSchedulerResult struct {
 	Statuses                  []PlacementStatus      `json:"statuses,omitempty"`
 }
 
+type PlacementMigrationOptions struct {
+	Model  PlacementModel
+	From   string
+	To     string
+	Now    time.Time
+	DryRun bool
+}
+
 type PlacementActions interface {
 	Place(context.Context, vaultic.ID, PlacementBackend) error
 	Promote(context.Context, vaultic.ID, PlacementBackend) error
@@ -130,6 +138,9 @@ func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions
 				return completePlacementRequest(ctx, store, entry.Key, request.Operation, packID, pack, backend, options.Now)
 			}
 			return store.WriteMutableBatch(ctx, nil, [][]byte{entry.Key}, false)
+		}
+		if !backend.ingestEnabled() && request.Operation != schema.PlacementRequestEvict {
+			return failPlacementRequest(ctx, store, entry.Key, request, packID, pack, backend, options, errors.New("placement backend is not enabled for ingest"), &result)
 		}
 		if placementLimitReached(backend, pack.PhysicalSize, requestsUsed[backend.Hash], bytesUsed[backend.Hash], options) {
 			result.Deferred++
@@ -468,6 +479,78 @@ func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerO
 	return result, nil
 }
 
+func PlanPoolMigration(ctx context.Context, store Store, options PlacementMigrationOptions) (PlacementSchedulerResult, error) {
+	result := PlacementSchedulerResult{SchemaVersion: IntrospectSchemaVersion}
+	if options.Now.IsZero() {
+		options.Now = time.Now()
+	}
+	from, found := backendByID(options.Model, options.From)
+	if !found {
+		return result, fmt.Errorf("source placement backend %q is not configured", options.From)
+	}
+	target, found := backendByID(options.Model, options.To)
+	if !found {
+		return result, fmt.Errorf("target placement backend %q is not configured", options.To)
+	}
+	if !from.readAllowed() {
+		return result, fmt.Errorf("source placement backend %q is not read-enabled", options.From)
+	}
+	if !target.ingestEnabled() {
+		return result, fmt.Errorf("target placement backend %q is not ingest-enabled", options.To)
+	}
+	packs, err := loadPacks(ctx, store)
+	if err != nil {
+		return result, err
+	}
+	placements, _, err := loadPlacements(ctx, store)
+	if err != nil {
+		return result, err
+	}
+	requests, err := loadPlacementRequests(ctx, store)
+	if err != nil {
+		return result, err
+	}
+	puts := make([]daemon.Mutation, 0)
+	deadline := uint64(options.Now.Unix())
+	for packID, packPlacements := range placements {
+		pack, found := packs[packID]
+		if !found || pack.Lifecycle == schema.PackDeleted || pack.Lifecycle == schema.PackDeletePending {
+			continue
+		}
+		fromPlacement, hasSource := packPlacements[from.Hash]
+		if !hasSource || fromPlacement.State != schema.PlacementLive {
+			continue
+		}
+		if targetPlacement, hasTarget := packPlacements[target.Hash]; hasTarget && targetPlacement.State == schema.PlacementLive {
+			continue
+		}
+		if existing, exists := requests[packID]; exists && existing.record.TargetBackend == target.Hash {
+			continue
+		}
+		record := schema.PlacementRequestRecord{Classes: []string{"pool-migration"}, Operation: schema.PlacementRequestPlace, TargetBackend: target.Hash}
+		value, err := record.MarshalBinary()
+		if err != nil {
+			return result, err
+		}
+		puts = append(puts, daemon.Mutation{Key: schema.PlacementRequestKey(deadline, schema.ID(packID)), Value: value})
+	}
+	result.PacksScanned = uint64(len(placements))
+	result.RequestsWritten = uint64(len(puts))
+	if options.DryRun || len(puts) == 0 {
+		return result, nil
+	}
+	return result, store.WriteMutableBatch(ctx, puts, nil, false)
+}
+
+func backendByID(model PlacementModel, id string) (PlacementBackend, bool) {
+	for _, backend := range model.Backends {
+		if backend.ID == id {
+			return backend, true
+		}
+	}
+	return PlacementBackend{}, false
+}
+
 type placementRequest struct {
 	key    []byte
 	value  []byte
@@ -661,6 +744,9 @@ func archivalPromotionDue(pack schema.PackRecord, eligibility schema.PromotionEl
 func placementTargets(class string, model PlacementModel) []PlacementBackend {
 	result := make([]PlacementBackend, 0)
 	for _, backend := range model.Backends {
+		if !backend.ingestEnabled() {
+			continue
+		}
 		switch class {
 		case "metadata":
 			if backend.Role != "archival" && backend.Role != "cache" {
@@ -679,9 +765,6 @@ func placementTargets(class string, model PlacementModel) []PlacementBackend {
 				result = append(result, backend)
 			}
 		}
-	}
-	if len(result) == 0 && len(model.Backends) != 0 {
-		result = append(result, model.Backends[0])
 	}
 	return result
 }

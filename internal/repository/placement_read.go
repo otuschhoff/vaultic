@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -27,9 +28,14 @@ func (r *Repository) placementReadCandidates(ctx context.Context, packID vaultic
 		return []placementReadCandidate{{backend: r.be}}
 	}
 	candidates := make([]placementReadCandidate, 0, len(model.Backends))
+	observedPlacement := false
 	for _, policy := range model.Backends {
 		value, found, err := engine.SchemaStore().Get(ctx, schema.PackPlacementKey(schema.ID(packID), policy.Hash))
 		if err != nil || !found {
+			continue
+		}
+		observedPlacement = true
+		if !policy.ReadAllowed() {
 			continue
 		}
 		placement, err := schema.UnmarshalPlacementRecord(value)
@@ -44,6 +50,9 @@ func (r *Repository) placementReadCandidates(ctx context.Context, packID vaultic
 	}
 	sortPlacementReadCandidates(candidates)
 	if len(candidates) == 0 {
+		if observedPlacement {
+			return nil
+		}
 		return []placementReadCandidate{{backend: r.be}}
 	}
 	return candidates
@@ -101,6 +110,9 @@ func loadPackFromCandidates(ctx context.Context, candidates []placementReadCandi
 			continue
 		}
 		return nil
+	}
+	if lastErr == nil {
+		return fmt.Errorf("no readable placement for pack %s", handle.Name)
 	}
 	return lastErr
 }

@@ -84,6 +84,99 @@ func TestPlacementPlanQueuesUnsatisfiedOffsiteDeadline(t *testing.T) {
 	}
 }
 
+func TestPlacementPlanSkipsReadOnlyLegacyBackend(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	packID := deterministicID(220)
+	now := time.Unix(1_700_000_000, 0)
+	store.set(t, schema.PackKey(schema.ID(packID)), schema.PackRecord{
+		Type: schema.PackData, PhysicalSize: 100, PhysicalSizeKnown: true,
+		PayloadSize: 80, HeaderSize: 20, BlobCount: 1,
+		CreationTime: now.UnixNano(), CreationTimeKnown: true,
+		Lifecycle: schema.PackPublished, Tier: schema.TierCold, RetentionSource: schema.RetentionUnknown,
+	})
+	readOnly := false
+	model := PlacementModel{
+		Backends: []PlacementBackend{
+			{ID: "legacy", Hash: 1, Role: "primary", Ingest: &readOnly, ReadEnabled: boolPtr(true), Offsite: true, FailureDomain: "old-cloud"},
+			{ID: "active", Hash: 2, Role: "primary", Offsite: true, FailureDomain: "new-cloud"},
+		},
+		Policy: DurabilityPolicy{MinCopies: 1, MinDomains: 1, MinOffsite: 1},
+	}
+	result, err := PlanPlacement(context.Background(), store, PlacementSchedulerOptions{Model: model, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestsWritten != 1 {
+		t.Fatalf("requests written = %d, want 1", result.RequestsWritten)
+	}
+	value, found, err := store.Get(context.Background(), schema.PlacementRequestKey(uint64(now.Unix()), schema.ID(packID)))
+	if err != nil || !found {
+		t.Fatalf("placement request missing: found=%v err=%v", found, err)
+	}
+	request, err := schema.UnmarshalPlacementRequestRecord(value)
+	if err != nil || request.TargetBackend != 2 {
+		t.Fatalf("request target = %016x err=%v, want active backend", request.TargetBackend, err)
+	}
+}
+
+func TestPlanPoolMigrationQueuesCopiesToActiveTarget(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	packID := deterministicID(221)
+	now := time.Unix(1_700_000_000, 0)
+	storePlacementPack(t, store, packID, schema.TierCold)
+	store.set(t, schema.PackPlacementKey(schema.ID(packID), 1), schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown})
+	readOnly := false
+	model := PlacementModel{Backends: []PlacementBackend{
+		{ID: "legacy", Hash: 1, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
+		{ID: "active", Hash: 2},
+	}}
+	result, err := PlanPoolMigration(context.Background(), store, PlacementMigrationOptions{Model: model, From: "legacy", To: "active", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestsWritten != 1 || result.PacksScanned != 1 {
+		t.Fatalf("migration result = %#v", result)
+	}
+	value, found, err := store.Get(context.Background(), schema.PlacementRequestKey(uint64(now.Unix()), schema.ID(packID)))
+	if err != nil || !found {
+		t.Fatalf("migration request missing: found=%v err=%v", found, err)
+	}
+	request, err := schema.UnmarshalPlacementRequestRecord(value)
+	if err != nil || request.Operation != schema.PlacementRequestPlace || request.TargetBackend != 2 {
+		t.Fatalf("migration request = %#v err=%v", request, err)
+	}
+}
+
+func TestPlanPoolMigrationIgnoresStalePlacementWithoutLivePack(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	packID := deterministicID(222)
+	store.set(t, schema.PackPlacementKey(schema.ID(packID), 1), schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown})
+	readOnly := false
+	model := PlacementModel{Backends: []PlacementBackend{
+		{ID: "legacy", Hash: 1, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
+		{ID: "active", Hash: 2},
+	}}
+	result, err := PlanPoolMigration(context.Background(), store, PlacementMigrationOptions{Model: model, From: "legacy", To: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestsWritten != 0 {
+		t.Fatalf("stale placement queued migration work: %#v", result)
+	}
+}
+
+func TestPlanPoolMigrationRejectsNonIngestTarget(t *testing.T) {
+	readOnly := false
+	model := PlacementModel{Backends: []PlacementBackend{
+		{ID: "legacy", Hash: 1, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
+		{ID: "inactive", Hash: 2, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
+	}}
+	_, err := PlanPoolMigration(context.Background(), &memoryStore{values: make(map[string][]byte)}, PlacementMigrationOptions{Model: model, From: "legacy", To: "inactive"})
+	if err == nil {
+		t.Fatal("migration to non-ingest backend was accepted")
+	}
+}
+
 func TestPlacementPlanRemovesSatisfiedRequest(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}
 	packID := deterministicID(201)
@@ -271,6 +364,8 @@ func TestArchivalPromotionRequiresSufficientCurrentPolicyHorizon(t *testing.T) {
 		t.Fatal("promotion blocked despite policy covering archival minimum retention")
 	}
 }
+
+func boolPtr(value bool) *bool { return &value }
 
 func TestPlacementPlanKeepsPromotedSuccessorArchival(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}

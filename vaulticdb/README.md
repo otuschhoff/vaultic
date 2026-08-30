@@ -40,6 +40,32 @@ The daemon appends the repository identity hash to `VAULTICDB_S3_PREFIX`, so
 the configured prefix is a shared namespace root rather than a complete
 database path.
 
+For synchronous multi-provider metadata replication, set
+`VAULTICDB_OBJECT_STORE=replicated` and list replica IDs in
+`VAULTICDB_REPLICATED_REPLICAS`. Each replica uses the same object-store
+settings with a `VAULTICDB_REPLICATED_<ID>_` prefix; non-alphanumeric
+characters in the ID are written as underscores. The first replica is the
+primary read/list target, and reads fail over to later replicas when a replica
+returns an error. Writes, copies, deletes, and multipart completions must
+succeed on every replica before the operation is acknowledged.
+
+```sh
+export VAULTICDB_OBJECT_STORE=replicated
+export VAULTICDB_REPLICATED_REPLICAS=aws,local2
+export VAULTICDB_REPLICATED_AWS_OBJECT_STORE=s3
+export VAULTICDB_REPLICATED_AWS_S3_BUCKET=metadata-a
+export VAULTICDB_REPLICATED_AWS_S3_PREFIX=repositories/example
+export VAULTICDB_REPLICATED_LOCAL2_OBJECT_STORE=local
+export VAULTICDB_REPLICATED_LOCAL2_DATA_DIR=/srv/vaulticdb-secondary
+```
+
+Replica object stores may be `local`, `s3`, or `azure`. Azure replicas use
+`VAULTICDB_REPLICATED_<ID>_AZURE_ACCOUNT`,
+`VAULTICDB_REPLICATED_<ID>_AZURE_CONTAINER`, optional
+`VAULTICDB_REPLICATED_<ID>_AZURE_PREFIX`, and either
+`VAULTICDB_REPLICATED_<ID>_AZURE_ACCESS_KEY` or
+`VAULTICDB_REPLICATED_<ID>_AZURE_BEARER_TOKEN`.
+
 `VAULTICDB_OBJECT_STORE=memory` is available only for isolated development and
 tests. It is never selected as a fallback for a failed local or S3 open.
 

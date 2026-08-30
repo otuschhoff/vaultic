@@ -27,6 +27,16 @@ type indexPlacementOptions struct {
 	MaxBytes         uint64
 }
 
+type indexPlacementMigratePoolOptions struct {
+	Daemon      indexDaemonOptions
+	From        string
+	To          string
+	DryRun      bool
+	Execute     bool
+	MaxRequests uint64
+	MaxBytes    uint64
+}
+
 func newIndexPlacementCommand(globalOptions *global.Options) *cobra.Command {
 	var options indexPlacementOptions
 	command := &cobra.Command{
@@ -53,6 +63,34 @@ func newIndexPlacementCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().BoolVar(&options.Execute, "execute", false, "process queued placement work after planning")
 	command.Flags().Uint64Var(&options.MaxRequests, "max-requests", 0, "process at most this many placement requests (0 is unlimited)")
 	command.Flags().Uint64Var(&options.MaxBytes, "max-bytes", 0, "move at most this many pack bytes (0 is unlimited)")
+	command.AddCommand(newIndexPlacementMigratePoolCommand(globalOptions))
+	return command
+}
+
+func newIndexPlacementMigratePoolCommand(globalOptions *global.Options) *cobra.Command {
+	var options indexPlacementMigratePoolOptions
+	command := &cobra.Command{
+		Use:               "migrate-pool --from BACKEND --to BACKEND",
+		Short:             "Queue pack copies from a legacy placement backend to an active backend",
+		Args:              cobra.NoArgs,
+		DisableAutoGenTag: true,
+		RunE: func(command *cobra.Command, _ []string) error {
+			result, err := runIndexPlacementMigratePool(command.Context(), options, *globalOptions, globalOptions.Term)
+			if globalOptions.JSON {
+				globalOptions.Term.Print(ui.ToJSONString(result))
+			}
+			return err
+		},
+	}
+	options.Daemon.AddFlags(command.Flags())
+	command.Flags().StringVar(&options.From, "from", "", "source placement backend ID")
+	command.Flags().StringVar(&options.To, "to", "", "target placement backend ID")
+	command.Flags().BoolVar(&options.DryRun, "dry-run", false, "report migration requests without writing rq records")
+	command.Flags().BoolVar(&options.Execute, "execute", false, "process queued migration work after planning")
+	command.Flags().Uint64Var(&options.MaxRequests, "max-requests", 0, "process at most this many placement requests (0 is unlimited)")
+	command.Flags().Uint64Var(&options.MaxBytes, "max-bytes", 0, "move at most this many pack bytes (0 is unlimited)")
+	_ = command.MarkFlagRequired("from")
+	_ = command.MarkFlagRequired("to")
 	return command
 }
 
@@ -135,6 +173,53 @@ func runIndexPlacement(ctx context.Context, options indexPlacementOptions, globa
 	}
 	if result.Overdue != 0 && !options.NoFail {
 		return result, errIndexDifferences
+	}
+	return result, nil
+}
+
+func runIndexPlacementMigratePool(ctx context.Context, options indexPlacementMigratePoolOptions, globalOptions global.Options, term ui.Terminal) (maintenance.PlacementSchedulerResult, error) {
+	var result maintenance.PlacementSchedulerResult
+	config, err := options.Daemon.config("")
+	if err != nil {
+		return result, err
+	}
+	ctx = repository.WithDaemonOptions(ctx, config)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
+	if err := requireSlateDBRepository(repo); err != nil {
+		return result, err
+	}
+	store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
+	if err != nil {
+		return result, err
+	}
+	defer closeStore()
+	model, err := indexMaintenancePlacementModel(repo)
+	if err != nil {
+		return result, err
+	}
+	result, err = maintenance.PlanPoolMigration(ctx, store, maintenance.PlacementMigrationOptions{Model: model, From: options.From, To: options.To, Now: time.Now(), DryRun: options.DryRun})
+	if err != nil {
+		return result, err
+	}
+	if options.Execute && !options.DryRun {
+		worker, workerErr := maintenance.ExecutePlacement(ctx, store, repositoryPlacementActions{repo: repo, printer: printer}, maintenance.PlacementWorkerOptions{
+			Model: model, Now: time.Now(), MaxRequests: options.MaxRequests, MaxBytes: options.MaxBytes,
+		})
+		result.Worker = &worker
+		if workerErr != nil {
+			return result, workerErr
+		}
+	}
+	if !globalOptions.JSON {
+		printer.P("queued %d migration requests from %s to %s\n", result.RequestsWritten, options.From, options.To)
+		if result.Worker != nil {
+			printer.P("worker attempted %d; placed %d; promoted %d; evicted %d; failed %d; deferred %d\n", result.Worker.Attempted, result.Worker.Placed, result.Worker.Promoted, result.Worker.Evicted, result.Worker.Failed, result.Worker.Deferred)
+		}
 	}
 	return result, nil
 }

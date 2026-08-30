@@ -440,6 +440,7 @@ func indexMaintenancePlacementModel(repo *repository.Repository) (maintenance.Pl
 	for _, backend := range model.Backends {
 		converted.Backends = append(converted.Backends, maintenance.PlacementBackend{
 			ID: backend.ID, Hash: backend.Hash, Role: backend.Role,
+			Ingest: backend.Ingest, ReadEnabled: backend.ReadEnabled,
 			Offsite: backend.Offsite, FailureDomain: backend.FailureDomain,
 			RetrievalClass: backend.RetrievalClass, PricePerGBEgress: backend.PricePerGBEgress,
 			MinRetentionSeconds: backend.MinRetentionSeconds,
