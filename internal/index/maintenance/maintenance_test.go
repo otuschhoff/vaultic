@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -137,6 +138,25 @@ func (store *memoryStore) WriteMutableBatch(_ context.Context, puts []daemon.Mut
 		delete(store.values, string(key))
 	}
 	return nil
+}
+
+func TestCheckAnalyticsConsistency(t *testing.T) {
+	store, _, _ := newMemoryStore(t, schema.PackPublished)
+	store.set(t, schema.AnalyticsMetadataKey(), schema.AnalyticsMetadataRecord{Enabled: false})
+	result, err := CheckWithOptions(context.Background(), nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 1})
+	if err != nil || result.AnalyticsMismatch != 0 {
+		t.Fatalf("disabled analytics produced findings: %+v, %v", result, err)
+	}
+
+	generation := uint64(1)
+	store.set(t, schema.AnalyticsMetadataKey(), schema.AnalyticsMetadataRecord{Enabled: true, Generation: generation, Facts: 1, BuiltAt: time.Now().UnixNano()})
+	store.set(t, schema.AnalyticsManifestKey(generation), schema.AnalyticsManifestRecord{Generation: generation, Segments: []uint64{1}})
+	store.set(t, schema.AnalyticsWatermarkKey(generation), schema.AnalyticsWatermarkRecord{RepositoryGeneration: generation, ManifestGeneration: generation, AppliedAt: time.Now().UnixNano()})
+	store.values[string(schema.AnalyticsDerivedGenerationMarkerKey(generation))] = []byte{schema.Version}
+	result, err = CheckWithOptions(context.Background(), nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 1})
+	if err != nil || result.AnalyticsMismatch != 2 || result.Clean() || len(result.Findings) != 1 || result.Findings[0].Kind != "analytics_segment_pair_missing" {
+		t.Fatalf("missing analytics segment not reported with finding cap: %+v, %v", result, err)
+	}
 }
 
 type memoryDestination struct {

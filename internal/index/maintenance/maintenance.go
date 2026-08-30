@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/otuschhoff/vaultic/internal/index/analytics"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
@@ -94,13 +95,14 @@ type CheckResult struct {
 	// is advisory and derived, so this is reported but never makes the check
 	// dirty.
 	HistoryEventsMalformed uint64    `json:"history_events_malformed"`
+	AnalyticsMismatch      uint64    `json:"analytics_mismatches"`
 	GCCandidates           uint64    `json:"gc_candidates"`
 	Warnings               uint64    `json:"warnings"`
 	Findings               []Finding `json:"findings,omitempty"`
 }
 
 func (result CheckResult) Clean() bool {
-	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0
+	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0 && result.AnalyticsMismatch == 0
 }
 
 func (result CheckResult) HasWarnings() bool { return result.Warnings != 0 }
@@ -334,6 +336,14 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 	}
 	if err := checkPathVersionIndex(ctx, store, options.PathIndexPaths, &result, options.MaxFindings); err != nil {
 		return result, err
+	}
+	analyticsFindings, err := analytics.CheckConsistency(ctx, store)
+	if err != nil {
+		return result, err
+	}
+	result.AnalyticsMismatch = uint64(len(analyticsFindings))
+	for _, finding := range analyticsFindings {
+		addFinding(&result, options.MaxFindings, Finding{Kind: finding.Kind, Key: finding.Key, Want: finding.Want, Got: finding.Got})
 	}
 	return result, nil
 }

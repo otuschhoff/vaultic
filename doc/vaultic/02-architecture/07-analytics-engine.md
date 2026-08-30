@@ -213,13 +213,29 @@ change, write an idempotent analytics delta to
 boundary and contains creation, live-state, retained-reference, and
 classification inputs. A bounded background builder consumes deltas in commit
 order. It writes immutable candidate `af:`/`ai:`/`am:` artifacts under a build
-ID, then uses one transaction to publish the new segment manifest, all affected
-`ar:` rows, and `aw:applied:<classification-epoch>` together. Queries reach
+ID and writes changed generation-scoped overlays/views before publication. It
+then uses one transaction to publish the child manifest, generation completion
+marker, watermark, and active metadata pointer. Queries reach
 segments only through the published manifest. A crash before publication leaves
 unreferenced candidates for cleanup; a crash after publication sees the whole
-commit. Replay derives stable output IDs from `(epoch, commit-seq, ordinal)` and
-is idempotent. Outbox records are reclaimed only below a checkpoint covered by
-a verified analytics snapshot.
+commit. Child manifests reference their parent and contain only new immutable
+delta segments. Point and prefix lookups resolve changed derived records through
+the bounded parent chain; explicit tombstones suppress deleted parent records.
+The chain is limited to eight delta generations, after which catch-up performs a
+full streaming compaction. Replay observes the durable watermark before doing
+work and is idempotent. Outbox records are reclaimed only after the published
+watermark covers them.
+
+A full rebuild scans authoritative source records in bytewise key order. Its
+versioned checkpoint stores the exact last fully consumed source key, candidate
+segment IDs, fact count, and applied commit. Each iteration retains at most
+`segment_rows` facts; compact rollups are merged into on-disk candidate records,
+while overlays and GDPR mappings stream directly. Dictionary IDs are stable
+SHA-256-derived 32-bit IDs and collisions fail closed. Content manifests are
+visited one record at a time rather than retained with the fact batch. Legacy
+offset checkpoints fail decoding and restart after candidate cleanup. Rebuild
+and catch-up results report their maximum buffered records and a conservative
+working-set estimate.
 
 Queries read only through the highest fully applied analytics watermark and
 report both that value and authoritative metadata head, making lag explicit.
@@ -227,6 +243,9 @@ No partially applied commit is visible. `--require-current` waits or fails when
 the builder lags; the default returns a snapshot-consistent result at the
 reported watermark. This keeps authoritative transactions small while giving
 bounded, measurable catch-up behavior rather than silently stale results.
+Persisted pending/running query jobs pin their manifest generation and all of
+its parents; cleanup skips pinned segments, indexes, views, manifests, and
+watermarks until the job completes or is cancelled.
 
 Snapshot publish/forget and complete-crawl source changes produce separate
 ordered outbox commits. Until both are applied, a query correctly reports the

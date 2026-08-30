@@ -1,10 +1,13 @@
 package index
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/index/analytics"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -240,5 +243,25 @@ func TestPacksPublishedWithoutATierPolicyStayUnknown(t *testing.T) {
 	}
 	if published.Record.Tier != schema.TierUnknown {
 		t.Fatalf("unwired engine recorded tier %v", published.Record.Tier)
+	}
+}
+
+func TestAutomaticAnalyticsCatchUpIsBoundedAndNonfatal(t *testing.T) {
+	original := automaticAnalyticsCatchUp
+	t.Cleanup(func() { automaticAnalyticsCatchUp = original })
+	called := false
+	automaticAnalyticsCatchUp = func(ctx context.Context, _ analytics.Store, options analytics.CatchUpOptions) (analytics.CatchUpResult, error) {
+		called = true
+		if options.MaxDeltas != 1024 {
+			t.Fatalf("automatic catch-up limit = %d", options.MaxDeltas)
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("automatic catch-up has no deadline")
+		}
+		return analytics.CatchUpResult{}, errors.New("injected catch-up failure")
+	}
+	NewDaemonEngine(nil).catchUpAnalytics(context.Background())
+	if !called {
+		t.Fatal("automatic catch-up was not invoked")
 	}
 }

@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -61,6 +59,16 @@ type SnapshotScope struct {
 	SnapshotID   schema.ID
 	RootKey      []byte
 	OriginalJSON []byte
+	Crawl        *AuthoritativeCrawlClaim
+}
+
+type AuthoritativeCrawlClaim struct {
+	ScopeID    schema.ID
+	RootFSID   uint32
+	RootInode  uint64
+	StartFence uint64
+	Complete   bool
+	DebtKeys   [][]byte
 }
 
 type ReconciledRevision struct {
@@ -100,6 +108,22 @@ func (store *SchemaStore) ScanPrefix(ctx context.Context, prefix, afterKey []byt
 		pageSize = store.client.Limits().MaxPageItems
 	}
 	return store.client.ScanPage(ctx, prefix, afterKey, pageSize, "")
+}
+
+// MetadataHead returns the highest globally allocated authoritative commit.
+func (store *SchemaStore) MetadataHead(ctx context.Context) (uint64, error) {
+	value, found, err := store.Get(ctx, schema.NextRevisionKey())
+	if err != nil || !found {
+		return 0, err
+	}
+	next, err := schema.UnmarshalNextRevision(value)
+	if err != nil {
+		return 0, err
+	}
+	if next == 0 {
+		return 0, fmt.Errorf("invalid next metadata revision")
+	}
+	return next - 1, nil
 }
 
 // RecordCrawlDebtFailure leaves debt pending while atomically recording a
@@ -193,141 +217,6 @@ func (store *SchemaStore) resolveCrawlDebtOnce(ctx context.Context, keys [][]byt
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
-	return nil
-}
-
-type analyticsConfig struct {
-	SVMDepth          int      `json:"svm_depth,omitempty"`
-	VolumeDepth       int      `json:"volume_depth,omitempty"`
-	PathGroupDepth    int      `json:"path_group_depth,omitempty"`
-	PathGroupPrefixes []string `json:"path_group_prefixes,omitempty"`
-}
-
-func (store *SchemaStore) refreshAnalyticsFact(ctx context.Context, parsed schema.ParsedKey, revisionValue []byte) error {
-	backoff := 100 * time.Microsecond
-	for range revisionAllocationAttempts {
-		err := store.refreshAnalyticsFactOnce(ctx, parsed, revisionValue)
-		if status.Code(err) != codes.Aborted {
-			return err
-		}
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-		backoff = min(backoff*2, 25*time.Millisecond)
-	}
-	return fmt.Errorf("refresh analytics fact: transaction conflict retry limit exceeded")
-}
-
-func (store *SchemaStore) refreshAnalyticsFactOnce(ctx context.Context, parsed schema.ParsedKey, revisionValue []byte) error {
-	transaction, err := store.client.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			rollbackTransaction(ctx, transaction)
-		}
-	}()
-	metadataValue, found, err := transaction.Get(ctx, schema.AnalyticsMetadataKey())
-	if err != nil || !found {
-		return err
-	}
-	metadata, err := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
-	if err != nil || !metadata.Enabled {
-		return err
-	}
-	factKey := schema.AnalyticsFactKey(parsed.FSID, parsed.Inode)
-	factValue, factFound, err := transaction.Get(ctx, factKey)
-	if err != nil {
-		return err
-	}
-	var fact schema.AnalyticsFactRecord
-	if factFound {
-		fact, err = schema.UnmarshalAnalyticsFactRecord(factValue)
-		if err != nil {
-			return err
-		}
-		fact.Residency = schema.AnalyticsLive
-	} else {
-		revision, err := schema.UnmarshalInodeRevision(revisionValue)
-		if err != nil {
-			return err
-		}
-		var config analyticsConfig
-		if metadata.ConfigJSON != "" {
-			if err := json.Unmarshal([]byte(metadata.ConfigJSON), &config); err != nil {
-				return err
-			}
-		}
-		if config.SVMDepth == 0 {
-			config.SVMDepth = 1
-		}
-		if config.VolumeDepth == 0 {
-			config.VolumeDepth = 2
-		}
-		if config.PathGroupDepth == 0 {
-			config.PathGroupDepth = 3
-		}
-		fact = schema.AnalyticsFactRecord{Revision: parsed.Revision, UID: revision.UID, GID: revision.GID, Known: revision.Known, LogicalSize: revision.Size, SourcePath: revision.SourcePath, Residency: schema.AnalyticsLive, CreationBasis: schema.AnalyticsTimeUnknown}
-		if revision.Known&schema.KnownCTime != 0 {
-			fact.CreatedAt, fact.CreationBasis = revision.CTime, schema.AnalyticsCTime
-		} else if revision.Known&schema.KnownMTime != 0 {
-			fact.CreatedAt, fact.CreationBasis = revision.MTime, schema.AnalyticsMTime
-		}
-		if fact.CreationBasis != schema.AnalyticsTimeUnknown {
-			created := time.Unix(0, fact.CreatedAt).UTC()
-			fact.CalendarYear, fact.CalendarMonth = int32(created.Year()), uint8(created.Month())
-			isoYear, week := created.ISOWeek()
-			fact.ISOYear, fact.Workweek = int32(isoYear), uint8(week)
-		}
-		if revision.Known&schema.KnownSize != 0 && revision.Size != 0 {
-			fact.SizeLog10 = uint8(math.Floor(math.Log10(float64(revision.Size))))
-		}
-		parts := strings.FieldsFunc(path.Clean(revision.SourcePath), func(r rune) bool { return r == '/' })
-		atDepth := func(depth int) string {
-			if depth > 0 && len(parts) >= depth {
-				return parts[depth-1]
-			}
-			return "unknown"
-		}
-		fact.SVM, fact.Volume, fact.PathGroup = atDepth(config.SVMDepth), atDepth(config.VolumeDepth), atDepth(config.PathGroupDepth)
-		best := ""
-		for _, prefix := range config.PathGroupPrefixes {
-			if (revision.SourcePath == prefix || strings.HasPrefix(revision.SourcePath, prefix+"/")) && len(prefix) > len(best) {
-				best = prefix
-			}
-		}
-		if best != "" {
-			fact.PathGroup = best
-		}
-		metadata.Facts++
-	}
-	factValue, err = fact.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	metadata.Generation++
-	if metadata.Generation == 0 {
-		metadata.Generation = 1
-	}
-	metadata.BuiltAt = time.Now().UnixNano()
-	metadata.CacheEntries = 0
-	metadataValue, err = metadata.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	if err := transaction.WriteBatch(ctx, []Mutation{{Key: factKey, Value: factValue}, {Key: schema.AnalyticsMetadataKey(), Value: metadataValue}}, nil); err != nil {
-		return err
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return err
-	}
-	committed = true
 	return nil
 }
 
@@ -1799,7 +1688,13 @@ func validateMutableKey(key []byte) error {
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
 		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyPathVersion:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility,
+		schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyAnalyticsBuildCheckpoint,
+		schema.KeyAnalyticsDictionary, schema.KeyAnalyticsFactSegment, schema.KeyAnalyticsSegmentMetadata, schema.KeyAnalyticsDimensionIndex,
+		schema.KeyAnalyticsResidency, schema.KeyAnalyticsWatermark, schema.KeyAnalyticsManifest, schema.KeyAnalyticsQueryResult,
+		schema.KeyAnalyticsQueryHeat, schema.KeyAnalyticsQueryView, schema.KeyAnalyticsQueryJob,
+		schema.KeyGrowthTime, schema.KeyGrowthPath, schema.KeyUserSummary, schema.KeyGroupSummary, schema.KeyUserStats, schema.KeyGroupStats, schema.KeyUserChurn,
+		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion:
 		return nil
 	case schema.KeyPackHistory:
 		// The event log is append-only: entries are written by the catalog
@@ -1820,7 +1715,13 @@ func validateMutableDeleteKey(key []byte) error {
 	switch parsed.Kind {
 	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyExportIndexCheckpoint,
 		schema.KeyPackHistory, schema.KeyPackHistoryBucket,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyPathVersion:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility,
+		schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyAnalyticsBuildCheckpoint,
+		schema.KeyAnalyticsDictionary, schema.KeyAnalyticsFactSegment, schema.KeyAnalyticsSegmentMetadata, schema.KeyAnalyticsDimensionIndex,
+		schema.KeyAnalyticsResidency, schema.KeyAnalyticsDelta, schema.KeyAnalyticsWatermark, schema.KeyAnalyticsManifest, schema.KeyAnalyticsQueryResult,
+		schema.KeyAnalyticsQueryHeat, schema.KeyAnalyticsQueryView, schema.KeyAnalyticsQueryJob,
+		schema.KeyGrowthTime, schema.KeyGrowthPath, schema.KeyUserSummary, schema.KeyGroupSummary, schema.KeyUserStats, schema.KeyGroupStats, schema.KeyUserChurn,
+		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion:
 		// History is explicitly prunable: it is derived, advisory, and retained
 		// on its own schedule.
 		return nil
@@ -1841,7 +1742,7 @@ func validatePublishKey(key []byte) (bool, error) {
 		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
 		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
 		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyPathVersion:
+		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyAnalyticsBuildCheckpoint, schema.KeyPathVersion:
 		return false, nil
 	case schema.KeyPackHistory:
 		return true, nil
@@ -1899,9 +1800,32 @@ func (store *SchemaStore) PublishSnapshotScope(ctx context.Context, scope Snapsh
 	if err != nil || root.Kind != schema.KeyDirectoryRevision || root.Revision == 0 || scope.SnapshotID == (schema.ID{}) {
 		return fmt.Errorf("invalid snapshot scope")
 	}
+	if scope.Crawl != nil && (scope.Crawl.RootFSID != root.FSID || scope.Crawl.RootInode != root.Inode) {
+		return fmt.Errorf("authoritative crawl root does not match snapshot root")
+	}
+	var identities []schema.ParsedKey
+	if enabled, enabledErr := store.analyticsEnabled(ctx); enabledErr != nil {
+		return enabledErr
+	} else if enabled {
+		identities, err = store.snapshotIdentities(ctx, scope.RootKey)
+		if err != nil {
+			return err
+		}
+	}
+	bindings, err := store.authoritativeScopeBindings(ctx, scope.Crawl)
+	if err != nil {
+		return err
+	}
+	crawlIdentities := identities
+	if scope.Crawl != nil {
+		crawlIdentities, err = store.snapshotObservedIdentities(ctx, scope.RootKey)
+		if err != nil {
+			return err
+		}
+	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.publishSnapshotScopeOnce(ctx, scope, root)
+		err := store.publishSnapshotScopeOnce(ctx, scope, root, identities, crawlIdentities, bindings)
 		if status.Code(err) != codes.Aborted {
 			return err
 		}
@@ -1917,7 +1841,7 @@ func (store *SchemaStore) PublishSnapshotScope(ctx context.Context, scope Snapsh
 	return fmt.Errorf("publish snapshot scope: transaction conflict retry limit exceeded")
 }
 
-func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope SnapshotScope, root schema.ParsedKey) error {
+func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope SnapshotScope, root schema.ParsedKey, identities, crawlIdentities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord) error {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
@@ -1974,6 +1898,52 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 		{Key: schema.SnapshotCommitKey(next, scope.SnapshotID), Value: snapshotCommitValue},
 		{Key: checkpointKey, Value: checkpointValue}, {Key: nextKey, Value: nextValue},
 	}
+	crawlGenerations := map[identityKey]uint64{}
+	if scope.Crawl != nil {
+		for _, identity := range crawlIdentities {
+			generation := identity.Revision
+			if _, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode); found && prior.State == schema.AuthoritativeSourceLive {
+				generation = prior.Generation
+			}
+			crawlGenerations[identityKey{identity.FSID, identity.Inode}] = generation
+		}
+	}
+	analyticsGeneration := uint64(0)
+	deltaOrdinal := uint32(0)
+	if metadataValue, found, getErr := transaction.Get(ctx, schema.AnalyticsMetadataKey()); getErr != nil {
+		return fail(getErr)
+	} else if found {
+		metadata, decodeErr := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
+		if decodeErr == nil && metadata.Enabled {
+			analyticsGeneration = metadata.Generation
+			for _, identity := range identities {
+				generation := identity.Revision
+				if crawlGeneration := crawlGenerations[identityKey{identity.FSID, identity.Inode}]; crawlGeneration != 0 {
+					generation = crawlGeneration
+				}
+				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: next, State: schema.AnalyticsUnknown, RetainedSnapshotRefs: 1, ReferenceOperation: schema.AnalyticsReferencesIncrement, ClassificationEpoch: metadata.Generation}
+				encoded, encodeErr := delta.MarshalBinary()
+				if encodeErr != nil {
+					return fail(encodeErr)
+				}
+				puts = append(puts, Mutation{Key: schema.AnalyticsDeltaKey(next, deltaOrdinal), Value: encoded})
+				deltaOrdinal++
+			}
+		}
+	}
+	if scope.Crawl != nil {
+		crawlPuts, err := store.authoritativeCrawlMutations(ctx, transaction, *scope.Crawl, crawlIdentities, bindings, next, analyticsGeneration)
+		if err != nil {
+			return fail(err)
+		}
+		for _, mutation := range crawlPuts {
+			if parsed, parseErr := schema.ParseKey(mutation.Key); parseErr == nil && parsed.Kind == schema.KeyAnalyticsDelta {
+				mutation.Key = schema.AnalyticsDeltaKey(next, deltaOrdinal)
+				deltaOrdinal++
+			}
+			puts = append(puts, mutation)
+		}
+	}
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
 		return fail(err)
 	}
@@ -1982,6 +1952,426 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 		return err
 	}
 	return nil
+}
+
+type identityKey struct {
+	fsid  uint32
+	inode uint64
+}
+
+func (store *SchemaStore) authoritativeScopeBindings(ctx context.Context, claim *AuthoritativeCrawlClaim) (map[string]schema.AuthoritativeSourceBindingRecord, error) {
+	result := map[string]schema.AuthoritativeSourceBindingRecord{}
+	if claim == nil {
+		return result, nil
+	}
+	if claim.ScopeID == (schema.ID{}) || claim.RootFSID == 0 || claim.RootInode == 0 || claim.StartFence == 0 {
+		return nil, fmt.Errorf("invalid authoritative crawl claim")
+	}
+	prefix := schema.AuthoritativeSourceBindingPrefix(claim.ScopeID)
+	var after []byte
+	for {
+		entries, done, err := store.ScanPrefix(ctx, prefix, after, 10_000)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			record, err := schema.UnmarshalAuthoritativeSourceBindingRecord(entry.Value)
+			if err != nil {
+				return nil, err
+			}
+			result[string(entry.Key)] = record
+		}
+		if done {
+			return result, nil
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("authoritative source-binding scan made no progress")
+		}
+		after = append(after[:0], entries[len(entries)-1].Key...)
+	}
+}
+
+func (store *SchemaStore) authoritativeCrawlMutations(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64) ([]Mutation, error) {
+	debtFree := true
+	for _, key := range claim.DebtKeys {
+		parsed, err := schema.ParseKey(key)
+		if err != nil || parsed.Kind != schema.KeyCrawlDebt {
+			return nil, fmt.Errorf("invalid authoritative crawl debt key")
+		}
+		value, found, err := transaction.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			debt, err := schema.UnmarshalCrawlDebtRecord(value)
+			if err != nil {
+				return nil, err
+			}
+			debtFree = debtFree && debt.Status == schema.DebtResolved
+		}
+	}
+	proof := schema.AuthoritativeCrawlProofRecord{ScopeID: claim.ScopeID, RootFSID: claim.RootFSID, RootInode: claim.RootInode, StartFence: claim.StartFence, EndCommit: commit, CompletedAt: time.Now().UnixNano(), Complete: claim.Complete, DebtFree: debtFree}
+	proofValue, err := proof.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	mutations := []Mutation{{Key: schema.AuthoritativeCrawlProofKey(claim.ScopeID, commit), Value: proofValue}}
+	observed := make(map[string]schema.ParsedKey, len(identities))
+	var analyticsOrdinal uint32
+	for _, identity := range identities {
+		priorKey, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode)
+		if found {
+			value, exists, err := transaction.Get(ctx, priorKey)
+			if err != nil {
+				return nil, err
+			}
+			if exists {
+				prior, err = schema.UnmarshalAuthoritativeSourceBindingRecord(value)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		generation := identity.Revision
+		continuity := schema.AnalyticsContinuityUnknown
+		newGeneration := !found
+		sourceStateChanged := !found || prior.State != schema.AuthoritativeSourceLive
+		if found && prior.State == schema.AuthoritativeSourceLive {
+			generation, continuity, newGeneration = prior.Generation, prior.Continuity, false
+		} else if found && prior.State == schema.AuthoritativeSourceDeleted {
+			continuity = schema.AnalyticsContinuityProven
+			newGeneration = true
+		}
+		key := schema.AuthoritativeSourceBindingKey(claim.ScopeID, identity.FSID, identity.Inode, generation)
+		observed[string(key)] = identity
+		binding := schema.AuthoritativeSourceBindingRecord{Generation: generation, Revision: identity.Revision, State: schema.AuthoritativeSourceLive, Continuity: continuity, LastObservedCommit: commit}
+		encoded, err := binding.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		mutations = append(mutations, Mutation{Key: key, Value: encoded})
+		if analyticsGeneration != 0 && sourceStateChanged {
+			var delta schema.AnalyticsDeltaRecord
+			if newGeneration {
+				delta = schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, CreatedAt: time.Now().UnixNano(), CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
+			} else {
+				delta = schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
+			}
+			value, err := delta.MarshalBinary()
+			if err != nil {
+				return nil, err
+			}
+			mutations = append(mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, analyticsOrdinal), Value: value})
+			analyticsOrdinal++
+		}
+	}
+	for keyString, prior := range bindings {
+		if _, found := observed[keyString]; found || prior.State == schema.AuthoritativeSourceDeleted {
+			continue
+		}
+		key := []byte(keyString)
+		if value, found, err := transaction.Get(ctx, key); err != nil {
+			return nil, err
+		} else if found {
+			prior, err = schema.UnmarshalAuthoritativeSourceBindingRecord(value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		state := schema.AuthoritativeSourceUnknown
+		analyticsState := schema.AnalyticsUnknown
+		if proof.Complete && proof.DebtFree && prior.LastObservedCommit <= claim.StartFence {
+			state = schema.AuthoritativeSourceDeleted
+			analyticsState = schema.AnalyticsDeleted
+			if prior.State == schema.AuthoritativeSourceLive && !hasUnknownGeneration(bindings, keyString) {
+				prior.Continuity = schema.AnalyticsContinuityProven
+			}
+		} else {
+			prior.Continuity = schema.AnalyticsContinuityUnknown
+		}
+		prior.State, prior.LastObservedCommit = state, commit
+		encoded, err := prior.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		mutations = append(mutations, Mutation{Key: key, Value: encoded})
+		if analyticsGeneration != 0 {
+			parsed, _ := schema.ParseKey(key)
+			delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: parsed.FSID, Inode: parsed.Inode, IdentityGeneration: prior.Generation, Revision: prior.Revision, IdentityContinuity: prior.Continuity, State: analyticsState, ClassificationEpoch: analyticsGeneration}
+			value, err := delta.MarshalBinary()
+			if err != nil {
+				return nil, err
+			}
+			mutations = append(mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, analyticsOrdinal), Value: value})
+			analyticsOrdinal++
+		}
+	}
+	return mutations, nil
+}
+
+func hasUnknownGeneration(bindings map[string]schema.AuthoritativeSourceBindingRecord, currentKey string) bool {
+	current, err := schema.ParseKey([]byte(currentKey))
+	if err != nil {
+		return true
+	}
+	for keyString, binding := range bindings {
+		if keyString == currentKey || binding.State != schema.AuthoritativeSourceUnknown {
+			continue
+		}
+		parsed, err := schema.ParseKey([]byte(keyString))
+		if err == nil && parsed.FSID == current.FSID && parsed.Inode == current.Inode {
+			return true
+		}
+	}
+	return false
+}
+
+func currentSourceBinding(bindings map[string]schema.AuthoritativeSourceBindingRecord, fsid uint32, inode uint64) ([]byte, schema.AuthoritativeSourceBindingRecord, bool) {
+	var selectedKey []byte
+	var selected schema.AuthoritativeSourceBindingRecord
+	for keyString, record := range bindings {
+		parsed, err := schema.ParseKey([]byte(keyString))
+		if err != nil || parsed.FSID != fsid || parsed.Inode != inode {
+			continue
+		}
+		if selectedKey == nil || sourceBindingPriority(record.State) > sourceBindingPriority(selected.State) || sourceBindingPriority(record.State) == sourceBindingPriority(selected.State) && record.LastObservedCommit > selected.LastObservedCommit {
+			selectedKey, selected = []byte(keyString), record
+		}
+	}
+	return selectedKey, selected, selectedKey != nil
+}
+
+func sourceBindingPriority(state schema.AuthoritativeSourceState) int {
+	if state == schema.AuthoritativeSourceLive {
+		return 2
+	}
+	if state == schema.AuthoritativeSourceUnknown {
+		return 1
+	}
+	return 0
+}
+
+// ForgetSnapshot atomically removes logical snapshot membership and emits
+// ordered analytics triggers. Physical pack lifecycle is deliberately absent.
+func (store *SchemaStore) ForgetSnapshot(ctx context.Context, snapshotID schema.ID) error {
+	value, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID))
+	if err != nil || !found {
+		return err
+	}
+	record, err := schema.UnmarshalSnapshotRecord(value)
+	if err != nil {
+		return err
+	}
+	rootKey := schema.DirectoryRevisionKey(record.RootFSID, record.RootInode, record.RootRevision)
+	var identities []schema.ParsedKey
+	if enabled, enabledErr := store.analyticsEnabled(ctx); enabledErr != nil {
+		return enabledErr
+	} else if enabled {
+		identities, err = store.snapshotIdentities(ctx, rootKey)
+		if err != nil {
+			return err
+		}
+	}
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		err = store.forgetSnapshotOnce(ctx, snapshotID, record, identities)
+		if status.Code(err) != codes.Aborted {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return fmt.Errorf("forget snapshot: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) forgetSnapshotOnce(ctx context.Context, snapshotID schema.ID, record schema.SnapshotRecord, identities []schema.ParsedKey) error {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error { rollbackTransaction(ctx, transaction); return err }
+	if _, found, err := transaction.Get(ctx, schema.SnapshotKey(snapshotID)); err != nil {
+		return fail(err)
+	} else if !found {
+		return transaction.Rollback(ctx)
+	}
+	next := uint64(1)
+	if value, found, err := transaction.Get(ctx, schema.NextRevisionKey()); err != nil {
+		return fail(err)
+	} else if found {
+		next, err = schema.UnmarshalNextRevision(value)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	if next == math.MaxUint64 {
+		return fail(fmt.Errorf("repository revision sequence exhausted"))
+	}
+	nextValue, err := schema.MarshalNextRevision(next + 1)
+	if err != nil {
+		return fail(err)
+	}
+	puts := []Mutation{{Key: schema.NextRevisionKey(), Value: nextValue}}
+	if metadataValue, found, getErr := transaction.Get(ctx, schema.AnalyticsMetadataKey()); getErr != nil {
+		return fail(getErr)
+	} else if found {
+		metadata, decodeErr := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
+		if decodeErr == nil && metadata.Enabled {
+			for ordinal, identity := range identities {
+				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: identity.Revision, Revision: next, State: schema.AnalyticsUnknown, ReferenceOperation: schema.AnalyticsReferencesDecrement, ClassificationEpoch: metadata.Generation}
+				encoded, encodeErr := delta.MarshalBinary()
+				if encodeErr != nil {
+					return fail(encodeErr)
+				}
+				puts = append(puts, Mutation{Key: schema.AnalyticsDeltaKey(next, uint32(ordinal)), Value: encoded})
+			}
+		}
+	}
+	deletes := [][]byte{schema.SnapshotKey(snapshotID), schema.SnapshotCommitKey(record.CommitSequence, snapshotID)}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, deletes); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fail(err)
+	}
+	return nil
+}
+
+func (store *SchemaStore) snapshotIdentities(ctx context.Context, rootKey []byte) ([]schema.ParsedKey, error) {
+	identities, err := store.snapshotIdentityRevisions(ctx, rootKey, false)
+	if err != nil {
+		return nil, err
+	}
+	generations := map[identityKey][]uint64{}
+	var after []byte
+	for {
+		entries, done, err := store.ScanPrefix(ctx, []byte("asb:"), after, 10_000)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			parsed, err := schema.ParseKey(entry.Key)
+			if err != nil || parsed.Kind != schema.KeyAuthoritativeSourceBinding {
+				return nil, fmt.Errorf("invalid authoritative source binding key %x", entry.Key)
+			}
+			generations[identityKey{parsed.FSID, parsed.Inode}] = append(generations[identityKey{parsed.FSID, parsed.Inode}], parsed.Generation)
+		}
+		if done {
+			break
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("authoritative source-binding scan made no progress")
+		}
+		after = append(after[:0], entries[len(entries)-1].Key...)
+	}
+	for index := range identities {
+		generation := uint64(0)
+		for _, candidate := range generations[identityKey{identities[index].FSID, identities[index].Inode}] {
+			if candidate <= identities[index].Revision && candidate > generation {
+				generation = candidate
+			}
+		}
+		if generation == 0 {
+			items, _, err := store.ScanPrefix(ctx, schema.InodeRevisionPrefix(identities[index].FSID, identities[index].Inode), nil, 1)
+			if err != nil || len(items) == 0 {
+				return nil, errors.Join(err, fmt.Errorf("snapshot inode %d:%d has no revision", identities[index].FSID, identities[index].Inode))
+			}
+			parsed, err := schema.ParseKey(items[0].Key)
+			if err != nil {
+				return nil, err
+			}
+			generation = parsed.Revision
+		}
+		identities[index].Revision = generation
+	}
+	return identities, nil
+}
+
+func (store *SchemaStore) snapshotObservedIdentities(ctx context.Context, rootKey []byte) ([]schema.ParsedKey, error) {
+	return store.snapshotIdentityRevisions(ctx, rootKey, false)
+}
+
+func (store *SchemaStore) snapshotIdentityRevisions(ctx context.Context, rootKey []byte, oldest bool) ([]schema.ParsedKey, error) {
+	seenDirectories := map[string]struct{}{}
+	identities := map[string]schema.ParsedKey{}
+	var visit func([]byte) error
+	visit = func(key []byte) error {
+		if _, seen := seenDirectories[string(key)]; seen {
+			return nil
+		}
+		seenDirectories[string(key)] = struct{}{}
+		value, found, err := store.Get(ctx, key)
+		if err != nil || !found {
+			return errors.Join(err, fmt.Errorf("snapshot directory %x is missing", key))
+		}
+		directory, err := schema.UnmarshalDirectoryRevision(value)
+		if err != nil {
+			return err
+		}
+		for _, child := range directory.Children {
+			parsed, err := schema.ParseKey(child.MetadataKey)
+			if err != nil {
+				return err
+			}
+			if parsed.Kind == schema.KeyDirectoryRevision {
+				if err := visit(child.MetadataKey); err != nil {
+					return err
+				}
+				continue
+			}
+			if parsed.Kind != schema.KeyInodeRevision {
+				continue
+			}
+			generation := parsed
+			if oldest {
+				items, _, err := store.ScanPrefix(ctx, schema.InodeRevisionPrefix(parsed.FSID, parsed.Inode), nil, 1)
+				if err != nil || len(items) == 0 {
+					return errors.Join(err, fmt.Errorf("snapshot inode %d:%d has no revision", parsed.FSID, parsed.Inode))
+				}
+				generation, err = schema.ParseKey(items[0].Key)
+				if err != nil {
+					return err
+				}
+			}
+			identities[string(schema.AnalyticsResidencyKey(parsed.FSID, parsed.Inode, generation.Revision))] = generation
+		}
+		return nil
+	}
+	if err := visit(rootKey); err != nil {
+		return nil, err
+	}
+	result := make([]schema.ParsedKey, 0, len(identities))
+	for _, identity := range identities {
+		result = append(result, identity)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].FSID != result[j].FSID {
+			return result[i].FSID < result[j].FSID
+		}
+		if result[i].Inode != result[j].Inode {
+			return result[i].Inode < result[j].Inode
+		}
+		return result[i].Revision < result[j].Revision
+	})
+	return result, nil
+}
+
+func (store *SchemaStore) analyticsEnabled(ctx context.Context) (bool, error) {
+	value, found, err := store.Get(ctx, schema.AnalyticsMetadataKey())
+	if err != nil || !found {
+		return false, err
+	}
+	metadata, err := schema.UnmarshalAnalyticsMetadataRecord(value)
+	if err != nil {
+		return false, nil
+	}
+	return metadata.Enabled, nil
 }
 
 func snapshotTimeUnixNano(originalJSON []byte) int64 {
@@ -2501,6 +2891,35 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	for _, mutation := range reconciled.RelatedPuts {
 		puts[string(mutation.Key)] = mutation
 	}
+	if currentParsed.Kind == schema.KeyCurrentInode && !currentFound {
+		metadataValue, enabled, getErr := transaction.Get(ctx, schema.AnalyticsMetadataKey())
+		if getErr != nil {
+			return fail(getErr)
+		}
+		if enabled {
+			metadata, decodeErr := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
+			if decodeErr == nil && metadata.Enabled {
+				revision, decodeErr := schema.UnmarshalInodeRevision(reconciled.RevisionValue)
+				if decodeErr != nil {
+					return fail(decodeErr)
+				}
+				delta := schema.AnalyticsDeltaRecord{
+					Kind: schema.AnalyticsDeltaCreation, FSID: revisionParsed.FSID, Inode: revisionParsed.Inode,
+					IdentityGeneration: reconciled.Revision, Revision: reconciled.Revision,
+					UID: revision.UID, GID: revision.GID, Known: revision.Known, LogicalSize: revision.Size,
+					CreatedAt: time.Now().UnixNano(), CreationBasis: schema.AnalyticsFirstSeen,
+					IdentityContinuity: schema.AnalyticsContinuityUnknown, State: schema.AnalyticsLive,
+					ClassificationEpoch: metadata.Generation,
+				}
+				encoded, encodeErr := delta.MarshalBinary()
+				if encodeErr != nil {
+					return fail(fmt.Errorf("encode analytics outbox delta: %w", encodeErr))
+				}
+				key := schema.AnalyticsDeltaKey(reconciled.Revision, 0)
+				puts[string(key)] = Mutation{Key: key, Value: encoded}
+			}
+		}
+	}
 
 	// Publish hardlink reference records for multi-parent inodes.
 	if reconciled.HasMultipleParents && len(reconciled.HardlinkParents) > 0 {
@@ -2527,11 +2946,6 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	if err := transaction.Commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
-	}
-	if currentParsed.Kind == schema.KeyCurrentInode {
-		// Analytics is disposable: a missed refresh is repaired by rebuild and
-		// must never turn a committed backup into a failure.
-		_ = store.refreshAnalyticsFact(ctx, revisionParsed, reconciled.RevisionValue)
 	}
 	return nil
 }

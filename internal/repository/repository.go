@@ -914,7 +914,16 @@ func (r *internalRepository) RemoveUnpacked(ctx context.Context, t vaultic.FileT
 }
 
 func (r *Repository) removeUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) error {
-	return r.be.Remove(ctx, backend.Handle{Type: backend.FileType(t), Name: id.String()})
+	removeErr := r.be.Remove(ctx, backend.Handle{Type: backend.FileType(t), Name: id.String()})
+	if t == vaultic.SnapshotFile {
+		if engine, ok := r.Engine().(*enginepkg.DaemonEngine); ok {
+			if removeErr != nil && !r.be.IsNotExist(removeErr) {
+				return removeErr
+			}
+			return engine.ForgetSnapshot(ctx, id)
+		}
+	}
+	return removeErr
 }
 
 func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error) error {

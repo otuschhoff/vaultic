@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/index/analytics"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
@@ -57,6 +59,8 @@ type PlacementBackendPolicy struct {
 	MaxRequestsPerSecond uint64
 	ObjectOverheadBytes  uint64
 }
+
+var automaticAnalyticsCatchUp = analytics.CatchUp
 
 // tierFor maps a pack type onto the tier its bytes were actually routed to.
 //
@@ -200,6 +204,7 @@ type DaemonEngine struct {
 	client           *daemon.Client
 	store            *daemon.SchemaStore
 	mu               sync.Mutex
+	analyticsMu      sync.Mutex
 	pendingSnapshots map[vaultic.ID][]byte
 	nextSnapshotRoot []byte
 	pendingPacks     map[vaultic.ID]struct{}
@@ -306,19 +311,44 @@ func (engine *DaemonEngine) MarkSnapshotFailed(ctx context.Context, id vaultic.I
 }
 
 func (engine *DaemonEngine) PublishSnapshotScope(ctx context.Context, id vaultic.ID, rootKey []byte) error {
+	return engine.PublishSnapshotScopeWithCrawl(ctx, id, rootKey, nil)
+}
+
+// PublishSnapshotScopeWithCrawl is reserved for callers that can explicitly
+// certify an enumerated source scope. Ordinary backups publish no crawl proof.
+func (engine *DaemonEngine) PublishSnapshotScopeWithCrawl(ctx context.Context, id vaultic.ID, rootKey []byte, crawl *daemon.AuthoritativeCrawlClaim) error {
 	engine.mu.Lock()
 	originalJSON, found := engine.pendingSnapshots[id]
 	engine.mu.Unlock()
 	if !found {
 		return fmt.Errorf("snapshot %s has no pending compatibility projection", id.Str())
 	}
-	if err := engine.store.PublishSnapshotScope(ctx, daemon.SnapshotScope{SnapshotID: schema.ID(id), RootKey: rootKey, OriginalJSON: originalJSON}); err != nil {
+	if err := engine.store.PublishSnapshotScope(ctx, daemon.SnapshotScope{SnapshotID: schema.ID(id), RootKey: rootKey, OriginalJSON: originalJSON, Crawl: crawl}); err != nil {
 		return err
 	}
 	engine.mu.Lock()
 	delete(engine.pendingSnapshots, id)
 	engine.mu.Unlock()
+	engine.catchUpAnalytics(ctx)
 	return nil
+}
+
+func (engine *DaemonEngine) ForgetSnapshot(ctx context.Context, id vaultic.ID) error {
+	if err := engine.store.ForgetSnapshot(ctx, schema.ID(id)); err != nil {
+		return err
+	}
+	engine.catchUpAnalytics(ctx)
+	return nil
+}
+
+func (engine *DaemonEngine) catchUpAnalytics(ctx context.Context) {
+	engine.analyticsMu.Lock()
+	defer engine.analyticsMu.Unlock()
+	catchUpCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := automaticAnalyticsCatchUp(catchUpCtx, engine.store, analytics.CatchUpOptions{MaxDeltas: 1024}); err != nil {
+		debug.Log("automatic analytics catch-up deferred: %v", err)
+	}
 }
 
 func (*DaemonEngine) Mode() Mode { return ModeSlateDB }

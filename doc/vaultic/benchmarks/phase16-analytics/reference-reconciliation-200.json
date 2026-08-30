@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "inodes_per_sample": 200,
+  "samples": 7,
+  "warmup_inodes": 50,
+  "content_ids_per_inode": 8,
+  "go_version": "go1.27.0",
+  "goos": "darwin",
+  "goarch": "arm64",
+  "cpus": 10,
+  "hardware": "Apple M1 Max, 64 GiB",
+  "date": "2026-08-30T03:02:20Z",
+  "commit": "4e092f9ff-dirty",
+  "baseline": {
+    "median_seconds": 20.478760459,
+    "p95_seconds": 20.498966625,
+    "median_inodes_per_second": 9.766216094983623,
+    "authoritative_mutations": 3600,
+    "authoritative_encoded_bytes": 316000,
+    "authoritative_encoded_bytes_per_inode": 1580
+  },
+  "analytics_enabled": {
+    "median_seconds": 20.474568666,
+    "p95_seconds": 20.486551583,
+    "median_inodes_per_second": 9.768215548888184,
+    "authoritative_mutations": 3800,
+    "authoritative_encoded_bytes": 336400,
+    "authoritative_encoded_bytes_per_inode": 1682
+  },
+  "median_time_overhead_percent": 0.0239012653580728,
+  "p95_time_overhead_percent": 0.15550928221694793,
+  "authoritative_write_overhead_percent": 6.455696202531636,
+  "post_commit_catch_up": {
+    "deltas": 200,
+    "seconds": 0.408895292,
+    "deltas_per_second": 489.12277522627966,
+    "retained_derived_bytes": 26876
+  },
+  "gates": {
+    "authoritative_metadata_write_10pct": "pass",
+    "reconciliation_cpu_time_5pct": "pass"
+  },
+  "methodology": [
+    "Each pair publishes identical deterministic first-seen inode revisions through SchemaStore.PublishReconciledRevision and a real vaulticdb transaction.",
+    "Fixture encoding, daemon startup, analytics metadata setup, revision allocation, warm-up, validation reads, and catch-up are outside the authoritative wall-time interval.",
+    "Sample order alternates baseline-first and enabled-first; reported overhead is the median and p95 of paired sample ratios.",
+    "Authoritative bytes are exact key plus encoded-value bytes for every mutation produced by these first-seen reconciliations; enabled accounting includes ae: deltas.",
+    "Post-commit catch-up runs in a separate repository and is reported independently."
+  ],
+  "limitations": [
+    "The CPU/time gate is evaluated with authoritative wall time because vaulticdb executes in a separate process; process CPU attribution is not portable through the public client API.",
+    "Encoded-byte accounting is logical authoritative metadata, not physical SlateDB WAL, block-compression, or compaction amplification."
+  ]
+}

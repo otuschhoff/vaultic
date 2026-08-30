@@ -61,6 +61,66 @@ const (
 	KeyAnalyticsFact
 	KeyAnalyticsCache
 	KeyAnalyticsMetadata
+	KeyAnalyticsBuildCheckpoint
+	KeyAnalyticsDictionary
+	KeyAnalyticsFactSegment
+	KeyAnalyticsSegmentMetadata
+	KeyAnalyticsDimensionIndex
+	KeyAnalyticsResidency
+	KeyAnalyticsDelta
+	KeyAnalyticsWatermark
+	KeyAnalyticsManifest
+	KeyAnalyticsQueryResult
+	KeyAnalyticsQueryHeat
+	KeyAnalyticsQueryView
+	KeyAnalyticsQueryJob
+	KeyGrowthTime
+	KeyGrowthPath
+	KeyUserSummary
+	KeyGroupSummary
+	KeyUserChurn
+	KeyUserInode
+	KeyUserBlob
+	KeyAuthoritativeCrawlProof
+	KeyAuthoritativeSourceBinding
+	KeyAnalyticsDerivedMarker
+	KeyUserBlobContribution
+	KeyUserStats
+	KeyGroupStats
+)
+
+type AnalyticsDictionaryKind byte
+
+const (
+	AnalyticsDictionarySVM AnalyticsDictionaryKind = iota + 1
+	AnalyticsDictionaryVolume
+	AnalyticsDictionaryPathGroup
+)
+
+type AnalyticsDimension byte
+
+const (
+	AnalyticsDimensionUID AnalyticsDimension = iota + 1
+	AnalyticsDimensionGID
+	AnalyticsDimensionCalendarYear
+	AnalyticsDimensionCalendarMonth
+	AnalyticsDimensionISOYear
+	AnalyticsDimensionWorkweek
+	AnalyticsDimensionSVM
+	AnalyticsDimensionVolume
+	AnalyticsDimensionPathGroup
+	AnalyticsDimensionSizeLog10
+	AnalyticsDimensionCreationBasis
+	AnalyticsDimensionIdentityContinuity
+	AnalyticsDimensionResidency
+)
+
+type AnalyticsGranularity byte
+
+const (
+	AnalyticsGranularityWeek AnalyticsGranularity = iota + 1
+	AnalyticsGranularityMonth
+	AnalyticsGranularityYear
 )
 
 // HistoryGranularity names a rollup bucket width. The values are part of the
@@ -110,22 +170,34 @@ const (
 )
 
 type ParsedKey struct {
-	Kind        KeyKind
-	ID          ID
-	SecondID    ID
-	FSID        uint32
-	Inode       uint64
-	Revision    uint64
-	Segment     uint32
-	Aggregate   AggregateKind
-	Tier        PackTier
-	GCTarget    GCTarget
-	EventTime   uint64
-	Granularity HistoryGranularity
-	Backend     uint64
-	PackType    PackType
-	DeleteAfter int64
-	Path        string
+	Kind           KeyKind
+	ID             ID
+	SecondID       ID
+	FSID           uint32
+	Inode          uint64
+	Revision       uint64
+	Segment        uint32
+	Aggregate      AggregateKind
+	Tier           PackTier
+	GCTarget       GCTarget
+	EventTime      uint64
+	Granularity    HistoryGranularity
+	Backend        uint64
+	PackType       PackType
+	DeleteAfter    int64
+	Path           string
+	Generation     uint64
+	ViewGeneration uint64
+	Commit         uint64
+	Ordinal        uint32
+	Dictionary     AnalyticsDictionaryKind
+	Dimension      AnalyticsDimension
+	Value          uint64
+	Epoch          uint64
+	UID            uint32
+	GID            uint32
+	Timestamp      int64
+	Residency      AnalyticsResidency
 }
 
 func BlobKey(id ID) []byte           { return idKey("b:", id) }
@@ -422,6 +494,310 @@ func AnalyticsFactPrefix() []byte                       { return []byte("an:") }
 func AnalyticsCacheKey(hash ID) []byte                  { return idKey("aq:", hash) }
 func AnalyticsCachePrefix() []byte                      { return []byte("aq:") }
 func AnalyticsMetadataKey() []byte                      { return []byte("meta:analytics") }
+func AnalyticsBuildCheckpointKey() []byte               { return []byte("meta:analytics-build") }
+
+func AnalyticsDictionaryKey(kind AnalyticsDictionaryKind, id uint32) []byte {
+	if !validAnalyticsDictionaryKind(kind) || id == 0 {
+		return nil
+	}
+	key := []byte{'a', 'd', ':', byte(kind)}
+	return binary.BigEndian.AppendUint32(key, id)
+}
+
+func AnalyticsDictionaryPrefix(kind AnalyticsDictionaryKind) []byte {
+	if !validAnalyticsDictionaryKind(kind) {
+		return nil
+	}
+	return []byte{'a', 'd', ':', byte(kind)}
+}
+
+func AnalyticsFactSegmentKey(segment uint64) []byte     { return analyticsUint64Key("af:", segment) }
+func AnalyticsFactSegmentPrefix() []byte                { return []byte("af:") }
+func AnalyticsSegmentMetadataKey(segment uint64) []byte { return analyticsUint64Key("am:", segment) }
+func AnalyticsSegmentMetadataPrefix() []byte            { return []byte("am:") }
+func AnalyticsManifestKey(classificationEpoch uint64) []byte {
+	return analyticsUint64Key("ap:", classificationEpoch)
+}
+func AnalyticsManifestPrefix() []byte { return []byte("ap:") }
+
+func AnalyticsDimensionIndexKey(dimension AnalyticsDimension, value, segment uint64) []byte {
+	if !validAnalyticsDimension(dimension) || segment == 0 {
+		return nil
+	}
+	key := make([]byte, 3+1+8+8)
+	copy(key, "ai:")
+	key[3] = byte(dimension)
+	binary.BigEndian.PutUint64(key[4:12], value)
+	binary.BigEndian.PutUint64(key[12:], segment)
+	return key
+}
+
+func AnalyticsDimensionIndexPrefix(dimension AnalyticsDimension, value uint64) []byte {
+	if !validAnalyticsDimension(dimension) {
+		return nil
+	}
+	key := make([]byte, 3+1+8)
+	copy(key, "ai:")
+	key[3] = byte(dimension)
+	binary.BigEndian.PutUint64(key[4:], value)
+	return key
+}
+
+func AnalyticsResidencyKey(fsid uint32, inode, generation uint64) []byte {
+	if generation == 0 {
+		return nil
+	}
+	return revisionKey("ar:", fsid, inode, generation)
+}
+
+func AnalyticsResidencyPrefix(fsid uint32, inode uint64) []byte {
+	return inodeKey("ar:", fsid, inode)
+}
+
+func AnalyticsDerivedKey(generation uint64, key []byte) []byte {
+	if generation == 0 || !isAnalyticsDerivedKey(key) {
+		return nil
+	}
+	result := make([]byte, 4+8+1+len(key))
+	copy(result, "av1:")
+	binary.BigEndian.PutUint64(result[4:12], generation)
+	result[12] = ':'
+	copy(result[13:], key)
+	return result
+}
+
+func AnalyticsDerivedPrefix(generation uint64, prefix []byte) []byte {
+	if generation == 0 {
+		return nil
+	}
+	result := make([]byte, 4+8+1+len(prefix))
+	copy(result, "av1:")
+	binary.BigEndian.PutUint64(result[4:12], generation)
+	result[12] = ':'
+	copy(result[13:], prefix)
+	return result
+}
+
+func AnalyticsDerivedGenerationPrefix(generation uint64) []byte {
+	return AnalyticsDerivedPrefix(generation, nil)
+}
+
+func AnalyticsDerivedGenerationMarkerKey(generation uint64) []byte {
+	if generation == 0 {
+		return nil
+	}
+	return AnalyticsDerivedPrefix(generation, []byte("complete"))
+}
+
+func AnalyticsDeltaKey(commit uint64, ordinal uint32) []byte {
+	if commit == 0 {
+		return nil
+	}
+	key := make([]byte, 3+8+4)
+	copy(key, "ae:")
+	binary.BigEndian.PutUint64(key[3:11], commit)
+	binary.BigEndian.PutUint32(key[11:], ordinal)
+	return key
+}
+
+func AnalyticsDeltaPrefix() []byte { return []byte("ae:") }
+
+func AuthoritativeCrawlProofKey(scope ID, endCommit uint64) []byte {
+	if scope == (ID{}) || endCommit == 0 {
+		return nil
+	}
+	key := make([]byte, 4+32+8)
+	copy(key, "acp:")
+	copy(key[4:36], scope[:])
+	binary.BigEndian.PutUint64(key[36:], endCommit)
+	return key
+}
+
+func AuthoritativeCrawlProofPrefix(scope ID) []byte {
+	if scope == (ID{}) {
+		return nil
+	}
+	key := make([]byte, 4+32)
+	copy(key, "acp:")
+	copy(key[4:], scope[:])
+	return key
+}
+
+func AuthoritativeSourceBindingKey(scope ID, fsid uint32, inode, generation uint64) []byte {
+	if scope == (ID{}) || fsid == 0 || inode == 0 || generation == 0 {
+		return nil
+	}
+	key := make([]byte, 4+32+4+8+8)
+	copy(key, "asb:")
+	copy(key[4:36], scope[:])
+	binary.BigEndian.PutUint32(key[36:40], fsid)
+	binary.BigEndian.PutUint64(key[40:48], inode)
+	binary.BigEndian.PutUint64(key[48:], generation)
+	return key
+}
+
+func AuthoritativeSourceBindingPrefix(scope ID) []byte {
+	if scope == (ID{}) {
+		return nil
+	}
+	key := make([]byte, 4+32)
+	copy(key, "asb:")
+	copy(key[4:], scope[:])
+	return key
+}
+
+func AnalyticsWatermarkKey(classificationEpoch uint64) []byte {
+	return analyticsUint64Key("aw:applied:", classificationEpoch)
+}
+
+func AnalyticsWatermarkPrefix() []byte { return []byte("aw:applied:") }
+
+func AnalyticsQueryResultKey(hash ID, repositoryGeneration, classificationEpoch, appliedCommit uint64) []byte {
+	if repositoryGeneration == 0 || classificationEpoch == 0 {
+		return nil
+	}
+	key := make([]byte, 10+32+8+8+8)
+	copy(key, "aq:result:")
+	copy(key[10:42], hash[:])
+	binary.BigEndian.PutUint64(key[42:50], repositoryGeneration)
+	binary.BigEndian.PutUint64(key[50:58], classificationEpoch)
+	binary.BigEndian.PutUint64(key[58:], appliedCommit)
+	return key
+}
+
+func AnalyticsQueryHeatKey(hash ID) []byte { return idKey("aq:heat:", hash) }
+
+func AnalyticsQueryViewKey(view ID, bucket uint64) []byte {
+	key := make([]byte, 8+32+8)
+	copy(key, "aq:view:")
+	copy(key[8:40], view[:])
+	binary.BigEndian.PutUint64(key[40:], bucket)
+	return key
+}
+
+func AnalyticsQueryJobKey(query ID) []byte { return idKey("aq:job:", query) }
+func AnalyticsQueryJobPrefix() []byte      { return []byte("aq:job:") }
+
+func GrowthTimeKey(granularity AnalyticsGranularity, timestamp int64, tier PackTier) []byte {
+	if !validAnalyticsGranularity(granularity) || !validPackTier(tier) {
+		return nil
+	}
+	key := make([]byte, 7+1+8+1)
+	copy(key, "g:time:")
+	key[7] = byte(granularity)
+	binary.BigEndian.PutUint64(key[8:16], uint64(timestamp)^(uint64(1)<<63))
+	key[16] = byte(tier)
+	return key
+}
+
+func GrowthTimePrefix(granularity AnalyticsGranularity) []byte {
+	if !validAnalyticsGranularity(granularity) {
+		return nil
+	}
+	return []byte{'g', ':', 't', 'i', 'm', 'e', ':', byte(granularity)}
+}
+
+func GrowthPathKey(path string, granularity AnalyticsGranularity, timestamp int64) []byte {
+	path = normalizeAnalyticsPath(path)
+	if path == "" || len(path) > MaxPathIndexPathBytes || !validAnalyticsGranularity(granularity) {
+		return nil
+	}
+	key := make([]byte, 7+2+len(path)+1+8)
+	copy(key, "g:path:")
+	binary.BigEndian.PutUint16(key[7:9], uint16(len(path)))
+	copy(key[9:], path)
+	key[9+len(path)] = byte(granularity)
+	binary.BigEndian.PutUint64(key[10+len(path):], uint64(timestamp)^(uint64(1)<<63))
+	return key
+}
+
+func GrowthPathPrefix(path string) []byte {
+	path = normalizeAnalyticsPath(path)
+	if path == "" || len(path) > MaxPathIndexPathBytes {
+		return nil
+	}
+	key := make([]byte, 7+2+len(path))
+	copy(key, "g:path:")
+	binary.BigEndian.PutUint16(key[7:9], uint16(len(path)))
+	copy(key[9:], path)
+	return key
+}
+
+func UserSummaryKey(uid uint32) []byte  { return analyticsUint32Key("u:summary:", uid) }
+func GroupSummaryKey(gid uint32) []byte { return analyticsUint32Key("g:summary:", gid) }
+
+func UserStatsKey(uid uint32, residency AnalyticsResidency) []byte {
+	return analyticsStatsKey("u:statsv1:", uid, residency)
+}
+
+func UserStatsPrefix() []byte { return []byte("u:statsv1:") }
+
+func GroupStatsKey(gid uint32, residency AnalyticsResidency) []byte {
+	return analyticsStatsKey("g:statsv1:", gid, residency)
+}
+
+func GroupStatsPrefix() []byte { return []byte("g:statsv1:") }
+
+func analyticsStatsKey(prefix string, id uint32, residency AnalyticsResidency) []byte {
+	if residency < AnalyticsLive || residency > AnalyticsExpired {
+		return nil
+	}
+	key := make([]byte, len(prefix)+4+1)
+	copy(key, prefix)
+	binary.BigEndian.PutUint32(key[len(prefix):len(prefix)+4], id)
+	key[len(key)-1] = byte(residency)
+	return key
+}
+
+func UserChurnKey(uid uint32, granularity AnalyticsGranularity, timestamp int64) []byte {
+	if !validAnalyticsGranularity(granularity) {
+		return nil
+	}
+	key := make([]byte, 8+4+1+8)
+	copy(key, "u:churn:")
+	binary.BigEndian.PutUint32(key[8:12], uid)
+	key[12] = byte(granularity)
+	binary.BigEndian.PutUint64(key[13:], uint64(timestamp)^(uint64(1)<<63))
+	return key
+}
+
+func UserInodeKey(uid, fsid uint32, inode uint64) []byte {
+	key := make([]byte, 9+4+4+8)
+	copy(key, "u:inodes:")
+	binary.BigEndian.PutUint32(key[9:13], uid)
+	binary.BigEndian.PutUint32(key[13:17], fsid)
+	binary.BigEndian.PutUint64(key[17:], inode)
+	return key
+}
+
+func UserInodePrefix(uid uint32) []byte { return analyticsUint32Key("u:inodes:", uid) }
+
+func UserBlobKey(uid uint32, blob ID) []byte {
+	key := make([]byte, 8+4+32)
+	copy(key, "u:blobs:")
+	binary.BigEndian.PutUint32(key[8:12], uid)
+	copy(key[12:], blob[:])
+	return key
+}
+
+func UserBlobPrefix(uid uint32) []byte { return analyticsUint32Key("u:blobs:", uid) }
+
+func UserBlobContributionKey(uid uint32, blob ID, fsid uint32, inode, generation uint64, ordinal uint32) []byte {
+	if generation == 0 {
+		return nil
+	}
+	key := make([]byte, 9+4+32+4+8+8+4)
+	copy(key, "u:blobv1:")
+	binary.BigEndian.PutUint32(key[9:13], uid)
+	copy(key[13:45], blob[:])
+	binary.BigEndian.PutUint32(key[45:49], fsid)
+	binary.BigEndian.PutUint64(key[49:57], inode)
+	binary.BigEndian.PutUint64(key[57:65], generation)
+	binary.BigEndian.PutUint32(key[65:], ordinal)
+	return key
+}
+
+func UserBlobContributionPrefix(uid uint32) []byte { return analyticsUint32Key("u:blobv1:", uid) }
 
 func NextEventSequenceKey() []byte { return []byte("meta:next-event-seq") }
 
@@ -438,6 +814,21 @@ func NextExportSequenceKey() []byte { return []byte("meta:next-export-seq") }
 func ParseKey(key []byte) (ParsedKey, error) {
 	var parsed ParsedKey
 	switch {
+	case len(key) >= 13 && string(key[:4]) == "av1:" && key[12] == ':':
+		generation := binary.BigEndian.Uint64(key[4:12])
+		if generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics derived key generation", ErrMalformed)
+		}
+		if string(key[13:]) == "complete" {
+			parsed.Kind, parsed.ViewGeneration = KeyAnalyticsDerivedMarker, generation
+			break
+		}
+		inner, err := ParseKey(key[13:])
+		if err != nil || inner.ViewGeneration != 0 || !isAnalyticsDerivedKind(inner.Kind) {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics derived key", ErrMalformed)
+		}
+		parsed = inner
+		parsed.ViewGeneration = generation
 	case len(key) == 34 && string(key[:2]) == "b:":
 		parsed.Kind = KeyBlob
 		copy(parsed.ID[:], key[2:])
@@ -564,11 +955,158 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		copy(parsed.ID[:], key[3:])
 	case len(key) == 15 && string(key[:3]) == "an:":
 		parsed.Kind, parsed.FSID, parsed.Inode = KeyAnalyticsFact, binary.BigEndian.Uint32(key[3:7]), binary.BigEndian.Uint64(key[7:])
-	case len(key) == 35 && string(key[:3]) == "aq:":
+	case len(key) == 8 && string(key[:3]) == "ad:":
+		parsed.Kind = KeyAnalyticsDictionary
+		parsed.Dictionary = AnalyticsDictionaryKind(key[3])
+		parsed.Ordinal = binary.BigEndian.Uint32(key[4:])
+		if !validAnalyticsDictionaryKind(parsed.Dictionary) || parsed.Ordinal == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics dictionary key", ErrMalformed)
+		}
+	case len(key) == 11 && string(key[:3]) == "af:":
+		parsed.Kind, parsed.Generation = KeyAnalyticsFactSegment, binary.BigEndian.Uint64(key[3:])
+		if parsed.Generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics fact segment key", ErrMalformed)
+		}
+	case len(key) == 11 && string(key[:3]) == "am:":
+		parsed.Kind, parsed.Generation = KeyAnalyticsSegmentMetadata, binary.BigEndian.Uint64(key[3:])
+		if parsed.Generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics segment metadata key", ErrMalformed)
+		}
+	case len(key) == 20 && string(key[:3]) == "ai:":
+		parsed.Kind = KeyAnalyticsDimensionIndex
+		parsed.Dimension = AnalyticsDimension(key[3])
+		parsed.Value = binary.BigEndian.Uint64(key[4:12])
+		parsed.Generation = binary.BigEndian.Uint64(key[12:])
+		if !validAnalyticsDimension(parsed.Dimension) || parsed.Generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics dimension index key", ErrMalformed)
+		}
+	case len(key) == 23 && string(key[:3]) == "ar:":
+		parsed.Kind = KeyAnalyticsResidency
+		parsed.FSID = binary.BigEndian.Uint32(key[3:7])
+		parsed.Inode = binary.BigEndian.Uint64(key[7:15])
+		parsed.Generation = binary.BigEndian.Uint64(key[15:])
+		if parsed.Generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics residency key", ErrMalformed)
+		}
+	case len(key) == 15 && string(key[:3]) == "ae:":
+		parsed.Kind = KeyAnalyticsDelta
+		parsed.Commit = binary.BigEndian.Uint64(key[3:11])
+		parsed.Ordinal = binary.BigEndian.Uint32(key[11:])
+		if parsed.Commit == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics delta key", ErrMalformed)
+		}
+	case len(key) == 44 && string(key[:4]) == "acp:":
+		parsed.Kind = KeyAuthoritativeCrawlProof
+		copy(parsed.ID[:], key[4:36])
+		parsed.Commit = binary.BigEndian.Uint64(key[36:])
+		if parsed.ID == (ID{}) || parsed.Commit == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid authoritative crawl proof key", ErrMalformed)
+		}
+	case len(key) == 56 && string(key[:4]) == "asb:":
+		parsed.Kind = KeyAuthoritativeSourceBinding
+		copy(parsed.ID[:], key[4:36])
+		parsed.FSID = binary.BigEndian.Uint32(key[36:40])
+		parsed.Inode = binary.BigEndian.Uint64(key[40:48])
+		parsed.Generation = binary.BigEndian.Uint64(key[48:])
+		if parsed.ID == (ID{}) || parsed.FSID == 0 || parsed.Inode == 0 || parsed.Generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid authoritative source binding key", ErrMalformed)
+		}
+	case len(key) == 19 && string(key[:11]) == "aw:applied:":
+		parsed.Kind, parsed.Epoch = KeyAnalyticsWatermark, binary.BigEndian.Uint64(key[11:])
+		if parsed.Epoch == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics watermark key", ErrMalformed)
+		}
+	case len(key) == 11 && string(key[:3]) == "ap:":
+		parsed.Kind, parsed.Epoch = KeyAnalyticsManifest, binary.BigEndian.Uint64(key[3:])
+		if parsed.Epoch == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics manifest key", ErrMalformed)
+		}
+	case len(key) == 66 && string(key[:10]) == "aq:result:":
+		parsed.Kind = KeyAnalyticsQueryResult
+		copy(parsed.ID[:], key[10:42])
+		parsed.Generation = binary.BigEndian.Uint64(key[42:50])
+		parsed.Epoch = binary.BigEndian.Uint64(key[50:58])
+		parsed.Commit = binary.BigEndian.Uint64(key[58:])
+		if parsed.Generation == 0 || parsed.Epoch == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics query result key", ErrMalformed)
+		}
+	case len(key) == 40 && string(key[:8]) == "aq:heat:":
+		parsed.Kind = KeyAnalyticsQueryHeat
+		copy(parsed.ID[:], key[8:])
+	case len(key) == 48 && string(key[:8]) == "aq:view:":
+		parsed.Kind = KeyAnalyticsQueryView
+		copy(parsed.ID[:], key[8:40])
+		parsed.Value = binary.BigEndian.Uint64(key[40:])
+	case len(key) == 39 && string(key[:7]) == "aq:job:":
+		parsed.Kind = KeyAnalyticsQueryJob
+		copy(parsed.ID[:], key[7:])
+	case len(key) == 17 && string(key[:7]) == "g:time:":
+		parsed.Kind = KeyGrowthTime
+		parsed.Granularity = HistoryGranularity(key[7])
+		parsed.Timestamp = int64(binary.BigEndian.Uint64(key[8:16]) ^ (uint64(1) << 63))
+		parsed.Tier = PackTier(key[16])
+		if !validAnalyticsGranularity(AnalyticsGranularity(parsed.Granularity)) || !validPackTier(parsed.Tier) {
+			return ParsedKey{}, fmt.Errorf("%w: invalid growth time key", ErrMalformed)
+		}
+	case len(key) >= 18 && string(key[:7]) == "g:path:":
+		pathLength := int(binary.BigEndian.Uint16(key[7:9]))
+		if pathLength == 0 || pathLength > MaxPathIndexPathBytes || len(key) != 7+2+pathLength+1+8 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid growth path key", ErrMalformed)
+		}
+		parsed.Kind = KeyGrowthPath
+		parsed.Path = string(key[9 : 9+pathLength])
+		parsed.Granularity = HistoryGranularity(key[9+pathLength])
+		parsed.Timestamp = int64(binary.BigEndian.Uint64(key[10+pathLength:]) ^ (uint64(1) << 63))
+		if parsed.Path != normalizeAnalyticsPath(parsed.Path) || !validAnalyticsGranularity(AnalyticsGranularity(parsed.Granularity)) {
+			return ParsedKey{}, fmt.Errorf("%w: invalid growth path key", ErrMalformed)
+		}
+	case len(key) == 14 && string(key[:10]) == "u:summary:":
+		parsed.Kind, parsed.UID = KeyUserSummary, binary.BigEndian.Uint32(key[10:])
+	case len(key) == 14 && string(key[:10]) == "g:summary:":
+		parsed.Kind, parsed.GID = KeyGroupSummary, binary.BigEndian.Uint32(key[10:])
+	case len(key) == 15 && string(key[:10]) == "u:statsv1:":
+		parsed.Kind, parsed.UID = KeyUserStats, binary.BigEndian.Uint32(key[10:14])
+		parsed.Residency = AnalyticsResidency(key[14])
+		if parsed.Residency < AnalyticsLive || parsed.Residency > AnalyticsExpired {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics user stats key", ErrMalformed)
+		}
+	case len(key) == 15 && string(key[:10]) == "g:statsv1:":
+		parsed.Kind, parsed.GID = KeyGroupStats, binary.BigEndian.Uint32(key[10:14])
+		parsed.Residency = AnalyticsResidency(key[14])
+		if parsed.Residency < AnalyticsLive || parsed.Residency > AnalyticsExpired {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics group stats key", ErrMalformed)
+		}
+	case len(key) == 21 && string(key[:8]) == "u:churn:":
+		parsed.Kind, parsed.UID = KeyUserChurn, binary.BigEndian.Uint32(key[8:12])
+		parsed.Granularity = HistoryGranularity(key[12])
+		parsed.Timestamp = int64(binary.BigEndian.Uint64(key[13:]) ^ (uint64(1) << 63))
+		if !validAnalyticsGranularity(AnalyticsGranularity(parsed.Granularity)) {
+			return ParsedKey{}, fmt.Errorf("%w: invalid user churn key", ErrMalformed)
+		}
+	case len(key) == 25 && string(key[:9]) == "u:inodes:":
+		parsed.Kind, parsed.UID = KeyUserInode, binary.BigEndian.Uint32(key[9:13])
+		parsed.FSID = binary.BigEndian.Uint32(key[13:17])
+		parsed.Inode = binary.BigEndian.Uint64(key[17:])
+	case len(key) == 44 && string(key[:8]) == "u:blobs:":
+		parsed.Kind, parsed.UID = KeyUserBlob, binary.BigEndian.Uint32(key[8:12])
+		copy(parsed.ID[:], key[12:])
+	case len(key) == 69 && string(key[:9]) == "u:blobv1:":
+		parsed.Kind, parsed.UID = KeyUserBlobContribution, binary.BigEndian.Uint32(key[9:13])
+		copy(parsed.ID[:], key[13:45])
+		parsed.FSID = binary.BigEndian.Uint32(key[45:49])
+		parsed.Inode = binary.BigEndian.Uint64(key[49:57])
+		parsed.Generation = binary.BigEndian.Uint64(key[57:65])
+		parsed.Ordinal = binary.BigEndian.Uint32(key[65:])
+		if parsed.Generation == 0 {
+			return ParsedKey{}, fmt.Errorf("%w: invalid analytics user blob contribution key", ErrMalformed)
+		}
+	case len(key) == 35 && string(key[:3]) == "aq:" && !reservedAnalyticsQueryPrefix(key):
 		parsed.Kind = KeyAnalyticsCache
 		copy(parsed.ID[:], key[3:])
 	case string(key) == "meta:analytics":
 		parsed.Kind = KeyAnalyticsMetadata
+	case string(key) == "meta:analytics-build":
+		parsed.Kind = KeyAnalyticsBuildCheckpoint
 	default:
 		if kind, ok := parseAggregate(key); ok {
 			parsed.Kind, parsed.Aggregate = KeyPackAggregate, kind
@@ -579,6 +1117,20 @@ func ParseKey(key []byte) (ParsedKey, error) {
 		}
 	}
 	return parsed, nil
+}
+
+func isAnalyticsDerivedKey(key []byte) bool {
+	parsed, err := ParseKey(key)
+	return err == nil && parsed.ViewGeneration == 0 && isAnalyticsDerivedKind(parsed.Kind)
+}
+
+func isAnalyticsDerivedKind(kind KeyKind) bool {
+	switch kind {
+	case KeyAnalyticsResidency, KeyGrowthTime, KeyGrowthPath, KeyUserSummary, KeyGroupSummary, KeyUserStats, KeyGroupStats, KeyUserChurn, KeyUserInode, KeyUserBlob, KeyUserBlobContribution:
+		return true
+	default:
+		return false
+	}
 }
 
 func idKey(prefix string, id ID) []byte {
@@ -601,6 +1153,56 @@ func revisionKey(prefix string, fsid uint32, inode, revision uint64) []byte {
 	binary.BigEndian.PutUint64(key[len(prefix)+4:], inode)
 	binary.BigEndian.PutUint64(key[len(prefix)+12:], revision)
 	return key
+}
+
+func analyticsUint64Key(prefix string, value uint64) []byte {
+	if value == 0 {
+		return nil
+	}
+	key := make([]byte, len(prefix)+8)
+	copy(key, prefix)
+	binary.BigEndian.PutUint64(key[len(prefix):], value)
+	return key
+}
+
+func analyticsUint32Key(prefix string, value uint32) []byte {
+	key := make([]byte, len(prefix)+4)
+	copy(key, prefix)
+	binary.BigEndian.PutUint32(key[len(prefix):], value)
+	return key
+}
+
+func normalizeAnalyticsPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || strings.IndexByte(path, 0) >= 0 {
+		return ""
+	}
+	path = "/" + strings.Trim(path, "/")
+	if path == "/" || strings.Contains(path, "//") {
+		return ""
+	}
+	return path
+}
+
+func validAnalyticsDictionaryKind(kind AnalyticsDictionaryKind) bool {
+	return kind >= AnalyticsDictionarySVM && kind <= AnalyticsDictionaryPathGroup
+}
+
+func validAnalyticsDimension(dimension AnalyticsDimension) bool {
+	return dimension >= AnalyticsDimensionUID && dimension <= AnalyticsDimensionResidency
+}
+
+func validAnalyticsGranularity(granularity AnalyticsGranularity) bool {
+	return granularity >= AnalyticsGranularityWeek && granularity <= AnalyticsGranularityYear
+}
+
+func reservedAnalyticsQueryPrefix(key []byte) bool {
+	for _, prefix := range []string{"aq:result:", "aq:heat:", "aq:view:", "aq:job:"} {
+		if strings.HasPrefix(string(key), prefix) {
+			return true
+		}
+	}
+	return false
 }
 func parseAggregate(key []byte) (AggregateKind, bool) {
 	for kind, name := range map[AggregateKind]string{

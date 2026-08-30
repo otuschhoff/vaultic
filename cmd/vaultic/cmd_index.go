@@ -381,6 +381,7 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	}
 	if !globalOptions.JSON {
 		printer.P("legacy locations: %d; SlateDB locations: %d; differences: %d; aggregate mismatches: %d\n", result.LegacyLocations, result.SlateDBLocations, result.MissingInSlateDB+result.MissingInLegacy, result.AggregateMismatch)
+		printer.P("analytics consistency mismatches: %d\n", result.AnalyticsMismatch)
 		printer.P("packs: unknown tier %d; retention unknown %d; usage unaccounted %d\n", result.UnknownTierPacks, result.RetentionUnknownPacks, result.UsageUnaccountedPacks)
 		printer.P("placements: missing %d; reverse mismatches %d; tier mismatches %d; below durability %d; unknown backends %d\n",
 			result.MissingPlacementRecords, result.BackendPackMismatch, result.DerivedTierMismatch,

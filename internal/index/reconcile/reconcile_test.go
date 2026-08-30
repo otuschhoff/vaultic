@@ -48,6 +48,23 @@ func (filesystem *fakeFS) Dir(path string) string {
 	return filepath.Dir(path)
 }
 
+func TestAuthoritativeCrawlClaimIsExplicitAndFailsClosed(t *testing.T) {
+	if claim := (&Reconciler{}).AuthoritativeCrawlClaim(); claim != nil {
+		t.Fatalf("default reconciler produced authoritative claim: %#v", claim)
+	}
+	scope := AuthoritativeCrawlScope{ScopeID: testSchemaID(240), RootFSID: 1, RootInode: 2, StartFence: 3, Complete: true}
+	debtKey := schema.CrawlDebtKey(schema.ID{}, testSchemaID(241))
+	reconciler := &Reconciler{options: Options{Authoritative: &scope}, crawlDebt: map[string][]byte{string(debtKey): debtKey}}
+	claim := reconciler.AuthoritativeCrawlClaim()
+	if claim == nil || !claim.Complete || len(claim.DebtKeys) != 1 || !bytes.Equal(claim.DebtKeys[0], debtKey) {
+		t.Fatalf("complete authoritative claim = %#v", claim)
+	}
+	reconciler.deferred.Store(1)
+	if claim := reconciler.AuthoritativeCrawlClaim(); claim == nil || claim.Complete {
+		t.Fatalf("deferred reconciliation overclaimed completeness: %#v", claim)
+	}
+}
+
 type fakeStore struct {
 	mu        sync.Mutex
 	values    map[string][]byte

@@ -526,6 +526,52 @@ func ValidateValue(key []byte, value []byte) error {
 		}
 	case KeyAnalyticsMetadata:
 		_, err = UnmarshalAnalyticsMetadataRecord(value)
+	case KeyAnalyticsBuildCheckpoint:
+		_, err = UnmarshalAnalyticsBuildCheckpointRecord(value)
+	case KeyAnalyticsDictionary:
+		_, err = UnmarshalAnalyticsDictionaryRecord(value)
+	case KeyAnalyticsFactSegment:
+		_, err = UnmarshalAnalyticsFactSegmentRecord(value)
+	case KeyAnalyticsSegmentMetadata:
+		_, err = UnmarshalAnalyticsSegmentMetadataRecord(value)
+	case KeyAnalyticsDimensionIndex:
+		_, err = UnmarshalAnalyticsDimensionIndexRecord(value)
+	case KeyAnalyticsResidency:
+		_, err = UnmarshalAnalyticsResidencyRecord(value)
+	case KeyAnalyticsDelta:
+		_, err = UnmarshalAnalyticsDeltaRecord(value)
+	case KeyAuthoritativeCrawlProof:
+		var record AuthoritativeCrawlProofRecord
+		record, err = UnmarshalAuthoritativeCrawlProofRecord(value)
+		if err == nil && (record.ScopeID != parsed.ID || record.EndCommit != parsed.Commit) {
+			err = fmt.Errorf("%w: authoritative crawl proof key mismatch", ErrMalformed)
+		}
+	case KeyAuthoritativeSourceBinding:
+		var record AuthoritativeSourceBindingRecord
+		record, err = UnmarshalAuthoritativeSourceBindingRecord(value)
+		if err == nil && record.Generation != parsed.Generation {
+			err = fmt.Errorf("%w: authoritative source binding key mismatch", ErrMalformed)
+		}
+	case KeyAnalyticsWatermark:
+		_, err = UnmarshalAnalyticsWatermarkRecord(value)
+	case KeyAnalyticsManifest:
+		_, err = UnmarshalAnalyticsManifestRecord(value)
+	case KeyAnalyticsQueryResult, KeyAnalyticsQueryHeat, KeyAnalyticsQueryView:
+		_, err = UnmarshalAnalyticsQueryRecord(value)
+	case KeyAnalyticsQueryJob:
+		_, err = UnmarshalAnalyticsQueryJobRecord(value)
+	case KeyGrowthTime, KeyGrowthPath, KeyUserChurn:
+		_, err = UnmarshalAnalyticsAggregateRecord(value)
+	case KeyUserSummary, KeyGroupSummary, KeyUserStats, KeyGroupStats:
+		_, err = UnmarshalAnalyticsSummaryRecord(value)
+	case KeyUserInode:
+		_, err = UnmarshalAnalyticsUserInodeRecord(value)
+	case KeyUserBlob, KeyUserBlobContribution:
+		_, err = UnmarshalAnalyticsUserBlobRecord(value)
+	case KeyAnalyticsDerivedMarker:
+		if len(value) != 1 || value[0] != Version {
+			err = fmt.Errorf("%w: invalid analytics derived generation marker", ErrMalformed)
+		}
 	case KeySnapshotCommit:
 		var record SnapshotCommitRecord
 		record, err = UnmarshalSnapshotCommitRecord(value)

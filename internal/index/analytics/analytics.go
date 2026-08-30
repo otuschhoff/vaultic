@@ -27,14 +27,20 @@ type Store interface {
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 }
 
+type metadataHeadStore interface {
+	MetadataHead(context.Context) (uint64, error)
+}
+
 // Config controls deterministic path classification and cache promotion.
 type Config struct {
 	SVMDepth          int      `json:"svm_depth,omitempty"`
 	VolumeDepth       int      `json:"volume_depth,omitempty"`
 	PathGroupDepth    int      `json:"path_group_depth,omitempty"`
 	PathGroupPrefixes []string `json:"path_group_prefixes,omitempty"`
+	SegmentRows       int      `json:"segment_rows,omitempty"`
 	CacheAfter        uint64   `json:"cache_after,omitempty"`
 	CacheTTLSeconds   int64    `json:"cache_ttl_seconds,omitempty"`
+	CacheMaxEntries   int      `json:"cache_max_entries,omitempty"`
 }
 
 func (config Config) normalized() Config {
@@ -50,6 +56,12 @@ func (config Config) normalized() Config {
 	if config.CacheAfter == 0 {
 		config.CacheAfter = 3
 	}
+	if config.SegmentRows == 0 {
+		config.SegmentRows = 4096
+	}
+	if config.CacheMaxEntries == 0 {
+		config.CacheMaxEntries = 1024
+	}
 	if config.CacheTTLSeconds == 0 {
 		config.CacheTTLSeconds = 86400
 	}
@@ -58,7 +70,7 @@ func (config Config) normalized() Config {
 
 func (config Config) Validate() error {
 	config = config.normalized()
-	if config.SVMDepth < 1 || config.VolumeDepth < 1 || config.PathGroupDepth < 1 {
+	if config.SVMDepth < 1 || config.VolumeDepth < 1 || config.PathGroupDepth < 1 || config.SegmentRows < 1 || config.CacheMaxEntries < 1 {
 		return fmt.Errorf("analytics path depths must be positive")
 	}
 	if config.CacheTTLSeconds < 0 {
@@ -80,11 +92,15 @@ func (config Config) Validate() error {
 
 // LifecycleResult describes an enable, rebuild, disable, or purge operation.
 type LifecycleResult struct {
-	Enabled    bool   `json:"enabled"`
-	Generation uint64 `json:"generation"`
-	Facts      uint64 `json:"facts"`
-	Removed    uint64 `json:"removed,omitempty"`
-	BuiltAt    int64  `json:"built_at,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	Generation          uint64 `json:"generation"`
+	Facts               uint64 `json:"facts"`
+	Removed             uint64 `json:"removed,omitempty"`
+	BuiltAt             int64  `json:"built_at,omitempty"`
+	BuildID             string `json:"build_id,omitempty"`
+	Resumed             bool   `json:"resumed,omitempty"`
+	PeakFactsBuffered   uint64 `json:"peak_facts_buffered,omitempty"`
+	PeakWorkingSetBytes uint64 `json:"peak_working_set_bytes,omitempty"`
 }
 
 func Status(ctx context.Context, store Store) (schema.AnalyticsMetadataRecord, error) {
@@ -99,7 +115,7 @@ func Enable(ctx context.Context, store Store, config Config, dryRun bool) (Lifec
 	return Rebuild(ctx, store, config, dryRun)
 }
 
-func Rebuild(ctx context.Context, store Store, config Config, dryRun bool) (LifecycleResult, error) {
+func rebuildLegacy(ctx context.Context, store Store, config Config, dryRun bool) (LifecycleResult, error) {
 	if err := config.Validate(); err != nil {
 		return LifecycleResult{}, err
 	}
@@ -201,7 +217,14 @@ func Disable(ctx context.Context, store Store, purge, dryRun bool) (LifecycleRes
 	}
 	var removed uint64
 	if purge {
-		removed, err = purgePrefixes(ctx, store, dryRun, schema.AnalyticsFactPrefix(), schema.AnalyticsCachePrefix())
+		removed, err = purgePrefixes(ctx, store, dryRun,
+			schema.AnalyticsFactPrefix(), schema.AnalyticsFactSegmentPrefix(), schema.AnalyticsSegmentMetadataPrefix(),
+			[]byte("ai:"), []byte("ar:"), schema.AnalyticsDictionaryPrefix(schema.AnalyticsDictionarySVM),
+			schema.AnalyticsDictionaryPrefix(schema.AnalyticsDictionaryVolume), schema.AnalyticsDictionaryPrefix(schema.AnalyticsDictionaryPathGroup),
+			schema.AnalyticsManifestPrefix(), schema.AnalyticsWatermarkPrefix(), schema.AnalyticsCachePrefix(),
+			[]byte("av1:"),
+			[]byte("g:time:"), []byte("g:path:"), []byte("u:summary:"), []byte("g:summary:"),
+			[]byte("u:churn:"), []byte("u:inodes:"), []byte("u:blobs:"), []byte("u:blobv1:"), schema.AnalyticsBuildCheckpointKey())
 		if err != nil {
 			return LifecycleResult{}, err
 		}
@@ -268,20 +291,31 @@ func classifyGroup(source string, parts []string, config Config) string {
 
 // Query supports arbitrary conjunctions and arbitrary grouping subsets.
 type Query struct {
-	UIDs        []uint32 `json:"uids,omitempty"`
-	GIDs        []uint32 `json:"gids,omitempty"`
-	Years       []int    `json:"years,omitempty"`
-	Months      []int    `json:"months,omitempty"`
-	ISOYears    []int    `json:"iso_years,omitempty"`
-	Workweeks   []int    `json:"workweeks,omitempty"`
-	SVMs        []string `json:"svms,omitempty"`
-	Volumes     []string `json:"volumes,omitempty"`
-	PathGroups  []string `json:"path_groups,omitempty"`
-	SizeMin     *uint64  `json:"size_min,omitempty"`
-	SizeMax     *uint64  `json:"size_max,omitempty"`
-	SizeLog10   []int    `json:"size_log10,omitempty"`
-	Residencies []string `json:"residencies,omitempty"`
-	GroupBy     []string `json:"group_by,omitempty"`
+	UIDs                 []uint32 `json:"uids,omitempty"`
+	GIDs                 []uint32 `json:"gids,omitempty"`
+	Years                []int    `json:"years,omitempty"`
+	Months               []int    `json:"months,omitempty"`
+	ISOYears             []int    `json:"iso_years,omitempty"`
+	Workweeks            []int    `json:"workweeks,omitempty"`
+	SVMs                 []string `json:"svms,omitempty"`
+	Volumes              []string `json:"volumes,omitempty"`
+	PathGroups           []string `json:"path_groups,omitempty"`
+	CreatedSince         *int64   `json:"created_since,omitempty"`
+	CreatedUntil         *int64   `json:"created_until,omitempty"`
+	SizeMin              *uint64  `json:"size_min,omitempty"`
+	SizeMax              *uint64  `json:"size_max,omitempty"`
+	SizeLog10            []int    `json:"size_log10,omitempty"`
+	Residencies          []string `json:"residencies,omitempty"`
+	CreationBases        []string `json:"creation_bases,omitempty"`
+	IdentityContinuities []string `json:"identity_continuities,omitempty"`
+	GroupBy              []string `json:"group_by,omitempty"`
+	IncludeIncomplete    bool     `json:"include_incomplete,omitempty"`
+	// RequireCurrent uses the optional metadata-head Store capability and fails
+	// explicitly when the capability is absent or the builder is behind.
+	RequireCurrent bool `json:"require_current,omitempty"`
+	// AllowStale accepts the latest completely published manifest. Results
+	// always report its exact generation, epoch, commit, and application time.
+	AllowStale bool `json:"allow_stale,omitempty"`
 }
 
 type Group struct {
@@ -290,13 +324,37 @@ type Group struct {
 	LogicalBytes uint64            `json:"logical_bytes"`
 }
 type Result struct {
-	SchemaVersion       int     `json:"schema_version"`
-	Generation          uint64  `json:"generation"`
-	Cached              bool    `json:"cached"`
-	Files               uint64  `json:"files"`
-	LogicalBytes        uint64  `json:"logical_bytes"`
-	UnknownCreationTime uint64  `json:"unknown_creation_time"`
-	Groups              []Group `json:"groups,omitempty"`
+	SchemaVersion       int           `json:"schema_version"`
+	Generation          uint64        `json:"generation"`
+	Cached              bool          `json:"cached"`
+	Files               uint64        `json:"files"`
+	LogicalBytes        uint64        `json:"logical_bytes"`
+	UnknownCreationTime uint64        `json:"unknown_creation_time"`
+	Groups              []Group       `json:"groups,omitempty"`
+	Watermark           WatermarkInfo `json:"watermark"`
+	Explain             Explain       `json:"explain"`
+}
+
+type WatermarkInfo struct {
+	RepositoryGeneration       uint64 `json:"repository_generation"`
+	ClassificationEpoch        uint64 `json:"classification_epoch"`
+	AppliedCommit              uint64 `json:"applied_commit"`
+	AppliedAt                  int64  `json:"applied_at"`
+	AuthoritativeHead          uint64 `json:"authoritative_head,omitempty"`
+	LagCommits                 uint64 `json:"lag_commits,omitempty"`
+	AuthoritativeHeadAvailable bool   `json:"authoritative_head_available"`
+}
+
+type Explain struct {
+	Source             string   `json:"source"`
+	ViewFallbacks      []string `json:"view_fallbacks,omitempty"`
+	LegacyFallback     bool     `json:"legacy_fallback,omitempty"`
+	SegmentsConsidered uint64   `json:"segments_considered"`
+	SegmentsPruned     uint64   `json:"segments_pruned"`
+	SegmentsScanned    uint64   `json:"segments_scanned"`
+	RowsScanned        uint64   `json:"rows_scanned"`
+	IndexesUsed        []string `json:"indexes_used,omitempty"`
+	IndexFallbacks     []string `json:"index_fallbacks,omitempty"`
 }
 type cacheEnvelope struct {
 	Generation uint64  `json:"generation"`
@@ -305,7 +363,7 @@ type cacheEnvelope struct {
 	Result     *Result `json:"result,omitempty"`
 }
 
-func Execute(ctx context.Context, store Store, query Query) (Result, error) {
+func executeLegacy(ctx context.Context, store Store, query Query) (Result, error) {
 	if err := query.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -406,6 +464,9 @@ func Execute(ctx context.Context, store Store, query Query) (Result, error) {
 }
 
 func (query Query) Validate() error {
+	if query.CreatedSince != nil && query.CreatedUntil != nil && *query.CreatedSince >= *query.CreatedUntil {
+		return fmt.Errorf("created-since must be less than exclusive created-until")
+	}
 	if query.SizeMin != nil && query.SizeMax != nil && *query.SizeMin >= *query.SizeMax {
 		return fmt.Errorf("size-min must be less than exclusive size-max")
 	}
@@ -424,15 +485,25 @@ func (query Query) Validate() error {
 			return fmt.Errorf("size-log10 must be in 0..19, got %d", magnitude)
 		}
 	}
-	allowed := map[string]bool{"uid": true, "gid": true, "year": true, "month": true, "iso-year": true, "workweek": true, "svm": true, "volume": true, "path-group": true, "size-log10": true, "residency": true}
+	allowed := map[string]bool{"uid": true, "gid": true, "year": true, "month": true, "iso-year": true, "workweek": true, "svm": true, "volume": true, "path-group": true, "size-log10": true, "residency": true, "creation-basis": true, "identity-continuity": true}
 	for _, name := range query.GroupBy {
 		if !allowed[name] {
 			return fmt.Errorf("unknown analytics group-by dimension %q", name)
 		}
 	}
 	for _, residency := range query.Residencies {
-		if residency != "live" && residency != "archive-only" && residency != "unknown" {
+		if residency != "live" && residency != "archive-only" && residency != "unknown" && residency != "deleted" && residency != "expired" {
 			return fmt.Errorf("unknown analytics residency %q", residency)
+		}
+	}
+	for _, basis := range query.CreationBases {
+		if basis != "ctime" && basis != "mtime" && basis != "birth-time" && basis != "first-seen" && basis != "unknown" {
+			return fmt.Errorf("unknown analytics creation basis %q", basis)
+		}
+	}
+	for _, continuity := range query.IdentityContinuities {
+		if continuity != "proven" && continuity != "source-generation" && continuity != "unknown" {
+			return fmt.Errorf("unknown analytics identity continuity %q", continuity)
 		}
 	}
 	return nil
@@ -450,6 +521,8 @@ func canonicalQuery(query Query) ([]byte, error) {
 	query.Volumes = append([]string(nil), query.Volumes...)
 	query.PathGroups = append([]string(nil), query.PathGroups...)
 	query.Residencies = append([]string(nil), query.Residencies...)
+	query.CreationBases = append([]string(nil), query.CreationBases...)
+	query.IdentityContinuities = append([]string(nil), query.IdentityContinuities...)
 	query.GroupBy = append([]string(nil), query.GroupBy...)
 	sort.Slice(query.UIDs, func(i, j int) bool { return query.UIDs[i] < query.UIDs[j] })
 	sort.Slice(query.GIDs, func(i, j int) bool { return query.GIDs[i] < query.GIDs[j] })
@@ -462,8 +535,34 @@ func canonicalQuery(query Query) ([]byte, error) {
 	sort.Strings(query.Volumes)
 	sort.Strings(query.PathGroups)
 	sort.Strings(query.Residencies)
+	sort.Strings(query.CreationBases)
+	sort.Strings(query.IdentityContinuities)
 	sort.Strings(query.GroupBy)
 	return json.Marshal(query)
+}
+
+func canonicalPredicates(query Query) ([]byte, error) {
+	query.GroupBy = nil
+	query.RequireCurrent = false
+	query.AllowStale = false
+	return canonicalQuery(query)
+}
+
+func canonicalShape(query Query) ([]byte, error) {
+	shape := struct {
+		UIDs, GIDs, Years, Months, ISOYears, Workweeks, SVMs, Volumes, PathGroups bool
+		CreatedSince, CreatedUntil, SizeMin, SizeMax, SizeLog10                   bool
+		Residencies, CreationBases, IdentityContinuities, IncludeIncomplete       bool
+		GroupBy                                                                   []string
+	}{
+		len(query.UIDs) != 0, len(query.GIDs) != 0, len(query.Years) != 0, len(query.Months) != 0,
+		len(query.ISOYears) != 0, len(query.Workweeks) != 0, len(query.SVMs) != 0, len(query.Volumes) != 0,
+		len(query.PathGroups) != 0, query.CreatedSince != nil, query.CreatedUntil != nil, query.SizeMin != nil,
+		query.SizeMax != nil, len(query.SizeLog10) != 0, len(query.Residencies) != 0, len(query.CreationBases) != 0,
+		len(query.IdentityContinuities) != 0, query.IncludeIncomplete, append([]string(nil), query.GroupBy...),
+	}
+	sort.Strings(shape.GroupBy)
+	return json.Marshal(shape)
 }
 
 func matches(f schema.AnalyticsFactRecord, q Query) bool {
@@ -477,7 +576,10 @@ func matches(f schema.AnalyticsFactRecord, q Query) bool {
 		return false
 	}
 	if f.CreationBasis == schema.AnalyticsTimeUnknown {
-		return len(q.Years) == 0 && len(q.Months) == 0 && len(q.ISOYears) == 0 && len(q.Workweeks) == 0
+		return len(q.Years) == 0 && len(q.Months) == 0 && len(q.ISOYears) == 0 && len(q.Workweeks) == 0 && q.CreatedSince == nil && q.CreatedUntil == nil
+	}
+	if q.CreatedSince != nil && f.CreatedAt < *q.CreatedSince || q.CreatedUntil != nil && f.CreatedAt >= *q.CreatedUntil {
+		return false
 	}
 	return hasInt(q.Years, int(f.CalendarYear)) && hasInt(q.Months, int(f.CalendarMonth)) && hasInt(q.ISOYears, int(f.ISOYear)) && hasInt(q.Workweeks, int(f.Workweek))
 }
@@ -526,6 +628,10 @@ func residencyName(value schema.AnalyticsResidency) string {
 		return "live"
 	case schema.AnalyticsArchiveOnly:
 		return "archive-only"
+	case schema.AnalyticsDeleted:
+		return "deleted"
+	case schema.AnalyticsExpired:
+		return "expired"
 	default:
 		return "unknown"
 	}
@@ -587,6 +693,10 @@ func dimensions(f schema.AnalyticsFactRecord, names []string) map[string]string 
 			}
 		case "residency":
 			values[name] = residencyName(f.Residency)
+		case "creation-basis":
+			values[name] = creationBasisName(f.CreationBasis)
+		case "identity-continuity":
+			values[name] = continuityName(f.IdentityContinuity)
 		}
 	}
 	return values
@@ -624,16 +734,22 @@ func purgePrefixes(ctx context.Context, store Store, dryRun bool, prefixes ...[]
 func scan(ctx context.Context, store Store, prefix []byte, visit func(daemon.KeyValue) error) error {
 	var cursor []byte
 	for {
-		entries, more, err := store.ScanPrefix(ctx, prefix, cursor, pageSize)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, done, err := store.ScanPrefix(ctx, prefix, cursor, pageSize)
 		if err != nil {
 			return err
 		}
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := visit(entry); err != nil {
 				return err
 			}
 		}
-		if !more {
+		if done {
 			return nil
 		}
 		if len(entries) == 0 {

@@ -32,6 +32,15 @@ type Options struct {
 	QueueDepth     int
 	BatchSize      int
 	PathIndexPaths []string
+	Authoritative  *AuthoritativeCrawlScope
+}
+
+type AuthoritativeCrawlScope struct {
+	ScopeID    schema.ID
+	RootFSID   uint32
+	RootInode  uint64
+	StartFence uint64
+	Complete   bool
 }
 
 func (options Options) withDefaults() (Options, error) {
@@ -46,6 +55,9 @@ func (options Options) withDefaults() (Options, error) {
 	}
 	if options.Workers < 1 || options.QueueDepth < 1 || options.BatchSize < 1 || options.BatchSize > 10_000 {
 		return Options{}, fmt.Errorf("invalid reconciliation worker, queue, or batch limit")
+	}
+	if scope := options.Authoritative; scope != nil && (scope.ScopeID == (schema.ID{}) || scope.RootFSID == 0 || scope.RootInode == 0 || scope.StartFence == 0) {
+		return Options{}, fmt.Errorf("invalid authoritative reconciliation scope")
 	}
 	return options, nil
 }
@@ -122,6 +134,7 @@ type Reconciler struct {
 	errors     []error
 	rootKey    []byte
 	debtByPath map[string][][]byte
+	crawlDebt  map[string][]byte
 
 	scanned    atomic.Uint64
 	reused     atomic.Uint64
@@ -142,7 +155,7 @@ func New(ctx context.Context, filesystem statFS, store Store, options Options) (
 	reconciler := &Reconciler{
 		ctx: ctx, filesystem: filesystem, store: store, options: options,
 		input: make(chan *workItem, options.QueueDepth), prepared: make(chan preparedItem, options.QueueDepth),
-		writerDone: make(chan struct{}), debtByPath: make(map[string][][]byte),
+		writerDone: make(chan struct{}), debtByPath: make(map[string][][]byte), crawlDebt: make(map[string][]byte),
 	}
 	reconciler.pool.New = func() any { return new(workItem) }
 	if err := reconciler.loadPendingDebt(); err != nil {
@@ -203,6 +216,23 @@ func (reconciler *Reconciler) RootKey() []byte {
 	reconciler.mu.Lock()
 	defer reconciler.mu.Unlock()
 	return append([]byte(nil), reconciler.rootKey...)
+}
+
+// AuthoritativeCrawlClaim returns an explicit post-close claim only when the
+// caller opted into a known scope. Current backup callers deliberately do not.
+func (reconciler *Reconciler) AuthoritativeCrawlClaim() *daemon.AuthoritativeCrawlClaim {
+	if reconciler.options.Authoritative == nil {
+		return nil
+	}
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	scope := *reconciler.options.Authoritative
+	claim := &daemon.AuthoritativeCrawlClaim{ScopeID: scope.ScopeID, RootFSID: scope.RootFSID, RootInode: scope.RootInode, StartFence: scope.StartFence, Complete: scope.Complete && reconciler.failed.Load() == 0 && reconciler.deferred.Load() == 0 && len(reconciler.errors) == 0}
+	for _, key := range reconciler.crawlDebt {
+		claim.DebtKeys = append(claim.DebtKeys, append([]byte(nil), key...))
+	}
+	sort.Slice(claim.DebtKeys, func(i, j int) bool { return bytes.Compare(claim.DebtKeys[i], claim.DebtKeys[j]) < 0 })
+	return claim
 }
 
 // CanReuse permits the archiver fast path only for a complete verified inode
@@ -319,6 +349,7 @@ func (reconciler *Reconciler) loadPendingDebt() error {
 			if debt.Status == schema.DebtPending && len(debt.PathOrTree) > 0 {
 				path := normalizeSnapshotPath(string(debt.PathOrTree))
 				reconciler.debtByPath[path] = append(reconciler.debtByPath[path], append([]byte(nil), entry.Key...))
+				reconciler.crawlDebt[string(entry.Key)] = append([]byte(nil), entry.Key...)
 			}
 		}
 		if done {
@@ -916,6 +947,9 @@ func (reconciler *Reconciler) writeDeferredDebt(snapshotPath string, cause error
 	normalized := normalizeSnapshotPath(snapshotPath)
 	work := schema.ID(sha256.Sum256([]byte("phase5-deferred:" + normalized + ":" + errorClass(cause))))
 	key := schema.CrawlDebtKey(schema.ID{}, work)
+	reconciler.mu.Lock()
+	reconciler.crawlDebt[string(key)] = append([]byte(nil), key...)
+	reconciler.mu.Unlock()
 	record := schema.CrawlDebtRecord{
 		PathOrTree: []byte(normalized), Reason: schema.DebtMissingInode, Status: schema.DebtPending,
 		LastAttemptUnixNano: time.Now().UnixNano(), ErrorClass: errorClass(cause),

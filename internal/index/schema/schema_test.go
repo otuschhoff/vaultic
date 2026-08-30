@@ -75,7 +75,23 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{RepackLineageKey(id, second), KeyRepackLineage},
 		{PromotionEligibilityKey(id), KeyPromotionEligibility},
 		{AnalyticsFactKey(3, 4), KeyAnalyticsFact}, {AnalyticsCacheKey(id), KeyAnalyticsCache},
-		{AnalyticsMetadataKey(), KeyAnalyticsMetadata},
+		{AnalyticsMetadataKey(), KeyAnalyticsMetadata}, {AnalyticsBuildCheckpointKey(), KeyAnalyticsBuildCheckpoint},
+		{AnalyticsDictionaryKey(AnalyticsDictionarySVM, 7), KeyAnalyticsDictionary},
+		{AnalyticsFactSegmentKey(8), KeyAnalyticsFactSegment}, {AnalyticsSegmentMetadataKey(8), KeyAnalyticsSegmentMetadata},
+		{AnalyticsDimensionIndexKey(AnalyticsDimensionUID, 600, 8), KeyAnalyticsDimensionIndex},
+		{AnalyticsResidencyKey(3, 4, 5), KeyAnalyticsResidency}, {AnalyticsDeltaKey(9, 2), KeyAnalyticsDelta},
+		{AnalyticsDerivedKey(6, AnalyticsResidencyKey(3, 4, 5)), KeyAnalyticsResidency}, {AnalyticsDerivedGenerationMarkerKey(6), KeyAnalyticsDerivedMarker},
+		{AnalyticsWatermarkKey(6), KeyAnalyticsWatermark}, {AnalyticsManifestKey(6), KeyAnalyticsManifest},
+		{AnalyticsQueryResultKey(id, 2, 6, 9), KeyAnalyticsQueryResult}, {AnalyticsQueryHeatKey(id), KeyAnalyticsQueryHeat},
+		{AnalyticsQueryViewKey(id, 3), KeyAnalyticsQueryView}, {AnalyticsQueryJobKey(id), KeyAnalyticsQueryJob},
+		{GrowthTimeKey(AnalyticsGranularityMonth, -10, TierCold), KeyGrowthTime},
+		{GrowthPathKey("/home/alice", AnalyticsGranularityYear, 10), KeyGrowthPath},
+		{UserSummaryKey(600), KeyUserSummary}, {GroupSummaryKey(700), KeyGroupSummary},
+		{UserStatsKey(600, AnalyticsArchiveOnly), KeyUserStats}, {GroupStatsKey(700, AnalyticsUnknown), KeyGroupStats},
+		{UserChurnKey(600, AnalyticsGranularityWeek, 10), KeyUserChurn},
+		{UserBlobContributionKey(600, id, 2, 3, 4, 5), KeyUserBlobContribution},
+		{UserInodeKey(600, 3, 4), KeyUserInode}, {UserBlobKey(600, id), KeyUserBlob},
+		{AuthoritativeCrawlProofKey(id, 9), KeyAuthoritativeCrawlProof}, {AuthoritativeSourceBindingKey(id, 3, 4, 5), KeyAuthoritativeSourceBinding},
 		{CurrentInodeKey(3, 4), KeyCurrentInode}, {InodeRevisionKey(3, 4, 5), KeyInodeRevision},
 		{CurrentDirectoryKey(3, 4), KeyCurrentDirectory}, {DirectoryRevisionKey(3, 4, 5), KeyDirectoryRevision},
 		{SnapshotKey(id), KeySnapshot}, {ContentManifestKey(id, 7), KeyContentManifest}, {ReverseManifestKey(id, second), KeyReverseManifest},
@@ -97,6 +113,75 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 	for _, malformed := range [][]byte{nil, {}, []byte("b:"), append(BlobKey(id), 0), []byte("a:pack:bogus"), []byte("gc:x:")} {
 		if _, err := ParseKey(malformed); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("ParseKey(%x) = %v", malformed, err)
+		}
+	}
+}
+
+func TestPhase16AnalyticsKeysPreserveComponentsAndOrdering(t *testing.T) {
+	id := testID(7)
+	tests := []struct {
+		key   []byte
+		check func(ParsedKey) bool
+	}{
+		{AnalyticsDictionaryKey(AnalyticsDictionaryVolume, 12), func(key ParsedKey) bool { return key.Dictionary == AnalyticsDictionaryVolume && key.Ordinal == 12 }},
+		{AnalyticsFactSegmentKey(13), func(key ParsedKey) bool { return key.Generation == 13 }},
+		{AnalyticsDimensionIndexKey(AnalyticsDimensionCalendarYear, 2024, 13), func(key ParsedKey) bool {
+			return key.Dimension == AnalyticsDimensionCalendarYear && key.Value == 2024 && key.Generation == 13
+		}},
+		{AnalyticsResidencyKey(2, 3, 4), func(key ParsedKey) bool { return key.FSID == 2 && key.Inode == 3 && key.Generation == 4 }},
+		{AnalyticsDerivedKey(15, UserInodeKey(600, 2, 3)), func(key ParsedKey) bool {
+			return key.ViewGeneration == 15 && key.UID == 600 && key.FSID == 2 && key.Inode == 3
+		}},
+		{AnalyticsDerivedGenerationMarkerKey(15), func(key ParsedKey) bool { return key.ViewGeneration == 15 && key.Kind == KeyAnalyticsDerivedMarker }},
+		{AnalyticsDerivedKey(15, UserBlobContributionKey(600, id, 2, 3, 4, 5)), func(key ParsedKey) bool {
+			return key.ViewGeneration == 15 && key.UID == 600 && key.ID == id && key.FSID == 2 && key.Inode == 3 && key.Generation == 4 && key.Ordinal == 5
+		}},
+		{AnalyticsDeltaKey(14, 15), func(key ParsedKey) bool { return key.Commit == 14 && key.Ordinal == 15 }},
+		{AuthoritativeCrawlProofKey(id, 23), func(key ParsedKey) bool { return key.ID == id && key.Commit == 23 }},
+		{AuthoritativeSourceBindingKey(id, 2, 3, 4), func(key ParsedKey) bool {
+			return key.ID == id && key.FSID == 2 && key.Inode == 3 && key.Generation == 4
+		}},
+		{AnalyticsWatermarkKey(16), func(key ParsedKey) bool { return key.Epoch == 16 }},
+		{AnalyticsQueryResultKey(id, 17, 18, 19), func(key ParsedKey) bool {
+			return key.ID == id && key.Generation == 17 && key.Epoch == 18 && key.Commit == 19
+		}},
+		{GrowthTimeKey(AnalyticsGranularityMonth, -20, TierCold), func(key ParsedKey) bool {
+			return key.Granularity == HistoryGranularity(AnalyticsGranularityMonth) && key.Timestamp == -20 && key.Tier == TierCold
+		}},
+		{GrowthPathKey("home/alice/", AnalyticsGranularityYear, 21), func(key ParsedKey) bool { return key.Path == "/home/alice" && key.Timestamp == 21 }},
+		{UserChurnKey(600, AnalyticsGranularityWeek, 22), func(key ParsedKey) bool { return key.UID == 600 && key.Timestamp == 22 }},
+		{UserInodeKey(600, 2, 3), func(key ParsedKey) bool { return key.UID == 600 && key.FSID == 2 && key.Inode == 3 }},
+		{UserBlobKey(600, id), func(key ParsedKey) bool { return key.UID == 600 && key.ID == id }},
+	}
+	for _, test := range tests {
+		parsed, err := ParseKey(test.key)
+		if err != nil || !test.check(parsed) {
+			t.Fatalf("analytics key %x parsed as %#v, %v", test.key, parsed, err)
+		}
+		for size := range len(test.key) {
+			if _, err := ParseKey(test.key[:size]); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("analytics key %x truncation at %d returned %v", test.key, size, err)
+			}
+		}
+	}
+	if bytes.Compare(AnalyticsDeltaKey(8, 99), AnalyticsDeltaKey(9, 0)) >= 0 || bytes.Compare(AnalyticsDeltaKey(9, 0), AnalyticsDeltaKey(9, 1)) >= 0 {
+		t.Fatal("analytics delta keys do not preserve commit/ordinal order")
+	}
+	if bytes.Compare(GrowthTimeKey(AnalyticsGranularityWeek, -1, TierHot), GrowthTimeKey(AnalyticsGranularityWeek, 0, TierHot)) >= 0 {
+		t.Fatal("growth time keys do not preserve signed timestamp order")
+	}
+	if prefix := GrowthPathPrefix("/home/alice"); !bytes.HasPrefix(GrowthPathKey("/home/alice", AnalyticsGranularityWeek, 1), prefix) || bytes.HasPrefix(GrowthPathKey("/home/alice2", AnalyticsGranularityWeek, 1), prefix) {
+		t.Fatalf("growth path prefix is ambiguous: %x", prefix)
+	}
+	for _, invalid := range [][]byte{
+		AnalyticsDictionaryKey(0, 1), AnalyticsFactSegmentKey(0), AnalyticsDimensionIndexKey(0, 1, 1),
+		AnalyticsDimensionIndexKey(AnalyticsDimensionUID, 1, 0), AnalyticsResidencyKey(1, 2, 0), AnalyticsDeltaKey(0, 1),
+		AuthoritativeCrawlProofKey(ID{}, 1), AuthoritativeCrawlProofKey(id, 0), AuthoritativeSourceBindingKey(ID{}, 1, 1, 1), AuthoritativeSourceBindingKey(id, 0, 1, 1), AuthoritativeSourceBindingKey(id, 1, 1, 0),
+		AnalyticsWatermarkKey(0), AnalyticsManifestKey(0), AnalyticsQueryResultKey(id, 0, 1, 1),
+		GrowthTimeKey(0, 1, TierHot), GrowthPathKey("/", AnalyticsGranularityWeek, 1),
+	} {
+		if invalid != nil {
+			t.Fatalf("invalid analytics key constructor returned %x", invalid)
 		}
 	}
 }
@@ -266,6 +351,42 @@ func TestValidateValueMatchesKeyFamily(t *testing.T) {
 	if err := ValidateValue(DirectoryRevisionKey(1, 1, 1), directory); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("cross-filesystem file child returned %v", err)
 	}
+	analyticsValues := []struct{ key, value []byte }{}
+	appendValue := func(key []byte, record binaryRecord) {
+		value, err := record.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		analyticsValues = append(analyticsValues, struct{ key, value []byte }{key, value})
+	}
+	appendValue(AnalyticsDictionaryKey(AnalyticsDictionarySVM, 1), AnalyticsDictionaryRecord{Value: "svm"})
+	appendValue(AnalyticsFactSegmentKey(1), AnalyticsFactSegmentRecord{RowCount: 1, Columns: []AnalyticsColumn{{Kind: AnalyticsColumnUID, Codec: AnalyticsCodecRaw, Data: []byte{1}}}})
+	appendValue(AnalyticsSegmentMetadataKey(1), AnalyticsSegmentMetadataRecord{RowCount: 1, MinCreatedAt: 1, MaxCreatedAt: 1, MinLogicalSize: 1, MaxLogicalSize: 1, MinRevision: 1, MaxRevision: 1, FirstCommit: 1, LastCommit: 1, ClassificationEpoch: 1})
+	appendValue(AnalyticsDimensionIndexKey(AnalyticsDimensionUID, 600, 1), AnalyticsDimensionIndexRecord{Codec: AnalyticsCodecRaw, RowCount: 1, MatchCount: 1, Bitmap: []byte{1}})
+	appendValue(AnalyticsResidencyKey(1, 2, 3), AnalyticsResidencyRecord{State: AnalyticsLive, ClassificationEpoch: 1, FactSegment: 1})
+	appendValue(AnalyticsDeltaKey(1, 0), AnalyticsDeltaRecord{Kind: AnalyticsDeltaSourceState, IdentityGeneration: 1, Revision: 1, State: AnalyticsLive, ClassificationEpoch: 1})
+	appendValue(AnalyticsWatermarkKey(1), AnalyticsWatermarkRecord{RepositoryGeneration: 1, ManifestGeneration: 1, AppliedAt: 1})
+	appendValue(AnalyticsManifestKey(1), AnalyticsManifestRecord{Generation: 1, Segments: []uint64{1}})
+	appendValue(AnalyticsBuildCheckpointKey(), AnalyticsBuildCheckpointRecord{BuildID: id, FormatVersion: 1, Generation: 2, ConfigJSON: "{}", SourceKeyCursor: AuthoritativeSourceBindingKey(id, 1, 2, 3), Facts: 1, AppliedCommit: 1, CandidateSegments: []uint64{2<<32 | 1}, StartedAt: 1, UpdatedAt: 1})
+	appendValue(AnalyticsQueryResultKey(id, 1, 1, 1), AnalyticsQueryRecord{Payload: []byte{1}})
+	appendValue(AnalyticsQueryHeatKey(id), AnalyticsQueryRecord{Payload: []byte{1}})
+	appendValue(AnalyticsQueryViewKey(id, 1), AnalyticsQueryRecord{Payload: []byte{1}})
+	appendValue(AnalyticsQueryJobKey(id), AnalyticsQueryJobRecord{State: AnalyticsQueryPending, CanonicalQuery: []byte{1}, RepositoryGeneration: 1, ClassificationEpoch: 1, UpdatedAt: 1})
+	appendValue(GrowthTimeKey(AnalyticsGranularityWeek, 1, TierHot), AnalyticsAggregateRecord{})
+	appendValue(GrowthPathKey("/home", AnalyticsGranularityWeek, 1), AnalyticsAggregateRecord{})
+	appendValue(UserSummaryKey(600), AnalyticsSummaryRecord{})
+	appendValue(GroupSummaryKey(700), AnalyticsSummaryRecord{})
+	appendValue(UserChurnKey(600, AnalyticsGranularityWeek, 1), AnalyticsAggregateRecord{})
+	appendValue(UserInodeKey(600, 1, 2), AnalyticsUserInodeRecord{LatestRevision: 1})
+	appendValue(UserBlobKey(600, id), AnalyticsUserBlobRecord{ReferenceCount: 1, FirstSeen: 1})
+	for _, test := range analyticsValues {
+		if err := ValidateValue(test.key, test.value); err != nil {
+			t.Fatalf("ValidateValue(%x): %v", test.key, err)
+		}
+	}
+	if err := ValidateValue(AnalyticsDictionaryKey(AnalyticsDictionarySVM, 1), analyticsValues[1].value); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("mismatched analytics record family returned %v", err)
+	}
 }
 
 func TestEncodedValuesStayWithinTransportLimit(t *testing.T) {
@@ -275,6 +396,33 @@ func TestEncodedValuesStayWithinTransportLimit(t *testing.T) {
 	}
 	if _, err := UnmarshalPackAggregate(make([]byte, MaxEncodedValueBytes+1)); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("oversized decoded record returned %v", err)
+	}
+	if _, err := (AnalyticsFactSegmentRecord{RowCount: 1, Columns: []AnalyticsColumn{{Kind: AnalyticsColumnUID, Codec: AnalyticsCodecRaw, Data: oversizedField}}}).MarshalBinary(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("oversized analytics segment returned %v", err)
+	}
+}
+
+func TestPhase16AnalyticsRecordsRejectInvalidStates(t *testing.T) {
+	invalid := []binaryRecord{
+		AnalyticsDictionaryRecord{},
+		AnalyticsFactSegmentRecord{RowCount: 1, Columns: []AnalyticsColumn{{Kind: AnalyticsColumnUID, Codec: AnalyticsCodecRaw, Data: []byte{1}}, {Kind: AnalyticsColumnUID, Codec: AnalyticsCodecRaw, Data: []byte{2}}}},
+		AnalyticsSegmentMetadataRecord{RowCount: 1, MinCreatedAt: 2, MaxCreatedAt: 1, MinRevision: 1, MaxRevision: 1, FirstCommit: 1, LastCommit: 1, ClassificationEpoch: 1},
+		AnalyticsDimensionIndexRecord{Codec: AnalyticsCodecRoaring, RowCount: 1, MatchCount: 2, Bitmap: []byte{1}},
+		AnalyticsResidencyRecord{State: AnalyticsArchiveOnly, ClassificationEpoch: 1, FactSegment: 1},
+		AnalyticsResidencyRecord{State: AnalyticsExpired, RetainedSnapshotRefs: 1, ClassificationEpoch: 1, FactSegment: 1},
+		AuthoritativeCrawlProofRecord{ScopeID: testID(1), RootFSID: 1, RootInode: 1, StartFence: 2, EndCommit: 1, CompletedAt: 1, Complete: true, DebtFree: true},
+		AuthoritativeSourceBindingRecord{Revision: 1, State: AuthoritativeSourceLive, LastObservedCommit: 1},
+		AnalyticsDeltaRecord{Kind: AnalyticsDeltaCreation, IdentityGeneration: 1, Revision: 1, Known: 1 << 15, CreationBasis: AnalyticsCTime, ClassificationEpoch: 1},
+		AnalyticsWatermarkRecord{RepositoryGeneration: 1, ManifestGeneration: 1},
+		AnalyticsManifestRecord{Generation: 1, Segments: []uint64{2, 1}},
+		AnalyticsUserInodeRecord{}, AnalyticsUserBlobRecord{},
+		AnalyticsQueryJobRecord{State: AnalyticsQueryComplete, CanonicalQuery: []byte{1}, RepositoryGeneration: 1, ClassificationEpoch: 1, UpdatedAt: 1},
+		AnalyticsQueryJobRecord{State: AnalyticsQueryFailed, CanonicalQuery: []byte{1}, RepositoryGeneration: 1, ClassificationEpoch: 1, UpdatedAt: 1},
+	}
+	for _, record := range invalid {
+		if _, err := record.MarshalBinary(); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("invalid analytics record %#v returned %v", record, err)
+		}
 	}
 }
 
@@ -414,8 +562,41 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}, UnmarshalPlacementRequestRecord)
 	roundTrip(t, RepackLineageRecord{RunID: id3, Kind: LineagePromotion}, UnmarshalRepackLineageRecord)
 	roundTrip(t, PromotionEligibilityRecord{SurvivalUntil: 500, EvaluatedAt: 100, Indefinite: false}, UnmarshalPromotionEligibilityRecord)
-	roundTrip(t, AnalyticsFactRecord{Revision: 1, UID: 2, GID: 3, Known: KnownCTime, CreatedAt: 4, LogicalSize: 5, CalendarYear: 2024, CalendarMonth: 2, ISOYear: 2024, Workweek: 8, SourcePath: "/svm/vol/q/file", SVM: "svm", Volume: "vol", PathGroup: "q", Residency: AnalyticsLive, CreationBasis: AnalyticsCTime}, UnmarshalAnalyticsFactRecord)
+	analyticsFact := AnalyticsFactRecord{Revision: 1, UID: 2, GID: 3, Known: KnownCTime, CreatedAt: 4, LogicalSize: 5, CalendarYear: 2024, CalendarMonth: 2, ISOYear: 2024, Workweek: 8, SourcePath: "/svm/vol/q/file", SVM: "svm", Volume: "vol", PathGroup: "q", Residency: AnalyticsLive, CreationBasis: AnalyticsCTime, IdentityGeneration: 42, IdentityContinuity: AnalyticsContinuitySourceGeneration}
+	encodedAnalyticsFact, err := analyticsFact.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, analyticsFact, UnmarshalAnalyticsFactRecord, len(encodedAnalyticsFact)-9)
 	roundTrip(t, AnalyticsMetadataRecord{Enabled: true, Generation: 1, Facts: 2, BuiltAt: 3}, UnmarshalAnalyticsMetadataRecord)
+	roundTrip(t, AnalyticsDictionaryRecord{Value: "svm-finance"}, UnmarshalAnalyticsDictionaryRecord)
+	roundTrip(t, AnalyticsFactSegmentRecord{RowCount: 2, Columns: []AnalyticsColumn{{Kind: AnalyticsColumnIdentity, Codec: AnalyticsCodecRaw, Data: []byte{1, 2}}, {Kind: AnalyticsColumnUID, Codec: AnalyticsCodecDelta, Data: []byte{3, 4}}}}, UnmarshalAnalyticsFactSegmentRecord)
+	roundTrip(t, AnalyticsSegmentMetadataRecord{RowCount: 2, MinCreatedAt: -4, MaxCreatedAt: 5, MinLogicalSize: 6, MaxLogicalSize: 7, MinRevision: 8, MaxRevision: 9, FirstCommit: 10, LastCommit: 11, ClassificationEpoch: 12, Bloom: []byte{13}, CodecParameters: "raw-v1"}, UnmarshalAnalyticsSegmentMetadataRecord)
+	roundTrip(t, AnalyticsDimensionIndexRecord{Codec: AnalyticsCodecRoaring, RowCount: 10, MatchCount: 2, LogicalBytes: 99, Bitmap: []byte{1, 2, 3}}, UnmarshalAnalyticsDimensionIndexRecord)
+	roundTrip(t, AnalyticsResidencyRecord{State: AnalyticsArchiveOnly, LastCompleteCrawl: 2, RetainedSnapshotRefs: 3, ClassificationEpoch: 4, FactSegment: 5, Row: 6}, UnmarshalAnalyticsResidencyRecord)
+	creationDelta := AnalyticsDeltaRecord{Kind: AnalyticsDeltaCreation, FSID: 1, Inode: 2, IdentityGeneration: 3, Revision: 4, UID: 5, GID: 6, Known: KnownSize, CreatedAt: 7, LogicalSize: 8, CreationBasis: AnalyticsBirthTime, IdentityContinuity: AnalyticsContinuitySourceGeneration, ClassificationEpoch: 9, SVM: 10, Volume: 11, PathGroup: 12}
+	encodedCreationDelta, err := creationDelta.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, creationDelta, UnmarshalAnalyticsDeltaRecord, len(encodedCreationDelta)-1)
+	referenceDelta := AnalyticsDeltaRecord{Kind: AnalyticsDeltaRetainedReferences, FSID: 1, Inode: 2, IdentityGeneration: 3, Revision: 4, State: AnalyticsUnknown, RetainedSnapshotRefs: 9, ClassificationEpoch: 10, ReferenceOperation: AnalyticsReferencesSet}
+	encodedReferenceDelta, err := referenceDelta.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, referenceDelta, UnmarshalAnalyticsDeltaRecord, len(encodedReferenceDelta)-1)
+	scope := testID(44)
+	roundTrip(t, AuthoritativeCrawlProofRecord{ScopeID: scope, RootFSID: 1, RootInode: 2, StartFence: 3, EndCommit: 4, CompletedAt: 5, Complete: true, DebtFree: true}, UnmarshalAuthoritativeCrawlProofRecord)
+	roundTrip(t, AuthoritativeSourceBindingRecord{Generation: 1, Revision: 2, State: AuthoritativeSourceDeleted, Continuity: AnalyticsContinuityProven, LastObservedCommit: 3}, UnmarshalAuthoritativeSourceBindingRecord)
+	roundTrip(t, AnalyticsWatermarkRecord{RepositoryGeneration: 1, AppliedCommit: 2, ManifestGeneration: 3, AppliedAt: 4}, UnmarshalAnalyticsWatermarkRecord)
+	roundTrip(t, AnalyticsManifestRecord{Generation: 1, Segments: []uint64{2, 3, 5}}, UnmarshalAnalyticsManifestRecord)
+	roundTrip(t, AnalyticsAggregateRecord{BytesAdded: 1, BytesDeleted: 2, FilesAdded: 3, FilesDeleted: 4}, UnmarshalAnalyticsAggregateRecord)
+	roundTrip(t, AnalyticsSummaryRecord{ActiveBytes: 1, ActiveFiles: 2, UniqueBlobCount: 3, UniqueBlobBytes: 4}, UnmarshalAnalyticsSummaryRecord)
+	roundTrip(t, AnalyticsUserInodeRecord{LatestRevision: 1, PathSample: "/home/alice/file"}, UnmarshalAnalyticsUserInodeRecord)
+	roundTrip(t, AnalyticsUserBlobRecord{ReferenceCount: 2, FirstSeen: 3}, UnmarshalAnalyticsUserBlobRecord)
+	roundTrip(t, AnalyticsQueryRecord{Payload: []byte(`{"count":2}`)}, UnmarshalAnalyticsQueryRecord)
+	roundTrip(t, AnalyticsQueryJobRecord{State: AnalyticsQueryComplete, CanonicalQuery: []byte(`{"uid":600}`), RepositoryGeneration: 1, ClassificationEpoch: 2, AppliedCommit: 3, CompletedSegments: []uint64{4, 5}, RowsScanned: 6, UpdatedAt: 7, Result: []byte(`{"count":2}`)}, UnmarshalAnalyticsQueryJobRecord)
 	for _, invalid := range []PlacementRecord{
 		{State: PlacementState(99)},
 		{State: PlacementLive, PlacedAt: 1},

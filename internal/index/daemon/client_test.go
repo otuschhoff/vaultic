@@ -304,13 +304,13 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
 		t.Fatal(err)
 	}
-	factValue, found, err := store.Get(ctx, schema.AnalyticsFactKey(3, 9))
+	deltaValue, found, err := store.Get(ctx, schema.AnalyticsDeltaKey(revision, 0))
 	if err != nil || !found {
-		t.Fatalf("incremental analytics fact: found=%t err=%v", found, err)
+		t.Fatalf("transactional analytics delta: found=%t err=%v", found, err)
 	}
-	fact, err := schema.UnmarshalAnalyticsFactRecord(factValue)
-	if err != nil || fact.Revision != revision || fact.Residency != schema.AnalyticsLive {
-		t.Fatalf("incremental analytics fact = %#v, err=%v", fact, err)
+	delta, err := schema.UnmarshalAnalyticsDeltaRecord(deltaValue)
+	if err != nil || delta.Kind != schema.AnalyticsDeltaCreation || delta.Revision != revision || delta.IdentityGeneration != revision || delta.State != schema.AnalyticsLive {
+		t.Fatalf("transactional analytics delta = %#v, err=%v", delta, err)
 	}
 	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
 		t.Fatalf("idempotent retry: %v", err)
@@ -357,13 +357,8 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	factValue, _, err = store.Get(ctx, schema.AnalyticsFactKey(3, 9))
-	if err != nil {
-		t.Fatal(err)
-	}
-	fact, err = schema.UnmarshalAnalyticsFactRecord(factValue)
-	if err != nil || fact.Revision != revision {
-		t.Fatalf("later revision replaced creation fact: %#v, %v", fact, err)
+	if _, found, err := store.Get(ctx, schema.AnalyticsDeltaKey(secondRevision, 0)); err != nil || found {
+		t.Fatalf("later revision emitted a new creation delta: found=%t err=%v", found, err)
 	}
 	oldReverseValue, found, err := store.Get(ctx, schema.ReverseManifestKey(content[0], manifestID))
 	if err != nil || !found {
@@ -567,6 +562,235 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	}
 	if !bytes.Equal(commit.RootKey, rootKey) || commit.SnapshotTimeUnixNano == 0 {
 		t.Fatalf("snapshot commit record = %#v", commit)
+	}
+}
+
+func TestSchemaStoreSnapshotMembershipDeltasPublishAndForget(t *testing.T) {
+	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase16-snapshot-membership", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: time.Now().UnixNano(), ConfigJSON: "{}"}
+	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeSchemaRecord(t, metadata), true); err != nil {
+		t.Fatal(err)
+	}
+	inodeRevision, err := store.AllocateRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inodeKey := schema.InodeRevisionKey(1, 2, inodeRevision)
+	inode := schema.InodeRevision{Known: schema.KnownPath, SourcePath: "/file", Freshness: schema.FreshnessVerified}
+	if err := store.PublishRevision(ctx, schema.CurrentInodeKey(1, 2), inodeKey, encodeSchemaRecord(t, inode), inodeRevision); err != nil {
+		t.Fatal(err)
+	}
+	rootRevision, err := store.AllocateRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootKey := schema.DirectoryRevisionKey(1, 1, rootRevision)
+	root := schema.DirectoryRevision{Known: schema.KnownPath, SourcePath: "/", Freshness: schema.FreshnessVerified, Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: inodeKey}}}
+	if err := store.PublishRevision(ctx, schema.CurrentDirectoryKey(1, 1), rootKey, encodeSchemaRecord(t, root), rootRevision); err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := daemonTestID(42)
+	if err := store.MarkExportPending(ctx, snapshotID, rootKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishSnapshotScope(ctx, SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"time":"2026-08-30T12:00:00Z"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	snapshotValue, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID))
+	if err != nil || !found {
+		t.Fatalf("published snapshot: found=%t err=%v", found, err)
+	}
+	snapshot, err := schema.UnmarshalSnapshotRecord(snapshotValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaValue, found, err := store.Get(ctx, schema.AnalyticsDeltaKey(snapshot.CommitSequence, 0))
+	if err != nil || !found {
+		t.Fatalf("snapshot publish delta: found=%t err=%v", found, err)
+	}
+	delta, err := schema.UnmarshalAnalyticsDeltaRecord(deltaValue)
+	if err != nil || delta.Kind != schema.AnalyticsDeltaRetainedReferences || delta.IdentityGeneration != inodeRevision || delta.RetainedSnapshotRefs != 1 {
+		t.Fatalf("snapshot publish delta = %#v, err=%v", delta, err)
+	}
+	if err := store.ForgetSnapshot(ctx, snapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID)); err != nil || found {
+		t.Fatalf("forgotten snapshot remains: found=%t err=%v", found, err)
+	}
+	forgetDeltaValue, found, err := store.Get(ctx, schema.AnalyticsDeltaKey(snapshot.CommitSequence+1, 0))
+	if err != nil || !found {
+		t.Fatalf("snapshot forget delta: found=%t err=%v", found, err)
+	}
+	forgetDelta, err := schema.UnmarshalAnalyticsDeltaRecord(forgetDeltaValue)
+	if err != nil || forgetDelta.RetainedSnapshotRefs != 0 || forgetDelta.IdentityGeneration != inodeRevision {
+		t.Fatalf("snapshot forget delta = %#v, err=%v", forgetDelta, err)
+	}
+}
+
+func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.T) {
+	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase16-crawl-proof", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: time.Now().UnixNano(), ConfigJSON: "{}"}
+	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeSchemaRecord(t, metadata), true); err != nil {
+		t.Fatal(err)
+	}
+	publishInode := func(fsid uint32, inode uint64, path string) uint64 {
+		t.Helper()
+		revision, err := store.AllocateRevision(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := schema.InodeRevision{Known: schema.KnownPath, SourcePath: path, Freshness: schema.FreshnessVerified}
+		if err := store.PublishRevision(ctx, schema.CurrentInodeKey(fsid, inode), schema.InodeRevisionKey(fsid, inode, revision), encodeSchemaRecord(t, record), revision); err != nil {
+			t.Fatal(err)
+		}
+		return revision
+	}
+	publishCrawl := func(snapshotByte byte, scope schema.ID, inode, inodeRevision, startFence uint64, complete bool, debtKeys [][]byte) uint64 {
+		t.Helper()
+		rootRevision, err := store.AllocateRevision(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootKey := schema.DirectoryRevisionKey(1, uint64(snapshotByte)+100, rootRevision)
+		root := schema.DirectoryRevision{Known: schema.KnownPath, SourcePath: "/", Freshness: schema.FreshnessVerified}
+		if inodeRevision != 0 {
+			root.Children = []schema.DirectoryChild{{Name: "file", Inode: inode, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, inode, inodeRevision)}}
+		}
+		if err := store.PublishRevision(ctx, schema.CurrentDirectoryKey(1, uint64(snapshotByte)+100), rootKey, encodeSchemaRecord(t, root), rootRevision); err != nil {
+			t.Fatal(err)
+		}
+		snapshotID := daemonTestID(snapshotByte)
+		if err := store.MarkExportPending(ctx, snapshotID, rootKey); err != nil {
+			t.Fatal(err)
+		}
+		claim := &AuthoritativeCrawlClaim{ScopeID: scope, RootFSID: 1, RootInode: uint64(snapshotByte) + 100, StartFence: startFence, Complete: complete, DebtKeys: debtKeys}
+		if err := store.PublishSnapshotScope(ctx, SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"time":"2026-08-30T12:00:00Z"}`), Crawl: claim}); err != nil {
+			t.Fatal(err)
+		}
+		value, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID))
+		if err != nil || !found {
+			t.Fatalf("snapshot commit: found=%t err=%v", found, err)
+		}
+		snapshot, err := schema.UnmarshalSnapshotRecord(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot.CommitSequence
+	}
+	readBinding := func(scope schema.ID, inode, generation uint64) schema.AuthoritativeSourceBindingRecord {
+		t.Helper()
+		value, found, err := store.Get(ctx, schema.AuthoritativeSourceBindingKey(scope, 1, inode, generation))
+		if err != nil || !found {
+			t.Fatalf("binding %d:%d: found=%t err=%v", inode, generation, found, err)
+		}
+		record, err := schema.UnmarshalAuthoritativeSourceBindingRecord(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+
+	scopeA, scopeB := daemonTestID(201), daemonTestID(202)
+	first := publishInode(1, 2, "/file")
+	firstA := publishCrawl(101, scopeA, 2, first, 1, true, nil)
+	publishCrawl(102, scopeB, 2, first, 1, true, nil)
+	deletedCommit := publishCrawl(103, scopeA, 0, 0, firstA, true, nil)
+	deleted := readBinding(scopeA, 2, first)
+	if deleted.State != schema.AuthoritativeSourceDeleted || deleted.Continuity != schema.AnalyticsContinuityProven {
+		t.Fatalf("complete absence binding = %#v", deleted)
+	}
+	if isolated := readBinding(scopeB, 2, first); isolated.State != schema.AuthoritativeSourceLive {
+		t.Fatalf("scope B was changed by scope A proof: %#v", isolated)
+	}
+	proofValue, found, err := store.Get(ctx, schema.AuthoritativeCrawlProofKey(scopeA, deletedCommit))
+	if err != nil || !found {
+		t.Fatalf("crawl proof: found=%t err=%v", found, err)
+	}
+	proof, err := schema.UnmarshalAuthoritativeCrawlProofRecord(proofValue)
+	if err != nil || !proof.Complete || !proof.DebtFree {
+		t.Fatalf("crawl proof = %#v, err=%v", proof, err)
+	}
+	reappeared := publishInode(1, 2, "/replacement")
+	publishCrawl(104, scopeA, 2, reappeared, deletedCommit, true, nil)
+	if current := readBinding(scopeA, 2, reappeared); current.State != schema.AuthoritativeSourceLive || current.Continuity != schema.AnalyticsContinuityProven || current.Generation == first {
+		t.Fatalf("proven reappearance binding = %#v", current)
+	}
+	if old := readBinding(scopeA, 2, first); old.State != schema.AuthoritativeSourceDeleted {
+		t.Fatalf("old generation was overwritten: %#v", old)
+	}
+	nextValue, found, err := store.Get(ctx, schema.NextRevisionKey())
+	if err != nil || !found {
+		t.Fatalf("next revision before forget: found=%t err=%v", found, err)
+	}
+	forgetCommit, err := schema.UnmarshalNextRevision(nextValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ForgetSnapshot(ctx, daemonTestID(104)); err != nil {
+		t.Fatal(err)
+	}
+	forgetValue, found, err := store.Get(ctx, schema.AnalyticsDeltaKey(forgetCommit, 0))
+	if err != nil || !found {
+		t.Fatalf("forget delta: found=%t err=%v", found, err)
+	}
+	forgetDelta, err := schema.UnmarshalAnalyticsDeltaRecord(forgetValue)
+	if err != nil || forgetDelta.IdentityGeneration != reappeared || forgetDelta.RetainedSnapshotRefs != 0 {
+		t.Fatalf("reappeared forget delta = %#v, err=%v", forgetDelta, err)
+	}
+
+	scopeGap := daemonTestID(203)
+	gapFirst := publishInode(1, 3, "/gap")
+	gapObserved := publishCrawl(105, scopeGap, 3, gapFirst, 1, true, nil)
+	publishCrawl(106, scopeGap, 0, 0, gapObserved, false, nil)
+	if uncertain := readBinding(scopeGap, 3, gapFirst); uncertain.State != schema.AuthoritativeSourceUnknown || uncertain.Continuity != schema.AnalyticsContinuityUnknown {
+		t.Fatalf("incomplete absence binding = %#v", uncertain)
+	}
+	gapReappeared := publishInode(1, 3, "/gap-replacement")
+	publishCrawl(107, scopeGap, 3, gapReappeared, gapObserved, false, nil)
+	if uncertain := readBinding(scopeGap, 3, gapReappeared); uncertain.State != schema.AuthoritativeSourceLive || uncertain.Continuity != schema.AnalyticsContinuityUnknown || uncertain.Generation == gapFirst {
+		t.Fatalf("gap reappearance binding = %#v", uncertain)
+	}
+	if old := readBinding(scopeGap, 3, gapFirst); old.State != schema.AuthoritativeSourceUnknown {
+		t.Fatalf("gap generation was merged: %#v", old)
+	}
+
+	scopeDebt := daemonTestID(204)
+	debtFirst := publishInode(1, 4, "/debt")
+	debtObserved := publishCrawl(108, scopeDebt, 4, debtFirst, 1, true, nil)
+	debtKey := schema.CrawlDebtKey(schema.ID{}, daemonTestID(205))
+	debt := schema.CrawlDebtRecord{PathOrTree: []byte("debt"), Reason: schema.DebtMissingInode, Status: schema.DebtPending}
+	if err := store.Put(ctx, debtKey, encodeSchemaRecord(t, debt), true); err != nil {
+		t.Fatal(err)
+	}
+	debtCommit := publishCrawl(109, scopeDebt, 0, 0, debtObserved, true, [][]byte{debtKey})
+	if uncertain := readBinding(scopeDebt, 4, debtFirst); uncertain.State != schema.AuthoritativeSourceUnknown {
+		t.Fatalf("debt-bearing absence proved deletion: %#v", uncertain)
+	}
+	proofValue, _, _ = store.Get(ctx, schema.AuthoritativeCrawlProofKey(scopeDebt, debtCommit))
+	proof, err = schema.UnmarshalAuthoritativeCrawlProofRecord(proofValue)
+	if err != nil || !proof.Complete || proof.DebtFree {
+		t.Fatalf("debt-bearing proof = %#v, err=%v", proof, err)
+	}
+
+	scopeFence := daemonTestID(206)
+	fenceFirst := publishInode(1, 5, "/fenced")
+	fenceObserved := publishCrawl(110, scopeFence, 5, fenceFirst, 1, true, nil)
+	publishCrawl(111, scopeFence, 0, 0, fenceObserved-1, true, nil)
+	if fenced := readBinding(scopeFence, 5, fenceFirst); fenced.State != schema.AuthoritativeSourceUnknown {
+		t.Fatalf("stale start fence proved deletion: %#v", fenced)
 	}
 }
 

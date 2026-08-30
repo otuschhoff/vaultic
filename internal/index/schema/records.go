@@ -843,6 +843,8 @@ const (
 	AnalyticsLive AnalyticsResidency = iota + 1
 	AnalyticsArchiveOnly
 	AnalyticsUnknown
+	AnalyticsDeleted
+	AnalyticsExpired
 )
 
 type AnalyticsCreationBasis byte
@@ -851,26 +853,38 @@ const (
 	AnalyticsCTime AnalyticsCreationBasis = iota + 1
 	AnalyticsMTime
 	AnalyticsTimeUnknown
+	AnalyticsBirthTime
+	AnalyticsFirstSeen
+)
+
+type AnalyticsIdentityContinuity byte
+
+const (
+	AnalyticsContinuityUnknown AnalyticsIdentityContinuity = iota
+	AnalyticsContinuityProven
+	AnalyticsContinuitySourceGeneration
 )
 
 type AnalyticsFactRecord struct {
-	Revision      uint64
-	UID           uint32
-	GID           uint32
-	Known         uint16
-	CreatedAt     int64
-	LogicalSize   uint64
-	CalendarYear  int32
-	CalendarMonth uint8
-	ISOYear       int32
-	Workweek      uint8
-	SizeLog10     uint8
-	SourcePath    string
-	SVM           string
-	Volume        string
-	PathGroup     string
-	Residency     AnalyticsResidency
-	CreationBasis AnalyticsCreationBasis
+	Revision           uint64
+	UID                uint32
+	GID                uint32
+	Known              uint16
+	CreatedAt          int64
+	LogicalSize        uint64
+	CalendarYear       int32
+	CalendarMonth      uint8
+	ISOYear            int32
+	Workweek           uint8
+	SizeLog10          uint8
+	SourcePath         string
+	SVM                string
+	Volume             string
+	PathGroup          string
+	Residency          AnalyticsResidency
+	CreationBasis      AnalyticsCreationBasis
+	IdentityGeneration uint64
+	IdentityContinuity AnalyticsIdentityContinuity
 }
 
 func (record AnalyticsFactRecord) MarshalBinary() ([]byte, error) {
@@ -896,6 +910,8 @@ func (record AnalyticsFactRecord) MarshalBinary() ([]byte, error) {
 	}
 	e.u8(byte(record.Residency))
 	e.u8(byte(record.CreationBasis))
+	e.u64(record.IdentityGeneration)
+	e.u8(byte(record.IdentityContinuity))
 	return e.finish()
 }
 
@@ -960,6 +976,18 @@ func UnmarshalAnalyticsFactRecord(data []byte) (AnalyticsFactRecord, error) {
 		return record, err
 	}
 	record.CreationBasis = AnalyticsCreationBasis(basis)
+	if d.at == len(d.data) {
+		record.IdentityContinuity = AnalyticsContinuityUnknown
+	} else {
+		if record.IdentityGeneration, err = d.u64(); err != nil {
+			return record, err
+		}
+		continuity, readErr := d.u8()
+		if readErr != nil {
+			return record, readErr
+		}
+		record.IdentityContinuity = AnalyticsIdentityContinuity(continuity)
+	}
 	if !validAnalyticsFact(record) {
 		return AnalyticsFactRecord{}, fmt.Errorf("%w: invalid analytics fact", ErrMalformed)
 	}
@@ -967,7 +995,10 @@ func UnmarshalAnalyticsFactRecord(data []byte) (AnalyticsFactRecord, error) {
 }
 
 func validAnalyticsFact(record AnalyticsFactRecord) bool {
-	if record.Revision == 0 || record.Known & ^knownFieldMask != 0 || record.Residency < AnalyticsLive || record.Residency > AnalyticsUnknown || record.CreationBasis < AnalyticsCTime || record.CreationBasis > AnalyticsTimeUnknown || record.CalendarMonth > 12 || record.Workweek > 53 || record.SizeLog10 > 19 {
+	if record.Revision == 0 || record.Known & ^knownFieldMask != 0 || record.Residency < AnalyticsLive || record.Residency > AnalyticsExpired || record.CreationBasis < AnalyticsCTime || record.CreationBasis > AnalyticsFirstSeen || record.IdentityContinuity > AnalyticsContinuitySourceGeneration || record.CalendarMonth > 12 || record.Workweek > 53 || record.SizeLog10 > 19 {
+		return false
+	}
+	if record.IdentityContinuity == AnalyticsContinuitySourceGeneration && record.IdentityGeneration == 0 {
 		return false
 	}
 	if record.CreationBasis == AnalyticsTimeUnknown {
