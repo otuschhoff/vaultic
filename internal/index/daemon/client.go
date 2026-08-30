@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 
 	vaulticfs "github.com/otuschhoff/vaultic/internal/fs"
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -51,6 +54,13 @@ type Options struct {
 	DataDir          string
 	S3Bucket         string
 	S3Prefix         string
+	EncryptionMode   string
+	PassphraseFile   string
+	AzureTokenFile   string
+	GCPTokenFile     string
+	VaultTokenFile   string
+	PKCS11PINFile    string
+	RecoveryUnlock   bool
 }
 
 func (o Options) withDefaults() Options {
@@ -77,11 +87,57 @@ func DefaultSocket(repositoryID string) string {
 
 // Client is a validated connection to one vaulticdb endpoint.
 type Client struct {
-	conn    *grpc.ClientConn
-	rpc     vaulticdbv1.VaulticDBClient
-	process *exec.Cmd
-	options Options
-	limits  Limits
+	conn       *grpc.ClientConn
+	rpc        vaulticdbv1.VaulticDBClient
+	process    *exec.Cmd
+	options    Options
+	limits     Limits
+	encryption EncryptionInfo
+}
+
+// EncryptionInfo describes the validated daemon metadata-encryption state.
+type EncryptionInfo struct {
+	Enabled            bool
+	Algorithm          string
+	ActiveDEKVersion   uint32
+	EnvelopeGeneration uint64
+	UnlockSlot         string
+	RecoveryUnlock     bool
+}
+
+// KeySlotInfo is non-secret metadata describing one independent DEK wrapping.
+type KeySlotInfo struct {
+	ID           string `json:"id"`
+	Provider     string `json:"provider"`
+	Priority     uint32 `json:"priority"`
+	Recovery     bool   `json:"recovery"`
+	KeyReference string `json:"key_reference"`
+	DEKVersion   uint32 `json:"dek_version"`
+}
+
+// KeyStatus is the redacted metadata-encryption key state.
+type KeyStatus struct {
+	EnvelopeGeneration uint64        `json:"envelope_generation"`
+	ActiveDEKVersion   uint32        `json:"active_dek_version"`
+	Slots              []KeySlotInfo `json:"slots"`
+}
+
+// DEKRewriteProgress reports one bounded old-version rewrite batch.
+type DEKRewriteProgress struct {
+	Rewritten uint64 `json:"rewritten"`
+	Remaining uint64 `json:"remaining"`
+}
+
+// EncryptionAudit reports raw metadata-object encryption consistency.
+type EncryptionAudit struct {
+	Enabled            bool   `json:"enabled"`
+	Objects            uint64 `json:"objects"`
+	InvalidObjects     uint64 `json:"invalid_objects"`
+	PlaintextObjects   uint64 `json:"plaintext_objects"`
+	OldVersionObjects  uint64 `json:"old_version_objects"`
+	EnvelopeGeneration uint64 `json:"envelope_generation"`
+	ActiveDEKVersion   uint32 `json:"active_dek_version"`
+	Algorithm          string `json:"algorithm"`
 }
 
 // Limits are the bounded-work capabilities advertised by vaulticdb.
@@ -120,6 +176,28 @@ func Connect(ctx context.Context, options Options) (*Client, error) {
 // daemon's singleton lock successfully starts it; other callers retry attach.
 func Ensure(ctx context.Context, options Options) (*Client, error) {
 	options = options.withDefaults()
+	if options.EncryptionMode != "" && options.EncryptionMode != "off" && options.EncryptionMode != "required" && options.EncryptionMode != "initialize" {
+		return nil, fmt.Errorf("%w: unsupported metadata encryption mode %q", ErrUnavailable, options.EncryptionMode)
+	}
+	if (options.EncryptionMode == "required" || options.EncryptionMode == "initialize") && options.PassphraseFile == "" {
+		return nil, fmt.Errorf("%w: metadata recovery passphrase file is required", ErrUnavailable)
+	}
+	if options.RecoveryUnlock && options.PassphraseFile == "" {
+		return nil, fmt.Errorf("%w: recovery unlock requires a passphrase file", ErrUnavailable)
+	}
+	for description, path := range map[string]string{
+		"metadata recovery passphrase": options.PassphraseFile,
+		"Azure KMS token":              options.AzureTokenFile,
+		"Google Cloud KMS token":       options.GCPTokenFile,
+		"Vault Transit token":          options.VaultTokenFile,
+		"PKCS#11 PIN":                  options.PKCS11PINFile,
+	} {
+		if path != "" {
+			if err := validateProtectedFile(path, description); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+			}
+		}
+	}
 	if options.ObjectStore == "s3" && options.S3Bucket == "" {
 		return nil, fmt.Errorf("%w: S3 bucket is not configured", ErrUnavailable)
 	}
@@ -148,19 +226,30 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	}
 
 	cmd := exec.Command(options.DaemonPath)
+	var daemonErrors bytes.Buffer
+	cmd.Stderr = &limitedWriter{writer: &daemonErrors, remaining: 64 * 1024}
 	cmd.Env = append(os.Environ(),
 		"VAULTICDB_SOCKET="+options.Socket,
 		"VAULTICDB_REPOSITORY_ID="+options.RepositoryID,
 	)
 	for name, value := range map[string]string{
-		"VAULTICDB_OBJECT_STORE": options.ObjectStore,
-		"VAULTICDB_DATA_DIR":     options.DataDir,
-		"VAULTICDB_S3_BUCKET":    options.S3Bucket,
-		"VAULTICDB_S3_PREFIX":    options.S3Prefix,
+		"VAULTICDB_OBJECT_STORE":               options.ObjectStore,
+		"VAULTICDB_DATA_DIR":                   options.DataDir,
+		"VAULTICDB_S3_BUCKET":                  options.S3Bucket,
+		"VAULTICDB_S3_PREFIX":                  options.S3Prefix,
+		"VAULTICDB_ENCRYPTION":                 options.EncryptionMode,
+		"VAULTICDB_ENCRYPTION_PASSPHRASE_FILE": options.PassphraseFile,
+		"VAULTICDB_AZURE_TOKEN_FILE":           options.AzureTokenFile,
+		"VAULTICDB_GCP_TOKEN_FILE":             options.GCPTokenFile,
+		"VAULTICDB_VAULT_TOKEN_FILE":           options.VaultTokenFile,
+		"VAULTICDB_PKCS11_PIN_FILE":            options.PKCS11PINFile,
 	} {
 		if value != "" {
 			cmd.Env = append(cmd.Env, name+"="+value)
 		}
+	}
+	if options.RecoveryUnlock {
+		cmd.Env = append(cmd.Env, "VAULTICDB_ENCRYPTION_RECOVERY_ACK=true")
 	}
 	if options.AuthToken != "" {
 		cmd.Env = append(cmd.Env, "VAULTICDB_TCP_AUTH_TOKEN="+options.AuthToken)
@@ -187,6 +276,10 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		cleanupOwnedArtifacts(options, cmd.Process.Pid)
+		if strings.Contains(daemonErrors.String(), "no metadata key slot could be unwrapped") {
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "metadata key unwrap failed", Fields: map[string]any{"repository_id": options.RepositoryID}})
+			return nil, fmt.Errorf("%w: no metadata key slot could be unwrapped", ErrUnavailable)
+		}
 		return nil, fmt.Errorf("%w: wait for daemon readiness: %w", ErrUnavailable, err)
 	}
 	metadataPath := options.Socket
@@ -202,6 +295,41 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	}
 	client.process = cmd
 	return client, nil
+}
+
+type limitedWriter struct {
+	writer    io.Writer
+	remaining int
+}
+
+func (writer *limitedWriter) Write(data []byte) (int, error) {
+	length := len(data)
+	if writer.remaining == 0 {
+		return length, nil
+	}
+	if len(data) > writer.remaining {
+		data = data[:writer.remaining]
+	}
+	written, err := writer.writer.Write(data)
+	writer.remaining -= written
+	if err != nil {
+		return written, err
+	}
+	return length, nil
+}
+
+func validateProtectedFile(path, description string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s file: %w", description, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s file is not a regular file", description)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s file must not be accessible by group or others", description)
+	}
+	return nil
 }
 
 func tcpMetadataPath(address string) string {
@@ -424,13 +552,199 @@ func (c *Client) validate(ctx context.Context) error {
 		MaxMessageBytes: capabilities.GetMaxMessageBytes(),
 		MaxPageItems:    capabilities.GetMaxPageItems(),
 	}
+	c.encryption = EncryptionInfo{
+		Enabled: capabilities.GetEncryptionEnabled(), Algorithm: capabilities.GetEncryptionAlgorithm(),
+		ActiveDEKVersion: capabilities.GetActiveDekVersion(), EnvelopeGeneration: capabilities.GetEnvelopeGeneration(),
+		UnlockSlot: capabilities.GetUnlockSlot(), RecoveryUnlock: capabilities.GetRecoveryUnlock(),
+	}
+	if (c.options.EncryptionMode == "required" || c.options.EncryptionMode == "initialize") && !c.encryption.Enabled {
+		return fmt.Errorf("daemon did not enable required metadata encryption")
+	}
+	if c.encryption.Enabled {
+		c.auditEncryptionUnlock(ctx)
+	}
 	return nil
+}
+
+func (c *Client) auditEncryptionUnlock(ctx context.Context) {
+	severity := observability.Notice
+	if c.encryption.RecoveryUnlock {
+		severity = observability.Warning
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: severity, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "metadata key slot unlocked", Fields: map[string]any{"repository_id": c.options.RepositoryID, "slot_id": c.encryption.UnlockSlot, "dek_version": c.encryption.ActiveDEKVersion, "envelope_generation": c.encryption.EnvelopeGeneration, "recovery": c.encryption.RecoveryUnlock}})
 }
 
 func (c *Client) RPC() vaulticdbv1.VaulticDBClient { return c.rpc }
 
 // Limits returns the storage limits validated during connection setup.
 func (c *Client) Limits() Limits { return c.limits }
+
+// Encryption returns the daemon's validated metadata-encryption state.
+func (c *Client) Encryption() EncryptionInfo { return c.encryption }
+
+// GetMasterKey returns the repository master key held by encrypted metadata.
+func (c *Client) GetMasterKey(ctx context.Context) ([]byte, bool, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.GetMasterKey(ctx, &vaulticdbv1.MasterKeyRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return nil, false, err
+	}
+	return response.GetMasterKey(), response.GetFound(), nil
+}
+
+// StoreMasterKey immutably stores a repository master key inside encrypted metadata.
+func (c *Client) StoreMasterKey(ctx context.Context, masterKey []byte) error {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	_, err := c.rpc.StoreMasterKey(ctx, &vaulticdbv1.StoreMasterKeyRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), MasterKey: masterKey})
+	return err
+}
+
+// KeyStatus returns redacted key-envelope metadata.
+func (c *Client) KeyStatus(ctx context.Context) (KeyStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.KeyStatus(ctx, &vaulticdbv1.KeyStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return KeyStatus{}, err
+	}
+	return keyStatus(response), nil
+}
+
+// ExportKeyEnvelope returns the current wrapped-key envelope for repository mirroring.
+func (c *Client) ExportKeyEnvelope(ctx context.Context) ([]byte, uint64, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.ExportKeyEnvelope(ctx, &vaulticdbv1.KeyStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return nil, 0, err
+	}
+	return response.GetEnvelope(), response.GetGeneration(), nil
+}
+
+// CheckEncryption validates every raw metadata object header and DEK version.
+func (c *Client) CheckEncryption(ctx context.Context) (EncryptionAudit, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.CheckEncryption(ctx, &vaulticdbv1.KeyStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return EncryptionAudit{}, err
+	}
+	return EncryptionAudit{
+		Enabled:            response.GetEnabled(),
+		Objects:            response.GetObjects(),
+		InvalidObjects:     response.GetInvalidObjects(),
+		PlaintextObjects:   response.GetPlaintextObjects(),
+		OldVersionObjects:  response.GetOldVersionObjects(),
+		EnvelopeGeneration: response.GetEnvelopeGeneration(),
+		ActiveDEKVersion:   response.GetActiveDekVersion(),
+		Algorithm:          response.GetAlgorithm(),
+	}, nil
+}
+
+// AddLocalKeySlot adds an independently wrapped Argon2id slot.
+func (c *Client) AddLocalKeySlot(ctx context.Context, slotID string, passphrase []byte, priority uint32, recovery bool) (KeyStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.AddLocalKeySlot(ctx, &vaulticdbv1.AddLocalKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Passphrase: passphrase, Priority: priority, Recovery: recovery})
+	if err != nil {
+		return KeyStatus{}, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata key slot added", Fields: map[string]any{"slot_id": slotID, "provider": "local-argon2id", "envelope_generation": response.GetEnvelopeGeneration()}})
+	return keyStatus(response), nil
+}
+
+// AddCloudKeySlot wraps the metadata DEK using a cloud KMS provider.
+func (c *Client) AddCloudKeySlot(ctx context.Context, slotID, provider, keyReference string, bearerToken []byte, priority uint32) (KeyStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.AddCloudKeySlot(ctx, &vaulticdbv1.AddCloudKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Provider: provider, KeyReference: keyReference, BearerToken: bearerToken, Priority: priority})
+	if err != nil {
+		return KeyStatus{}, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata cloud key slot added", Fields: map[string]any{"slot_id": slotID, "provider": provider, "key_reference": keyReference, "envelope_generation": response.GetEnvelopeGeneration()}})
+	return keyStatus(response), nil
+}
+
+// RemoveKeySlot removes a wrapping slot while retaining at least one slot.
+func (c *Client) RemoveKeySlot(ctx context.Context, slotID string) (KeyStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RemoveKeySlot(ctx, &vaulticdbv1.RemoveKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID})
+	if err != nil {
+		return KeyStatus{}, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata key slot removed", Fields: map[string]any{"slot_id": slotID, "envelope_generation": response.GetEnvelopeGeneration()}})
+	return keyStatus(response), nil
+}
+
+// RotateLocalKeySlot rewraps the unchanged DEK under a new passphrase-derived KEK.
+func (c *Client) RotateLocalKeySlot(ctx context.Context, slotID string, passphrase []byte) (KeyStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RotateLocalKeySlot(ctx, &vaulticdbv1.RotateLocalKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Passphrase: passphrase})
+	if err != nil {
+		return KeyStatus{}, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "metadata KEK rotated", Fields: map[string]any{"slot_id": slotID, "envelope_generation": response.GetEnvelopeGeneration()}})
+	return keyStatus(response), nil
+}
+
+// RotateDEK publishes a new metadata DEK version and switches new writes to it.
+func (c *Client) RotateDEK(ctx context.Context) (KeyStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RotateDek(ctx, &vaulticdbv1.RotateDekRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return KeyStatus{}, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata DEK rotated", Fields: map[string]any{"dek_version": response.GetActiveDekVersion(), "envelope_generation": response.GetEnvelopeGeneration()}})
+	return keyStatus(response), nil
+}
+
+// RewriteDEK rewrites at most maxObjects encrypted objects under the active DEK.
+func (c *Client) RewriteDEK(ctx context.Context, maxObjects uint32) (DEKRewriteProgress, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RewriteDek(ctx, &vaulticdbv1.RewriteDekRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), MaxObjects: maxObjects})
+	if err != nil {
+		return DEKRewriteProgress{}, err
+	}
+	return DEKRewriteProgress{Rewritten: response.GetRewritten(), Remaining: response.GetRemaining()}, nil
+}
+
+// EscrowMasterKey wraps the in-DB repository master key with a cloud provider.
+func (c *Client) EscrowMasterKey(ctx context.Context, escrowID, provider, keyReference string, bearerToken []byte) ([]byte, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.EscrowMasterKey(ctx, &vaulticdbv1.EscrowMasterKeyRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), EscrowId: escrowID, Provider: provider, KeyReference: keyReference, BearerToken: bearerToken})
+	if err != nil {
+		return nil, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "repository master key escrowed", Fields: map[string]any{"escrow_id": escrowID, "provider": provider, "key_reference": keyReference}})
+	return response.GetRecord(), nil
+}
+
+// RecoverEscrow unwraps a standalone escrow record without metadata DB access.
+func (c *Client) RecoverEscrow(ctx context.Context, record, bearerToken []byte) ([]byte, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RecoverEscrow(ctx, &vaulticdbv1.RecoverEscrowRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Record: record, BearerToken: bearerToken})
+	if err != nil {
+		return nil, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "repository master key recovered from escrow", Fields: map[string]any{"repository_id": c.options.RepositoryID}})
+	return response.GetMasterKey(), nil
+}
+
+func keyStatus(response *vaulticdbv1.KeyStatusResponse) KeyStatus {
+	result := KeyStatus{EnvelopeGeneration: response.GetEnvelopeGeneration(), ActiveDEKVersion: response.GetActiveDekVersion(), Slots: make([]KeySlotInfo, len(response.GetSlots()))}
+	for index, slot := range response.GetSlots() {
+		result.Slots[index] = KeySlotInfo{ID: slot.GetId(), Provider: slot.GetProvider(), Priority: slot.GetPriority(), Recovery: slot.GetRecovery(), KeyReference: slot.GetKeyReference(), DEKVersion: slot.GetDekVersion()}
+	}
+	return result
+}
 
 // Get reads one binary record, optionally through a transaction.
 func (c *Client) Get(ctx context.Context, key []byte, transactionID string) ([]byte, bool, error) {
@@ -440,6 +754,7 @@ func (c *Client) Get(ctx context.Context, key []byte, transactionID string) ([]b
 		Context: requestContext(ctx), TransactionId: transactionID, Key: key,
 	})
 	if err != nil {
+		c.auditRPCError(ctx, "get", err)
 		return nil, false, err
 	}
 	if !bytes.Equal(response.GetKey(), key) {
@@ -463,6 +778,7 @@ func (c *Client) MultiGet(ctx context.Context, keys [][]byte, transactionID stri
 	}
 	response, err := c.rpc.MultiGet(ctx, request)
 	if err != nil {
+		c.auditRPCError(ctx, "multi_get", err)
 		return nil, nil, err
 	}
 	if len(response.GetResults()) != len(keys) {
@@ -493,6 +809,7 @@ func (c *Client) ScanPage(ctx context.Context, prefix, afterKey []byte, pageSize
 		Prefix: prefix, AfterKey: afterKey, PageSize: pageSize,
 	})
 	if err != nil {
+		c.auditRPCError(ctx, "scan", err)
 		return nil, false, err
 	}
 	entries := make([]KeyValue, len(response.GetEntries()))
@@ -527,6 +844,7 @@ func (c *Client) WriteBatch(ctx context.Context, puts []Mutation, deletes [][]by
 	}
 	response, err := c.rpc.WriteBatch(ctx, request)
 	if err != nil {
+		c.auditRPCError(ctx, "write_batch", err)
 		return false, err
 	}
 	return response.GetDurable(), nil
@@ -551,6 +869,7 @@ func (c *Client) Begin(ctx context.Context) (*Transaction, error) {
 	defer cancel()
 	response, err := c.rpc.Begin(ctx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
 	if err != nil {
+		c.auditRPCError(ctx, "begin", err)
 		return nil, err
 	}
 	if response.GetTransactionId() == "" {
@@ -589,6 +908,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 		Context: requestContext(ctx), TransactionId: t.id,
 	})
 	if err != nil {
+		t.client.auditRPCError(ctx, "commit", err)
 		switch status.Code(err) {
 		case codes.Aborted, codes.NotFound, codes.InvalidArgument, codes.FailedPrecondition:
 		default:
@@ -620,12 +940,20 @@ func (t *Transaction) Rollback(ctx context.Context) error {
 		Context: requestContext(ctx), TransactionId: t.id,
 	})
 	if err != nil {
+		t.client.auditRPCError(ctx, "rollback", err)
 		if previous == transactionCommitUncertain && status.Code(err) == codes.NotFound {
 			return err
 		}
 		t.state.CompareAndSwap(transactionClosed, previous)
 	}
 	return err
+}
+
+func (c *Client) auditRPCError(ctx context.Context, operation string, err error) {
+	if status.Code(err) != codes.DataLoss {
+		return
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "vaulticdb", Message: "encrypted metadata authentication failed", Fields: map[string]any{"repository_id": c.options.RepositoryID, "operation": operation}})
 }
 
 // Close closes the RPC connection and shuts down only a daemon started by this client.

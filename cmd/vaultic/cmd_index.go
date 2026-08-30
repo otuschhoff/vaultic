@@ -21,17 +21,24 @@ import (
 )
 
 type indexDaemonOptions struct {
-	Socket       string
-	TCPAddress   string
-	TCPAllowlist []string
-	AuthToken    string
-	DaemonPath   string
-	DataDir      string
-	ObjectStore  string
-	S3Bucket     string
-	S3Prefix     string
-	Start        bool
-	Persistent   bool
+	Socket         string
+	TCPAddress     string
+	TCPAllowlist   []string
+	AuthToken      string
+	DaemonPath     string
+	DataDir        string
+	ObjectStore    string
+	S3Bucket       string
+	S3Prefix       string
+	EncryptionMode string
+	PassphraseFile string
+	AzureTokenFile string
+	GCPTokenFile   string
+	VaultTokenFile string
+	PKCS11PINFile  string
+	RecoveryUnlock bool
+	Start          bool
+	Persistent     bool
 }
 
 var errIndexDifferences = errors.New("metadata indexes differ")
@@ -62,6 +69,13 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.ObjectStore, "daemon-object-store", "", "vaulticdb object store: local, memory, or s3")
 	flags.StringVar(&options.S3Bucket, "daemon-s3-bucket", "", "vaulticdb S3 bucket")
 	flags.StringVar(&options.S3Prefix, "daemon-s3-prefix", "", "vaulticdb S3 key prefix")
+	flags.StringVar(&options.EncryptionMode, "metadata-encryption", "", "metadata encryption mode: off, required, or initialize")
+	flags.StringVar(&options.PassphraseFile, "metadata-recovery-passphrase-file", "", "file containing the metadata recovery passphrase")
+	flags.StringVar(&options.AzureTokenFile, "metadata-azure-token-file", "", "protected Azure Key Vault bearer-token file")
+	flags.StringVar(&options.GCPTokenFile, "metadata-gcp-token-file", "", "protected Google Cloud KMS bearer-token file")
+	flags.StringVar(&options.VaultTokenFile, "metadata-vault-token-file", "", "protected Vault Transit token file")
+	flags.StringVar(&options.PKCS11PINFile, "metadata-pkcs11-pin-file", "", "protected PKCS#11 user PIN file")
+	flags.BoolVar(&options.RecoveryUnlock, "metadata-recovery-unlock", false, "acknowledge use of a recovery slot while cloud slots exist")
 }
 
 func (options indexDaemonOptions) connect(ctx context.Context, repositoryID string) (*daemon.Client, error) {
@@ -95,6 +109,9 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		Socket: options.Socket, TCPAddress: options.TCPAddress, TCPAllowlist: options.TCPAllowlist,
 		AuthToken: options.AuthToken, RepositoryID: repositoryID, DataDir: options.DataDir,
 		ObjectStore: options.ObjectStore, S3Bucket: options.S3Bucket, S3Prefix: options.S3Prefix,
+		EncryptionMode: options.EncryptionMode, PassphraseFile: options.PassphraseFile,
+		AzureTokenFile: options.AzureTokenFile, GCPTokenFile: options.GCPTokenFile, VaultTokenFile: options.VaultTokenFile, PKCS11PINFile: options.PKCS11PINFile,
+		RecoveryUnlock: options.RecoveryUnlock,
 	}
 	if options.Start {
 		config.DaemonPath = options.DaemonPath
@@ -130,6 +147,8 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexUserStatsCommand(globalOptions),
 		newIndexGDPRCommand(globalOptions),
 		newIndexVerifyStorageCommand(globalOptions),
+		newIndexKeysCommand(globalOptions),
+		newIndexEncryptCommand(globalOptions),
 	)
 	return command
 }

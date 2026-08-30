@@ -23,6 +23,8 @@ import (
 	"github.com/otuschhoff/vaultic/internal/configfile"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
+	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/options"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
@@ -67,27 +69,42 @@ type Options struct {
 	AzureKeyVaultTimeout       time.Duration
 	KeyHint                    string
 	// MasterKey* open the repository directly with a master key (no password).
-	MasterKey          string
-	MasterKeyFile      string
-	MasterKeyCommand   string
-	Quiet              bool
-	Verbose            int
-	LogFile            string
-	LogLevel           string
-	NoProgress         bool
-	ProgressInterval   time.Duration
-	NoLock             bool
-	RetryLock          time.Duration
-	JSON               bool
-	CacheDir           string
-	NoCache            bool
-	CleanupCache       bool
-	Compression        repository.CompressionMode
-	PackSize           uint
-	TreePackSize       uint
-	DataPackSize       uint
-	NoExtraVerify      bool
-	InsecureNoPassword bool
+	MasterKey                 string
+	MasterKeyFile             string
+	MasterKeyCommand          string
+	MetadataKeyInDB           bool
+	MetadataDaemonSocket      string
+	MetadataDaemonPath        string
+	MetadataDaemonDataDir     string
+	MetadataDaemonObjectStore string
+	MetadataDaemonS3Bucket    string
+	MetadataDaemonS3Prefix    string
+	MetadataEncryptionMode    string
+	MetadataPassphraseFile    string
+	MetadataAzureTokenFile    string
+	MetadataGCPTokenFile      string
+	MetadataVaultTokenFile    string
+	MetadataPKCS11PINFile     string
+	MetadataRecoveryUnlock    bool
+	MetadataLossRecovery      bool
+	Quiet                     bool
+	Verbose                   int
+	LogFile                   string
+	LogLevel                  string
+	NoProgress                bool
+	ProgressInterval          time.Duration
+	NoLock                    bool
+	RetryLock                 time.Duration
+	JSON                      bool
+	CacheDir                  string
+	NoCache                   bool
+	CleanupCache              bool
+	Compression               repository.CompressionMode
+	PackSize                  uint
+	TreePackSize              uint
+	DataPackSize              uint
+	NoExtraVerify             bool
+	InsecureNoPassword        bool
 
 	// RepoHot is the location of the hot part of a hot/cold repository
 	// (empty for a normal repository).
@@ -155,6 +172,21 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.MasterKey, "key", "", "master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)")
 	f.StringVar(&opts.MasterKeyFile, "key-file", "", "`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)")
 	f.StringVar(&opts.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
+	f.BoolVar(&opts.MetadataKeyInDB, "metadata-key-in-db", false, "unlock the repository master key from encrypted SlateDB metadata")
+	f.StringVar(&opts.MetadataDaemonSocket, "metadata-daemon-socket", "", "private vaulticdb Unix socket for key-in-DB unlock")
+	f.StringVar(&opts.MetadataDaemonPath, "metadata-daemon-path", "", "start this vaulticdb binary for key-in-DB unlock")
+	f.StringVar(&opts.MetadataDaemonDataDir, "metadata-daemon-data-dir", "", "local vaulticdb data directory for key-in-DB unlock")
+	f.StringVar(&opts.MetadataDaemonObjectStore, "metadata-daemon-object-store", "", "vaulticdb object store for key-in-DB unlock")
+	f.StringVar(&opts.MetadataDaemonS3Bucket, "metadata-daemon-s3-bucket", "", "vaulticdb S3 bucket for key-in-DB unlock")
+	f.StringVar(&opts.MetadataDaemonS3Prefix, "metadata-daemon-s3-prefix", "", "vaulticdb S3 prefix for key-in-DB unlock")
+	f.StringVar(&opts.MetadataEncryptionMode, "metadata-encryption-mode", "", "metadata encryption mode for key-in-DB unlock")
+	f.StringVar(&opts.MetadataPassphraseFile, "metadata-passphrase-file", "", "protected metadata recovery passphrase file")
+	f.StringVar(&opts.MetadataAzureTokenFile, "metadata-key-db-azure-token-file", "", "protected Azure KMS token file for key-in-DB unlock")
+	f.StringVar(&opts.MetadataGCPTokenFile, "metadata-key-db-gcp-token-file", "", "protected Google KMS token file for key-in-DB unlock")
+	f.StringVar(&opts.MetadataVaultTokenFile, "metadata-key-db-vault-token-file", "", "protected Vault Transit token file for key-in-DB unlock")
+	f.StringVar(&opts.MetadataPKCS11PINFile, "metadata-key-db-pkcs11-pin-file", "", "protected PKCS#11 PIN file for key-in-DB unlock")
+	f.BoolVar(&opts.MetadataRecoveryUnlock, "metadata-recovery-ack", false, "acknowledge metadata recovery-slot use")
+	f.BoolVar(&opts.MetadataLossRecovery, "metadata-loss-recovery", false, "use the legacy JSON index after total SlateDB metadata loss (requires a direct master key)")
 
 	f.StringVar(&opts.RepoHot, "repo-hot", "", "hot part of a hot/cold `repository` (cold storage; default: $VAULTIC_REPO_HOT)")
 	f.StringVar(&opts.WarmUpCommand, "warm-up-command", "", "warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)")
@@ -217,6 +249,21 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	opts.MasterKey = env.Get("KEY")
 	opts.MasterKeyFile = env.Get("KEY_FILE")
 	opts.MasterKeyCommand = env.Get("KEY_COMMAND")
+	opts.MetadataKeyInDB = env.Get("METADATA_KEY_IN_DB") == "true"
+	opts.MetadataDaemonSocket = env.Get("METADATA_DAEMON_SOCKET")
+	opts.MetadataDaemonPath = env.Get("METADATA_DAEMON_PATH")
+	opts.MetadataDaemonDataDir = env.Get("METADATA_DAEMON_DATA_DIR")
+	opts.MetadataDaemonObjectStore = env.Get("METADATA_DAEMON_OBJECT_STORE")
+	opts.MetadataDaemonS3Bucket = env.Get("METADATA_DAEMON_S3_BUCKET")
+	opts.MetadataDaemonS3Prefix = env.Get("METADATA_DAEMON_S3_PREFIX")
+	opts.MetadataEncryptionMode = env.Get("METADATA_ENCRYPTION_MODE")
+	opts.MetadataPassphraseFile = env.Get("METADATA_PASSPHRASE_FILE")
+	opts.MetadataAzureTokenFile = env.Get("METADATA_AZURE_TOKEN_FILE")
+	opts.MetadataGCPTokenFile = env.Get("METADATA_GCP_TOKEN_FILE")
+	opts.MetadataVaultTokenFile = env.Get("METADATA_VAULT_TOKEN_FILE")
+	opts.MetadataPKCS11PINFile = env.Get("METADATA_PKCS11_PIN_FILE")
+	opts.MetadataRecoveryUnlock = env.Get("METADATA_RECOVERY_ACK") == "true"
+	opts.MetadataLossRecovery = env.Get("METADATA_LOSS_RECOVERY") == "true"
 	opts.RepoHot = env.Get("REPO_HOT")
 	opts.WarmUpCommand = env.Get("WARM_UP_COMMAND")
 	if v := env.Get("WARM_UP_BATCH"); v != "" {
@@ -508,8 +555,63 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if err != nil {
 		return nil, err
 	}
+	if gopts.MetadataLossRecovery {
+		if gopts.MetadataKeyInDB || (gopts.MasterKey == "" && gopts.MasterKeyFile == "" && gopts.MasterKeyCommand == "") {
+			return nil, errors.Fatal("metadata-loss recovery requires --key, --key-file, or --key-command and cannot use --metadata-key-in-db")
+		}
+		ctx = repository.WithMetadataLossRecovery(ctx)
+		_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "repository", Message: "legacy metadata-loss recovery selected"})
+	}
 
-	err = decryptRepository(ctx, s, &gopts, printer)
+	if gopts.MetadataKeyInDB {
+		var resolution metadataindex.Resolution
+		resolution, err = metadataindex.Resolve(ctx, be, "")
+		if err != nil || resolution.Mode != metadataindex.ModeSlateDB || resolution.Manifest == nil {
+			return nil, errors.Fatalf("discover repository identity for key-in-DB unlock: %v", err)
+		}
+		options := daemon.Options{
+			Socket:           gopts.MetadataDaemonSocket,
+			RepositoryID:     resolution.Manifest.RepositoryID,
+			DaemonPath:       gopts.MetadataDaemonPath,
+			PersistentDaemon: true,
+			DataDir:          gopts.MetadataDaemonDataDir,
+			ObjectStore:      gopts.MetadataDaemonObjectStore,
+			S3Bucket:         gopts.MetadataDaemonS3Bucket,
+			S3Prefix:         gopts.MetadataDaemonS3Prefix,
+			EncryptionMode:   gopts.MetadataEncryptionMode,
+			PassphraseFile:   gopts.MetadataPassphraseFile,
+			AzureTokenFile:   gopts.MetadataAzureTokenFile,
+			GCPTokenFile:     gopts.MetadataGCPTokenFile,
+			VaultTokenFile:   gopts.MetadataVaultTokenFile,
+			PKCS11PINFile:    gopts.MetadataPKCS11PINFile,
+			RecoveryUnlock:   gopts.MetadataRecoveryUnlock,
+		}
+		ctx = repository.WithDaemonOptions(ctx, options)
+		var client *daemon.Client
+		if options.DaemonPath != "" {
+			client, err = daemon.Ensure(ctx, options)
+		} else {
+			client, err = daemon.Connect(ctx, options)
+		}
+		if err != nil {
+			return nil, errors.Fatalf("unlock encrypted metadata for repository: %v", err)
+		}
+		masterKey, found, keyErr := client.GetMasterKey(ctx)
+		_ = client.Close(ctx)
+		if keyErr != nil {
+			return nil, errors.Fatalf("read repository master key from encrypted metadata: %v", keyErr)
+		}
+		if !found {
+			return nil, errors.Fatalf("encrypted metadata does not contain a repository master key")
+		}
+		err = s.UseMasterKey(ctx, string(masterKey))
+		clear(masterKey)
+		if err == nil && s.Config().ID != resolution.Manifest.RepositoryID {
+			err = errors.Fatalf("key-in-DB repository identity mismatch")
+		}
+	} else {
+		err = decryptRepository(ctx, s, &gopts, printer)
+	}
 	if err != nil {
 		return nil, err
 	}

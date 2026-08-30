@@ -71,9 +71,9 @@ The compatibility is one-way, and deliberately so. A Phase 9 pack record
 carries fields an older decoder does not know, and that decoder requires a
 record to end exactly where it expects, so it rejects the record as having
 trailing data. Downgrading to an older binary against a catalog that Phase 9
-has written is therefore not supported. This matches the rollback path in
-[Phase 18](05-analytics-compliance-scale-phases-16-19.md), which resumes from the legacy JSON indexes rather than from an
-older SlateDB build.
+has written is therefore not supported. This matches the
+[rollback plan](08-rollout-and-rollback.md), which resumes from the legacy
+JSON indexes rather than from an older SlateDB build.
 
 Two fields were added beyond the listed set. `usage_known` distinguishes "usage
 has never been computed" from "every byte is unreachable", which the listed

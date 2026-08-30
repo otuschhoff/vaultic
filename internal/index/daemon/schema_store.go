@@ -22,6 +22,11 @@ const revisionAllocationAttempts = 128
 // the bounded daemon client.
 type SchemaStore struct{ client *Client }
 
+// CheckEncryption validates the underlying metadata objects without exposing keys.
+func (s *SchemaStore) CheckEncryption(ctx context.Context) (EncryptionAudit, error) {
+	return s.client.CheckEncryption(ctx)
+}
+
 type LegacyPackImport struct {
 	SourceIndex schema.ID
 	PackID      schema.ID

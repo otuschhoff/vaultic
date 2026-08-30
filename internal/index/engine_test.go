@@ -34,6 +34,16 @@ func manifestPayload(t *testing.T, manifest Manifest) []byte {
 	return payload
 }
 
+func TestRecoveryLegacyEngineRejectsMutations(t *testing.T) {
+	engine := NewRecoveryLegacyEngine(legacyindex.NewMasterIndex())
+	if engine.AddPending(vaultic.BlobHandle{}, 1) {
+		t.Fatal("recovery engine accepted a pending blob")
+	}
+	if err := engine.Flush(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("recovery engine flush error = %v", err)
+	}
+}
+
 type collectingLegacySink struct {
 	blobs  []vaultic.PackBlob
 	closed bool

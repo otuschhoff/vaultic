@@ -71,11 +71,18 @@ type snapshotAuthority interface {
 }
 
 type daemonOptionsContextKey struct{}
+type metadataLossRecoveryContextKey struct{}
 
 // WithDaemonOptions configures metadata daemon attachment for operator
 // workflows that must open an already-authoritative repository.
 func WithDaemonOptions(ctx context.Context, options daemon.Options) context.Context {
 	return context.WithValue(ctx, daemonOptionsContextKey{}, options)
+}
+
+// WithMetadataLossRecovery explicitly selects the legacy JSON index after
+// total loss of authoritative SlateDB metadata.
+func WithMetadataLossRecovery(ctx context.Context) context.Context {
+	return context.WithValue(ctx, metadataLossRecoveryContextKey{}, true)
 }
 
 // internalRepository allows using SaveUnpacked and RemoveUnpacked with all FileTypes
@@ -275,6 +282,11 @@ func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.En
 		return nil, err
 	}
 	if resolution.Mode == enginepkg.ModeSlateDB {
+		if recovery, _ := ctx.Value(metadataLossRecoveryContextKey{}).(bool); recovery {
+			engine := enginepkg.NewRecoveryLegacyEngine(r.idx)
+			r.SetEngine(engine)
+			return engine, nil
+		}
 		if !feature.Flag.Enabled(feature.SlateDBAuthoritative) {
 			return nil, fmt.Errorf("repository %s requires the slatedb-authoritative feature: %w", r.cfg.ID, enginepkg.ErrUnavailable)
 		}

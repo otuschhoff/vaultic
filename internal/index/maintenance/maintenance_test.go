@@ -19,6 +19,42 @@ type memoryStore struct {
 	batchWrites int
 }
 
+type auditedMemoryStore struct {
+	*memoryStore
+	audit daemon.EncryptionAudit
+}
+
+func (store *auditedMemoryStore) CheckEncryption(context.Context) (daemon.EncryptionAudit, error) {
+	return store.audit, nil
+}
+
+func TestCheckReportsEncryptionIntegrityAndRewriteDebt(t *testing.T) {
+	store, _, _ := newMemoryStore(t, schema.PackPublished)
+	audited := &auditedMemoryStore{memoryStore: store, audit: daemon.EncryptionAudit{
+		Enabled:            true,
+		Objects:            12,
+		PlaintextObjects:   2,
+		InvalidObjects:     1,
+		OldVersionObjects:  3,
+		EnvelopeGeneration: 4,
+		ActiveDEKVersion:   2,
+		Algorithm:          "AES-256-GCM",
+	}}
+	result, err := CheckWithOptions(context.Background(), nil, audited, CheckOptions{SlateDBOnly: true, MaxFindings: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.EncryptionEnabled || result.EncryptedObjects != 10 || result.EnvelopeGeneration != 4 || result.ActiveDEKVersion != 2 || result.Clean() || !result.HasWarnings() {
+		t.Fatalf("encryption audit was not reflected in check result: %+v", result)
+	}
+	wantKinds := []string{"metadata_object_plaintext", "metadata_encryption_invalid", "metadata_dek_rewrite_pending"}
+	for index, kind := range wantKinds {
+		if len(result.Findings) <= index || result.Findings[index].Kind != kind {
+			t.Fatalf("missing encryption finding %q: %+v", kind, result.Findings)
+		}
+	}
+}
+
 func TestCheckVerificationStateDetectsProjectionDrift(t *testing.T) {
 	ctx := context.Background()
 	store, packID, _ := newMemoryStore(t, schema.PackPublished)

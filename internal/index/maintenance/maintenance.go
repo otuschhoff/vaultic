@@ -28,6 +28,10 @@ type Store interface {
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 }
 
+type encryptionAuditor interface {
+	CheckEncryption(context.Context) (daemon.EncryptionAudit, error)
+}
+
 type LegacySource interface {
 	vaultic.ListerLoaderUnpacked
 }
@@ -57,6 +61,14 @@ type ExportResult struct {
 }
 
 type CheckResult struct {
+	EncryptionEnabled         bool   `json:"encryption_enabled"`
+	EncryptionAlgorithm       string `json:"encryption_algorithm,omitempty"`
+	EnvelopeGeneration        uint64 `json:"envelope_generation,omitempty"`
+	ActiveDEKVersion          uint32 `json:"active_dek_version,omitempty"`
+	EncryptedObjects          uint64 `json:"encrypted_objects,omitempty"`
+	PlaintextObjects          uint64 `json:"plaintext_objects,omitempty"`
+	InvalidEncryptedObjects   uint64 `json:"invalid_encrypted_objects,omitempty"`
+	OldDEKObjects             uint64 `json:"old_dek_objects,omitempty"`
 	LegacyIndexes             uint64 `json:"legacy_indexes"`
 	LegacySnapshots           uint64 `json:"legacy_snapshots"`
 	SlateDBSnapshots          uint64 `json:"slatedb_snapshots"`
@@ -103,7 +115,7 @@ type CheckResult struct {
 }
 
 func (result CheckResult) Clean() bool {
-	return result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0 && result.VerificationStateMismatch == 0 && result.AnalyticsMismatch == 0
+	return result.PlaintextObjects == 0 && result.InvalidEncryptedObjects == 0 && result.MissingInSlateDB == 0 && result.MissingInLegacy == 0 && result.MissingPacks == 0 && result.InvalidPacks == 0 && result.AggregateMismatch == 0 && result.ReverseEdgeMismatch == 0 && result.SnapshotMismatch == 0 && result.SnapshotCommitMismatch == 0 && result.PathVersionMismatch == 0 && result.FailedExports == 0 && result.MissingPlacementRecords == 0 && result.BackendPackMismatch == 0 && result.DerivedTierMismatch == 0 && result.PacksBelowDurability == 0 && result.VerificationStateMismatch == 0 && result.AnalyticsMismatch == 0
 }
 
 func (result CheckResult) HasWarnings() bool { return result.Warnings != 0 }
@@ -264,6 +276,30 @@ func CheckWithOptions(ctx context.Context, source LegacySource, store Store, opt
 	}
 	if options.LegacyOnly {
 		return result, nil
+	}
+	if auditor, ok := store.(encryptionAuditor); ok {
+		audit, auditErr := auditor.CheckEncryption(ctx)
+		if auditErr != nil {
+			return result, fmt.Errorf("check metadata encryption: %w", auditErr)
+		}
+		result.EncryptionEnabled = audit.Enabled
+		result.EncryptionAlgorithm = audit.Algorithm
+		result.EnvelopeGeneration = audit.EnvelopeGeneration
+		result.ActiveDEKVersion = audit.ActiveDEKVersion
+		result.EncryptedObjects = audit.Objects - audit.PlaintextObjects
+		result.PlaintextObjects = audit.PlaintextObjects
+		result.InvalidEncryptedObjects = audit.InvalidObjects
+		result.OldDEKObjects = audit.OldVersionObjects
+		if audit.Enabled && audit.PlaintextObjects != 0 {
+			addFinding(&result, options.MaxFindings, Finding{Kind: "metadata_object_plaintext", Key: "*", Want: "0", Got: fmt.Sprint(audit.PlaintextObjects)})
+		}
+		if audit.Enabled && audit.InvalidObjects != 0 {
+			addFinding(&result, options.MaxFindings, Finding{Kind: "metadata_encryption_invalid", Key: "*", Want: "0", Got: fmt.Sprint(audit.InvalidObjects)})
+		}
+		if audit.Enabled && audit.OldVersionObjects != 0 {
+			result.Warnings++
+			addFinding(&result, options.MaxFindings, Finding{Kind: "metadata_dek_rewrite_pending", Key: "*", Want: "0", Got: fmt.Sprint(audit.OldVersionObjects)})
+		}
 	}
 	slatedb, packStats, err := loadSlateDBLocations(ctx, store)
 	if err != nil {

@@ -37,11 +37,18 @@ pub mod proto {
 
 use proto::{
     vaultic_db_server::{VaulticDb, VaulticDbServer},
-    BeginResponse, CapabilitiesRequest, CapabilitiesResponse, CommitResponse, Empty, GetRequest,
-    GetResponse, HealthRequest, HealthResponse, MultiGetRequest, MultiGetResponse, RequestContext,
-    ScanRequest, ScanResponse, TransactionRequest, WriteBatchRequest, WriteBatchResponse,
+    AddCloudKeySlotRequest, AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest,
+    CapabilitiesResponse, CommitResponse, Empty, EncryptionAuditResponse, EscrowMasterKeyRequest,
+    EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, GetRequest, GetResponse, HealthRequest,
+    HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest,
+    MasterKeyResponse, MultiGetRequest, MultiGetResponse, RecoverEscrowRequest,
+    RemoveKeySlotRequest, RequestContext, RewriteDekRequest, RewriteDekResponse, RotateDekRequest,
+    RotateLocalKeySlotRequest, ScanRequest, ScanResponse, StoreMasterKeyRequest,
+    TransactionRequest, WriteBatchRequest, WriteBatchResponse,
 };
+use zeroize::Zeroizing;
 
+mod encryption;
 mod storage;
 
 use storage::{repeated_message_encoded_len, Storage};
@@ -72,6 +79,265 @@ struct Service {
 
 #[tonic::async_trait]
 impl VaulticDb for Service {
+    async fn check_encryption(
+        &self,
+        request: Request<KeyStatusRequest>,
+    ) -> Result<Response<EncryptionAuditResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        if !self.storage.encryption_status().enabled {
+            return Ok(Response::new(EncryptionAuditResponse {
+                enabled: false,
+                ..Default::default()
+            }));
+        }
+        let manager = self.storage.key_manager()?;
+        let (envelope_generation, active_dek_version, _) = manager.status().await;
+        let audit = manager
+            .audit_objects()
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(EncryptionAuditResponse {
+            objects: audit.objects,
+            invalid_objects: audit.invalid_objects,
+            plaintext_objects: audit.plaintext_objects,
+            old_version_objects: audit.old_version_objects,
+            envelope_generation,
+            active_dek_version,
+            algorithm: "AES-256-GCM".to_string(),
+            enabled: true,
+        }))
+    }
+
+    async fn export_key_envelope(
+        &self,
+        request: Request<KeyStatusRequest>,
+    ) -> Result<Response<ExportKeyEnvelopeResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let manager = self.storage.key_manager()?;
+        let (generation, _, _) = manager.status().await;
+        Ok(Response::new(ExportKeyEnvelopeResponse {
+            envelope: manager
+                .export_envelope()
+                .await
+                .map_err(key_management_error)?,
+            generation,
+        }))
+    }
+
+    async fn escrow_master_key(
+        &self,
+        request: Request<EscrowMasterKeyRequest>,
+    ) -> Result<Response<EscrowMasterKeyResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let request = request.into_inner();
+        let token = cloud_token(request.bearer_token)?;
+        let provider = encryption::envelope::providers::for_management(&request.provider, token)
+            .await
+            .map_err(key_management_error)?;
+        let master_key =
+            Zeroizing::new(self.storage.get_master_key().await?.ok_or_else(|| {
+                Status::failed_precondition("repository master key is not stored")
+            })?);
+        let record = encryption::envelope::create_escrow_record(
+            &request.repository_id,
+            &request.escrow_id,
+            &request.key_reference,
+            &master_key,
+            provider.as_ref(),
+        )
+        .await
+        .map_err(key_management_error)?;
+        Ok(Response::new(EscrowMasterKeyResponse {
+            record: serde_json::to_vec_pretty(&record)
+                .map_err(|error| key_management_error(error.into()))?,
+        }))
+    }
+
+    async fn recover_escrow(
+        &self,
+        request: Request<RecoverEscrowRequest>,
+    ) -> Result<Response<MasterKeyResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let request = request.into_inner();
+        let record: encryption::envelope::EscrowRecord = serde_json::from_slice(&request.record)
+            .map_err(|error| Status::invalid_argument(format!("decode escrow record: {error}")))?;
+        let token = cloud_token(request.bearer_token)?;
+        let provider = encryption::envelope::providers::for_management(&record.provider, token)
+            .await
+            .map_err(key_management_error)?;
+        let master_key = encryption::envelope::recover_escrow_record(
+            &record,
+            &request.repository_id,
+            provider.as_ref(),
+        )
+        .await
+        .map_err(key_management_error)?;
+        Ok(Response::new(MasterKeyResponse {
+            found: true,
+            master_key: master_key.to_vec(),
+        }))
+    }
+
+    async fn rewrite_dek(
+        &self,
+        request: Request<RewriteDekRequest>,
+    ) -> Result<Response<RewriteDekResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let (rewritten, remaining) = self
+            .storage
+            .key_manager()?
+            .rewrite_old_deks(request.get_ref().max_objects as usize)
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(RewriteDekResponse {
+            rewritten: rewritten as u64,
+            remaining: remaining as u64,
+        }))
+    }
+
+    async fn rotate_dek(
+        &self,
+        request: Request<RotateDekRequest>,
+    ) -> Result<Response<KeyStatusResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        self.storage
+            .key_manager()?
+            .rotate_dek()
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(self.key_status_response().await?))
+    }
+
+    async fn add_cloud_key_slot(
+        &self,
+        request: Request<AddCloudKeySlotRequest>,
+    ) -> Result<Response<KeyStatusResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let request = request.into_inner();
+        let token = Zeroizing::new(request.bearer_token);
+        let token =
+            if token.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8(token.to_vec()).map_err(|_| {
+                    Status::invalid_argument("cloud bearer token is not valid UTF-8")
+                })?)
+            };
+        let provider = encryption::envelope::providers::for_management(&request.provider, token)
+            .await
+            .map_err(key_management_error)?;
+        self.storage
+            .key_manager()?
+            .add_cloud_slot(
+                &request.slot_id,
+                &request.key_reference,
+                request.priority,
+                provider.as_ref(),
+            )
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(self.key_status_response().await?))
+    }
+
+    async fn key_status(
+        &self,
+        request: Request<KeyStatusRequest>,
+    ) -> Result<Response<KeyStatusResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        Ok(Response::new(self.key_status_response().await?))
+    }
+
+    async fn add_local_key_slot(
+        &self,
+        request: Request<AddLocalKeySlotRequest>,
+    ) -> Result<Response<KeyStatusResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let request = request.into_inner();
+        let passphrase = Zeroizing::new(request.passphrase);
+        self.storage
+            .key_manager()?
+            .add_local_slot(
+                &request.slot_id,
+                &passphrase,
+                request.priority,
+                request.recovery,
+            )
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(self.key_status_response().await?))
+    }
+
+    async fn remove_key_slot(
+        &self,
+        request: Request<RemoveKeySlotRequest>,
+    ) -> Result<Response<KeyStatusResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let slot_id = request.into_inner().slot_id;
+        self.storage
+            .key_manager()?
+            .remove_slot(&slot_id)
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(self.key_status_response().await?))
+    }
+
+    async fn rotate_local_key_slot(
+        &self,
+        request: Request<RotateLocalKeySlotRequest>,
+    ) -> Result<Response<KeyStatusResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let request = request.into_inner();
+        let passphrase = Zeroizing::new(request.passphrase);
+        self.storage
+            .key_manager()?
+            .rotate_local_slot(&request.slot_id, &passphrase)
+            .await
+            .map_err(key_management_error)?;
+        Ok(Response::new(self.key_status_response().await?))
+    }
+
+    async fn get_master_key(
+        &self,
+        request: Request<MasterKeyRequest>,
+    ) -> Result<Response<MasterKeyResponse>, Status> {
+        check_request(
+            &self.state,
+            &request,
+            request.get_ref().repository_id.as_str(),
+        )?;
+        check_context(request.get_ref().context.as_ref())?;
+        if !self.state.unix_socket {
+            return Err(Status::failed_precondition(
+                "master-key-in-DB is available only over a private Unix socket",
+            ));
+        }
+        let value = self.storage.get_master_key().await?;
+        Ok(Response::new(MasterKeyResponse {
+            found: value.is_some(),
+            master_key: value.unwrap_or_default(),
+        }))
+    }
+
+    async fn store_master_key(
+        &self,
+        request: Request<StoreMasterKeyRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        check_request(
+            &self.state,
+            &request,
+            request.get_ref().repository_id.as_str(),
+        )?;
+        check_context(request.get_ref().context.as_ref())?;
+        if !self.state.unix_socket {
+            return Err(Status::failed_precondition(
+                "master-key-in-DB is available only over a private Unix socket",
+            ));
+        }
+        let master_key = Zeroizing::new(request.get_ref().master_key.clone());
+        self.storage.store_master_key(&master_key).await?;
+        Ok(Response::new(Empty { context: None }))
+    }
+
     async fn health(
         &self,
         request: Request<HealthRequest>,
@@ -102,6 +368,7 @@ impl VaulticDb for Service {
             request.get_ref().repository_id.as_str(),
         )?;
         check_context(request.get_ref().context.as_ref())?;
+        let encryption = self.storage.encryption_status();
         Ok(Response::new(CapabilitiesResponse {
             daemon_id: self.state.daemon_id.to_string(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -113,6 +380,12 @@ impl VaulticDb for Service {
             max_message_bytes: MAX_MESSAGE_BYTES,
             max_page_items: MAX_PAGE_ITEMS,
             max_concurrent_requests: MAX_CONCURRENT_REQUESTS as u32,
+            encryption_enabled: encryption.enabled,
+            encryption_algorithm: encryption.algorithm.to_owned(),
+            active_dek_version: encryption.active_dek_version,
+            envelope_generation: encryption.envelope_generation,
+            unlock_slot: encryption.unlock_slot.clone().unwrap_or_default(),
+            recovery_unlock: encryption.recovery_unlock,
         }))
     }
 
@@ -221,6 +494,56 @@ impl VaulticDb for Service {
             .await?;
         Ok(Response::new(Empty { context: None }))
     }
+}
+
+impl Service {
+    fn check_key_request<T>(
+        &self,
+        request: &Request<T>,
+        repository_id: &str,
+    ) -> Result<(), Status> {
+        check_request(&self.state, request, repository_id)?;
+        if !self.state.unix_socket {
+            return Err(Status::failed_precondition(
+                "key management is available only over a private Unix socket",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn key_status_response(&self) -> Result<KeyStatusResponse, Status> {
+        let (envelope_generation, active_dek_version, slots) =
+            self.storage.key_manager()?.status().await;
+        Ok(KeyStatusResponse {
+            envelope_generation,
+            active_dek_version,
+            slots: slots
+                .into_iter()
+                .map(|slot| KeySlotInfo {
+                    id: slot.id,
+                    provider: slot.provider,
+                    priority: slot.priority,
+                    recovery: slot.recovery,
+                    key_reference: slot.key_reference,
+                    dek_version: slot.dek_version,
+                })
+                .collect(),
+        })
+    }
+}
+
+fn key_management_error(error: anyhow::Error) -> Status {
+    Status::failed_precondition(error.to_string())
+}
+
+fn cloud_token(value: Vec<u8>) -> Result<Option<String>, Status> {
+    let value = Zeroizing::new(value);
+    if value.is_empty() {
+        return Ok(None);
+    }
+    String::from_utf8(value.to_vec())
+        .map(Some)
+        .map_err(|_| Status::invalid_argument("cloud bearer token is not valid UTF-8"))
 }
 
 fn check_storage_request<T>(
@@ -364,6 +687,7 @@ fn repository_key(repository_id: &str) -> String {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    disable_core_dumps();
     if env::var_os("VAULTICDB_NATIVE_SMOKE").is_some() {
         return native_smoke().await;
     }
@@ -461,6 +785,17 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn disable_core_dumps() {
+    #[cfg(unix)]
+    unsafe {
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
 }
 
 fn storage_service(

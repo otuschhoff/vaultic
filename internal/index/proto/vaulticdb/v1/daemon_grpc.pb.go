@@ -19,17 +19,30 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	VaulticDB_Health_FullMethodName       = "/vaulticdb.v1.VaulticDB/Health"
-	VaulticDB_Capabilities_FullMethodName = "/vaulticdb.v1.VaulticDB/Capabilities"
-	VaulticDB_Drain_FullMethodName        = "/vaulticdb.v1.VaulticDB/Drain"
-	VaulticDB_Shutdown_FullMethodName     = "/vaulticdb.v1.VaulticDB/Shutdown"
-	VaulticDB_Get_FullMethodName          = "/vaulticdb.v1.VaulticDB/Get"
-	VaulticDB_MultiGet_FullMethodName     = "/vaulticdb.v1.VaulticDB/MultiGet"
-	VaulticDB_Scan_FullMethodName         = "/vaulticdb.v1.VaulticDB/Scan"
-	VaulticDB_WriteBatch_FullMethodName   = "/vaulticdb.v1.VaulticDB/WriteBatch"
-	VaulticDB_Begin_FullMethodName        = "/vaulticdb.v1.VaulticDB/Begin"
-	VaulticDB_Commit_FullMethodName       = "/vaulticdb.v1.VaulticDB/Commit"
-	VaulticDB_Rollback_FullMethodName     = "/vaulticdb.v1.VaulticDB/Rollback"
+	VaulticDB_Health_FullMethodName             = "/vaulticdb.v1.VaulticDB/Health"
+	VaulticDB_Capabilities_FullMethodName       = "/vaulticdb.v1.VaulticDB/Capabilities"
+	VaulticDB_Drain_FullMethodName              = "/vaulticdb.v1.VaulticDB/Drain"
+	VaulticDB_Shutdown_FullMethodName           = "/vaulticdb.v1.VaulticDB/Shutdown"
+	VaulticDB_Get_FullMethodName                = "/vaulticdb.v1.VaulticDB/Get"
+	VaulticDB_MultiGet_FullMethodName           = "/vaulticdb.v1.VaulticDB/MultiGet"
+	VaulticDB_Scan_FullMethodName               = "/vaulticdb.v1.VaulticDB/Scan"
+	VaulticDB_WriteBatch_FullMethodName         = "/vaulticdb.v1.VaulticDB/WriteBatch"
+	VaulticDB_Begin_FullMethodName              = "/vaulticdb.v1.VaulticDB/Begin"
+	VaulticDB_Commit_FullMethodName             = "/vaulticdb.v1.VaulticDB/Commit"
+	VaulticDB_Rollback_FullMethodName           = "/vaulticdb.v1.VaulticDB/Rollback"
+	VaulticDB_GetMasterKey_FullMethodName       = "/vaulticdb.v1.VaulticDB/GetMasterKey"
+	VaulticDB_StoreMasterKey_FullMethodName     = "/vaulticdb.v1.VaulticDB/StoreMasterKey"
+	VaulticDB_KeyStatus_FullMethodName          = "/vaulticdb.v1.VaulticDB/KeyStatus"
+	VaulticDB_AddLocalKeySlot_FullMethodName    = "/vaulticdb.v1.VaulticDB/AddLocalKeySlot"
+	VaulticDB_AddCloudKeySlot_FullMethodName    = "/vaulticdb.v1.VaulticDB/AddCloudKeySlot"
+	VaulticDB_RemoveKeySlot_FullMethodName      = "/vaulticdb.v1.VaulticDB/RemoveKeySlot"
+	VaulticDB_RotateLocalKeySlot_FullMethodName = "/vaulticdb.v1.VaulticDB/RotateLocalKeySlot"
+	VaulticDB_RotateDek_FullMethodName          = "/vaulticdb.v1.VaulticDB/RotateDek"
+	VaulticDB_RewriteDek_FullMethodName         = "/vaulticdb.v1.VaulticDB/RewriteDek"
+	VaulticDB_EscrowMasterKey_FullMethodName    = "/vaulticdb.v1.VaulticDB/EscrowMasterKey"
+	VaulticDB_RecoverEscrow_FullMethodName      = "/vaulticdb.v1.VaulticDB/RecoverEscrow"
+	VaulticDB_ExportKeyEnvelope_FullMethodName  = "/vaulticdb.v1.VaulticDB/ExportKeyEnvelope"
+	VaulticDB_CheckEncryption_FullMethodName    = "/vaulticdb.v1.VaulticDB/CheckEncryption"
 )
 
 // VaulticDBClient is the client API for VaulticDB service.
@@ -47,6 +60,19 @@ type VaulticDBClient interface {
 	Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error)
 	Commit(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*CommitResponse, error)
 	Rollback(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*Empty, error)
+	GetMasterKey(ctx context.Context, in *MasterKeyRequest, opts ...grpc.CallOption) (*MasterKeyResponse, error)
+	StoreMasterKey(ctx context.Context, in *StoreMasterKeyRequest, opts ...grpc.CallOption) (*Empty, error)
+	KeyStatus(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error)
+	AddLocalKeySlot(ctx context.Context, in *AddLocalKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error)
+	AddCloudKeySlot(ctx context.Context, in *AddCloudKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error)
+	RemoveKeySlot(ctx context.Context, in *RemoveKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error)
+	RotateLocalKeySlot(ctx context.Context, in *RotateLocalKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error)
+	RotateDek(ctx context.Context, in *RotateDekRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error)
+	RewriteDek(ctx context.Context, in *RewriteDekRequest, opts ...grpc.CallOption) (*RewriteDekResponse, error)
+	EscrowMasterKey(ctx context.Context, in *EscrowMasterKeyRequest, opts ...grpc.CallOption) (*EscrowMasterKeyResponse, error)
+	RecoverEscrow(ctx context.Context, in *RecoverEscrowRequest, opts ...grpc.CallOption) (*MasterKeyResponse, error)
+	ExportKeyEnvelope(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*ExportKeyEnvelopeResponse, error)
+	CheckEncryption(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*EncryptionAuditResponse, error)
 }
 
 type vaulticDBClient struct {
@@ -167,6 +193,136 @@ func (c *vaulticDBClient) Rollback(ctx context.Context, in *TransactionRequest, 
 	return out, nil
 }
 
+func (c *vaulticDBClient) GetMasterKey(ctx context.Context, in *MasterKeyRequest, opts ...grpc.CallOption) (*MasterKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MasterKeyResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_GetMasterKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) StoreMasterKey(ctx context.Context, in *StoreMasterKeyRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, VaulticDB_StoreMasterKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) KeyStatus(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeyStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_KeyStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) AddLocalKeySlot(ctx context.Context, in *AddLocalKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeyStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_AddLocalKeySlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) AddCloudKeySlot(ctx context.Context, in *AddCloudKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeyStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_AddCloudKeySlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RemoveKeySlot(ctx context.Context, in *RemoveKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeyStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RemoveKeySlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RotateLocalKeySlot(ctx context.Context, in *RotateLocalKeySlotRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeyStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RotateLocalKeySlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RotateDek(ctx context.Context, in *RotateDekRequest, opts ...grpc.CallOption) (*KeyStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeyStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RotateDek_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RewriteDek(ctx context.Context, in *RewriteDekRequest, opts ...grpc.CallOption) (*RewriteDekResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RewriteDekResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RewriteDek_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) EscrowMasterKey(ctx context.Context, in *EscrowMasterKeyRequest, opts ...grpc.CallOption) (*EscrowMasterKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EscrowMasterKeyResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_EscrowMasterKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RecoverEscrow(ctx context.Context, in *RecoverEscrowRequest, opts ...grpc.CallOption) (*MasterKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MasterKeyResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RecoverEscrow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) ExportKeyEnvelope(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*ExportKeyEnvelopeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExportKeyEnvelopeResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_ExportKeyEnvelope_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) CheckEncryption(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*EncryptionAuditResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EncryptionAuditResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_CheckEncryption_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VaulticDBServer is the server API for VaulticDB service.
 // All implementations must embed UnimplementedVaulticDBServer
 // for forward compatibility.
@@ -182,6 +338,19 @@ type VaulticDBServer interface {
 	Begin(context.Context, *Empty) (*BeginResponse, error)
 	Commit(context.Context, *TransactionRequest) (*CommitResponse, error)
 	Rollback(context.Context, *TransactionRequest) (*Empty, error)
+	GetMasterKey(context.Context, *MasterKeyRequest) (*MasterKeyResponse, error)
+	StoreMasterKey(context.Context, *StoreMasterKeyRequest) (*Empty, error)
+	KeyStatus(context.Context, *KeyStatusRequest) (*KeyStatusResponse, error)
+	AddLocalKeySlot(context.Context, *AddLocalKeySlotRequest) (*KeyStatusResponse, error)
+	AddCloudKeySlot(context.Context, *AddCloudKeySlotRequest) (*KeyStatusResponse, error)
+	RemoveKeySlot(context.Context, *RemoveKeySlotRequest) (*KeyStatusResponse, error)
+	RotateLocalKeySlot(context.Context, *RotateLocalKeySlotRequest) (*KeyStatusResponse, error)
+	RotateDek(context.Context, *RotateDekRequest) (*KeyStatusResponse, error)
+	RewriteDek(context.Context, *RewriteDekRequest) (*RewriteDekResponse, error)
+	EscrowMasterKey(context.Context, *EscrowMasterKeyRequest) (*EscrowMasterKeyResponse, error)
+	RecoverEscrow(context.Context, *RecoverEscrowRequest) (*MasterKeyResponse, error)
+	ExportKeyEnvelope(context.Context, *KeyStatusRequest) (*ExportKeyEnvelopeResponse, error)
+	CheckEncryption(context.Context, *KeyStatusRequest) (*EncryptionAuditResponse, error)
 	mustEmbedUnimplementedVaulticDBServer()
 }
 
@@ -224,6 +393,45 @@ func (UnimplementedVaulticDBServer) Commit(context.Context, *TransactionRequest)
 }
 func (UnimplementedVaulticDBServer) Rollback(context.Context, *TransactionRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Rollback not implemented")
+}
+func (UnimplementedVaulticDBServer) GetMasterKey(context.Context, *MasterKeyRequest) (*MasterKeyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetMasterKey not implemented")
+}
+func (UnimplementedVaulticDBServer) StoreMasterKey(context.Context, *StoreMasterKeyRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StoreMasterKey not implemented")
+}
+func (UnimplementedVaulticDBServer) KeyStatus(context.Context, *KeyStatusRequest) (*KeyStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method KeyStatus not implemented")
+}
+func (UnimplementedVaulticDBServer) AddLocalKeySlot(context.Context, *AddLocalKeySlotRequest) (*KeyStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddLocalKeySlot not implemented")
+}
+func (UnimplementedVaulticDBServer) AddCloudKeySlot(context.Context, *AddCloudKeySlotRequest) (*KeyStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddCloudKeySlot not implemented")
+}
+func (UnimplementedVaulticDBServer) RemoveKeySlot(context.Context, *RemoveKeySlotRequest) (*KeyStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveKeySlot not implemented")
+}
+func (UnimplementedVaulticDBServer) RotateLocalKeySlot(context.Context, *RotateLocalKeySlotRequest) (*KeyStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RotateLocalKeySlot not implemented")
+}
+func (UnimplementedVaulticDBServer) RotateDek(context.Context, *RotateDekRequest) (*KeyStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RotateDek not implemented")
+}
+func (UnimplementedVaulticDBServer) RewriteDek(context.Context, *RewriteDekRequest) (*RewriteDekResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RewriteDek not implemented")
+}
+func (UnimplementedVaulticDBServer) EscrowMasterKey(context.Context, *EscrowMasterKeyRequest) (*EscrowMasterKeyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EscrowMasterKey not implemented")
+}
+func (UnimplementedVaulticDBServer) RecoverEscrow(context.Context, *RecoverEscrowRequest) (*MasterKeyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RecoverEscrow not implemented")
+}
+func (UnimplementedVaulticDBServer) ExportKeyEnvelope(context.Context, *KeyStatusRequest) (*ExportKeyEnvelopeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExportKeyEnvelope not implemented")
+}
+func (UnimplementedVaulticDBServer) CheckEncryption(context.Context, *KeyStatusRequest) (*EncryptionAuditResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckEncryption not implemented")
 }
 func (UnimplementedVaulticDBServer) mustEmbedUnimplementedVaulticDBServer() {}
 func (UnimplementedVaulticDBServer) testEmbeddedByValue()                   {}
@@ -444,6 +652,240 @@ func _VaulticDB_Rollback_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VaulticDB_GetMasterKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MasterKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).GetMasterKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_GetMasterKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).GetMasterKey(ctx, req.(*MasterKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_StoreMasterKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StoreMasterKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).StoreMasterKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_StoreMasterKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).StoreMasterKey(ctx, req.(*StoreMasterKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_KeyStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KeyStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).KeyStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_KeyStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).KeyStatus(ctx, req.(*KeyStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_AddLocalKeySlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddLocalKeySlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).AddLocalKeySlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_AddLocalKeySlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).AddLocalKeySlot(ctx, req.(*AddLocalKeySlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_AddCloudKeySlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddCloudKeySlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).AddCloudKeySlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_AddCloudKeySlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).AddCloudKeySlot(ctx, req.(*AddCloudKeySlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RemoveKeySlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveKeySlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RemoveKeySlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RemoveKeySlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RemoveKeySlot(ctx, req.(*RemoveKeySlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RotateLocalKeySlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateLocalKeySlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RotateLocalKeySlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RotateLocalKeySlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RotateLocalKeySlot(ctx, req.(*RotateLocalKeySlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RotateDek_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateDekRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RotateDek(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RotateDek_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RotateDek(ctx, req.(*RotateDekRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RewriteDek_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RewriteDekRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RewriteDek(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RewriteDek_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RewriteDek(ctx, req.(*RewriteDekRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_EscrowMasterKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EscrowMasterKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).EscrowMasterKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_EscrowMasterKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).EscrowMasterKey(ctx, req.(*EscrowMasterKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RecoverEscrow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecoverEscrowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RecoverEscrow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RecoverEscrow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RecoverEscrow(ctx, req.(*RecoverEscrowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_ExportKeyEnvelope_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KeyStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).ExportKeyEnvelope(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_ExportKeyEnvelope_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).ExportKeyEnvelope(ctx, req.(*KeyStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_CheckEncryption_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KeyStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).CheckEncryption(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_CheckEncryption_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).CheckEncryption(ctx, req.(*KeyStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VaulticDB_ServiceDesc is the grpc.ServiceDesc for VaulticDB service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -494,6 +936,58 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Rollback",
 			Handler:    _VaulticDB_Rollback_Handler,
+		},
+		{
+			MethodName: "GetMasterKey",
+			Handler:    _VaulticDB_GetMasterKey_Handler,
+		},
+		{
+			MethodName: "StoreMasterKey",
+			Handler:    _VaulticDB_StoreMasterKey_Handler,
+		},
+		{
+			MethodName: "KeyStatus",
+			Handler:    _VaulticDB_KeyStatus_Handler,
+		},
+		{
+			MethodName: "AddLocalKeySlot",
+			Handler:    _VaulticDB_AddLocalKeySlot_Handler,
+		},
+		{
+			MethodName: "AddCloudKeySlot",
+			Handler:    _VaulticDB_AddCloudKeySlot_Handler,
+		},
+		{
+			MethodName: "RemoveKeySlot",
+			Handler:    _VaulticDB_RemoveKeySlot_Handler,
+		},
+		{
+			MethodName: "RotateLocalKeySlot",
+			Handler:    _VaulticDB_RotateLocalKeySlot_Handler,
+		},
+		{
+			MethodName: "RotateDek",
+			Handler:    _VaulticDB_RotateDek_Handler,
+		},
+		{
+			MethodName: "RewriteDek",
+			Handler:    _VaulticDB_RewriteDek_Handler,
+		},
+		{
+			MethodName: "EscrowMasterKey",
+			Handler:    _VaulticDB_EscrowMasterKey_Handler,
+		},
+		{
+			MethodName: "RecoverEscrow",
+			Handler:    _VaulticDB_RecoverEscrow_Handler,
+		},
+		{
+			MethodName: "ExportKeyEnvelope",
+			Handler:    _VaulticDB_ExportKeyEnvelope_Handler,
+		},
+		{
+			MethodName: "CheckEncryption",
+			Handler:    _VaulticDB_CheckEncryption_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

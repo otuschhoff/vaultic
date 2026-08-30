@@ -119,6 +119,132 @@ message CapabilitiesResponse {
   uint32 max_message_bytes = 8;
   uint32 max_page_items = 9;
   uint32 max_concurrent_requests = 10;
+  bool encryption_enabled = 11;
+  string encryption_algorithm = 12;
+  uint32 active_dek_version = 13;
+  uint64 envelope_generation = 14;
+  string unlock_slot = 15;
+  bool recovery_unlock = 16;
+}
+
+message MasterKeyRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+}
+
+message MasterKeyResponse {
+  bool found = 1;
+  bytes master_key = 2;
+}
+
+message StoreMasterKeyRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  bytes master_key = 3;
+}
+
+message KeyStatusRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+}
+
+message KeySlotInfo {
+  string id = 1;
+  string provider = 2;
+  uint32 priority = 3;
+  bool recovery = 4;
+  string key_reference = 5;
+  uint32 dek_version = 6;
+}
+
+message KeyStatusResponse {
+  uint64 envelope_generation = 1;
+  uint32 active_dek_version = 2;
+  repeated KeySlotInfo slots = 3;
+}
+
+message AddLocalKeySlotRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string slot_id = 3;
+  bytes passphrase = 4;
+  uint32 priority = 5;
+  bool recovery = 6;
+}
+
+message AddCloudKeySlotRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string slot_id = 3;
+  string provider = 4;
+  string key_reference = 5;
+  bytes bearer_token = 6;
+  uint32 priority = 7;
+}
+
+message RemoveKeySlotRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string slot_id = 3;
+}
+
+message RotateLocalKeySlotRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string slot_id = 3;
+  bytes passphrase = 4;
+}
+
+message RotateDekRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+}
+
+message RewriteDekRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  uint32 max_objects = 3;
+}
+
+message RewriteDekResponse {
+  uint64 rewritten = 1;
+  uint64 remaining = 2;
+}
+
+message EscrowMasterKeyRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string escrow_id = 3;
+  string provider = 4;
+  string key_reference = 5;
+  bytes bearer_token = 6;
+}
+
+message EscrowMasterKeyResponse {
+  bytes record = 1;
+}
+
+message ExportKeyEnvelopeResponse {
+  bytes envelope = 1;
+  uint64 generation = 2;
+}
+
+message EncryptionAuditResponse {
+  uint64 objects = 1;
+  uint64 invalid_objects = 2;
+  uint64 plaintext_objects = 3;
+  uint64 old_version_objects = 4;
+  uint64 envelope_generation = 5;
+  uint32 active_dek_version = 6;
+  string algorithm = 7;
+  bool enabled = 8;
+}
+
+message RecoverEscrowRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  bytes record = 3;
+  bytes bearer_token = 4;
 }
 
 service VaulticDB {
@@ -133,4 +259,17 @@ service VaulticDB {
   rpc Begin(Empty) returns (BeginResponse);
   rpc Commit(TransactionRequest) returns (CommitResponse);
   rpc Rollback(TransactionRequest) returns (Empty);
+  rpc GetMasterKey(MasterKeyRequest) returns (MasterKeyResponse);
+  rpc StoreMasterKey(StoreMasterKeyRequest) returns (Empty);
+  rpc KeyStatus(KeyStatusRequest) returns (KeyStatusResponse);
+  rpc AddLocalKeySlot(AddLocalKeySlotRequest) returns (KeyStatusResponse);
+  rpc AddCloudKeySlot(AddCloudKeySlotRequest) returns (KeyStatusResponse);
+  rpc RemoveKeySlot(RemoveKeySlotRequest) returns (KeyStatusResponse);
+  rpc RotateLocalKeySlot(RotateLocalKeySlotRequest) returns (KeyStatusResponse);
+  rpc RotateDek(RotateDekRequest) returns (KeyStatusResponse);
+  rpc RewriteDek(RewriteDekRequest) returns (RewriteDekResponse);
+  rpc EscrowMasterKey(EscrowMasterKeyRequest) returns (EscrowMasterKeyResponse);
+  rpc RecoverEscrow(RecoverEscrowRequest) returns (MasterKeyResponse);
+  rpc ExportKeyEnvelope(KeyStatusRequest) returns (ExportKeyEnvelopeResponse);
+  rpc CheckEncryption(KeyStatusRequest) returns (EncryptionAuditResponse);
 }

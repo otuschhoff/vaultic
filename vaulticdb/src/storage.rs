@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use prost::Message;
+use serde::{Deserialize, Serialize};
 use slatedb::{
     object_store::{aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory, ObjectStore},
     Db, DbIterator, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
@@ -19,19 +20,37 @@ use slatedb::{
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
 
-use crate::proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest};
+use crate::{
+    encryption::envelope::{self, EncryptionStatus, KeyManager},
+    proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest},
+};
 
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
 const DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
+const MASTER_KEY_RECORD: &[u8] = b"meta:master-key";
+const ENCRYPTION_POLICY_RECORD: &[u8] = b"meta:encryption";
+const MAX_MASTER_KEY_BYTES: usize = 4096;
 
 struct TransactionSlot {
     transaction: Mutex<Option<DbTransaction>>,
     last_touched_ms: AtomicU64,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncryptionPolicy {
+    format: u32,
+    required: bool,
+    algorithm: String,
+    object_format: u32,
+    repository_id: String,
+}
+
 pub struct Storage {
     db: Db,
+    encryption: EncryptionStatus,
+    key_manager: Option<Arc<KeyManager>>,
     transactions: RwLock<HashMap<String, Arc<TransactionSlot>>>,
     next_transaction: AtomicU64,
     transaction_idle_timeout_ms: u64,
@@ -40,15 +59,119 @@ pub struct Storage {
 impl Storage {
     pub async fn open(repository_id: &str) -> Result<Self> {
         let (path, object_store) = object_store(repository_id)?;
+        let (object_store, encryption, key_manager) =
+            envelope::configure(repository_id, object_store).await?;
         let db = Db::open(path, object_store)
             .await
             .context("open SlateDB database")?;
-        Ok(Self {
+        let storage = Self {
             db,
+            encryption,
+            key_manager,
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             transaction_idle_timeout_ms: transaction_idle_timeout_ms()?,
+        };
+        storage.ensure_encryption_policy(repository_id).await?;
+        Ok(storage)
+    }
+
+    pub fn encryption_status(&self) -> &EncryptionStatus {
+        &self.encryption
+    }
+
+    pub fn key_manager(&self) -> Result<&Arc<KeyManager>, Status> {
+        self.key_manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition("key management requires metadata encryption")
         })
+    }
+
+    async fn ensure_encryption_policy(&self, repository_id: &str) -> Result<()> {
+        let existing = self
+            .db
+            .get(ENCRYPTION_POLICY_RECORD)
+            .await
+            .context("read metadata encryption policy")?;
+        if !self.encryption.enabled {
+            if existing.is_some() {
+                bail!("metadata encryption policy exists but encryption is disabled");
+            }
+            return Ok(());
+        }
+        let expected = EncryptionPolicy {
+            format: 1,
+            required: true,
+            algorithm: self.encryption.algorithm.to_owned(),
+            object_format: 1,
+            repository_id: repository_id.to_owned(),
+        };
+        if let Some(value) = existing {
+            let actual: EncryptionPolicy =
+                serde_json::from_slice(&value).context("decode metadata encryption policy")?;
+            if actual != expected {
+                bail!(
+                    "metadata encryption policy does not match the active encryption configuration"
+                );
+            }
+            return Ok(());
+        }
+        if !self.encryption.initializing {
+            bail!("metadata encryption policy is missing while encryption is required");
+        }
+        self.db
+            .put(
+                ENCRYPTION_POLICY_RECORD,
+                serde_json::to_vec(&expected).context("encode metadata encryption policy")?,
+            )
+            .await
+            .context("write metadata encryption policy")?
+            .await_durable()
+            .await
+            .context("persist metadata encryption policy")
+    }
+
+    pub async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
+        if !self.encryption.enabled {
+            return Err(Status::failed_precondition(
+                "master-key-in-DB requires metadata encryption",
+            ));
+        }
+        self.db
+            .get(MASTER_KEY_RECORD)
+            .await
+            .map_err(storage_error)
+            .map(|value| value.map(|bytes| bytes.to_vec()))
+    }
+
+    pub async fn store_master_key(&self, master_key: &[u8]) -> Result<(), Status> {
+        if !self.encryption.enabled {
+            return Err(Status::failed_precondition(
+                "master-key-in-DB requires metadata encryption",
+            ));
+        }
+        if master_key.is_empty() || master_key.len() > MAX_MASTER_KEY_BYTES {
+            return Err(Status::invalid_argument("invalid repository master key"));
+        }
+        if let Some(existing) = self
+            .db
+            .get(MASTER_KEY_RECORD)
+            .await
+            .map_err(storage_error)?
+        {
+            if existing.as_ref() == master_key {
+                return Ok(());
+            }
+            return Err(Status::already_exists(
+                "a different repository master key is already stored",
+            ));
+        }
+        self.db
+            .put(MASTER_KEY_RECORD, master_key)
+            .await
+            .map_err(storage_error)?
+            .await_durable()
+            .await
+            .map_err(storage_error)
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -374,6 +497,9 @@ fn validate_mutations(request: &WriteBatchRequest) -> Result<(), Status> {
 
 fn storage_error(error: slatedb::Error) -> Status {
     let message = format!("SlateDB operation failed: {error}");
+    if crate::encryption::is_integrity_error(&error) {
+        return Status::data_loss(message);
+    }
     match error.kind() {
         ErrorKind::Transaction => Status::aborted(message),
         ErrorKind::Unavailable | ErrorKind::Closed(_) => Status::unavailable(message),

@@ -4,7 +4,7 @@
 
 Vaultic and vaulticdb are assessed against six regulatory, cybersecurity, and
 governance frameworks, plus the shared security/verification architecture.
-These assessments are supported by [Phase 16 and Phase 17](../04-roadmap/05-analytics-compliance-scale-phases-16-19.md)
+These assessments are supported by [Phase 16 and Phase 17](../04-roadmap/05-analytics-compliance-scale-phases-16-20.md)
 of the roadmap. They assess vaultic's technical enablement and evidence; they
 do not certify a deploying organization or replace its governance and
 operational controls.

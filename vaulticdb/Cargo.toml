@@ -7,15 +7,31 @@ license = "BSD-2-Clause"
 description = "Vaultic SlateDB metadata service"
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1.0"
+argon2 = "0.5"
+async-trait = "0.1"
+aws-config = { version = "1.11", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-kms = "1.117"
+base64 = "0.22"
+bytes = "1.10"
+cryptoki = "0.10"
 fs2 = "0.4"
+futures-util = "0.3"
 ipnet = "2.11"
+libc = "0.2"
 prost = "0.13"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sha2 = "0.10"
 slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "ae07acd4498068d1b9ba799cc9f6c9824e6f6251" }
 tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tonic = { version = "0.12", features = ["transport"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+thiserror = "2.0"
+zeroize = { version = "1.8", features = ["derive"] }
 
 [build-dependencies]
 tonic-build = "0.12"

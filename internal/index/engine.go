@@ -126,6 +126,30 @@ type LegacyEngine struct {
 
 var _ LegacyIndexEngine = (*LegacyEngine)(nil)
 
+// RecoveryLegacyEngine permits inspection and export after total SlateDB loss
+// while preventing a legacy write from diverging from the authoritative state.
+type RecoveryLegacyEngine struct{ *LegacyEngine }
+
+var _ LegacyIndexEngine = (*RecoveryLegacyEngine)(nil)
+
+func NewRecoveryLegacyEngine(master *legacyindex.MasterIndex) *RecoveryLegacyEngine {
+	return &RecoveryLegacyEngine{LegacyEngine: NewLegacyEngine(master)}
+}
+
+func (*RecoveryLegacyEngine) AddPending(vaultic.BlobHandle, uint) bool { return false }
+
+func (*RecoveryLegacyEngine) StorePack(context.Context, vaultic.ID, pack.Blobs, vaultic.SaverUnpacked[vaultic.FileType]) error {
+	return fmt.Errorf("metadata-loss recovery is read-only")
+}
+
+func (*RecoveryLegacyEngine) Load(context.Context, vaultic.ListerLoaderUnpacked, vaultic.Counter, func(vaultic.ID, *legacyindex.Index, error) error) error {
+	return fmt.Errorf("metadata-loss recovery is read-only")
+}
+
+func (*RecoveryLegacyEngine) Flush(context.Context, vaultic.SaverUnpacked[vaultic.FileType]) error {
+	return fmt.Errorf("metadata-loss recovery is read-only")
+}
+
 func NewLegacyEngine(master ...*legacyindex.MasterIndex) *LegacyEngine {
 	var idx *legacyindex.MasterIndex
 	if len(master) > 0 {
@@ -234,7 +258,7 @@ func Resolve(ctx context.Context, be backend.Backend, repositoryID string) (Reso
 	if manifest.FormatVersion != ManifestFormatVersion || manifest.SchemaVersion != ManifestSchemaVersion {
 		return Resolution{Mode: ModeSlateDB, State: ManifestUnsupported, Manifest: &manifest}, fmt.Errorf("unsupported slatedb manifest format %d schema %q", manifest.FormatVersion, manifest.SchemaVersion)
 	}
-	if !manifest.Authoritative || manifest.RepositoryID == "" || manifest.RepositoryID != repositoryID {
+	if !manifest.Authoritative || manifest.RepositoryID == "" || (repositoryID != "" && manifest.RepositoryID != repositoryID) {
 		return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt, Manifest: &manifest}, fmt.Errorf("invalid slatedb manifest repository or authority")
 	}
 	return Resolution{Mode: ModeSlateDB, State: ManifestValid, Manifest: &manifest}, nil

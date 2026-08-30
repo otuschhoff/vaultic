@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -17,10 +18,50 @@ import (
 
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	target, err := observability.ParseSyslogTarget("udp://" + listener.LocalAddr().String() + "?categories=auth,integrity&min-severity=warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observability.SetDefaultSyslog(observability.NewSyslogExporter([]observability.SyslogTarget{target}, "host", "vaultic"))
+	defer observability.SetDefaultSyslog(nil)
+	client := &Client{
+		options: Options{RepositoryID: "repo-a"},
+		encryption: EncryptionInfo{
+			Enabled: true, ActiveDEKVersion: 3, EnvelopeGeneration: 7,
+			UnlockSlot: "offline", RecoveryUnlock: true,
+		},
+	}
+	client.auditEncryptionUnlock(context.Background())
+	client.auditRPCError(context.Background(), "get", status.Error(codes.DataLoss, "authentication failed"))
+	messages := make([]string, 2)
+	buffer := make([]byte, 4096)
+	for index := range messages {
+		if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		count, _, err := listener.ReadFrom(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		messages[index] = string(buffer[:count])
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, `"category":"auth"`) || !strings.Contains(joined, `"recovery":true`) || !strings.Contains(joined, `"category":"integrity"`) || !strings.Contains(joined, `"operation":"get"`) {
+		t.Fatalf("missing encryption security events: %s", joined)
+	}
+}
 
 func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 	dataDir := t.TempDir()
@@ -1396,6 +1437,199 @@ func TestEnsureRejectsInsecureTCPConfiguration(t *testing.T) {
 	}
 	if _, err := Ensure(context.Background(), Options{ObjectStore: "s3", DaemonPath: daemonBinary(t)}); err == nil || !strings.Contains(err.Error(), "bucket") {
 		t.Fatalf("expected missing S3 bucket error, got %v", err)
+	}
+}
+
+func TestEncryptedDaemonPersistsOnlyCiphertextAndReopens(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	passphraseFile := filepath.Join(t.TempDir(), "recovery-passphrase")
+	if err := os.WriteFile(passphraseFile, []byte("correct horse battery staple\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "encrypted-daemon", DaemonPath: daemonBinary(t),
+		DataDir: dataDir, EncryptionMode: "initialize", PassphraseFile: passphraseFile,
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info := client.Encryption(); !info.Enabled || info.Algorithm != "AES-256-GCM" || info.ActiveDEKVersion != 1 || info.UnlockSlot != "local-recovery" {
+		t.Fatalf("unexpected encryption status: %+v", info)
+	}
+	secret := []byte("alice/private/metadata-value")
+	masterKey := []byte("base64-encoded-repository-master-key-fixture")
+	if _, err := client.WriteBatch(ctx, []Mutation{{Key: []byte("phase18/secret"), Value: secret}}, nil, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.StoreMasterKey(ctx, masterKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.StoreMasterKey(ctx, []byte("different-key")); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("master key replacement was not rejected: %v", err)
+	}
+	keyStatus, err := client.AddLocalKeySlot(ctx, "replacement-recovery", []byte("temporary passphrase"), 10, true)
+	if err != nil || keyStatus.EnvelopeGeneration != 2 || len(keyStatus.Slots) != 2 {
+		t.Fatalf("add key slot = %+v, err=%v", keyStatus, err)
+	}
+	keyStatus, err = client.RotateLocalKeySlot(ctx, "replacement-recovery", []byte("replacement passphrase"))
+	if err != nil || keyStatus.EnvelopeGeneration != 3 {
+		t.Fatalf("rotate key slot = %+v, err=%v", keyStatus, err)
+	}
+	keyStatus, err = client.RemoveKeySlot(ctx, "local-recovery")
+	if err != nil || keyStatus.EnvelopeGeneration != 4 || len(keyStatus.Slots) != 1 {
+		t.Fatalf("remove key slot = %+v, err=%v", keyStatus, err)
+	}
+	if _, err := client.RemoveKeySlot(ctx, "replacement-recovery"); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("final slot removal was not rejected: %v", err)
+	}
+	keyStatus, err = client.RotateDEK(ctx)
+	if err != nil || keyStatus.EnvelopeGeneration != 5 || keyStatus.ActiveDEKVersion != 2 {
+		t.Fatalf("rotate DEK = %+v, err=%v", keyStatus, err)
+	}
+	rotatedSecret := []byte("metadata-written-under-DEK-version-2")
+	if _, err := client.WriteBatch(ctx, []Mutation{{Key: []byte("phase18/rotated"), Value: rotatedSecret}}, nil, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	var rewritten uint64
+	for {
+		progress, rewriteErr := client.RewriteDEK(ctx, 1)
+		if rewriteErr != nil {
+			t.Fatal(rewriteErr)
+		}
+		rewritten += progress.Rewritten
+		if progress.Remaining == 0 {
+			break
+		}
+	}
+	if rewritten == 0 {
+		t.Fatal("DEK rotation did not rewrite any old-version objects")
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := filepath.WalkDir(dataDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if bytes.Contains(data, secret) || bytes.Contains(data, masterKey) {
+			return fmt.Errorf("plaintext metadata found in %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	options.Socket = testSocket(t)
+	options.EncryptionMode = "required"
+	if err := os.WriteFile(passphraseFile, []byte("replacement passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	if info := client.Encryption(); info.ActiveDEKVersion != 2 || info.EnvelopeGeneration != 6 {
+		t.Fatalf("reopened rotated encryption status: %+v", info)
+	}
+	value, found, err := client.Get(ctx, []byte("phase18/secret"), "")
+	if err != nil || !found || !bytes.Equal(value, secret) {
+		t.Fatalf("reopened encrypted value = %q, found=%t, err=%v", value, found, err)
+	}
+	value, found, err = client.GetMasterKey(ctx)
+	if err != nil || !found || !bytes.Equal(value, masterKey) {
+		t.Fatalf("reopened master key = %q, found=%t, err=%v", value, found, err)
+	}
+	value, found, err = client.Get(ctx, []byte("phase18/rotated"), "")
+	if err != nil || !found || !bytes.Equal(value, rotatedSecret) {
+		t.Fatalf("reopened rotated value = %q, found=%t, err=%v", value, found, err)
+	}
+}
+
+func TestEncryptedDaemonRefusesMissingPersistentPolicy(t *testing.T) {
+	ctx := context.Background()
+	passphraseFile := filepath.Join(t.TempDir(), "recovery-passphrase")
+	if err := os.WriteFile(passphraseFile, []byte("policy test passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "encrypted-policy", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphraseFile,
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WriteBatch(ctx, nil, [][]byte{[]byte("meta:encryption")}, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	options.Socket = testSocket(t)
+	options.EncryptionMode = "required"
+	if client, err := Ensure(ctx, options); err == nil {
+		_ = client.Close(ctx)
+		t.Fatal("required encryption recreated a missing persistent policy")
+	}
+}
+
+func TestFailedMetadataKeyUnwrapEmitsAuthEvent(t *testing.T) {
+	ctx := context.Background()
+	passphraseFile := filepath.Join(t.TempDir(), "recovery-passphrase")
+	if err := os.WriteFile(passphraseFile, []byte("correct passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "failed-unwrap", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphraseFile,
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passphraseFile, []byte("wrong passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	target, err := observability.ParseSyslogTarget("udp://" + listener.LocalAddr().String() + "?categories=auth&min-severity=warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observability.SetDefaultSyslog(observability.NewSyslogExporter([]observability.SyslogTarget{target}, "host", "vaultic"))
+	defer observability.SetDefaultSyslog(nil)
+	options.Socket = testSocket(t)
+	options.EncryptionMode = "required"
+	if client, err := Ensure(ctx, options); err == nil {
+		_ = client.Close(ctx)
+		t.Fatal("wrong metadata passphrase unexpectedly unlocked the daemon")
+	} else if !strings.Contains(err.Error(), "no metadata key slot could be unwrapped") {
+		t.Fatalf("unexpected failed-unlock error: %v", err)
+	}
+	buffer := make([]byte, 4096)
+	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	count, _, err := listener.ReadFrom(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := string(buffer[:count])
+	if !strings.Contains(message, `"category":"auth"`) || !strings.Contains(message, `"message":"metadata key unwrap failed"`) || strings.Contains(message, "passphrase") {
+		t.Fatalf("unexpected failed-unlock event: %s", message)
 	}
 }
 
