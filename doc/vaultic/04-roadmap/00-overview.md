@@ -16,7 +16,7 @@ exit criteria for its phases.
 | 5–8 | [Core operations: crawl reconciliation, dual-write/export, CLI, prune/GC](02-core-operations-phases-5-8.md) | see phase detail |
 | 9–12 | [Pack lifecycle: tier model, history rollups, introspection, backend placement](03-pack-lifecycle-phases-9-12.md) | see phase detail |
 | 13–15 | [Path history and placement scheduling](04-path-and-placement-phases-13-15.md) | see phase detail |
-| 16–21 | [Analytics, compliance, and scale-out](05-analytics-compliance-scale-phases-16-21.md) | see phase detail |
+| 16–22 | [Analytics, compliance, scale-out, and operational resilience](05-analytics-compliance-scale-phases-16-21.md) | see phase detail |
 
 ## Supporting plans
 
