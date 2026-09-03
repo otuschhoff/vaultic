@@ -1276,6 +1276,9 @@ fn set_private_socket_permissions(_path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream as StdUnixStream;
     use std::sync::{Mutex, OnceLock};
     use vaulticdb::encryption::recovery_capsule::{
         publish_local, CapsuleBuilder, MemberCredential,
@@ -1409,6 +1412,24 @@ mod tests {
         ] {
             unsafe { env::remove_var(key) };
         }
+    }
+
+    #[test]
+    fn tcp_authentication_descriptor_is_consumed_and_closed() {
+        let _guard = transport_environment_lock().lock().unwrap();
+        let (mut writer, reader) = StdUnixStream::pair().unwrap();
+        writer.write_all(b"test-token").unwrap();
+        drop(writer);
+        let descriptor = reader.into_raw_fd();
+        unsafe { env::set_var("VAULTICDB_TCP_AUTH_TOKEN_FD", descriptor.to_string()) };
+        let token = read_auth_token().unwrap().unwrap();
+        assert_eq!(token.as_str(), "test-token");
+        assert!(env::var_os("VAULTICDB_TCP_AUTH_TOKEN_FD").is_none());
+        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 
     #[test]

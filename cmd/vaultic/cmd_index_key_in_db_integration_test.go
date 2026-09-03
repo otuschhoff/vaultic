@@ -408,6 +408,58 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 	if err != nil || status.Locked {
 		t.Fatalf("Rust broker status locked=%t, err=%v", status.Locked, err)
 	}
+	if err := brokerClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-processDone
+	processExited = true
+
+	restarted := exec.CommandContext(ctx, brokerBinary, configPath)
+	restarted.Env = []string{}
+	var restartErrors bytes.Buffer
+	restarted.Stderr = &restartErrors
+	if err := restarted.Start(); err != nil {
+		t.Fatal(err)
+	}
+	restartDone := make(chan error, 1)
+	go func() { restartDone <- restarted.Wait() }()
+	restartExited := false
+	t.Cleanup(func() {
+		if restartExited {
+			return
+		}
+		_ = restarted.Process.Kill()
+		<-restartDone
+	})
+	deadline = time.Now().Add(5 * time.Second)
+	var restartedClient *indexbroker.Client
+	for {
+		restartedClient, err = indexbroker.Dial(ctx, socket)
+		if err == nil {
+			break
+		}
+		select {
+		case processErr := <-restartDone:
+			restartExited = true
+			t.Fatalf("restarted broker exited before accepting connections: %v: %s", processErr, restartErrors.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("restarted broker did not accept connections: %v: %s", err, restartErrors.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer restartedClient.Close()
+	status, err = restartedClient.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Locked || status.ActiveSessions != 0 || status.ActiveLeases != 0 {
+		t.Fatalf("restarted broker retained epoch state: %+v", status)
+	}
 }
 
 func metadataRepositoryContext(t *testing.T, ctx context.Context, options indexDaemonOptions, repositoryID string) context.Context {
