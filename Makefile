@@ -24,7 +24,7 @@ endif
 
 all: build
 
-# Alias to build both deliverables for the host platform.
+# Alias to build the CLI, metadata daemon, and key broker for the host platform.
 build: vaultic vaulticdb
 
 clean:
@@ -53,7 +53,7 @@ vaultic-%:
 	mkdir -p $(BIN_DIR)/$*; \
 	go run build.go --goos "$$goos" --goarch "$$goarch" -o $(BIN_DIR)/$*/vaultic
 
-# --- vaulticdb (Rust daemon) ---
+# --- vaulticdb (Rust daemon and key broker) ---
 # Linux targets use the *-musl target triple (statically linked by default)
 # built via cargo-zigbuild for cross-linking from macOS. The macOS target
 # builds natively via cargo; true static linking isn't possible on Darwin.
@@ -77,7 +77,8 @@ vaulticdb-%:
 		*) \
 			rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo build --manifest-path vaulticdb/Cargo.toml --release --target "$$target" ;; \
 	esac; \
-	cp vaulticdb/target/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb
+	cp vaulticdb/target/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb; \
+	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker
 
 vaulticdb-proto:
 	./vaulticdb/generate-proto.sh

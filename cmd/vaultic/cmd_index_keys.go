@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,10 +15,12 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/global"
+	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/spf13/cobra"
 )
 
@@ -84,9 +88,169 @@ func newIndexKeysCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexKeysStoreMasterKeyCommand(globalOptions, &options),
 		newIndexKeysEscrowCommand(globalOptions, &options),
 		newIndexKeysMirrorEnvelopeCommand(globalOptions, &options),
+		newIndexKeysQuorumCommand(globalOptions, &options),
 	)
 	return command
 }
+
+func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
+	command := &cobra.Command{Use: "quorum", Short: "Migrate and manage recovery capsule policy", Args: cobra.NoArgs, DisableAutoGenTag: true}
+	command.AddCommand(
+		newIndexKeysQuorumPrepareCommand(globalOptions, options),
+		newIndexKeysQuorumFinalizeCommand(globalOptions, options),
+	)
+	return command
+}
+
+func newIndexKeysQuorumPrepareCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
+	var capsuleDirectory, groupID, brokerPublicKeyFile, stateFile string
+	var generation uint64
+	var threshold uint32
+	var memberSpecs []string
+	command := &cobra.Command{Use: "migrate-prepare", Short: "Publish a verified capsule while retaining the database master key", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if generation == 0 || threshold == 0 || groupID == "" || capsuleDirectory == "" || brokerPublicKeyFile == "" || stateFile == "" {
+			return fmt.Errorf("capsule directory, generation, group, threshold, broker public key, and state file are required")
+		}
+		publicKey, err := os.ReadFile(brokerPublicKeyFile)
+		if err != nil {
+			return fmt.Errorf("read broker identity public key: %w", err)
+		}
+		publicKey = bytes.TrimSpace(publicKey)
+		if decoded, decodeErr := base64.StdEncoding.DecodeString(string(publicKey)); decodeErr == nil && len(decoded) == 32 {
+			publicKey = decoded
+		}
+		if len(publicKey) != 32 {
+			return fmt.Errorf("broker identity public key must be 32 raw bytes or base64")
+		}
+		members := make([]daemon.OfflineCapsuleMember, 0, len(memberSpecs))
+		for _, spec := range memberSpecs {
+			parts := strings.SplitN(spec, "=", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid --member %q; expected ID=PROVIDER:FILE", spec)
+			}
+			providerAndFile := strings.SplitN(parts[1], ":", 2)
+			if len(providerAndFile) != 2 || (providerAndFile[0] != "offline-argon2id" && providerAndFile[0] != "offline-keyfile") {
+				return fmt.Errorf("invalid offline member provider in %q", spec)
+			}
+			credential, readErr := readProtectedBinary(providerAndFile[1], "capsule member credential", providerAndFile[0] == "offline-argon2id")
+			if readErr != nil {
+				return readErr
+			}
+			defer clear(credential)
+			members = append(members, daemon.OfflineCapsuleMember{ID: parts[0], Provider: providerAndFile[0], Credential: credential})
+		}
+		if len(members) == 0 || threshold > uint32(len(members)) {
+			return fmt.Errorf("threshold must be satisfiable by at least one --member")
+		}
+		client, err := options.Daemon.connect(command.Context(), options.RepositoryID)
+		if err != nil {
+			return err
+		}
+		defer client.Close(command.Context())
+		migration, err := client.PrepareCapsuleMigration(command.Context(), capsuleDirectory, generation, groupID, threshold, publicKey, members)
+		if err != nil {
+			return err
+		}
+		state := map[string]any{"format": 1, "repository_id": options.RepositoryID, "generation": migration.Generation, "capsule_sha256": migration.CapsuleSHA256, "local_path": migration.LocalPath, "mirror_path": migration.MirrorPath}
+		if err := writeNewProtectedJSON(stateFile, state); err != nil {
+			return err
+		}
+		if globalOptions.JSON {
+			globalOptions.Term.Print(ui.ToJSONString(state))
+		} else {
+			globalOptions.Term.Print(fmt.Sprintf("capsule generation %d prepared at %s and mirrored at %s\nstate: %s\nmaster key remains in database until migrate-finalize proves capsule access\n", migration.Generation, migration.LocalPath, migration.MirrorPath, stateFile))
+		}
+		return nil
+	}}
+	command.Flags().StringVar(&capsuleDirectory, "capsule-directory", "", "deterministic local capsule generation directory")
+	command.Flags().Uint64Var(&generation, "generation", 1, "new immutable capsule generation")
+	command.Flags().StringVar(&groupID, "group", "operators", "threshold group ID")
+	command.Flags().Uint32Var(&threshold, "threshold", 0, "required member contributions")
+	command.Flags().StringVar(&brokerPublicKeyFile, "broker-public-key", "", "broker Ed25519 public-key file")
+	command.Flags().StringArrayVar(&memberSpecs, "member", nil, "offline member ID=PROVIDER:FILE (repeatable)")
+	command.Flags().StringVar(&stateFile, "state-file", "", "new mode-0600 migration state file")
+	return command
+}
+
+func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
+	var stateFile string
+	var confirm bool
+	command := &cobra.Command{Use: "migrate-finalize", Short: "Prove capsule pack access and remove the database master key", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if !confirm || stateFile == "" {
+			return fmt.Errorf("--state-file and --confirm are required")
+		}
+		var state struct {
+			Format        int    `json:"format"`
+			RepositoryID  string `json:"repository_id"`
+			Generation    uint64 `json:"generation"`
+			CapsuleSHA256 string `json:"capsule_sha256"`
+			LocalPath     string `json:"local_path"`
+			MirrorPath    string `json:"mirror_path"`
+		}
+		if err := readProtectedJSON(stateFile, "capsule migration state", &state); err != nil {
+			return err
+		}
+		if state.Format != 1 || state.RepositoryID != options.RepositoryID || len(state.CapsuleSHA256) != 64 {
+			return fmt.Errorf("migration state does not match repository")
+		}
+		proofOptions := *globalOptions
+		proofOptions.MetadataLossRecovery = true
+		printer := progress.NewTerminalPrinter(proofOptions.JSON, proofOptions.Verbosity, proofOptions.Term)
+		repo, err := global.OpenRepository(command.Context(), proofOptions, printer)
+		if err != nil {
+			return fmt.Errorf("prove capsule repository access: %w", err)
+		}
+		var packProof bool
+		err = repo.List(command.Context(), vaultic.PackFile, func(id vaultic.ID, size int64) error {
+			if _, readErr := repo.ListPackHandles(command.Context(), id, size); readErr != nil {
+				return readErr
+			}
+			packProof = true
+			return errCapsulePackProofComplete
+		})
+		if err != nil && err != errCapsulePackProofComplete {
+			_ = repo.Close()
+			return fmt.Errorf("authenticate pack through capsule lease: %w", err)
+		}
+		if err := repo.Close(); err != nil {
+			return err
+		}
+		brokerClient, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return fmt.Errorf("acquire capsule proof lease: %w", err)
+		}
+		defer brokerClient.Close()
+		lease, err := brokerClient.AcquireLease(command.Context(), globalOptions.KeyBrokerReleaseManifest, "metadata-loss-recovery", globalOptions.KeyBrokerLeaseDuration)
+		if err != nil {
+			return fmt.Errorf("acquire capsule proof lease: %w", err)
+		}
+		proof := hmac.New(sha256.New, lease.Key)
+		_, _ = proof.Write([]byte("vaultic-capsule-migration-finalize-v1\x00" + options.RepositoryID + "\x00" + state.CapsuleSHA256))
+		brokerKeyProof := proof.Sum(nil)
+		clear(lease.Key)
+		defer clear(brokerKeyProof)
+		client, err := options.Daemon.connect(command.Context(), options.RepositoryID)
+		if err != nil {
+			return err
+		}
+		defer client.Close(command.Context())
+		if err := client.FinalizeCapsuleMigration(command.Context(), state.CapsuleSHA256, brokerKeyProof); err != nil {
+			return err
+		}
+		result := map[string]any{"finalized": true, "generation": state.Generation, "capsule_sha256": state.CapsuleSHA256, "pack_authenticated": packProof}
+		if globalOptions.JSON {
+			globalOptions.Term.Print(ui.ToJSONString(result))
+		} else {
+			globalOptions.Term.Print(fmt.Sprintf("capsule migration finalized; database master key removed; pack authenticated: %t\n", packProof))
+		}
+		return nil
+	}}
+	command.Flags().StringVar(&stateFile, "state-file", "", "mode-0600 migration state from migrate-prepare")
+	command.Flags().BoolVar(&confirm, "confirm", false, "confirm irreversible removal after capsule proof")
+	return command
+}
+
+var errCapsulePackProofComplete = fmt.Errorf("capsule pack proof complete")
 
 func newIndexKeysMirrorEnvelopeCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
 	return &cobra.Command{Use: "mirror-envelope", Short: "Mirror the current key envelope into the repository backend", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {

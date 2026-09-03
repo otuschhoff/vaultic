@@ -18,7 +18,7 @@ import (
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
@@ -27,6 +27,22 @@ func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	command, args, err := root.Find([]string{"list", "index"})
 	if err != nil || command == nil || command.Name() != "list" || len(args) != 1 || args[0] != "index" {
 		t.Fatalf("list index = %v, %v, %v", command, args, err)
+	}
+}
+
+func TestGenerationAnchorNeverMovesBackward(t *testing.T) {
+	path := t.TempDir() + "/generation"
+	if generation, err := readGenerationAnchor(path, 4); err != nil || generation != 4 {
+		t.Fatalf("initial anchor = %d, %v", generation, err)
+	}
+	if err := writeGenerationAnchor(path, 7); err != nil {
+		t.Fatal(err)
+	}
+	if generation, err := readGenerationAnchor(path, 4); err != nil || generation != 7 {
+		t.Fatalf("persisted anchor = %d, %v", generation, err)
+	}
+	if err := writeGenerationAnchor(path, 6); err == nil {
+		t.Fatal("generation anchor downgrade was accepted")
 	}
 }
 

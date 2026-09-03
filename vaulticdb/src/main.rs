@@ -17,6 +17,7 @@ use std::os::unix::fs::FileTypeExt;
 
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use hmac::{Hmac, Mac};
 use ipnet::IpNet;
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -30,6 +31,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{transport::Server, Request, Response, Status};
+use vaulticdb::encryption;
 
 pub mod proto {
     tonic::include_proto!("vaulticdb.v1");
@@ -42,13 +44,14 @@ use proto::{
     EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, GetRequest, GetResponse, HealthRequest,
     HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest,
     MasterKeyResponse, MultiGetRequest, MultiGetResponse, RecoverEscrowRequest,
+    FinalizeCapsuleMigrationRequest, PrepareCapsuleMigrationRequest,
+    PrepareCapsuleMigrationResponse,
     RemoveKeySlotRequest, RequestContext, RewriteDekRequest, RewriteDekResponse, RotateDekRequest,
     RotateLocalKeySlotRequest, ScanRequest, ScanResponse, StoreMasterKeyRequest,
     TransactionRequest, WriteBatchRequest, WriteBatchResponse,
 };
 use zeroize::Zeroizing;
 
-mod encryption;
 mod replication;
 mod storage;
 
@@ -80,6 +83,119 @@ struct Service {
 
 #[tonic::async_trait]
 impl VaulticDb for Service {
+    async fn prepare_capsule_migration(
+        &self,
+        request: Request<PrepareCapsuleMigrationRequest>,
+    ) -> Result<Response<PrepareCapsuleMigrationResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let mut request = request.into_inner();
+        if request.threshold == 0 || request.threshold > u32::from(u8::MAX) {
+            return Err(Status::invalid_argument("invalid capsule threshold"));
+        }
+        let manager = self.storage.key_manager()?;
+        let audit = manager.audit_objects().await.map_err(key_management_error)?;
+        if audit.invalid_objects != 0 || audit.plaintext_objects != 0 || audit.old_version_objects != 0 {
+            return Err(Status::failed_precondition(
+                "all metadata objects must authenticate under the active DEK before migration",
+            ));
+        }
+        let metadata_dek = manager
+            .active_dek_for_migration()
+            .await
+            .map_err(key_management_error)?;
+        let repository_master_key = Zeroizing::new(
+            self.storage
+                .get_master_key()
+                .await?
+                .ok_or_else(|| Status::failed_precondition("repository master key is not stored"))?,
+        );
+        let protected_credentials = request
+            .members
+            .iter_mut()
+            .map(|member| {
+                Ok((
+                    member.member_id.clone(),
+                    member.provider.clone(),
+                    Zeroizing::new(std::mem::take(&mut member.credential)),
+                ))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        let credentials = protected_credentials
+            .iter()
+            .map(|(member_id, provider, credential)| {
+                let credential = match provider.as_str() {
+                    "offline-argon2id" => encryption::recovery_capsule::MemberCredential::Passphrase(credential.as_slice()),
+                    "offline-keyfile" => encryption::recovery_capsule::MemberCredential::Keyfile(credential.as_slice()),
+                    _ => return Err(Status::invalid_argument("migration currently accepts offline-argon2id and offline-keyfile members")),
+                };
+                Ok((member_id.as_str(), credential))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        let capsule = encryption::recovery_capsule::CapsuleBuilder::new(
+            request.repository_id.clone(),
+            request.generation,
+        )
+        .broker_identity_public_key(&request.broker_identity_public_key)
+        .create_offline_threshold(
+            &request.group_id,
+            request.threshold as u8,
+            &credentials,
+            &metadata_dek,
+            &repository_master_key,
+        )
+        .map_err(key_management_error)?;
+        let verification = credentials.iter().map(|(member, credential)| ((*member).to_owned(), *credential)).collect();
+        capsule
+            .recover_offline(&verification)
+            .map_err(key_management_error)?;
+        let local_path = encryption::recovery_capsule::publish_local(
+            std::path::Path::new(&request.capsule_directory),
+            &capsule,
+        )
+        .map_err(key_management_error)?;
+        let mirror_path = manager
+            .publish_capsule_mirror(&capsule)
+            .await
+            .map_err(key_management_error)?;
+        let mut encoded = serde_json::to_vec_pretty(&capsule)
+            .map_err(|error| key_management_error(error.into()))?;
+        encoded.push(b'\n');
+        let capsule_sha256 = format!("{:x}", Sha256::digest(&encoded));
+        self.storage.record_capsule_migration(&capsule_sha256).await?;
+        Ok(Response::new(PrepareCapsuleMigrationResponse {
+            generation: capsule.header.generation,
+            local_path: local_path.display().to_string(),
+            mirror_path,
+            capsule_sha256,
+            capsule: encoded,
+        }))
+    }
+
+    async fn finalize_capsule_migration(
+        &self,
+        request: Request<FinalizeCapsuleMigrationRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let repository_id = request.get_ref().repository_id.as_str();
+        let capsule_sha256 = request.get_ref().capsule_sha256.as_str();
+        let master_key = self
+            .storage
+            .get_master_key()
+            .await?
+            .ok_or_else(|| {
+                Status::failed_precondition("repository master key is not stored in the database")
+            })?;
+        verify_capsule_migration_proof(
+            &master_key,
+            repository_id,
+            capsule_sha256,
+            &request.get_ref().broker_key_proof,
+        )?;
+        self.storage
+            .finalize_capsule_migration(capsule_sha256)
+            .await?;
+        Ok(Response::new(Empty::default()))
+    }
     async fn check_encryption(
         &self,
         request: Request<KeyStatusRequest>,
@@ -497,6 +613,23 @@ impl VaulticDb for Service {
     }
 }
 
+fn verify_capsule_migration_proof(
+    master_key: &[u8],
+    repository_id: &str,
+    capsule_sha256: &str,
+    proof: &[u8],
+) -> Result<(), Status> {
+    let mut verifier = Hmac::<Sha256>::new_from_slice(master_key)
+        .map_err(|_| Status::internal("initialize capsule migration proof verification"))?;
+    verifier.update(b"vaultic-capsule-migration-finalize-v1\0");
+    verifier.update(repository_id.as_bytes());
+    verifier.update(b"\0");
+    verifier.update(capsule_sha256.as_bytes());
+    verifier
+        .verify_slice(proof)
+        .map_err(|_| Status::permission_denied("capsule-recovered repository key proof failed"))
+}
+
 impl Service {
     fn check_key_request<T>(
         &self,
@@ -735,6 +868,7 @@ async fn main() -> Result<()> {
                 return Err(error);
             }
             let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            monitor_broker_lease(storage.as_ref(), shutdown.clone());
             let service = storage_service(state.clone(), shutdown.clone(), storage.clone());
             let stream = UnixListenerStream::new(listener);
             let result = Server::builder()
@@ -768,6 +902,7 @@ async fn main() -> Result<()> {
             let _lock = acquire_singleton_lock(&lock_path)?;
             write_runtime_metadata(&metadata_path, tcp_enabled)?;
             let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            monitor_broker_lease(storage.as_ref(), shutdown.clone());
             let service = storage_service(state, shutdown, storage.clone());
             let (sender, receiver) = mpsc::channel(64);
             tokio::spawn(accept_allowed_tcp(listener, allowlist, sender));
@@ -786,6 +921,24 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn monitor_broker_lease(storage: &Storage, shutdown: watch::Sender<bool>) {
+    let Some((mut disconnected, expires_unix_ms)) = storage.broker_lease_monitor() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(expires_unix_ms);
+        let until_expiry = std::time::Duration::from_millis(expires_unix_ms.saturating_sub(now));
+        tokio::select! {
+            _ = disconnected.changed() => {}
+            _ = tokio::time::sleep(until_expiry) => {}
+        }
+        let _ = shutdown.send(true);
+    });
 }
 
 fn disable_core_dumps() {
@@ -978,6 +1131,42 @@ mod tests {
         assert!(
             matches!(parse_transport("").unwrap(), Transport::Unix(path) if path == PathBuf::from(default_socket_path("")).as_path())
         );
+    }
+
+    #[test]
+    fn capsule_migration_proof_binds_key_repository_and_digest() {
+        let mut proof = Hmac::<Sha256>::new_from_slice(b"repository-key").unwrap();
+        proof.update(b"vaultic-capsule-migration-finalize-v1\0repository-a\0");
+        proof.update("ab".repeat(32).as_bytes());
+        let proof = proof.finalize().into_bytes();
+        assert!(verify_capsule_migration_proof(
+            b"repository-key",
+            "repository-a",
+            &"ab".repeat(32),
+            &proof
+        )
+        .is_ok());
+        assert!(verify_capsule_migration_proof(
+            b"wrong-key",
+            "repository-a",
+            &"ab".repeat(32),
+            &proof
+        )
+        .is_err());
+        assert!(verify_capsule_migration_proof(
+            b"repository-key",
+            "repository-b",
+            &"ab".repeat(32),
+            &proof
+        )
+        .is_err());
+        assert!(verify_capsule_migration_proof(
+            b"repository-key",
+            "repository-a",
+            &"cd".repeat(32),
+            &proof
+        )
+        .is_err());
     }
 
     #[test]

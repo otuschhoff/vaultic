@@ -19,30 +19,32 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	VaulticDB_Health_FullMethodName             = "/vaulticdb.v1.VaulticDB/Health"
-	VaulticDB_Capabilities_FullMethodName       = "/vaulticdb.v1.VaulticDB/Capabilities"
-	VaulticDB_Drain_FullMethodName              = "/vaulticdb.v1.VaulticDB/Drain"
-	VaulticDB_Shutdown_FullMethodName           = "/vaulticdb.v1.VaulticDB/Shutdown"
-	VaulticDB_Get_FullMethodName                = "/vaulticdb.v1.VaulticDB/Get"
-	VaulticDB_MultiGet_FullMethodName           = "/vaulticdb.v1.VaulticDB/MultiGet"
-	VaulticDB_Scan_FullMethodName               = "/vaulticdb.v1.VaulticDB/Scan"
-	VaulticDB_WriteBatch_FullMethodName         = "/vaulticdb.v1.VaulticDB/WriteBatch"
-	VaulticDB_Begin_FullMethodName              = "/vaulticdb.v1.VaulticDB/Begin"
-	VaulticDB_Commit_FullMethodName             = "/vaulticdb.v1.VaulticDB/Commit"
-	VaulticDB_Rollback_FullMethodName           = "/vaulticdb.v1.VaulticDB/Rollback"
-	VaulticDB_GetMasterKey_FullMethodName       = "/vaulticdb.v1.VaulticDB/GetMasterKey"
-	VaulticDB_StoreMasterKey_FullMethodName     = "/vaulticdb.v1.VaulticDB/StoreMasterKey"
-	VaulticDB_KeyStatus_FullMethodName          = "/vaulticdb.v1.VaulticDB/KeyStatus"
-	VaulticDB_AddLocalKeySlot_FullMethodName    = "/vaulticdb.v1.VaulticDB/AddLocalKeySlot"
-	VaulticDB_AddCloudKeySlot_FullMethodName    = "/vaulticdb.v1.VaulticDB/AddCloudKeySlot"
-	VaulticDB_RemoveKeySlot_FullMethodName      = "/vaulticdb.v1.VaulticDB/RemoveKeySlot"
-	VaulticDB_RotateLocalKeySlot_FullMethodName = "/vaulticdb.v1.VaulticDB/RotateLocalKeySlot"
-	VaulticDB_RotateDek_FullMethodName          = "/vaulticdb.v1.VaulticDB/RotateDek"
-	VaulticDB_RewriteDek_FullMethodName         = "/vaulticdb.v1.VaulticDB/RewriteDek"
-	VaulticDB_EscrowMasterKey_FullMethodName    = "/vaulticdb.v1.VaulticDB/EscrowMasterKey"
-	VaulticDB_RecoverEscrow_FullMethodName      = "/vaulticdb.v1.VaulticDB/RecoverEscrow"
-	VaulticDB_ExportKeyEnvelope_FullMethodName  = "/vaulticdb.v1.VaulticDB/ExportKeyEnvelope"
-	VaulticDB_CheckEncryption_FullMethodName    = "/vaulticdb.v1.VaulticDB/CheckEncryption"
+	VaulticDB_Health_FullMethodName                   = "/vaulticdb.v1.VaulticDB/Health"
+	VaulticDB_Capabilities_FullMethodName             = "/vaulticdb.v1.VaulticDB/Capabilities"
+	VaulticDB_Drain_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Drain"
+	VaulticDB_Shutdown_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Shutdown"
+	VaulticDB_Get_FullMethodName                      = "/vaulticdb.v1.VaulticDB/Get"
+	VaulticDB_MultiGet_FullMethodName                 = "/vaulticdb.v1.VaulticDB/MultiGet"
+	VaulticDB_Scan_FullMethodName                     = "/vaulticdb.v1.VaulticDB/Scan"
+	VaulticDB_WriteBatch_FullMethodName               = "/vaulticdb.v1.VaulticDB/WriteBatch"
+	VaulticDB_Begin_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Begin"
+	VaulticDB_Commit_FullMethodName                   = "/vaulticdb.v1.VaulticDB/Commit"
+	VaulticDB_Rollback_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Rollback"
+	VaulticDB_GetMasterKey_FullMethodName             = "/vaulticdb.v1.VaulticDB/GetMasterKey"
+	VaulticDB_StoreMasterKey_FullMethodName           = "/vaulticdb.v1.VaulticDB/StoreMasterKey"
+	VaulticDB_KeyStatus_FullMethodName                = "/vaulticdb.v1.VaulticDB/KeyStatus"
+	VaulticDB_AddLocalKeySlot_FullMethodName          = "/vaulticdb.v1.VaulticDB/AddLocalKeySlot"
+	VaulticDB_AddCloudKeySlot_FullMethodName          = "/vaulticdb.v1.VaulticDB/AddCloudKeySlot"
+	VaulticDB_RemoveKeySlot_FullMethodName            = "/vaulticdb.v1.VaulticDB/RemoveKeySlot"
+	VaulticDB_RotateLocalKeySlot_FullMethodName       = "/vaulticdb.v1.VaulticDB/RotateLocalKeySlot"
+	VaulticDB_RotateDek_FullMethodName                = "/vaulticdb.v1.VaulticDB/RotateDek"
+	VaulticDB_RewriteDek_FullMethodName               = "/vaulticdb.v1.VaulticDB/RewriteDek"
+	VaulticDB_EscrowMasterKey_FullMethodName          = "/vaulticdb.v1.VaulticDB/EscrowMasterKey"
+	VaulticDB_RecoverEscrow_FullMethodName            = "/vaulticdb.v1.VaulticDB/RecoverEscrow"
+	VaulticDB_ExportKeyEnvelope_FullMethodName        = "/vaulticdb.v1.VaulticDB/ExportKeyEnvelope"
+	VaulticDB_CheckEncryption_FullMethodName          = "/vaulticdb.v1.VaulticDB/CheckEncryption"
+	VaulticDB_PrepareCapsuleMigration_FullMethodName  = "/vaulticdb.v1.VaulticDB/PrepareCapsuleMigration"
+	VaulticDB_FinalizeCapsuleMigration_FullMethodName = "/vaulticdb.v1.VaulticDB/FinalizeCapsuleMigration"
 )
 
 // VaulticDBClient is the client API for VaulticDB service.
@@ -73,6 +75,8 @@ type VaulticDBClient interface {
 	RecoverEscrow(ctx context.Context, in *RecoverEscrowRequest, opts ...grpc.CallOption) (*MasterKeyResponse, error)
 	ExportKeyEnvelope(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*ExportKeyEnvelopeResponse, error)
 	CheckEncryption(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*EncryptionAuditResponse, error)
+	PrepareCapsuleMigration(ctx context.Context, in *PrepareCapsuleMigrationRequest, opts ...grpc.CallOption) (*PrepareCapsuleMigrationResponse, error)
+	FinalizeCapsuleMigration(ctx context.Context, in *FinalizeCapsuleMigrationRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type vaulticDBClient struct {
@@ -323,6 +327,26 @@ func (c *vaulticDBClient) CheckEncryption(ctx context.Context, in *KeyStatusRequ
 	return out, nil
 }
 
+func (c *vaulticDBClient) PrepareCapsuleMigration(ctx context.Context, in *PrepareCapsuleMigrationRequest, opts ...grpc.CallOption) (*PrepareCapsuleMigrationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareCapsuleMigrationResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_PrepareCapsuleMigration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) FinalizeCapsuleMigration(ctx context.Context, in *FinalizeCapsuleMigrationRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, VaulticDB_FinalizeCapsuleMigration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VaulticDBServer is the server API for VaulticDB service.
 // All implementations must embed UnimplementedVaulticDBServer
 // for forward compatibility.
@@ -351,6 +375,8 @@ type VaulticDBServer interface {
 	RecoverEscrow(context.Context, *RecoverEscrowRequest) (*MasterKeyResponse, error)
 	ExportKeyEnvelope(context.Context, *KeyStatusRequest) (*ExportKeyEnvelopeResponse, error)
 	CheckEncryption(context.Context, *KeyStatusRequest) (*EncryptionAuditResponse, error)
+	PrepareCapsuleMigration(context.Context, *PrepareCapsuleMigrationRequest) (*PrepareCapsuleMigrationResponse, error)
+	FinalizeCapsuleMigration(context.Context, *FinalizeCapsuleMigrationRequest) (*Empty, error)
 	mustEmbedUnimplementedVaulticDBServer()
 }
 
@@ -432,6 +458,12 @@ func (UnimplementedVaulticDBServer) ExportKeyEnvelope(context.Context, *KeyStatu
 }
 func (UnimplementedVaulticDBServer) CheckEncryption(context.Context, *KeyStatusRequest) (*EncryptionAuditResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CheckEncryption not implemented")
+}
+func (UnimplementedVaulticDBServer) PrepareCapsuleMigration(context.Context, *PrepareCapsuleMigrationRequest) (*PrepareCapsuleMigrationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PrepareCapsuleMigration not implemented")
+}
+func (UnimplementedVaulticDBServer) FinalizeCapsuleMigration(context.Context, *FinalizeCapsuleMigrationRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FinalizeCapsuleMigration not implemented")
 }
 func (UnimplementedVaulticDBServer) mustEmbedUnimplementedVaulticDBServer() {}
 func (UnimplementedVaulticDBServer) testEmbeddedByValue()                   {}
@@ -886,6 +918,42 @@ func _VaulticDB_CheckEncryption_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VaulticDB_PrepareCapsuleMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareCapsuleMigrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).PrepareCapsuleMigration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_PrepareCapsuleMigration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).PrepareCapsuleMigration(ctx, req.(*PrepareCapsuleMigrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_FinalizeCapsuleMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinalizeCapsuleMigrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).FinalizeCapsuleMigration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_FinalizeCapsuleMigration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).FinalizeCapsuleMigration(ctx, req.(*FinalizeCapsuleMigrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VaulticDB_ServiceDesc is the grpc.ServiceDesc for VaulticDB service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -988,6 +1056,14 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckEncryption",
 			Handler:    _VaulticDB_CheckEncryption_Handler,
+		},
+		{
+			MethodName: "PrepareCapsuleMigration",
+			Handler:    _VaulticDB_PrepareCapsuleMigration_Handler,
+		},
+		{
+			MethodName: "FinalizeCapsuleMigration",
+			Handler:    _VaulticDB_FinalizeCapsuleMigration_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

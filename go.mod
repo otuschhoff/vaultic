@@ -20,6 +20,7 @@ require (
 	github.com/anacrolix/fuse v0.3.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/cloudflare/circl v1.6.5
 	github.com/dustin/go-humanize v1.0.1
 	github.com/elithrar/simple-scrypt v1.4.1
 	github.com/go-ole/go-ole v1.3.0

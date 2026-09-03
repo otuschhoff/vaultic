@@ -45,6 +45,7 @@ type Repository struct {
 	cache                  *cache.Cache
 	placementBackends      map[uint64]backend.Backend
 	ownedPlacementBackends []backend.Backend
+	ownedClosers           []io.Closer
 
 	opts Options
 
@@ -63,6 +64,11 @@ type Repository struct {
 
 	zeroChunkOnce sync.Once
 	zeroChunkID   vaultic.ID
+}
+
+// AddOwnedCloser binds a local capability lease to the repository lifetime.
+func (r *Repository) AddOwnedCloser(closer io.Closer) {
+	r.ownedClosers = append(r.ownedClosers, closer)
 }
 
 type snapshotAuthority interface {
@@ -1463,6 +1469,9 @@ func (r *Repository) Delete(ctx context.Context) error {
 // Close closes the repository by closing the backend.
 func (r *Repository) Close() error {
 	errs := []error{r.Engine().Close(), r.be.Close()}
+	for _, closer := range r.ownedClosers {
+		errs = append(errs, closer.Close())
+	}
 	for _, placement := range r.ownedPlacementBackends {
 		errs = append(errs, placement.Close())
 	}

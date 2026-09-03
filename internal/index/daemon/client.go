@@ -601,6 +601,50 @@ func (c *Client) StoreMasterKey(ctx context.Context, masterKey []byte) error {
 	return err
 }
 
+type OfflineCapsuleMember struct {
+	ID         string
+	Provider   string
+	Credential []byte
+}
+
+type CapsuleMigration struct {
+	Generation    uint64
+	LocalPath     string
+	MirrorPath    string
+	CapsuleSHA256 string
+	Capsule       []byte
+}
+
+func (c *Client) PrepareCapsuleMigration(ctx context.Context, capsuleDirectory string, generation uint64, groupID string, threshold uint32, brokerIdentityPublicKey []byte, members []OfflineCapsuleMember) (CapsuleMigration, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	requestMembers := make([]*vaulticdbv1.OfflineCapsuleMember, len(members))
+	for index, member := range members {
+		requestMembers[index] = &vaulticdbv1.OfflineCapsuleMember{MemberId: member.ID, Provider: member.Provider, Credential: append([]byte(nil), member.Credential...)}
+		defer func(value []byte) {
+			for index := range value {
+				value[index] = 0
+			}
+		}(requestMembers[index].Credential)
+	}
+	response, err := c.rpc.PrepareCapsuleMigration(ctx, &vaulticdbv1.PrepareCapsuleMigrationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), CapsuleDirectory: capsuleDirectory, Generation: generation, GroupId: groupID, Threshold: threshold, BrokerIdentityPublicKey: brokerIdentityPublicKey, Members: requestMembers})
+	if err != nil {
+		return CapsuleMigration{}, err
+	}
+	_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "recovery capsule migration prepared", Fields: map[string]any{"repository_id": c.options.RepositoryID, "generation": response.GetGeneration(), "capsule_sha256": response.GetCapsuleSha256()}})
+	return CapsuleMigration{Generation: response.GetGeneration(), LocalPath: response.GetLocalPath(), MirrorPath: response.GetMirrorPath(), CapsuleSHA256: response.GetCapsuleSha256(), Capsule: response.GetCapsule()}, nil
+}
+
+func (c *Client) FinalizeCapsuleMigration(ctx context.Context, capsuleSHA256 string, brokerKeyProof []byte) error {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	_, err := c.rpc.FinalizeCapsuleMigration(ctx, &vaulticdbv1.FinalizeCapsuleMigrationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), CapsuleSha256: capsuleSHA256, BrokerKeyProof: brokerKeyProof})
+	if err == nil {
+		_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "recovery capsule migration finalized and database master key removed", Fields: map[string]any{"repository_id": c.options.RepositoryID, "capsule_sha256": capsuleSHA256}})
+	}
+	return err
+}
+
 // KeyStatus returns redacted key-envelope metadata.
 func (c *Client) KeyStatus(ctx context.Context) (KeyStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)

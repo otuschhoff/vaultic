@@ -24,15 +24,20 @@ use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
 
 use crate::{
-    encryption::envelope::{self, EncryptionStatus, KeyManager},
     proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest},
     replication::ReplicatedObjectStore,
 };
+use vaulticdb::encryption::{
+    self,
+    envelope::{self, EncryptionStatus, KeyManager},
+};
+use vaulticdb::broker::{acquire_metadata_lease, BrokerLeaseConnection};
 
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
 const DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
 const MASTER_KEY_RECORD: &[u8] = b"meta:master-key";
+const CAPSULE_MIGRATION_RECORD: &[u8] = b"meta:capsule-migration";
 const ENCRYPTION_POLICY_RECORD: &[u8] = b"meta:encryption";
 const MAX_MASTER_KEY_BYTES: usize = 4096;
 
@@ -58,13 +63,38 @@ pub struct Storage {
     transactions: RwLock<HashMap<String, Arc<TransactionSlot>>>,
     next_transaction: AtomicU64,
     transaction_idle_timeout_ms: u64,
+    broker_lease: Option<BrokerLeaseConnection>,
 }
 
 impl Storage {
     pub async fn open(repository_id: &str) -> Result<Self> {
         let (path, object_store) = object_store(repository_id)?;
-        let (object_store, encryption, key_manager) =
-            envelope::configure(repository_id, object_store).await?;
+        let mut broker_lease = None;
+        let (object_store, encryption, key_manager) = if let Ok(socket) = env::var("VAULTICDB_BROKER_SOCKET") {
+            let manifest = env::var("VAULTICDB_RELEASE_MANIFEST")
+                .context("VAULTICDB_RELEASE_MANIFEST is required with VAULTICDB_BROKER_SOCKET")?;
+            let ttl = env::var("VAULTICDB_BROKER_LEASE_SECONDS")
+                .unwrap_or_else(|_| "3600".to_owned())
+                .parse::<u64>()
+                .context("invalid VAULTICDB_BROKER_LEASE_SECONDS")?;
+            let (lease, dek) = acquire_metadata_lease(
+                &socket,
+                std::path::Path::new(&manifest),
+                std::time::Duration::from_secs(ttl),
+            )
+            .await?;
+            let configured = envelope::configure_brokered(
+                repository_id,
+                object_store,
+                &dek,
+                lease.key_version,
+                lease.capsule_generation,
+            )?;
+            broker_lease = Some(lease);
+            configured
+        } else {
+            envelope::configure(repository_id, object_store).await?
+        };
         let db = Db::open(path, object_store)
             .await
             .context("open SlateDB database")?;
@@ -75,9 +105,16 @@ impl Storage {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             transaction_idle_timeout_ms: transaction_idle_timeout_ms()?,
+            broker_lease,
         };
         storage.ensure_encryption_policy(repository_id).await?;
         Ok(storage)
+    }
+
+    pub fn broker_lease_monitor(&self) -> Option<(tokio::sync::watch::Receiver<bool>, u64)> {
+        self.broker_lease
+            .as_ref()
+            .map(|lease| (lease.disconnected(), lease.expires_unix_ms))
     }
 
     pub fn encryption_status(&self) -> &EncryptionStatus {
@@ -135,6 +172,11 @@ impl Storage {
     }
 
     pub async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
+        if self.broker_lease.is_some() {
+            return Err(Status::failed_precondition(
+                "repository master key is authoritative only in the recovery capsule",
+            ));
+        }
         if !self.encryption.enabled {
             return Err(Status::failed_precondition(
                 "master-key-in-DB requires metadata encryption",
@@ -148,6 +190,11 @@ impl Storage {
     }
 
     pub async fn store_master_key(&self, master_key: &[u8]) -> Result<(), Status> {
+        if self.broker_lease.is_some() {
+            return Err(Status::failed_precondition(
+                "master-key-in-DB is prohibited in brokered mode",
+            ));
+        }
         if !self.encryption.enabled {
             return Err(Status::failed_precondition(
                 "master-key-in-DB requires metadata encryption",
@@ -176,6 +223,34 @@ impl Storage {
             .await_durable()
             .await
             .map_err(storage_error)
+    }
+
+    pub async fn record_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
+        if capsule_sha256.len() != 64 || !capsule_sha256.bytes().all(|value| value.is_ascii_hexdigit()) {
+            return Err(Status::invalid_argument("invalid capsule digest"));
+        }
+        self.db
+            .put(CAPSULE_MIGRATION_RECORD, capsule_sha256.as_bytes())
+            .await
+            .map(|_| ())
+            .map_err(storage_error)
+    }
+
+    pub async fn finalize_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
+        let pending = self
+            .db
+            .get(CAPSULE_MIGRATION_RECORD)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| Status::failed_precondition("no prepared capsule migration"))?;
+        if pending.as_ref() != capsule_sha256.as_bytes() {
+            return Err(Status::failed_precondition("prepared capsule digest mismatch"));
+        }
+        let mut batch = slatedb::WriteBatch::new();
+        batch.delete(MASTER_KEY_RECORD);
+        batch.delete(CAPSULE_MIGRATION_RECORD);
+        self.db.write(batch).await.map_err(storage_error)?;
+        self.db.flush().await.map_err(storage_error)
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -373,6 +448,7 @@ impl Storage {
     }
 }
 
+
 fn transaction_idle_timeout_ms() -> Result<u64> {
     let seconds = match env::var("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS") {
         Ok(value) => value
@@ -501,7 +577,7 @@ fn validate_mutations(request: &WriteBatchRequest) -> Result<(), Status> {
 
 fn storage_error(error: slatedb::Error) -> Status {
     let message = format!("SlateDB operation failed: {error}");
-    if crate::encryption::is_integrity_error(&error) {
+    if encryption::is_integrity_error(&error) {
         return Status::data_loss(message);
     }
     match error.kind() {
@@ -664,7 +740,8 @@ fn env_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{repeated_message_encoded_len, transaction_expired};
+    use super::*;
+    use slatedb::object_store::memory::InMemory;
 
     #[test]
     fn repeated_message_size_includes_tag_and_varint_length() {
@@ -682,5 +759,43 @@ mod tests {
         assert!(!transaction_expired(1_000, 1_999, 1_000));
         assert!(transaction_expired(1_000, 2_000, 1_000));
         assert!(!transaction_expired(2_000, 1_000, 1_000));
+    }
+
+    #[tokio::test]
+    async fn capsule_migration_keeps_master_key_until_matching_finalize() {
+        let db = Db::open("migration-test", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let storage = Storage {
+            db,
+            encryption: EncryptionStatus {
+                enabled: true,
+                algorithm: "AES-256-GCM",
+                active_dek_version: 1,
+                envelope_generation: 1,
+                unlock_slot: Some("test".to_owned()),
+                recovery_unlock: false,
+                initializing: false,
+            },
+            key_manager: None,
+            transactions: RwLock::new(HashMap::new()),
+            next_transaction: AtomicU64::new(1),
+            transaction_idle_timeout_ms: 1_000,
+            broker_lease: None,
+        };
+        storage.store_master_key(b"repository-key").await.unwrap();
+        let digest = "ab".repeat(32);
+        storage.record_capsule_migration(&digest).await.unwrap();
+        assert!(storage
+            .finalize_capsule_migration(&"cd".repeat(32))
+            .await
+            .is_err());
+        assert_eq!(
+            storage.get_master_key().await.unwrap().unwrap(),
+            b"repository-key"
+        );
+        storage.finalize_capsule_migration(&digest).await.unwrap();
+        assert!(storage.get_master_key().await.unwrap().is_none());
+        storage.close().await.unwrap();
     }
 }

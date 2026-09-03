@@ -148,6 +148,7 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexGDPRCommand(globalOptions),
 		newIndexVerifyStorageCommand(globalOptions),
 		newIndexKeysCommand(globalOptions),
+		newIndexUnlockCommand(globalOptions),
 		newIndexEncryptCommand(globalOptions),
 	)
 	return command

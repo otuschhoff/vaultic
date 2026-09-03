@@ -16,19 +16,25 @@ aws-sdk-kms = "1.117"
 base64 = "0.22"
 bytes = "1.10"
 cryptoki = "0.10"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 fs2 = "0.4"
 futures-util = "0.3"
+hkdf = "0.12"
+hmac = "0.12"
+hpke = "0.13"
 ipnet = "2.11"
 libc = "0.2"
 object_store = { version = "0.14", default-features = false, features = ["azure"] }
 prost = "0.13"
 rand = "0.9"
+rand08 = { package = "rand", version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+sharks = "0.5"
 slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "ae07acd4498068d1b9ba799cc9f6c9824e6f6251" }
-tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.47", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tonic = { version = "0.12", features = ["transport"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 thiserror = "2.0"

@@ -178,6 +178,23 @@ impl KeyManager {
         serde_json::to_vec_pretty(&state.envelope).context("encode metadata key envelope")
     }
 
+    pub async fn active_dek_for_migration(&self) -> Result<Zeroizing<Vec<u8>>> {
+        let state = self.state.lock().await;
+        let keys = expand_deks(&state.envelope, &state.dek)?;
+        let active = keys
+            .iter()
+            .find(|key| key.version == state.envelope.active_dek_version)
+            .context("active metadata DEK is unavailable")?;
+        Ok(Zeroizing::new(active.secret().to_vec()))
+    }
+
+    pub async fn publish_capsule_mirror(
+        &self,
+        capsule: &super::recovery_capsule::RecoveryCapsule,
+    ) -> Result<String> {
+        super::recovery_capsule::publish_mirror(self.inner.as_ref(), capsule).await
+    }
+
     pub async fn add_local_slot(
         &self,
         slot_id: &str,
@@ -441,6 +458,40 @@ pub async fn configure(
         migrate_plaintext_objects(inner.as_ref(), configured.0.as_ref()).await?;
     }
     Ok(configured)
+}
+
+pub fn configure_brokered(
+    repository_id: &str,
+    inner: Arc<dyn ObjectStore>,
+    dek: &[u8],
+    dek_version: u32,
+    capsule_generation: u64,
+) -> Result<(Arc<dyn ObjectStore>, EncryptionStatus, Option<Arc<KeyManager>>)> {
+    if repository_id.is_empty() || dek.len() != DEK_BYTES || dek_version == 0 || capsule_generation == 0 {
+        bail!("invalid brokered metadata encryption configuration");
+    }
+    let key: [u8; DEK_BYTES] = dek
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("brokered metadata DEK has an invalid length"))?;
+    let encrypted: Arc<dyn ObjectStore> = Arc::new(EncryptedObjectStore::new(
+        inner,
+        repository_id,
+        vec![EncryptionKey::new(dek_version, key)],
+        dek_version,
+    )?);
+    Ok((
+        encrypted,
+        EncryptionStatus {
+            enabled: true,
+            algorithm: "AES-256-GCM",
+            active_dek_version: dek_version,
+            envelope_generation: capsule_generation,
+            unlock_slot: Some("broker-lease".to_owned()),
+            recovery_unlock: false,
+            initializing: false,
+        },
+        None,
+    ))
 }
 
 fn enforce_recovery_acknowledgement(

@@ -24,6 +24,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/options"
 	"github.com/otuschhoff/vaultic/internal/repository"
@@ -87,6 +88,9 @@ type Options struct {
 	MetadataPKCS11PINFile     string
 	MetadataRecoveryUnlock    bool
 	MetadataLossRecovery      bool
+	KeyBrokerSocket           string
+	KeyBrokerReleaseManifest  string
+	KeyBrokerLeaseDuration    time.Duration
 	Quiet                     bool
 	Verbose                   int
 	LogFile                   string
@@ -187,6 +191,9 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.MetadataPKCS11PINFile, "metadata-key-db-pkcs11-pin-file", "", "protected PKCS#11 PIN file for key-in-DB unlock")
 	f.BoolVar(&opts.MetadataRecoveryUnlock, "metadata-recovery-ack", false, "acknowledge metadata recovery-slot use")
 	f.BoolVar(&opts.MetadataLossRecovery, "metadata-loss-recovery", false, "use the legacy JSON index after total SlateDB metadata loss (requires a direct master key)")
+	f.StringVar(&opts.KeyBrokerSocket, "key-broker-socket", "", "local vaultic-key-broker Unix socket")
+	f.StringVar(&opts.KeyBrokerReleaseManifest, "key-broker-release-manifest", "", "signed release manifest authorizing this Vaultic executable")
+	f.DurationVar(&opts.KeyBrokerLeaseDuration, "key-broker-lease", 15*time.Minute, "job-scoped repository-key lease lifetime")
 
 	f.StringVar(&opts.RepoHot, "repo-hot", "", "hot part of a hot/cold `repository` (cold storage; default: $VAULTIC_REPO_HOT)")
 	f.StringVar(&opts.WarmUpCommand, "warm-up-command", "", "warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)")
@@ -264,6 +271,13 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	opts.MetadataPKCS11PINFile = env.Get("METADATA_PKCS11_PIN_FILE")
 	opts.MetadataRecoveryUnlock = env.Get("METADATA_RECOVERY_ACK") == "true"
 	opts.MetadataLossRecovery = env.Get("METADATA_LOSS_RECOVERY") == "true"
+	opts.KeyBrokerSocket = env.Get("KEY_BROKER_SOCKET")
+	opts.KeyBrokerReleaseManifest = env.Get("KEY_BROKER_RELEASE_MANIFEST")
+	if value := env.Get("KEY_BROKER_LEASE"); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			opts.KeyBrokerLeaseDuration = duration
+		}
+	}
 	opts.RepoHot = env.Get("REPO_HOT")
 	opts.WarmUpCommand = env.Get("WARM_UP_COMMAND")
 	if v := env.Get("WARM_UP_BATCH"); v != "" {
@@ -343,7 +357,7 @@ func (opts *Options) PreRun(needsPassword bool) error {
 		return err
 	}
 	opts.Extended = extendedOpts
-	if !needsPassword {
+	if !needsPassword || opts.KeyBrokerSocket != "" {
 		return nil
 	}
 	pwd, err := resolvePassword(opts, "VAULTIC_PASSWORD")
@@ -555,15 +569,50 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if err != nil {
 		return nil, err
 	}
+	if gopts.KeyBrokerSocket != "" {
+		if gopts.KeyBrokerReleaseManifest == "" {
+			return nil, errors.Fatal("--key-broker-release-manifest is required with --key-broker-socket")
+		}
+		if gopts.MetadataKeyInDB || gopts.MasterKey != "" || gopts.MasterKeyFile != "" || gopts.MasterKeyCommand != "" || gopts.Password != "" || gopts.PasswordFile != "" || gopts.PasswordCommand != "" || gopts.AzureKeyVaultURL != "" || gopts.InsecureNoPassword {
+			return nil, errors.Fatal("brokered unlock is mutually exclusive with password, direct-key, Azure-secret, and key-in-DB routes")
+		}
+		client, connectErr := indexbroker.Dial(ctx, gopts.KeyBrokerSocket)
+		if connectErr != nil {
+			return nil, connectErr
+		}
+		capability := "repository-master-key"
+		if gopts.MetadataLossRecovery {
+			capability = "metadata-loss-recovery"
+		}
+		lease, leaseErr := client.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, capability, gopts.KeyBrokerLeaseDuration)
+		if leaseErr != nil {
+			_ = client.Close()
+			return nil, leaseErr
+		}
+		if lease.ExpiresUnixMS <= uint64(time.Now().UnixMilli()) {
+			clear(lease.Key)
+			_ = client.Close()
+			return nil, errors.Fatal("key broker returned an expired repository lease")
+		}
+		err = s.UseMasterKey(ctx, string(lease.Key))
+		clear(lease.Key)
+		if err != nil {
+			_ = client.Close()
+			return nil, errors.Fatalf("open repository with broker lease: %v", err)
+		}
+		s.AddOwnedCloser(client)
+	}
 	if gopts.MetadataLossRecovery {
-		if gopts.MetadataKeyInDB || (gopts.MasterKey == "" && gopts.MasterKeyFile == "" && gopts.MasterKeyCommand == "") {
+		if gopts.KeyBrokerSocket == "" && (gopts.MetadataKeyInDB || (gopts.MasterKey == "" && gopts.MasterKeyFile == "" && gopts.MasterKeyCommand == "")) {
 			return nil, errors.Fatal("metadata-loss recovery requires --key, --key-file, or --key-command and cannot use --metadata-key-in-db")
 		}
 		ctx = repository.WithMetadataLossRecovery(ctx)
 		_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "repository", Message: "legacy metadata-loss recovery selected"})
 	}
 
-	if gopts.MetadataKeyInDB {
+	if gopts.KeyBrokerSocket != "" {
+		// The repository was already authenticated using the job-scoped broker lease.
+	} else if gopts.MetadataKeyInDB {
 		var resolution metadataindex.Resolution
 		resolution, err = metadataindex.Resolve(ctx, be, "")
 		if err != nil || resolution.Mode != metadataindex.ModeSlateDB || resolution.Manifest == nil {

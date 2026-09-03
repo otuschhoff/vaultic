@@ -2421,6 +2421,310 @@ func (x *RecoverEscrowRequest) GetBearerToken() []byte {
 	return nil
 }
 
+type OfflineCapsuleMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MemberId      string                 `protobuf:"bytes,1,opt,name=member_id,json=memberId,proto3" json:"member_id,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Credential    []byte                 `protobuf:"bytes,3,opt,name=credential,proto3" json:"credential,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OfflineCapsuleMember) Reset() {
+	*x = OfflineCapsuleMember{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OfflineCapsuleMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OfflineCapsuleMember) ProtoMessage() {}
+
+func (x *OfflineCapsuleMember) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OfflineCapsuleMember.ProtoReflect.Descriptor instead.
+func (*OfflineCapsuleMember) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *OfflineCapsuleMember) GetMemberId() string {
+	if x != nil {
+		return x.MemberId
+	}
+	return ""
+}
+
+func (x *OfflineCapsuleMember) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *OfflineCapsuleMember) GetCredential() []byte {
+	if x != nil {
+		return x.Credential
+	}
+	return nil
+}
+
+type PrepareCapsuleMigrationRequest struct {
+	state                   protoimpl.MessageState  `protogen:"open.v1"`
+	RepositoryId            string                  `protobuf:"bytes,1,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	Context                 *RequestContext         `protobuf:"bytes,2,opt,name=context,proto3" json:"context,omitempty"`
+	CapsuleDirectory        string                  `protobuf:"bytes,3,opt,name=capsule_directory,json=capsuleDirectory,proto3" json:"capsule_directory,omitempty"`
+	Generation              uint64                  `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	GroupId                 string                  `protobuf:"bytes,5,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
+	Threshold               uint32                  `protobuf:"varint,6,opt,name=threshold,proto3" json:"threshold,omitempty"`
+	BrokerIdentityPublicKey []byte                  `protobuf:"bytes,7,opt,name=broker_identity_public_key,json=brokerIdentityPublicKey,proto3" json:"broker_identity_public_key,omitempty"`
+	Members                 []*OfflineCapsuleMember `protobuf:"bytes,8,rep,name=members,proto3" json:"members,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *PrepareCapsuleMigrationRequest) Reset() {
+	*x = PrepareCapsuleMigrationRequest{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareCapsuleMigrationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareCapsuleMigrationRequest) ProtoMessage() {}
+
+func (x *PrepareCapsuleMigrationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareCapsuleMigrationRequest.ProtoReflect.Descriptor instead.
+func (*PrepareCapsuleMigrationRequest) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetRepositoryId() string {
+	if x != nil {
+		return x.RepositoryId
+	}
+	return ""
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetCapsuleDirectory() string {
+	if x != nil {
+		return x.CapsuleDirectory
+	}
+	return ""
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetGroupId() string {
+	if x != nil {
+		return x.GroupId
+	}
+	return ""
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetThreshold() uint32 {
+	if x != nil {
+		return x.Threshold
+	}
+	return 0
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetBrokerIdentityPublicKey() []byte {
+	if x != nil {
+		return x.BrokerIdentityPublicKey
+	}
+	return nil
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetMembers() []*OfflineCapsuleMember {
+	if x != nil {
+		return x.Members
+	}
+	return nil
+}
+
+type PrepareCapsuleMigrationResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Generation    uint64                 `protobuf:"varint,1,opt,name=generation,proto3" json:"generation,omitempty"`
+	LocalPath     string                 `protobuf:"bytes,2,opt,name=local_path,json=localPath,proto3" json:"local_path,omitempty"`
+	MirrorPath    string                 `protobuf:"bytes,3,opt,name=mirror_path,json=mirrorPath,proto3" json:"mirror_path,omitempty"`
+	CapsuleSha256 string                 `protobuf:"bytes,4,opt,name=capsule_sha256,json=capsuleSha256,proto3" json:"capsule_sha256,omitempty"`
+	Capsule       []byte                 `protobuf:"bytes,5,opt,name=capsule,proto3" json:"capsule,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareCapsuleMigrationResponse) Reset() {
+	*x = PrepareCapsuleMigrationResponse{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareCapsuleMigrationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareCapsuleMigrationResponse) ProtoMessage() {}
+
+func (x *PrepareCapsuleMigrationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareCapsuleMigrationResponse.ProtoReflect.Descriptor instead.
+func (*PrepareCapsuleMigrationResponse) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *PrepareCapsuleMigrationResponse) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *PrepareCapsuleMigrationResponse) GetLocalPath() string {
+	if x != nil {
+		return x.LocalPath
+	}
+	return ""
+}
+
+func (x *PrepareCapsuleMigrationResponse) GetMirrorPath() string {
+	if x != nil {
+		return x.MirrorPath
+	}
+	return ""
+}
+
+func (x *PrepareCapsuleMigrationResponse) GetCapsuleSha256() string {
+	if x != nil {
+		return x.CapsuleSha256
+	}
+	return ""
+}
+
+func (x *PrepareCapsuleMigrationResponse) GetCapsule() []byte {
+	if x != nil {
+		return x.Capsule
+	}
+	return nil
+}
+
+type FinalizeCapsuleMigrationRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RepositoryId   string                 `protobuf:"bytes,1,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	Context        *RequestContext        `protobuf:"bytes,2,opt,name=context,proto3" json:"context,omitempty"`
+	CapsuleSha256  string                 `protobuf:"bytes,3,opt,name=capsule_sha256,json=capsuleSha256,proto3" json:"capsule_sha256,omitempty"`
+	BrokerKeyProof []byte                 `protobuf:"bytes,4,opt,name=broker_key_proof,json=brokerKeyProof,proto3" json:"broker_key_proof,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *FinalizeCapsuleMigrationRequest) Reset() {
+	*x = FinalizeCapsuleMigrationRequest{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinalizeCapsuleMigrationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinalizeCapsuleMigrationRequest) ProtoMessage() {}
+
+func (x *FinalizeCapsuleMigrationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinalizeCapsuleMigrationRequest.ProtoReflect.Descriptor instead.
+func (*FinalizeCapsuleMigrationRequest) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *FinalizeCapsuleMigrationRequest) GetRepositoryId() string {
+	if x != nil {
+		return x.RepositoryId
+	}
+	return ""
+}
+
+func (x *FinalizeCapsuleMigrationRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *FinalizeCapsuleMigrationRequest) GetCapsuleSha256() string {
+	if x != nil {
+		return x.CapsuleSha256
+	}
+	return ""
+}
+
+func (x *FinalizeCapsuleMigrationRequest) GetBrokerKeyProof() []byte {
+	if x != nil {
+		return x.BrokerKeyProof
+	}
+	return nil
+}
+
 var File_vaulticdb_v1_daemon_proto protoreflect.FileDescriptor
 
 const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
@@ -2608,7 +2912,39 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12\x16\n" +
 	"\x06record\x18\x03 \x01(\fR\x06record\x12!\n" +
-	"\fbearer_token\x18\x04 \x01(\fR\vbearerToken2\xd1\x0e\n" +
+	"\fbearer_token\x18\x04 \x01(\fR\vbearerToken\"o\n" +
+	"\x14OfflineCapsuleMember\x12\x1b\n" +
+	"\tmember_id\x18\x01 \x01(\tR\bmemberId\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1e\n" +
+	"\n" +
+	"credential\x18\x03 \x01(\fR\n" +
+	"credential\"\xfe\x02\n" +
+	"\x1ePrepareCapsuleMigrationRequest\x12#\n" +
+	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12+\n" +
+	"\x11capsule_directory\x18\x03 \x01(\tR\x10capsuleDirectory\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\x12\x19\n" +
+	"\bgroup_id\x18\x05 \x01(\tR\agroupId\x12\x1c\n" +
+	"\tthreshold\x18\x06 \x01(\rR\tthreshold\x12;\n" +
+	"\x1abroker_identity_public_key\x18\a \x01(\fR\x17brokerIdentityPublicKey\x12<\n" +
+	"\amembers\x18\b \x03(\v2\".vaulticdb.v1.OfflineCapsuleMemberR\amembers\"\xc2\x01\n" +
+	"\x1fPrepareCapsuleMigrationResponse\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x01 \x01(\x04R\n" +
+	"generation\x12\x1d\n" +
+	"\n" +
+	"local_path\x18\x02 \x01(\tR\tlocalPath\x12\x1f\n" +
+	"\vmirror_path\x18\x03 \x01(\tR\n" +
+	"mirrorPath\x12%\n" +
+	"\x0ecapsule_sha256\x18\x04 \x01(\tR\rcapsuleSha256\x12\x18\n" +
+	"\acapsule\x18\x05 \x01(\fR\acapsule\"\xcf\x01\n" +
+	"\x1fFinalizeCapsuleMigrationRequest\x12#\n" +
+	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12%\n" +
+	"\x0ecapsule_sha256\x18\x03 \x01(\tR\rcapsuleSha256\x12(\n" +
+	"\x10broker_key_proof\x18\x04 \x01(\fR\x0ebrokerKeyProof2\xa9\x10\n" +
 	"\tVaulticDB\x12C\n" +
 	"\x06Health\x12\x1b.vaulticdb.v1.HealthRequest\x1a\x1c.vaulticdb.v1.HealthResponse\x12U\n" +
 	"\fCapabilities\x12!.vaulticdb.v1.CapabilitiesRequest\x1a\".vaulticdb.v1.CapabilitiesResponse\x121\n" +
@@ -2635,7 +2971,9 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x0fEscrowMasterKey\x12$.vaulticdb.v1.EscrowMasterKeyRequest\x1a%.vaulticdb.v1.EscrowMasterKeyResponse\x12T\n" +
 	"\rRecoverEscrow\x12\".vaulticdb.v1.RecoverEscrowRequest\x1a\x1f.vaulticdb.v1.MasterKeyResponse\x12\\\n" +
 	"\x11ExportKeyEnvelope\x12\x1e.vaulticdb.v1.KeyStatusRequest\x1a'.vaulticdb.v1.ExportKeyEnvelopeResponse\x12X\n" +
-	"\x0fCheckEncryption\x12\x1e.vaulticdb.v1.KeyStatusRequest\x1a%.vaulticdb.v1.EncryptionAuditResponseBLZJgithub.com/otuschhoff/vaultic/internal/index/proto/vaulticdbv1;vaulticdbv1b\x06proto3"
+	"\x0fCheckEncryption\x12\x1e.vaulticdb.v1.KeyStatusRequest\x1a%.vaulticdb.v1.EncryptionAuditResponse\x12v\n" +
+	"\x17PrepareCapsuleMigration\x12,.vaulticdb.v1.PrepareCapsuleMigrationRequest\x1a-.vaulticdb.v1.PrepareCapsuleMigrationResponse\x12^\n" +
+	"\x18FinalizeCapsuleMigration\x12-.vaulticdb.v1.FinalizeCapsuleMigrationRequest\x1a\x13.vaulticdb.v1.EmptyBLZJgithub.com/otuschhoff/vaultic/internal/index/proto/vaulticdbv1;vaulticdbv1b\x06proto3"
 
 var (
 	file_vaulticdb_v1_daemon_proto_rawDescOnce sync.Once
@@ -2649,46 +2987,50 @@ func file_vaulticdb_v1_daemon_proto_rawDescGZIP() []byte {
 	return file_vaulticdb_v1_daemon_proto_rawDescData
 }
 
-var file_vaulticdb_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_vaulticdb_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_vaulticdb_v1_daemon_proto_goTypes = []any{
-	(*RequestContext)(nil),            // 0: vaulticdb.v1.RequestContext
-	(*Empty)(nil),                     // 1: vaulticdb.v1.Empty
-	(*ErrorDetail)(nil),               // 2: vaulticdb.v1.ErrorDetail
-	(*BatchLimits)(nil),               // 3: vaulticdb.v1.BatchLimits
-	(*KeyValue)(nil),                  // 4: vaulticdb.v1.KeyValue
-	(*GetRequest)(nil),                // 5: vaulticdb.v1.GetRequest
-	(*GetResponse)(nil),               // 6: vaulticdb.v1.GetResponse
-	(*MultiGetRequest)(nil),           // 7: vaulticdb.v1.MultiGetRequest
-	(*MultiGetResponse)(nil),          // 8: vaulticdb.v1.MultiGetResponse
-	(*WriteBatchRequest)(nil),         // 9: vaulticdb.v1.WriteBatchRequest
-	(*WriteBatchResponse)(nil),        // 10: vaulticdb.v1.WriteBatchResponse
-	(*ScanRequest)(nil),               // 11: vaulticdb.v1.ScanRequest
-	(*ScanResponse)(nil),              // 12: vaulticdb.v1.ScanResponse
-	(*TransactionRequest)(nil),        // 13: vaulticdb.v1.TransactionRequest
-	(*BeginResponse)(nil),             // 14: vaulticdb.v1.BeginResponse
-	(*CommitResponse)(nil),            // 15: vaulticdb.v1.CommitResponse
-	(*HealthRequest)(nil),             // 16: vaulticdb.v1.HealthRequest
-	(*HealthResponse)(nil),            // 17: vaulticdb.v1.HealthResponse
-	(*CapabilitiesRequest)(nil),       // 18: vaulticdb.v1.CapabilitiesRequest
-	(*CapabilitiesResponse)(nil),      // 19: vaulticdb.v1.CapabilitiesResponse
-	(*MasterKeyRequest)(nil),          // 20: vaulticdb.v1.MasterKeyRequest
-	(*MasterKeyResponse)(nil),         // 21: vaulticdb.v1.MasterKeyResponse
-	(*StoreMasterKeyRequest)(nil),     // 22: vaulticdb.v1.StoreMasterKeyRequest
-	(*KeyStatusRequest)(nil),          // 23: vaulticdb.v1.KeyStatusRequest
-	(*KeySlotInfo)(nil),               // 24: vaulticdb.v1.KeySlotInfo
-	(*KeyStatusResponse)(nil),         // 25: vaulticdb.v1.KeyStatusResponse
-	(*AddLocalKeySlotRequest)(nil),    // 26: vaulticdb.v1.AddLocalKeySlotRequest
-	(*AddCloudKeySlotRequest)(nil),    // 27: vaulticdb.v1.AddCloudKeySlotRequest
-	(*RemoveKeySlotRequest)(nil),      // 28: vaulticdb.v1.RemoveKeySlotRequest
-	(*RotateLocalKeySlotRequest)(nil), // 29: vaulticdb.v1.RotateLocalKeySlotRequest
-	(*RotateDekRequest)(nil),          // 30: vaulticdb.v1.RotateDekRequest
-	(*RewriteDekRequest)(nil),         // 31: vaulticdb.v1.RewriteDekRequest
-	(*RewriteDekResponse)(nil),        // 32: vaulticdb.v1.RewriteDekResponse
-	(*EscrowMasterKeyRequest)(nil),    // 33: vaulticdb.v1.EscrowMasterKeyRequest
-	(*EscrowMasterKeyResponse)(nil),   // 34: vaulticdb.v1.EscrowMasterKeyResponse
-	(*ExportKeyEnvelopeResponse)(nil), // 35: vaulticdb.v1.ExportKeyEnvelopeResponse
-	(*EncryptionAuditResponse)(nil),   // 36: vaulticdb.v1.EncryptionAuditResponse
-	(*RecoverEscrowRequest)(nil),      // 37: vaulticdb.v1.RecoverEscrowRequest
+	(*RequestContext)(nil),                  // 0: vaulticdb.v1.RequestContext
+	(*Empty)(nil),                           // 1: vaulticdb.v1.Empty
+	(*ErrorDetail)(nil),                     // 2: vaulticdb.v1.ErrorDetail
+	(*BatchLimits)(nil),                     // 3: vaulticdb.v1.BatchLimits
+	(*KeyValue)(nil),                        // 4: vaulticdb.v1.KeyValue
+	(*GetRequest)(nil),                      // 5: vaulticdb.v1.GetRequest
+	(*GetResponse)(nil),                     // 6: vaulticdb.v1.GetResponse
+	(*MultiGetRequest)(nil),                 // 7: vaulticdb.v1.MultiGetRequest
+	(*MultiGetResponse)(nil),                // 8: vaulticdb.v1.MultiGetResponse
+	(*WriteBatchRequest)(nil),               // 9: vaulticdb.v1.WriteBatchRequest
+	(*WriteBatchResponse)(nil),              // 10: vaulticdb.v1.WriteBatchResponse
+	(*ScanRequest)(nil),                     // 11: vaulticdb.v1.ScanRequest
+	(*ScanResponse)(nil),                    // 12: vaulticdb.v1.ScanResponse
+	(*TransactionRequest)(nil),              // 13: vaulticdb.v1.TransactionRequest
+	(*BeginResponse)(nil),                   // 14: vaulticdb.v1.BeginResponse
+	(*CommitResponse)(nil),                  // 15: vaulticdb.v1.CommitResponse
+	(*HealthRequest)(nil),                   // 16: vaulticdb.v1.HealthRequest
+	(*HealthResponse)(nil),                  // 17: vaulticdb.v1.HealthResponse
+	(*CapabilitiesRequest)(nil),             // 18: vaulticdb.v1.CapabilitiesRequest
+	(*CapabilitiesResponse)(nil),            // 19: vaulticdb.v1.CapabilitiesResponse
+	(*MasterKeyRequest)(nil),                // 20: vaulticdb.v1.MasterKeyRequest
+	(*MasterKeyResponse)(nil),               // 21: vaulticdb.v1.MasterKeyResponse
+	(*StoreMasterKeyRequest)(nil),           // 22: vaulticdb.v1.StoreMasterKeyRequest
+	(*KeyStatusRequest)(nil),                // 23: vaulticdb.v1.KeyStatusRequest
+	(*KeySlotInfo)(nil),                     // 24: vaulticdb.v1.KeySlotInfo
+	(*KeyStatusResponse)(nil),               // 25: vaulticdb.v1.KeyStatusResponse
+	(*AddLocalKeySlotRequest)(nil),          // 26: vaulticdb.v1.AddLocalKeySlotRequest
+	(*AddCloudKeySlotRequest)(nil),          // 27: vaulticdb.v1.AddCloudKeySlotRequest
+	(*RemoveKeySlotRequest)(nil),            // 28: vaulticdb.v1.RemoveKeySlotRequest
+	(*RotateLocalKeySlotRequest)(nil),       // 29: vaulticdb.v1.RotateLocalKeySlotRequest
+	(*RotateDekRequest)(nil),                // 30: vaulticdb.v1.RotateDekRequest
+	(*RewriteDekRequest)(nil),               // 31: vaulticdb.v1.RewriteDekRequest
+	(*RewriteDekResponse)(nil),              // 32: vaulticdb.v1.RewriteDekResponse
+	(*EscrowMasterKeyRequest)(nil),          // 33: vaulticdb.v1.EscrowMasterKeyRequest
+	(*EscrowMasterKeyResponse)(nil),         // 34: vaulticdb.v1.EscrowMasterKeyResponse
+	(*ExportKeyEnvelopeResponse)(nil),       // 35: vaulticdb.v1.ExportKeyEnvelopeResponse
+	(*EncryptionAuditResponse)(nil),         // 36: vaulticdb.v1.EncryptionAuditResponse
+	(*RecoverEscrowRequest)(nil),            // 37: vaulticdb.v1.RecoverEscrowRequest
+	(*OfflineCapsuleMember)(nil),            // 38: vaulticdb.v1.OfflineCapsuleMember
+	(*PrepareCapsuleMigrationRequest)(nil),  // 39: vaulticdb.v1.PrepareCapsuleMigrationRequest
+	(*PrepareCapsuleMigrationResponse)(nil), // 40: vaulticdb.v1.PrepareCapsuleMigrationResponse
+	(*FinalizeCapsuleMigrationRequest)(nil), // 41: vaulticdb.v1.FinalizeCapsuleMigrationRequest
 }
 var file_vaulticdb_v1_daemon_proto_depIdxs = []int32{
 	0,  // 0: vaulticdb.v1.Empty.context:type_name -> vaulticdb.v1.RequestContext
@@ -2714,59 +3056,66 @@ var file_vaulticdb_v1_daemon_proto_depIdxs = []int32{
 	0,  // 20: vaulticdb.v1.RewriteDekRequest.context:type_name -> vaulticdb.v1.RequestContext
 	0,  // 21: vaulticdb.v1.EscrowMasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
 	0,  // 22: vaulticdb.v1.RecoverEscrowRequest.context:type_name -> vaulticdb.v1.RequestContext
-	16, // 23: vaulticdb.v1.VaulticDB.Health:input_type -> vaulticdb.v1.HealthRequest
-	18, // 24: vaulticdb.v1.VaulticDB.Capabilities:input_type -> vaulticdb.v1.CapabilitiesRequest
-	1,  // 25: vaulticdb.v1.VaulticDB.Drain:input_type -> vaulticdb.v1.Empty
-	1,  // 26: vaulticdb.v1.VaulticDB.Shutdown:input_type -> vaulticdb.v1.Empty
-	5,  // 27: vaulticdb.v1.VaulticDB.Get:input_type -> vaulticdb.v1.GetRequest
-	7,  // 28: vaulticdb.v1.VaulticDB.MultiGet:input_type -> vaulticdb.v1.MultiGetRequest
-	11, // 29: vaulticdb.v1.VaulticDB.Scan:input_type -> vaulticdb.v1.ScanRequest
-	9,  // 30: vaulticdb.v1.VaulticDB.WriteBatch:input_type -> vaulticdb.v1.WriteBatchRequest
-	1,  // 31: vaulticdb.v1.VaulticDB.Begin:input_type -> vaulticdb.v1.Empty
-	13, // 32: vaulticdb.v1.VaulticDB.Commit:input_type -> vaulticdb.v1.TransactionRequest
-	13, // 33: vaulticdb.v1.VaulticDB.Rollback:input_type -> vaulticdb.v1.TransactionRequest
-	20, // 34: vaulticdb.v1.VaulticDB.GetMasterKey:input_type -> vaulticdb.v1.MasterKeyRequest
-	22, // 35: vaulticdb.v1.VaulticDB.StoreMasterKey:input_type -> vaulticdb.v1.StoreMasterKeyRequest
-	23, // 36: vaulticdb.v1.VaulticDB.KeyStatus:input_type -> vaulticdb.v1.KeyStatusRequest
-	26, // 37: vaulticdb.v1.VaulticDB.AddLocalKeySlot:input_type -> vaulticdb.v1.AddLocalKeySlotRequest
-	27, // 38: vaulticdb.v1.VaulticDB.AddCloudKeySlot:input_type -> vaulticdb.v1.AddCloudKeySlotRequest
-	28, // 39: vaulticdb.v1.VaulticDB.RemoveKeySlot:input_type -> vaulticdb.v1.RemoveKeySlotRequest
-	29, // 40: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:input_type -> vaulticdb.v1.RotateLocalKeySlotRequest
-	30, // 41: vaulticdb.v1.VaulticDB.RotateDek:input_type -> vaulticdb.v1.RotateDekRequest
-	31, // 42: vaulticdb.v1.VaulticDB.RewriteDek:input_type -> vaulticdb.v1.RewriteDekRequest
-	33, // 43: vaulticdb.v1.VaulticDB.EscrowMasterKey:input_type -> vaulticdb.v1.EscrowMasterKeyRequest
-	37, // 44: vaulticdb.v1.VaulticDB.RecoverEscrow:input_type -> vaulticdb.v1.RecoverEscrowRequest
-	23, // 45: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:input_type -> vaulticdb.v1.KeyStatusRequest
-	23, // 46: vaulticdb.v1.VaulticDB.CheckEncryption:input_type -> vaulticdb.v1.KeyStatusRequest
-	17, // 47: vaulticdb.v1.VaulticDB.Health:output_type -> vaulticdb.v1.HealthResponse
-	19, // 48: vaulticdb.v1.VaulticDB.Capabilities:output_type -> vaulticdb.v1.CapabilitiesResponse
-	1,  // 49: vaulticdb.v1.VaulticDB.Drain:output_type -> vaulticdb.v1.Empty
-	1,  // 50: vaulticdb.v1.VaulticDB.Shutdown:output_type -> vaulticdb.v1.Empty
-	6,  // 51: vaulticdb.v1.VaulticDB.Get:output_type -> vaulticdb.v1.GetResponse
-	8,  // 52: vaulticdb.v1.VaulticDB.MultiGet:output_type -> vaulticdb.v1.MultiGetResponse
-	12, // 53: vaulticdb.v1.VaulticDB.Scan:output_type -> vaulticdb.v1.ScanResponse
-	10, // 54: vaulticdb.v1.VaulticDB.WriteBatch:output_type -> vaulticdb.v1.WriteBatchResponse
-	14, // 55: vaulticdb.v1.VaulticDB.Begin:output_type -> vaulticdb.v1.BeginResponse
-	15, // 56: vaulticdb.v1.VaulticDB.Commit:output_type -> vaulticdb.v1.CommitResponse
-	1,  // 57: vaulticdb.v1.VaulticDB.Rollback:output_type -> vaulticdb.v1.Empty
-	21, // 58: vaulticdb.v1.VaulticDB.GetMasterKey:output_type -> vaulticdb.v1.MasterKeyResponse
-	1,  // 59: vaulticdb.v1.VaulticDB.StoreMasterKey:output_type -> vaulticdb.v1.Empty
-	25, // 60: vaulticdb.v1.VaulticDB.KeyStatus:output_type -> vaulticdb.v1.KeyStatusResponse
-	25, // 61: vaulticdb.v1.VaulticDB.AddLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	25, // 62: vaulticdb.v1.VaulticDB.AddCloudKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	25, // 63: vaulticdb.v1.VaulticDB.RemoveKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	25, // 64: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	25, // 65: vaulticdb.v1.VaulticDB.RotateDek:output_type -> vaulticdb.v1.KeyStatusResponse
-	32, // 66: vaulticdb.v1.VaulticDB.RewriteDek:output_type -> vaulticdb.v1.RewriteDekResponse
-	34, // 67: vaulticdb.v1.VaulticDB.EscrowMasterKey:output_type -> vaulticdb.v1.EscrowMasterKeyResponse
-	21, // 68: vaulticdb.v1.VaulticDB.RecoverEscrow:output_type -> vaulticdb.v1.MasterKeyResponse
-	35, // 69: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:output_type -> vaulticdb.v1.ExportKeyEnvelopeResponse
-	36, // 70: vaulticdb.v1.VaulticDB.CheckEncryption:output_type -> vaulticdb.v1.EncryptionAuditResponse
-	47, // [47:71] is the sub-list for method output_type
-	23, // [23:47] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	0,  // 23: vaulticdb.v1.PrepareCapsuleMigrationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	38, // 24: vaulticdb.v1.PrepareCapsuleMigrationRequest.members:type_name -> vaulticdb.v1.OfflineCapsuleMember
+	0,  // 25: vaulticdb.v1.FinalizeCapsuleMigrationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	16, // 26: vaulticdb.v1.VaulticDB.Health:input_type -> vaulticdb.v1.HealthRequest
+	18, // 27: vaulticdb.v1.VaulticDB.Capabilities:input_type -> vaulticdb.v1.CapabilitiesRequest
+	1,  // 28: vaulticdb.v1.VaulticDB.Drain:input_type -> vaulticdb.v1.Empty
+	1,  // 29: vaulticdb.v1.VaulticDB.Shutdown:input_type -> vaulticdb.v1.Empty
+	5,  // 30: vaulticdb.v1.VaulticDB.Get:input_type -> vaulticdb.v1.GetRequest
+	7,  // 31: vaulticdb.v1.VaulticDB.MultiGet:input_type -> vaulticdb.v1.MultiGetRequest
+	11, // 32: vaulticdb.v1.VaulticDB.Scan:input_type -> vaulticdb.v1.ScanRequest
+	9,  // 33: vaulticdb.v1.VaulticDB.WriteBatch:input_type -> vaulticdb.v1.WriteBatchRequest
+	1,  // 34: vaulticdb.v1.VaulticDB.Begin:input_type -> vaulticdb.v1.Empty
+	13, // 35: vaulticdb.v1.VaulticDB.Commit:input_type -> vaulticdb.v1.TransactionRequest
+	13, // 36: vaulticdb.v1.VaulticDB.Rollback:input_type -> vaulticdb.v1.TransactionRequest
+	20, // 37: vaulticdb.v1.VaulticDB.GetMasterKey:input_type -> vaulticdb.v1.MasterKeyRequest
+	22, // 38: vaulticdb.v1.VaulticDB.StoreMasterKey:input_type -> vaulticdb.v1.StoreMasterKeyRequest
+	23, // 39: vaulticdb.v1.VaulticDB.KeyStatus:input_type -> vaulticdb.v1.KeyStatusRequest
+	26, // 40: vaulticdb.v1.VaulticDB.AddLocalKeySlot:input_type -> vaulticdb.v1.AddLocalKeySlotRequest
+	27, // 41: vaulticdb.v1.VaulticDB.AddCloudKeySlot:input_type -> vaulticdb.v1.AddCloudKeySlotRequest
+	28, // 42: vaulticdb.v1.VaulticDB.RemoveKeySlot:input_type -> vaulticdb.v1.RemoveKeySlotRequest
+	29, // 43: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:input_type -> vaulticdb.v1.RotateLocalKeySlotRequest
+	30, // 44: vaulticdb.v1.VaulticDB.RotateDek:input_type -> vaulticdb.v1.RotateDekRequest
+	31, // 45: vaulticdb.v1.VaulticDB.RewriteDek:input_type -> vaulticdb.v1.RewriteDekRequest
+	33, // 46: vaulticdb.v1.VaulticDB.EscrowMasterKey:input_type -> vaulticdb.v1.EscrowMasterKeyRequest
+	37, // 47: vaulticdb.v1.VaulticDB.RecoverEscrow:input_type -> vaulticdb.v1.RecoverEscrowRequest
+	23, // 48: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:input_type -> vaulticdb.v1.KeyStatusRequest
+	23, // 49: vaulticdb.v1.VaulticDB.CheckEncryption:input_type -> vaulticdb.v1.KeyStatusRequest
+	39, // 50: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:input_type -> vaulticdb.v1.PrepareCapsuleMigrationRequest
+	41, // 51: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:input_type -> vaulticdb.v1.FinalizeCapsuleMigrationRequest
+	17, // 52: vaulticdb.v1.VaulticDB.Health:output_type -> vaulticdb.v1.HealthResponse
+	19, // 53: vaulticdb.v1.VaulticDB.Capabilities:output_type -> vaulticdb.v1.CapabilitiesResponse
+	1,  // 54: vaulticdb.v1.VaulticDB.Drain:output_type -> vaulticdb.v1.Empty
+	1,  // 55: vaulticdb.v1.VaulticDB.Shutdown:output_type -> vaulticdb.v1.Empty
+	6,  // 56: vaulticdb.v1.VaulticDB.Get:output_type -> vaulticdb.v1.GetResponse
+	8,  // 57: vaulticdb.v1.VaulticDB.MultiGet:output_type -> vaulticdb.v1.MultiGetResponse
+	12, // 58: vaulticdb.v1.VaulticDB.Scan:output_type -> vaulticdb.v1.ScanResponse
+	10, // 59: vaulticdb.v1.VaulticDB.WriteBatch:output_type -> vaulticdb.v1.WriteBatchResponse
+	14, // 60: vaulticdb.v1.VaulticDB.Begin:output_type -> vaulticdb.v1.BeginResponse
+	15, // 61: vaulticdb.v1.VaulticDB.Commit:output_type -> vaulticdb.v1.CommitResponse
+	1,  // 62: vaulticdb.v1.VaulticDB.Rollback:output_type -> vaulticdb.v1.Empty
+	21, // 63: vaulticdb.v1.VaulticDB.GetMasterKey:output_type -> vaulticdb.v1.MasterKeyResponse
+	1,  // 64: vaulticdb.v1.VaulticDB.StoreMasterKey:output_type -> vaulticdb.v1.Empty
+	25, // 65: vaulticdb.v1.VaulticDB.KeyStatus:output_type -> vaulticdb.v1.KeyStatusResponse
+	25, // 66: vaulticdb.v1.VaulticDB.AddLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	25, // 67: vaulticdb.v1.VaulticDB.AddCloudKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	25, // 68: vaulticdb.v1.VaulticDB.RemoveKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	25, // 69: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	25, // 70: vaulticdb.v1.VaulticDB.RotateDek:output_type -> vaulticdb.v1.KeyStatusResponse
+	32, // 71: vaulticdb.v1.VaulticDB.RewriteDek:output_type -> vaulticdb.v1.RewriteDekResponse
+	34, // 72: vaulticdb.v1.VaulticDB.EscrowMasterKey:output_type -> vaulticdb.v1.EscrowMasterKeyResponse
+	21, // 73: vaulticdb.v1.VaulticDB.RecoverEscrow:output_type -> vaulticdb.v1.MasterKeyResponse
+	35, // 74: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:output_type -> vaulticdb.v1.ExportKeyEnvelopeResponse
+	36, // 75: vaulticdb.v1.VaulticDB.CheckEncryption:output_type -> vaulticdb.v1.EncryptionAuditResponse
+	40, // 76: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:output_type -> vaulticdb.v1.PrepareCapsuleMigrationResponse
+	1,  // 77: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:output_type -> vaulticdb.v1.Empty
+	52, // [52:78] is the sub-list for method output_type
+	26, // [26:52] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_vaulticdb_v1_daemon_proto_init() }
@@ -2780,7 +3129,7 @@ func file_vaulticdb_v1_daemon_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vaulticdb_v1_daemon_proto_rawDesc), len(file_vaulticdb_v1_daemon_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   38,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

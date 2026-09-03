@@ -28,6 +28,7 @@ const HEADER_SIZE: usize = 8 + 1 + 1 + 4 + 4 + 8 + NONCE_SIZE;
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 
 pub mod envelope;
+pub mod recovery_capsule;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EncryptionError {
@@ -41,7 +42,7 @@ pub(crate) enum EncryptionError {
     Range,
 }
 
-pub(crate) fn is_integrity_error(error: &(dyn std::error::Error + 'static)) -> bool {
+pub fn is_integrity_error(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(source) = current {
         if source.downcast_ref::<EncryptionError>().is_some() {
@@ -74,6 +75,10 @@ impl EncryptionKey {
             libc::mlock(key.as_ptr().cast(), key.len());
         }
         Self { version, key }
+    }
+
+    pub(crate) fn secret(&self) -> &[u8; 32] {
+        &self.key
     }
 }
 

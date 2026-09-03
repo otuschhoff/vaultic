@@ -247,6 +247,38 @@ message RecoverEscrowRequest {
   bytes bearer_token = 4;
 }
 
+message OfflineCapsuleMember {
+  string member_id = 1;
+  string provider = 2;
+  bytes credential = 3;
+}
+
+message PrepareCapsuleMigrationRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string capsule_directory = 3;
+  uint64 generation = 4;
+  string group_id = 5;
+  uint32 threshold = 6;
+  bytes broker_identity_public_key = 7;
+  repeated OfflineCapsuleMember members = 8;
+}
+
+message PrepareCapsuleMigrationResponse {
+  uint64 generation = 1;
+  string local_path = 2;
+  string mirror_path = 3;
+  string capsule_sha256 = 4;
+  bytes capsule = 5;
+}
+
+message FinalizeCapsuleMigrationRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string capsule_sha256 = 3;
+  bytes broker_key_proof = 4;
+}
+
 service VaulticDB {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
@@ -272,4 +304,6 @@ service VaulticDB {
   rpc RecoverEscrow(RecoverEscrowRequest) returns (MasterKeyResponse);
   rpc ExportKeyEnvelope(KeyStatusRequest) returns (ExportKeyEnvelopeResponse);
   rpc CheckEncryption(KeyStatusRequest) returns (EncryptionAuditResponse);
+  rpc PrepareCapsuleMigration(PrepareCapsuleMigrationRequest) returns (PrepareCapsuleMigrationResponse);
+  rpc FinalizeCapsuleMigration(FinalizeCapsuleMigrationRequest) returns (Empty);
 }
