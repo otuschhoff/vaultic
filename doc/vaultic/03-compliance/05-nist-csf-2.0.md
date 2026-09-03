@@ -61,8 +61,8 @@ strategy, cybersecurity supply-chain risk management, and policy evidence.
 
 - **Documented constraints and risk assumptions:**
   [Vision, Scope, and Non-Negotiable Guarantees](../01-strategy/01-vision-and-principles.md),
-  [Known Constraints](../04-roadmap/09-known-constraints.md), and
-  [Rollout and Rollback](../04-roadmap/08-rollout-and-rollback.md) provide
+  [Known Constraints](../04-roadmap/04-known-constraints.md), and
+  [Rollout and Rollback](../04-roadmap/03-rollout-and-rollback.md) provide
   concrete inputs to a risk register.
 - **Explicit trust boundaries:** The
   [VaulticDB Service Architecture](../02-architecture/01-vaulticdb-service.md)
