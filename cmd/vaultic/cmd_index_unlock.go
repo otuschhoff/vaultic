@@ -81,7 +81,7 @@ func newIndexUnlockStatusCommand(globalOptions *global.Options, options *indexUn
 }
 
 func newIndexUnlockContributeCommand(globalOptions *global.Options, options *indexUnlockOptions) *cobra.Command {
-	var sessionFile, memberID, passphraseFile, keyFile, azureTokenFile, gcpTokenFile, generationAnchor, confirmedFingerprint string
+	var sessionFile, memberID, passphraseFile, keyFile, azureTokenFile, gcpTokenFile, yubikeyPINFile, custodianPath, generationAnchor, confirmedFingerprint string
 	var awsKMS, unverifiedSession bool
 	var prepare bool
 	var sessionTTL time.Duration
@@ -120,7 +120,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			return nil
 		}
 		credentialRoutes := 0
-		for _, configured := range []bool{passphraseFile != "", keyFile != "", azureTokenFile != "", gcpTokenFile != "", awsKMS} {
+		for _, configured := range []bool{passphraseFile != "", keyFile != "", azureTokenFile != "", gcpTokenFile != "", yubikeyPINFile != "", awsKMS} {
 			if configured {
 				credentialRoutes++
 			}
@@ -152,6 +152,9 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			if unwrapErr != nil {
 				return unwrapErr
 			}
+			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
+		} else if yubikeyPINFile != "" {
+			unwrapper := indexbroker.YubiKeyPIVUnwrapper{HelperPath: custodianPath, PINFile: yubikeyPINFile}
 			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
 		} else if azureTokenFile != "" || gcpTokenFile != "" {
 			tokenFile, description := azureTokenFile, "Azure custodian bearer token"
@@ -217,6 +220,8 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 	command.Flags().StringVar(&azureTokenFile, "azure-token-file", "", "mode-0600 Entra bearer-token file for an Azure Key Vault member")
 	command.Flags().StringVar(&gcpTokenFile, "gcp-token-file", "", "mode-0600 Google Cloud bearer-token file for a Cloud KMS member")
 	command.Flags().BoolVar(&awsKMS, "aws-kms", false, "use the AWS SDK credential chain for an AWS KMS or CloudHSM-backed member")
+	command.Flags().StringVar(&yubikeyPINFile, "yubikey-piv-pin-file", "", "mode-0600 YubiKey PIV PIN file")
+	command.Flags().StringVar(&custodianPath, "custodian-path", "vaultic-key-custodian", "path to the hardware custodian executable")
 	command.Flags().BoolVar(&unverifiedSession, "unverified-session", false, "acknowledge a broker identity-loss recovery session after independently confirming its fingerprint")
 	command.Flags().StringVar(&generationAnchor, "generation-anchor", "", "mode-0600 custodian last-seen-generation file")
 	command.Flags().StringVar(&confirmedFingerprint, "confirm-fingerprint", "", "out-of-band confirmed signed-session fingerprint")

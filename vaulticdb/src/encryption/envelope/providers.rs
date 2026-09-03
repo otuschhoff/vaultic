@@ -15,7 +15,7 @@ use cryptoki::{
         rsa::{PkcsMgfType, PkcsOaepParams, PkcsOaepSource},
         Mechanism, MechanismType,
     },
-    object::{Attribute, KeyType, ObjectClass},
+    object::{Attribute, AttributeType, KeyType, ObjectClass},
     session::UserType,
     slot::Slot,
     types::{AuthPin, Ulong},
@@ -23,6 +23,7 @@ use cryptoki::{
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone)]
@@ -657,6 +658,33 @@ impl YubikeyPivProvider {
         let session = pkcs11
             .open_ro_session(Slot::try_from(reference.slot_id)?)
             .context("open YubiKey PIV session")?;
+        let public_keys = session.find_objects(&[
+            Attribute::Class(ObjectClass::PUBLIC_KEY),
+            Attribute::KeyType(KeyType::RSA),
+            Attribute::Id(reference.key_id.clone()),
+        ])?;
+        if public_keys.len() != 1 {
+            bail!("YubiKey PIV reference must resolve to exactly one RSA public key");
+        }
+        let attributes = session.get_attributes(
+            public_keys[0],
+            &[AttributeType::Modulus, AttributeType::PublicExponent],
+        )?;
+        let modulus = attributes.iter().find_map(|attribute| match attribute {
+            Attribute::Modulus(value) => Some(value.as_slice()),
+            _ => None,
+        });
+        let exponent = attributes.iter().find_map(|attribute| match attribute {
+            Attribute::PublicExponent(value) => Some(value.as_slice()),
+            _ => None,
+        });
+        let actual_fingerprint = rsa_public_key_fingerprint(
+            modulus.context("YubiKey PIV public key has no RSA modulus")?,
+            exponent.context("YubiKey PIV public key has no RSA exponent")?,
+        );
+        if actual_fingerprint != reference.public_key_fingerprint {
+            bail!("YubiKey PIV public key fingerprint does not match key reference");
+        }
         if !encrypt {
             session
                 .login(
@@ -665,16 +693,15 @@ impl YubikeyPivProvider {
                 )
                 .context("verify YubiKey PIV PIN")?;
         }
-        let class = if encrypt {
-            ObjectClass::PUBLIC_KEY
+        let keys = if encrypt {
+            public_keys
         } else {
-            ObjectClass::PRIVATE_KEY
+            session.find_objects(&[
+                Attribute::Class(ObjectClass::PRIVATE_KEY),
+                Attribute::KeyType(KeyType::RSA),
+                Attribute::Id(reference.key_id),
+            ])?
         };
-        let keys = session.find_objects(&[
-            Attribute::Class(class),
-            Attribute::KeyType(KeyType::RSA),
-            Attribute::Id(reference.key_id),
-        ])?;
         if keys.len() != 1 {
             bail!("YubiKey PIV reference must resolve to exactly one RSA key");
         }
@@ -773,6 +800,7 @@ struct YubikeyPivReference {
     module_path: String,
     slot_id: u64,
     key_id: Vec<u8>,
+    public_key_fingerprint: String,
 }
 
 fn parse_yubikey_piv_reference(reference: &str) -> Result<YubikeyPivReference> {
@@ -786,8 +814,8 @@ fn parse_yubikey_piv_reference(reference: &str) -> Result<YubikeyPivReference> {
                 .context("invalid YubiKey PIV key reference field")
         })
         .collect::<Result<HashMap<_, _>>>()?;
-    if fields.len() != 4 || fields.get("type") != Some(&"rsa-key-pair") {
-        bail!("YubiKey PIV key reference requires module-path, slot-id, id, and type=rsa-key-pair");
+    if fields.len() != 5 || fields.get("type") != Some(&"rsa-key-pair") {
+        bail!("YubiKey PIV key reference requires module-path, slot-id, id, public-key-sha256, and type=rsa-key-pair");
     }
     let module_path = fields
         .get("module-path")
@@ -813,7 +841,28 @@ fn parse_yubikey_piv_reference(reference: &str) -> Result<YubikeyPivReference> {
             .parse()
             .context("YubiKey PIV slot-id is invalid")?,
         key_id,
+        public_key_fingerprint: fields
+            .get("public-key-sha256")
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .context("YubiKey PIV public-key-sha256 must contain 64 hexadecimal characters")?
+            .to_ascii_lowercase(),
     })
+}
+
+pub fn yubikey_piv_public_key_binding(reference: &str) -> Result<String> {
+    Ok(format!(
+        "sha256:{}",
+        parse_yubikey_piv_reference(reference)?.public_key_fingerprint
+    ))
+}
+
+fn rsa_public_key_fingerprint(modulus: &[u8], exponent: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update((modulus.len() as u64).to_be_bytes());
+    digest.update(modulus);
+    digest.update((exponent.len() as u64).to_be_bytes());
+    digest.update(exponent);
+    format!("{:x}", digest.finalize())
 }
 
 fn parse_pkcs11_reference(reference: &str) -> Result<Pkcs11Reference> {
@@ -933,12 +982,13 @@ mod tests {
     #[test]
     fn yubikey_piv_references_pin_module_slot_and_rsa_key_id() {
         let reference = parse_yubikey_piv_reference(
-            "pkcs11:module-path=/usr/local/lib/libykcs11.dylib;slot-id=2;id=9a;type=rsa-key-pair",
+            "pkcs11:module-path=/usr/local/lib/libykcs11.dylib;slot-id=2;id=9a;public-key-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;type=rsa-key-pair",
         )
         .unwrap();
         assert_eq!(reference.module_path, "/usr/local/lib/libykcs11.dylib");
         assert_eq!(reference.slot_id, 2);
         assert_eq!(reference.key_id, vec![0x9a]);
+        assert_eq!(reference.public_key_fingerprint, "a".repeat(64));
         assert!(parse_yubikey_piv_reference(
             "pkcs11:module-path=libykcs11.so;slot-id=2;id=9a;type=rsa-key-pair"
         )

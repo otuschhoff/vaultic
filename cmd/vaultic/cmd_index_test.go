@@ -108,6 +108,20 @@ func TestParseExternalPolicyMembers(t *testing.T) {
 	if _, _, err := parseExternalPolicyMembers([]string{awsPath}); err == nil || !strings.Contains(err.Error(), "SDK credential chain") {
 		t.Fatalf("AWS bearer token file was accepted: %v", err)
 	}
+
+	pivPath := filepath.Join(root, "piv.json")
+	piv := fmt.Sprintf(`{"member_id":"piv-a","provider":"yubikey-piv","key_reference":"pkcs11:module-path=/usr/lib/libykcs11.so;slot-id=1;id=9a;public-key-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;type=rsa-key-pair","hardware":{"credential_id":"piv-9a","public_key":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_presence_required":true},"bearer_token_file":%q}`, tokenPath)
+	if err := os.WriteFile(pivPath, []byte(piv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pivMembers, pivTokens, err := parseExternalPolicyMembers([]string{pivPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearPolicyCredentials(pivTokens)
+	if len(pivMembers) != 1 || pivMembers[0].Hardware == nil || pivMembers[0].Principal != nil || pivMembers[0].BearerToken == nil || *pivMembers[0].BearerToken != "azure-token" {
+		t.Fatalf("PIV members = %#v", pivMembers)
+	}
 }
 
 func TestValidateComposedPolicyMemberCredentials(t *testing.T) {

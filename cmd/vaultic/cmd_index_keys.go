@@ -470,15 +470,15 @@ func parseExternalPolicyMembers(paths []string) ([]indexbroker.ExternalPolicyMem
 			clearPolicyCredentials(tokens)
 			return nil, tokens, err
 		}
-		if definition.MemberID == "" || definition.KeyReference == "" || definition.Principal == nil {
+		if definition.MemberID == "" || definition.KeyReference == "" || (definition.Principal == nil) == (definition.Hardware == nil) {
 			clearPolicyCredentials(tokens)
-			return nil, tokens, fmt.Errorf("external member %q requires member_id, key_reference, and principal", path)
+			return nil, tokens, fmt.Errorf("external member %q requires member_id, key_reference, and exactly one principal or hardware binding", path)
 		}
 		if _, exists := seen[definition.MemberID]; exists {
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("duplicate member ID %q", definition.MemberID)
 		}
-		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" {
+		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" && definition.Provider != "yubikey-piv" {
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("unsupported external member provider %q", definition.Provider)
 		}
@@ -489,6 +489,19 @@ func parseExternalPolicyMembers(paths []string) ([]indexbroker.ExternalPolicyMem
 				return nil, tokens, fmt.Errorf("external member %q requires bearer_token_file", definition.MemberID)
 			}
 			value, err := readProtectedBinary(definition.BearerTokenFile, "cloud enrollment bearer token", true)
+			if err != nil {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, err
+			}
+			tokens = append(tokens, value)
+			text := string(value)
+			token = &text
+		} else if definition.Provider == "yubikey-piv" {
+			if definition.BearerTokenFile == "" {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, fmt.Errorf("external member %q requires bearer_token_file containing the PIV PIN for enrollment", definition.MemberID)
+			}
+			value, err := readProtectedBinary(definition.BearerTokenFile, "YubiKey PIV enrollment PIN", true)
 			if err != nil {
 				clearPolicyCredentials(tokens)
 				return nil, tokens, err

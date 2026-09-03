@@ -284,8 +284,34 @@ in arguments or logs. For example:
   }
 
 Live-provider validation and complete IAM/RBAC deployment runbooks remain
-required. YubiKey PIV and FIDO2 names remain reserved and are not operational;
-do not enroll or report them as hardware-backed seats.
+required.
+
+YubiKey PIV members use the separately packaged ``vaultic-key-custodian``
+executable and Yubico's YKCS11 module. Provision an RSA key in a PIV slot with
+PIN and touch required by the token policy. The member key reference has this
+form:
+
+.. code-block:: text
+
+  pkcs11:module-path=/absolute/path/libykcs11.so;slot-id=1;id=9a;public-key-sha256=HEX;type=rsa-key-pair
+
+``public-key-sha256`` is the lowercase SHA-256 digest of the length-prefixed RSA
+modulus and public exponent returned by PKCS#11. Set the hardware
+``public_key`` field to ``sha256:HEX``, set ``credential_id`` to an
+organization-unique token/slot identity, record the token serial where
+available, and set ``user_presence_required`` to true. The broker verifies the
+public key against the token while enrolling. Contribution uses
+``index unlock contribute --yubikey-piv-pin-file FILE``; the helper verifies
+the PIN and performs the private-key operation on the token. Use
+``--custodian-path`` when the helper is not on ``PATH``. PIN files must be mode
+0600 and are never passed as PIN values in command arguments or logs.
+
+Model backup YubiKeys as separate members under an ``any_of`` policy for one
+hardware seat. Each token must have a distinct credential ID and public key;
+reusing either is reported as a policy finding. Linux release bundles keep the
+daemon and broker statically linked but build the custodian helper for GNU libc
+so it can load YKCS11 dynamically. FIDO2 ``hmac-secret``/PRF remains reserved
+and is not operational.
 
 Online policy mutation
 ======================

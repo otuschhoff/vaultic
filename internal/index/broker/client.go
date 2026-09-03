@@ -198,14 +198,15 @@ type hardwareBinding struct {
 }
 
 type ExternalMemberContext struct {
-	RepositoryID   string
-	Generation     uint64
-	RootKeyVersion uint32
-	PolicyHash     string
-	MemberID       string
-	Provider       string
-	KeyReference   string
-	Purpose        string
+	RepositoryID         string
+	Generation           uint64
+	RootKeyVersion       uint32
+	PolicyHash           string
+	MemberID             string
+	Provider             string
+	KeyReference         string
+	Purpose              string
+	HardwareCredentialID string
 }
 
 type VerifiedPrincipal struct {
@@ -562,8 +563,8 @@ func (value *capsule) ContributeExternalSession(ctx context.Context, session Sig
 	if member == nil {
 		return EncryptedContribution{}, fmt.Errorf("capsule has no member %q", memberID)
 	}
-	if member.Principal == nil || member.Provider == "offline-argon2id" || member.Provider == "offline-keyfile" {
-		return EncryptedContribution{}, errors.New("member is not a principal-bound external provider")
+	if (member.Principal == nil) == (member.Hardware == nil) || member.Provider == "offline-argon2id" || member.Provider == "offline-keyfile" {
+		return EncryptedContribution{}, errors.New("member is not an identity-bound external provider")
 	}
 	purpose, err := value.externalSharePurpose(*member)
 	if err != nil {
@@ -573,20 +574,32 @@ func (value *capsule) ContributeExternalSession(ctx context.Context, session Sig
 	if err != nil {
 		return EncryptedContribution{}, fmt.Errorf("decode externally wrapped member share: %w", err)
 	}
-	payload, principal, err := unwrapper.UnwrapMember(ctx, ExternalMemberContext{RepositoryID: value.Header.RepositoryID, Generation: value.Header.Generation, RootKeyVersion: value.Header.RootKeyVersion, PolicyHash: value.Header.PolicyHash, MemberID: member.MemberID, Provider: member.Provider, KeyReference: member.KeyReference, Purpose: purpose}, wrapper)
+	hardwareCredentialID := ""
+	if member.Hardware != nil {
+		hardwareCredentialID = member.Hardware.CredentialID
+	}
+	payload, principal, err := unwrapper.UnwrapMember(ctx, ExternalMemberContext{RepositoryID: value.Header.RepositoryID, Generation: value.Header.Generation, RootKeyVersion: value.Header.RootKeyVersion, PolicyHash: value.Header.PolicyHash, MemberID: member.MemberID, Provider: member.Provider, KeyReference: member.KeyReference, Purpose: purpose, HardwareCredentialID: hardwareCredentialID}, wrapper)
 	if err != nil {
 		return EncryptedContribution{}, fmt.Errorf("unwrap external member: %w", err)
 	}
 	defer clear(payload)
-	if principal.Authority != member.Principal.Authority || principal.TenantAccountOrProject != member.Principal.TenantAccountOrProject || principal.ImmutablePrincipalID != member.Principal.ImmutablePrincipalID {
-		return EncryptedContribution{}, errors.New("provider-authenticated principal does not match capsule member")
+	if member.Principal != nil {
+		if principal.Authority != member.Principal.Authority || principal.TenantAccountOrProject != member.Principal.TenantAccountOrProject || principal.ImmutablePrincipalID != member.Principal.ImmutablePrincipalID {
+			return EncryptedContribution{}, errors.New("provider-authenticated principal does not match capsule member")
+		}
+	} else if principal.Authority != member.Provider || principal.ImmutablePrincipalID != member.Hardware.CredentialID {
+		return EncryptedContribution{}, errors.New("hardware-authenticated credential does not match capsule member")
 	}
 	share, err := decodeExternalShare(purpose, payload)
 	if err != nil {
 		return EncryptedContribution{}, err
 	}
 	defer clear(share)
-	return value.encryptContribution(session, *member, share, lastSeenGeneration, &principal.ImmutablePrincipalID, unverifiedSession)
+	var principalID *string
+	if member.Principal != nil {
+		principalID = &principal.ImmutablePrincipalID
+	}
+	return value.encryptContribution(session, *member, share, lastSeenGeneration, principalID, unverifiedSession)
 }
 
 func (value *capsule) encryptContribution(session SignedSession, member memberShare, share []byte, lastSeenGeneration uint64, principalID *string, unverifiedSession bool) (EncryptedContribution, error) {

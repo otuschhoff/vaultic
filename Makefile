@@ -73,12 +73,17 @@ vaulticdb-%:
 	case "$$target" in \
 		*-musl) \
 			command -v cargo-zigbuild >/dev/null 2>&1 || { echo "vaulticdb: cargo-zigbuild is required for $$target (install with: cargo install cargo-zigbuild)" >&2; exit 1; }; \
-			RUSTUP_TOOLCHAIN=$(VAULTICDB_RUST_TOOLCHAIN) cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --target "$$target" --release ;; \
+			RUSTUP_TOOLCHAIN=$(VAULTICDB_RUST_TOOLCHAIN) cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --target "$$target" --release; \
+			helper_target=$${target%-musl}-gnu; \
+			./vaulticdb/check-rust-target.sh "$$helper_target" "$(VAULTICDB_RUST_TOOLCHAIN)"; \
+			RUSTUP_TOOLCHAIN=$(VAULTICDB_RUST_TOOLCHAIN) cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --target "$$helper_target" --release --bin vaultic-key-custodian ;; \
 		*) \
 			rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo build --manifest-path vaulticdb/Cargo.toml --release --target "$$target" ;; \
 	esac; \
 	cp vaulticdb/target/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb; \
-	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker
+	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker; \
+	helper_target=$$target; case "$$target" in *-musl) helper_target=$${target%-musl}-gnu ;; esac; \
+	cp vaulticdb/target/$$helper_target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian
 
 vaulticdb-proto:
 	./vaulticdb/generate-proto.sh

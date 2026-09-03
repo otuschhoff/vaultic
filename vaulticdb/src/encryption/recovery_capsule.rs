@@ -505,6 +505,14 @@ impl RecoveryCapsule {
                     {
                         bail!("hardware member binding is incomplete");
                     }
+                    if member.provider == MemberProvider::YubikeyPiv
+                        && hardware.public_key
+                            != crate::encryption::envelope::providers::yubikey_piv_public_key_binding(
+                                &member.key_reference,
+                            )?
+                    {
+                        bail!("YubiKey PIV hardware binding does not match key reference");
+                    }
                 }
                 _ => {
                     let principal = member
@@ -557,12 +565,11 @@ impl RecoveryCapsule {
                 }
                 MemberProvider::YubikeyPiv | MemberProvider::Fido2HmacSecret => {
                     hardware_verified = true;
-                    let provider = match member.provider {
-                        MemberProvider::YubikeyPiv => "yubikey-piv",
-                        MemberProvider::Fido2HmacSecret => "fido2-hmac-secret",
-                        _ => unreachable!(),
-                    };
-                    findings.push(format!("hardware provider {} is not operational", provider));
+                    if member.provider == MemberProvider::Fido2HmacSecret {
+                        findings.push(
+                            "hardware provider fido2-hmac-secret is not operational".to_owned(),
+                        );
+                    }
                     let credential = &member.hardware.as_ref().unwrap().credential_id;
                     if !hardware_credentials.insert(credential.clone()) {
                         findings.push(format!("duplicate hardware credential {credential}"));
@@ -1911,11 +1918,14 @@ mod tests {
         let mut hardware_capsule = capsule(2);
         for (index, member) in hardware_capsule.members.iter_mut().enumerate() {
             member.provider = MemberProvider::YubikeyPiv;
+            member.key_reference = "pkcs11:module-path=/usr/lib/libykcs11.so;slot-id=1;id=9a;public-key-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;type=rsa-key-pair".to_owned();
             member.nonce = None;
             member.argon2 = None;
             member.hardware = Some(HardwareBinding {
                 credential_id: format!("credential-{index}"),
-                public_key: "same-pinned-public-key".to_owned(),
+                public_key:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
                 serial_number: None,
                 attestation_fingerprint: None,
                 user_presence_required: true,
@@ -1924,10 +1934,6 @@ mod tests {
         let status = hardware_capsule.effective_policy_status().unwrap();
         assert!(!status.compliant);
         assert!(status.hardware_verified);
-        assert!(status
-            .findings
-            .iter()
-            .any(|finding| finding.contains("yubikey-piv is not operational")));
         assert!(status
             .findings
             .contains(&"duplicate hardware public key".to_owned()));
