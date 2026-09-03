@@ -29,6 +29,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/options"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/staging"
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
@@ -674,6 +675,7 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if err := applyRepoConfig(s, gopts); err != nil {
 		return nil, err
 	}
+	openedPlacements := make(map[string]backend.Backend, len(s.Config().PlacementBackends))
 	for _, placement := range s.Config().PlacementBackends {
 		if placement.Location == "" {
 			continue
@@ -686,6 +688,32 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 			return nil, errors.Fatalf("open placement backend %q: %v", placement.ID, openErr)
 		}
 		s.AttachPlacementBackend(repository.PlacementBackendHash(placement.ID), placementBackend)
+		openedPlacements[placement.ID] = placementBackend
+	}
+	if len(s.Config().StagingBackends) > 0 {
+		mirrors := make(map[string]backend.Backend, len(s.Config().StagingBackends))
+		for _, id := range s.Config().StagingBackends {
+			placementBackend, ok := openedPlacements[id]
+			if !ok {
+				_ = s.Close()
+				return nil, errors.Fatalf("staging backend %q is not an opened placement backend", id)
+			}
+			mirrors[id] = placementBackend
+		}
+		journalKey, keyErr := staging.DeriveJournalKey(s.Key().EncryptionKey[:], s.Config().ID)
+		if keyErr != nil {
+			_ = s.Close()
+			return nil, keyErr
+		}
+		policy := s.Config().PlacementPolicy
+		s.AttachStagedPackRoots(staging.PackRoots{
+			Store: staging.Store{
+				Mirrors: mirrors,
+				Key:     journalKey,
+				Policy:  staging.Policy{MinCopies: policy.MinCopies, MinDomains: policy.MinDomains, MinOffsite: policy.MinOffsite},
+			},
+			RepositoryID: s.Config().ID,
+		})
 	}
 
 	printRepositoryInfo(s, gopts, printer)

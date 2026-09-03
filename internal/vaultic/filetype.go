@@ -12,6 +12,9 @@ const (
 	SnapshotFile
 	IndexFile
 	ConfigFile
+	SlateDBFile
+	BootstrapFile
+	StagingFile
 )
 
 // Keep in sync with backend.FileType.String().
@@ -31,6 +34,12 @@ func (t FileType) String() string {
 		s = "index"
 	case ConfigFile:
 		s = "config"
+	case SlateDBFile:
+		s = "slatedb"
+	case BootstrapFile:
+		s = "bootstrap"
+	case StagingFile:
+		s = "staging"
 	}
 	return s
 }

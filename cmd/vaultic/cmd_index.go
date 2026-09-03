@@ -175,6 +175,8 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexKeysCommand(globalOptions),
 		newIndexUnlockCommand(globalOptions),
 		newIndexEncryptCommand(globalOptions),
+		newIndexWriterCommand(globalOptions),
+		newIndexStagingCommand(globalOptions),
 	)
 	return command
 }

@@ -147,6 +147,28 @@ type EncryptionAudit struct {
 	Algorithm          string `json:"algorithm"`
 }
 
+// WriterStatus describes observable VaulticDB writer ownership without exposing protobuf types.
+type WriterStatus struct {
+	InstanceID          string `json:"instance_id"`
+	Role                string `json:"role"`
+	CurrentEpoch        uint64 `json:"current_epoch"`
+	ObservedEpoch       uint64 `json:"observed_epoch"`
+	TransitionReason    string `json:"transition_reason"`
+	TransitionUnixMS    int64  `json:"transition_unix_ms"`
+	ActiveWriteIntents  uint64 `json:"active_write_intents"`
+	ActiveTransactions  uint64 `json:"active_transactions"`
+	LastDurableSequence uint64 `json:"last_durable_sequence"`
+	IdleDeadlineUnixMS  int64  `json:"idle_deadline_unix_ms"`
+	PromotionSafe       bool   `json:"promotion_safe"`
+}
+
+type durableIdempotencyRecord struct {
+	Format        uint32 `json:"format"`
+	Operation     string `json:"operation"`
+	RequestSHA256 string `json:"request_sha256"`
+	Durable       bool   `json:"durable"`
+}
+
 // Limits are the bounded-work capabilities advertised by vaulticdb.
 type Limits struct {
 	MaxBatchItems   uint32
@@ -628,6 +650,79 @@ func (c *Client) Limits() Limits { return c.limits }
 // Encryption returns the daemon's validated metadata-encryption state.
 func (c *Client) Encryption() EncryptionInfo { return c.encryption }
 
+// WriterStatus returns the daemon's current writer ownership and quiescence state.
+func (c *Client) WriterStatus(ctx context.Context) (WriterStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.WriterStatus(ctx, &vaulticdbv1.WriterStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return WriterStatus{}, err
+	}
+	return writerStatus(response), nil
+}
+
+// IdempotencyCommitted reports whether a durable transaction commit exists for key.
+func (c *Client) IdempotencyCommitted(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, fmt.Errorf("idempotency key is required")
+	}
+	value, found, err := c.Get(ctx, append([]byte("meta:idempotency:"), key...), "")
+	if err != nil || !found {
+		return false, err
+	}
+	var record durableIdempotencyRecord
+	if err := json.Unmarshal(value, &record); err != nil {
+		return false, fmt.Errorf("decode durable idempotency record: %w", err)
+	}
+	if record.Format != 1 || record.Operation != "transaction-commit" || record.RequestSHA256 == "" || !record.Durable {
+		return false, fmt.Errorf("invalid durable transaction idempotency record")
+	}
+	return true, nil
+}
+
+// DemoteWriter quiesces and relinquishes the daemon's writable SlateDB handle.
+func (c *Client) DemoteWriter(ctx context.Context, reason string, force bool, timeout time.Duration) (WriterStatus, error) {
+	if timeout <= 0 || timeout > 5*time.Minute {
+		return WriterStatus{}, fmt.Errorf("writer demotion timeout must be between 1ns and 5m")
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout+defaultRPCDeadline)
+	defer cancel()
+	response, err := c.rpc.DemoteWriter(ctx, &vaulticdbv1.DemoteWriterRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Force: force, TimeoutMs: uint64(timeout.Milliseconds()), Reason: reason})
+	if err != nil {
+		return WriterStatus{}, err
+	}
+	return writerStatus(response), nil
+}
+
+// PromoteWriter requests a freshly fenced writable SlateDB handle.
+func (c *Client) PromoteWriter(ctx context.Context, reason string) (WriterStatus, error) {
+	return c.PromoteWriterWithTakeover(ctx, reason, false, 0)
+}
+
+// PromoteWriterWithTakeover conditionally replaces the exact crashed-writer epoch acknowledged by an operator.
+func (c *Client) PromoteWriterWithTakeover(ctx context.Context, reason string, forceTakeover bool, expectedActiveEpoch uint64) (WriterStatus, error) {
+	if forceTakeover && expectedActiveEpoch == 0 {
+		return WriterStatus{}, fmt.Errorf("writer takeover requires the expected active epoch")
+	}
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.PromoteWriter(ctx, &vaulticdbv1.PromoteWriterRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Reason: reason, ForceTakeover: forceTakeover, ExpectedActiveEpoch: expectedActiveEpoch})
+	if err != nil {
+		return WriterStatus{}, err
+	}
+	return writerStatus(response), nil
+}
+
+func writerStatus(response *vaulticdbv1.WriterStatusResponse) WriterStatus {
+	role := strings.ToLower(strings.TrimPrefix(response.GetRole().String(), "WRITER_ROLE_"))
+	role = strings.ReplaceAll(role, "_", "-")
+	return WriterStatus{
+		InstanceID: response.GetInstanceId(), Role: role, CurrentEpoch: response.GetCurrentEpoch(), ObservedEpoch: response.GetObservedEpoch(),
+		TransitionReason: response.GetTransitionReason(), TransitionUnixMS: response.GetTransitionUnixMs(), ActiveWriteIntents: response.GetActiveWriteIntents(),
+		ActiveTransactions: response.GetActiveTransactions(), LastDurableSequence: response.GetLastDurableSequence(), IdleDeadlineUnixMS: response.GetIdleDeadlineUnixMs(), PromotionSafe: response.GetPromotionSafe(),
+	}
+}
+
 // GetMasterKey returns the repository master key held by encrypted metadata.
 func (c *Client) GetMasterKey(ctx context.Context) ([]byte, bool, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
@@ -1006,6 +1101,11 @@ func (c *Client) ScanPage(ctx context.Context, prefix, afterKey []byte, pageSize
 
 // WriteBatch atomically applies a bounded set of puts and deletes.
 func (c *Client) WriteBatch(ctx context.Context, puts []Mutation, deletes [][]byte, awaitDurable bool, transactionID string) (bool, error) {
+	return c.WriteBatchWithIdempotency(ctx, puts, deletes, awaitDurable, transactionID, "")
+}
+
+// WriteBatchWithIdempotency atomically applies a batch and binds its durable result to key.
+func (c *Client) WriteBatchWithIdempotency(ctx context.Context, puts []Mutation, deletes [][]byte, awaitDurable bool, transactionID, idempotencyKey string) (bool, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	if uint64(len(puts)+len(deletes)) > uint64(c.limits.MaxBatchItems) {
@@ -1013,7 +1113,7 @@ func (c *Client) WriteBatch(ctx context.Context, puts []Mutation, deletes [][]by
 	}
 	request := &vaulticdbv1.WriteBatchRequest{
 		Context: requestContext(ctx), TransactionId: transactionID,
-		Deletes: deletes, AwaitDurable: awaitDurable,
+		Deletes: deletes, AwaitDurable: awaitDurable, IdempotencyKey: idempotencyKey,
 		Puts: make([]*vaulticdbv1.KeyValue, len(puts)),
 	}
 	for index, put := range puts {
@@ -1032,9 +1132,10 @@ func (c *Client) WriteBatch(ctx context.Context, puts []Mutation, deletes [][]by
 
 // Transaction is a serializable daemon transaction.
 type Transaction struct {
-	client *Client
-	id     string
-	state  atomic.Uint32
+	client         *Client
+	id             string
+	state          atomic.Uint32
+	idempotencyKey string
 }
 
 const (
@@ -1079,13 +1180,24 @@ func (t *Transaction) WriteBatch(ctx context.Context, puts []Mutation, deletes [
 
 // Commit atomically publishes all mutations and waits for durability.
 func (t *Transaction) Commit(ctx context.Context) error {
-	if !t.state.CompareAndSwap(transactionOpen, transactionClosed) {
+	return t.CommitWithIdempotency(ctx, "")
+}
+
+// CommitWithIdempotency commits once and permits recovery of an uncertain response using the same key.
+func (t *Transaction) CommitWithIdempotency(ctx context.Context, idempotencyKey string) error {
+	state := t.state.Load()
+	if state == transactionCommitUncertain {
+		if idempotencyKey == "" || idempotencyKey != t.idempotencyKey {
+			return fmt.Errorf("transaction is already closed; uncertain commit requires its original idempotency key")
+		}
+	} else if !t.state.CompareAndSwap(transactionOpen, transactionClosed) {
 		return fmt.Errorf("transaction is already closed")
 	}
+	t.idempotencyKey = idempotencyKey
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	response, err := t.client.rpc.Commit(ctx, &vaulticdbv1.TransactionRequest{
-		Context: requestContext(ctx), TransactionId: t.id,
+		Context: requestContext(ctx), TransactionId: t.id, IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
 		t.client.auditRPCError(ctx, "commit", err)
@@ -1099,6 +1211,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 	if !response.GetDurable() {
 		return fmt.Errorf("vaulticdb committed transaction without durability acknowledgement")
 	}
+	t.state.Store(transactionClosed)
 	return nil
 }
 

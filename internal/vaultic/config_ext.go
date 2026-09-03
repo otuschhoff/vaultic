@@ -209,6 +209,26 @@ func (c Config) ValidateExtensions() error {
 			return errors.Errorf("placement backend %q cannot enable ingest while read_enabled is false", backend.ID)
 		}
 	}
+	seenStaging := map[string]struct{}{}
+	for _, id := range c.StagingBackends {
+		if _, duplicate := seenStaging[id]; duplicate {
+			return errors.Errorf("duplicate staging backend id %q", id)
+		}
+		seenStaging[id] = struct{}{}
+		var placement *PlacementBackend
+		for index := range c.PlacementBackends {
+			if c.PlacementBackends[index].ID == id {
+				placement = &c.PlacementBackends[index]
+				break
+			}
+		}
+		if placement == nil {
+			return errors.Errorf("staging backend %q is not a placement backend", id)
+		}
+		if placement.Ingest != nil && !*placement.Ingest || placement.ReadEnabled != nil && !*placement.ReadEnabled {
+			return errors.Errorf("staging backend %q must be ingest and read enabled", id)
+		}
+	}
 	if c.PlacementPolicy.MinOffsite > c.PlacementPolicy.MinCopies && c.PlacementPolicy.MinCopies != 0 {
 		return errors.New("placement min_offsite must not exceed min_copies")
 	}

@@ -135,6 +135,9 @@ func (r *Repository) FinalizePrunePlan(ctx context.Context, printer vaultic.Prin
 	for _, id := range plan.PackIDs {
 		packIDs.Insert(id)
 	}
+	if err := r.excludeStagedPackRoots(ctx, packIDs); err != nil {
+		return err
+	}
 	if len(packIDs) != 0 {
 		printer.P("finalizing deferred prune plan %s: removing %d old packs\n", plan.ID, len(packIDs))
 		// Missing packs are safe here: retaining too many was the only safety
@@ -214,6 +217,9 @@ func (r *Repository) FinalizePrunePlanLoaded(ctx context.Context, printer vaulti
 		}
 		packIDs.Insert(id)
 	}
+	if err := r.excludeStagedPackRoots(ctx, packIDs); err != nil {
+		return err
+	}
 	if len(packIDs) != 0 {
 		printer.P("finalizing prune plan %s: removing %d old packs\n", plan.ID, len(packIDs))
 		if err := deleteFiles(ctx, true, &internalRepository{r}, packIDs, vaultic.PackFile, printer); err != nil {
@@ -230,6 +236,20 @@ func (r *Repository) FinalizePrunePlanLoaded(ctx context.Context, printer vaulti
 		return err
 	}
 	r.clearIndex()
+	return nil
+}
+
+func (r *Repository) excludeStagedPackRoots(ctx context.Context, candidates vaultic.IDSet) error {
+	if r.stagedPackRoots == nil || len(candidates) == 0 {
+		return nil
+	}
+	staged, err := r.stagedPackRoots.Current(ctx)
+	if err != nil {
+		return fmt.Errorf("revalidate staged journal roots before prune deletion: %w", err)
+	}
+	for id := range staged {
+		candidates.Delete(id)
+	}
 	return nil
 }
 

@@ -94,6 +94,18 @@ func TestDefaultLayout(t *testing.T) {
 			backend.Handle{Type: backend.KeyFile, Name: "123456"},
 			"keys/123456",
 		},
+		{
+			"",
+			path.Join,
+			backend.Handle{Type: backend.BootstrapFile, Name: "generation-1"},
+			"_vaultic/bootstrap/generation-1",
+		},
+		{
+			"",
+			path.Join,
+			backend.Handle{Type: backend.StagingFile, Name: "job/segment-1"},
+			"_vaultic/staging/job/segment-1",
+		},
 	}
 
 	t.Run("Paths", func(t *testing.T) {
@@ -110,6 +122,8 @@ func TestDefaultLayout(t *testing.T) {
 			filepath.Join(tempdir, "index"),
 			filepath.Join(tempdir, "locks"),
 			filepath.Join(tempdir, "keys"),
+			filepath.Join(tempdir, "_vaultic", "bootstrap"),
+			filepath.Join(tempdir, "_vaultic", "staging"),
 		}
 
 		for i := range 256 {
@@ -170,6 +184,14 @@ func TestRESTLayout(t *testing.T) {
 			backend.Handle{Type: backend.KeyFile, Name: "123456"},
 			strings.Join([]string{url, "keys", "123456"}, "/"),
 		},
+		{
+			backend.Handle{Type: backend.BootstrapFile, Name: "generation-1"},
+			strings.Join([]string{url, "_vaultic/bootstrap", "generation-1"}, "/"),
+		},
+		{
+			backend.Handle{Type: backend.StagingFile, Name: "job/segment-1"},
+			strings.Join([]string{url, "_vaultic/staging", "job/segment-1"}, "/"),
+		},
 	}
 
 	l := &RESTLayout{
@@ -185,6 +207,8 @@ func TestRESTLayout(t *testing.T) {
 			strings.Join([]string{url, "index"}, "/"),
 			strings.Join([]string{url, "locks"}, "/"),
 			strings.Join([]string{url, "keys"}, "/"),
+			strings.Join([]string{url, "_vaultic/bootstrap"}, "/"),
+			strings.Join([]string{url, "_vaultic/staging"}, "/"),
 		}
 
 		sort.Strings(want)

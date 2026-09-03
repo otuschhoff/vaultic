@@ -46,6 +46,7 @@ type Repository struct {
 	placementBackends      map[uint64]backend.Backend
 	ownedPlacementBackends []backend.Backend
 	ownedClosers           []io.Closer
+	stagedPackRoots        StagedPackRoots
 
 	opts Options
 
@@ -64,6 +65,18 @@ type Repository struct {
 
 	zeroChunkOnce sync.Once
 	zeroChunkID   vaultic.ID
+}
+
+// AttachStagedPackRoots installs authenticated deferred-journal reachability
+// for every destructive operation performed through this repository.
+func (r *Repository) AttachStagedPackRoots(roots StagedPackRoots) {
+	r.stagedPackRoots = roots
+}
+
+// PlacementBackend returns an opened placement backend for authenticated operator workflows.
+func (r *Repository) PlacementBackend(id uint64) (backend.Backend, bool) {
+	placementBackend, ok := r.placementBackends[id]
+	return placementBackend, ok
 }
 
 // AddOwnedCloser binds a local capability lease to the repository lifetime.

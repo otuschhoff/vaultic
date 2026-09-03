@@ -20,6 +20,7 @@ Vaultic Documentation
    070_encryption
    075_scripting
    077_troubleshooting
+   078_operational_resilience
    080_examples
    090_participating
    100_references

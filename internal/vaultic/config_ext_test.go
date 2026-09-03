@@ -162,3 +162,17 @@ func TestPackSizeDefaults(t *testing.T) {
 	bad := vaultic.Config{DataPackSizeBytes: 256 << 20, DataPackSizeLimitBytes: 128 << 20}
 	rtest.Assert(t, bad.ValidateExtensions() != nil, "size > limit accepted")
 }
+
+func TestStagingBackendValidation(t *testing.T) {
+	enabled, disabled := true, false
+	valid := vaultic.Config{PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Ingest: &enabled, ReadEnabled: &enabled}}, StagingBackends: []string{"a"}}
+	rtest.OK(t, valid.ValidateExtensions())
+	for _, config := range []vaultic.Config{
+		{PlacementBackends: valid.PlacementBackends, StagingBackends: []string{"missing"}},
+		{PlacementBackends: valid.PlacementBackends, StagingBackends: []string{"a", "a"}},
+		{PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Ingest: &disabled}}, StagingBackends: []string{"a"}},
+		{PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Ingest: &enabled, ReadEnabled: &disabled}}, StagingBackends: []string{"a"}},
+	} {
+		rtest.Assert(t, config.ValidateExtensions() != nil, "invalid staging backend configuration accepted")
+	}
+}

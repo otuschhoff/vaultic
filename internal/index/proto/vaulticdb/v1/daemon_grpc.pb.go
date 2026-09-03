@@ -21,6 +21,9 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	VaulticDB_Health_FullMethodName                   = "/vaulticdb.v1.VaulticDB/Health"
 	VaulticDB_Capabilities_FullMethodName             = "/vaulticdb.v1.VaulticDB/Capabilities"
+	VaulticDB_WriterStatus_FullMethodName             = "/vaulticdb.v1.VaulticDB/WriterStatus"
+	VaulticDB_DemoteWriter_FullMethodName             = "/vaulticdb.v1.VaulticDB/DemoteWriter"
+	VaulticDB_PromoteWriter_FullMethodName            = "/vaulticdb.v1.VaulticDB/PromoteWriter"
 	VaulticDB_Drain_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Drain"
 	VaulticDB_Shutdown_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Shutdown"
 	VaulticDB_Get_FullMethodName                      = "/vaulticdb.v1.VaulticDB/Get"
@@ -54,6 +57,9 @@ const (
 type VaulticDBClient interface {
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*CapabilitiesResponse, error)
+	WriterStatus(ctx context.Context, in *WriterStatusRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
+	DemoteWriter(ctx context.Context, in *DemoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
+	PromoteWriter(ctx context.Context, in *PromoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
 	Drain(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	Shutdown(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
@@ -103,6 +109,36 @@ func (c *vaulticDBClient) Capabilities(ctx context.Context, in *CapabilitiesRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CapabilitiesResponse)
 	err := c.cc.Invoke(ctx, VaulticDB_Capabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) WriterStatus(ctx context.Context, in *WriterStatusRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriterStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_WriterStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) DemoteWriter(ctx context.Context, in *DemoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriterStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_DemoteWriter_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) PromoteWriter(ctx context.Context, in *PromoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriterStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_PromoteWriter_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +401,9 @@ func (c *vaulticDBClient) PublishCapsuleMutation(ctx context.Context, in *Publis
 type VaulticDBServer interface {
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	Capabilities(context.Context, *CapabilitiesRequest) (*CapabilitiesResponse, error)
+	WriterStatus(context.Context, *WriterStatusRequest) (*WriterStatusResponse, error)
+	DemoteWriter(context.Context, *DemoteWriterRequest) (*WriterStatusResponse, error)
+	PromoteWriter(context.Context, *PromoteWriterRequest) (*WriterStatusResponse, error)
 	Drain(context.Context, *Empty) (*Empty, error)
 	Shutdown(context.Context, *Empty) (*Empty, error)
 	Get(context.Context, *GetRequest) (*GetResponse, error)
@@ -405,6 +444,15 @@ func (UnimplementedVaulticDBServer) Health(context.Context, *HealthRequest) (*He
 }
 func (UnimplementedVaulticDBServer) Capabilities(context.Context, *CapabilitiesRequest) (*CapabilitiesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Capabilities not implemented")
+}
+func (UnimplementedVaulticDBServer) WriterStatus(context.Context, *WriterStatusRequest) (*WriterStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method WriterStatus not implemented")
+}
+func (UnimplementedVaulticDBServer) DemoteWriter(context.Context, *DemoteWriterRequest) (*WriterStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DemoteWriter not implemented")
+}
+func (UnimplementedVaulticDBServer) PromoteWriter(context.Context, *PromoteWriterRequest) (*WriterStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PromoteWriter not implemented")
 }
 func (UnimplementedVaulticDBServer) Drain(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Drain not implemented")
@@ -534,6 +582,60 @@ func _VaulticDB_Capabilities_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VaulticDBServer).Capabilities(ctx, req.(*CapabilitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_WriterStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriterStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).WriterStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_WriterStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).WriterStatus(ctx, req.(*WriterStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_DemoteWriter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DemoteWriterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).DemoteWriter(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_DemoteWriter_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).DemoteWriter(ctx, req.(*DemoteWriterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_PromoteWriter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PromoteWriterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).PromoteWriter(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_PromoteWriter_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).PromoteWriter(ctx, req.(*PromoteWriterRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1002,6 +1104,18 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Capabilities",
 			Handler:    _VaulticDB_Capabilities_Handler,
+		},
+		{
+			MethodName: "WriterStatus",
+			Handler:    _VaulticDB_WriterStatus_Handler,
+		},
+		{
+			MethodName: "DemoteWriter",
+			Handler:    _VaulticDB_DemoteWriter_Handler,
+		},
+		{
+			MethodName: "PromoteWriter",
+			Handler:    _VaulticDB_PromoteWriter_Handler,
 		},
 		{
 			MethodName: "Drain",

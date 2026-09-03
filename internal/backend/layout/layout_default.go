@@ -26,6 +26,8 @@ var defaultLayoutPaths = map[backend.FileType]string{
 	backend.LockFile:     "locks",
 	backend.KeyFile:      "keys",
 	backend.SlateDBFile:  "slatedb",
+	backend.BootstrapFile: "_vaultic/bootstrap",
+	backend.StagingFile:   "_vaultic/staging",
 }
 
 func NewDefaultLayout(path string, join func(...string) string) *DefaultLayout {

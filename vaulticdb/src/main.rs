@@ -3,6 +3,7 @@
 use std::{
     env,
     fs::File,
+    future::Future,
     io::{self, Read},
     net::SocketAddr,
     os::fd::{FromRawFd, RawFd},
@@ -11,6 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -27,8 +29,8 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbReader, DbReaderMode, WriteBatch};
 use tokio::{
     net::{TcpListener, UnixListener},
-    sync::mpsc,
     sync::watch,
+    sync::{mpsc, Mutex},
 };
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{transport::Server, Request, Response, Status};
@@ -41,16 +43,18 @@ pub mod proto {
 use proto::{
     vaultic_db_server::{VaulticDb, VaulticDbServer},
     AddCloudKeySlotRequest, AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest,
-    CapabilitiesResponse, CommitResponse, Empty, EncryptionAuditResponse, EscrowMasterKeyRequest,
-    EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, FinalizeCapsuleMigrationRequest,
-    GetRequest, GetResponse, HealthRequest, HealthResponse, KeySlotInfo, KeyStatusRequest,
-    KeyStatusResponse, MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
-    PrepareCapsuleMigrationRequest, PrepareCapsuleMigrationResponse, PublishCapsuleMutationRequest,
+    CapabilitiesResponse, CommitResponse, DemoteWriterRequest, Empty, EncryptionAuditResponse,
+    EscrowMasterKeyRequest, EscrowMasterKeyResponse, ExportKeyEnvelopeResponse,
+    FinalizeCapsuleMigrationRequest, GetRequest, GetResponse, HealthRequest, HealthResponse,
+    KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest, MasterKeyResponse,
+    MultiGetRequest, MultiGetResponse, PrepareCapsuleMigrationRequest,
+    PrepareCapsuleMigrationResponse, PromoteWriterRequest, PublishCapsuleMutationRequest,
     PublishCapsuleMutationResponse, RecoverEscrowRequest, RemoveKeySlotRequest, RequestContext,
     RewriteDekRequest, RewriteDekResponse, RotateDekRequest, RotateLocalKeySlotRequest,
     ScanRequest, ScanResponse, StoreMasterKeyRequest, TransactionRequest, WriteBatchRequest,
-    WriteBatchResponse,
+    WriteBatchResponse, WriterStatusRequest, WriterStatusResponse,
 };
+use vaulticdb::writer_role::{RoleError, WriterRole as CoreWriterRole, WriterRoleState};
 use zeroize::Zeroizing;
 
 mod replication;
@@ -73,6 +77,13 @@ struct DaemonState {
     unix_socket: bool,
     tcp_enabled: bool,
     draining: Arc<AtomicBool>,
+    writer_role: Arc<Mutex<WriterRoleState>>,
+    writer_transition: Arc<Mutex<()>>,
+    last_writer_activity: Arc<Mutex<Instant>>,
+    writer_idle_grace: Option<Duration>,
+    writer_transition_timeout: Duration,
+    clock_started: Instant,
+    clock_started_unix_ms: i64,
 }
 
 #[derive(Clone)]
@@ -82,13 +93,103 @@ struct Service {
     storage: Arc<Storage>,
 }
 
+struct WriteIntentGuard {
+    writer_role: Arc<Mutex<WriterRoleState>>,
+    last_writer_activity: Arc<Mutex<Instant>>,
+}
+
+impl Drop for WriteIntentGuard {
+    fn drop(&mut self) {
+        let writer_role = self.writer_role.clone();
+        let last_writer_activity = self.last_writer_activity.clone();
+        tokio::spawn(async move {
+            writer_role.lock().await.finish_write();
+            *last_writer_activity.lock().await = Instant::now();
+        });
+    }
+}
+
 #[tonic::async_trait]
 impl VaulticDb for Service {
+    async fn writer_status(
+        &self,
+        request: Request<WriterStatusRequest>,
+    ) -> Result<Response<WriterStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        Ok(Response::new(self.writer_status_response().await))
+    }
+
+    async fn demote_writer(
+        &self,
+        request: Request<DemoteWriterRequest>,
+    ) -> Result<Response<WriterStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let request = request.into_inner();
+        let timeout = if request.timeout_ms == 0 {
+            self.state.writer_transition_timeout
+        } else {
+            Duration::from_millis(request.timeout_ms.clamp(1, 300_000))
+        };
+        let status = self
+            .transition_to_reader(timeout, request.reason, request.force)
+            .await?;
+        Ok(Response::new(status))
+    }
+
+    async fn promote_writer(
+        &self,
+        request: Request<PromoteWriterRequest>,
+    ) -> Result<Response<WriterStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
+        let request = request.into_inner();
+        let reason = request.reason;
+        {
+            let mut role = self.state.writer_role.lock().await;
+            role.begin_promotion(Instant::now(), reason)
+                .map_err(role_error)?;
+        }
+        let next_epoch = match self
+            .storage
+            .promote(if request.force_takeover {
+                Some(request.expected_active_epoch)
+            } else {
+                None
+            })
+            .await
+        {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                let observed_epoch = self.storage.writer_status_epoch().await.1;
+                self.state.writer_role.lock().await.fence(
+                    observed_epoch,
+                    Instant::now(),
+                    "writer promotion failed",
+                );
+                return Err(Status::failed_precondition(format!(
+                    "writer promotion failed: {error:#}"
+                )));
+            }
+        };
+        self.state
+            .writer_role
+            .lock()
+            .await
+            .complete_promotion(next_epoch, Instant::now())
+            .map_err(role_error)?;
+        *self.state.last_writer_activity.lock().await = Instant::now();
+        Ok(Response::new(self.writer_status_response().await))
+    }
+
     async fn publish_capsule_mutation(
         &self,
         request: Request<PublishCapsuleMutationRequest>,
     ) -> Result<Response<PublishCapsuleMutationResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let request = request.into_inner();
         let capsule = validate_capsule_mutation(
             std::path::Path::new(&request.capsule_directory),
@@ -121,6 +222,7 @@ impl VaulticDb for Service {
         request: Request<PrepareCapsuleMigrationRequest>,
     ) -> Result<Response<PrepareCapsuleMigrationResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let mut request = request.into_inner();
         if request.threshold == 0 || request.threshold > u32::from(u8::MAX) {
             return Err(Status::invalid_argument("invalid capsule threshold"));
@@ -226,6 +328,7 @@ impl VaulticDb for Service {
         request: Request<FinalizeCapsuleMigrationRequest>,
     ) -> Result<Response<Empty>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let repository_id = request.get_ref().repository_id.as_str();
         let capsule_sha256 = request.get_ref().capsule_sha256.as_str();
         match self.storage.get_master_key().await? {
@@ -353,6 +456,7 @@ impl VaulticDb for Service {
         request: Request<RewriteDekRequest>,
     ) -> Result<Response<RewriteDekResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let (rewritten, remaining) = self
             .storage
             .key_manager()?
@@ -370,6 +474,7 @@ impl VaulticDb for Service {
         request: Request<RotateDekRequest>,
     ) -> Result<Response<KeyStatusResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         self.storage
             .key_manager()?
             .rotate_dek()
@@ -383,6 +488,7 @@ impl VaulticDb for Service {
         request: Request<AddCloudKeySlotRequest>,
     ) -> Result<Response<KeyStatusResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let request = request.into_inner();
         let token = Zeroizing::new(request.bearer_token);
         let token =
@@ -422,6 +528,7 @@ impl VaulticDb for Service {
         request: Request<AddLocalKeySlotRequest>,
     ) -> Result<Response<KeyStatusResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let request = request.into_inner();
         let passphrase = Zeroizing::new(request.passphrase);
         self.storage
@@ -442,6 +549,7 @@ impl VaulticDb for Service {
         request: Request<RemoveKeySlotRequest>,
     ) -> Result<Response<KeyStatusResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let slot_id = request.into_inner().slot_id;
         self.storage
             .key_manager()?
@@ -456,6 +564,7 @@ impl VaulticDb for Service {
         request: Request<RotateLocalKeySlotRequest>,
     ) -> Result<Response<KeyStatusResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let _intent = self.write_intent().await?;
         let request = request.into_inner();
         let passphrase = Zeroizing::new(request.passphrase);
         self.storage
@@ -503,6 +612,7 @@ impl VaulticDb for Service {
                 "master-key-in-DB is available only over a private Unix socket",
             ));
         }
+        let _intent = self.write_intent().await?;
         let master_key = Zeroizing::new(request.get_ref().master_key.clone());
         self.storage.store_master_key(&master_key).await?;
         Ok(Response::new(Empty { context: None }))
@@ -556,6 +666,8 @@ impl VaulticDb for Service {
             envelope_generation: encryption.envelope_generation,
             unlock_slot: encryption.unlock_slot.clone().unwrap_or_default(),
             recovery_unlock: encryption.recovery_unlock,
+            writer_roles: true,
+            durable_idempotency: true,
         }))
     }
 
@@ -632,15 +744,29 @@ impl VaulticDb for Service {
     ) -> Result<Response<WriteBatchResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
         validate_write_batch(request.get_ref())?;
-        let durable = self.storage.write_batch(request.get_ref()).await?;
+        let durable = self
+            .with_write_intent(self.storage.write_batch(request.get_ref()))
+            .await?;
         Ok(Response::new(WriteBatchResponse { durable }))
     }
 
     async fn begin(&self, request: Request<Empty>) -> Result<Response<BeginResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        Ok(Response::new(BeginResponse {
-            transaction_id: self.storage.begin().await?,
-        }))
+        self.state
+            .writer_role
+            .lock()
+            .await
+            .transaction_opened()
+            .map_err(role_error)?;
+        let transaction_id = match self.storage.begin().await {
+            Ok(transaction_id) => transaction_id,
+            Err(error) => {
+                self.state.writer_role.lock().await.transaction_closed();
+                return Err(error);
+            }
+        };
+        *self.state.last_writer_activity.lock().await = Instant::now();
+        Ok(Response::new(BeginResponse { transaction_id }))
     }
 
     async fn commit(
@@ -648,9 +774,18 @@ impl VaulticDb for Service {
         request: Request<TransactionRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        self.storage
-            .commit(&request.get_ref().transaction_id)
-            .await?;
+        let result = self
+            .storage
+            .commit(
+                &request.get_ref().transaction_id,
+                &request.get_ref().idempotency_key,
+            )
+            .await;
+        if result.is_ok() {
+            self.state.writer_role.lock().await.transaction_closed();
+            *self.state.last_writer_activity.lock().await = Instant::now();
+        }
+        result?;
         Ok(Response::new(CommitResponse { durable: true }))
     }
 
@@ -659,9 +794,15 @@ impl VaulticDb for Service {
         request: Request<TransactionRequest>,
     ) -> Result<Response<Empty>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        self.storage
+        let result = self
+            .storage
             .rollback(&request.get_ref().transaction_id)
-            .await?;
+            .await;
+        if result.is_ok() {
+            self.state.writer_role.lock().await.transaction_closed();
+            *self.state.last_writer_activity.lock().await = Instant::now();
+        }
+        result?;
         Ok(Response::new(Empty { context: None }))
     }
 }
@@ -767,6 +908,127 @@ async fn publish_capsule_without_database(arguments: &[String]) -> Result<()> {
 }
 
 impl Service {
+    async fn transition_to_reader(
+        &self,
+        timeout: Duration,
+        reason: String,
+        force: bool,
+    ) -> Result<WriterStatusResponse, Status> {
+        let _transition = self.state.writer_transition.lock().await;
+        {
+            let mut role = self.state.writer_role.lock().await;
+            role.begin_demotion(Instant::now(), reason, force)
+                .map_err(role_error)?;
+        }
+        let storage = self.storage.clone();
+        let demotion = async move {
+            while storage.active_transactions().await != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            storage.demote().await
+        };
+        match tokio::time::timeout(timeout, demotion).await {
+            Ok(Ok(())) => self
+                .state
+                .writer_role
+                .lock()
+                .await
+                .complete_demotion(Instant::now())
+                .map_err(role_error)?,
+            Ok(Err(error)) => {
+                self.state
+                    .writer_role
+                    .lock()
+                    .await
+                    .fail_demotion(Instant::now());
+                return Err(Status::failed_precondition(format!(
+                    "writer demotion failed: {error:#}"
+                )));
+            }
+            Err(_) => {
+                self.state
+                    .writer_role
+                    .lock()
+                    .await
+                    .fail_demotion(Instant::now());
+                return Err(Status::deadline_exceeded("writer demotion timed out"));
+            }
+        }
+        Ok(self.writer_status_response().await)
+    }
+
+    async fn write_intent(&self) -> Result<WriteIntentGuard, Status> {
+        self.state
+            .writer_role
+            .lock()
+            .await
+            .admit_write()
+            .map_err(role_error)?;
+        Ok(WriteIntentGuard {
+            writer_role: self.state.writer_role.clone(),
+            last_writer_activity: self.state.last_writer_activity.clone(),
+        })
+    }
+
+    async fn with_write_intent<T, F>(&self, operation: F) -> Result<T, Status>
+    where
+        F: Future<Output = Result<T, Status>>,
+    {
+        self.state
+            .writer_role
+            .lock()
+            .await
+            .admit_write()
+            .map_err(role_error)?;
+        let result = operation.await;
+        self.state.writer_role.lock().await.finish_write();
+        *self.state.last_writer_activity.lock().await = Instant::now();
+        result
+    }
+
+    async fn writer_status_response(&self) -> WriterStatusResponse {
+        let status = self.state.writer_role.lock().await.status();
+        let transition_unix_ms = self.state.clock_started_unix_ms.saturating_add(
+            status
+                .transition_started
+                .saturating_duration_since(self.state.clock_started)
+                .as_millis()
+                .min(i64::MAX as u128) as i64,
+        );
+        let idle_deadline_unix_ms = match self.state.writer_idle_grace {
+            Some(grace) => {
+                let activity = *self.state.last_writer_activity.lock().await;
+                self.state.clock_started_unix_ms.saturating_add(
+                    activity
+                        .saturating_duration_since(self.state.clock_started)
+                        .saturating_add(grace)
+                        .as_millis()
+                        .min(i64::MAX as u128) as i64,
+                )
+            }
+            None => 0,
+        };
+        WriterStatusResponse {
+            instance_id: self.state.daemon_id.to_string(),
+            role: match status.role {
+                CoreWriterRole::ReadOnly => proto::WriterRole::ReadOnly as i32,
+                CoreWriterRole::Promoting => proto::WriterRole::Promoting as i32,
+                CoreWriterRole::ReadWrite => proto::WriterRole::ReadWrite as i32,
+                CoreWriterRole::Demoting => proto::WriterRole::Demoting as i32,
+                CoreWriterRole::Fenced => proto::WriterRole::Fenced as i32,
+            },
+            current_epoch: status.current_epoch,
+            observed_epoch: status.observed_epoch,
+            transition_reason: status.transition_reason,
+            transition_unix_ms,
+            active_write_intents: status.active_write_intents,
+            active_transactions: self.storage.active_transactions().await as u64,
+            last_durable_sequence: self.storage.last_durable_sequence(),
+            idle_deadline_unix_ms,
+            promotion_safe: status.promotion_safe,
+        }
+    }
+
     fn check_key_request<T>(
         &self,
         request: &Request<T>,
@@ -809,6 +1071,60 @@ impl Service {
 
 fn key_management_error(error: anyhow::Error) -> Status {
     Status::failed_precondition(error.to_string())
+}
+
+fn role_error(error: RoleError) -> Status {
+    match error {
+        RoleError::NotWriter | RoleError::MinimumTenure | RoleError::StaleEpoch => {
+            Status::failed_precondition(error.to_string())
+        }
+        RoleError::Transitioning => Status::unavailable(error.to_string()),
+        RoleError::Fenced { .. } => Status::aborted(error.to_string()),
+        RoleError::QuiescenceTimeout => Status::deadline_exceeded(error.to_string()),
+    }
+}
+
+fn unix_time_ms_i64() -> Result<i64, Status> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Status::internal("system time is before Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| Status::internal("system time exceeds signed milliseconds"))
+}
+
+fn configured_duration(
+    name: &str,
+    default: Duration,
+    allow_disabled: bool,
+) -> Result<Option<Duration>> {
+    let Ok(value) = env::var(name) else {
+        return Ok((!allow_disabled || !default.is_zero()).then_some(default));
+    };
+    let value = value.trim();
+    if allow_disabled && (value.is_empty() || value == "0" || value.eq_ignore_ascii_case("off")) {
+        return Ok(None);
+    }
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1u64)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3_600_000)
+    } else {
+        bail!("{name} must use an ms, s, m, or h suffix")
+    };
+    let milliseconds = number
+        .parse::<u64>()
+        .with_context(|| format!("parse {name}"))?
+        .checked_mul(multiplier)
+        .with_context(|| format!("{name} is too large"))?;
+    if milliseconds == 0 {
+        bail!("{name} must be positive or explicitly disabled")
+    }
+    Ok(Some(Duration::from_millis(milliseconds)))
 }
 
 fn cloud_token(value: Vec<u8>) -> Result<Option<String>, Status> {
@@ -997,7 +1313,22 @@ async fn main() -> Result<()> {
     let repository_id = env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default();
     let auth_token = read_auth_token()?;
     let transport = parse_transport(&repository_id, auth_token.is_some())?;
-    let state = DaemonState {
+    let clock_started = Instant::now();
+    let minimum_writer_tenure = configured_duration(
+        "VAULTICDB_WRITER_MINIMUM_TENURE",
+        Duration::from_secs(30),
+        false,
+    )?
+    .expect("minimum writer tenure has a default");
+    let writer_idle_grace =
+        configured_duration("VAULTICDB_WRITER_IDLE_GRACE", Duration::ZERO, true)?;
+    let writer_transition_timeout = configured_duration(
+        "VAULTICDB_WRITER_TRANSITION_TIMEOUT",
+        Duration::from_secs(30),
+        false,
+    )?
+    .expect("writer transition timeout has a default");
+    let mut state = DaemonState {
         daemon_id: Arc::from(
             env::var("VAULTICDB_DAEMON_ID").unwrap_or_else(|_| "vaulticdb-dev".to_owned()),
         ),
@@ -1006,6 +1337,17 @@ async fn main() -> Result<()> {
         unix_socket: matches!(&transport, Transport::Unix(_)),
         tcp_enabled: matches!(&transport, Transport::Tcp(_, _)),
         draining: Arc::new(AtomicBool::new(false)),
+        writer_role: Arc::new(Mutex::new(WriterRoleState::read_write(
+            1,
+            clock_started,
+            minimum_writer_tenure,
+        ))),
+        writer_transition: Arc::new(Mutex::new(())),
+        last_writer_activity: Arc::new(Mutex::new(clock_started)),
+        writer_idle_grace,
+        writer_transition_timeout,
+        clock_started,
+        clock_started_unix_ms: unix_time_ms_i64()?,
     };
     let tcp_enabled = matches!(transport, Transport::Tcp(_, _));
     let (shutdown, shutdown_rx) = watch::channel(false);
@@ -1034,6 +1376,12 @@ async fn main() -> Result<()> {
                 return Err(error);
             }
             let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            let (is_writer, epoch) = storage.writer_status_epoch().await;
+            state.writer_role = Arc::new(Mutex::new(if is_writer {
+                WriterRoleState::read_write(epoch, clock_started, minimum_writer_tenure)
+            } else {
+                WriterRoleState::read_only(epoch, clock_started, minimum_writer_tenure)
+            }));
             monitor_broker_lease(storage.as_ref(), shutdown.clone());
             let service = storage_service(state.clone(), shutdown.clone(), storage.clone());
             let stream = UnixListenerStream::new(listener);
@@ -1068,6 +1416,12 @@ async fn main() -> Result<()> {
             let _lock = acquire_singleton_lock(&lock_path)?;
             write_runtime_metadata(&metadata_path, tcp_enabled)?;
             let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            let (is_writer, epoch) = storage.writer_status_epoch().await;
+            state.writer_role = Arc::new(Mutex::new(if is_writer {
+                WriterRoleState::read_write(epoch, clock_started, minimum_writer_tenure)
+            } else {
+                WriterRoleState::read_only(epoch, clock_started, minimum_writer_tenure)
+            }));
             monitor_broker_lease(storage.as_ref(), shutdown.clone());
             let service = storage_service(state, shutdown, storage.clone());
             let (sender, receiver) = mpsc::channel(64);
@@ -1123,13 +1477,41 @@ fn storage_service(
     shutdown: watch::Sender<bool>,
     storage: Arc<Storage>,
 ) -> VaulticDbServer<Service> {
-    VaulticDbServer::new(Service {
+    let service = Service {
         state,
         shutdown,
         storage,
-    })
-    .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
-    .max_encoding_message_size(MAX_MESSAGE_BYTES as usize)
+    };
+    if let Some(grace) = service.state.writer_idle_grace {
+        let idle_service = service.clone();
+        tokio::spawn(async move {
+            let poll = grace
+                .min(Duration::from_secs(1))
+                .max(Duration::from_millis(100));
+            let mut interval = tokio::time::interval(poll);
+            loop {
+                interval.tick().await;
+                let status = idle_service.state.writer_role.lock().await.status();
+                let last_activity = *idle_service.state.last_writer_activity.lock().await;
+                if status.role == CoreWriterRole::ReadWrite
+                    && status.active_write_intents == 0
+                    && status.active_transactions == 0
+                    && Instant::now().saturating_duration_since(last_activity) >= grace
+                {
+                    let _ = idle_service
+                        .transition_to_reader(
+                            idle_service.state.writer_transition_timeout,
+                            "configured idle grace elapsed".to_owned(),
+                            false,
+                        )
+                        .await;
+                }
+            }
+        });
+    }
+    VaulticDbServer::new(service)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES as usize)
 }
 
 fn write_runtime_metadata(socket: &Path, tcp_enabled: bool) -> Result<()> {

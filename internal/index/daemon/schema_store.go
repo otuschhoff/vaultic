@@ -1606,6 +1606,19 @@ func (store *SchemaStore) WriteMutableBatch(ctx context.Context, puts []Mutation
 // catalog, aggregate, reverse-index, GC, and crawl-debt records. Existing
 // immutable values must match byte-for-byte.
 func (store *SchemaStore) PublishSchemaBatch(ctx context.Context, puts []Mutation, deletes [][]byte) error {
+	return store.publishSchemaBatch(ctx, puts, deletes, "")
+}
+
+// PublishSchemaBatchWithIdempotency publishes one logical schema transaction and
+// permits an ambiguous commit to be recovered with the same durable key.
+func (store *SchemaStore) PublishSchemaBatchWithIdempotency(ctx context.Context, puts []Mutation, deletes [][]byte, idempotencyKey string) error {
+	if idempotencyKey == "" {
+		return fmt.Errorf("idempotency key is required")
+	}
+	return store.publishSchemaBatch(ctx, puts, deletes, idempotencyKey)
+}
+
+func (store *SchemaStore) publishSchemaBatch(ctx context.Context, puts []Mutation, deletes [][]byte, idempotencyKey string) error {
 	seen := make(map[string]struct{}, len(puts)+len(deletes))
 	immutableKeys := make([][]byte, 0, len(puts))
 	immutableIndexes := make([]int, 0, len(puts))
@@ -1676,7 +1689,7 @@ func (store *SchemaStore) PublishSchemaBatch(ctx context.Context, puts []Mutatio
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
-	if err := transaction.Commit(ctx); err != nil {
+	if err := transaction.CommitWithIdempotency(ctx, idempotencyKey); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
 	}

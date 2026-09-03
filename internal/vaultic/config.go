@@ -63,6 +63,8 @@ type Config struct {
 	// from how it was opened. A single declared backend must resolve to the same
 	// behavior as an empty declaration in a non-hot/cold repository.
 	PlacementBackends []PlacementBackend `json:"placement_backends,omitempty"`
+	// StagingBackends names placement backends that mirror authenticated deferred-ingest journals.
+	StagingBackends []string `json:"staging_backends,omitempty"`
 	// PlacementPolicy describes how many independent live placements a pack must
 	// retain before an eviction can proceed.
 	PlacementPolicy PlacementPolicy `json:"placement_policy,omitempty"`

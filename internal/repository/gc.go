@@ -26,6 +26,12 @@ type GCStore interface {
 	MarkPackDeleted(context.Context, schema.ID, []schema.ID) error
 }
 
+// StagedPackRoots supplies authenticated, sealed, unexpired journal roots.
+// Implementations must reread authoritative journal state on every call.
+type StagedPackRoots interface {
+	Current(context.Context) (vaultic.IDSet, error)
+}
+
 const gcScanPageSize = 10_000
 
 // GCOptions controls a single discover/revalidate/sweep pass.
@@ -44,6 +50,9 @@ type GCOptions struct {
 	// IgnoreSnapshots excludes these snapshot IDs from the retained-root walk,
 	// as if they had already been forgotten.
 	IgnoreSnapshots vaultic.IDSet
+	// StagedRoots prevents staged packs from being counted as committed while
+	// excluding them from repack and deletion decisions.
+	StagedRoots StagedPackRoots
 }
 
 // GCStats summarizes one discover/revalidate/sweep pass.
@@ -116,6 +125,9 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 		return nil, fmt.Errorf("gc requires a backend connection limit of at least two")
 	}
 	store := engine.SchemaStore()
+	if opts.StagedRoots == nil {
+		opts.StagedRoots = repo.stagedPackRoots
+	}
 
 	plan := &GCPlan{
 		repo: repo, store: store, engine: engine, opts: opts, runID: vaultic.NewRandomID(),
@@ -204,6 +216,21 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 	plan.Stats.WholePackCandidates = classification.wholePackCandidates
 	plan.Stats.MixedPackCandidates = classification.mixedPackCandidates
 	plan.Stats.PendingAge = classification.pendingAge
+	if opts.StagedRoots != nil {
+		staged, err := opts.StagedRoots.Current(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load staged journal roots: %w", err)
+		}
+		for packID := range staged {
+			delete(plan.wholePacks, packID)
+			delete(plan.mixedPacks, packID)
+			delete(plan.mixedPackMembers, packID)
+			delete(plan.retryPacks, packID)
+		}
+		plan.Stats.WholePackCandidates = uint64(len(plan.wholePacks))
+		plan.Stats.MixedPackCandidates = uint64(len(plan.mixedPacks))
+		plan.Stats.PendingRetries = uint64(len(plan.retryPacks))
+	}
 
 	if len(classification.gcPuts) != 0 && !opts.DryRun {
 		if err := store.WriteMutableBatch(ctx, classification.gcPuts, nil, true); err != nil {
@@ -541,6 +568,15 @@ func classifyDeleteFailure(failure error) string {
 // where deleting a missing key is a no-op rather than an error; otherwise a
 // retry could get permanently stuck never reaching MarkPackDeleted again.
 func (plan *GCPlan) deletePackObjectAndCatalog(ctx context.Context, packID vaultic.ID, members []vaultic.ID) error {
+	if plan.opts.StagedRoots != nil {
+		staged, err := plan.opts.StagedRoots.Current(ctx)
+		if err != nil {
+			return fmt.Errorf("revalidate staged journal roots: %w", err)
+		}
+		if staged.Has(packID) {
+			return fmt.Errorf("pack %s became protected by a sealed staging journal", packID)
+		}
+	}
 	if err := (&internalRepository{plan.repo}).RemoveUnpacked(ctx, vaultic.PackFile, packID); err != nil && !plan.repo.Backend().IsNotExist(err) {
 		return err
 	}

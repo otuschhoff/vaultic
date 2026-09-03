@@ -14,4 +14,7 @@ var (
 	_ = [1]struct{}{}[backend.SnapshotFile-backend.FileType(vaultic.SnapshotFile)]
 	_ = [1]struct{}{}[backend.IndexFile-backend.FileType(vaultic.IndexFile)]
 	_ = [1]struct{}{}[backend.ConfigFile-backend.FileType(vaultic.ConfigFile)]
+	_ = [1]struct{}{}[backend.SlateDBFile-backend.FileType(vaultic.SlateDBFile)]
+	_ = [1]struct{}{}[backend.BootstrapFile-backend.FileType(vaultic.BootstrapFile)]
+	_ = [1]struct{}{}[backend.StagingFile-backend.FileType(vaultic.StagingFile)]
 )

@@ -57,6 +57,7 @@ message WriteBatchRequest {
   repeated bytes deletes = 3;
   bool await_durable = 4;
   string transaction_id = 5;
+  string idempotency_key = 6;
 }
 
 message WriteBatchResponse {
@@ -79,6 +80,7 @@ message ScanResponse {
 message TransactionRequest {
   RequestContext context = 1;
   string transaction_id = 2;
+  string idempotency_key = 3;
 }
 
 message BeginResponse {
@@ -125,6 +127,52 @@ message CapabilitiesResponse {
   uint64 envelope_generation = 14;
   string unlock_slot = 15;
   bool recovery_unlock = 16;
+  bool writer_roles = 17;
+  bool durable_idempotency = 18;
+}
+
+enum WriterRole {
+  WRITER_ROLE_UNSPECIFIED = 0;
+  WRITER_ROLE_READ_ONLY = 1;
+  WRITER_ROLE_PROMOTING = 2;
+  WRITER_ROLE_READ_WRITE = 3;
+  WRITER_ROLE_DEMOTING = 4;
+  WRITER_ROLE_FENCED = 5;
+}
+
+message WriterStatusRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+}
+
+message WriterStatusResponse {
+  string instance_id = 1;
+  WriterRole role = 2;
+  uint64 current_epoch = 3;
+  uint64 observed_epoch = 4;
+  string transition_reason = 5;
+  int64 transition_unix_ms = 6;
+  uint64 active_write_intents = 7;
+  uint64 active_transactions = 8;
+  uint64 last_durable_sequence = 9;
+  int64 idle_deadline_unix_ms = 10;
+  bool promotion_safe = 11;
+}
+
+message DemoteWriterRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  bool force = 3;
+  uint64 timeout_ms = 4;
+  string reason = 5;
+}
+
+message PromoteWriterRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string reason = 3;
+  bool force_takeover = 4;
+  uint64 expected_active_epoch = 5;
 }
 
 message MasterKeyRequest {
@@ -300,6 +348,9 @@ message PublishCapsuleMutationResponse {
 service VaulticDB {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc WriterStatus(WriterStatusRequest) returns (WriterStatusResponse);
+  rpc DemoteWriter(DemoteWriterRequest) returns (WriterStatusResponse);
+  rpc PromoteWriter(PromoteWriterRequest) returns (WriterStatusResponse);
   rpc Drain(Empty) returns (Empty);
   rpc Shutdown(Empty) returns (Empty);
   rpc Get(GetRequest) returns (GetResponse);

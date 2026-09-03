@@ -14,12 +14,15 @@ use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use slatedb::{
+    config::DbReaderOptions,
     object_store::{
         aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, local::LocalFileSystem,
-        memory::InMemory, prefix::PrefixStore, ObjectStore,
+        memory::InMemory, path::Path as ObjectPath, prefix::PrefixStore, ObjectStore,
+        ObjectStoreExt, PutMode, PutOptions, UpdateVersion,
     },
-    Db, DbIterator, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
+    Db, DbIterator, DbReader, DbReaderMode, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
 };
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
@@ -43,6 +46,10 @@ const CAPSULE_MIGRATION_FINALIZED_RECORD: &[u8] = b"meta:capsule-migration-final
 const ENCRYPTION_POLICY_RECORD: &[u8] = b"meta:encryption";
 const METADATA_REBUILD_RECORD: &[u8] = b"meta:recovery-rebuild";
 const MAX_MASTER_KEY_BYTES: usize = 4096;
+const IDEMPOTENCY_PREFIX: &[u8] = b"meta:idempotency:";
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+const WRITER_EPOCH_PREFIX: &str = "_vaultic/writer-epochs";
+const ACTIVE_WRITER_PATH: &str = "_vaultic/active-writer";
 
 struct TransactionSlot {
     transaction: Mutex<Option<DbTransaction>>,
@@ -59,19 +66,56 @@ struct EncryptionPolicy {
     repository_id: String,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdempotencyRecord {
+    format: u32,
+    operation: String,
+    request_sha256: String,
+    durable: bool,
+}
+
 pub struct Storage {
-    db: Db,
+    database: RwLock<Database>,
+    database_path: String,
+    object_store: Arc<dyn ObjectStore>,
+    coordination_store: Arc<dyn ObjectStore>,
     encryption: EncryptionStatus,
     key_manager: Option<Arc<KeyManager>>,
     transactions: RwLock<HashMap<String, Arc<TransactionSlot>>>,
     next_transaction: AtomicU64,
+    last_durable_sequence: AtomicU64,
     transaction_idle_timeout_ms: u64,
     broker_lease: Option<BrokerLeaseConnection>,
+    writer_epoch: AtomicU64,
+}
+
+enum Database {
+    Writer(Db),
+    Reader(DbReader),
+    Unavailable,
+}
+
+impl Database {
+    fn as_writer(&self) -> Option<&Db> {
+        match self {
+            Self::Writer(db) => Some(db),
+            Self::Reader(_) | Self::Unavailable => None,
+        }
+    }
 }
 
 impl Storage {
     pub async fn open(repository_id: &str) -> Result<Self> {
         let (path, object_store) = object_store(repository_id)?;
+        let coordination_store =
+            if env::var("VAULTICDB_OBJECT_STORE").as_deref() == Ok("replicated") {
+                let replica = env::var("VAULTICDB_FENCING_REPLICA")
+                    .context("replicated metadata requires VAULTICDB_FENCING_REPLICA")?;
+                replicated_replica_store(&replica, &crate::repository_key(repository_id))?
+            } else {
+                object_store.clone()
+            };
         let recovery_initialize =
             env::var("VAULTICDB_METADATA_REBUILD_INITIALIZE").as_deref() == Ok("true");
         if recovery_initialize && env::var_os("VAULTICDB_BROKER_SOCKET").is_none() {
@@ -110,23 +154,67 @@ impl Storage {
         } else {
             envelope::configure(repository_id, object_store).await?
         };
-        let db = Db::open(path, object_store)
-            .await
-            .context("open SlateDB database")?;
+        let (database, writer_epoch) =
+            match claim_writer_epoch(coordination_store.as_ref(), None).await? {
+                Some(epoch) => {
+                    let db = match Db::open(path.clone(), object_store.clone()).await {
+                        Ok(db) => db,
+                        Err(error) => {
+                            release_writer_claim(coordination_store.as_ref(), epoch)
+                                .await
+                                .context("release writer claim after database open failure")?;
+                            return Err(error).context("open SlateDB database");
+                        }
+                    };
+                    (Database::Writer(db), epoch)
+                }
+                None => (
+                    Database::Reader(
+                        DbReader::open(
+                            path.as_str(),
+                            object_store.clone(),
+                            DbReaderMode::FollowLatest,
+                            DbReaderOptions {
+                                skip_wal_replay: false,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .context("open SlateDB database as non-fencing reader")?,
+                    ),
+                    latest_writer_epoch(coordination_store.as_ref()).await?,
+                ),
+            };
         let storage = Self {
-            db,
+            database: RwLock::new(database),
+            database_path: path,
+            object_store,
+            coordination_store,
             encryption,
             key_manager,
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
+            last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: transaction_idle_timeout_ms()?,
             broker_lease,
+            writer_epoch: AtomicU64::new(writer_epoch),
         };
-        storage.ensure_encryption_policy(repository_id).await?;
-        if recovery_initialize {
+        let initialize = async {
+            storage.ensure_encryption_policy(repository_id).await?;
+            if recovery_initialize {
+                storage
+                    .record_metadata_rebuild_handoff(repository_id)
+                    .await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = initialize {
             storage
-                .record_metadata_rebuild_handoff(repository_id)
-                .await?;
+                .close()
+                .await
+                .context("close storage after initialization failure")?;
+            return Err(error).context("initialize VaulticDB storage");
         }
         Ok(storage)
     }
@@ -141,6 +229,17 @@ impl Storage {
         &self.encryption
     }
 
+    pub async fn writer_status_epoch(&self) -> (bool, u64) {
+        (
+            matches!(&*self.database.read().await, Database::Writer(_)),
+            self.writer_epoch.load(Ordering::Acquire),
+        )
+    }
+
+    pub fn last_durable_sequence(&self) -> u64 {
+        self.last_durable_sequence.load(Ordering::Acquire)
+    }
+
     pub fn key_manager(&self) -> Result<&Arc<KeyManager>, Status> {
         self.key_manager.as_ref().ok_or_else(|| {
             Status::failed_precondition("key management requires metadata encryption")
@@ -148,8 +247,15 @@ impl Storage {
     }
 
     async fn ensure_encryption_policy(&self, repository_id: &str) -> Result<()> {
+        let database = self.database.read().await;
+        let Database::Writer(db) = &*database else {
+            bail!("metadata encryption policy requires a writer")
+        };
         let existing = self
-            .db
+            .writer()
+            .await?
+            .as_writer()
+            .expect("writer was validated")
             .get(ENCRYPTION_POLICY_RECORD)
             .await
             .context("read metadata encryption policy")?;
@@ -179,16 +285,15 @@ impl Storage {
         if !self.encryption.initializing {
             bail!("metadata encryption policy is missing while encryption is required");
         }
-        self.db
-            .put(
-                ENCRYPTION_POLICY_RECORD,
-                serde_json::to_vec(&expected).context("encode metadata encryption policy")?,
-            )
-            .await
-            .context("write metadata encryption policy")?
-            .await_durable()
-            .await
-            .context("persist metadata encryption policy")
+        db.put(
+            ENCRYPTION_POLICY_RECORD,
+            serde_json::to_vec(&expected).context("encode metadata encryption policy")?,
+        )
+        .await
+        .context("write metadata encryption policy")?
+        .await_durable()
+        .await
+        .context("persist metadata encryption policy")
     }
 
     async fn record_metadata_rebuild_handoff(&self, repository_id: &str) -> Result<()> {
@@ -203,8 +308,11 @@ impl Storage {
             "metadata_dek_version": lease.key_version,
             "broker_epoch_id": lease.epoch_id,
         }))?;
-        self.db
-            .put(METADATA_REBUILD_RECORD, value)
+        let database = self.database.read().await;
+        let Database::Writer(db) = &*database else {
+            bail!("metadata rebuild handoff requires a writer")
+        };
+        db.put(METADATA_REBUILD_RECORD, value)
             .await?
             .await_durable()
             .await
@@ -222,10 +330,8 @@ impl Storage {
                 "master-key-in-DB requires metadata encryption",
             ));
         }
-        self.db
-            .get(MASTER_KEY_RECORD)
+        self.read_value(MASTER_KEY_RECORD)
             .await
-            .map_err(storage_error)
             .map(|value| value.map(|bytes| bytes.to_vec()))
     }
 
@@ -243,12 +349,7 @@ impl Storage {
         if master_key.is_empty() || master_key.len() > MAX_MASTER_KEY_BYTES {
             return Err(Status::invalid_argument("invalid repository master key"));
         }
-        if let Some(existing) = self
-            .db
-            .get(MASTER_KEY_RECORD)
-            .await
-            .map_err(storage_error)?
-        {
+        if let Some(existing) = self.read_value(MASTER_KEY_RECORD).await? {
             if existing.as_ref() == master_key {
                 return Ok(());
             }
@@ -256,8 +357,11 @@ impl Storage {
                 "a different repository master key is already stored",
             ));
         }
-        self.db
-            .put(MASTER_KEY_RECORD, master_key)
+        let database = self.writer().await?;
+        let Database::Writer(db) = &*database else {
+            unreachable!()
+        };
+        db.put(MASTER_KEY_RECORD, master_key)
             .await
             .map_err(storage_error)?
             .await_durable()
@@ -287,8 +391,11 @@ impl Storage {
                 "a different capsule migration is already pending",
             ));
         }
-        self.db
-            .put(CAPSULE_MIGRATION_RECORD, capsule_sha256.as_bytes())
+        let database = self.writer().await?;
+        let Database::Writer(db) = &*database else {
+            unreachable!()
+        };
+        db.put(CAPSULE_MIGRATION_RECORD, capsule_sha256.as_bytes())
             .await
             .map_err(storage_error)?
             .await_durable()
@@ -300,18 +407,14 @@ impl Storage {
         &self,
     ) -> Result<(Option<String>, Option<String>), Status> {
         let pending = self
-            .db
-            .get(CAPSULE_MIGRATION_RECORD)
-            .await
-            .map_err(storage_error)?
+            .read_value(CAPSULE_MIGRATION_RECORD)
+            .await?
             .map(|value| String::from_utf8(value.to_vec()))
             .transpose()
             .map_err(|_| Status::data_loss("pending capsule migration digest is invalid"))?;
         let finalized = self
-            .db
-            .get(CAPSULE_MIGRATION_FINALIZED_RECORD)
-            .await
-            .map_err(storage_error)?
+            .read_value(CAPSULE_MIGRATION_FINALIZED_RECORD)
+            .await?
             .map(|value| String::from_utf8(value.to_vec()))
             .transpose()
             .map_err(|_| Status::data_loss("finalized capsule migration digest is invalid"))?;
@@ -319,17 +422,9 @@ impl Storage {
     }
 
     pub async fn finalize_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
-        let pending = self
-            .db
-            .get(CAPSULE_MIGRATION_RECORD)
-            .await
-            .map_err(storage_error)?;
+        let pending = self.read_value(CAPSULE_MIGRATION_RECORD).await?;
         let Some(pending) = pending else {
-            let finalized = self
-                .db
-                .get(CAPSULE_MIGRATION_FINALIZED_RECORD)
-                .await
-                .map_err(storage_error)?;
+            let finalized = self.read_value(CAPSULE_MIGRATION_FINALIZED_RECORD).await?;
             if finalized.as_deref() == Some(capsule_sha256.as_bytes()) {
                 return Ok(());
             }
@@ -349,19 +444,122 @@ impl Storage {
             CAPSULE_MIGRATION_FINALIZED_RECORD,
             capsule_sha256.as_bytes(),
         );
-        self.db.write(batch).await.map_err(storage_error)?;
-        self.db.flush().await.map_err(storage_error)
+        let database = self.writer().await?;
+        let Database::Writer(db) = &*database else {
+            unreachable!()
+        };
+        db.write(batch).await.map_err(storage_error)?;
+        db.flush().await.map_err(storage_error)
     }
 
     pub async fn close(&self) -> Result<()> {
         self.transactions.write().await.clear();
-        self.db.close().await.context("close SlateDB database")
+        let database = self.database.write().await;
+        let was_writer = matches!(&*database, Database::Writer(_));
+        match &*database {
+            Database::Writer(db) => db.close().await.context("close SlateDB writer"),
+            Database::Reader(reader) => reader.close().await.context("close SlateDB reader"),
+            Database::Unavailable => Ok(()),
+        }?;
+        if was_writer {
+            release_writer_claim(
+                self.coordination_store.as_ref(),
+                self.writer_epoch.load(Ordering::Acquire),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn demote(&self) -> Result<()> {
+        if !self.transactions.read().await.is_empty() {
+            bail!("active transactions prevent writer demotion")
+        }
+        let mut database = self.database.write().await;
+        if !matches!(&*database, Database::Writer(_)) {
+            bail!("VaulticDB is not the metadata writer")
+        }
+        let Database::Writer(db) = std::mem::replace(&mut *database, Database::Unavailable) else {
+            unreachable!()
+        };
+        db.flush()
+            .await
+            .context("flush SlateDB writer before demotion")?;
+        self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
+        db.close()
+            .await
+            .context("close SlateDB writer before demotion")?;
+        let reader = DbReader::open(
+            self.database_path.as_str(),
+            self.object_store.clone(),
+            DbReaderMode::FollowLatest,
+            DbReaderOptions {
+                skip_wal_replay: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .context("open non-fencing SlateDB reader")?;
+        *database = Database::Reader(reader);
+        release_writer_claim(
+            self.coordination_store.as_ref(),
+            self.writer_epoch.load(Ordering::Acquire),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn promote(&self, takeover_epoch: Option<u64>) -> Result<u64> {
+        let epoch = claim_writer_epoch(self.coordination_store.as_ref(), takeover_epoch)
+            .await?
+            .context("another VaulticDB instance acquired the next writer epoch")?;
+        let mut database = self.database.write().await;
+        if !matches!(&*database, Database::Reader(_)) {
+            bail!("VaulticDB is not read-only")
+        }
+        let Database::Reader(reader) = std::mem::replace(&mut *database, Database::Unavailable)
+        else {
+            unreachable!()
+        };
+        reader
+            .close()
+            .await
+            .context("close SlateDB reader before promotion")?;
+        let db = Db::open(self.database_path.as_str(), self.object_store.clone())
+            .await
+            .context("open freshly fenced SlateDB writer")?;
+        *database = Database::Writer(db);
+        self.writer_epoch.store(epoch, Ordering::Release);
+        Ok(epoch)
+    }
+
+    pub async fn active_transactions(&self) -> usize {
+        self.transactions.read().await.len()
+    }
+
+    async fn writer(&self) -> Result<tokio::sync::RwLockReadGuard<'_, Database>, Status> {
+        let database = self.database.read().await;
+        if !matches!(&*database, Database::Writer(_)) {
+            return Err(Status::failed_precondition(
+                "vaulticdb is not the metadata writer",
+            ));
+        }
+        Ok(database)
+    }
+
+    async fn read_value(&self, key: &[u8]) -> Result<Option<bytes::Bytes>, Status> {
+        let database = self.database.read().await;
+        match &*database {
+            Database::Writer(db) => db.get(key).await.map_err(storage_error),
+            Database::Reader(reader) => reader.get(key).await.map_err(storage_error),
+            Database::Unavailable => Err(Status::unavailable("vaulticdb storage is transitioning")),
+        }
     }
 
     pub async fn get(&self, key: &[u8], transaction_id: &str) -> Result<GetResponse, Status> {
         validate_key(key)?;
         let value = if transaction_id.is_empty() {
-            self.db.get(key).await.map_err(storage_error)?
+            self.read_value(key).await?
         } else {
             let transaction = self.transaction(transaction_id).await?;
             let transaction = transaction.transaction.lock().await;
@@ -399,8 +597,15 @@ impl Storage {
             ));
         }
         let suffix = after_key.strip_prefix(prefix).unwrap_or_default();
+        let database = self.database.read().await;
         let mut iterator = if transaction_id.is_empty() {
-            scan_prefix_db(&self.db, prefix, suffix).await?
+            match &*database {
+                Database::Writer(db) => scan_prefix_db(db, prefix, suffix).await?,
+                Database::Reader(reader) => scan_prefix_reader(reader, prefix, suffix).await?,
+                Database::Unavailable => {
+                    return Err(Status::unavailable("vaulticdb storage is transitioning"));
+                }
+            }
         } else {
             let transaction = self.transaction(transaction_id).await?;
             let transaction = transaction.transaction.lock().await;
@@ -418,7 +623,22 @@ impl Storage {
 
     pub async fn write_batch(&self, request: &WriteBatchRequest) -> Result<bool, Status> {
         validate_mutations(request)?;
+        self.assert_current_writer_epoch().await?;
         if request.transaction_id.is_empty() {
+            let request_digest = write_batch_digest(request);
+            let idempotency_key = idempotency_record_key(&request.idempotency_key)?;
+            if let Some(key) = idempotency_key.as_ref() {
+                if let Some(existing) = self.read_idempotency(key).await? {
+                    if existing.operation != "write-batch"
+                        || existing.request_sha256 != request_digest
+                    {
+                        return Err(Status::already_exists(
+                            "idempotency key is bound to a different operation",
+                        ));
+                    }
+                    return Ok(existing.durable);
+                }
+            }
             let mut batch = WriteBatch::new();
             for put in &request.puts {
                 batch.put(&put.key, &put.value);
@@ -426,11 +646,30 @@ impl Storage {
             for key in &request.deletes {
                 batch.delete(key);
             }
-            let handle = self.db.write(batch).await.map_err(storage_error)?;
-            if request.await_durable {
-                handle.await_durable().await.map_err(storage_error)?;
+            if let Some(key) = idempotency_key {
+                let record = IdempotencyRecord {
+                    format: 1,
+                    operation: "write-batch".to_owned(),
+                    request_sha256: request_digest,
+                    durable: true,
+                };
+                batch.put(
+                    key,
+                    serde_json::to_vec(&record).map_err(|error| {
+                        Status::internal(format!("encode idempotency record: {error}"))
+                    })?,
+                );
             }
-            return Ok(request.await_durable);
+            let database = self.writer().await?;
+            let Database::Writer(db) = &*database else {
+                unreachable!()
+            };
+            let handle = db.write(batch).await.map_err(storage_error)?;
+            if request.await_durable || !request.idempotency_key.is_empty() {
+                handle.await_durable().await.map_err(storage_error)?;
+                self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
+            }
+            return Ok(request.await_durable || !request.idempotency_key.is_empty());
         }
 
         if request.await_durable {
@@ -455,6 +694,7 @@ impl Storage {
     }
 
     pub async fn begin(&self) -> Result<String, Status> {
+        self.assert_current_writer_epoch().await?;
         let mut transactions = self.transactions.write().await;
         let now = unix_time_ms().map_err(storage_status)?;
         transactions.retain(|_, slot| {
@@ -471,7 +711,10 @@ impl Storage {
             ));
         }
         let transaction = self
-            .db
+            .writer()
+            .await?
+            .as_writer()
+            .expect("writer was validated")
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .map_err(storage_error)?;
@@ -490,7 +733,22 @@ impl Storage {
         Ok(id)
     }
 
-    pub async fn commit(&self, transaction_id: &str) -> Result<(), Status> {
+    pub async fn commit(&self, transaction_id: &str, idempotency_key: &str) -> Result<(), Status> {
+        self.assert_current_writer_epoch().await?;
+        let request_digest = transaction_digest(transaction_id);
+        let record_key = idempotency_record_key(idempotency_key)?;
+        if let Some(key) = record_key.as_ref() {
+            if let Some(existing) = self.read_idempotency(key).await? {
+                if existing.operation != "transaction-commit"
+                    || existing.request_sha256 != request_digest
+                {
+                    return Err(Status::already_exists(
+                        "idempotency key is bound to a different operation",
+                    ));
+                }
+                return Ok(());
+            }
+        }
         let transaction = self.remove_transaction(transaction_id).await?;
         let transaction = transaction
             .transaction
@@ -498,9 +756,26 @@ impl Storage {
             .await
             .take()
             .ok_or_else(|| Status::not_found("transaction was closed"))?;
+        if let Some(key) = record_key {
+            let record = IdempotencyRecord {
+                format: 1,
+                operation: "transaction-commit".to_owned(),
+                request_sha256: request_digest,
+                durable: true,
+            };
+            transaction
+                .put(
+                    key,
+                    serde_json::to_vec(&record).map_err(|error| {
+                        Status::internal(format!("encode idempotency record: {error}"))
+                    })?,
+                )
+                .map_err(storage_error)?;
+        }
         if let Some(handle) = transaction.commit().await.map_err(storage_error)? {
             handle.await_durable().await.map_err(storage_error)?;
         }
+        self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -533,6 +808,22 @@ impl Storage {
         Ok(transaction)
     }
 
+    async fn assert_current_writer_epoch(&self) -> Result<(), Status> {
+        let claimed = self.writer_epoch.load(Ordering::Acquire);
+        let observed = latest_writer_epoch(self.coordination_store.as_ref())
+            .await
+            .map_err(storage_status)?;
+        let active = active_writer_epoch(self.coordination_store.as_ref())
+            .await
+            .map_err(storage_status)?;
+        if claimed == 0 || observed != claimed || active != Some(claimed) {
+            return Err(Status::failed_precondition(format!(
+                "writer epoch is stale: claimed {claimed}, authoritative {observed}, active {active:?}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn remove_transaction(
         &self,
         transaction_id: &str,
@@ -546,6 +837,53 @@ impl Storage {
             .remove(transaction_id)
             .ok_or_else(|| Status::not_found("transaction was not found"))
     }
+
+    async fn read_idempotency(&self, key: &[u8]) -> Result<Option<IdempotencyRecord>, Status> {
+        self.read_value(key)
+            .await?
+            .map(|value| {
+                serde_json::from_slice(&value)
+                    .map_err(|_| Status::data_loss("invalid durable idempotency record"))
+            })
+            .transpose()
+    }
+}
+
+fn idempotency_record_key(value: &str) -> Result<Option<Vec<u8>>, Status> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MAX_IDEMPOTENCY_KEY_BYTES || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(Status::invalid_argument("invalid idempotency key"));
+    }
+    let mut key = IDEMPOTENCY_PREFIX.to_vec();
+    key.extend_from_slice(value.as_bytes());
+    Ok(Some(key))
+}
+
+fn write_batch_digest(request: &WriteBatchRequest) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"vaulticdb-write-batch-v1\0");
+    for put in &request.puts {
+        digest.update((put.key.len() as u64).to_be_bytes());
+        digest.update(&put.key);
+        digest.update((put.value.len() as u64).to_be_bytes());
+        digest.update(&put.value);
+    }
+    digest.update([0xff]);
+    for delete in &request.deletes {
+        digest.update((delete.len() as u64).to_be_bytes());
+        digest.update(delete);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn transaction_digest(transaction_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"vaulticdb-transaction-commit-v1\0");
+    digest.update(transaction_id.as_bytes());
+    format!("{:x}", digest.finalize())
 }
 
 async fn metadata_store_has_database_objects(store: &dyn ObjectStore) -> Result<bool> {
@@ -557,6 +895,104 @@ async fn metadata_store_has_database_objects(store: &dyn ObjectStore) -> Result<
         }
     }
     Ok(false)
+}
+
+async fn latest_writer_epoch(store: &dyn ObjectStore) -> Result<u64> {
+    let prefix = ObjectPath::from(WRITER_EPOCH_PREFIX);
+    let mut objects = store.list(Some(&prefix));
+    let mut latest = 0u64;
+    while let Some(object) = objects.next().await {
+        let object = object.context("list writer epoch coordination objects")?;
+        let Some(name) = object.location.as_ref().rsplit('/').next() else {
+            continue;
+        };
+        if let Ok(epoch) = name.parse::<u64>() {
+            latest = latest.max(epoch);
+        }
+    }
+    Ok(latest)
+}
+
+async fn claim_writer_epoch(
+    store: &dyn ObjectStore,
+    takeover_epoch: Option<u64>,
+) -> Result<Option<u64>> {
+    let epoch = latest_writer_epoch(store)
+        .await?
+        .checked_add(1)
+        .context("writer epoch overflow")?;
+    let active_path = ObjectPath::from(ACTIVE_WRITER_PATH);
+    let mode = if let Some(expected_epoch) = takeover_epoch {
+        let current = store
+            .get(&active_path)
+            .await
+            .context("read active writer claim for takeover")?;
+        let version = UpdateVersion {
+            e_tag: current.meta.e_tag.clone(),
+            version: current.meta.version.clone(),
+        };
+        let bytes = current
+            .bytes()
+            .await
+            .context("read active writer takeover claim")?;
+        let observed: u64 = std::str::from_utf8(&bytes)
+            .context("decode active writer takeover claim")?
+            .parse()
+            .context("parse active writer takeover epoch")?;
+        if observed != expected_epoch || observed != latest_writer_epoch(store).await? {
+            bail!("active writer changed since takeover was authorized")
+        }
+        PutMode::Update(version)
+    } else {
+        PutMode::Create
+    };
+    match store
+        .put_opts(
+            &active_path,
+            epoch.to_string().into_bytes().into(),
+            PutOptions::from(mode),
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(
+            slatedb::object_store::Error::AlreadyExists { .. }
+            | slatedb::object_store::Error::Precondition { .. },
+        ) => return Ok(None),
+        Err(error) => return Err(error).context("claim active writer ownership"),
+    }
+    let path = ObjectPath::from(format!("{WRITER_EPOCH_PREFIX}/{epoch:020}"));
+    let value = format!("pid={} time_ms={}\n", std::process::id(), unix_time_ms()?).into_bytes();
+    if let Err(error) = store
+        .put_opts(&path, value.into(), PutOptions::from(PutMode::Create))
+        .await
+    {
+        let _ = store.delete(&active_path).await;
+        return Err(error).context("publish writer epoch history");
+    }
+    Ok(Some(epoch))
+}
+
+async fn active_writer_epoch(store: &dyn ObjectStore) -> Result<Option<u64>> {
+    match store.get(&ObjectPath::from(ACTIVE_WRITER_PATH)).await {
+        Ok(result) => {
+            let bytes = result.bytes().await.context("read active writer claim")?;
+            let value = std::str::from_utf8(&bytes).context("decode active writer claim")?;
+            Ok(Some(value.parse().context("parse active writer epoch")?))
+        }
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error).context("read active writer claim"),
+    }
+}
+
+async fn release_writer_claim(store: &dyn ObjectStore, epoch: u64) -> Result<()> {
+    if active_writer_epoch(store).await? != Some(epoch) {
+        bail!("refusing to release a writer claim owned by another epoch")
+    }
+    store
+        .delete(&ObjectPath::from(ACTIVE_WRITER_PATH))
+        .await
+        .context("release active writer claim")
 }
 
 fn transaction_idle_timeout_ms() -> Result<u64> {
@@ -597,6 +1033,21 @@ async fn scan_prefix_db(db: &Db, prefix: &[u8], suffix: &[u8]) -> Result<DbItera
         db.scan_prefix(prefix, ..).await.map_err(storage_error)
     } else {
         db.scan_prefix(prefix, (Excluded(suffix), Unbounded))
+            .await
+            .map_err(storage_error)
+    }
+}
+
+async fn scan_prefix_reader(
+    reader: &DbReader,
+    prefix: &[u8],
+    suffix: &[u8],
+) -> Result<DbIterator, Status> {
+    if suffix.is_empty() {
+        reader.scan_prefix(prefix, ..).await.map_err(storage_error)
+    } else {
+        reader
+            .scan_prefix(prefix, (Excluded(suffix), Unbounded))
             .await
             .map_err(storage_error)
     }
@@ -696,6 +1147,104 @@ fn storage_error(error: slatedb::Error) -> Status {
         ErrorKind::Invalid => Status::invalid_argument(message),
         ErrorKind::Data => Status::data_loss(message),
         _ => Status::internal(message),
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    use crate::proto::{KeyValue, WriteBatchRequest};
+
+    #[tokio::test]
+    async fn demote_reads_and_promote_writes_without_restart() {
+        let suffix = rand::random::<u64>();
+        unsafe {
+            env::set_var("VAULTICDB_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_DATABASE_PATH", format!("role-test-{suffix}"));
+        }
+        let storage = Storage::open(&format!("role-repo-{suffix}")).await.unwrap();
+        let request = WriteBatchRequest {
+            puts: vec![KeyValue {
+                key: b"key".to_vec(),
+                value: b"before".to_vec(),
+            }],
+            await_durable: true,
+            ..Default::default()
+        };
+        storage.write_batch(&request).await.unwrap();
+        storage.demote().await.unwrap();
+        assert_eq!(storage.get(b"key", "").await.unwrap().value, b"before");
+        assert!(storage.write_batch(&request).await.is_err());
+
+        storage.promote(None).await.unwrap();
+        let request = WriteBatchRequest {
+            puts: vec![KeyValue {
+                key: b"key".to_vec(),
+                value: b"after".to_vec(),
+            }],
+            await_durable: true,
+            ..Default::default()
+        };
+        storage.write_batch(&request).await.unwrap();
+        assert_eq!(storage.get(b"key", "").await.unwrap().value, b"after");
+        storage.close().await.unwrap();
+        unsafe {
+            env::remove_var("VAULTICDB_DATABASE_PATH");
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_idempotency_recovers_batches_and_transaction_commits() {
+        let suffix = rand::random::<u64>();
+        unsafe {
+            env::set_var("VAULTICDB_OBJECT_STORE", "memory");
+            env::set_var(
+                "VAULTICDB_DATABASE_PATH",
+                format!("idempotency-test-{suffix}"),
+            );
+        }
+        let storage = Storage::open(&format!("idempotency-repo-{suffix}"))
+            .await
+            .unwrap();
+        let request = WriteBatchRequest {
+            puts: vec![KeyValue {
+                key: b"direct".to_vec(),
+                value: b"one".to_vec(),
+            }],
+            idempotency_key: "batch-one".to_owned(),
+            ..Default::default()
+        };
+        assert!(storage.write_batch(&request).await.unwrap());
+        assert!(storage.write_batch(&request).await.unwrap());
+        let mut conflict = request.clone();
+        conflict.puts[0].value = b"two".to_vec();
+        assert_eq!(
+            storage.write_batch(&conflict).await.unwrap_err().code(),
+            tonic::Code::AlreadyExists
+        );
+
+        let transaction_id = storage.begin().await.unwrap();
+        storage
+            .write_batch(&WriteBatchRequest {
+                puts: vec![KeyValue {
+                    key: b"transaction".to_vec(),
+                    value: b"committed".to_vec(),
+                }],
+                transaction_id: transaction_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage.commit(&transaction_id, "commit-one").await.unwrap();
+        storage.commit(&transaction_id, "commit-one").await.unwrap();
+        assert_eq!(
+            storage.get(b"transaction", "").await.unwrap().value,
+            b"committed"
+        );
+        storage.close().await.unwrap();
+        unsafe {
+            env::remove_var("VAULTICDB_DATABASE_PATH");
+        }
     }
 }
 
@@ -1005,11 +1554,21 @@ mod tests {
 
     #[tokio::test]
     async fn capsule_migration_keeps_master_key_until_matching_finalize() {
-        let db = Db::open("migration-test", Arc::new(InMemory::new()))
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        let db = Db::open("migration-test", object_store.clone())
             .await
             .unwrap();
         let storage = Storage {
-            db,
+            database: RwLock::new(Database::Writer(db)),
+            database_path: "migration-test".to_owned(),
+            coordination_store: object_store.clone(),
+            object_store,
             encryption: EncryptionStatus {
                 enabled: true,
                 algorithm: "AES-256-GCM",
@@ -1022,8 +1581,10 @@ mod tests {
             key_manager: None,
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
+            last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             broker_lease: None,
+            writer_epoch: AtomicU64::new(1),
         };
         storage.store_master_key(b"repository-key").await.unwrap();
         let digest = "ab".repeat(32);
@@ -1057,5 +1618,57 @@ mod tests {
             (None, Some(digest))
         );
         storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writer_epoch_claim_is_exclusive_and_fences_stale_claims() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), Some(1))
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        assert!(claim_writer_epoch(object_store.as_ref(), Some(1))
+            .await
+            .is_err());
+
+        let db = Db::open("epoch-test", object_store.clone()).await.unwrap();
+        let storage = Storage {
+            database: RwLock::new(Database::Writer(db)),
+            database_path: "epoch-test".to_owned(),
+            coordination_store: object_store.clone(),
+            object_store,
+            encryption: EncryptionStatus {
+                enabled: false,
+                algorithm: "none",
+                active_dek_version: 0,
+                envelope_generation: 0,
+                unlock_slot: None,
+                recovery_unlock: false,
+                initializing: false,
+            },
+            key_manager: None,
+            transactions: RwLock::new(HashMap::new()),
+            next_transaction: AtomicU64::new(1),
+            last_durable_sequence: AtomicU64::new(0),
+            transaction_idle_timeout_ms: 1_000,
+            broker_lease: None,
+            writer_epoch: AtomicU64::new(1),
+        };
+        let error = storage.assert_current_writer_epoch().await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 }
