@@ -314,8 +314,29 @@ in arguments or logs. For example:
     "bearer_token_file": "/secure/alice.azure-token"
   }
 
-Live-provider validation and complete IAM/RBAC deployment runbooks remain
-required.
+Grant each member identity access only to its own versioned key and keep the
+broker service identity out of every custodian role. For Azure, assign a
+Key Vault or Managed HSM data-plane role at the individual key scope that
+permits ``wrapKey`` during enrollment and ``unwrapKey`` during contribution;
+do not grant secret, certificate, key creation, deletion, purge, or vault-wide
+administrator rights. Record the Entra tenant ID and immutable user or group
+object ID in the member definition. For AWS, scope ``kms:Encrypt`` and
+``kms:Decrypt`` to one key ARN, add ``kms:DescribeKey`` for a CloudHSM custom
+key store, and permit ``sts:GetCallerIdentity`` so the contribution can bind
+the accepted role. Map each IAM Identity Center duty group to a distinct role;
+do not reuse one role or KMS key for two seats. For Google Cloud, grant only
+``cloudkms.cryptoKeyVersions.useToEncrypt`` and
+``cloudkms.cryptoKeyVersions.useToDecrypt`` on one CryptoKey and record the
+project plus immutable principal subject. Use an HSM protection-level key for
+``gcp-cloud-hsm`` members.
+
+Before activation, have a different operator inspect the provider policy, key
+version, tenant/account/project, and immutable principal recorded in every
+definition. Exercise enrollment and contribution with the intended principal,
+then prove that a different principal and a neighboring key are denied. Retain
+the cloud provider's data-plane and identity audit records with the capsule
+generation event. Live-provider validation and organization-specific group
+mapping remain deployment gates.
 
 YubiKey PIV members use the separately packaged ``vaultic-key-custodian``
 executable and Yubico's YKCS11 module. Provision an RSA key in a PIV slot with
@@ -370,6 +391,44 @@ the custodian helper for GNU libc so it can dynamically access YKCS11 and HID.
 Linux hosts require the HID/udev runtime permissions needed by the service
 account; macOS uses the native HID backend.
 
+Custody progression and separation
+===================================
+
+Treat a bootstrap 1-of-1 member as temporary and non-compliant. Move first to
+an offline threshold while the broker is unlocked. ``create-group`` requires
+the complete resulting member set and each protected credential file, for
+example:
+
+.. code-block:: console
+
+  $ vaultic index keys quorum create-group operators \
+      --capsule /secure/capsules/00000000000000000001.json \
+      --capsule-directory /secure/capsules --threshold 2 \
+      --member alice=offline-argon2id:/secure/alice.passphrase \
+      --member bob=offline-keyfile:/media/bob/member.key \
+      --member carol=offline-keyfile:/media/carol/member.key
+
+After activation the broker relocks. Perform a fresh ceremony proving each of
+the three 2-member combinations succeeds and each single member fails, then
+run ``index keys quorum verify`` and ``index keys status --capsule``. Destroy
+the bootstrap credential only after those checks and include its absence in
+the signed bypass inventory. Offline separation remains ``custody-assumed``;
+store each credential with a different custodian and in a different failure
+domain.
+
+To move to a principal-verified cloud 2-of-4 policy, prepare four distinct
+mode-0600 external-member definitions and run ``create-group`` with
+``--threshold 2`` and four ``--external-member`` arguments. Every mutation
+must supply all resulting member definitions or credentials, not only the
+changed seat. To retain offline break-glass as a separate alternative, use a
+mode-0600 ``--policy-file`` containing the complete ``any_of`` expression and
+supply both the cloud and offline member material. A reduction in the minimum
+effective threshold additionally requires
+``--acknowledge-policy-downgrade``. Verify that status is
+``principal-verified``, that no key or immutable principal is reused across
+seats, and that every unwanted old alternative has disappeared before
+destroying superseded credentials.
+
 Online policy mutation
 ======================
 
@@ -402,6 +461,18 @@ create-only publication idempotently, and activates only its recorded digest.
 Use ``quorum cancel-mutation --confirm`` only after proving that no local or
 repository mirror of the candidate generation was published; cancellation
 cannot revoke immutable bytes that already escaped.
+
+A membership or threshold change only reshapes custody of the existing keys.
+After suspected metadata-DEK exposure, run the authenticated ``rotate-dek``
+rewrite described above and do not retire the old version until the second scan
+is clean. After suspected repository master-key exposure, there is no safe
+in-place capsule-only repair: freeze writers, initialize a new repository with
+a fresh master key and new Phase 20 capsule, copy every snapshot through an
+authenticated source read and target write, and perform sampled full restores
+from the target. Compare snapshot inventory and pack checks, then switch writers
+and retain or destroy the old repository according to incident-retention
+policy. Merely resharing the old key or deleting its latest capsule does not
+revoke historical copies.
 
 Broker lifecycle and trust boundary
 ===================================
@@ -477,6 +548,35 @@ limits, and restarts only after unsuccessful exit. Install it root-owned under
 not expose systemd's namespace controls; apply an organization-reviewed sandbox
 profile or endpoint policy in addition to the template. On either platform,
 service restart starts a new locked broker and therefore requires a new quorum.
+
+Signed client upgrades
+======================
+
+Keep the broker identity key and client release-signing key separate. A second
+``identity-init`` invocation can create the raw Ed25519 release key and its
+base64 public key; name and custody those outputs for release signing rather
+than broker identity. For each installed binary, sign the exact bytes with a
+strictly increasing integer version:
+
+.. code-block:: console
+
+  $ vaultic-key-broker identity-init /secure/release-signing.key release-signing.pub
+  $ vaultic-key-broker release-sign /secure/release-signing.key \
+      /usr/local/bin/vaultic vaultic 43 production-release vaultic.release.json
+
+Stage the binary and manifest together, update the broker authorization range
+only after reviewing the component, release identity, UID, capabilities, and
+digest, then atomically install them at their root-owned non-writable paths.
+Keep the preceding version authorized only for a defined rollback window;
+never lower ``minimum_version`` to recover from an unsigned deployment.
+
+To rotate the release-signing key, generate a new pair offline, add a second
+authorization entry for the new public key, sign every authorized component,
+and restart the broker. The restart begins locked and requires a new quorum.
+After all clients have connected with new-key manifests, remove the old
+authorization, restart and unlock once more, and archive the overlap and
+retirement events. Broker identity rotation is different: loss of that key
+uses the identity-recovery procedure below and publishes a new capsule.
 
 Unlock ceremony
 ===============
@@ -613,6 +713,20 @@ identity; the no-database publisher supports this even when SlateDB is absent.
 Activation relocks the broker, after which ordinary signed sessions are
 required again.
 
+Create the replacement identity with ``vaultic-key-broker identity-init``.
+Build a protected broker configuration that points at the surviving capsule,
+the replacement private key, a new owner-only socket, and sets
+``identity_recovery`` to ``true``; then start
+``vaultic-key-broker RECOVERY-CONFIG.json``. Prepare a session normally and
+require every contributor to add ``--unverified-session`` only after comparing
+its fingerprint independently. Use an ordinary quorum policy mutation with the
+complete resulting member set to publish the next generation; the recovery
+broker automatically pins its replacement public identity. Stop the recovery
+process, remove recovery mode from configuration, restart locked, and prove
+that an unverified contribution is now rejected before completing a normal
+signed ceremony. Preserve the critical recovery, publication, activation, and
+relock events.
+
 Local and S3 candidate rebuild plus no-database identity-repin paths are
 implemented. The S3-compatible release lane destroys and lists an isolated
 candidate prefix, rebuilds and reopens encrypted records, and scans raw objects
@@ -625,10 +739,18 @@ lease, break-glass use, threshold downgrade, evidence of a persistent plaintext
 key copy, and payload authentication failure as security-significant. Vaultic
 does not provide a plaintext key-export command; authorized connection-bound
 lease grants are the audited key-delivery boundary, while external copies are
-covered by the signed bypass inventory. Run periodic exercises that
-start from an empty metadata directory, verify capsule discovery and
-fingerprints, satisfy every supported policy alternative, list and restore
-packs through a recovery lease, and explicitly relock the broker.
+covered by the signed bypass inventory. Run a periodic exercise from an empty,
+isolated metadata directory: record the capsule generation and policy hash;
+verify capsule discovery and fingerprints over an independent channel;
+satisfy every supported normal and break-glass policy alternative; prove every
+sub-threshold set fails; list and restore a sampled pack through a recovery
+lease; run quorum verification and metadata consistency checks; and explicitly
+relock the broker. Confirm the expected session, contribution, quorum, lease,
+recovery, and lock events reached remote retention without secret fields.
+Record date, repository, generation, participants, combinations exercised,
+restored snapshot or object, event-query reference, deviations, and independent
+sign-off. Do not reuse the recovery candidate as production authority unless
+the documented activation checks are deliberately completed.
 
 The broker writes one-line structured JSON security events to standard error,
 which systemd and launchd route to their managed logs. Events cover capsule
