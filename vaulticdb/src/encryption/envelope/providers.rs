@@ -10,7 +10,11 @@ use base64::{
 };
 use cryptoki::{
     context::{CInitializeArgs, Pkcs11},
-    mechanism::{aead::GcmParams, Mechanism},
+    mechanism::{
+        aead::GcmParams,
+        rsa::{PkcsMgfType, PkcsOaepParams, PkcsOaepSource},
+        Mechanism, MechanismType,
+    },
     object::{Attribute, KeyType, ObjectClass},
     session::UserType,
     slot::Slot,
@@ -80,6 +84,9 @@ pub async fn from_environment(provider: &str) -> Result<Option<Box<dyn KeyProvid
         "pkcs11" => token_from_file("VAULTICDB_PKCS11_PIN_FILE").map(|pin| {
             pin.map(|value| Box::new(Pkcs11Provider::new(value)) as Box<dyn KeyProvider>)
         }),
+        "yubikey-piv" => token_from_file("VAULTICDB_YUBIKEY_PIV_PIN_FILE").map(|pin| {
+            pin.map(|value| Box::new(YubikeyPivProvider::new(value)) as Box<dyn KeyProvider>)
+        }),
         value => bail!("unsupported metadata key provider {value:?}"),
     }
 }
@@ -103,6 +110,9 @@ pub async fn for_management(
         ))),
         "pkcs11" => Ok(Box::new(Pkcs11Provider::new(
             bearer_token.context("PKCS#11 requires a PIN file")?,
+        ))),
+        "yubikey-piv" => Ok(Box::new(YubikeyPivProvider::new(
+            bearer_token.context("YubiKey PIV requires a PIN file")?,
         ))),
         "aws-kms" => bail!("AWS KMS uses the SDK credential chain, not a bearer token"),
         value => bail!("unsupported metadata key provider {value:?}"),
@@ -627,6 +637,100 @@ impl KeyProvider for Pkcs11Provider {
     }
 }
 
+pub struct YubikeyPivProvider {
+    pin: Zeroizing<String>,
+}
+
+impl YubikeyPivProvider {
+    pub fn new(pin: String) -> Self {
+        Self {
+            pin: Zeroizing::new(pin),
+        }
+    }
+
+    fn crypt(&self, context: &KeyContext<'_>, input: &[u8], encrypt: bool) -> Result<Vec<u8>> {
+        let reference = parse_yubikey_piv_reference(context.key_reference)?;
+        let pkcs11 = Pkcs11::new(&reference.module_path).context("load YKCS11 module")?;
+        pkcs11
+            .initialize(CInitializeArgs::OsThreads)
+            .context("initialize YKCS11 module")?;
+        let session = pkcs11
+            .open_ro_session(Slot::try_from(reference.slot_id)?)
+            .context("open YubiKey PIV session")?;
+        if !encrypt {
+            session
+                .login(
+                    UserType::User,
+                    Some(&AuthPin::new(self.pin.as_str().to_owned())),
+                )
+                .context("verify YubiKey PIV PIN")?;
+        }
+        let class = if encrypt {
+            ObjectClass::PUBLIC_KEY
+        } else {
+            ObjectClass::PRIVATE_KEY
+        };
+        let keys = session.find_objects(&[
+            Attribute::Class(class),
+            Attribute::KeyType(KeyType::RSA),
+            Attribute::Id(reference.key_id),
+        ])?;
+        if keys.len() != 1 {
+            bail!("YubiKey PIV reference must resolve to exactly one RSA key");
+        }
+        let label = context.binding();
+        let params = PkcsOaepParams::new(
+            MechanismType::SHA256,
+            PkcsMgfType::MGF1_SHA256,
+            PkcsOaepSource::data_specified(label.as_bytes()),
+        );
+        if encrypt {
+            session
+                .encrypt(&Mechanism::RsaPkcsOaep(params), keys[0], input)
+                .context("encrypt share with YubiKey PIV public key")
+        } else {
+            session
+                .decrypt(&Mechanism::RsaPkcsOaep(params), keys[0], input)
+                .context("decrypt share with YubiKey PIV private key (PIN or touch rejected)")
+        }
+    }
+}
+
+#[async_trait]
+impl KeyProvider for YubikeyPivProvider {
+    fn name(&self) -> &'static str {
+        "yubikey-piv"
+    }
+
+    async fn wrap(&self, context: &KeyContext<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let pin = self.pin.as_str().to_owned();
+        let context = OwnedKeyContext::from(context);
+        let plaintext = plaintext.to_vec();
+        tokio::task::spawn_blocking(move || {
+            YubikeyPivProvider::new(pin).crypt(&context.as_borrowed(), &plaintext, true)
+        })
+        .await
+        .context("join YubiKey PIV wrap operation")?
+    }
+
+    async fn unwrap(
+        &self,
+        context: &KeyContext<'_>,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let pin = self.pin.as_str().to_owned();
+        let context = OwnedKeyContext::from(context);
+        let ciphertext = ciphertext.to_vec();
+        tokio::task::spawn_blocking(move || {
+            YubikeyPivProvider::new(pin)
+                .crypt(&context.as_borrowed(), &ciphertext, false)
+                .map(Zeroizing::new)
+        })
+        .await
+        .context("join YubiKey PIV unwrap operation")?
+    }
+}
+
 struct OwnedKeyContext {
     repository_id: String,
     slot_id: String,
@@ -663,6 +767,53 @@ struct Pkcs11Reference {
     module_path: String,
     slot_id: u64,
     object: String,
+}
+
+struct YubikeyPivReference {
+    module_path: String,
+    slot_id: u64,
+    key_id: Vec<u8>,
+}
+
+fn parse_yubikey_piv_reference(reference: &str) -> Result<YubikeyPivReference> {
+    let fields = reference
+        .strip_prefix("pkcs11:")
+        .context("YubiKey PIV key reference must start with pkcs11:")?
+        .split(';')
+        .map(|field| {
+            field
+                .split_once('=')
+                .context("invalid YubiKey PIV key reference field")
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    if fields.len() != 4 || fields.get("type") != Some(&"rsa-key-pair") {
+        bail!("YubiKey PIV key reference requires module-path, slot-id, id, and type=rsa-key-pair");
+    }
+    let module_path = fields
+        .get("module-path")
+        .filter(|value| value.starts_with('/') && !value.contains('\0'))
+        .context("YKCS11 module-path must be absolute")?;
+    let encoded_id = fields
+        .get("id")
+        .filter(|value| !value.is_empty() && value.len() % 2 == 0)
+        .context("YubiKey PIV key id must be non-empty hexadecimal bytes")?;
+    let key_id = encoded_id
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).expect("hexadecimal key id is ASCII");
+            u8::from_str_radix(text, 16).context("YubiKey PIV key id is not hexadecimal")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(YubikeyPivReference {
+        module_path: (*module_path).to_owned(),
+        slot_id: fields
+            .get("slot-id")
+            .context("YubiKey PIV slot-id is missing")?
+            .parse()
+            .context("YubiKey PIV slot-id is invalid")?,
+        key_id,
+    })
 }
 
 fn parse_pkcs11_reference(reference: &str) -> Result<Pkcs11Reference> {
@@ -775,6 +926,29 @@ mod tests {
         .is_err());
         assert!(parse_pkcs11_reference(
             "pkcs11:module-path=/module.so;slot-id=7;object=key;type=private"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn yubikey_piv_references_pin_module_slot_and_rsa_key_id() {
+        let reference = parse_yubikey_piv_reference(
+            "pkcs11:module-path=/usr/local/lib/libykcs11.dylib;slot-id=2;id=9a;type=rsa-key-pair",
+        )
+        .unwrap();
+        assert_eq!(reference.module_path, "/usr/local/lib/libykcs11.dylib");
+        assert_eq!(reference.slot_id, 2);
+        assert_eq!(reference.key_id, vec![0x9a]);
+        assert!(parse_yubikey_piv_reference(
+            "pkcs11:module-path=libykcs11.so;slot-id=2;id=9a;type=rsa-key-pair"
+        )
+        .is_err());
+        assert!(parse_yubikey_piv_reference(
+            "pkcs11:module-path=/libykcs11.so;slot-id=2;id=zz;type=rsa-key-pair"
+        )
+        .is_err());
+        assert!(parse_yubikey_piv_reference(
+            "pkcs11:module-path=/libykcs11.so;slot-id=2;id=9a;type=private"
         )
         .is_err());
     }

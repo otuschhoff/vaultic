@@ -1260,7 +1260,7 @@ fn validate_external_provider(provider: &MemberProvider, key_provider: &str) -> 
                 MemberProvider::GcpKms | MemberProvider::GcpCloudHsm,
                 "gcp-kms"
             )
-            | (MemberProvider::YubikeyPiv, "pkcs11")
+            | (MemberProvider::YubikeyPiv, "yubikey-piv")
             | (MemberProvider::Fido2HmacSecret, "fido2-hmac-secret")
     );
     if !valid {
