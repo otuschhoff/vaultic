@@ -9,6 +9,8 @@ on:
       - "internal/index/**"
       - "cmd/vaulticdb-smoke/**"
       - "cmd/vaultic/cmd_index*.go"
+      - "contrib/launchd/com.vaultic.key-broker.plist"
+      - "contrib/systemd/vaultic-key-broker.service"
       - "go.mod"
       - "go.sum"
   pull_request:
@@ -18,6 +20,8 @@ on:
       - "internal/index/**"
       - "cmd/vaulticdb-smoke/**"
       - "cmd/vaultic/cmd_index*.go"
+      - "contrib/launchd/com.vaultic.key-broker.plist"
+      - "contrib/systemd/vaultic-key-broker.service"
       - "go.mod"
       - "go.sum"
   workflow_dispatch:
@@ -46,6 +50,12 @@ jobs:
 
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install --yes musl-tools protobuf-compiler
+
+      - name: Verify systemd broker service
+        run: |
+          sudo install -D --mode=0755 /bin/true /usr/local/libexec/vaultic-key-broker
+          sudo install -D --mode=0600 /dev/null /etc/vaultic/key-broker.json
+          systemd-analyze verify contrib/systemd/vaultic-key-broker.service
 
       - name: Install protobuf generators
         run: |
