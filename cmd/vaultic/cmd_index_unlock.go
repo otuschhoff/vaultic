@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,7 +68,8 @@ func newIndexUnlockStatusCommand(globalOptions *global.Options, options *indexUn
 }
 
 func newIndexUnlockContributeCommand(globalOptions *global.Options, options *indexUnlockOptions) *cobra.Command {
-	var sessionFile, memberID, passphraseFile, keyFile, generationAnchor, confirmedFingerprint string
+	var sessionFile, memberID, passphraseFile, keyFile, azureTokenFile, gcpTokenFile, generationAnchor, confirmedFingerprint string
+	var awsKMS bool
 	var prepare bool
 	var sessionTTL time.Duration
 	command := &cobra.Command{Use: "contribute", Short: "Prepare or submit a verified custodian contribution", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
@@ -86,6 +88,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 		if prepare {
 			session, err := client.CreateSession(command.Context(), sessionTTL)
 			if err != nil {
+				_ = emitUnlockEvent(command.Context(), observability.Warning, "unlock session creation rejected", map[string]any{"capsule_generation": capsule.Generation()})
 				return err
 			}
 			if session.Transcript.RepositoryID != capsule.RepositoryID() || session.Transcript.CapsuleGeneration != capsule.Generation() {
@@ -94,6 +97,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			if err := writeNewProtectedJSON(sessionFile, session); err != nil {
 				return err
 			}
+			_ = emitUnlockEvent(command.Context(), observability.Notice, "unlock session created", map[string]any{"session_id": session.Transcript.SessionID, "capsule_generation": capsule.Generation(), "expires_unix_ms": session.Transcript.ExpiresUnixMS})
 			result := map[string]any{"session_file": sessionFile, "fingerprint": session.Fingerprint, "expires_unix_ms": session.Transcript.ExpiresUnixMS, "capsule_generation": capsule.Generation()}
 			if globalOptions.JSON {
 				globalOptions.Term.Print(ui.ToJSONString(result))
@@ -102,8 +106,14 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			}
 			return nil
 		}
-		if memberID == "" || confirmedFingerprint == "" || (passphraseFile == "") == (keyFile == "") {
-			return fmt.Errorf("--member, --confirm-fingerprint, and exactly one of --passphrase-file or --key-file are required")
+		credentialRoutes := 0
+		for _, configured := range []bool{passphraseFile != "", keyFile != "", azureTokenFile != "", gcpTokenFile != "", awsKMS} {
+			if configured {
+				credentialRoutes++
+			}
+		}
+		if memberID == "" || confirmedFingerprint == "" || credentialRoutes != 1 {
+			return fmt.Errorf("--member, --confirm-fingerprint, and exactly one custodian credential route are required")
 		}
 		var session indexbroker.SignedSession
 		if err := readProtectedJSON(sessionFile, "unlock session", &session); err != nil {
@@ -112,26 +122,56 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 		if confirmedFingerprint != session.Fingerprint {
 			return fmt.Errorf("confirmed fingerprint does not match signed session")
 		}
-		credentialPath, description, keyfile := passphraseFile, "custodian passphrase", false
-		if keyFile != "" {
-			credentialPath, description, keyfile = keyFile, "custodian keyfile", true
-		}
-		credential, err := readProtectedBinary(credentialPath, description, !keyfile)
-		if err != nil {
-			return err
-		}
-		defer clear(credential)
 		lastSeen, err := readGenerationAnchor(generationAnchor, capsule.Generation())
 		if err != nil {
+			_ = emitUnlockEvent(command.Context(), observability.Warning, "custodian contribution rejected", map[string]any{"member_id": memberID, "capsule_generation": capsule.Generation(), "stage": "unwrap_or_verify"})
 			return err
 		}
-		contribution, err := capsule.ContributeOffline(session, "unix:"+options.Socket, memberID, credential, keyfile, lastSeen, time.Now())
+		var contribution indexbroker.EncryptedContribution
+		if awsKMS {
+			unwrapper, unwrapErr := indexbroker.NewAWSKMSUnwrapper(command.Context())
+			if unwrapErr != nil {
+				return unwrapErr
+			}
+			contribution, err = capsule.ContributeExternal(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now())
+		} else if azureTokenFile != "" || gcpTokenFile != "" {
+			tokenFile, description := azureTokenFile, "Azure custodian bearer token"
+			if gcpTokenFile != "" {
+				tokenFile, description = gcpTokenFile, "Google Cloud custodian bearer token"
+			}
+			token, readErr := readProtectedBinary(tokenFile, description, true)
+			if readErr != nil {
+				return readErr
+			}
+			defer clear(token)
+			var unwrapper indexbroker.ExternalMemberUnwrapper
+			if azureTokenFile != "" {
+				unwrapper, err = indexbroker.NewAzureKeyVaultUnwrapper(string(token), &http.Client{Timeout: 30 * time.Second})
+			} else {
+				unwrapper, err = indexbroker.NewGoogleCloudKMSUnwrapper(string(token), &http.Client{Timeout: 30 * time.Second})
+			}
+			if err != nil {
+				return err
+			}
+			contribution, err = capsule.ContributeExternal(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now())
+		} else {
+			credentialPath, description, keyfile := passphraseFile, "custodian passphrase", false
+			if keyFile != "" {
+				credentialPath, description, keyfile = keyFile, "custodian keyfile", true
+			}
+			credential, readErr := readProtectedBinary(credentialPath, description, !keyfile)
+			if readErr != nil {
+				return readErr
+			}
+			defer clear(credential)
+			contribution, err = capsule.ContributeOffline(session, "unix:"+options.Socket, memberID, credential, keyfile, lastSeen, time.Now())
+		}
 		if err != nil {
 			return err
 		}
 		unlocked, err := client.SubmitContribution(command.Context(), contribution)
 		if err != nil {
-			_ = emitUnlockEvent(command.Context(), observability.Warning, "custodian contribution rejected", map[string]any{"member_id": memberID, "capsule_generation": capsule.Generation()})
+			_ = emitUnlockEvent(command.Context(), observability.Warning, "custodian contribution rejected", map[string]any{"member_id": memberID, "capsule_generation": capsule.Generation(), "stage": "broker_submission"})
 			return err
 		}
 		if generationAnchor != "" {
@@ -155,6 +195,9 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 	command.Flags().StringVar(&memberID, "member", "", "capsule member ID")
 	command.Flags().StringVar(&passphraseFile, "passphrase-file", "", "mode-0600 offline custodian passphrase file")
 	command.Flags().StringVar(&keyFile, "key-file", "", "mode-0600 offline custodian keyfile")
+	command.Flags().StringVar(&azureTokenFile, "azure-token-file", "", "mode-0600 Entra bearer-token file for an Azure Key Vault member")
+	command.Flags().StringVar(&gcpTokenFile, "gcp-token-file", "", "mode-0600 Google Cloud bearer-token file for a Cloud KMS member")
+	command.Flags().BoolVar(&awsKMS, "aws-kms", false, "use the AWS SDK credential chain for an AWS KMS or CloudHSM-backed member")
 	command.Flags().StringVar(&generationAnchor, "generation-anchor", "", "mode-0600 custodian last-seen-generation file")
 	command.Flags().StringVar(&confirmedFingerprint, "confirm-fingerprint", "", "out-of-band confirmed signed-session fingerprint")
 	return command

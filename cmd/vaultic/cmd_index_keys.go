@@ -17,6 +17,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
@@ -98,8 +99,59 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 	command.AddCommand(
 		newIndexKeysQuorumPrepareCommand(globalOptions, options),
 		newIndexKeysQuorumFinalizeCommand(globalOptions, options),
+		newIndexKeysQuorumVerifyCommand(globalOptions),
 	)
 	return command
+}
+
+func newIndexKeysQuorumVerifyCommand(globalOptions *global.Options) *cobra.Command {
+	var capsulePath, brokerSocket string
+	command := &cobra.Command{Use: "verify", Short: "Verify the current capsule and effective quorum policy", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		capsule, err := indexbroker.LoadCapsule(capsulePath)
+		if err != nil {
+			return err
+		}
+		client, err := indexbroker.Dial(command.Context(), brokerSocket)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		status, err := client.Status(command.Context())
+		if err != nil {
+			return err
+		}
+		if err := verifyQuorumStatus(capsule.RepositoryID(), capsule.Generation(), capsule.LogicalID(), capsule.PolicyHash(), status); err != nil {
+			return err
+		}
+		if globalOptions.JSON {
+			globalOptions.Term.Print(ui.ToJSONString(status))
+		} else {
+			globalOptions.Term.Print(fmt.Sprintf("capsule generation %d verified; minimum custodians %d; principal verified %t; hardware verified %t; custody assumed %t\n", status.CapsuleGeneration, status.MinimumCustodians, status.PrincipalVerified, status.HardwareVerified, status.CustodyAssumed))
+		}
+		return nil
+	}}
+	command.Flags().StringVar(&capsulePath, "capsule", "", "local immutable recovery capsule")
+	command.Flags().StringVar(&brokerSocket, "broker-socket", "", "local key-broker Unix socket")
+	_ = command.MarkFlagRequired("capsule")
+	_ = command.MarkFlagRequired("broker-socket")
+	return command
+}
+
+func verifyQuorumStatus(repositoryID string, generation uint64, logicalID, policyHash string, status indexbroker.Status) error {
+	if err := matchQuorumCapsule(repositoryID, generation, logicalID, policyHash, status); err != nil {
+		return err
+	}
+	if !status.Compliant {
+		return fmt.Errorf("capsule policy is not quorum-compliant: %s", strings.Join(status.Findings, "; "))
+	}
+	return nil
+}
+
+func matchQuorumCapsule(repositoryID string, generation uint64, logicalID, policyHash string, status indexbroker.Status) error {
+	if status.RepositoryID != repositoryID || status.CapsuleGeneration != generation || status.CapsuleLogicalID != logicalID || status.PolicyHash != policyHash {
+		return fmt.Errorf("broker capsule does not match local capsule: broker repository %q generation %d", status.RepositoryID, status.CapsuleGeneration)
+	}
+	return nil
 }
 
 func newIndexKeysQuorumPrepareCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
@@ -174,10 +226,10 @@ func newIndexKeysQuorumPrepareCommand(globalOptions *global.Options, options *in
 
 func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
 	var stateFile string
-	var confirm bool
+	var confirm, retireLegacyRoutes, standaloneEscrowDestroyed bool
 	command := &cobra.Command{Use: "migrate-finalize", Short: "Prove capsule pack access and remove the database master key", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
-		if !confirm || stateFile == "" {
-			return fmt.Errorf("--state-file and --confirm are required")
+		if !confirm || !retireLegacyRoutes || !standaloneEscrowDestroyed || stateFile == "" {
+			return fmt.Errorf("--state-file, --confirm, --retire-legacy-routes, and --confirm-standalone-escrow-destroyed are required")
 		}
 		var state struct {
 			Format        int    `json:"format"`
@@ -200,6 +252,7 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 		if err != nil {
 			return fmt.Errorf("prove capsule repository access: %w", err)
 		}
+		defer repo.Close()
 		var packProof bool
 		err = repo.List(command.Context(), vaultic.PackFile, func(id vaultic.ID, size int64) error {
 			if _, readErr := repo.ListPackHandles(command.Context(), id, size); readErr != nil {
@@ -211,9 +264,6 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 		if err != nil && err != errCapsulePackProofComplete {
 			_ = repo.Close()
 			return fmt.Errorf("authenticate pack through capsule lease: %w", err)
-		}
-		if err := repo.Close(); err != nil {
-			return err
 		}
 		brokerClient, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
 		if err != nil {
@@ -234,10 +284,15 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 			return err
 		}
 		defer client.Close(command.Context())
-		if err := client.FinalizeCapsuleMigration(command.Context(), state.CapsuleSHA256, brokerKeyProof); err != nil {
-			return err
+		retiredKeys, retiredEscrows, err := retireLegacyQuorumBypasses(command.Context(), repo.Backend())
+		if err != nil {
+			return fmt.Errorf("legacy bypass retirement is incomplete; database master key retained: %w", err)
 		}
-		result := map[string]any{"finalized": true, "generation": state.Generation, "capsule_sha256": state.CapsuleSHA256, "pack_authenticated": packProof}
+		if err := client.FinalizeCapsuleMigration(command.Context(), state.CapsuleSHA256, brokerKeyProof); err != nil {
+			return fmt.Errorf("legacy repository routes retired but database master key retained: %w", err)
+		}
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "capsule migration finalized and legacy key routes retired", Fields: map[string]any{"repository_id": state.RepositoryID, "capsule_generation": state.Generation, "retired_password_keys": retiredKeys, "retired_escrows": retiredEscrows}})
+		result := map[string]any{"finalized": true, "generation": state.Generation, "capsule_sha256": state.CapsuleSHA256, "pack_authenticated": packProof, "retired_password_keys": retiredKeys, "retired_escrows": retiredEscrows}
 		if globalOptions.JSON {
 			globalOptions.Term.Print(ui.ToJSONString(result))
 		} else {
@@ -247,7 +302,35 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 	}}
 	command.Flags().StringVar(&stateFile, "state-file", "", "mode-0600 migration state from migrate-prepare")
 	command.Flags().BoolVar(&confirm, "confirm", false, "confirm irreversible removal after capsule proof")
+	command.Flags().BoolVar(&retireLegacyRoutes, "retire-legacy-routes", false, "remove all repository password keys and mirrored standalone escrow records after capsule proof")
+	command.Flags().BoolVar(&standaloneEscrowDestroyed, "confirm-standalone-escrow-destroyed", false, "confirm externally copied standalone escrow and plaintext key files have been destroyed")
 	return command
+}
+
+func retireLegacyQuorumBypasses(ctx context.Context, destination backend.Backend) (int, int, error) {
+	var handles []backend.Handle
+	if err := destination.List(ctx, backend.KeyFile, func(info backend.FileInfo) error {
+		handles = append(handles, backend.Handle{Type: backend.KeyFile, Name: info.Name})
+		return nil
+	}); err != nil && !destination.IsNotExist(err) {
+		return 0, 0, fmt.Errorf("inventory repository password keys: %w", err)
+	}
+	passwordKeys := len(handles)
+	if err := destination.List(ctx, backend.SlateDBFile, func(info backend.FileInfo) error {
+		if strings.HasPrefix(info.Name, "escrow-") && strings.HasSuffix(info.Name, ".json") {
+			handles = append(handles, backend.Handle{Type: backend.SlateDBFile, Name: info.Name, IsMetadata: true})
+		}
+		return nil
+	}); err != nil && !destination.IsNotExist(err) {
+		return 0, 0, fmt.Errorf("inventory mirrored escrow records: %w", err)
+	}
+	escrows := len(handles) - passwordKeys
+	for _, handle := range handles {
+		if err := destination.Remove(ctx, handle); err != nil && !destination.IsNotExist(err) {
+			return passwordKeys, escrows, fmt.Errorf("remove %s: %w", handle.Name, err)
+		}
+	}
+	return passwordKeys, escrows, nil
 }
 
 var errCapsulePackProofComplete = fmt.Errorf("capsule pack proof complete")
@@ -563,13 +646,81 @@ func newIndexKeysStoreMasterKeyCommand(globalOptions *global.Options, options *i
 }
 
 func newIndexKeysStatusCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
-	return &cobra.Command{Use: "status", Short: "Show redacted metadata key status", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+	var capsulePath string
+	command := &cobra.Command{Use: "status", Short: "Show redacted metadata and quorum key status", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
 		status, err := withKeyClient(command.Context(), *options, func(client *daemon.Client) (daemon.KeyStatus, error) { return client.KeyStatus(command.Context()) })
-		if err == nil {
-			printKeyStatus(globalOptions, status)
+		if err != nil {
+			return err
 		}
-		return err
+		if capsulePath == "" {
+			printKeyStatus(globalOptions, status)
+			return nil
+		}
+		if options.Daemon.BrokerSocket == "" {
+			return fmt.Errorf("--capsule requires --metadata-key-broker-socket")
+		}
+		capsule, err := indexbroker.LoadCapsule(capsulePath)
+		if err != nil {
+			return err
+		}
+		brokerClient, err := indexbroker.Dial(command.Context(), options.Daemon.BrokerSocket)
+		if err != nil {
+			return err
+		}
+		defer brokerClient.Close()
+		quorum, err := brokerClient.Status(command.Context())
+		if err != nil {
+			return err
+		}
+		if err := matchQuorumCapsule(capsule.RepositoryID(), capsule.Generation(), capsule.LogicalID(), capsule.PolicyHash(), quorum); err != nil {
+			return err
+		}
+		findings := quorumAccessRouteFindings(*globalOptions, status)
+		findings = append(findings, quorum.Findings...)
+		compliant := quorum.Compliant && len(findings) == 0
+		result := struct {
+			Metadata  daemon.KeyStatus   `json:"metadata"`
+			Quorum    indexbroker.Status `json:"quorum"`
+			Compliant bool               `json:"compliant"`
+			Findings  []string           `json:"findings,omitempty"`
+		}{Metadata: status, Quorum: quorum, Compliant: compliant, Findings: findings}
+		if globalOptions.JSON {
+			globalOptions.Term.Print(ui.ToJSONString(result))
+		} else {
+			printKeyStatus(globalOptions, status)
+			globalOptions.Term.Print(fmt.Sprintf("quorum generation %d; minimum custodians %d; compliant %t\n", quorum.CapsuleGeneration, quorum.MinimumCustodians, compliant))
+			for _, finding := range findings {
+				globalOptions.Term.Print("non-compliant: " + finding + "\n")
+			}
+		}
+		return nil
 	}}
+	command.Flags().StringVar(&capsulePath, "capsule", "", "local immutable recovery capsule to verify against the running broker")
+	return command
+}
+
+func quorumAccessRouteFindings(options global.Options, metadata daemon.KeyStatus) []string {
+	var findings []string
+	configured := []struct {
+		active bool
+		name   string
+	}{
+		{options.Password != "" || options.PasswordFile != "" || options.PasswordCommand != "", "ordinary repository password route configured"},
+		{options.MasterKey != "" || options.MasterKeyFile != "" || options.MasterKeyCommand != "", "direct repository master-key route configured"},
+		{options.AzureKeyVaultURL != "", "legacy Azure secret route configured"},
+		{options.InsecureNoPassword, "insecure no-password route configured"},
+		{options.MetadataKeyInDB, "repository master-key-in-database route configured"},
+		{options.MetadataPassphraseFile != "", "standalone metadata passphrase route configured"},
+	}
+	for _, route := range configured {
+		if route.active {
+			findings = append(findings, route.name)
+		}
+	}
+	for _, slot := range metadata.Slots {
+		findings = append(findings, fmt.Sprintf("standalone metadata DEK slot %q (%s) remains", slot.ID, slot.Provider))
+	}
+	return findings
 }
 
 func newIndexKeysAddSlotCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {

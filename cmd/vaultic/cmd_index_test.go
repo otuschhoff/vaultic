@@ -1,24 +1,30 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/mem"
 	"github.com/otuschhoff/vaultic/internal/global"
+	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
@@ -27,6 +33,99 @@ func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	command, args, err := root.Find([]string{"list", "index"})
 	if err != nil || command == nil || command.Name() != "list" || len(args) != 1 || args[0] != "index" {
 		t.Fatalf("list index = %v, %v, %v", command, args, err)
+	}
+}
+
+func TestVerifyQuorumStatusFailsClosed(t *testing.T) {
+	valid := indexbroker.Status{RepositoryID: "repo-a", CapsuleGeneration: 3, CapsuleLogicalID: "capsule-a", PolicyHash: "hash-a", Compliant: true, MinimumCustodians: 2}
+	if err := verifyQuorumStatus("repo-a", 3, "capsule-a", "hash-a", valid); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyQuorumStatus("repo-a", 2, "capsule-a", "hash-a", valid); err == nil {
+		t.Fatal("mismatched capsule generation accepted")
+	}
+	if err := verifyQuorumStatus("repo-a", 3, "capsule-a", "other-hash", valid); err == nil {
+		t.Fatal("mismatched capsule policy accepted")
+	}
+	valid.Compliant = false
+	valid.Findings = []string{"effective policy has a 1-of-1 path"}
+	if err := verifyQuorumStatus("repo-a", 3, "capsule-a", "hash-a", valid); err == nil || !strings.Contains(err.Error(), "1-of-1") {
+		t.Fatalf("non-compliant policy accepted: %v", err)
+	}
+}
+
+func TestQuorumAccessRouteFindingsEnumeratesCompleteKeyBypasses(t *testing.T) {
+	options := global.Options{PasswordFile: "password", MasterKeyCommand: "key-command", AzureKeyVaultURL: "https://vault", MetadataKeyInDB: true, MetadataPassphraseFile: "metadata-password"}
+	status := daemon.KeyStatus{Slots: []daemon.KeySlotInfo{{ID: "recovery", Provider: "local-argon2id"}}}
+	findings := quorumAccessRouteFindings(options, status)
+	if len(findings) != 6 {
+		t.Fatalf("bypass findings = %v", findings)
+	}
+	if clean := quorumAccessRouteFindings(global.Options{}, daemon.KeyStatus{}); len(clean) != 0 {
+		t.Fatalf("clean broker route reported findings: %v", clean)
+	}
+}
+
+func TestRetireLegacyQuorumBypassesPreservesCapsuleMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := mem.New()
+	handles := []backend.Handle{
+		{Type: backend.KeyFile, Name: "password-a"},
+		{Type: backend.KeyFile, Name: "password-b"},
+		{Type: backend.SlateDBFile, Name: "escrow-old.json", IsMetadata: true},
+		{Type: backend.SlateDBFile, Name: "recovery-capsule-0001.json", IsMetadata: true},
+	}
+	for _, handle := range handles {
+		if err := store.Save(ctx, handle, backend.NewByteReader([]byte("record"), store.Hasher())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, escrows, err := retireLegacyQuorumBypasses(ctx, store)
+	if err != nil || keys != 2 || escrows != 1 {
+		t.Fatalf("retirement = keys %d, escrows %d, err %v", keys, escrows, err)
+	}
+	for _, handle := range handles[:3] {
+		if _, err := store.Stat(ctx, handle); err == nil {
+			t.Fatalf("legacy bypass %s remains", handle.Name)
+		}
+	}
+	if _, err := store.Stat(ctx, handles[3]); err != nil {
+		t.Fatalf("capsule metadata was removed: %v", err)
+	}
+}
+
+func TestMetadataRebuildImportRequiresRecoveryGuards(t *testing.T) {
+	base := indexImportOptions{
+		Activate:                   true,
+		FromLegacy:                 true,
+		ConfirmMetadataLossRebuild: true,
+		Daemon: indexDaemonOptions{
+			Start: true, RebuildInitialize: true, EncryptionMode: "required",
+			DataDir: filepath.Join(t.TempDir(), "candidate"), BrokerSocket: "/tmp/broker.sock",
+		},
+	}
+	globalOptions := global.Options{MetadataLossRecovery: true, KeyBrokerSocket: "/tmp/broker.sock"}
+	tests := []struct {
+		name   string
+		mutate func(*indexImportOptions, *global.Options)
+		want   string
+	}{
+		{name: "acknowledgement", mutate: func(options *indexImportOptions, _ *global.Options) { options.ConfirmMetadataLossRebuild = false }, want: "requires --confirm-metadata-loss-rebuild"},
+		{name: "new candidate", mutate: func(options *indexImportOptions, _ *global.Options) { options.Daemon.DataDir = t.TempDir() }, want: "candidate directory already exists"},
+		{name: "shared broker", mutate: func(_ *indexImportOptions, globalOptions *global.Options) {
+			globalOptions.KeyBrokerSocket = "/tmp/other.sock"
+		}, want: "use the same key broker"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := base
+			globals := globalOptions
+			test.mutate(&options, &globals)
+			_, err := runIndexImport(context.Background(), options, globals, nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("metadata rebuild guard = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

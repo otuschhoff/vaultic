@@ -41,26 +41,30 @@ var requestSequence atomic.Uint64
 
 // Options controls how a vaultic process connects to or starts vaulticdb.
 type Options struct {
-	Socket           string
-	TCPAddress       string
-	TCPAllowlist     []string
-	AuthToken        string
-	RepositoryID     string
-	DaemonPath       string
-	StartTimeout     time.Duration
-	RetryInterval    time.Duration
-	PersistentDaemon bool
-	ObjectStore      string
-	DataDir          string
-	S3Bucket         string
-	S3Prefix         string
-	EncryptionMode   string
-	PassphraseFile   string
-	AzureTokenFile   string
-	GCPTokenFile     string
-	VaultTokenFile   string
-	PKCS11PINFile    string
-	RecoveryUnlock   bool
+	Socket            string
+	TCPAddress        string
+	TCPAllowlist      []string
+	AuthToken         string
+	RepositoryID      string
+	DaemonPath        string
+	StartTimeout      time.Duration
+	RetryInterval     time.Duration
+	PersistentDaemon  bool
+	ObjectStore       string
+	DataDir           string
+	S3Bucket          string
+	S3Prefix          string
+	EncryptionMode    string
+	PassphraseFile    string
+	AzureTokenFile    string
+	GCPTokenFile      string
+	VaultTokenFile    string
+	PKCS11PINFile     string
+	RecoveryUnlock    bool
+	BrokerSocket      string
+	BrokerManifest    string
+	BrokerLease       time.Duration
+	RebuildInitialize bool
 }
 
 func (o Options) withDefaults() Options {
@@ -179,8 +183,14 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	if options.EncryptionMode != "" && options.EncryptionMode != "off" && options.EncryptionMode != "required" && options.EncryptionMode != "initialize" {
 		return nil, fmt.Errorf("%w: unsupported metadata encryption mode %q", ErrUnavailable, options.EncryptionMode)
 	}
-	if (options.EncryptionMode == "required" || options.EncryptionMode == "initialize") && options.PassphraseFile == "" {
+	if options.RebuildInitialize && (options.BrokerSocket == "" || options.EncryptionMode != "required") {
+		return nil, fmt.Errorf("%w: metadata rebuild initialization requires brokered required encryption", ErrUnavailable)
+	}
+	if (options.EncryptionMode == "required" || options.EncryptionMode == "initialize") && options.PassphraseFile == "" && options.BrokerSocket == "" {
 		return nil, fmt.Errorf("%w: metadata recovery passphrase file is required", ErrUnavailable)
+	}
+	if options.BrokerSocket != "" && options.BrokerManifest == "" {
+		return nil, fmt.Errorf("%w: broker release manifest is required", ErrUnavailable)
 	}
 	if options.RecoveryUnlock && options.PassphraseFile == "" {
 		return nil, fmt.Errorf("%w: recovery unlock requires a passphrase file", ErrUnavailable)
@@ -213,6 +223,10 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	client, connectErr := Connect(probeCtx, options)
 	cancelProbe()
 	if connectErr == nil {
+		if options.RebuildInitialize {
+			_ = client.Close(ctx)
+			return nil, fmt.Errorf("%w: metadata rebuild initialization refuses an existing daemon", ErrUnavailable)
+		}
 		return client, nil
 	}
 	if options.DaemonPath == "" {
@@ -243,6 +257,8 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		"VAULTICDB_GCP_TOKEN_FILE":             options.GCPTokenFile,
 		"VAULTICDB_VAULT_TOKEN_FILE":           options.VaultTokenFile,
 		"VAULTICDB_PKCS11_PIN_FILE":            options.PKCS11PINFile,
+		"VAULTICDB_BROKER_SOCKET":              options.BrokerSocket,
+		"VAULTICDB_RELEASE_MANIFEST":           options.BrokerManifest,
 	} {
 		if value != "" {
 			cmd.Env = append(cmd.Env, name+"="+value)
@@ -250,6 +266,12 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	}
 	if options.RecoveryUnlock {
 		cmd.Env = append(cmd.Env, "VAULTICDB_ENCRYPTION_RECOVERY_ACK=true")
+	}
+	if options.BrokerLease > 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_BROKER_LEASE_SECONDS="+strconv.FormatUint(uint64(options.BrokerLease/time.Second), 10))
+	}
+	if options.RebuildInitialize {
+		cmd.Env = append(cmd.Env, "VAULTICDB_METADATA_REBUILD_INITIALIZE=true")
 	}
 	if options.AuthToken != "" {
 		cmd.Env = append(cmd.Env, "VAULTICDB_TCP_AUTH_TOKEN="+options.AuthToken)

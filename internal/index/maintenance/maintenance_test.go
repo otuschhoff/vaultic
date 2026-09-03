@@ -19,6 +19,12 @@ type memoryStore struct {
 	batchWrites int
 }
 
+func TestCheckResultTreatsQuorumBypassAsDirty(t *testing.T) {
+	result := CheckResult{QuorumChecked: true, QuorumNonCompliant: true}
+	if result.Clean() {
+		t.Fatal("quorum bypass was reported as a clean index check")
+	}
+}
 type auditedMemoryStore struct {
 	*memoryStore
 	audit daemon.EncryptionAudit

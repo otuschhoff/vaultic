@@ -23,6 +23,8 @@ use slatedb::object_store::{
 };
 use zeroize::Zeroizing;
 
+use super::envelope::providers::{KeyContext, KeyProvider};
+
 pub const CAPSULE_FORMAT: u32 = 2;
 pub const ROOT_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
@@ -30,6 +32,7 @@ const SALT_BYTES: usize = 16;
 const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
 const DEFAULT_ITERATIONS: u32 = 3;
 const DEFAULT_PARALLELISM: u32 = 1;
+const EXTERNAL_SHARE_MAGIC: &[u8] = b"VLTCAPSH1";
 pub const CAPSULE_DIRECTORY: &str = "_vaultic/recovery-capsules";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,6 +171,19 @@ pub struct UnwrappedMemberShare {
     pub plaintext: Zeroizing<Vec<u8>>,
 }
 
+pub struct ExternalMemberProtection<'a> {
+    pub provider: MemberProvider,
+    pub key_reference: &'a str,
+    pub principal: Option<PrincipalBinding>,
+    pub hardware: Option<HardwareBinding>,
+    pub key_provider: &'a dyn KeyProvider,
+}
+
+pub enum MemberProtection<'a> {
+    Offline(MemberCredential<'a>),
+    External(ExternalMemberProtection<'a>),
+}
+
 pub struct CapsuleBuilder {
     repository_id: String,
     generation: u64,
@@ -282,6 +298,100 @@ impl CapsuleBuilder {
                 credential,
                 &share.plaintext,
             )?);
+        }
+        let metadata_dek = wrap_payload(
+            &header,
+            metadata_dek,
+            "metadata-dek",
+            root_secret.as_ref(),
+        )?;
+        let repository_master_key = wrap_payload(
+            &header,
+            repository_master_key,
+            "repository-master-key",
+            root_secret.as_ref(),
+        )?;
+        let capsule = RecoveryCapsule {
+            header,
+            policy,
+            members,
+            metadata_dek,
+            repository_master_key,
+        };
+        capsule.validate()?;
+        Ok(capsule)
+    }
+
+    pub async fn create_policy(
+        self,
+        policy: UnlockPolicy,
+        protections: &[(&str, MemberProtection<'_>)],
+        metadata_dek: &[u8],
+        repository_master_key: &[u8],
+    ) -> Result<RecoveryCapsule> {
+        if self.repository_id.is_empty() || self.generation == 0 {
+            bail!("repository ID and non-zero generation are required");
+        }
+        if metadata_dek.len() != 32 || repository_master_key.is_empty() {
+            bail!("metadata DEK must be 32 bytes and repository master key must not be empty");
+        }
+        let policy_member_ids = policy.member_ids()?;
+        let protection_ids = protections
+            .iter()
+            .map(|(member_id, _)| (*member_id).to_owned())
+            .collect::<BTreeSet<_>>();
+        if protection_ids.len() != protections.len() || protection_ids != policy_member_ids {
+            bail!("member protections must match policy members exactly");
+        }
+        let policy_hash = policy_hash(&policy)?;
+        let mut header = CapsuleHeader {
+            format: CAPSULE_FORMAT,
+            logical_id: String::new(),
+            repository_id: self.repository_id,
+            generation: self.generation,
+            root_key_version: self.root_key_version,
+            metadata_dek_version: self.metadata_dek_version,
+            repository_key_version: self.repository_key_version,
+            algorithm: "HKDF-SHA256/AES-256-GCM/Shamir-GF256".to_owned(),
+            policy_hash,
+            broker_identity_public_key: BASE64.encode(self.broker_identity_public_key),
+            policy_intent: if policy.minimum_custodians() >= 2 {
+                PolicyIntent::Quorum
+            } else {
+                PolicyIntent::Bootstrap
+            },
+        };
+        header.logical_id = logical_id(&header);
+
+        let mut root_secret = Zeroizing::new([0_u8; ROOT_KEY_BYTES]);
+        rand::rng().fill_bytes(root_secret.as_mut());
+        let mut distributed = Vec::new();
+        distribute_policy_secret(&policy, root_secret.as_ref(), "root", &mut distributed)?;
+        let protection_map = protections
+            .iter()
+            .map(|(member_id, protection)| (*member_id, protection))
+            .collect::<BTreeMap<_, _>>();
+        let mut members = Vec::with_capacity(distributed.len());
+        for share in distributed {
+            let protection = protection_map
+                .get(share.member_id.as_str())
+                .context("missing member protection")?;
+            let member = match protection {
+                MemberProtection::Offline(credential) => wrap_offline_share(
+                    &header,
+                    &share.group_id,
+                    &share.member_id,
+                    share.share_index,
+                    share.threshold,
+                    share.share_count,
+                    credential,
+                    &share.plaintext,
+                )?,
+                MemberProtection::External(external) => {
+                    wrap_external_share(&header, &share, external).await?
+                }
+            };
+            members.push(member);
         }
         let metadata_dek = wrap_payload(
             &header,
@@ -501,6 +611,45 @@ impl RecoveryCapsule {
             .find(|member| member.member_id == member_id)
             .context("capsule has no such member")?;
         let plaintext = unwrap_offline_share(&self.header, member, credential)?;
+        Share::try_from(plaintext.as_slice())
+            .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))?;
+        Ok(UnwrappedMemberShare {
+            member_id: member_id.to_owned(),
+            share_index: member.share_index,
+            plaintext,
+        })
+    }
+
+    pub async fn unwrap_external_member(
+        &self,
+        member_id: &str,
+        provider: &dyn KeyProvider,
+    ) -> Result<UnwrappedMemberShare> {
+        self.validate()?;
+        let member = self
+            .members
+            .iter()
+            .find(|member| member.member_id == member_id)
+            .context("capsule has no such member")?;
+        validate_external_provider(&member.provider, provider.name())?;
+        let ciphertext = BASE64
+            .decode(&member.wrapped_share)
+            .context("decode externally wrapped member share")?;
+        let purpose = external_share_purpose(&self.header, member)?;
+        let plaintext = provider
+            .unwrap(
+                &KeyContext {
+                    repository_id: &self.header.repository_id,
+                    slot_id: &member.member_id,
+                    key_reference: &member.key_reference,
+                    dek_version: self.header.root_key_version,
+                    purpose: &purpose,
+                },
+                &ciphertext,
+            )
+            .await
+            .context("unwrap externally protected member share")?;
+        let plaintext = decode_external_share(&purpose, plaintext.as_slice())?;
         Share::try_from(plaintext.as_slice())
             .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))?;
         Ok(UnwrappedMemberShare {
@@ -1029,6 +1178,112 @@ fn wrap_offline_share(
     })
 }
 
+async fn wrap_external_share(
+    header: &CapsuleHeader,
+    share: &DistributedShare,
+    protection: &ExternalMemberProtection<'_>,
+) -> Result<MemberShare> {
+    validate_external_provider(&protection.provider, protection.key_provider.name())?;
+    if protection.key_reference.is_empty() {
+        bail!("external member key reference must not be empty");
+    }
+    let mut member = MemberShare {
+        member_id: share.member_id.clone(),
+        group_id: share.group_id.clone(),
+        share_index: share.share_index,
+        threshold: share.threshold,
+        share_count: share.share_count,
+        provider: protection.provider.clone(),
+        key_reference: protection.key_reference.to_owned(),
+        wrapped_share: String::new(),
+        nonce: None,
+        argon2: None,
+        principal: protection.principal.clone(),
+        hardware: protection.hardware.clone(),
+    };
+    let purpose = external_share_purpose(header, &member)?;
+    let payload = encode_external_share(&purpose, &share.plaintext);
+    let ciphertext = protection
+        .key_provider
+        .wrap(
+            &KeyContext {
+                repository_id: &header.repository_id,
+                slot_id: &member.member_id,
+                key_reference: &member.key_reference,
+                dek_version: header.root_key_version,
+                purpose: &purpose,
+            },
+            &payload,
+        )
+        .await
+        .context("wrap externally protected member share")?;
+    member.wrapped_share = BASE64.encode(ciphertext);
+    Ok(member)
+}
+
+fn validate_external_provider(provider: &MemberProvider, key_provider: &str) -> Result<()> {
+    let valid = matches!(
+        (provider, key_provider),
+        (MemberProvider::AzureKeyVault, "azure-key-vault")
+            | (MemberProvider::AwsKms, "aws-kms")
+            | (MemberProvider::AwsCloudhsm, "aws-kms")
+            | (MemberProvider::GcpKms | MemberProvider::GcpCloudHsm, "gcp-kms")
+            | (MemberProvider::YubikeyPiv, "pkcs11")
+            | (MemberProvider::Fido2HmacSecret, "fido2-hmac-secret")
+    );
+    if !valid {
+        bail!("member provider does not match external key provider");
+    }
+    Ok(())
+}
+
+fn external_share_purpose(header: &CapsuleHeader, member: &MemberShare) -> Result<String> {
+    let binding = serde_json::to_vec(&(
+        "vaultic-recovery-capsule-external-share",
+        &header.repository_id,
+        header.generation,
+        header.root_key_version,
+        &header.policy_hash,
+        &member.group_id,
+        &member.member_id,
+        member.share_index,
+        member.threshold,
+        member.share_count,
+        &member.provider,
+        &member.key_reference,
+        &member.principal,
+        &member.hardware,
+    ))?;
+    Ok(format!(
+        "recovery-capsule-share:{}",
+        Sha256::digest(binding)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn encode_external_share(purpose: &str, share: &[u8]) -> Zeroizing<Vec<u8>> {
+    let mut payload = Zeroizing::new(Vec::with_capacity(
+        EXTERNAL_SHARE_MAGIC.len() + Sha256::output_size() + share.len(),
+    ));
+    payload.extend_from_slice(EXTERNAL_SHARE_MAGIC);
+    payload.extend_from_slice(&Sha256::digest(purpose.as_bytes()));
+    payload.extend_from_slice(share);
+    payload
+}
+
+fn decode_external_share(purpose: &str, payload: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let prefix_len = EXTERNAL_SHARE_MAGIC.len() + Sha256::output_size();
+    if payload.len() <= prefix_len
+        || !payload.starts_with(EXTERNAL_SHARE_MAGIC)
+        || payload[EXTERNAL_SHARE_MAGIC.len()..prefix_len] != Sha256::digest(purpose.as_bytes())[..]
+    {
+        bail!("externally wrapped member share context mismatch");
+    }
+    Ok(Zeroizing::new(payload[prefix_len..].to_vec()))
+}
+
 fn unwrap_offline_share(
     header: &CapsuleHeader,
     member: &MemberShare,
@@ -1223,6 +1478,50 @@ fn decode_fixed<const N: usize>(encoded: &str, name: &str) -> Result<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+
+    struct ContextProvider {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl KeyProvider for ContextProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        async fn wrap(&self, context: &KeyContext<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+            let binding = serde_json::to_vec(&(
+                context.repository_id,
+                context.slot_id,
+                context.key_reference,
+                context.dek_version,
+                context.purpose,
+            ))?;
+            let mut wrapped = Sha256::digest(binding).to_vec();
+            wrapped.extend_from_slice(plaintext);
+            Ok(wrapped)
+        }
+
+        async fn unwrap(
+            &self,
+            context: &KeyContext<'_>,
+            ciphertext: &[u8],
+        ) -> Result<Zeroizing<Vec<u8>>> {
+            let binding = serde_json::to_vec(&(
+                context.repository_id,
+                context.slot_id,
+                context.key_reference,
+                context.dek_version,
+                context.purpose,
+            ))?;
+            let expected = Sha256::digest(binding);
+            if ciphertext.len() < expected.len() || ciphertext[..expected.len()] != expected[..] {
+                bail!("external member context mismatch");
+            }
+            Ok(Zeroizing::new(ciphertext[expected.len()..].to_vec()))
+        }
+    }
 
     fn capsule(required: u8) -> RecoveryCapsule {
         CapsuleBuilder::new("repo-a", 7)
@@ -1268,6 +1567,116 @@ mod tests {
                 MemberCredential::Passphrase(b"alice passphrase"),
             )]))
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn external_member_wrap_is_context_bound_and_recovers_with_offline_member() {
+        let azure = ContextProvider {
+            name: "azure-key-vault",
+        };
+        let aws = ContextProvider { name: "aws-kms" };
+        let policy = UnlockPolicy::Threshold {
+            group_id: "operators".to_owned(),
+            required: 2,
+            members: vec!["alice".to_owned(), "bob".to_owned()],
+        };
+        let capsule = CapsuleBuilder::new("repo-a", 8)
+            .broker_identity_public_key(&[9; 32])
+            .create_policy(
+                policy,
+                &[
+                    (
+                        "alice",
+                        MemberProtection::External(ExternalMemberProtection {
+                            provider: MemberProvider::AzureKeyVault,
+                            key_reference: "https://example.vault.azure.net/keys/alice/version",
+                            principal: Some(PrincipalBinding {
+                                authority: "entra".to_owned(),
+                                tenant_account_or_project: "tenant-a".to_owned(),
+                                immutable_principal_id: "object-alice".to_owned(),
+                            }),
+                            hardware: None,
+                            key_provider: &azure,
+                        }),
+                    ),
+                    (
+                        "bob",
+                        MemberProtection::Offline(MemberCredential::Keyfile(&[4; 32])),
+                    ),
+                ],
+                &[7; 32],
+                b"repository-master-key",
+            )
+            .await
+            .unwrap();
+
+        let external = capsule.unwrap_external_member("alice", &azure).await.unwrap();
+        assert!(capsule.unwrap_external_member("alice", &aws).await.is_err());
+        let mut substituted_key = capsule.clone();
+        substituted_key.members[0].key_reference =
+            "https://example.vault.azure.net/keys/other/version".to_owned();
+        assert!(substituted_key
+            .unwrap_external_member("alice", &azure)
+            .await
+            .is_err());
+        let mut substituted_principal = capsule.clone();
+        substituted_principal.members[0]
+            .principal
+            .as_mut()
+            .unwrap()
+            .immutable_principal_id = "object-mallory".to_owned();
+        assert!(substituted_principal
+            .unwrap_external_member("alice", &azure)
+            .await
+            .is_err());
+        let offline = capsule
+            .unwrap_offline_member("bob", &MemberCredential::Keyfile(&[4; 32]))
+            .unwrap();
+        let recovered = capsule.recover_from_shares(&[external, offline]).unwrap();
+        assert_eq!(recovered.metadata_dek.as_slice(), &[7; 32]);
+        assert_eq!(
+            recovered.repository_master_key.as_slice(),
+            b"repository-master-key"
+        );
+    }
+
+    #[test]
+    fn external_share_binding_has_stable_cross_language_fixture() {
+        let header = CapsuleHeader {
+            format: 2,
+            logical_id: "unused".to_owned(),
+            repository_id: "repo-a".to_owned(),
+            generation: 8,
+            root_key_version: 1,
+            metadata_dek_version: 1,
+            repository_key_version: 1,
+            algorithm: "unused".to_owned(),
+            policy_hash: "policy-hash".to_owned(),
+            broker_identity_public_key: "unused".to_owned(),
+            policy_intent: PolicyIntent::Quorum,
+        };
+        let member = MemberShare {
+            member_id: "alice".to_owned(),
+            group_id: "operators".to_owned(),
+            share_index: 1,
+            threshold: 2,
+            share_count: 2,
+            provider: MemberProvider::AzureKeyVault,
+            key_reference: "https://example.vault.azure.net/keys/alice/version".to_owned(),
+            wrapped_share: String::new(),
+            nonce: None,
+            argon2: None,
+            principal: Some(PrincipalBinding {
+                authority: "entra".to_owned(),
+                tenant_account_or_project: "tenant-a".to_owned(),
+                immutable_principal_id: "object-alice".to_owned(),
+            }),
+            hardware: None,
+        };
+        assert_eq!(
+            external_share_purpose(&header, &member).unwrap(),
+            "recovery-capsule-share:98436d46b6026a26669db00967c0c1c744f1095700a3c5b73abeddcbf8302306"
+        );
     }
 
     #[test]

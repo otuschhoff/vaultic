@@ -65,6 +65,7 @@ struct FileAuthorization {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum BrokerRequest {
+    Negotiate { protocols: Vec<String> },
     Status,
     CreateSession { ttl_seconds: u64 },
     SubmitContribution { contribution: EncryptedContribution },
@@ -75,6 +76,7 @@ enum BrokerRequest {
         release_signature: String,
         capability: Capability,
         ttl_seconds: u64,
+        challenge_response: String,
     },
     ReleaseLease { lease_id: String },
     Lock,
@@ -83,11 +85,17 @@ enum BrokerRequest {
 #[derive(Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 enum BrokerResponse {
+    Negotiated {
+        protocol: &'static str,
+        challenge: String,
+    },
     Status {
         protocol: &'static str,
         locked: bool,
         repository_id: String,
         capsule_generation: u64,
+        capsule_logical_id: String,
+        policy_hash: String,
         epoch_id: Option<String>,
         active_sessions: usize,
         active_leases: usize,
@@ -125,6 +133,12 @@ struct PeerProcess {
     executable_sha256: String,
     owned_by_root: bool,
     installation_path_read_only: bool,
+}
+
+#[derive(Default)]
+struct ConnectionProtocol {
+    negotiated: bool,
+    lease_challenge: Option<String>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -314,6 +328,7 @@ async fn serve_connection(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut request = Vec::new();
+    let mut protocol = ConnectionProtocol::default();
     loop {
         request.clear();
         let read = tokio::select! {
@@ -338,6 +353,7 @@ async fn serve_connection(
                     &connection_id,
                     &peer,
                     &endpoint_binding,
+                    &mut protocol,
                 )
                     .await
                     .unwrap_or_else(|error| BrokerResponse::Error {
@@ -370,10 +386,30 @@ async fn handle_request(
     connection_id: &str,
     peer: &PeerProcess,
     endpoint_binding: &str,
+    protocol: &mut ConnectionProtocol,
 ) -> Result<BrokerResponse> {
     let now = unix_time_ms()?;
     let mut broker = broker.lock().await;
+    if let BrokerRequest::Negotiate { protocols } = &request {
+        if protocol.negotiated {
+            bail!("broker protocol is already negotiated");
+        }
+        if !protocols.iter().any(|value| value == PROTOCOL_VERSION) {
+            bail!("no mutually supported broker protocol");
+        }
+        let challenge = random_id();
+        protocol.negotiated = true;
+        protocol.lease_challenge = Some(challenge.clone());
+        return Ok(BrokerResponse::Negotiated {
+            protocol: PROTOCOL_VERSION,
+            challenge,
+        });
+    }
+    if !protocol.negotiated {
+        bail!("broker protocol negotiation is required");
+    }
     match request {
+        BrokerRequest::Negotiate { .. } => unreachable!(),
         BrokerRequest::Status => {
             let status = broker.status(now);
             Ok(BrokerResponse::Status {
@@ -381,6 +417,8 @@ async fn handle_request(
                 locked: status.locked,
                 repository_id: status.repository_id,
                 capsule_generation: status.capsule_generation,
+                capsule_logical_id: status.capsule_logical_id,
+                policy_hash: status.policy_hash,
                 epoch_id: status.epoch_id,
                 active_sessions: status.active_sessions,
                 active_leases: status.active_leases,
@@ -411,7 +449,16 @@ async fn handle_request(
             release_signature,
             capability,
             ttl_seconds,
+            challenge_response,
         } => {
+            let challenge = protocol
+                .lease_challenge
+                .take()
+                .context("lease challenge is missing or already consumed")?;
+            let expected = lease_challenge_response(&challenge, &peer.executable_sha256);
+            if challenge_response != expected {
+                bail!("lease challenge response is invalid");
+            }
             let client = ClientIdentity {
                 connection_id: connection_id.to_owned(),
                 component,
@@ -579,6 +626,15 @@ fn random_id() -> String {
     BASE64.encode(bytes)
 }
 
+fn lease_challenge_response(challenge: &str, executable_sha256: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "vaultic-broker-lease-challenge-v1\0{PROTOCOL_VERSION}\0{challenge}\0{executable_sha256}"
+        ))
+    )
+}
+
 fn disable_core_dumps() {
     #[cfg(unix)]
     unsafe {
@@ -648,5 +704,26 @@ mod tests {
         let signature = Signature::from_slice(&BASE64.decode(manifest.signature).unwrap()).unwrap();
         release_key.verifying_key().verify(&message, &signature).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lease_challenge_is_protocol_and_executable_bound() {
+        let challenge = "challenge-a";
+        let digest = "ab".repeat(32);
+        let response = lease_challenge_response(challenge, &digest);
+        assert_eq!(response.len(), 64);
+        assert_eq!(response, lease_challenge_response(challenge, &digest));
+        assert_ne!(response, lease_challenge_response("challenge-b", &digest));
+        assert_ne!(response, lease_challenge_response(challenge, &"cd".repeat(32)));
+    }
+
+    #[test]
+    fn connection_protocol_consumes_lease_challenge_once() {
+        let mut protocol = ConnectionProtocol {
+            negotiated: true,
+            lease_challenge: Some("challenge-a".to_owned()),
+        };
+        assert_eq!(protocol.lease_challenge.take().as_deref(), Some("challenge-a"));
+        assert!(protocol.lease_challenge.take().is_none());
     }
 }

@@ -239,11 +239,24 @@ direct key, standalone escrow, duplicate cloud key, overlapping principal, or
 duplicate hardware credential is a complete-key bypass and makes the overall
 deployment non-compliant regardless of the advertised normal threshold.
 
-The currently implemented migration ceremony accepts
-``offline-argon2id`` and ``offline-keyfile`` members. Other provider names in
-the capsule format are reserved until their custodian-side enrollment and
-identity verification adapters are configured; enum presence alone does not
-make a provider operational or compliant.
+Use ``vaultic index keys quorum verify`` for a strict comparison of a local
+capsule with the running broker's authenticated repository, generation,
+logical capsule ID, and policy hash. ``index keys status --capsule`` and
+``index check --quorum-capsule`` additionally report configured password,
+direct-key, Azure-secret, no-password, key-in-DB, metadata-passphrase, and
+standalone metadata-slot bypasses. External plaintext exports and escrow copies
+cannot be discovered reliably and remain operator-audited custody items.
+
+The capsule library supports mixed offline and externally wrapped members.
+Custodian contribution adapters are available for Azure Key Vault/Managed
+HSM, AWS KMS and CloudHSM-backed KMS keys, and Google Cloud KMS/Cloud HSM.
+External share framing binds the complete capsule and member context even when
+the provider wrapping primitive has no native AAD. AWS role sessions are
+normalized to stable IAM role ARNs; CloudHSM members require provider
+attestation of their hardware-backed key origin. The current migration command
+still enrolls only ``offline-argon2id`` and ``offline-keyfile`` members, so use
+of cloud members awaits the generalized policy-enrollment command. YubiKey PIV
+and FIDO2 names remain reserved and are not operational.
 
 Broker lifecycle and trust boundary
 ===================================
@@ -260,7 +273,10 @@ during the same live epoch does not.
 The broker socket and its parent directory are owner-only. The service checks
 OS peer credentials, hashes the actual peer executable, requires a root-owned
 non-writable installation path, verifies a signed release manifest, enforces
-component and version authorization, and rejects software downgrade. Generate
+component and version authorization, and rejects software downgrade. Every
+connection first negotiates ``vaultic-key-broker.v1``. Each lease request must
+answer a one-time random challenge bound to that protocol and the executable
+digest observed by the broker; the challenge cannot be replayed. Generate
 the long-term broker identity offline and retain its public key for capsule
 creation:
 
@@ -364,12 +380,17 @@ without deleting the retained route.
   $ vaultic index keys quorum migrate-finalize \
       --repository-id REPOSITORY-UUID \
       --state-file /secure/capsule-migration.json --confirm \
+    --retire-legacy-routes --confirm-standalone-escrow-destroyed \
       --key-broker-socket /run/vaultic/key-broker.sock \
       --key-broker-release-manifest vaultic.release.json
 
-After successful finalization, remove ordinary password keys and retire every
-standalone escrow according to the custody runbook. Retaining any complete-key
-copy remains a non-compliant bypass. Preserve historical capsules as
+  Finalization removes ordinary repository password-key records and mirrored
+  standalone escrow records after capsule and pack proof succeeds but before the
+  database master-key record is removed. A retirement failure therefore leaves
+  the database route available for a retry. The
+  operator must separately destroy exported escrow and plaintext key files and
+  explicitly attest that fact. Retaining any complete-key copy remains a
+  non-compliant bypass. Preserve historical capsules as
 ciphertext evidence, but remember that resharing does not revoke a copied old
 generation held together with enough old credentials. Rotate and rewrite the
 metadata DEK after retiring a suspected metadata path; repository master-key
@@ -382,18 +403,25 @@ The capsule is independent of SlateDB. Once unlocked, an explicitly authorized
 Vaultic recovery job can request ``metadata-loss-recovery`` and inspect or
 restore packs through the legacy index without writing a plaintext key file.
 Recovery mode is read-only and must be explicitly selected. Preserve suspect
-metadata and audit evidence before recovery.
+metadata and audit evidence before recovery. To rebuild a local candidate, use
+``index import --metadata-rebuild-initialize`` with a new
+``--daemon-data-dir``, brokered ``required`` metadata encryption,
+``--metadata-loss-recovery``, ``--activate``, and
+``--confirm-metadata-loss-rebuild``. The repository and candidate daemon must
+use the same broker. The daemon rejects a candidate containing database
+objects, writes authenticated recovery provenance before normal records, and
+Vaultic compares the completed candidate against legacy metadata before
+activating SlateDB authority.
 
 Complete broker-host loss also loses the session-signing identity. The normal
 client correctly rejects sessions not signed by the identity pinned in the
 capsule. Until the separately acknowledged unsigned-session recovery and
 identity re-pinning workflow is enabled, retain a protected backup of the
 broker identity private key with disaster-recovery materials; do not bypass
-signature verification manually. Likewise, authenticated metadata rebuild
-handoff is required before writing a replacement database. Read-only pack
-recovery is available now, but operators must not describe metadata rebuild as
-complete until the rebuilt database uses the recovered DEK or a fresh DEK
-published in a new capsule generation.
+signature verification manually. The local candidate rebuild path is
+implemented, but remote-object-store activation and a full
+destruction-to-restore service test remain required before treating metadata
+rebuild coverage as complete.
 
 Audit ``auth``, ``integrity``, and ``lifecycle`` events remotely. Treat capsule
 rollback, rejected contribution, client authorization denial, unexpected

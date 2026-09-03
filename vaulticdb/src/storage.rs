@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use slatedb::{
@@ -39,6 +40,7 @@ const DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
 const MASTER_KEY_RECORD: &[u8] = b"meta:master-key";
 const CAPSULE_MIGRATION_RECORD: &[u8] = b"meta:capsule-migration";
 const ENCRYPTION_POLICY_RECORD: &[u8] = b"meta:encryption";
+const METADATA_REBUILD_RECORD: &[u8] = b"meta:recovery-rebuild";
 const MAX_MASTER_KEY_BYTES: usize = 4096;
 
 struct TransactionSlot {
@@ -69,6 +71,13 @@ pub struct Storage {
 impl Storage {
     pub async fn open(repository_id: &str) -> Result<Self> {
         let (path, object_store) = object_store(repository_id)?;
+        let recovery_initialize = env::var("VAULTICDB_METADATA_REBUILD_INITIALIZE").as_deref() == Ok("true");
+        if recovery_initialize && env::var_os("VAULTICDB_BROKER_SOCKET").is_none() {
+            bail!("metadata rebuild initialization requires a broker metadata-DEK lease");
+        }
+        if recovery_initialize && metadata_store_has_database_objects(object_store.as_ref()).await? {
+            bail!("metadata rebuild initialization requires an empty candidate metadata store");
+        }
         let mut broker_lease = None;
         let (object_store, encryption, key_manager) = if let Ok(socket) = env::var("VAULTICDB_BROKER_SOCKET") {
             let manifest = env::var("VAULTICDB_RELEASE_MANIFEST")
@@ -89,6 +98,7 @@ impl Storage {
                 &dek,
                 lease.key_version,
                 lease.capsule_generation,
+                recovery_initialize,
             )?;
             broker_lease = Some(lease);
             configured
@@ -108,6 +118,9 @@ impl Storage {
             broker_lease,
         };
         storage.ensure_encryption_policy(repository_id).await?;
+        if recovery_initialize {
+            storage.record_metadata_rebuild_handoff(repository_id).await?;
+        }
         Ok(storage)
     }
 
@@ -169,6 +182,26 @@ impl Storage {
             .await_durable()
             .await
             .context("persist metadata encryption policy")
+    }
+
+    async fn record_metadata_rebuild_handoff(&self, repository_id: &str) -> Result<()> {
+        let lease = self
+            .broker_lease
+            .as_ref()
+            .context("metadata rebuild handoff requires a broker lease")?;
+        let value = serde_json::to_vec(&serde_json::json!({
+            "format": 1,
+            "repository_id": repository_id,
+            "capsule_generation": lease.capsule_generation,
+            "metadata_dek_version": lease.key_version,
+            "broker_epoch_id": lease.epoch_id,
+        }))?;
+        self.db
+            .put(METADATA_REBUILD_RECORD, value)
+            .await?
+            .await_durable()
+            .await
+            .context("persist metadata rebuild handoff")
     }
 
     pub async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
@@ -446,6 +479,17 @@ impl Storage {
             .remove(transaction_id)
             .ok_or_else(|| Status::not_found("transaction was not found"))
     }
+}
+
+async fn metadata_store_has_database_objects(store: &dyn ObjectStore) -> Result<bool> {
+    let mut objects = store.list(None);
+    while let Some(object) = objects.next().await {
+        let object = object.context("inspect candidate metadata store")?;
+        if !object.location.as_ref().starts_with("_vaultic/") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 
@@ -741,6 +785,28 @@ fn env_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slatedb::object_store::ObjectStoreExt;
+
+    #[tokio::test]
+    async fn metadata_rebuild_candidate_ignores_capsules_but_rejects_database_objects() {
+        let store = InMemory::new();
+        store
+            .put(
+                &slatedb::object_store::path::Path::from("_vaultic/recovery-capsules/one.json"),
+                vec![1_u8].into(),
+            )
+            .await
+            .unwrap();
+        assert!(!metadata_store_has_database_objects(&store).await.unwrap());
+        store
+            .put(
+                &slatedb::object_store::path::Path::from("manifest/0001"),
+                vec![2_u8].into(),
+            )
+            .await
+            .unwrap();
+        assert!(metadata_store_has_database_objects(&store).await.unwrap());
+    }
     use slatedb::object_store::memory::InMemory;
 
     #[test]

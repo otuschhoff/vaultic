@@ -34,6 +34,8 @@ const (
 type Client struct {
 	connection net.Conn
 	reader     *bufio.Reader
+	protocol   string
+	challenge  string
 }
 
 type Status struct {
@@ -41,6 +43,8 @@ type Status struct {
 	Locked            bool     `json:"locked"`
 	RepositoryID      string   `json:"repository_id"`
 	CapsuleGeneration uint64   `json:"capsule_generation"`
+	CapsuleLogicalID  string   `json:"capsule_logical_id"`
+	PolicyHash        string   `json:"policy_hash"`
 	EpochID           *string  `json:"epoch_id"`
 	ActiveSessions    int      `json:"active_sessions"`
 	ActiveLeases      int      `json:"active_leases"`
@@ -117,18 +121,53 @@ type capsuleHeader struct {
 }
 
 type memberShare struct {
-	MemberID     string          `json:"member_id"`
-	GroupID      string          `json:"group_id"`
-	ShareIndex   uint8           `json:"share_index"`
-	Threshold    uint8           `json:"threshold"`
-	ShareCount   uint8           `json:"share_count"`
-	Provider     string          `json:"provider"`
-	KeyReference string          `json:"key_reference"`
-	WrappedShare string          `json:"wrapped_share"`
-	Nonce        *string         `json:"nonce"`
-	Argon2       *argon2Config   `json:"argon2"`
-	Principal    json.RawMessage `json:"principal"`
-	Hardware     json.RawMessage `json:"hardware"`
+	MemberID     string            `json:"member_id"`
+	GroupID      string            `json:"group_id"`
+	ShareIndex   uint8             `json:"share_index"`
+	Threshold    uint8             `json:"threshold"`
+	ShareCount   uint8             `json:"share_count"`
+	Provider     string            `json:"provider"`
+	KeyReference string            `json:"key_reference"`
+	WrappedShare string            `json:"wrapped_share"`
+	Nonce        *string           `json:"nonce"`
+	Argon2       *argon2Config     `json:"argon2"`
+	Principal    *principalBinding `json:"principal"`
+	Hardware     *hardwareBinding  `json:"hardware"`
+}
+
+type principalBinding struct {
+	Authority              string `json:"authority"`
+	TenantAccountOrProject string `json:"tenant_account_or_project"`
+	ImmutablePrincipalID   string `json:"immutable_principal_id"`
+}
+
+type hardwareBinding struct {
+	CredentialID           string  `json:"credential_id"`
+	PublicKey              string  `json:"public_key"`
+	SerialNumber           *string `json:"serial_number"`
+	AttestationFingerprint *string `json:"attestation_fingerprint"`
+	UserPresenceRequired   bool    `json:"user_presence_required"`
+}
+
+type ExternalMemberContext struct {
+	RepositoryID   string
+	Generation     uint64
+	RootKeyVersion uint32
+	PolicyHash     string
+	MemberID       string
+	Provider       string
+	KeyReference   string
+	Purpose        string
+}
+
+type VerifiedPrincipal struct {
+	Authority              string
+	TenantAccountOrProject string
+	ImmutablePrincipalID   string
+}
+
+type ExternalMemberUnwrapper interface {
+	UnwrapMember(context.Context, ExternalMemberContext, []byte) ([]byte, VerifiedPrincipal, error)
 }
 
 type argon2Config struct {
@@ -143,6 +182,7 @@ type responseEnvelope struct {
 	Code              string         `json:"code"`
 	Message           string         `json:"message"`
 	Protocol          string         `json:"protocol"`
+	Challenge         string         `json:"challenge"`
 	Locked            bool           `json:"locked"`
 	RepositoryID      string         `json:"repository_id"`
 	CapsuleGeneration uint64         `json:"capsule_generation"`
@@ -172,7 +212,19 @@ func Dial(ctx context.Context, socket string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect key broker: %w", err)
 	}
-	return &Client{connection: connection, reader: bufio.NewReaderSize(connection, maxResponse)}, nil
+	client := &Client{connection: connection, reader: bufio.NewReaderSize(connection, maxResponse)}
+	var response responseEnvelope
+	if err := client.call(ctx, map[string]any{"operation": "negotiate", "protocols": []string{protocolVersion}}, &response); err != nil {
+		_ = connection.Close()
+		return nil, fmt.Errorf("negotiate key broker protocol: %w", err)
+	}
+	if response.Result != "negotiated" || response.Protocol != protocolVersion || response.Challenge == "" {
+		_ = connection.Close()
+		return nil, errors.New("key broker returned an invalid protocol negotiation")
+	}
+	client.protocol = response.Protocol
+	client.challenge = response.Challenge
+	return client, nil
 }
 
 func (client *Client) Close() error { return client.connection.Close() }
@@ -253,10 +305,16 @@ func (client *Client) AcquireLease(ctx context.Context, manifestPath, capability
 		return Lease{}, fmt.Errorf("hash running Vaultic executable: %w", err)
 	}
 	digest := sha256.Sum256(executableData)
-	if !strings.EqualFold(manifest.ExecutableSHA256, hex.EncodeToString(digest[:])) {
+	executableDigest := hex.EncodeToString(digest[:])
+	if !strings.EqualFold(manifest.ExecutableSHA256, executableDigest) {
 		return Lease{}, errors.New("release manifest executable digest does not match running Vaultic")
 	}
-	request := map[string]any{"operation": "acquire_lease", "component": manifest.Component, "version": manifest.Version, "release_identity": manifest.ReleaseIdentity, "release_signature": manifest.Signature, "capability": capability, "ttl_seconds": uint64(ttl / time.Second)}
+	if client.protocol != protocolVersion || client.challenge == "" {
+		return Lease{}, errors.New("broker lease challenge is unavailable or already consumed")
+	}
+	challengeDigest := sha256.Sum256([]byte("vaultic-broker-lease-challenge-v1\x00" + protocolVersion + "\x00" + client.challenge + "\x00" + executableDigest))
+	request := map[string]any{"operation": "acquire_lease", "component": manifest.Component, "version": manifest.Version, "release_identity": manifest.ReleaseIdentity, "release_signature": manifest.Signature, "capability": capability, "ttl_seconds": uint64(ttl / time.Second), "challenge_response": hex.EncodeToString(challengeDigest[:])}
+	client.challenge = ""
 	var response responseEnvelope
 	if err := client.call(ctx, request, &response); err != nil {
 		return Lease{}, err
@@ -324,6 +382,10 @@ func (value *capsule) RepositoryID() string { return value.Header.RepositoryID }
 
 func (value *capsule) Generation() uint64 { return value.Header.Generation }
 
+func (value *capsule) LogicalID() string { return value.Header.LogicalID }
+
+func (value *capsule) PolicyHash() string { return value.Header.PolicyHash }
+
 func (value *capsule) ContributeOffline(session SignedSession, endpoint, memberID string, credential []byte, keyfile bool, lastSeenGeneration uint64, now time.Time) (EncryptedContribution, error) {
 	if err := value.verifySession(session, endpoint, now); err != nil {
 		return EncryptedContribution{}, err
@@ -343,13 +405,58 @@ func (value *capsule) ContributeOffline(session SignedSession, endpoint, memberI
 		return EncryptedContribution{}, err
 	}
 	defer clear(share)
+	return value.encryptContribution(session, *member, share, lastSeenGeneration, nil)
+}
+
+func (value *capsule) ContributeExternal(ctx context.Context, session SignedSession, endpoint, memberID string, unwrapper ExternalMemberUnwrapper, lastSeenGeneration uint64, now time.Time) (EncryptedContribution, error) {
+	if err := value.verifySession(session, endpoint, now); err != nil {
+		return EncryptedContribution{}, err
+	}
+	var member *memberShare
+	for index := range value.Members {
+		if value.Members[index].MemberID == memberID {
+			member = &value.Members[index]
+			break
+		}
+	}
+	if member == nil {
+		return EncryptedContribution{}, fmt.Errorf("capsule has no member %q", memberID)
+	}
+	if member.Principal == nil || member.Provider == "offline-argon2id" || member.Provider == "offline-keyfile" {
+		return EncryptedContribution{}, errors.New("member is not a principal-bound external provider")
+	}
+	purpose, err := value.externalSharePurpose(*member)
+	if err != nil {
+		return EncryptedContribution{}, err
+	}
+	wrapper, err := base64.StdEncoding.DecodeString(member.WrappedShare)
+	if err != nil {
+		return EncryptedContribution{}, fmt.Errorf("decode externally wrapped member share: %w", err)
+	}
+	payload, principal, err := unwrapper.UnwrapMember(ctx, ExternalMemberContext{RepositoryID: value.Header.RepositoryID, Generation: value.Header.Generation, RootKeyVersion: value.Header.RootKeyVersion, PolicyHash: value.Header.PolicyHash, MemberID: member.MemberID, Provider: member.Provider, KeyReference: member.KeyReference, Purpose: purpose}, wrapper)
+	if err != nil {
+		return EncryptedContribution{}, fmt.Errorf("unwrap external member: %w", err)
+	}
+	defer clear(payload)
+	if principal.Authority != member.Principal.Authority || principal.TenantAccountOrProject != member.Principal.TenantAccountOrProject || principal.ImmutablePrincipalID != member.Principal.ImmutablePrincipalID {
+		return EncryptedContribution{}, errors.New("provider-authenticated principal does not match capsule member")
+	}
+	share, err := decodeExternalShare(purpose, payload)
+	if err != nil {
+		return EncryptedContribution{}, err
+	}
+	defer clear(share)
+	return value.encryptContribution(session, *member, share, lastSeenGeneration, &principal.ImmutablePrincipalID)
+}
+
+func (value *capsule) encryptContribution(session SignedSession, member memberShare, share []byte, lastSeenGeneration uint64, principalID *string) (EncryptedContribution, error) {
 	payload, err := json.Marshal(struct {
 		MemberID           string  `json:"member_id"`
 		ShareIndex         uint8   `json:"share_index"`
 		Share              []byte  `json:"share"`
 		LastSeenGeneration uint64  `json:"last_seen_generation"`
 		PrincipalID        *string `json:"principal_id"`
-	}{MemberID: member.MemberID, ShareIndex: member.ShareIndex, Share: share, LastSeenGeneration: lastSeenGeneration})
+	}{MemberID: member.MemberID, ShareIndex: member.ShareIndex, Share: share, LastSeenGeneration: lastSeenGeneration, PrincipalID: principalID})
 	if err != nil {
 		return EncryptedContribution{}, err
 	}
@@ -384,6 +491,25 @@ func (value *capsule) ContributeOffline(session SignedSession, endpoint, memberI
 	}
 	ciphertext, tag := sealed[:len(sealed)-16], sealed[len(sealed)-16:]
 	return EncryptedContribution{SessionID: session.Transcript.SessionID, EncappedKey: base64.StdEncoding.EncodeToString(encapped), Ciphertext: base64.StdEncoding.EncodeToString(ciphertext), Tag: base64.StdEncoding.EncodeToString(tag)}, nil
+}
+
+func (value *capsule) externalSharePurpose(member memberShare) (string, error) {
+	binding, err := json.Marshal([]any{"vaultic-recovery-capsule-external-share", value.Header.RepositoryID, value.Header.Generation, value.Header.RootKeyVersion, value.Header.PolicyHash, member.GroupID, member.MemberID, member.ShareIndex, member.Threshold, member.ShareCount, member.Provider, member.KeyReference, member.Principal, member.Hardware})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(binding)
+	return "recovery-capsule-share:" + hex.EncodeToString(digest[:]), nil
+}
+
+func decodeExternalShare(purpose string, payload []byte) ([]byte, error) {
+	const magic = "VLTCAPSH1"
+	digest := sha256.Sum256([]byte(purpose))
+	prefix := len(magic) + len(digest)
+	if len(payload) <= prefix || string(payload[:len(magic)]) != magic || !bytes.Equal(payload[len(magic):prefix], digest[:]) {
+		return nil, errors.New("externally wrapped member share context mismatch")
+	}
+	return append([]byte(nil), payload[prefix:]...), nil
 }
 
 func (value *capsule) verifySession(session SignedSession, endpoint string, now time.Time) error {
@@ -429,7 +555,8 @@ func (value *capsule) unwrapMember(member memberShare, credential []byte, keyfil
 		if len(credential) < 32 {
 			return nil, errors.New("offline keyfile must contain at least 32 bytes")
 		}
-		reader := hkdf.New(sha256.New, credential, []byte(value.Header.RepositoryID), []byte(fmt.Sprintf("vaultic-capsule-keyfile\x00%d\x00%s", value.Header.Generation, member.MemberID)))
+		info := fmt.Appendf(nil, "vaultic-capsule-keyfile\x00%d\x00%s", value.Header.Generation, member.MemberID)
+		reader := hkdf.New(sha256.New, credential, []byte(value.Header.RepositoryID), info)
 		key = make([]byte, 32)
 		if _, err := reader.Read(key); err != nil {
 			return nil, err

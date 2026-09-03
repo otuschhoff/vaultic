@@ -63,6 +63,17 @@ func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {
 	}
 }
 
+func TestMetadataRebuildInitializationRequiresBrokeredRequiredEncryption(t *testing.T) {
+	_, err := Ensure(context.Background(), Options{RebuildInitialize: true, EncryptionMode: "required"})
+	if err == nil || !strings.Contains(err.Error(), "requires brokered required encryption") {
+		t.Fatalf("missing broker accepted for metadata rebuild: %v", err)
+	}
+	_, err = Ensure(context.Background(), Options{RebuildInitialize: true, EncryptionMode: "initialize", BrokerSocket: "/tmp/broker.sock", BrokerManifest: "/tmp/manifest"})
+	if err == nil || !strings.Contains(err.Error(), "requires brokered required encryption") {
+		t.Fatalf("wrong encryption mode accepted for metadata rebuild: %v", err)
+	}
+}
+
 func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	options := Options{Socket: testSocket(t), RepositoryID: "phase3-storage", DaemonPath: daemonBinary(t), DataDir: dataDir}

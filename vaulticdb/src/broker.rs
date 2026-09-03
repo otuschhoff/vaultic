@@ -90,6 +90,8 @@ pub struct UnlockStatus {
     pub locked: bool,
     pub repository_id: String,
     pub capsule_generation: u64,
+    pub capsule_logical_id: String,
+    pub policy_hash: String,
     pub epoch_id: Option<String>,
     pub active_sessions: usize,
     pub active_leases: usize,
@@ -234,6 +236,8 @@ impl KeyBroker {
             locked: self.epoch.is_none(),
             repository_id: self.capsule.header.repository_id.clone(),
             capsule_generation: self.capsule.header.generation,
+            capsule_logical_id: self.capsule.header.logical_id.clone(),
+            policy_hash: self.capsule.header.policy_hash.clone(),
             epoch_id: self.epoch.as_ref().map(|epoch| epoch.id.clone()),
             active_sessions: self.sessions.len(),
             active_leases: self.leases.len(),
@@ -511,6 +515,41 @@ pub async fn acquire_metadata_lease(
         .await
         .with_context(|| format!("connect key broker {socket}"))?;
     let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let negotiation = serde_json::json!({
+        "operation": "negotiate",
+        "protocols": ["vaultic-key-broker.v1"],
+    });
+    let mut negotiation = serde_json::to_vec(&negotiation)?;
+    negotiation.push(b'\n');
+    writer.write_all(&negotiation).await?;
+    writer.flush().await?;
+    let mut negotiation_response = Vec::new();
+    reader.read_until(b'\n', &mut negotiation_response).await?;
+    #[derive(Deserialize)]
+    struct NegotiationResponse {
+        result: String,
+        #[serde(default)]
+        protocol: String,
+        #[serde(default)]
+        challenge: String,
+        #[serde(default)]
+        message: String,
+    }
+    let negotiation: NegotiationResponse = serde_json::from_slice(&negotiation_response)?;
+    if negotiation.result != "negotiated"
+        || negotiation.protocol != "vaultic-key-broker.v1"
+        || negotiation.challenge.is_empty()
+    {
+        bail!("key broker protocol negotiation failed: {}", negotiation.message);
+    }
+    let challenge_response = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "vaultic-broker-lease-challenge-v1\0vaultic-key-broker.v1\0{}\0{}",
+            negotiation.challenge, actual_digest
+        ))
+    );
     let request = serde_json::json!({
         "operation": "acquire_lease",
         "component": manifest.component,
@@ -519,12 +558,12 @@ pub async fn acquire_metadata_lease(
         "release_signature": manifest.signature,
         "capability": "metadata-dek",
         "ttl_seconds": ttl.as_secs(),
+        "challenge_response": challenge_response,
     });
     let mut request = serde_json::to_vec(&request)?;
     request.push(b'\n');
     writer.write_all(&request).await?;
     writer.flush().await?;
-    let mut reader = BufReader::new(reader);
     let mut response = Vec::new();
     reader.read_until(b'\n', &mut response).await?;
     if response.len() > 1024 * 1024 {

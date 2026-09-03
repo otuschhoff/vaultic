@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/global"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/legacyimport"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
@@ -21,24 +24,28 @@ import (
 )
 
 type indexDaemonOptions struct {
-	Socket         string
-	TCPAddress     string
-	TCPAllowlist   []string
-	AuthToken      string
-	DaemonPath     string
-	DataDir        string
-	ObjectStore    string
-	S3Bucket       string
-	S3Prefix       string
-	EncryptionMode string
-	PassphraseFile string
-	AzureTokenFile string
-	GCPTokenFile   string
-	VaultTokenFile string
-	PKCS11PINFile  string
-	RecoveryUnlock bool
-	Start          bool
-	Persistent     bool
+	Socket            string
+	TCPAddress        string
+	TCPAllowlist      []string
+	AuthToken         string
+	DaemonPath        string
+	DataDir           string
+	ObjectStore       string
+	S3Bucket          string
+	S3Prefix          string
+	EncryptionMode    string
+	PassphraseFile    string
+	AzureTokenFile    string
+	GCPTokenFile      string
+	VaultTokenFile    string
+	PKCS11PINFile     string
+	RecoveryUnlock    bool
+	BrokerSocket      string
+	BrokerManifest    string
+	BrokerLease       time.Duration
+	RebuildInitialize bool
+	Start             bool
+	Persistent        bool
 }
 
 var errIndexDifferences = errors.New("metadata indexes differ")
@@ -76,6 +83,10 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.VaultTokenFile, "metadata-vault-token-file", "", "protected Vault Transit token file")
 	flags.StringVar(&options.PKCS11PINFile, "metadata-pkcs11-pin-file", "", "protected PKCS#11 user PIN file")
 	flags.BoolVar(&options.RecoveryUnlock, "metadata-recovery-unlock", false, "acknowledge use of a recovery slot while cloud slots exist")
+	flags.StringVar(&options.BrokerSocket, "metadata-key-broker-socket", "", "local key-broker socket for the vaulticdb metadata-DEK lease")
+	flags.StringVar(&options.BrokerManifest, "metadata-key-broker-release-manifest", "", "signed release manifest authorizing vaulticdb")
+	flags.DurationVar(&options.BrokerLease, "metadata-key-broker-lease", time.Hour, "vaulticdb metadata-DEK lease lifetime")
+	flags.BoolVar(&options.RebuildInitialize, "metadata-rebuild-initialize", false, "initialize an empty candidate metadata store under a broker-leased DEK")
 }
 
 func (options indexDaemonOptions) connect(ctx context.Context, repositoryID string) (*daemon.Client, error) {
@@ -112,6 +123,8 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		EncryptionMode: options.EncryptionMode, PassphraseFile: options.PassphraseFile,
 		AzureTokenFile: options.AzureTokenFile, GCPTokenFile: options.GCPTokenFile, VaultTokenFile: options.VaultTokenFile, PKCS11PINFile: options.PKCS11PINFile,
 		RecoveryUnlock: options.RecoveryUnlock,
+		BrokerSocket:   options.BrokerSocket, BrokerManifest: options.BrokerManifest,
+		BrokerLease: options.BrokerLease, RebuildInitialize: options.RebuildInitialize,
 	}
 	if options.Start {
 		config.DaemonPath = options.DaemonPath
@@ -155,16 +168,17 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 }
 
 type indexImportOptions struct {
-	Daemon             indexDaemonOptions
-	Resume             bool
-	DryRun             bool
-	Activate           bool
-	FromLegacy         bool
-	BatchSize          uint32
-	MaxErrors          uint64
-	WorkBudget         uint64
-	SnapshotDepth      uint
-	SnapshotWorkBudget uint64
+	Daemon                     indexDaemonOptions
+	Resume                     bool
+	DryRun                     bool
+	Activate                   bool
+	FromLegacy                 bool
+	BatchSize                  uint32
+	MaxErrors                  uint64
+	WorkBudget                 uint64
+	SnapshotDepth              uint
+	SnapshotWorkBudget         uint64
+	ConfirmMetadataLossRebuild bool
 }
 
 func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
@@ -194,6 +208,7 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.Uint64Var(&options.WorkBudget, "work-budget", 0, "maximum blob records to examine (zero is unlimited)")
 	flags.UintVar(&options.SnapshotDepth, "snapshot-depth", math.MaxUint, "maximum tree depth to import (zero disables snapshot import)")
 	flags.Uint64Var(&options.SnapshotWorkBudget, "snapshot-work-budget", 0, "maximum snapshot nodes to examine (zero is unlimited)")
+	flags.BoolVar(&options.ConfirmMetadataLossRebuild, "confirm-metadata-loss-rebuild", false, "acknowledge replacement of lost or suspect authoritative metadata after candidate validation")
 	return command
 }
 
@@ -204,6 +219,24 @@ func runIndexImport(ctx context.Context, options indexImportOptions, globalOptio
 	}
 	if options.DryRun && options.Activate {
 		return result, fmt.Errorf("--activate cannot be combined with --dry-run")
+	}
+	if options.Daemon.RebuildInitialize {
+		if !options.ConfirmMetadataLossRebuild || !options.Activate || !options.Daemon.Start || !globalOptions.MetadataLossRecovery {
+			return result, fmt.Errorf("metadata rebuild initialization requires --confirm-metadata-loss-rebuild, --activate, --start-daemon, and --metadata-loss-recovery")
+		}
+		if options.Daemon.DataDir == "" || options.Daemon.ObjectStore == "s3" {
+			return result, fmt.Errorf("metadata rebuild initialization currently requires a new local --daemon-data-dir candidate")
+		}
+		if _, statErr := os.Stat(options.Daemon.DataDir); !errors.Is(statErr, os.ErrNotExist) {
+			if statErr != nil {
+				return result, fmt.Errorf("inspect metadata rebuild candidate: %w", statErr)
+			}
+			return result, fmt.Errorf("metadata rebuild candidate directory already exists")
+		}
+		if globalOptions.KeyBrokerSocket == "" || options.Daemon.BrokerSocket != globalOptions.KeyBrokerSocket {
+			return result, fmt.Errorf("metadata rebuild requires the repository and candidate daemon to use the same key broker")
+		}
+		_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index", Message: "authenticated metadata rebuild started", Fields: map[string]any{"candidate_data_dir": options.Daemon.DataDir}})
 	}
 	config, err := options.Daemon.config("")
 	if err != nil {
@@ -247,8 +280,25 @@ func runIndexImport(ctx context.Context, options indexImportOptions, globalOptio
 		if client == nil {
 			return result, fmt.Errorf("repository is already SlateDB-authoritative")
 		}
+		if options.Daemon.RebuildInitialize {
+			placementModel, checkErr := indexMaintenancePlacementModel(repo)
+			if checkErr != nil {
+				return result, checkErr
+			}
+			validation, checkErr := maintenance.CheckWithOptions(ctx, repo, store, maintenance.CheckOptions{MaxFindings: 100, PlacementModel: placementModel, PathIndexPaths: repo.Config().PathIndexPaths})
+			if checkErr != nil {
+				return result, fmt.Errorf("validate rebuilt metadata candidate: %w", checkErr)
+			}
+			if !validation.Clean() || validation.HasWarnings() {
+				return result, fmt.Errorf("rebuilt metadata candidate failed validation: %d findings, %d warnings", len(validation.Findings), validation.Warnings)
+			}
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index", Message: "authenticated metadata rebuild candidate validated", Fields: map[string]any{"candidate_data_dir": options.Daemon.DataDir, "packs": result.PacksImported, "blobs": result.BlobsImported}})
+		}
 		if activateErr := repo.EnableSlateDBAuthority(ctx, client); activateErr != nil {
 			return result, fmt.Errorf("activate SlateDB authority: %w", activateErr)
+		}
+		if options.Daemon.RebuildInitialize {
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "authenticated metadata rebuild activated", Fields: map[string]any{"candidate_data_dir": options.Daemon.DataDir}})
 		}
 		keepStore = true
 	}
@@ -344,6 +394,7 @@ type indexCheckOptions struct {
 	IncludeCrawlDebt bool
 	FailOnWarning    bool
 	PathIndexPaths   []string
+	QuorumCapsule    string
 }
 
 func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
@@ -365,6 +416,7 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().BoolVar(&options.IncludeCrawlDebt, "include-crawl-debt", false, "include individual pending crawl-debt findings")
 	command.Flags().BoolVar(&options.FailOnWarning, "fail-on-warning", false, "return exit status 2 for expected incompleteness warnings")
 	command.Flags().StringSliceVar(&options.PathIndexPaths, "path-index", nil, "validate pv path-index entries for these paths")
+	command.Flags().StringVar(&options.QuorumCapsule, "quorum-capsule", "", "verify quorum policy and access routes against this capsule and the configured metadata key broker")
 	return command
 }
 
@@ -399,6 +451,49 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	result, err = maintenance.CheckWithOptions(ctx, repo, store, maintenance.CheckOptions{LegacyOnly: options.LegacyOnly, SlateDBOnly: options.SlateDBOnly, IncludeCrawlDebt: options.IncludeCrawlDebt, MaxFindings: options.MaxFindings, PlacementModel: placementModel, PathIndexPaths: pathIndexPaths})
 	if err != nil {
 		return result, err
+	}
+	if options.QuorumCapsule != "" {
+		if options.Daemon.BrokerSocket == "" {
+			return result, fmt.Errorf("--quorum-capsule requires --metadata-key-broker-socket")
+		}
+		capsule, loadErr := indexbroker.LoadCapsule(options.QuorumCapsule)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		brokerClient, dialErr := indexbroker.Dial(ctx, options.Daemon.BrokerSocket)
+		if dialErr != nil {
+			return result, dialErr
+		}
+		quorum, statusErr := brokerClient.Status(ctx)
+		_ = brokerClient.Close()
+		if statusErr != nil {
+			return result, statusErr
+		}
+		if matchErr := matchQuorumCapsule(capsule.RepositoryID(), capsule.Generation(), capsule.LogicalID(), capsule.PolicyHash(), quorum); matchErr != nil {
+			return result, matchErr
+		}
+		metadataStatus := daemon.KeyStatus{}
+		statusClient, connectErr := options.Daemon.connect(ctx, repo.Config().ID)
+		if connectErr == nil {
+			metadataStatus, connectErr = statusClient.KeyStatus(ctx)
+			_ = statusClient.Close(ctx)
+		}
+		if connectErr != nil {
+			return result, fmt.Errorf("read metadata key status for quorum check: %w", connectErr)
+		}
+		findings := quorumAccessRouteFindings(globalOptions, metadataStatus)
+		findings = append(findings, quorum.Findings...)
+		result.QuorumChecked = true
+		result.QuorumNonCompliant = !quorum.Compliant || len(findings) != 0
+		result.MinimumCustodians = quorum.MinimumCustodians
+		result.PrincipalVerified = quorum.PrincipalVerified
+		result.HardwareVerified = quorum.HardwareVerified
+		result.CustodyAssumed = quorum.CustodyAssumed
+		for _, finding := range findings {
+			if options.MaxFindings == 0 || uint(len(result.Findings)) < options.MaxFindings {
+				result.Findings = append(result.Findings, maintenance.Finding{Kind: "quorum_bypass", Key: finding})
+			}
+		}
 	}
 	if !globalOptions.JSON {
 		printer.P("legacy locations: %d; SlateDB locations: %d; differences: %d; aggregate mismatches: %d\n", result.LegacyLocations, result.SlateDBLocations, result.MissingInSlateDB+result.MissingInLegacy, result.AggregateMismatch)
