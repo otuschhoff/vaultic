@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/global"
@@ -104,6 +105,8 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumFinalizeCommand(globalOptions, options),
 		newIndexKeysQuorumVerifyCommand(globalOptions),
 		newIndexKeysQuorumEnrollFIDO2Command(),
+		newIndexKeysQuorumGenerateAttestationKeyCommand(globalOptions),
+		newIndexKeysQuorumAttestBypassesCommand(globalOptions),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "create-group"),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "add-member"),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "remove-member"),
@@ -1200,13 +1203,16 @@ func newIndexKeysStoreMasterKeyCommand(globalOptions *global.Options, options *i
 }
 
 func newIndexKeysStatusCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
-	var capsulePath string
+	var capsulePath, bypassAttestation, bypassAttestationKey string
 	command := &cobra.Command{Use: "status", Short: "Show redacted metadata and quorum key status", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
 		status, err := withKeyClient(command.Context(), *options, func(client *daemon.Client) (daemon.KeyStatus, error) { return client.KeyStatus(command.Context()) })
 		if err != nil {
 			return err
 		}
 		if capsulePath == "" {
+			if bypassAttestation != "" || bypassAttestationKey != "" {
+				return fmt.Errorf("--bypass-attestation and --bypass-attestation-key require --capsule")
+			}
 			printKeyStatus(globalOptions, status)
 			return nil
 		}
@@ -1230,6 +1236,7 @@ func newIndexKeysStatusCommand(globalOptions *global.Options, options *indexKeys
 			return err
 		}
 		findings := quorumAccessRouteFindings(*globalOptions, status)
+		findings = append(findings, quorumAttestationFindings(capsule, bypassAttestation, bypassAttestationKey, time.Now())...)
 		findings = append(findings, quorum.Findings...)
 		compliant := quorum.Compliant && len(findings) == 0
 		result := struct {
@@ -1250,6 +1257,8 @@ func newIndexKeysStatusCommand(globalOptions *global.Options, options *indexKeys
 		return nil
 	}}
 	command.Flags().StringVar(&capsulePath, "capsule", "", "local immutable recovery capsule to verify against the running broker")
+	command.Flags().StringVar(&bypassAttestation, "bypass-attestation", "", "mode-0600 signed non-discoverable bypass attestation")
+	command.Flags().StringVar(&bypassAttestationKey, "bypass-attestation-key", "", "mode-0600 pinned Ed25519 attestation public key")
 	return command
 }
 

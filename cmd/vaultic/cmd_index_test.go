@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -23,11 +25,12 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/ui"
 )
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "quorum", "create-group"}, {"index", "keys", "quorum", "add-member"}, {"index", "keys", "quorum", "remove-member"}, {"index", "keys", "quorum", "set-threshold"}, {"index", "keys", "quorum", "replace-member"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "quorum", "generate-attestation-key"}, {"index", "keys", "quorum", "attest-bypasses"}, {"index", "keys", "quorum", "create-group"}, {"index", "keys", "quorum", "add-member"}, {"index", "keys", "quorum", "remove-member"}, {"index", "keys", "quorum", "set-threshold"}, {"index", "keys", "quorum", "replace-member"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
@@ -226,6 +229,157 @@ func TestQuorumAccessRouteFindingsEnumeratesCompleteKeyBypasses(t *testing.T) {
 	}
 	if clean := quorumAccessRouteFindings(global.Options{}, daemon.KeyStatus{}); len(clean) != 0 {
 		t.Fatalf("clean broker route reported findings: %v", clean)
+	}
+}
+
+type testCapsuleIdentity struct {
+	repositoryID string
+	generation   uint64
+	logicalID    string
+	policyHash   string
+}
+
+func (identity testCapsuleIdentity) RepositoryID() string { return identity.repositoryID }
+func (identity testCapsuleIdentity) Generation() uint64   { return identity.generation }
+func (identity testCapsuleIdentity) LogicalID() string    { return identity.logicalID }
+func (identity testCapsuleIdentity) PolicyHash() string   { return identity.policyHash }
+
+func TestQuorumAttestationFindingsVerifiesSignedCapsuleBinding(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	identity := testCapsuleIdentity{"repo-a", 7, "capsule-a", "policy-a"}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "attestation.pub")
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(publicKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := quorumBypassAttestation{
+		Version: 1, RepositoryID: identity.repositoryID, CapsuleGeneration: identity.generation,
+		CapsuleLogicalID: identity.logicalID, PolicyHash: identity.policyHash,
+		IssuedUnix: now.Add(-time.Hour).Unix(), ExpiresUnix: now.Add(24 * time.Hour).Unix(),
+		Statements: quorumBypassStatements{true, true, true, true, true, true},
+	}
+	writeAttestation := func(t *testing.T, attestation quorumBypassAttestation, mode os.FileMode) string {
+		t.Helper()
+		payload, err := attestation.signedPayload()
+		if err != nil {
+			t.Fatal(err)
+		}
+		attestation.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+		encoded, err := json.Marshal(attestation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "attestation.json")
+		if err := os.WriteFile(path, encoded, mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	if findings := quorumAttestationFindings(identity, writeAttestation(t, valid, 0o600), keyPath, now); len(findings) != 0 {
+		t.Fatalf("valid attestation findings = %v", findings)
+	}
+
+	tests := []struct {
+		name        string
+		change      func(*quorumBypassAttestation)
+		wantFinding string
+	}{
+		{"capsule mismatch", func(value *quorumBypassAttestation) { value.CapsuleGeneration++ }, "does not match"},
+		{"expired", func(value *quorumBypassAttestation) { value.ExpiresUnix = now.Unix() }, "expired"},
+		{"overlong validity", func(value *quorumBypassAttestation) {
+			value.ExpiresUnix = value.IssuedUnix + int64(91*24*time.Hour/time.Second)
+		}, "validity window"},
+		{"missing statement", func(value *quorumBypassAttestation) { value.Statements.NoWarmRestartMaterial = false }, "warm-restart"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			attestation := valid
+			test.change(&attestation)
+			findings := quorumAttestationFindings(identity, writeAttestation(t, attestation, 0o600), keyPath, now)
+			if len(findings) == 0 || !strings.Contains(findings[0], test.wantFinding) {
+				t.Fatalf("findings = %v, want %q", findings, test.wantFinding)
+			}
+		})
+	}
+
+	tamperedPath := writeAttestation(t, valid, 0o600)
+	tampered, err := os.ReadFile(tamperedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered = bytes.Replace(tampered, []byte(`"repository_id":"repo-a"`), []byte(`"repository_id":"repo-b"`), 1)
+	if err := os.WriteFile(tamperedPath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if findings := quorumAttestationFindings(identity, tamperedPath, keyPath, now); len(findings) == 0 || !strings.Contains(findings[0], "signature") {
+		t.Fatalf("tampered attestation findings = %v", findings)
+	}
+	undomained := valid
+	undomained.Signature = ""
+	undomainedPayload, err := json.Marshal(undomained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	undomained.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, undomainedPayload))
+	undomainedPath := filepath.Join(t.TempDir(), "undomained.json")
+	undomainedJSON, err := json.Marshal(undomained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(undomainedPath, undomainedJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if findings := quorumAttestationFindings(identity, undomainedPath, keyPath, now); len(findings) == 0 || !strings.Contains(findings[0], "signature") {
+		t.Fatalf("undomained signature findings = %v", findings)
+	}
+
+	if runtime.GOOS != "windows" {
+		unprotectedPath := writeAttestation(t, valid, 0o644)
+		if findings := quorumAttestationFindings(identity, unprotectedPath, keyPath, now); len(findings) == 0 || !strings.Contains(findings[0], "group or others") {
+			t.Fatalf("unprotected attestation findings = %v", findings)
+		}
+	}
+}
+
+func TestGenerateQuorumAttestationKeyCommand(t *testing.T) {
+	directory := t.TempDir()
+	privateKeyPath := filepath.Join(directory, "attestation.key")
+	publicKeyPath := filepath.Join(directory, "attestation.pub")
+	options := &global.Options{Term: &ui.MockTerminal{}}
+	command := newIndexKeysQuorumGenerateAttestationKeyCommand(options)
+	command.SetArgs([]string{"--private-key", privateKeyPath, "--public-key", publicKeyPath})
+	if err := command.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	privateEncoded, err := readProtectedBinary(privateKeyPath, "private key", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := base64.StdEncoding.DecodeString(string(privateEncoded))
+	if err != nil || len(privateKey) != ed25519.PrivateKeySize {
+		t.Fatalf("generated private key is invalid: %v", err)
+	}
+	publicEncoded, err := readProtectedBinary(publicKeyPath, "public key", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(string(publicEncoded))
+	if err != nil || !bytes.Equal(publicKey, privateKey[ed25519.SeedSize:]) {
+		t.Fatalf("generated public key does not match private key: %v", err)
+	}
+	originalPrivate := append([]byte(nil), privateEncoded...)
+	second := newIndexKeysQuorumGenerateAttestationKeyCommand(options)
+	second.SetArgs([]string{"--private-key", privateKeyPath, "--public-key", publicKeyPath})
+	if err := second.ExecuteContext(t.Context()); err == nil {
+		t.Fatal("existing attestation key was overwritten")
+	}
+	unchangedPrivate, err := os.ReadFile(privateKeyPath)
+	if err != nil || !bytes.Equal(bytes.TrimSpace(unchangedPrivate), originalPrivate) {
+		t.Fatalf("private key changed after overwrite attempt: %v", err)
 	}
 }
 

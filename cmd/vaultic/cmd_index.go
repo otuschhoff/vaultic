@@ -415,14 +415,16 @@ func runIndexExport(ctx context.Context, options indexExportOptions, globalOptio
 }
 
 type indexCheckOptions struct {
-	Daemon           indexDaemonOptions
-	MaxFindings      uint
-	LegacyOnly       bool
-	SlateDBOnly      bool
-	IncludeCrawlDebt bool
-	FailOnWarning    bool
-	PathIndexPaths   []string
-	QuorumCapsule    string
+	Daemon               indexDaemonOptions
+	MaxFindings          uint
+	LegacyOnly           bool
+	SlateDBOnly          bool
+	IncludeCrawlDebt     bool
+	FailOnWarning        bool
+	PathIndexPaths       []string
+	QuorumCapsule        string
+	BypassAttestation    string
+	BypassAttestationKey string
 }
 
 func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
@@ -445,11 +447,16 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().BoolVar(&options.FailOnWarning, "fail-on-warning", false, "return exit status 2 for expected incompleteness warnings")
 	command.Flags().StringSliceVar(&options.PathIndexPaths, "path-index", nil, "validate pv path-index entries for these paths")
 	command.Flags().StringVar(&options.QuorumCapsule, "quorum-capsule", "", "verify quorum policy and access routes against this capsule and the configured metadata key broker")
+	command.Flags().StringVar(&options.BypassAttestation, "bypass-attestation", "", "mode-0600 signed non-discoverable bypass attestation")
+	command.Flags().StringVar(&options.BypassAttestationKey, "bypass-attestation-key", "", "mode-0600 pinned Ed25519 attestation public key")
 	return command
 }
 
 func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions global.Options, term ui.Terminal) (maintenance.CheckResult, error) {
 	var result maintenance.CheckResult
+	if options.QuorumCapsule == "" && (options.BypassAttestation != "" || options.BypassAttestationKey != "") {
+		return result, fmt.Errorf("--bypass-attestation and --bypass-attestation-key require --quorum-capsule")
+	}
 	config, err := options.Daemon.config("")
 	if err != nil {
 		return result, err
@@ -510,6 +517,7 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			return result, fmt.Errorf("read metadata key status for quorum check: %w", connectErr)
 		}
 		findings := quorumAccessRouteFindings(globalOptions, metadataStatus)
+		findings = append(findings, quorumAttestationFindings(capsule, options.BypassAttestation, options.BypassAttestationKey, time.Now())...)
 		findings = append(findings, quorum.Findings...)
 		result.QuorumChecked = true
 		result.QuorumNonCompliant = !quorum.Compliant || len(findings) != 0

@@ -244,8 +244,39 @@ capsule with the running broker's authenticated repository, generation,
 logical capsule ID, and policy hash. ``index keys status --capsule`` and
 ``index check --quorum-capsule`` additionally report configured password,
 direct-key, Azure-secret, no-password, key-in-DB, metadata-passphrase, and
-standalone metadata-slot bypasses. External plaintext exports and escrow copies
-cannot be discovered reliably and remain operator-audited custody items.
+standalone metadata-slot bypasses. Routes that cannot be discovered from the
+running process and repository require a signed operator inventory. Generate and
+protect a dedicated Ed25519 keypair, with the private key held by the security
+reviewer and the public key pinned on hosts that evaluate compliance::
+
+  $ vaultic index keys quorum generate-attestation-key \
+      --private-key /secure/bypass-attestation.key \
+      --public-key /etc/vaultic/bypass-attestation.pub
+
+After inventorying every storage system, custodian workstation, automation host,
+backup, escrow destination, and restart mechanism, sign an attestation bound to the
+exact repository, capsule generation, logical capsule identity, and policy hash::
+
+  $ vaultic index keys quorum attest-bypasses \
+      --capsule /secure/recovery-capsule.json \
+      --private-key /secure/bypass-attestation.key \
+      --output /secure/bypass-attestation.json \
+      --valid-for 720h \
+      --confirm-no-plaintext-key-exports \
+      --confirm-no-external-standalone-escrow \
+      --confirm-generation-anchors-current \
+      --confirm-broker-credentials-protected \
+      --confirm-no-warm-restart-material \
+      --confirm-offline-custodian-separation
+
+Pass both ``--bypass-attestation`` and ``--bypass-attestation-key`` with
+``index keys status --capsule`` or ``index check --quorum-capsule``. Compliance
+fails closed when either file is absent, unprotected, malformed, signed by another
+key, expired, valid for more than 90 days, bound to another capsule, or missing any
+statement. Reissue after every policy or capsule-generation change and rotate the
+signing key through a separately reviewed public-key deployment. An attestation is
+an auditable assertion, not proof by itself; retain the reviewed inventory and
+destruction evidence with it.
 
 The capsule library and online mutation workflow support mixed offline and
 externally wrapped members. Custodian contribution adapters are available for
