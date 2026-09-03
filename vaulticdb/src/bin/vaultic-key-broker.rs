@@ -1,9 +1,8 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::BTreeSet,
-    env,
-    fs,
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
     os::{
         fd::AsRawFd,
         unix::fs::{FileTypeExt, MetadataExt},
@@ -31,8 +30,12 @@ use vaulticdb::{
         unix_time_ms, Capability, ClientAuthorization, ClientIdentity, EncryptedContribution,
         KeyBroker,
     },
-    encryption::recovery_capsule::RecoveryCapsule,
+    encryption::recovery_capsule::{
+        ExternalMemberProtection, HardwareBinding, MemberCredential, MemberProtection,
+        MemberProvider, PrincipalBinding, RecoveryCapsule, UnlockPolicy,
+    },
 };
+use zeroize::Zeroizing;
 
 const PROTOCOL_VERSION: &str = "vaultic-key-broker.v1";
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -47,6 +50,8 @@ struct BrokerConfig {
     socket_path: PathBuf,
     #[serde(default)]
     maximum_unlocked_seconds: Option<u64>,
+    #[serde(default)]
+    identity_recovery: bool,
     authorizations: Vec<FileAuthorization>,
 }
 
@@ -63,12 +68,47 @@ struct FileAuthorization {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizedOperation {
+    component: String,
+    version: u64,
+    release_identity: String,
+    release_signature: String,
+    challenge_response: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfflinePolicyMember {
+    member_id: String,
+    provider: MemberProvider,
+    credential: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalPolicyMember {
+    member_id: String,
+    provider: MemberProvider,
+    key_reference: String,
+    principal: Option<PrincipalBinding>,
+    hardware: Option<HardwareBinding>,
+    bearer_token: Option<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum BrokerRequest {
-    Negotiate { protocols: Vec<String> },
+    Negotiate {
+        protocols: Vec<String>,
+    },
     Status,
-    CreateSession { ttl_seconds: u64 },
-    SubmitContribution { contribution: EncryptedContribution },
+    CreateSession {
+        ttl_seconds: u64,
+    },
+    SubmitContribution {
+        contribution: EncryptedContribution,
+    },
     AcquireLease {
         component: String,
         version: u64,
@@ -78,7 +118,27 @@ enum BrokerRequest {
         ttl_seconds: u64,
         challenge_response: String,
     },
-    ReleaseLease { lease_id: String },
+    ReleaseLease {
+        lease_id: String,
+    },
+    PreparePolicyMutation {
+        authorization: AuthorizedOperation,
+        policy: UnlockPolicy,
+        members: Vec<OfflinePolicyMember>,
+        #[serde(default)]
+        external_members: Vec<ExternalPolicyMember>,
+        acknowledge_downgrade: bool,
+    },
+    ActivatePolicyMutation {
+        authorization: AuthorizedOperation,
+        capsule_sha256: String,
+    },
+    PendingPolicyMutation {
+        authorization: AuthorizedOperation,
+    },
+    CancelPolicyMutation {
+        authorization: AuthorizedOperation,
+    },
     Lock,
 }
 
@@ -105,6 +165,10 @@ enum BrokerResponse {
         custody_assumed: bool,
         compliant: bool,
         findings: Vec<String>,
+        policy_mutation_pending: bool,
+        pending_capsule_generation: Option<u64>,
+        pending_capsule_sha256: Option<String>,
+        identity_recovery: bool,
     },
     Session {
         session: vaulticdb::broker::SignedSession,
@@ -120,6 +184,10 @@ enum BrokerResponse {
         key_version: u32,
         capsule_generation: u64,
         key: String,
+    },
+    PolicyMutationPrepared {
+        capsule: RecoveryCapsule,
+        capsule_sha256: String,
     },
     Ok,
     Error {
@@ -141,14 +209,30 @@ struct ConnectionProtocol {
     lease_challenge: Option<String>,
 }
 
+#[derive(Serialize)]
+struct BrokerSecurityEvent<'a> {
+    timestamp_unix_ms: u64,
+    severity: &'a str,
+    category: &'a str,
+    component: &'static str,
+    event: &'a str,
+    fields: BTreeMap<&'a str, String>,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     disable_core_dumps();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments.first().is_some_and(|argument| argument == "identity-init") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "identity-init")
+    {
         return identity_init(&arguments[1..]);
     }
-    if arguments.first().is_some_and(|argument| argument == "release-sign") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "release-sign")
+    {
         return release_sign(&arguments[1..]);
     }
     let config_path = arguments
@@ -169,6 +253,16 @@ async fn main() -> Result<()> {
             &config.repository_id,
         )?
         .context("no recovery capsule generation found")?;
+    emit_security_event(
+        "notice",
+        "integrity",
+        "capsule_discovered",
+        &[
+            ("repository_id", config.repository_id.clone()),
+            ("capsule_generation", capsule.header.generation.to_string()),
+            ("capsule_logical_id", capsule.header.logical_id.clone()),
+        ],
+    );
     let identity_bytes = fs::read(&config.identity_key_path)?;
     let identity = SigningKey::from_bytes(
         &identity_bytes
@@ -197,12 +291,11 @@ async fn main() -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     let maximum_lifetime = config.maximum_unlocked_seconds.map(Duration::from_secs);
-    let broker = Arc::new(Mutex::new(KeyBroker::new(
-        capsule,
-        identity,
-        authorizations,
-        maximum_lifetime,
-    )?));
+    let broker = Arc::new(Mutex::new(if config.identity_recovery {
+        KeyBroker::new_identity_recovery(capsule, identity, authorizations, maximum_lifetime)?
+    } else {
+        KeyBroker::new(capsule, identity, authorizations, maximum_lifetime)?
+    }));
     let lock_notification = Arc::new(Notify::new());
 
     prepare_socket_parent(&config.socket_path)?;
@@ -228,6 +321,7 @@ async fn main() -> Result<()> {
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 broker.lock().await.lock();
+                emit_security_event("critical", "lifecycle", "broker_locked_for_shutdown", &[]);
                 break;
             }
         }
@@ -245,7 +339,9 @@ fn identity_init(arguments: &[std::ffi::OsString]) -> Result<()> {
     let public_path = PathBuf::from(&arguments[1]);
     let identity = SigningKey::generate(&mut LegacyOsRng);
     write_new_file(&private_path, identity.as_bytes(), 0o600)?;
-    let mut public = BASE64.encode(identity.verifying_key().as_bytes()).into_bytes();
+    let mut public = BASE64
+        .encode(identity.verifying_key().as_bytes())
+        .into_bytes();
     public.push(b'\n');
     if let Err(error) = write_new_file(&public_path, &public, 0o644) {
         let _ = fs::remove_file(private_path);
@@ -346,19 +442,30 @@ async fn serve_connection(
         } else {
             match serde_json::from_slice::<BrokerRequest>(&request) {
                 Ok(request) => {
-                    let requests_lock = matches!(&request, BrokerRequest::Lock);
+                    let requests_lock = matches!(
+                        &request,
+                        BrokerRequest::Lock | BrokerRequest::ActivatePolicyMutation { .. }
+                    );
                     let response = handle_request(
-                    request,
-                    &broker,
-                    &connection_id,
-                    &peer,
-                    &endpoint_binding,
-                    &mut protocol,
-                )
+                        request,
+                        &broker,
+                        &connection_id,
+                        &peer,
+                        &endpoint_binding,
+                        &mut protocol,
+                    )
                     .await
-                    .unwrap_or_else(|error| BrokerResponse::Error {
-                    code: "request_rejected",
-                    message: error.to_string(),
+                    .unwrap_or_else(|error| {
+                        emit_security_event(
+                            "warning",
+                            "auth",
+                            "request_rejected",
+                            &[("connection_id", connection_id.clone())],
+                        );
+                        BrokerResponse::Error {
+                            code: "request_rejected",
+                            message: error.to_string(),
+                        }
                     });
                     if requests_lock {
                         lock_notification.notify_waiters();
@@ -377,6 +484,12 @@ async fn serve_connection(
         writer.flush().await?;
     }
     broker.lock().await.disconnect(&connection_id);
+    emit_security_event(
+        "notice",
+        "lifecycle",
+        "connection_closed_leases_revoked",
+        &[("connection_id", connection_id)],
+    );
     Ok(())
 }
 
@@ -390,6 +503,26 @@ async fn handle_request(
 ) -> Result<BrokerResponse> {
     let now = unix_time_ms()?;
     let mut broker = broker.lock().await;
+    let expiration = broker.expire_state(now);
+    if expiration.expired_sessions != 0 {
+        emit_security_event(
+            "notice",
+            "lifecycle",
+            "sessions_expired",
+            &[("expired_sessions", expiration.expired_sessions.to_string())],
+        );
+    }
+    if expiration.expired_leases != 0 {
+        emit_security_event(
+            "warning",
+            "lifecycle",
+            "leases_expired_or_revoked",
+            &[("expired_leases", expiration.expired_leases.to_string())],
+        );
+    }
+    if expiration.automatic_lock {
+        emit_security_event("critical", "lifecycle", "maximum_epoch_lifetime_lock", &[]);
+    }
     if let BrokerRequest::Negotiate { protocols } = &request {
         if protocol.negotiated {
             bail!("broker protocol is already negotiated");
@@ -428,19 +561,55 @@ async fn handle_request(
                 custody_assumed: status.custody_assumed,
                 compliant: status.compliant,
                 findings: status.findings,
+                policy_mutation_pending: status.policy_mutation_pending,
+                pending_capsule_generation: status.pending_capsule_generation,
+                pending_capsule_sha256: status.pending_capsule_sha256,
+                identity_recovery: status.identity_recovery,
             })
         }
-        BrokerRequest::CreateSession { ttl_seconds } => Ok(BrokerResponse::Session {
-            session: broker.create_session(
-                endpoint_binding,
-                Duration::from_secs(ttl_seconds),
-                now,
-            )?,
-        }),
+        BrokerRequest::CreateSession { ttl_seconds } => {
+            let session =
+                broker.create_session(endpoint_binding, Duration::from_secs(ttl_seconds), now)?;
+            emit_security_event(
+                "notice",
+                "auth",
+                "session_created",
+                &[
+                    ("session_id", session.transcript.session_id.clone()),
+                    ("repository_id", session.transcript.repository_id.clone()),
+                    (
+                        "capsule_generation",
+                        session.transcript.capsule_generation.to_string(),
+                    ),
+                    (
+                        "expires_unix_ms",
+                        session.transcript.expires_unix_ms.to_string(),
+                    ),
+                    (
+                        "identity_recovery",
+                        session.transcript.identity_recovery.to_string(),
+                    ),
+                ],
+            );
+            Ok(BrokerResponse::Session { session })
+        }
         BrokerRequest::SubmitContribution { contribution } => {
-            Ok(BrokerResponse::Contribution {
-                unlocked: broker.submit_contribution(contribution, now)?,
-            })
+            let session_id = contribution.session_id.clone();
+            let unlocked = broker.submit_contribution(contribution, now)?;
+            emit_security_event(
+                if unlocked { "critical" } else { "notice" },
+                "auth",
+                if unlocked {
+                    "quorum_completed"
+                } else {
+                    "contribution_accepted"
+                },
+                &[
+                    ("session_id", session_id),
+                    ("unlocked", unlocked.to_string()),
+                ],
+            );
+            Ok(BrokerResponse::Contribution { unlocked })
         }
         BrokerRequest::AcquireLease {
             component,
@@ -470,12 +639,22 @@ async fn handle_request(
                 executable_owned_by_root: peer.owned_by_root,
                 installation_path_read_only: peer.installation_path_read_only,
             };
-            let lease = broker.acquire_lease(
-                &client,
-                capability,
-                Duration::from_secs(ttl_seconds),
-                now,
-            )?;
+            let lease =
+                broker.acquire_lease(&client, capability, Duration::from_secs(ttl_seconds), now)?;
+            emit_security_event(
+                "notice",
+                "auth",
+                "lease_granted",
+                &[
+                    ("connection_id", connection_id.to_owned()),
+                    ("component", client.component.clone()),
+                    ("version", client.version.to_string()),
+                    ("release_identity", client.release_identity.clone()),
+                    ("capability", format!("{:?}", lease.capability)),
+                    ("lease_id", lease.lease_id.clone()),
+                    ("expires_unix_ms", lease.expires_unix_ms.to_string()),
+                ],
+            );
             Ok(BrokerResponse::Lease {
                 lease_id: lease.lease_id,
                 epoch_id: lease.epoch_id,
@@ -488,13 +667,189 @@ async fn handle_request(
         }
         BrokerRequest::ReleaseLease { lease_id } => {
             broker.release_lease(&lease_id, connection_id)?;
+            emit_security_event(
+                "notice",
+                "lifecycle",
+                "lease_released",
+                &[
+                    ("connection_id", connection_id.to_owned()),
+                    ("lease_id", lease_id),
+                ],
+            );
+            Ok(BrokerResponse::Ok)
+        }
+        BrokerRequest::PreparePolicyMutation {
+            authorization,
+            policy,
+            members,
+            external_members,
+            acknowledge_downgrade,
+        } => {
+            let client = authorized_client(protocol, peer, connection_id, authorization)?;
+            let credentials = members
+                .into_iter()
+                .map(|member| {
+                    if member.member_id.is_empty() || member.credential.is_empty() {
+                        bail!("policy member ID and credential must not be empty");
+                    }
+                    let credential = BASE64
+                        .decode(member.credential)
+                        .context("decode policy member credential")?;
+                    if credential.is_empty() {
+                        bail!("policy member credential must not be empty");
+                    }
+                    match member.provider {
+                        MemberProvider::OfflineArgon2id | MemberProvider::OfflineKeyfile => Ok((
+                            member.member_id,
+                            member.provider,
+                            Zeroizing::new(credential),
+                        )),
+                        _ => bail!("offline policy member has an external provider"),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut external_providers = Vec::with_capacity(external_members.len());
+            for member in external_members {
+                if member.member_id.is_empty() || member.key_reference.is_empty() {
+                    bail!("external policy member ID and key reference must not be empty");
+                }
+                let provider_name = match member.provider {
+                    MemberProvider::AzureKeyVault => "azure-key-vault",
+                    MemberProvider::AwsKms | MemberProvider::AwsCloudhsm => "aws-kms",
+                    MemberProvider::GcpKms | MemberProvider::GcpCloudHsm => "gcp-kms",
+                    _ => bail!("unsupported external policy member provider"),
+                };
+                let provider = vaulticdb::encryption::envelope::providers::for_management(
+                    provider_name,
+                    member.bearer_token.clone(),
+                )
+                .await?;
+                external_providers.push((member, provider));
+            }
+            let mut protections = credentials
+                .iter()
+                .map(|(member_id, provider, credential)| {
+                    let credential = match provider {
+                        MemberProvider::OfflineArgon2id => {
+                            MemberCredential::Passphrase(credential.as_slice())
+                        }
+                        MemberProvider::OfflineKeyfile => {
+                            MemberCredential::Keyfile(credential.as_slice())
+                        }
+                        _ => unreachable!("validated above"),
+                    };
+                    (member_id.as_str(), MemberProtection::Offline(credential))
+                })
+                .collect::<Vec<_>>();
+            protections.extend(external_providers.iter().map(|(member, provider)| {
+                (
+                    member.member_id.as_str(),
+                    MemberProtection::External(ExternalMemberProtection {
+                        provider: member.provider.clone(),
+                        key_reference: &member.key_reference,
+                        principal: member.principal.clone(),
+                        hardware: member.hardware.clone(),
+                        key_provider: provider.as_ref(),
+                    }),
+                )
+            }));
+            let (capsule, capsule_sha256) = broker
+                .prepare_policy_mutation(&client, policy, &protections, acknowledge_downgrade, now)
+                .await?;
+            emit_security_event(
+                if acknowledge_downgrade {
+                    "critical"
+                } else {
+                    "notice"
+                },
+                "lifecycle",
+                "policy_mutation_prepared",
+                &[
+                    ("repository_id", capsule.header.repository_id.clone()),
+                    ("capsule_generation", capsule.header.generation.to_string()),
+                    ("capsule_sha256", capsule_sha256.clone()),
+                ],
+            );
+            Ok(BrokerResponse::PolicyMutationPrepared {
+                capsule,
+                capsule_sha256,
+            })
+        }
+        BrokerRequest::ActivatePolicyMutation {
+            authorization,
+            capsule_sha256,
+        } => {
+            let client = authorized_client(protocol, peer, connection_id, authorization)?;
+            broker.activate_policy_mutation(&client, &capsule_sha256)?;
+            emit_security_event(
+                "critical",
+                "lifecycle",
+                "policy_mutation_activated_and_locked",
+                &[("capsule_sha256", capsule_sha256)],
+            );
+            Ok(BrokerResponse::Ok)
+        }
+        BrokerRequest::PendingPolicyMutation { authorization } => {
+            let client = authorized_client(protocol, peer, connection_id, authorization)?;
+            let (capsule, capsule_sha256) = broker.pending_policy_mutation(&client)?;
+            Ok(BrokerResponse::PolicyMutationPrepared {
+                capsule,
+                capsule_sha256,
+            })
+        }
+        BrokerRequest::CancelPolicyMutation { authorization } => {
+            let client = authorized_client(protocol, peer, connection_id, authorization)?;
+            broker.authorize_client(&client, Capability::PolicyMutation)?;
+            broker.cancel_policy_mutation()?;
+            emit_security_event(
+                "warning",
+                "lifecycle",
+                "policy_mutation_cancelled",
+                &[
+                    ("component", client.component),
+                    ("release_identity", client.release_identity),
+                ],
+            );
             Ok(BrokerResponse::Ok)
         }
         BrokerRequest::Lock => {
             broker.lock();
+            emit_security_event(
+                "critical",
+                "lifecycle",
+                "broker_locked",
+                &[("connection_id", connection_id.to_owned())],
+            );
             Ok(BrokerResponse::Ok)
         }
     }
+}
+
+fn authorized_client(
+    protocol: &mut ConnectionProtocol,
+    peer: &PeerProcess,
+    connection_id: &str,
+    authorization: AuthorizedOperation,
+) -> Result<ClientIdentity> {
+    let challenge = protocol
+        .lease_challenge
+        .take()
+        .context("authorization challenge is missing or already consumed")?;
+    let expected = lease_challenge_response(&challenge, &peer.executable_sha256);
+    if authorization.challenge_response != expected {
+        bail!("authorization challenge response is invalid");
+    }
+    Ok(ClientIdentity {
+        connection_id: connection_id.to_owned(),
+        component: authorization.component,
+        version: authorization.version,
+        release_identity: authorization.release_identity,
+        executable_sha256: peer.executable_sha256.clone(),
+        release_signature: authorization.release_signature,
+        peer_uid: peer.uid,
+        executable_owned_by_root: peer.owned_by_root,
+        installation_path_read_only: peer.installation_path_read_only,
+    })
 }
 
 fn inspect_peer(stream: &UnixStream) -> Result<PeerProcess> {
@@ -571,9 +926,7 @@ fn trusted_installation_path(executable: &Path) -> Result<bool> {
     let canonical = executable.canonicalize()?;
     for path in canonical.ancestors() {
         let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink()
-            || metadata.uid() != 0
-            || metadata.mode() & 0o022 != 0
+        if metadata.file_type().is_symlink() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0
         {
             return Ok(false);
         }
@@ -588,13 +941,18 @@ fn require_private_regular_file(path: &Path) -> Result<()> {
         || metadata.file_type().is_symlink()
         || metadata.mode() & 0o077 != 0
     {
-        bail!("{} must be a non-symlink regular file with mode 0600 or stricter", path.display());
+        bail!(
+            "{} must be a non-symlink regular file with mode 0600 or stricter",
+            path.display()
+        );
     }
     Ok(())
 }
 
 fn prepare_socket_parent(path: &Path) -> Result<()> {
-    let parent = path.parent().context("broker socket has no parent directory")?;
+    let parent = path
+        .parent()
+        .context("broker socket has no parent directory")?;
     fs::create_dir_all(parent)?;
     set_mode(parent, 0o700)
 }
@@ -635,6 +993,55 @@ fn lease_challenge_response(challenge: &str, executable_sha256: &str) -> String 
     )
 }
 
+fn emit_security_event(severity: &str, category: &str, event: &str, fields: &[(&str, String)]) {
+    match security_event_json(severity, category, event, fields) {
+        Ok(encoded) => eprintln!("{encoded}"),
+        Err(error) => eprintln!("vaultic-key-broker: security event rejected: {error}"),
+    }
+}
+
+fn security_event_json(
+    severity: &str,
+    category: &str,
+    event: &str,
+    fields: &[(&str, String)],
+) -> Result<String> {
+    const ALLOWED_FIELDS: &[&str] = &[
+        "repository_id",
+        "capsule_generation",
+        "capsule_logical_id",
+        "session_id",
+        "member_id",
+        "unlocked",
+        "connection_id",
+        "component",
+        "version",
+        "release_identity",
+        "capability",
+        "lease_id",
+        "expires_unix_ms",
+        "identity_recovery",
+        "capsule_sha256",
+        "expired_sessions",
+        "expired_leases",
+    ];
+    let mut encoded_fields = BTreeMap::new();
+    for (name, value) in fields {
+        if !ALLOWED_FIELDS.contains(name) {
+            bail!("security event field {name:?} is not allowlisted");
+        }
+        encoded_fields.insert(*name, value.clone());
+    }
+    Ok(serde_json::to_string(&BrokerSecurityEvent {
+        timestamp_unix_ms: unix_time_ms()?,
+        severity,
+        category,
+        component: "vaultic-key-broker",
+        event,
+        fields: encoded_fields,
+    })?)
+}
+
 fn disable_core_dumps() {
     #[cfg(unix)]
     unsafe {
@@ -651,6 +1058,22 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signature, Verifier};
     use std::ffi::OsString;
+    use vaulticdb::{
+        broker::{encrypt_offline_contribution, ClientAuthorization},
+        encryption::recovery_capsule::{CapsuleBuilder, MemberCredential},
+    };
+
+    async fn exchange(stream: &mut UnixStream, request: serde_json::Value) -> serde_json::Value {
+        let mut encoded = serde_json::to_vec(&request).unwrap();
+        encoded.push(b'\n');
+        stream.write_all(&encoded).await.unwrap();
+        let mut response = Vec::new();
+        BufReader::new(stream)
+            .read_until(b'\n', &mut response)
+            .await
+            .unwrap();
+        serde_json::from_slice(&response).unwrap()
+    }
 
     #[test]
     fn provisioning_creates_pinned_identity_and_verifiable_release() {
@@ -670,7 +1093,11 @@ mod tests {
         assert_eq!(fs::read(&identity_private).unwrap().len(), 32);
         assert_eq!(
             BASE64
-                .decode(String::from_utf8(fs::read(&identity_public).unwrap()).unwrap().trim())
+                .decode(
+                    String::from_utf8(fs::read(&identity_public).unwrap())
+                        .unwrap()
+                        .trim()
+                )
                 .unwrap()
                 .len(),
             32
@@ -692,7 +1119,10 @@ mod tests {
         .unwrap();
         let manifest: vaulticdb::broker::ReleaseManifest =
             serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
-        assert_eq!(manifest.executable_sha256, format!("{:x}", Sha256::digest(fs::read(executable).unwrap())));
+        assert_eq!(
+            manifest.executable_sha256,
+            format!("{:x}", Sha256::digest(fs::read(executable).unwrap()))
+        );
         let message = serde_json::to_vec(&(
             "vaultic-client-release-v1",
             &manifest.component,
@@ -702,7 +1132,10 @@ mod tests {
         ))
         .unwrap();
         let signature = Signature::from_slice(&BASE64.decode(manifest.signature).unwrap()).unwrap();
-        release_key.verifying_key().verify(&message, &signature).unwrap();
+        release_key
+            .verifying_key()
+            .verify(&message, &signature)
+            .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -714,7 +1147,10 @@ mod tests {
         assert_eq!(response.len(), 64);
         assert_eq!(response, lease_challenge_response(challenge, &digest));
         assert_ne!(response, lease_challenge_response("challenge-b", &digest));
-        assert_ne!(response, lease_challenge_response(challenge, &"cd".repeat(32)));
+        assert_ne!(
+            response,
+            lease_challenge_response(challenge, &"cd".repeat(32))
+        );
     }
 
     #[test]
@@ -723,7 +1159,257 @@ mod tests {
             negotiated: true,
             lease_challenge: Some("challenge-a".to_owned()),
         };
-        assert_eq!(protocol.lease_challenge.take().as_deref(), Some("challenge-a"));
+        assert_eq!(
+            protocol.lease_challenge.take().as_deref(),
+            Some("challenge-a")
+        );
         assert!(protocol.lease_challenge.take().is_none());
+    }
+
+    #[test]
+    fn security_events_reject_secret_bearing_fields() {
+        assert!(security_event_json(
+            "notice",
+            "auth",
+            "lease_granted",
+            &[
+                ("component", "vaultic".to_owned()),
+                ("release_identity", "release-a".to_owned())
+            ],
+        )
+        .unwrap()
+        .contains("\"component\":\"vaultic-key-broker\""));
+        assert!(security_event_json(
+            "warning",
+            "auth",
+            "request_rejected",
+            &[("bearer_token", "secret-token".to_owned())],
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn unix_service_negotiates_connections_independently_and_broadcasts_lock() {
+        let identity = SigningKey::generate(&mut LegacyOsRng);
+        let capsule = CapsuleBuilder::new("repo-a", 1)
+            .broker_identity_public_key(identity.verifying_key().as_bytes())
+            .create_offline_threshold(
+                "operators",
+                1,
+                &[("alice", MemberCredential::Passphrase(b"alice passphrase"))],
+                &[7; 32],
+                b"repository-master-key",
+            )
+            .unwrap();
+        let broker = Arc::new(Mutex::new(
+            KeyBroker::new(capsule, identity, Vec::new(), None).unwrap(),
+        ));
+        let notification = Arc::new(Notify::new());
+        let (mut client_a, server_a) = UnixStream::pair().unwrap();
+        let (mut client_b, server_b) = UnixStream::pair().unwrap();
+        let task_a = tokio::spawn(serve_connection(
+            server_a,
+            broker.clone(),
+            "unix:/test/broker.sock".to_owned(),
+            notification.clone(),
+        ));
+        let task_b = tokio::spawn(serve_connection(
+            server_b,
+            broker.clone(),
+            "unix:/test/broker.sock".to_owned(),
+            notification,
+        ));
+
+        for stream in [&mut client_a, &mut client_b] {
+            let response = exchange(
+                stream,
+                serde_json::json!({"operation":"negotiate","protocols":[PROTOCOL_VERSION]}),
+            )
+            .await;
+            assert_eq!(response["result"], "negotiated");
+            assert_eq!(response["protocol"], PROTOCOL_VERSION);
+            assert!(response["challenge"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+        }
+        let status = exchange(&mut client_b, serde_json::json!({"operation":"status"})).await;
+        assert_eq!(status["result"], "status");
+        assert_eq!(status["repository_id"], "repo-a");
+
+        let locked = exchange(&mut client_a, serde_json::json!({"operation":"lock"})).await;
+        assert_eq!(locked["result"], "ok");
+        let mut closed = Vec::new();
+        assert_eq!(
+            client_b
+                .readable()
+                .await
+                .and_then(|_| client_b.try_read_buf(&mut closed))
+                .unwrap(),
+            0
+        );
+
+        drop(client_a);
+        task_a.await.unwrap().unwrap();
+        task_b.await.unwrap().unwrap();
+        assert!(broker.lock().await.status(unix_time_ms().unwrap()).locked);
+    }
+
+    #[tokio::test]
+    async fn protocol_policy_mutation_retains_candidate_until_exact_activation() {
+        let identity = SigningKey::generate(&mut LegacyOsRng);
+        let release_key = SigningKey::from_bytes(&[6; 32]);
+        let capsule = CapsuleBuilder::new("repo-a", 1)
+            .broker_identity_public_key(identity.verifying_key().as_bytes())
+            .create_offline_threshold(
+                "operators",
+                1,
+                &[("alice", MemberCredential::Passphrase(b"alice passphrase"))],
+                &[7; 32],
+                b"repository-master-key",
+            )
+            .unwrap();
+        let authorizations = vec![ClientAuthorization {
+            component: "vaultic".to_owned(),
+            minimum_version: 20,
+            maximum_version: 20,
+            release_identity: "release-a".to_owned(),
+            release_public_key: release_key.verifying_key().to_bytes(),
+            peer_uid: 42,
+            capabilities: BTreeSet::from([Capability::PolicyMutation]),
+        }];
+        let mut state = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let session = state
+            .create_session("unix:/test/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        let contribution = encrypt_offline_contribution(
+            &capsule,
+            &session,
+            "unix:/test/broker.sock",
+            "alice",
+            &MemberCredential::Passphrase(b"alice passphrase"),
+            1,
+            None,
+            1_001,
+        )
+        .unwrap();
+        assert!(state.submit_contribution(contribution, 1_002).unwrap());
+        let broker = Mutex::new(state);
+        let peer = PeerProcess {
+            uid: 42,
+            executable_sha256: "ab".repeat(32),
+            owned_by_root: true,
+            installation_path_read_only: true,
+        };
+        let authorize = |challenge: &str| {
+            let manifest = serde_json::to_vec(&(
+                "vaultic-client-release-v1",
+                "vaultic",
+                20_u64,
+                &peer.executable_sha256,
+                "release-a",
+            ))
+            .unwrap();
+            AuthorizedOperation {
+                component: "vaultic".to_owned(),
+                version: 20,
+                release_identity: "release-a".to_owned(),
+                release_signature: BASE64.encode(release_key.sign(&manifest).to_bytes()),
+                challenge_response: lease_challenge_response(challenge, &peer.executable_sha256),
+            }
+        };
+        let mut protocol = ConnectionProtocol {
+            negotiated: true,
+            lease_challenge: Some("prepare-challenge".to_owned()),
+        };
+        let prepared = handle_request(
+            BrokerRequest::PreparePolicyMutation {
+                authorization: authorize("prepare-challenge"),
+                policy: UnlockPolicy::Threshold {
+                    group_id: "operators".to_owned(),
+                    required: 1,
+                    members: vec!["bob".to_owned()],
+                },
+                members: vec![OfflinePolicyMember {
+                    member_id: "bob".to_owned(),
+                    provider: MemberProvider::OfflineArgon2id,
+                    credential: BASE64.encode(b"bob passphrase"),
+                }],
+                external_members: Vec::new(),
+                acknowledge_downgrade: false,
+            },
+            &broker,
+            "connection-a",
+            &peer,
+            "unix:/test/broker.sock",
+            &mut protocol,
+        )
+        .await
+        .unwrap();
+        let digest = match prepared {
+            BrokerResponse::PolicyMutationPrepared {
+                capsule,
+                capsule_sha256,
+            } => {
+                assert_eq!(capsule.header.generation, 2);
+                capsule_sha256
+            }
+            _ => panic!("unexpected mutation response"),
+        };
+        protocol.lease_challenge = Some("pending-challenge".to_owned());
+        let pending = handle_request(
+            BrokerRequest::PendingPolicyMutation {
+                authorization: authorize("pending-challenge"),
+            },
+            &broker,
+            "connection-a",
+            &peer,
+            "unix:/test/broker.sock",
+            &mut protocol,
+        )
+        .await
+        .unwrap();
+        match pending {
+            BrokerResponse::PolicyMutationPrepared {
+                capsule,
+                capsule_sha256,
+            } => {
+                assert_eq!(capsule.header.generation, 2);
+                assert_eq!(capsule_sha256, digest);
+            }
+            _ => panic!("unexpected pending mutation response"),
+        }
+        protocol.lease_challenge = Some("wrong-challenge".to_owned());
+        assert!(handle_request(
+            BrokerRequest::ActivatePolicyMutation {
+                authorization: authorize("wrong-challenge"),
+                capsule_sha256: "00".repeat(32),
+            },
+            &broker,
+            "connection-a",
+            &peer,
+            "unix:/test/broker.sock",
+            &mut protocol,
+        )
+        .await
+        .is_err());
+        assert!(broker.lock().await.status(1_003).policy_mutation_pending);
+        protocol.lease_challenge = Some("activate-challenge".to_owned());
+        handle_request(
+            BrokerRequest::ActivatePolicyMutation {
+                authorization: authorize("activate-challenge"),
+                capsule_sha256: digest,
+            },
+            &broker,
+            "connection-a",
+            &peer,
+            "unix:/test/broker.sock",
+            &mut protocol,
+        )
+        .await
+        .unwrap();
+        let status = broker.lock().await.status(1_004);
+        assert!(status.locked);
+        assert_eq!(status.capsule_generation, 2);
+        assert!(!status.policy_mutation_pending);
     }
 }

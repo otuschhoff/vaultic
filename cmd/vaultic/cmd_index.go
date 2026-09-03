@@ -119,6 +119,7 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 	config := daemon.Options{
 		Socket: options.Socket, TCPAddress: options.TCPAddress, TCPAllowlist: options.TCPAllowlist,
 		AuthToken: options.AuthToken, RepositoryID: repositoryID, DataDir: options.DataDir,
+		DaemonPath:  options.DaemonPath,
 		ObjectStore: options.ObjectStore, S3Bucket: options.S3Bucket, S3Prefix: options.S3Prefix,
 		EncryptionMode: options.EncryptionMode, PassphraseFile: options.PassphraseFile,
 		AzureTokenFile: options.AzureTokenFile, GCPTokenFile: options.GCPTokenFile, VaultTokenFile: options.VaultTokenFile, PKCS11PINFile: options.PKCS11PINFile,
@@ -127,7 +128,6 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		BrokerLease: options.BrokerLease, RebuildInitialize: options.RebuildInitialize,
 	}
 	if options.Start {
-		config.DaemonPath = options.DaemonPath
 		config.PersistentDaemon = options.Persistent
 	}
 	return config, nil
@@ -224,19 +224,14 @@ func runIndexImport(ctx context.Context, options indexImportOptions, globalOptio
 		if !options.ConfirmMetadataLossRebuild || !options.Activate || !options.Daemon.Start || !globalOptions.MetadataLossRecovery {
 			return result, fmt.Errorf("metadata rebuild initialization requires --confirm-metadata-loss-rebuild, --activate, --start-daemon, and --metadata-loss-recovery")
 		}
-		if options.Daemon.DataDir == "" || options.Daemon.ObjectStore == "s3" {
-			return result, fmt.Errorf("metadata rebuild initialization currently requires a new local --daemon-data-dir candidate")
-		}
-		if _, statErr := os.Stat(options.Daemon.DataDir); !errors.Is(statErr, os.ErrNotExist) {
-			if statErr != nil {
-				return result, fmt.Errorf("inspect metadata rebuild candidate: %w", statErr)
-			}
-			return result, fmt.Errorf("metadata rebuild candidate directory already exists")
+		candidate, err := validateMetadataRebuildTarget(options.Daemon)
+		if err != nil {
+			return result, err
 		}
 		if globalOptions.KeyBrokerSocket == "" || options.Daemon.BrokerSocket != globalOptions.KeyBrokerSocket {
 			return result, fmt.Errorf("metadata rebuild requires the repository and candidate daemon to use the same key broker")
 		}
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index", Message: "authenticated metadata rebuild started", Fields: map[string]any{"candidate_data_dir": options.Daemon.DataDir}})
+		_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index", Message: "authenticated metadata rebuild started", Fields: map[string]any{"candidate": candidate}})
 	}
 	config, err := options.Daemon.config("")
 	if err != nil {
@@ -292,13 +287,13 @@ func runIndexImport(ctx context.Context, options indexImportOptions, globalOptio
 			if !validation.Clean() || validation.HasWarnings() {
 				return result, fmt.Errorf("rebuilt metadata candidate failed validation: %d findings, %d warnings", len(validation.Findings), validation.Warnings)
 			}
-			_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index", Message: "authenticated metadata rebuild candidate validated", Fields: map[string]any{"candidate_data_dir": options.Daemon.DataDir, "packs": result.PacksImported, "blobs": result.BlobsImported}})
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index", Message: "authenticated metadata rebuild candidate validated", Fields: map[string]any{"candidate": rebuildCandidateName(options.Daemon), "packs": result.PacksImported, "blobs": result.BlobsImported}})
 		}
 		if activateErr := repo.EnableSlateDBAuthority(ctx, client); activateErr != nil {
 			return result, fmt.Errorf("activate SlateDB authority: %w", activateErr)
 		}
 		if options.Daemon.RebuildInitialize {
-			_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "authenticated metadata rebuild activated", Fields: map[string]any{"candidate_data_dir": options.Daemon.DataDir}})
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "authenticated metadata rebuild activated", Fields: map[string]any{"candidate": rebuildCandidateName(options.Daemon)}})
 		}
 		keepStore = true
 	}
@@ -315,6 +310,39 @@ func runIndexImport(ctx context.Context, options indexImportOptions, globalOptio
 		return result, fmt.Errorf("%w: import completed with %d findings", errIndexIncomplete, result.ErrorsSeen)
 	}
 	return result, nil
+}
+
+func validateMetadataRebuildTarget(options indexDaemonOptions) (string, error) {
+	if options.ObjectStore == "s3" {
+		if options.DataDir != "" {
+			return "", fmt.Errorf("S3 metadata rebuild candidate does not accept --daemon-data-dir")
+		}
+		prefix := strings.Trim(options.S3Prefix, "/")
+		if options.S3Bucket == "" || prefix == "" {
+			return "", fmt.Errorf("S3 metadata rebuild candidate requires --daemon-s3-bucket and a dedicated non-empty --daemon-s3-prefix")
+		}
+		return "s3://" + options.S3Bucket + "/" + prefix, nil
+	}
+	if options.ObjectStore != "" && options.ObjectStore != "local" {
+		return "", fmt.Errorf("metadata rebuild candidate must use a persistent local or S3 object store")
+	}
+	if options.DataDir == "" {
+		return "", fmt.Errorf("local metadata rebuild candidate requires a new --daemon-data-dir")
+	}
+	if _, err := os.Stat(options.DataDir); !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			return "", fmt.Errorf("inspect metadata rebuild candidate: %w", err)
+		}
+		return "", fmt.Errorf("metadata rebuild candidate directory already exists")
+	}
+	return options.DataDir, nil
+}
+
+func rebuildCandidateName(options indexDaemonOptions) string {
+	if options.ObjectStore == "s3" {
+		return "s3://" + options.S3Bucket + "/" + strings.Trim(options.S3Prefix, "/")
+	}
+	return options.DataDir
 }
 
 func openIndexStore(ctx context.Context, repo *repository.Repository, options indexDaemonOptions) (*daemon.SchemaStore, *daemon.Client, func(), error) {

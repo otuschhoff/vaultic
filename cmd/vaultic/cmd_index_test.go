@@ -5,10 +5,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +26,7 @@ import (
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "quorum", "create-group"}, {"index", "keys", "quorum", "add-member"}, {"index", "keys", "quorum", "remove-member"}, {"index", "keys", "quorum", "set-threshold"}, {"index", "keys", "quorum", "replace-member"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
@@ -33,6 +35,100 @@ func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	command, args, err := root.Find([]string{"list", "index"})
 	if err != nil || command == nil || command.Name() != "list" || len(args) != 1 || args[0] != "index" {
 		t.Fatalf("list index = %v, %v, %v", command, args, err)
+	}
+}
+
+func TestMutateThresholdPolicyOperations(t *testing.T) {
+	current := indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 2, Members: []string{"alice", "bob", "carol"}}
+	tests := []struct {
+		name      string
+		operation string
+		args      []string
+		threshold uint32
+		want      indexbroker.UnlockPolicy
+	}{
+		{name: "create", operation: "create-group", args: []string{"new-operators"}, threshold: 2, want: indexbroker.UnlockPolicy{Type: "threshold", GroupID: "new-operators", Required: 2}},
+		{name: "add", operation: "add-member", args: []string{"dana"}, want: indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 2, Members: []string{"alice", "bob", "carol", "dana"}}},
+		{name: "remove", operation: "remove-member", args: []string{"carol"}, want: indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 2, Members: []string{"alice", "bob"}}},
+		{name: "threshold", operation: "set-threshold", args: []string{"3"}, want: indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 3, Members: []string{"alice", "bob", "carol"}}},
+		{name: "replace", operation: "replace-member", args: []string{"alice", "dana"}, want: indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 2, Members: []string{"bob", "carol", "dana"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := mutateThresholdPolicy(current, test.operation, test.args, "", test.threshold)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(test.want) {
+				t.Fatalf("policy = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+	twoOfTwo := indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 2, Members: []string{"alice", "bob"}}
+	if _, err := mutateThresholdPolicy(twoOfTwo, "remove-member", []string{"bob"}, "", 0); err == nil {
+		t.Fatal("removal below the active threshold was accepted")
+	}
+	if _, err := mutateThresholdPolicy(current, "replace-member", []string{"alice", "bob"}, "", 0); err == nil {
+		t.Fatal("replacement with an existing member was accepted")
+	}
+	if err := validatePolicyMemberCredentials(current, []indexbroker.OfflinePolicyMember{{MemberID: "alice"}, {MemberID: "bob"}}, nil); err == nil {
+		t.Fatal("incomplete resulting credential set was accepted")
+	}
+}
+
+func TestParseExternalPolicyMembers(t *testing.T) {
+	root := t.TempDir()
+	tokenPath := filepath.Join(root, "token")
+	if err := os.WriteFile(tokenPath, []byte("azure-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	azurePath := filepath.Join(root, "azure.json")
+	azure := fmt.Sprintf(`{"member_id":"azure-a","provider":"azure-key-vault","key_reference":"https://example.vault.azure.net/keys/key/version","principal":{"authority":"entra","tenant_account_or_project":"tenant-a","immutable_principal_id":"object-a"},"bearer_token_file":%q}`, tokenPath)
+	if err := os.WriteFile(azurePath, []byte(azure), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	members, tokens, err := parseExternalPolicyMembers([]string{azurePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearPolicyCredentials(tokens)
+	if len(members) != 1 || members[0].BearerToken == nil || *members[0].BearerToken != "azure-token" {
+		t.Fatalf("external members = %#v", members)
+	}
+	policy := indexbroker.UnlockPolicy{Type: "threshold", GroupID: "operators", Required: 2, Members: []string{"offline-a", "azure-a"}}
+	if err := validatePolicyMemberCredentials(policy, []indexbroker.OfflinePolicyMember{{MemberID: "offline-a"}}, members); err != nil {
+		t.Fatal(err)
+	}
+
+	awsPath := filepath.Join(root, "aws.json")
+	aws := fmt.Sprintf(`{"member_id":"aws-a","provider":"aws-kms","key_reference":"arn:aws:kms:us-east-1:123456789012:key/abc","principal":{"authority":"aws-iam","tenant_account_or_project":"123456789012","immutable_principal_id":"arn:aws:iam::123456789012:role/operator"},"bearer_token_file":%q}`, tokenPath)
+	if err := os.WriteFile(awsPath, []byte(aws), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parseExternalPolicyMembers([]string{awsPath}); err == nil || !strings.Contains(err.Error(), "SDK credential chain") {
+		t.Fatalf("AWS bearer token file was accepted: %v", err)
+	}
+}
+
+func TestValidateComposedPolicyMemberCredentials(t *testing.T) {
+	policy := indexbroker.UnlockPolicy{Type: "all_of", Policies: []indexbroker.UnlockPolicy{
+		{Type: "member", MemberID: "offline-a"},
+		{Type: "any_of", Policies: []indexbroker.UnlockPolicy{
+			{Type: "member", MemberID: "cloud-a"},
+			{Type: "threshold", GroupID: "backup", Required: 1, Members: []string{"offline-b", "cloud-b"}},
+		}},
+	}}
+	offline := []indexbroker.OfflinePolicyMember{{MemberID: "offline-a"}, {MemberID: "offline-b"}}
+	external := []indexbroker.ExternalPolicyMember{{MemberID: "cloud-a"}, {MemberID: "cloud-b"}}
+	if err := validatePolicyMemberCredentials(policy, offline, external); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := indexbroker.UnlockPolicy{Type: "all_of", Policies: []indexbroker.UnlockPolicy{
+		{Type: "member", MemberID: "same"},
+		{Type: "member", MemberID: "same"},
+	}}
+	if err := validatePolicyMemberCredentials(duplicate, []indexbroker.OfflinePolicyMember{{MemberID: "same"}}, nil); err == nil || !strings.Contains(err.Error(), "appears more than once") {
+		t.Fatalf("duplicate policy member was accepted: %v", err)
 	}
 }
 
@@ -56,9 +152,9 @@ func TestVerifyQuorumStatusFailsClosed(t *testing.T) {
 
 func TestQuorumAccessRouteFindingsEnumeratesCompleteKeyBypasses(t *testing.T) {
 	options := global.Options{PasswordFile: "password", MasterKeyCommand: "key-command", AzureKeyVaultURL: "https://vault", MetadataKeyInDB: true, MetadataPassphraseFile: "metadata-password"}
-	status := daemon.KeyStatus{Slots: []daemon.KeySlotInfo{{ID: "recovery", Provider: "local-argon2id"}}}
+	status := daemon.KeyStatus{Slots: []daemon.KeySlotInfo{{ID: "recovery", Provider: "local-argon2id"}}, PendingCapsuleMigrationSHA256: strings.Repeat("a", 64)}
 	findings := quorumAccessRouteFindings(options, status)
-	if len(findings) != 6 {
+	if len(findings) != 7 || !slices.Contains(findings, "capsule migration is prepared but not finalized") {
 		t.Fatalf("bypass findings = %v", findings)
 	}
 	if clean := quorumAccessRouteFindings(global.Options{}, daemon.KeyStatus{}); len(clean) != 0 {
@@ -126,6 +222,26 @@ func TestMetadataRebuildImportRequiresRecoveryGuards(t *testing.T) {
 				t.Fatalf("metadata rebuild guard = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateMetadataRebuildTarget(t *testing.T) {
+	local := filepath.Join(t.TempDir(), "new-candidate")
+	if target, err := validateMetadataRebuildTarget(indexDaemonOptions{DataDir: local}); err != nil || target != local {
+		t.Fatalf("local candidate = %q, %v", target, err)
+	}
+	remote := indexDaemonOptions{ObjectStore: "s3", S3Bucket: "metadata-bucket", S3Prefix: "/repo-a/rebuild-2026/"}
+	if target, err := validateMetadataRebuildTarget(remote); err != nil || target != "s3://metadata-bucket/repo-a/rebuild-2026" {
+		t.Fatalf("remote candidate = %q, %v", target, err)
+	}
+	for _, invalid := range []indexDaemonOptions{
+		{ObjectStore: "s3", S3Bucket: "metadata-bucket"},
+		{ObjectStore: "s3", S3Bucket: "metadata-bucket", S3Prefix: "candidate", DataDir: local},
+		{ObjectStore: "memory"},
+	} {
+		if _, err := validateMetadataRebuildTarget(invalid); err == nil {
+			t.Fatalf("invalid rebuild target accepted: %+v", invalid)
+		}
 	}
 }
 

@@ -41,14 +41,14 @@ use proto::{
     vaultic_db_server::{VaulticDb, VaulticDbServer},
     AddCloudKeySlotRequest, AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest,
     CapabilitiesResponse, CommitResponse, Empty, EncryptionAuditResponse, EscrowMasterKeyRequest,
-    EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, GetRequest, GetResponse, HealthRequest,
-    HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest,
-    MasterKeyResponse, MultiGetRequest, MultiGetResponse, RecoverEscrowRequest,
-    FinalizeCapsuleMigrationRequest, PrepareCapsuleMigrationRequest,
-    PrepareCapsuleMigrationResponse,
-    RemoveKeySlotRequest, RequestContext, RewriteDekRequest, RewriteDekResponse, RotateDekRequest,
-    RotateLocalKeySlotRequest, ScanRequest, ScanResponse, StoreMasterKeyRequest,
-    TransactionRequest, WriteBatchRequest, WriteBatchResponse,
+    EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, FinalizeCapsuleMigrationRequest,
+    GetRequest, GetResponse, HealthRequest, HealthResponse, KeySlotInfo, KeyStatusRequest,
+    KeyStatusResponse, MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
+    PrepareCapsuleMigrationRequest, PrepareCapsuleMigrationResponse, PublishCapsuleMutationRequest,
+    PublishCapsuleMutationResponse, RecoverEscrowRequest, RemoveKeySlotRequest, RequestContext,
+    RewriteDekRequest, RewriteDekResponse, RotateDekRequest, RotateLocalKeySlotRequest,
+    ScanRequest, ScanResponse, StoreMasterKeyRequest, TransactionRequest, WriteBatchRequest,
+    WriteBatchResponse,
 };
 use zeroize::Zeroizing;
 
@@ -83,6 +83,38 @@ struct Service {
 
 #[tonic::async_trait]
 impl VaulticDb for Service {
+    async fn publish_capsule_mutation(
+        &self,
+        request: Request<PublishCapsuleMutationRequest>,
+    ) -> Result<Response<PublishCapsuleMutationResponse>, Status> {
+        self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
+        let request = request.into_inner();
+        let capsule = validate_capsule_mutation(
+            std::path::Path::new(&request.capsule_directory),
+            &request.repository_id,
+            &request.capsule,
+            &request.capsule_sha256,
+            request.identity_recovery,
+        )
+        .map_err(key_management_error)?;
+        let manager = self.storage.key_manager()?;
+        let mirror_path = manager
+            .publish_capsule_mirror(&capsule)
+            .await
+            .map_err(key_management_error)?;
+        let local_path = encryption::recovery_capsule::publish_local(
+            std::path::Path::new(&request.capsule_directory),
+            &capsule,
+        )
+        .map_err(key_management_error)?;
+        Ok(Response::new(PublishCapsuleMutationResponse {
+            generation: capsule.header.generation,
+            local_path: local_path.display().to_string(),
+            mirror_path,
+            capsule_sha256: request.capsule_sha256,
+        }))
+    }
+
     async fn prepare_capsule_migration(
         &self,
         request: Request<PrepareCapsuleMigrationRequest>,
@@ -93,8 +125,14 @@ impl VaulticDb for Service {
             return Err(Status::invalid_argument("invalid capsule threshold"));
         }
         let manager = self.storage.key_manager()?;
-        let audit = manager.audit_objects().await.map_err(key_management_error)?;
-        if audit.invalid_objects != 0 || audit.plaintext_objects != 0 || audit.old_version_objects != 0 {
+        let audit = manager
+            .audit_objects()
+            .await
+            .map_err(key_management_error)?;
+        if audit.invalid_objects != 0
+            || audit.plaintext_objects != 0
+            || audit.old_version_objects != 0
+        {
             return Err(Status::failed_precondition(
                 "all metadata objects must authenticate under the active DEK before migration",
             ));
@@ -103,12 +141,10 @@ impl VaulticDb for Service {
             .active_dek_for_migration()
             .await
             .map_err(key_management_error)?;
-        let repository_master_key = Zeroizing::new(
-            self.storage
-                .get_master_key()
-                .await?
-                .ok_or_else(|| Status::failed_precondition("repository master key is not stored"))?,
-        );
+        let repository_master_key =
+            Zeroizing::new(self.storage.get_master_key().await?.ok_or_else(|| {
+                Status::failed_precondition("repository master key is not stored")
+            })?);
         let protected_credentials = request
             .members
             .iter_mut()
@@ -124,9 +160,17 @@ impl VaulticDb for Service {
             .iter()
             .map(|(member_id, provider, credential)| {
                 let credential = match provider.as_str() {
-                    "offline-argon2id" => encryption::recovery_capsule::MemberCredential::Passphrase(credential.as_slice()),
-                    "offline-keyfile" => encryption::recovery_capsule::MemberCredential::Keyfile(credential.as_slice()),
-                    _ => return Err(Status::invalid_argument("migration currently accepts offline-argon2id and offline-keyfile members")),
+                    "offline-argon2id" => {
+                        encryption::recovery_capsule::MemberCredential::Passphrase(
+                            credential.as_slice(),
+                        )
+                    }
+                    "offline-keyfile" => encryption::recovery_capsule::MemberCredential::Keyfile(
+                        credential.as_slice(),
+                    ),
+                    _ => return Err(Status::invalid_argument(
+                        "migration currently accepts offline-argon2id and offline-keyfile members",
+                    )),
                 };
                 Ok((member_id.as_str(), credential))
             })
@@ -144,7 +188,10 @@ impl VaulticDb for Service {
             &repository_master_key,
         )
         .map_err(key_management_error)?;
-        let verification = credentials.iter().map(|(member, credential)| ((*member).to_owned(), *credential)).collect();
+        let verification = credentials
+            .iter()
+            .map(|(member, credential)| ((*member).to_owned(), *credential))
+            .collect();
         capsule
             .recover_offline(&verification)
             .map_err(key_management_error)?;
@@ -161,7 +208,9 @@ impl VaulticDb for Service {
             .map_err(|error| key_management_error(error.into()))?;
         encoded.push(b'\n');
         let capsule_sha256 = format!("{:x}", Sha256::digest(&encoded));
-        self.storage.record_capsule_migration(&capsule_sha256).await?;
+        self.storage
+            .record_capsule_migration(&capsule_sha256)
+            .await?;
         Ok(Response::new(PrepareCapsuleMigrationResponse {
             generation: capsule.header.generation,
             local_path: local_path.display().to_string(),
@@ -178,13 +227,9 @@ impl VaulticDb for Service {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
         let repository_id = request.get_ref().repository_id.as_str();
         let capsule_sha256 = request.get_ref().capsule_sha256.as_str();
-        let master_key = self
-            .storage
-            .get_master_key()
-            .await?
-            .ok_or_else(|| {
-                Status::failed_precondition("repository master key is not stored in the database")
-            })?;
+        let master_key = self.storage.get_master_key().await?.ok_or_else(|| {
+            Status::failed_precondition("repository master key is not stored in the database")
+        })?;
         verify_capsule_migration_proof(
             &master_key,
             repository_id,
@@ -630,6 +675,89 @@ fn verify_capsule_migration_proof(
         .map_err(|_| Status::permission_denied("capsule-recovered repository key proof failed"))
 }
 
+fn validate_capsule_mutation(
+    capsule_directory: &std::path::Path,
+    repository_id: &str,
+    encoded: &[u8],
+    expected_digest: &str,
+    identity_recovery: bool,
+) -> Result<encryption::recovery_capsule::RecoveryCapsule> {
+    if capsule_directory.as_os_str().is_empty() || expected_digest.len() != 64 {
+        bail!("capsule directory and SHA-256 digest are required");
+    }
+    let capsule: encryption::recovery_capsule::RecoveryCapsule =
+        serde_json::from_slice(encoded).context("decode recovery capsule")?;
+    capsule.validate()?;
+    let canonical = serde_json::to_vec(&capsule)?;
+    if canonical != encoded {
+        bail!("recovery capsule must use canonical JSON encoding");
+    }
+    if capsule.header.repository_id != repository_id {
+        bail!("recovery capsule repository identity mismatch");
+    }
+    if format!("{:x}", Sha256::digest(&canonical)) != expected_digest {
+        bail!("recovery capsule digest mismatch");
+    }
+    let (_, current) =
+        encryption::recovery_capsule::discover_latest(capsule_directory, repository_id)?
+            .context("current recovery capsule is missing")?;
+    if capsule.header.generation == current.header.generation {
+        if capsule != current {
+            bail!("recovery capsule generation conflicts with the current capsule");
+        }
+        return Ok(capsule);
+    }
+    let expected_generation = current
+        .header
+        .generation
+        .checked_add(1)
+        .context("capsule generation overflow")?;
+    if capsule.header.generation != expected_generation {
+        bail!("capsule mutation generation is not sequential");
+    }
+    let identity_changed =
+        capsule.header.broker_identity_public_key != current.header.broker_identity_public_key;
+    if identity_changed != identity_recovery {
+        bail!("broker identity pin change does not match identity-recovery declaration");
+    }
+    Ok(capsule)
+}
+
+async fn publish_capsule_without_database(arguments: &[String]) -> Result<()> {
+    if arguments.len() != 5 {
+        bail!("usage: vaulticdb publish-capsule CAPSULE_DIRECTORY CAPSULE_FILE SHA256 IDENTITY_RECOVERY");
+    }
+    let repository_id =
+        env::var("VAULTICDB_REPOSITORY_ID").context("VAULTICDB_REPOSITORY_ID is required")?;
+    let capsule_directory = PathBuf::from(&arguments[1]);
+    let encoded = std::fs::read(&arguments[2])
+        .with_context(|| format!("read recovery capsule {}", arguments[2]))?;
+    let identity_recovery = arguments[4]
+        .parse::<bool>()
+        .context("IDENTITY_RECOVERY must be true or false")?;
+    let capsule = validate_capsule_mutation(
+        &capsule_directory,
+        &repository_id,
+        &encoded,
+        &arguments[3],
+        identity_recovery,
+    )?;
+    let (_, object_store) = storage::object_store(&repository_id)?;
+    let mirror_path =
+        encryption::recovery_capsule::publish_mirror(object_store.as_ref(), &capsule).await?;
+    let local_path = encryption::recovery_capsule::publish_local(&capsule_directory, &capsule)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "generation": capsule.header.generation,
+            "local_path": local_path,
+            "mirror_path": mirror_path,
+            "capsule_sha256": arguments[3],
+        })
+    );
+    Ok(())
+}
+
 impl Service {
     fn check_key_request<T>(
         &self,
@@ -648,6 +776,8 @@ impl Service {
     async fn key_status_response(&self) -> Result<KeyStatusResponse, Status> {
         let (envelope_generation, active_dek_version, slots) =
             self.storage.key_manager()?.status().await;
+        let (pending_capsule_migration_sha256, finalized_capsule_migration_sha256) =
+            self.storage.capsule_migration_status().await?;
         Ok(KeyStatusResponse {
             envelope_generation,
             active_dek_version,
@@ -662,6 +792,9 @@ impl Service {
                     dek_version: slot.dek_version,
                 })
                 .collect(),
+            pending_capsule_migration_sha256: pending_capsule_migration_sha256.unwrap_or_default(),
+            finalized_capsule_migration_sha256: finalized_capsule_migration_sha256
+                .unwrap_or_default(),
         })
     }
 }
@@ -822,6 +955,13 @@ fn repository_key(repository_id: &str) -> String {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     disable_core_dumps();
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "publish-capsule")
+    {
+        return publish_capsule_without_database(&arguments).await;
+    }
     if env::var_os("VAULTICDB_NATIVE_SMOKE").is_some() {
         return native_smoke().await;
     }
@@ -1111,6 +1251,9 @@ fn set_private_socket_permissions(_path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    use vaulticdb::encryption::recovery_capsule::{
+        publish_local, CapsuleBuilder, MemberCredential,
+    };
 
     fn transport_environment_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1167,6 +1310,58 @@ mod tests {
             &proof
         )
         .is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identity_recovery_publishes_capsule_without_opening_database() {
+        let _guard = transport_environment_lock().lock().unwrap();
+        let root = env::temp_dir().join(format!(
+            "vaultic-capsule-publisher-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let capsule_directory = root.join("capsules");
+        let credentials = [
+            ("alice", MemberCredential::Passphrase(b"alice passphrase")),
+            ("bob", MemberCredential::Passphrase(b"bob passphrase")),
+        ];
+        let current = CapsuleBuilder::new("repo-a", 1)
+            .broker_identity_public_key(&[1; 32])
+            .create_offline_threshold("operators", 2, &credentials, &[7; 32], b"master-key")
+            .unwrap();
+        publish_local(&capsule_directory, &current).unwrap();
+        let candidate = CapsuleBuilder::new("repo-a", 2)
+            .broker_identity_public_key(&[2; 32])
+            .create_offline_threshold("operators", 2, &credentials, &[7; 32], b"master-key")
+            .unwrap();
+        let encoded = serde_json::to_vec(&candidate).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&encoded));
+        let candidate_path = root.join("candidate.json");
+        std::fs::write(&candidate_path, encoded).unwrap();
+        unsafe {
+            env::set_var("VAULTICDB_REPOSITORY_ID", "repo-a");
+            env::set_var("VAULTICDB_OBJECT_STORE", "memory");
+        }
+        let arguments = vec![
+            "publish-capsule".to_owned(),
+            capsule_directory.display().to_string(),
+            candidate_path.display().to_string(),
+            digest,
+            "true".to_owned(),
+        ];
+        publish_capsule_without_database(&arguments).await.unwrap();
+        publish_capsule_without_database(&arguments).await.unwrap();
+        let (_, published) =
+            encryption::recovery_capsule::discover_latest(&capsule_directory, "repo-a")
+                .unwrap()
+                .unwrap();
+        assert_eq!(published, candidate);
+        unsafe {
+            env::remove_var("VAULTICDB_REPOSITORY_ID");
+            env::remove_var("VAULTICDB_OBJECT_STORE");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

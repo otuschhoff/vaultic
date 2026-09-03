@@ -247,16 +247,78 @@ direct-key, Azure-secret, no-password, key-in-DB, metadata-passphrase, and
 standalone metadata-slot bypasses. External plaintext exports and escrow copies
 cannot be discovered reliably and remain operator-audited custody items.
 
-The capsule library supports mixed offline and externally wrapped members.
-Custodian contribution adapters are available for Azure Key Vault/Managed
-HSM, AWS KMS and CloudHSM-backed KMS keys, and Google Cloud KMS/Cloud HSM.
+The capsule library and online mutation workflow support mixed offline and
+externally wrapped members. Custodian contribution adapters are available for
+Azure Key Vault/Managed HSM, AWS KMS and CloudHSM-backed KMS keys, and Google
+Cloud KMS/Cloud HSM.
 External share framing binds the complete capsule and member context even when
 the provider wrapping primitive has no native AAD. AWS role sessions are
 normalized to stable IAM role ARNs; CloudHSM members require provider
-attestation of their hardware-backed key origin. The current migration command
-still enrolls only ``offline-argon2id`` and ``offline-keyfile`` members, so use
-of cloud members awaits the generalized policy-enrollment command. YubiKey PIV
-and FIDO2 names remain reserved and are not operational.
+attestation of their hardware-backed key origin. Azure contribution checks the
+provider-accepted token's Key Vault audience, tenant, immutable object ID, and
+expiry. Google contribution checks provider token introspection, project,
+immutable subject, and remaining lifetime. These checks bind the principal
+that the provider accepted; the client does not independently implement the
+provider's JWT signing-key validation.
+
+Online mutation accepts each cloud member through a separate mode-0600 JSON
+definition supplied with repeatable ``--external-member`` flags. The file
+contains no wrapped share, but names the member, provider, immutable key
+reference, and expected principal binding. Azure and Google definitions name a
+separate mode-0600 ``bearer_token_file``; AWS definitions omit it and use the
+SDK credential chain. Tokens, credentials, PINs, and shares must never appear
+in arguments or logs. For example:
+
+.. code-block:: json
+
+  {
+    "member_id": "azure-alice",
+    "provider": "azure-key-vault",
+    "key_reference": "https://example.vault.azure.net/keys/recovery/KEY-VERSION",
+    "principal": {
+      "authority": "entra",
+      "tenant_account_or_project": "TENANT-ID",
+      "immutable_principal_id": "OBJECT-ID"
+    },
+    "bearer_token_file": "/secure/alice.azure-token"
+  }
+
+Live-provider validation and complete IAM/RBAC deployment runbooks remain
+required. YubiKey PIV and FIDO2 names remain reserved and are not operational;
+do not enroll or report them as hardware-backed seats.
+
+Online policy mutation
+======================
+
+``create-group``, ``add-member``, ``remove-member``, ``set-threshold``, and
+``replace-member`` require an unlocked broker and a release manifest authorized
+for ``policy-mutation``. Supply every resulting member protection on every
+mutation. Simple threshold policies use repeatable ``--member`` and
+``--external-member`` inputs. A complete JSON policy supplied with
+``--policy-file`` enables composed ``member``, ``any_of``, ``all_of``, and
+threshold expressions. The broker rejects missing, extra, or duplicate leaves.
+
+The broker recovers the already authenticated metadata DEK and repository
+master key, creates a fresh root and every share, and retains the exact new
+capsule and digest. VaulticDB publishes the repository mirror before the local
+immutable generation. Only then does the broker activate that exact digest and
+relock. Reducing the minimum effective threshold requires
+``--acknowledge-policy-downgrade`` and emits a critical event.
+
+If publication or activation is interrupted, the candidate remains pending.
+Do not start another mutation. Retry the same immutable bytes with:
+
+.. code-block:: console
+
+  $ vaultic index keys quorum resume-mutation \
+      --repository-id REPOSITORY-UUID \
+      --capsule-directory /secure/capsules
+
+The signed resume operation retrieves the exact retained candidate, repeats
+create-only publication idempotently, and activates only its recorded digest.
+Use ``quorum cancel-mutation --confirm`` only after proving that no local or
+repository mirror of the candidate generation was published; cancellation
+cannot revoke immutable bytes that already escaped.
 
 Broker lifecycle and trust boundary
 ===================================
@@ -304,6 +366,35 @@ protect against root, kernel, debugger, broker-process, or authorized-client
 compromise during an unlock epoch. An authorized client receives key bytes in
 protected process memory and can copy them while its lease is valid.
 
+Service installation
+====================
+
+Deployment templates are provided as
+``contrib/systemd/vaultic-key-broker.service`` and
+``contrib/launchd/com.vaultic.key-broker.plist``. Install the broker executable
+at the root-owned, non-writable path in the selected template. Create the
+dedicated ``vaultic`` or ``_vaultic`` account without a login shell or home
+directory. The broker config and identity key must be non-symlink regular files
+owned for that account and mode 0600; capsule directories must be readable by
+it. The service creates the socket parent and socket owner-only. Configure every
+authorized client with the broker account's numeric UID because peer UID is
+part of authorization.
+
+The systemd template uses a read-only filesystem view except for
+``/run/vaultic``, private temporary and device namespaces, no-new-privileges,
+native system calls, and zero core size. It permits ``AF_INET`` and ``AF_INET6``
+outbound connections because online Azure/AWS/GCP policy enrollment is brokered;
+the executable still creates no network listener. Sites using offline-only
+policies can reduce ``RestrictAddressFamilies`` to ``AF_UNIX``. Adjust
+``ReadWritePaths`` only when the socket is deliberately placed elsewhere.
+
+The launchd template is a system LaunchDaemon, sets umask 0077 and zero core
+limits, and restarts only after unsuccessful exit. Install it root-owned under
+``/Library/LaunchDaemons`` after replacing paths and account names. macOS does
+not expose systemd's namespace controls; apply an organization-reviewed sandbox
+profile or endpoint policy in addition to the template. On either platform,
+service restart starts a new locked broker and therefore requires a new quorum.
+
 Unlock ceremony
 ===============
 
@@ -326,7 +417,7 @@ fingerprint differs.
       --session-file /secure/session.json --member alice \
       --passphrase-file /secure/alice.passphrase \
       --generation-anchor /secure/alice.generation \
-      --confirm-fingerprint XXXX-XXXX-XXXX-XXXX-XXXX
+      --confirm-fingerprint XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
 
 The generation anchor is mode 0600 and monotonic. Every contribution carries
 the newest generation that custodian tooling has observed. If storage serves
@@ -371,26 +462,29 @@ opens the repository through a ``metadata-loss-recovery`` lease, authenticates
 the repository configuration and a pack header when packs exist, then obtains
 a fresh broker lease and proves possession of the same repository key to
 VaulticDB with a domain-separated HMAC over the repository and prepared
-capsule digest. Only an exact pending digest and valid key proof atomically
-remove the database master-key record. Wrong or repeated finalization fails
-without deleting the retained route.
+capsule digest. Preparing the same digest is idempotent, while a different
+pending digest or a post-finalization preparation is rejected. Only an exact
+pending digest and valid key proof atomically remove the database master-key
+record. Wrong or repeated finalization fails without deleting the retained
+route. ``index keys status`` exposes the redacted pending or finalized digest;
+an unfinished migration is reported as non-compliant.
 
 .. code-block:: console
 
   $ vaultic index keys quorum migrate-finalize \
       --repository-id REPOSITORY-UUID \
       --state-file /secure/capsule-migration.json --confirm \
-    --retire-legacy-routes --confirm-standalone-escrow-destroyed \
+      --retire-legacy-routes --confirm-standalone-escrow-destroyed \
       --key-broker-socket /run/vaultic/key-broker.sock \
       --key-broker-release-manifest vaultic.release.json
 
-  Finalization removes ordinary repository password-key records and mirrored
-  standalone escrow records after capsule and pack proof succeeds but before the
-  database master-key record is removed. A retirement failure therefore leaves
-  the database route available for a retry. The
-  operator must separately destroy exported escrow and plaintext key files and
-  explicitly attest that fact. Retaining any complete-key copy remains a
-  non-compliant bypass. Preserve historical capsules as
+Finalization removes ordinary repository password-key records and mirrored
+standalone escrow records after capsule and pack proof succeeds but before the
+database master-key record is removed. A retirement failure therefore leaves
+the database route available for a retry. The operator must separately destroy
+exported escrow and plaintext key files and explicitly attest that fact.
+Retaining any complete-key copy remains a non-compliant bypass. Preserve
+historical capsules as
 ciphertext evidence, but remember that resharing does not revoke a copied old
 generation held together with enough old credentials. Rotate and rewrite the
 metadata DEK after retiring a suspected metadata path; repository master-key
@@ -413,15 +507,32 @@ objects, writes authenticated recovery provenance before normal records, and
 Vaultic compares the completed candidate against legacy metadata before
 activating SlateDB authority.
 
-Complete broker-host loss also loses the session-signing identity. The normal
-client correctly rejects sessions not signed by the identity pinned in the
-capsule. Until the separately acknowledged unsigned-session recovery and
-identity re-pinning workflow is enabled, retain a protected backup of the
-broker identity private key with disaster-recovery materials; do not bypass
-signature verification manually. The local candidate rebuild path is
-implemented, but remote-object-store activation and a full
-destruction-to-restore service test remain required before treating metadata
-rebuild coverage as complete.
+For a remote candidate, select ``--daemon-object-store s3`` and provide a
+bucket plus a dedicated non-empty ``--daemon-s3-prefix`` instead of
+``--daemon-data-dir``. Use a new generation-specific prefix whose access policy
+does not permit other writers. The daemon lists that prefix and rejects it if
+any database object already exists; recovery-capsule mirrors under
+``_vaultic/`` do not count as database objects. Activation occurs only after
+the same encrypted provenance, full import, and consistency checks used for a
+local candidate. Preserve the old prefix until the rebuilt authority has been
+independently listed and restored.
+
+Complete broker-host loss also loses the session-signing identity. Start the
+replacement broker only with its explicit identity-recovery configuration and
+a fresh identity key. Recovery sessions are visibly marked and normal clients
+reject them. Every custodian must use ``--unverified-session`` and independently
+compare the displayed fingerprint; this skips only verification against the
+lost identity and does not skip endpoint, repository, generation, expiry,
+transcript, or fingerprint checks. Critical authentication events record each
+acknowledgement. The recovery broker grants no key leases. Its first successful
+operation must publish a fresh capsule generation that pins the replacement
+identity; the no-database publisher supports this even when SlateDB is absent.
+Activation relocks the broker, after which ordinary signed sessions are
+required again.
+
+Local and S3 candidate rebuild plus no-database identity-repin paths are
+implemented, but a credential-gated remote destruction-to-list/restore service
+test remains required before treating metadata rebuild coverage as complete.
 
 Audit ``auth``, ``integrity``, and ``lifecycle`` events remotely. Treat capsule
 rollback, rejected contribution, client authorization denial, unexpected
@@ -430,3 +541,15 @@ authentication failure as security-significant. Run periodic exercises that
 start from an empty metadata directory, verify capsule discovery and
 fingerprints, satisfy every supported policy alternative, list and restore
 packs through a recovery lease, and explicitly relock the broker.
+
+The broker writes one-line structured JSON security events to standard error,
+which systemd and launchd route to their managed logs. Events cover capsule
+discovery, session creation/expiry, accepted contributions and quorum
+completion, lease grant/release/expiry and disconnect revocation, authorization
+rejection, policy mutation prepare/activate/cancel, explicit lock, shutdown
+lock, and maximum-lifetime automatic lock. Event field names are allowlisted
+and exclude credentials, tokens, PINs, shares, keys, and request bodies.
+Client-side observability adds custodian member IDs and
+publication/migration/recovery context that is not visible before an encrypted
+contribution is authenticated. Configure remote collection and retention so a
+lost broker host cannot erase the only generation evidence.

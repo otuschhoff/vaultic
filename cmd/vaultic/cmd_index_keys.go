@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
@@ -100,8 +102,477 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumPrepareCommand(globalOptions, options),
 		newIndexKeysQuorumFinalizeCommand(globalOptions, options),
 		newIndexKeysQuorumVerifyCommand(globalOptions),
+		newIndexKeysQuorumMutationCommand(globalOptions, options, "create-group"),
+		newIndexKeysQuorumMutationCommand(globalOptions, options, "add-member"),
+		newIndexKeysQuorumMutationCommand(globalOptions, options, "remove-member"),
+		newIndexKeysQuorumMutationCommand(globalOptions, options, "set-threshold"),
+		newIndexKeysQuorumMutationCommand(globalOptions, options, "replace-member"),
+		newIndexKeysQuorumResumeMutationCommand(globalOptions, options),
+		newIndexKeysQuorumCancelMutationCommand(globalOptions),
 	)
 	return command
+}
+
+func newIndexKeysQuorumMutationCommand(globalOptions *global.Options, options *indexKeysOptions, operation string) *cobra.Command {
+	var capsulePath, capsuleDirectory, groupID, policyFile string
+	var memberSpecs, externalMemberFiles []string
+	var threshold uint32
+	var acknowledgeDowngrade bool
+	argumentRule := cobra.ExactArgs(1)
+	usage := operation + " MEMBER"
+	if operation == "create-group" {
+		usage = "create-group GROUP"
+	} else if operation == "set-threshold" {
+		usage = "set-threshold THRESHOLD"
+	} else if operation == "replace-member" {
+		usage = "replace-member OLD NEW"
+		argumentRule = cobra.ExactArgs(2)
+	}
+	command := &cobra.Command{Use: usage, Short: "Create and publish a fresh recovery capsule policy generation", Args: argumentRule, DisableAutoGenTag: true, RunE: func(command *cobra.Command, args []string) error {
+		capsule, err := indexbroker.LoadCapsule(capsulePath)
+		if err != nil {
+			return err
+		}
+		if capsule.RepositoryID() != options.RepositoryID {
+			return fmt.Errorf("recovery capsule repository identity mismatch")
+		}
+		current, err := capsule.PolicyDefinition()
+		if err != nil {
+			return err
+		}
+		var policy indexbroker.UnlockPolicy
+		if policyFile != "" {
+			if operation == "create-group" && (threshold != 0 || groupID != "") {
+				return fmt.Errorf("--policy-file cannot be combined with --threshold or --group")
+			}
+			if err := readPolicyDefinition(policyFile, &policy); err != nil {
+				return err
+			}
+		} else {
+			policy, err = mutateThresholdPolicy(current, operation, args, groupID, threshold)
+			if err != nil {
+				return err
+			}
+		}
+		members, credentials, err := parseOfflinePolicyMembers(memberSpecs)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			for _, credential := range credentials {
+				clear(credential)
+			}
+		}()
+		externalMembers, tokens, err := parseExternalPolicyMembers(externalMemberFiles)
+		if err != nil {
+			return err
+		}
+		defer clearPolicyCredentials(tokens)
+		if operation == "create-group" && policyFile == "" {
+			policy.Members = make([]string, 0, len(members)+len(externalMembers))
+			for _, member := range members {
+				policy.Members = append(policy.Members, member.MemberID)
+			}
+			for _, member := range externalMembers {
+				policy.Members = append(policy.Members, member.MemberID)
+			}
+			sort.Strings(policy.Members)
+		}
+		if err := validatePolicyMemberCredentials(policy, members, externalMembers); err != nil {
+			return err
+		}
+		if acknowledgeDowngrade {
+			_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Critical, Category: observability.CategoryAuth, Component: "index", Message: "recovery capsule policy downgrade acknowledged", Fields: map[string]any{"repository_id": options.RepositoryID, "operation": operation}})
+		}
+		brokerClient, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return err
+		}
+		status, err := brokerClient.Status(command.Context())
+		if err != nil {
+			_ = brokerClient.Close()
+			return err
+		}
+		if err := matchQuorumCapsule(capsule.RepositoryID(), capsule.Generation(), capsule.LogicalID(), capsule.PolicyHash(), status); err != nil {
+			_ = brokerClient.Close()
+			return err
+		}
+		prepared, err := brokerClient.PreparePolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest, policy, members, externalMembers, acknowledgeDowngrade)
+		_ = brokerClient.Close()
+		if err != nil {
+			return err
+		}
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index", Message: "recovery capsule policy mutation prepared", Fields: map[string]any{"repository_id": options.RepositoryID, "operation": operation, "capsule_sha256": prepared.CapsuleSHA256}})
+		published, err := publishPreparedPolicyMutation(command.Context(), options, status, capsuleDirectory, prepared)
+		if err != nil {
+			_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "index", Message: "recovery capsule policy mutation publication interrupted; candidate retained for resume", Fields: map[string]any{"repository_id": options.RepositoryID, "operation": operation, "capsule_sha256": prepared.CapsuleSHA256}})
+			return fmt.Errorf("publish policy mutation (candidate retained; run quorum resume-mutation): %w", err)
+		}
+		if published.CapsuleSHA256 != prepared.CapsuleSHA256 {
+			return fmt.Errorf("published capsule digest does not match broker candidate")
+		}
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index", Message: "recovery capsule generation published to local and repository mirrors", Fields: map[string]any{"repository_id": options.RepositoryID, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256, "local_path": published.LocalPath, "mirror_path": published.MirrorPath}})
+		activationClient, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return fmt.Errorf("capsule was published but broker activation connection failed: %w", err)
+		}
+		defer activationClient.Close()
+		if err := activationClient.ActivatePolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest, prepared.CapsuleSHA256); err != nil {
+			return fmt.Errorf("capsule was published but broker activation failed: %w", err)
+		}
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "recovery capsule policy generation activated", Fields: map[string]any{"repository_id": options.RepositoryID, "operation": operation, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256}})
+		if status.IdentityRecovery {
+			_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Critical, Category: observability.CategoryAuth, Component: "index", Message: "broker identity recovery completed and fresh identity pinned", Fields: map[string]any{"repository_id": options.RepositoryID, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256}})
+		}
+		result := map[string]any{"operation": operation, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256, "local_path": published.LocalPath, "mirror_path": published.MirrorPath, "broker_locked": true}
+		if globalOptions.JSON {
+			globalOptions.Term.Print(ui.ToJSONString(result))
+		} else {
+			globalOptions.Term.Print(fmt.Sprintf("capsule generation %d published and activated; broker relocked\nlocal: %s\nmirror: %s\n", published.Generation, published.LocalPath, published.MirrorPath))
+		}
+		return nil
+	}}
+	command.Flags().StringVar(&capsulePath, "capsule", "", "current immutable recovery capsule")
+	command.Flags().StringVar(&capsuleDirectory, "capsule-directory", "", "deterministic local capsule generation directory")
+	command.Flags().StringVar(&groupID, "group", "", "threshold group ID for create-group")
+	command.Flags().StringVar(&policyFile, "policy-file", "", "complete resulting member/any_of/all_of/threshold policy JSON")
+	command.Flags().Uint32Var(&threshold, "threshold", 0, "required contributions for create-group")
+	command.Flags().StringArrayVar(&memberSpecs, "member", nil, "resulting member ID=PROVIDER:FILE (repeatable; all members required)")
+	command.Flags().StringArrayVar(&externalMemberFiles, "external-member", nil, "mode-0600 cloud member enrollment JSON file (repeatable; all resulting external members required)")
+	command.Flags().BoolVar(&acknowledgeDowngrade, "acknowledge-policy-downgrade", false, "acknowledge a reduction in effective quorum strength")
+	_ = command.MarkFlagRequired("capsule")
+	_ = command.MarkFlagRequired("capsule-directory")
+	return command
+}
+
+func newIndexKeysQuorumResumeMutationCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
+	var capsuleDirectory string
+	command := &cobra.Command{Use: "resume-mutation", Short: "Resume publication and activation of the exact pending policy mutation", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		client, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return err
+		}
+		status, err := client.Status(command.Context())
+		if err != nil {
+			_ = client.Close()
+			return err
+		}
+		if !status.PolicyMutationPending || status.PendingCapsuleSHA256 == nil || status.PendingCapsuleGeneration == nil {
+			_ = client.Close()
+			return fmt.Errorf("broker has no pending policy mutation")
+		}
+		prepared, err := client.PendingPolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest)
+		_ = client.Close()
+		if err != nil {
+			return err
+		}
+		if prepared.CapsuleSHA256 != *status.PendingCapsuleSHA256 {
+			return fmt.Errorf("pending capsule digest changed during resume")
+		}
+		published, err := publishPreparedPolicyMutation(command.Context(), options, status, capsuleDirectory, prepared)
+		if err != nil {
+			return fmt.Errorf("resume policy mutation publication: %w", err)
+		}
+		activationClient, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return fmt.Errorf("capsule was published but broker activation connection failed: %w", err)
+		}
+		defer activationClient.Close()
+		if err := activationClient.ActivatePolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest, prepared.CapsuleSHA256); err != nil {
+			return fmt.Errorf("capsule was published but broker activation failed: %w", err)
+		}
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "interrupted recovery capsule policy mutation resumed and activated", Fields: map[string]any{"repository_id": options.RepositoryID, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256}})
+		if globalOptions.JSON {
+			globalOptions.Term.Print(ui.ToJSONString(map[string]any{"resumed": true, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256, "local_path": published.LocalPath, "mirror_path": published.MirrorPath, "broker_locked": true}))
+		} else {
+			globalOptions.Term.Print(fmt.Sprintf("capsule generation %d publication resumed and activated; broker relocked\n", published.Generation))
+		}
+		return nil
+	}}
+	command.Flags().StringVar(&capsuleDirectory, "capsule-directory", "", "deterministic local capsule generation directory")
+	_ = command.MarkFlagRequired("capsule-directory")
+	return command
+}
+
+func newIndexKeysQuorumCancelMutationCommand(globalOptions *global.Options) *cobra.Command {
+	var confirm bool
+	command := &cobra.Command{Use: "cancel-mutation", Short: "Cancel an unpublished pending policy mutation", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if !confirm {
+			return fmt.Errorf("--confirm is required")
+		}
+		client, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		if err := client.CancelPolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest); err != nil {
+			return err
+		}
+		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "index", Message: "pending recovery capsule policy mutation explicitly cancelled"})
+		return nil
+	}}
+	command.Flags().BoolVar(&confirm, "confirm", false, "confirm cancellation after verifying no candidate mirror was published")
+	return command
+}
+
+func publishPreparedPolicyMutation(ctx context.Context, options *indexKeysOptions, status indexbroker.Status, capsuleDirectory string, prepared indexbroker.PreparedPolicyMutation) (daemon.PublishedCapsuleMutation, error) {
+	if status.IdentityRecovery {
+		daemonOptions, err := options.Daemon.config(options.RepositoryID)
+		if err != nil {
+			return daemon.PublishedCapsuleMutation{}, err
+		}
+		return daemon.PublishCapsuleWithoutDatabase(ctx, daemonOptions, capsuleDirectory, prepared.Capsule, prepared.CapsuleSHA256)
+	}
+	client, err := options.Daemon.connect(ctx, options.RepositoryID)
+	if err != nil {
+		return daemon.PublishedCapsuleMutation{}, err
+	}
+	defer client.Close(ctx)
+	return client.PublishCapsuleMutation(ctx, capsuleDirectory, prepared.Capsule, prepared.CapsuleSHA256, false)
+}
+
+func mutateThresholdPolicy(current indexbroker.UnlockPolicy, operation string, args []string, groupID string, threshold uint32) (indexbroker.UnlockPolicy, error) {
+	policy := current
+	if operation == "create-group" {
+		if threshold == 0 || threshold > 255 {
+			return indexbroker.UnlockPolicy{}, fmt.Errorf("--threshold must be between 1 and 255")
+		}
+		if groupID != "" && groupID != args[0] {
+			return indexbroker.UnlockPolicy{}, fmt.Errorf("group argument and --group must match")
+		}
+		return indexbroker.UnlockPolicy{Type: "threshold", GroupID: args[0], Required: uint8(threshold)}, nil
+	}
+	if policy.Type != "threshold" || policy.GroupID == "" {
+		return indexbroker.UnlockPolicy{}, fmt.Errorf("%s currently requires a top-level threshold policy", operation)
+	}
+	switch operation {
+	case "add-member":
+		for _, member := range policy.Members {
+			if member == args[0] {
+				return indexbroker.UnlockPolicy{}, fmt.Errorf("member %q already exists", args[0])
+			}
+		}
+		policy.Members = append(policy.Members, args[0])
+	case "remove-member":
+		members := policy.Members[:0]
+		for _, member := range policy.Members {
+			if member != args[0] {
+				members = append(members, member)
+			}
+		}
+		if len(members) == len(policy.Members) {
+			return indexbroker.UnlockPolicy{}, fmt.Errorf("member %q does not exist", args[0])
+		}
+		policy.Members = members
+	case "set-threshold":
+		value, err := strconv.ParseUint(args[0], 10, 8)
+		if err != nil || value == 0 {
+			return indexbroker.UnlockPolicy{}, fmt.Errorf("threshold must be between 1 and 255")
+		}
+		policy.Required = uint8(value)
+	case "replace-member":
+		if args[0] == args[1] {
+			return indexbroker.UnlockPolicy{}, fmt.Errorf("replacement member must have a different ID")
+		}
+		found := false
+		for index, member := range policy.Members {
+			if member == args[1] {
+				return indexbroker.UnlockPolicy{}, fmt.Errorf("replacement member %q already exists", args[1])
+			}
+			if member == args[0] {
+				policy.Members[index] = args[1]
+				found = true
+			}
+		}
+		if !found {
+			return indexbroker.UnlockPolicy{}, fmt.Errorf("member %q does not exist", args[0])
+		}
+	default:
+		return indexbroker.UnlockPolicy{}, fmt.Errorf("unsupported policy mutation %q", operation)
+	}
+	if len(policy.Members) == 0 || int(policy.Required) > len(policy.Members) {
+		return indexbroker.UnlockPolicy{}, fmt.Errorf("threshold %d is not satisfiable by %d members", policy.Required, len(policy.Members))
+	}
+	sort.Strings(policy.Members)
+	return policy, nil
+}
+
+func parseOfflinePolicyMembers(specs []string) ([]indexbroker.OfflinePolicyMember, [][]byte, error) {
+	members := make([]indexbroker.OfflinePolicyMember, 0, len(specs))
+	credentials := make([][]byte, 0, len(specs))
+	seen := make(map[string]struct{}, len(specs))
+	for _, spec := range specs {
+		parts := strings.SplitN(spec, "=", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			clearPolicyCredentials(credentials)
+			return nil, credentials, fmt.Errorf("invalid --member %q; expected ID=PROVIDER:FILE", spec)
+		}
+		if _, exists := seen[parts[0]]; exists {
+			clearPolicyCredentials(credentials)
+			return nil, credentials, fmt.Errorf("duplicate member ID %q", parts[0])
+		}
+		providerAndFile := strings.SplitN(parts[1], ":", 2)
+		if len(providerAndFile) != 2 || (providerAndFile[0] != "offline-argon2id" && providerAndFile[0] != "offline-keyfile") {
+			clearPolicyCredentials(credentials)
+			return nil, credentials, fmt.Errorf("invalid offline member provider in %q", spec)
+		}
+		credential, err := readProtectedBinary(providerAndFile[1], "capsule member credential", providerAndFile[0] == "offline-argon2id")
+		if err != nil {
+			clearPolicyCredentials(credentials)
+			return nil, credentials, err
+		}
+		seen[parts[0]] = struct{}{}
+		credentials = append(credentials, credential)
+		members = append(members, indexbroker.OfflinePolicyMember{MemberID: parts[0], Provider: providerAndFile[0], Credential: base64.StdEncoding.EncodeToString(credential)})
+	}
+	return members, credentials, nil
+}
+
+func clearPolicyCredentials(credentials [][]byte) {
+	for _, credential := range credentials {
+		clear(credential)
+	}
+}
+
+func readPolicyDefinition(path string, policy *indexbroker.UnlockPolicy) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open resulting policy %q: %w", path, err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, 1024*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(policy); err != nil {
+		return fmt.Errorf("decode resulting policy %q: %w", path, err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("resulting policy %q contains trailing JSON data", path)
+	}
+	return nil
+}
+
+type externalPolicyMemberFile struct {
+	MemberID        string                              `json:"member_id"`
+	Provider        string                              `json:"provider"`
+	KeyReference    string                              `json:"key_reference"`
+	Principal       *indexbroker.PolicyPrincipalBinding `json:"principal"`
+	Hardware        *indexbroker.PolicyHardwareBinding  `json:"hardware,omitempty"`
+	BearerTokenFile string                              `json:"bearer_token_file,omitempty"`
+}
+
+func parseExternalPolicyMembers(paths []string) ([]indexbroker.ExternalPolicyMember, [][]byte, error) {
+	members := make([]indexbroker.ExternalPolicyMember, 0, len(paths))
+	tokens := make([][]byte, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		var definition externalPolicyMemberFile
+		if err := readProtectedJSON(path, "external capsule member", &definition); err != nil {
+			clearPolicyCredentials(tokens)
+			return nil, tokens, err
+		}
+		if definition.MemberID == "" || definition.KeyReference == "" || definition.Principal == nil {
+			clearPolicyCredentials(tokens)
+			return nil, tokens, fmt.Errorf("external member %q requires member_id, key_reference, and principal", path)
+		}
+		if _, exists := seen[definition.MemberID]; exists {
+			clearPolicyCredentials(tokens)
+			return nil, tokens, fmt.Errorf("duplicate member ID %q", definition.MemberID)
+		}
+		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" {
+			clearPolicyCredentials(tokens)
+			return nil, tokens, fmt.Errorf("unsupported external member provider %q", definition.Provider)
+		}
+		var token *string
+		if definition.Provider == "azure-key-vault" || definition.Provider == "gcp-kms" || definition.Provider == "gcp-cloud-hsm" {
+			if definition.BearerTokenFile == "" {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, fmt.Errorf("external member %q requires bearer_token_file", definition.MemberID)
+			}
+			value, err := readProtectedBinary(definition.BearerTokenFile, "cloud enrollment bearer token", true)
+			if err != nil {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, err
+			}
+			tokens = append(tokens, value)
+			text := string(value)
+			token = &text
+		} else if definition.BearerTokenFile != "" {
+			clearPolicyCredentials(tokens)
+			return nil, tokens, fmt.Errorf("AWS members use the SDK credential chain, not bearer_token_file")
+		}
+		seen[definition.MemberID] = struct{}{}
+		members = append(members, indexbroker.ExternalPolicyMember{MemberID: definition.MemberID, Provider: definition.Provider, KeyReference: definition.KeyReference, Principal: definition.Principal, Hardware: definition.Hardware, BearerToken: token})
+	}
+	return members, tokens, nil
+}
+
+func validatePolicyMemberCredentials(policy indexbroker.UnlockPolicy, members []indexbroker.OfflinePolicyMember, externalMembers []indexbroker.ExternalPolicyMember) error {
+	expected, err := policyMemberIDs(policy)
+	if err != nil {
+		return err
+	}
+	actual := make([]string, 0, len(members)+len(externalMembers))
+	for _, member := range members {
+		actual = append(actual, member.MemberID)
+	}
+	for _, member := range externalMembers {
+		actual = append(actual, member.MemberID)
+	}
+	sort.Strings(expected)
+	sort.Strings(actual)
+	if strings.Join(expected, "\x00") != strings.Join(actual, "\x00") {
+		return fmt.Errorf("--member credentials must match every resulting policy member exactly")
+	}
+	return nil
+}
+
+func policyMemberIDs(policy indexbroker.UnlockPolicy) ([]string, error) {
+	var members []string
+	seen := make(map[string]struct{})
+	var visit func(indexbroker.UnlockPolicy) error
+	visit = func(node indexbroker.UnlockPolicy) error {
+		switch node.Type {
+		case "member":
+			if node.MemberID == "" || len(node.Policies) != 0 || node.GroupID != "" || node.Required != 0 || len(node.Members) != 0 {
+				return fmt.Errorf("member policy must contain only a non-empty member_id")
+			}
+			if _, exists := seen[node.MemberID]; exists {
+				return fmt.Errorf("policy member %q appears more than once", node.MemberID)
+			}
+			seen[node.MemberID] = struct{}{}
+			members = append(members, node.MemberID)
+		case "threshold":
+			if node.GroupID == "" || node.Required == 0 || int(node.Required) > len(node.Members) || len(node.Policies) != 0 || node.MemberID != "" {
+				return fmt.Errorf("threshold policy requires a group_id, a satisfiable required count, and members")
+			}
+			for _, member := range node.Members {
+				if member == "" {
+					return fmt.Errorf("threshold policy contains an empty member ID")
+				}
+				if _, exists := seen[member]; exists {
+					return fmt.Errorf("policy member %q appears more than once", member)
+				}
+				seen[member] = struct{}{}
+				members = append(members, member)
+			}
+		case "any_of", "all_of":
+			if len(node.Policies) == 0 || node.MemberID != "" || node.GroupID != "" || node.Required != 0 || len(node.Members) != 0 {
+				return fmt.Errorf("%s policy must contain only non-empty policies", node.Type)
+			}
+			for _, child := range node.Policies {
+				if err := visit(child); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("unsupported policy type %q", node.Type)
+		}
+		return nil
+	}
+	if err := visit(policy); err != nil {
+		return nil, err
+	}
+	return members, nil
 }
 
 func newIndexKeysQuorumVerifyCommand(globalOptions *global.Options) *cobra.Command {
@@ -720,6 +1191,9 @@ func quorumAccessRouteFindings(options global.Options, metadata daemon.KeyStatus
 	for _, slot := range metadata.Slots {
 		findings = append(findings, fmt.Sprintf("standalone metadata DEK slot %q (%s) remains", slot.ID, slot.Provider))
 	}
+	if metadata.PendingCapsuleMigrationSHA256 != "" {
+		findings = append(findings, "capsule migration is prepared but not finalized")
+	}
 	return findings
 }
 
@@ -872,6 +1346,12 @@ func printKeyStatus(globalOptions *global.Options, status daemon.KeyStatus) {
 	globalOptions.Term.Print(fmt.Sprintf("envelope generation %d; active DEK version %d\n", status.EnvelopeGeneration, status.ActiveDEKVersion))
 	for _, slot := range status.Slots {
 		globalOptions.Term.Print(fmt.Sprintf("%s: %s (%s), priority %d, DEK %d, recovery %t\n", slot.ID, slot.Provider, slot.KeyReference, slot.Priority, slot.DEKVersion, slot.Recovery))
+	}
+	if status.PendingCapsuleMigrationSHA256 != "" {
+		globalOptions.Term.Print("capsule migration pending: " + status.PendingCapsuleMigrationSHA256 + "\n")
+	}
+	if status.FinalizedCapsuleMigrationSHA256 != "" {
+		globalOptions.Term.Print("capsule migration finalized: " + status.FinalizedCapsuleMigrationSHA256 + "\n")
 	}
 }
 

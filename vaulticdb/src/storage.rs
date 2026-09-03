@@ -28,17 +28,18 @@ use crate::{
     proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest},
     replication::ReplicatedObjectStore,
 };
+use vaulticdb::broker::{acquire_metadata_lease, BrokerLeaseConnection};
 use vaulticdb::encryption::{
     self,
     envelope::{self, EncryptionStatus, KeyManager},
 };
-use vaulticdb::broker::{acquire_metadata_lease, BrokerLeaseConnection};
 
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
 const DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
 const MASTER_KEY_RECORD: &[u8] = b"meta:master-key";
 const CAPSULE_MIGRATION_RECORD: &[u8] = b"meta:capsule-migration";
+const CAPSULE_MIGRATION_FINALIZED_RECORD: &[u8] = b"meta:capsule-migration-finalized";
 const ENCRYPTION_POLICY_RECORD: &[u8] = b"meta:encryption";
 const METADATA_REBUILD_RECORD: &[u8] = b"meta:recovery-rebuild";
 const MAX_MASTER_KEY_BYTES: usize = 4096;
@@ -71,15 +72,19 @@ pub struct Storage {
 impl Storage {
     pub async fn open(repository_id: &str) -> Result<Self> {
         let (path, object_store) = object_store(repository_id)?;
-        let recovery_initialize = env::var("VAULTICDB_METADATA_REBUILD_INITIALIZE").as_deref() == Ok("true");
+        let recovery_initialize =
+            env::var("VAULTICDB_METADATA_REBUILD_INITIALIZE").as_deref() == Ok("true");
         if recovery_initialize && env::var_os("VAULTICDB_BROKER_SOCKET").is_none() {
             bail!("metadata rebuild initialization requires a broker metadata-DEK lease");
         }
-        if recovery_initialize && metadata_store_has_database_objects(object_store.as_ref()).await? {
+        if recovery_initialize && metadata_store_has_database_objects(object_store.as_ref()).await?
+        {
             bail!("metadata rebuild initialization requires an empty candidate metadata store");
         }
         let mut broker_lease = None;
-        let (object_store, encryption, key_manager) = if let Ok(socket) = env::var("VAULTICDB_BROKER_SOCKET") {
+        let (object_store, encryption, key_manager) = if let Ok(socket) =
+            env::var("VAULTICDB_BROKER_SOCKET")
+        {
             let manifest = env::var("VAULTICDB_RELEASE_MANIFEST")
                 .context("VAULTICDB_RELEASE_MANIFEST is required with VAULTICDB_BROKER_SOCKET")?;
             let ttl = env::var("VAULTICDB_BROKER_LEASE_SECONDS")
@@ -119,7 +124,9 @@ impl Storage {
         };
         storage.ensure_encryption_policy(repository_id).await?;
         if recovery_initialize {
-            storage.record_metadata_rebuild_handoff(repository_id).await?;
+            storage
+                .record_metadata_rebuild_handoff(repository_id)
+                .await?;
         }
         Ok(storage)
     }
@@ -259,14 +266,56 @@ impl Storage {
     }
 
     pub async fn record_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
-        if capsule_sha256.len() != 64 || !capsule_sha256.bytes().all(|value| value.is_ascii_hexdigit()) {
+        if capsule_sha256.len() != 64
+            || !capsule_sha256
+                .bytes()
+                .all(|value| value.is_ascii_hexdigit())
+        {
             return Err(Status::invalid_argument("invalid capsule digest"));
+        }
+        let (pending, finalized) = self.capsule_migration_status().await?;
+        if finalized.is_some() {
+            return Err(Status::failed_precondition(
+                "capsule migration is already finalized",
+            ));
+        }
+        if let Some(pending) = pending {
+            if pending == capsule_sha256 {
+                return Ok(());
+            }
+            return Err(Status::already_exists(
+                "a different capsule migration is already pending",
+            ));
         }
         self.db
             .put(CAPSULE_MIGRATION_RECORD, capsule_sha256.as_bytes())
             .await
-            .map(|_| ())
+            .map_err(storage_error)?
+            .await_durable()
+            .await
             .map_err(storage_error)
+    }
+
+    pub async fn capsule_migration_status(
+        &self,
+    ) -> Result<(Option<String>, Option<String>), Status> {
+        let pending = self
+            .db
+            .get(CAPSULE_MIGRATION_RECORD)
+            .await
+            .map_err(storage_error)?
+            .map(|value| String::from_utf8(value.to_vec()))
+            .transpose()
+            .map_err(|_| Status::data_loss("pending capsule migration digest is invalid"))?;
+        let finalized = self
+            .db
+            .get(CAPSULE_MIGRATION_FINALIZED_RECORD)
+            .await
+            .map_err(storage_error)?
+            .map(|value| String::from_utf8(value.to_vec()))
+            .transpose()
+            .map_err(|_| Status::data_loss("finalized capsule migration digest is invalid"))?;
+        Ok((pending, finalized))
     }
 
     pub async fn finalize_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
@@ -277,11 +326,17 @@ impl Storage {
             .map_err(storage_error)?
             .ok_or_else(|| Status::failed_precondition("no prepared capsule migration"))?;
         if pending.as_ref() != capsule_sha256.as_bytes() {
-            return Err(Status::failed_precondition("prepared capsule digest mismatch"));
+            return Err(Status::failed_precondition(
+                "prepared capsule digest mismatch",
+            ));
         }
         let mut batch = slatedb::WriteBatch::new();
         batch.delete(MASTER_KEY_RECORD);
         batch.delete(CAPSULE_MIGRATION_RECORD);
+        batch.put(
+            CAPSULE_MIGRATION_FINALIZED_RECORD,
+            capsule_sha256.as_bytes(),
+        );
         self.db.write(batch).await.map_err(storage_error)?;
         self.db.flush().await.map_err(storage_error)
     }
@@ -492,7 +547,6 @@ async fn metadata_store_has_database_objects(store: &dyn ObjectStore) -> Result<
     Ok(false)
 }
 
-
 fn transaction_idle_timeout_ms() -> Result<u64> {
     let seconds = match env::var("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS") {
         Ok(value) => value
@@ -633,7 +687,7 @@ fn storage_error(error: slatedb::Error) -> Status {
     }
 }
 
-fn object_store(repository_id: &str) -> Result<(String, Arc<dyn ObjectStore>)> {
+pub(crate) fn object_store(repository_id: &str) -> Result<(String, Arc<dyn ObjectStore>)> {
     let repository_key = crate::repository_key(repository_id);
     match env::var("VAULTICDB_OBJECT_STORE")
         .unwrap_or_else(|_| "local".to_owned())
@@ -852,6 +906,15 @@ mod tests {
         storage.store_master_key(b"repository-key").await.unwrap();
         let digest = "ab".repeat(32);
         storage.record_capsule_migration(&digest).await.unwrap();
+        storage.record_capsule_migration(&digest).await.unwrap();
+        assert!(storage
+            .record_capsule_migration(&"cd".repeat(32))
+            .await
+            .is_err());
+        assert_eq!(
+            storage.capsule_migration_status().await.unwrap(),
+            (Some(digest.clone()), None)
+        );
         assert!(storage
             .finalize_capsule_migration(&"cd".repeat(32))
             .await
@@ -862,6 +925,10 @@ mod tests {
         );
         storage.finalize_capsule_migration(&digest).await.unwrap();
         assert!(storage.get_master_key().await.unwrap().is_none());
+        assert_eq!(
+            storage.capsule_migration_status().await.unwrap(),
+            (None, Some(digest))
+        );
         storage.close().await.unwrap();
     }
 }

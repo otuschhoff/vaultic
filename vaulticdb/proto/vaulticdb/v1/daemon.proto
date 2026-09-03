@@ -161,6 +161,8 @@ message KeyStatusResponse {
   uint64 envelope_generation = 1;
   uint32 active_dek_version = 2;
   repeated KeySlotInfo slots = 3;
+  string pending_capsule_migration_sha256 = 4;
+  string finalized_capsule_migration_sha256 = 5;
 }
 
 message AddLocalKeySlotRequest {
@@ -279,6 +281,22 @@ message FinalizeCapsuleMigrationRequest {
   bytes broker_key_proof = 4;
 }
 
+message PublishCapsuleMutationRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  string capsule_directory = 3;
+  bytes capsule = 4;
+  string capsule_sha256 = 5;
+  bool identity_recovery = 6;
+}
+
+message PublishCapsuleMutationResponse {
+  uint64 generation = 1;
+  string local_path = 2;
+  string mirror_path = 3;
+  string capsule_sha256 = 4;
+}
+
 service VaulticDB {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
@@ -306,4 +324,5 @@ service VaulticDB {
   rpc CheckEncryption(KeyStatusRequest) returns (EncryptionAuditResponse);
   rpc PrepareCapsuleMigration(PrepareCapsuleMigrationRequest) returns (PrepareCapsuleMigrationResponse);
   rpc FinalizeCapsuleMigration(FinalizeCapsuleMigrationRequest) returns (Empty);
+  rpc PublishCapsuleMutation(PublishCapsuleMutationRequest) returns (PublishCapsuleMutationResponse);
 }

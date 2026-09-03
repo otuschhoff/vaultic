@@ -72,9 +72,15 @@ pub enum PolicyIntent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UnlockPolicy {
-    Member { member_id: String },
-    AnyOf { policies: Vec<UnlockPolicy> },
-    AllOf { policies: Vec<UnlockPolicy> },
+    Member {
+        member_id: String,
+    },
+    AnyOf {
+        policies: Vec<UnlockPolicy>,
+    },
+    AllOf {
+        policies: Vec<UnlockPolicy>,
+    },
     Threshold {
         group_id: String,
         required: u8,
@@ -210,6 +216,18 @@ impl CapsuleBuilder {
         self
     }
 
+    pub fn key_versions(
+        mut self,
+        root_key_version: u32,
+        metadata_dek_version: u32,
+        repository_key_version: u32,
+    ) -> Self {
+        self.root_key_version = root_key_version;
+        self.metadata_dek_version = metadata_dek_version;
+        self.repository_key_version = repository_key_version;
+        self
+    }
+
     pub fn create_offline_threshold(
         self,
         group_id: &str,
@@ -299,12 +317,8 @@ impl CapsuleBuilder {
                 &share.plaintext,
             )?);
         }
-        let metadata_dek = wrap_payload(
-            &header,
-            metadata_dek,
-            "metadata-dek",
-            root_secret.as_ref(),
-        )?;
+        let metadata_dek =
+            wrap_payload(&header, metadata_dek, "metadata-dek", root_secret.as_ref())?;
         let repository_master_key = wrap_payload(
             &header,
             repository_master_key,
@@ -393,12 +407,8 @@ impl CapsuleBuilder {
             };
             members.push(member);
         }
-        let metadata_dek = wrap_payload(
-            &header,
-            metadata_dek,
-            "metadata-dek",
-            root_secret.as_ref(),
-        )?;
+        let metadata_dek =
+            wrap_payload(&header, metadata_dek, "metadata-dek", root_secret.as_ref())?;
         let repository_master_key = wrap_payload(
             &header,
             repository_master_key,
@@ -485,7 +495,10 @@ impl RecoveryCapsule {
                     }
                 }
                 MemberProvider::YubikeyPiv | MemberProvider::Fido2HmacSecret => {
-                    let hardware = member.hardware.as_ref().context("hardware member lacks credential binding")?;
+                    let hardware = member
+                        .hardware
+                        .as_ref()
+                        .context("hardware member lacks credential binding")?;
                     if hardware.credential_id.is_empty()
                         || hardware.public_key.is_empty()
                         || !hardware.user_presence_required
@@ -494,7 +507,10 @@ impl RecoveryCapsule {
                     }
                 }
                 _ => {
-                    let principal = member.principal.as_ref().context("cloud member lacks principal binding")?;
+                    let principal = member
+                        .principal
+                        .as_ref()
+                        .context("cloud member lacks principal binding")?;
                     if member.key_reference.is_empty()
                         || principal.authority.is_empty()
                         || principal.tenant_account_or_project.is_empty()
@@ -541,6 +557,12 @@ impl RecoveryCapsule {
                 }
                 MemberProvider::YubikeyPiv | MemberProvider::Fido2HmacSecret => {
                     hardware_verified = true;
+                    let provider = match member.provider {
+                        MemberProvider::YubikeyPiv => "yubikey-piv",
+                        MemberProvider::Fido2HmacSecret => "fido2-hmac-secret",
+                        _ => unreachable!(),
+                    };
+                    findings.push(format!("hardware provider {} is not operational", provider));
                     let credential = &member.hardware.as_ref().unwrap().credential_id;
                     if !hardware_credentials.insert(credential.clone()) {
                         findings.push(format!("duplicate hardware credential {credential}"));
@@ -553,7 +575,10 @@ impl RecoveryCapsule {
                 _ => {
                     principal_verified = true;
                     if !cloud_keys.insert((member.provider.clone(), member.key_reference.clone())) {
-                        findings.push(format!("duplicate cloud key reference {}", member.key_reference));
+                        findings.push(format!(
+                            "duplicate cloud key reference {}",
+                            member.key_reference
+                        ));
                     }
                     let principal = member.principal.as_ref().unwrap();
                     let identity = (
@@ -659,7 +684,10 @@ impl RecoveryCapsule {
         })
     }
 
-    pub fn recover_from_shares(&self, contributions: &[UnwrappedMemberShare]) -> Result<RecoveredKeys> {
+    pub fn recover_from_shares(
+        &self,
+        contributions: &[UnwrappedMemberShare],
+    ) -> Result<RecoveredKeys> {
         self.validate()?;
         let mut unlocked = BTreeSet::new();
         let mut indexes = BTreeSet::new();
@@ -742,7 +770,10 @@ pub fn publish_local(directory: &Path, capsule: &RecoveryCapsule) -> Result<Path
     Ok(path)
 }
 
-pub fn discover_latest(directory: &Path, repository_id: &str) -> Result<Option<(PathBuf, RecoveryCapsule)>> {
+pub fn discover_latest(
+    directory: &Path,
+    repository_id: &str,
+) -> Result<Option<(PathBuf, RecoveryCapsule)>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -804,7 +835,8 @@ pub async fn publish_mirror(store: &dyn ObjectStore, capsule: &RecoveryCapsule) 
         Err(error @ ObjectStoreError::AlreadyExists { .. }) => {
             let existing = store.get(&path).await?.bytes().await?;
             if existing.as_ref() != encoded.as_slice() {
-                return Err(error).context("immutable capsule mirror conflicts with existing generation");
+                return Err(error)
+                    .context("immutable capsule mirror conflicts with existing generation");
             }
         }
         Err(error) => return Err(error).context("publish immutable capsule mirror"),
@@ -999,12 +1031,7 @@ fn distribute_policy_secret(
                     fragment
                 };
                 let fragment = Zeroizing::new(fragment);
-                distribute_policy_secret(
-                    child,
-                    &fragment,
-                    &format!("{path}/all/{index}"),
-                    output,
-                )?;
+                distribute_policy_secret(child, &fragment, &format!("{path}/all/{index}"), output)?;
             }
         }
         UnlockPolicy::Threshold {
@@ -1047,11 +1074,9 @@ fn recover_policy_secret(
         }
         UnlockPolicy::AnyOf { policies } => {
             for (index, child) in policies.iter().enumerate() {
-                if let Ok(secret) = recover_policy_secret(
-                    child,
-                    contributions,
-                    &format!("{path}/any/{index}"),
-                ) {
+                if let Ok(secret) =
+                    recover_policy_secret(child, contributions, &format!("{path}/any/{index}"))
+                {
                     return Ok(secret);
                 }
             }
@@ -1060,11 +1085,8 @@ fn recover_policy_secret(
         UnlockPolicy::AllOf { policies } => {
             let mut secret: Option<Zeroizing<Vec<u8>>> = None;
             for (index, child) in policies.iter().enumerate() {
-                let fragment = recover_policy_secret(
-                    child,
-                    contributions,
-                    &format!("{path}/all/{index}"),
-                )?;
+                let fragment =
+                    recover_policy_secret(child, contributions, &format!("{path}/all/{index}"))?;
                 if let Some(secret) = secret.as_mut() {
                     if secret.len() != fragment.len() {
                         bail!("all_of fragments have inconsistent lengths");
@@ -1091,7 +1113,10 @@ fn recover_policy_secret(
     }
 }
 
-fn recover_shamir(contributions: &[UnwrappedMemberShare], required: u8) -> Result<Zeroizing<Vec<u8>>> {
+fn recover_shamir(
+    contributions: &[UnwrappedMemberShare],
+    required: u8,
+) -> Result<Zeroizing<Vec<u8>>> {
     recover_shamir_refs(&contributions.iter().collect::<Vec<_>>(), required)
 }
 
@@ -1109,11 +1134,9 @@ fn recover_shamir_refs(
                 .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(Zeroizing::new(
-        Sharks(required)
-            .recover(&shares)
-            .map_err(|error| anyhow::anyhow!("reconstruct policy secret: {error}"))?,
-    ))
+    Ok(Zeroizing::new(Sharks(required).recover(&shares).map_err(
+        |error| anyhow::anyhow!("reconstruct policy secret: {error}"),
+    )?))
 }
 
 fn wrap_offline_share(
@@ -1160,7 +1183,13 @@ fn wrap_offline_share(
         &provider,
     )?;
     let ciphertext = Aes256Gcm::new_from_slice(kek.as_ref())?
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: share, aad: &aad })
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: share,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("wrap member share"))?;
     Ok(MemberShare {
         member_id: member_id.to_owned(),
@@ -1227,7 +1256,10 @@ fn validate_external_provider(provider: &MemberProvider, key_provider: &str) -> 
         (MemberProvider::AzureKeyVault, "azure-key-vault")
             | (MemberProvider::AwsKms, "aws-kms")
             | (MemberProvider::AwsCloudhsm, "aws-kms")
-            | (MemberProvider::GcpKms | MemberProvider::GcpCloudHsm, "gcp-kms")
+            | (
+                MemberProvider::GcpKms | MemberProvider::GcpCloudHsm,
+                "gcp-kms"
+            )
             | (MemberProvider::YubikeyPiv, "pkcs11")
             | (MemberProvider::Fido2HmacSecret, "fido2-hmac-secret")
     );
@@ -1293,7 +1325,10 @@ fn unwrap_offline_share(
         (MemberProvider::OfflineArgon2id, MemberCredential::Passphrase(passphrase)) => {
             derive_passphrase_kek(
                 passphrase,
-                member.argon2.as_ref().context("missing Argon2 parameters")?,
+                member
+                    .argon2
+                    .as_ref()
+                    .context("missing Argon2 parameters")?,
             )?
         }
         (MemberProvider::OfflineKeyfile, MemberCredential::Keyfile(keyfile)) => {
@@ -1301,7 +1336,8 @@ fn unwrap_offline_share(
         }
         _ => bail!("member credential type does not match provider"),
     };
-    let nonce = decode_fixed::<NONCE_BYTES>(member.nonce.as_deref().unwrap_or_default(), "share nonce")?;
+    let nonce =
+        decode_fixed::<NONCE_BYTES>(member.nonce.as_deref().unwrap_or_default(), "share nonce")?;
     let ciphertext = BASE64
         .decode(&member.wrapped_share)
         .context("decode wrapped member share")?;
@@ -1315,7 +1351,13 @@ fn unwrap_offline_share(
         &member.provider,
     )?;
     let plaintext = Aes256Gcm::new_from_slice(kek.as_ref())?
-        .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ciphertext, aad: &aad })
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("member share authentication failed"))?;
     Ok(Zeroizing::new(plaintext))
 }
@@ -1353,7 +1395,11 @@ fn derive_keyfile_kek(
     let hkdf = Hkdf::<Sha256>::new(Some(header.repository_id.as_bytes()), keyfile);
     let mut key = Zeroizing::new([0_u8; 32]);
     hkdf.expand(
-        format!("vaultic-capsule-keyfile\0{}\0{}", header.generation, member_id).as_bytes(),
+        format!(
+            "vaultic-capsule-keyfile\0{}\0{}",
+            header.generation, member_id
+        )
+        .as_bytes(),
         key.as_mut(),
     )
     .map_err(|_| anyhow::anyhow!("derive keyfile wrapping key"))?;
@@ -1371,7 +1417,13 @@ fn wrap_payload(
     rand::rng().fill_bytes(&mut nonce);
     let aad = payload_aad(header, purpose)?;
     let ciphertext = Aes256Gcm::new_from_slice(key.as_ref())?
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: &aad })
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("wrap {purpose}"))?;
     Ok(WrappedPayload {
         purpose: purpose.to_owned(),
@@ -1391,10 +1443,18 @@ fn unwrap_payload(
     }
     let key = derive_payload_key(header, purpose, root_secret)?;
     let nonce = decode_fixed::<NONCE_BYTES>(&payload.nonce, "payload nonce")?;
-    let ciphertext = BASE64.decode(&payload.ciphertext).context("decode wrapped payload")?;
+    let ciphertext = BASE64
+        .decode(&payload.ciphertext)
+        .context("decode wrapped payload")?;
     let aad = payload_aad(header, purpose)?;
     let plaintext = Aes256Gcm::new_from_slice(key.as_ref())?
-        .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ciphertext, aad: &aad })
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("{purpose} authentication failed"))?;
     Ok(Zeroizing::new(plaintext))
 }
@@ -1471,8 +1531,12 @@ fn logical_id(header: &CapsuleHeader) -> String {
 }
 
 fn decode_fixed<const N: usize>(encoded: &str, name: &str) -> Result<[u8; N]> {
-    let decoded = BASE64.decode(encoded).with_context(|| format!("decode {name}"))?;
-    decoded.try_into().map_err(|_| anyhow::anyhow!("invalid {name} length"))
+    let decoded = BASE64
+        .decode(encoded)
+        .with_context(|| format!("decode {name}"))?;
+    decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid {name} length"))
 }
 
 #[cfg(test)]
@@ -1545,21 +1609,36 @@ mod tests {
         let capsule = capsule(2);
         for credentials in [
             BTreeMap::from([
-                ("alice".to_owned(), MemberCredential::Passphrase(b"alice passphrase")),
-                ("bob".to_owned(), MemberCredential::Passphrase(b"bob passphrase")),
+                (
+                    "alice".to_owned(),
+                    MemberCredential::Passphrase(b"alice passphrase"),
+                ),
+                (
+                    "bob".to_owned(),
+                    MemberCredential::Passphrase(b"bob passphrase"),
+                ),
             ]),
             BTreeMap::from([
-                ("alice".to_owned(), MemberCredential::Passphrase(b"alice passphrase")),
+                (
+                    "alice".to_owned(),
+                    MemberCredential::Passphrase(b"alice passphrase"),
+                ),
                 ("carol".to_owned(), MemberCredential::Keyfile(&[3; 32])),
             ]),
             BTreeMap::from([
-                ("bob".to_owned(), MemberCredential::Passphrase(b"bob passphrase")),
+                (
+                    "bob".to_owned(),
+                    MemberCredential::Passphrase(b"bob passphrase"),
+                ),
                 ("carol".to_owned(), MemberCredential::Keyfile(&[3; 32])),
             ]),
         ] {
             let recovered = capsule.recover_offline(&credentials).unwrap();
             assert_eq!(recovered.metadata_dek.as_slice(), &[7; 32]);
-            assert_eq!(recovered.repository_master_key.as_slice(), b"repository-master-key");
+            assert_eq!(
+                recovered.repository_master_key.as_slice(),
+                b"repository-master-key"
+            );
         }
         assert!(capsule
             .recover_offline(&BTreeMap::from([(
@@ -1610,7 +1689,10 @@ mod tests {
             .await
             .unwrap();
 
-        let external = capsule.unwrap_external_member("alice", &azure).await.unwrap();
+        let external = capsule
+            .unwrap_external_member("alice", &azure)
+            .await
+            .unwrap();
         assert!(capsule.unwrap_external_member("alice", &aws).await.is_err());
         let mut substituted_key = capsule.clone();
         substituted_key.members[0].key_reference =
@@ -1682,7 +1764,10 @@ mod tests {
     #[test]
     fn both_payloads_must_authenticate() {
         let mut capsule = capsule(1);
-        std::mem::swap(&mut capsule.metadata_dek.ciphertext, &mut capsule.repository_master_key.ciphertext);
+        std::mem::swap(
+            &mut capsule.metadata_dek.ciphertext,
+            &mut capsule.repository_master_key.ciphertext,
+        );
         let credentials = BTreeMap::from([(
             "alice".to_owned(),
             MemberCredential::Passphrase(b"alice passphrase"),
@@ -1744,12 +1829,12 @@ mod tests {
                 b"repository-master-key",
             )
             .unwrap();
-        for hardware in [
-            ("yubikey-primary", [1; 32]),
-            ("yubikey-backup", [2; 32]),
-        ] {
+        for hardware in [("yubikey-primary", [1; 32]), ("yubikey-backup", [2; 32])] {
             let credentials = BTreeMap::from([
-                (hardware.0.to_owned(), MemberCredential::Keyfile(&hardware.1)),
+                (
+                    hardware.0.to_owned(),
+                    MemberCredential::Keyfile(&hardware.1),
+                ),
                 (
                     "offline-password".to_owned(),
                     MemberCredential::Passphrase(b"offline passphrase"),
@@ -1796,7 +1881,10 @@ mod tests {
         assert_eq!(bootstrap.minimum_custodians, 1);
         assert!(!bootstrap.compliant);
         assert!(bootstrap.custody_assumed);
-        assert!(bootstrap.findings.iter().any(|finding| finding.contains("bootstrap")));
+        assert!(bootstrap
+            .findings
+            .iter()
+            .any(|finding| finding.contains("bootstrap")));
 
         let quorum = capsule(2).effective_policy_status().unwrap();
         assert_eq!(quorum.minimum_custodians, 2);
@@ -1811,7 +1899,8 @@ mod tests {
         aws_capsule.members[0].provider = MemberProvider::AwsKms;
         aws_capsule.members[0].nonce = None;
         aws_capsule.members[0].argon2 = None;
-        aws_capsule.members[0].key_reference = "arn:aws:kms:us-east-1:123456789012:key/a".to_owned();
+        aws_capsule.members[0].key_reference =
+            "arn:aws:kms:us-east-1:123456789012:key/a".to_owned();
         aws_capsule.members[0].principal = Some(PrincipalBinding {
             authority: "entra".to_owned(),
             tenant_account_or_project: "123456789012".to_owned(),
@@ -1834,6 +1923,13 @@ mod tests {
         }
         let status = hardware_capsule.effective_policy_status().unwrap();
         assert!(!status.compliant);
-        assert!(status.findings.contains(&"duplicate hardware public key".to_owned()));
+        assert!(status.hardware_verified);
+        assert!(status
+            .findings
+            .iter()
+            .any(|finding| finding.contains("yubikey-piv is not operational")));
+        assert!(status
+            .findings
+            .contains(&"duplicate hardware public key".to_owned()));
     }
 }

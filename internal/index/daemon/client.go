@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -121,9 +122,11 @@ type KeySlotInfo struct {
 
 // KeyStatus is the redacted metadata-encryption key state.
 type KeyStatus struct {
-	EnvelopeGeneration uint64        `json:"envelope_generation"`
-	ActiveDEKVersion   uint32        `json:"active_dek_version"`
-	Slots              []KeySlotInfo `json:"slots"`
+	EnvelopeGeneration              uint64        `json:"envelope_generation"`
+	ActiveDEKVersion                uint32        `json:"active_dek_version"`
+	Slots                           []KeySlotInfo `json:"slots"`
+	PendingCapsuleMigrationSHA256   string        `json:"pending_capsule_migration_sha256,omitempty"`
+	FinalizedCapsuleMigrationSHA256 string        `json:"finalized_capsule_migration_sha256,omitempty"`
 }
 
 // DEKRewriteProgress reports one bounded old-version rewrite batch.
@@ -637,6 +640,79 @@ type CapsuleMigration struct {
 	Capsule       []byte
 }
 
+type PublishedCapsuleMutation struct {
+	Generation    uint64 `json:"generation"`
+	LocalPath     string `json:"local_path"`
+	MirrorPath    string `json:"mirror_path"`
+	CapsuleSHA256 string `json:"capsule_sha256"`
+}
+
+func (c *Client) PublishCapsuleMutation(ctx context.Context, capsuleDirectory string, capsule []byte, capsuleSHA256 string, identityRecovery bool) (PublishedCapsuleMutation, error) {
+	if capsuleDirectory == "" || len(capsule) == 0 || len(capsuleSHA256) != 64 {
+		return PublishedCapsuleMutation{}, errors.New("capsule directory, capsule, and SHA-256 digest are required")
+	}
+	response, err := c.rpc.PublishCapsuleMutation(ctx, &vaulticdbv1.PublishCapsuleMutationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), CapsuleDirectory: capsuleDirectory, Capsule: capsule, CapsuleSha256: capsuleSHA256, IdentityRecovery: identityRecovery})
+	if err != nil {
+		return PublishedCapsuleMutation{}, err
+	}
+	return PublishedCapsuleMutation{Generation: response.GetGeneration(), LocalPath: response.GetLocalPath(), MirrorPath: response.GetMirrorPath(), CapsuleSHA256: response.GetCapsuleSha256()}, nil
+}
+
+func PublishCapsuleWithoutDatabase(ctx context.Context, options Options, capsuleDirectory string, capsule []byte, capsuleSHA256 string) (PublishedCapsuleMutation, error) {
+	if options.DaemonPath == "" || options.RepositoryID == "" || capsuleDirectory == "" || len(capsule) == 0 || len(capsuleSHA256) != 64 {
+		return PublishedCapsuleMutation{}, errors.New("daemon path, repository ID, capsule directory, capsule, and SHA-256 digest are required")
+	}
+	temporary, err := os.CreateTemp("", "vaultic-capsule-mutation-*.json")
+	if err != nil {
+		return PublishedCapsuleMutation{}, fmt.Errorf("create temporary capsule: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return PublishedCapsuleMutation{}, err
+	}
+	if _, err := temporary.Write(capsule); err != nil {
+		_ = temporary.Close()
+		return PublishedCapsuleMutation{}, fmt.Errorf("write temporary capsule: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return PublishedCapsuleMutation{}, fmt.Errorf("sync temporary capsule: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return PublishedCapsuleMutation{}, err
+	}
+	command := exec.CommandContext(ctx, options.DaemonPath, "publish-capsule", capsuleDirectory, temporaryPath, capsuleSHA256, "true")
+	command.Env = append(os.Environ(), "VAULTICDB_REPOSITORY_ID="+options.RepositoryID)
+	for name, value := range map[string]string{
+		"VAULTICDB_OBJECT_STORE": options.ObjectStore,
+		"VAULTICDB_DATA_DIR":     options.DataDir,
+		"VAULTICDB_S3_BUCKET":    options.S3Bucket,
+		"VAULTICDB_S3_PREFIX":    options.S3Prefix,
+	} {
+		if value != "" {
+			command.Env = append(command.Env, name+"="+value)
+		}
+	}
+	var output, daemonErrors bytes.Buffer
+	command.Stdout = &limitedWriter{writer: &output, remaining: 64 * 1024}
+	command.Stderr = &limitedWriter{writer: &daemonErrors, remaining: 64 * 1024}
+	if err := command.Run(); err != nil {
+		return PublishedCapsuleMutation{}, fmt.Errorf("publish capsule without database: %w: %s", err, strings.TrimSpace(daemonErrors.String()))
+	}
+	var published PublishedCapsuleMutation
+	decoder := json.NewDecoder(&output)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&published); err != nil {
+		return PublishedCapsuleMutation{}, fmt.Errorf("decode capsule publisher result: %w", err)
+	}
+	if published.CapsuleSHA256 != capsuleSHA256 || published.Generation == 0 || published.LocalPath == "" || published.MirrorPath == "" {
+		return PublishedCapsuleMutation{}, errors.New("capsule publisher returned inconsistent results")
+	}
+	return published, nil
+}
+
 func (c *Client) PrepareCapsuleMigration(ctx context.Context, capsuleDirectory string, generation uint64, groupID string, threshold uint32, brokerIdentityPublicKey []byte, members []OfflineCapsuleMember) (CapsuleMigration, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
@@ -805,7 +881,7 @@ func (c *Client) RecoverEscrow(ctx context.Context, record, bearerToken []byte) 
 }
 
 func keyStatus(response *vaulticdbv1.KeyStatusResponse) KeyStatus {
-	result := KeyStatus{EnvelopeGeneration: response.GetEnvelopeGeneration(), ActiveDEKVersion: response.GetActiveDekVersion(), Slots: make([]KeySlotInfo, len(response.GetSlots()))}
+	result := KeyStatus{EnvelopeGeneration: response.GetEnvelopeGeneration(), ActiveDEKVersion: response.GetActiveDekVersion(), Slots: make([]KeySlotInfo, len(response.GetSlots())), PendingCapsuleMigrationSHA256: response.GetPendingCapsuleMigrationSha256(), FinalizedCapsuleMigrationSHA256: response.GetFinalizedCapsuleMigrationSha256()}
 	for index, slot := range response.GetSlots() {
 		result.Slots[index] = KeySlotInfo{ID: slot.GetId(), Provider: slot.GetProvider(), Priority: slot.GetPriority(), Recovery: slot.GetRecovery(), KeyReference: slot.GetKeyReference(), DEKVersion: slot.GetDekVersion()}
 	}

@@ -23,7 +23,7 @@ func TestGoogleCloudKMSUnwrapperReturnsProviderAcceptedPrincipal(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"plaintext":"` + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + `"}`)), Header: make(http.Header)}, nil
 		case "oauth2.googleapis.com":
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-a","email":"alice@example.com"}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-a","email":"alice@example.com","expires_in":"3600"}`)), Header: make(http.Header)}, nil
 		default:
 			t.Fatalf("unexpected host %q", request.URL.Host)
 			return nil, nil
@@ -62,7 +62,7 @@ func TestGoogleCloudHSMRequiresProviderAttestation(t *testing.T) {
 	protectionLevel := "HSM"
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "oauth2.googleapis.com" {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-a"}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-a","expires_in":3600}`)), Header: make(http.Header)}, nil
 		}
 		body := `{"plaintext":"` + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + `","protectionLevel":"` + protectionLevel + `"}`
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
@@ -78,6 +78,23 @@ func TestGoogleCloudHSMRequiresProviderAttestation(t *testing.T) {
 	protectionLevel = "SOFTWARE"
 	if _, _, err := unwrapper.UnwrapMember(context.Background(), member, []byte("ciphertext")); err == nil {
 		t.Fatal("software-protected key accepted for Google Cloud HSM member")
+	}
+}
+
+func TestGoogleTokenIntrospectionRejectsExpiredToken(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "cloudkms.googleapis.com" {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"plaintext":"` + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + `"}`)), Header: make(http.Header)}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-a","expires_in":"0"}`)), Header: make(http.Header)}, nil
+	})}
+	unwrapper, err := NewGoogleCloudKMSUnwrapper("token-a", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = unwrapper.UnwrapMember(context.Background(), ExternalMemberContext{RepositoryID: "repo-a", RootKeyVersion: 1, MemberID: "alice", Provider: "gcp-kms", KeyReference: "projects/project-a/locations/global/keyRings/ring/cryptoKeys/alice", Purpose: "purpose-a"}, []byte("ciphertext"))
+	if err == nil || !strings.Contains(err.Error(), "current lifetime") {
+		t.Fatalf("expired Google token was accepted: %v", err)
 	}
 }
 

@@ -17,15 +17,16 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use rand08::rngs::OsRng as LegacyOsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     sync::watch,
 };
+use zeroize::Zeroizing;
 
 use crate::encryption::recovery_capsule::{
-    MemberCredential, RecoveredKeys, RecoveryCapsule, UnwrappedMemberShare,
+    CapsuleBuilder, MemberCredential, MemberProtection, RecoveredKeys, RecoveryCapsule,
+    UnlockPolicy, UnwrappedMemberShare,
 };
 
 type SessionKem = X25519HkdfSha256;
@@ -43,6 +44,7 @@ pub enum Capability {
     MetadataDek,
     RepositoryMasterKey,
     MetadataLossRecovery,
+    PolicyMutation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +58,7 @@ pub struct SessionTranscript {
     pub nonce: String,
     pub expires_unix_ms: u64,
     pub hpke_public_key: String,
+    pub identity_recovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +86,8 @@ struct ContributionPayload {
     share: Vec<u8>,
     last_seen_generation: u64,
     principal_id: Option<String>,
+    #[serde(default)]
+    unverified_session_acknowledged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +106,17 @@ pub struct UnlockStatus {
     pub custody_assumed: bool,
     pub compliant: bool,
     pub findings: Vec<String>,
+    pub policy_mutation_pending: bool,
+    pub pending_capsule_generation: Option<u64>,
+    pub pending_capsule_sha256: Option<String>,
+    pub identity_recovery: bool,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct ExpirationSummary {
+    pub expired_sessions: usize,
+    pub expired_leases: usize,
+    pub automatic_lock: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +201,11 @@ struct LeaseState {
     expires_unix_ms: u64,
 }
 
+struct PendingPolicyMutation {
+    capsule: RecoveryCapsule,
+    digest: String,
+}
+
 pub struct KeyBroker {
     capsule: RecoveryCapsule,
     identity: SigningKey,
@@ -194,6 +215,8 @@ pub struct KeyBroker {
     authorizations: Vec<ClientAuthorization>,
     maximum_unlocked_lifetime: Option<Duration>,
     identity_locked: bool,
+    pending_policy_mutation: Option<PendingPolicyMutation>,
+    identity_recovery: bool,
 }
 
 impl KeyBroker {
@@ -203,12 +226,47 @@ impl KeyBroker {
         authorizations: Vec<ClientAuthorization>,
         maximum_unlocked_lifetime: Option<Duration>,
     ) -> Result<Self> {
+        Self::new_with_identity_mode(
+            capsule,
+            identity,
+            authorizations,
+            maximum_unlocked_lifetime,
+            false,
+        )
+    }
+
+    pub fn new_identity_recovery(
+        capsule: RecoveryCapsule,
+        identity: SigningKey,
+        authorizations: Vec<ClientAuthorization>,
+        maximum_unlocked_lifetime: Option<Duration>,
+    ) -> Result<Self> {
+        Self::new_with_identity_mode(
+            capsule,
+            identity,
+            authorizations,
+            maximum_unlocked_lifetime,
+            true,
+        )
+    }
+
+    fn new_with_identity_mode(
+        capsule: RecoveryCapsule,
+        identity: SigningKey,
+        authorizations: Vec<ClientAuthorization>,
+        maximum_unlocked_lifetime: Option<Duration>,
+        identity_recovery: bool,
+    ) -> Result<Self> {
         capsule.validate()?;
         let pinned = BASE64
             .decode(&capsule.header.broker_identity_public_key)
             .context("decode pinned broker identity")?;
-        if pinned.as_slice() != identity.verifying_key().as_bytes() {
+        let identity_matches = pinned.as_slice() == identity.verifying_key().as_bytes();
+        if !identity_recovery && !identity_matches {
             bail!("broker identity does not match capsule pin");
+        }
+        if identity_recovery && identity_matches {
+            bail!("identity recovery requires a fresh broker identity");
         }
         if maximum_unlocked_lifetime == Some(Duration::ZERO) {
             bail!("maximum unlocked lifetime must not be zero");
@@ -223,6 +281,8 @@ impl KeyBroker {
             authorizations,
             maximum_unlocked_lifetime,
             identity_locked: true,
+            pending_policy_mutation: None,
+            identity_recovery,
         })
     }
 
@@ -247,6 +307,16 @@ impl KeyBroker {
             custody_assumed: policy.custody_assumed,
             compliant: policy.compliant,
             findings: policy.findings,
+            policy_mutation_pending: self.pending_policy_mutation.is_some(),
+            pending_capsule_generation: self
+                .pending_policy_mutation
+                .as_ref()
+                .map(|pending| pending.capsule.header.generation),
+            pending_capsule_sha256: self
+                .pending_policy_mutation
+                .as_ref()
+                .map(|pending| pending.digest.clone()),
+            identity_recovery: self.identity_recovery,
         }
     }
 
@@ -280,6 +350,7 @@ impl KeyBroker {
                 .checked_add(u64::try_from(ttl.as_millis())?)
                 .context("session expiry overflow")?,
             hpke_public_key: BASE64.encode(public_key.to_bytes()),
+            identity_recovery: self.identity_recovery,
         };
         let transcript_bytes = encode_transcript(&transcript)?;
         let signature = self.identity.sign(&transcript_bytes);
@@ -316,6 +387,9 @@ impl KeyBroker {
             bail!("unlock session has expired");
         }
         let payload = decrypt_contribution(session, &contribution)?;
+        if payload.unverified_session_acknowledged != self.identity_recovery {
+            bail!("identity-recovery contribution acknowledgement does not match broker mode");
+        }
         if payload.last_seen_generation > self.capsule.header.generation {
             bail!("custodian generation attestation rejects capsule rollback");
         }
@@ -369,6 +443,15 @@ impl KeyBroker {
         now_unix_ms: u64,
     ) -> Result<KeyLease> {
         self.expire(now_unix_ms);
+        if self.pending_policy_mutation.is_some() {
+            bail!("policy mutation is pending publication");
+        }
+        if self.identity_recovery {
+            bail!("key leases are disabled until broker identity is repinned");
+        }
+        if capability == Capability::PolicyMutation {
+            bail!("policy mutation capability cannot issue a key lease");
+        }
         if ttl.is_zero() || ttl > MAX_LEASE_TTL || client.connection_id.is_empty() {
             bail!("invalid lease request");
         }
@@ -382,6 +465,7 @@ impl KeyBroker {
             Capability::RepositoryMasterKey | Capability::MetadataLossRecovery => {
                 epoch.keys.repository_master_key.as_slice()
             }
+            Capability::PolicyMutation => unreachable!("rejected above"),
         };
         let lease_id = random_id(&mut rand::rng());
         self.leases.insert(
@@ -402,10 +486,145 @@ impl KeyBroker {
                 Capability::RepositoryMasterKey | Capability::MetadataLossRecovery => {
                     self.capsule.header.repository_key_version
                 }
+                Capability::PolicyMutation => unreachable!("rejected above"),
             },
             capsule_generation: self.capsule.header.generation,
             key: Zeroizing::new(key.to_vec()),
         })
+    }
+
+    pub fn prepare_offline_policy_mutation(
+        &mut self,
+        client: &ClientIdentity,
+        policy: UnlockPolicy,
+        credentials: &[(&str, MemberCredential<'_>)],
+        acknowledge_downgrade: bool,
+        now_unix_ms: u64,
+    ) -> Result<(RecoveryCapsule, String)> {
+        self.expire(now_unix_ms);
+        self.authorize(client, Capability::PolicyMutation)?;
+        if self.pending_policy_mutation.is_some() {
+            bail!("a policy mutation is already pending publication");
+        }
+        let epoch = self.epoch.as_ref().context("broker is locked")?;
+        let generation = self
+            .capsule
+            .header
+            .generation
+            .checked_add(1)
+            .context("capsule generation overflow")?;
+        let candidate = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
+            .broker_identity_public_key(self.identity.verifying_key().as_bytes())
+            .key_versions(
+                self.capsule.header.root_key_version,
+                self.capsule.header.metadata_dek_version,
+                self.capsule.header.repository_key_version,
+            )
+            .create_offline_policy(
+                policy,
+                credentials,
+                epoch.keys.metadata_dek.as_slice(),
+                epoch.keys.repository_master_key.as_slice(),
+            )?;
+        self.accept_policy_mutation(candidate, acknowledge_downgrade)
+    }
+
+    pub async fn prepare_policy_mutation(
+        &mut self,
+        client: &ClientIdentity,
+        policy: UnlockPolicy,
+        protections: &[(&str, MemberProtection<'_>)],
+        acknowledge_downgrade: bool,
+        now_unix_ms: u64,
+    ) -> Result<(RecoveryCapsule, String)> {
+        self.expire(now_unix_ms);
+        self.authorize(client, Capability::PolicyMutation)?;
+        if self.pending_policy_mutation.is_some() {
+            bail!("a policy mutation is already pending publication");
+        }
+        let epoch = self.epoch.as_ref().context("broker is locked")?;
+        let generation = self
+            .capsule
+            .header
+            .generation
+            .checked_add(1)
+            .context("capsule generation overflow")?;
+        let candidate = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
+            .broker_identity_public_key(self.identity.verifying_key().as_bytes())
+            .key_versions(
+                self.capsule.header.root_key_version,
+                self.capsule.header.metadata_dek_version,
+                self.capsule.header.repository_key_version,
+            )
+            .create_policy(
+                policy,
+                protections,
+                epoch.keys.metadata_dek.as_slice(),
+                epoch.keys.repository_master_key.as_slice(),
+            )
+            .await?;
+        self.accept_policy_mutation(candidate, acknowledge_downgrade)
+    }
+
+    fn accept_policy_mutation(
+        &mut self,
+        candidate: RecoveryCapsule,
+        acknowledge_downgrade: bool,
+    ) -> Result<(RecoveryCapsule, String)> {
+        let current_status = self.capsule.effective_policy_status()?;
+        let candidate_status = candidate.effective_policy_status()?;
+        let is_downgrade = candidate_status.minimum_custodians < current_status.minimum_custodians
+            || (current_status.compliant && !candidate_status.compliant);
+        if is_downgrade && !acknowledge_downgrade {
+            bail!("policy downgrade requires explicit acknowledgement");
+        }
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&candidate)?));
+        self.close_all_sessions();
+        self.leases.clear();
+        self.pending_policy_mutation = Some(PendingPolicyMutation {
+            capsule: candidate.clone(),
+            digest: digest.clone(),
+        });
+        Ok((candidate, digest))
+    }
+
+    pub fn activate_policy_mutation(
+        &mut self,
+        client: &ClientIdentity,
+        digest: &str,
+    ) -> Result<()> {
+        self.authorize(client, Capability::PolicyMutation)?;
+        let pending = self
+            .pending_policy_mutation
+            .as_ref()
+            .context("no policy mutation is pending publication")?;
+        if pending.digest != digest {
+            bail!("published capsule digest does not match pending policy mutation");
+        }
+        let pending = self.pending_policy_mutation.take().expect("checked above");
+        self.capsule = pending.capsule;
+        self.identity_recovery = false;
+        self.lock();
+        Ok(())
+    }
+
+    pub fn pending_policy_mutation(
+        &self,
+        client: &ClientIdentity,
+    ) -> Result<(RecoveryCapsule, String)> {
+        self.authorize(client, Capability::PolicyMutation)?;
+        let pending = self
+            .pending_policy_mutation
+            .as_ref()
+            .context("no policy mutation is pending publication")?;
+        Ok((pending.capsule.clone(), pending.digest.clone()))
+    }
+
+    pub fn cancel_policy_mutation(&mut self) -> Result<()> {
+        self.pending_policy_mutation
+            .take()
+            .context("no policy mutation is pending publication")?;
+        Ok(())
     }
 
     pub fn release_lease(&mut self, lease_id: &str, connection_id: &str) -> Result<()> {
@@ -458,13 +677,19 @@ impl KeyBroker {
         Ok(())
     }
 
-    fn expire(&mut self, now_unix_ms: u64) {
+    pub fn authorize_client(&self, client: &ClientIdentity, capability: Capability) -> Result<()> {
+        self.authorize(client, capability)
+    }
+
+    pub fn expire_state(&mut self, now_unix_ms: u64) -> ExpirationSummary {
+        let leases_before = self.leases.len();
         let expired_sessions = self
             .sessions
             .iter()
             .filter(|(_, session)| session.signed.transcript.expires_unix_ms <= now_unix_ms)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
+        let expired_session_count = expired_sessions.len();
         for session_id in expired_sessions {
             self.sessions.remove(&session_id);
         }
@@ -475,7 +700,11 @@ impl KeyBroker {
             .is_some_and(|expiry| expiry <= now_unix_ms)
         {
             self.lock();
-            return;
+            return ExpirationSummary {
+                expired_sessions: expired_session_count,
+                expired_leases: leases_before,
+                automatic_lock: true,
+            };
         }
         self.leases.retain(|_, lease| {
             lease.expires_unix_ms > now_unix_ms
@@ -484,6 +713,15 @@ impl KeyBroker {
                     .as_ref()
                     .is_some_and(|epoch| epoch.id == lease.epoch_id)
         });
+        ExpirationSummary {
+            expired_sessions: expired_session_count,
+            expired_leases: leases_before - self.leases.len(),
+            automatic_lock: false,
+        }
+    }
+
+    fn expire(&mut self, now_unix_ms: u64) {
+        let _ = self.expire_state(now_unix_ms);
     }
 
     fn close_all_sessions(&mut self) {
@@ -541,7 +779,10 @@ pub async fn acquire_metadata_lease(
         || negotiation.protocol != "vaultic-key-broker.v1"
         || negotiation.challenge.is_empty()
     {
-        bail!("key broker protocol negotiation failed: {}", negotiation.message);
+        bail!(
+            "key broker protocol negotiation failed: {}",
+            negotiation.message
+        );
     }
     let challenge_response = format!(
         "{:x}",
@@ -591,7 +832,11 @@ pub async fn acquire_metadata_lease(
     }
     let response: LeaseResponse = serde_json::from_slice(&response)?;
     if response.result == "error" {
-        bail!("key broker rejected metadata lease ({}): {}", response.code, response.message);
+        bail!(
+            "key broker rejected metadata lease ({}): {}",
+            response.code,
+            response.message
+        );
     }
     if response.result != "lease"
         || response.lease_id.is_empty()
@@ -601,7 +846,11 @@ pub async fn acquire_metadata_lease(
     {
         bail!("invalid key broker metadata lease response");
     }
-    let key = Zeroizing::new(BASE64.decode(&response.key).context("decode leased metadata DEK")?);
+    let key = Zeroizing::new(
+        BASE64
+            .decode(&response.key)
+            .context("decode leased metadata DEK")?,
+    );
     if key.len() != 32 {
         bail!("broker metadata DEK has an invalid length");
     }
@@ -687,6 +936,48 @@ pub fn encrypt_offline_contribution(
     now_unix_ms: u64,
 ) -> Result<EncryptedContribution> {
     verify_session(capsule, session, endpoint_binding, now_unix_ms)?;
+    encrypt_offline_contribution_inner(
+        capsule,
+        session,
+        member_id,
+        credential,
+        last_seen_generation,
+        principal_id,
+        false,
+    )
+}
+
+pub fn encrypt_offline_contribution_unverified(
+    capsule: &RecoveryCapsule,
+    session: &SignedSession,
+    endpoint_binding: &str,
+    member_id: &str,
+    credential: &MemberCredential<'_>,
+    last_seen_generation: u64,
+    principal_id: Option<String>,
+    now_unix_ms: u64,
+) -> Result<EncryptedContribution> {
+    verify_unverified_session(capsule, session, endpoint_binding, now_unix_ms)?;
+    encrypt_offline_contribution_inner(
+        capsule,
+        session,
+        member_id,
+        credential,
+        last_seen_generation,
+        principal_id,
+        true,
+    )
+}
+
+fn encrypt_offline_contribution_inner(
+    capsule: &RecoveryCapsule,
+    session: &SignedSession,
+    member_id: &str,
+    credential: &MemberCredential<'_>,
+    last_seen_generation: u64,
+    principal_id: Option<String>,
+    unverified_session_acknowledged: bool,
+) -> Result<EncryptedContribution> {
     let share = capsule.unwrap_offline_member(member_id, credential)?;
     let payload = ContributionPayload {
         member_id: share.member_id,
@@ -694,6 +985,7 @@ pub fn encrypt_offline_contribution(
         share: share.plaintext.to_vec(),
         last_seen_generation,
         principal_id,
+        unverified_session_acknowledged,
     };
     let mut plaintext = Zeroizing::new(serde_json::to_vec(&payload)?);
     let transcript = encode_transcript(&session.transcript)?;
@@ -701,12 +993,12 @@ pub fn encrypt_offline_contribution(
     let public_key = <SessionKem as KemTrait>::PublicKey::from_bytes(&public_key_bytes)
         .map_err(|_| anyhow::anyhow!("invalid session HPKE public key"))?;
     let mut rng = StdRng::from_os_rng();
-    let (encapped_key, mut sender) = hpke::setup_sender::<
-        SessionAead,
-        SessionKdf,
-        SessionKem,
-        _,
-    >(&OpModeS::Base, &public_key, SESSION_INFO, &mut rng)
+    let (encapped_key, mut sender) = hpke::setup_sender::<SessionAead, SessionKdf, SessionKem, _>(
+        &OpModeS::Base,
+        &public_key,
+        SESSION_INFO,
+        &mut rng,
+    )
     .map_err(|_| anyhow::anyhow!("initialize contribution HPKE sender"))?;
     let tag = sender
         .seal_in_place_detached(plaintext.as_mut(), &transcript)
@@ -725,6 +1017,41 @@ pub fn verify_session(
     endpoint_binding: &str,
     now_unix_ms: u64,
 ) -> Result<()> {
+    verify_session_transcript(capsule, session, endpoint_binding, now_unix_ms)?;
+    if session.transcript.identity_recovery {
+        bail!("identity-recovery session requires explicit unverified-session acknowledgement");
+    }
+    let public_key_bytes = BASE64.decode(&capsule.header.broker_identity_public_key)?;
+    let public_key = VerifyingKey::from_bytes(
+        &public_key_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid broker identity public key length"))?,
+    )?;
+    let signature_bytes = BASE64.decode(&session.signature)?;
+    let signature = Signature::from_slice(&signature_bytes)?;
+    public_key.verify(&encode_transcript(&session.transcript)?, &signature)?;
+    Ok(())
+}
+
+pub fn verify_unverified_session(
+    capsule: &RecoveryCapsule,
+    session: &SignedSession,
+    endpoint_binding: &str,
+    now_unix_ms: u64,
+) -> Result<()> {
+    verify_session_transcript(capsule, session, endpoint_binding, now_unix_ms)?;
+    if !session.transcript.identity_recovery {
+        bail!("normal signed session cannot use unverified-session acknowledgement");
+    }
+    Ok(())
+}
+
+fn verify_session_transcript(
+    capsule: &RecoveryCapsule,
+    session: &SignedSession,
+    endpoint_binding: &str,
+    now_unix_ms: u64,
+) -> Result<()> {
     capsule.validate()?;
     let transcript = &session.transcript;
     if transcript.protocol != "vaultic-key-broker.v1"
@@ -736,16 +1063,7 @@ pub fn verify_session(
     {
         bail!("unlock session transcript does not match capsule or endpoint");
     }
-    let public_key_bytes = BASE64.decode(&capsule.header.broker_identity_public_key)?;
-    let public_key = VerifyingKey::from_bytes(
-        &public_key_bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid broker identity public key length"))?,
-    )?;
-    let signature_bytes = BASE64.decode(&session.signature)?;
-    let signature = Signature::from_slice(&signature_bytes)?;
     let encoded = encode_transcript(transcript)?;
-    public_key.verify(&encoded, &signature)?;
     if session.fingerprint != session_fingerprint(&encoded) {
         bail!("unlock session fingerprint mismatch");
     }
@@ -810,7 +1128,7 @@ fn release_manifest(client: &ClientIdentity) -> Result<Vec<u8>> {
 
 fn session_fingerprint(transcript: &[u8]) -> String {
     let digest = Sha256::digest(transcript);
-    digest[..10]
+    digest[..16]
         .chunks(2)
         .map(|chunk| format!("{:02X}{:02X}", chunk[0], chunk[1]))
         .collect::<Vec<_>>()
@@ -832,7 +1150,54 @@ pub fn unix_time_ms() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encryption::recovery_capsule::CapsuleBuilder;
+    use crate::encryption::{
+        envelope::providers::{KeyContext, KeyProvider},
+        recovery_capsule::{
+            CapsuleBuilder, ExternalMemberProtection, MemberProvider, PrincipalBinding,
+        },
+    };
+    use async_trait::async_trait;
+
+    struct ContextProvider;
+
+    #[async_trait]
+    impl KeyProvider for ContextProvider {
+        fn name(&self) -> &'static str {
+            "azure-key-vault"
+        }
+
+        async fn wrap(&self, context: &KeyContext<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+            let binding = serde_json::to_vec(&(
+                context.repository_id,
+                context.slot_id,
+                context.key_reference,
+                context.dek_version,
+                context.purpose,
+            ))?;
+            let mut wrapped = Sha256::digest(binding).to_vec();
+            wrapped.extend_from_slice(plaintext);
+            Ok(wrapped)
+        }
+
+        async fn unwrap(
+            &self,
+            context: &KeyContext<'_>,
+            ciphertext: &[u8],
+        ) -> Result<Zeroizing<Vec<u8>>> {
+            let binding = serde_json::to_vec(&(
+                context.repository_id,
+                context.slot_id,
+                context.key_reference,
+                context.dek_version,
+                context.purpose,
+            ))?;
+            let expected = Sha256::digest(binding);
+            if ciphertext.len() < expected.len() || ciphertext[..expected.len()] != expected[..] {
+                bail!("external member context mismatch");
+            }
+            Ok(Zeroizing::new(ciphertext[expected.len()..].to_vec()))
+        }
+    }
 
     fn setup() -> (RecoveryCapsule, SigningKey, Vec<ClientAuthorization>) {
         let identity = SigningKey::generate(&mut LegacyOsRng);
@@ -857,7 +1222,7 @@ mod tests {
             release_identity: "release-key-a".to_owned(),
             release_public_key: release_signing_key().verifying_key().to_bytes(),
             peer_uid: 42,
-            capabilities: BTreeSet::from([Capability::MetadataDek]),
+            capabilities: BTreeSet::from([Capability::MetadataDek, Capability::PolicyMutation]),
         }];
         (capsule, identity, authorizations)
     }
@@ -886,20 +1251,56 @@ mod tests {
         SigningKey::from_bytes(&[6; 32])
     }
 
+    fn signed_client(
+        signing_key: &SigningKey,
+        release_identity: &str,
+        version: u64,
+    ) -> ClientIdentity {
+        let mut client = ClientIdentity {
+            connection_id: "connection-a".to_owned(),
+            component: "vaulticdb".to_owned(),
+            version,
+            release_identity: release_identity.to_owned(),
+            executable_sha256: "ab".repeat(32),
+            release_signature: String::new(),
+            peer_uid: 42,
+            executable_owned_by_root: true,
+            installation_path_read_only: true,
+        };
+        client.release_signature = BASE64.encode(
+            signing_key
+                .sign(&release_manifest(&client).unwrap())
+                .to_bytes(),
+        );
+        client
+    }
+
     #[test]
     fn active_session_capacity_is_bounded_and_reclaimed_after_expiry() {
         let (capsule, identity, authorizations) = setup();
         let mut broker = KeyBroker::new(capsule, identity, authorizations, None).unwrap();
         for _ in 0..MAX_ACTIVE_SESSIONS {
             broker
-                .create_session("unix:/run/vaultic/broker.sock", Duration::from_secs(1), 1_000)
+                .create_session(
+                    "unix:/run/vaultic/broker.sock",
+                    Duration::from_secs(1),
+                    1_000,
+                )
                 .unwrap();
         }
         assert!(broker
-            .create_session("unix:/run/vaultic/broker.sock", Duration::from_secs(1), 1_000)
+            .create_session(
+                "unix:/run/vaultic/broker.sock",
+                Duration::from_secs(1),
+                1_000
+            )
             .is_err());
         assert!(broker
-            .create_session("unix:/run/vaultic/broker.sock", Duration::from_secs(1), 2_000)
+            .create_session(
+                "unix:/run/vaultic/broker.sock",
+                Duration::from_secs(1),
+                2_000
+            )
             .is_ok());
     }
 
@@ -909,10 +1310,18 @@ mod tests {
         let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
         assert!(broker.status(1_000).locked);
         let session = broker
-            .create_session("unix:/run/vaultic/broker.sock", Duration::from_secs(60), 1_000)
+            .create_session(
+                "unix:/run/vaultic/broker.sock",
+                Duration::from_secs(60),
+                1_000,
+            )
             .unwrap();
         for (member, credential, unlocked) in [
-            ("alice", MemberCredential::Passphrase(b"alice passphrase"), false),
+            (
+                "alice",
+                MemberCredential::Passphrase(b"alice passphrase"),
+                false,
+            ),
             ("bob", MemberCredential::Passphrase(b"bob passphrase"), true),
         ] {
             let contribution = encrypt_offline_contribution(
@@ -926,7 +1335,10 @@ mod tests {
                 1_001,
             )
             .unwrap();
-            assert_eq!(broker.submit_contribution(contribution, 1_002).unwrap(), unlocked);
+            assert_eq!(
+                broker.submit_contribution(contribution, 1_002).unwrap(),
+                unlocked
+            );
         }
         assert!(!broker.status(1_003).locked);
         let lease = broker
@@ -960,6 +1372,342 @@ mod tests {
         assert_eq!(broker.status(1_005).active_leases, 0);
         broker.lock();
         assert!(broker.status(1_006).locked);
+    }
+
+    #[test]
+    fn release_key_rotation_preserves_strict_client_authorization() {
+        let (capsule, identity, _) = setup();
+        let old_key = SigningKey::from_bytes(&[6; 32]);
+        let new_key = SigningKey::from_bytes(&[9; 32]);
+        let authorizations = vec![
+            ClientAuthorization {
+                component: "vaulticdb".to_owned(),
+                minimum_version: 20,
+                maximum_version: 21,
+                release_identity: "release-key-a".to_owned(),
+                release_public_key: old_key.verifying_key().to_bytes(),
+                peer_uid: 42,
+                capabilities: BTreeSet::from([Capability::MetadataDek]),
+            },
+            ClientAuthorization {
+                component: "vaulticdb".to_owned(),
+                minimum_version: 21,
+                maximum_version: 22,
+                release_identity: "release-key-b".to_owned(),
+                release_public_key: new_key.verifying_key().to_bytes(),
+                peer_uid: 42,
+                capabilities: BTreeSet::from([Capability::MetadataDek]),
+            },
+        ];
+        let broker = KeyBroker::new(capsule, identity, authorizations, None).unwrap();
+
+        let old_release = signed_client(&old_key, "release-key-a", 21);
+        let new_release = signed_client(&new_key, "release-key-b", 21);
+        assert!(broker
+            .authorize(&old_release, Capability::MetadataDek)
+            .is_ok());
+        assert!(broker
+            .authorize(&new_release, Capability::MetadataDek)
+            .is_ok());
+
+        let rejected = [
+            signed_client(&old_key, "release-key-a", 19),
+            signed_client(&new_key, "release-key-b", 20),
+            {
+                let mut value = signed_client(&old_key, "release-key-a", 21);
+                value.peer_uid = 7;
+                value
+            },
+            {
+                let mut value = signed_client(&old_key, "release-key-a", 21);
+                value.component = "vaultic".to_owned();
+                value
+            },
+            {
+                let mut value = signed_client(&old_key, "release-key-a", 21);
+                value.installation_path_read_only = false;
+                value
+            },
+            {
+                let mut value = signed_client(&old_key, "release-key-a", 21);
+                value.executable_owned_by_root = false;
+                value
+            },
+            {
+                let mut value = signed_client(&old_key, "release-key-a", 21);
+                value.executable_sha256 = "cd".repeat(32);
+                value
+            },
+            signed_client(&new_key, "release-key-a", 21),
+        ];
+        for client in rejected {
+            assert!(broker.authorize(&client, Capability::MetadataDek).is_err());
+        }
+        assert!(broker
+            .authorize(&old_release, Capability::RepositoryMasterKey)
+            .is_err());
+    }
+
+    #[test]
+    fn policy_mutation_preserves_keys_refreshes_shares_and_relocks() {
+        let (capsule, identity, authorizations) = setup();
+        let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        for (member, passphrase) in [
+            ("alice", b"alice passphrase".as_slice()),
+            ("bob", b"bob passphrase".as_slice()),
+        ] {
+            let contribution = encrypt_offline_contribution(
+                &capsule,
+                &session,
+                "unix:/broker.sock",
+                member,
+                &MemberCredential::Passphrase(passphrase),
+                4,
+                None,
+                1_001,
+            )
+            .unwrap();
+            broker.submit_contribution(contribution, 1_002).unwrap();
+        }
+        broker
+            .acquire_lease(
+                &client(),
+                Capability::MetadataDek,
+                Duration::from_secs(30),
+                1_003,
+            )
+            .unwrap();
+
+        let policy = UnlockPolicy::Threshold {
+            group_id: "new-operators".to_owned(),
+            required: 2,
+            members: vec!["dana".to_owned(), "erin".to_owned(), "frank".to_owned()],
+        };
+        let protections = [
+            ("dana", MemberCredential::Passphrase(b"dana passphrase")),
+            ("erin", MemberCredential::Passphrase(b"erin passphrase")),
+            ("frank", MemberCredential::Keyfile(&[8; 32])),
+        ];
+        let (candidate, digest) = broker
+            .prepare_offline_policy_mutation(&client(), policy, &protections, false, 1_004)
+            .unwrap();
+
+        assert_eq!(candidate.header.generation, 5);
+        assert_eq!(
+            candidate.header.metadata_dek_version,
+            capsule.header.metadata_dek_version
+        );
+        assert_eq!(
+            candidate.header.repository_key_version,
+            capsule.header.repository_key_version
+        );
+        assert_ne!(candidate.header.logical_id, capsule.header.logical_id);
+        assert_ne!(
+            candidate.metadata_dek.ciphertext,
+            capsule.metadata_dek.ciphertext
+        );
+        assert_ne!(candidate.members, capsule.members);
+        let recovered = candidate
+            .recover_offline(&BTreeMap::from([
+                (
+                    "dana".to_owned(),
+                    MemberCredential::Passphrase(b"dana passphrase"),
+                ),
+                (
+                    "erin".to_owned(),
+                    MemberCredential::Passphrase(b"erin passphrase"),
+                ),
+            ]))
+            .unwrap();
+        assert_eq!(recovered.metadata_dek.as_slice(), &[7; 32]);
+        assert_eq!(
+            recovered.repository_master_key.as_slice(),
+            b"repository-master-key"
+        );
+        assert_eq!(broker.status(1_005).capsule_generation, 4);
+        assert_eq!(broker.status(1_005).active_leases, 0);
+        assert_eq!(broker.status(1_005).pending_capsule_generation, Some(5));
+        assert_eq!(
+            broker.status(1_005).pending_capsule_sha256.as_deref(),
+            Some(digest.as_str())
+        );
+        assert!(broker
+            .acquire_lease(
+                &client(),
+                Capability::MetadataDek,
+                Duration::from_secs(30),
+                1_005,
+            )
+            .is_err());
+        assert!(broker
+            .activate_policy_mutation(&client(), "wrong-digest")
+            .is_err());
+        broker.activate_policy_mutation(&client(), &digest).unwrap();
+        let status = broker.status(1_006);
+        assert!(status.locked);
+        assert_eq!(status.capsule_generation, 5);
+        assert_eq!(status.active_leases, 0);
+        assert!(!status.policy_mutation_pending);
+    }
+
+    #[test]
+    fn identity_recovery_requires_acknowledgement_and_repin_before_leases() {
+        let (capsule, _, authorizations) = setup();
+        let replacement_identity = SigningKey::from_bytes(&[11; 32]);
+        let replacement_public_key = replacement_identity.verifying_key().to_bytes();
+        let mut broker = KeyBroker::new_identity_recovery(
+            capsule.clone(),
+            replacement_identity,
+            authorizations,
+            None,
+        )
+        .unwrap();
+        let session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        assert!(session.transcript.identity_recovery);
+        assert!(encrypt_offline_contribution(
+            &capsule,
+            &session,
+            "unix:/broker.sock",
+            "alice",
+            &MemberCredential::Passphrase(b"alice passphrase"),
+            4,
+            None,
+            1_001,
+        )
+        .is_err());
+        for (member, passphrase) in [
+            ("alice", b"alice passphrase".as_slice()),
+            ("bob", b"bob passphrase".as_slice()),
+        ] {
+            let contribution = encrypt_offline_contribution_unverified(
+                &capsule,
+                &session,
+                "unix:/broker.sock",
+                member,
+                &MemberCredential::Passphrase(passphrase),
+                4,
+                None,
+                1_001,
+            )
+            .unwrap();
+            broker.submit_contribution(contribution, 1_002).unwrap();
+        }
+        assert!(broker.status(1_003).identity_recovery);
+        assert!(broker
+            .acquire_lease(
+                &client(),
+                Capability::MetadataDek,
+                Duration::from_secs(30),
+                1_003,
+            )
+            .is_err());
+
+        let policy = capsule.policy.clone();
+        let protections = [
+            (
+                "alice",
+                MemberCredential::Passphrase(b"new alice passphrase"),
+            ),
+            ("bob", MemberCredential::Passphrase(b"new bob passphrase")),
+            ("carol", MemberCredential::Keyfile(&[12; 32])),
+        ];
+        let (candidate, digest) = broker
+            .prepare_offline_policy_mutation(&client(), policy, &protections, false, 1_004)
+            .unwrap();
+        assert_eq!(
+            BASE64
+                .decode(&candidate.header.broker_identity_public_key)
+                .unwrap(),
+            replacement_public_key
+        );
+        broker.activate_policy_mutation(&client(), &digest).unwrap();
+        let status = broker.status(1_005);
+        assert!(status.locked);
+        assert!(!status.identity_recovery);
+        assert_eq!(status.capsule_generation, 5);
+    }
+
+    #[tokio::test]
+    async fn mixed_cloud_policy_mutation_preserves_keys_and_context_binding() {
+        let (capsule, identity, authorizations) = setup();
+        let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        for (member, passphrase) in [
+            ("alice", b"alice passphrase".as_slice()),
+            ("bob", b"bob passphrase".as_slice()),
+        ] {
+            let contribution = encrypt_offline_contribution(
+                &capsule,
+                &session,
+                "unix:/broker.sock",
+                member,
+                &MemberCredential::Passphrase(passphrase),
+                4,
+                None,
+                1_001,
+            )
+            .unwrap();
+            broker.submit_contribution(contribution, 1_002).unwrap();
+        }
+        let provider = ContextProvider;
+        let policy = UnlockPolicy::Threshold {
+            group_id: "operators".to_owned(),
+            required: 2,
+            members: vec!["alice".to_owned(), "cloud".to_owned()],
+        };
+        let protections = [
+            (
+                "alice",
+                MemberProtection::Offline(MemberCredential::Passphrase(b"new alice passphrase")),
+            ),
+            (
+                "cloud",
+                MemberProtection::External(ExternalMemberProtection {
+                    provider: MemberProvider::AzureKeyVault,
+                    key_reference: "https://example.vault.azure.net/keys/cloud/version",
+                    principal: Some(PrincipalBinding {
+                        authority: "entra".to_owned(),
+                        tenant_account_or_project: "tenant-a".to_owned(),
+                        immutable_principal_id: "object-cloud".to_owned(),
+                    }),
+                    hardware: None,
+                    key_provider: &provider,
+                }),
+            ),
+        ];
+        let (candidate, _) = broker
+            .prepare_policy_mutation(&client(), policy, &protections, false, 1_003)
+            .await
+            .unwrap();
+        let offline = candidate
+            .unwrap_offline_member(
+                "alice",
+                &MemberCredential::Passphrase(b"new alice passphrase"),
+            )
+            .unwrap();
+        let cloud = candidate
+            .unwrap_external_member("cloud", &provider)
+            .await
+            .unwrap();
+        let recovered = candidate.recover_from_shares(&[offline, cloud]).unwrap();
+        assert_eq!(recovered.metadata_dek.as_slice(), &[7; 32]);
+        assert_eq!(
+            recovered.repository_master_key.as_slice(),
+            b"repository-master-key"
+        );
+        let mut tampered = candidate;
+        tampered.members[1].key_reference.push_str("-other");
+        assert!(tampered
+            .unwrap_external_member("cloud", &provider)
+            .await
+            .is_err());
     }
 
     #[test]
@@ -997,7 +1745,9 @@ mod tests {
             2_001,
         )
         .unwrap();
-        assert!(!broker.submit_contribution(contribution.clone(), 2_002).unwrap());
+        assert!(!broker
+            .submit_contribution(contribution.clone(), 2_002)
+            .unwrap());
         assert!(broker.submit_contribution(contribution, 2_003).is_err());
     }
 

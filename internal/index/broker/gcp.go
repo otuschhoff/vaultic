@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -108,8 +109,9 @@ func (unwrapper *GoogleCloudKMSUnwrapper) lookupPrincipal(ctx context.Context, p
 		return VerifiedPrincipal{}, fmt.Errorf("Google token introspection returned HTTP %d", response.StatusCode)
 	}
 	var claims struct {
-		Subject string `json:"sub"`
-		Email   string `json:"email"`
+		Subject   string          `json:"sub"`
+		Email     string          `json:"email"`
+		ExpiresIn json.RawMessage `json:"expires_in"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxProviderResponse))
 	if err := decoder.Decode(&claims); err != nil {
@@ -119,8 +121,21 @@ func (unwrapper *GoogleCloudKMSUnwrapper) lookupPrincipal(ctx context.Context, p
 	if identity == "" {
 		identity = claims.Email
 	}
-	if identity == "" {
-		return VerifiedPrincipal{}, errors.New("Google token identity has no immutable subject")
+	if identity == "" || !positiveGoogleTokenLifetime(claims.ExpiresIn) {
+		return VerifiedPrincipal{}, errors.New("Google token identity has no immutable subject or current lifetime")
 	}
 	return VerifiedPrincipal{Authority: "gcp-iam", TenantAccountOrProject: project, ImmutablePrincipalID: identity}, nil
+}
+
+func positiveGoogleTokenLifetime(raw json.RawMessage) bool {
+	var seconds int64
+	if json.Unmarshal(raw, &seconds) == nil {
+		return seconds > 0
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return false
+	}
+	seconds, err := strconv.ParseInt(text, 10, 64)
+	return err == nil && seconds > 0
 }

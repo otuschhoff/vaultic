@@ -3,10 +3,12 @@ package broker
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -16,7 +18,7 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 }
 
 func azureTestToken(audience, tenant, object string) string {
-	claims := `{"aud":"` + audience + `","tid":"` + tenant + `","oid":"` + object + `"}`
+	claims := fmt.Sprintf(`{"aud":%q,"tid":%q,"oid":%q,"exp":%d}`, audience, tenant, object, time.Now().Add(time.Hour).Unix())
 	return "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature"
 }
 
@@ -50,6 +52,11 @@ func TestAzureKeyVaultUnwrapperFailsClosed(t *testing.T) {
 	}
 	if _, err := azureTokenPrincipal(azureTestToken("other-audience", "tenant-a", "object-a")); err == nil {
 		t.Fatal("wrong Azure token audience accepted")
+	}
+	expiredClaims := fmt.Sprintf(`{"aud":"https://vault.azure.net","tid":"tenant-a","oid":"object-a","exp":%d}`, time.Now().Add(-time.Minute).Unix())
+	expiredToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(expiredClaims)) + ".signature"
+	if _, err := azureTokenPrincipal(expiredToken); err == nil {
+		t.Fatal("expired Azure bearer token accepted")
 	}
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"error":"denied"}`)), Header: make(http.Header)}, nil

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const maxProviderResponse = 1024 * 1024
@@ -112,12 +113,13 @@ func azureTokenPrincipal(token string) (VerifiedPrincipal, error) {
 		TenantID string          `json:"tid"`
 		ObjectID string          `json:"oid"`
 		Audience json.RawMessage `json:"aud"`
+		Expires  int64           `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return VerifiedPrincipal{}, errors.New("decode Azure bearer token claims")
 	}
-	if claims.TenantID == "" || claims.ObjectID == "" || !azureVaultAudience(claims.Audience) {
-		return VerifiedPrincipal{}, errors.New("Azure bearer token lacks Key Vault tenant, object, or audience claims")
+	if claims.TenantID == "" || claims.ObjectID == "" || !azureVaultAudience(claims.Audience) || claims.Expires <= time.Now().Unix() {
+		return VerifiedPrincipal{}, errors.New("Azure bearer token lacks current Key Vault tenant, object, audience, or expiry claims")
 	}
 	return VerifiedPrincipal{Authority: "entra", TenantAccountOrProject: claims.TenantID, ImmutablePrincipalID: claims.ObjectID}, nil
 }

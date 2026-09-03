@@ -45,6 +45,7 @@ const (
 	VaulticDB_CheckEncryption_FullMethodName          = "/vaulticdb.v1.VaulticDB/CheckEncryption"
 	VaulticDB_PrepareCapsuleMigration_FullMethodName  = "/vaulticdb.v1.VaulticDB/PrepareCapsuleMigration"
 	VaulticDB_FinalizeCapsuleMigration_FullMethodName = "/vaulticdb.v1.VaulticDB/FinalizeCapsuleMigration"
+	VaulticDB_PublishCapsuleMutation_FullMethodName   = "/vaulticdb.v1.VaulticDB/PublishCapsuleMutation"
 )
 
 // VaulticDBClient is the client API for VaulticDB service.
@@ -77,6 +78,7 @@ type VaulticDBClient interface {
 	CheckEncryption(ctx context.Context, in *KeyStatusRequest, opts ...grpc.CallOption) (*EncryptionAuditResponse, error)
 	PrepareCapsuleMigration(ctx context.Context, in *PrepareCapsuleMigrationRequest, opts ...grpc.CallOption) (*PrepareCapsuleMigrationResponse, error)
 	FinalizeCapsuleMigration(ctx context.Context, in *FinalizeCapsuleMigrationRequest, opts ...grpc.CallOption) (*Empty, error)
+	PublishCapsuleMutation(ctx context.Context, in *PublishCapsuleMutationRequest, opts ...grpc.CallOption) (*PublishCapsuleMutationResponse, error)
 }
 
 type vaulticDBClient struct {
@@ -347,6 +349,16 @@ func (c *vaulticDBClient) FinalizeCapsuleMigration(ctx context.Context, in *Fina
 	return out, nil
 }
 
+func (c *vaulticDBClient) PublishCapsuleMutation(ctx context.Context, in *PublishCapsuleMutationRequest, opts ...grpc.CallOption) (*PublishCapsuleMutationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishCapsuleMutationResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_PublishCapsuleMutation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VaulticDBServer is the server API for VaulticDB service.
 // All implementations must embed UnimplementedVaulticDBServer
 // for forward compatibility.
@@ -377,6 +389,7 @@ type VaulticDBServer interface {
 	CheckEncryption(context.Context, *KeyStatusRequest) (*EncryptionAuditResponse, error)
 	PrepareCapsuleMigration(context.Context, *PrepareCapsuleMigrationRequest) (*PrepareCapsuleMigrationResponse, error)
 	FinalizeCapsuleMigration(context.Context, *FinalizeCapsuleMigrationRequest) (*Empty, error)
+	PublishCapsuleMutation(context.Context, *PublishCapsuleMutationRequest) (*PublishCapsuleMutationResponse, error)
 	mustEmbedUnimplementedVaulticDBServer()
 }
 
@@ -464,6 +477,9 @@ func (UnimplementedVaulticDBServer) PrepareCapsuleMigration(context.Context, *Pr
 }
 func (UnimplementedVaulticDBServer) FinalizeCapsuleMigration(context.Context, *FinalizeCapsuleMigrationRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FinalizeCapsuleMigration not implemented")
+}
+func (UnimplementedVaulticDBServer) PublishCapsuleMutation(context.Context, *PublishCapsuleMutationRequest) (*PublishCapsuleMutationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PublishCapsuleMutation not implemented")
 }
 func (UnimplementedVaulticDBServer) mustEmbedUnimplementedVaulticDBServer() {}
 func (UnimplementedVaulticDBServer) testEmbeddedByValue()                   {}
@@ -954,6 +970,24 @@ func _VaulticDB_FinalizeCapsuleMigration_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VaulticDB_PublishCapsuleMutation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishCapsuleMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).PublishCapsuleMutation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_PublishCapsuleMutation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).PublishCapsuleMutation(ctx, req.(*PublishCapsuleMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VaulticDB_ServiceDesc is the grpc.ServiceDesc for VaulticDB service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1064,6 +1098,10 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FinalizeCapsuleMigration",
 			Handler:    _VaulticDB_FinalizeCapsuleMigration_Handler,
+		},
+		{
+			MethodName: "PublishCapsuleMutation",
+			Handler:    _VaulticDB_PublishCapsuleMutation_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -59,6 +59,19 @@ func newIndexUnlockStatusCommand(globalOptions *global.Options, options *indexUn
 			}
 			globalOptions.Term.Print(fmt.Sprintf("broker %s; repository %s; capsule generation %d; minimum custodians %d; compliant %t; sessions %d; leases %d\n", state, status.RepositoryID, status.CapsuleGeneration, status.MinimumCustodians, status.Compliant, status.ActiveSessions, status.ActiveLeases))
 			globalOptions.Term.Print(fmt.Sprintf("assurance: principal-verified=%t hardware-verified=%t custody-assumed=%t\n", status.PrincipalVerified, status.HardwareVerified, status.CustodyAssumed))
+			if status.IdentityRecovery {
+				globalOptions.Term.Print("identity recovery: active; leases disabled until a fresh capsule generation repins this broker\n")
+			}
+			if status.PolicyMutationPending {
+				generation, digest := "unknown", "unknown"
+				if status.PendingCapsuleGeneration != nil {
+					generation = strconv.FormatUint(*status.PendingCapsuleGeneration, 10)
+				}
+				if status.PendingCapsuleSHA256 != nil {
+					digest = *status.PendingCapsuleSHA256
+				}
+				globalOptions.Term.Print(fmt.Sprintf("policy mutation pending: generation %s; sha256 %s\n", generation, digest))
+			}
 			for _, finding := range status.Findings {
 				globalOptions.Term.Print("finding: " + finding + "\n")
 			}
@@ -69,7 +82,7 @@ func newIndexUnlockStatusCommand(globalOptions *global.Options, options *indexUn
 
 func newIndexUnlockContributeCommand(globalOptions *global.Options, options *indexUnlockOptions) *cobra.Command {
 	var sessionFile, memberID, passphraseFile, keyFile, azureTokenFile, gcpTokenFile, generationAnchor, confirmedFingerprint string
-	var awsKMS bool
+	var awsKMS, unverifiedSession bool
 	var prepare bool
 	var sessionTTL time.Duration
 	command := &cobra.Command{Use: "contribute", Short: "Prepare or submit a verified custodian contribution", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
@@ -122,6 +135,12 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 		if confirmedFingerprint != session.Fingerprint {
 			return fmt.Errorf("confirmed fingerprint does not match signed session")
 		}
+		if session.Transcript.IdentityRecovery != unverifiedSession {
+			return fmt.Errorf("identity-recovery sessions require --unverified-session, which normal sessions reject")
+		}
+		if unverifiedSession {
+			_ = emitUnlockEvent(command.Context(), observability.Critical, "unverified broker identity recovery session acknowledged", map[string]any{"session_id": session.Transcript.SessionID, "member_id": memberID, "capsule_generation": capsule.Generation(), "fingerprint": session.Fingerprint})
+		}
 		lastSeen, err := readGenerationAnchor(generationAnchor, capsule.Generation())
 		if err != nil {
 			_ = emitUnlockEvent(command.Context(), observability.Warning, "custodian contribution rejected", map[string]any{"member_id": memberID, "capsule_generation": capsule.Generation(), "stage": "unwrap_or_verify"})
@@ -133,7 +152,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			if unwrapErr != nil {
 				return unwrapErr
 			}
-			contribution, err = capsule.ContributeExternal(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now())
+			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
 		} else if azureTokenFile != "" || gcpTokenFile != "" {
 			tokenFile, description := azureTokenFile, "Azure custodian bearer token"
 			if gcpTokenFile != "" {
@@ -153,7 +172,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			if err != nil {
 				return err
 			}
-			contribution, err = capsule.ContributeExternal(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now())
+			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
 		} else {
 			credentialPath, description, keyfile := passphraseFile, "custodian passphrase", false
 			if keyFile != "" {
@@ -164,7 +183,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 				return readErr
 			}
 			defer clear(credential)
-			contribution, err = capsule.ContributeOffline(session, "unix:"+options.Socket, memberID, credential, keyfile, lastSeen, time.Now())
+			contribution, err = capsule.ContributeOfflineSession(session, "unix:"+options.Socket, memberID, credential, keyfile, lastSeen, time.Now(), unverifiedSession)
 		}
 		if err != nil {
 			return err
@@ -198,6 +217,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 	command.Flags().StringVar(&azureTokenFile, "azure-token-file", "", "mode-0600 Entra bearer-token file for an Azure Key Vault member")
 	command.Flags().StringVar(&gcpTokenFile, "gcp-token-file", "", "mode-0600 Google Cloud bearer-token file for a Cloud KMS member")
 	command.Flags().BoolVar(&awsKMS, "aws-kms", false, "use the AWS SDK credential chain for an AWS KMS or CloudHSM-backed member")
+	command.Flags().BoolVar(&unverifiedSession, "unverified-session", false, "acknowledge a broker identity-loss recovery session after independently confirming its fingerprint")
 	command.Flags().StringVar(&generationAnchor, "generation-anchor", "", "mode-0600 custodian last-seen-generation file")
 	command.Flags().StringVar(&confirmedFingerprint, "confirm-fingerprint", "", "out-of-band confirmed signed-session fingerprint")
 	return command

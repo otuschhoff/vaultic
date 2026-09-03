@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vaultic.key-broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/libexec/vaultic-key-broker</string>
+    <string>/usr/local/etc/vaultic/key-broker.json</string>
+  </array>
+  <key>UserName</key>
+  <string>_vaultic</string>
+  <key>GroupName</key>
+  <string>_vaultic</string>
+  <key>WorkingDirectory</key>
+  <string>/var/empty</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>Core</key>
+    <integer>0</integer>
+  </dict>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>Core</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/var/log/vaultic-key-broker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/vaultic-key-broker.log</string>
+</dict>
+</plist>

@@ -39,21 +39,25 @@ type Client struct {
 }
 
 type Status struct {
-	Protocol          string   `json:"protocol"`
-	Locked            bool     `json:"locked"`
-	RepositoryID      string   `json:"repository_id"`
-	CapsuleGeneration uint64   `json:"capsule_generation"`
-	CapsuleLogicalID  string   `json:"capsule_logical_id"`
-	PolicyHash        string   `json:"policy_hash"`
-	EpochID           *string  `json:"epoch_id"`
-	ActiveSessions    int      `json:"active_sessions"`
-	ActiveLeases      int      `json:"active_leases"`
-	MinimumCustodians int      `json:"minimum_custodians"`
-	PrincipalVerified bool     `json:"principal_verified"`
-	HardwareVerified  bool     `json:"hardware_verified"`
-	CustodyAssumed    bool     `json:"custody_assumed"`
-	Compliant         bool     `json:"compliant"`
-	Findings          []string `json:"findings"`
+	Protocol                 string   `json:"protocol"`
+	Locked                   bool     `json:"locked"`
+	RepositoryID             string   `json:"repository_id"`
+	CapsuleGeneration        uint64   `json:"capsule_generation"`
+	CapsuleLogicalID         string   `json:"capsule_logical_id"`
+	PolicyHash               string   `json:"policy_hash"`
+	EpochID                  *string  `json:"epoch_id"`
+	ActiveSessions           int      `json:"active_sessions"`
+	ActiveLeases             int      `json:"active_leases"`
+	MinimumCustodians        int      `json:"minimum_custodians"`
+	PrincipalVerified        bool     `json:"principal_verified"`
+	HardwareVerified         bool     `json:"hardware_verified"`
+	CustodyAssumed           bool     `json:"custody_assumed"`
+	Compliant                bool     `json:"compliant"`
+	Findings                 []string `json:"findings"`
+	PolicyMutationPending    bool     `json:"policy_mutation_pending"`
+	PendingCapsuleGeneration *uint64  `json:"pending_capsule_generation"`
+	PendingCapsuleSHA256     *string  `json:"pending_capsule_sha256"`
+	IdentityRecovery         bool     `json:"identity_recovery"`
 }
 
 type ReleaseManifest struct {
@@ -83,6 +87,7 @@ type SessionTranscript struct {
 	Nonce             string `json:"nonce"`
 	ExpiresUnixMS     uint64 `json:"expires_unix_ms"`
 	HPKEPublicKey     string `json:"hpke_public_key"`
+	IdentityRecovery  bool   `json:"identity_recovery"`
 }
 
 type SignedSession struct {
@@ -96,6 +101,49 @@ type EncryptedContribution struct {
 	EncappedKey string `json:"encapped_key"`
 	Ciphertext  string `json:"ciphertext"`
 	Tag         string `json:"tag"`
+}
+
+type UnlockPolicy struct {
+	Type     string         `json:"type"`
+	MemberID string         `json:"member_id,omitempty"`
+	Policies []UnlockPolicy `json:"policies,omitempty"`
+	GroupID  string         `json:"group_id,omitempty"`
+	Required uint8          `json:"required,omitempty"`
+	Members  []string       `json:"members,omitempty"`
+}
+
+type OfflinePolicyMember struct {
+	MemberID   string `json:"member_id"`
+	Provider   string `json:"provider"`
+	Credential string `json:"credential"`
+}
+
+type PolicyPrincipalBinding struct {
+	Authority              string `json:"authority"`
+	TenantAccountOrProject string `json:"tenant_account_or_project"`
+	ImmutablePrincipalID   string `json:"immutable_principal_id"`
+}
+
+type PolicyHardwareBinding struct {
+	CredentialID           string  `json:"credential_id"`
+	PublicKey              string  `json:"public_key"`
+	SerialNumber           *string `json:"serial_number,omitempty"`
+	AttestationFingerprint *string `json:"attestation_fingerprint,omitempty"`
+	UserPresenceRequired   bool    `json:"user_presence_required"`
+}
+
+type ExternalPolicyMember struct {
+	MemberID     string                  `json:"member_id"`
+	Provider     string                  `json:"provider"`
+	KeyReference string                  `json:"key_reference"`
+	Principal    *PolicyPrincipalBinding `json:"principal,omitempty"`
+	Hardware     *PolicyHardwareBinding  `json:"hardware,omitempty"`
+	BearerToken  *string                 `json:"bearer_token,omitempty"`
+}
+
+type PreparedPolicyMutation struct {
+	Capsule       json.RawMessage
+	CapsuleSHA256 string
 }
 
 type capsule struct {
@@ -178,30 +226,38 @@ type argon2Config struct {
 }
 
 type responseEnvelope struct {
-	Result            string         `json:"result"`
-	Code              string         `json:"code"`
-	Message           string         `json:"message"`
-	Protocol          string         `json:"protocol"`
-	Challenge         string         `json:"challenge"`
-	Locked            bool           `json:"locked"`
-	RepositoryID      string         `json:"repository_id"`
-	CapsuleGeneration uint64         `json:"capsule_generation"`
-	EpochID           *string        `json:"epoch_id"`
-	ActiveSessions    int            `json:"active_sessions"`
-	ActiveLeases      int            `json:"active_leases"`
-	MinimumCustodians int            `json:"minimum_custodians"`
-	PrincipalVerified bool           `json:"principal_verified"`
-	HardwareVerified  bool           `json:"hardware_verified"`
-	CustodyAssumed    bool           `json:"custody_assumed"`
-	Compliant         bool           `json:"compliant"`
-	Findings          []string       `json:"findings"`
-	Session           *SignedSession `json:"session"`
-	Unlocked          bool           `json:"unlocked"`
-	LeaseID           string         `json:"lease_id"`
-	Capability        string         `json:"capability"`
-	ExpiresUnixMS     uint64         `json:"expires_unix_ms"`
-	KeyVersion        uint32         `json:"key_version"`
-	Key               string         `json:"key"`
+	Result                   string          `json:"result"`
+	Code                     string          `json:"code"`
+	Message                  string          `json:"message"`
+	Protocol                 string          `json:"protocol"`
+	Challenge                string          `json:"challenge"`
+	Locked                   bool            `json:"locked"`
+	RepositoryID             string          `json:"repository_id"`
+	CapsuleGeneration        uint64          `json:"capsule_generation"`
+	CapsuleLogicalID         string          `json:"capsule_logical_id"`
+	PolicyHash               string          `json:"policy_hash"`
+	EpochID                  *string         `json:"epoch_id"`
+	ActiveSessions           int             `json:"active_sessions"`
+	ActiveLeases             int             `json:"active_leases"`
+	MinimumCustodians        int             `json:"minimum_custodians"`
+	PrincipalVerified        bool            `json:"principal_verified"`
+	HardwareVerified         bool            `json:"hardware_verified"`
+	CustodyAssumed           bool            `json:"custody_assumed"`
+	Compliant                bool            `json:"compliant"`
+	Findings                 []string        `json:"findings"`
+	PolicyMutationPending    bool            `json:"policy_mutation_pending"`
+	PendingCapsuleGeneration *uint64         `json:"pending_capsule_generation"`
+	PendingCapsuleSHA256     *string         `json:"pending_capsule_sha256"`
+	IdentityRecovery         bool            `json:"identity_recovery"`
+	Session                  *SignedSession  `json:"session"`
+	Unlocked                 bool            `json:"unlocked"`
+	LeaseID                  string          `json:"lease_id"`
+	Capability               string          `json:"capability"`
+	ExpiresUnixMS            uint64          `json:"expires_unix_ms"`
+	KeyVersion               uint32          `json:"key_version"`
+	Key                      string          `json:"key"`
+	Capsule                  json.RawMessage `json:"capsule"`
+	CapsuleSHA256            string          `json:"capsule_sha256"`
 }
 
 func Dial(ctx context.Context, socket string) (*Client, error) {
@@ -237,7 +293,7 @@ func (client *Client) Status(ctx context.Context) (Status, error) {
 	if response.Result != "status" || response.Protocol != protocolVersion {
 		return Status{}, fmt.Errorf("unexpected broker status response or protocol %q", response.Protocol)
 	}
-	return Status{Protocol: response.Protocol, Locked: response.Locked, RepositoryID: response.RepositoryID, CapsuleGeneration: response.CapsuleGeneration, EpochID: response.EpochID, ActiveSessions: response.ActiveSessions, ActiveLeases: response.ActiveLeases, MinimumCustodians: response.MinimumCustodians, PrincipalVerified: response.PrincipalVerified, HardwareVerified: response.HardwareVerified, CustodyAssumed: response.CustodyAssumed, Compliant: response.Compliant, Findings: response.Findings}, nil
+	return Status{Protocol: response.Protocol, Locked: response.Locked, RepositoryID: response.RepositoryID, CapsuleGeneration: response.CapsuleGeneration, CapsuleLogicalID: response.CapsuleLogicalID, PolicyHash: response.PolicyHash, EpochID: response.EpochID, ActiveSessions: response.ActiveSessions, ActiveLeases: response.ActiveLeases, MinimumCustodians: response.MinimumCustodians, PrincipalVerified: response.PrincipalVerified, HardwareVerified: response.HardwareVerified, CustodyAssumed: response.CustodyAssumed, Compliant: response.Compliant, Findings: response.Findings, PolicyMutationPending: response.PolicyMutationPending, PendingCapsuleGeneration: response.PendingCapsuleGeneration, PendingCapsuleSHA256: response.PendingCapsuleSHA256, IdentityRecovery: response.IdentityRecovery}, nil
 }
 
 func (client *Client) CreateSession(ctx context.Context, ttl time.Duration) (SignedSession, error) {
@@ -283,38 +339,11 @@ func (client *Client) AcquireLease(ctx context.Context, manifestPath, capability
 	if ttl <= 0 || ttl > time.Hour || ttl%time.Second != 0 {
 		return Lease{}, errors.New("broker lease lifetime must be positive whole seconds and at most one hour")
 	}
-	manifestData, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return Lease{}, fmt.Errorf("read release manifest: %w", err)
-	}
-	var manifest ReleaseManifest
-	decoder := json.NewDecoder(bytes.NewReader(manifestData))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
-		return Lease{}, fmt.Errorf("decode release manifest: %w", err)
-	}
-	if manifest.Component != "vaultic" || manifest.Signature == "" || manifest.ReleaseIdentity == "" {
-		return Lease{}, errors.New("release manifest is not a signed Vaultic manifest")
-	}
-	executable, err := os.Executable()
+	authorization, err := client.authorizedOperation(manifestPath)
 	if err != nil {
 		return Lease{}, err
 	}
-	executableData, err := os.ReadFile(executable)
-	if err != nil {
-		return Lease{}, fmt.Errorf("hash running Vaultic executable: %w", err)
-	}
-	digest := sha256.Sum256(executableData)
-	executableDigest := hex.EncodeToString(digest[:])
-	if !strings.EqualFold(manifest.ExecutableSHA256, executableDigest) {
-		return Lease{}, errors.New("release manifest executable digest does not match running Vaultic")
-	}
-	if client.protocol != protocolVersion || client.challenge == "" {
-		return Lease{}, errors.New("broker lease challenge is unavailable or already consumed")
-	}
-	challengeDigest := sha256.Sum256([]byte("vaultic-broker-lease-challenge-v1\x00" + protocolVersion + "\x00" + client.challenge + "\x00" + executableDigest))
-	request := map[string]any{"operation": "acquire_lease", "component": manifest.Component, "version": manifest.Version, "release_identity": manifest.ReleaseIdentity, "release_signature": manifest.Signature, "capability": capability, "ttl_seconds": uint64(ttl / time.Second), "challenge_response": hex.EncodeToString(challengeDigest[:])}
-	client.challenge = ""
+	request := map[string]any{"operation": "acquire_lease", "component": authorization["component"], "version": authorization["version"], "release_identity": authorization["release_identity"], "release_signature": authorization["release_signature"], "capability": capability, "ttl_seconds": uint64(ttl / time.Second), "challenge_response": authorization["challenge_response"]}
 	var response responseEnvelope
 	if err := client.call(ctx, request, &response); err != nil {
 		return Lease{}, err
@@ -329,6 +358,99 @@ func (client *Client) AcquireLease(ctx context.Context, manifestPath, capability
 	return Lease{LeaseID: response.LeaseID, EpochID: *response.EpochID, Capability: response.Capability, ExpiresUnixMS: response.ExpiresUnixMS, KeyVersion: response.KeyVersion, CapsuleGeneration: response.CapsuleGeneration, Key: key}, nil
 }
 
+func (client *Client) PreparePolicyMutation(ctx context.Context, manifestPath string, policy UnlockPolicy, members []OfflinePolicyMember, externalMembers []ExternalPolicyMember, acknowledgeDowngrade bool) (PreparedPolicyMutation, error) {
+	authorization, err := client.authorizedOperation(manifestPath)
+	if err != nil {
+		return PreparedPolicyMutation{}, err
+	}
+	var response responseEnvelope
+	request := map[string]any{"operation": "prepare_policy_mutation", "authorization": authorization, "policy": policy, "members": members, "external_members": externalMembers, "acknowledge_downgrade": acknowledgeDowngrade}
+	if err := client.call(ctx, request, &response); err != nil {
+		return PreparedPolicyMutation{}, err
+	}
+	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 || len(response.CapsuleSHA256) != 64 {
+		return PreparedPolicyMutation{}, errors.New("invalid prepared policy mutation response")
+	}
+	return PreparedPolicyMutation{Capsule: response.Capsule, CapsuleSHA256: response.CapsuleSHA256}, nil
+}
+
+func (client *Client) PendingPolicyMutation(ctx context.Context, manifestPath string) (PreparedPolicyMutation, error) {
+	authorization, err := client.authorizedOperation(manifestPath)
+	if err != nil {
+		return PreparedPolicyMutation{}, err
+	}
+	var response responseEnvelope
+	if err := client.call(ctx, map[string]any{"operation": "pending_policy_mutation", "authorization": authorization}, &response); err != nil {
+		return PreparedPolicyMutation{}, err
+	}
+	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 || len(response.CapsuleSHA256) != 64 {
+		return PreparedPolicyMutation{}, errors.New("unexpected broker pending policy mutation response")
+	}
+	return PreparedPolicyMutation{Capsule: response.Capsule, CapsuleSHA256: response.CapsuleSHA256}, nil
+}
+
+func (client *Client) ActivatePolicyMutation(ctx context.Context, manifestPath, capsuleSHA256 string) error {
+	return client.policyMutationControl(ctx, manifestPath, "activate_policy_mutation", capsuleSHA256)
+}
+
+func (client *Client) CancelPolicyMutation(ctx context.Context, manifestPath string) error {
+	return client.policyMutationControl(ctx, manifestPath, "cancel_policy_mutation", "")
+}
+
+func (client *Client) policyMutationControl(ctx context.Context, manifestPath, operation, capsuleSHA256 string) error {
+	authorization, err := client.authorizedOperation(manifestPath)
+	if err != nil {
+		return err
+	}
+	request := map[string]any{"operation": operation, "authorization": authorization}
+	if capsuleSHA256 != "" {
+		request["capsule_sha256"] = capsuleSHA256
+	}
+	var response responseEnvelope
+	if err := client.call(ctx, request, &response); err != nil {
+		return err
+	}
+	if response.Result != "ok" {
+		return fmt.Errorf("unexpected broker %s response", operation)
+	}
+	return nil
+}
+
+func (client *Client) authorizedOperation(manifestPath string) (map[string]any, error) {
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("read release manifest: %w", err)
+	}
+	var manifest ReleaseManifest
+	decoder := json.NewDecoder(bytes.NewReader(manifestData))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("decode release manifest: %w", err)
+	}
+	if manifest.Component != "vaultic" || manifest.Signature == "" || manifest.ReleaseIdentity == "" {
+		return nil, errors.New("release manifest is not a signed Vaultic manifest")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	executableData, err := os.ReadFile(executable)
+	if err != nil {
+		return nil, fmt.Errorf("hash running Vaultic executable: %w", err)
+	}
+	digest := sha256.Sum256(executableData)
+	executableDigest := hex.EncodeToString(digest[:])
+	if !strings.EqualFold(manifest.ExecutableSHA256, executableDigest) {
+		return nil, errors.New("release manifest executable digest does not match running Vaultic")
+	}
+	if client.protocol != protocolVersion || client.challenge == "" {
+		return nil, errors.New("broker authorization challenge is unavailable or already consumed")
+	}
+	challengeDigest := sha256.Sum256([]byte("vaultic-broker-lease-challenge-v1\x00" + protocolVersion + "\x00" + client.challenge + "\x00" + executableDigest))
+	client.challenge = ""
+	return map[string]any{"component": manifest.Component, "version": manifest.Version, "release_identity": manifest.ReleaseIdentity, "release_signature": manifest.Signature, "challenge_response": hex.EncodeToString(challengeDigest[:])}, nil
+}
+
 func (client *Client) call(ctx context.Context, request any, response *responseEnvelope) error {
 	deadline, hasDeadline := ctx.Deadline()
 	if hasDeadline {
@@ -341,6 +463,7 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 	if err != nil {
 		return err
 	}
+	defer clear(encoded)
 	encoded = append(encoded, '\n')
 	if _, err := client.connection.Write(encoded); err != nil {
 		return fmt.Errorf("write broker request: %w", err)
@@ -349,6 +472,7 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 	if err != nil {
 		return fmt.Errorf("read broker response: %w", err)
 	}
+	defer clear(line)
 	if len(line) > maxResponse {
 		return errors.New("broker response exceeds size limit")
 	}
@@ -386,8 +510,20 @@ func (value *capsule) LogicalID() string { return value.Header.LogicalID }
 
 func (value *capsule) PolicyHash() string { return value.Header.PolicyHash }
 
+func (value *capsule) PolicyDefinition() (UnlockPolicy, error) {
+	var policy UnlockPolicy
+	if err := json.Unmarshal(value.Policy, &policy); err != nil {
+		return UnlockPolicy{}, fmt.Errorf("decode recovery capsule policy: %w", err)
+	}
+	return policy, nil
+}
+
 func (value *capsule) ContributeOffline(session SignedSession, endpoint, memberID string, credential []byte, keyfile bool, lastSeenGeneration uint64, now time.Time) (EncryptedContribution, error) {
-	if err := value.verifySession(session, endpoint, now); err != nil {
+	return value.ContributeOfflineSession(session, endpoint, memberID, credential, keyfile, lastSeenGeneration, now, false)
+}
+
+func (value *capsule) ContributeOfflineSession(session SignedSession, endpoint, memberID string, credential []byte, keyfile bool, lastSeenGeneration uint64, now time.Time, unverifiedSession bool) (EncryptedContribution, error) {
+	if err := value.verifySession(session, endpoint, now, unverifiedSession); err != nil {
 		return EncryptedContribution{}, err
 	}
 	var member *memberShare
@@ -405,11 +541,15 @@ func (value *capsule) ContributeOffline(session SignedSession, endpoint, memberI
 		return EncryptedContribution{}, err
 	}
 	defer clear(share)
-	return value.encryptContribution(session, *member, share, lastSeenGeneration, nil)
+	return value.encryptContribution(session, *member, share, lastSeenGeneration, nil, unverifiedSession)
 }
 
 func (value *capsule) ContributeExternal(ctx context.Context, session SignedSession, endpoint, memberID string, unwrapper ExternalMemberUnwrapper, lastSeenGeneration uint64, now time.Time) (EncryptedContribution, error) {
-	if err := value.verifySession(session, endpoint, now); err != nil {
+	return value.ContributeExternalSession(ctx, session, endpoint, memberID, unwrapper, lastSeenGeneration, now, false)
+}
+
+func (value *capsule) ContributeExternalSession(ctx context.Context, session SignedSession, endpoint, memberID string, unwrapper ExternalMemberUnwrapper, lastSeenGeneration uint64, now time.Time, unverifiedSession bool) (EncryptedContribution, error) {
+	if err := value.verifySession(session, endpoint, now, unverifiedSession); err != nil {
 		return EncryptedContribution{}, err
 	}
 	var member *memberShare
@@ -446,17 +586,18 @@ func (value *capsule) ContributeExternal(ctx context.Context, session SignedSess
 		return EncryptedContribution{}, err
 	}
 	defer clear(share)
-	return value.encryptContribution(session, *member, share, lastSeenGeneration, &principal.ImmutablePrincipalID)
+	return value.encryptContribution(session, *member, share, lastSeenGeneration, &principal.ImmutablePrincipalID, unverifiedSession)
 }
 
-func (value *capsule) encryptContribution(session SignedSession, member memberShare, share []byte, lastSeenGeneration uint64, principalID *string) (EncryptedContribution, error) {
+func (value *capsule) encryptContribution(session SignedSession, member memberShare, share []byte, lastSeenGeneration uint64, principalID *string, unverifiedSession bool) (EncryptedContribution, error) {
 	payload, err := json.Marshal(struct {
-		MemberID           string  `json:"member_id"`
-		ShareIndex         uint8   `json:"share_index"`
-		Share              []byte  `json:"share"`
-		LastSeenGeneration uint64  `json:"last_seen_generation"`
-		PrincipalID        *string `json:"principal_id"`
-	}{MemberID: member.MemberID, ShareIndex: member.ShareIndex, Share: share, LastSeenGeneration: lastSeenGeneration, PrincipalID: principalID})
+		MemberID                      string  `json:"member_id"`
+		ShareIndex                    uint8   `json:"share_index"`
+		Share                         []byte  `json:"share"`
+		LastSeenGeneration            uint64  `json:"last_seen_generation"`
+		PrincipalID                   *string `json:"principal_id"`
+		UnverifiedSessionAcknowledged bool    `json:"unverified_session_acknowledged"`
+	}{MemberID: member.MemberID, ShareIndex: member.ShareIndex, Share: share, LastSeenGeneration: lastSeenGeneration, PrincipalID: principalID, UnverifiedSessionAcknowledged: unverifiedSession})
 	if err != nil {
 		return EncryptedContribution{}, err
 	}
@@ -512,7 +653,7 @@ func decodeExternalShare(purpose string, payload []byte) ([]byte, error) {
 	return append([]byte(nil), payload[prefix:]...), nil
 }
 
-func (value *capsule) verifySession(session SignedSession, endpoint string, now time.Time) error {
+func (value *capsule) verifySession(session SignedSession, endpoint string, now time.Time, unverifiedSession bool) error {
 	transcript := session.Transcript
 	if transcript.Protocol != protocolVersion || transcript.RepositoryID != value.Header.RepositoryID || transcript.CapsuleGeneration != value.Header.Generation || transcript.EndpointBinding != endpoint || transcript.ExpiresUnixMS <= uint64(now.UnixMilli()) || transcript.SessionID == "" {
 		return errors.New("unlock session transcript does not match capsule or endpoint")
@@ -521,17 +662,22 @@ func (value *capsule) verifySession(session SignedSession, endpoint string, now 
 	if err != nil {
 		return err
 	}
-	publicKey, err := base64.StdEncoding.DecodeString(value.Header.BrokerIdentityPublicKey)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid pinned broker identity public key")
+	if transcript.IdentityRecovery != unverifiedSession {
+		return errors.New("identity-recovery session requires explicit unverified-session acknowledgement")
 	}
-	signature, err := base64.StdEncoding.DecodeString(session.Signature)
-	if err != nil || !ed25519.Verify(publicKey, encoded, signature) {
-		return errors.New("unlock session signature verification failed")
+	if !unverifiedSession {
+		publicKey, err := base64.StdEncoding.DecodeString(value.Header.BrokerIdentityPublicKey)
+		if err != nil || len(publicKey) != ed25519.PublicKeySize {
+			return errors.New("invalid pinned broker identity public key")
+		}
+		signature, err := base64.StdEncoding.DecodeString(session.Signature)
+		if err != nil || !ed25519.Verify(publicKey, encoded, signature) {
+			return errors.New("unlock session signature verification failed")
+		}
 	}
 	digest := sha256.Sum256(encoded)
-	parts := make([]string, 0, 5)
-	for offset := 0; offset < 10; offset += 2 {
+	parts := make([]string, 0, 8)
+	for offset := 0; offset < 16; offset += 2 {
 		parts = append(parts, strings.ToUpper(hex.EncodeToString(digest[offset:offset+2])))
 	}
 	if session.Fingerprint != strings.Join(parts, "-") {
