@@ -26,3 +26,6 @@ the phased plan that implements this design.
    resolution queries.
 7. [Analytics Engine](07-analytics-engine.md) — high-dimensional creation
    analytics, growth/churn, and per-user/group attribution.
+8. [Quorum Key Broker Implementation and State Machines](08-quorum-key-broker.md) —
+   Phase 20 component ownership, broker/session/lease/mutation/recovery states,
+   transition invariants, failure handling, and operator reconciliation.

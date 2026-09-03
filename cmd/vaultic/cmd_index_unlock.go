@@ -207,15 +207,15 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 		if err != nil {
 			return err
 		}
+		if generationAnchor != "" {
+			if err := writeGenerationAnchor(generationAnchor, capsule.Generation()); err != nil {
+				return fmt.Errorf("persist observed capsule generation before contribution: %w", err)
+			}
+		}
 		unlocked, err := client.SubmitContribution(command.Context(), contribution)
 		if err != nil {
 			_ = emitUnlockEvent(command.Context(), observability.Warning, "custodian contribution rejected", map[string]any{"member_id": memberID, "capsule_generation": capsule.Generation(), "stage": "broker_submission"})
 			return err
-		}
-		if generationAnchor != "" {
-			if err := writeGenerationAnchor(generationAnchor, capsule.Generation()); err != nil {
-				return err
-			}
 		}
 		_ = emitUnlockEvent(command.Context(), observability.Notice, "custodian contribution accepted", map[string]any{"member_id": memberID, "capsule_generation": capsule.Generation(), "quorum_complete": unlocked})
 		if globalOptions.JSON {

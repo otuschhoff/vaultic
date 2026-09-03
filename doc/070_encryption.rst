@@ -199,6 +199,11 @@ stop writers, preserve the encrypted objects and envelope generations, run
 Quorum recovery capsules and broker
 ***********************************
 
+The maintainer-facing implementation map, transition invariants, state
+machines, and failure-reconciliation matrix are maintained in
+``doc/vaultic/02-architecture/08-quorum-key-broker.md``. This section is the
+operator runbook and uses the same transition names.
+
 The key-in-DB and standalone escrow procedures above are the migration
 baseline for Phase 20. They are not quorum-compliant access routes. A migrated
 repository uses one immutable recovery capsule as the sole managed holder of

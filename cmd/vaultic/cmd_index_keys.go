@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -170,10 +171,12 @@ func newIndexKeysQuorumEnrollMacosSecureEnclaveCommand() *cobra.Command {
 			if runErr == nil {
 				return
 			}
-			rollback := exec.CommandContext(command.Context(), custodianPath, "macos-secure-enclave-delete", definition.KeyReference)
+			rollbackContext, cancelRollback := context.WithTimeout(context.WithoutCancel(command.Context()), 30*time.Second)
+			defer cancelRollback()
+			rollback := exec.CommandContext(rollbackContext, custodianPath, "macos-secure-enclave-delete", definition.KeyReference)
 			rollback.Env = []string{}
 			if output, err := rollback.CombinedOutput(); err != nil {
-				runErr = fmt.Errorf("%w; Secure Enclave enrollment rollback failed: %v: %s", runErr, err, strings.TrimSpace(string(output)))
+				runErr = errors.Join(runErr, fmt.Errorf("Secure Enclave enrollment rollback failed: %w: %s", err, strings.TrimSpace(string(output))))
 			}
 		}()
 		return writeNewProtectedJSON(outputPath, definition)

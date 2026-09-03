@@ -171,11 +171,17 @@ pub struct RecoveredKeys {
     pub repository_master_key: Zeroizing<Vec<u8>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UnwrappedMemberShare {
     pub member_id: String,
     pub share_index: u8,
     pub plaintext: Zeroizing<Vec<u8>>,
+}
+
+pub(crate) fn validate_shamir_share(share: &[u8]) -> Result<()> {
+    Share::try_from(share)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))
 }
 
 pub struct ExternalMemberProtection<'a> {
@@ -664,8 +670,7 @@ impl RecoveryCapsule {
             .find(|member| member.member_id == member_id)
             .context("capsule has no such member")?;
         let plaintext = unwrap_offline_share(&self.header, member, credential)?;
-        Share::try_from(plaintext.as_slice())
-            .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))?;
+        validate_shamir_share(plaintext.as_slice())?;
         Ok(UnwrappedMemberShare {
             member_id: member_id.to_owned(),
             share_index: member.share_index,
@@ -703,8 +708,7 @@ impl RecoveryCapsule {
             .await
             .context("unwrap externally protected member share")?;
         let plaintext = decode_external_share(&purpose, plaintext.as_slice())?;
-        Share::try_from(plaintext.as_slice())
-            .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))?;
+        validate_shamir_share(plaintext.as_slice())?;
         Ok(UnwrappedMemberShare {
             member_id: member_id.to_owned(),
             share_index: member.share_index,
@@ -731,8 +735,7 @@ impl RecoveryCapsule {
             {
                 bail!("duplicate or re-indexed member contribution");
             }
-            Share::try_from(contribution.plaintext.as_slice())
-                .map_err(|error| anyhow::anyhow!("decode Shamir share: {error}"))?;
+            validate_shamir_share(contribution.plaintext.as_slice())?;
         }
         if !self.policy.satisfied_by(&unlocked) {
             bail!("unlock policy is not satisfied");
@@ -757,6 +760,14 @@ impl RecoveryCapsule {
             metadata_dek,
             repository_master_key,
         })
+    }
+
+    pub(crate) fn policy_satisfied_by(&self, contributions: &[UnwrappedMemberShare]) -> bool {
+        let members = contributions
+            .iter()
+            .map(|contribution| contribution.member_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.policy.satisfied_by(&members)
     }
 }
 

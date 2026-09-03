@@ -25,8 +25,8 @@ use tokio::{
 use zeroize::Zeroizing;
 
 use crate::encryption::recovery_capsule::{
-    CapsuleBuilder, MemberCredential, MemberProtection, RecoveredKeys, RecoveryCapsule,
-    UnlockPolicy, UnwrappedMemberShare,
+    validate_shamir_share, CapsuleBuilder, MemberCredential, MemberProtection, RecoveredKeys,
+    RecoveryCapsule, UnlockPolicy, UnwrappedMemberShare,
 };
 
 type SessionKem = X25519HkdfSha256;
@@ -417,27 +417,46 @@ impl KeyBroker {
             .iter()
             .find(|member| member.member_id == payload.member_id)
             .context("contribution references unknown capsule member")?;
+        let share_identity = (member.group_id.clone(), payload.share_index);
         if member.share_index != payload.share_index
-            || !session.member_ids.insert(payload.member_id.clone())
-            || !session
-                .share_indexes
-                .insert((member.group_id.clone(), payload.share_index))
+            || session.member_ids.contains(&payload.member_id)
+            || session.share_indexes.contains(&share_identity)
         {
             bail!("duplicate or re-indexed contribution");
         }
-        if let Some(principal_id) = payload.principal_id {
-            if principal_id.is_empty() || !session.principal_ids.insert(principal_id) {
+        if let Some(principal_id) = payload.principal_id.as_ref() {
+            if principal_id.is_empty() || session.principal_ids.contains(principal_id) {
                 bail!("duplicate or invalid contributing principal");
             }
         }
-        session.contributions.push(UnwrappedMemberShare {
-            member_id: payload.member_id,
+        validate_shamir_share(&payload.share).map_err(|_| ContributionRejection::PayloadInvalid)?;
+        let member_id = payload.member_id;
+        let principal_id = payload.principal_id;
+        let accepted_contribution = UnwrappedMemberShare {
+            member_id: member_id.clone(),
             share_index: payload.share_index,
             plaintext: Zeroizing::new(payload.share),
-        });
+        };
+        let mut candidate_contributions = session.contributions.clone();
+        candidate_contributions.push(accepted_contribution);
 
-        let Ok(keys) = self.capsule.recover_from_shares(&session.contributions) else {
+        if !self.capsule.policy_satisfied_by(&candidate_contributions) {
+            session.member_ids.insert(member_id);
+            session.share_indexes.insert(share_identity);
+            if let Some(principal_id) = principal_id {
+                session.principal_ids.insert(principal_id);
+            }
+            session.contributions = candidate_contributions;
             return Ok(false);
+        }
+        let keys = match self.capsule.recover_from_shares(&candidate_contributions) {
+            Ok(keys) => keys,
+            Err(error) => {
+                self.sessions.remove(&contribution.session_id);
+                return Err(error).context(
+                    "satisfied unlock policy failed share reconstruction or payload authentication; session closed",
+                );
+            }
         };
         protect_recovered_keys(&keys)?;
         let epoch_id = random_id(&mut rand::rng());
@@ -1005,6 +1024,13 @@ fn encrypt_offline_contribution_inner(
         principal_id,
         unverified_session_acknowledged,
     };
+    encrypt_contribution_payload(session, &payload)
+}
+
+fn encrypt_contribution_payload(
+    session: &SignedSession,
+    payload: &ContributionPayload,
+) -> Result<EncryptedContribution> {
     let mut plaintext = Zeroizing::new(serde_json::to_vec(&payload)?);
     let transcript = encode_transcript(&session.transcript)?;
     let public_key_bytes = BASE64.decode(&session.transcript.hpke_public_key)?;
@@ -1834,10 +1860,88 @@ mod tests {
             error.downcast_ref::<ContributionRejection>(),
             Some(ContributionRejection::PayloadInvalid)
         ));
+        let malformed_share = encrypt_contribution_payload(
+            &session,
+            &ContributionPayload {
+                member_id: "alice".to_owned(),
+                share_index: capsule.members[0].share_index,
+                share: vec![0],
+                last_seen_generation: 4,
+                principal_id: Some("principal-a".to_owned()),
+                unverified_session_acknowledged: false,
+            },
+        )
+        .unwrap();
+        let error = broker
+            .submit_contribution(malformed_share, 2_002)
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ContributionRejection>(),
+            Some(ContributionRejection::PayloadInvalid)
+        ));
+        let invalid_principal = encrypt_offline_contribution(
+            &capsule,
+            &session,
+            "unix:/broker.sock",
+            "alice",
+            &MemberCredential::Passphrase(b"alice passphrase"),
+            4,
+            Some(String::new()),
+            2_001,
+        )
+        .unwrap();
+        assert!(broker
+            .submit_contribution(invalid_principal, 2_002)
+            .is_err());
         assert!(!broker
             .submit_contribution(contribution.clone(), 2_002)
             .unwrap());
         assert!(broker.submit_contribution(contribution, 2_003).is_err());
+
+        let poisoned_session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 3_000)
+            .unwrap();
+        let mut wrong_share = capsule
+            .unwrap_offline_member("alice", &MemberCredential::Passphrase(b"alice passphrase"))
+            .unwrap()
+            .plaintext
+            .to_vec();
+        *wrong_share.last_mut().unwrap() ^= 1;
+        let poisoned = encrypt_contribution_payload(
+            &poisoned_session,
+            &ContributionPayload {
+                member_id: "alice".to_owned(),
+                share_index: capsule
+                    .members
+                    .iter()
+                    .find(|member| member.member_id == "alice")
+                    .unwrap()
+                    .share_index,
+                share: wrong_share,
+                last_seen_generation: 4,
+                principal_id: None,
+                unverified_session_acknowledged: false,
+            },
+        )
+        .unwrap();
+        assert!(!broker.submit_contribution(poisoned, 3_001).unwrap());
+        let bob = encrypt_offline_contribution(
+            &capsule,
+            &poisoned_session,
+            "unix:/broker.sock",
+            "bob",
+            &MemberCredential::Passphrase(b"bob passphrase"),
+            4,
+            None,
+            3_001,
+        )
+        .unwrap();
+        let error = broker.submit_contribution(bob.clone(), 3_002).unwrap_err();
+        assert!(error.to_string().contains("session closed"));
+        let error = broker.submit_contribution(bob, 3_003).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown or expired unlock session"));
     }
 
     #[test]

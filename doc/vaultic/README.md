@@ -31,7 +31,9 @@ Start at the [architecture overview](02-architecture/00-overview.md). It
 covers the vaulticdb process architecture and engine resolution, the SlateDB
 binary schema, legacy JSON interop and crawl reconciliation, the CLI and
 locking model, storage placement policy, path/inode history queries, and the
-creation-analytics engine.
+creation-analytics engine. The
+[quorum key broker implementation and state machines](02-architecture/08-quorum-key-broker.md)
+document defines Phase 20 transition ordering and failure recovery.
 
 ## 3. Compliance — [03-compliance/](03-compliance/)
 
