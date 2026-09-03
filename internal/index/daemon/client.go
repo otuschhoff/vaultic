@@ -162,6 +162,21 @@ type WriterStatus struct {
 	PromotionSafe       bool   `json:"promotion_safe"`
 }
 
+type GenerationStatus struct {
+	RepositoryID                  string `json:"repository_id"`
+	Decision                      uint64 `json:"decision"`
+	ActiveGeneration              uint64 `json:"active_generation"`
+	Namespace                     string `json:"namespace"`
+	PreviousGeneration            uint64 `json:"previous_generation"`
+	PreviousNamespace             string `json:"previous_namespace"`
+	State                         string `json:"state"`
+	ReportSHA256                  string `json:"report_sha256"`
+	DecidedAtUnixMS               int64  `json:"decided_at_unix_ms"`
+	ObservationUntilUnixMS        int64  `json:"observation_until_unix_ms"`
+	RetiredGeneration             uint64 `json:"retired_generation,omitempty"`
+	DestructiveMaintenanceAllowed bool   `json:"destructive_maintenance_allowed"`
+}
+
 type durableIdempotencyRecord struct {
 	Format        uint32 `json:"format"`
 	Operation     string `json:"operation"`
@@ -659,6 +674,70 @@ func (c *Client) WriterStatus(ctx context.Context) (WriterStatus, error) {
 		return WriterStatus{}, err
 	}
 	return writerStatus(response), nil
+}
+
+func (c *Client) GenerationStatus(ctx context.Context) (GenerationStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.GenerationStatus(ctx, &vaulticdbv1.GenerationStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	if err != nil {
+		return GenerationStatus{}, err
+	}
+	return generationStatus(response), nil
+}
+
+func (c *Client) ActivateGeneration(ctx context.Context, expected, candidate uint64, namespace, reportSHA256 string, observationWindow time.Duration) (GenerationStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.ActivateGeneration(ctx, &vaulticdbv1.ActivateGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedActiveGeneration: expected, CandidateGeneration: candidate, CandidateNamespace: namespace, ReportSha256: reportSHA256, ObservationWindowMs: uint64(observationWindow.Milliseconds()), Approve: true})
+	if err != nil {
+		return GenerationStatus{}, err
+	}
+	return generationStatus(response), nil
+}
+
+func (c *Client) QuarantineGeneration(ctx context.Context, expectedGeneration uint64, diagnosticSHA256 string) (GenerationStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.QuarantineGeneration(ctx, &vaulticdbv1.QuarantineGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedActiveGeneration: expectedGeneration, DiagnosticSha256: diagnosticSHA256, HealingRequired: true})
+	if err != nil {
+		return GenerationStatus{}, err
+	}
+	return generationStatus(response), nil
+}
+
+func (c *Client) VerifyGeneration(ctx context.Context, expectedDecision uint64, reportSHA256 string) (GenerationStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.VerifyGeneration(ctx, &vaulticdbv1.VerifyGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedDecision: expectedDecision, ReportSha256: reportSHA256, PostActivationCheckClean: true})
+	if err != nil {
+		return GenerationStatus{}, err
+	}
+	return generationStatus(response), nil
+}
+
+func (c *Client) RollbackGeneration(ctx context.Context, expectedDecision uint64, reportSHA256 string, observationWindow time.Duration) (GenerationStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RollbackGeneration(ctx, &vaulticdbv1.RollbackGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedDecision: expectedDecision, ReportSha256: reportSHA256, ObservationWindowMs: uint64(observationWindow.Milliseconds()), Acknowledge: true})
+	if err != nil {
+		return GenerationStatus{}, err
+	}
+	return generationStatus(response), nil
+}
+
+func (c *Client) RetireGeneration(ctx context.Context, expectedDecision, generation uint64, reportSHA256 string) (GenerationStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.RetireGeneration(ctx, &vaulticdbv1.RetireGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedDecision: expectedDecision, Generation: generation, ReportSha256: reportSHA256, Acknowledge: true})
+	if err != nil {
+		return GenerationStatus{}, err
+	}
+	return generationStatus(response), nil
+}
+
+func generationStatus(response *vaulticdbv1.GenerationStatusResponse) GenerationStatus {
+	return GenerationStatus{RepositoryID: response.GetRepositoryId(), Decision: response.GetDecision(), ActiveGeneration: response.GetActiveGeneration(), Namespace: response.GetNamespace(), PreviousGeneration: response.GetPreviousGeneration(), PreviousNamespace: response.GetPreviousNamespace(), State: response.GetState(), ReportSHA256: response.GetReportSha256(), DecidedAtUnixMS: response.GetDecidedAtUnixMs(), ObservationUntilUnixMS: response.GetObservationUntilUnixMs(), RetiredGeneration: response.GetRetiredGeneration(), DestructiveMaintenanceAllowed: response.GetDestructiveMaintenanceAllowed()}
 }
 
 // IdempotencyCommitted reports whether a durable transaction commit exists for key.

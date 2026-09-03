@@ -65,14 +65,24 @@ func (store Store) PublishCompletion(ctx context.Context, completion Completion)
 }
 
 func Reconcile(ctx context.Context, store Store, authority Authority, verifier PackVerifier, job Job) ReconcileResult {
+	return reconcile(ctx, store, authority, verifier, job, false)
+}
+
+// ReconcileCandidate replays authenticated journals into an isolated Plan B
+// generation without changing repository-visible snapshot or completion state.
+func ReconcileCandidate(ctx context.Context, store Store, authority Authority, verifier PackVerifier, job Job) ReconcileResult {
+	return reconcile(ctx, store, authority, verifier, job, true)
+}
+
+func reconcile(ctx context.Context, store Store, authority Authority, verifier PackVerifier, job Job, candidate bool) ReconcileResult {
 	result := ReconcileResult{JobID: job.Header.JobID, IdempotencyKey: job.Header.IdempotencyKey}
-	if job.State == StateCommitted && job.Completion != nil {
+	if !candidate && job.State == StateCommitted && job.Completion != nil {
 		result.Disposition = ReconcileCommitted
 		result.MetadataTransaction = job.Completion.MetadataTransaction
 		result.SnapshotID = job.Completion.SnapshotID
 		return result
 	}
-	if job.State != StateSealedPending {
+	if job.State != StateSealedPending && !(candidate && job.State == StateCommitted && job.Completion != nil) {
 		return reconcileFailure(result, Reject(fmt.Errorf("journal state %q is not eligible for reconciliation", job.State)))
 	}
 	segments, err := store.VerifyJob(ctx, job)
@@ -104,6 +114,12 @@ func Reconcile(ctx context.Context, store Store, authority Authority, verifier P
 	}
 	if err := authority.PublishSnapshot(ctx, commit); err != nil {
 		return reconcileFailure(result, Retryable(fmt.Errorf("publish normal snapshot after metadata commit: %w", err)))
+	}
+	if candidate {
+		result.Disposition = ReconcileCommitted
+		result.MetadataTransaction = commit.MetadataTransaction
+		result.SnapshotID = commit.SnapshotID
+		return result
 	}
 	completion := Completion{
 		Header: job.Header, State: StateCommitted, SealSHA256: job.SealSHA256,

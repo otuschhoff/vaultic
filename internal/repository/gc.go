@@ -374,6 +374,13 @@ func (plan *GCPlan) Execute(ctx context.Context, printer vaultic.Printer) error 
 	if plan.opts.DryRun {
 		return nil
 	}
+	status, err := plan.engine.Client().GenerationStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("verify metadata generation maintenance interlock: %w", err)
+	}
+	if !status.DestructiveMaintenanceAllowed {
+		return fmt.Errorf("destructive maintenance is disabled while metadata generation state is %q", status.State)
+	}
 	if err := plan.retryPendingDeletions(ctx, printer); err != nil {
 		return err
 	}

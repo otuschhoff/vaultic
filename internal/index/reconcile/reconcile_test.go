@@ -3,6 +3,7 @@ package reconcile
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -20,6 +21,31 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+func TestDecodeDeferredObservationsStrict(t *testing.T) {
+	want := DeferredObservation{SnapshotPath: "/snapshot/file", SourcePath: "/source/file", ParentPath: "/source"}
+	payload, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observations, err := DecodeDeferredObservations([]json.RawMessage{payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 1 || observations[0].SnapshotPath != want.SnapshotPath || observations[0].SourcePath != want.SourcePath {
+		t.Fatalf("unexpected decoded observations: %#v", observations)
+	}
+
+	for _, invalid := range []json.RawMessage{
+		append(append(json.RawMessage(nil), payload[:len(payload)-1]...), []byte(`,"unknown":true}`)...),
+		append(append(json.RawMessage(nil), payload...), []byte(` {}`)...),
+	} {
+		if _, err := DecodeDeferredObservations([]json.RawMessage{invalid}); err == nil {
+			t.Fatalf("accepted invalid deferred observation %q", invalid)
+		}
+	}
+}
 
 type fakeFS struct {
 	mu      sync.Mutex
@@ -62,6 +88,44 @@ func TestAuthoritativeCrawlClaimIsExplicitAndFailsClosed(t *testing.T) {
 	reconciler.deferred.Store(1)
 	if claim := reconciler.AuthoritativeCrawlClaim(); claim == nil || claim.Complete {
 		t.Fatalf("deferred reconciliation overclaimed completeness: %#v", claim)
+	}
+}
+
+func TestReplayDeferredUsesFreshAuthoritativeRevisions(t *testing.T) {
+	store, observations := deferredReplayFixture()
+	root, err := ReplayDeferred(context.Background(), store, observations, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := schema.ParseKey(root)
+	if err != nil || parsed.Kind != schema.KeyDirectoryRevision || len(store.published) != 1 || store.next != 2 {
+		t.Fatalf("root=%x parsed=%#v published=%d revisions=%d err=%v", root, parsed, len(store.published), store.next, err)
+	}
+}
+
+func deferredReplayFixture() (*fakeStore, []DeferredObservation) {
+	store := newFakeStore()
+	now := time.Now().UTC()
+	rootStat := DeferredStat{Name: "source", Mode: os.ModeDir | 0o755, DeviceID: 7, Inode: 10, Links: 1, ModTime: now, ChangeTime: now}
+	fileStat := DeferredStat{Name: "file", Mode: 0o644, DeviceID: 7, Inode: 11, Links: 1, Size: 4, ModTime: now, ChangeTime: now}
+	return store, []DeferredObservation{{
+		SnapshotPath: "/file", SourcePath: "/source/file", ParentPath: "/source",
+		Node: data.Node{Name: "file", Type: data.NodeTypeFile, Size: 4}, Stat: fileStat, ParentStat: rootStat,
+	}}
+}
+
+func TestReplayDeferredRetryReusesSyntheticRoot(t *testing.T) {
+	store, observations := deferredReplayFixture()
+	first, err := ReplayDeferred(context.Background(), store, observations, Options{Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ReplayDeferred(context.Background(), store, observations, Options{Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("replay root changed from %x to %x", first, second)
 	}
 }
 

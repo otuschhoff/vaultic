@@ -41,18 +41,21 @@ pub mod proto {
 }
 
 use proto::{
-    vaultic_db_server::{VaulticDb, VaulticDbServer},
+    vaultic_db_server::{VaulticDb, VaulticDbServer}, ActivateGenerationRequest,
     AddCloudKeySlotRequest, AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest,
     CapabilitiesResponse, CommitResponse, DemoteWriterRequest, Empty, EncryptionAuditResponse,
     EscrowMasterKeyRequest, EscrowMasterKeyResponse, ExportKeyEnvelopeResponse,
-    FinalizeCapsuleMigrationRequest, GetRequest, GetResponse, HealthRequest, HealthResponse,
-    KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest, MasterKeyResponse,
-    MultiGetRequest, MultiGetResponse, PrepareCapsuleMigrationRequest,
+    FinalizeCapsuleMigrationRequest, GenerationStatusRequest, GenerationStatusResponse, GetRequest,
+    GetResponse, HealthRequest, HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse,
+    MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
+    PrepareCapsuleMigrationRequest,
     PrepareCapsuleMigrationResponse, PromoteWriterRequest, PublishCapsuleMutationRequest,
-    PublishCapsuleMutationResponse, RecoverEscrowRequest, RemoveKeySlotRequest, RequestContext,
-    RewriteDekRequest, RewriteDekResponse, RotateDekRequest, RotateLocalKeySlotRequest,
-    ScanRequest, ScanResponse, StoreMasterKeyRequest, TransactionRequest, WriteBatchRequest,
-    WriteBatchResponse, WriterStatusRequest, WriterStatusResponse,
+    PublishCapsuleMutationResponse, QuarantineGenerationRequest, RecoverEscrowRequest,
+    RemoveKeySlotRequest, RequestContext, RetireGenerationRequest, RewriteDekRequest,
+    RewriteDekResponse, RollbackGenerationRequest,
+    RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest, ScanResponse, StoreMasterKeyRequest,
+    TransactionRequest, VerifyGenerationRequest, WriteBatchRequest, WriteBatchResponse,
+    WriterStatusRequest, WriterStatusResponse,
 };
 use vaulticdb::writer_role::{RoleError, WriterRole as CoreWriterRole, WriterRoleState};
 use zeroize::Zeroizing;
@@ -60,7 +63,7 @@ use zeroize::Zeroizing;
 mod replication;
 mod storage;
 
-use storage::{repeated_message_encoded_len, Storage};
+use storage::{repeated_message_encoded_len, GenerationAuthority, Storage};
 
 const PROTOCOL_VERSION: &str = "vaulticdb.v1";
 const SCHEMA_VERSION: &str = "0";
@@ -68,6 +71,27 @@ const MAX_BATCH_ITEMS: u32 = 10_000;
 const MAX_PAGE_ITEMS: u32 = 1_000;
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 128;
+
+fn generation_status_response(authority: GenerationAuthority) -> GenerationStatusResponse {
+    GenerationStatusResponse {
+        repository_id: authority.repository_id,
+        decision: authority.decision,
+        active_generation: authority.active_generation,
+        namespace: authority.namespace,
+        previous_generation: authority.previous_generation,
+        previous_namespace: authority.previous_namespace,
+        state: authority.state.clone(),
+        report_sha256: authority.report_sha256,
+        decided_at_unix_ms: authority.decided_at_ms.min(i64::MAX as u64) as i64,
+        observation_until_unix_ms: authority.observation_until_ms.min(i64::MAX as u64) as i64,
+        retired_generation: authority.retired_generation,
+        destructive_maintenance_allowed: authority.state == "healthy",
+    }
+}
+
+fn generation_error(error: anyhow::Error) -> Status {
+    Status::failed_precondition(format!("metadata generation authority: {error:#}"))
+}
 
 #[derive(Clone)]
 struct DaemonState {
@@ -111,6 +135,154 @@ impl Drop for WriteIntentGuard {
 
 #[tonic::async_trait]
 impl VaulticDb for Service {
+    async fn generation_status(
+        &self,
+        request: Request<GenerationStatusRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let authority = self
+            .storage
+            .generation_authority(&request.get_ref().repository_id)
+            .await
+            .map_err(generation_error)?;
+        Ok(Response::new(generation_status_response(authority)))
+    }
+
+    async fn activate_generation(
+        &self,
+        request: Request<ActivateGenerationRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let _intent = self.authority_intent().await?;
+        let request = request.into_inner();
+        if !request.approve {
+            return Err(Status::failed_precondition(
+                "metadata generation activation requires explicit approval",
+            ));
+        }
+        let authority = self
+            .storage
+            .activate_generation(
+                &request.repository_id,
+                request.expected_active_generation,
+                request.candidate_generation,
+                request.candidate_namespace,
+                request.report_sha256,
+                request.observation_window_ms,
+            )
+            .await
+            .map_err(generation_error)?;
+        Ok(Response::new(generation_status_response(authority)))
+    }
+
+    async fn quarantine_generation(
+        &self,
+        request: Request<QuarantineGenerationRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let _intent = self.authority_intent().await?;
+        let request = request.into_inner();
+        if !request.healing_required {
+            return Err(Status::invalid_argument(
+                "quarantine requires a proven healing-required classification",
+            ));
+        }
+        let authority = self
+            .storage
+            .quarantine_generation(
+                &request.repository_id,
+                request.expected_active_generation,
+                request.diagnostic_sha256,
+            )
+            .await
+            .map_err(generation_error)?;
+        Ok(Response::new(generation_status_response(authority)))
+    }
+
+    async fn verify_generation(
+        &self,
+        request: Request<VerifyGenerationRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let _intent = self.authority_intent().await?;
+        let request = request.into_inner();
+        if !request.post_activation_check_clean {
+            return Err(Status::failed_precondition(
+                "post-activation index check did not pass",
+            ));
+        }
+        let authority = self
+            .storage
+            .verify_generation(
+                &request.repository_id,
+                request.expected_decision,
+                request.report_sha256,
+            )
+            .await
+            .map_err(generation_error)?;
+        Ok(Response::new(generation_status_response(authority)))
+    }
+
+    async fn rollback_generation(
+        &self,
+        request: Request<RollbackGenerationRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let _intent = self.authority_intent().await?;
+        let request = request.into_inner();
+        if !request.acknowledge {
+            return Err(Status::failed_precondition(
+                "metadata generation rollback requires separate acknowledgement",
+            ));
+        }
+        let authority = self
+            .storage
+            .rollback_generation(
+                &request.repository_id,
+                request.expected_decision,
+                request.report_sha256,
+                request.observation_window_ms,
+            )
+            .await
+            .map_err(generation_error)?;
+        self.storage
+            .refresh_writer_fence()
+            .await
+            .map_err(generation_error)?;
+        Ok(Response::new(generation_status_response(authority)))
+    }
+
+    async fn retire_generation(
+        &self,
+        request: Request<RetireGenerationRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        check_request(&self.state, &request, &request.get_ref().repository_id)?;
+        check_context(request.get_ref().context.as_ref())?;
+        let _intent = self.authority_intent().await?;
+        let request = request.into_inner();
+        if !request.acknowledge {
+            return Err(Status::failed_precondition(
+                "metadata generation retirement requires separate acknowledgement",
+            ));
+        }
+        let authority = self
+            .storage
+            .retire_generation(
+                &request.repository_id,
+                request.expected_decision,
+                request.generation,
+                request.report_sha256,
+            )
+            .await
+            .map_err(generation_error)?;
+        Ok(Response::new(generation_status_response(authority)))
+    }
+
     async fn writer_status(
         &self,
         request: Request<WriterStatusRequest>,
@@ -920,22 +1092,30 @@ impl Service {
             role.begin_demotion(Instant::now(), reason, force)
                 .map_err(role_error)?;
         }
-        let storage = self.storage.clone();
-        let demotion = async move {
-            while storage.active_transactions().await != 0 {
+        let drain = async {
+            while self.storage.active_transactions().await != 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            storage.demote().await
         };
-        match tokio::time::timeout(timeout, demotion).await {
-            Ok(Ok(())) => self
+        if tokio::time::timeout(timeout, drain).await.is_err() {
+            self.state
+                .writer_role
+                .lock()
+                .await
+                .fail_demotion(Instant::now());
+            return Err(Status::deadline_exceeded(
+                "writer demotion quiescence timed out",
+            ));
+        }
+        match self.storage.demote().await {
+            Ok(()) => self
                 .state
                 .writer_role
                 .lock()
                 .await
                 .complete_demotion(Instant::now())
                 .map_err(role_error)?,
-            Ok(Err(error)) => {
+            Err(error) => {
                 self.state
                     .writer_role
                     .lock()
@@ -945,19 +1125,19 @@ impl Service {
                     "writer demotion failed: {error:#}"
                 )));
             }
-            Err(_) => {
-                self.state
-                    .writer_role
-                    .lock()
-                    .await
-                    .fail_demotion(Instant::now());
-                return Err(Status::deadline_exceeded("writer demotion timed out"));
-            }
         }
         Ok(self.writer_status_response().await)
     }
 
     async fn write_intent(&self) -> Result<WriteIntentGuard, Status> {
+        if !self.storage.mutations_allowed(&self.state.repository_id).await.map_err(generation_error)? {
+            return Err(Status::failed_precondition("metadata generation mutation interlock is active"));
+        }
+        self.authority_intent().await
+    }
+
+    async fn authority_intent(&self) -> Result<WriteIntentGuard, Status> {
+        self.storage.ensure_writer_fence().await.map_err(generation_error)?;
         self.state
             .writer_role
             .lock()

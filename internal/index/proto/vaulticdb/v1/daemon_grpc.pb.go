@@ -24,6 +24,12 @@ const (
 	VaulticDB_WriterStatus_FullMethodName             = "/vaulticdb.v1.VaulticDB/WriterStatus"
 	VaulticDB_DemoteWriter_FullMethodName             = "/vaulticdb.v1.VaulticDB/DemoteWriter"
 	VaulticDB_PromoteWriter_FullMethodName            = "/vaulticdb.v1.VaulticDB/PromoteWriter"
+	VaulticDB_GenerationStatus_FullMethodName         = "/vaulticdb.v1.VaulticDB/GenerationStatus"
+	VaulticDB_QuarantineGeneration_FullMethodName     = "/vaulticdb.v1.VaulticDB/QuarantineGeneration"
+	VaulticDB_ActivateGeneration_FullMethodName       = "/vaulticdb.v1.VaulticDB/ActivateGeneration"
+	VaulticDB_VerifyGeneration_FullMethodName         = "/vaulticdb.v1.VaulticDB/VerifyGeneration"
+	VaulticDB_RollbackGeneration_FullMethodName       = "/vaulticdb.v1.VaulticDB/RollbackGeneration"
+	VaulticDB_RetireGeneration_FullMethodName         = "/vaulticdb.v1.VaulticDB/RetireGeneration"
 	VaulticDB_Drain_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Drain"
 	VaulticDB_Shutdown_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Shutdown"
 	VaulticDB_Get_FullMethodName                      = "/vaulticdb.v1.VaulticDB/Get"
@@ -60,6 +66,12 @@ type VaulticDBClient interface {
 	WriterStatus(ctx context.Context, in *WriterStatusRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
 	DemoteWriter(ctx context.Context, in *DemoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
 	PromoteWriter(ctx context.Context, in *PromoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
+	GenerationStatus(ctx context.Context, in *GenerationStatusRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
+	QuarantineGeneration(ctx context.Context, in *QuarantineGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
+	ActivateGeneration(ctx context.Context, in *ActivateGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
+	VerifyGeneration(ctx context.Context, in *VerifyGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
+	RollbackGeneration(ctx context.Context, in *RollbackGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
+	RetireGeneration(ctx context.Context, in *RetireGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
 	Drain(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	Shutdown(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
@@ -139,6 +151,66 @@ func (c *vaulticDBClient) PromoteWriter(ctx context.Context, in *PromoteWriterRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WriterStatusResponse)
 	err := c.cc.Invoke(ctx, VaulticDB_PromoteWriter_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) GenerationStatus(ctx context.Context, in *GenerationStatusRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_GenerationStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) QuarantineGeneration(ctx context.Context, in *QuarantineGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_QuarantineGeneration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) ActivateGeneration(ctx context.Context, in *ActivateGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_ActivateGeneration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) VerifyGeneration(ctx context.Context, in *VerifyGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_VerifyGeneration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RollbackGeneration(ctx context.Context, in *RollbackGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RollbackGeneration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) RetireGeneration(ctx context.Context, in *RetireGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_RetireGeneration_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -404,6 +476,12 @@ type VaulticDBServer interface {
 	WriterStatus(context.Context, *WriterStatusRequest) (*WriterStatusResponse, error)
 	DemoteWriter(context.Context, *DemoteWriterRequest) (*WriterStatusResponse, error)
 	PromoteWriter(context.Context, *PromoteWriterRequest) (*WriterStatusResponse, error)
+	GenerationStatus(context.Context, *GenerationStatusRequest) (*GenerationStatusResponse, error)
+	QuarantineGeneration(context.Context, *QuarantineGenerationRequest) (*GenerationStatusResponse, error)
+	ActivateGeneration(context.Context, *ActivateGenerationRequest) (*GenerationStatusResponse, error)
+	VerifyGeneration(context.Context, *VerifyGenerationRequest) (*GenerationStatusResponse, error)
+	RollbackGeneration(context.Context, *RollbackGenerationRequest) (*GenerationStatusResponse, error)
+	RetireGeneration(context.Context, *RetireGenerationRequest) (*GenerationStatusResponse, error)
 	Drain(context.Context, *Empty) (*Empty, error)
 	Shutdown(context.Context, *Empty) (*Empty, error)
 	Get(context.Context, *GetRequest) (*GetResponse, error)
@@ -453,6 +531,24 @@ func (UnimplementedVaulticDBServer) DemoteWriter(context.Context, *DemoteWriterR
 }
 func (UnimplementedVaulticDBServer) PromoteWriter(context.Context, *PromoteWriterRequest) (*WriterStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PromoteWriter not implemented")
+}
+func (UnimplementedVaulticDBServer) GenerationStatus(context.Context, *GenerationStatusRequest) (*GenerationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GenerationStatus not implemented")
+}
+func (UnimplementedVaulticDBServer) QuarantineGeneration(context.Context, *QuarantineGenerationRequest) (*GenerationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method QuarantineGeneration not implemented")
+}
+func (UnimplementedVaulticDBServer) ActivateGeneration(context.Context, *ActivateGenerationRequest) (*GenerationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ActivateGeneration not implemented")
+}
+func (UnimplementedVaulticDBServer) VerifyGeneration(context.Context, *VerifyGenerationRequest) (*GenerationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VerifyGeneration not implemented")
+}
+func (UnimplementedVaulticDBServer) RollbackGeneration(context.Context, *RollbackGenerationRequest) (*GenerationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RollbackGeneration not implemented")
+}
+func (UnimplementedVaulticDBServer) RetireGeneration(context.Context, *RetireGenerationRequest) (*GenerationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RetireGeneration not implemented")
 }
 func (UnimplementedVaulticDBServer) Drain(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Drain not implemented")
@@ -636,6 +732,114 @@ func _VaulticDB_PromoteWriter_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VaulticDBServer).PromoteWriter(ctx, req.(*PromoteWriterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_GenerationStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GenerationStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).GenerationStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_GenerationStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).GenerationStatus(ctx, req.(*GenerationStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_QuarantineGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QuarantineGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).QuarantineGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_QuarantineGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).QuarantineGeneration(ctx, req.(*QuarantineGenerationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_ActivateGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActivateGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).ActivateGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_ActivateGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).ActivateGeneration(ctx, req.(*ActivateGenerationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_VerifyGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).VerifyGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_VerifyGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).VerifyGeneration(ctx, req.(*VerifyGenerationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RollbackGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RollbackGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RollbackGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RollbackGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RollbackGeneration(ctx, req.(*RollbackGenerationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_RetireGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RetireGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).RetireGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_RetireGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).RetireGeneration(ctx, req.(*RetireGenerationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1116,6 +1320,30 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PromoteWriter",
 			Handler:    _VaulticDB_PromoteWriter_Handler,
+		},
+		{
+			MethodName: "GenerationStatus",
+			Handler:    _VaulticDB_GenerationStatus_Handler,
+		},
+		{
+			MethodName: "QuarantineGeneration",
+			Handler:    _VaulticDB_QuarantineGeneration_Handler,
+		},
+		{
+			MethodName: "ActivateGeneration",
+			Handler:    _VaulticDB_ActivateGeneration_Handler,
+		},
+		{
+			MethodName: "VerifyGeneration",
+			Handler:    _VaulticDB_VerifyGeneration_Handler,
+		},
+		{
+			MethodName: "RollbackGeneration",
+			Handler:    _VaulticDB_RollbackGeneration_Handler,
+		},
+		{
+			MethodName: "RetireGeneration",
+			Handler:    _VaulticDB_RetireGeneration_Handler,
 		},
 		{
 			MethodName: "Drain",

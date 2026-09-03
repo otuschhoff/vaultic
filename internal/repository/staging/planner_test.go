@@ -9,10 +9,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/data"
+	indexreconcile "github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
 
 type plannerStore map[string][]byte
+
+func observationRecord(t *testing.T) Record {
+	t.Helper()
+	payload, err := json.Marshal(indexreconcile.DeferredObservation{SnapshotPath: "/", SourcePath: "/", Node: data.Node{Type: "dir"}, Stat: indexreconcile.DeferredStat{DeviceID: 1, Inode: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Record{Kind: indexreconcile.DeferredObservationKind, Payload: payload}
+}
 
 func (store plannerStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
 	value, found := store[string(key)]
@@ -30,7 +41,7 @@ func TestBuildDaemonCommitPlanDerivesProducerFacts(t *testing.T) {
 	segment := Segment{
 		Header:  Header{CreatedAt: time.Unix(100, 0)},
 		Packs:   []Pack{{ID: packID, Type: "data", Size: 100, PayloadSize: 7, HeaderSize: 93, BlobCount: 1, SHA256: packID, Placements: []Placement{{BackendID: "a", FailureDomain: "site-a", Size: 100, SHA256: packID}}}},
-		Records: []Record{{Kind: "blob-fact-v1", Payload: blobPayload}, {Kind: "prospective-snapshot-v1", Payload: snapshotJSON}},
+		Records: []Record{{Kind: "blob-fact-v1", Payload: blobPayload}, {Kind: "prospective-snapshot-v1", Payload: snapshotJSON}, observationRecord(t)},
 	}
 	plan, err := BuildDaemonCommitPlan(context.Background(), plannerStore{}, []Segment{segment})
 	if err != nil {
@@ -67,7 +78,7 @@ func TestBuildDaemonCommitPlanMergesBlobLocationsAndRejectsMutableFacts(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := BuildDaemonCommitPlan(context.Background(), plannerStore{string(schema.BlobKey(blobID)): firstBlob}, []Segment{{Records: []Record{snapshotFact, blobFact}}})
+	plan, err := BuildDaemonCommitPlan(context.Background(), plannerStore{string(schema.BlobKey(blobID)): firstBlob}, []Segment{{Records: []Record{snapshotFact, blobFact, observationRecord(t)}}})
 	if err != nil {
 		t.Fatal(err)
 	}

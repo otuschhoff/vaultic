@@ -935,6 +935,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	arch.ExcludedItem = progressReporter.ExcludedItem
 
 	var reconciler *reconcile.Reconciler
+	var deferredCapture *reconcile.DeferredCapture
 	if authoritativeEngine != nil {
 		reconciler, err = reconcile.New(cancelCtx, targetFS, authoritativeEngine.SchemaStore(), reconcile.Options{PathIndexPaths: repo.Config().PathIndexPaths})
 		if err != nil {
@@ -973,6 +974,12 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	var deferredResult repository.DeferredUploadResult
 	var deferredStore staging.Store
 	if deferredActive {
+		deferredCapture = reconcile.NewDeferredCapture(targetFS)
+		previousReconcileNode := arch.ReconcileNode
+		arch.ReconcileNode = func(snapshotPath, sourcePath string, node *data.Node) {
+			previousReconcileNode(snapshotPath, sourcePath, node)
+			deferredCapture.Observe(snapshotPath, sourcePath, node)
+		}
 		uploadOptions, store, err := repo.DeferredUploadPlan()
 		if err != nil {
 			return err
@@ -1028,11 +1035,15 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	var deferredJobID string
 	var deferredSeal staging.Seal
 	if err == nil && deferredActive {
+		observations, captureErr := deferredCapture.Close()
+		if captureErr != nil {
+			err = captureErr
+		}
 		deferredJobID = vaultic.NewRandomID().String()
 		snapshotPayload, marshalErr := json.Marshal(snapshot)
 		if marshalErr != nil {
 			err = marshalErr
-		} else {
+		} else if err == nil {
 			sourceDigest := sha256.Sum256([]byte(strings.Join(targets, "\x00")))
 			header := staging.Header{
 				Format: 1, RepositoryID: repo.Config().ID, JobID: deferredJobID, IdempotencyKey: deferredJobID,
@@ -1042,6 +1053,17 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 				SourceIdentitySHA256: hex.EncodeToString(sourceDigest[:]), ConsistencyEvidence: "full-crawl",
 			}
 			records := append(deferredResult.Records, staging.Record{Kind: "prospective-snapshot-v1", Payload: snapshotPayload})
+			for _, observation := range observations {
+				payload, marshalErr := json.Marshal(observation)
+				if marshalErr != nil {
+					err = marshalErr
+					break
+				}
+				records = append(records, staging.Record{Kind: reconcile.DeferredObservationKind, Payload: payload})
+			}
+			if err != nil {
+				return err
+			}
 			deferredSeal, _, _, err = deferredStore.PublishJob(ctx, header, deferredResult.Packs, records)
 			if err == nil {
 				_ = observability.Emit(ctx, observability.Event{Severity: observability.Info, Category: observability.CategoryIntegrity, Component: "backup", Message: "deferred pack durability verified", Fields: map[string]any{"job_id": deferredJobID, "pack_count": deferredSeal.PackCount, "protected_bytes": deferredSeal.ProtectedBytes}})

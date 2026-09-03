@@ -50,6 +50,25 @@ const IDEMPOTENCY_PREFIX: &[u8] = b"meta:idempotency:";
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const WRITER_EPOCH_PREFIX: &str = "_vaultic/writer-epochs";
 const ACTIVE_WRITER_PATH: &str = "_vaultic/active-writer";
+const ACTIVE_GENERATION_PATH: &str = "_vaultic/metadata-authority";
+const GENERATION_DECISION_PREFIX: &str = "_vaultic/metadata-authority-decisions";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationAuthority {
+    pub format: u32,
+    pub repository_id: String,
+    pub decision: u64,
+    pub active_generation: u64,
+    pub namespace: String,
+    pub previous_generation: u64,
+    pub previous_namespace: String,
+    pub state: String,
+    pub report_sha256: String,
+    pub decided_at_ms: u64,
+    pub observation_until_ms: u64,
+    pub retired_generation: u64,
+}
 
 struct TransactionSlot {
     transaction: Mutex<Option<DbTransaction>>,
@@ -537,6 +556,189 @@ impl Storage {
         self.transactions.read().await.len()
     }
 
+    pub async fn refresh_writer_fence(&self) -> Result<u64> {
+        let current = self.writer_epoch.load(Ordering::Acquire);
+        let epoch = claim_writer_epoch(self.coordination_store.as_ref(), Some(current))
+            .await?
+            .context("writer changed before metadata generation fencing")?;
+        self.writer_epoch.store(epoch, Ordering::Release);
+        Ok(epoch)
+    }
+
+    pub async fn ensure_writer_fence(&self) -> Result<()> {
+        let current = self.writer_epoch.load(Ordering::Acquire);
+        if current == 0 || active_writer_epoch(self.coordination_store.as_ref()).await? != Some(current) {
+            bail!("writer epoch is stale")
+        }
+        Ok(())
+    }
+
+    pub async fn mutations_allowed(&self, repository_id: &str) -> Result<bool> {
+        Ok(self.generation_authority(repository_id).await?.state == "healthy")
+    }
+
+    pub async fn generation_authority(&self, repository_id: &str) -> Result<GenerationAuthority> {
+        Ok(read_generation_authority(self.coordination_store.as_ref(), repository_id)
+            .await?
+            .0)
+    }
+
+    pub async fn quarantine_generation(
+        &self,
+        repository_id: &str,
+        expected_generation: u64,
+        diagnostic_sha256: String,
+    ) -> Result<GenerationAuthority> {
+        validate_report_sha256(&diagnostic_sha256)?;
+        let (current, version) =
+            read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
+        if current.active_generation != expected_generation {
+            bail!("metadata generation changed since quarantine was authorized")
+        }
+        if current.state == "healing-required" && current.report_sha256 == diagnostic_sha256 {
+            return Ok(current);
+        }
+        if current.state != "healthy" {
+            bail!("metadata generation is already under a recovery interlock")
+        }
+        let mut authority = current;
+        authority.decision = authority.decision.checked_add(1).context("generation decision overflow")?;
+        authority.state = "healing-required".to_owned();
+        authority.report_sha256 = diagnostic_sha256;
+        authority.decided_at_ms = unix_time_ms()?;
+        publish_generation_authority(self.coordination_store.as_ref(), &authority, version).await?;
+        Ok(authority)
+    }
+
+    pub async fn activate_generation(
+        &self,
+        repository_id: &str,
+        expected_generation: u64,
+        candidate_generation: u64,
+        namespace: String,
+        report_sha256: String,
+        observation_window_ms: u64,
+    ) -> Result<GenerationAuthority> {
+        validate_generation_input(candidate_generation, &namespace, &report_sha256)?;
+        let (current, version) =
+            read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
+        if current.active_generation != expected_generation
+            || candidate_generation <= current.active_generation
+            || current.state != "healing-required"
+        {
+            bail!("metadata generation changed since activation was authorized")
+        }
+        let decided_at_ms = unix_time_ms()?;
+        let authority = GenerationAuthority {
+            format: 1,
+            repository_id: repository_id.to_owned(),
+            decision: current.decision.checked_add(1).context("generation decision overflow")?,
+            active_generation: candidate_generation,
+            namespace,
+            previous_generation: current.active_generation,
+            previous_namespace: current.namespace,
+            state: "post-activation".to_owned(),
+            report_sha256,
+            decided_at_ms,
+            observation_until_ms: decided_at_ms
+                .checked_add(observation_window_ms)
+                .context("generation observation deadline overflow")?,
+            retired_generation: current.retired_generation,
+        };
+        publish_generation_authority(self.coordination_store.as_ref(), &authority, version).await?;
+        Ok(authority)
+    }
+
+    pub async fn verify_generation(
+        &self,
+        repository_id: &str,
+        expected_decision: u64,
+        report_sha256: String,
+    ) -> Result<GenerationAuthority> {
+        validate_report_sha256(&report_sha256)?;
+        let (current, version) =
+            read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
+        if current.decision != expected_decision || current.state != "post-activation" {
+            bail!("metadata generation is not awaiting the authorized post-activation check")
+        }
+        if unix_time_ms()? < current.observation_until_ms {
+            bail!("metadata generation observation window has not elapsed")
+        }
+        let mut authority = current;
+        authority.decision = authority.decision.checked_add(1).context("generation decision overflow")?;
+        authority.state = "healthy".to_owned();
+        authority.report_sha256 = report_sha256;
+        authority.decided_at_ms = unix_time_ms()?;
+        publish_generation_authority(self.coordination_store.as_ref(), &authority, version).await?;
+        Ok(authority)
+    }
+
+    pub async fn rollback_generation(
+        &self,
+        repository_id: &str,
+        expected_decision: u64,
+        report_sha256: String,
+        observation_window_ms: u64,
+    ) -> Result<GenerationAuthority> {
+        validate_report_sha256(&report_sha256)?;
+        let (current, version) =
+            read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
+        if current.decision != expected_decision
+            || current.state != "post-activation"
+            || current.previous_generation == 0
+            || current.previous_namespace.is_empty()
+        {
+            bail!("metadata generation rollback is no longer permitted")
+        }
+        let decided_at_ms = unix_time_ms()?;
+        let authority = GenerationAuthority {
+            format: 1,
+            repository_id: repository_id.to_owned(),
+            decision: current.decision.checked_add(1).context("generation decision overflow")?,
+            active_generation: current.previous_generation,
+            namespace: current.previous_namespace,
+            previous_generation: current.active_generation,
+            previous_namespace: current.namespace,
+            state: "post-activation".to_owned(),
+            report_sha256,
+            decided_at_ms,
+            observation_until_ms: decided_at_ms
+                .checked_add(observation_window_ms)
+                .context("generation observation deadline overflow")?,
+            retired_generation: current.retired_generation,
+        };
+        publish_generation_authority(self.coordination_store.as_ref(), &authority, version).await?;
+        Ok(authority)
+    }
+
+    pub async fn retire_generation(
+        &self,
+        repository_id: &str,
+        expected_decision: u64,
+        generation: u64,
+        report_sha256: String,
+    ) -> Result<GenerationAuthority> {
+        validate_report_sha256(&report_sha256)?;
+        let (current, version) =
+            read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
+        if current.decision != expected_decision
+            || current.state != "healthy"
+            || generation == current.active_generation
+            || generation != current.previous_generation
+        {
+            bail!("metadata generation is not eligible for retirement")
+        }
+        let mut authority = current;
+        authority.decision = authority.decision.checked_add(1).context("generation decision overflow")?;
+        authority.previous_generation = 0;
+        authority.previous_namespace.clear();
+        authority.retired_generation = generation;
+        authority.report_sha256 = report_sha256;
+        authority.decided_at_ms = unix_time_ms()?;
+        publish_generation_authority(self.coordination_store.as_ref(), &authority, version).await?;
+        Ok(authority)
+    }
+
     async fn writer(&self) -> Result<tokio::sync::RwLockReadGuard<'_, Database>, Status> {
         let database = self.database.read().await;
         if !matches!(&*database, Database::Writer(_)) {
@@ -985,6 +1187,87 @@ async fn active_writer_epoch(store: &dyn ObjectStore) -> Result<Option<u64>> {
     }
 }
 
+async fn read_generation_authority(
+        store: &dyn ObjectStore,
+        repository_id: &str,
+    ) -> Result<(GenerationAuthority, Option<UpdateVersion>)> {
+        let path = ObjectPath::from(ACTIVE_GENERATION_PATH);
+        match store.get(&path).await {
+            Ok(result) => {
+                let version = UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                };
+                let bytes = result.bytes().await.context("read metadata generation authority")?;
+                let authority: GenerationAuthority =
+                    serde_json::from_slice(&bytes).context("decode metadata generation authority")?;
+                if authority.format != 1 || authority.repository_id != repository_id {
+                    bail!("metadata generation authority identity mismatch")
+                }
+                Ok((authority, Some(version)))
+            }
+            Err(slatedb::object_store::Error::NotFound { .. }) => Ok((
+                GenerationAuthority {
+                    format: 1,
+                    repository_id: repository_id.to_owned(),
+                    decision: 0,
+                    active_generation: 1,
+                    namespace: "default".to_owned(),
+                    previous_generation: 0,
+                    previous_namespace: String::new(),
+                    state: "healthy".to_owned(),
+                    report_sha256: String::new(),
+                    decided_at_ms: 0,
+                    observation_until_ms: 0,
+                    retired_generation: 0,
+                },
+                None,
+            )),
+            Err(error) => Err(error).context("read metadata generation authority"),
+        }
+    }
+
+    async fn publish_generation_authority(
+        store: &dyn ObjectStore,
+        authority: &GenerationAuthority,
+        version: Option<UpdateVersion>,
+    ) -> Result<()> {
+        let encoded = serde_json::to_vec(authority).context("encode metadata generation authority")?;
+        let digest = Sha256::digest(&encoded);
+        let decision_path = ObjectPath::from(format!(
+            "{GENERATION_DECISION_PREFIX}/{:020}-{}",
+            authority.decision,
+            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        ));
+        store
+            .put_opts(
+                &decision_path,
+                encoded.clone().into(),
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .context("publish immutable metadata generation decision")?;
+        let mode = version.map_or(PutMode::Create, PutMode::Update);
+        if let Err(error) = store
+            .put_opts(
+                &ObjectPath::from(ACTIVE_GENERATION_PATH),
+                encoded.into(),
+                PutOptions::from(mode),
+            )
+            .await
+        {
+            if matches!(
+                error,
+                slatedb::object_store::Error::AlreadyExists { .. }
+                    | slatedb::object_store::Error::Precondition { .. }
+            ) {
+                bail!("metadata generation authority changed concurrently")
+            }
+            return Err(error).context("activate metadata generation authority");
+        }
+        Ok(())
+}
+
 async fn release_writer_claim(store: &dyn ObjectStore, epoch: u64) -> Result<()> {
     if active_writer_epoch(store).await? != Some(epoch) {
         bail!("refusing to release a writer claim owned by another epoch")
@@ -1122,6 +1405,20 @@ fn encoded_varint_len(mut value: u64) -> usize {
 fn validate_key(key: &[u8]) -> Result<(), Status> {
     if key.is_empty() {
         return Err(Status::invalid_argument("key must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_generation_input(generation: u64, namespace: &str, report_sha256: &str) -> Result<()> {
+    if generation == 0 || namespace.trim().is_empty() || namespace.len() > 1024 {
+        bail!("invalid candidate metadata generation")
+    }
+    validate_report_sha256(report_sha256)
+}
+
+fn validate_report_sha256(report_sha256: &str) -> Result<()> {
+    if report_sha256.len() != 64 || !report_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("healing report SHA-256 must contain 64 hexadecimal characters")
     }
     Ok(())
 }
@@ -1670,5 +1967,107 @@ mod tests {
         };
         let error = storage.assert_current_writer_epoch().await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn metadata_generation_activation_rejects_stale_compare_and_swap() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (current, version) = read_generation_authority(object_store.as_ref(), "repo")
+            .await
+            .unwrap();
+        let first = GenerationAuthority {
+            format: 1,
+            repository_id: "repo".to_owned(),
+            decision: current.decision + 1,
+            active_generation: 2,
+            namespace: "candidate-a".to_owned(),
+            previous_generation: current.active_generation,
+            previous_namespace: current.namespace.clone(),
+            state: "post-activation".to_owned(),
+            report_sha256: "ab".repeat(32),
+            decided_at_ms: 1,
+            observation_until_ms: 2,
+            retired_generation: 0,
+        };
+        let mut second = first.clone();
+        second.namespace = "candidate-b".to_owned();
+        publish_generation_authority(object_store.as_ref(), &first, version.clone())
+            .await
+            .unwrap();
+        assert!(publish_generation_authority(object_store.as_ref(), &second, version)
+            .await
+            .is_err());
+        assert_eq!(
+            read_generation_authority(object_store.as_ref(), "repo")
+                .await
+                .unwrap()
+                .0,
+            first
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_generation_lifecycle_gates_mutation_rollback_and_retirement() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("generation-lifecycle", object_store.clone())
+            .await
+            .unwrap();
+        let storage = Storage {
+            database: RwLock::new(Database::Writer(db)),
+            database_path: "generation-lifecycle".to_owned(),
+            coordination_store: object_store.clone(),
+            object_store,
+            encryption: EncryptionStatus {
+                enabled: false,
+                algorithm: "none",
+                active_dek_version: 0,
+                envelope_generation: 0,
+                unlock_slot: None,
+                recovery_unlock: false,
+                initializing: false,
+            },
+            key_manager: None,
+            transactions: RwLock::new(HashMap::new()),
+            next_transaction: AtomicU64::new(1),
+            last_durable_sequence: AtomicU64::new(0),
+            transaction_idle_timeout_ms: 1_000,
+            broker_lease: None,
+            writer_epoch: AtomicU64::new(0),
+        };
+        let diagnostic = "aa".repeat(32);
+        let quarantined = storage
+            .quarantine_generation("repo", 1, diagnostic)
+            .await
+            .unwrap();
+        assert_eq!(quarantined.state, "healing-required");
+        assert!(!storage.mutations_allowed("repo").await.unwrap());
+
+        let activated = storage
+            .activate_generation("repo", 1, 2, "candidate-2".to_owned(), "bb".repeat(32), 60_000)
+            .await
+            .unwrap();
+        assert_eq!(activated.state, "post-activation");
+        assert!(storage
+            .verify_generation("repo", activated.decision, "cc".repeat(32))
+            .await
+            .is_err());
+
+        let rolled_back = storage
+            .rollback_generation("repo", activated.decision, "dd".repeat(32), 0)
+            .await
+            .unwrap();
+        assert_eq!(rolled_back.active_generation, 1);
+        assert!(rolled_back.decision > activated.decision);
+        let verified = storage
+            .verify_generation("repo", rolled_back.decision, "ee".repeat(32))
+            .await
+            .unwrap();
+        assert!(storage.mutations_allowed("repo").await.unwrap());
+        let retired = storage
+            .retire_generation("repo", verified.decision, 2, "ff".repeat(32))
+            .await
+            .unwrap();
+        assert_eq!(retired.retired_generation, 2);
+        assert_eq!(retired.previous_generation, 0);
     }
 }

@@ -109,6 +109,68 @@ The authenticated abandonment record retains pack protection until `DeleteAfter`
 
 Plan B is reserved for authenticated metadata damage, identity mismatch, rollback, or an integrity preflight that proves the current generation cannot accept Plan A. A candidate must use an isolated persistent namespace, preserve the suspect namespace unchanged, rebuild from authenticated sources in documented authority order, represent unknown facts as crawl debt, pass full validation read-only, and activate through a conditional generation update plus a fresh writer fence. Activation, rollback, and retirement are separate operator approvals. Never use the legacy import activation flags as an in-place repair of a suspect generation, and never retire forensic data before the post-activation observation window and a clean `index check`.
 
+`index staging reconcile` publishes the authenticated `healing-required` quarantine decision when its integrity preflight proves Plan A unsafe. Operational failures remain retryable and cannot create this decision. Inspect the interlock before planning:
+
+```console
+vaultic index heal status
+```
+
+Create a signed, immutable inventory without changing authority. The namespace must be a new persistent local directory or dedicated object-store prefix:
+
+```console
+vaultic index heal plan \
+  --candidate-namespace /srv/vaulticdb/rebuild-0002
+```
+
+Execute against a persistent isolated daemon. Execution resumes legacy imports, verifies authenticated staging sources, replays sealed and completed journals idempotently, and then demotes the candidate for read-only inspection. A fresh-DEK plan additionally requires the same unlocked broker, rebuild initialization, and required metadata encryption before the first candidate metadata write.
+
+```console
+vaultic index heal execute --plan PLAN_ID \
+  --artifact-dir /protected/vaultic-healing \
+  --metadata-rebuild-initialize --metadata-encryption required \
+  --metadata-key-broker-socket /run/vaultic/key-broker.sock \
+  --metadata-key-broker-release-manifest /etc/vaultic/releases.json \
+  --start-daemon --persistent-daemon \
+  --daemon-data-dir /srv/vaulticdb/rebuild-0002
+```
+
+Run all structural, AEAD, pack/blob, tree/snapshot, placement, journal, legacy-comparison, and read-only gates. Failed validation still writes a signed diagnostic report, but that report cannot authorize activation.
+
+```console
+vaultic index heal verify --plan PLAN_ID \
+  --artifact-dir /protected/vaultic-healing \
+  --daemon-socket /run/vaulticdb-candidate.sock
+```
+
+Activation checks the signed plan and clean report, compares the expected suspect generation and authority decision, publishes an immutable generation decision through the coordination object store, and rotates the writer fence. It is never automatic:
+
+```console
+vaultic index heal activate --plan PLAN_ID --report REPORT_ID \
+  --artifact-dir /protected/vaultic-healing \
+  --observation-window 24h --approve
+```
+
+The activated generation remains in `post-activation`: ordinary mutations and destructive maintenance are disabled. Clients must discard cached metadata resolution and connect to the namespace named by `index heal status`. During this interval, rollback publishes a newer authority decision rather than silently serving an older generation:
+
+```console
+vaultic index heal rollback --plan PLAN_ID --report REPORT_ID \
+  --artifact-dir /protected/vaultic-healing \
+  --expected-decision DECISION --observation-window 24h \
+  --daemon-socket /run/vaulticdb-candidate.sock \
+  --daemon-data-dir /srv/vaulticdb/rebuild-0002 \
+  --acknowledge-rollback
+```
+
+After the observation window, a clean check completes verification. Only a healthy authority permits GC. Retirement removes only authority eligibility; physical forensic deletion remains a separately controlled storage operation:
+
+```console
+vaultic index heal retire --expected-decision DECISION \
+  --generation OLD_GENERATION --report REPORT_SHA256 \
+  --acknowledge-retirement
+```
+
+Plans, checkpoints, and reports are canonical JSON authenticated with a purpose-separated repository key. Plans and reports are create-only; checkpoints are atomically replaceable for resume. Preserve the artifact directory with the topology and capsule anchors. A crash before authority CAS leaves the old generation authoritative. A crash after CAS is resolved by `index heal status`; never repeat activation against a guessed generation.
+
 ## Exercises and monitoring
 
 Alert on writer fencing, metadata corruption bypass, quota refusal, under-replicated or conflicting journals, expiry, rejection, abandonment, and emergency restore. Events intentionally exclude paths, credentials, keys, shares, journal plaintext, and broker secret material.

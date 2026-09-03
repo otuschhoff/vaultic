@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"sort"
 	"time"
 
@@ -98,6 +99,16 @@ func BuildDaemonCommitPlan(ctx context.Context, store schemaReader, segments []S
 			}
 		}
 		for _, record := range segment.Records {
+			if record.Kind == "crawl-observation-v1" {
+				var observation json.RawMessage
+				decoder := json.NewDecoder(bytes.NewReader(record.Payload))
+				decoder.DisallowUnknownFields()
+				if err := decoder.Decode(&observation); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+					return DaemonCommitPlan{}, Reject(fmt.Errorf("decode deferred crawl observation"))
+				}
+				plan.Observations = append(plan.Observations, append(json.RawMessage(nil), observation...))
+				continue
+			}
 			if record.Kind == "prospective-snapshot-v1" {
 				if len(record.Payload) == 0 || !json.Valid(record.Payload) {
 					return DaemonCommitPlan{}, Reject(fmt.Errorf("invalid prospective snapshot JSON"))
@@ -145,6 +156,9 @@ func BuildDaemonCommitPlan(ctx context.Context, store schemaReader, segments []S
 	}
 	if plan.SnapshotID == "" {
 		return DaemonCommitPlan{}, Reject(fmt.Errorf("journal has no prospective snapshot fact"))
+	}
+	if len(plan.Observations) == 0 {
+		return DaemonCommitPlan{}, Reject(fmt.Errorf("journal has no deferred crawl observations"))
 	}
 	keys := make([]string, 0, len(planned))
 	for key := range planned {

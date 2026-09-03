@@ -434,10 +434,28 @@ func (reconciler *Reconciler) publishSnapshotRoot(published map[string]published
 	if len(children) == 0 && len(reconciler.options.PathIndexPaths) == 0 {
 		return nil
 	}
+	sort.Slice(children, func(left, right int) bool { return children[left].Name < children[right].Name })
 	record := schema.DirectoryRevision{Children: children, SourcePath: "/", Known: schema.KnownPath, Freshness: schema.FreshnessVerified}
 	value, err := record.MarshalBinary()
 	if err != nil {
 		return err
+	}
+	currentKey := schema.CurrentDirectoryKey(0, 0)
+	if currentValue, found, getErr := reconciler.store.Get(reconciler.ctx, currentKey); getErr != nil {
+		return getErr
+	} else if found {
+		pointer, decodeErr := schema.UnmarshalCurrentPointer(currentValue)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if existing, revisionFound, revisionErr := reconciler.store.Get(reconciler.ctx, pointer.RecordKey); revisionErr != nil {
+			return revisionErr
+		} else if revisionFound && bytes.Equal(existing, value) {
+			reconciler.mu.Lock()
+			reconciler.rootKey = append([]byte(nil), pointer.RecordKey...)
+			reconciler.mu.Unlock()
+			return nil
+		}
 	}
 	revision, err := reconciler.store.AllocateRevision(reconciler.ctx)
 	if err != nil {
@@ -448,7 +466,7 @@ func (reconciler *Reconciler) publishSnapshotRoot(published map[string]published
 	if err != nil {
 		return err
 	}
-	if err := reconciler.store.PublishRevisionBatch(reconciler.ctx, schema.CurrentDirectoryKey(0, 0), key, value, revision, tombstones, nil); err != nil {
+	if err := reconciler.store.PublishRevisionBatch(reconciler.ctx, currentKey, key, value, revision, tombstones, nil); err != nil {
 		return err
 	}
 	reconciler.mu.Lock()

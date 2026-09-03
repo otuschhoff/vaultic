@@ -1786,6 +1786,24 @@ func (store *SchemaStore) MarkExportPending(ctx context.Context, snapshotID sche
 	return store.Put(ctx, schema.ExportCheckpointKey(snapshotID), encoded, true)
 }
 
+func (store *SchemaStore) ExportCheckpointRoot(ctx context.Context, snapshotID schema.ID) ([]byte, error) {
+	value, found, err := store.Get(ctx, schema.ExportCheckpointKey(snapshotID))
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("snapshot export checkpoint is missing")
+	}
+	record, err := schema.UnmarshalExportCheckpointRecord(value)
+	if err != nil {
+		return nil, err
+	}
+	if (record.State != schema.ExportPending && record.State != schema.ExportComplete) || len(record.RootKey) == 0 {
+		return nil, fmt.Errorf("snapshot export checkpoint has no recoverable root")
+	}
+	return append([]byte(nil), record.RootKey...), nil
+}
+
 func (store *SchemaStore) MarkExportFailed(ctx context.Context, snapshotID schema.ID, failure error) error {
 	key := schema.ExportCheckpointKey(snapshotID)
 	value, found, err := store.Get(ctx, key)

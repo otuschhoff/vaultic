@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/global"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/repository/staging"
@@ -224,6 +227,13 @@ func newIndexStagingReconcileCommand(globalOptions *global.Options) *cobra.Comma
 				}
 				return nil
 			},
+			ReplayObservations: func(ctx context.Context, payloads []json.RawMessage) ([]byte, error) {
+				observations, err := reconcile.DecodeDeferredObservations(payloads)
+				if err != nil {
+					return nil, err
+				}
+				return reconcile.ReplayDeferred(ctx, engine.SchemaStore(), observations, reconcile.Options{PathIndexPaths: repo.Config().PathIndexPaths})
+			},
 		}
 		result := staging.Reconcile(ctx, store, authority, staging.BackendPackVerifier{Backends: store.Mirrors, Policy: store.Policy}, job)
 		if globalOptions.JSON {
@@ -237,6 +247,14 @@ func newIndexStagingReconcileCommand(globalOptions *global.Options) *cobra.Comma
 			severity, category = observability.Warning, observability.CategoryIntegrity
 		} else if result.Disposition == staging.ReconcileHealingRequired {
 			severity, category = observability.Critical, observability.CategoryIntegrity
+			diagnostic := sha256.Sum256([]byte(result.JobID + "\x00" + result.Reason))
+			status, statusErr := engine.Client().GenerationStatus(ctx)
+			if statusErr != nil {
+				return fmt.Errorf("query generation for healing quarantine: %w", statusErr)
+			}
+			if _, quarantineErr := engine.Client().QuarantineGeneration(ctx, status.ActiveGeneration, hex.EncodeToString(diagnostic[:])); quarantineErr != nil {
+				return fmt.Errorf("quarantine healing-required generation: %w", quarantineErr)
+			}
 		} else if result.Disposition == staging.ReconcileRetryable {
 			severity = observability.Warning
 		}

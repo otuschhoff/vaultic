@@ -177,6 +177,7 @@ func newIndexCommand(globalOptions *global.Options) *cobra.Command {
 		newIndexEncryptCommand(globalOptions),
 		newIndexWriterCommand(globalOptions),
 		newIndexStagingCommand(globalOptions),
+		newIndexHealCommand(globalOptions),
 	)
 	return command
 }
@@ -235,8 +236,8 @@ func runIndexImport(ctx context.Context, options indexImportOptions, globalOptio
 		return result, fmt.Errorf("--activate cannot be combined with --dry-run")
 	}
 	if options.Daemon.RebuildInitialize {
-		if !options.ConfirmMetadataLossRebuild || !options.Activate || !options.Daemon.Start || !globalOptions.MetadataLossRecovery {
-			return result, fmt.Errorf("metadata rebuild initialization requires --confirm-metadata-loss-rebuild, --activate, --start-daemon, and --metadata-loss-recovery")
+		if !options.ConfirmMetadataLossRebuild || !options.Daemon.Start || !globalOptions.MetadataLossRecovery {
+			return result, fmt.Errorf("metadata rebuild initialization requires --confirm-metadata-loss-rebuild, --start-daemon, and --metadata-loss-recovery")
 		}
 		candidate, err := validateMetadataRebuildTarget(options.Daemon)
 		if err != nil {
