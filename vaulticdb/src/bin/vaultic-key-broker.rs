@@ -27,8 +27,8 @@ use tokio::{
 };
 use vaulticdb::{
     broker::{
-        unix_time_ms, Capability, ClientAuthorization, ClientIdentity, EncryptedContribution,
-        KeyBroker,
+        unix_time_ms, Capability, ClientAuthorization, ClientIdentity, ContributionRejection,
+        EncryptedContribution, KeyBroker,
     },
     encryption::recovery_capsule::{
         ExternalMemberProtection, HardwareBinding, MemberCredential, MemberProtection,
@@ -291,11 +291,20 @@ async fn main() -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     let maximum_lifetime = config.maximum_unlocked_seconds.map(Duration::from_secs);
-    let broker = Arc::new(Mutex::new(if config.identity_recovery {
+    let identity_recovery = config.identity_recovery;
+    let broker = Arc::new(Mutex::new(if identity_recovery {
         KeyBroker::new_identity_recovery(capsule, identity, authorizations, maximum_lifetime)?
     } else {
         KeyBroker::new(capsule, identity, authorizations, maximum_lifetime)?
     }));
+    if identity_recovery {
+        emit_security_event(
+            "critical",
+            "auth",
+            "broker_identity_recovery_mode_active",
+            &[("identity_recovery", "true".to_owned())],
+        );
+    }
     let lock_notification = Arc::new(Notify::new());
 
     prepare_socket_parent(&config.socket_path)?;
@@ -456,12 +465,7 @@ async fn serve_connection(
                     )
                     .await
                     .unwrap_or_else(|error| {
-                        emit_security_event(
-                            "warning",
-                            "auth",
-                            "request_rejected",
-                            &[("connection_id", connection_id.clone())],
-                        );
+                        emit_rejection_event(&error, &connection_id);
                         BrokerResponse::Error {
                             code: "request_rejected",
                             message: error.to_string(),
@@ -815,12 +819,27 @@ async fn handle_request(
             Ok(BrokerResponse::Ok)
         }
         BrokerRequest::Lock => {
+            let status = broker.status(now);
             broker.lock();
+            emit_security_event(
+                "notice",
+                "lifecycle",
+                "sessions_closed_by_explicit_lock",
+                &[
+                    ("connection_id", connection_id.to_owned()),
+                    ("session_count", status.active_sessions.to_string()),
+                    ("lease_count", status.active_leases.to_string()),
+                ],
+            );
             emit_security_event(
                 "critical",
                 "lifecycle",
                 "broker_locked",
-                &[("connection_id", connection_id.to_owned())],
+                &[
+                    ("connection_id", connection_id.to_owned()),
+                    ("session_count", status.active_sessions.to_string()),
+                    ("lease_count", status.active_leases.to_string()),
+                ],
             );
             Ok(BrokerResponse::Ok)
         }
@@ -1002,6 +1021,49 @@ fn emit_security_event(severity: &str, category: &str, event: &str, fields: &[(&
     }
 }
 
+fn emit_rejection_event(error: &anyhow::Error, connection_id: &str) {
+    let (severity, category, event, fields) = rejection_event(error, connection_id);
+    emit_security_event(severity, category, event, &fields);
+}
+
+fn rejection_event(
+    error: &anyhow::Error,
+    connection_id: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    Vec<(&'static str, String)>,
+) {
+    match error.downcast_ref::<ContributionRejection>() {
+        Some(ContributionRejection::PayloadAuthentication) => (
+            "warning",
+            "integrity",
+            "contribution_payload_authentication_failed",
+            vec![("connection_id", connection_id.to_owned())],
+        ),
+        Some(ContributionRejection::Rollback {
+            last_seen_generation,
+            current_generation,
+        }) => (
+            "critical",
+            "integrity",
+            "capsule_rollback_rejected",
+            vec![
+                ("connection_id", connection_id.to_owned()),
+                ("last_seen_generation", last_seen_generation.to_string()),
+                ("current_generation", current_generation.to_string()),
+            ],
+        ),
+        None => (
+            "warning",
+            "auth",
+            "request_rejected",
+            vec![("connection_id", connection_id.to_owned())],
+        ),
+    }
+}
+
 fn security_event_json(
     severity: &str,
     category: &str,
@@ -1026,6 +1088,10 @@ fn security_event_json(
         "capsule_sha256",
         "expired_sessions",
         "expired_leases",
+        "session_count",
+        "lease_count",
+        "last_seen_generation",
+        "current_generation",
     ];
     let mut encoded_fields = BTreeMap::new();
     for (name, value) in fields {
@@ -1226,6 +1292,37 @@ mod tests {
             &[("bearer_token", "secret-token".to_owned())],
         )
         .is_err());
+    }
+
+    #[test]
+    fn contribution_rejections_have_stable_secret_free_events() {
+        let authentication = anyhow::Error::new(ContributionRejection::PayloadAuthentication);
+        let (severity, category, event, fields) = rejection_event(&authentication, "connection-a");
+        assert_eq!(
+            (severity, category, event),
+            (
+                "warning",
+                "integrity",
+                "contribution_payload_authentication_failed"
+            )
+        );
+        let encoded = security_event_json(severity, category, event, &fields).unwrap();
+        assert!(encoded.contains("\"connection_id\":\"connection-a\""));
+        assert!(!encoded.contains("ciphertext"));
+
+        let rollback = anyhow::Error::new(ContributionRejection::Rollback {
+            last_seen_generation: 8,
+            current_generation: 7,
+        });
+        let (severity, category, event, fields) = rejection_event(&rollback, "connection-b");
+        assert_eq!(
+            (severity, category, event),
+            ("critical", "integrity", "capsule_rollback_rejected")
+        );
+        let encoded = security_event_json(severity, category, event, &fields).unwrap();
+        assert!(encoded.contains("\"last_seen_generation\":\"8\""));
+        assert!(encoded.contains("\"current_generation\":\"7\""));
+        assert!(!encoded.contains("share"));
     }
 
     #[tokio::test]

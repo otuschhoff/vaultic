@@ -609,13 +609,18 @@ Activation relocks the broker, after which ordinary signed sessions are
 required again.
 
 Local and S3 candidate rebuild plus no-database identity-repin paths are
-implemented, but a credential-gated remote destruction-to-list/restore service
-test remains required before treating metadata rebuild coverage as complete.
+implemented. The S3-compatible release lane destroys and lists an isolated
+candidate prefix, rebuilds and reopens encrypted records, and scans raw objects
+for known plaintext and the DEK. Repeat the exercise with production-provider
+credentials and retention controls before treating a deployment as complete.
 
 Audit ``auth``, ``integrity``, and ``lifecycle`` events remotely. Treat capsule
 rollback, rejected contribution, client authorization denial, unexpected
-lease, break-glass use, threshold downgrade, plaintext export, and payload
-authentication failure as security-significant. Run periodic exercises that
+lease, break-glass use, threshold downgrade, evidence of a persistent plaintext
+key copy, and payload authentication failure as security-significant. Vaultic
+does not provide a plaintext key-export command; authorized connection-bound
+lease grants are the audited key-delivery boundary, while external copies are
+covered by the signed bypass inventory. Run periodic exercises that
 start from an empty metadata directory, verify capsule discovery and
 fingerprints, satisfy every supported policy alternative, list and restore
 packs through a recovery lease, and explicitly relock the broker.
@@ -624,8 +629,9 @@ The broker writes one-line structured JSON security events to standard error,
 which systemd and launchd route to their managed logs. Events cover capsule
 discovery, session creation/expiry, accepted contributions and quorum
 completion, lease grant/release/expiry and disconnect revocation, authorization
-rejection, policy mutation prepare/activate/cancel, explicit lock, shutdown
-lock, and maximum-lifetime automatic lock. Event field names are allowlisted
+rejection, rollback rejection, payload-authentication failure, identity-recovery
+startup, policy mutation prepare/activate/cancel, explicit session closure and
+lock, shutdown lock, and maximum-lifetime automatic lock. Event field names are allowlisted
 and exclude credentials, tokens, PINs, shares, keys, and request bodies.
 Client-side observability adds custodian member IDs and
 publication/migration/recovery context that is not visible before an encrypted

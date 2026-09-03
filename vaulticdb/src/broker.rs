@@ -38,6 +38,17 @@ const MAX_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_ACTIVE_SESSIONS: usize = 64;
 const MAX_LEASE_TTL: Duration = Duration::from_secs(60 * 60);
 
+#[derive(Debug, thiserror::Error)]
+pub enum ContributionRejection {
+    #[error("contribution payload authentication failed")]
+    PayloadAuthentication,
+    #[error("custodian generation attestation rejects capsule rollback")]
+    Rollback {
+        last_seen_generation: u64,
+        current_generation: u64,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum Capability {
@@ -386,12 +397,17 @@ impl KeyBroker {
         if now_unix_ms >= session.signed.transcript.expires_unix_ms {
             bail!("unlock session has expired");
         }
-        let payload = decrypt_contribution(session, &contribution)?;
+        let payload = decrypt_contribution(session, &contribution)
+            .map_err(|_| ContributionRejection::PayloadAuthentication)?;
         if payload.unverified_session_acknowledged != self.identity_recovery {
             bail!("identity-recovery contribution acknowledgement does not match broker mode");
         }
         if payload.last_seen_generation > self.capsule.header.generation {
-            bail!("custodian generation attestation rejects capsule rollback");
+            return Err(ContributionRejection::Rollback {
+                last_seen_generation: payload.last_seen_generation,
+                current_generation: self.capsule.header.generation,
+            }
+            .into());
         }
         let member = self
             .capsule
@@ -1097,7 +1113,7 @@ fn decrypt_contribution(
     .map_err(|_| anyhow::anyhow!("initialize contribution HPKE receiver"))?;
     receiver
         .open_in_place_detached(ciphertext.as_mut(), &transcript, &tag)
-        .map_err(|_| anyhow::anyhow!("contribution authentication failed"))?;
+        .map_err(|_| ContributionRejection::PayloadAuthentication)?;
     serde_json::from_slice(&ciphertext).context("decode contribution payload")
 }
 
@@ -1732,7 +1748,14 @@ mod tests {
             2_001,
         )
         .unwrap();
-        assert!(broker.submit_contribution(rollback, 2_002).is_err());
+        let error = broker.submit_contribution(rollback, 2_002).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ContributionRejection>(),
+            Some(ContributionRejection::Rollback {
+                last_seen_generation: 5,
+                current_generation: 4,
+            })
+        ));
 
         let contribution = encrypt_offline_contribution(
             &capsule,
@@ -1745,6 +1768,13 @@ mod tests {
             2_001,
         )
         .unwrap();
+        let mut malformed = contribution.clone();
+        malformed.ciphertext = "not-base64".to_owned();
+        let error = broker.submit_contribution(malformed, 2_002).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ContributionRejection>(),
+            Some(ContributionRejection::PayloadAuthentication)
+        ));
         assert!(!broker
             .submit_contribution(contribution.clone(), 2_002)
             .unwrap());
