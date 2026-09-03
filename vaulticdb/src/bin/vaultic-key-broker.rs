@@ -1130,6 +1130,18 @@ fn disable_core_dumps() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_dumps_are_disabled() {
+        disable_core_dumps();
+        let mut limit = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) }, 0);
+        assert_eq!(limit.rlim_cur, 0);
+        assert_eq!(limit.rlim_max, 0);
+    }
     use ed25519_dalek::{Signature, Verifier};
     use std::ffi::OsString;
     use vaulticdb::{

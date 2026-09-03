@@ -1284,6 +1284,18 @@ mod tests {
         publish_local, CapsuleBuilder, MemberCredential,
     };
 
+    #[test]
+    fn core_dumps_are_disabled() {
+        disable_core_dumps();
+        let mut limit = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) }, 0);
+        assert_eq!(limit.rlim_cur, 0);
+        assert_eq!(limit.rlim_max, 0);
+    }
+
     fn transport_environment_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
