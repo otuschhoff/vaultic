@@ -1449,6 +1449,26 @@ func TestEnsureRejectsInsecureTCPConfiguration(t *testing.T) {
 	if _, err := Ensure(context.Background(), Options{ObjectStore: "s3", DaemonPath: daemonBinary(t)}); err == nil || !strings.Contains(err.Error(), "bucket") {
 		t.Fatalf("expected missing S3 bucket error, got %v", err)
 	}
+
+}
+
+func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
+	t.Setenv("VAULTIC_UNRELATED_SECRET", "must-not-be-inherited")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3-credential")
+	t.Setenv("PATH", "/test/bin")
+
+	local := strings.Join(daemonEnvironment(Options{ObjectStore: "local"}), "\n")
+	if strings.Contains(local, "VAULTIC_UNRELATED_SECRET") || strings.Contains(local, "AWS_SECRET_ACCESS_KEY") {
+		t.Fatalf("local daemon inherited a secret-bearing environment: %s", local)
+	}
+	if !strings.Contains(local, "PATH=/test/bin") {
+		t.Fatalf("local daemon lost required runtime environment: %s", local)
+	}
+
+	s3 := strings.Join(daemonEnvironment(Options{ObjectStore: "s3"}), "\n")
+	if strings.Contains(s3, "VAULTIC_UNRELATED_SECRET") || !strings.Contains(s3, "AWS_SECRET_ACCESS_KEY=s3-credential") {
+		t.Fatalf("S3 daemon environment is not credential-chain scoped: %s", s3)
+	}
 }
 
 func TestEncryptedDaemonPersistsOnlyCiphertextAndReopens(t *testing.T) {

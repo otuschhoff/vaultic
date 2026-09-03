@@ -3,8 +3,9 @@
 use std::{
     env,
     fs::File,
-    io,
+    io::{self, Read},
     net::SocketAddr,
+    os::fd::{FromRawFd, RawFd},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -68,7 +69,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 128;
 struct DaemonState {
     daemon_id: Arc<str>,
     repository_id: Arc<str>,
-    auth_token: Option<Arc<str>>,
+    auth_token: Option<Arc<Zeroizing<String>>>,
     unix_socket: bool,
     tcp_enabled: bool,
     draining: Arc<AtomicBool>,
@@ -885,7 +886,7 @@ fn check_request<T>(
     repository_id: &str,
 ) -> Result<(), Status> {
     if let Some(token) = &state.auth_token {
-        let expected = format!("Bearer {token}");
+        let expected = format!("Bearer {}", token.as_str());
         if request
             .metadata()
             .get("authorization")
@@ -904,7 +905,7 @@ enum Transport {
     Tcp(SocketAddr, Vec<IpNet>),
 }
 
-fn parse_transport(repository_id: &str) -> Result<Transport> {
+fn parse_transport(repository_id: &str, has_auth_token: bool) -> Result<Transport> {
     let transport = env::var("VAULTICDB_TRANSPORT").unwrap_or_else(|_| "unix".to_owned());
     match transport.as_str() {
         "unix" => Ok(Transport::Unix(PathBuf::from(
@@ -918,11 +919,8 @@ fn parse_transport(repository_id: &str) -> Result<Transport> {
             {
                 bail!("VAULTICDB_TCP_ALLOWLIST is required when TCP transport is enabled")
             }
-            if env::var("VAULTICDB_TCP_AUTH_TOKEN")
-                .unwrap_or_default()
-                .is_empty()
-            {
-                bail!("VAULTICDB_TCP_AUTH_TOKEN is required when TCP transport is enabled")
+            if !has_auth_token {
+                bail!("a TCP authentication token is required when TCP transport is enabled")
             }
             let addr =
                 env::var("VAULTICDB_TCP_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_owned());
@@ -959,6 +957,29 @@ fn repository_key(repository_id: &str) -> String {
     format!("{digest:x}")
 }
 
+fn read_auth_token() -> Result<Option<Zeroizing<String>>> {
+    let Some(descriptor) = env::var_os("VAULTICDB_TCP_AUTH_TOKEN_FD") else {
+        return Ok(None);
+    };
+    unsafe { env::remove_var("VAULTICDB_TCP_AUTH_TOKEN_FD") };
+    let descriptor: RawFd = descriptor
+        .to_string_lossy()
+        .parse()
+        .context("invalid TCP authentication-token descriptor")?;
+    if descriptor < 3 {
+        bail!("TCP authentication-token descriptor must not be a standard stream")
+    }
+    let mut input = unsafe { File::from_raw_fd(descriptor) }.take(64 * 1024 + 1);
+    let mut token = Zeroizing::new(String::new());
+    input
+        .read_to_string(&mut token)
+        .context("read TCP authentication token")?;
+    if token.is_empty() || token.len() > 64 * 1024 {
+        bail!("TCP authentication token must contain between 1 and 65536 bytes")
+    }
+    Ok(Some(token))
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     disable_core_dumps();
@@ -974,16 +995,14 @@ async fn main() -> Result<()> {
     }
 
     let repository_id = env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default();
-    let transport = parse_transport(&repository_id)?;
-    let auth_token = env::var("VAULTICDB_TCP_AUTH_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty());
+    let auth_token = read_auth_token()?;
+    let transport = parse_transport(&repository_id, auth_token.is_some())?;
     let state = DaemonState {
         daemon_id: Arc::from(
             env::var("VAULTICDB_DAEMON_ID").unwrap_or_else(|_| "vaulticdb-dev".to_owned()),
         ),
         repository_id: Arc::from(repository_id),
-        auth_token: auth_token.map(Arc::from),
+        auth_token: auth_token.map(Arc::new),
         unix_socket: matches!(&transport, Transport::Unix(_)),
         tcp_enabled: matches!(&transport, Transport::Tcp(_, _)),
         draining: Arc::new(AtomicBool::new(false)),
@@ -1274,12 +1293,12 @@ mod tests {
             "VAULTICDB_TRANSPORT",
             "VAULTICDB_SOCKET",
             "VAULTICDB_TCP_ALLOWLIST",
-            "VAULTICDB_TCP_AUTH_TOKEN",
+            "VAULTICDB_TCP_AUTH_TOKEN_FD",
         ] {
             unsafe { env::remove_var(key) };
         }
         assert!(
-            matches!(parse_transport("").unwrap(), Transport::Unix(path) if path == PathBuf::from(default_socket_path("")).as_path())
+            matches!(parse_transport("", false).unwrap(), Transport::Unix(path) if path == PathBuf::from(default_socket_path("")).as_path())
         );
     }
 
@@ -1376,18 +1395,17 @@ mod tests {
         let _guard = transport_environment_lock().lock().unwrap();
         unsafe { env::set_var("VAULTICDB_TRANSPORT", "tcp") };
         unsafe { env::remove_var("VAULTICDB_TCP_ALLOWLIST") };
-        unsafe { env::remove_var("VAULTICDB_TCP_AUTH_TOKEN") };
-        assert!(parse_transport("").is_err());
+        unsafe { env::remove_var("VAULTICDB_TCP_AUTH_TOKEN_FD") };
+        assert!(parse_transport("", false).is_err());
         unsafe { env::set_var("VAULTICDB_TCP_ALLOWLIST", "127.0.0.1/32,::1/128") };
-        assert!(parse_transport("").is_err());
-        unsafe { env::set_var("VAULTICDB_TCP_AUTH_TOKEN", "test-token") };
+        assert!(parse_transport("", false).is_err());
         assert!(
-            matches!(parse_transport("").unwrap(), Transport::Tcp(_, networks) if networks.len() == 2)
+            matches!(parse_transport("", true).unwrap(), Transport::Tcp(_, networks) if networks.len() == 2)
         );
         for key in [
             "VAULTICDB_TRANSPORT",
             "VAULTICDB_TCP_ALLOWLIST",
-            "VAULTICDB_TCP_AUTH_TOKEN",
+            "VAULTICDB_TCP_AUTH_TOKEN_FD",
         ] {
             unsafe { env::remove_var(key) };
         }

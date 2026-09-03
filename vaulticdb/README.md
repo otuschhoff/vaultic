@@ -77,9 +77,13 @@ VAULTICDB_NATIVE_SMOKE=1 cargo run --manifest-path vaulticdb/Cargo.toml
 
 The service reports protocol `vaulticdb.v1`, schema `0`, and does not expose TCP
 unless `VAULTICDB_TRANSPORT=tcp`, a non-empty `VAULTICDB_TCP_ALLOWLIST`, and
-`VAULTICDB_TCP_AUTH_TOKEN` are provided. Storage calls are rejected after
-drain. Commits and writes requesting durability return only after SlateDB's
-durability handle completes.
+`VAULTICDB_TCP_AUTH_TOKEN_FD` names a non-standard inherited descriptor
+containing a non-empty bearer token. The daemon consumes and closes that
+descriptor during startup and removes its number from the environment. Vaultic
+opens the descriptor from the protected `--daemon-auth-token-file`; it never
+places the token in either process's arguments or environment. Storage calls
+are rejected after drain. Commits and writes requesting durability return only
+after SlateDB's durability handle completes.
 
 Abandoned transactions are reclaimed after five minutes of inactivity before
 the active-transaction limit is enforced. Set

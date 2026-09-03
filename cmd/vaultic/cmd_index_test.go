@@ -648,8 +648,12 @@ func TestAnalyticsJobOptionValidation(t *testing.T) {
 }
 
 func TestIndexDaemonOptionsRequireExplicitTCPConfiguration(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "daemon.token")
+	if err := os.WriteFile(tokenFile, []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, options := range map[string]indexDaemonOptions{
-		"token without TCP":        {AuthToken: "token"},
+		"token without TCP":        {AuthTokenFile: tokenFile},
 		"allowlist without TCP":    {TCPAllowlist: []string{"127.0.0.0/8"}},
 		"socket and TCP":           {Socket: "/tmp/vaulticdb.sock", TCPAddress: "127.0.0.1:9876"},
 		"persistent without start": {Persistent: true},
@@ -660,8 +664,8 @@ func TestIndexDaemonOptionsRequireExplicitTCPConfiguration(t *testing.T) {
 			}
 		})
 	}
-	config, err := (indexDaemonOptions{TCPAddress: "127.0.0.1:9876", TCPAllowlist: []string{"127.0.0.0/8"}, AuthToken: "token", Start: true, DaemonPath: "vaulticdb"}).config("repository")
-	if err != nil || config.RepositoryID != "repository" || config.DaemonPath != "vaulticdb" || config.Socket != "" {
+	config, err := (indexDaemonOptions{TCPAddress: "127.0.0.1:9876", TCPAllowlist: []string{"127.0.0.0/8"}, AuthTokenFile: tokenFile, Start: true, DaemonPath: "vaulticdb"}).config("repository")
+	if err != nil || config.RepositoryID != "repository" || config.DaemonPath != "vaulticdb" || config.Socket != "" || config.AuthToken != "token" {
 		t.Fatalf("valid TCP config = %#v, %v", config, err)
 	}
 	s3, err := (indexDaemonOptions{Start: true, DaemonPath: "vaulticdb", ObjectStore: "s3", S3Bucket: "bucket", S3Prefix: "repo/index"}).config("repository")

@@ -27,7 +27,7 @@ type indexDaemonOptions struct {
 	Socket            string
 	TCPAddress        string
 	TCPAllowlist      []string
-	AuthToken         string
+	AuthTokenFile     string
 	DaemonPath        string
 	DataDir           string
 	ObjectStore       string
@@ -68,7 +68,7 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.Socket, "daemon-socket", "", "vaulticdb Unix socket (repository-scoped default)")
 	flags.StringVar(&options.TCPAddress, "daemon-tcp-address", "", "vaulticdb TCP address (opt-in)")
 	flags.StringSliceVar(&options.TCPAllowlist, "daemon-tcp-allow", nil, "CIDR allowed to connect to a started TCP daemon")
-	flags.StringVar(&options.AuthToken, "daemon-auth-token", "", "authentication token for an opt-in TCP daemon")
+	flags.StringVar(&options.AuthTokenFile, "daemon-auth-token-file", "", "protected authentication-token file for an opt-in TCP daemon")
 	flags.BoolVar(&options.Start, "start-daemon", false, "start vaulticdb when it is not already running")
 	flags.BoolVar(&options.Persistent, "persistent-daemon", false, "leave a daemon started by this command running")
 	flags.StringVar(&options.DaemonPath, "daemon-path", "vaulticdb", "path to vaulticdb when --start-daemon is set")
@@ -90,8 +90,8 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 }
 
 func (options indexDaemonOptions) connect(ctx context.Context, repositoryID string) (*daemon.Client, error) {
-	if options.TCPAddress == "" && (len(options.TCPAllowlist) != 0 || options.AuthToken != "") {
-		return nil, fmt.Errorf("--daemon-tcp-allow and --daemon-auth-token require --daemon-tcp-address")
+	if options.TCPAddress == "" && (len(options.TCPAllowlist) != 0 || options.AuthTokenFile != "") {
+		return nil, fmt.Errorf("--daemon-tcp-allow and --daemon-auth-token-file require --daemon-tcp-address")
 	}
 	if options.TCPAddress != "" && options.Socket != "" {
 		return nil, fmt.Errorf("--daemon-socket and --daemon-tcp-address are mutually exclusive")
@@ -107,8 +107,8 @@ func (options indexDaemonOptions) connect(ctx context.Context, repositoryID stri
 }
 
 func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, error) {
-	if options.TCPAddress == "" && (len(options.TCPAllowlist) != 0 || options.AuthToken != "") {
-		return daemon.Options{}, fmt.Errorf("--daemon-tcp-allow and --daemon-auth-token require --daemon-tcp-address")
+	if options.TCPAddress == "" && (len(options.TCPAllowlist) != 0 || options.AuthTokenFile != "") {
+		return daemon.Options{}, fmt.Errorf("--daemon-tcp-allow and --daemon-auth-token-file require --daemon-tcp-address")
 	}
 	if options.TCPAddress != "" && options.Socket != "" {
 		return daemon.Options{}, fmt.Errorf("--daemon-socket and --daemon-tcp-address are mutually exclusive")
@@ -116,9 +116,21 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 	if options.Persistent && !options.Start {
 		return daemon.Options{}, fmt.Errorf("--persistent-daemon requires --start-daemon")
 	}
+	var authToken string
+	if options.AuthTokenFile != "" {
+		value, err := readProtectedBinary(options.AuthTokenFile, "vaulticdb TCP authentication token", true)
+		if err != nil {
+			return daemon.Options{}, err
+		}
+		defer clear(value)
+		if len(value) == 0 {
+			return daemon.Options{}, errors.New("vaulticdb TCP authentication token is empty")
+		}
+		authToken = string(value)
+	}
 	config := daemon.Options{
 		Socket: options.Socket, TCPAddress: options.TCPAddress, TCPAllowlist: options.TCPAllowlist,
-		AuthToken: options.AuthToken, RepositoryID: repositoryID, DataDir: options.DataDir,
+		AuthToken: authToken, RepositoryID: repositoryID, DataDir: options.DataDir,
 		DaemonPath:  options.DaemonPath,
 		ObjectStore: options.ObjectStore, S3Bucket: options.S3Bucket, S3Prefix: options.S3Prefix,
 		EncryptionMode: options.EncryptionMode, PassphraseFile: options.PassphraseFile,

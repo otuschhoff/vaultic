@@ -245,7 +245,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	cmd := exec.Command(options.DaemonPath)
 	var daemonErrors bytes.Buffer
 	cmd.Stderr = &limitedWriter{writer: &daemonErrors, remaining: 64 * 1024}
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(daemonEnvironment(options),
 		"VAULTICDB_SOCKET="+options.Socket,
 		"VAULTICDB_REPOSITORY_ID="+options.RepositoryID,
 	)
@@ -276,8 +276,15 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	if options.RebuildInitialize {
 		cmd.Env = append(cmd.Env, "VAULTICDB_METADATA_REBUILD_INITIALIZE=true")
 	}
+	var authRead, authWrite *os.File
 	if options.AuthToken != "" {
-		cmd.Env = append(cmd.Env, "VAULTICDB_TCP_AUTH_TOKEN="+options.AuthToken)
+		var pipeErr error
+		authRead, authWrite, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			return nil, fmt.Errorf("create vaulticdb authentication pipe: %w", pipeErr)
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, authRead)
+		cmd.Env = append(cmd.Env, "VAULTICDB_TCP_AUTH_TOKEN_FD="+strconv.Itoa(3+len(cmd.ExtraFiles)-1))
 	}
 	if options.TCPAddress != "" {
 		cmd.Env = append(cmd.Env,
@@ -288,12 +295,26 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		)
 	}
 	if err := cmd.Start(); err != nil {
+		if authRead != nil {
+			_ = authRead.Close()
+			_ = authWrite.Close()
+		}
 		// Another caller may have started the singleton between our first dial
 		// and this start attempt. Retry attach before returning the start error.
 		if client, dialErr := retryDial(ctx, options); dialErr == nil {
 			return client, nil
 		}
 		return nil, fmt.Errorf("start vaulticdb: %w", err)
+	}
+	if authRead != nil {
+		_ = authRead.Close()
+		_, writeErr := io.WriteString(authWrite, options.AuthToken)
+		closeErr := authWrite.Close()
+		if writeErr != nil || closeErr != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, fmt.Errorf("send vaulticdb authentication token: %w", errors.Join(writeErr, closeErr))
+		}
 	}
 
 	client, err := retryDial(ctx, options)
@@ -684,7 +705,7 @@ func PublishCapsuleWithoutDatabase(ctx context.Context, options Options, capsule
 		return PublishedCapsuleMutation{}, err
 	}
 	command := exec.CommandContext(ctx, options.DaemonPath, "publish-capsule", capsuleDirectory, temporaryPath, capsuleSHA256, "true")
-	command.Env = append(os.Environ(), "VAULTICDB_REPOSITORY_ID="+options.RepositoryID)
+	command.Env = append(daemonEnvironment(options), "VAULTICDB_REPOSITORY_ID="+options.RepositoryID)
 	for name, value := range map[string]string{
 		"VAULTICDB_OBJECT_STORE": options.ObjectStore,
 		"VAULTICDB_DATA_DIR":     options.DataDir,
@@ -711,6 +732,23 @@ func PublishCapsuleWithoutDatabase(ctx context.Context, options Options, capsule
 		return PublishedCapsuleMutation{}, errors.New("capsule publisher returned inconsistent results")
 	}
 	return published, nil
+}
+
+func daemonEnvironment(options Options) []string {
+	allowed := map[string]bool{
+		"HOME": true, "PATH": true, "TMPDIR": true,
+		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+		"http_proxy": true, "https_proxy": true, "no_proxy": true,
+		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+	}
+	result := make([]string, 0, len(allowed))
+	for _, entry := range os.Environ() {
+		name, _, found := strings.Cut(entry, "=")
+		if found && (allowed[name] || (options.ObjectStore == "s3" && strings.HasPrefix(name, "AWS_"))) {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func (c *Client) PrepareCapsuleMigration(ctx context.Context, capsuleDirectory string, generation uint64, groupID string, threshold uint32, brokerIdentityPublicKey []byte, members []OfflineCapsuleMember) (CapsuleMigration, error) {
