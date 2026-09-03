@@ -14,6 +14,7 @@ lets a reader start at "why" and drill down to "how" and "when".
 | Regulatory | How does the design support privacy, security, resilience, controls, and I&T governance frameworks? | [03-compliance/](03-compliance/) |
 | Tactical | What is the phased plan to build it, in what order, with what exit criteria? | [04-roadmap/](04-roadmap/) |
 | Parity-specific | What is the plan to reach rustic feature parity? | [05-rustic-parity/](05-rustic-parity/) |
+| Operations | How are degraded ingest, writer transfer, reconciliation, and emergency recovery operated? | [05-operations/](05-operations/) |
 
 ## 1. Strategy — [01-strategy/](01-strategy/)
 
@@ -57,6 +58,12 @@ Start at the [rustic-parity overview](05-rustic-parity/00-overview.md). This
 is a separate, independently phased roadmap to close the feature gap with
 [rustic](https://github.com/rustic-rs/rustic) while preserving repository
 format compatibility with both restic and rustic.
+
+## 6. Operations — [05-operations/](05-operations/)
+
+The [metadata resilience runbook](05-operations/metadata-resilience.md) covers
+bootstrap recovery, writer transfer, deferred crawl guarantees, journal
+reconciliation and emergency restore, quotas, expiry, and abandonment.
 
 ## Conventions
 

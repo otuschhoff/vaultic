@@ -2,15 +2,25 @@ package global
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/all"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/repository/bootstrap"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestReadRepo(t *testing.T) {
@@ -39,6 +49,84 @@ func TestReadRepo(t *testing.T) {
 	_, err = readRepo(gopts3)
 	if err == nil {
 		t.Fatal("must not read repository path from invalid file path")
+	}
+}
+
+func TestResolveBootstrapRepositorySurvivesSeedLoss(t *testing.T) {
+	ctx := context.Background()
+	tempDir := rtest.TempDir(t)
+	vaultic.TestDisableCheckPolynomial(t)
+	survivingLocation := filepath.Join(tempDir, "surviving")
+	if err := os.Mkdir(survivingLocation, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := crypto.NewRandomKey()
+	encodedKey, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterKey := base64.StdEncoding.EncodeToString(encodedKey)
+	manifest := bootstrap.Manifest{
+		Format: 1, RepositoryID: "repo-a", Generation: 1, CreatedAt: time.Now().UTC(),
+		Backends: []vaultic.PlacementBackend{{ID: "surviving", Location: survivingLocation, FailureDomain: "site-a"}},
+		Policy:   vaultic.PlacementPolicy{MinCopies: 1, MinDomains: 1}, StagingBackends: []string{"surviving"},
+	}
+	projection := vaultic.Config{Version: 2, ID: "repo-a", PlacementBackends: manifest.Backends, PlacementPolicy: manifest.Policy, StagingBackends: manifest.StagingBackends}
+	manifest.RepositoryConfig, err = json.Marshal(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectionDigest := sha256.Sum256(manifest.RepositoryConfig)
+	manifest.ConfigSHA256 = fmt.Sprintf("%x", projectionDigest)
+	sealed, digest, err := bootstrap.Seal(manifest, key.EncryptionKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gopts := Options{Backends: all.Backends(), MasterKey: masterKey}
+	printer := vaultic.NewNoopPrinter()
+	seedBackend, err := innerOpenBackend(ctx, survivingLocation, gopts, nil, false, printer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap.Publish(ctx, map[string]backend.Backend{"surviving": seedBackend}, 1, sealed); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedBackend.Close(); err != nil {
+		t.Fatal(err)
+	}
+	anchorPath := filepath.Join(tempDir, "anchor.json")
+	profilePath := filepath.Join(tempDir, "bootstrap.toml")
+	profile := "format = 1\nrepository_id = \"repo-a\"\nanchor_file = \"" + anchorPath + "\"\n" +
+		"[[seed]]\nid = \"missing\"\nlocation = \"" + filepath.Join(tempDir, "missing") + "\"\n" +
+		"[[seed]]\nid = \"surviving\"\nlocation = \"" + survivingLocation + "\"\n"
+	if err := os.WriteFile(profilePath, []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gopts.BootstrapProfile = profilePath
+	location, resolvedKey, brokerClient, err := resolveBootstrapRepository(ctx, gopts, printer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location != survivingLocation || resolvedKey != masterKey || brokerClient != nil {
+		t.Fatalf("resolution = %q, key=%t, broker=%v", location, resolvedKey == masterKey, brokerClient)
+	}
+	anchor, err := bootstrap.LoadAnchor(anchorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if anchor.RepositoryID != "repo-a" || anchor.Generation != 1 || anchor.SHA256 != digest {
+		t.Fatalf("anchor = %#v", anchor)
+	}
+	dataPlaneRepo, err := OpenDataPlaneRepository(ctx, gopts, printer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataPlaneRepo.Close()
+	if dataPlaneRepo.Config().ID != "repo-a" {
+		t.Fatalf("data-plane repository config = %#v", dataPlaneRepo.Config())
+	}
+	if _, _, err := dataPlaneRepo.DeferredUploadPlan(); err != nil {
+		t.Fatal(err)
 	}
 }
 

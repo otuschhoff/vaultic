@@ -286,6 +286,8 @@ func (engine *DaemonEngine) repackContext() (schema.ID, []schema.ID, schema.Repa
 
 func (engine *DaemonEngine) SchemaStore() *daemon.SchemaStore { return engine.store }
 
+func (engine *DaemonEngine) Client() *daemon.Client { return engine.client }
+
 func (engine *DaemonEngine) SetNextSnapshotRoot(rootKey []byte) {
 	engine.mu.Lock()
 	engine.nextSnapshotRoot = append([]byte(nil), rootKey...)

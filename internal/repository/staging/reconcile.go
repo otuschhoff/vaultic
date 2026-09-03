@@ -61,7 +61,7 @@ func (store Store) PublishCompletion(ctx context.Context, completion Completion)
 	if err != nil {
 		return err
 	}
-	return Publish(ctx, store.Mirrors, CompletionHandle(completion.Header.JobID), encoded)
+	return store.publish(ctx, CompletionHandle(completion.Header.JobID), encoded)
 }
 
 func Reconcile(ctx context.Context, store Store, authority Authority, verifier PackVerifier, job Job) ReconcileResult {

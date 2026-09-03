@@ -117,12 +117,37 @@ type appendTransaction struct {
 	repo *Repository
 }
 
+type deferredTransaction struct {
+	repo *Repository
+}
+
 var _ vaultic.AppendRepository = (*appendTransaction)(nil)
 
 // AppendTransaction returns the restricted capability for an append-only
 // operation such as backup, copy destination writes, or merge.
 func (r *Repository) AppendTransaction() vaultic.AppendRepository {
 	return &appendTransaction{repo: r}
+}
+
+// DeferredTransaction forces a full crawl and cannot publish ordinary metadata.
+func (r *Repository) DeferredTransaction() vaultic.AppendRepository {
+	return &deferredTransaction{repo: r}
+}
+
+func (tx *deferredTransaction) Connections() uint { return tx.repo.Connections() }
+func (tx *deferredTransaction) LoadBlob(context.Context, vaultic.BlobHandle, []byte) ([]byte, error) {
+	return nil, fmt.Errorf("deferred crawl cannot load a metadata basis")
+}
+func (tx *deferredTransaction) LookupBlobSize(vaultic.BlobHandle) (uint, bool) { return 0, false }
+func (tx *deferredTransaction) WithBlobUploader(context.Context, func(context.Context, vaultic.BlobSaverWithAsync) error) error {
+	return fmt.Errorf("deferred crawl requires an explicit staging uploader")
+}
+func (tx *deferredTransaction) SaveUnpacked(context.Context, vaultic.WriteableFileType, []byte) (vaultic.ID, error) {
+	return vaultic.ID{}, fmt.Errorf("deferred crawl cannot publish ordinary metadata")
+}
+func (tx *deferredTransaction) PackSize() uint { return tx.repo.PackSize() }
+func (tx *deferredTransaction) ChunkerFactory() vaultic.ChunkerFactory {
+	return tx.repo.ChunkerFactory()
 }
 
 func (tx *appendTransaction) Connections() uint { return tx.repo.Connections() }

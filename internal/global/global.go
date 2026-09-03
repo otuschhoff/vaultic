@@ -28,6 +28,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/options"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/repository/bootstrap"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/staging"
 	"github.com/otuschhoff/vaultic/internal/textfile"
@@ -63,6 +64,7 @@ type Options struct {
 
 	Repo                       string
 	RepositoryFile             string
+	BootstrapProfile           string
 	PasswordFile               string
 	PasswordCommand            string
 	AzureKeyVaultURL           string
@@ -167,6 +169,7 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringSliceVarP(&opts.UseProfiles, "use-profile", "P", nil, "load TOML `profile` (repeatable; default: vaultic.toml)")
 	f.StringVarP(&opts.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $VAULTIC_REPOSITORY)")
 	f.StringVarP(&opts.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)")
+	f.StringVar(&opts.BootstrapProfile, "bootstrap-profile", "", "credential-free bootstrap topology profile (default: $VAULTIC_BOOTSTRAP_PROFILE)")
 	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
 	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
 	f.StringVarP(&opts.PasswordCommand, "password-command", "", "", "shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)")
@@ -243,6 +246,7 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 
 	opts.Repo = env.Get("REPOSITORY")
 	opts.RepositoryFile = env.Get("REPOSITORY_FILE")
+	opts.BootstrapProfile = env.Get("BOOTSTRAP_PROFILE")
 	opts.PasswordFile = env.Get("PASSWORD_FILE")
 	opts.KeyHint = env.Get("KEY_HINT")
 	opts.PasswordCommand = env.Get("PASSWORD_COMMAND")
@@ -551,6 +555,25 @@ const maxKeys = 20
 
 // OpenRepository reads the password and opens the repository.
 func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (*repository.Repository, error) {
+	var bootstrapMasterKey string
+	var bootstrapBroker *indexbroker.Client
+	if gopts.BootstrapProfile != "" {
+		if gopts.Repo != "" || gopts.RepositoryFile != "" {
+			return nil, errors.Fatal("--bootstrap-profile is mutually exclusive with --repo and --repository-file")
+		}
+		var err error
+		gopts.Repo, bootstrapMasterKey, bootstrapBroker, err = resolveBootstrapRepository(ctx, gopts, printer)
+		if err != nil {
+			return nil, err
+		}
+		if bootstrapBroker != nil {
+			defer func() {
+				if bootstrapBroker != nil {
+					_ = bootstrapBroker.Close()
+				}
+			}()
+		}
+	}
 	repo, err := readRepo(gopts)
 	if err != nil {
 		return nil, err
@@ -570,7 +593,13 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if err != nil {
 		return nil, err
 	}
-	if gopts.KeyBrokerSocket != "" {
+	if bootstrapMasterKey != "" {
+		err = s.UseMasterKey(ctx, bootstrapMasterKey)
+		if err == nil && bootstrapBroker != nil {
+			s.AddOwnedCloser(bootstrapBroker)
+			bootstrapBroker = nil
+		}
+	} else if gopts.KeyBrokerSocket != "" {
 		if gopts.KeyBrokerReleaseManifest == "" {
 			return nil, errors.Fatal("--key-broker-release-manifest is required with --key-broker-socket")
 		}
@@ -666,16 +695,13 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		return nil, err
 	}
 
-	if _, err := s.ResolveEngineFromBackend(ctx); err != nil {
-		return nil, errors.Fatalf("resolve repository metadata engine: %v", err)
-	}
-
 	// apply the in-repo config (compression, pack sizes, extra verify);
 	// CLI flags and environment variables take precedence
 	if err := applyRepoConfig(s, gopts); err != nil {
 		return nil, err
 	}
 	openedPlacements := make(map[string]backend.Backend, len(s.Config().PlacementBackends))
+	placementFailures := make(map[string]error)
 	for _, placement := range s.Config().PlacementBackends {
 		if placement.Location == "" {
 			continue
@@ -684,36 +710,25 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		placementOptions.RepoHot = ""
 		placementBackend, openErr := innerOpenBackend(ctx, placement.Location, placementOptions, placementOptions.Extended, false, printer)
 		if openErr != nil {
-			_ = s.Close()
-			return nil, errors.Fatalf("open placement backend %q: %v", placement.ID, openErr)
+			placementFailures[placement.ID] = openErr
+			printer.E("unable to open placement backend %q: %v\n", placement.ID, openErr)
+			continue
 		}
 		s.AttachPlacementBackend(repository.PlacementBackendHash(placement.ID), placementBackend)
 		openedPlacements[placement.ID] = placementBackend
 	}
 	if len(s.Config().StagingBackends) > 0 {
-		mirrors := make(map[string]backend.Backend, len(s.Config().StagingBackends))
-		for _, id := range s.Config().StagingBackends {
-			placementBackend, ok := openedPlacements[id]
-			if !ok {
-				_ = s.Close()
-				return nil, errors.Fatalf("staging backend %q is not an opened placement backend", id)
-			}
-			mirrors[id] = placementBackend
-		}
-		journalKey, keyErr := staging.DeriveJournalKey(s.Key().EncryptionKey[:], s.Config().ID)
-		if keyErr != nil {
+		_, store, planErr := s.DeferredUploadPlan()
+		if planErr != nil {
 			_ = s.Close()
-			return nil, keyErr
+			return nil, errors.Fatalf("reachable staging backends do not satisfy repository policy (%v): %v", placementFailures, planErr)
 		}
-		policy := s.Config().PlacementPolicy
-		s.AttachStagedPackRoots(staging.PackRoots{
-			Store: staging.Store{
-				Mirrors: mirrors,
-				Key:     journalKey,
-				Policy:  staging.Policy{MinCopies: policy.MinCopies, MinDomains: policy.MinDomains, MinOffsite: policy.MinOffsite},
-			},
-			RepositoryID: s.Config().ID,
-		})
+		s.AttachStagedPackRoots(staging.PackRoots{Store: store, RepositoryID: s.Config().ID})
+	}
+
+	if _, err := s.ResolveEngineFromBackend(ctx); err != nil {
+		_ = s.Close()
+		return nil, errors.Fatalf("resolve repository metadata engine: %v", err)
 	}
 
 	printRepositoryInfo(s, gopts, printer)
@@ -727,6 +742,240 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		return nil, err
 	}
 	return s, nil
+}
+
+func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (string, string, *indexbroker.Client, error) {
+	profile, err := bootstrap.LoadProfile(gopts.BootstrapProfile)
+	if err != nil {
+		return "", "", nil, err
+	}
+	masterKey, err := resolveMasterKey(gopts)
+	if err != nil {
+		return "", "", nil, err
+	}
+	var brokerClient *indexbroker.Client
+	var topologyKey []byte
+	if gopts.KeyBrokerSocket != "" {
+		if masterKey != "" || gopts.MetadataKeyInDB || gopts.Password != "" || gopts.PasswordFile != "" || gopts.PasswordCommand != "" {
+			return "", "", nil, errors.Fatal("brokered bootstrap is mutually exclusive with password, direct-key, and key-in-DB routes")
+		}
+		if gopts.KeyBrokerReleaseManifest == "" {
+			return "", "", nil, errors.Fatal("--key-broker-release-manifest is required with brokered bootstrap")
+		}
+		brokerClient, err = indexbroker.Dial(ctx, gopts.KeyBrokerSocket)
+		if err != nil {
+			return "", "", nil, err
+		}
+		lease, leaseErr := brokerClient.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "topology-discovery", gopts.KeyBrokerLeaseDuration)
+		if leaseErr != nil {
+			_ = brokerClient.Close()
+			return "", "", nil, leaseErr
+		}
+		topologyKey = append([]byte(nil), lease.Key...)
+		clear(lease.Key)
+	}
+	if masterKey == "" && len(topologyKey) == 0 {
+		return "", "", brokerClient, errors.Fatal("bootstrap topology authentication requires a broker lease or direct repository key")
+	}
+	var rootKey []byte
+	if masterKey != "" {
+		key, decodeErr := repository.DecodeMasterKey(masterKey)
+		if decodeErr != nil {
+			if brokerClient != nil {
+				_ = brokerClient.Close()
+			}
+			return "", "", nil, decodeErr
+		}
+		rootKey = key.EncryptionKey[:]
+	}
+	seeds := make(map[string]backend.Backend, len(profile.Seeds))
+	locations := make(map[string]string, len(profile.Seeds))
+	for _, seed := range profile.Seeds {
+		seedBackend, openErr := innerOpenBackend(ctx, seed.Location, gopts, gopts.Extended, false, printer)
+		if openErr != nil {
+			continue
+		}
+		seeds[seed.ID] = seedBackend
+		locations[seed.ID] = seed.Location
+	}
+	defer func() {
+		for _, seed := range seeds {
+			_ = seed.Close()
+		}
+	}()
+	if len(seeds) == 0 {
+		if brokerClient != nil {
+			_ = brokerClient.Close()
+		}
+		return "", "", nil, errors.Fatal("no bootstrap seed backend is reachable")
+	}
+	var copies []bootstrap.Copy
+	var failures map[string]error
+	if len(topologyKey) > 0 {
+		copies, failures = bootstrap.DiscoverWithTopologyKey(ctx, seeds, topologyKey, profile.RepositoryID)
+		clear(topologyKey)
+	} else {
+		copies, failures = bootstrap.Discover(ctx, seeds, rootKey, profile.RepositoryID)
+	}
+	if len(copies) == 0 {
+		if brokerClient != nil {
+			_ = brokerClient.Close()
+		}
+		return "", "", nil, errors.Errorf("no authenticated bootstrap topology is reachable: %v", failures)
+	}
+	trusted := make([]bootstrap.Anchor, 0, 1)
+	if profile.AnchorFile != "" {
+		anchor, anchorErr := bootstrap.LoadAnchor(profile.AnchorFile)
+		if anchorErr != nil && !os.IsNotExist(anchorErr) {
+			if brokerClient != nil {
+				_ = brokerClient.Close()
+			}
+			return "", "", nil, anchorErr
+		}
+		if anchorErr == nil {
+			trusted = append(trusted, anchor)
+		}
+	}
+	winner, err := bootstrap.Resolve(copies, trusted...)
+	if err != nil {
+		if brokerClient != nil {
+			_ = brokerClient.Close()
+		}
+		return "", "", nil, err
+	}
+	reachable := make([]vaultic.PlacementBackend, 0, len(winner.Manifest.Backends))
+	for _, declared := range winner.Manifest.Backends {
+		candidate, openErr := innerOpenBackend(ctx, declared.Location, gopts, gopts.Extended, false, printer)
+		if openErr != nil {
+			continue
+		}
+		_ = candidate.Close()
+		reachable = append(reachable, declared)
+	}
+	if _, err := bootstrap.EvaluatePolicy(reachable, winner.Manifest.Policy); err != nil {
+		if brokerClient != nil {
+			_ = brokerClient.Close()
+		}
+		return "", "", nil, err
+	}
+	location := locations[winner.Seed]
+	if location == "" {
+		return "", "", brokerClient, errors.Fatal("winning bootstrap topology has no configured seed locator")
+	}
+	if profile.AnchorFile != "" {
+		if err := bootstrap.StoreAnchor(profile.AnchorFile, bootstrap.Anchor{RepositoryID: winner.Manifest.RepositoryID, Generation: winner.Manifest.Generation, SHA256: winner.SHA256}); err != nil {
+			if brokerClient != nil {
+				_ = brokerClient.Close()
+			}
+			return "", "", nil, err
+		}
+	}
+	if brokerClient != nil {
+		lease, leaseErr := brokerClient.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "repository-master-key", gopts.KeyBrokerLeaseDuration)
+		if leaseErr != nil {
+			_ = brokerClient.Close()
+			return "", "", nil, leaseErr
+		}
+		masterKey = string(lease.Key)
+		clear(lease.Key)
+	}
+	return location, masterKey, brokerClient, nil
+}
+
+func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (*repository.Repository, error) {
+	if gopts.BootstrapProfile == "" {
+		return nil, errors.Fatal("data-plane-only mode requires --bootstrap-profile")
+	}
+	location, masterKey, brokerClient, err := resolveBootstrapRepository(ctx, gopts, printer)
+	if err != nil {
+		return nil, err
+	}
+	if brokerClient != nil {
+		defer func() {
+			if brokerClient != nil {
+				_ = brokerClient.Close()
+			}
+		}()
+	}
+	manifest, err := discoverBootstrapManifest(ctx, gopts, masterKey, printer)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := manifest.ConfigProjection()
+	if err != nil {
+		return nil, err
+	}
+	primary, err := innerOpenBackend(ctx, location, gopts, gopts.Extended, false, printer)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := createRepositoryInstance(primary, gopts)
+	if err != nil {
+		_ = primary.Close()
+		return nil, err
+	}
+	if err := repo.UseDataPlaneMasterKey(masterKey, cfg); err != nil {
+		_ = repo.Close()
+		return nil, err
+	}
+	for _, declared := range manifest.Backends {
+		placementOptions := gopts
+		placementOptions.RepoHot = ""
+		destination, openErr := innerOpenBackend(ctx, declared.Location, placementOptions, placementOptions.Extended, false, printer)
+		if openErr != nil {
+			continue
+		}
+		repo.AttachPlacementBackend(repository.PlacementBackendHash(declared.ID), destination)
+	}
+	if _, _, err := repo.DeferredUploadPlan(); err != nil {
+		_ = repo.Close()
+		return nil, err
+	}
+	if brokerClient != nil {
+		repo.AddOwnedCloser(brokerClient)
+		brokerClient = nil
+	}
+	return repo, nil
+}
+
+func discoverBootstrapManifest(ctx context.Context, gopts Options, masterKey string, printer vaultic.Printer) (bootstrap.Manifest, error) {
+	profile, err := bootstrap.LoadProfile(gopts.BootstrapProfile)
+	if err != nil {
+		return bootstrap.Manifest{}, err
+	}
+	key, err := repository.DecodeMasterKey(masterKey)
+	if err != nil {
+		return bootstrap.Manifest{}, err
+	}
+	seeds := make(map[string]backend.Backend, len(profile.Seeds))
+	for _, seed := range profile.Seeds {
+		destination, openErr := innerOpenBackend(ctx, seed.Location, gopts, gopts.Extended, false, printer)
+		if openErr == nil {
+			seeds[seed.ID] = destination
+		}
+	}
+	defer func() {
+		for _, seed := range seeds {
+			_ = seed.Close()
+		}
+	}()
+	copies, failures := bootstrap.Discover(ctx, seeds, key.EncryptionKey[:], profile.RepositoryID)
+	if len(copies) == 0 {
+		return bootstrap.Manifest{}, errors.Errorf("no authenticated bootstrap topology is reachable: %v", failures)
+	}
+	trusted := make([]bootstrap.Anchor, 0, 1)
+	if profile.AnchorFile != "" {
+		anchor, anchorErr := bootstrap.LoadAnchor(profile.AnchorFile)
+		if anchorErr != nil {
+			return bootstrap.Manifest{}, anchorErr
+		}
+		trusted = append(trusted, anchor)
+	}
+	winner, err := bootstrap.Resolve(copies, trusted...)
+	if err != nil {
+		return bootstrap.Manifest{}, err
+	}
+	return winner.Manifest, nil
 }
 
 // hasRepositoryConfig checks if the repository config file exists and is not empty.

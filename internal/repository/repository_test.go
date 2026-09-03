@@ -22,6 +22,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/staging"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
@@ -31,6 +32,90 @@ var testSizes = []int{5, 23, 2<<18 + 23, 1 << 20}
 func TestSave(t *testing.T) {
 	repository.TestAllVersions(t, testSavePassID)
 	repository.TestAllVersions(t, testSaveCalculateID)
+}
+
+func TestDeferredUploadDoesNotMutateNormalIndex(t *testing.T) {
+	repo, _, _ := repository.TestRepositoryWithVersion(t, 2)
+	first, second := mem.New(), mem.New()
+	data := []byte("deferred data")
+	blobID := vaultic.Hash(data)
+	result, err := repo.WithDeferredBlobUploader(context.Background(), repository.DeferredUploadOptions{
+		Backends: []repository.DeferredBackend{
+			{ID: "a", FailureDomain: "site-a", Backend: first},
+			{ID: "b", FailureDomain: "site-b", Offsite: true, Backend: second},
+		},
+		Policy: staging.Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+	}, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		id, known, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, data, blobID, false)
+		if err != nil {
+			return err
+		}
+		if known || id != blobID {
+			t.Fatalf("deferred blob result = %s, known=%v", id, known)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Packs) != 1 || len(result.Packs[0].Placements) != 2 || len(result.Records) != 1 {
+		t.Fatalf("deferred result = %#v", result)
+	}
+	if entries := repo.LookupBlob(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID}); len(entries) != 0 {
+		t.Fatalf("deferred blob entered normal index: %#v", entries)
+	}
+	packID := result.Packs[0].ID
+	for _, destination := range []backend.Backend{first, second} {
+		if _, err := destination.Stat(context.Background(), backend.Handle{Type: backend.PackFile, Name: packID}); err != nil {
+			t.Fatalf("staged pack missing: %v", err)
+		}
+	}
+}
+
+func TestDeferredUploadRefusesPackOverByteQuota(t *testing.T) {
+	repo, _, _ := repository.TestRepositoryWithVersion(t, 2)
+	destination := mem.New()
+	data := []byte("deferred data")
+	_, err := repo.WithDeferredBlobUploader(context.Background(), repository.DeferredUploadOptions{
+		Backends: []repository.DeferredBackend{{ID: "a", FailureDomain: "site-a", Backend: destination}},
+		Policy:   staging.Policy{MinCopies: 1, MinDomains: 1}, MaxAdditionalBytes: 1,
+	}, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, data, vaultic.Hash(data), false)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "byte quota exceeded") {
+		t.Fatalf("quota error = %v", err)
+	}
+	err = destination.List(context.Background(), backend.PackFile, func(backend.FileInfo) error {
+		t.Fatal("pack uploaded after quota refusal")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeferredJournalIndexReadsStagedBlob(t *testing.T) {
+	repo, _, _ := repository.TestRepositoryWithVersion(t, 2)
+	data := []byte("emergency restore data")
+	blobID := vaultic.Hash(data)
+	result, err := repo.WithDeferredBlobUploader(context.Background(), repository.DeferredUploadOptions{
+		Backends: []repository.DeferredBackend{{ID: "primary", FailureDomain: "site-a", Backend: repo.Backend()}},
+		Policy:   staging.Policy{MinCopies: 1, MinDomains: 1},
+	}, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, data, blobID, false)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UseDeferredJournalIndex([]staging.Segment{{Packs: result.Packs, Records: result.Records}}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := repo.LoadBlob(context.Background(), vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID}, nil)
+	if err != nil || !bytes.Equal(loaded, data) {
+		t.Fatalf("loaded staged blob = %q, %v", loaded, err)
+	}
 }
 
 func testSavePassID(t *testing.T, version uint) {

@@ -1507,6 +1507,38 @@ func TestArchiverSnapshot(t *testing.T) {
 	}
 }
 
+func TestDeferredSnapshotRemainsUnpublished(t *testing.T) {
+	tempdir, repo := prepareTempdirRepoSrc(t, TestDir{"foo": TestFile{Content: "foo"}})
+	arch := New(repo, fs.Track{FS: fs.NewLocal()}, Options{})
+	publishCalled := false
+	arch.BeforeSnapshot = func() error {
+		publishCalled = true
+		return nil
+	}
+	back := rtest.Chdir(t, tempdir)
+	defer back()
+
+	snapshot, snapshotID, _, err := arch.Snapshot(context.Background(), []string{"foo"}, SnapshotOptions{
+		Time:             time.Now(),
+		DeferredUploader: repo.WithBlobUploader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == nil || snapshot.Tree == nil || !snapshotID.IsNull() {
+		t.Fatalf("prospective snapshot = %#v, id=%s", snapshot, snapshotID)
+	}
+	if publishCalled {
+		t.Fatal("deferred snapshot invoked publication hook")
+	}
+	_, _, _, err = arch.Snapshot(context.Background(), []string{"foo"}, SnapshotOptions{
+		Time: time.Now(), ParentSnapshot: snapshot, DeferredUploader: repo.WithBlobUploader,
+	})
+	if err == nil {
+		t.Fatal("deferred snapshot accepted a parent metadata basis")
+	}
+}
+
 func TestArchiverReconcileNodeReceivesFinalNodes(t *testing.T) {
 	repo := repository.TestRepository(t)
 	testFS := fs.NewLocal()

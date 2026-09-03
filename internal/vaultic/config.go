@@ -65,6 +65,8 @@ type Config struct {
 	PlacementBackends []PlacementBackend `json:"placement_backends,omitempty"`
 	// StagingBackends names placement backends that mirror authenticated deferred-ingest journals.
 	StagingBackends []string `json:"staging_backends,omitempty"`
+	// StagingQuota bounds deferred jobs while authoritative metadata is unavailable.
+	StagingQuota StagingQuota `json:"staging_quota,omitempty"`
 	// PlacementPolicy describes how many independent live placements a pack must
 	// retain before an eviction can proceed.
 	PlacementPolicy PlacementPolicy `json:"placement_policy,omitempty"`
@@ -114,6 +116,13 @@ type PlacementPolicy struct {
 	MinOffsite                uint  `json:"min_offsite,omitempty"`
 	OffsiteDeadline           int64 `json:"offsite_deadline_seconds,omitempty"`
 	PromotionCrossoverSeconds int64 `json:"promotion_crossover_seconds,omitempty"`
+}
+
+type StagingQuota struct {
+	MaxBytes            uint64 `json:"max_bytes,omitempty"`
+	MaxJobs             uint64 `json:"max_jobs,omitempty"`
+	MaxAgeSeconds       int64  `json:"max_age_seconds,omitempty"`
+	MaxExtensionSeconds int64  `json:"max_extension_seconds,omitempty"`
 }
 
 // PrunePlan records the immutable candidates produced after prune has uploaded
@@ -186,21 +195,28 @@ func LoadConfig(ctx context.Context, r LoaderUnpacked) (Config, error) {
 		return Config{}, err
 	}
 
-	if cfg.Version < MinRepoVersion || cfg.Version > MaxRepoVersion {
-		return Config{}, errors.Errorf("unsupported repository version %v", cfg.Version)
-	}
-
-	if checkPolynomial {
-		if !cfg.ChunkerPolynomial.Irreducible() {
-			return Config{}, errors.New("invalid chunker polynomial")
-		}
-	}
-
-	if err := cfg.ValidateExtensions(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
+}
+
+func (cfg Config) Validate() error {
+	if cfg.Version < MinRepoVersion || cfg.Version > MaxRepoVersion {
+		return errors.Errorf("unsupported repository version %v", cfg.Version)
+	}
+
+	if checkPolynomial {
+		if !cfg.ChunkerPolynomial.Irreducible() {
+			return errors.New("invalid chunker polynomial")
+		}
+	}
+
+	if err := cfg.ValidateExtensions(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func SaveConfig(ctx context.Context, r SaverUnpacked[FileType], cfg Config) error {

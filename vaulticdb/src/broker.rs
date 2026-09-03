@@ -6,6 +6,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hkdf::Hkdf;
 use hpke::{
     aead::{AeadTag, ChaCha20Poly1305},
     kdf::HkdfSha256,
@@ -56,6 +57,7 @@ pub enum ContributionRejection {
 pub enum Capability {
     MetadataDek,
     RepositoryMasterKey,
+    TopologyDiscovery,
     MetadataLossRecovery,
     PolicyMutation,
 }
@@ -498,9 +500,19 @@ impl KeyBroker {
             .checked_add(u64::try_from(ttl.as_millis())?)
             .context("lease expiry overflow")?;
         let key = match capability {
-            Capability::MetadataDek => epoch.keys.metadata_dek.as_slice(),
+            Capability::MetadataDek => Zeroizing::new(epoch.keys.metadata_dek.to_vec()),
             Capability::RepositoryMasterKey | Capability::MetadataLossRecovery => {
-                epoch.keys.repository_master_key.as_slice()
+                Zeroizing::new(epoch.keys.repository_master_key.to_vec())
+            }
+            Capability::TopologyDiscovery => {
+                let mut key = Zeroizing::new(vec![0_u8; 32]);
+                Hkdf::<Sha256>::new(
+                    Some(self.capsule.header.repository_id.as_bytes()),
+                    epoch.keys.repository_master_key.as_slice(),
+                )
+                .expand(b"vaultic/bootstrap-topology-v1", key.as_mut_slice())
+                .map_err(|_| anyhow::anyhow!("derive topology discovery key"))?;
+                key
             }
             Capability::PolicyMutation => unreachable!("rejected above"),
         };
@@ -520,13 +532,13 @@ impl KeyBroker {
             expires_unix_ms,
             key_version: match capability {
                 Capability::MetadataDek => self.capsule.header.metadata_dek_version,
-                Capability::RepositoryMasterKey | Capability::MetadataLossRecovery => {
-                    self.capsule.header.repository_key_version
-                }
+                Capability::RepositoryMasterKey
+                | Capability::TopologyDiscovery
+                | Capability::MetadataLossRecovery => self.capsule.header.repository_key_version,
                 Capability::PolicyMutation => unreachable!("rejected above"),
             },
             capsule_generation: self.capsule.header.generation,
-            key: Zeroizing::new(key.to_vec()),
+            key,
         })
     }
 

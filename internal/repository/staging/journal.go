@@ -33,6 +33,7 @@ const (
 	StateSealedPending State = "sealed-pending"
 	StateCommitting    State = "committing"
 	StateCommitted     State = "committed"
+	StateRejected      State = "rejected"
 	StateAbandoned     State = "abandoned"
 	StateExpired       State = "expired"
 )
@@ -64,11 +65,23 @@ type Placement struct {
 }
 
 type Pack struct {
-	ID         string      `json:"id"`
-	Type       string      `json:"type"`
-	Size       int64       `json:"size"`
-	SHA256     string      `json:"sha256"`
-	Placements []Placement `json:"placements"`
+	ID          string      `json:"id"`
+	Type        string      `json:"type"`
+	Size        int64       `json:"size"`
+	PayloadSize uint64      `json:"payload_size"`
+	HeaderSize  uint64      `json:"header_size"`
+	BlobCount   uint64      `json:"blob_count"`
+	SHA256      string      `json:"sha256"`
+	Placements  []Placement `json:"placements"`
+}
+
+type BlobFact struct {
+	ID                 string `json:"id"`
+	Type               string `json:"type"`
+	PackID             string `json:"pack_id"`
+	Offset             uint   `json:"offset"`
+	Length             uint   `json:"length"`
+	UncompressedLength uint   `json:"uncompressed_length,omitempty"`
 }
 
 type Record struct {
@@ -112,22 +125,57 @@ type Abandonment struct {
 	DeleteAfter     time.Time `json:"delete_after"`
 }
 
+type Rejection struct {
+	Header     Header    `json:"header"`
+	State      State     `json:"state"`
+	SealSHA256 string    `json:"seal_sha256"`
+	Reason     string    `json:"reason"`
+	RejectedAt time.Time `json:"rejected_at"`
+}
+
+type Extension struct {
+	Header                  Header    `json:"header"`
+	SealSHA256              string    `json:"seal_sha256"`
+	Generation              uint64    `json:"generation"`
+	PreviousExtensionSHA256 string    `json:"previous_extension_sha256,omitempty"`
+	PreviousExpiresAt       time.Time `json:"previous_expires_at"`
+	ExpiresAt               time.Time `json:"expires_at"`
+	ExtendedAt              time.Time `json:"extended_at"`
+}
+
 type Job struct {
-	Header         Header            `json:"header"`
-	State          State             `json:"state"`
-	Seal           Seal              `json:"seal"`
-	SealSHA256     string            `json:"seal_sha256"`
-	Completion     *Completion       `json:"completion,omitempty"`
-	Abandonment    *Abandonment      `json:"abandonment,omitempty"`
-	MirrorFailures map[string]string `json:"mirror_failures,omitempty"`
+	Header          Header            `json:"header"`
+	State           State             `json:"state"`
+	Seal            Seal              `json:"seal"`
+	SealSHA256      string            `json:"seal_sha256"`
+	Completion      *Completion       `json:"completion,omitempty"`
+	Abandonment     *Abandonment      `json:"abandonment,omitempty"`
+	Rejection       *Rejection        `json:"rejection,omitempty"`
+	Extension       *Extension        `json:"extension,omitempty"`
+	ExtensionSHA256 string            `json:"extension_sha256,omitempty"`
+	MirrorFailures  map[string]string `json:"mirror_failures,omitempty"`
+}
+
+func (job Job) EffectiveExpiresAt() time.Time {
+	if job.Extension != nil {
+		return job.Extension.ExpiresAt
+	}
+	return job.Header.ExpiresAt
 }
 
 type Store struct {
 	Mirrors                map[string]backend.Backend
+	MirrorPlacements       map[string]MirrorPlacement
 	Key                    []byte
 	Policy                 Policy
 	Now                    func() time.Time
 	AbandonmentSafetyDelay time.Duration
+	MaxExtension           time.Duration
+}
+
+type MirrorPlacement struct {
+	FailureDomain string
+	Offsite       bool
 }
 
 type PackRoots struct {
@@ -142,7 +190,7 @@ func (roots PackRoots) Current(ctx context.Context) (vaultic.IDSet, error) {
 	}
 	protected := vaultic.NewIDSet()
 	for _, job := range jobs {
-		if job.State != StateSealedPending && job.State != StateExpired && !(job.State == StateAbandoned && job.Abandonment != nil && roots.Store.now().Before(job.Abandonment.DeleteAfter)) {
+		if job.State != StateSealedPending && job.State != StateExpired && job.State != StateRejected && !(job.State == StateAbandoned && job.Abandonment != nil && roots.Store.now().Before(job.Abandonment.DeleteAfter)) {
 			continue
 		}
 		segments, err := roots.Store.VerifyJob(ctx, job)
@@ -173,6 +221,31 @@ type Quota struct {
 	MaxJobs         uint64
 	MaxAge          time.Duration
 	MaxPerPrincipal uint64
+}
+
+type Usage struct {
+	Jobs        uint64
+	Bytes       uint64
+	OldestJobAt time.Time
+}
+
+func (store Store) ActiveUsage(ctx context.Context, repositoryID string) (Usage, error) {
+	jobs, err := store.Discover(ctx, repositoryID)
+	if err != nil {
+		return Usage{}, err
+	}
+	var usage Usage
+	for _, job := range jobs {
+		if job.State == StateCommitted || job.State == StateAbandoned && job.Abandonment != nil && !store.now().Before(job.Abandonment.DeleteAfter) {
+			continue
+		}
+		usage.Jobs++
+		usage.Bytes += job.Seal.ProtectedBytes
+		if usage.OldestJobAt.IsZero() || job.Header.CreatedAt.Before(usage.OldestJobAt) {
+			usage.OldestJobAt = job.Header.CreatedAt
+		}
+	}
+	return usage, nil
 }
 
 func DeriveJournalKey(repositoryKey []byte, repositoryID string) ([]byte, error) {
@@ -297,6 +370,58 @@ func SealAbandonment(abandonment Abandonment, key []byte) ([]byte, string, error
 	return sealObject(abandonment, key, abandonment.Header, "abandonment", 0)
 }
 
+func SealRejection(rejection Rejection, key []byte) ([]byte, string, error) {
+	if rejection.State != StateRejected || !validDigest(rejection.SealSHA256) || rejection.Reason == "" || rejection.RejectedAt.IsZero() {
+		return nil, "", fmt.Errorf("invalid journal rejection")
+	}
+	return sealObject(rejection, key, rejection.Header, "rejection", 0)
+}
+
+func SealExtension(extension Extension, key []byte) ([]byte, string, error) {
+	if !validDigest(extension.SealSHA256) || extension.Generation == 0 || extension.Generation > 1 && !validDigest(extension.PreviousExtensionSHA256) || extension.ExtendedAt.IsZero() || !extension.ExpiresAt.After(extension.PreviousExpiresAt) || extension.ExtendedAt.After(extension.ExpiresAt) {
+		return nil, "", fmt.Errorf("invalid journal expiry extension")
+	}
+	return sealObject(extension, key, extension.Header, "extension", extension.Generation)
+}
+
+func (store Store) PublishExtension(ctx context.Context, job Job, expiresAt time.Time) (Extension, error) {
+	if job.State == StateCommitted || job.State == StateAbandoned || job.State == StateRejected {
+		return Extension{}, fmt.Errorf("terminal journal cannot be extended")
+	}
+	now := store.now()
+	if store.MaxExtension > 0 && expiresAt.Sub(now) > store.MaxExtension {
+		return Extension{}, fmt.Errorf("journal extension exceeds repository policy")
+	}
+	generation := uint64(1)
+	if job.Extension != nil {
+		generation = job.Extension.Generation + 1
+	}
+	extension := Extension{Header: job.Header, SealSHA256: job.SealSHA256, Generation: generation, PreviousExtensionSHA256: job.ExtensionSHA256, PreviousExpiresAt: job.EffectiveExpiresAt(), ExpiresAt: expiresAt.UTC(), ExtendedAt: now}
+	encoded, _, err := SealExtension(extension, store.Key)
+	if err != nil {
+		return Extension{}, err
+	}
+	if err := store.publish(ctx, ExtensionHandle(job.Header.JobID, generation), encoded); err != nil {
+		return Extension{}, err
+	}
+	return extension, nil
+}
+
+func (store Store) PublishRejection(ctx context.Context, job Job, reason string) (Rejection, error) {
+	if job.State != StateSealedPending && job.State != StateExpired {
+		return Rejection{}, fmt.Errorf("only an uncommitted sealed journal can be rejected")
+	}
+	rejection := Rejection{Header: job.Header, State: StateRejected, SealSHA256: job.SealSHA256, Reason: reason, RejectedAt: store.now()}
+	encoded, _, err := SealRejection(rejection, store.Key)
+	if err != nil {
+		return Rejection{}, err
+	}
+	if err := store.publish(ctx, RejectionHandle(job.Header.JobID), encoded); err != nil {
+		return Rejection{}, err
+	}
+	return rejection, nil
+}
+
 func (store Store) PublishAbandonment(ctx context.Context, job Job, reason, acknowledgement string) (Abandonment, error) {
 	if job.State != StateSealedPending && job.State != StateExpired {
 		return Abandonment{}, fmt.Errorf("only an uncommitted sealed journal can be abandoned")
@@ -311,7 +436,7 @@ func (store Store) PublishAbandonment(ctx context.Context, job Job, reason, ackn
 	if err != nil {
 		return Abandonment{}, err
 	}
-	if err := Publish(ctx, store.Mirrors, AbandonmentHandle(job.Header.JobID), encoded); err != nil {
+	if err := store.publish(ctx, AbandonmentHandle(job.Header.JobID), encoded); err != nil {
 		return Abandonment{}, err
 	}
 	return abandonment, nil
@@ -350,10 +475,68 @@ func (store Store) PublishSegment(ctx context.Context, segment Segment) (string,
 	if err != nil {
 		return "", err
 	}
-	if err := Publish(ctx, store.Mirrors, SegmentHandle(segment.Header.JobID, segment.Sequence), encoded); err != nil {
+	if err := store.publish(ctx, SegmentHandle(segment.Header.JobID, segment.Sequence), encoded); err != nil {
 		return "", err
 	}
 	return digest, nil
+}
+
+func (store Store) PublishJob(ctx context.Context, header Header, packs []Pack, records []Record) (Seal, string, uint64, error) {
+	segments := make([]Segment, 0, 1)
+	current := Segment{Header: header, Sequence: 1}
+	appendIfFits := func(pack *Pack, record *Record) bool {
+		candidate := current
+		candidate.Packs = append([]Pack(nil), current.Packs...)
+		candidate.Records = append([]Record(nil), current.Records...)
+		if pack != nil {
+			candidate.Packs = append(candidate.Packs, *pack)
+		}
+		if record != nil {
+			candidate.Records = append(candidate.Records, *record)
+		}
+		encoded, err := json.Marshal(candidate)
+		if err != nil || len(encoded) > MaxSegmentBytes {
+			return false
+		}
+		current = candidate
+		return true
+	}
+	flush := func() error {
+		if len(current.Packs) == 0 && len(current.Records) == 0 {
+			return fmt.Errorf("journal item exceeds segment size limit")
+		}
+		segments = append(segments, current)
+		current = Segment{Header: header, Sequence: uint64(len(segments) + 1)}
+		return nil
+	}
+	for index := range packs {
+		if !appendIfFits(&packs[index], nil) {
+			if err := flush(); err != nil || !appendIfFits(&packs[index], nil) {
+				return Seal{}, "", 0, fmt.Errorf("staged pack fact exceeds segment size limit")
+			}
+		}
+	}
+	for index := range records {
+		if !appendIfFits(nil, &records[index]) {
+			if err := flush(); err != nil || !appendIfFits(nil, &records[index]) {
+				return Seal{}, "", 0, fmt.Errorf("staged journal record exceeds segment size limit")
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return Seal{}, "", 0, err
+	}
+	previous := ""
+	for index := range segments {
+		segments[index].PreviousSHA256 = previous
+		digest, err := store.PublishSegment(ctx, segments[index])
+		if err != nil {
+			return Seal{}, "", 0, err
+		}
+		previous = digest
+	}
+	seal, digest, err := store.PublishSeal(ctx, header, uint64(len(segments)))
+	return seal, digest, uint64(len(segments)), err
 }
 
 func (store Store) PublishSeal(ctx context.Context, header Header, segmentCount uint64) (Seal, string, error) {
@@ -363,17 +546,9 @@ func (store Store) PublishSeal(ctx context.Context, header Header, segmentCount 
 	segments := make([][]byte, segmentCount)
 	for sequence := uint64(1); sequence <= segmentCount; sequence++ {
 		handle := SegmentHandle(header.JobID, sequence)
-		var authoritative []byte
-		for id, mirror := range store.Mirrors {
-			encoded, err := loadObject(ctx, mirror, handle)
-			if err != nil {
-				return Seal{}, "", fmt.Errorf("read journal segment %d from %s: %w", sequence, id, err)
-			}
-			if authoritative == nil {
-				authoritative = encoded
-			} else if !bytes.Equal(authoritative, encoded) {
-				return Seal{}, "", fmt.Errorf("journal segment %d conflicts across mirrors", sequence)
-			}
+		authoritative, err := store.loadQuorum(ctx, handle)
+		if err != nil {
+			return Seal{}, "", fmt.Errorf("read journal segment %d: %w", sequence, err)
 		}
 		segments[sequence-1] = authoritative
 	}
@@ -381,10 +556,81 @@ func (store Store) PublishSeal(ctx context.Context, header Header, segmentCount 
 	if err != nil {
 		return Seal{}, "", err
 	}
-	if err := Publish(ctx, store.Mirrors, SealHandle(header.JobID), encoded); err != nil {
+	if err := store.publish(ctx, SealHandle(header.JobID), encoded); err != nil {
 		return Seal{}, "", err
 	}
 	return seal, digest, nil
+}
+
+func (store Store) publish(ctx context.Context, handle backend.Handle, encoded []byte) error {
+	successes := uint(0)
+	offsite := uint(0)
+	domains := make(map[string]struct{})
+	failures := make(map[string]error)
+	for id, mirror := range store.Mirrors {
+		if err := Publish(ctx, map[string]backend.Backend{id: mirror}, handle, encoded); err != nil {
+			failures[id] = err
+			continue
+		}
+		successes++
+		placement, ok := store.MirrorPlacements[id]
+		if !ok {
+			placement.FailureDomain = id
+		}
+		domains[placement.FailureDomain] = struct{}{}
+		if placement.Offsite {
+			offsite++
+		}
+	}
+	if successes < store.Policy.MinCopies || uint(len(domains)) < store.Policy.MinDomains || offsite < store.Policy.MinOffsite {
+		return fmt.Errorf("journal publication policy unsatisfied: %v", failures)
+	}
+	return nil
+}
+
+func (store Store) loadQuorum(ctx context.Context, handle backend.Handle) ([]byte, error) {
+	var authoritative []byte
+	successes := uint(0)
+	offsite := uint(0)
+	domains := make(map[string]struct{})
+	failures := make(map[string]error)
+	for id, mirror := range store.Mirrors {
+		encoded, err := loadObject(ctx, mirror, handle)
+		if err != nil {
+			failures[id] = err
+			continue
+		}
+		if authoritative == nil {
+			authoritative = encoded
+		} else if !bytes.Equal(authoritative, encoded) {
+			return nil, fmt.Errorf("journal object conflicts across mirrors")
+		}
+		successes++
+		placement, ok := store.MirrorPlacements[id]
+		if !ok {
+			placement.FailureDomain = id
+		}
+		domains[placement.FailureDomain] = struct{}{}
+		if placement.Offsite {
+			offsite++
+		}
+	}
+	if successes < store.Policy.MinCopies || uint(len(domains)) < store.Policy.MinDomains || offsite < store.Policy.MinOffsite {
+		return nil, fmt.Errorf("journal read policy unsatisfied: %v", failures)
+	}
+	return authoritative, nil
+}
+
+func (store Store) loadOptionalQuorum(ctx context.Context, handle backend.Handle) ([]byte, bool, error) {
+	for _, mirror := range store.Mirrors {
+		if _, err := mirror.Stat(ctx, handle); err == nil {
+			encoded, err := store.loadQuorum(ctx, handle)
+			return encoded, err == nil, err
+		} else if !mirror.IsNotExist(err) {
+			continue
+		}
+	}
+	return nil, false, nil
 }
 
 func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, error) {
@@ -396,7 +642,7 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 	failures := map[string]string{}
 	for id, mirror := range store.Mirrors {
 		err := mirror.List(ctx, backend.StagingFile, func(info backend.FileInfo) error {
-			jobID, ok := strings.CutSuffix(info.Name, "/seal")
+			jobID, ok := strings.CutSuffix(info.Name, "--seal")
 			if !ok || jobID == "" || strings.Contains(jobID, "/") {
 				return nil
 			}
@@ -413,7 +659,10 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 	}
 	jobs := make([]Job, 0, len(copies))
 	for jobID, candidates := range copies {
-		first := candidates[0].bytes
+		first, err := store.loadQuorum(ctx, SealHandle(jobID))
+		if err != nil {
+			return nil, fmt.Errorf("load journal %s seal: %w", jobID, err)
+		}
 		for _, candidate := range candidates[1:] {
 			if !bytes.Equal(first, candidate.bytes) {
 				return nil, fmt.Errorf("conflicting seal for journal %s", jobID)
@@ -429,7 +678,6 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 		if _, err := openObject(first, store.Key, header, "seal", 0, &seal); err != nil {
 			return nil, err
 		}
-		expired := seal.Header.ExpiresAt.Before(store.now())
 		if err := seal.Header.Validate(seal.Header.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -437,19 +685,37 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 			return nil, fmt.Errorf("journal seal identity mismatch")
 		}
 		digest := sha256.Sum256(first)
-		state := StateSealedPending
-		if expired {
-			state = StateExpired
-		}
-		job := Job{Header: seal.Header, State: state, Seal: seal, SealSHA256: hex.EncodeToString(digest[:]), MirrorFailures: failures}
-		for _, candidate := range candidates {
-			completionBytes, err := loadObject(ctx, store.Mirrors[candidate.mirror], CompletionHandle(jobID))
+		job := Job{Header: seal.Header, State: StateSealedPending, Seal: seal, SealSHA256: hex.EncodeToString(digest[:]), MirrorFailures: failures}
+		previousExpiry := job.Header.ExpiresAt
+		previousDigest := ""
+		for generation := uint64(1); ; generation++ {
+			extensionBytes, found, err := store.loadOptionalQuorum(ctx, ExtensionHandle(jobID, generation))
 			if err != nil {
-				if !store.Mirrors[candidate.mirror].IsNotExist(err) {
-					job.MirrorFailures[candidate.mirror] = err.Error()
-				}
-				continue
+				return nil, fmt.Errorf("load journal %s extension %d: %w", jobID, generation, err)
 			}
+			if !found {
+				break
+			}
+			var extension Extension
+			digest, err := openObject(extensionBytes, store.Key, seal.Header, "extension", generation, &extension)
+			if err != nil {
+				return nil, err
+			}
+			if extension.SealSHA256 != job.SealSHA256 || extension.Generation != generation || extension.PreviousExpiresAt != previousExpiry || extension.PreviousExtensionSHA256 != previousDigest || !extension.ExpiresAt.After(extension.PreviousExpiresAt) {
+				return nil, fmt.Errorf("journal extension does not bind the discovered seal and expiry")
+			}
+			job.Extension = &extension
+			job.ExtensionSHA256 = digest
+			previousExpiry, previousDigest = extension.ExpiresAt, digest
+		}
+		if !job.EffectiveExpiresAt().After(store.now()) {
+			job.State = StateExpired
+		}
+		completionBytes, found, err := store.loadOptionalQuorum(ctx, CompletionHandle(jobID))
+		if err != nil {
+			return nil, fmt.Errorf("load journal %s completion: %w", jobID, err)
+		}
+		if found {
 			var completion Completion
 			if _, err := openObject(completionBytes, store.Key, seal.Header, "completion", 0, &completion); err != nil {
 				return nil, err
@@ -458,17 +724,13 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 				return nil, fmt.Errorf("journal completion does not bind the discovered seal")
 			}
 			job.State, job.Completion = StateCommitted, &completion
-			break
 		}
 		if job.State != StateCommitted {
-			for _, candidate := range candidates {
-				abandonmentBytes, err := loadObject(ctx, store.Mirrors[candidate.mirror], AbandonmentHandle(jobID))
-				if err != nil {
-					if !store.Mirrors[candidate.mirror].IsNotExist(err) {
-						job.MirrorFailures[candidate.mirror] = err.Error()
-					}
-					continue
-				}
+			abandonmentBytes, found, err := store.loadOptionalQuorum(ctx, AbandonmentHandle(jobID))
+			if err != nil {
+				return nil, fmt.Errorf("load journal %s abandonment: %w", jobID, err)
+			}
+			if found {
 				var abandonment Abandonment
 				if _, err := openObject(abandonmentBytes, store.Key, seal.Header, "abandonment", 0, &abandonment); err != nil {
 					return nil, err
@@ -477,7 +739,22 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 					return nil, fmt.Errorf("journal abandonment does not bind the discovered seal")
 				}
 				job.State, job.Abandonment = StateAbandoned, &abandonment
-				break
+			}
+		}
+		if job.State != StateCommitted && job.State != StateAbandoned {
+			rejectionBytes, found, err := store.loadOptionalQuorum(ctx, RejectionHandle(jobID))
+			if err != nil {
+				return nil, fmt.Errorf("load journal %s rejection: %w", jobID, err)
+			}
+			if found {
+				var rejection Rejection
+				if _, err := openObject(rejectionBytes, store.Key, seal.Header, "rejection", 0, &rejection); err != nil {
+					return nil, err
+				}
+				if rejection.State != StateRejected || rejection.SealSHA256 != job.SealSHA256 {
+					return nil, fmt.Errorf("journal rejection does not bind the discovered seal")
+				}
+				job.State, job.Rejection = StateRejected, &rejection
 			}
 		}
 		jobs = append(jobs, job)
@@ -487,7 +764,7 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 }
 
 func (store Store) VerifyJob(ctx context.Context, job Job) ([]Segment, error) {
-	if job.State != StateSealedPending && job.State != StateCommitted && job.State != StateExpired && job.State != StateAbandoned {
+	if job.State != StateSealedPending && job.State != StateCommitted && job.State != StateExpired && job.State != StateAbandoned && job.State != StateRejected {
 		return nil, fmt.Errorf("journal %s is not a sealed reachability root", job.Header.JobID)
 	}
 	if len(job.Seal.SegmentSHA256) == 0 || job.Seal.Header != job.Header {
@@ -497,17 +774,9 @@ func (store Store) VerifyJob(ctx context.Context, job Job) ([]Segment, error) {
 	previous := ""
 	for index, expectedDigest := range job.Seal.SegmentSHA256 {
 		sequence := uint64(index + 1)
-		var authoritative []byte
-		for id, mirror := range store.Mirrors {
-			encoded, err := loadObject(ctx, mirror, SegmentHandle(job.Header.JobID, sequence))
-			if err != nil {
-				return nil, fmt.Errorf("load sealed journal segment %d from %s: %w", sequence, id, err)
-			}
-			if authoritative == nil {
-				authoritative = encoded
-			} else if !bytes.Equal(authoritative, encoded) {
-				return nil, fmt.Errorf("sealed journal segment %d conflicts across mirrors", sequence)
-			}
+		authoritative, err := store.loadQuorum(ctx, SegmentHandle(job.Header.JobID, sequence))
+		if err != nil {
+			return nil, fmt.Errorf("load sealed journal segment %d: %w", sequence, err)
 		}
 		digest := sha256.Sum256(authoritative)
 		if hex.EncodeToString(digest[:]) != expectedDigest {
@@ -556,19 +825,27 @@ func loadObject(ctx context.Context, source backend.Backend, handle backend.Hand
 }
 
 func SegmentHandle(jobID string, sequence uint64) backend.Handle {
-	return backend.Handle{Type: backend.StagingFile, Name: fmt.Sprintf("%s/segments/%020d", jobID, sequence)}
+	return backend.Handle{Type: backend.StagingFile, Name: fmt.Sprintf("%s--segment--%020d", jobID, sequence)}
 }
 
 func SealHandle(jobID string) backend.Handle {
-	return backend.Handle{Type: backend.StagingFile, Name: jobID + "/seal"}
+	return backend.Handle{Type: backend.StagingFile, Name: jobID + "--seal"}
 }
 
 func CompletionHandle(jobID string) backend.Handle {
-	return backend.Handle{Type: backend.StagingFile, Name: jobID + "/completion"}
+	return backend.Handle{Type: backend.StagingFile, Name: jobID + "--completion"}
 }
 
 func AbandonmentHandle(jobID string) backend.Handle {
-	return backend.Handle{Type: backend.StagingFile, Name: jobID + "/abandonment"}
+	return backend.Handle{Type: backend.StagingFile, Name: jobID + "--abandonment"}
+}
+
+func RejectionHandle(jobID string) backend.Handle {
+	return backend.Handle{Type: backend.StagingFile, Name: jobID + "--rejection"}
+}
+
+func ExtensionHandle(jobID string, generation uint64) backend.Handle {
+	return backend.Handle{Type: backend.StagingFile, Name: fmt.Sprintf("%s--extension--%020d", jobID, generation)}
 }
 
 func CheckQuota(quota Quota, activeJobs, principalJobs, stagedBytes uint64, oldest time.Time, additional uint64, now time.Time) error {
@@ -579,6 +856,9 @@ func CheckQuota(quota Quota, activeJobs, principalJobs, stagedBytes uint64, olde
 }
 
 func validatePack(pack Pack, policy Policy) error {
+	if pack.Size <= 0 || pack.PayloadSize+pack.HeaderSize != uint64(pack.Size) || pack.BlobCount == 0 {
+		return fmt.Errorf("invalid staged pack size accounting")
+	}
 	if pack.ID == "" || pack.Size <= 0 || !validDigest(pack.SHA256) {
 		return fmt.Errorf("invalid staged pack")
 	}

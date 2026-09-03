@@ -2,20 +2,28 @@ package staging
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+type failingJournalBackend struct{ backend.Backend }
+
+func (failingJournalBackend) Save(context.Context, backend.Handle, backend.RewindReader) error {
+	return fmt.Errorf("mirror unavailable")
+}
 
 func journalHeader(now time.Time) Header {
 	return Header{Format: 1, RepositoryID: "repo-a", JobID: "job-a", IdempotencyKey: "idem-a", CreatedAt: now, ExpiresAt: now.Add(time.Hour), CapsuleGeneration: 2, RepositoryKeyVersion: 1, ChunkerVersion: "rabin-v1", CompressionVersion: "zstd-v1", PlacementPolicyVersion: 3, SourceIdentitySHA256: strings.Repeat("ab", 32), ConsistencyEvidence: "full-crawl"}
 }
 
 func durablePack() Pack {
-	return Pack{ID: "pack-a", Type: "data", Size: 42, SHA256: strings.Repeat("cd", 32), Placements: []Placement{{BackendID: "a", FailureDomain: "one", Size: 42, SHA256: strings.Repeat("cd", 32)}, {BackendID: "b", FailureDomain: "two", Offsite: true, Size: 42, SHA256: strings.Repeat("cd", 32)}}}
+	return Pack{ID: "pack-a", Type: "data", Size: 42, PayloadSize: 20, HeaderSize: 22, BlobCount: 1, SHA256: strings.Repeat("cd", 32), Placements: []Placement{{BackendID: "a", FailureDomain: "one", Size: 42, SHA256: strings.Repeat("cd", 32)}, {BackendID: "b", FailureDomain: "two", Offsite: true, Size: 42, SHA256: strings.Repeat("cd", 32)}}}
 }
 
 func TestSegmentsSealOnlyAfterDurabilityAndContinuousChain(t *testing.T) {
@@ -88,7 +96,7 @@ func TestStoreVerifiesMirrorsBeforeSealAndDiscoversCompletion(t *testing.T) {
 	now := time.Now().UTC()
 	key := []byte("0123456789abcdef0123456789abcdef")
 	first, second := mem.New(), mem.New()
-	store := Store{Mirrors: map[string]backend.Backend{"a": first, "b": second}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
+	store := Store{Mirrors: map[string]backend.Backend{"a": first, "b": second}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
 	header := journalHeader(now)
 	segment := Segment{Header: header, Sequence: 1, Packs: []Pack{durablePack()}}
 	if _, err := store.PublishSegment(context.Background(), segment); err != nil {
@@ -120,7 +128,7 @@ func TestStoreRefusesSealWhenMirrorSegmentIsMissingOrDifferent(t *testing.T) {
 	now := time.Now().UTC()
 	key := []byte("0123456789abcdef0123456789abcdef")
 	first, second := mem.New(), mem.New()
-	store := Store{Mirrors: map[string]backend.Backend{"a": first, "b": second}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
+	store := Store{Mirrors: map[string]backend.Backend{"a": first, "b": second}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
 	header := journalHeader(now)
 	segment := Segment{Header: header, Sequence: 1, Packs: []Pack{durablePack()}}
 	encoded, _, err := SealSegment(segment, key, store.Policy, now)
@@ -163,7 +171,7 @@ func TestPublishIsIdempotentCreateAndRejectsReplacement(t *testing.T) {
 func TestPackRootsProtectOnlySealedPendingJobs(t *testing.T) {
 	now := time.Now().UTC()
 	key := []byte("0123456789abcdef0123456789abcdef")
-	store := Store{Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
+	store := Store{Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
 	header := journalHeader(now)
 	pack := durablePack()
 	pack.ID = strings.Repeat("12", 32)
@@ -193,7 +201,7 @@ func TestExpiredPackRootsRequireAcknowledgedAbandonmentAndSafetyDelay(t *testing
 	now := time.Now().UTC()
 	clock := now
 	key := []byte("0123456789abcdef0123456789abcdef")
-	store := Store{Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return clock }, AbandonmentSafetyDelay: time.Hour}
+	store := Store{Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return clock }, AbandonmentSafetyDelay: time.Hour}
 	header := journalHeader(now)
 	pack := durablePack()
 	pack.ID = strings.Repeat("34", 32)
@@ -224,6 +232,98 @@ func TestExpiredPackRootsRequireAcknowledgedAbandonmentAndSafetyDelay(t *testing
 	protected, err = roots.Current(context.Background())
 	if err != nil || len(protected) != 0 {
 		t.Fatalf("abandoned roots after delay = %#v, %v", protected, err)
+	}
+}
+
+func TestPublishJobUsesMirrorPolicyQuorum(t *testing.T) {
+	now := time.Now().UTC()
+	store := Store{
+		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New(), "c": failingJournalBackend{mem.New()}},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}, "c": {FailureDomain: "three"}},
+		Key:              []byte("0123456789abcdef0123456789abcdef"), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now },
+	}
+	seal, _, segments, err := store.PublishJob(context.Background(), journalHeader(now), []Pack{durablePack()}, []Record{{Kind: "test", Payload: []byte(`{"ok":true}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if segments != 1 || seal.PackCount != 1 {
+		t.Fatalf("seal = %#v, segments=%d", seal, segments)
+	}
+	jobs, err := store.Discover(context.Background(), "repo-a")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("discover = %#v, %v", jobs, err)
+	}
+	if _, err := store.VerifyJob(context.Background(), jobs[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRejectedJournalRemainsProtected(t *testing.T) {
+	now := time.Now().UTC()
+	store := Store{
+		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:              []byte("0123456789abcdef0123456789abcdef"), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now },
+	}
+	pack := durablePack()
+	pack.ID = strings.Repeat("ef", 32)
+	if _, _, _, err := store.PublishJob(context.Background(), journalHeader(now), []Pack{pack}, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.Discover(context.Background(), "repo-a")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("discover = %#v, %v", jobs, err)
+	}
+	if _, err := store.PublishRejection(context.Background(), jobs[0], "basis conflict"); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = store.Discover(context.Background(), "repo-a")
+	if err != nil || jobs[0].State != StateRejected || jobs[0].Rejection.Reason != "basis conflict" {
+		t.Fatalf("rejected discovery = %#v, %v", jobs, err)
+	}
+	roots, err := (PackRoots{Store: store, RepositoryID: "repo-a"}).Current(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	packID, _ := vaultic.ParseID(pack.ID)
+	if !roots.Has(packID) {
+		t.Fatal("rejected journal pack lost GC protection")
+	}
+}
+
+func TestJournalExpiryExtensionIsAuthenticatedAndBounded(t *testing.T) {
+	now := time.Now().UTC()
+	store := Store{
+		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:              []byte("0123456789abcdef0123456789abcdef"), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, MaxExtension: 4 * time.Hour, Now: func() time.Time { return now },
+	}
+	if _, _, _, err := store.PublishJob(context.Background(), journalHeader(now), []Pack{durablePack()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.Discover(context.Background(), "repo-a")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("discover = %#v, %v", jobs, err)
+	}
+	extendedExpiry := jobs[0].Header.ExpiresAt.Add(2 * time.Hour)
+	if _, err := store.PublishExtension(context.Background(), jobs[0], extendedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(90 * time.Minute)
+	jobs, err = store.Discover(context.Background(), "repo-a")
+	if err != nil || jobs[0].State != StateSealedPending || !jobs[0].EffectiveExpiresAt().Equal(extendedExpiry) {
+		t.Fatalf("extended discovery = %#v, %v", jobs, err)
+	}
+	secondExpiry := extendedExpiry.Add(30 * time.Minute)
+	if _, err := store.PublishExtension(context.Background(), jobs[0], secondExpiry); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = store.Discover(context.Background(), "repo-a")
+	if err != nil || jobs[0].Extension.Generation != 2 || !jobs[0].EffectiveExpiresAt().Equal(secondExpiry) {
+		t.Fatalf("second extension discovery = %#v, %v", jobs, err)
+	}
+	if _, err := store.PublishExtension(context.Background(), jobs[0], now.Add(5*time.Hour)); err == nil {
+		t.Fatal("extension beyond repository policy was accepted")
 	}
 }
 

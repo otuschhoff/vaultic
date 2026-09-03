@@ -29,15 +29,16 @@ const (
 )
 
 type Manifest struct {
-	Format          uint                       `json:"format"`
-	RepositoryID    string                     `json:"repository_id"`
-	Generation      uint64                     `json:"generation"`
-	CreatedAt       time.Time                  `json:"created_at"`
-	ConfigSHA256    string                     `json:"config_sha256"`
-	Backends        []vaultic.PlacementBackend `json:"backends"`
-	Policy          vaultic.PlacementPolicy    `json:"placement_policy"`
-	StagingBackends []string                   `json:"staging_backends"`
-	PreviousSHA256  string                     `json:"previous_sha256,omitempty"`
+	Format           uint                       `json:"format"`
+	RepositoryID     string                     `json:"repository_id"`
+	Generation       uint64                     `json:"generation"`
+	CreatedAt        time.Time                  `json:"created_at"`
+	ConfigSHA256     string                     `json:"config_sha256"`
+	RepositoryConfig json.RawMessage            `json:"repository_config,omitempty"`
+	Backends         []vaultic.PlacementBackend `json:"backends"`
+	Policy           vaultic.PlacementPolicy    `json:"placement_policy"`
+	StagingBackends  []string                   `json:"staging_backends"`
+	PreviousSHA256   string                     `json:"previous_sha256,omitempty"`
 }
 
 type Anchor struct {
@@ -66,6 +67,25 @@ func (manifest Manifest) Validate() error {
 	}
 	if !validDigest(manifest.ConfigSHA256) || manifest.PreviousSHA256 != "" && !validDigest(manifest.PreviousSHA256) {
 		return fmt.Errorf("invalid bootstrap topology digest")
+	}
+	if len(manifest.RepositoryConfig) > 0 {
+		cfg, err := manifest.ConfigProjection()
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(manifest.RepositoryConfig)
+		if hex.EncodeToString(digest[:]) != manifest.ConfigSHA256 || cfg.ID != manifest.RepositoryID {
+			return fmt.Errorf("bootstrap repository config projection identity or digest mismatch")
+		}
+		configuredBackends, _ := json.Marshal(cfg.PlacementBackends)
+		manifestBackends, _ := json.Marshal(manifest.Backends)
+		configuredPolicy, _ := json.Marshal(cfg.PlacementPolicy)
+		manifestPolicy, _ := json.Marshal(manifest.Policy)
+		configuredStaging, _ := json.Marshal(cfg.StagingBackends)
+		manifestStaging, _ := json.Marshal(manifest.StagingBackends)
+		if !bytes.Equal(configuredBackends, manifestBackends) || !bytes.Equal(configuredPolicy, manifestPolicy) || !bytes.Equal(configuredStaging, manifestStaging) {
+			return fmt.Errorf("bootstrap repository config projection disagrees with topology")
+		}
 	}
 	if len(manifest.Backends) == 0 || len(manifest.StagingBackends) == 0 {
 		return fmt.Errorf("bootstrap topology requires backends and staging mirrors")
@@ -99,6 +119,22 @@ func (manifest Manifest) Validate() error {
 	}
 	_, err := EvaluatePolicy(manifest.Backends, manifest.Policy)
 	return err
+}
+
+func (manifest Manifest) ConfigProjection() (vaultic.Config, error) {
+	if len(manifest.RepositoryConfig) == 0 {
+		return vaultic.Config{}, fmt.Errorf("bootstrap topology has no repository config projection")
+	}
+	var cfg vaultic.Config
+	decoder := json.NewDecoder(bytes.NewReader(manifest.RepositoryConfig))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return vaultic.Config{}, fmt.Errorf("decode bootstrap repository config projection")
+	}
+	if err := cfg.Validate(); err != nil {
+		return vaultic.Config{}, err
+	}
+	return cfg, nil
 }
 
 func EvaluatePolicy(backends []vaultic.PlacementBackend, policy vaultic.PlacementPolicy) ([]string, error) {
@@ -160,6 +196,21 @@ func Seal(manifest Manifest, rootKey []byte) ([]byte, string, error) {
 }
 
 func Open(encoded, rootKey []byte, expectedRepository string) (Manifest, string, error) {
+	return open(encoded, expectedRepository, func(repositoryID string) ([]byte, error) {
+		return deriveKey(rootKey, repositoryID, "bootstrap-topology-v1")
+	})
+}
+
+func OpenWithTopologyKey(encoded, topologyKey []byte, expectedRepository string) (Manifest, string, error) {
+	return open(encoded, expectedRepository, func(string) ([]byte, error) {
+		if len(topologyKey) != 32 {
+			return nil, fmt.Errorf("invalid topology discovery key")
+		}
+		return topologyKey, nil
+	})
+}
+
+func open(encoded []byte, expectedRepository string, keyFor func(string) ([]byte, error)) (Manifest, string, error) {
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	var sealed sealedManifest
@@ -169,7 +220,7 @@ func Open(encoded, rootKey []byte, expectedRepository string) (Manifest, string,
 	if decoder.Decode(&struct{}{}) != io.EOF || sealed.Format != Format || sealed.RepositoryID != expectedRepository || sealed.Generation == 0 {
 		return Manifest{}, "", fmt.Errorf("invalid sealed bootstrap topology identity")
 	}
-	key, err := deriveKey(rootKey, sealed.RepositoryID, "bootstrap-topology-v1")
+	key, err := keyFor(sealed.RepositoryID)
 	if err != nil {
 		return Manifest{}, "", err
 	}
@@ -233,7 +284,7 @@ func Resolve(copies []Copy, trusted ...Anchor) (Copy, error) {
 }
 
 func Handle(generation uint64) backend.Handle {
-	return backend.Handle{Type: backend.BootstrapFile, Name: fmt.Sprintf("topology/%020d", generation)}
+	return backend.Handle{Type: backend.BootstrapFile, Name: fmt.Sprintf("topology-%020d", generation)}
 }
 
 func Publish(ctx context.Context, mirrors map[string]backend.Backend, generation uint64, encoded []byte) error {
@@ -265,6 +316,18 @@ func Publish(ctx context.Context, mirrors map[string]backend.Backend, generation
 }
 
 func Discover(ctx context.Context, seeds map[string]backend.Backend, rootKey []byte, repositoryID string) ([]Copy, map[string]error) {
+	return discover(ctx, seeds, repositoryID, func(encoded []byte) (Manifest, string, error) {
+		return Open(encoded, rootKey, repositoryID)
+	})
+}
+
+func DiscoverWithTopologyKey(ctx context.Context, seeds map[string]backend.Backend, topologyKey []byte, repositoryID string) ([]Copy, map[string]error) {
+	return discover(ctx, seeds, repositoryID, func(encoded []byte) (Manifest, string, error) {
+		return OpenWithTopologyKey(encoded, topologyKey, repositoryID)
+	})
+}
+
+func discover(ctx context.Context, seeds map[string]backend.Backend, repositoryID string, opener func([]byte) (Manifest, string, error)) ([]Copy, map[string]error) {
 	copies := make([]Copy, 0)
 	failures := make(map[string]error)
 	for seedID, seed := range seeds {
@@ -277,7 +340,7 @@ func Discover(ctx context.Context, seeds map[string]backend.Backend, rootKey []b
 			if err != nil {
 				return err
 			}
-			manifest, digest, err := Open(encoded, rootKey, repositoryID)
+			manifest, digest, err := opener(encoded)
 			if err != nil {
 				return err
 			}
@@ -309,7 +372,10 @@ func load(ctx context.Context, source backend.Backend, handle backend.Handle) ([
 }
 
 func topologyGeneration(name string) (uint64, bool) {
-	value, ok := strings.CutPrefix(name, "topology/")
+	value, ok := strings.CutPrefix(name, "topology-")
+	if !ok {
+		value, ok = strings.CutPrefix(name, "topology/")
+	}
 	if !ok || len(value) != 20 {
 		return 0, false
 	}

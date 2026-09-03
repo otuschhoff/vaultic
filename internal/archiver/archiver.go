@@ -910,6 +910,9 @@ type SnapshotOptions struct {
 	Delete      *data.DeleteOption
 	// SkipIfUnchanged omits the snapshot creation if it is identical to the parent snapshot.
 	SkipIfUnchanged bool
+	// DeferredUploader creates durable packs without publishing normal metadata.
+	// Deferred crawls are always full crawls and return a null snapshot ID.
+	DeferredUploader func(context.Context, func(context.Context, vaultic.BlobSaverWithAsync) error) error
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
@@ -954,6 +957,9 @@ func (arch *Archiver) stopWorkers() {
 
 // Snapshot saves several targets and returns a snapshot.
 func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*data.Snapshot, vaultic.ID, *Summary, error) {
+	if opts.DeferredUploader != nil && opts.ParentSnapshot != nil {
+		return nil, vaultic.ID{}, nil, errors.New("deferred crawl cannot use a parent snapshot")
+	}
 	arch.summary = &Summary{
 		BackupStart: opts.BackupStart,
 	}
@@ -1002,7 +1008,11 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 
 	var rootTreeID vaultic.ID
 
-	err = arch.Repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+	withUploader := arch.Repo.WithBlobUploader
+	if opts.DeferredUploader != nil {
+		withUploader = opts.DeferredUploader
+	}
+	err = withUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		wg, wgCtx := errgroup.WithContext(ctx)
 		start := time.Now()
 
@@ -1091,6 +1101,9 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		TotalBytesProcessed: arch.summary.ProcessedBytes,
 	}
 
+	if opts.DeferredUploader != nil {
+		return sn, vaultic.ID{}, arch.summary, nil
+	}
 	if err := arch.BeforeSnapshot(); err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}

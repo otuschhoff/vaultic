@@ -200,17 +200,9 @@ func searchKey(ctx context.Context, s *Repository, password string, maxKeys int,
 // This is the vaultic equivalent of rustic's `--key` option. Handle the key
 // with care: anyone in possession of it can decrypt the whole repository.
 func (r *Repository) UseMasterKey(ctx context.Context, masterKeyJSON string) error {
-	raw, err := base64.StdEncoding.DecodeString(masterKeyJSON)
+	key, err := DecodeMasterKey(masterKeyJSON)
 	if err != nil {
-		return errors.Fatalf("invalid master key (expected base64-encoded JSON): %v", err)
-	}
-
-	key := &crypto.Key{}
-	if err := json.Unmarshal(raw, key); err != nil {
-		return errors.Fatalf("invalid master key (expected JSON): %v", err)
-	}
-	if !key.Valid() {
-		return errors.Fatal("invalid master key")
+		return err
 	}
 
 	r.key = key
@@ -224,6 +216,38 @@ func (r *Repository) UseMasterKey(ctx context.Context, masterKeyJSON string) err
 	r.setConfig(cfg)
 	r.ApplyRepoSettings()
 	return nil
+}
+
+func (r *Repository) UseDataPlaneMasterKey(masterKeyJSON string, cfg vaultic.Config) error {
+	key, err := DecodeMasterKey(masterKeyJSON)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid bootstrap config projection: %w", err)
+	}
+	r.key = key
+	r.keyID = vaultic.ID{}
+	r.setConfig(cfg)
+	r.ApplyRepoSettings()
+	return nil
+}
+
+// DecodeMasterKey validates the base64-encoded repository key without opening a backend.
+func DecodeMasterKey(masterKeyJSON string) (*crypto.Key, error) {
+	raw, err := base64.StdEncoding.DecodeString(masterKeyJSON)
+	if err != nil {
+		return nil, errors.Fatalf("invalid master key (expected base64-encoded JSON): %v", err)
+	}
+
+	key := &crypto.Key{}
+	if err := json.Unmarshal(raw, key); err != nil {
+		return nil, errors.Fatalf("invalid master key (expected JSON): %v", err)
+	}
+	if !key.Valid() {
+		return nil, errors.Fatal("invalid master key")
+	}
+	return key, nil
 }
 
 // LoadKey loads a key from the backend.

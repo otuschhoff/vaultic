@@ -334,7 +334,7 @@ func (client *Client) Lock(ctx context.Context) error {
 }
 
 func (client *Client) AcquireLease(ctx context.Context, manifestPath, capability string, ttl time.Duration) (Lease, error) {
-	if capability != "repository-master-key" && capability != "metadata-loss-recovery" {
+	if capability != "repository-master-key" && capability != "topology-discovery" && capability != "metadata-loss-recovery" {
 		return Lease{}, fmt.Errorf("unsupported Vaultic broker capability %q", capability)
 	}
 	if ttl <= 0 || ttl > time.Hour || ttl%time.Second != 0 {

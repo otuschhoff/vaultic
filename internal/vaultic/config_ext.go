@@ -238,6 +238,12 @@ func (c Config) ValidateExtensions() error {
 	if c.PlacementPolicy.PromotionCrossoverSeconds < 0 {
 		return errors.New("placement promotion_crossover_seconds must not be negative")
 	}
+	if c.StagingQuota.MaxAgeSeconds < 0 {
+		return errors.New("staging max_age_seconds must not be negative")
+	}
+	if c.StagingQuota.MaxExtensionSeconds < 0 {
+		return errors.New("staging max_extension_seconds must not be negative")
+	}
 	return nil
 }
 

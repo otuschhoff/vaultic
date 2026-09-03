@@ -12,8 +12,23 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
+	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
+
+func TestAutomaticDeferredFallbackDistinguishesUnavailableFromCorrupt(t *testing.T) {
+	opts := BackupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}
+	if !shouldUseDataPlaneFallback(fmt.Errorf("connect: %w", enginepkg.ErrUnavailable), opts) {
+		t.Fatal("operational metadata unavailability did not select deferred fallback")
+	}
+	if shouldUseDataPlaneFallback(fmt.Errorf("corrupt metadata manifest"), opts) {
+		t.Fatal("metadata corruption bypassed explicit acknowledgement")
+	}
+	opts.AcknowledgeMetadataBypass = true
+	if !shouldUseDataPlaneFallback(fmt.Errorf("corrupt metadata manifest"), opts) {
+		t.Fatal("acknowledged metadata corruption did not select deferred fallback")
+	}
+}
 
 func TestBackupCrawlFlags(t *testing.T) {
 	command := newBackupCommand(&global.Options{})

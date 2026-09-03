@@ -2,6 +2,9 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -36,9 +39,42 @@ func TestSealOpenAndResolveTopology(t *testing.T) {
 	if _, _, err := Open(encoded, []byte("abcdef0123456789abcdef0123456789"), "repo-a"); err == nil {
 		t.Fatal("wrong topology key authenticated")
 	}
+	topologyKey, err := deriveKey(key, "repo-a", "bootstrap-topology-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	derivedOpened, derivedDigest, err := OpenWithTopologyKey(encoded, topologyKey, "repo-a")
+	if err != nil || derivedOpened.Generation != manifest.Generation || derivedDigest != digest {
+		t.Fatalf("derived-key open = %#v, %q, %v", derivedOpened, derivedDigest, err)
+	}
 	copy, err := Resolve([]Copy{{Seed: "a", Manifest: opened, SHA256: digest}}, Anchor{RepositoryID: "repo-a", Generation: 2, SHA256: digest})
 	if err != nil || copy.Seed != "a" {
 		t.Fatalf("resolve = %#v, %v", copy, err)
+	}
+}
+
+func TestTopologyConfigProjectionIsDigestBound(t *testing.T) {
+	vaultic.TestDisableCheckPolynomial(t)
+	manifest := testManifest()
+	cfg := vaultic.Config{Version: 2, ID: manifest.RepositoryID, PlacementBackends: manifest.Backends, PlacementPolicy: manifest.Policy, StagingBackends: manifest.StagingBackends}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	manifest.RepositoryConfig = encoded
+	manifest.ConfigSHA256 = hex.EncodeToString(digest[:])
+	if err := manifest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := manifest.ConfigProjection()
+	if err != nil || projection.ID != manifest.RepositoryID {
+		t.Fatalf("projection = %#v, %v", projection, err)
+	}
+	manifest.RepositoryConfig = append([]byte(nil), encoded...)
+	manifest.RepositoryConfig[len(manifest.RepositoryConfig)-1] ^= 1
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("tampered repository config projection was accepted")
 	}
 }
 

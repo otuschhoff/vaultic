@@ -2,7 +2,12 @@ package staging
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
@@ -12,6 +17,29 @@ type plannerStore map[string][]byte
 func (store plannerStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
 	value, found := store[string(key)]
 	return value, found, nil
+}
+
+func TestBuildDaemonCommitPlanDerivesProducerFacts(t *testing.T) {
+	packID := strings.Repeat("11", 32)
+	blobID := strings.Repeat("22", 32)
+	blobPayload, err := json.Marshal(BlobFact{ID: blobID, Type: "data", PackID: packID, Offset: 3, Length: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotJSON := []byte(`{"tree":"0123456789abcdef"}`)
+	segment := Segment{
+		Header:  Header{CreatedAt: time.Unix(100, 0)},
+		Packs:   []Pack{{ID: packID, Type: "data", Size: 100, PayloadSize: 7, HeaderSize: 93, BlobCount: 1, SHA256: packID, Placements: []Placement{{BackendID: "a", FailureDomain: "site-a", Size: 100, SHA256: packID}}}},
+		Records: []Record{{Kind: "blob-fact-v1", Payload: blobPayload}, {Kind: "prospective-snapshot-v1", Payload: snapshotJSON}},
+	}
+	plan, err := BuildDaemonCommitPlan(context.Background(), plannerStore{}, []Segment{segment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(snapshotJSON)
+	if plan.SnapshotID != hex.EncodeToString(digest[:]) || string(plan.SnapshotJSON) != string(snapshotJSON) || len(plan.Puts) != 4 {
+		t.Fatalf("derived plan = %#v", plan)
+	}
 }
 
 func TestBuildDaemonCommitPlanMergesBlobLocationsAndRejectsMutableFacts(t *testing.T) {

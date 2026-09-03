@@ -8,16 +8,17 @@ import (
 )
 
 type DaemonCommitPlan struct {
-	Puts       []daemon.Mutation
-	Deletes    [][]byte
-	SnapshotID string
+	Puts         []daemon.Mutation
+	Deletes      [][]byte
+	SnapshotID   string
+	SnapshotJSON []byte
 }
 
 type DaemonAuthority struct {
 	Client            *daemon.Client
 	Store             *daemon.SchemaStore
 	Preflight         func(context.Context, Header) error
-	SnapshotPublisher func(context.Context, string) error
+	SnapshotPublisher func(context.Context, string, []byte) error
 	plan              DaemonCommitPlan
 }
 
@@ -55,5 +56,5 @@ func (authority *DaemonAuthority) PublishSnapshot(ctx context.Context, commit Co
 	if commit.SnapshotID != authority.plan.SnapshotID {
 		return fmt.Errorf("idempotency result does not match prospective snapshot")
 	}
-	return authority.SnapshotPublisher(ctx, commit.SnapshotID)
+	return authority.SnapshotPublisher(ctx, commit.SnapshotID, authority.plan.SnapshotJSON)
 }

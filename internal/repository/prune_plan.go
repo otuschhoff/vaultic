@@ -222,7 +222,11 @@ func (r *Repository) FinalizePrunePlanLoaded(ctx context.Context, printer vaulti
 	}
 	if len(packIDs) != 0 {
 		printer.P("finalizing prune plan %s: removing %d old packs\n", plan.ID, len(packIDs))
-		if err := deleteFiles(ctx, true, &internalRepository{r}, packIDs, vaultic.PackFile, printer); err != nil {
+		remover := vaultic.RemoverUnpacked[vaultic.FileType](&internalRepository{r})
+		if r.stagedPackRoots != nil {
+			remover = stagedRootRevalidatingRemover{RemoverUnpacked: remover, roots: r.stagedPackRoots}
+		}
+		if err := deleteFiles(ctx, true, remover, packIDs, vaultic.PackFile, printer); err != nil {
 			return err
 		}
 	}
@@ -237,6 +241,24 @@ func (r *Repository) FinalizePrunePlanLoaded(ctx context.Context, printer vaulti
 	}
 	r.clearIndex()
 	return nil
+}
+
+type stagedRootRevalidatingRemover struct {
+	vaultic.RemoverUnpacked[vaultic.FileType]
+	roots StagedPackRoots
+}
+
+func (remover stagedRootRevalidatingRemover) RemoveUnpacked(ctx context.Context, fileType vaultic.FileType, id vaultic.ID) error {
+	if fileType == vaultic.PackFile {
+		staged, err := remover.roots.Current(ctx)
+		if err != nil {
+			return fmt.Errorf("revalidate staged journal roots immediately before pack deletion: %w", err)
+		}
+		if staged.Has(id) {
+			return fmt.Errorf("pack %s became protected by a sealed staging journal", id)
+		}
+	}
+	return remover.RemoverUnpacked.RemoveUnpacked(ctx, fileType, id)
 }
 
 func (r *Repository) excludeStagedPackRoots(ctx context.Context, candidates vaultic.IDSet) error {

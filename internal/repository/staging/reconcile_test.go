@@ -51,10 +51,11 @@ func sealedTestJob(t *testing.T) (Store, Job) {
 	t.Helper()
 	now := time.Now().UTC()
 	store := Store{
-		Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
-		Key:     []byte("0123456789abcdef0123456789abcdef"),
-		Policy:  Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
-		Now:     func() time.Time { return now },
+		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:              []byte("0123456789abcdef0123456789abcdef"),
+		Policy:           Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+		Now:              func() time.Time { return now },
 	}
 	header := journalHeader(now)
 	if _, err := store.PublishSegment(context.Background(), Segment{Header: header, Sequence: 1, Packs: []Pack{durablePack()}}); err != nil {

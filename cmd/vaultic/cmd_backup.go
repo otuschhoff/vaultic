@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -35,7 +38,9 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/analytics"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/repository/staging"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
@@ -84,45 +89,49 @@ Exit status is 12 if the password is incorrect.
 type BackupOptions struct {
 	filter.ExcludePatternOptions
 
-	Parent                  string
-	GroupBy                 data.SnapshotGroupByOptions
-	Force                   bool
-	ExcludeOtherFS          bool
-	ExcludeIfPresent        []string
-	ExcludeCaches           bool
-	ExcludeLargerThan       string
-	ExcludeCloudFiles       bool
-	Stdin                   bool
-	StdinFilename           string
-	StdinCommand            bool
-	Tags                    data.TagLists
-	Host                    string
-	Label                   string
-	Description             string
-	DescriptionFrom         string
-	DeleteNever             bool
-	DeleteAfter             string
-	FilesFrom               []string
-	FilesFromVerbatim       []string
-	FilesFromRaw            []string
-	TimeStamp               string
-	WithAtime               bool
-	IgnoreInode             bool
-	IgnoreCtime             bool
-	UseFsSnapshot           bool
-	DryRun                  bool
-	ReadConcurrency         uint
-	NoScan                  bool
-	UseCWalk                bool
-	CWalkConcurrency        int
-	UsePathdiff             bool
-	PathdiffEndpoint        string
-	PathdiffRequireCoverage bool
-	PathdiffSVMMap          string
-	SkipIfUnchanged         bool
-	ProfileNames            []string
-	Init                    bool
-	List                    bool
+	Parent                    string
+	GroupBy                   data.SnapshotGroupByOptions
+	Force                     bool
+	ExcludeOtherFS            bool
+	ExcludeIfPresent          []string
+	ExcludeCaches             bool
+	ExcludeLargerThan         string
+	ExcludeCloudFiles         bool
+	Stdin                     bool
+	StdinFilename             string
+	StdinCommand              bool
+	Tags                      data.TagLists
+	Host                      string
+	Label                     string
+	Description               string
+	DescriptionFrom           string
+	DeleteNever               bool
+	DeleteAfter               string
+	FilesFrom                 []string
+	FilesFromVerbatim         []string
+	FilesFromRaw              []string
+	TimeStamp                 string
+	WithAtime                 bool
+	IgnoreInode               bool
+	IgnoreCtime               bool
+	UseFsSnapshot             bool
+	DryRun                    bool
+	ReadConcurrency           uint
+	NoScan                    bool
+	UseCWalk                  bool
+	CWalkConcurrency          int
+	UsePathdiff               bool
+	PathdiffEndpoint          string
+	PathdiffRequireCoverage   bool
+	PathdiffSVMMap            string
+	SkipIfUnchanged           bool
+	ProfileNames              []string
+	Init                      bool
+	List                      bool
+	AllowDeferredCommit       bool
+	DeferredMode              string
+	DeferredExpiry            time.Duration
+	AcknowledgeMetadataBypass bool
 
 	readConcurrencyFlag *pflag.Flag
 }
@@ -178,6 +187,10 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 		f.BoolVar(&opts.ExcludeCloudFiles, "exclude-cloud-files", false, "excludes online-only cloud files (such as OneDrive, iCloud drive, …)")
 	}
 	f.BoolVar(&opts.SkipIfUnchanged, "skip-if-unchanged", false, "skip snapshot creation if identical to parent snapshot")
+	f.BoolVar(&opts.AllowDeferredCommit, "allow-deferred-commit", false, "acknowledge that durable data remains unavailable as a snapshot until metadata reconciliation")
+	f.StringVar(&opts.DeferredMode, "deferred-mode", "", "deferred ingest mode (auto, read-only-assisted, or data-plane-only)")
+	f.DurationVar(&opts.DeferredExpiry, "deferred-expiry", 72*time.Hour, "staging journal expiry for deferred ingest")
+	f.BoolVar(&opts.AcknowledgeMetadataBypass, "acknowledge-metadata-bypass", false, "acknowledge that data-plane-only mode ignores unavailable or corrupt metadata")
 	f.StringSliceVar(&opts.ProfileNames, "name", nil, "run named [[backup.snapshots]] profile job (repeatable)")
 	f.BoolVar(&opts.Init, "init", false, "initialize the repository if it does not exist")
 	f.BoolVar(&opts.List, "ls", false, "list the contents of the created snapshot")
@@ -409,6 +422,21 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 
 // Check returns an error when an invalid combination of options was set.
 func (opts BackupOptions) Check(gopts global.Options, args []string) error {
+	if opts.DeferredMode != "" && !opts.AllowDeferredCommit {
+		return errors.Fatal("--deferred-mode requires --allow-deferred-commit")
+	}
+	if opts.AllowDeferredCommit && opts.DeferredMode != "auto" && opts.DeferredMode != "read-only-assisted" && opts.DeferredMode != "data-plane-only" {
+		return errors.Fatal("--allow-deferred-commit requires --deferred-mode=auto, read-only-assisted, or data-plane-only")
+	}
+	if opts.DeferredMode == "data-plane-only" && !opts.AcknowledgeMetadataBypass {
+		return errors.Fatal("--deferred-mode=data-plane-only requires --acknowledge-metadata-bypass")
+	}
+	if opts.AllowDeferredCommit && (opts.Parent != "" || opts.SkipIfUnchanged || opts.DryRun || opts.Init || opts.List) {
+		return errors.Fatal("deferred ingest cannot use --parent, --skip-if-unchanged, --dry-run, --init, or --list")
+	}
+	if opts.AllowDeferredCommit && opts.DeferredExpiry <= 0 {
+		return errors.Fatal("--deferred-expiry must be positive")
+	}
 	if opts.UseCWalk && opts.CWalkConcurrency < 1 {
 		return errors.Fatal("--cwalk-concurrency must be at least 1")
 	}
@@ -673,11 +701,46 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		}
 	}
 
-	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, opts.DryRun, printer)
+	deferredActive := opts.AllowDeferredCommit && opts.DeferredMode != "auto"
+	metadataBypassed := opts.DeferredMode == "data-plane-only"
+	var repo *repository.Repository
+	var unlock func()
+	if opts.DeferredMode == "data-plane-only" {
+		repo, err = global.OpenDataPlaneRepository(ctx, gopts, printer)
+		if err == nil {
+			unlock = func() { _ = repo.Close() }
+		}
+	} else {
+		ctx, repo, unlock, err = openWithAppendLock(ctx, gopts, opts.DryRun, printer)
+		if shouldUseDataPlaneFallback(err, opts) {
+			repo, err = global.OpenDataPlaneRepository(ctx, gopts, printer)
+			if err == nil {
+				deferredActive = true
+				metadataBypassed = true
+				unlock = func() { _ = repo.Close() }
+			}
+		} else if err == nil && opts.DeferredMode == "auto" {
+			if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
+				status, statusErr := engine.Client().WriterStatus(ctx)
+				if statusErr != nil || status.Role != "read-write" {
+					deferredActive = true
+				}
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if deferredActive {
+		severity := observability.Notice
+		message := "deferred backup mode selected"
+		if metadataBypassed {
+			severity = observability.Critical
+			message = "metadata bypassed for data-plane-only deferred crawl"
+		}
+		_ = observability.Emit(ctx, observability.Event{Severity: severity, Category: observability.CategoryLifecycle, Component: "backup", Message: message, Fields: map[string]any{"mode": opts.DeferredMode}})
+	}
 
 	progressReporter := backup.NewProgress(printer, gopts.Quiet, gopts.JSON, term.CanUpdateStatus())
 	defer progressReporter.Done()
@@ -689,7 +752,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	}
 
 	var parentSnapshot *data.Snapshot
-	if !opts.Stdin {
+	if !opts.Stdin && !deferredActive {
 		parentSnapshot, err = findParentSnapshot(ctx, repo, opts, targets, timeStamp)
 		if err != nil {
 			return err
@@ -704,13 +767,14 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		}
 	}
 
-	if !gopts.JSON {
+	if !gopts.JSON && !deferredActive {
 		printer.V("load index files")
 	}
-
-	err = repo.LoadIndex(ctx, printer)
-	if err != nil {
-		return err
+	if !deferredActive {
+		err = repo.LoadIndex(ctx, printer)
+		if err != nil {
+			return err
+		}
 	}
 
 	targetFS := fs.NewLocal()
@@ -797,7 +861,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	}
 	var authoritativeEngine *enginepkg.DaemonEngine
 	var mandatorySelect archiver.SelectFunc
-	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
+	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok && !deferredActive {
 		authoritativeEngine = engine
 		excludedUIDs, err := analytics.ExcludedUIDs(ctx, engine.SchemaStore())
 		if err != nil {
@@ -838,7 +902,11 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 			archiverOptions.CWalkRoots = pathdiffPlan.ChangedDirs
 		}
 	}
-	arch := archiver.New(repo.AppendTransaction(), targetFS, archiverOptions)
+	archiverRepository := repo.AppendTransaction()
+	if deferredActive {
+		archiverRepository = repo.DeferredTransaction()
+	}
+	arch := archiver.New(archiverRepository, targetFS, archiverOptions)
 	arch.SelectByName = selectByNameFilter
 	arch.Select = selectFilter
 	if pathdiffPlan.Selective {
@@ -902,6 +970,33 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		ProgramVersion:  "vaultic " + global.Version,
 		SkipIfUnchanged: opts.SkipIfUnchanged,
 	}
+	var deferredResult repository.DeferredUploadResult
+	var deferredStore staging.Store
+	if deferredActive {
+		uploadOptions, store, err := repo.DeferredUploadPlan()
+		if err != nil {
+			return err
+		}
+		quotaConfig := repo.Config().StagingQuota
+		quota := staging.Quota{MaxBytes: quotaConfig.MaxBytes, MaxJobs: quotaConfig.MaxJobs, MaxAge: time.Duration(quotaConfig.MaxAgeSeconds) * time.Second}
+		usage, err := store.ActiveUsage(ctx, repo.Config().ID)
+		if err != nil {
+			return fmt.Errorf("inspect deferred staging quota: %w", err)
+		}
+		if err := staging.CheckQuota(quota, usage.Jobs, 0, usage.Bytes, usage.OldestJobAt, 0, time.Now().UTC()); err != nil {
+			_ = observability.Emit(ctx, observability.Event{Severity: observability.Error, Category: observability.CategoryLifecycle, Component: "backup", Message: "deferred staging quota refused upload"})
+			return err
+		}
+		if quota.MaxBytes > 0 {
+			uploadOptions.MaxAdditionalBytes = quota.MaxBytes - usage.Bytes
+		}
+		deferredStore = store
+		snapshotOpts.DeferredUploader = func(ctx context.Context, fn func(context.Context, vaultic.BlobSaverWithAsync) error) error {
+			var uploadErr error
+			deferredResult, uploadErr = repo.WithDeferredBlobUploader(ctx, uploadOptions, fn)
+			return uploadErr
+		}
+	}
 
 	// resolve description (--description-from overrides --description)
 	if opts.DescriptionFrom != "" {
@@ -929,7 +1024,31 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	if !gopts.JSON {
 		printer.V("start backup on %v", targets)
 	}
-	_, id, summary, err := arch.Snapshot(ctx, targets, snapshotOpts)
+	snapshot, id, summary, err := arch.Snapshot(ctx, targets, snapshotOpts)
+	var deferredJobID string
+	var deferredSeal staging.Seal
+	if err == nil && deferredActive {
+		deferredJobID = vaultic.NewRandomID().String()
+		snapshotPayload, marshalErr := json.Marshal(snapshot)
+		if marshalErr != nil {
+			err = marshalErr
+		} else {
+			sourceDigest := sha256.Sum256([]byte(strings.Join(targets, "\x00")))
+			header := staging.Header{
+				Format: 1, RepositoryID: repo.Config().ID, JobID: deferredJobID, IdempotencyKey: deferredJobID,
+				CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(opts.DeferredExpiry),
+				CapsuleGeneration: 1, RepositoryKeyVersion: 1, ChunkerVersion: "rabin-v1",
+				CompressionVersion: fmt.Sprintf("repository-v%d", repo.Config().Version), PlacementPolicyVersion: 1,
+				SourceIdentitySHA256: hex.EncodeToString(sourceDigest[:]), ConsistencyEvidence: "full-crawl",
+			}
+			records := append(deferredResult.Records, staging.Record{Kind: "prospective-snapshot-v1", Payload: snapshotPayload})
+			deferredSeal, _, _, err = deferredStore.PublishJob(ctx, header, deferredResult.Packs, records)
+			if err == nil {
+				_ = observability.Emit(ctx, observability.Event{Severity: observability.Info, Category: observability.CategoryIntegrity, Component: "backup", Message: "deferred pack durability verified", Fields: map[string]any{"job_id": deferredJobID, "pack_count": deferredSeal.PackCount, "protected_bytes": deferredSeal.ProtectedBytes}})
+				_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "staging", Message: "deferred ingest journal sealed", Fields: map[string]any{"job_id": deferredJobID, "expires_at": deferredSeal.Header.ExpiresAt}})
+			}
+		}
+	}
 	if reconciler != nil {
 		if reconcileErr := reconciler.Close(); reconcileErr != nil && err == nil {
 			err = fmt.Errorf("reconcile authoritative snapshot metadata: %w", reconcileErr)
@@ -952,6 +1071,28 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	// return original error
 	if err != nil {
 		return errors.Fatalf("unable to save snapshot: %v", err)
+	}
+	if deferredActive {
+		if werr != nil {
+			return werr
+		}
+		if !success {
+			return ErrInvalidSourceData
+		}
+		placements := make(map[string]uint64)
+		for _, pack := range deferredResult.Packs {
+			for _, placement := range pack.Placements {
+				placements[placement.BackendID]++
+			}
+		}
+		result := map[string]any{"state": "data_durable_metadata_pending", "job_id": deferredJobID, "packs": len(deferredResult.Packs), "protected_bytes": deferredSeal.ProtectedBytes, "placements": placements, "expires_at": deferredSeal.Header.ExpiresAt, "reason": opts.DeferredMode}
+		if gopts.JSON {
+			encoded, _ := json.Marshal(result)
+			term.Print(string(encoded))
+		} else {
+			printer.P("data durable; metadata pending (job %s, %d packs, expires in %s)\n", deferredJobID, len(deferredResult.Packs), opts.DeferredExpiry)
+		}
+		return nil
 	}
 
 	// Report finished execution
@@ -1000,4 +1141,8 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		}
 	}
 	return nil
+}
+
+func shouldUseDataPlaneFallback(openErr error, opts BackupOptions) bool {
+	return openErr != nil && opts.DeferredMode == "auto" && (opts.AcknowledgeMetadataBypass || errors.Is(openErr, enginepkg.ErrUnavailable))
 }

@@ -13,8 +13,28 @@ type testStagedRoots struct {
 	err error
 }
 
+type recordingRemover struct{ removed vaultic.IDSet }
+
+func (remover *recordingRemover) Connections() uint { return 1 }
+func (remover *recordingRemover) RemoveUnpacked(_ context.Context, _ vaultic.FileType, id vaultic.ID) error {
+	remover.removed.Insert(id)
+	return nil
+}
+
 func (roots testStagedRoots) Current(context.Context) (vaultic.IDSet, error) {
 	return roots.ids, roots.err
+}
+
+func TestStagedRootRevalidatingRemoverBlocksNewRoot(t *testing.T) {
+	protected := vaultic.TestParseID("1111111111111111111111111111111111111111111111111111111111111111")
+	inner := &recordingRemover{removed: vaultic.NewIDSet()}
+	remover := stagedRootRevalidatingRemover{RemoverUnpacked: inner, roots: testStagedRoots{ids: vaultic.NewIDSet(protected)}}
+	if err := remover.RemoveUnpacked(context.Background(), vaultic.PackFile, protected); err == nil {
+		t.Fatal("new staged root did not block immediate pack deletion")
+	}
+	if inner.removed.Has(protected) {
+		t.Fatal("protected pack reached physical remover")
+	}
 }
 
 func TestExcludeStagedPackRootsRevalidatesAndFailsClosed(t *testing.T) {
