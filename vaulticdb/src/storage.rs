@@ -839,7 +839,117 @@ fn env_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slatedb::object_store::ObjectStoreExt;
+    use slatedb::object_store::{path::Path, ObjectStoreExt};
+
+    #[tokio::test]
+    async fn s3_metadata_rebuild_destroys_rebuilds_and_reopens_encrypted_candidate() {
+        if env::var_os("VAULTICDB_TEST_S3_ENDPOINT").is_none() {
+            return;
+        }
+        let bucket =
+            env::var("VAULTICDB_TEST_S3_BUCKET").unwrap_or_else(|_| "vaulticdb-ci".to_owned());
+        let prefix = format!(
+            "phase20/rebuild-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        );
+        let raw: Arc<dyn ObjectStore> = Arc::new(PrefixStore::new(
+            AmazonS3Builder::from_env()
+                .with_bucket_name(bucket)
+                .build()
+                .unwrap(),
+            prefix,
+        ));
+
+        let stale = Path::from("manifest/stale");
+        raw.put(&stale, b"stale-authoritative-metadata".to_vec().into())
+            .await
+            .unwrap();
+        let stale_objects = raw
+            .list(None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(stale_objects.len(), 1);
+        for object in stale_objects {
+            raw.delete(&object.location).await.unwrap();
+        }
+        assert!(!metadata_store_has_database_objects(raw.as_ref())
+            .await
+            .unwrap());
+
+        let repository_id = "phase20-s3-rebuild";
+        let dek = [0x5a; 32];
+        let plaintext = b"phase20-known-plaintext-metadata";
+        let (encrypted, _, _) =
+            envelope::configure_brokered(repository_id, raw.clone(), &dek, 3, 9, true).unwrap();
+        let db = Db::open("db", encrypted).await.unwrap();
+        db.put(b"p:rebuilt-pack", plaintext.to_vec())
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        db.put(
+            METADATA_REBUILD_RECORD,
+            serde_json::to_vec(&serde_json::json!({
+                "format": 1,
+                "repository_id": repository_id,
+                "capsule_generation": 9,
+                "metadata_dek_version": 3,
+                "broker_epoch_id": "test-epoch",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let objects = raw
+            .list(None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!objects.is_empty());
+        for object in &objects {
+            let bytes = raw
+                .get(&object.location)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            assert!(!bytes
+                .windows(plaintext.len())
+                .any(|value| value == plaintext));
+            assert!(!bytes.windows(dek.len()).any(|value| value == dek));
+        }
+
+        let (encrypted, _, _) =
+            envelope::configure_brokered(repository_id, raw.clone(), &dek, 3, 9, false).unwrap();
+        let reopened = Db::open("db", encrypted).await.unwrap();
+        assert_eq!(
+            reopened.get(b"p:rebuilt-pack").await.unwrap().unwrap(),
+            plaintext.as_slice()
+        );
+        assert!(reopened
+            .get(METADATA_REBUILD_RECORD)
+            .await
+            .unwrap()
+            .is_some());
+        reopened.close().await.unwrap();
+
+        for object in objects {
+            raw.delete(&object.location).await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn metadata_rebuild_candidate_ignores_capsules_but_rejects_database_objects() {
