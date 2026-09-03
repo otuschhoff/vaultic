@@ -42,6 +42,8 @@ const MAX_LEASE_TTL: Duration = Duration::from_secs(60 * 60);
 pub enum ContributionRejection {
     #[error("contribution payload authentication failed")]
     PayloadAuthentication,
+    #[error("contribution payload is malformed")]
+    PayloadInvalid,
     #[error("custodian generation attestation rejects capsule rollback")]
     Rollback {
         last_seen_generation: u64,
@@ -94,6 +96,7 @@ pub struct EncryptedContribution {
 struct ContributionPayload {
     member_id: String,
     share_index: u8,
+    #[serde(with = "base64_bytes")]
     share: Vec<u8>,
     last_seen_generation: u64,
     principal_id: Option<String>,
@@ -397,8 +400,7 @@ impl KeyBroker {
         if now_unix_ms >= session.signed.transcript.expires_unix_ms {
             bail!("unlock session has expired");
         }
-        let payload = decrypt_contribution(session, &contribution)
-            .map_err(|_| ContributionRejection::PayloadAuthentication)?;
+        let payload = decrypt_contribution(session, &contribution)?;
         if payload.unverified_session_acknowledged != self.identity_recovery {
             bail!("identity-recovery contribution acknowledgement does not match broker mode");
         }
@@ -1090,19 +1092,27 @@ fn decrypt_contribution(
     session: &SessionState,
     contribution: &EncryptedContribution,
 ) -> Result<ContributionPayload> {
-    let encapped_bytes = BASE64.decode(&contribution.encapped_key)?;
+    let encapped_bytes = BASE64
+        .decode(&contribution.encapped_key)
+        .map_err(|_| ContributionRejection::PayloadInvalid)?;
     if encapped_bytes.len() != 32 {
-        bail!("invalid HPKE encapsulated key length");
+        return Err(ContributionRejection::PayloadInvalid.into());
     }
     let encapped_key = <SessionKem as KemTrait>::EncappedKey::from_bytes(&encapped_bytes)
-        .map_err(|_| anyhow::anyhow!("invalid HPKE encapsulated key"))?;
-    let tag_bytes = BASE64.decode(&contribution.tag)?;
+        .map_err(|_| ContributionRejection::PayloadInvalid)?;
+    let tag_bytes = BASE64
+        .decode(&contribution.tag)
+        .map_err(|_| ContributionRejection::PayloadInvalid)?;
     if tag_bytes.len() != 16 {
-        bail!("invalid HPKE authentication tag length");
+        return Err(ContributionRejection::PayloadInvalid.into());
     }
     let tag = AeadTag::<SessionAead>::from_bytes(&tag_bytes)
-        .map_err(|_| anyhow::anyhow!("invalid HPKE authentication tag"))?;
-    let mut ciphertext = Zeroizing::new(BASE64.decode(&contribution.ciphertext)?);
+        .map_err(|_| ContributionRejection::PayloadInvalid)?;
+    let mut ciphertext = Zeroizing::new(
+        BASE64
+            .decode(&contribution.ciphertext)
+            .map_err(|_| ContributionRejection::PayloadInvalid)?,
+    );
     let transcript = encode_transcript(&session.signed.transcript)?;
     let mut receiver = hpke::setup_receiver::<SessionAead, SessionKdf, SessionKem>(
         &OpModeR::Base,
@@ -1110,11 +1120,32 @@ fn decrypt_contribution(
         &encapped_key,
         SESSION_INFO,
     )
-    .map_err(|_| anyhow::anyhow!("initialize contribution HPKE receiver"))?;
+    .map_err(|_| ContributionRejection::PayloadInvalid)?;
     receiver
         .open_in_place_detached(ciphertext.as_mut(), &transcript, &tag)
         .map_err(|_| ContributionRejection::PayloadAuthentication)?;
-    serde_json::from_slice(&ciphertext).context("decode contribution payload")
+    serde_json::from_slice(&ciphertext).map_err(|_| ContributionRejection::PayloadInvalid.into())
+}
+
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&BASE64.encode(value))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BASE64
+            .decode(String::deserialize(deserializer)?)
+            .map_err(D::Error::custom)
+    }
 }
 
 fn encode_transcript(transcript: &SessionTranscript) -> Result<Vec<u8>> {
@@ -1323,6 +1354,8 @@ mod tests {
     #[test]
     fn signed_hpke_quorum_unlocks_and_leases_are_scoped() {
         let (capsule, identity, authorizations) = setup();
+        let restart_identity = identity.clone();
+        let restart_authorizations = authorizations.clone();
         let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
         assert!(broker.status(1_000).locked);
         let session = broker
@@ -1386,6 +1419,32 @@ mod tests {
             .is_err());
         broker.disconnect("connection-a");
         assert_eq!(broker.status(1_005).active_leases, 0);
+        let mut reconnected = client();
+        reconnected.connection_id = "connection-b".to_owned();
+        let reacquired = broker
+            .acquire_lease(
+                &reconnected,
+                Capability::MetadataDek,
+                Duration::from_secs(30),
+                1_005,
+            )
+            .unwrap();
+        assert_eq!(reacquired.key.as_slice(), &[7; 32]);
+
+        let mut restarted =
+            KeyBroker::new(capsule, restart_identity, restart_authorizations, None).unwrap();
+        assert!(restarted.status(1_006).locked);
+        assert!(restarted
+            .release_lease(&reacquired.lease_id, "connection-b")
+            .is_err());
+        assert!(restarted
+            .acquire_lease(
+                &reconnected,
+                Capability::MetadataDek,
+                Duration::from_secs(30),
+                1_006,
+            )
+            .is_err());
         broker.lock();
         assert!(broker.status(1_006).locked);
     }
@@ -1773,7 +1832,7 @@ mod tests {
         let error = broker.submit_contribution(malformed, 2_002).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<ContributionRejection>(),
-            Some(ContributionRejection::PayloadAuthentication)
+            Some(ContributionRejection::PayloadInvalid)
         ));
         assert!(!broker
             .submit_contribution(contribution.clone(), 2_002)

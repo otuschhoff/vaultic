@@ -336,6 +336,11 @@ public key against the token while enrolling. Contribution uses
 the PIN and performs the private-key operation on the token. Use
 ``--custodian-path`` when the helper is not on ``PATH``. PIN files must be mode
 0600 and are never passed as PIN values in command arguments or logs.
+Wrapped hardware shares are sent to the custodian helper as bounded base64 on
+standard input, not as command-line arguments. Vaultic starts every custodian
+operation with an empty environment so unrelated parent credentials are not
+inherited; only protected PIN-file paths and non-secret member context appear
+in the argument list.
 
 FIDO2 ``hmac-secret`` members use a non-resident credential scoped to a
 DNS-style relying-party ID. Enroll one with:
@@ -629,7 +634,8 @@ The broker writes one-line structured JSON security events to standard error,
 which systemd and launchd route to their managed logs. Events cover capsule
 discovery, session creation/expiry, accepted contributions and quorum
 completion, lease grant/release/expiry and disconnect revocation, authorization
-rejection, rollback rejection, payload-authentication failure, identity-recovery
+rejection, rollback rejection, payload-authentication failure, malformed
+authenticated contribution payloads, identity-recovery
 startup, policy mutation prepare/activate/cancel, explicit session closure and
 lock, shutdown lock, and maximum-lifetime automatic lock. Event field names are allowlisted
 and exclude credentials, tokens, PINs, shares, keys, and request bodies.

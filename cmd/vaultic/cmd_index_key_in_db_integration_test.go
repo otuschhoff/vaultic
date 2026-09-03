@@ -11,16 +11,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/ui/termstatus"
@@ -245,6 +249,164 @@ func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
 	}
 	if status.PendingCapsuleMigrationSHA256 != "" || status.FinalizedCapsuleMigrationSHA256 != migration.CapsuleSHA256 {
 		t.Fatalf("migration status = %+v", status)
+	}
+}
+
+func TestGoContributionsUnlockRustBroker(t *testing.T) {
+	brokerBinary := filepath.Join(filepath.Dir(testVaulticDBBinary(t)), "vaultic-key-broker")
+	if _, err := os.Stat(brokerBinary); err != nil {
+		t.Skipf("compiled vaultic-key-broker unavailable: %v", err)
+	}
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+	environment, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	environment.gopts.BackendTestHook = nil
+	testRunInit(t, environment.gopts)
+	term, cancelTerm := termstatus.Setup(os.Stdin, io.Discard, io.Discard, true)
+	defer cancelTerm()
+	environment.gopts.Term = term
+
+	ctx := context.Background()
+	printer := progress.NewTerminalPrinter(true, 0, environment.gopts.Term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, environment.gopts, true, printer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryID := repo.Config().ID
+	if err := metadataindex.Activate(ctx, repo.Backend(), repositoryID); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	rawMasterKey, err := json.Marshal(repo.Key())
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterKey := []byte(base64.StdEncoding.EncodeToString(rawMasterKey))
+	clear(rawMasterKey)
+	defer clear(masterKey)
+	passphraseFile := filepath.Join(t.TempDir(), "metadata-passphrase")
+	if err := os.WriteFile(passphraseFile, []byte("metadata recovery passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	daemonClient, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: testMetadataSocket(t), RepositoryID: repositoryID,
+		DaemonPath: testVaulticDBBinary(t), DataDir: t.TempDir(),
+		EncryptionMode: "initialize", PassphraseFile: passphraseFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer daemonClient.Close(ctx)
+	if err := daemonClient.StoreMasterKey(ctx, masterKey); err != nil {
+		t.Fatal(err)
+	}
+	publicIdentity, privateIdentity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsuleDirectory := t.TempDir()
+	credentials := [][]byte{bytes.Repeat([]byte{1}, 32), []byte("bob's offline recovery passphrase")}
+	migration, err := daemonClient.PrepareCapsuleMigration(ctx, capsuleDirectory, 1, "operators", 2, publicIdentity, []daemon.OfflineCapsuleMember{
+		{ID: "alice", Provider: "offline-keyfile", Credential: credentials[0]},
+		{ID: "bob", Provider: "offline-argon2id", Credential: credentials[1]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, err := indexbroker.LoadCapsule(migration.LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	identityPath := filepath.Join(root, "identity.key")
+	if err := os.WriteFile(identityPath, privateIdentity.Seed(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, releasePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketDirectory, err := os.MkdirTemp("/tmp", "vkb-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socket := filepath.Join(socketDirectory, "broker.sock")
+	configPath := filepath.Join(root, "broker.json")
+	config := map[string]any{
+		"format": 1, "capsule_directory": capsuleDirectory, "repository_id": repositoryID,
+		"identity_key_path": identityPath, "socket_path": socket,
+		"authorizations": []map[string]any{{
+			"component": "unused", "minimum_version": 1, "maximum_version": 1,
+			"release_identity": "test", "release_public_key": base64.StdEncoding.EncodeToString(releasePrivate[ed25519.SeedSize:]),
+			"peer_uid": uint32(os.Geteuid()), "capabilities": []string{"metadata-dek"},
+		}},
+	}
+	if err := writeNewProtectedJSON(configPath, config); err != nil {
+		t.Fatal(err)
+	}
+	process := exec.CommandContext(ctx, brokerBinary, configPath)
+	process.Env = []string{}
+	var processErrors bytes.Buffer
+	process.Stderr = &processErrors
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	processDone := make(chan error, 1)
+	go func() { processDone <- process.Wait() }()
+	processExited := false
+	t.Cleanup(func() {
+		if processExited {
+			return
+		}
+		_ = process.Process.Kill()
+		<-processDone
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		connection, dialErr := net.DialTimeout("unix", socket, 50*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			break
+		}
+		select {
+		case processErr := <-processDone:
+			processExited = true
+			t.Fatalf("broker exited before creating socket: %v: %s", processErr, processErrors.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("broker did not create socket: %v: %s", dialErr, processErrors.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	brokerClient, err := indexbroker.Dial(ctx, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer brokerClient.Close()
+	session, err := brokerClient.CreateSession(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, member := range []string{"alice", "bob"} {
+		contribution, err := capsule.ContributeOffline(session, "unix:"+socket, member, credentials[index], index == 0, capsule.Generation(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		unlocked, err := brokerClient.SubmitContribution(ctx, contribution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if unlocked != (index == 1) {
+			t.Fatalf("contribution %d unlocked=%t", index, unlocked)
+		}
+	}
+	status, err := brokerClient.Status(ctx)
+	if err != nil || status.Locked {
+		t.Fatalf("Rust broker status locked=%t, err=%v", status.Locked, err)
 	}
 }
 

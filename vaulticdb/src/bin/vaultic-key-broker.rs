@@ -1042,6 +1042,12 @@ fn rejection_event(
             "contribution_payload_authentication_failed",
             vec![("connection_id", connection_id.to_owned())],
         ),
+        Some(ContributionRejection::PayloadInvalid) => (
+            "warning",
+            "integrity",
+            "contribution_payload_invalid",
+            vec![("connection_id", connection_id.to_owned())],
+        ),
         Some(ContributionRejection::Rollback {
             last_seen_generation,
             current_generation,
@@ -1162,6 +1168,27 @@ mod tests {
             inspected.installation_path_read_only,
             trusted_installation_path(&executable).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn stale_socket_cleanup_rejects_active_and_non_socket_paths() {
+        let root = PathBuf::from("/tmp").join(format!(
+            "vbsc-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let socket = root.join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        assert!(remove_stale_socket(&socket).await.is_err());
+        drop(listener);
+        remove_stale_socket(&socket).await.unwrap();
+        assert!(!socket.exists());
+
+        fs::write(&socket, b"do not replace").unwrap();
+        assert!(remove_stale_socket(&socket).await.is_err());
+        assert_eq!(fs::read(&socket).unwrap(), b"do not replace");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1308,6 +1335,16 @@ mod tests {
         );
         let encoded = security_event_json(severity, category, event, &fields).unwrap();
         assert!(encoded.contains("\"connection_id\":\"connection-a\""));
+        assert!(!encoded.contains("ciphertext"));
+
+        let invalid = anyhow::Error::new(ContributionRejection::PayloadInvalid);
+        let (severity, category, event, fields) = rejection_event(&invalid, "connection-b");
+        assert_eq!(
+            (severity, category, event),
+            ("warning", "integrity", "contribution_payload_invalid")
+        );
+        let encoded = security_event_json(severity, category, event, &fields).unwrap();
+        assert!(encoded.contains("\"connection_id\":\"connection-b\""));
         assert!(!encoded.contains("ciphertext"));
 
         let rollback = anyhow::Error::new(ContributionRejection::Rollback {

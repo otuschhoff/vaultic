@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -26,7 +27,12 @@ func (unwrapper FIDO2HMACSecretUnwrapper) UnwrapMember(ctx context.Context, memb
 	if unwrapper.HelperPath == "" || unwrapper.PINFile == "" {
 		return nil, VerifiedPrincipal{}, fmt.Errorf("FIDO2 helper path and PIN file are required")
 	}
-	command := exec.CommandContext(ctx, unwrapper.HelperPath, "fido2-hmac-secret-unwrap", unwrapper.PINFile, member.RepositoryID, member.MemberID, member.KeyReference, strconv.FormatUint(uint64(member.RootKeyVersion), 10), member.Purpose, base64.StdEncoding.EncodeToString(ciphertext))
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(ciphertext)))
+	base64.StdEncoding.Encode(encoded, ciphertext)
+	defer clear(encoded)
+	command := exec.CommandContext(ctx, unwrapper.HelperPath, "fido2-hmac-secret-unwrap", unwrapper.PINFile, member.RepositoryID, member.MemberID, member.KeyReference, strconv.FormatUint(uint64(member.RootKeyVersion), 10), member.Purpose)
+	command.Env = []string{}
+	command.Stdin = bytes.NewReader(encoded)
 	output, err := command.Output()
 	if err != nil {
 		return nil, VerifiedPrincipal{}, fmt.Errorf("FIDO2 unwrap helper: %w", err)
@@ -45,7 +51,12 @@ func (unwrapper YubiKeyPIVUnwrapper) UnwrapMember(ctx context.Context, member Ex
 	if unwrapper.HelperPath == "" || unwrapper.PINFile == "" {
 		return nil, VerifiedPrincipal{}, fmt.Errorf("YubiKey PIV helper path and PIN file are required")
 	}
-	command := exec.CommandContext(ctx, unwrapper.HelperPath, "yubikey-piv-unwrap", unwrapper.PINFile, member.RepositoryID, member.MemberID, member.KeyReference, strconv.FormatUint(uint64(member.RootKeyVersion), 10), member.Purpose, base64.StdEncoding.EncodeToString(ciphertext))
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(ciphertext)))
+	base64.StdEncoding.Encode(encoded, ciphertext)
+	defer clear(encoded)
+	command := exec.CommandContext(ctx, unwrapper.HelperPath, "yubikey-piv-unwrap", unwrapper.PINFile, member.RepositoryID, member.MemberID, member.KeyReference, strconv.FormatUint(uint64(member.RootKeyVersion), 10), member.Purpose)
+	command.Env = []string{}
+	command.Stdin = bytes.NewReader(encoded)
 	output, err := command.Output()
 	if err != nil {
 		return nil, VerifiedPrincipal{}, fmt.Errorf("YubiKey PIV unwrap helper: %w", err)

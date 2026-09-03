@@ -124,7 +124,9 @@ func newIndexKeysQuorumEnrollFIDO2Command() *cobra.Command {
 		if memberID == "" || relyingPartyID == "" || pinFile == "" || outputPath == "" {
 			return fmt.Errorf("--member, --relying-party-id, --pin-file, and --output are required")
 		}
-		output, err := exec.CommandContext(command.Context(), custodianPath, "fido2-enroll", pinFile, relyingPartyID).Output()
+		helper := exec.CommandContext(command.Context(), custodianPath, "fido2-enroll", pinFile, relyingPartyID)
+		helper.Env = []string{}
+		output, err := helper.Output()
 		if err != nil {
 			return fmt.Errorf("enroll FIDO2 credential: %w", err)
 		}
@@ -569,7 +571,9 @@ func parseExternalPolicyMembers(ctx context.Context, repositoryID string, paths 
 			if helper == "" {
 				helper = "vaultic-key-custodian"
 			}
-			output, err := exec.CommandContext(ctx, helper, "fido2-hmac-secret-derive", definition.PINFile, repositoryID, definition.MemberID, definition.KeyReference).Output()
+			command := exec.CommandContext(ctx, helper, "fido2-hmac-secret-derive", definition.PINFile, repositoryID, definition.MemberID, definition.KeyReference)
+			command.Env = []string{}
+			output, err := command.Output()
 			if err != nil {
 				clearPolicyCredentials(tokens)
 				return nil, tokens, fmt.Errorf("derive FIDO2 enrollment secret: %w", err)

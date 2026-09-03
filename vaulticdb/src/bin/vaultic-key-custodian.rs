@@ -1,4 +1,4 @@
-use std::{env, fs, os::unix::fs::PermissionsExt};
+use std::{env, fs, io::Read, os::unix::fs::PermissionsExt};
 
 use anyhow::{bail, Context, Result};
 use base64::{
@@ -84,11 +84,7 @@ async fn fido2_unwrap(arguments: &[String]) -> Result<()> {
     let mut secret = fido2_secret(&arguments[1], &arguments[2], &arguments[3], &arguments[4])?;
     let provider = Fido2HmacSecretProvider::from_base64(BASE64.encode(secret))?;
     secret.zeroize();
-    let ciphertext = Zeroizing::new(
-        BASE64
-            .decode(&arguments[7])
-            .context("decode wrapped FIDO2 share")?,
-    );
+    let ciphertext = read_wrapped_share("FIDO2")?;
     let plaintext = provider
         .unwrap(
             &KeyContext {
@@ -173,6 +169,30 @@ fn read_pin(path: &str) -> Result<Zeroizing<String>> {
     Ok(pin)
 }
 
+fn read_wrapped_share(provider: &str) -> Result<Zeroizing<Vec<u8>>> {
+    const MAX_ENCODED_SHARE_BYTES: usize = 1024 * 1024;
+    let mut encoded = Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take((MAX_ENCODED_SHARE_BYTES + 1) as u64)
+        .read_to_end(&mut encoded)
+        .context("read wrapped share from stdin")?;
+    decode_wrapped_share(encoded.as_slice(), provider)
+}
+
+fn decode_wrapped_share(encoded: &[u8], provider: &str) -> Result<Zeroizing<Vec<u8>>> {
+    const MAX_ENCODED_SHARE_BYTES: usize = 1024 * 1024;
+    if encoded.len() > MAX_ENCODED_SHARE_BYTES {
+        bail!("wrapped share exceeds input limit");
+    }
+    let encoded = encoded.trim_ascii_end();
+    if encoded.is_empty() {
+        bail!("wrapped share stdin is empty");
+    }
+    Ok(Zeroizing::new(BASE64.decode(encoded).with_context(
+        || format!("decode wrapped {provider} share"),
+    )?))
+}
+
 #[cfg(not(target_env = "musl"))]
 fn parse_fido2_reference(reference: &str) -> Result<(String, Vec<u8>, Vec<u8>)> {
     let fields = reference
@@ -242,12 +262,25 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn wrapped_share_stdin_is_bounded_and_strictly_decoded() {
+        assert_eq!(
+            decode_wrapped_share(b"Y2lwaGVydGV4dA==\n", "test")
+                .unwrap()
+                .as_slice(),
+            b"ciphertext"
+        );
+        assert!(decode_wrapped_share(b"", "test").is_err());
+        assert!(decode_wrapped_share(b"not-base64", "test").is_err());
+        assert!(decode_wrapped_share(&vec![b'A'; 1024 * 1024 + 1], "test").is_err());
+    }
 }
 #[tokio::main]
 async fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match arguments.first().map(String::as_str) {
-        Some("yubikey-piv-unwrap") if arguments.len() == 8 => yubikey_piv_unwrap(&arguments).await,
+        Some("yubikey-piv-unwrap") if arguments.len() == 7 => yubikey_piv_unwrap(&arguments).await,
         Some("fido2-enroll") if arguments.len() == 3 => fido2_enroll(&arguments),
         Some("fido2-hmac-secret-derive") if arguments.len() == 5 => {
             let mut secret =
@@ -256,7 +289,7 @@ async fn main() -> Result<()> {
             secret.zeroize();
             Ok(())
         }
-        Some("fido2-hmac-secret-unwrap") if arguments.len() == 8 => fido2_unwrap(&arguments).await,
+        Some("fido2-hmac-secret-unwrap") if arguments.len() == 7 => fido2_unwrap(&arguments).await,
         _ => bail!("invalid vaultic-key-custodian operation or argument count"),
     }
 }
@@ -266,11 +299,7 @@ async fn yubikey_piv_unwrap(arguments: &[String]) -> Result<()> {
     let root_key_version = arguments[5]
         .parse::<u32>()
         .context("invalid root key version")?;
-    let ciphertext = Zeroizing::new(
-        BASE64
-            .decode(&arguments[7])
-            .context("decode wrapped PIV share")?,
-    );
+    let ciphertext = read_wrapped_share("PIV")?;
     let provider = YubikeyPivProvider::new(pin.as_str().to_owned());
     let plaintext = provider
         .unwrap(

@@ -11,8 +11,9 @@ import (
 func TestYubiKeyPIVUnwrapperUsesBoundContext(t *testing.T) {
 	root := t.TempDir()
 	argumentsPath := filepath.Join(root, "arguments")
+	stdinPath := filepath.Join(root, "stdin")
 	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + "\\n'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + "\\n'\n"
 	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -28,10 +29,17 @@ func TestYubiKeyPIVUnwrapperUsesBoundContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"yubikey-piv-unwrap", "/protected/pin", "repo-a", "piv-a", "pkcs11:reference", "3", "bound-purpose", base64.StdEncoding.EncodeToString([]byte("ciphertext"))} {
+	for _, expected := range []string{"yubikey-piv-unwrap", "/protected/pin", "repo-a", "piv-a", "pkcs11:reference", "3", "bound-purpose"} {
 		if !strings.Contains(string(arguments), expected) {
 			t.Fatalf("helper arguments %q do not contain %q", arguments, expected)
 		}
+	}
+	if strings.Contains(string(arguments), base64.StdEncoding.EncodeToString([]byte("ciphertext"))) {
+		t.Fatalf("wrapped share leaked into helper argv: %q", arguments)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil || string(stdin) != base64.StdEncoding.EncodeToString([]byte("ciphertext")) {
+		t.Fatalf("helper stdin = %q, %v", stdin, err)
 	}
 }
 
@@ -44,8 +52,10 @@ func TestYubiKeyPIVUnwrapperFailsClosed(t *testing.T) {
 
 func TestFIDO2HMACSecretUnwrapperUsesBoundContext(t *testing.T) {
 	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	stdinPath := filepath.Join(root, "stdin")
 	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '" + base64.StdEncoding.EncodeToString([]byte("fido-share")) + "\\n'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("fido-share")) + "\\n'\n"
 	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -56,5 +66,16 @@ func TestFIDO2HMACSecretUnwrapperUsesBoundContext(t *testing.T) {
 	}
 	if string(plaintext) != "fido-share" || identity.Authority != "fido2-hmac-secret" || identity.ImmutablePrincipalID != "credential-a" {
 		t.Fatalf("unexpected unwrap result: %q, %#v", plaintext, identity)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(arguments), base64.StdEncoding.EncodeToString([]byte("ciphertext"))) {
+		t.Fatalf("wrapped share leaked into helper argv: %q", arguments)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil || string(stdin) != base64.StdEncoding.EncodeToString([]byte("ciphertext")) {
+		t.Fatalf("helper stdin = %q, %v", stdin, err)
 	}
 }
