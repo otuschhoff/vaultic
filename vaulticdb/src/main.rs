@@ -227,18 +227,25 @@ impl VaulticDb for Service {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
         let repository_id = request.get_ref().repository_id.as_str();
         let capsule_sha256 = request.get_ref().capsule_sha256.as_str();
-        let master_key = self.storage.get_master_key().await?.ok_or_else(|| {
-            Status::failed_precondition("repository master key is not stored in the database")
-        })?;
-        verify_capsule_migration_proof(
-            &master_key,
-            repository_id,
-            capsule_sha256,
-            &request.get_ref().broker_key_proof,
-        )?;
-        self.storage
-            .finalize_capsule_migration(capsule_sha256)
-            .await?;
+        match self.storage.get_master_key().await? {
+            Some(master_key) => {
+                let master_key = Zeroizing::new(master_key);
+                verify_capsule_migration_proof(
+                    &master_key,
+                    repository_id,
+                    capsule_sha256,
+                    &request.get_ref().broker_key_proof,
+                )?;
+                self.storage
+                    .finalize_capsule_migration(capsule_sha256)
+                    .await?;
+            }
+            None => {
+                self.storage
+                    .finalize_capsule_migration(capsule_sha256)
+                    .await?;
+            }
+        }
         Ok(Response::new(Empty::default()))
     }
     async fn check_encryption(

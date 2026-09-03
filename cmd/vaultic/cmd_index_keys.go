@@ -841,12 +841,12 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 			return err
 		}
 		defer client.Close(command.Context())
+		if err := client.FinalizeCapsuleMigration(command.Context(), state.CapsuleSHA256, brokerKeyProof); err != nil {
+			return fmt.Errorf("finalize capsule migration before legacy route retirement: %w", err)
+		}
 		retiredKeys, retiredEscrows, err := retireLegacyQuorumBypasses(command.Context(), repo.Backend())
 		if err != nil {
-			return fmt.Errorf("legacy bypass retirement is incomplete; database master key retained: %w", err)
-		}
-		if err := client.FinalizeCapsuleMigration(command.Context(), state.CapsuleSHA256, brokerKeyProof); err != nil {
-			return fmt.Errorf("legacy repository routes retired but database master key retained: %w", err)
+			return fmt.Errorf("capsule migration finalized but legacy bypass retirement is incomplete; rerun migrate-finalize: %w", err)
 		}
 		_ = observability.Emit(command.Context(), observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index", Message: "capsule migration finalized and legacy key routes retired", Fields: map[string]any{"repository_id": state.RepositoryID, "capsule_generation": state.Generation, "retired_password_keys": retiredKeys, "retired_escrows": retiredEscrows}})
 		result := map[string]any{"finalized": true, "generation": state.Generation, "capsule_sha256": state.CapsuleSHA256, "pack_authenticated": packProof, "retired_password_keys": retiredKeys, "retired_escrows": retiredEscrows}

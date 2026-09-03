@@ -1,13 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
@@ -134,6 +141,110 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 	defer recovered.Close()
 	if recovered.Config().ID != repositoryID {
 		t.Fatalf("recovered repository %q, want %q", recovered.Config().ID, repositoryID)
+	}
+}
+
+func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+	environment, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	environment.gopts.BackendTestHook = nil
+	testRunInit(t, environment.gopts)
+	term, cancelTerm := termstatus.Setup(os.Stdin, io.Discard, io.Discard, true)
+	defer cancelTerm()
+	environment.gopts.Term = term
+
+	ctx := context.Background()
+	printer := progress.NewTerminalPrinter(true, 0, environment.gopts.Term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, environment.gopts, true, printer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryID := repo.Config().ID
+	if err := metadataindex.Activate(ctx, repo.Backend(), repositoryID); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	rawMasterKey, err := json.Marshal(repo.Key())
+	if err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	masterKey := []byte(base64.StdEncoding.EncodeToString(rawMasterKey))
+	clear(rawMasterKey)
+	backendStore := repo.Backend()
+	unlock()
+	defer clear(masterKey)
+
+	passphraseFile := filepath.Join(t.TempDir(), "metadata-passphrase")
+	if err := os.WriteFile(passphraseFile, []byte("metadata recovery passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	daemonOptions := daemon.Options{
+		Socket: testMetadataSocket(t), RepositoryID: repositoryID,
+		DaemonPath: testVaulticDBBinary(t), DataDir: t.TempDir(),
+		EncryptionMode: "initialize", PassphraseFile: passphraseFile,
+	}
+	client, err := daemon.Ensure(ctx, daemonOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	if err := client.StoreMasterKey(ctx, masterKey); err != nil {
+		t.Fatal(err)
+	}
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration, err := client.PrepareCapsuleMigration(ctx, t.TempDir(), 1, "operators", 2, publicKey, []daemon.OfflineCapsuleMember{
+		{ID: "alice", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{1}, 32)},
+		{ID: "bob", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{2}, 32)},
+		{ID: "carol", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{3}, 32)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := client.GetMasterKey(ctx); err != nil || !found {
+		t.Fatalf("prepare did not retain database master key: found %t, err %v", found, err)
+	}
+	if err := backendStore.Save(ctx, backend.Handle{Type: backend.SlateDBFile, Name: "escrow-retire.json", IsMetadata: true}, backend.NewByteReader([]byte("wrapped escrow"), backendStore.Hasher())); err != nil {
+		t.Fatal(err)
+	}
+
+	proof := hmac.New(sha256.New, masterKey)
+	_, _ = proof.Write([]byte("vaultic-capsule-migration-finalize-v1\x00" + repositoryID + "\x00" + migration.CapsuleSHA256))
+	if err := client.FinalizeCapsuleMigration(ctx, migration.CapsuleSHA256, proof.Sum(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.FinalizeCapsuleMigration(ctx, migration.CapsuleSHA256, proof.Sum(nil)); err != nil {
+		t.Fatalf("same migration finalize retry failed: %v", err)
+	}
+	if err := client.FinalizeCapsuleMigration(ctx, strings.Repeat("f", 64), proof.Sum(nil)); err == nil {
+		t.Fatal("different migration digest accepted after finalization")
+	}
+	if key, found, err := client.GetMasterKey(ctx); err != nil || found || len(key) != 0 {
+		t.Fatalf("database master key remains after finalization: found %t, bytes %d, err %v", found, len(key), err)
+	}
+	if _, _, err := retireLegacyQuorumBypasses(ctx, backendStore); err != nil {
+		t.Fatal(err)
+	}
+	for _, fileType := range []backend.FileType{backend.KeyFile} {
+		if err := backendStore.List(ctx, fileType, func(info backend.FileInfo) error {
+			return fmt.Errorf("managed bypass remains: %s", info.Name)
+		}); err != nil && !backendStore.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	if _, err := backendStore.Stat(ctx, backend.Handle{Type: backend.SlateDBFile, Name: "escrow-retire.json", IsMetadata: true}); err == nil {
+		t.Fatal("managed escrow remains after retirement")
+	}
+	status, err := client.KeyStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.PendingCapsuleMigrationSHA256 != "" || status.FinalizedCapsuleMigrationSHA256 != migration.CapsuleSHA256 {
+		t.Fatalf("migration status = %+v", status)
 	}
 }
 

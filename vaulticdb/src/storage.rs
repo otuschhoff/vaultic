@@ -323,8 +323,20 @@ impl Storage {
             .db
             .get(CAPSULE_MIGRATION_RECORD)
             .await
-            .map_err(storage_error)?
-            .ok_or_else(|| Status::failed_precondition("no prepared capsule migration"))?;
+            .map_err(storage_error)?;
+        let Some(pending) = pending else {
+            let finalized = self
+                .db
+                .get(CAPSULE_MIGRATION_FINALIZED_RECORD)
+                .await
+                .map_err(storage_error)?;
+            if finalized.as_deref() == Some(capsule_sha256.as_bytes()) {
+                return Ok(());
+            }
+            return Err(Status::failed_precondition(
+                "no matching prepared or finalized capsule migration",
+            ));
+        };
         if pending.as_ref() != capsule_sha256.as_bytes() {
             return Err(Status::failed_precondition(
                 "prepared capsule digest mismatch",
@@ -1034,6 +1046,11 @@ mod tests {
             b"repository-key"
         );
         storage.finalize_capsule_migration(&digest).await.unwrap();
+        storage.finalize_capsule_migration(&digest).await.unwrap();
+        assert!(storage
+            .finalize_capsule_migration(&"cd".repeat(32))
+            .await
+            .is_err());
         assert!(storage.get_master_key().await.unwrap().is_none());
         assert_eq!(
             storage.capsule_migration_status().await.unwrap(),

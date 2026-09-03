@@ -411,6 +411,52 @@ func TestRetireLegacyQuorumBypassesPreservesCapsuleMetadata(t *testing.T) {
 	}
 }
 
+type failRemoveOnceBackend struct {
+	backend.Backend
+	target string
+	failed bool
+}
+
+func (destination *failRemoveOnceBackend) Remove(ctx context.Context, handle backend.Handle) error {
+	if handle.Name == destination.target && !destination.failed {
+		destination.failed = true
+		return errors.New("injected removal failure")
+	}
+	return destination.Backend.Remove(ctx, handle)
+}
+
+func TestRetireLegacyQuorumBypassesResumesAfterPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	store := mem.New()
+	handles := []backend.Handle{
+		{Type: backend.KeyFile, Name: "password-a"},
+		{Type: backend.KeyFile, Name: "password-b"},
+		{Type: backend.SlateDBFile, Name: "escrow-old.json", IsMetadata: true},
+		{Type: backend.SlateDBFile, Name: "recovery-capsule-0001.json", IsMetadata: true},
+	}
+	for _, handle := range handles {
+		if err := store.Save(ctx, handle, backend.NewByteReader([]byte(handle.Name), store.Hasher())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	failing := &failRemoveOnceBackend{Backend: store, target: "password-b"}
+	if _, _, err := retireLegacyQuorumBypasses(ctx, failing); err == nil || !strings.Contains(err.Error(), "injected removal failure") {
+		t.Fatalf("partial retirement error = %v", err)
+	}
+	keys, escrows, err := retireLegacyQuorumBypasses(ctx, failing)
+	if err != nil || keys != 1 || escrows != 1 {
+		t.Fatalf("resumed retirement = keys %d, escrows %d, err %v", keys, escrows, err)
+	}
+	for _, handle := range handles[:3] {
+		if _, err := store.Stat(ctx, handle); err == nil {
+			t.Fatalf("legacy bypass %s remains", handle.Name)
+		}
+	}
+	if _, err := store.Stat(ctx, handles[3]); err != nil {
+		t.Fatalf("capsule metadata was removed: %v", err)
+	}
+}
+
 func TestMetadataRebuildImportRequiresRecoveryGuards(t *testing.T) {
 	base := indexImportOptions{
 		Activate:                   true,
