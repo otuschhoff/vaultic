@@ -17,12 +17,13 @@ import (
 const maxProviderResponse = 1024 * 1024
 
 type AzureKeyVaultUnwrapper struct {
-	token  string
+	token  []byte
 	client *http.Client
 }
 
-func NewAzureKeyVaultUnwrapper(token string, client *http.Client) (*AzureKeyVaultUnwrapper, error) {
-	if strings.TrimSpace(token) == "" {
+func NewAzureKeyVaultUnwrapper(token []byte, client *http.Client) (*AzureKeyVaultUnwrapper, error) {
+	token = bytes.TrimSpace(token)
+	if len(token) == 0 {
 		return nil, errors.New("Azure Key Vault bearer token is required")
 	}
 	if client == nil {
@@ -30,8 +31,10 @@ func NewAzureKeyVaultUnwrapper(token string, client *http.Client) (*AzureKeyVaul
 	}
 	providerClient := *client
 	providerClient.CheckRedirect = rejectProviderRedirect
-	return &AzureKeyVaultUnwrapper{token: strings.TrimSpace(token), client: &providerClient}, nil
+	return &AzureKeyVaultUnwrapper{token: append([]byte(nil), token...), client: &providerClient}, nil
 }
+
+func (unwrapper *AzureKeyVaultUnwrapper) Clear() { clear(unwrapper.token) }
 
 func rejectProviderRedirect(_ *http.Request, _ []*http.Request) error {
 	return errors.New("provider redirects are not allowed")
@@ -56,7 +59,7 @@ func (unwrapper *AzureKeyVaultUnwrapper) UnwrapMember(ctx context.Context, membe
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+unwrapper.token)
+	request.Header.Set("Authorization", "Bearer "+string(unwrapper.token))
 	request.Header.Set("Content-Type", "application/json")
 	response, err := unwrapper.client.Do(request)
 	if err != nil {
@@ -79,7 +82,7 @@ func (unwrapper *AzureKeyVaultUnwrapper) UnwrapMember(ctx context.Context, membe
 	if err != nil || len(plaintext) == 0 {
 		return nil, VerifiedPrincipal{}, errors.New("Azure Key Vault returned invalid plaintext")
 	}
-	principal, err := azureTokenPrincipal(unwrapper.token)
+	principal, err := azureTokenPrincipal(string(unwrapper.token))
 	if err != nil {
 		clear(plaintext)
 		return nil, VerifiedPrincipal{}, err

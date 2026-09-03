@@ -171,12 +171,19 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			defer clear(token)
 			var unwrapper indexbroker.ExternalMemberUnwrapper
 			if azureTokenFile != "" {
-				unwrapper, err = indexbroker.NewAzureKeyVaultUnwrapper(string(token), &http.Client{Timeout: 30 * time.Second})
+				azure, createErr := indexbroker.NewAzureKeyVaultUnwrapper(token, &http.Client{Timeout: 30 * time.Second})
+				if createErr != nil {
+					return createErr
+				}
+				defer azure.Clear()
+				unwrapper = azure
 			} else {
-				unwrapper, err = indexbroker.NewGoogleCloudKMSUnwrapper(string(token), &http.Client{Timeout: 30 * time.Second})
-			}
-			if err != nil {
-				return err
+				google, createErr := indexbroker.NewGoogleCloudKMSUnwrapper(token, &http.Client{Timeout: 30 * time.Second})
+				if createErr != nil {
+					return createErr
+				}
+				defer google.Clear()
+				unwrapper = google
 			}
 			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
 		} else {

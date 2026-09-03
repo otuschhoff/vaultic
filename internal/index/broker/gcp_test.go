@@ -29,7 +29,7 @@ func TestGoogleCloudKMSUnwrapperReturnsProviderAcceptedPrincipal(t *testing.T) {
 			return nil, nil
 		}
 	})}
-	unwrapper, err := NewGoogleCloudKMSUnwrapper("token-a", client)
+	unwrapper, err := NewGoogleCloudKMSUnwrapper([]byte("token-a"), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestGoogleCloudKMSUnwrapperFailsClosed(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
 	})}
-	unwrapper, err := NewGoogleCloudKMSUnwrapper("token-a", client)
+	unwrapper, err := NewGoogleCloudKMSUnwrapper([]byte("token-a"), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestGoogleCloudHSMRequiresProviderAttestation(t *testing.T) {
 		body := `{"plaintext":"` + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + `","protectionLevel":"` + protectionLevel + `"}`
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}
-	unwrapper, err := NewGoogleCloudKMSUnwrapper("token-a", client)
+	unwrapper, err := NewGoogleCloudKMSUnwrapper([]byte("token-a"), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestGoogleTokenIntrospectionRejectsExpiredToken(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-a","expires_in":"0"}`)), Header: make(http.Header)}, nil
 	})}
-	unwrapper, err := NewGoogleCloudKMSUnwrapper("token-a", client)
+	unwrapper, err := NewGoogleCloudKMSUnwrapper([]byte("token-a"), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestGoogleTokenIntrospectionErrorDoesNotLeakToken(t *testing.T) {
 		}
 		return nil, errors.New("request failed for " + request.URL.String())
 	})}
-	unwrapper, err := NewGoogleCloudKMSUnwrapper(token, client)
+	unwrapper, err := NewGoogleCloudKMSUnwrapper([]byte(token), client)
 	if err != nil {
 		t.Fatal(err)
 	}

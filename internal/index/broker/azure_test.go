@@ -17,6 +17,26 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
+func TestCloudUnwrapperTokensAreClearable(t *testing.T) {
+	azure, err := NewAzureKeyVaultUnwrapper([]byte("azure-token"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	google, err := NewGoogleCloudKMSUnwrapper([]byte("google-token"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	azure.Clear()
+	google.Clear()
+	for _, token := range [][]byte{azure.token, google.token} {
+		for _, value := range token {
+			if value != 0 {
+				t.Fatal("cloud bearer token was not cleared")
+			}
+		}
+	}
+}
+
 func azureTestToken(audience, tenant, object string) string {
 	claims := fmt.Sprintf(`{"aud":%q,"tid":%q,"oid":%q,"exp":%d}`, audience, tenant, object, time.Now().Add(time.Hour).Unix())
 	return "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature"
@@ -33,7 +53,7 @@ func TestAzureKeyVaultUnwrapperReturnsProviderAcceptedPrincipal(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"value":"` + base64.RawURLEncoding.EncodeToString([]byte("wrapped-share")) + `"}`)), Header: make(http.Header)}, nil
 	})}
-	unwrapper, err := NewAzureKeyVaultUnwrapper(token, client)
+	unwrapper, err := NewAzureKeyVaultUnwrapper([]byte(token), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +81,7 @@ func TestAzureKeyVaultUnwrapperFailsClosed(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"error":"denied"}`)), Header: make(http.Header)}, nil
 	})}
-	unwrapper, err := NewAzureKeyVaultUnwrapper(azureTestToken("https://vault.azure.net", "tenant-a", "object-a"), client)
+	unwrapper, err := NewAzureKeyVaultUnwrapper([]byte(azureTestToken("https://vault.azure.net", "tenant-a", "object-a")), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +91,7 @@ func TestAzureKeyVaultUnwrapperFailsClosed(t *testing.T) {
 }
 
 func TestProviderRedirectsAreRejected(t *testing.T) {
-	unwrapper, err := NewAzureKeyVaultUnwrapper("token", &http.Client{})
+	unwrapper, err := NewAzureKeyVaultUnwrapper([]byte("token"), &http.Client{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,12 +15,13 @@ import (
 )
 
 type GoogleCloudKMSUnwrapper struct {
-	token  string
+	token  []byte
 	client *http.Client
 }
 
-func NewGoogleCloudKMSUnwrapper(token string, client *http.Client) (*GoogleCloudKMSUnwrapper, error) {
-	if strings.TrimSpace(token) == "" {
+func NewGoogleCloudKMSUnwrapper(token []byte, client *http.Client) (*GoogleCloudKMSUnwrapper, error) {
+	token = bytes.TrimSpace(token)
+	if len(token) == 0 {
 		return nil, errors.New("Google Cloud bearer token is required")
 	}
 	if client == nil {
@@ -28,8 +29,10 @@ func NewGoogleCloudKMSUnwrapper(token string, client *http.Client) (*GoogleCloud
 	}
 	providerClient := *client
 	providerClient.CheckRedirect = rejectProviderRedirect
-	return &GoogleCloudKMSUnwrapper{token: strings.TrimSpace(token), client: &providerClient}, nil
+	return &GoogleCloudKMSUnwrapper{token: append([]byte(nil), token...), client: &providerClient}, nil
 }
+
+func (unwrapper *GoogleCloudKMSUnwrapper) Clear() { clear(unwrapper.token) }
 
 func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(ctx context.Context, member ExternalMemberContext, ciphertext []byte) ([]byte, VerifiedPrincipal, error) {
 	project, err := validateGoogleKeyReference(member.KeyReference)
@@ -51,7 +54,7 @@ func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(ctx context.Context, memb
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+unwrapper.token)
+	request.Header.Set("Authorization", "Bearer "+string(unwrapper.token))
 	request.Header.Set("Content-Type", "application/json")
 	response, err := unwrapper.client.Do(request)
 	if err != nil {
@@ -95,7 +98,7 @@ func validateGoogleKeyReference(reference string) (string, error) {
 }
 
 func (unwrapper *GoogleCloudKMSUnwrapper) lookupPrincipal(ctx context.Context, project string) (VerifiedPrincipal, error) {
-	endpoint := "https://oauth2.googleapis.com/tokeninfo?access_token=" + url.QueryEscape(unwrapper.token)
+	endpoint := "https://oauth2.googleapis.com/tokeninfo?access_token=" + url.QueryEscape(string(unwrapper.token))
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return VerifiedPrincipal{}, err
