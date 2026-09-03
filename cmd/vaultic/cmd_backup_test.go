@@ -11,8 +11,47 @@ import (
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/global"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
+
+func TestBackupCrawlFlags(t *testing.T) {
+	command := newBackupCommand(&global.Options{})
+	for _, name := range []string{
+		"use-cwalk", "cwalk-concurrency", "use-pathdiff", "pathdiff-endpoint",
+		"pathdiff-require-coverage", "pathdiff-svm-map",
+	} {
+		if command.Flags().Lookup(name) == nil {
+			t.Errorf("backup flag --%s is not registered", name)
+		}
+	}
+	if value, err := command.Flags().GetInt("cwalk-concurrency"); err != nil || value != runtime.GOMAXPROCS(0) {
+		t.Errorf("cwalk concurrency = %d, %v; want GOMAXPROCS %d", value, err, runtime.GOMAXPROCS(0))
+	}
+}
+
+func TestBackupCrawlOptionValidation(t *testing.T) {
+	globalOptions := global.Options{InsecureNoPassword: true}
+	tests := []struct {
+		name string
+		opts BackupOptions
+		want string
+	}{
+		{"invalid-workers", BackupOptions{UseCWalk: true}, "--cwalk-concurrency must be at least 1"},
+		{"pathdiff-needs-cwalk", BackupOptions{UsePathdiff: true}, "--use-pathdiff requires --use-cwalk"},
+		{"pathdiff-needs-endpoint", BackupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true}, "--use-pathdiff requires --pathdiff-endpoint"},
+		{"pathdiff-needs-map", BackupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket"}, "--use-pathdiff requires --pathdiff-svm-map"},
+		{"coverage-needs-pathdiff", BackupOptions{PathdiffRequireCoverage: true}, "--pathdiff-require-coverage requires --use-pathdiff"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.opts.Check(globalOptions, nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Check() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
 
 func TestCollectTargets(t *testing.T) {
 	dir := rtest.TempDir(t)

@@ -22,6 +22,20 @@ func NewLocal() FS {
 	return local{}
 }
 
+// IsLocal reports whether filesystem accesses the host filesystem directly.
+func IsLocal(filesystem FS) bool {
+	switch filesystem := filesystem.(type) {
+	case local, *local:
+		return true
+	case Track:
+		return IsLocal(filesystem.FS)
+	case *Track:
+		return IsLocal(filesystem.FS)
+	default:
+		return false
+	}
+}
+
 // statically ensure that local implements FS.
 var _ FS = &local{}
 

@@ -1852,6 +1852,68 @@ func TestArchiverExplicitBackupTarget(t *testing.T) {
 	}
 }
 
+func TestArchiverSelectiveSubtreeReuse(t *testing.T) {
+	ctx := t.Context()
+	tempdir, repo := prepareTempdirRepoSrc(t, TestDir{
+		"changed":   TestDir{"file": TestFile{Content: "before"}},
+		"unchanged": TestDir{"file": TestFile{Content: "stable"}},
+	})
+	back := rtest.Chdir(t, tempdir)
+	defer back()
+
+	first := New(repo, fs.NewLocal(), Options{})
+	parent, _, _, err := first.Snapshot(ctx, []string{"."}, SnapshotOptions{Time: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("changed", "file"), []byte("after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("unchanged", "file"), []byte("not crawled"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var reused []string
+	second := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 8, CWalkQueue: 1, CWalkRoots: []string{"changed"}})
+	second.ReuseSubtree = func(_ string, sourcePath string, _ *data.Node) bool {
+		if filepath.Base(sourcePath) == "unchanged" {
+			reused = append(reused, sourcePath)
+			return true
+		}
+		return false
+	}
+	_, snapshotID, _, err := second.Snapshot(ctx, []string{"."}, SnapshotOptions{Time: time.Now(), ParentSnapshot: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reused) != 1 {
+		t.Fatalf("reused subtrees = %q, want one unchanged subtree", reused)
+	}
+	TestEnsureSnapshot(t, repo, snapshotID, TestDir{
+		"changed":   TestDir{"file": TestFile{Content: "after"}},
+		"unchanged": TestDir{"file": TestFile{Content: "stable"}},
+	})
+}
+
+func TestArchiverCWalkTraversal(t *testing.T) {
+	ctx := t.Context()
+	source := TestDir{
+		"a":    TestDir{"nested": TestDir{"file": TestFile{Content: "a"}}},
+		"b":    TestDir{},
+		"root": TestFile{Content: "root"},
+	}
+	tempdir, repo := prepareTempdirRepoSrc(t, source)
+	back := rtest.Chdir(t, tempdir)
+	defer back()
+
+	arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 8, CWalkQueue: 1})
+	_, snapshotID, _, err := arch.Snapshot(ctx, []string{"."}, SnapshotOptions{Time: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	TestEnsureSnapshot(t, repo, snapshotID, source)
+}
+
 func TestArchiverMandatorySelectRejectsExplicitTarget(t *testing.T) {
 	ctx := t.Context()
 	tempdir, repo := prepareTempdirRepoSrc(t, TestDir{"blocked": TestFile{Content: "must not be archived"}})

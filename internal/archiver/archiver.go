@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/crawl"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
@@ -98,10 +99,11 @@ type Archiver struct {
 	FS              fs.FS
 	Options         Options
 
-	fileSaver *fileSaver
-	treeSaver *treeSaver
-	mu        sync.Mutex
-	summary   *Summary
+	fileSaver     *fileSaver
+	treeSaver     *treeSaver
+	cwalkManifest *crawl.DirectoryManifest
+	mu            sync.Mutex
+	summary       *Summary
 
 	// Error is called for all errors that occur during backup.
 	Error ErrorFunc
@@ -129,6 +131,9 @@ type Archiver struct {
 	// ReuseNode can reject the legacy unchanged-file fast path when an
 	// additional metadata authority requires the file to be read again.
 	ReuseNode func(snapshotPath, sourcePath string, info *fs.ExtendedFileInfo, previous *data.Node) bool
+	// ReuseSubtree permits a verified change source to reuse an unchanged
+	// parent directory without listing its descendants.
+	ReuseSubtree func(snapshotPath, sourcePath string, previous *data.Node) bool
 
 	// StartFile is called when a file is being processed by a worker.
 	StartFile func(filename string)
@@ -164,6 +169,15 @@ type Options struct {
 	// SaveTreeConcurrency sets how many trees are marshalled and saved to the
 	// repo concurrently.
 	SaveTreeConcurrency uint
+
+	// CWalkConcurrency enables a disk-backed cwalk directory manifest using
+	// this many workers. Zero retains direct sequential directory reads.
+	CWalkConcurrency int
+	// CWalkQueue bounds directory records waiting for manifest persistence.
+	CWalkQueue int
+	// CWalkRoots optionally limits manifest discovery to selective changed roots.
+	// Empty means the snapshot targets.
+	CWalkRoots []string
 }
 
 // applyDefaults returns a copy of o with the default options set for all unset
@@ -202,6 +216,7 @@ func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
 		ReconcileNode:  func(string, string, *data.Node) {},
 		BeforeSnapshot: func() error { return nil },
 		ReuseNode:      func(string, string, *fs.ExtendedFileInfo, *data.Node) bool { return true },
+		ReuseSubtree:   func(string, string, *data.Node) bool { return false },
 		StartFile:      func(string) {},
 		CompleteBlob:   func(uint64) {},
 		ExcludedItem:   func(string) {},
@@ -365,6 +380,11 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 			return futureNode{}, err
 		}
 		snItem := join(snPath, name)
+		if oldNode != nil && oldNode.Type == data.NodeTypeDir && oldNode.Subtree != nil && arch.ReuseSubtree(snItem, pathname, oldNode) {
+			node := *oldNode
+			nodes = append(nodes, newFutureNodeWithResult(futureNodeResult{snPath: snItem, target: pathname, node: &node}))
+			continue
+		}
 		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode, false)
 
 		// return error early if possible
@@ -392,11 +412,6 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 }
 
 func (arch *Archiver) dirToNodeAndEntries(snPath, dir string, meta fs.File) (node *data.Node, names []string, err error) {
-	err = meta.MakeReadable()
-	if err != nil {
-		return nil, nil, fmt.Errorf("openfile for readdirnames failed: %w", err)
-	}
-
 	node, err = arch.nodeFromFileInfo(snPath, dir, meta, false)
 	if err != nil {
 		return nil, nil, err
@@ -405,6 +420,21 @@ func (arch *Archiver) dirToNodeAndEntries(snPath, dir string, meta fs.File) (nod
 		return nil, nil, fmt.Errorf("directory %q changed type, refusing to archive", snPath)
 	}
 
+	if arch.cwalkManifest != nil {
+		var found bool
+		names, found, err = arch.cwalkManifest.Names(dir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read cwalk manifest for %v: %w", dir, err)
+		}
+		if found {
+			sort.Strings(names)
+			return node, names, nil
+		}
+	}
+	err = meta.MakeReadable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("openfile for readdirnames failed: %w", err)
+	}
 	names, err = meta.Readdirnames(-1)
 	if err != nil {
 		return nil, nil, fmt.Errorf("readdirnames %v failed: %w", dir, err)
@@ -740,6 +770,11 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 			if err != nil {
 				return futureNode{}, 0, err
 			}
+			if oldNode != nil && oldNode.Type == data.NodeTypeDir && oldNode.Subtree != nil && arch.ReuseSubtree(pathname, subatree.Path, oldNode) {
+				node := *oldNode
+				nodes = append(nodes, newFutureNodeWithResult(futureNodeResult{snPath: pathname, target: subatree.Path, node: &node}))
+				continue
+			}
 			fn, excluded, err := arch.save(ctx, pathname, subatree.Path, oldNode, subatree.Explicit)
 
 			if err != nil {
@@ -931,6 +966,38 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 	atree, err := newTree(arch.FS, cleanTargets)
 	if err != nil {
 		return nil, vaultic.ID{}, nil, err
+	}
+	if arch.Options.CWalkConcurrency > 0 && fs.IsLocal(arch.FS) {
+		queueCapacity := arch.Options.CWalkQueue
+		if queueCapacity <= 0 {
+			queueCapacity = 4096
+		}
+		var selectMu sync.Mutex
+		roots := arch.Options.CWalkRoots
+		if len(roots) == 0 {
+			roots = targets
+		}
+		manifest, manifestErr := crawl.BuildDirectoryManifest(ctx, roots, arch.Options.CWalkConcurrency, queueCapacity, func(item string, _ os.FileInfo) bool {
+			selectMu.Lock()
+			defer selectMu.Unlock()
+			if !arch.SelectByName(item) {
+				return true
+			}
+			info, err := arch.FS.Lstat(item)
+			if err != nil {
+				return false
+			}
+			return !arch.MandatorySelect(item, info, arch.FS) || !arch.Select(item, info, arch.FS)
+		})
+		if manifestErr != nil {
+			debug.Log("cwalk manifest unavailable, using sequential traversal: %v", manifestErr)
+		} else {
+			arch.cwalkManifest = manifest
+			defer func() {
+				_ = manifest.Close()
+				arch.cwalkManifest = nil
+			}()
+		}
 	}
 
 	var rootTreeID vaultic.ID

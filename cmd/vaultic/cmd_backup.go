@@ -15,12 +15,14 @@ import (
 	"strings"
 	"time"
 
+	uppathdiff "github.com/otuschhoff/pathdiff"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/otuschhoff/vaultic/internal/archiver"
 	"github.com/otuschhoff/vaultic/internal/configfile"
+	"github.com/otuschhoff/vaultic/internal/crawl"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
@@ -82,39 +84,45 @@ Exit status is 12 if the password is incorrect.
 type BackupOptions struct {
 	filter.ExcludePatternOptions
 
-	Parent            string
-	GroupBy           data.SnapshotGroupByOptions
-	Force             bool
-	ExcludeOtherFS    bool
-	ExcludeIfPresent  []string
-	ExcludeCaches     bool
-	ExcludeLargerThan string
-	ExcludeCloudFiles bool
-	Stdin             bool
-	StdinFilename     string
-	StdinCommand      bool
-	Tags              data.TagLists
-	Host              string
-	Label             string
-	Description       string
-	DescriptionFrom   string
-	DeleteNever       bool
-	DeleteAfter       string
-	FilesFrom         []string
-	FilesFromVerbatim []string
-	FilesFromRaw      []string
-	TimeStamp         string
-	WithAtime         bool
-	IgnoreInode       bool
-	IgnoreCtime       bool
-	UseFsSnapshot     bool
-	DryRun            bool
-	ReadConcurrency   uint
-	NoScan            bool
-	SkipIfUnchanged   bool
-	ProfileNames      []string
-	Init              bool
-	List              bool
+	Parent                  string
+	GroupBy                 data.SnapshotGroupByOptions
+	Force                   bool
+	ExcludeOtherFS          bool
+	ExcludeIfPresent        []string
+	ExcludeCaches           bool
+	ExcludeLargerThan       string
+	ExcludeCloudFiles       bool
+	Stdin                   bool
+	StdinFilename           string
+	StdinCommand            bool
+	Tags                    data.TagLists
+	Host                    string
+	Label                   string
+	Description             string
+	DescriptionFrom         string
+	DeleteNever             bool
+	DeleteAfter             string
+	FilesFrom               []string
+	FilesFromVerbatim       []string
+	FilesFromRaw            []string
+	TimeStamp               string
+	WithAtime               bool
+	IgnoreInode             bool
+	IgnoreCtime             bool
+	UseFsSnapshot           bool
+	DryRun                  bool
+	ReadConcurrency         uint
+	NoScan                  bool
+	UseCWalk                bool
+	CWalkConcurrency        int
+	UsePathdiff             bool
+	PathdiffEndpoint        string
+	PathdiffRequireCoverage bool
+	PathdiffSVMMap          string
+	SkipIfUnchanged         bool
+	ProfileNames            []string
+	Init                    bool
+	List                    bool
 
 	readConcurrencyFlag *pflag.Flag
 }
@@ -157,6 +165,12 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.IgnoreCtime, "ignore-ctime", false, "ignore ctime changes when checking for modified files (default: $VAULTIC_IGNORE_CTIME or false)")
 	f.BoolVarP(&opts.DryRun, "dry-run", "n", false, "do not upload or write any data, just show what would be done")
 	f.BoolVar(&opts.NoScan, "no-scan", false, "do not run scanner to estimate size of backup")
+	f.BoolVar(&opts.UseCWalk, "use-cwalk", false, "use parallel cwalk traversal for the backup scanner")
+	f.IntVar(&opts.CWalkConcurrency, "cwalk-concurrency", runtime.GOMAXPROCS(0), "run `n` concurrent cwalk workers")
+	f.BoolVar(&opts.UsePathdiff, "use-pathdiff", false, "use verified pathdiff events to skip unchanged subtrees")
+	f.StringVar(&opts.PathdiffEndpoint, "pathdiff-endpoint", "", "pathdiff control socket `path`")
+	f.BoolVar(&opts.PathdiffRequireCoverage, "pathdiff-require-coverage", false, "fail instead of performing a full crawl when pathdiff coverage is unverified")
+	f.StringVar(&opts.PathdiffSVMMap, "pathdiff-svm-map", "", "pathdiff source-to-LIF/SVM/volume topology JSON `file`")
 	if runtime.GOOS == "windows" {
 		f.BoolVar(&opts.UseFsSnapshot, "use-fs-snapshot", false, "use filesystem snapshot where possible (currently only Windows VSS)")
 	}
@@ -395,6 +409,21 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 
 // Check returns an error when an invalid combination of options was set.
 func (opts BackupOptions) Check(gopts global.Options, args []string) error {
+	if opts.UseCWalk && opts.CWalkConcurrency < 1 {
+		return errors.Fatal("--cwalk-concurrency must be at least 1")
+	}
+	if opts.UsePathdiff && !opts.UseCWalk {
+		return errors.Fatal("--use-pathdiff requires --use-cwalk")
+	}
+	if opts.UsePathdiff && opts.PathdiffEndpoint == "" {
+		return errors.Fatal("--use-pathdiff requires --pathdiff-endpoint")
+	}
+	if opts.UsePathdiff && opts.PathdiffSVMMap == "" {
+		return errors.Fatal("--use-pathdiff requires --pathdiff-svm-map")
+	}
+	if opts.PathdiffRequireCoverage && !opts.UsePathdiff {
+		return errors.Fatal("--pathdiff-require-coverage requires --use-pathdiff")
+	}
 	if gopts.Password == "" && !gopts.InsecureNoPassword {
 		if opts.Stdin {
 			return errors.Fatal("cannot read both password and data from stdin")
@@ -731,6 +760,36 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		targetFS = backupFSTestHook(targetFS)
 	}
 
+	pathdiffPlan := crawl.Plan{Reason: "pathdiff is disabled"}
+	if opts.UsePathdiff {
+		if !fs.IsLocal(targetFS) {
+			pathdiffPlan.Reason = "source does not use the plain local filesystem"
+		} else if parentSnapshot == nil {
+			pathdiffPlan.Reason = "no parent snapshot is available"
+		} else {
+			topology, topologyErr := crawl.LoadTopology(opts.PathdiffSVMMap)
+			if topologyErr != nil {
+				pathdiffPlan.Reason = topologyErr.Error()
+			} else {
+				service := crawl.NewPathdiffService(uppathdiff.NewClient(opts.PathdiffEndpoint))
+				pathdiffPlan, err = crawl.BuildPathdiffPlan(ctx, service, topology, targets, parentSnapshot.Time, backupStart)
+				if err != nil {
+					return fmt.Errorf("build pathdiff crawl plan: %w", err)
+				}
+			}
+		}
+		if !pathdiffPlan.Selective {
+			if opts.PathdiffRequireCoverage {
+				return errors.Fatalf("pathdiff coverage is required: %s", pathdiffPlan.Reason)
+			}
+			if !gopts.JSON {
+				printer.V("pathdiff coverage unverified, using full cwalk traversal: %s", pathdiffPlan.Reason)
+			}
+		} else if !gopts.JSON {
+			printer.V("pathdiff coverage verified; crawling %d changed subtrees", len(pathdiffPlan.ChangedDirs))
+		}
+	}
+
 	// rejectFuncs collect functions that can reject items from the backup based on path and file info
 	rejectFuncs, err := collectRejectFuncs(opts, targets, targetFS, printer.E)
 	if err != nil {
@@ -758,7 +817,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 	cancelCtx, cancel := context.WithCancel(wgCtx)
 	defer cancel()
 
-	if !opts.NoScan {
+	if !opts.NoScan && !pathdiffPlan.Selective && !opts.UseCWalk {
 		sc := archiver.NewScanner(targetFS)
 		sc.SelectByName = selectByNameFilter
 		sc.Select = selectFilter
@@ -771,9 +830,22 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		wg.Go(func() error { return sc.Scan(cancelCtx, targets) })
 	}
 
-	arch := archiver.New(repo.AppendTransaction(), targetFS, archiver.Options{ReadConcurrency: opts.ReadConcurrency})
+	archiverOptions := archiver.Options{ReadConcurrency: opts.ReadConcurrency}
+	if opts.UseCWalk && (!pathdiffPlan.Selective || len(pathdiffPlan.ChangedDirs) > 0) {
+		archiverOptions.CWalkConcurrency = opts.CWalkConcurrency
+		archiverOptions.CWalkQueue = 4096
+		if pathdiffPlan.Selective {
+			archiverOptions.CWalkRoots = pathdiffPlan.ChangedDirs
+		}
+	}
+	arch := archiver.New(repo.AppendTransaction(), targetFS, archiverOptions)
 	arch.SelectByName = selectByNameFilter
 	arch.Select = selectFilter
+	if pathdiffPlan.Selective {
+		arch.ReuseSubtree = func(_ string, sourcePath string, _ *data.Node) bool {
+			return pathdiffPlan.ReuseSubtree(sourcePath)
+		}
+	}
 	if mandatorySelect != nil {
 		arch.MandatorySelect = mandatorySelect
 	}

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -120,6 +122,90 @@ func TestScanner(t *testing.T) {
 				t.Error(cmp.Diff(test.want, results))
 			}
 		})
+	}
+}
+
+func TestScannerCWalkEquivalent(t *testing.T) {
+	tempdir := rtest.TempDir(t)
+	TestCreateFiles(t, tempdir, TestDir{
+		"keep": TestDir{
+			"a.txt":  TestFile{Content: "alpha"},
+			"empty":  TestDir{},
+			"nested": TestDir{"b.bin": TestFile{Content: "binary"}},
+		},
+		"skip":    TestDir{"ignored.txt": TestFile{Content: "ignored"}},
+		"top.txt": TestFile{Content: "top"},
+	})
+
+	run := func(workers int) (ScanStats, []string) {
+		t.Helper()
+		scanner := NewScanner(fs.NewLocal())
+		scanner.CWalkWorkers = workers
+		scanner.SelectByName = func(item string) bool {
+			return filepath.Base(item) != "skip"
+		}
+		scanner.Select = func(_ string, info *fs.ExtendedFileInfo, _ fs.FS) bool {
+			return info.Mode.IsDir() || info.Size <= 5
+		}
+		var final ScanStats
+		var paths []string
+		scanner.Result = func(item string, stats ScanStats) {
+			if item == "" {
+				final = stats
+				return
+			}
+			relative, err := filepath.Rel(tempdir, item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths = append(paths, relative)
+		}
+		if err := scanner.Scan(t.Context(), []string{tempdir}); err != nil {
+			t.Fatal(err)
+		}
+		sort.Strings(paths)
+		return final, paths
+	}
+
+	wantStats, wantPaths := run(0)
+	gotStats, gotPaths := run(8)
+	if diff := cmp.Diff(wantStats, gotStats); diff != "" {
+		t.Errorf("final stats mismatch (-sequential +cwalk):\n%s", diff)
+	}
+	if diff := cmp.Diff(wantPaths, gotPaths); diff != "" {
+		t.Errorf("visited paths mismatch (-sequential +cwalk):\n%s", diff)
+	}
+}
+
+func TestScannerCWalkSuppressedErrorFallsBack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions differ on Windows")
+	}
+	tempdir := rtest.TempDir(t)
+	TestCreateFiles(t, tempdir, TestDir{
+		"readable":   TestFile{Content: "readable"},
+		"unreadable": TestDir{"hidden": TestFile{Content: "hidden"}},
+	})
+	unreadable := filepath.Join(tempdir, "unreadable")
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+
+	scanner := NewScanner(fs.NewLocal())
+	scanner.CWalkWorkers = 4
+	scanner.Error = func(_ string, _ error) error { return nil }
+	var final ScanStats
+	scanner.Result = func(item string, stats ScanStats) {
+		if item == "" {
+			final = stats
+		}
+	}
+	if err := scanner.Scan(t.Context(), []string{tempdir}); err != nil {
+		t.Fatal(err)
+	}
+	if final.Files != 1 || final.Bytes != uint64(len("readable")) {
+		t.Fatalf("fallback stats = %#v", final)
 	}
 }
 
@@ -315,5 +401,31 @@ func TestScannerCancel(t *testing.T) {
 
 	if lastStats != result {
 		t.Errorf("wrong final result, want\n  %#v\ngot:\n  %#v", result, lastStats)
+	}
+}
+
+func BenchmarkScannerCWalkConcurrency(b *testing.B) {
+	tempdir := b.TempDir()
+	for directory := range 64 {
+		name := filepath.Join(tempdir, strconv.Itoa(directory))
+		if err := os.Mkdir(name, 0o700); err != nil {
+			b.Fatal(err)
+		}
+		for file := range 32 {
+			if err := os.WriteFile(filepath.Join(name, strconv.Itoa(file)), []byte("benchmark"), 0o600); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	for _, workers := range []int{1, 2, 4, 8} {
+		b.Run(strconv.Itoa(workers)+"-workers", func(b *testing.B) {
+			for range b.N {
+				scanner := NewScanner(fs.NewLocal())
+				scanner.CWalkWorkers = workers
+				if err := scanner.Scan(b.Context(), []string{tempdir}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

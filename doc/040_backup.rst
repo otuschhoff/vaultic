@@ -66,6 +66,52 @@ are the files currently being read by vaultic.
 Be aware that the live status shows the processed files and not the transferred
 data. Transferred volume might be lower (due to deduplication) or higher.
 
+Parallel and selective crawling
+*******************************
+
+For large local filesystem trees, ``--use-cwalk`` runs the initial traversal with
+the upstream parallel cwalk engine. ``--cwalk-concurrency N`` controls its worker
+count and defaults to the Go process CPU count. A bounded internal queue applies
+backpressure to concurrent callbacks. Non-local filesystem implementations use the
+standard scanner automatically.
+
+``--use-pathdiff`` enables selective parent-subtree reuse and requires all of
+``--use-cwalk``, ``--pathdiff-endpoint PATH``, and ``--pathdiff-svm-map FILE``.
+The endpoint is the Unix control socket of a running upstream pathdiff service. The
+map is strict version-1 JSON containing only source-to-LIF/SVM/volume topology.
+See the crawl architecture document for the complete schema and state machine.
+
+Every field in a source entry is required, and every backup target must have
+exactly one entry. ``remote_path`` must be absolute::
+
+        {
+            "version": 1,
+            "sources": [
+                {
+                    "target": "/mnt/finance",
+                    "remote_path": "/vol/finance/dept-a",
+                    "lif": "192.0.2.10",
+                    "svm_id": "7f66f7de-6f2c-11ef-a3bd-00a098012345",
+                    "svm": "svm-finance",
+                    "volume_msid": "2163258291",
+                    "volume": "finance"
+                }
+            ]
+        }
+
+For each source, Vaultic queries that service for observed changes in the exact
+parent-snapshot-to-backup-start window and for the time since which the matching
+LIF/SVM observation has been active. Selective mode requires sufficient retention,
+an observation start no later than the parent, the same active engine session before
+and after the query, and exact LIF/SVM/volume ID/name matching. The topology file
+does not provide coverage evidence. Otherwise Vaultic reports the reason and
+performs a full cwalk scan. Add ``--pathdiff-require-coverage`` when automation must fail
+instead of accepting that fallback. The full progress scan is omitted after a
+selective plan is verified because running it would negate subtree skipping.
+Changed subtree roots still use cwalk; only their ancestor frontier uses direct
+directory reads. Parent-time boundaries are inclusive because snapshot time marks
+backup start, so an equal-time event must be treated conservatively as a change.
+
 On Windows, the ``--use-fs-snapshot`` option will use Windows' Volume Shadow Copy
 Service (VSS) when creating backups. Vaultic will transparently create a VSS
 snapshot for each volume that contains files to backup. Files are read from the

@@ -231,12 +231,100 @@ Crawling datasets containing 1.5+ billion inodes across high-performance enterpr
 
 2. **Selective Change-Path Acceleration via `pathdiff` (`github.com/otuschhoff/pathdiff`):**
    - Uses storage system change event feeds (`pathdiff`) to selectively identify subdirectories and target paths that have experienced changes since the timestamp of the last successful backup crawl/snapshot.
-   - **Guaranteed Event Coverage Requirement:** `pathdiff` acceleration is enabled **only when 100% event coverage** can be strictly verified since the last snapshot timestamp (i.e. contiguous event log sequence numbers with zero buffer overflows, missing event windows, or service restarts). If 100% coverage cannot be guaranteed, `vaultic` automatically falls back safely to a full `cwalk` directory traversal.
+  - **Guaranteed Event Coverage Requirement:** `pathdiff` acceleration is enabled **only when the running service reports that it observed the requested source continuously from no later than the parent snapshot through the end of the requested window**. If that claim cannot be established, `vaultic` automatically falls back safely to a full `cwalk` directory traversal.
    - **Volume & Topology Semantic Matching:**
      - Maps `vaultic` source paths (e.g., `/mnt/nfs_finance/dept_a`) to `pathdiff`'s `volume + subpath` model.
      - Resolves storage volume IDs to canonical volume names.
      - Resolves `vaultic` source paths to storage volumes via target host LIF (Logical Interface) IP/hostname $\rightarrow$ SVM (Storage Virtual Machine) $\rightarrow$ volume mapping.
    - **`pathdiff` Enhancements & In-Tree Import:**
-     - Making necessary enhancements to `pathdiff` to support volume ID-to-name resolution, LIF $\rightarrow$ SVM volume matching, and contiguous event coverage verification is explicitly within scope.
+    - Making necessary enhancements to `pathdiff` to support volume ID-to-name resolution, LIF $\rightarrow$ SVM volume matching, and service-owned observation coverage is explicitly within scope.
      - `pathdiff` may be imported directly into `vaultic` (e.g., under `internal/pathdiff` or as an embedded module) to eliminate RPC latency, streamline volume/SVM matching, and ensure zero-copy event validation.
+
+#### Implemented data flow
+
+`cwalk` is used only for a plain local filesystem, because its API invokes native
+`os.Lstat` and `os.ReadDir`. VSS, stdin, command-backed, and test filesystem
+implementations continue through the `internal/fs.FS` sequential walker. Concurrent
+callbacks enter a bounded 4096-item adapter queue; one aggregator owns cumulative
+statistics and progress callbacks. Existing selection functions are serialized
+because their contract does not require thread safety.
+
+Selective backup is implemented at the parent-tree reuse boundary. A directory is
+reused only when it has a parent node with a durable subtree ID and no verified
+changed path is equal to, above, or below that directory. Changed ancestors are
+opened and listed normally. This preserves deterministic tree assembly and detects
+creates and deletes while avoiding all I/O below unrelated directory nodes.
+Full crawls persist cwalk directory results in fixed-size Pebble batches and consume
+them during archive construction. Selective crawls build that manifest only below
+collapsed changed roots; the small ancestor frontier uses direct directory reads.
+Both the callback queue and persistence batch are bounded.
+Each walker starts with one worker and resizes to the configured concurrency after
+root discovery. This uses cwalk's zero-delay live workers instead of paying its
+staggered startup delay before useful branch work exists.
+
+```mermaid
+stateDiagram-v2
+    [*] --> FullCrawl
+    FullCrawl --> Verify: pathdiff enabled and parent exists
+    Verify --> FullCrawl: endpoint, retention, topology, or engine invalid
+    Verify --> QueryService: topology resolved
+    QueryService --> FullCrawl: unavailable, late observation, reconnect, or retention gap
+    QueryService --> Selective: service observed complete path window
+    FullCrawl --> Failed: coverage required
+    FullCrawl --> CWalk: fallback allowed
+    Selective --> ReuseParentSubtrees
+    Selective --> CrawlChangedAncestors
+    ReuseParentSubtrees --> Snapshot
+    CrawlChangedAncestors --> Snapshot
+    CWalk --> Snapshot
+```
+
+The SVM map is strict JSON with `version: 1` and `sources`. Every
+source binds an absolute or resolvable local `target` to `remote_path`, `lif`,
+`svm_id`, `svm`, `volume_msid`, and `volume`. Unknown JSON fields are rejected.
+The file contains topology only; it is never accepted as evidence that changes
+were observed.
+
+For every mapped source, Vaultic asks the running pathdiff service for changes
+below `remote_path` in the inclusive parent-snapshot-to-backup-start window. The
+current localhost Unix-socket adapter combines the service's status, retention,
+active engine, and path-window event APIs. It reads the matching LIF/SVM engine
+before and after the event query and requires the same `Since` value, proving that
+the active observation session did not reconnect during the query. `Since` must
+be no later than the parent snapshot and retention must span the complete window.
+The resulting `ChangeWindow` carries changed events, `ObservedSince`,
+`ObservedUntil`, and a continuity decision. A future network protocol implements
+the same service interface and should return those fields atomically.
+The left timestamp boundary is inclusive because a snapshot timestamp records
+backup start rather than an atomic filesystem fence. Reprocessing an equal-time
+event is harmless; excluding one could miss a change made while the parent backup
+was still traversing.
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "target": "/mnt/finance",
+      "remote_path": "/vol/finance/dept-a",
+      "lif": "192.0.2.10",
+      "svm_id": "7f66f7de-6f2c-11ef-a3bd-00a098012345",
+      "svm": "svm-finance",
+      "volume_msid": "2163258291",
+      "volume": "finance"
+    }
+  ]
+}
+```
+
+The topology file must be protected against modification by untrusted source
+users. It identifies the service observation stream but cannot assert coverage.
+Because the upstream event model has one path and no rename destination, every
+rename-class event marks the complete mapped target changed. This conservative
+fallback catches cross-directory moves without assuming storage-specific event
+pairing.
+
+The normal backup reconciler deliberately has no `AuthoritativeCrawlScope`, so a
+selective run cannot publish a full-crawl proof. It observes reused directory nodes
+but does not claim that their descendants were scanned.
 

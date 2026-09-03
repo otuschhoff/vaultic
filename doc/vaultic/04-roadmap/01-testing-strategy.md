@@ -72,8 +72,8 @@
 - TCP allowlist and authentication rejection/acceptance cases
 - Restic/Rustic reading vaultic-exported JSON indexes
 - `cwalk` parallel directory traversal producing results identical to standard walking
-- `pathdiff` volume ID resolution, target host LIF $\rightarrow$ SVM $\rightarrow$ volume topology matching, and 100% event coverage validation
-- Fallback from selective `pathdiff` crawl to full `cwalk` scan when event coverage sequence gaps or buffer overflows are detected
+- `pathdiff` volume ID resolution, target host LIF $\rightarrow$ SVM $\rightarrow$ volume topology matching, and service-owned path-window observation validation
+- Fallback from selective `pathdiff` crawl to full `cwalk` scan for late observation, insufficient retention, engine reconnects, query failures, or topology mismatches
 
 ### Scale tests
 
