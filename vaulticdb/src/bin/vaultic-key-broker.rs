@@ -1077,6 +1077,44 @@ mod tests {
         serde_json::from_slice(&response).unwrap()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn peer_inspection_uses_kernel_identity_and_running_executable() {
+        let (peer, _other) = UnixStream::pair().unwrap();
+        let inspected = inspect_peer(&peer).unwrap();
+        let executable = env::current_exe().unwrap();
+        assert_eq!(inspected.uid, unsafe { libc::geteuid() });
+        assert_eq!(
+            inspected.executable_sha256,
+            format!("{:x}", Sha256::digest(fs::read(&executable).unwrap()))
+        );
+        assert_eq!(
+            inspected.owned_by_root,
+            fs::metadata(&executable).unwrap().uid() == 0
+        );
+        assert_eq!(
+            inspected.installation_path_read_only,
+            trusted_installation_path(&executable).unwrap()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn installation_path_rejects_mutable_ancestors_and_accepts_system_binary() {
+        let root = env::temp_dir().join(format!(
+            "vaultic-broker-untrusted-path-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let executable = root.join("vaulticdb");
+        fs::write(&executable, b"not an executable").unwrap();
+        assert!(!trusted_installation_path(&executable).unwrap());
+        fs::remove_dir_all(root).unwrap();
+
+        assert!(trusted_installation_path(Path::new("/bin/sh")).unwrap());
+    }
+
     #[test]
     fn provisioning_creates_pinned_identity_and_verifiable_release() {
         let root = env::temp_dir().join(format!(
