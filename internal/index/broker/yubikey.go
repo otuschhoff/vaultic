@@ -20,6 +20,34 @@ type FIDO2HMACSecretUnwrapper struct {
 	PINFile    string
 }
 
+type MacosSecureEnclaveUnwrapper struct {
+	HelperPath string
+}
+
+func (unwrapper MacosSecureEnclaveUnwrapper) UnwrapMember(ctx context.Context, member ExternalMemberContext, ciphertext []byte) ([]byte, VerifiedPrincipal, error) {
+	if member.Provider != "macos-secure-enclave" || member.HardwareCredentialID == "" {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("macOS Secure Enclave unwrapper requires a hardware-bound macos-secure-enclave member")
+	}
+	if unwrapper.HelperPath == "" {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("macOS Secure Enclave helper path is required")
+	}
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(ciphertext)))
+	base64.StdEncoding.Encode(encoded, ciphertext)
+	defer clear(encoded)
+	command := exec.CommandContext(ctx, unwrapper.HelperPath, "macos-secure-enclave-unwrap", member.RepositoryID, member.MemberID, member.KeyReference, strconv.FormatUint(uint64(member.RootKeyVersion), 10), member.Purpose)
+	command.Env = []string{}
+	command.Stdin = bytes.NewReader(encoded)
+	output, err := command.Output()
+	if err != nil {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("macOS Secure Enclave unwrap helper: %w", err)
+	}
+	plaintext, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	if err != nil {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("decode macOS Secure Enclave helper output: %w", err)
+	}
+	return plaintext, VerifiedPrincipal{Authority: "macos-secure-enclave", ImmutablePrincipalID: member.HardwareCredentialID}, nil
+}
+
 func (unwrapper FIDO2HMACSecretUnwrapper) UnwrapMember(ctx context.Context, member ExternalMemberContext, ciphertext []byte) ([]byte, VerifiedPrincipal, error) {
 	if member.Provider != "fido2-hmac-secret" || member.HardwareCredentialID == "" {
 		return nil, VerifiedPrincipal{}, fmt.Errorf("FIDO2 unwrapper requires a hardware-bound fido2-hmac-secret member")

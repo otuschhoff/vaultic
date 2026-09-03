@@ -25,6 +25,7 @@ hpke = "0.13"
 ipnet = "2.11"
 libc = "0.2"
 object_store = { version = "0.14", default-features = false, features = ["azure"] }
+p256 = { version = "0.13", features = ["ecdh"] }
 prost = "0.13"
 rand = "0.9"
 rand08 = { package = "rand", version = "0.8" }
@@ -42,6 +43,10 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 [target.'cfg(not(target_env = "musl"))'.dependencies]
 ctap-hid-fido2 = "3.5.13"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [build-dependencies]
 tonic-build = "0.12"

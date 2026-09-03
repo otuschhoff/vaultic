@@ -82,7 +82,7 @@ func newIndexUnlockStatusCommand(globalOptions *global.Options, options *indexUn
 
 func newIndexUnlockContributeCommand(globalOptions *global.Options, options *indexUnlockOptions) *cobra.Command {
 	var sessionFile, memberID, passphraseFile, keyFile, azureTokenFile, gcpTokenFile, yubikeyPINFile, fido2PINFile, custodianPath, generationAnchor, confirmedFingerprint string
-	var awsKMS, unverifiedSession bool
+	var awsKMS, macosSecureEnclave, unverifiedSession bool
 	var prepare bool
 	var sessionTTL time.Duration
 	command := &cobra.Command{Use: "contribute", Short: "Prepare or submit a verified custodian contribution", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
@@ -120,7 +120,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			return nil
 		}
 		credentialRoutes := 0
-		for _, configured := range []bool{passphraseFile != "", keyFile != "", azureTokenFile != "", gcpTokenFile != "", yubikeyPINFile != "", fido2PINFile != "", awsKMS} {
+		for _, configured := range []bool{passphraseFile != "", keyFile != "", azureTokenFile != "", gcpTokenFile != "", yubikeyPINFile != "", fido2PINFile != "", awsKMS, macosSecureEnclave} {
 			if configured {
 				credentialRoutes++
 			}
@@ -158,6 +158,12 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
 		} else if fido2PINFile != "" {
 			unwrapper := indexbroker.FIDO2HMACSecretUnwrapper{HelperPath: custodianPath, PINFile: fido2PINFile}
+			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
+		} else if macosSecureEnclave {
+			if runtime.GOOS != "darwin" {
+				return fmt.Errorf("macOS Secure Enclave contribution requires macOS")
+			}
+			unwrapper := indexbroker.MacosSecureEnclaveUnwrapper{HelperPath: custodianPath}
 			contribution, err = capsule.ContributeExternalSession(command.Context(), session, "unix:"+options.Socket, memberID, unwrapper, lastSeen, time.Now(), unverifiedSession)
 		} else if azureTokenFile != "" || gcpTokenFile != "" {
 			tokenFile, description := azureTokenFile, "Azure custodian bearer token"
@@ -232,6 +238,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 	command.Flags().BoolVar(&awsKMS, "aws-kms", false, "use the AWS SDK credential chain for an AWS KMS or CloudHSM-backed member")
 	command.Flags().StringVar(&yubikeyPINFile, "yubikey-piv-pin-file", "", "mode-0600 YubiKey PIV PIN file")
 	command.Flags().StringVar(&fido2PINFile, "fido2-pin-file", "", "mode-0600 FIDO2 authenticator PIN file")
+	command.Flags().BoolVar(&macosSecureEnclave, "macos-secure-enclave", false, "authorize the contribution with Touch ID and the enrolled Secure Enclave key")
 	command.Flags().StringVar(&custodianPath, "custodian-path", "vaultic-key-custodian", "path to the hardware custodian executable")
 	command.Flags().BoolVar(&unverifiedSession, "unverified-session", false, "acknowledge a broker identity-loss recovery session after independently confirming its fingerprint")
 	command.Flags().StringVar(&generationAnchor, "generation-anchor", "", "mode-0600 custodian last-seen-generation file")

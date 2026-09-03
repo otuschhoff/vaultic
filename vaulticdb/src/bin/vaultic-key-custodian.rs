@@ -8,7 +8,9 @@ use base64::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use vaulticdb::encryption::envelope::providers::{
-    Fido2HmacSecretProvider, KeyContext, KeyProvider, YubikeyPivProvider,
+    macos_secure_enclave_ephemeral_public_key, macos_secure_enclave_reference_parts,
+    macos_secure_enclave_unwrap_with_shared_secret, Fido2HmacSecretProvider, KeyContext,
+    KeyProvider, YubikeyPivProvider,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -154,6 +156,202 @@ fn fido2_secret(_: &str, _: &str, _: &str, _: &str) -> Result<[u8; 32]> {
     bail!("FIDO2 operations require the dynamically linked vaultic-key-custodian build")
 }
 
+#[cfg(target_os = "macos")]
+fn macos_secure_enclave_enroll(arguments: &[String]) -> Result<()> {
+    use std::io::Write;
+
+    use security_framework::{
+        access_control::{ProtectionMode, SecAccessControl},
+        item::Location,
+        key::{GenerateKeyOptions, KeyType, SecKey, Token},
+        passwords_options::AccessControlOptions,
+    };
+
+    let application_tag = URL_SAFE_NO_PAD
+        .decode(&arguments[1])
+        .context("decode macOS Secure Enclave application tag")?;
+    if application_tag.len() != 32 {
+        bail!("macOS Secure Enclave application tag must be 32 random bytes");
+    }
+    let access_control = SecAccessControl::create_with_protection(
+        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+        (AccessControlOptions::BIOMETRY_CURRENT_SET | AccessControlOptions::PRIVATE_KEY_USAGE)
+            .bits(),
+    )
+    .context("create macOS Secure Enclave biometric access control")?;
+    let mut options = GenerateKeyOptions::default();
+    options
+        .set_key_type(KeyType::ec())
+        .set_size_in_bits(256)
+        .set_token(Token::SecureEnclave)
+        .set_location(Location::DataProtectionKeychain)
+        .set_label(macos_secure_enclave_label(&arguments[1]))
+        .set_access_control(access_control);
+    let private_key = SecKey::new(&options).map_err(|error| {
+        anyhow::anyhow!(
+            "create Secure Enclave key; the custodian must be code-signed for Data Protection Keychain access: {error}"
+        )
+    })?;
+    let enrollment = (|| -> Result<String> {
+        let public_key = private_key
+            .public_key()
+            .context("Secure Enclave returned no public key")?
+            .external_representation()
+            .context("export Secure Enclave public key")?
+            .to_vec();
+        if public_key.len() != 65 || public_key.first() != Some(&4) {
+            bail!("Secure Enclave returned an invalid P-256 public key");
+        }
+        Ok(serde_json::to_string(&json!({
+            "application_tag": arguments[1],
+            "public_key": format!("sha256:{:x}", Sha256::digest(&public_key)),
+            "public_key_data": URL_SAFE_NO_PAD.encode(public_key),
+            "access_control": "biometry-current-set",
+            "user_presence_required": true
+        }))?)
+    })();
+    let output = match enrollment {
+        Ok(output) => output,
+        Err(error) => {
+            private_key.delete().ok();
+            return Err(error);
+        }
+    };
+    if let Err(error) = writeln!(std::io::stdout().lock(), "{output}") {
+        private_key.delete().ok();
+        return Err(error).context("write Secure Enclave enrollment result");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_secure_enclave_enroll(_: &[String]) -> Result<()> {
+    bail!("macOS Secure Enclave operations require macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_secure_enclave_delete(arguments: &[String]) -> Result<()> {
+    use security_framework::item::{ItemSearchOptions, KeyClass, Reference, SearchResult};
+
+    let (application_tag, expected_public_key) =
+        macos_secure_enclave_reference_parts(&arguments[1])?;
+    let mut search = ItemSearchOptions::new();
+    search
+        .ignore_legacy_keychains()
+        .key_class(KeyClass::private())
+        .label(&macos_secure_enclave_label(
+            &URL_SAFE_NO_PAD.encode(application_tag),
+        ))
+        .load_refs(true);
+    let mut results = search.search().context(
+        "find Secure Enclave key for enrollment rollback; the custodian must be code-signed for Data Protection Keychain access",
+    )?;
+    if results.len() != 1 {
+        bail!("Secure Enclave key for enrollment rollback is missing or ambiguous");
+    }
+    let private_key = match results.remove(0) {
+        SearchResult::Ref(Reference::Key(key)) => key,
+        _ => bail!("Secure Enclave rollback lookup did not return a private key"),
+    };
+    let actual_public_key = private_key
+        .public_key()
+        .context("Secure Enclave returned no public key during enrollment rollback")?
+        .external_representation()
+        .context("export Secure Enclave public key during enrollment rollback")?
+        .to_vec();
+    if actual_public_key != expected_public_key {
+        bail!("Secure Enclave rollback public key does not match the enrollment binding");
+    }
+    private_key
+        .delete()
+        .context("delete Secure Enclave key after failed enrollment")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_secure_enclave_delete(_: &[String]) -> Result<()> {
+    bail!("macOS Secure Enclave operations require macOS")
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn macos_secure_enclave_unwrap(arguments: &[String]) -> Result<()> {
+    use core_foundation::data::CFData;
+    use security_framework::{
+        item::{ItemSearchOptions, KeyClass, Reference, SearchResult},
+        key::{Algorithm, KeyType, SecKey},
+        os::macos::key::SecKeyExt,
+    };
+
+    let ciphertext = read_wrapped_share("macOS Secure Enclave")?;
+    let (application_tag, expected_public_key) =
+        macos_secure_enclave_reference_parts(&arguments[3])?;
+    let encoded_tag = URL_SAFE_NO_PAD.encode(application_tag);
+    let mut search = ItemSearchOptions::new();
+    search
+        .ignore_legacy_keychains()
+        .key_class(KeyClass::private())
+        .label(&macos_secure_enclave_label(&encoded_tag))
+        .load_refs(true);
+    let mut results = search.search().context(
+        "find Secure Enclave key; the custodian must be code-signed for Data Protection Keychain access",
+    )?;
+    if results.len() != 1 {
+        bail!("macOS Secure Enclave key is missing or ambiguous");
+    }
+    let private_key = match results.remove(0) {
+        SearchResult::Ref(Reference::Key(key)) => key,
+        _ => bail!("macOS Secure Enclave lookup did not return a private key"),
+    };
+    let actual_public_key = private_key
+        .public_key()
+        .context("Secure Enclave returned no public key")?
+        .external_representation()
+        .context("export Secure Enclave public key")?
+        .to_vec();
+    if actual_public_key != expected_public_key {
+        bail!("macOS Secure Enclave public key does not match the capsule binding");
+    }
+    let ephemeral = macos_secure_enclave_ephemeral_public_key(&ciphertext)?;
+    let ephemeral_key = SecKey::from_data(KeyType::ec(), &CFData::from_buffer(ephemeral))
+        .map_err(|error| anyhow::anyhow!("import ephemeral P-256 public key: {error}"))?;
+    let mut shared_secret = Zeroizing::new(
+        private_key
+            .key_exchange(Algorithm::ECDHKeyExchangeStandard, &ephemeral_key, 32, None)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Secure Enclave ECDH; Touch ID authorization was denied or unavailable: {error}"
+                )
+            })?,
+    );
+    if shared_secret.len() != 32 {
+        shared_secret.zeroize();
+        bail!("Secure Enclave returned an invalid ECDH result");
+    }
+    let plaintext = macos_secure_enclave_unwrap_with_shared_secret(
+        &KeyContext {
+            repository_id: &arguments[1],
+            slot_id: &arguments[2],
+            key_reference: &arguments[3],
+            dek_version: arguments[4].parse().context("invalid root key version")?,
+            purpose: &arguments[5],
+        },
+        &ciphertext,
+        shared_secret.as_slice(),
+    )?;
+    shared_secret.zeroize();
+    println!("{}", BASE64.encode(plaintext.as_slice()));
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_secure_enclave_unwrap(_: &[String]) -> Result<()> {
+    bail!("macOS Secure Enclave operations require macOS")
+}
+
+fn macos_secure_enclave_label(application_tag: &str) -> String {
+    format!("com.vaultic.secure-enclave.{application_tag}")
+}
+
 fn read_pin(path: &str) -> Result<Zeroizing<String>> {
     let metadata = fs::metadata(path).context("inspect hardware PIN file")?;
     if metadata.permissions().mode() & 0o077 != 0 {
@@ -290,6 +488,15 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some("fido2-hmac-secret-unwrap") if arguments.len() == 7 => fido2_unwrap(&arguments).await,
+        Some("macos-secure-enclave-enroll") if arguments.len() == 2 => {
+            macos_secure_enclave_enroll(&arguments)
+        }
+        Some("macos-secure-enclave-delete") if arguments.len() == 2 => {
+            macos_secure_enclave_delete(&arguments)
+        }
+        Some("macos-secure-enclave-unwrap") if arguments.len() == 6 => {
+            macos_secure_enclave_unwrap(&arguments)
+        }
         _ => bail!("invalid vaultic-key-custodian operation or argument count"),
     }
 }

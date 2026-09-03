@@ -383,6 +383,88 @@ Only that transient 32-byte output enters process memory, where it wraps or
 unwraps the bound share and is then zeroized. Use ``--fido2-pin-file`` when
 contributing.
 
+macOS Secure Enclave and Touch ID members
+-----------------------------------------
+
+The ``macos-secure-enclave`` provider creates a non-exportable P-256 private
+key in the Mac's Secure Enclave and stores its reference in the Data Protection
+Keychain. It is separate from WebAuthn passkeys and does not use iCloud
+Keychain synchronization. Enroll a seat on the Mac that will contribute it:
+
+.. code-block:: console
+
+  $ vaultic index keys quorum enroll-macos-secure-enclave \
+      --member mac-alice --output /secure/mac-alice.json
+
+The native ``vaultic-key-custodian`` creates a random application tag and a
+key protected by ``biometryCurrentSet`` plus private-key usage. The mode-0600
+definition contains only that tag, the uncompressed P-256 public key and its
+SHA-256 fingerprint, and the strict access-control mode. The private key never
+leaves the Secure Enclave. If validation or protected definition-file creation
+fails, enrollment deletes the exact tagged key after rechecking its public key.
+The packaged helper is code-signed with the stable
+``com.vaultic.key-custodian`` identifier and Data Protection Keychain
+entitlements. Production packaging must replace the default ad hoc signature
+with the organization's signing identity while retaining a compatible
+application identifier and keychain access group across upgrades.
+
+During policy creation, Vaultic generates an ephemeral P-256 key, performs
+ECDH against the enrolled public key, derives a purpose-separated wrapping key
+with HKDF-SHA256, and encrypts the member share with AES-256-GCM. The
+authenticated context includes the repository, generation, policy, group,
+member, share coordinates, root-key version, provider, key reference, hardware
+binding, and purpose. During contribution, the custodian retrieves the exact
+tagged private key, verifies its public key against the capsule, and asks macOS
+to authorize the ECDH operation with Touch ID. The wrapped share travels to
+the helper on bounded standard input; the helper environment is empty and the
+derived shared secret and plaintext share are zeroized after use.
+
+Contribute the enrolled member with the signed-session and fingerprint options
+used by every custodian, selecting the local hardware route explicitly:
+
+.. code-block:: console
+
+  $ vaultic index unlock contribute \
+      --capsule /secure/capsules/00000000000000000002.json \
+      --broker-socket /run/vaultic/key-broker.sock \
+      --session-file /secure/unlock-session.json \
+      --member mac-alice --macos-secure-enclave \
+      --confirm-fingerprint FINGERPRINT
+
+Cancellation, biometric mismatch or lockout, changed biometric enrollment,
+key deletion, unavailable Secure Enclave, malformed ciphertext, and public-key
+or context substitution fail closed. The strict provider does not silently
+fall back to a login password or device passcode. Changing the enrolled Touch
+ID set invalidates the key, and loss of the Mac is unrecoverable for that seat.
+Always combine it with an independent recovery member or alternative.
+
+Touch ID proves that macOS authorized one locally enrolled biometric; it does
+not prove which person supplied it. Status therefore reports this seat as
+``hardware-verified``, never ``principal-verified``. Duplicate application
+tags or public keys are non-compliant, and two keys on one Mac must not be
+treated as two independent people.
+
+A mixed local/cloud/offline 2-of-4 policy can combine a YubiKey, this Mac, a
+GCP principal, and an offline key, for example:
+
+.. code-block:: console
+
+  $ vaultic index keys quorum create-group operators \
+      --repository-id REPOSITORY-UUID \
+      --capsule /secure/capsules/00000000000000000001.json \
+      --capsule-directory /secure/capsules --threshold 2 \
+      --external-member /secure/yubikey-alice.json \
+      --external-member /secure/mac-alice.json \
+      --external-member /secure/gcp-alice.json \
+      --member offline-alice=offline-keyfile:/media/offline/member.key
+
+Exercise every intended pair before activation evidence is accepted. In
+particular, test Mac loss and biometric-set replacement by recovering through
+a pair that does not contain the Secure Enclave seat. Physical Secure Enclave
+and Touch ID validation on every advertised macOS release target remains a
+production deployment gate; deterministic tests and code-signature checks do
+not substitute for that exercise.
+
 Model backup PIV or FIDO2 authenticators as separate members under an
 ``any_of`` policy for one hardware seat. Each token must have a distinct
 credential ID and public key; reusing either is reported as a policy finding.

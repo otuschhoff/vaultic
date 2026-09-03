@@ -5,6 +5,8 @@ PLATFORMS := macos-arm64 linux-amd64 linux-arm64
 
 BIN_DIR := bin
 VAULTICDB_RUST_TOOLCHAIN ?= stable
+MACOS_CODESIGN_IDENTITY ?= -
+MACOS_CUSTODIAN_ENTITLEMENTS ?= contrib/macos/vaultic-key-custodian.entitlements
 
 # Map uname -s/-m to one of $(PLATFORMS). Empty if the host isn't supported
 # (e.g. Intel Macs, which are not one of the supported build targets).
@@ -83,7 +85,11 @@ vaulticdb-%:
 	cp vaulticdb/target/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb; \
 	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker; \
 	helper_target=$$target; case "$$target" in *-musl) helper_target=$${target%-musl}-gnu ;; esac; \
-	cp vaulticdb/target/$$helper_target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian
+	cp vaulticdb/target/$$helper_target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian; \
+	if [ "$*" = macos-arm64 ]; then \
+		codesign --force --sign "$(MACOS_CODESIGN_IDENTITY)" --identifier com.vaultic.key-custodian --entitlements "$(MACOS_CUSTODIAN_ENTITLEMENTS)" $(BIN_DIR)/$*/vaultic-key-custodian; \
+		codesign --verify --strict $(BIN_DIR)/$*/vaultic-key-custodian; \
+	fi
 
 vaulticdb-proto:
 	./vaulticdb/generate-proto.sh

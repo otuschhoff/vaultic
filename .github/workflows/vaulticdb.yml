@@ -10,7 +10,9 @@ on:
       - "cmd/vaulticdb-smoke/**"
       - "cmd/vaultic/cmd_index*.go"
       - "contrib/launchd/com.vaultic.key-broker.plist"
+      - "contrib/macos/vaultic-key-custodian.entitlements"
       - "contrib/systemd/vaultic-key-broker.service"
+      - "Makefile"
       - "go.mod"
       - "go.sum"
   pull_request:
@@ -21,7 +23,9 @@ on:
       - "cmd/vaulticdb-smoke/**"
       - "cmd/vaultic/cmd_index*.go"
       - "contrib/launchd/com.vaultic.key-broker.plist"
+      - "contrib/macos/vaultic-key-custodian.entitlements"
       - "contrib/systemd/vaultic-key-broker.service"
+      - "Makefile"
       - "go.mod"
       - "go.sum"
   workflow_dispatch:
@@ -30,6 +34,37 @@ permissions:
   contents: read
 
 jobs:
+  macos-secure-enclave-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Test Secure Enclave policy and codec
+        run: |
+          cargo test --manifest-path vaulticdb/Cargo.toml encryption::envelope::providers::tests::macos_secure_enclave_wrap_is_authenticated_and_context_bound
+          cargo test --manifest-path vaulticdb/Cargo.toml encryption::recovery_capsule::tests::mixed_two_of_four_accepts_secure_enclave_yubikey_gcp_and_offline
+          go test ./internal/index/broker -run TestMacosSecureEnclave -v
+          go test ./cmd/vaultic -run 'TestParseExternalPolicyMembers|TestEnrollMacosSecureEnclave' -v
+
+      - name: Build and sign native custodian
+        run: |
+          cargo build --manifest-path vaulticdb/Cargo.toml --bin vaultic-key-custodian
+          codesign --force --sign - --identifier com.vaultic.key-custodian \
+            --entitlements contrib/macos/vaultic-key-custodian.entitlements \
+            vaulticdb/target/debug/vaultic-key-custodian
+          codesign --verify --strict vaulticdb/target/debug/vaultic-key-custodian
+          codesign -d --entitlements :- vaulticdb/target/debug/vaultic-key-custodian 2>&1 \
+            | sed -n '/^<?xml/,$p' | plutil -lint -
+
   vaulticdb:
     runs-on: ubuntu-latest
     steps:

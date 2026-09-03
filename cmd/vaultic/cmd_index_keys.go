@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/elliptic"
 	"crypto/hmac"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -105,6 +107,7 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumFinalizeCommand(globalOptions, options),
 		newIndexKeysQuorumVerifyCommand(globalOptions),
 		newIndexKeysQuorumEnrollFIDO2Command(),
+		newIndexKeysQuorumEnrollMacosSecureEnclaveCommand(),
 		newIndexKeysQuorumGenerateAttestationKeyCommand(globalOptions),
 		newIndexKeysQuorumAttestBypassesCommand(globalOptions),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "create-group"),
@@ -115,6 +118,69 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumResumeMutationCommand(globalOptions, options),
 		newIndexKeysQuorumCancelMutationCommand(globalOptions),
 	)
+	return command
+}
+
+func newIndexKeysQuorumEnrollMacosSecureEnclaveCommand() *cobra.Command {
+	var memberID, custodianPath, outputPath string
+	command := &cobra.Command{Use: "enroll-macos-secure-enclave", Short: "Create a Touch ID-gated macOS Secure Enclave credential", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) (runErr error) {
+		if runtime.GOOS != "darwin" {
+			return fmt.Errorf("macOS Secure Enclave enrollment requires macOS")
+		}
+		if memberID == "" || outputPath == "" {
+			return fmt.Errorf("--member and --output are required")
+		}
+		applicationTag := make([]byte, 32)
+		if _, err := cryptorand.Read(applicationTag); err != nil {
+			return fmt.Errorf("generate Secure Enclave application tag: %w", err)
+		}
+		defer clear(applicationTag)
+		encodedTag := base64.RawURLEncoding.EncodeToString(applicationTag)
+		helper := exec.CommandContext(command.Context(), custodianPath, "macos-secure-enclave-enroll", encodedTag)
+		helper.Env = []string{}
+		output, err := helper.Output()
+		if err != nil {
+			return fmt.Errorf("enroll macOS Secure Enclave credential: %w", err)
+		}
+		var result struct {
+			ApplicationTag       string `json:"application_tag"`
+			PublicKey            string `json:"public_key"`
+			PublicKeyData        string `json:"public_key_data"`
+			AccessControl        string `json:"access_control"`
+			UserPresenceRequired bool   `json:"user_presence_required"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(output))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&result); err != nil || result.ApplicationTag != encodedTag || result.AccessControl != "biometry-current-set" || !result.UserPresenceRequired {
+			return fmt.Errorf("custodian helper returned invalid macOS Secure Enclave enrollment metadata")
+		}
+		publicKey, err := base64.RawURLEncoding.DecodeString(result.PublicKeyData)
+		publicX, publicY := elliptic.Unmarshal(elliptic.P256(), publicKey)
+		if err != nil || publicX == nil || publicY == nil || result.PublicKey != fmt.Sprintf("sha256:%x", sha256.Sum256(publicKey)) {
+			return fmt.Errorf("custodian helper returned invalid macOS Secure Enclave public key metadata")
+		}
+		definition := externalPolicyMemberFile{
+			MemberID:      memberID,
+			Provider:      "macos-secure-enclave",
+			KeyReference:  fmt.Sprintf("secure-enclave:application-tag=%s;public-key=%s;access-control=%s", result.ApplicationTag, result.PublicKeyData, result.AccessControl),
+			Hardware:      &indexbroker.PolicyHardwareBinding{CredentialID: result.ApplicationTag, PublicKey: result.PublicKey, UserPresenceRequired: true},
+			CustodianPath: custodianPath,
+		}
+		defer func() {
+			if runErr == nil {
+				return
+			}
+			rollback := exec.CommandContext(command.Context(), custodianPath, "macos-secure-enclave-delete", definition.KeyReference)
+			rollback.Env = []string{}
+			if output, err := rollback.CombinedOutput(); err != nil {
+				runErr = fmt.Errorf("%w; Secure Enclave enrollment rollback failed: %v: %s", runErr, err, strings.TrimSpace(string(output)))
+			}
+		}()
+		return writeNewProtectedJSON(outputPath, definition)
+	}}
+	command.Flags().StringVar(&memberID, "member", "", "new Secure Enclave member ID")
+	command.Flags().StringVar(&custodianPath, "custodian-path", "vaultic-key-custodian", "path to the hardware custodian executable")
+	command.Flags().StringVar(&outputPath, "output", "", "new mode-0600 external-member definition")
 	return command
 }
 
@@ -531,7 +597,7 @@ func parseExternalPolicyMembers(ctx context.Context, repositoryID string, paths 
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("duplicate member ID %q", definition.MemberID)
 		}
-		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" && definition.Provider != "yubikey-piv" && definition.Provider != "fido2-hmac-secret" {
+		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" && definition.Provider != "yubikey-piv" && definition.Provider != "fido2-hmac-secret" && definition.Provider != "macos-secure-enclave" {
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("unsupported external member provider %q", definition.Provider)
 		}
@@ -586,6 +652,11 @@ func parseExternalPolicyMembers(ctx context.Context, repositoryID string, paths 
 			tokens = append(tokens, value)
 			text := base64.StdEncoding.EncodeToString(value)
 			token = &text
+		} else if definition.Provider == "macos-secure-enclave" {
+			if definition.BearerTokenFile != "" || definition.PINFile != "" {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, fmt.Errorf("macOS Secure Enclave member %q must not configure a bearer token or PIN file", definition.MemberID)
+			}
 		} else if definition.BearerTokenFile != "" {
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("AWS members use the SDK credential chain, not bearer_token_file")

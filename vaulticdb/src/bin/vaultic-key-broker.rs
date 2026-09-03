@@ -723,13 +723,23 @@ async fn handle_request(
                     MemberProvider::GcpKms | MemberProvider::GcpCloudHsm => "gcp-kms",
                     MemberProvider::YubikeyPiv => "yubikey-piv",
                     MemberProvider::Fido2HmacSecret => "fido2-hmac-secret",
+                    MemberProvider::MacosSecureEnclave => "macos-secure-enclave",
                     _ => bail!("unsupported external policy member provider"),
                 };
-                let provider = vaulticdb::encryption::envelope::providers::for_management(
-                    provider_name,
-                    member.bearer_token.clone(),
-                )
-                .await?;
+                let provider: Box<dyn vaulticdb::encryption::envelope::providers::KeyProvider> =
+                    if member.provider == MemberProvider::MacosSecureEnclave {
+                        Box::new(
+                            vaulticdb::encryption::envelope::providers::MacosSecureEnclaveProvider::from_key_reference(
+                                &member.key_reference,
+                            )?,
+                        )
+                    } else {
+                        vaulticdb::encryption::envelope::providers::for_management(
+                            provider_name,
+                            member.bearer_token.clone(),
+                        )
+                        .await?
+                    };
                 external_providers.push((member, provider));
             }
             let mut protections = credentials

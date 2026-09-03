@@ -140,6 +140,7 @@ pub enum MemberProvider {
     OfflineKeyfile,
     YubikeyPiv,
     Fido2HmacSecret,
+    MacosSecureEnclave,
     AzureKeyVault,
     AwsKms,
     AwsCloudhsm,
@@ -494,7 +495,9 @@ impl RecoveryCapsule {
                         bail!("offline member must not claim principal or hardware verification");
                     }
                 }
-                MemberProvider::YubikeyPiv | MemberProvider::Fido2HmacSecret => {
+                MemberProvider::YubikeyPiv
+                | MemberProvider::Fido2HmacSecret
+                | MemberProvider::MacosSecureEnclave => {
                     let hardware = member
                         .hardware
                         .as_ref()
@@ -522,6 +525,16 @@ impl RecoveryCapsule {
                             || hardware.public_key != public_key
                         {
                             bail!("FIDO2 hardware binding does not match key reference");
+                        }
+                    }
+                    if member.provider == MemberProvider::MacosSecureEnclave {
+                        let (credential_id, public_key) = crate::encryption::envelope::providers::macos_secure_enclave_hardware_bindings(&member.key_reference)?;
+                        if hardware.credential_id != credential_id
+                            || hardware.public_key != public_key
+                            || hardware.serial_number.is_some()
+                            || hardware.attestation_fingerprint.is_some()
+                        {
+                            bail!("macOS Secure Enclave hardware binding does not match key reference");
                         }
                     }
                 }
@@ -574,7 +587,9 @@ impl RecoveryCapsule {
                 MemberProvider::OfflineArgon2id | MemberProvider::OfflineKeyfile => {
                     custody_assumed = true;
                 }
-                MemberProvider::YubikeyPiv | MemberProvider::Fido2HmacSecret => {
+                MemberProvider::YubikeyPiv
+                | MemberProvider::Fido2HmacSecret
+                | MemberProvider::MacosSecureEnclave => {
                     hardware_verified = true;
                     let credential = &member.hardware.as_ref().unwrap().credential_id;
                     if !hardware_credentials.insert(credential.clone()) {
@@ -1275,6 +1290,7 @@ fn validate_external_provider(provider: &MemberProvider, key_provider: &str) -> 
             )
             | (MemberProvider::YubikeyPiv, "yubikey-piv")
             | (MemberProvider::Fido2HmacSecret, "fido2-hmac-secret")
+            | (MemberProvider::MacosSecureEnclave, "macos-secure-enclave")
     );
     if !valid {
         bail!("member provider does not match external key provider");
@@ -1733,6 +1749,161 @@ mod tests {
             recovered.repository_master_key.as_slice(),
             b"repository-master-key"
         );
+    }
+
+    #[tokio::test]
+    async fn mixed_two_of_four_accepts_secure_enclave_yubikey_gcp_and_offline() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+        let yubikey = ContextProvider {
+            name: "yubikey-piv",
+        };
+        let enclave = ContextProvider {
+            name: "macos-secure-enclave",
+        };
+        let gcp = ContextProvider { name: "gcp-kms" };
+        let enclave_public_key = p256::SecretKey::random(&mut rand08::rngs::OsRng)
+            .public_key()
+            .to_encoded_point(false);
+        let enclave_tag = URL_SAFE_NO_PAD.encode([8u8; 32]);
+        let enclave_reference = format!(
+            "secure-enclave:application-tag={enclave_tag};public-key={};access-control=biometry-current-set",
+            URL_SAFE_NO_PAD.encode(enclave_public_key.as_bytes())
+        );
+        let enclave_fingerprint =
+            format!("sha256:{:x}", Sha256::digest(enclave_public_key.as_bytes()));
+        let yubikey_reference = "pkcs11:module-path=/usr/lib/libykcs11.so;slot-id=1;id=9a;public-key-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;type=rsa-key-pair";
+        let capsule = CapsuleBuilder::new("repo-a", 9)
+            .broker_identity_public_key(&[9; 32])
+            .create_policy(
+                UnlockPolicy::Threshold {
+                    group_id: "operators".to_owned(),
+                    required: 2,
+                    members: vec![
+                        "enclave".to_owned(),
+                        "gcp".to_owned(),
+                        "offline".to_owned(),
+                        "yubikey".to_owned(),
+                    ],
+                },
+                &[
+                    (
+                        "enclave",
+                        MemberProtection::External(ExternalMemberProtection {
+                            provider: MemberProvider::MacosSecureEnclave,
+                            key_reference: &enclave_reference,
+                            principal: None,
+                            hardware: Some(HardwareBinding {
+                                credential_id: enclave_tag.clone(),
+                                public_key: enclave_fingerprint.clone(),
+                                serial_number: None,
+                                attestation_fingerprint: None,
+                                user_presence_required: true,
+                            }),
+                            key_provider: &enclave,
+                        }),
+                    ),
+                    (
+                        "gcp",
+                        MemberProtection::External(ExternalMemberProtection {
+                            provider: MemberProvider::GcpKms,
+                            key_reference: "projects/project-a/locations/global/keyRings/ring/cryptoKeys/key/cryptoKeyVersions/1",
+                            principal: Some(PrincipalBinding {
+                                authority: "gcp-iam".to_owned(),
+                                tenant_account_or_project: "project-a".to_owned(),
+                                immutable_principal_id: "user:operator@example.com".to_owned(),
+                            }),
+                            hardware: None,
+                            key_provider: &gcp,
+                        }),
+                    ),
+                    (
+                        "offline",
+                        MemberProtection::Offline(MemberCredential::Keyfile(&[4; 32])),
+                    ),
+                    (
+                        "yubikey",
+                        MemberProtection::External(ExternalMemberProtection {
+                            provider: MemberProvider::YubikeyPiv,
+                            key_reference: yubikey_reference,
+                            principal: None,
+                            hardware: Some(HardwareBinding {
+                                credential_id: "piv-9a".to_owned(),
+                                public_key: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                                serial_number: Some("12345678".to_owned()),
+                                attestation_fingerprint: None,
+                                user_presence_required: true,
+                            }),
+                            key_provider: &yubikey,
+                        }),
+                    ),
+                ],
+                &[7; 32],
+                b"repository-master-key",
+            )
+            .await
+            .unwrap();
+
+        let status = capsule.effective_policy_status().unwrap();
+        assert_eq!(status.minimum_custodians, 2);
+        assert!(status.compliant);
+        assert!(status.principal_verified);
+        assert!(status.hardware_verified);
+        assert!(status.custody_assumed);
+
+        let mut substituted_binding = capsule.clone();
+        substituted_binding
+            .members
+            .iter_mut()
+            .find(|member| member.member_id == "enclave")
+            .unwrap()
+            .hardware
+            .as_mut()
+            .unwrap()
+            .public_key = "sha256:substituted".to_owned();
+        assert!(substituted_binding.validate().is_err());
+
+        let enclave_share = capsule
+            .unwrap_external_member("enclave", &enclave)
+            .await
+            .unwrap();
+        let offline_share = capsule
+            .unwrap_offline_member("offline", &MemberCredential::Keyfile(&[4; 32]))
+            .unwrap();
+        let recovered = capsule
+            .recover_from_shares(&[enclave_share, offline_share])
+            .unwrap();
+        assert_eq!(recovered.metadata_dek.as_slice(), &[7; 32]);
+        assert_eq!(
+            recovered.repository_master_key.as_slice(),
+            b"repository-master-key"
+        );
+
+        let mut duplicate = capsule;
+        let enclave_member = duplicate
+            .members
+            .iter()
+            .find(|member| member.member_id == "enclave")
+            .unwrap()
+            .clone();
+        let yubikey_member = duplicate
+            .members
+            .iter_mut()
+            .find(|member| member.member_id == "yubikey")
+            .unwrap();
+        yubikey_member.provider = MemberProvider::MacosSecureEnclave;
+        yubikey_member.key_reference = enclave_member.key_reference;
+        yubikey_member.hardware = enclave_member.hardware;
+        let duplicate_status = duplicate.effective_policy_status().unwrap();
+        assert!(!duplicate_status.compliant);
+        assert!(duplicate_status
+            .findings
+            .iter()
+            .any(|finding| finding.contains("duplicate hardware credential")));
+        assert!(duplicate_status
+            .findings
+            .contains(&"duplicate hardware public key".to_owned()));
     }
 
     #[test]

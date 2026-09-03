@@ -24,7 +24,10 @@ use cryptoki::{
     slot::Slot,
     types::{AuthPin, Ulong},
 };
+use hkdf::Hkdf;
+use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
 use rand::RngCore;
+use rand08::rngs::OsRng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -846,6 +849,181 @@ impl KeyProvider for Fido2HmacSecretProvider {
     }
 }
 
+const MACOS_SECURE_ENCLAVE_VERSION: u8 = 1;
+const MACOS_SECURE_ENCLAVE_PUBLIC_KEY_BYTES: usize = 65;
+const MACOS_SECURE_ENCLAVE_NONCE_BYTES: usize = 12;
+
+struct MacosSecureEnclaveReference {
+    application_tag: String,
+    public_key: Vec<u8>,
+}
+
+pub struct MacosSecureEnclaveProvider {
+    public_key: PublicKey,
+}
+
+impl MacosSecureEnclaveProvider {
+    pub fn from_key_reference(reference: &str) -> Result<Self> {
+        let reference = parse_macos_secure_enclave_reference(reference)?;
+        Ok(Self {
+            public_key: PublicKey::from_sec1_bytes(&reference.public_key)
+                .context("decode macOS Secure Enclave public key")?,
+        })
+    }
+}
+
+#[async_trait]
+impl KeyProvider for MacosSecureEnclaveProvider {
+    fn name(&self) -> &'static str {
+        "macos-secure-enclave"
+    }
+
+    async fn wrap(&self, context: &KeyContext<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let ephemeral_secret = EphemeralSecret::random(&mut OsRng);
+        let ephemeral_public = PublicKey::from(&ephemeral_secret);
+        let shared_secret = ephemeral_secret.diffie_hellman(&self.public_key);
+        let key = macos_secure_enclave_key(shared_secret.raw_secret_bytes().as_slice(), context)?;
+        let cipher = Aes256Gcm::new_from_slice(key.as_slice()).expect("32-byte AES key");
+        let mut nonce = [0u8; MACOS_SECURE_ENCLAVE_NONCE_BYTES];
+        rand::rng().fill_bytes(&mut nonce);
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: context.binding().as_bytes(),
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("encrypt share for macOS Secure Enclave failed"))?;
+        let mut output = Vec::with_capacity(
+            1 + MACOS_SECURE_ENCLAVE_PUBLIC_KEY_BYTES
+                + MACOS_SECURE_ENCLAVE_NONCE_BYTES
+                + ciphertext.len(),
+        );
+        output.push(MACOS_SECURE_ENCLAVE_VERSION);
+        output.extend_from_slice(ephemeral_public.to_encoded_point(false).as_bytes());
+        output.extend_from_slice(&nonce);
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    async fn unwrap(
+        &self,
+        _context: &KeyContext<'_>,
+        _ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        bail!("macOS Secure Enclave unwrap requires the native custodian helper")
+    }
+}
+
+pub fn macos_secure_enclave_hardware_bindings(reference: &str) -> Result<(String, String)> {
+    let reference = parse_macos_secure_enclave_reference(reference)?;
+    Ok((
+        reference.application_tag,
+        format!("sha256:{:x}", Sha256::digest(reference.public_key)),
+    ))
+}
+
+pub fn macos_secure_enclave_reference_parts(reference: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let reference = parse_macos_secure_enclave_reference(reference)?;
+    Ok((
+        URL_SAFE_NO_PAD
+            .decode(reference.application_tag)
+            .expect("validated application tag"),
+        reference.public_key,
+    ))
+}
+
+pub fn macos_secure_enclave_ephemeral_public_key(ciphertext: &[u8]) -> Result<&[u8]> {
+    if ciphertext.len()
+        < 1 + MACOS_SECURE_ENCLAVE_PUBLIC_KEY_BYTES + MACOS_SECURE_ENCLAVE_NONCE_BYTES + 16
+        || ciphertext[0] != MACOS_SECURE_ENCLAVE_VERSION
+    {
+        bail!("macOS Secure Enclave ciphertext is malformed or truncated");
+    }
+    let public_key = &ciphertext[1..1 + MACOS_SECURE_ENCLAVE_PUBLIC_KEY_BYTES];
+    PublicKey::from_sec1_bytes(public_key)
+        .context("decode ephemeral macOS Secure Enclave public key")?;
+    Ok(public_key)
+}
+
+pub fn macos_secure_enclave_unwrap_with_shared_secret(
+    context: &KeyContext<'_>,
+    ciphertext: &[u8],
+    shared_secret: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    macos_secure_enclave_ephemeral_public_key(ciphertext)?;
+    if shared_secret.len() != 32 {
+        bail!("macOS Secure Enclave ECDH output must be 32 bytes");
+    }
+    let nonce_offset = 1 + MACOS_SECURE_ENCLAVE_PUBLIC_KEY_BYTES;
+    let payload_offset = nonce_offset + MACOS_SECURE_ENCLAVE_NONCE_BYTES;
+    let key = macos_secure_enclave_key(shared_secret, context)?;
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice()).expect("32-byte AES key");
+    cipher
+        .decrypt(
+            Nonce::from_slice(&ciphertext[nonce_offset..payload_offset]),
+            Payload {
+                msg: &ciphertext[payload_offset..],
+                aad: context.binding().as_bytes(),
+            },
+        )
+        .map(Zeroizing::new)
+        .map_err(|_| anyhow::anyhow!("macOS Secure Enclave share authentication failed"))
+}
+
+fn macos_secure_enclave_key(
+    shared_secret: &[u8],
+    context: &KeyContext<'_>,
+) -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(
+        Some(b"vaultic-macos-secure-enclave-share-v1"),
+        shared_secret,
+    )
+    .expand(context.binding().as_bytes(), key.as_mut())
+    .map_err(|_| anyhow::anyhow!("derive macOS Secure Enclave share key"))?;
+    Ok(key)
+}
+
+fn parse_macos_secure_enclave_reference(reference: &str) -> Result<MacosSecureEnclaveReference> {
+    let fields = reference
+        .strip_prefix("secure-enclave:")
+        .context("macOS Secure Enclave key reference must start with secure-enclave:")?
+        .split(';')
+        .map(|field| {
+            field
+                .split_once('=')
+                .context("invalid macOS Secure Enclave key reference field")
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    if fields.len() != 3 || fields.get("access-control") != Some(&"biometry-current-set") {
+        bail!("macOS Secure Enclave key reference requires application-tag, public-key, and access-control=biometry-current-set");
+    }
+    let application_tag = fields
+        .get("application-tag")
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .context("macOS Secure Enclave application tag is invalid")?;
+    let application_tag_bytes = URL_SAFE_NO_PAD
+        .decode(application_tag)
+        .context("decode macOS Secure Enclave application tag")?;
+    if application_tag_bytes.is_empty() || application_tag_bytes.len() > 128 {
+        bail!("macOS Secure Enclave application tag is invalid");
+    }
+    let public_key = URL_SAFE_NO_PAD
+        .decode(
+            fields
+                .get("public-key")
+                .context("macOS Secure Enclave public key is missing")?,
+        )
+        .context("decode macOS Secure Enclave public key")?;
+    PublicKey::from_sec1_bytes(&public_key).context("decode macOS Secure Enclave public key")?;
+    Ok(MacosSecureEnclaveReference {
+        application_tag: (*application_tag).to_owned(),
+        public_key,
+    })
+}
+
 struct OwnedKeyContext {
     repository_id: String,
     slot_id: String,
@@ -1050,7 +1228,7 @@ mod tests {
             purpose: "metadata-dek",
         };
         let binding = context.binding();
-        assert!(binding.contains("repo\0slot\07\0metadata-dek"));
+        assert!(binding.contains(concat!("repo\0slot\0", "7\0metadata-dek")));
         let aws = context.aws_context();
         assert_eq!(aws["vaultic:repository"], "repo");
         assert_eq!(aws["vaultic:purpose"], "metadata-dek");
@@ -1183,6 +1361,104 @@ mod tests {
         .is_err());
         assert!(fido2_hardware_bindings(
             "fido2:rp-id=vaultic.example;credential-id=;public-key-der=BAUG"
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn macos_secure_enclave_wrap_is_authenticated_and_context_bound() {
+        let private_key = p256::SecretKey::random(&mut OsRng);
+        let public_key = private_key.public_key().to_encoded_point(false);
+        let application_tag = URL_SAFE_NO_PAD.encode(b"vaultic/repo-a/enclave-a");
+        let reference = format!(
+            "secure-enclave:application-tag={application_tag};public-key={};access-control=biometry-current-set",
+            URL_SAFE_NO_PAD.encode(public_key.as_bytes())
+        );
+        let provider = MacosSecureEnclaveProvider::from_key_reference(&reference).unwrap();
+        let context = KeyContext {
+            repository_id: "repo-a",
+            slot_id: "enclave-a",
+            key_reference: &reference,
+            dek_version: 3,
+            purpose: "capsule-share",
+        };
+        let ciphertext = provider.wrap(&context, b"share").await.unwrap();
+        let ephemeral_public = PublicKey::from_sec1_bytes(
+            macos_secure_enclave_ephemeral_public_key(&ciphertext).unwrap(),
+        )
+        .unwrap();
+        let shared_secret = p256::ecdh::diffie_hellman(
+            private_key.to_nonzero_scalar(),
+            ephemeral_public.as_affine(),
+        );
+        assert_eq!(
+            macos_secure_enclave_unwrap_with_shared_secret(
+                &context,
+                &ciphertext,
+                shared_secret.raw_secret_bytes().as_slice(),
+            )
+            .unwrap()
+            .as_slice(),
+            b"share"
+        );
+
+        let other_context = KeyContext {
+            repository_id: "repo-b",
+            ..context
+        };
+        assert!(macos_secure_enclave_unwrap_with_shared_secret(
+            &other_context,
+            &ciphertext,
+            shared_secret.raw_secret_bytes().as_slice(),
+        )
+        .is_err());
+        for other_context in [
+            KeyContext {
+                slot_id: "enclave-b",
+                ..context
+            },
+            KeyContext {
+                dek_version: 4,
+                ..context
+            },
+            KeyContext {
+                purpose: "metadata-dek",
+                ..context
+            },
+        ] {
+            assert!(macos_secure_enclave_unwrap_with_shared_secret(
+                &other_context,
+                &ciphertext,
+                shared_secret.raw_secret_bytes().as_slice(),
+            )
+            .is_err());
+        }
+        let mut tampered = ciphertext.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(macos_secure_enclave_unwrap_with_shared_secret(
+            &context,
+            &tampered,
+            shared_secret.raw_secret_bytes().as_slice(),
+        )
+        .is_err());
+
+        let (credential_id, fingerprint) =
+            macos_secure_enclave_hardware_bindings(&reference).unwrap();
+        assert_eq!(credential_id, application_tag);
+        assert_eq!(
+            fingerprint,
+            format!("sha256:{:x}", Sha256::digest(public_key.as_bytes()))
+        );
+        assert!(MacosSecureEnclaveProvider::from_key_reference(
+            "secure-enclave:application-tag=AQ;public-key=AQ;access-control=user-presence"
+        )
+        .is_err());
+        assert!(MacosSecureEnclaveProvider::from_key_reference(
+            "secure-enclave:application-tag=AQ;access-control=biometry-current-set"
+        )
+        .is_err());
+        assert!(MacosSecureEnclaveProvider::from_key_reference(
+            "secure-enclave:application-tag=AQ;public-key=AQ;access-control=biometry-current-set;extra=AQ"
         )
         .is_err());
     }

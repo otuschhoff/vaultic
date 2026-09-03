@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,7 +32,7 @@ import (
 
 func TestIndexCommandGroupDoesNotChangeListIndex(t *testing.T) {
 	root := newRootCommand(&global.Options{})
-	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "quorum", "generate-attestation-key"}, {"index", "keys", "quorum", "attest-bypasses"}, {"index", "keys", "quorum", "create-group"}, {"index", "keys", "quorum", "add-member"}, {"index", "keys", "quorum", "remove-member"}, {"index", "keys", "quorum", "set-threshold"}, {"index", "keys", "quorum", "replace-member"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
+	for _, path := range [][]string{{"index", "import"}, {"index", "export"}, {"index", "check"}, {"index", "rebuild-pack-stats"}, {"index", "gc"}, {"index", "analytics"}, {"index", "growth"}, {"index", "user-stats"}, {"index", "gdpr", "audit"}, {"index", "encrypt"}, {"index", "unlock", "status"}, {"index", "unlock", "contribute"}, {"index", "unlock", "lock"}, {"index", "keys", "status"}, {"index", "keys", "add-slot"}, {"index", "keys", "remove-slot"}, {"index", "keys", "rotate-kek"}, {"index", "keys", "rotate-dek"}, {"index", "keys", "store-master-key"}, {"index", "keys", "mirror-envelope"}, {"index", "keys", "quorum", "migrate-prepare"}, {"index", "keys", "quorum", "migrate-finalize"}, {"index", "keys", "quorum", "verify"}, {"index", "keys", "quorum", "enroll-macos-secure-enclave"}, {"index", "keys", "quorum", "generate-attestation-key"}, {"index", "keys", "quorum", "attest-bypasses"}, {"index", "keys", "quorum", "create-group"}, {"index", "keys", "quorum", "add-member"}, {"index", "keys", "quorum", "remove-member"}, {"index", "keys", "quorum", "set-threshold"}, {"index", "keys", "quorum", "replace-member"}, {"index", "keys", "escrow", "create"}, {"index", "keys", "escrow", "recover"}} {
 		command, args, err := root.Find(path)
 		if err != nil || command == nil || len(args) != 0 || command.Name() != path[len(path)-1] {
 			t.Fatalf("find %v = %v, %v, %v", path, command, args, err)
@@ -145,6 +147,29 @@ func TestParseExternalPolicyMembers(t *testing.T) {
 	if len(fidoMembers) != 1 || fidoMembers[0].BearerToken == nil || *fidoMembers[0].BearerToken != base64.StdEncoding.EncodeToString(make([]byte, 32)) {
 		t.Fatalf("FIDO2 members = %#v", fidoMembers)
 	}
+
+	publicKey := elliptic.Marshal(elliptic.P256(), elliptic.P256().Params().Gx, elliptic.P256().Params().Gy)
+	encodedPublicKey := base64.RawURLEncoding.EncodeToString(publicKey)
+	applicationTag := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	enclavePath := filepath.Join(root, "enclave.json")
+	enclave := fmt.Sprintf(`{"member_id":"enclave-a","provider":"macos-secure-enclave","key_reference":"secure-enclave:application-tag=%s;public-key=%s;access-control=biometry-current-set","hardware":{"credential_id":"%s","public_key":"sha256:%x","user_presence_required":true}}`, applicationTag, encodedPublicKey, applicationTag, sha256.Sum256(publicKey))
+	if err := os.WriteFile(enclavePath, []byte(enclave), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enclaveMembers, enclaveTokens, err := parseExternalPolicyMembers(t.Context(), "repo-a", []string{enclavePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enclaveMembers) != 1 || enclaveMembers[0].Hardware == nil || enclaveMembers[0].BearerToken != nil || len(enclaveTokens) != 0 {
+		t.Fatalf("Secure Enclave members = %#v, tokens = %#v", enclaveMembers, enclaveTokens)
+	}
+	enclaveWithPIN := strings.TrimSuffix(enclave, "}") + fmt.Sprintf(`,"pin_file":%q}`, tokenPath)
+	if err := os.WriteFile(enclavePath, []byte(enclaveWithPIN), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parseExternalPolicyMembers(t.Context(), "repo-a", []string{enclavePath}); err == nil || !strings.Contains(err.Error(), "must not configure") {
+		t.Fatalf("Secure Enclave PIN file was accepted: %v", err)
+	}
 }
 
 func TestEnrollFIDO2WritesProtectedExternalMember(t *testing.T) {
@@ -177,6 +202,78 @@ func TestEnrollFIDO2WritesProtectedExternalMember(t *testing.T) {
 	}
 	if metadata.Mode().Perm() != 0o600 {
 		t.Fatalf("FIDO2 definition mode = %o", metadata.Mode().Perm())
+	}
+}
+
+func TestEnrollMacosSecureEnclaveWritesProtectedExternalMember(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Secure Enclave enrollment is macOS-only")
+	}
+	root := t.TempDir()
+	publicKey := elliptic.Marshal(elliptic.P256(), elliptic.P256().Params().Gx, elliptic.P256().Params().Gy)
+	encodedPublicKey := base64.RawURLEncoding.EncodeToString(publicKey)
+	publicKeyFingerprint := fmt.Sprintf("sha256:%x", sha256.Sum256(publicKey))
+	helperPath := filepath.Join(root, "custodian")
+	helper := fmt.Sprintf("#!/bin/sh\nprintf '{\"application_tag\":\"%%s\",\"public_key\":\"%s\",\"public_key_data\":\"%s\",\"access_control\":\"biometry-current-set\",\"user_presence_required\":true}\\n' \"$2\"\n", publicKeyFingerprint, encodedPublicKey)
+	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(root, "member.json")
+	command := newIndexKeysQuorumEnrollMacosSecureEnclaveCommand()
+	command.SetArgs([]string{"--member", "enclave-a", "--custodian-path", helperPath, "--output", outputPath})
+	if err := command.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var definition externalPolicyMemberFile
+	if err := readProtectedJSON(outputPath, "Secure Enclave member", &definition); err != nil {
+		t.Fatal(err)
+	}
+	if definition.Provider != "macos-secure-enclave" || definition.Hardware == nil || definition.Hardware.CredentialID == "" || definition.Hardware.PublicKey != publicKeyFingerprint || definition.BearerTokenFile != "" || definition.PINFile != "" || !strings.Contains(definition.KeyReference, "access-control=biometry-current-set") {
+		t.Fatalf("unexpected Secure Enclave definition: %#v", definition)
+	}
+	metadata, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Mode().Perm() != 0o600 {
+		t.Fatalf("Secure Enclave definition mode = %o", metadata.Mode().Perm())
+	}
+}
+
+func TestEnrollMacosSecureEnclaveRollsBackKeyWhenOutputExists(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Secure Enclave enrollment is macOS-only")
+	}
+	root := t.TempDir()
+	publicKey := elliptic.Marshal(elliptic.P256(), elliptic.P256().Params().Gx, elliptic.P256().Params().Gy)
+	encodedPublicKey := base64.RawURLEncoding.EncodeToString(publicKey)
+	publicKeyFingerprint := fmt.Sprintf("sha256:%x", sha256.Sum256(publicKey))
+	operationsPath := filepath.Join(root, "operations")
+	helperPath := filepath.Join(root, "custodian")
+	helper := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$1" >> %q
+if [ "$1" = macos-secure-enclave-enroll ]; then
+  printf '{"application_tag":"%%s","public_key":"%s","public_key_data":"%s","access_control":"biometry-current-set","user_presence_required":true}\n' "$2"
+fi
+`, operationsPath, publicKeyFingerprint, encodedPublicKey)
+	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(root, "member.json")
+	if err := os.WriteFile(outputPath, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := newIndexKeysQuorumEnrollMacosSecureEnclaveCommand()
+	command.SetArgs([]string{"--member", "enclave-a", "--custodian-path", helperPath, "--output", outputPath})
+	if err := command.ExecuteContext(t.Context()); err == nil {
+		t.Fatal("enrollment unexpectedly replaced an existing output file")
+	}
+	operations, err := os.ReadFile(operationsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(operations) != "macos-secure-enclave-enroll\nmacos-secure-enclave-delete\n" {
+		t.Fatalf("unexpected helper operations: %q", operations)
 	}
 }
 
