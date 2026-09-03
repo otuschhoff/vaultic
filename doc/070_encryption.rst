@@ -306,12 +306,33 @@ the PIN and performs the private-key operation on the token. Use
 ``--custodian-path`` when the helper is not on ``PATH``. PIN files must be mode
 0600 and are never passed as PIN values in command arguments or logs.
 
-Model backup YubiKeys as separate members under an ``any_of`` policy for one
-hardware seat. Each token must have a distinct credential ID and public key;
-reusing either is reported as a policy finding. Linux release bundles keep the
-daemon and broker statically linked but build the custodian helper for GNU libc
-so it can load YKCS11 dynamically. FIDO2 ``hmac-secret``/PRF remains reserved
-and is not operational.
+FIDO2 ``hmac-secret`` members use a non-resident credential scoped to a
+DNS-style relying-party ID. Enroll one with:
+
+.. code-block:: console
+
+  $ vaultic index keys quorum enroll-fido2 \
+      --member fido-alice --relying-party-id recovery.example.org \
+      --pin-file /secure/alice.fido-pin --output /secure/fido-alice.json
+
+The generated mode-0600 file contains the credential ID, relying-party ID,
+pinned credential public-key hash, public verification key, and verified
+attestation certificate fingerprint when the authenticator supplies one. It
+contains neither the authenticator seed nor an ``hmac-secret`` output. During
+policy mutation and contribution, the custodian helper performs a fresh
+PIN-and-touch assertion, verifies UP, UV, credential ID, RP ID, and assertion
+signature, and requests a domain-separated secret for the repository/member.
+Only that transient 32-byte output enters process memory, where it wraps or
+unwraps the bound share and is then zeroized. Use ``--fido2-pin-file`` when
+contributing.
+
+Model backup PIV or FIDO2 authenticators as separate members under an
+``any_of`` policy for one hardware seat. Each token must have a distinct
+credential ID and public key; reusing either is reported as a policy finding.
+Linux release bundles keep the daemon and broker statically linked but build
+the custodian helper for GNU libc so it can dynamically access YKCS11 and HID.
+Linux hosts require the HID/udev runtime permissions needed by the service
+account; macOS uses the native HID backend.
 
 Online policy mutation
 ======================

@@ -1,5 +1,9 @@
 use std::{collections::HashMap, env, path::PathBuf};
 
+use aes_gcm::{
+    aead::{Aead, Payload},
+    Aes256Gcm, KeyInit, Nonce,
+};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -24,7 +28,7 @@ use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Clone)]
 pub struct KeyContext<'a> {
@@ -88,6 +92,12 @@ pub async fn from_environment(provider: &str) -> Result<Option<Box<dyn KeyProvid
         "yubikey-piv" => token_from_file("VAULTICDB_YUBIKEY_PIV_PIN_FILE").map(|pin| {
             pin.map(|value| Box::new(YubikeyPivProvider::new(value)) as Box<dyn KeyProvider>)
         }),
+        "fido2-hmac-secret" => token_from_file("VAULTICDB_FIDO2_SECRET_FILE").map(|secret| {
+            secret
+                .map(Fido2HmacSecretProvider::from_base64)
+                .transpose()
+                .map(|provider| provider.map(|value| Box::new(value) as Box<dyn KeyProvider>))
+        })?,
         value => bail!("unsupported metadata key provider {value:?}"),
     }
 }
@@ -115,6 +125,9 @@ pub async fn for_management(
         "yubikey-piv" => Ok(Box::new(YubikeyPivProvider::new(
             bearer_token.context("YubiKey PIV requires a PIN file")?,
         ))),
+        "fido2-hmac-secret" => Ok(Box::new(Fido2HmacSecretProvider::from_base64(
+            bearer_token.context("FIDO2 hmac-secret output is required")?,
+        )?)),
         "aws-kms" => bail!("AWS KMS uses the SDK credential chain, not a bearer token"),
         value => bail!("unsupported metadata key provider {value:?}"),
     }
@@ -758,6 +771,81 @@ impl KeyProvider for YubikeyPivProvider {
     }
 }
 
+pub struct Fido2HmacSecretProvider {
+    secret: Zeroizing<[u8; 32]>,
+}
+
+impl Fido2HmacSecretProvider {
+    pub fn from_base64(value: String) -> Result<Self> {
+        let mut decoded = Zeroizing::new(
+            BASE64
+                .decode(value)
+                .context("decode FIDO2 hmac-secret output")?,
+        );
+        let secret: [u8; 32] = decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("FIDO2 hmac-secret output must be 32 bytes"))?;
+        decoded.zeroize();
+        Ok(Self {
+            secret: Zeroizing::new(secret),
+        })
+    }
+
+    fn crypt(&self, context: &KeyContext<'_>, input: &[u8], encrypt: bool) -> Result<Vec<u8>> {
+        let cipher = Aes256Gcm::new_from_slice(self.secret.as_slice()).expect("32-byte AES key");
+        let aad = context.binding();
+        if encrypt {
+            let mut nonce = [0u8; 12];
+            rand::rng().fill_bytes(&mut nonce);
+            let ciphertext = cipher
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: input,
+                        aad: aad.as_bytes(),
+                    },
+                )
+                .map_err(|_| anyhow::anyhow!("encrypt share with FIDO2 hmac-secret failed"))?;
+            let mut output = nonce.to_vec();
+            output.extend_from_slice(&ciphertext);
+            Ok(output)
+        } else {
+            if input.len() < 28 {
+                bail!("FIDO2 hmac-secret ciphertext is truncated");
+            }
+            cipher
+                .decrypt(
+                    Nonce::from_slice(&input[..12]),
+                    Payload {
+                        msg: &input[12..],
+                        aad: aad.as_bytes(),
+                    },
+                )
+                .map_err(|_| anyhow::anyhow!("FIDO2 hmac-secret authentication failed"))
+        }
+    }
+}
+
+#[async_trait]
+impl KeyProvider for Fido2HmacSecretProvider {
+    fn name(&self) -> &'static str {
+        "fido2-hmac-secret"
+    }
+
+    async fn wrap(&self, context: &KeyContext<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.crypt(context, plaintext, true)
+    }
+
+    async fn unwrap(
+        &self,
+        context: &KeyContext<'_>,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.crypt(context, ciphertext, false).map(Zeroizing::new)
+    }
+}
+
 struct OwnedKeyContext {
     repository_id: String,
     slot_id: String,
@@ -853,6 +941,56 @@ pub fn yubikey_piv_public_key_binding(reference: &str) -> Result<String> {
     Ok(format!(
         "sha256:{}",
         parse_yubikey_piv_reference(reference)?.public_key_fingerprint
+    ))
+}
+
+pub fn fido2_hardware_bindings(reference: &str) -> Result<(String, String)> {
+    let fields = reference
+        .strip_prefix("fido2:")
+        .context("FIDO2 key reference must start with fido2:")?
+        .split(';')
+        .map(|field| {
+            field
+                .split_once('=')
+                .context("invalid FIDO2 key reference field")
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    if fields.len() != 3 {
+        bail!("FIDO2 key reference requires rp-id, credential-id, and public-key-der");
+    }
+    let rp_id = fields.get("rp-id").context("FIDO2 rp-id is missing")?;
+    if rp_id.is_empty()
+        || rp_id.len() > 253
+        || rp_id.starts_with('.')
+        || rp_id.ends_with('.')
+        || rp_id
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-'))
+    {
+        bail!("FIDO2 relying-party ID is invalid");
+    }
+    let credential_id = fields
+        .get("credential-id")
+        .context("FIDO2 credential-id is missing")?;
+    let credential = URL_SAFE_NO_PAD
+        .decode(credential_id)
+        .context("decode FIDO2 credential-id")?;
+    if credential.is_empty() {
+        bail!("FIDO2 credential-id is empty");
+    }
+    let public_key = URL_SAFE_NO_PAD
+        .decode(
+            fields
+                .get("public-key-der")
+                .context("FIDO2 public-key-der is missing")?,
+        )
+        .context("decode FIDO2 public-key-der")?;
+    if public_key.is_empty() {
+        bail!("FIDO2 public-key-der is empty");
+    }
+    Ok((
+        (*credential_id).to_owned(),
+        format!("sha256:{:x}", Sha256::digest(public_key)),
     ))
 }
 
@@ -999,6 +1137,52 @@ mod tests {
         .is_err());
         assert!(parse_yubikey_piv_reference(
             "pkcs11:module-path=/libykcs11.so;slot-id=2;id=9a;type=private"
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn fido2_secret_wrap_is_authenticated_and_context_bound() {
+        let provider = Fido2HmacSecretProvider::from_base64(BASE64.encode([7u8; 32])).unwrap();
+        let context = KeyContext {
+            repository_id: "repo-a",
+            slot_id: "fido-a",
+            key_reference: "fido2:reference",
+            dek_version: 3,
+            purpose: "capsule-share",
+        };
+        let ciphertext = provider.wrap(&context, b"share").await.unwrap();
+        assert_eq!(
+            provider
+                .unwrap(&context, &ciphertext)
+                .await
+                .unwrap()
+                .as_slice(),
+            b"share"
+        );
+        let other = KeyContext {
+            repository_id: "repo-b",
+            ..context
+        };
+        assert!(provider.unwrap(&other, &ciphertext).await.is_err());
+        assert!(Fido2HmacSecretProvider::from_base64(BASE64.encode([1u8; 31])).is_err());
+    }
+
+    #[test]
+    fn fido2_reference_binds_credential_and_public_key() {
+        let reference = "fido2:rp-id=vaultic.example;credential-id=AQID;public-key-der=BAUG";
+        let (credential, public_key) = fido2_hardware_bindings(reference).unwrap();
+        assert_eq!(credential, "AQID");
+        assert_eq!(
+            public_key,
+            format!("sha256:{:x}", Sha256::digest([4, 5, 6]))
+        );
+        assert!(fido2_hardware_bindings(
+            "fido2:rp-id=bad/id;credential-id=AQID;public-key-der=BAUG"
+        )
+        .is_err());
+        assert!(fido2_hardware_bindings(
+            "fido2:rp-id=vaultic.example;credential-id=;public-key-der=BAUG"
         )
         .is_err());
     }

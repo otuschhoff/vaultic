@@ -513,6 +513,17 @@ impl RecoveryCapsule {
                     {
                         bail!("YubiKey PIV hardware binding does not match key reference");
                     }
+                    if member.provider == MemberProvider::Fido2HmacSecret {
+                        let (credential_id, public_key) =
+                            crate::encryption::envelope::providers::fido2_hardware_bindings(
+                                &member.key_reference,
+                            )?;
+                        if hardware.credential_id != credential_id
+                            || hardware.public_key != public_key
+                        {
+                            bail!("FIDO2 hardware binding does not match key reference");
+                        }
+                    }
                 }
                 _ => {
                     let principal = member
@@ -565,11 +576,6 @@ impl RecoveryCapsule {
                 }
                 MemberProvider::YubikeyPiv | MemberProvider::Fido2HmacSecret => {
                     hardware_verified = true;
-                    if member.provider == MemberProvider::Fido2HmacSecret {
-                        findings.push(
-                            "hardware provider fido2-hmac-secret is not operational".to_owned(),
-                        );
-                    }
                     let credential = &member.hardware.as_ref().unwrap().credential_id;
                     if !hardware_credentials.insert(credential.clone()) {
                         findings.push(format!("duplicate hardware credential {credential}"));
@@ -1937,5 +1943,51 @@ mod tests {
         assert!(status
             .findings
             .contains(&"duplicate hardware public key".to_owned()));
+    }
+
+    #[test]
+    fn fido2_capsule_binds_credential_and_public_key() {
+        let mut hardware_capsule = capsule(2);
+        for (index, member) in hardware_capsule.members.iter_mut().enumerate() {
+            let (credential_id, public_key_der, public_key) = match index {
+                0 => (
+                    "AQID",
+                    "BAUG",
+                    "sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472",
+                ),
+                1 => (
+                    "AQIE",
+                    "BAUH",
+                    "sha256:8c7fdb659a9365d10a5499b5bf9f8ca06b17d9d85943e59c04b731f6698a5e6d",
+                ),
+                _ => (
+                    "AQIF",
+                    "BAUI",
+                    "sha256:840783f8ac59b5d855485caf270137690f02686134765e03d0c0a15e065e6b76",
+                ),
+            };
+            member.provider = MemberProvider::Fido2HmacSecret;
+            member.key_reference = format!(
+                "fido2:rp-id=vaultic.example;credential-id={credential_id};public-key-der={public_key_der}"
+            );
+            member.nonce = None;
+            member.argon2 = None;
+            member.hardware = Some(HardwareBinding {
+                credential_id: credential_id.to_owned(),
+                public_key: public_key.to_owned(),
+                serial_number: None,
+                attestation_fingerprint: None,
+                user_presence_required: true,
+            });
+        }
+        let status = hardware_capsule.effective_policy_status().unwrap();
+        assert!(status.hardware_verified);
+        assert!(status.compliant);
+        hardware_capsule.members[0]
+            .hardware
+            .as_mut()
+            .unwrap()
+            .public_key = "sha256:wrong".to_owned();
+        assert!(hardware_capsule.validate().is_err());
     }
 }

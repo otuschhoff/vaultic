@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -102,6 +103,7 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumPrepareCommand(globalOptions, options),
 		newIndexKeysQuorumFinalizeCommand(globalOptions, options),
 		newIndexKeysQuorumVerifyCommand(globalOptions),
+		newIndexKeysQuorumEnrollFIDO2Command(),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "create-group"),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "add-member"),
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "remove-member"),
@@ -110,6 +112,50 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumResumeMutationCommand(globalOptions, options),
 		newIndexKeysQuorumCancelMutationCommand(globalOptions),
 	)
+	return command
+}
+
+func newIndexKeysQuorumEnrollFIDO2Command() *cobra.Command {
+	var memberID, relyingPartyID, pinFile, custodianPath, outputPath string
+	command := &cobra.Command{Use: "enroll-fido2", Short: "Create a PIN-and-touch FIDO2 hmac-secret credential", Args: cobra.NoArgs, DisableAutoGenTag: true, RunE: func(command *cobra.Command, _ []string) error {
+		if memberID == "" || relyingPartyID == "" || pinFile == "" || outputPath == "" {
+			return fmt.Errorf("--member, --relying-party-id, --pin-file, and --output are required")
+		}
+		output, err := exec.CommandContext(command.Context(), custodianPath, "fido2-enroll", pinFile, relyingPartyID).Output()
+		if err != nil {
+			return fmt.Errorf("enroll FIDO2 credential: %w", err)
+		}
+		var result struct {
+			CredentialID           string  `json:"credential_id"`
+			PublicKey              string  `json:"public_key"`
+			PublicKeyDER           string  `json:"public_key_der"`
+			RelyingPartyID         string  `json:"relying_party_id"`
+			AttestationFingerprint *string `json:"attestation_fingerprint"`
+			UserPresenceRequired   bool    `json:"user_presence_required"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(output))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&result); err != nil || result.CredentialID == "" || result.PublicKey == "" || result.PublicKeyDER == "" || result.RelyingPartyID != relyingPartyID || !result.UserPresenceRequired {
+			return fmt.Errorf("custodian helper returned invalid FIDO2 enrollment metadata")
+		}
+		definition := externalPolicyMemberFile{
+			MemberID:      memberID,
+			Provider:      "fido2-hmac-secret",
+			KeyReference:  fmt.Sprintf("fido2:rp-id=%s;credential-id=%s;public-key-der=%s", relyingPartyID, result.CredentialID, result.PublicKeyDER),
+			Hardware:      &indexbroker.PolicyHardwareBinding{CredentialID: result.CredentialID, PublicKey: result.PublicKey, AttestationFingerprint: result.AttestationFingerprint, UserPresenceRequired: true},
+			PINFile:       pinFile,
+			CustodianPath: custodianPath,
+		}
+		if err := writeNewProtectedJSON(outputPath, definition); err != nil {
+			return err
+		}
+		return nil
+	}}
+	command.Flags().StringVar(&memberID, "member", "", "new hardware member ID")
+	command.Flags().StringVar(&relyingPartyID, "relying-party-id", "", "FIDO2 relying-party ID")
+	command.Flags().StringVar(&pinFile, "pin-file", "", "mode-0600 FIDO2 authenticator PIN file")
+	command.Flags().StringVar(&custodianPath, "custodian-path", "vaultic-key-custodian", "path to the hardware custodian executable")
+	command.Flags().StringVar(&outputPath, "output", "", "new mode-0600 external-member definition")
 	return command
 }
 
@@ -163,7 +209,7 @@ func newIndexKeysQuorumMutationCommand(globalOptions *global.Options, options *i
 				clear(credential)
 			}
 		}()
-		externalMembers, tokens, err := parseExternalPolicyMembers(externalMemberFiles)
+		externalMembers, tokens, err := parseExternalPolicyMembers(command.Context(), options.RepositoryID, externalMemberFiles)
 		if err != nil {
 			return err
 		}
@@ -458,9 +504,11 @@ type externalPolicyMemberFile struct {
 	Principal       *indexbroker.PolicyPrincipalBinding `json:"principal"`
 	Hardware        *indexbroker.PolicyHardwareBinding  `json:"hardware,omitempty"`
 	BearerTokenFile string                              `json:"bearer_token_file,omitempty"`
+	PINFile         string                              `json:"pin_file,omitempty"`
+	CustodianPath   string                              `json:"custodian_path,omitempty"`
 }
 
-func parseExternalPolicyMembers(paths []string) ([]indexbroker.ExternalPolicyMember, [][]byte, error) {
+func parseExternalPolicyMembers(ctx context.Context, repositoryID string, paths []string) ([]indexbroker.ExternalPolicyMember, [][]byte, error) {
 	members := make([]indexbroker.ExternalPolicyMember, 0, len(paths))
 	tokens := make([][]byte, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
@@ -478,7 +526,7 @@ func parseExternalPolicyMembers(paths []string) ([]indexbroker.ExternalPolicyMem
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("duplicate member ID %q", definition.MemberID)
 		}
-		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" && definition.Provider != "yubikey-piv" {
+		if definition.Provider != "azure-key-vault" && definition.Provider != "aws-kms" && definition.Provider != "aws-cloudhsm" && definition.Provider != "gcp-kms" && definition.Provider != "gcp-cloud-hsm" && definition.Provider != "yubikey-piv" && definition.Provider != "fido2-hmac-secret" {
 			clearPolicyCredentials(tokens)
 			return nil, tokens, fmt.Errorf("unsupported external member provider %q", definition.Provider)
 		}
@@ -508,6 +556,28 @@ func parseExternalPolicyMembers(paths []string) ([]indexbroker.ExternalPolicyMem
 			}
 			tokens = append(tokens, value)
 			text := string(value)
+			token = &text
+		} else if definition.Provider == "fido2-hmac-secret" {
+			if definition.PINFile == "" {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, fmt.Errorf("external member %q requires pin_file", definition.MemberID)
+			}
+			helper := definition.CustodianPath
+			if helper == "" {
+				helper = "vaultic-key-custodian"
+			}
+			output, err := exec.CommandContext(ctx, helper, "fido2-hmac-secret-derive", definition.PINFile, repositoryID, definition.MemberID, definition.KeyReference).Output()
+			if err != nil {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, fmt.Errorf("derive FIDO2 enrollment secret: %w", err)
+			}
+			value, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+			if err != nil || len(value) != 32 {
+				clearPolicyCredentials(tokens)
+				return nil, tokens, fmt.Errorf("FIDO2 custodian helper returned an invalid secret")
+			}
+			tokens = append(tokens, value)
+			text := base64.StdEncoding.EncodeToString(value)
 			token = &text
 		} else if definition.BearerTokenFile != "" {
 			clearPolicyCredentials(tokens)

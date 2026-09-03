@@ -14,6 +14,30 @@ type YubiKeyPIVUnwrapper struct {
 	PINFile    string
 }
 
+type FIDO2HMACSecretUnwrapper struct {
+	HelperPath string
+	PINFile    string
+}
+
+func (unwrapper FIDO2HMACSecretUnwrapper) UnwrapMember(ctx context.Context, member ExternalMemberContext, ciphertext []byte) ([]byte, VerifiedPrincipal, error) {
+	if member.Provider != "fido2-hmac-secret" || member.HardwareCredentialID == "" {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("FIDO2 unwrapper requires a hardware-bound fido2-hmac-secret member")
+	}
+	if unwrapper.HelperPath == "" || unwrapper.PINFile == "" {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("FIDO2 helper path and PIN file are required")
+	}
+	command := exec.CommandContext(ctx, unwrapper.HelperPath, "fido2-hmac-secret-unwrap", unwrapper.PINFile, member.RepositoryID, member.MemberID, member.KeyReference, strconv.FormatUint(uint64(member.RootKeyVersion), 10), member.Purpose, base64.StdEncoding.EncodeToString(ciphertext))
+	output, err := command.Output()
+	if err != nil {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("FIDO2 unwrap helper: %w", err)
+	}
+	plaintext, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	if err != nil {
+		return nil, VerifiedPrincipal{}, fmt.Errorf("decode FIDO2 helper output: %w", err)
+	}
+	return plaintext, VerifiedPrincipal{Authority: "fido2-hmac-secret", ImmutablePrincipalID: member.HardwareCredentialID}, nil
+}
+
 func (unwrapper YubiKeyPIVUnwrapper) UnwrapMember(ctx context.Context, member ExternalMemberContext, ciphertext []byte) ([]byte, VerifiedPrincipal, error) {
 	if member.Provider != "yubikey-piv" || member.HardwareCredentialID == "" {
 		return nil, VerifiedPrincipal{}, fmt.Errorf("YubiKey PIV unwrapper requires a hardware-bound yubikey-piv member")

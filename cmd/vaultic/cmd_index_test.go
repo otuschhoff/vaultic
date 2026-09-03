@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -87,7 +88,7 @@ func TestParseExternalPolicyMembers(t *testing.T) {
 	if err := os.WriteFile(azurePath, []byte(azure), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	members, tokens, err := parseExternalPolicyMembers([]string{azurePath})
+	members, tokens, err := parseExternalPolicyMembers(t.Context(), "repo-a", []string{azurePath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ func TestParseExternalPolicyMembers(t *testing.T) {
 	if err := os.WriteFile(awsPath, []byte(aws), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := parseExternalPolicyMembers([]string{awsPath}); err == nil || !strings.Contains(err.Error(), "SDK credential chain") {
+	if _, _, err := parseExternalPolicyMembers(t.Context(), "repo-a", []string{awsPath}); err == nil || !strings.Contains(err.Error(), "SDK credential chain") {
 		t.Fatalf("AWS bearer token file was accepted: %v", err)
 	}
 
@@ -114,13 +115,65 @@ func TestParseExternalPolicyMembers(t *testing.T) {
 	if err := os.WriteFile(pivPath, []byte(piv), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pivMembers, pivTokens, err := parseExternalPolicyMembers([]string{pivPath})
+	pivMembers, pivTokens, err := parseExternalPolicyMembers(t.Context(), "repo-a", []string{pivPath})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer clearPolicyCredentials(pivTokens)
 	if len(pivMembers) != 1 || pivMembers[0].Hardware == nil || pivMembers[0].Principal != nil || pivMembers[0].BearerToken == nil || *pivMembers[0].BearerToken != "azure-token" {
 		t.Fatalf("PIV members = %#v", pivMembers)
+	}
+
+	helperPath := filepath.Join(root, "custodian")
+	helper := "#!/bin/sh\nprintf '" + base64.StdEncoding.EncodeToString(make([]byte, 32)) + "\\n'\n"
+	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fidoPath := filepath.Join(root, "fido.json")
+	fido := fmt.Sprintf(`{"member_id":"fido-a","provider":"fido2-hmac-secret","key_reference":"fido2:rp-id=vaultic.example;credential-id=AQID;public-key-der=BAUG","hardware":{"credential_id":"AQID","public_key":"sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472","user_presence_required":true},"pin_file":%q,"custodian_path":%q}`, tokenPath, helperPath)
+	if err := os.WriteFile(fidoPath, []byte(fido), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fidoMembers, fidoSecrets, err := parseExternalPolicyMembers(t.Context(), "repo-a", []string{fidoPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearPolicyCredentials(fidoSecrets)
+	if len(fidoMembers) != 1 || fidoMembers[0].BearerToken == nil || *fidoMembers[0].BearerToken != base64.StdEncoding.EncodeToString(make([]byte, 32)) {
+		t.Fatalf("FIDO2 members = %#v", fidoMembers)
+	}
+}
+
+func TestEnrollFIDO2WritesProtectedExternalMember(t *testing.T) {
+	root := t.TempDir()
+	helperPath := filepath.Join(root, "custodian")
+	helperOutput := `{"credential_id":"AQID","public_key":"sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472","public_key_der":"BAUG","relying_party_id":"vaultic.example","attestation_fingerprint":null,"user_presence_required":true}`
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nprintf '%s\\n' '"+helperOutput+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pinPath := filepath.Join(root, "pin")
+	if err := os.WriteFile(pinPath, []byte("123456"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(root, "member.json")
+	command := newIndexKeysQuorumEnrollFIDO2Command()
+	command.SetArgs([]string{"--member", "fido-a", "--relying-party-id", "vaultic.example", "--pin-file", pinPath, "--custodian-path", helperPath, "--output", outputPath})
+	if err := command.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var definition externalPolicyMemberFile
+	if err := readProtectedJSON(outputPath, "FIDO2 member", &definition); err != nil {
+		t.Fatal(err)
+	}
+	if definition.Provider != "fido2-hmac-secret" || definition.Hardware == nil || definition.Hardware.CredentialID != "AQID" || definition.BearerTokenFile != "" {
+		t.Fatalf("unexpected FIDO2 definition: %#v", definition)
+	}
+	metadata, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Mode().Perm() != 0o600 {
+		t.Fatalf("FIDO2 definition mode = %o", metadata.Mode().Perm())
 	}
 }
 

@@ -41,3 +41,20 @@ func TestYubiKeyPIVUnwrapperFailsClosed(t *testing.T) {
 		t.Fatal("wrong provider was accepted")
 	}
 }
+
+func TestFIDO2HMACSecretUnwrapperUsesBoundContext(t *testing.T) {
+	root := t.TempDir()
+	helperPath := filepath.Join(root, "helper")
+	script := "#!/bin/sh\nprintf '" + base64.StdEncoding.EncodeToString([]byte("fido-share")) + "\\n'\n"
+	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unwrapper := FIDO2HMACSecretUnwrapper{HelperPath: helperPath, PINFile: "/protected/pin"}
+	plaintext, identity, err := unwrapper.UnwrapMember(t.Context(), ExternalMemberContext{RepositoryID: "repo-a", RootKeyVersion: 3, MemberID: "fido-a", Provider: "fido2-hmac-secret", KeyReference: "fido2:reference", Purpose: "bound-purpose", HardwareCredentialID: "credential-a"}, []byte("ciphertext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plaintext) != "fido-share" || identity.Authority != "fido2-hmac-secret" || identity.ImmutablePrincipalID != "credential-a" {
+		t.Fatalf("unexpected unwrap result: %q, %#v", plaintext, identity)
+	}
+}

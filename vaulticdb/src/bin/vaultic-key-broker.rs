@@ -718,6 +718,7 @@ async fn handle_request(
                     MemberProvider::AwsKms | MemberProvider::AwsCloudhsm => "aws-kms",
                     MemberProvider::GcpKms | MemberProvider::GcpCloudHsm => "gcp-kms",
                     MemberProvider::YubikeyPiv => "yubikey-piv",
+                    MemberProvider::Fido2HmacSecret => "fido2-hmac-secret",
                     _ => bail!("unsupported external policy member provider"),
                 };
                 let provider = vaulticdb::encryption::envelope::providers::for_management(
