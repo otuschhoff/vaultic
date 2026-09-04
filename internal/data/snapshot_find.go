@@ -282,7 +282,7 @@ func (f *SnapshotFilter) findSorted(ctx context.Context, be vaultic.Lister, load
 	var matches Snapshots
 	err = ForAllSnapshots(ctx, be, loader, nil, func(id vaultic.ID, snapshot *Snapshot, err error) error {
 		if err != nil {
-			return errors.Errorf("Error loading snapshot %v: %v", id.Str(), err)
+			return errors.Errorf("Error loading snapshot %v: %w", id.Str(), err)
 		}
 		if !f.matches(snapshot) {
 			return nil

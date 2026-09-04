@@ -299,7 +299,7 @@ func copyTree(ctx context.Context, srcRepo *repository.Repository, dstRepo vault
 		return visited
 	}, func(treeID vaultic.ID, err error, nodes data.TreeNodeIterator) error {
 		if err != nil {
-			return fmt.Errorf("LoadTree(%v) returned error %v", treeID.Str(), err)
+			return fmt.Errorf("LoadTree(%v) returned error %w", treeID.Str(), err)
 		}
 
 		// copy raw tree bytes to avoid problems if the serialization changes

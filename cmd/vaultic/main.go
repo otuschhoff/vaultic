@@ -373,6 +373,12 @@ func exitCodeForError(err error) int {
 		return 11
 	case errors.Is(err, repository.ErrNoKeyFound):
 		return 12
+	case errors.IsUnauthorized(err):
+		return 12
+	case errors.IsIntegrity(err):
+		return 2
+	case errors.IsRejected(err), errors.IsTransient(err), errors.IsUnavailable(err):
+		return 1
 	case errors.Is(err, context.Canceled):
 		return 130
 	default:

@@ -17,6 +17,10 @@ message ErrorDetail {
   string code = 1;
   string message = 2;
   bool retryable = 3;
+  // Set when the error applies to a specific request or state field.
+  string field = 4;
+  // Set when the error identifies an observed repository generation.
+  uint64 generation = 5;
 }
 
 message BatchLimits {

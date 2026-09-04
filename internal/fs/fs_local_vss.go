@@ -74,7 +74,7 @@ func parseMountPoints(list string, msgError ErrorHandler) (volumes map[string]st
 	}
 	for s := range strings.SplitSeq(list, ";") {
 		if v, err := getVolumeNameForVolumeMountPoint(s); err != nil {
-			msgError(s, errors.Errorf("failed to parse vss.exclude-volumes [%s]: %s", s, err))
+			msgError(s, errors.Errorf("failed to parse vss.exclude-volumes [%s]: %w", s, err))
 		} else {
 			if volumes == nil {
 				volumes = make(map[string]struct{})
@@ -111,7 +111,7 @@ func (fs *LocalVss) DeleteSnapshots() {
 
 	for volumeName, snapshot := range fs.snapshots {
 		if err := snapshot.Delete(); err != nil {
-			fs.msgError(volumeName, errors.Errorf("failed to delete VSS snapshot: %s", err))
+			fs.msgError(volumeName, errors.Errorf("failed to delete VSS snapshot: %w", err))
 			activeSnapshots[volumeName] = snapshot
 		}
 	}
@@ -137,7 +137,7 @@ func (fs *LocalVss) isMountPointIncluded(mountPoint string) bool {
 
 	volume, err := getVolumeNameForVolumeMountPoint(mountPoint)
 	if err != nil {
-		fs.msgError(mountPoint, errors.Errorf("failed to get volume from mount point [%s]: %s", mountPoint, err))
+		fs.msgError(mountPoint, errors.Errorf("failed to get volume from mount point [%s]: %w", mountPoint, err))
 		return true
 	}
 

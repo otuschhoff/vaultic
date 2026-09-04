@@ -63,6 +63,84 @@ func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {
 	}
 }
 
+func TestClassifyRPCErrorPreservesStatusAndDetail(t *testing.T) {
+	cause := errors.New("transport cause")
+	detail := &vaulticdbv1.ErrorDetail{
+		Code: "writer_fenced", Message: "writer is fenced", Generation: 42,
+	}
+	rpcStatus, err := status.New(codes.FailedPrecondition, "writer is fenced").WithDetails(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classified := classifyRPCError(rpcStatus.Err())
+	if !errors.Is(classified, ErrWriterFenced) {
+		t.Fatalf("classified error = %v, want ErrWriterFenced", classified)
+	}
+	wrapped := &RPCError{detail: detail, cause: cause, kind: ErrWriterFenced}
+	if !errors.Is(wrapped, cause) || !errors.Is(wrapped, ErrWriterFenced) {
+		t.Fatalf("RPCError did not preserve cause and kind: %v", wrapped)
+	}
+	if status.Code(classified) != codes.FailedPrecondition {
+		t.Fatalf("status code = %v, want FailedPrecondition", status.Code(classified))
+	}
+	var daemonError *RPCError
+	if !errors.As(classified, &daemonError) || daemonError.Detail().GetGeneration() != 42 {
+		t.Fatalf("structured detail not preserved: %#v", daemonError)
+	}
+}
+
+func TestEveryDaemonDetailCodeHasSentinel(t *testing.T) {
+	tests := map[string]error{
+		"writer_fenced": ErrWriterFenced, "writer_demoted": ErrWriterDemoted,
+		"writer_transitioning": ErrWriterTransitioning, "generation_changed": ErrGenerationChanged,
+		"namespace_mismatch": ErrNamespaceMismatch, "encryption_integrity": ErrEncryptionIntegrity,
+		"idempotency_conflict": ErrIdempotencyConflict, "storage_unavailable": ErrStorageUnavailable,
+		"invalid_request": ErrInvalidRequest, "key_management": ErrKeyManagement,
+		"writer_role": ErrWriterRole,
+	}
+	for code, want := range tests {
+		t.Run(code, func(t *testing.T) {
+			if got := daemonErrorKind(code); !errors.Is(got, want) {
+				t.Fatalf("daemonErrorKind(%q) = %v, want %v", code, got, want)
+			}
+		})
+	}
+	if got := daemonErrorKind("future_code"); got != nil {
+		t.Fatalf("unknown code classified as %v", got)
+	}
+}
+
+func TestGenerationConflictReturnsTypedDaemonError(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "typed-generation-error",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(ctx); err != nil {
+			t.Errorf("close daemon client: %v", err)
+		}
+	})
+	current, err := client.GenerationStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.QuarantineGeneration(ctx, current.ActiveGeneration+1, strings.Repeat("a", 64))
+	if !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("quarantine error = %v, want ErrGenerationChanged", err)
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("quarantine status = %v, want FailedPrecondition", status.Code(err))
+	}
+	var daemonError *RPCError
+	if !errors.As(err, &daemonError) || daemonError.Detail().GetField() != "generation" {
+		t.Fatalf("generation detail not preserved: %#v", daemonError)
+	}
+}
+
 func TestMetadataRebuildInitializationRequiresBrokeredRequiredEncryption(t *testing.T) {
 	_, err := Ensure(context.Background(), Options{RebuildInitialize: true, EncryptionMode: "required"})
 	if err == nil || !strings.Contains(err.Error(), "requires brokered required encryption") {
@@ -1647,7 +1725,7 @@ func TestFailedMetadataKeyUnwrapEmitsAuthEvent(t *testing.T) {
 	if client, err := Ensure(ctx, options); err == nil {
 		_ = client.Close(ctx)
 		t.Fatal("wrong metadata passphrase unexpectedly unlocked the daemon")
-	} else if !strings.Contains(err.Error(), "no metadata key slot could be unwrapped") {
+	} else if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("unexpected failed-unlock error: %v", err)
 	}
 	buffer := make([]byte, 4096)
@@ -1659,7 +1737,9 @@ func TestFailedMetadataKeyUnwrapEmitsAuthEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := string(buffer[:count])
-	if !strings.Contains(message, `"category":"auth"`) || !strings.Contains(message, `"message":"metadata key unwrap failed"`) || strings.Contains(message, "passphrase") {
+	categoryFound := strings.Contains(message, `"category":"auth"`)
+	eventFound := strings.Contains(message, `"message":"encrypted metadata daemon failed during startup"`)
+	if !categoryFound || !eventFound || strings.Contains(message, "passphrase") {
 		t.Fatalf("unexpected failed-unlock event: %s", message)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	vaulticerrors "github.com/otuschhoff/vaultic/internal/errors"
 	vaulticfs "github.com/otuschhoff/vaultic/internal/fs"
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/observability"
@@ -35,8 +37,6 @@ const (
 	SchemaVersion      = "0"
 	defaultRPCDeadline = 10 * time.Second
 )
-
-var ErrUnavailable = errors.New("vaulticdb unavailable")
 
 var requestSequence atomic.Uint64
 
@@ -210,7 +210,7 @@ func Connect(ctx context.Context, options Options) (*Client, error) {
 	defer cancel()
 	client, err := dial(ctx, options)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return client, nil
 }
@@ -244,7 +244,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	} {
 		if path != "" {
 			if err := validateProtectedFile(path, description); err != nil {
-				return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+				return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 			}
 		}
 	}
@@ -256,7 +256,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	}
 	for _, network := range options.TCPAllowlist {
 		if _, _, err := net.ParseCIDR(network); err != nil {
-			return nil, fmt.Errorf("%w: invalid TCP allowlist entry %q: %v", ErrUnavailable, network, err)
+			return nil, fmt.Errorf("%w: invalid TCP allowlist entry %q: %w", ErrUnavailable, network, err)
 		}
 	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, dialAttemptTimeout(options))
@@ -264,7 +264,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	cancelProbe()
 	if connectErr == nil {
 		if options.RebuildInitialize {
-			_ = client.Close(ctx)
+			vaulticerrors.LogCleanup("close existing vaulticdb client", func() error { return client.Close(ctx) }, log.Printf)
 			return nil, fmt.Errorf("%w: metadata rebuild initialization refuses an existing daemon", ErrUnavailable)
 		}
 		return client, nil
@@ -333,8 +333,8 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	}
 	if err := cmd.Start(); err != nil {
 		if authRead != nil {
-			_ = authRead.Close()
-			_ = authWrite.Close()
+			vaulticerrors.LogClose(authRead, "close vaulticdb authentication reader", log.Printf)
+			vaulticerrors.LogClose(authWrite, "close vaulticdb authentication writer", log.Printf)
 		}
 		// Another caller may have started the singleton between our first dial
 		// and this start attempt. Retry attach before returning the start error.
@@ -344,7 +344,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		return nil, fmt.Errorf("start vaulticdb: %w", err)
 	}
 	if authRead != nil {
-		_ = authRead.Close()
+		vaulticerrors.CloseQuietly(authRead)
 		_, writeErr := io.WriteString(authWrite, options.AuthToken)
 		closeErr := authWrite.Close()
 		if writeErr != nil || closeErr != nil {
@@ -359,9 +359,12 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		cleanupOwnedArtifacts(options, cmd.Process.Pid)
-		if strings.Contains(daemonErrors.String(), "no metadata key slot could be unwrapped") {
-			_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "metadata key unwrap failed", Fields: map[string]any{"repository_id": options.RepositoryID}})
-			return nil, fmt.Errorf("%w: no metadata key slot could be unwrapped", ErrUnavailable)
+		if options.EncryptionMode == "required" || options.EncryptionMode == "initialize" {
+			_ = observability.Emit(ctx, observability.Event{
+				Severity: observability.Warning, Category: observability.CategoryAuth,
+				Component: "vaulticdb", Message: "encrypted metadata daemon failed during startup",
+				Fields: map[string]any{"repository_id": options.RepositoryID},
+			})
 		}
 		return nil, fmt.Errorf("%w: wait for daemon readiness: %w", ErrUnavailable, err)
 	}
@@ -438,11 +441,11 @@ func cleanupOwnedArtifacts(options Options, processID int) {
 	if !daemonOwnsProcess(base, processID) {
 		return
 	}
-	_ = os.Remove(metadataPath(base, ".pid"))
-	_ = os.Remove(metadataPath(base, ".cap"))
+	vaulticerrors.LogCleanup("remove vaulticdb PID file", func() error { return os.Remove(metadataPath(base, ".pid")) }, log.Printf)
+	vaulticerrors.LogCleanup("remove vaulticdb capability file", func() error { return os.Remove(metadataPath(base, ".cap")) }, log.Printf)
 	if options.TCPAddress == "" {
 		if info, err := os.Lstat(options.Socket); err == nil && info.Mode()&os.ModeSocket != 0 {
-			_ = os.Remove(options.Socket)
+			vaulticerrors.LogCleanup("remove vaulticdb socket", func() error { return os.Remove(options.Socket) }, log.Printf)
 		}
 	}
 }
@@ -469,6 +472,7 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 	conn, err := grpc.DialContext(ctx, target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(dialer),
+		grpc.WithUnaryInterceptor(classifyUnaryClientError),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -479,7 +483,7 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 		client.rpc = &authenticatedClient{VaulticDBClient: client.rpc, token: options.AuthToken}
 	}
 	if err := client.validate(ctx); err != nil {
-		_ = conn.Close()
+		vaulticerrors.CloseQuietly(conn)
 		return nil, err
 	}
 	return client, nil
@@ -864,15 +868,15 @@ func PublishCapsuleWithoutDatabase(ctx context.Context, options Options, capsule
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
+		vaulticerrors.CloseQuietly(temporary)
 		return PublishedCapsuleMutation{}, err
 	}
 	if _, err := temporary.Write(capsule); err != nil {
-		_ = temporary.Close()
+		vaulticerrors.CloseQuietly(temporary)
 		return PublishedCapsuleMutation{}, fmt.Errorf("write temporary capsule: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
+		vaulticerrors.CloseQuietly(temporary)
 		return PublishedCapsuleMutation{}, fmt.Errorf("sync temporary capsule: %w", err)
 	}
 	if err := temporary.Close(); err != nil {

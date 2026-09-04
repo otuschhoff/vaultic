@@ -68,7 +68,7 @@ func (opts *SnapshotOptions) AddFlags(f *pflag.FlagSet) {
 	err := f.MarkDeprecated("last", "use --latest 1")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err)
+		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 	f.IntVar(&opts.Latest, "latest", 0, "only show the last `n` snapshots for each host and path")
 	f.VarP(&opts.GroupBy, "group-by", "g", "`group` snapshots by host, paths and/or tags, separated by comma")

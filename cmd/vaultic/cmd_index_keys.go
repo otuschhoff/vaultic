@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
+	vaulticerrors "github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -310,15 +312,15 @@ func newIndexKeysQuorumMutationCommand(globalOptions *global.Options, options *i
 		}
 		status, err := brokerClient.Status(command.Context())
 		if err != nil {
-			_ = brokerClient.Close()
+			vaulticerrors.LogClose(brokerClient, "close key broker client", log.Printf)
 			return err
 		}
 		if err := matchQuorumCapsule(capsule.RepositoryID(), capsule.Generation(), capsule.LogicalID(), capsule.PolicyHash(), status); err != nil {
-			_ = brokerClient.Close()
+			vaulticerrors.LogClose(brokerClient, "close key broker client", log.Printf)
 			return err
 		}
 		prepared, err := brokerClient.PreparePolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest, policy, members, externalMembers, acknowledgeDowngrade)
-		_ = brokerClient.Close()
+		vaulticerrors.LogClose(brokerClient, "close key broker client", log.Printf)
 		if err != nil {
 			return err
 		}
@@ -374,15 +376,15 @@ func newIndexKeysQuorumResumeMutationCommand(globalOptions *global.Options, opti
 		}
 		status, err := client.Status(command.Context())
 		if err != nil {
-			_ = client.Close()
+			vaulticerrors.LogClose(client, "close activation client", log.Printf)
 			return err
 		}
 		if !status.PolicyMutationPending || status.PendingCapsuleSHA256 == nil || status.PendingCapsuleGeneration == nil {
-			_ = client.Close()
+			vaulticerrors.LogClose(client, "close activation client", log.Printf)
 			return fmt.Errorf("broker has no pending policy mutation")
 		}
 		prepared, err := client.PendingPolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest)
-		_ = client.Close()
+		vaulticerrors.LogClose(client, "close activation client", log.Printf)
 		if err != nil {
 			return err
 		}
@@ -897,7 +899,7 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 			return errCapsulePackProofComplete
 		})
 		if err != nil && err != errCapsulePackProofComplete {
-			_ = repo.Close()
+			vaulticerrors.CloseQuietly(repo)
 			return fmt.Errorf("authenticate pack through capsule lease: %w", err)
 		}
 		brokerClient, err := indexbroker.Dial(command.Context(), globalOptions.KeyBrokerSocket)
@@ -1154,10 +1156,10 @@ func newIndexKeysEscrowRecoverCommand(options *indexKeysOptions) *cobra.Command 
 		if _, err = file.Write(append(masterKey, '\n')); err == nil {
 			err = file.Close()
 		} else {
-			_ = file.Close()
+			vaulticerrors.LogClose(file, "close exported key file", log.Printf)
 		}
 		if err != nil {
-			_ = os.Remove(outputKeyFile)
+			vaulticerrors.LogCleanup("remove incomplete exported key file", func() error { return os.Remove(outputKeyFile) }, log.Printf)
 			return fmt.Errorf("write recovered key file: %w", err)
 		}
 		return nil
@@ -1496,7 +1498,7 @@ func withMirroredKeyMutation(ctx context.Context, globalOptions *global.Options,
 	_, _, mirrorErr := mirrorCurrentEnvelope(ctx, repo.Backend(), client)
 	if err != nil {
 		if mirrorErr != nil {
-			return daemon.KeyStatus{}, fmt.Errorf("key operation failed: %w (current envelope mirror also failed: %v)", err, mirrorErr)
+			return daemon.KeyStatus{}, fmt.Errorf("key operation failed: %w (current envelope mirror also failed: %w)", err, mirrorErr)
 		}
 		return daemon.KeyStatus{}, err
 	}

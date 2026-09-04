@@ -23,7 +23,7 @@ func removeResticBinary(dir, target string) error {
 		_ = os.Remove(backup)
 	}
 	if err := os.Rename(target, backup); err != nil {
-		return fmt.Errorf("unable to rename target file: %v", err)
+		return fmt.Errorf("unable to rename target file: %w", err)
 	}
 	return nil
 }

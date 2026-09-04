@@ -62,6 +62,8 @@ type Repository struct {
 	allocDec sync.Once
 	enc      *zstd.Encoder
 	dec      *zstd.Decoder
+	encErr   error
+	decErr   error
 
 	zeroChunkOnce sync.Once
 	zeroChunkID   vaultic.ID
@@ -310,12 +312,12 @@ func (r *Repository) SetEngine(engine enginepkg.Engine) {
 	r.engine = engine
 }
 
-func (r *Repository) legacyIndexEngine() enginepkg.LegacyIndexEngine {
+func (r *Repository) legacyIndexEngine() (enginepkg.LegacyIndexEngine, error) {
 	engine, ok := r.Engine().(enginepkg.LegacyIndexEngine)
 	if !ok {
-		panic("repository operation requires the legacy index engine")
+		return nil, ErrLegacyEngineRequired
 	}
-	return engine
+	return engine, nil
 }
 
 // ResolveEngineFromBackend validates the authoritative manifest through the
@@ -490,7 +492,11 @@ func (r *Repository) packSizing(t vaultic.BlobType) (size, limit uint64, growFac
 
 func (r *Repository) currentBlobSize(t vaultic.BlobType) uint64 {
 	types := make(map[vaultic.ID]vaultic.BlobType)
-	for blob := range r.legacyIndexEngine().Values() {
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return 0
+	}
+	for blob := range engine.Values() {
 		packID := blob.PackID()
 		if previous, ok := types[packID]; !ok {
 			types[packID] = blob.Handle().Type
@@ -641,7 +647,11 @@ func (r *Repository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []
 	debug.Log("load %v (buf len %v, cap %d)", bh, len(buf), cap(buf))
 
 	// lookup packs
-	blobs := r.legacyIndexEngine().Lookup(bh)
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return nil, err
+	}
+	blobs := engine.Lookup(bh)
 	if len(blobs) == 0 {
 		debug.Log("id %v not found in index", bh.ID)
 		return nil, errors.Errorf("id %v not found in repository", bh.ID)
@@ -650,7 +660,7 @@ func (r *Repository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []
 	// try cached pack files first
 	sortCachedPacksFirst(r.cache, blobs)
 
-	buf, err := r.loadBlob(ctx, blobs, buf)
+	buf, err = r.loadBlob(ctx, blobs, buf)
 	if err != nil {
 		if r.cache != nil {
 			for _, blob := range blobs {
@@ -686,7 +696,11 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 			continue
 		}
 
-		it := newPackBlobIterator(blob.PackID(), newByteReader(buf), blob.Blob.Offset, pack.Blobs{blob.Blob}, r.key, r.getZstdDecoder())
+		decoder, err := r.getZstdDecoder()
+		if err != nil {
+			return nil, err
+		}
+		it := newPackBlobIterator(blob.PackID(), newByteReader(buf), blob.Blob.Offset, pack.Blobs{blob.Blob}, r.key, decoder)
 		pbv, err := it.Next()
 
 		if err == nil {
@@ -715,7 +729,7 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 	return nil, errors.Errorf("loading %v from %v packs failed", blobs[0].Handle(), len(blobs))
 }
 
-func (r *Repository) getZstdEncoder() *zstd.Encoder {
+func (r *Repository) getZstdEncoder() (*zstd.Encoder, error) {
 	r.allocEnc.Do(func() {
 
 		var level zstd.EncoderLevel
@@ -743,14 +757,15 @@ func (r *Repository) getZstdEncoder() *zstd.Encoder {
 
 		enc, err := zstd.NewWriter(nil, opts...)
 		if err != nil {
-			panic(err)
+			r.encErr = fmt.Errorf("initialize zstd encoder: %w", err)
+			return
 		}
 		r.enc = enc
 	})
-	return r.enc
+	return r.enc, r.encErr
 }
 
-func (r *Repository) getZstdDecoder() *zstd.Decoder {
+func (r *Repository) getZstdDecoder() (*zstd.Decoder, error) {
 	r.allocDec.Do(func() {
 		opts := []zstd.DOption{
 			// Use all available cores.
@@ -762,11 +777,12 @@ func (r *Repository) getZstdDecoder() *zstd.Decoder {
 
 		dec, err := zstd.NewReader(nil, opts...)
 		if err != nil {
-			panic(err)
+			r.decErr = fmt.Errorf("initialize zstd decoder: %w", err)
+			return
 		}
 		r.dec = dec
 	})
-	return r.dec
+	return r.dec, r.decErr
 }
 
 // saveAndEncrypt encrypts data and stores it to the backend as type t. If data
@@ -786,7 +802,11 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t vaultic.BlobType, dat
 		// generate zero-sized blobs.
 		if len(data) > 0 && (r.opts.Compression != CompressionOff || t != vaultic.DataBlob) {
 			uncompressedLength = len(data)
-			data = r.getZstdEncoder().EncodeAll(data, nil)
+			encoder, err := r.getZstdEncoder()
+			if err != nil {
+				return 0, err
+			}
+			data = encoder.EncodeAll(data, nil)
 		}
 	}
 
@@ -812,7 +832,7 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t vaultic.BlobType, dat
 	case vaultic.DataBlob:
 		pm = r.dataPM
 	default:
-		panic(fmt.Sprintf("invalid type: %v", t))
+		return 0, fmt.Errorf("%w: %v", ErrInvalidBlobType, t)
 	}
 
 	return pm.SaveBlob(ctx, t, id, ciphertext, uncompressedLength)
@@ -831,7 +851,11 @@ func (r *Repository) verifyCiphertext(buf []byte, uncompressedLength int, id vau
 	if uncompressedLength != 0 {
 		// DecodeAll will allocate a slice if it is not large enough since it
 		// knows the decompressed size (because we're using EncodeAll)
-		plaintext, err = r.getZstdDecoder().DecodeAll(plaintext, nil)
+		decoder, decoderErr := r.getZstdDecoder()
+		if decoderErr != nil {
+			return decoderErr
+		}
+		plaintext, err = decoder.DecodeAll(plaintext, nil)
 		if err != nil {
 			return fmt.Errorf("decompression failed: %w", err)
 		}
@@ -851,7 +875,11 @@ func (r *Repository) compressUnpacked(p []byte) ([]byte, error) {
 
 	// version byte
 	out := []byte{2}
-	out = r.getZstdEncoder().EncodeAll(p, out)
+	encoder, err := r.getZstdEncoder()
+	if err != nil {
+		return nil, err
+	}
+	out = encoder.EncodeAll(p, out)
 	return out, nil
 }
 
@@ -874,7 +902,11 @@ func (r *Repository) decompressUnpacked(p []byte) ([]byte, error) {
 		return nil, errors.New("not supported encoding format")
 	}
 
-	return r.getZstdDecoder().DecodeAll(p[1:], nil)
+	decoder, err := r.getZstdDecoder()
+	if err != nil {
+		return nil, err
+	}
+	return decoder.DecodeAll(p[1:], nil)
 }
 
 // SaveUnpacked encrypts data and stores it in the backend. Returned is the
@@ -990,7 +1022,9 @@ func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.C
 	// pack uploader + wg.Go below + blob saver (CPU bound)
 	wg.SetLimit(2 + runtime.GOMAXPROCS(0))
 	r.mainWg = wg
-	r.startPackUploader(ctx, wg)
+	if err := r.startPackUploader(ctx, wg); err != nil {
+		return err
+	}
 	// blob saver are spawned on demand, use wait group to keep track of them
 	r.blobSaver = &sync.WaitGroup{}
 	wg.Go(func() error {
@@ -1016,9 +1050,9 @@ func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.C
 	return wg.Wait()
 }
 
-func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) {
+func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) error {
 	if r.packerWg != nil {
-		panic("uploader already started")
+		return ErrUploaderAlreadyStarted
 	}
 
 	innerWg, ctx := errgroup.WithContext(ctx)
@@ -1032,6 +1066,7 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 	wg.Go(func() error {
 		return innerWg.Wait()
 	})
+	return nil
 }
 
 type blobSaverRepo struct {
@@ -1055,7 +1090,11 @@ func (r *Repository) flush(ctx context.Context) error {
 		return err
 	}
 
-	return r.legacyIndexEngine().Flush(ctx, &internalRepository{r})
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return err
+	}
+	return engine.Flush(ctx, &internalRepository{r})
 }
 
 func (r *Repository) flushBlobSaver() {
@@ -1096,7 +1135,11 @@ func (r *Repository) Connections() uint {
 }
 
 func (r *Repository) LookupBlob(bh vaultic.BlobHandle) []vaultic.PackBlob {
-	entries := r.legacyIndexEngine().Lookup(bh)
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return nil
+	}
+	entries := engine.Lookup(bh)
 	out := make([]vaultic.PackBlob, len(entries))
 	for i, e := range entries {
 		out[i] = e
@@ -1106,13 +1149,21 @@ func (r *Repository) LookupBlob(bh vaultic.BlobHandle) []vaultic.PackBlob {
 
 // LookupBlobSize returns the size of blob id. Also returns pending blobs.
 func (r *Repository) LookupBlobSize(bh vaultic.BlobHandle) (uint, bool) {
-	return r.legacyIndexEngine().LookupSize(bh)
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return 0, false
+	}
+	return engine.LookupSize(bh)
 }
 
 // ListBlobs runs fn on all blobs known to the index. When the context is cancelled,
 // the index iteration returns immediately with ctx.Err(). This blocks any modification of the index.
 func (r *Repository) ListBlobs(ctx context.Context, fn func(vaultic.PackBlob)) error {
-	for blob := range r.legacyIndexEngine().Values() {
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return err
+	}
+	for blob := range engine.Values() {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -1123,7 +1174,13 @@ func (r *Repository) ListBlobs(ctx context.Context, fn func(vaultic.PackBlob)) e
 
 // listPacksFromIndex returns index entries for the given packs, grouped by pack file.
 func (r *Repository) listPacksFromIndex(ctx context.Context, packs vaultic.IDSet) <-chan index.PackBlobs {
-	return r.legacyIndexEngine().ListPacks(ctx, packs)
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		result := make(chan index.PackBlobs)
+		close(result)
+		return result
+	}
+	return engine.ListPacks(ctx, packs)
 }
 
 func (r *Repository) clearIndex() {
@@ -1147,7 +1204,11 @@ func (r *Repository) loadIndexWithCallback(ctx context.Context, p vaultic.Termin
 
 	bar := p.NewCounterTerminalOnly("index files loaded")
 
-	err := r.legacyIndexEngine().Load(ctx, r, bar, cb)
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return err
+	}
+	err = engine.Load(ctx, r, bar, cb)
 	if err != nil {
 		return err
 	}
@@ -1161,7 +1222,7 @@ func (r *Repository) loadIndexWithCallback(ctx context.Context, p vaultic.Termin
 		defer cancel()
 
 		invalidIndex := false
-		for blob := range r.legacyIndexEngine().Values() {
+		for blob := range engine.Values() {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -1192,6 +1253,10 @@ func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[vaul
 	// track spawned goroutines using wg, create a new context which is
 	// cancelled as soon as an error occurs.
 	wg, wgCtx := errgroup.WithContext(ctx)
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return nil, err
+	}
 
 	type FileInfo struct {
 		vaultic.ID
@@ -1221,7 +1286,7 @@ func (r *Repository) createIndexFromPacks(ctx context.Context, packsize map[vaul
 				m.Lock()
 				invalid = append(invalid, fi.ID)
 				m.Unlock()
-			} else if err := r.legacyIndexEngine().StorePack(wgCtx, fi.ID, entries, &internalRepository{r}); err != nil {
+			} else if err := engine.StorePack(wgCtx, fi.ID, entries, &internalRepository{r}); err != nil {
 				return err
 			}
 			p.Add(1)
@@ -1544,7 +1609,11 @@ func (r *Repository) saveBlob(ctx context.Context, t vaultic.BlobType, buf []byt
 	}
 
 	// first try to add to pending blobs; if not successful, this blob is already known
-	known = !r.legacyIndexEngine().AddPending(vaultic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return vaultic.ID{}, false, 0, err
+	}
+	known = !engine.AddPending(vaultic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
 
 	// only save when needed or explicitly told
 	if !known || storeDuplicate {
@@ -1573,6 +1642,12 @@ type loadBlobFn func(ctx context.Context, bh vaultic.BlobHandle, buf []byte) ([]
 // Skip sections with more than 1MB unused blobs
 const maxUnusedRange = 1 * 1024 * 1024
 
+var (
+	ErrLegacyEngineRequired   = errors.New("repository operation requires the legacy index engine")
+	ErrInvalidBlobType        = errors.New("invalid blob type")
+	ErrUploaderAlreadyStarted = errors.New("repository uploader already started")
+)
+
 // LoadBlobsFromPack loads the listed blobs from the specified pack file. The plaintext blob is passed to
 // the handleBlobFn callback or an error if decryption failed or the blob hash does not match.
 // handleBlobFn is called at most once for each blob. If the callback returns an error,
@@ -1587,10 +1662,14 @@ func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID vaultic.ID, h
 }
 
 func (r *Repository) blobsInPack(packID vaultic.ID, handles []vaultic.BlobHandle) (pack.Blobs, error) {
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return nil, err
+	}
 	blobs := make(pack.Blobs, 0, len(handles))
 	for _, h := range handles {
 		found := false
-		for _, pb := range r.legacyIndexEngine().Lookup(h) {
+		for _, pb := range engine.Lookup(h) {
 			if pb.PackID().Equal(packID) {
 				blobs = append(blobs, pb.Blob)
 				found = true
@@ -1605,7 +1684,11 @@ func (r *Repository) blobsInPack(packID vaultic.ID, handles []vaultic.BlobHandle
 }
 
 func (r *Repository) loadBlobsFromPack(ctx context.Context, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
-	return streamPack(ctx, r.loadPackFromPlacements, r.LoadBlob, r.getZstdDecoder(), r.key, packID, blobs, handleBlobFn)
+	decoder, err := r.getZstdDecoder()
+	if err != nil {
+		return err
+	}
+	return streamPack(ctx, r.loadPackFromPlacements, r.LoadBlob, decoder, r.key, packID, blobs, handleBlobFn)
 }
 
 func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {

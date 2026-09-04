@@ -569,7 +569,7 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		if bootstrapBroker != nil {
 			defer func() {
 				if bootstrapBroker != nil {
-					_ = bootstrapBroker.Close()
+					errors.LogClose(bootstrapBroker, "close bootstrap broker", debug.Log)
 				}
 			}()
 		}
@@ -616,18 +616,18 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 		}
 		lease, leaseErr := client.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, capability, gopts.KeyBrokerLeaseDuration)
 		if leaseErr != nil {
-			_ = client.Close()
+			errors.LogClose(client, "close key broker after lease failure", debug.Log)
 			return nil, leaseErr
 		}
 		if lease.ExpiresUnixMS <= uint64(time.Now().UnixMilli()) {
 			clear(lease.Key)
-			_ = client.Close()
+			errors.LogClose(client, "close key broker after expired lease", debug.Log)
 			return nil, errors.Fatal("key broker returned an expired repository lease")
 		}
 		err = s.UseMasterKey(ctx, string(lease.Key))
 		clear(lease.Key)
 		if err != nil {
-			_ = client.Close()
+			errors.LogClose(client, "close key broker after repository unlock failure", debug.Log)
 			return nil, errors.Fatalf("open repository with broker lease: %v", err)
 		}
 		s.AddOwnedCloser(client)
@@ -676,7 +676,7 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 			return nil, errors.Fatalf("unlock encrypted metadata for repository: %v", err)
 		}
 		masterKey, found, keyErr := client.GetMasterKey(ctx)
-		_ = client.Close(ctx)
+		errors.LogCleanup("close metadata daemon client", func() error { return client.Close(ctx) }, debug.Log)
 		if keyErr != nil {
 			return nil, errors.Fatalf("read repository master key from encrypted metadata: %v", keyErr)
 		}
@@ -720,14 +720,14 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if len(s.Config().StagingBackends) > 0 {
 		_, store, planErr := s.DeferredUploadPlan()
 		if planErr != nil {
-			_ = s.Close()
+			errors.LogClose(s, "close repository after staging policy failure", debug.Log)
 			return nil, errors.Fatalf("reachable staging backends do not satisfy repository policy (%v): %v", placementFailures, planErr)
 		}
 		s.AttachStagedPackRoots(staging.PackRoots{Store: store, RepositoryID: s.Config().ID})
 	}
 
 	if _, err := s.ResolveEngineFromBackend(ctx); err != nil {
-		_ = s.Close()
+		errors.LogClose(s, "close repository after metadata engine failure", debug.Log)
 		return nil, errors.Fatalf("resolve repository metadata engine: %v", err)
 	}
 
@@ -768,7 +768,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 		}
 		lease, leaseErr := brokerClient.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "topology-discovery", gopts.KeyBrokerLeaseDuration)
 		if leaseErr != nil {
-			_ = brokerClient.Close()
+			errors.LogClose(brokerClient, "close bootstrap broker after lease failure", debug.Log)
 			return "", "", nil, leaseErr
 		}
 		topologyKey = append([]byte(nil), lease.Key...)
@@ -782,7 +782,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 		key, decodeErr := repository.DecodeMasterKey(masterKey)
 		if decodeErr != nil {
 			if brokerClient != nil {
-				_ = brokerClient.Close()
+				errors.LogClose(brokerClient, "close bootstrap broker after key decode failure", debug.Log)
 			}
 			return "", "", nil, decodeErr
 		}
@@ -800,12 +800,12 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 	}
 	defer func() {
 		for _, seed := range seeds {
-			_ = seed.Close()
+			errors.LogClose(seed, "close bootstrap seed", debug.Log)
 		}
 	}()
 	if len(seeds) == 0 {
 		if brokerClient != nil {
-			_ = brokerClient.Close()
+			errors.LogClose(brokerClient, "close bootstrap broker without reachable seeds", debug.Log)
 		}
 		return "", "", nil, errors.Fatal("no bootstrap seed backend is reachable")
 	}
@@ -819,7 +819,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 	}
 	if len(copies) == 0 {
 		if brokerClient != nil {
-			_ = brokerClient.Close()
+			errors.LogClose(brokerClient, "close bootstrap broker without authenticated topology", debug.Log)
 		}
 		return "", "", nil, errors.Errorf("no authenticated bootstrap topology is reachable: %v", failures)
 	}
@@ -828,7 +828,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 		anchor, anchorErr := bootstrap.LoadAnchor(profile.AnchorFile)
 		if anchorErr != nil && !os.IsNotExist(anchorErr) {
 			if brokerClient != nil {
-				_ = brokerClient.Close()
+				errors.LogClose(brokerClient, "close bootstrap broker after anchor failure", debug.Log)
 			}
 			return "", "", nil, anchorErr
 		}
@@ -839,7 +839,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 	winner, err := bootstrap.Resolve(copies, trusted...)
 	if err != nil {
 		if brokerClient != nil {
-			_ = brokerClient.Close()
+			errors.LogClose(brokerClient, "close bootstrap broker after topology resolution failure", debug.Log)
 		}
 		return "", "", nil, err
 	}
@@ -849,12 +849,12 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 		if openErr != nil {
 			continue
 		}
-		_ = candidate.Close()
+		errors.LogClose(candidate, "close bootstrap policy candidate", debug.Log)
 		reachable = append(reachable, declared)
 	}
 	if _, err := bootstrap.EvaluatePolicy(reachable, winner.Manifest.Policy); err != nil {
 		if brokerClient != nil {
-			_ = brokerClient.Close()
+			errors.LogClose(brokerClient, "close bootstrap broker after policy failure", debug.Log)
 		}
 		return "", "", nil, err
 	}
@@ -865,7 +865,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 	if profile.AnchorFile != "" {
 		if err := bootstrap.StoreAnchor(profile.AnchorFile, bootstrap.Anchor{RepositoryID: winner.Manifest.RepositoryID, Generation: winner.Manifest.Generation, SHA256: winner.SHA256}); err != nil {
 			if brokerClient != nil {
-				_ = brokerClient.Close()
+				errors.LogClose(brokerClient, "close bootstrap broker after anchor update failure", debug.Log)
 			}
 			return "", "", nil, err
 		}
@@ -873,7 +873,7 @@ func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaul
 	if brokerClient != nil {
 		lease, leaseErr := brokerClient.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "repository-master-key", gopts.KeyBrokerLeaseDuration)
 		if leaseErr != nil {
-			_ = brokerClient.Close()
+			errors.LogClose(brokerClient, "close bootstrap broker after repository lease failure", debug.Log)
 			return "", "", nil, leaseErr
 		}
 		masterKey = string(lease.Key)
@@ -893,7 +893,7 @@ func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic
 	if brokerClient != nil {
 		defer func() {
 			if brokerClient != nil {
-				_ = brokerClient.Close()
+				errors.LogClose(brokerClient, "close data-plane bootstrap broker", debug.Log)
 			}
 		}()
 	}
@@ -911,11 +911,11 @@ func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic
 	}
 	repo, err := createRepositoryInstance(primary, gopts)
 	if err != nil {
-		_ = primary.Close()
+		errors.LogClose(primary, "close data-plane primary backend", debug.Log)
 		return nil, err
 	}
 	if err := repo.UseDataPlaneMasterKey(masterKey, cfg); err != nil {
-		_ = repo.Close()
+		errors.LogClose(repo, "close data-plane repository after key failure", debug.Log)
 		return nil, err
 	}
 	for _, declared := range manifest.Backends {
@@ -928,7 +928,7 @@ func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic
 		repo.AttachPlacementBackend(repository.PlacementBackendHash(declared.ID), destination)
 	}
 	if _, _, err := repo.DeferredUploadPlan(); err != nil {
-		_ = repo.Close()
+		errors.LogClose(repo, "close data-plane repository after staging failure", debug.Log)
 		return nil, err
 	}
 	if brokerClient != nil {
@@ -956,7 +956,7 @@ func discoverBootstrapManifest(ctx context.Context, gopts Options, masterKey str
 	}
 	defer func() {
 		for _, seed := range seeds {
-			_ = seed.Close()
+			errors.LogClose(seed, "close manifest discovery seed", debug.Log)
 		}
 	}()
 	copies, failures := bootstrap.Discover(ctx, seeds, key.EncryptionKey[:], profile.RepositoryID)
@@ -983,7 +983,10 @@ func hasRepositoryConfig(ctx context.Context, be backend.Backend, repo string, g
 	fi, err := be.Stat(ctx, backend.Handle{Type: backend.ConfigFile})
 	if be.IsNotExist(err) {
 		//nolint:staticcheck // capitalized error string is intentional
-		return fmt.Errorf("Fatal: %w: unable to open config file: %v\nIs there a repository at the following location?\n%v", ErrNoRepository, err, location.StripPassword(gopts.Backends, repo))
+		return fmt.Errorf(
+			"Fatal: %w: unable to open config file: %w\nIs there a repository at the following location?\n%v",
+			ErrNoRepository, err, location.StripPassword(gopts.Backends, repo),
+		)
 	}
 	if err != nil {
 		return errors.Fatalf("unable to open config file: %v\n%v", err, location.StripPassword(gopts.Backends, repo))
@@ -1280,7 +1283,7 @@ func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options
 		hotGopts.RepoHot = "" // open the hot part as a plain repository
 		hotBe, err := innerOpenBackend(ctx, gopts.RepoHot, hotGopts, hotGopts.Extended, create, printer)
 		if err != nil {
-			return nil, errors.Errorf("unable to open hot repository %v: %v", location.StripPassword(gopts.Backends, gopts.RepoHot), err)
+			return nil, errors.Errorf("unable to open hot repository %v: %w", location.StripPassword(gopts.Backends, gopts.RepoHot), err)
 		}
 		debug.Log("using hot/cold repository (hot: %v)", location.StripPassword(gopts.Backends, gopts.RepoHot))
 		be = hotcold.New(hotBe, be)
@@ -1342,7 +1345,7 @@ func createOrOpenBackend(ctx context.Context, scheme string, cfg any, rt http.Ro
 
 	if errors.Is(err, backend.ErrNoRepository) {
 		//nolint:staticcheck // capitalized error string is intentional
-		return nil, fmt.Errorf("Fatal: %w at %v: %v", ErrNoRepository, location.StripPassword(gopts.Backends, s), err)
+		return nil, fmt.Errorf("Fatal: %w at %v: %w", ErrNoRepository, location.StripPassword(gopts.Backends, s), err)
 	}
 	if err != nil {
 		if create {

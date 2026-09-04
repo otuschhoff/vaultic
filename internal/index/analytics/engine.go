@@ -28,7 +28,7 @@ var (
 func mustAnalyticsZstdEncoder() *zstd.Encoder {
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)))
 	if err != nil {
-		panic(err)
+		panic(err) //nolint:forbidigo // fixed options must initialize before package use
 	}
 	return encoder
 }
@@ -36,7 +36,7 @@ func mustAnalyticsZstdEncoder() *zstd.Encoder {
 func mustAnalyticsZstdDecoder() *zstd.Decoder {
 	decoder, err := zstd.NewReader(nil)
 	if err != nil {
-		panic(err)
+		panic(err) //nolint:forbidigo // fixed options must initialize before package use
 	}
 	return decoder
 }

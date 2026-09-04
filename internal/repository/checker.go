@@ -487,10 +487,14 @@ func checkPackInnerBackend(ctx context.Context, r *Repository, source backend.Ba
 		errs = append(errs, errors.Errorf("pack header size does not match, want %v, got %v", idxHdrSize, hdrSize))
 	}
 
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return err
+	}
 	for _, blob := range blobs {
 		// Check if blob is contained in index and position is correct
 		idxHas := false
-		for _, pb := range r.legacyIndexEngine().Lookup(blob.BlobHandle) {
+		for _, pb := range engine.Lookup(blob.BlobHandle) {
 			if pb.PackID().Equal(id) && pb.Blob == blob {
 				idxHas = true
 				break

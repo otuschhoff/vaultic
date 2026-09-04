@@ -163,7 +163,7 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	err := f.MarkDeprecated("hostname", "use --host")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag could not be found
-		panic(err)
+		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 	f.StringArrayVar(&opts.FilesFrom, "files-from", nil, "read the files to backup from `file` (can be combined with file args; can be specified multiple times)")
 	f.StringArrayVar(&opts.FilesFromVerbatim, "files-from-verbatim", nil, "read the files to backup from `file` (can be combined with file args; can be specified multiple times)")

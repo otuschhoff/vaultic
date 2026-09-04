@@ -16,16 +16,40 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"golang.org/x/sync/errgroup"
 )
 
 type mapcache map[backend.Handle]bool
 
+type unsupportedEngine struct{}
+
+func (unsupportedEngine) Mode() enginepkg.Mode { return enginepkg.ModeLegacy }
+func (unsupportedEngine) Close() error         { return nil }
+
 func (c mapcache) Has(h backend.Handle) bool { return c[h] }
+
+func TestLegacyEngineRequirementReturnsError(t *testing.T) {
+	repo := TestRepository(t)
+	repo.SetEngine(unsupportedEngine{})
+	_, err := repo.legacyIndexEngine()
+	if !errors.Is(err, ErrLegacyEngineRequired) {
+		t.Fatalf("legacyIndexEngine error = %v, want ErrLegacyEngineRequired", err)
+	}
+}
+
+func TestDuplicateUploaderStartReturnsError(t *testing.T) {
+	repo := TestRepository(t)
+	repo.packerWg = &errgroup.Group{}
+	if err := repo.startPackUploader(context.Background(), &errgroup.Group{}); !errors.Is(err, ErrUploaderAlreadyStarted) {
+		t.Fatalf("startPackUploader error = %v, want ErrUploaderAlreadyStarted", err)
+	}
+}
 
 func TestSortCachedPacksFirst(t *testing.T) {
 	var (
@@ -424,7 +448,11 @@ func TestBlobVerification(t *testing.T) {
 		}
 
 		uncompressedLength := uint(len(plaintext))
-		plaintext = repo.getZstdEncoder().EncodeAll(plaintext, nil)
+		encoder, err := repo.getZstdEncoder()
+		if err != nil {
+			t.Fatal(err)
+		}
+		plaintext = encoder.EncodeAll(plaintext, nil)
 
 		if test.damage == damageCompressed {
 			plaintext = plaintext[:len(plaintext)-8]
@@ -438,7 +466,7 @@ func TestBlobVerification(t *testing.T) {
 			ciphertext[42] ^= 0x42
 		}
 
-		err := repo.verifyCiphertext(ciphertext, int(uncompressedLength), id)
+		err = repo.verifyCiphertext(ciphertext, int(uncompressedLength), id)
 		if test.msg == "" {
 			rtest.Assert(t, err == nil, "expected no error, got %v", err)
 		} else {
@@ -473,7 +501,11 @@ func TestUnpackedVerification(t *testing.T) {
 		}
 
 		compressed := []byte{2}
-		compressed = repo.getZstdEncoder().EncodeAll(plaintext, compressed)
+		encoder, err := repo.getZstdEncoder()
+		if err != nil {
+			t.Fatal(err)
+		}
+		compressed = encoder.EncodeAll(plaintext, compressed)
 
 		if test.damage == damageCompressed {
 			compressed = compressed[:len(compressed)-8]
@@ -487,7 +519,7 @@ func TestUnpackedVerification(t *testing.T) {
 			ciphertext[42] ^= 0x42
 		}
 
-		err := repo.verifyUnpacked(ciphertext, vaultic.IndexFile, orig)
+		err = repo.verifyUnpacked(ciphertext, vaultic.IndexFile, orig)
 		if test.msg == "" {
 			rtest.Assert(t, err == nil, "expected no error, got %v", err)
 		} else {

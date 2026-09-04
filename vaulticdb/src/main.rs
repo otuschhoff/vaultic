@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 use std::{
     env,
     fs::File,
@@ -59,9 +57,11 @@ use proto::{
 use vaulticdb::writer_role::{RoleError, WriterRole as CoreWriterRole, WriterRoleState};
 use zeroize::Zeroizing;
 
+mod error;
 mod replication;
 mod storage;
 
+use error::VaulticDbError;
 use storage::{repeated_message_encoded_len, GenerationAuthority, Storage};
 
 const PROTOCOL_VERSION: &str = "vaulticdb.v1";
@@ -86,10 +86,6 @@ fn generation_status_response(authority: GenerationAuthority) -> GenerationStatu
         retired_generation: authority.retired_generation,
         destructive_maintenance_allowed: authority.state == "healthy",
     }
-}
-
-fn generation_error(error: anyhow::Error) -> Status {
-    Status::failed_precondition(format!("metadata generation authority: {error:#}"))
 }
 
 #[derive(Clone)]
@@ -144,7 +140,8 @@ impl VaulticDb for Service {
             .storage
             .generation_authority(&request.get_ref().repository_id)
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         Ok(Response::new(generation_status_response(authority)))
     }
 
@@ -172,7 +169,8 @@ impl VaulticDb for Service {
                 request.observation_window_ms,
             )
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         Ok(Response::new(generation_status_response(authority)))
     }
 
@@ -197,7 +195,8 @@ impl VaulticDb for Service {
                 request.diagnostic_sha256,
             )
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         Ok(Response::new(generation_status_response(authority)))
     }
 
@@ -222,7 +221,8 @@ impl VaulticDb for Service {
                 request.report_sha256,
             )
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         Ok(Response::new(generation_status_response(authority)))
     }
 
@@ -248,11 +248,13 @@ impl VaulticDb for Service {
                 request.observation_window_ms,
             )
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         self.storage
             .refresh_writer_fence()
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         Ok(Response::new(generation_status_response(authority)))
     }
 
@@ -278,7 +280,8 @@ impl VaulticDb for Service {
                 request.report_sha256,
             )
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         Ok(Response::new(generation_status_response(authority)))
     }
 
@@ -1133,7 +1136,8 @@ impl Service {
             .storage
             .mutations_allowed(&self.state.repository_id)
             .await
-            .map_err(generation_error)?
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?
         {
             return Err(Status::failed_precondition(
                 "metadata generation mutation interlock is active",
@@ -1146,7 +1150,8 @@ impl Service {
         self.storage
             .ensure_writer_fence()
             .await
-            .map_err(generation_error)?;
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?;
         self.state
             .writer_role
             .lock()
@@ -1259,18 +1264,11 @@ impl Service {
 }
 
 fn key_management_error(error: anyhow::Error) -> Status {
-    Status::failed_precondition(error.to_string())
+    VaulticDbError::key_management(error).into()
 }
 
 fn role_error(error: RoleError) -> Status {
-    match error {
-        RoleError::NotWriter | RoleError::MinimumTenure | RoleError::StaleEpoch => {
-            Status::failed_precondition(error.to_string())
-        }
-        RoleError::Transitioning => Status::unavailable(error.to_string()),
-        RoleError::Fenced { .. } => Status::aborted(error.to_string()),
-        RoleError::QuiescenceTimeout => Status::deadline_exceeded(error.to_string()),
-    }
+    VaulticDbError::from(error).into()
 }
 
 fn unix_time_ms_i64() -> Result<i64, Status> {

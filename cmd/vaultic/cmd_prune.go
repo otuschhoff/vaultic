@@ -110,7 +110,7 @@ func (opts *PruneOptions) AddLimitedFlags(f *pflag.FlagSet) {
 	err := f.MarkDeprecated("repack-small", "small files are automatically repacked. Use --repack-smaller-than to specify a minimum size")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err)
+		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -264,5 +265,9 @@ func Emit(ctx context.Context, event Event) error {
 	if exporter == nil {
 		return nil
 	}
-	return exporter.Emit(ctx, event)
+	err := exporter.Emit(ctx, event)
+	if err != nil {
+		log.Printf("observability: emit %s/%s event: %v", event.Category, event.Component, err)
+	}
+	return err
 }

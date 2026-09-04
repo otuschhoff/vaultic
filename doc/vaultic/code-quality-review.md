@@ -288,6 +288,16 @@ Goal: make errors classifiable across the daemon boundary and remove crash paths
 
 Exit criteria: `errorlint` and `forbidigo` promoted from warn to error; zero `strings.Contains(err.Error())` in non-test code; Go tests assert on sentinels rather than message text for daemon-boundary errors.
 
+**Implementation status (2026-09-04): complete.**
+
+- Rust now maps `VaulticDbError` and writer-role failures to stable gRPC codes with a standard `google.rpc.Status` envelope containing `vaulticdb.v1.ErrorDetail`. The additive detail carries a stable code, retryability, field, and generation. Generation conflicts and writer fencing are machine-readable, all writer-state `unreachable!()` and validation `expect()` paths return errors, and the crate-wide `result_large_err` source suppression was removed. Existing tonic `Status` size debt is recorded explicitly in the CI Clippy baseline.
+- The Go daemon client classifies every unary RPC through one interceptor. `RPCError` preserves the original gRPC status and cause while supporting `errors.Is` for writer, generation, namespace, encryption, idempotency, storage, request, and key-management sentinels. Tests cover every detail code and a real Rust-daemon generation conflict.
+- `internal/errors` now provides unwrap-preserving `Transient`, `Rejected`, `Integrity`, `Unauthorized`, and `Unavailable` classifications plus explicit cleanup helpers. Staging reconciliation uses the shared taxonomy without changing its public dispositions, and CLI exit-code mapping handles the shared classes in one switch with direct tests.
+- Repository zstd initialization, invalid blob types, duplicate uploader starts, and missing legacy-engine capabilities now return errors instead of panicking. Regression tests cover the directly triggerable former panic paths. Remaining command initialization panics are documented construction-time invariants; runtime finder dispatch now returns an error.
+- Observability delivery failures are logged internally before being returned, so best-effort audit call sites no longer fail silently. Ignored cleanup in key management, daemon startup, and global repository bootstrap now uses explicit quiet or logged cleanup helpers.
+- All identified lossy `%v` error wraps were converted to `%w`, including Windows-only paths. Production daemon code no longer classifies errors by matching `err.Error()` or daemon stderr.
+- Validation: the complete native Go suite passes, all 88 Rust tests pass, Linux Go cross-compilation passes, Windows-only changed packages compile, strict Clippy passes, the exact golangci-lint v2.12 new-code check reports zero issues, protobuf bindings regenerate with CI-pinned tools, and `git diff --check` is clean.
+
 ### Phase 2 — Mechanical file splits (#5, part of #6)
 
 Goal: shrink the largest files without changing any function body. Pure moves, reviewed by `git diff --color-moved`.

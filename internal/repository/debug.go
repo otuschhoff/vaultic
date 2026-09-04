@@ -135,7 +135,7 @@ func ExaminePack(ctx context.Context, repo *Repository, id vaultic.ID, opts Exam
 
 	blobs, err := repo.listPack(ctx, id, int64(len(buf)))
 	if err != nil {
-		return fmt.Errorf("pack %v: %v", id.Str(), err)
+		return fmt.Errorf("pack %v: %w", id.Str(), err)
 	}
 	checkPackSize(blobs, len(buf), printer)
 

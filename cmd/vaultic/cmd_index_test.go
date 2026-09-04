@@ -22,6 +22,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	vaulticerrors "github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -780,6 +781,26 @@ func TestIndexPartialResultsUseWarningSentinels(t *testing.T) {
 	}
 	if code := exitCodeForError(errIndexIncomplete); code != 2 {
 		t.Fatalf("incomplete exit code = %d, want 2", code)
+	}
+}
+
+func TestClassifiedErrorExitCodes(t *testing.T) {
+	cause := errors.New("classified")
+	tests := []struct {
+		err  error
+		code int
+	}{
+		{&vaulticerrors.Transient{Err: cause}, 1},
+		{&vaulticerrors.Rejected{Err: cause}, 1},
+		{&vaulticerrors.Unavailable{Err: cause}, 1},
+		{&vaulticerrors.Integrity{Err: cause}, 2},
+		{&vaulticerrors.Unauthorized{Err: cause}, 12},
+		{context.Canceled, 130},
+	}
+	for _, test := range tests {
+		if got := exitCodeForError(test.err); got != test.code {
+			t.Errorf("exitCodeForError(%T) = %d, want %d", test.err, got, test.code)
+		}
 	}
 }
 

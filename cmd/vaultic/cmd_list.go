@@ -101,7 +101,7 @@ func packfileList(ctx context.Context, repo vaultic.Repository, snapshotID strin
 	// subpaths would require special handling and limit restorability
 	sn, _, err := (&data.SnapshotFilter{}).FindLatest(ctx, repo, repo, snapshotID)
 	if err != nil {
-		return fmt.Errorf("failed to find snapshot: %v", err)
+		return fmt.Errorf("failed to find snapshot: %w", err)
 	}
 
 	if err = repo.LoadIndex(ctx, printer); err != nil {

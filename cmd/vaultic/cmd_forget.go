@@ -176,7 +176,7 @@ func (opts *ForgetOptions) AddFlags(f *pflag.FlagSet) {
 	err := f.MarkDeprecated("hostname", "use --host")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err)
+		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 	// must be defined after `--hostname` to not override the default value from the environment
 	initMultiSnapshotFilter(f, &opts.SnapshotFilter, false)

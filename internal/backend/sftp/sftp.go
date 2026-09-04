@@ -114,7 +114,7 @@ func startClient(cfg Config, errorLog func(string, ...any)) (*SFTP, error) {
 		// increase send buffer per file to 4MB
 		sftp.MaxConcurrentRequestsPerFile(128))
 	if err != nil {
-		return nil, errors.Errorf("unable to start the sftp session, error: %v", err)
+		return nil, errors.Errorf("unable to start the sftp session, error: %w", err)
 	}
 
 	err = bg()
@@ -459,7 +459,7 @@ func (r *SFTP) Load(ctx context.Context, h backend.Handle, length int, offset in
 		_, rderr := rd.Read([]byte{0})
 		if rderr == io.EOF && rd.(*util.LimitedReadCloser).N != 0 {
 			// file is too short
-			return fmt.Errorf("%w: %v", errTooShort, err)
+			return fmt.Errorf("%w: %w", errTooShort, err)
 		}
 
 		return err

@@ -28,6 +28,7 @@ use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
 
 use crate::{
+    error::VaulticDbError,
     proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest},
     replication::ReplicatedObjectStore,
 };
@@ -270,11 +271,7 @@ impl Storage {
         let Database::Writer(db) = &*database else {
             bail!("metadata encryption policy requires a writer")
         };
-        let existing = self
-            .writer()
-            .await?
-            .as_writer()
-            .expect("writer was validated")
+        let existing = db
             .get(ENCRYPTION_POLICY_RECORD)
             .await
             .context("read metadata encryption policy")?;
@@ -377,9 +374,9 @@ impl Storage {
             ));
         }
         let database = self.writer().await?;
-        let Database::Writer(db) = &*database else {
-            unreachable!()
-        };
+        let db = database
+            .as_writer()
+            .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
         db.put(MASTER_KEY_RECORD, master_key)
             .await
             .map_err(storage_error)?
@@ -411,9 +408,9 @@ impl Storage {
             ));
         }
         let database = self.writer().await?;
-        let Database::Writer(db) = &*database else {
-            unreachable!()
-        };
+        let db = database
+            .as_writer()
+            .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
         db.put(CAPSULE_MIGRATION_RECORD, capsule_sha256.as_bytes())
             .await
             .map_err(storage_error)?
@@ -464,9 +461,9 @@ impl Storage {
             capsule_sha256.as_bytes(),
         );
         let database = self.writer().await?;
-        let Database::Writer(db) = &*database else {
-            unreachable!()
-        };
+        let db = database
+            .as_writer()
+            .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
         db.write(batch).await.map_err(storage_error)?;
         db.flush().await.map_err(storage_error)
     }
@@ -498,8 +495,10 @@ impl Storage {
         if !matches!(&*database, Database::Writer(_)) {
             bail!("VaulticDB is not the metadata writer")
         }
-        let Database::Writer(db) = std::mem::replace(&mut *database, Database::Unavailable) else {
-            unreachable!()
+        let previous = std::mem::replace(&mut *database, Database::Unavailable);
+        let Database::Writer(db) = previous else {
+            *database = previous;
+            return Err(VaulticDbError::WriterDemoted.into());
         };
         db.flush()
             .await
@@ -536,9 +535,10 @@ impl Storage {
         if !matches!(&*database, Database::Reader(_)) {
             bail!("VaulticDB is not read-only")
         }
-        let Database::Reader(reader) = std::mem::replace(&mut *database, Database::Unavailable)
-        else {
-            unreachable!()
+        let previous = std::mem::replace(&mut *database, Database::Unavailable);
+        let Database::Reader(reader) = previous else {
+            *database = previous;
+            return Err(VaulticDbError::WriterTransitioning.into());
         };
         reader
             .close()
@@ -761,9 +761,7 @@ impl Storage {
     async fn writer(&self) -> Result<tokio::sync::RwLockReadGuard<'_, Database>, Status> {
         let database = self.database.read().await;
         if !matches!(&*database, Database::Writer(_)) {
-            return Err(Status::failed_precondition(
-                "vaulticdb is not the metadata writer",
-            ));
+            return Err(VaulticDbError::WriterDemoted.into());
         }
         Ok(database)
     }
@@ -882,9 +880,9 @@ impl Storage {
                 );
             }
             let database = self.writer().await?;
-            let Database::Writer(db) = &*database else {
-                unreachable!()
-            };
+            let db = database
+                .as_writer()
+                .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
             let handle = db.write(batch).await.map_err(storage_error)?;
             if request.await_durable || !request.idempotency_key.is_empty() {
                 handle.await_durable().await.map_err(storage_error)?;
@@ -931,11 +929,11 @@ impl Storage {
                 "active transaction limit exceeded",
             ));
         }
-        let transaction = self
-            .writer()
-            .await?
+        let database = self.writer().await?;
+        let writer = database
             .as_writer()
-            .expect("writer was validated")
+            .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
+        let transaction = writer
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .map_err(storage_error)?;

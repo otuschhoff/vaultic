@@ -111,7 +111,7 @@ func Transport(opts TransportOptions) (http.RoundTripper, error) {
 
 		crt, err := tls.X509KeyPair(certs, key)
 		if err != nil {
-			return nil, errors.Errorf("parse TLS client cert or key: %v", err)
+			return nil, errors.Errorf("parse TLS client cert or key: %w", err)
 		}
 		tr.TLSClientConfig.Certificates = []tls.Certificate{crt}
 	}
@@ -124,7 +124,7 @@ func Transport(opts TransportOptions) (http.RoundTripper, error) {
 			}
 			b, err := os.ReadFile(filename)
 			if err != nil {
-				return nil, errors.Errorf("unable to read root certificate: %v", err)
+				return nil, errors.Errorf("unable to read root certificate: %w", err)
 			}
 			if ok := pool.AppendCertsFromPEM(b); !ok {
 				return nil, errors.Errorf("cannot parse root certificate from %q", filename)

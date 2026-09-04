@@ -25,7 +25,7 @@ func ParseID(s string) (ID, error) {
 
 	b, err := hex.DecodeString(s)
 	if err != nil {
-		return ID{}, fmt.Errorf("invalid ID: %s", err)
+		return ID{}, fmt.Errorf("invalid ID: %w", err)
 	}
 
 	id := ID{}
@@ -93,7 +93,7 @@ func (id *ID) UnmarshalJSON(b []byte) error {
 
 	_, err := hex.Decode(id[:], b)
 	if err != nil {
-		return fmt.Errorf("invalid ID: %s", err)
+		return fmt.Errorf("invalid ID: %w", err)
 	}
 
 	return nil

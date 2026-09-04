@@ -92,7 +92,7 @@ func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 	err := f.MarkDeprecated("check-unused", "`--check-unused` is deprecated and will be ignored")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err)
+		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 	f.BoolVar(&opts.WithCache, "with-cache", false, "use existing cache, only read uncached data from repository")
 	f.BoolVar(&opts.CheckHotCold, "check-hot-cold", false, "for a hot/cold repository (--repo-hot): verify that the hot and cold parts agree")
@@ -173,7 +173,7 @@ func parsePercentage(s string) (float64, error) {
 
 	p, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0, errors.Errorf("parsePercentage: %v", err)
+		return 0, errors.Errorf("parsePercentage: %w", err)
 	}
 	return p, nil
 }

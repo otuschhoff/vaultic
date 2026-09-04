@@ -44,7 +44,7 @@ func (f *jqFlag) String() string { return *f.target }
 func (f *jqFlag) Type() string   { return "jq" }
 func (f *jqFlag) Set(s string) error {
 	if _, err := gojq.Parse(s); err != nil {
-		return errors.Errorf("invalid jq expression: %v", err)
+		return errors.Errorf("invalid jq expression: %w", err)
 	}
 	*f.target = s
 	return nil

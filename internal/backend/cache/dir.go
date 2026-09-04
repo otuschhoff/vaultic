@@ -24,7 +24,7 @@ func DefaultDir() (cachedir string, err error) {
 
 	cachedir, err = os.UserCacheDir()
 	if err != nil {
-		return "", fmt.Errorf("unable to locate cache directory: %v", err)
+		return "", fmt.Errorf("unable to locate cache directory: %w", err)
 	}
 
 	return filepath.Join(cachedir, "vaultic"), nil

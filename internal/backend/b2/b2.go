@@ -195,7 +195,7 @@ func (be *b2Backend) Load(ctx context.Context, h backend.Handle, length int, off
 		_, rderr := rd.Read([]byte{0})
 		if rderr == io.EOF && limrd.N != 0 {
 			// file is too short
-			return fmt.Errorf("%w: %v", errTooShort, err)
+			return fmt.Errorf("%w: %w", errTooShort, err)
 		}
 
 		return err

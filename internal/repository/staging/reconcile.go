@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	vaulticerrors "github.com/otuschhoff/vaultic/internal/errors"
 )
 
 type ReconcileDisposition string
@@ -40,20 +42,12 @@ type PackVerifier interface {
 	VerifyPack(context.Context, Pack) error
 }
 
-type classifiedError struct {
-	disposition ReconcileDisposition
-	err         error
-}
-
-func (error classifiedError) Error() string { return error.err.Error() }
-func (error classifiedError) Unwrap() error { return error.err }
-
 func Retryable(error error) error {
-	return classifiedError{disposition: ReconcileRetryable, err: error}
+	return &vaulticerrors.Transient{Err: error}
 }
-func Reject(error error) error { return classifiedError{disposition: ReconcileRejected, err: error} }
+func Reject(error error) error { return &vaulticerrors.Rejected{Err: error} }
 func HealingRequired(error error) error {
-	return classifiedError{disposition: ReconcileHealingRequired, err: error}
+	return &vaulticerrors.Integrity{Err: error}
 }
 
 func (store Store) PublishCompletion(ctx context.Context, completion Completion) error {
@@ -137,9 +131,13 @@ func reconcile(ctx context.Context, store Store, authority Authority, verifier P
 
 func reconcileFailure(result ReconcileResult, err error) ReconcileResult {
 	result.Disposition = ReconcileRetryable
-	var classified classifiedError
-	if errors.As(err, &classified) {
-		result.Disposition = classified.disposition
+	var rejected *vaulticerrors.Rejected
+	var integrity *vaulticerrors.Integrity
+	switch {
+	case errors.As(err, &rejected):
+		result.Disposition = ReconcileRejected
+	case errors.As(err, &integrity):
+		result.Disposition = ReconcileHealingRequired
 	}
 	result.Reason = err.Error()
 	return result

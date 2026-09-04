@@ -113,7 +113,8 @@ jobs:
             -A clippy::too_many_arguments \
             -A clippy::type_complexity \
             -A clippy::chunks_exact_to_as_chunks \
-            -A clippy::large_enum_variant
+            -A clippy::large_enum_variant \
+            -A clippy::result_large_err
           cargo clippy --manifest-path vaulticdb/Cargo.toml --all-targets -- \
             -W clippy::too_many_lines \
             -W clippy::cognitive_complexity \

@@ -91,7 +91,7 @@ func (opts *StatsOptions) AddFlags(f *pflag.FlagSet) {
 
 func must(err error) {
 	if err != nil {
-		panic(fmt.Sprintf("error during setup: %v", err))
+		panic(fmt.Sprintf("error during setup: %v", err)) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 }
 
@@ -151,7 +151,7 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 	for _, sn := range snapshots {
 		err = statsWalkSnapshot(ctx, sn, repo, opts, stats, statsProgress)
 		if err != nil {
-			return fmt.Errorf("error walking snapshot: %v", err)
+			return fmt.Errorf("error walking snapshot: %w", err)
 		}
 	}
 	if ctx.Err() != nil {
@@ -190,7 +190,7 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 	if gopts.JSON {
 		err = json.NewEncoder(gopts.Term.OutputWriter()).Encode(stats)
 		if err != nil {
-			return fmt.Errorf("encoding output: %v", err)
+			return fmt.Errorf("encoding output: %w", err)
 		}
 		return nil
 	}
@@ -239,7 +239,7 @@ func statsWalkSnapshot(ctx context.Context, snapshot *data.Snapshot, repo vaulti
 		ProcessNode: statsWalkTree(repo, opts, stats, hardLinkIndex, sp),
 	})
 	if err != nil {
-		return fmt.Errorf("walking tree %s: %v", *snapshot.Tree, err)
+		return fmt.Errorf("walking tree %s: %w", *snapshot.Tree, err)
 	}
 
 	return nil

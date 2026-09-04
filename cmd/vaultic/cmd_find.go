@@ -445,15 +445,16 @@ func (f *Finder) findIDs(ctx context.Context, sn *data.Snapshot) error {
 
 var errAllPacksFound = errors.New("all packs found")
 
-func (f *Finder) addBlobHandle(h vaultic.BlobHandle) {
+func (f *Finder) addBlobHandle(h vaultic.BlobHandle) error {
 	switch h.Type {
 	case vaultic.DataBlob:
 		f.blobIDs[h.ID.String()] = struct{}{}
 	case vaultic.TreeBlob:
 		f.treeIDs[h.ID.String()] = struct{}{}
 	default:
-		panic(fmt.Sprintf("unknown type %v in blob list", h.Type.String()))
+		return fmt.Errorf("unknown type %v in blob list", h.Type.String())
 	}
+	return nil
 }
 
 // packsToBlobs converts the list of pack IDs to a list of blob IDs that
@@ -488,7 +489,9 @@ func (f *Finder) packsToBlobs(ctx context.Context, packs []string) error {
 			return nil
 		}
 		for _, h := range handles {
-			f.addBlobHandle(h)
+			if err := f.addBlobHandle(h); err != nil {
+				return err
+			}
 		}
 		// forget successfully processed pack
 		delete(packIDs, idStr)
@@ -530,7 +533,11 @@ func (f *Finder) indexPacksToBlobs(ctx context.Context, packIDs map[string]struc
 
 	// remember which packs were found in the index
 	indexPackIDs := make(map[string]struct{})
+	var callbackErr error
 	err := f.repo.ListBlobs(wctx, func(pb vaultic.PackBlob) {
+		if callbackErr != nil {
+			return
+		}
 		packID := pb.PackID()
 		idStr := packID.String()
 		// keep entry in packIDs as Each() returns individual index entries
@@ -546,12 +553,19 @@ func (f *Finder) indexPacksToBlobs(ctx context.Context, packIDs map[string]struc
 			}
 		}
 		if matchingID {
-			f.addBlobHandle(pb.Handle())
+			callbackErr = f.addBlobHandle(pb.Handle())
+			if callbackErr != nil {
+				cancel()
+				return
+			}
 			indexPackIDs[idStr] = struct{}{}
 		}
 	})
 	if err != nil {
 		return nil, err
+	}
+	if callbackErr != nil {
+		return nil, callbackErr
 	}
 
 	for id := range indexPackIDs {

@@ -158,7 +158,7 @@ func (s *Suite[C]) RunBenchmarks(b *testing.B) {
 func (s *Suite[C]) createOrError(t testing.TB) (backend.Backend, error) {
 	tr, err := backend.Transport(backend.TransportOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("cannot create transport for tests: %v", err)
+		return nil, fmt.Errorf("cannot create transport for tests: %w", err)
 	}
 
 	be, err := s.Factory.Create(context.TODO(), s.Config, tr, nil, t.Logf)

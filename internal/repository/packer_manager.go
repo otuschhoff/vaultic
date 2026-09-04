@@ -299,5 +299,9 @@ func (r *Repository) savePacker(ctx context.Context, t vaultic.BlobType, p *pack
 	}); ok {
 		return engine.StorePackSized(ctx, id, p.Packer.Blobs(), &internalRepository{r}, uint64(packInfo.Size()))
 	}
-	return r.legacyIndexEngine().StorePack(ctx, id, p.Packer.Blobs(), &internalRepository{r})
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return err
+	}
+	return engine.StorePack(ctx, id, p.Packer.Blobs(), &internalRepository{r})
 }
