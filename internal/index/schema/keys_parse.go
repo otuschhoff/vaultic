@@ -275,7 +275,17 @@ func isAnalyticsDerivedKey(key []byte) bool {
 
 func isAnalyticsDerivedKind(kind KeyKind) bool {
 	switch kind {
-	case KeyAnalyticsResidency, KeyGrowthTime, KeyGrowthPath, KeyUserSummary, KeyGroupSummary, KeyUserStats, KeyGroupStats, KeyUserChurn, KeyUserInode, KeyUserBlob, KeyUserBlobContribution:
+	case KeyAnalyticsResidency,
+		KeyGrowthTime,
+		KeyGrowthPath,
+		KeyUserSummary,
+		KeyGroupSummary,
+		KeyUserStats,
+		KeyGroupStats,
+		KeyUserChurn,
+		KeyUserInode,
+		KeyUserBlob,
+		KeyUserBlobContribution:
 		return true
 	default:
 		return false

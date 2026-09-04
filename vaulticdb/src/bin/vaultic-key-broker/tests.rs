@@ -13,8 +13,15 @@ mod tests {
         assert_eq!(limit.rlim_cur, 0);
         assert_eq!(limit.rlim_max, 0);
     }
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use ed25519_dalek::{Signature, Verifier};
-    use std::ffi::OsString;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand08::rngs::OsRng as LegacyOsRng;
+    use sha2::{Digest, Sha256};
+    use std::{
+        collections::BTreeSet, env, ffi::OsString, fs, os::unix::fs::MetadataExt, path::Path,
+        time::Duration,
+    };
     use vaulticdb::{
         broker::{encrypt_offline_contribution, ClientAuthorization},
         encryption::recovery_capsule::{CapsuleBuilder, MemberCredential},

@@ -20,7 +20,14 @@ func seriesFor(t *testing.T, store *memoryStore, options SeriesOptions) SeriesRe
 
 // writeBucket stores one rollup bucket directly, which lets a series test pin
 // coverage and values without replaying an event stream.
-func writeBucket(t *testing.T, store *memoryStore, granularity schema.HistoryGranularity, start uint64, packType schema.PackType, bucket schema.PackHistoryBucket) {
+func writeBucket(
+	t *testing.T,
+	store *memoryStore,
+	granularity schema.HistoryGranularity,
+	start uint64,
+	packType schema.PackType,
+	bucket schema.PackHistoryBucket,
+) {
 	t.Helper()
 	store.set(t, schema.PackHistoryBucketKey(granularity, start, 0, packType), bucket)
 }

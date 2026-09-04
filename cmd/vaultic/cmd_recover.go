@@ -174,7 +174,14 @@ func runRecover(ctx context.Context, gopts global.Options, term ui.Terminal) err
 
 }
 
-func createSnapshot(ctx context.Context, printer vaultic.Printer, name, hostname string, tags []string, repo vaultic.SaverUnpacked[vaultic.WriteableFileType], tree *vaultic.ID) error {
+func createSnapshot(
+	ctx context.Context,
+	printer vaultic.Printer,
+	name, hostname string,
+	tags []string,
+	repo vaultic.SaverUnpacked[vaultic.WriteableFileType],
+	tree *vaultic.ID,
+) error {
 	sn, err := data.NewSnapshot([]string{name}, tags, hostname, time.Now())
 	if err != nil {
 		return errors.Fatalf("unable to save snapshot: %v", err)

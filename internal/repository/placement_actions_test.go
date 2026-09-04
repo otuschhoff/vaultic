@@ -54,7 +54,15 @@ func TestReadDisabledPlacementIsNotUsedAsFallback(t *testing.T) {
 	config := repo.Config()
 	config.PlacementBackends = []vaultic.PlacementBackend{
 		{ID: "local", Role: PlacementRolePrimary, FailureDomain: "local", RetrievalClass: "standard"},
-		{ID: "warm", Role: PlacementRolePrimary, Ingest: boolPtr(false), ReadEnabled: &readDisabled, Offsite: true, FailureDomain: "warm", RetrievalClass: "standard"},
+		{
+			ID:             "warm",
+			Role:           PlacementRolePrimary,
+			Ingest:         boolPtr(false),
+			ReadEnabled:    &readDisabled,
+			Offsite:        true,
+			FailureDomain:  "warm",
+			RetrievalClass: "standard",
+		},
 	}
 	repo.setConfig(config)
 	warm := mem.New()

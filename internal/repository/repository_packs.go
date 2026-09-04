@@ -62,8 +62,26 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 	r.uploader = newPackerUploader(ctx, innerWg, r, r.Connections())
 	treeSize, treeLimit, treeGrow := r.packSizing(vaultic.TreeBlob)
 	dataSize, dataLimit, dataGrow := r.packSizing(vaultic.DataBlob)
-	r.treePM = newConfiguredPackerManager(r.key, vaultic.TreeBlob, treeSize, treeLimit, r.currentBlobSize(vaultic.TreeBlob), treeGrow, r.packerCount, r.uploader.QueuePacker)
-	r.dataPM = newConfiguredPackerManager(r.key, vaultic.DataBlob, dataSize, dataLimit, r.currentBlobSize(vaultic.DataBlob), dataGrow, r.packerCount, r.uploader.QueuePacker)
+	r.treePM = newConfiguredPackerManager(
+		r.key,
+		vaultic.TreeBlob,
+		treeSize,
+		treeLimit,
+		r.currentBlobSize(vaultic.TreeBlob),
+		treeGrow,
+		r.packerCount,
+		r.uploader.QueuePacker,
+	)
+	r.dataPM = newConfiguredPackerManager(
+		r.key,
+		vaultic.DataBlob,
+		dataSize,
+		dataLimit,
+		r.currentBlobSize(vaultic.DataBlob),
+		dataGrow,
+		r.packerCount,
+		r.uploader.QueuePacker,
+	)
 
 	wg.Go(func() error {
 		return innerWg.Wait()
@@ -75,11 +93,24 @@ type blobSaverRepo struct {
 	repo *Repository
 }
 
-func (r *blobSaverRepo) SaveBlob(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool) (newID vaultic.ID, known bool, size int, err error) {
+func (r *blobSaverRepo) SaveBlob(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+) (newID vaultic.ID, known bool, size int, err error) {
 	return r.repo.saveBlob(ctx, t, buf, id, storeDuplicate)
 }
 
-func (r *blobSaverRepo) SaveBlobAsync(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, size int, err error)) {
+func (r *blobSaverRepo) SaveBlobAsync(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+	cb func(newID vaultic.ID, known bool, size int, err error),
+) {
 	r.repo.saveBlobAsync(ctx, t, buf, id, storeDuplicate, cb)
 }
 
@@ -201,7 +232,11 @@ func (r *Repository) SaveLegacyIndex(ctx context.Context, index *index.Index) (v
 }
 
 // loadIndexWithCallback loads all index files from the backend in parallel and stores them
-func (r *Repository) loadIndexWithCallback(ctx context.Context, p vaultic.TerminalCounterFactory, cb func(id vaultic.ID, idx *index.Index, err error) error) error {
+func (r *Repository) loadIndexWithCallback(
+	ctx context.Context,
+	p vaultic.TerminalCounterFactory,
+	cb func(id vaultic.ID, idx *index.Index, err error) error,
+) error {
 	debug.Log("Loading index")
 
 	bar := p.NewCounterTerminalOnly("index files loaded")

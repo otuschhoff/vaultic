@@ -246,7 +246,15 @@ func placementLimitReached(backend PlacementBackend, size, requests, bytes uint6
 	return false
 }
 
-func persistPlacementAttempt(ctx context.Context, store Store, requestKey []byte, request schema.PlacementRequestRecord, packID vaultic.ID, pack schema.PackRecord, backend PlacementBackend) error {
+func persistPlacementAttempt(
+	ctx context.Context,
+	store Store,
+	requestKey []byte,
+	request schema.PlacementRequestRecord,
+	packID vaultic.ID,
+	pack schema.PackRecord,
+	backend PlacementBackend,
+) error {
 	requestValue, err := request.MarshalBinary()
 	if err != nil {
 		return err
@@ -313,7 +321,16 @@ func failPlacementRequest(ctx context.Context, failure placementFailure) error {
 	return nil
 }
 
-func completePlacementRequest(ctx context.Context, store Store, requestKey []byte, operation schema.PlacementRequestOperation, packID vaultic.ID, pack schema.PackRecord, backend PlacementBackend, now time.Time) error {
+func completePlacementRequest(
+	ctx context.Context,
+	store Store,
+	requestKey []byte,
+	operation schema.PlacementRequestOperation,
+	packID vaultic.ID,
+	pack schema.PackRecord,
+	backend PlacementBackend,
+	now time.Time,
+) error {
 	var puts []daemon.Mutation
 	eventType := schema.EventPromoted
 	reason := "scheduler_promotion"
@@ -365,7 +382,15 @@ func currentPlacement(ctx context.Context, store Store, packID vaultic.ID, backe
 	return schema.UnmarshalPlacementRecord(value)
 }
 
-func recordPlacementEvent(ctx context.Context, store Store, packID vaultic.ID, pack schema.PackRecord, backend uint64, eventType schema.PackEventType, reason string) {
+func recordPlacementEvent(
+	ctx context.Context,
+	store Store,
+	packID vaultic.ID,
+	pack schema.PackRecord,
+	backend uint64,
+	eventType schema.PackEventType,
+	reason string,
+) {
 	eventStore, ok := store.(placementEventStore)
 	if !ok {
 		return
@@ -378,7 +403,14 @@ func recordPlacementEvent(ctx context.Context, store Store, packID vaultic.ID, p
 	}})
 }
 
-func evictionPreservesDurability(ctx context.Context, store Store, packID vaultic.ID, removeBackend uint64, backends map[uint64]PlacementBackend, policy DurabilityPolicy) (bool, error) {
+func evictionPreservesDurability(
+	ctx context.Context,
+	store Store,
+	packID vaultic.ID,
+	removeBackend uint64,
+	backends map[uint64]PlacementBackend,
+	policy DurabilityPolicy,
+) (bool, error) {
 	placements, _, err := loadPlacements(ctx, store)
 	if err != nil {
 		return false, err
@@ -657,7 +689,16 @@ func nextPlacementAction(status PlacementStatus, model PlacementModel) (Placemen
 	return PlacementBackend{}, 0, false
 }
 
-func placementStatus(packID vaultic.ID, pack schema.PackRecord, placements placementSet, eligibility schema.PromotionEligibilityRecord, model PlacementModel, backends map[uint64]PlacementBackend, now time.Time, wasPromoted bool) PlacementStatus {
+func placementStatus(
+	packID vaultic.ID,
+	pack schema.PackRecord,
+	placements placementSet,
+	eligibility schema.PromotionEligibilityRecord,
+	model PlacementModel,
+	backends map[uint64]PlacementBackend,
+	now time.Time,
+	wasPromoted bool,
+) PlacementStatus {
 	class := placementClass(pack, eligibility, model, now, wasPromoted)
 	targets := placementTargets(class, model)
 	live := make(map[uint64]struct{})
@@ -669,29 +710,7 @@ func placementStatus(packID vaultic.ID, pack schema.PackRecord, placements place
 	for _, backend := range targets {
 		targetHashes[backend.Hash] = struct{}{}
 	}
-	if len(status.MissingBackends) == 0 {
-		for backendHash, placement := range placements {
-			if placement.State != schema.PlacementLive {
-				continue
-			}
-			if _, targeted := targetHashes[backendHash]; targeted {
-				continue
-			}
-			if placement.MinRetentionUntil > now.UnixNano() {
-				continue
-			}
-			remaining := make(placementSet, len(placements)-1)
-			for candidateHash, candidate := range placements {
-				if candidateHash != backendHash {
-					remaining[candidateHash] = candidate
-				}
-			}
-			if durable(remaining, backends, model.Policy) {
-				status.ExcessBackends = append(status.ExcessBackends, backendName(backendHash, model))
-			}
-		}
-		sort.Strings(status.ExcessBackends)
-	}
+	status.ExcessBackends = excessBackends(placements, targetHashes, model, backends, now)
 	for backendHash, placement := range placements {
 		if placement.State != schema.PlacementLive {
 			continue
@@ -711,6 +730,35 @@ func placementStatus(packID vaultic.ID, pack schema.PackRecord, placements place
 	}
 	status.PendingPromotion = class == "archival-data" && len(status.MissingBackends) != 0
 	return status
+}
+
+func excessBackends(
+	placements placementSet,
+	targets map[uint64]struct{},
+	model PlacementModel,
+	backends map[uint64]PlacementBackend,
+	now time.Time,
+) []string {
+	var excess []string
+	for backendHash, placement := range placements {
+		if placement.State != schema.PlacementLive || placement.MinRetentionUntil > now.UnixNano() {
+			continue
+		}
+		if _, targeted := targets[backendHash]; targeted {
+			continue
+		}
+		remaining := make(placementSet, len(placements)-1)
+		for candidateHash, candidate := range placements {
+			if candidateHash != backendHash {
+				remaining[candidateHash] = candidate
+			}
+		}
+		if durable(remaining, backends, model.Policy) {
+			excess = append(excess, backendName(backendHash, model))
+		}
+	}
+	sort.Strings(excess)
+	return excess
 }
 
 const defaultPromotionCrossover = 8 * 24 * time.Hour

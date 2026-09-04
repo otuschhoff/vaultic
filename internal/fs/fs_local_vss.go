@@ -14,9 +14,9 @@ import (
 // VSSConfig holds extended options of windows volume shadow copy service.
 type VSSConfig struct {
 	ExcludeAllMountPoints bool          `option:"exclude-all-mount-points" help:"exclude mountpoints from snapshotting on all volumes"`
-	ExcludeVolumes        string        `option:"exclude-volumes" help:"semicolon separated list of volumes to exclude from snapshotting (ex. 'c:\\;e:\\mnt;\\\\?\\Volume{...}')"`
-	Timeout               time.Duration `option:"timeout" help:"time that the VSS can spend creating snapshot before timing out"`
-	Provider              string        `option:"provider" help:"VSS provider identifier which will be used for snapshotting"`
+	ExcludeVolumes        string        `option:"exclude-volumes" help:"semicolon-separated volumes to exclude (example: c:\\;e:\\mnt)"`
+	Timeout               time.Duration `option:"timeout"                  help:"time that the VSS can spend creating snapshot before timing out"`
+	Provider              string        `option:"provider"                 help:"VSS provider identifier which will be used for snapshotting"`
 }
 
 func init() {

@@ -395,7 +395,11 @@ func TestRewriterKeepEmptyDirectory(t *testing.T) {
 
 func TestRewriterFailOnUnknownFields(t *testing.T) {
 	tm := data.TestWritableTreeMap{TestTreeMap: data.TestTreeMap{}}
-	node := []byte(`{"nodes":[{"name":"subfile","type":"file","mtime":"0001-01-01T00:00:00Z","atime":"0001-01-01T00:00:00Z","ctime":"0001-01-01T00:00:00Z","uid":0,"gid":0,"content":null,"unknown_field":42}]}`)
+	node := []byte(
+		("{\"nodes\":[{\"name\":\"subfile\",\"type\":\"file\",\"mtime\":\"0001-01-01T00:00:00Z\",\"at" +
+			"ime\":\"0001-01-01T00:00:00Z\",\"ctime\":\"0001-01-01T00:00:00Z\",\"uid\":0,\"gid\":0,\"" +
+			"content\":null,\"unknown_field\":42}]}"),
+	)
 	id := vaultic.Hash(node)
 	tm.TestTreeMap[id] = node
 

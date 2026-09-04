@@ -239,7 +239,14 @@ func createEncryptedFileWriteData(filepath string, fileInfo NodeInfo) (err error
 	}
 	var handle windows.Handle
 	//Create the file with encrypted flag
-	if handle, err = windows.CreateFile(ptr, uint32(windows.GENERIC_READ|windows.GENERIC_WRITE), uint32(windows.FILE_SHARE_READ), nil, uint32(windows.CREATE_ALWAYS), windows.FILE_ATTRIBUTE_ENCRYPTED, 0); err != nil {
+	if handle,
+		err = windows.CreateFile(ptr,
+		uint32(windows.GENERIC_READ|windows.GENERIC_WRITE),
+		uint32(windows.FILE_SHARE_READ),
+		nil,
+		uint32(windows.CREATE_ALWAYS),
+		windows.FILE_ATTRIBUTE_ENCRYPTED,
+		0); err != nil {
 		return err
 	}
 	//Write data to file

@@ -103,7 +103,8 @@ func validAnalyticsFactSegment(record AnalyticsFactSegmentRecord) bool {
 	}
 	previous := AnalyticsColumnKind(0)
 	for _, column := range record.Columns {
-		if column.Kind <= previous || column.Kind > AnalyticsColumnSizeLog10 || column.Codec < AnalyticsCodecRaw || column.Codec > AnalyticsCodecZstd || len(column.Data) == 0 {
+		if column.Kind <= previous || column.Kind > AnalyticsColumnSizeLog10 || column.Codec < AnalyticsCodecRaw || column.Codec > AnalyticsCodecZstd ||
+			len(column.Data) == 0 {
 			return false
 		}
 		previous = column.Kind
@@ -226,7 +227,11 @@ func UnmarshalAnalyticsSegmentMetadataRecord(data []byte) (AnalyticsSegmentMetad
 }
 
 func validAnalyticsSegmentMetadata(record AnalyticsSegmentMetadataRecord) bool {
-	return record.RowCount > 0 && record.MinCreatedAt <= record.MaxCreatedAt && record.MinLogicalSize <= record.MaxLogicalSize && record.MinRevision > 0 && record.MinRevision <= record.MaxRevision && record.FirstCommit > 0 && record.FirstCommit <= record.LastCommit && record.ClassificationEpoch > 0
+	return record.RowCount > 0 && record.MinCreatedAt <= record.MaxCreatedAt && record.MinLogicalSize <= record.MaxLogicalSize && record.MinRevision > 0 &&
+		record.MinRevision <= record.MaxRevision &&
+		record.FirstCommit > 0 &&
+		record.FirstCommit <= record.LastCommit &&
+		record.ClassificationEpoch > 0
 }
 
 type AnalyticsDimensionIndexRecord struct {
@@ -238,7 +243,10 @@ type AnalyticsDimensionIndexRecord struct {
 }
 
 func (record AnalyticsDimensionIndexRecord) MarshalBinary() ([]byte, error) {
-	if record.Codec != AnalyticsCodecRaw && record.Codec != AnalyticsCodecRoaring && record.Codec != AnalyticsCodecZstd || record.RowCount == 0 || record.MatchCount == 0 || record.MatchCount > record.RowCount || len(record.Bitmap) == 0 {
+	if record.Codec != AnalyticsCodecRaw && record.Codec != AnalyticsCodecRoaring && record.Codec != AnalyticsCodecZstd || record.RowCount == 0 ||
+		record.MatchCount == 0 ||
+		record.MatchCount > record.RowCount ||
+		len(record.Bitmap) == 0 {
 		return nil, fmt.Errorf("%w: invalid analytics dimension index", ErrMalformed)
 	}
 	e := newEncoder()
@@ -275,7 +283,10 @@ func UnmarshalAnalyticsDimensionIndexRecord(data []byte) (AnalyticsDimensionInde
 	if record.Bitmap, err = d.bytes(); err != nil {
 		return record, err
 	}
-	if record.Codec != AnalyticsCodecRaw && record.Codec != AnalyticsCodecRoaring && record.Codec != AnalyticsCodecZstd || record.RowCount == 0 || record.MatchCount == 0 || record.MatchCount > record.RowCount || len(record.Bitmap) == 0 {
+	if record.Codec != AnalyticsCodecRaw && record.Codec != AnalyticsCodecRoaring && record.Codec != AnalyticsCodecZstd || record.RowCount == 0 ||
+		record.MatchCount == 0 ||
+		record.MatchCount > record.RowCount ||
+		len(record.Bitmap) == 0 {
 		return AnalyticsDimensionIndexRecord{}, fmt.Errorf("%w: invalid analytics dimension index", ErrMalformed)
 	}
 	return record, d.done()
@@ -498,7 +509,12 @@ func UnmarshalAnalyticsDeltaRecord(data []byte) (AnalyticsDeltaRecord, error) {
 }
 
 func validAnalyticsDelta(record AnalyticsDeltaRecord) bool {
-	if record.Kind < AnalyticsDeltaCreation || record.Kind > AnalyticsDeltaClassification || record.IdentityGeneration == 0 || record.Revision == 0 || record.Known&^knownFieldMask != 0 || record.ClassificationEpoch == 0 || record.IdentityContinuity > AnalyticsContinuitySourceGeneration || record.State > AnalyticsExpired || record.ReferenceOperation > AnalyticsReferencesDecrement {
+	if record.Kind < AnalyticsDeltaCreation || record.Kind > AnalyticsDeltaClassification || record.IdentityGeneration == 0 || record.Revision == 0 ||
+		record.Known&^knownFieldMask != 0 ||
+		record.ClassificationEpoch == 0 ||
+		record.IdentityContinuity > AnalyticsContinuitySourceGeneration ||
+		record.State > AnalyticsExpired ||
+		record.ReferenceOperation > AnalyticsReferencesDecrement {
 		return false
 	}
 	if record.Kind != AnalyticsDeltaRetainedReferences && record.ReferenceOperation != AnalyticsReferencesLegacy {
@@ -574,7 +590,8 @@ func UnmarshalAuthoritativeCrawlProofRecord(data []byte) (AuthoritativeCrawlProo
 }
 
 func validAuthoritativeCrawlProof(record AuthoritativeCrawlProofRecord) bool {
-	return record.ScopeID != (ID{}) && record.RootFSID != 0 && record.RootInode != 0 && record.StartFence != 0 && record.EndCommit >= record.StartFence && record.CompletedAt != 0
+	return record.ScopeID != (ID{}) && record.RootFSID != 0 && record.RootInode != 0 && record.StartFence != 0 && record.EndCommit >= record.StartFence &&
+		record.CompletedAt != 0
 }
 
 type AuthoritativeSourceState byte
@@ -638,7 +655,9 @@ func UnmarshalAuthoritativeSourceBindingRecord(data []byte) (AuthoritativeSource
 }
 
 func validAuthoritativeSourceBinding(record AuthoritativeSourceBindingRecord) bool {
-	return record.Generation != 0 && record.Revision != 0 && record.State >= AuthoritativeSourceLive && record.State <= AuthoritativeSourceUnknown && record.Continuity <= AnalyticsContinuitySourceGeneration && record.LastObservedCommit != 0
+	return record.Generation != 0 && record.Revision != 0 && record.State >= AuthoritativeSourceLive && record.State <= AuthoritativeSourceUnknown &&
+		record.Continuity <= AnalyticsContinuitySourceGeneration &&
+		record.LastObservedCommit != 0
 }
 
 type AnalyticsWatermarkRecord struct {
@@ -692,7 +711,9 @@ type AnalyticsManifestRecord struct {
 }
 
 func (record AnalyticsManifestRecord) MarshalBinary() ([]byte, error) {
-	if record.Generation == 0 || record.ParentGeneration >= record.Generation || record.ParentGeneration == 0 && record.LayerDepth != 0 || record.ParentGeneration != 0 && record.LayerDepth == 0 || !strictlyIncreasingOrEmpty(record.Segments) {
+	if record.Generation == 0 || record.ParentGeneration >= record.Generation || record.ParentGeneration == 0 && record.LayerDepth != 0 ||
+		record.ParentGeneration != 0 && record.LayerDepth == 0 ||
+		!strictlyIncreasingOrEmpty(record.Segments) {
 		return nil, fmt.Errorf("%w: invalid analytics manifest", ErrMalformed)
 	}
 	e := newEncoder()
@@ -731,7 +752,9 @@ func UnmarshalAnalyticsManifestRecord(data []byte) (AnalyticsManifestRecord, err
 			return record, err
 		}
 	}
-	if record.Generation == 0 || record.ParentGeneration >= record.Generation || record.ParentGeneration == 0 && record.LayerDepth != 0 || record.ParentGeneration != 0 && record.LayerDepth == 0 || !strictlyIncreasingOrEmpty(record.Segments) {
+	if record.Generation == 0 || record.ParentGeneration >= record.Generation || record.ParentGeneration == 0 && record.LayerDepth != 0 ||
+		record.ParentGeneration != 0 && record.LayerDepth == 0 ||
+		!strictlyIncreasingOrEmpty(record.Segments) {
 		return AnalyticsManifestRecord{}, fmt.Errorf("%w: invalid analytics manifest", ErrMalformed)
 	}
 	return record, d.done()
@@ -834,7 +857,10 @@ func UnmarshalAnalyticsBuildCheckpointRecord(data []byte) (AnalyticsBuildCheckpo
 }
 
 func validAnalyticsBuildCheckpoint(record AnalyticsBuildCheckpointRecord) bool {
-	return record.BuildID != (ID{}) && record.FormatVersion == 1 && record.Generation != 0 && record.ConfigJSON != "" && strictlyIncreasingOrEmpty(record.CandidateSegments) && record.StartedAt != 0 && record.UpdatedAt >= record.StartedAt
+	return record.BuildID != (ID{}) && record.FormatVersion == 1 && record.Generation != 0 && record.ConfigJSON != "" &&
+		strictlyIncreasingOrEmpty(record.CandidateSegments) &&
+		record.StartedAt != 0 &&
+		record.UpdatedAt >= record.StartedAt
 }
 
 type AnalyticsAggregateRecord struct {
@@ -1078,7 +1104,10 @@ func UnmarshalAnalyticsQueryJobRecord(data []byte) (AnalyticsQueryJobRecord, err
 }
 
 func validAnalyticsQueryJob(record AnalyticsQueryJobRecord) bool {
-	if record.State < AnalyticsQueryPending || record.State > AnalyticsQueryCancelled || len(record.CanonicalQuery) == 0 || record.RepositoryGeneration == 0 || record.ClassificationEpoch == 0 || record.UpdatedAt == 0 || !strictlyIncreasingOrEmpty(record.CompletedSegments) {
+	if record.State < AnalyticsQueryPending || record.State > AnalyticsQueryCancelled || len(record.CanonicalQuery) == 0 || record.RepositoryGeneration == 0 ||
+		record.ClassificationEpoch == 0 ||
+		record.UpdatedAt == 0 ||
+		!strictlyIncreasingOrEmpty(record.CompletedSegments) {
 		return false
 	}
 	if record.State == AnalyticsQueryComplete && len(record.Result) == 0 {

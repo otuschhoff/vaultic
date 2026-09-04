@@ -58,23 +58,48 @@ func Growth(ctx context.Context, store Store, options GrowthOptions) (GrowthResu
 			return report, nil
 		}
 	}
-	result, err := Execute(ctx, store, Query{CreatedSince: options.Since, CreatedUntil: options.Until, SVMs: options.SVMs, Volumes: options.Volumes, PathGroups: options.PathGroups, GroupBy: groupBy, IncludeIncomplete: true})
+	result, err := Execute(
+		ctx,
+		store,
+		Query{
+			CreatedSince:      options.Since,
+			CreatedUntil:      options.Until,
+			SVMs:              options.SVMs,
+			Volumes:           options.Volumes,
+			PathGroups:        options.PathGroups,
+			GroupBy:           groupBy,
+			IncludeIncomplete: true,
+		},
+	)
 	if err != nil {
 		return GrowthResult{}, err
 	}
-	report := GrowthResult{SchemaVersion: 1, Granularity: options.Granularity, Watermark: result.Watermark, Explain: result.Explain}
+	report := GrowthResult{
+		SchemaVersion: 1,
+		Granularity:   options.Granularity,
+		Watermark:     result.Watermark,
+		Explain:       result.Explain,
+	}
 	for _, group := range result.Groups {
 		start, err := growthBucketStart(options.Granularity, group.Dimensions)
 		if err != nil {
 			return GrowthResult{}, err
 		}
-		report.Buckets = append(report.Buckets, GrowthBucket{Start: start.Format(time.RFC3339), Files: group.Files, LogicalBytes: group.LogicalBytes})
+		report.Buckets = append(
+			report.Buckets,
+			GrowthBucket{Start: start.Format(time.RFC3339), Files: group.Files, LogicalBytes: group.LogicalBytes},
+		)
 	}
 	sort.Slice(report.Buckets, func(i, j int) bool { return report.Buckets[i].Start < report.Buckets[j].Start })
 	return report, nil
 }
 
-func growthFromViews(ctx context.Context, store Store, options GrowthOptions, granularity schema.AnalyticsGranularity) (GrowthResult, bool, error) {
+func growthFromViews(
+	ctx context.Context,
+	store Store,
+	options GrowthOptions,
+	granularity schema.AnalyticsGranularity,
+) (GrowthResult, bool, error) {
 	pinned, found, err := pinLatest(ctx, store)
 	if err != nil || !found {
 		return GrowthResult{}, false, err
@@ -83,7 +108,12 @@ func growthFromViews(ctx context.Context, store Store, options GrowthOptions, gr
 	if err != nil {
 		return GrowthResult{}, false, err
 	}
-	report := GrowthResult{SchemaVersion: 1, Granularity: options.Granularity, Watermark: watermark, Explain: Explain{Source: "materialized-view"}}
+	report := GrowthResult{
+		SchemaVersion: 1,
+		Granularity:   options.Granularity,
+		Watermark:     watermark,
+		Explain:       Explain{Source: "materialized-view"},
+	}
 	buckets := map[int64]*GrowthBucket{}
 	prefixes := [][]byte{schema.GrowthTimePrefix(granularity)}
 	if len(options.PathGroups) != 0 {
@@ -99,7 +129,8 @@ func growthFromViews(ctx context.Context, store Store, options GrowthOptions, gr
 			if err != nil {
 				return err
 			}
-			if key.Granularity != schema.HistoryGranularity(granularity) || key.Kind == schema.KeyGrowthTime && key.Tier != schema.TierUnknown {
+			if key.Granularity != schema.HistoryGranularity(granularity) ||
+				key.Kind == schema.KeyGrowthTime && key.Tier != schema.TierUnknown {
 				return nil
 			}
 			record, err := schema.UnmarshalAnalyticsAggregateRecord(kv.Value)
@@ -210,7 +241,8 @@ func UserStats(ctx context.Context, store Store, options UserStatsOptions) (User
 		return UserStatsResult{}, fmt.Errorf("limit must not be negative")
 	}
 	residencies := options.Residencies
-	viewCompatible := options.Since == nil && options.Until == nil && (dimension == "uid" && len(options.GIDs) == 0 || dimension == "gid" && len(options.UIDs) == 0)
+	viewCompatible := options.Since == nil && options.Until == nil &&
+		(dimension == "uid" && len(options.GIDs) == 0 || dimension == "gid" && len(options.UIDs) == 0)
 	if viewCompatible {
 		if report, used, err := userStatsFromViews(ctx, store, options, dimension); err != nil {
 			return UserStatsResult{}, err
@@ -218,17 +250,42 @@ func UserStats(ctx context.Context, store Store, options UserStatsOptions) (User
 			return report, nil
 		}
 	}
-	result, err := Execute(ctx, store, Query{UIDs: options.UIDs, GIDs: options.GIDs, Residencies: residencies, CreatedSince: options.Since, CreatedUntil: options.Until, GroupBy: []string{dimension, "residency"}, IncludeIncomplete: true})
+	result, err := Execute(
+		ctx,
+		store,
+		Query{
+			UIDs:              options.UIDs,
+			GIDs:              options.GIDs,
+			Residencies:       residencies,
+			CreatedSince:      options.Since,
+			CreatedUntil:      options.Until,
+			GroupBy:           []string{dimension, "residency"},
+			IncludeIncomplete: true,
+		},
+	)
 	if err != nil {
 		return UserStatsResult{}, err
 	}
-	report := UserStatsResult{SchemaVersion: 1, GroupBy: options.GroupBy, Watermark: result.Watermark, Explain: result.Explain}
+	report := UserStatsResult{
+		SchemaVersion: 1,
+		GroupBy:       options.GroupBy,
+		Watermark:     result.Watermark,
+		Explain:       result.Explain,
+	}
 	for _, group := range result.Groups {
 		id, err := strconv.ParseUint(group.Dimensions[dimension], 10, 32)
 		if err != nil {
 			continue
 		}
-		report.Rows = append(report.Rows, UserStatsRow{ID: uint32(id), Residency: group.Dimensions["residency"], Files: group.Files, LogicalBytes: group.LogicalBytes})
+		report.Rows = append(
+			report.Rows,
+			UserStatsRow{
+				ID:           uint32(id),
+				Residency:    group.Dimensions["residency"],
+				Files:        group.Files,
+				LogicalBytes: group.LogicalBytes,
+			},
+		)
 	}
 	sort.Slice(report.Rows, func(i, j int) bool {
 		if report.Rows[i].LogicalBytes != report.Rows[j].LogicalBytes {
@@ -248,7 +305,12 @@ func UserStats(ctx context.Context, store Store, options UserStatsOptions) (User
 	return report, nil
 }
 
-func userStatsFromViews(ctx context.Context, store Store, options UserStatsOptions, dimension string) (UserStatsResult, bool, error) {
+func userStatsFromViews(
+	ctx context.Context,
+	store Store,
+	options UserStatsOptions,
+	dimension string,
+) (UserStatsResult, bool, error) {
 	pinned, found, err := pinLatest(ctx, store)
 	if err != nil || !found {
 		return UserStatsResult{}, false, err
@@ -269,7 +331,12 @@ func userStatsFromViews(ctx context.Context, store Store, options UserStatsOptio
 			allowed[id] = struct{}{}
 		}
 	}
-	report := UserStatsResult{SchemaVersion: 1, GroupBy: options.GroupBy, Watermark: watermark, Explain: Explain{Source: "materialized-view"}}
+	report := UserStatsResult{
+		SchemaVersion: 1,
+		GroupBy:       options.GroupBy,
+		Watermark:     watermark,
+		Explain:       Explain{Source: "materialized-view"},
+	}
 	seen := false
 	visit := func(kv daemon.KeyValue) error {
 		key, err := schema.ParseKey(kv.Key)
@@ -294,7 +361,10 @@ func userStatsFromViews(ctx context.Context, store Store, options UserStatsOptio
 			return err
 		}
 		seen = true
-		report.Rows = append(report.Rows, UserStatsRow{ID: id, Residency: residency, Files: record.ActiveFiles, LogicalBytes: record.ActiveBytes})
+		report.Rows = append(
+			report.Rows,
+			UserStatsRow{ID: id, Residency: residency, Files: record.ActiveFiles, LogicalBytes: record.ActiveBytes},
+		)
 		return nil
 	}
 	if scoped {
@@ -397,13 +467,26 @@ type GDPRAuditResult struct {
 	Explain       Explain       `json:"explain"`
 }
 
-func SetUIDExclusionPolicy(ctx context.Context, store Store, uid uint32, excluded bool, reason string, now time.Time, runID schema.ID) error {
+func SetUIDExclusionPolicy(
+	ctx context.Context,
+	store Store,
+	uid uint32,
+	excluded bool,
+	reason string,
+	now time.Time,
+	runID schema.ID,
+) error {
 	record := schema.UIDExclusionPolicyRecord{Excluded: excluded, UpdatedAt: now.Unix(), RunID: runID, Reason: reason}
 	value, err := record.MarshalBinary()
 	if err != nil {
 		return err
 	}
-	return store.WriteMutableBatch(ctx, []daemon.Mutation{{Key: schema.UIDExclusionPolicyKey(uid), Value: value}}, nil, true)
+	return store.WriteMutableBatch(
+		ctx,
+		[]daemon.Mutation{{Key: schema.UIDExclusionPolicyKey(uid), Value: value}},
+		nil,
+		true,
+	)
 }
 
 func ExcludedUIDs(ctx context.Context, store Store) (map[uint32]struct{}, error) {
@@ -429,8 +512,19 @@ func GDPRAudit(ctx context.Context, store Store, uid uint32) (GDPRAuditResult, e
 	return GDPRAuditWithOptions(ctx, store, uid, GDPRAuditOptions{})
 }
 
-func GDPRAuditWithOptions(ctx context.Context, store Store, uid uint32, options GDPRAuditOptions) (GDPRAuditResult, error) {
-	result := GDPRAuditResult{SchemaVersion: 1, UID: uid, Unavailable: []string{"retention expiry is omitted when authoritative pack or placement metadata has no deadline"}}
+func GDPRAuditWithOptions(
+	ctx context.Context,
+	store Store,
+	uid uint32,
+	options GDPRAuditOptions,
+) (GDPRAuditResult, error) {
+	result := GDPRAuditResult{
+		SchemaVersion: 1,
+		UID:           uid,
+		Unavailable: []string{
+			"retention expiry is omitted when authoritative pack or placement metadata has no deadline",
+		},
+	}
 	generation := uint64(0)
 	scoped := false
 	if pinned, found, err := pinLatest(ctx, store); err != nil {
@@ -456,67 +550,13 @@ func GDPRAuditWithOptions(ctx context.Context, store Store, uid uint32, options 
 		return scan(ctx, store, prefix, visit)
 	}
 	if err := scanView(inodePrefix, func(kv daemon.KeyValue) error {
-		key, err := schema.ParseKey(kv.Key)
-		if err != nil {
-			return err
-		}
-		record, err := schema.UnmarshalAnalyticsUserInodeRecord(kv.Value)
-		if err != nil {
-			return err
-		}
-		residency, err := inodeResidency(ctx, store, generation, key.FSID, key.Inode)
-		if err != nil {
-			return err
-		}
-		result.Inodes = append(result.Inodes, GDPRInode{FSID: key.FSID, Inode: key.Inode, LatestRevision: record.LatestRevision, Path: record.PathSample, Residency: residency})
-		return nil
+		return appendGDPRInode(ctx, store, generation, kv, &result)
 	}); err != nil {
 		return GDPRAuditResult{}, err
 	}
 	blobIndexes := map[schema.ID]int{}
 	if err := scanView(blobPrefix, func(kv daemon.KeyValue) error {
-		key, err := schema.ParseKey(kv.Key)
-		if err != nil {
-			return err
-		}
-		record, err := schema.UnmarshalAnalyticsUserBlobRecord(kv.Value)
-		if err != nil {
-			return err
-		}
-		if index, found := blobIndexes[key.ID]; found {
-			result.Blobs[index].ReferenceCount += record.ReferenceCount
-			if result.Blobs[index].FirstSeen == 0 || record.FirstSeen < result.Blobs[index].FirstSeen {
-				result.Blobs[index].FirstSeen = record.FirstSeen
-			}
-			return nil
-		}
-		blob := GDPRBlob{Hash: hex.EncodeToString(key.ID[:]), ReferenceCount: record.ReferenceCount, FirstSeen: record.FirstSeen}
-		value, found, err := store.Get(ctx, schema.BlobKey(key.ID))
-		if err != nil {
-			return err
-		}
-		if found {
-			blobRecord, err := schema.UnmarshalBlobRecord(value)
-			if err != nil {
-				return err
-			}
-			seen := map[schema.ID]struct{}{}
-			for _, location := range blobRecord.Locations {
-				if _, ok := seen[location.PackID]; ok {
-					continue
-				}
-				seen[location.PackID] = struct{}{}
-				pack, err := gdprPack(ctx, store, location.PackID)
-				if err != nil {
-					return err
-				}
-				blob.Packs = append(blob.Packs, pack)
-			}
-		}
-		sort.Slice(blob.Packs, func(i, j int) bool { return blob.Packs[i].ID < blob.Packs[j].ID })
-		blobIndexes[key.ID] = len(result.Blobs)
-		result.Blobs = append(result.Blobs, blob)
-		return nil
+		return appendGDPRBlob(ctx, store, kv, blobIndexes, &result)
 	}); err != nil {
 		return GDPRAuditResult{}, err
 	}
@@ -539,7 +579,79 @@ func GDPRAuditWithOptions(ctx context.Context, store Store, uid uint32, options 
 	return result, nil
 }
 
-func explainBlobSurvival(ctx context.Context, store Store, generation uint64, uid uint32, blobs []GDPRBlob, sourceLimit int) error {
+func appendGDPRInode(ctx context.Context, store Store, generation uint64, kv daemon.KeyValue, result *GDPRAuditResult) error {
+	key, err := schema.ParseKey(kv.Key)
+	if err != nil {
+		return err
+	}
+	record, err := schema.UnmarshalAnalyticsUserInodeRecord(kv.Value)
+	if err != nil {
+		return err
+	}
+	residency, err := inodeResidency(ctx, store, generation, key.FSID, key.Inode)
+	if err != nil {
+		return err
+	}
+	result.Inodes = append(result.Inodes, GDPRInode{
+		FSID: key.FSID, Inode: key.Inode, LatestRevision: record.LatestRevision,
+		Path: record.PathSample, Residency: residency,
+	})
+	return nil
+}
+
+func appendGDPRBlob(ctx context.Context, store Store, kv daemon.KeyValue, indexes map[schema.ID]int, result *GDPRAuditResult) error {
+	key, err := schema.ParseKey(kv.Key)
+	if err != nil {
+		return err
+	}
+	record, err := schema.UnmarshalAnalyticsUserBlobRecord(kv.Value)
+	if err != nil {
+		return err
+	}
+	if index, found := indexes[key.ID]; found {
+		result.Blobs[index].ReferenceCount += record.ReferenceCount
+		if result.Blobs[index].FirstSeen == 0 || record.FirstSeen < result.Blobs[index].FirstSeen {
+			result.Blobs[index].FirstSeen = record.FirstSeen
+		}
+		return nil
+	}
+	blob := GDPRBlob{Hash: hex.EncodeToString(key.ID[:]), ReferenceCount: record.ReferenceCount, FirstSeen: record.FirstSeen}
+	value, found, err := store.Get(ctx, schema.BlobKey(key.ID))
+	if err != nil {
+		return err
+	}
+	if found {
+		blobRecord, err := schema.UnmarshalBlobRecord(value)
+		if err != nil {
+			return err
+		}
+		seen := map[schema.ID]struct{}{}
+		for _, location := range blobRecord.Locations {
+			if _, ok := seen[location.PackID]; ok {
+				continue
+			}
+			seen[location.PackID] = struct{}{}
+			pack, err := gdprPack(ctx, store, location.PackID)
+			if err != nil {
+				return err
+			}
+			blob.Packs = append(blob.Packs, pack)
+		}
+	}
+	sort.Slice(blob.Packs, func(i, j int) bool { return blob.Packs[i].ID < blob.Packs[j].ID })
+	indexes[key.ID] = len(result.Blobs)
+	result.Blobs = append(result.Blobs, blob)
+	return nil
+}
+
+func explainBlobSurvival(
+	ctx context.Context,
+	store Store,
+	generation uint64,
+	uid uint32,
+	blobs []GDPRBlob,
+	sourceLimit int,
+) error {
 	if sourceLimit <= 0 {
 		sourceLimit = 20
 	}
@@ -570,42 +682,60 @@ func explainBlobSurvival(ctx context.Context, store Store, generation uint64, ui
 		if err != nil {
 			return err
 		}
-		explanation := blob.SurvivingExplanation
-		if key.UID == uid {
-			explanation.ScopedReferences += record.ReferenceCount
-			return nil
-		}
-		explanation.ExternalReferences += record.ReferenceCount
-		explanation.WouldSurvive = true
-		for index := range explanation.ExternalSources {
-			source := &explanation.ExternalSources[index]
-			if source.UID == key.UID && source.FSID == key.FSID && source.Inode == key.Inode && source.Generation == key.Generation {
-				source.References += record.ReferenceCount
-				return nil
-			}
-		}
-		if len(explanation.ExternalSources) >= sourceLimit {
-			explanation.SourcesTruncated = true
-			return nil
-		}
-		source := GDPRExternalSource{UID: key.UID, FSID: key.FSID, Inode: key.Inode, Generation: key.Generation, References: record.ReferenceCount}
-		value, found, err := store.Get(ctx, schema.AnalyticsDerivedKey(generation, schema.UserInodeKey(key.UID, key.FSID, key.Inode)))
-		if err != nil {
-			return err
-		}
-		if found && !bytes.Equal(value, analyticsDerivedTombstone) {
-			inode, err := schema.UnmarshalAnalyticsUserInodeRecord(value)
-			if err != nil {
-				return err
-			}
-			source.LatestRevision, source.Path = inode.LatestRevision, inode.PathSample
-		}
-		explanation.ExternalSources = append(explanation.ExternalSources, source)
-		return nil
+		return addSurvivingReference(ctx, store, generation, uid, key, record, blob.SurvivingExplanation, sourceLimit)
 	})
 }
 
-func explainBlobSurvivalAuthoritative(ctx context.Context, store Store, uid uint32, blobs []GDPRBlob, sourceLimit int) error {
+func addSurvivingReference(
+	ctx context.Context,
+	store Store,
+	generation uint64,
+	uid uint32,
+	key schema.ParsedKey,
+	record schema.AnalyticsUserBlobRecord,
+	explanation *GDPRBlobSurvival,
+	sourceLimit int,
+) error {
+	if key.UID == uid {
+		explanation.ScopedReferences += record.ReferenceCount
+		return nil
+	}
+	explanation.ExternalReferences += record.ReferenceCount
+	explanation.WouldSurvive = true
+	for index := range explanation.ExternalSources {
+		source := &explanation.ExternalSources[index]
+		if source.UID == key.UID && source.FSID == key.FSID && source.Inode == key.Inode && source.Generation == key.Generation {
+			source.References += record.ReferenceCount
+			return nil
+		}
+	}
+	if len(explanation.ExternalSources) >= sourceLimit {
+		explanation.SourcesTruncated = true
+		return nil
+	}
+	source := GDPRExternalSource{UID: key.UID, FSID: key.FSID, Inode: key.Inode, Generation: key.Generation, References: record.ReferenceCount}
+	value, found, err := store.Get(ctx, schema.AnalyticsDerivedKey(generation, schema.UserInodeKey(key.UID, key.FSID, key.Inode)))
+	if err != nil {
+		return err
+	}
+	if found && !bytes.Equal(value, analyticsDerivedTombstone) {
+		inode, err := schema.UnmarshalAnalyticsUserInodeRecord(value)
+		if err != nil {
+			return err
+		}
+		source.LatestRevision, source.Path = inode.LatestRevision, inode.PathSample
+	}
+	explanation.ExternalSources = append(explanation.ExternalSources, source)
+	return nil
+}
+
+func explainBlobSurvivalAuthoritative(
+	ctx context.Context,
+	store Store,
+	uid uint32,
+	blobs []GDPRBlob,
+	sourceLimit int,
+) error {
 	if sourceLimit <= 0 {
 		sourceLimit = 20
 	}
@@ -655,13 +785,28 @@ func explainBlobSurvivalAuthoritative(ctx context.Context, store Store, uid uint
 				explanation.SourcesTruncated = true
 				continue
 			}
-			explanation.ExternalSources = append(explanation.ExternalSources, GDPRExternalSource{UID: revision.UID, FSID: key.FSID, Inode: key.Inode, LatestRevision: key.Revision, Path: revision.SourcePath, References: count})
+			explanation.ExternalSources = append(
+				explanation.ExternalSources,
+				GDPRExternalSource{
+					UID:            revision.UID,
+					FSID:           key.FSID,
+					Inode:          key.Inode,
+					LatestRevision: key.Revision,
+					Path:           revision.SourcePath,
+					References:     count,
+				},
+			)
 		}
 		return nil
 	})
 }
 
-func gdprManifestContent(ctx context.Context, store Store, id schema.ID, cache map[schema.ID][]schema.ID) ([]schema.ID, error) {
+func gdprManifestContent(
+	ctx context.Context,
+	store Store,
+	id schema.ID,
+	cache map[schema.ID][]schema.ID,
+) ([]schema.ID, error) {
 	if content, found := cache[id]; found {
 		return content, nil
 	}
@@ -727,13 +872,23 @@ func activeViewState(ctx context.Context, store Store, pinned pinnedGeneration) 
 		return false, WatermarkInfo{}, err
 	}
 	if scoped && (len(marker) != 1 || marker[0] != schema.Version) {
-		return false, WatermarkInfo{}, fmt.Errorf("analytics generation %d has an invalid derived-view marker", pinned.epoch)
+		return false, WatermarkInfo{}, fmt.Errorf(
+			"analytics generation %d has an invalid derived-view marker",
+			pinned.epoch,
+		)
 	}
 	head, available, err := authoritativeHead(ctx, store)
 	if err != nil {
 		return false, WatermarkInfo{}, err
 	}
-	watermark := WatermarkInfo{RepositoryGeneration: pinned.watermark.RepositoryGeneration, ClassificationEpoch: pinned.epoch, AppliedCommit: pinned.watermark.AppliedCommit, AppliedAt: pinned.watermark.AppliedAt, AuthoritativeHead: head, AuthoritativeHeadAvailable: available}
+	watermark := WatermarkInfo{
+		RepositoryGeneration:       pinned.watermark.RepositoryGeneration,
+		ClassificationEpoch:        pinned.epoch,
+		AppliedCommit:              pinned.watermark.AppliedCommit,
+		AppliedAt:                  pinned.watermark.AppliedAt,
+		AuthoritativeHead:          head,
+		AuthoritativeHeadAvailable: available,
+	}
 	if head > pinned.watermark.AppliedCommit {
 		watermark.LagCommits = head - pinned.watermark.AppliedCommit
 	}
@@ -764,7 +919,9 @@ func gdprPack(ctx context.Context, store Store, id schema.ID) (GDPRPack, error) 
 			return err
 		}
 		result.Backends = append(result.Backends, key.Backend)
-		result.Placements = append(result.Placements, GDPRPlacement{Backend: key.Backend, State: placementStateName(record.State), StorageClass: record.StorageClass})
+		result.Placements = append(result.Placements, GDPRPlacement{
+			Backend: key.Backend, State: placementStateName(record.State), StorageClass: record.StorageClass,
+		})
 		if record.RetentionSource != schema.RetentionUnknown && (!result.RetentionAvailable || record.MinRetentionUntil > result.RetentionUntil) {
 			result.RetentionAvailable, result.RetentionUntil = true, record.MinRetentionUntil
 		}
@@ -773,7 +930,10 @@ func gdprPack(ctx context.Context, store Store, id schema.ID) (GDPRPack, error) 
 		return result, err
 	}
 	sort.Slice(result.Backends, func(i, j int) bool { return result.Backends[i] < result.Backends[j] })
-	sort.Slice(result.Placements, func(i, j int) bool { return result.Placements[i].Backend < result.Placements[j].Backend })
+	sort.Slice(
+		result.Placements,
+		func(i, j int) bool { return result.Placements[i].Backend < result.Placements[j].Backend },
+	)
 	return result, nil
 }
 
@@ -822,7 +982,17 @@ func QueryJobStatus(ctx context.Context, store Store, id schema.ID) (JobStatus, 
 	if err != nil {
 		return JobStatus{}, err
 	}
-	return JobStatus{ID: hex.EncodeToString(id[:]), State: queryJobStateName(record.State), RepositoryGeneration: record.RepositoryGeneration, ClassificationEpoch: record.ClassificationEpoch, AppliedCommit: record.AppliedCommit, CompletedSegments: uint64(len(record.CompletedSegments)), RowsScanned: record.RowsScanned, UpdatedAt: record.UpdatedAt, Error: record.Error}, nil
+	return JobStatus{
+		ID:                   hex.EncodeToString(id[:]),
+		State:                queryJobStateName(record.State),
+		RepositoryGeneration: record.RepositoryGeneration,
+		ClassificationEpoch:  record.ClassificationEpoch,
+		AppliedCommit:        record.AppliedCommit,
+		CompletedSegments:    uint64(len(record.CompletedSegments)),
+		RowsScanned:          record.RowsScanned,
+		UpdatedAt:            record.UpdatedAt,
+		Error:                record.Error,
+	}, nil
 }
 
 func queryJobStateName(state schema.AnalyticsQueryJobState) string {
@@ -882,7 +1052,14 @@ func InspectStatus(ctx context.Context, store Store) (OperationalStatus, error) 
 	if err != nil {
 		return OperationalStatus{}, err
 	}
-	lifecycleStatus := LifecycleStatus{Enabled: lifecycle.Enabled, Generation: lifecycle.Generation, Facts: lifecycle.Facts, CacheEntries: lifecycle.CacheEntries, BuiltAt: lifecycle.BuiltAt, ConfigJSON: lifecycle.ConfigJSON}
+	lifecycleStatus := LifecycleStatus{
+		Enabled:      lifecycle.Enabled,
+		Generation:   lifecycle.Generation,
+		Facts:        lifecycle.Facts,
+		CacheEntries: lifecycle.CacheEntries,
+		BuiltAt:      lifecycle.BuiltAt,
+		ConfigJSON:   lifecycle.ConfigJSON,
+	}
 	return OperationalStatus{SchemaVersion: 1, Lifecycle: lifecycleStatus, CatchUp: catchUp, Cache: cache}, nil
 }
 
@@ -950,5 +1127,11 @@ func PurgeCache(ctx context.Context, store Store, includeViews, includeJobs, dry
 			return LifecycleResult{}, err
 		}
 	}
-	return LifecycleResult{Enabled: metadata.Enabled, Generation: metadata.Generation, Facts: metadata.Facts, Removed: removed, BuiltAt: metadata.BuiltAt}, nil
+	return LifecycleResult{
+		Enabled:    metadata.Enabled,
+		Generation: metadata.Generation,
+		Facts:      metadata.Facts,
+		Removed:    removed,
+		BuiltAt:    metadata.BuiltAt,
+	}, nil
 }

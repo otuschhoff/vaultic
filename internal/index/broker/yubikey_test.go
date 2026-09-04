@@ -13,16 +13,31 @@ func TestYubiKeyPIVUnwrapperUsesBoundContext(t *testing.T) {
 	argumentsPath := filepath.Join(root, "arguments")
 	stdinPath := filepath.Join(root, "stdin")
 	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("wrapped-share")) + "\\n'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString(
+		[]byte("wrapped-share"),
+	) + "\\n'\n"
 	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	unwrapper := YubiKeyPIVUnwrapper{HelperPath: helperPath, PINFile: "/protected/pin"}
-	plaintext, identity, err := unwrapper.UnwrapMember(t.Context(), ExternalMemberContext{RepositoryID: "repo-a", RootKeyVersion: 3, MemberID: "piv-a", Provider: "yubikey-piv", KeyReference: "pkcs11:reference", Purpose: "bound-purpose", HardwareCredentialID: "credential-a"}, []byte("ciphertext"))
+	plaintext, identity, err := unwrapper.UnwrapMember(
+		t.Context(),
+		ExternalMemberContext{
+			RepositoryID:         "repo-a",
+			RootKeyVersion:       3,
+			MemberID:             "piv-a",
+			Provider:             "yubikey-piv",
+			KeyReference:         "pkcs11:reference",
+			Purpose:              "bound-purpose",
+			HardwareCredentialID: "credential-a",
+		},
+		[]byte("ciphertext"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(plaintext) != "wrapped-share" || identity.Authority != "yubikey-piv" || identity.ImmutablePrincipalID != "credential-a" {
+	if string(plaintext) != "wrapped-share" || identity.Authority != "yubikey-piv" ||
+		identity.ImmutablePrincipalID != "credential-a" {
 		t.Fatalf("unexpected unwrap result: %q, %#v", plaintext, identity)
 	}
 	arguments, err := os.ReadFile(argumentsPath)
@@ -55,16 +70,31 @@ func TestFIDO2HMACSecretUnwrapperUsesBoundContext(t *testing.T) {
 	argumentsPath := filepath.Join(root, "arguments")
 	stdinPath := filepath.Join(root, "stdin")
 	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("fido-share")) + "\\n'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString(
+		[]byte("fido-share"),
+	) + "\\n'\n"
 	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	unwrapper := FIDO2HMACSecretUnwrapper{HelperPath: helperPath, PINFile: "/protected/pin"}
-	plaintext, identity, err := unwrapper.UnwrapMember(t.Context(), ExternalMemberContext{RepositoryID: "repo-a", RootKeyVersion: 3, MemberID: "fido-a", Provider: "fido2-hmac-secret", KeyReference: "fido2:reference", Purpose: "bound-purpose", HardwareCredentialID: "credential-a"}, []byte("ciphertext"))
+	plaintext, identity, err := unwrapper.UnwrapMember(
+		t.Context(),
+		ExternalMemberContext{
+			RepositoryID:         "repo-a",
+			RootKeyVersion:       3,
+			MemberID:             "fido-a",
+			Provider:             "fido2-hmac-secret",
+			KeyReference:         "fido2:reference",
+			Purpose:              "bound-purpose",
+			HardwareCredentialID: "credential-a",
+		},
+		[]byte("ciphertext"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(plaintext) != "fido-share" || identity.Authority != "fido2-hmac-secret" || identity.ImmutablePrincipalID != "credential-a" {
+	if string(plaintext) != "fido-share" || identity.Authority != "fido2-hmac-secret" ||
+		identity.ImmutablePrincipalID != "credential-a" {
 		t.Fatalf("unexpected unwrap result: %q, %#v", plaintext, identity)
 	}
 	arguments, err := os.ReadFile(argumentsPath)
@@ -87,16 +117,32 @@ func TestMacosSecureEnclaveUnwrapperUsesBoundContextAndEmptyEnvironment(t *testi
 	stdinPath := filepath.Join(root, "stdin")
 	environmentPath := filepath.Join(root, "environment")
 	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\nenv > " + environmentPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("enclave-share")) + "\\n'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath
+	script += "\nenv > " + environmentPath
+	script += "\ncat > " + stdinPath
+	script += "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("enclave-share")) + "\\n'\n"
 	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	unwrapper := MacosSecureEnclaveUnwrapper{HelperPath: helperPath}
-	plaintext, identity, err := unwrapper.UnwrapMember(t.Context(), ExternalMemberContext{RepositoryID: "repo-a", RootKeyVersion: 3, MemberID: "enclave-a", Provider: "macos-secure-enclave", KeyReference: "secure-enclave:reference", Purpose: "bound-purpose", HardwareCredentialID: "credential-a"}, []byte("ciphertext"))
+	plaintext, identity, err := unwrapper.UnwrapMember(
+		t.Context(),
+		ExternalMemberContext{
+			RepositoryID:         "repo-a",
+			RootKeyVersion:       3,
+			MemberID:             "enclave-a",
+			Provider:             "macos-secure-enclave",
+			KeyReference:         "secure-enclave:reference",
+			Purpose:              "bound-purpose",
+			HardwareCredentialID: "credential-a",
+		},
+		[]byte("ciphertext"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(plaintext) != "enclave-share" || identity.Authority != "macos-secure-enclave" || identity.ImmutablePrincipalID != "credential-a" {
+	if string(plaintext) != "enclave-share" || identity.Authority != "macos-secure-enclave" ||
+		identity.ImmutablePrincipalID != "credential-a" {
 		t.Fatalf("unexpected unwrap result: %q, %#v", plaintext, identity)
 	}
 	arguments, err := os.ReadFile(argumentsPath)
@@ -129,7 +175,12 @@ func TestMacosSecureEnclaveUnwrapperUsesBoundContextAndEmptyEnvironment(t *testi
 
 func TestMacosSecureEnclaveUnwrapperFailsClosed(t *testing.T) {
 	unwrapper := MacosSecureEnclaveUnwrapper{HelperPath: "/missing"}
-	if _, _, err := unwrapper.UnwrapMember(t.Context(), ExternalMemberContext{Provider: "fido2-hmac-secret", HardwareCredentialID: "credential-a"}, nil); err == nil {
+	if _,
+		_,
+		err := unwrapper.UnwrapMember(t.Context(),
+		ExternalMemberContext{Provider: "fido2-hmac-secret",
+			HardwareCredentialID: "credential-a"},
+		nil); err == nil {
 		t.Fatal("wrong provider was accepted")
 	}
 }

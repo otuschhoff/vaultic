@@ -166,7 +166,11 @@ func BuildPathdiffPlan(ctx context.Context, service ChangeService, topology Topo
 			return full("coverage for %q is incomplete: %s", mapping.RemotePath, reason)
 		}
 		for _, event := range window.Events {
-			if event.Timestamp.Before(since) || event.Timestamp.After(until) || event.LIFIPv4 != mapping.LIF || event.SVMID != mapping.SVMID || event.SVMName != mapping.SVM || event.VolumeMSID != mapping.VolumeMSID || event.VolumeName != mapping.Volume || !remotePathWithin(mapping.RemotePath, event.Path) {
+			if event.Timestamp.Before(since) || event.Timestamp.After(until) || event.LIFIPv4 != mapping.LIF || event.SVMID != mapping.SVMID ||
+				event.SVMName != mapping.SVM ||
+				event.VolumeMSID != mapping.VolumeMSID ||
+				event.VolumeName != mapping.Volume ||
+				!remotePathWithin(mapping.RemotePath, event.Path) {
 				return full("pathdiff returned an event outside the requested path, window, or topology for %q", mapping.RemotePath)
 			}
 			if strings.Contains(strings.ToLower(event.Operation), "rename") {
@@ -241,7 +245,10 @@ func matchMappings(mappings []SourceMapping, targets []string) ([]SourceMapping,
 			if err != nil {
 				continue
 			}
-			if filepath.Clean(absolute) == filepath.Clean(mappedTarget) && mapping.LIF != "" && mapping.SVMID != "" && mapping.SVM != "" && mapping.Volume != "" && mapping.VolumeMSID != "" && path.IsAbs(mapping.RemotePath) {
+			if filepath.Clean(absolute) == filepath.Clean(mappedTarget) && mapping.LIF != "" && mapping.SVMID != "" && mapping.SVM != "" &&
+				mapping.Volume != "" &&
+				mapping.VolumeMSID != "" &&
+				path.IsAbs(mapping.RemotePath) {
 				if found != nil {
 					return nil, fmt.Errorf("target %q has multiple complete LIF/SVM/volume mappings", target)
 				}

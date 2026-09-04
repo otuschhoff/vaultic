@@ -141,7 +141,13 @@ func TestBackupWithRelativePath(t *testing.T) {
 	// that the correct parent snapshot was used
 	latestSn, _ := testRunSnapshots(t, env.gopts)
 	rtest.Assert(t, latestSn != nil, "missing latest snapshot")
-	rtest.Assert(t, latestSn.Parent != nil && latestSn.Parent.Equal(firstSnapshotID), "second snapshot selected unexpected parent %v instead of %v", latestSn.Parent, firstSnapshotID)
+	rtest.Assert(
+		t,
+		latestSn.Parent != nil && latestSn.Parent.Equal(firstSnapshotID),
+		"second snapshot selected unexpected parent %v instead of %v",
+		latestSn.Parent,
+		firstSnapshotID,
+	)
 }
 
 type vssDeleteOriginalFS struct {
@@ -185,7 +191,7 @@ func TestBackupVSS(t *testing.T) {
 	opts := BackupOptions{UseFsSnapshot: true}
 
 	var testFS *vssDeleteOriginalFS
-	opts.fsTestHook = func(fs fs.FS) fs.FS {
+	opts.FSTestHook = func(fs fs.FS) fs.FS {
 		testFS = &vssDeleteOriginalFS{
 			FS:       fs,
 			testdata: env.testdata,
@@ -219,7 +225,13 @@ func TestBackupParentSelection(t *testing.T) {
 	// test that the correct parent snapshot was used
 	latestSn, _ := testRunSnapshots(t, env.gopts)
 	rtest.Assert(t, latestSn != nil, "missing latest snapshot")
-	rtest.Assert(t, latestSn.Parent != nil && latestSn.Parent.Equal(firstSnapshotID), "third snapshot selected unexpected parent %v instead of %v", latestSn.Parent, firstSnapshotID)
+	rtest.Assert(
+		t,
+		latestSn.Parent != nil && latestSn.Parent.Equal(firstSnapshotID),
+		"third snapshot selected unexpected parent %v instead of %v",
+		latestSn.Parent,
+		firstSnapshotID,
+	)
 }
 
 func TestDryRunBackup(t *testing.T) {

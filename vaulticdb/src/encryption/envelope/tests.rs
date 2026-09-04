@@ -10,9 +10,14 @@ mod tests {
         let passphrase = b"correct horse battery staple";
         let (envelope, expected) = new_local_envelope("repo-a", passphrase).unwrap();
         validate_envelope(&envelope, "repo-a").unwrap();
-        let (_, actual) = unlock_envelope(&envelope, Some(passphrase)).await.unwrap();
+        let credentials = ProviderCredentials::default();
+        let (_, actual) = unlock_envelope(&envelope, Some(passphrase), &credentials)
+            .await
+            .unwrap();
         assert_eq!(actual.as_slice(), expected.as_slice());
-        assert!(unlock_envelope(&envelope, Some(b"wrong")).await.is_err());
+        assert!(unlock_envelope(&envelope, Some(b"wrong"), &credentials)
+            .await
+            .is_err());
         assert!(validate_envelope(&envelope, "repo-b").is_err());
     }
 

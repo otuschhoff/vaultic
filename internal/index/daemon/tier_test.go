@@ -10,7 +10,10 @@ import (
 
 func tierTestStore(t *testing.T, repositoryID string) (*SchemaStore, context.Context) {
 	t.Helper()
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: repositoryID, DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{Socket: testSocket(t), RepositoryID: repositoryID, DaemonPath: daemonBinary(t), DataDir: t.TempDir()},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +98,9 @@ func TestDeletePendingWritesPerPlacementDeleteQueue(t *testing.T) {
 			PayloadSize: 5, HeaderSize: 50, BlobCount: 1,
 			Lifecycle: schema.PackExportPending, Tier: schema.TierCold,
 		},
-		Blobs:      map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 5, Type: schema.BlobData}}}},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 5, Type: schema.BlobData}}},
+		},
 		Placements: map[uint64]schema.PlacementRecord{42: placement},
 	}
 	if err := store.PublishPack(ctx, published); err != nil {
@@ -121,7 +126,8 @@ func TestDeletePendingWritesPerPlacementDeleteQueue(t *testing.T) {
 	if updated.DeleteAfter != placement.MinRetentionUntil {
 		t.Fatalf("delete-after = %d, want retention %d", updated.DeleteAfter, placement.MinRetentionUntil)
 	}
-	if _, found, err := store.Get(ctx, schema.PlacementDeleteQueueKey(updated.DeleteAfter, packID, 42)); err != nil || !found {
+	if _, found, err := store.Get(ctx, schema.PlacementDeleteQueueKey(updated.DeleteAfter, packID, 42)); err != nil ||
+		!found {
 		t.Fatalf("delete queue missing: found=%v err=%v", found, err)
 	}
 	if value, found, err := store.Get(ctx, schema.BackendPackKey(42, packID)); err != nil || !found {
@@ -155,9 +161,19 @@ func TestPublishMaintainsTierAggregatesAtomically(t *testing.T) {
 	coldBlob, treeBlob := daemonTestID(62), daemonTestID(63)
 
 	for _, published := range []PublishedPack{
-		{PackID: coldPack, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 5, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
+		{PackID: coldPack,
+			Record: schema.PackRecord{
+				Type: schema.PackData, PayloadSize: 5, BlobCount: 1,
+				Lifecycle: schema.PackExportPending, Tier: schema.TierCold,
+			},
 			Blobs: map[schema.ID]schema.BlobRecord{coldBlob: {Locations: []schema.BlobLocation{{PackID: coldPack, Length: 5, Type: schema.BlobData}}}}},
-		{PackID: mirroredPack, Record: schema.PackRecord{Type: schema.PackTree, PayloadSize: 7, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierMirrored},
+		{PackID: mirroredPack,
+			Record: schema.PackRecord{Type: schema.PackTree,
+				PayloadSize: 7,
+				BlobCount:   1,
+				Lifecycle:   schema.PackExportPending,
+				Tier:        schema.TierMirrored},
+
 			Blobs: map[schema.ID]schema.BlobRecord{treeBlob: {Locations: []schema.BlobLocation{{PackID: mirroredPack, Length: 7, Type: schema.BlobTree}}}}},
 	} {
 		if err := store.PublishPack(ctx, published); err != nil {
@@ -194,8 +210,16 @@ func TestPackDeletionUpdatesTierAggregates(t *testing.T) {
 	packID, blobID := daemonTestID(70), daemonTestID(71)
 	published := PublishedPack{
 		PackID: packID,
-		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 9, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
-		Blobs:  map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 9, Type: schema.BlobData}}}},
+		Record: schema.PackRecord{
+			Type:        schema.PackData,
+			PayloadSize: 9,
+			BlobCount:   1,
+			Lifecycle:   schema.PackExportPending,
+			Tier:        schema.TierCold,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 9, Type: schema.BlobData}}},
+		},
 	}
 	if err := store.PublishPack(ctx, published); err != nil {
 		t.Fatal(err)
@@ -220,7 +244,15 @@ func TestPackDeletionUpdatesTierAggregates(t *testing.T) {
 // Deleting one of its packs must still succeed, because a missing accelerator
 // may never block a destructive operation from completing correctly.
 func TestPackDeletionToleratesUnbuiltTierDimension(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase9-tier-unbuilt-delete", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{
+			Socket:       testSocket(t),
+			RepositoryID: "phase9-tier-unbuilt-delete",
+			DaemonPath:   daemonBinary(t),
+			DataDir:      t.TempDir(),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,8 +262,16 @@ func TestPackDeletionToleratesUnbuiltTierDimension(t *testing.T) {
 	packID, blobID := daemonTestID(80), daemonTestID(81)
 	published := PublishedPack{
 		PackID: packID,
-		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 4, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
-		Blobs:  map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 4, Type: schema.BlobData}}}},
+		Record: schema.PackRecord{
+			Type:        schema.PackData,
+			PayloadSize: 4,
+			BlobCount:   1,
+			Lifecycle:   schema.PackExportPending,
+			Tier:        schema.TierCold,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 4, Type: schema.BlobData}}},
+		},
 	}
 	if err := store.PublishPack(ctx, published); err != nil {
 		t.Fatal(err)
@@ -273,8 +313,15 @@ func TestPackTierTransitionMovesAggregates(t *testing.T) {
 	imported := LegacyPackImport{
 		PackID:      packID,
 		SourceIndex: sourceIndex,
-		Record:      schema.PackRecord{Type: schema.PackData, PayloadSize: 6, BlobCount: 1, Lifecycle: schema.PackImported},
-		Blobs:       map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 6, Type: schema.BlobData}}}},
+		Record: schema.PackRecord{
+			Type:        schema.PackData,
+			PayloadSize: 6,
+			BlobCount:   1,
+			Lifecycle:   schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 6, Type: schema.BlobData}}},
+		},
 	}
 	if err := store.ImportLegacyPack(ctx, imported); err != nil {
 		t.Fatal(err)
@@ -287,8 +334,14 @@ func TestPackTierTransitionMovesAggregates(t *testing.T) {
 	// The same pack is published by vaultic, this time with its routing known.
 	routed := PublishedPack{
 		PackID: packID,
-		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 6, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
-		Blobs:  imported.Blobs,
+		Record: schema.PackRecord{
+			Type:        schema.PackData,
+			PayloadSize: 6,
+			BlobCount:   1,
+			Lifecycle:   schema.PackExportPending,
+			Tier:        schema.TierCold,
+		},
+		Blobs: imported.Blobs,
 	}
 	if err := store.PublishPack(ctx, routed); err != nil {
 		t.Fatal(err)
@@ -318,7 +371,15 @@ func TestPackTierTransitionMovesAggregates(t *testing.T) {
 // does not exist, and the publish must still succeed rather than failing on an
 // aggregate underflow.
 func TestTierTransitionToleratesUnbuiltTierDimension(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase9-tier-transition-unbuilt", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{
+			Socket:       testSocket(t),
+			RepositoryID: "phase9-tier-transition-unbuilt",
+			DaemonPath:   daemonBinary(t),
+			DataDir:      t.TempDir(),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,8 +390,15 @@ func TestTierTransitionToleratesUnbuiltTierDimension(t *testing.T) {
 	imported := LegacyPackImport{
 		PackID:      packID,
 		SourceIndex: sourceIndex,
-		Record:      schema.PackRecord{Type: schema.PackData, PayloadSize: 6, BlobCount: 1, Lifecycle: schema.PackImported},
-		Blobs:       map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 6, Type: schema.BlobData}}}},
+		Record: schema.PackRecord{
+			Type:        schema.PackData,
+			PayloadSize: 6,
+			BlobCount:   1,
+			Lifecycle:   schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 6, Type: schema.BlobData}}},
+		},
 	}
 	if err := store.ImportLegacyPack(ctx, imported); err != nil {
 		t.Fatal(err)
@@ -342,8 +410,14 @@ func TestTierTransitionToleratesUnbuiltTierDimension(t *testing.T) {
 
 	routed := PublishedPack{
 		PackID: packID,
-		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 6, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
-		Blobs:  imported.Blobs,
+		Record: schema.PackRecord{
+			Type:        schema.PackData,
+			PayloadSize: 6,
+			BlobCount:   1,
+			Lifecycle:   schema.PackExportPending,
+			Tier:        schema.TierCold,
+		},
+		Blobs: imported.Blobs,
 	}
 	if err := store.PublishPack(ctx, routed); err != nil {
 		t.Fatalf("publish failed on a repository without tier aggregates: %v", err)
@@ -363,9 +437,17 @@ func TestUpdatePackUsageIsAtomicAcrossPacks(t *testing.T) {
 	packA, packB := daemonTestID(90), daemonTestID(91)
 	blobA, blobB := daemonTestID(92), daemonTestID(93)
 	for _, published := range []PublishedPack{
-		{PackID: packA, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 10, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
+		{PackID: packA,
+			Record: schema.PackRecord{
+				Type: schema.PackData, PayloadSize: 10, BlobCount: 1,
+				Lifecycle: schema.PackExportPending, Tier: schema.TierCold,
+			},
 			Blobs: map[schema.ID]schema.BlobRecord{blobA: {Locations: []schema.BlobLocation{{PackID: packA, Length: 10, Type: schema.BlobData}}}}},
-		{PackID: packB, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 20, BlobCount: 1, Lifecycle: schema.PackExportPending, Tier: schema.TierCold},
+		{PackID: packB,
+			Record: schema.PackRecord{
+				Type: schema.PackData, PayloadSize: 20, BlobCount: 1,
+				Lifecycle: schema.PackExportPending, Tier: schema.TierCold,
+			},
 			Blobs: map[schema.ID]schema.BlobRecord{blobB: {Locations: []schema.BlobLocation{{PackID: packB, Length: 20, Type: schema.BlobData}}}}},
 	} {
 		if err := store.PublishPack(ctx, published); err != nil {

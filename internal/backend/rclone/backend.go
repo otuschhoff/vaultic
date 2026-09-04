@@ -94,7 +94,10 @@ func run(errorLog func(string, ...any), command string, args ...string) (*StdioC
 	}
 	if err != nil {
 		if errors.Is(err, exec.ErrDot) {
-			return nil, nil, nil, nil, errors.Errorf("cannot implicitly run relative executable %v found in current directory, use -o rclone.program=./<program> to override", cmd.Path)
+			return nil, nil, nil, nil, errors.Errorf(
+				"cannot implicitly run relative executable %v found in current directory, use -o rclone.program=./<program> to override",
+				cmd.Path,
+			)
 		}
 		return nil, nil, nil, nil, err
 	}

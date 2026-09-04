@@ -39,7 +39,14 @@ Exit status is 1 if there was any error.
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			term := globalOptions.Term
-			return runConfig(cmd.Context(), cmd.Flags(), opts, *globalOptions, args, progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term))
+			return runConfig(
+				cmd.Context(),
+				cmd.Flags(),
+				opts,
+				*globalOptions,
+				args,
+				progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term),
+			)
 		},
 	}
 	opts.AddFlags(cmd.Flags())
@@ -84,7 +91,12 @@ func (opts *ConfigOptions) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.setDataPackGrowfactor, "set-datapack-growfactor", "", "set data pack grow `factor` (or 'unset')")
 	f.StringVar(&opts.setDataPackSizeLimit, "set-datapack-size-limit", "", "set data pack size `limit` in bytes (or 'unset')")
 	f.StringVar(&opts.setMinPacksizeToleratePercent, "set-min-packsize-tolerate-percent", "", "tolerated minimum pack size in `percent` of target (or 'unset')")
-	f.StringVar(&opts.setMaxPacksizeToleratePercent, "set-max-packsize-tolerate-percent", "", "tolerated maximum pack size in `percent` of target, 0=unlimited (or 'unset')")
+	f.StringVar(
+		&opts.setMaxPacksizeToleratePercent,
+		"set-max-packsize-tolerate-percent",
+		"",
+		"tolerated maximum pack size in `percent` of target, 0=unlimited (or 'unset')",
+	)
 }
 
 func runConfig(ctx context.Context, flags *pflag.FlagSet, opts ConfigOptions, gopts global.Options, args []string, printer vaultic.Printer) error {

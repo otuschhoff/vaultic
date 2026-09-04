@@ -66,7 +66,10 @@ func TestPlacementPlanQueuesUnsatisfiedOffsiteDeadline(t *testing.T) {
 	if result.Unsatisfied != 1 || result.Overdue != 1 || result.RequestsWritten != 1 {
 		t.Fatalf("placement result = %#v", result)
 	}
-	value, found, err := store.Get(context.Background(), schema.PlacementRequestKey(uint64(result.OldestUnsatisfiedDeadline/int64(time.Second)), schema.ID(packID)))
+	value, found, err := store.Get(
+		context.Background(),
+		schema.PlacementRequestKey(uint64(result.OldestUnsatisfiedDeadline/int64(time.Second)), schema.ID(packID)),
+	)
 	if err != nil || !found {
 		t.Fatalf("rq record missing: found=%v err=%v", found, err)
 	}
@@ -124,7 +127,11 @@ func TestPlanPoolMigrationQueuesCopiesToActiveTarget(t *testing.T) {
 	packID := deterministicID(221)
 	now := time.Unix(1_700_000_000, 0)
 	storePlacementPack(t, store, packID, schema.TierCold)
-	store.set(t, schema.PackPlacementKey(schema.ID(packID), 1), schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown})
+	store.set(
+		t,
+		schema.PackPlacementKey(schema.ID(packID), 1),
+		schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown},
+	)
 	readOnly := false
 	model := PlacementModel{Backends: []PlacementBackend{
 		{ID: "legacy", Hash: 1, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
@@ -150,7 +157,11 @@ func TestPlanPoolMigrationQueuesCopiesToActiveTarget(t *testing.T) {
 func TestPlanPoolMigrationIgnoresStalePlacementWithoutLivePack(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}
 	packID := deterministicID(222)
-	store.set(t, schema.PackPlacementKey(schema.ID(packID), 1), schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown})
+	store.set(
+		t,
+		schema.PackPlacementKey(schema.ID(packID), 1),
+		schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown},
+	)
 	readOnly := false
 	model := PlacementModel{Backends: []PlacementBackend{
 		{ID: "legacy", Hash: 1, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
@@ -171,7 +182,11 @@ func TestPlanPoolMigrationRejectsNonIngestTarget(t *testing.T) {
 		{ID: "legacy", Hash: 1, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
 		{ID: "inactive", Hash: 2, Ingest: &readOnly, ReadEnabled: boolPtr(true)},
 	}}
-	_, err := PlanPoolMigration(context.Background(), &memoryStore{values: make(map[string][]byte)}, PlacementMigrationOptions{Model: model, From: "legacy", To: "inactive"})
+	_, err := PlanPoolMigration(
+		context.Background(),
+		&memoryStore{values: make(map[string][]byte)},
+		PlacementMigrationOptions{Model: model, From: "legacy", To: "inactive"},
+	)
 	if err == nil {
 		t.Fatal("migration to non-ingest backend was accepted")
 	}
@@ -225,8 +240,15 @@ func TestSingleBackendPlacementPlanDoesNoSchedulerWork(t *testing.T) {
 		CreationTime: now.UnixNano(), CreationTimeKnown: true,
 		Lifecycle: schema.PackPublished, Tier: schema.TierSingle, RetentionSource: schema.RetentionUnknown,
 	})
-	model := PlacementModel{Backends: []PlacementBackend{{ID: "single", Hash: 1, Role: "primary", FailureDomain: "single"}}, Policy: DurabilityPolicy{MinCopies: 1, MinDomains: 1}}
-	store.set(t, schema.PackPlacementKey(schema.ID(packID), 1), schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown})
+	model := PlacementModel{
+		Backends: []PlacementBackend{{ID: "single", Hash: 1, Role: "primary", FailureDomain: "single"}},
+		Policy:   DurabilityPolicy{MinCopies: 1, MinDomains: 1},
+	}
+	store.set(
+		t,
+		schema.PackPlacementKey(schema.ID(packID), 1),
+		schema.PlacementRecord{State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown},
+	)
 	result, err := PlanPlacement(context.Background(), store, PlacementSchedulerOptions{Model: model, Now: now})
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +350,13 @@ func TestPlacementPlanDoesNotPromoteUnknownOrDeadPack(t *testing.T) {
 		used  uint64
 	}{"unknown": {false, 0}, "dead": {true, 0}} {
 		t.Run(name, func(t *testing.T) {
-			pack := schema.PackRecord{Type: schema.PackData, CreationTimeKnown: true, CreationTime: now.Add(-30 * 24 * time.Hour).UnixNano(), UsageKnown: usage.known, UsedPayloadBytes: usage.used}
+			pack := schema.PackRecord{
+				Type:              schema.PackData,
+				CreationTimeKnown: true,
+				CreationTime:      now.Add(-30 * 24 * time.Hour).UnixNano(),
+				UsageKnown:        usage.known,
+				UsedPayloadBytes:  usage.used,
+			}
 			if archivalPromotionDue(pack, schema.PromotionEligibilityRecord{EvaluatedAt: now.UnixNano(), Indefinite: true}, model, now) {
 				t.Fatal("pack was promoted without known surviving bytes")
 			}

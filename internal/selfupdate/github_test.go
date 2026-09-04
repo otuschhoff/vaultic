@@ -23,7 +23,13 @@ func TestNewGitHubRequest(t *testing.T) {
 		rtest.Assert(t, req.Method == http.MethodGet, "expected method %s, got %s", http.MethodGet, req.Method)
 		rtest.Assert(t, req.URL.String() == url, "expected URL %s, got %s", url, req.URL.String())
 		rtest.Assert(t, req.Header.Get("Accept") == acceptHeader, "expected Accept header %s, got %s", acceptHeader, req.Header.Get("Accept"))
-		rtest.Assert(t, req.Header.Get("Authorization") == "token "+expectedToken, "expected Authorization header 'token %s', got %s", expectedToken, req.Header.Get("Authorization"))
+		rtest.Assert(
+			t,
+			req.Header.Get("Authorization") == "token "+expectedToken,
+			"expected Authorization header 'token %s', got %s",
+			expectedToken,
+			req.Header.Get("Authorization"),
+		)
 	})
 
 	t.Run("Without GITHUB_ACCESS_TOKEN", func(t *testing.T) {

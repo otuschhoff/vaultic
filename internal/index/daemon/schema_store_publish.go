@@ -67,7 +67,11 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	return nil
 }
 
-func (store *SchemaStore) planReconciledRevision(ctx context.Context, transaction *Transaction, input reconciledRevisionInput) (reconciledRevisionPlan, bool, error) {
+func (store *SchemaStore) planReconciledRevision(
+	ctx context.Context,
+	transaction *Transaction,
+	input reconciledRevisionInput,
+) (reconciledRevisionPlan, bool, error) {
 	state, err := loadReconciledRevisionState(ctx, transaction, input)
 	if err != nil || state.noop {
 		return reconciledRevisionPlan{}, state.noop, err
@@ -101,7 +105,12 @@ func sortedReconciledMutations(plan reconciledRevisionPlan) []Mutation {
 	return mutations
 }
 
-func newReconciledRevisionPlan(ctx context.Context, transaction *Transaction, input reconciledRevisionInput, state reconciledRevisionState) (reconciledRevisionPlan, error) {
+func newReconciledRevisionPlan(
+	ctx context.Context,
+	transaction *Transaction,
+	input reconciledRevisionInput,
+	state reconciledRevisionState,
+) (reconciledRevisionPlan, error) {
 	reconciled := input.reconciled
 	plan := reconciledRevisionPlan{
 		puts:      map[string]Mutation{string(reconciled.CurrentKey): {Key: reconciled.CurrentKey, Value: input.currentValue}},
@@ -135,7 +144,13 @@ func newReconciledRevisionPlan(ctx context.Context, transaction *Transaction, in
 	return plan, nil
 }
 
-func planHistoricalReferences(ctx context.Context, transaction *Transaction, input reconciledRevisionInput, state reconciledRevisionState, plan reconciledRevisionPlan) error {
+func planHistoricalReferences(
+	ctx context.Context,
+	transaction *Transaction,
+	input reconciledRevisionInput,
+	state reconciledRevisionState,
+	plan reconciledRevisionPlan,
+) error {
 	newSet := make(map[schema.ID]struct{}, len(plan.newUnique))
 	for _, id := range plan.newUnique {
 		newSet[id] = struct{}{}
@@ -243,7 +258,14 @@ func planCurrentManifestReferences(ctx context.Context, transaction *Transaction
 	return nil
 }
 
-func planCurrentManifestReference(ctx context.Context, transaction *Transaction, revision uint64, plan reconciledRevisionPlan, id schema.ID, segment uint32) error {
+func planCurrentManifestReference(
+	ctx context.Context,
+	transaction *Transaction,
+	revision uint64,
+	plan reconciledRevisionPlan,
+	id schema.ID,
+	segment uint32,
+) error {
 	key := schema.ReverseManifestKey(id, plan.manifestID)
 	_, found, err := transaction.Get(ctx, key)
 	if err != nil {
@@ -304,7 +326,13 @@ func planReconciledDebt(ctx context.Context, transaction *Transaction, reconcile
 	return nil
 }
 
-func planReconciledAnalytics(ctx context.Context, transaction *Transaction, input reconciledRevisionInput, state reconciledRevisionState, plan reconciledRevisionPlan) error {
+func planReconciledAnalytics(
+	ctx context.Context,
+	transaction *Transaction,
+	input reconciledRevisionInput,
+	state reconciledRevisionState,
+	plan reconciledRevisionPlan,
+) error {
 	if input.currentParsed.Kind != schema.KeyCurrentInode || state.currentFound {
 		return nil
 	}

@@ -122,7 +122,13 @@ func runReconciliationProfile(t *testing.T, inodes, samples int) reconciliationP
 			enabled[sample] = runAuthoritativeReconciliation(t, inodes, true, sample, false)
 			baseline[sample] = runAuthoritativeReconciliation(t, inodes, false, sample, false)
 		}
-		t.Logf("reconciliation feasibility sample %d/%d: baseline=%s enabled=%s", sample+1, samples, baseline[sample].duration, enabled[sample].duration)
+		t.Logf(
+			"reconciliation feasibility sample %d/%d: baseline=%s enabled=%s",
+			sample+1,
+			samples,
+			baseline[sample].duration,
+			enabled[sample].duration,
+		)
 	}
 	baselineAggregate := aggregateReconciliationRuns(baseline, inodes)
 	enabledAggregate := aggregateReconciliationRuns(enabled, inodes)
@@ -142,15 +148,22 @@ func runReconciliationProfile(t *testing.T, inodes, samples int) reconciliationP
 		P95TimeOverheadPercent: percentileFloat(paired, 0.95), AuthoritativeWriteOverhead: writeOverhead,
 		CatchUp: catchUp, Gates: map[string]string{},
 		Methodology: []string{
-			"Each pair publishes identical deterministic first-seen inode revisions through SchemaStore.PublishReconciledRevision and a real vaulticdb transaction.",
-			"Fixture encoding, daemon startup, analytics metadata setup, revision allocation, warm-up, validation reads, and catch-up are outside the authoritative wall-time interval.",
+			("Each pair publishes identical deterministic first-seen inode revisions through " +
+				"SchemaStore.PublishReconciledRevision and a real vaulticdb transaction."),
+			("Fixture encoding, daemon startup, analytics metadata setup, revision " +
+				"allocation, warm-up, validation reads, and catch-up are outside the " +
+				"authoritative wall-time interval."),
 			"Sample order alternates baseline-first and enabled-first; reported overhead is the median and p95 of paired sample ratios.",
-			"Authoritative bytes are exact key plus encoded-value bytes for every mutation produced by these first-seen reconciliations; enabled accounting includes ae: deltas.",
+			("Authoritative bytes are exact key plus encoded-value bytes for every " +
+				"mutation produced by these first-seen reconciliations; enabled accounting " +
+				"includes ae: deltas."),
 			"Post-commit catch-up runs in a separate repository and is reported independently.",
 			"Post-commit catch-up calls the production bounded outbox consumer and reports its maximum input buffer and conservative working-set estimate.",
 		},
 		Limitations: []string{
-			"The CPU/time gate is evaluated with authoritative wall time because vaulticdb executes in a separate process; process CPU attribution is not portable through the public client API.",
+			("The CPU/time gate is evaluated with authoritative wall time because " +
+				"vaulticdb executes in a separate process; process CPU attribution is not " +
+				"portable through the public client API."),
 			"Encoded-byte accounting is logical authoritative metadata, not physical SlateDB WAL, block-compression, or compaction amplification.",
 		},
 	}
@@ -159,7 +172,13 @@ func runReconciliationProfile(t *testing.T, inodes, samples int) reconciliationP
 	return profile
 }
 
-func runAuthoritativeReconciliation(t *testing.T, inodes int, enabled bool, sample int, account bool) reconciliationRun {
+func runAuthoritativeReconciliation(
+	t *testing.T,
+	inodes int,
+	enabled bool,
+	sample int,
+	account bool,
+) reconciliationRun {
 	t.Helper()
 	client := reconciliationDaemonClient(t, fmt.Sprintf("phase16-reconcile-%t-%d", enabled, sample))
 	defer func() {
@@ -169,7 +188,12 @@ func runAuthoritativeReconciliation(t *testing.T, inodes int, enabled bool, samp
 	}()
 	store := daemon.NewSchemaStore(client)
 	ctx := context.Background()
-	metadata := schema.AnalyticsMetadataRecord{Enabled: enabled, Generation: 1, BuiltAt: 1735689600000000000, ConfigJSON: "{}"}
+	metadata := schema.AnalyticsMetadataRecord{
+		Enabled:    enabled,
+		Generation: 1,
+		BuiltAt:    1735689600000000000,
+		ConfigJSON: "{}",
+	}
 	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeFeasibilityRecord(t, metadata), true); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +247,12 @@ func makeReconciliationWorkload(t *testing.T, store *daemon.SchemaStore, count i
 	return items
 }
 
-func authoritativeReconciliationBytes(t *testing.T, store *daemon.SchemaStore, items []daemon.ReconciledRevision, enabled bool) (uint64, uint64) {
+func authoritativeReconciliationBytes(
+	t *testing.T,
+	store *daemon.SchemaStore,
+	items []daemon.ReconciledRevision,
+	enabled bool,
+) (uint64, uint64) {
 	t.Helper()
 	ctx := context.Background()
 	var mutations, bytes uint64
@@ -256,7 +285,12 @@ func runCatchUpMeasurement(t *testing.T, inodes int) catchUpMeasurement {
 	defer func() { _ = client.Close(context.Background()) }()
 	store := daemon.NewSchemaStore(client)
 	ctx := context.Background()
-	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: 1735689600000000000, ConfigJSON: "{}"}
+	metadata := schema.AnalyticsMetadataRecord{
+		Enabled:    true,
+		Generation: 1,
+		BuiltAt:    1735689600000000000,
+		ConfigJSON: "{}",
+	}
 	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeFeasibilityRecord(t, metadata), true); err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +321,14 @@ func runCatchUpMeasurement(t *testing.T, inodes int) catchUpMeasurement {
 		}
 	}
 	duration := time.Since(started)
-	return catchUpMeasurement{Deltas: processed, Seconds: duration.Seconds(), DeltasPerSecond: float64(processed) / duration.Seconds(), DerivedBytes: analyticsDerivedBytes(t, store), PeakDeltasBuffered: peakDeltas, PeakWorkingSetBytes: peakBytes}
+	return catchUpMeasurement{
+		Deltas:              processed,
+		Seconds:             duration.Seconds(),
+		DeltasPerSecond:     float64(processed) / duration.Seconds(),
+		DerivedBytes:        analyticsDerivedBytes(t, store),
+		PeakDeltasBuffered:  peakDeltas,
+		PeakWorkingSetBytes: peakBytes,
+	}
 }
 
 func analyticsDerivedBytes(t *testing.T, store *daemon.SchemaStore) uint64 {
@@ -386,7 +427,54 @@ func percentileFloat(values []float64, percentile float64) float64 {
 func percentOver(baseline, enabled float64) float64 { return (enabled/baseline - 1) * 100 }
 
 func reconciliationMarkdown(profile reconciliationProfile) string {
-	return fmt.Sprintf("# Phase 16 Reconciliation Feasibility\n\nDate: `%s`  \nCommit: `%s`  \nEnvironment: `%s`; `%s %s/%s`, %d CPUs  \nWorkload: `%d` inodes/sample, `%d` samples, `%d` warm-up inodes, `%d` unique content IDs/inode\n\n| Metric | Baseline | Analytics enabled | Overhead |\n|---|---:|---:|---:|\n| Median authoritative time | %.6f s | %.6f s | %.3f%% |\n| p95 authoritative time | %.6f s | %.6f s | paired p95 %.3f%% |\n| Authoritative mutations | %d | %d | %.3f%% |\n| Authoritative encoded bytes | %d | %d | %.3f%% |\n| Encoded bytes/inode | %.3f | %.3f | %.3f%% |\n\nPost-commit catch-up: %d deltas in %.6f s (%.0f deltas/s), %d retained derived bytes. Peak production buffer: %d deltas, %d estimated working-set bytes.\n\n## Gates\n\n```json\n%s\n```\n\n## Methodology\n\n%s\n\n## Limitations\n\n%s\n", profile.Date, profile.Commit, profile.Hardware, profile.GoVersion, profile.GOOS, profile.GOARCH, profile.CPUs, profile.Inodes, profile.Samples, profile.WarmupInodes, profile.ContentIDsPerInode, profile.Baseline.MedianSeconds, profile.Enabled.MedianSeconds, profile.MedianTimeOverheadPercent, profile.Baseline.P95Seconds, profile.Enabled.P95Seconds, profile.P95TimeOverheadPercent, profile.Baseline.Mutations, profile.Enabled.Mutations, percentOver(float64(profile.Baseline.Mutations), float64(profile.Enabled.Mutations)), profile.Baseline.EncodedBytes, profile.Enabled.EncodedBytes, profile.AuthoritativeWriteOverhead, profile.Baseline.EncodedBytesPerInode, profile.Enabled.EncodedBytesPerInode, profile.AuthoritativeWriteOverhead, profile.CatchUp.Deltas, profile.CatchUp.Seconds, profile.CatchUp.DeltasPerSecond, profile.CatchUp.DerivedBytes, profile.CatchUp.PeakDeltasBuffered, profile.CatchUp.PeakWorkingSetBytes, mustJSON(profile.Gates), "- "+joinLines(profile.Methodology), "- "+joinLines(profile.Limitations))
+	return fmt.Sprintf(
+		("# Phase 16 Reconciliation Feasibility\n\nDate: `%s`  \nCommit: `%s`  " +
+			"\nEnvironment: `%s`; `%s %s/%s`, %d CPUs  \nWorkload: `%d` inodes/sample, " +
+			"`%d` samples, `%d` warm-up inodes, `%d` unique content IDs/inode\n\n| Metric " +
+			"| Baseline | Analytics enabled | Overhead |\n|---|---:|---:|---:|\n| Median " +
+			"authoritative time | %.6f s | %.6f s | %.3f%% |\n| p95 authoritative time | " +
+			"%.6f s | %.6f s | paired p95 %.3f%% |\n| Authoritative mutations | %d | %d | " +
+			"%.3f%% |\n| Authoritative encoded bytes | %d | %d | %.3f%% |\n| Encoded " +
+			"bytes/inode | %.3f | %.3f | %.3f%% |\n\nPost-commit catch-up: %d deltas in " +
+			"%.6f s (%.0f deltas/s), %d retained derived bytes. Peak production buffer: " +
+			"%d deltas, %d estimated working-set bytes.\n\n## Gates\n\n```json\n%s\n```\n\n## " +
+			"Methodology\n\n%s\n\n## Limitations\n\n%s\n"),
+		profile.Date,
+		profile.Commit,
+		profile.Hardware,
+		profile.GoVersion,
+		profile.GOOS,
+		profile.GOARCH,
+		profile.CPUs,
+		profile.Inodes,
+		profile.Samples,
+		profile.WarmupInodes,
+		profile.ContentIDsPerInode,
+		profile.Baseline.MedianSeconds,
+		profile.Enabled.MedianSeconds,
+		profile.MedianTimeOverheadPercent,
+		profile.Baseline.P95Seconds,
+		profile.Enabled.P95Seconds,
+		profile.P95TimeOverheadPercent,
+		profile.Baseline.Mutations,
+		profile.Enabled.Mutations,
+		percentOver(float64(profile.Baseline.Mutations), float64(profile.Enabled.Mutations)),
+		profile.Baseline.EncodedBytes,
+		profile.Enabled.EncodedBytes,
+		profile.AuthoritativeWriteOverhead,
+		profile.Baseline.EncodedBytesPerInode,
+		profile.Enabled.EncodedBytesPerInode,
+		profile.AuthoritativeWriteOverhead,
+		profile.CatchUp.Deltas,
+		profile.CatchUp.Seconds,
+		profile.CatchUp.DeltasPerSecond,
+		profile.CatchUp.DerivedBytes,
+		profile.CatchUp.PeakDeltasBuffered,
+		profile.CatchUp.PeakWorkingSetBytes,
+		mustJSON(profile.Gates),
+		"- "+joinLines(profile.Methodology),
+		"- "+joinLines(profile.Limitations),
+	)
 }
 
 func joinLines(values []string) string { return fmt.Sprintf("%s", joinWith(values, "\n- ")) }

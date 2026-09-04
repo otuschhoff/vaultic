@@ -85,6 +85,55 @@ places the token in either process's arguments or environment. Storage calls
 are rejected after drain. Commits and writes requesting durability return only
 after SlateDB's durability handle completes.
 
+## Daemon environment
+
+All daemon-specific environment variables are parsed once by `Config::from_env`.
+
+| Variable | Default | Requirement or effect |
+|---|---|---|
+| `VAULTICDB_REPOSITORY_ID` | empty | Required by `publish-capsule`; scopes storage and daemon identity checks. |
+| `VAULTICDB_DAEMON_ID` | `vaulticdb-dev` | Instance ID reported by health and writer-role RPCs. |
+| `VAULTICDB_RUNTIME_DIR` | `/tmp/vaulticdb` | Parent for default Unix and TCP metadata paths. |
+| `VAULTICDB_TRANSPORT` | `unix` | `unix` or `tcp`. |
+| `VAULTICDB_SOCKET` | `<runtime>/<repository-hash>.sock` | Unix socket path. |
+| `VAULTICDB_TCP_ADDR` | `127.0.0.1:50051` | TCP listen address. |
+| `VAULTICDB_TCP_ALLOWLIST` | none | Required, comma-separated CIDRs when TCP is enabled. |
+| `VAULTICDB_TCP_AUTH_TOKEN_FD` | none | Required non-standard inherited descriptor when TCP is enabled; consumed and closed at startup. |
+| `VAULTICDB_TCP_METADATA` | `<runtime>/vaulticdb-tcp` | TCP PID, capability, and singleton-lock path base. |
+| `VAULTICDB_WRITER_MINIMUM_TENURE` | `30s` | Positive duration with `ms`, `s`, `m`, or `h` suffix. |
+| `VAULTICDB_WRITER_IDLE_GRACE` | disabled | Duration suffix as above; empty, `0`, or `off` disables automatic demotion. |
+| `VAULTICDB_WRITER_TRANSITION_TIMEOUT` | `30s` | Positive duration with `ms`, `s`, `m`, or `h` suffix. |
+| `VAULTICDB_OBJECT_STORE` | `local` | `local`, `memory`, `s3`, or `replicated`. |
+| `VAULTICDB_DATA_DIR` | system temp `vaulticdb/data` | Root for local storage; repository hash is appended. |
+| `VAULTICDB_S3_BUCKET` | none | Required for S3 storage. |
+| `VAULTICDB_S3_PREFIX` | none | Optional non-empty shared S3 prefix. |
+| `VAULTICDB_REPLICATED_REPLICAS` | none | Required comma-separated IDs for replicated storage. |
+| `VAULTICDB_FENCING_REPLICA` | none | Required configured replica ID for replicated writer fencing. |
+| `VAULTICDB_REPLICATED_<ID>_OBJECT_STORE` | none | Required per replica; `local`, `memory`, `s3`, or `azure`. |
+| `VAULTICDB_REPLICATED_<ID>_DATA_DIR` | none | Required for a local replica. |
+| `VAULTICDB_REPLICATED_<ID>_S3_BUCKET` | none | Required for an S3 replica. |
+| `VAULTICDB_REPLICATED_<ID>_S3_PREFIX` | none | Optional non-empty S3 replica prefix. |
+| `VAULTICDB_REPLICATED_<ID>_AZURE_ACCOUNT` | none | Required for an Azure replica. |
+| `VAULTICDB_REPLICATED_<ID>_AZURE_CONTAINER` | none | Required for an Azure replica. |
+| `VAULTICDB_REPLICATED_<ID>_AZURE_PREFIX` | none | Optional non-empty Azure replica prefix. |
+| `VAULTICDB_REPLICATED_<ID>_AZURE_ACCESS_KEY` | none | Optional Azure access key. |
+| `VAULTICDB_REPLICATED_<ID>_AZURE_BEARER_TOKEN` | none | Optional Azure bearer token. |
+| `VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS` | `300` | Integer of at least 10 seconds. |
+| `VAULTICDB_METADATA_REBUILD_INITIALIZE` | `false` | Requires brokered encryption and an empty candidate metadata store. |
+| `VAULTICDB_BROKER_SOCKET` | none | Enables brokered metadata-DEK acquisition. |
+| `VAULTICDB_RELEASE_MANIFEST` | none | Required with `VAULTICDB_BROKER_SOCKET`. |
+| `VAULTICDB_BROKER_LEASE_SECONDS` | `3600` | Broker lease lifetime in seconds. |
+| `VAULTICDB_ENCRYPTION` | `off` | `off`, `required`, or `initialize`. |
+| `VAULTICDB_ENCRYPTION_PASSPHRASE_FILE` | none | Private file used for local recovery unlock/initialization. |
+| `VAULTICDB_ENCRYPTION_RECOVERY_ACK` | `false` | Must be `true` when policy requires explicit recovery acknowledgement. |
+| `VAULTICDB_AZURE_TOKEN_FILE` | none | Private Azure Key Vault bearer-token file. |
+| `VAULTICDB_GCP_TOKEN_FILE` | none | Private Google Cloud KMS bearer-token file. |
+| `VAULTICDB_VAULT_TOKEN_FILE` | none | Private Vault Transit token file. |
+| `VAULTICDB_PKCS11_PIN_FILE` | none | Private PKCS#11 PIN file. |
+| `VAULTICDB_YUBIKEY_PIV_PIN_FILE` | none | Private YubiKey PIV PIN file. |
+| `VAULTICDB_FIDO2_SECRET_FILE` | none | Private FIDO2 hmac-secret output file. |
+| `VAULTICDB_NATIVE_SMOKE` | unset | Any value runs the native SlateDB smoke path and exits. |
+
 Abandoned transactions are reclaimed after five minutes of inactivity before
 the active-transaction limit is enforced. Set
 `VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS` to an integer of at least 10 seconds

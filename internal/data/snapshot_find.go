@@ -57,10 +57,15 @@ type SnapshotFilter struct {
 }
 
 func (f *SnapshotFilter) Empty() bool {
-	return len(f.Hosts)+len(f.Tags)+len(f.Paths)+len(f.Labels)+len(f.FilterHosts)+len(f.FilterPaths)+len(f.FilterTags)+len(f.PathsExact)+len(f.TagsExact) == 0 &&
+	selectionCount := len(f.Hosts) + len(f.Tags) + len(f.Paths) + len(f.Labels)
+	filterCount := len(f.FilterHosts) + len(f.FilterPaths) + len(f.FilterTags) + len(f.PathsExact) + len(f.TagsExact)
+	return selectionCount+filterCount == 0 &&
 		f.TimestampLimit.IsZero() && f.After.IsZero() &&
-		f.SizeMin == 0 && f.SizeMax == 0 && f.SizeAddedMin == 0 && f.SizeAddedMax == 0 &&
-		f.FilterLast == 0 && f.FilterJQ == ""
+		f.SizeMin == 0 && f.SizeMax == 0 &&
+		f.SizeAddedMin == 0 &&
+		f.SizeAddedMax == 0 &&
+		f.FilterLast == 0 &&
+		f.FilterJQ == ""
 }
 
 // matches reports whether sn satisfies all configured filter criteria.
@@ -242,14 +247,14 @@ func stringSlicesEqualUnordered(a, b []string) bool {
 	return true
 }
 
-// findLatest finds the latest snapshot matching the filter.
-func (f *SnapshotFilter) findLatest(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked) (*Snapshot, error) {
-	return f.findLatestN(ctx, be, loader, 0)
-}
-
 // findLatestN finds the N-th latest snapshot matching the filter (0 = latest).
 // This implements rustic's "latest~N" syntax.
-func (f *SnapshotFilter) findLatestN(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, n int) (*Snapshot, error) {
+func (f *SnapshotFilter) findLatestN(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	n int,
+) (*Snapshot, error) {
 	matches, err := f.findSorted(ctx, be, loader)
 	if err != nil {
 		return nil, err
@@ -265,7 +270,11 @@ func (f *SnapshotFilter) findLatestN(ctx context.Context, be vaultic.Lister, loa
 }
 
 // findSorted returns all snapshots matching the filter, sorted oldest first.
-func (f *SnapshotFilter) findSorted(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked) (Snapshots, error) {
+func (f *SnapshotFilter) findSorted(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+) (Snapshots, error) {
 	var err error
 	absTargets := make([]string, 0, len(f.Paths))
 	for _, target := range f.Paths {
@@ -311,7 +320,12 @@ func splitSnapshotID(s string) (id, subfolder string) {
 
 // FindSnapshot takes a string and tries to find a snapshot whose ID matches
 // the string as closely as possible.
-func FindSnapshot(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, s string) (*Snapshot, string, error) {
+func FindSnapshot(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	s string,
+) (*Snapshot, string, error) {
 	s, subfolder := splitSnapshotID(s)
 
 	// no need to list snapshots if `s` is already a full id
@@ -329,11 +343,16 @@ func FindSnapshot(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderU
 
 // FindLatest returns either the latest of a filtered list of all snapshots
 // or a snapshot specified by `snapshotID`. It also resolves "latest~N".
-func (f *SnapshotFilter) FindLatest(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, snapshotID string) (*Snapshot, string, error) {
+func (f *SnapshotFilter) FindLatest(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	snapshotID string,
+) (*Snapshot, string, error) {
 	id, subfolder := splitSnapshotID(snapshotID)
 	if n, ok := parseLatestN(id); ok {
 		sn, err := f.findLatestN(ctx, be, loader, n)
-		if err == ErrNoSnapshotFound {
+		if errors.Is(err, ErrNoSnapshotFound) {
 			err = fmt.Errorf("snapshot filter (Paths:%v Tags:%v Hosts:%v): %w",
 				f.Paths, f.Tags, f.Hosts, err)
 		}
@@ -363,68 +382,19 @@ type SnapshotFindCb func(string, *Snapshot, error) error
 var ErrInvalidSnapshotSyntax = errors.New("<snapshot>:<subfolder> syntax not allowed")
 
 // FindAll yields Snapshots, either given explicitly by `snapshotIDs` or filtered from the list of all snapshots.
-func (f *SnapshotFilter) FindAll(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, snapshotIDs []string, fn SnapshotFindCb) error {
+func (f *SnapshotFilter) FindAll(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	snapshotIDs []string,
+	fn SnapshotFindCb,
+) error {
 	if len(snapshotIDs) != 0 {
-		var err error
-		usedFilter := false
-
 		be, err := vaultic.MemorizeList(ctx, be, vaultic.SnapshotFile)
 		if err != nil {
 			return err
 		}
-
-		ids := vaultic.NewIDSet()
-		// Process all snapshot IDs given as arguments.
-		for _, s := range snapshotIDs {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			var sn *Snapshot
-			if n, ok := parseLatestN(s); ok {
-				// only a single latest/latest~N may be requested; the filter is
-				// used to constrain the candidate set
-				if usedFilter {
-					continue
-				}
-
-				usedFilter = true
-
-				sn, err = f.findLatestN(ctx, be, loader, n)
-				if err == ErrNoSnapshotFound {
-					err = errors.Errorf("no snapshot matched given filter (Paths:%v Tags:%v Hosts:%v)",
-						f.Paths, f.Tags, f.Hosts)
-				}
-				if sn != nil {
-					ids.Insert(*sn.ID())
-				}
-			} else if strings.HasPrefix(s, "latest:") {
-				err = ErrInvalidSnapshotSyntax
-			} else {
-				var subfolder string
-				sn, subfolder, err = FindSnapshot(ctx, be, loader, s)
-				if err == nil && subfolder != "" {
-					err = ErrInvalidSnapshotSyntax
-				} else if err == nil {
-					if ids.Has(*sn.ID()) {
-						continue
-					}
-
-					ids.Insert(*sn.ID())
-					s = sn.ID().String()
-				}
-			}
-			err = fn(s, sn, err)
-			if err != nil {
-				return err
-			}
-		}
-
-		// Give the user some indication their filters are not used.
-		if !usedFilter && !f.Empty() {
-			return fn("filters", nil, errors.Errorf("explicit snapshot ids are given"))
-		}
-		return ctx.Err()
+		return f.findExplicit(ctx, be, loader, snapshotIDs, fn)
 	}
 
 	// collect the matching snapshots so that --filter-last can be applied
@@ -453,4 +423,70 @@ func (f *SnapshotFilter) FindAll(ctx context.Context, be vaultic.Lister, loader 
 		}
 	}
 	return ctx.Err()
+}
+
+func (f *SnapshotFilter) findExplicit(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	snapshotIDs []string,
+	fn SnapshotFindCb,
+) error {
+	usedFilter := false
+	ids := vaultic.NewIDSet()
+	for _, requested := range snapshotIDs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		name, snapshot, used, skip, err := f.resolveExplicit(ctx, be, loader, requested, usedFilter, ids)
+		usedFilter = usedFilter || used
+		if skip {
+			continue
+		}
+		if err := fn(name, snapshot, err); err != nil {
+			return err
+		}
+	}
+	if !usedFilter && !f.Empty() {
+		return fn("filters", nil, errors.Errorf("explicit snapshot ids are given"))
+	}
+	return ctx.Err()
+}
+
+func (f *SnapshotFilter) resolveExplicit(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	requested string,
+	usedFilter bool,
+	ids vaultic.IDSet,
+) (string, *Snapshot, bool, bool, error) {
+	if n, ok := parseLatestN(requested); ok {
+		if usedFilter {
+			return requested, nil, false, true, nil
+		}
+		snapshot, err := f.findLatestN(ctx, be, loader, n)
+		if errors.Is(err, ErrNoSnapshotFound) {
+			err = errors.Errorf("no snapshot matched given filter (Paths:%v Tags:%v Hosts:%v)", f.Paths, f.Tags, f.Hosts)
+		}
+		if snapshot != nil {
+			ids.Insert(*snapshot.ID())
+		}
+		return requested, snapshot, true, false, err
+	}
+	if strings.HasPrefix(requested, "latest:") {
+		return requested, nil, false, false, ErrInvalidSnapshotSyntax
+	}
+	snapshot, subfolder, err := FindSnapshot(ctx, be, loader, requested)
+	if err == nil && subfolder != "" {
+		return requested, snapshot, false, false, ErrInvalidSnapshotSyntax
+	}
+	if err != nil {
+		return requested, snapshot, false, false, err
+	}
+	if ids.Has(*snapshot.ID()) {
+		return requested, snapshot, false, true, nil
+	}
+	ids.Insert(*snapshot.ID())
+	return snapshot.ID().String(), snapshot, false, false, nil
 }

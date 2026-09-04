@@ -44,6 +44,12 @@ type segmentIdentity struct {
 	Known      uint16 `json:"k"`
 }
 
+type analyticsIdentityKey struct {
+	fsid       uint32
+	inode      uint64
+	generation uint64
+}
+
 type segmentRows struct {
 	Identity   []segmentIdentity
 	UID        []uint32
@@ -198,7 +204,15 @@ func catchUp(ctx context.Context, store Store, options CatchUpOptions) (CatchUpR
 	return result, err
 }
 
-func publishDeltaGeneration(ctx context.Context, store Store, metadata schema.AnalyticsMetadataRecord, config Config, parent pinnedGeneration, deltas []schema.AnalyticsDeltaRecord, appliedCommit uint64) error {
+func publishDeltaGeneration(
+	ctx context.Context,
+	store Store,
+	metadata schema.AnalyticsMetadataRecord,
+	config Config,
+	parent pinnedGeneration,
+	deltas []schema.AnalyticsDeltaRecord,
+	appliedCommit uint64,
+) error {
 	generation := metadata.Generation + 1
 	if generation == 0 {
 		return fmt.Errorf("analytics generation overflow")
@@ -206,88 +220,9 @@ func publishDeltaGeneration(ctx context.Context, store Store, metadata schema.An
 	if err := cleanupCandidateGeneration(ctx, store, generation); err != nil {
 		return fmt.Errorf("clean orphaned analytics delta generation: %w", err)
 	}
-	type identityKey struct {
-		fsid       uint32
-		inode      uint64
-		generation uint64
-	}
-	order := make([]identityKey, 0, len(deltas))
-	affected := make(map[identityKey]buildFact, len(deltas))
-	previous := make(map[identityKey]buildFact, len(deltas))
-	for _, delta := range deltas {
-		if delta.ClassificationEpoch != metadata.Generation {
-			return fmt.Errorf("analytics classification epoch changed from %d to %d; streaming rebuild required", delta.ClassificationEpoch, metadata.Generation)
-		}
-		key := identityKey{delta.FSID, delta.Inode, delta.IdentityGeneration}
-		item, present := affected[key]
-		if !present {
-			loaded, found, err := loadActiveBuildFact(ctx, store, parent, delta.FSID, delta.Inode, delta.IdentityGeneration)
-			if err != nil {
-				return err
-			}
-			if found {
-				item = loaded
-				previous[key] = loaded
-			} else {
-				item = buildFact{identity: segmentIdentity{FSID: delta.FSID, Inode: delta.Inode, Generation: delta.IdentityGeneration, Revision: delta.Revision, Known: delta.Known}}
-			}
-			order = append(order, key)
-		}
-		if delta.Kind == schema.AnalyticsDeltaCreation || delta.Kind == schema.AnalyticsDeltaClassification {
-			revisionValue, found, err := store.Get(ctx, schema.InodeRevisionKey(delta.FSID, delta.Inode, delta.Revision))
-			if err != nil || !found {
-				return errors.Join(err, fmt.Errorf("analytics delta points to missing inode revision %d:%d:%d", delta.FSID, delta.Inode, delta.Revision))
-			}
-			revision, err := schema.UnmarshalInodeRevision(revisionValue)
-			if err != nil {
-				return err
-			}
-			item.identity.Revision, item.identity.Known = delta.Revision, delta.Known
-			item.fact = makeFact(schema.ParsedKey{FSID: delta.FSID, Inode: delta.Inode, Revision: delta.Revision}, revision, config)
-			item.fact.Revision, item.fact.UID, item.fact.GID, item.fact.Known = delta.Revision, delta.UID, delta.GID, delta.Known
-			item.fact.CreatedAt, item.fact.LogicalSize = delta.CreatedAt, delta.LogicalSize
-			item.fact.Residency, item.fact.CreationBasis = delta.State, delta.CreationBasis
-			item.fact.IdentityGeneration, item.fact.IdentityContinuity = delta.IdentityGeneration, delta.IdentityContinuity
-			populateFactCalendar(&item.fact)
-			item.retainedRefs = delta.RetainedSnapshotRefs
-		} else if delta.Kind == schema.AnalyticsDeltaSourceState {
-			item.fact.Residency = delta.State
-			if delta.IdentityContinuity != schema.AnalyticsContinuityUnknown {
-				item.fact.IdentityContinuity = delta.IdentityContinuity
-			}
-		} else {
-			switch delta.ReferenceOperation {
-			case schema.AnalyticsReferencesIncrement:
-				item.retainedRefs++
-			case schema.AnalyticsReferencesDecrement:
-				if item.retainedRefs == 0 {
-					return fmt.Errorf("analytics retained-reference underflow for %d:%d:%d", delta.FSID, delta.Inode, delta.IdentityGeneration)
-				}
-				item.retainedRefs--
-			case schema.AnalyticsReferencesSet:
-				item.retainedRefs = delta.RetainedSnapshotRefs
-			default:
-				// Legacy deltas encoded publish as one and forget as zero.
-				if delta.RetainedSnapshotRefs == 0 {
-					if item.retainedRefs == 0 {
-						return fmt.Errorf("analytics retained-reference underflow for legacy delta %d:%d:%d", delta.FSID, delta.Inode, delta.IdentityGeneration)
-					}
-					item.retainedRefs--
-				} else {
-					item.retainedRefs += delta.RetainedSnapshotRefs
-				}
-			}
-			if item.fact.Residency == schema.AnalyticsExpired && item.retainedRefs > 0 {
-				item.fact.Residency = schema.AnalyticsArchiveOnly
-			} else if item.fact.Residency == schema.AnalyticsArchiveOnly && item.retainedRefs == 0 {
-				item.fact.Residency = schema.AnalyticsExpired
-			}
-		}
-		affected[key] = item
-	}
-	facts := make([]buildFact, 0, len(order))
-	for _, key := range order {
-		facts = append(facts, affected[key])
+	facts, previous, affected, err := collectDeltaFacts(ctx, store, metadata.Generation, config, parent, deltas)
+	if err != nil {
+		return err
 	}
 	segment := generation<<32 | 1
 	if len(facts) != 0 {
@@ -323,12 +258,20 @@ func publishDeltaGeneration(ctx context.Context, store Store, metadata schema.An
 	if len(facts) != 0 {
 		segments = []uint64{segment}
 	}
-	manifestValue, err := (schema.AnalyticsManifestRecord{Generation: generation, ParentGeneration: parent.epoch, LayerDepth: parent.manifest.LayerDepth + 1, Segments: segments}).MarshalBinary()
+	manifestValue,
+		err := (schema.AnalyticsManifestRecord{Generation: generation,
+		ParentGeneration: parent.epoch,
+		LayerDepth:       parent.manifest.LayerDepth + 1,
+		Segments:         segments}).MarshalBinary()
 	if err != nil {
 		return err
 	}
 	builtAt := time.Now().UnixNano()
-	watermarkValue, err := (schema.AnalyticsWatermarkRecord{RepositoryGeneration: generation, AppliedCommit: appliedCommit, ManifestGeneration: generation, AppliedAt: builtAt}).MarshalBinary()
+	watermarkValue,
+		err := (schema.AnalyticsWatermarkRecord{RepositoryGeneration: generation,
+		AppliedCommit:      appliedCommit,
+		ManifestGeneration: generation,
+		AppliedAt:          builtAt}).MarshalBinary()
 	if err != nil {
 		return err
 	}
@@ -346,7 +289,140 @@ func publishDeltaGeneration(ctx context.Context, store Store, metadata schema.An
 	return store.WriteMutableBatch(ctx, publication, nil, true)
 }
 
-func subtractCandidateViews(ctx context.Context, store Store, generation, parentGeneration uint64, facts []buildFact) error {
+func collectDeltaFacts(
+	ctx context.Context,
+	store Store,
+	classificationEpoch uint64,
+	config Config,
+	parent pinnedGeneration,
+	deltas []schema.AnalyticsDeltaRecord,
+) ([]buildFact, map[analyticsIdentityKey]buildFact, map[analyticsIdentityKey]buildFact, error) {
+	order := make([]analyticsIdentityKey, 0, len(deltas))
+	affected := make(map[analyticsIdentityKey]buildFact, len(deltas))
+	previous := make(map[analyticsIdentityKey]buildFact, len(deltas))
+	for _, delta := range deltas {
+		if delta.ClassificationEpoch != classificationEpoch {
+			return nil, nil, nil, fmt.Errorf(
+				"analytics classification epoch changed from %d to %d; streaming rebuild required",
+				delta.ClassificationEpoch,
+				classificationEpoch,
+			)
+		}
+		key := analyticsIdentityKey{delta.FSID, delta.Inode, delta.IdentityGeneration}
+		current, present := affected[key]
+		item, first, old, err := applyAnalyticsDelta(ctx, store, config, parent, current, delta, !present)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if first {
+			order = append(order, key)
+			if old != nil {
+				previous[key] = *old
+			}
+		}
+		affected[key] = item
+	}
+	facts := make([]buildFact, 0, len(order))
+	for _, key := range order {
+		facts = append(facts, affected[key])
+	}
+	return facts, previous, affected, nil
+}
+
+func applyAnalyticsDelta(
+	ctx context.Context,
+	store Store,
+	config Config,
+	parent pinnedGeneration,
+	item buildFact,
+	delta schema.AnalyticsDeltaRecord,
+	first bool,
+) (buildFact, bool, *buildFact, error) {
+	var old *buildFact
+	if first {
+		loaded, found, err := loadActiveBuildFact(ctx, store, parent, delta.FSID, delta.Inode, delta.IdentityGeneration)
+		if err != nil {
+			return item, first, nil, err
+		}
+		if found {
+			item, old = loaded, &loaded
+		} else {
+			item.identity = segmentIdentity{
+				FSID: delta.FSID, Inode: delta.Inode, Generation: delta.IdentityGeneration,
+				Revision: delta.Revision, Known: delta.Known,
+			}
+		}
+	}
+	if delta.Kind == schema.AnalyticsDeltaCreation || delta.Kind == schema.AnalyticsDeltaClassification {
+		value, found, err := store.Get(ctx, schema.InodeRevisionKey(delta.FSID, delta.Inode, delta.Revision))
+		if err != nil || !found {
+			return item, first, old, errors.Join(
+				err,
+				fmt.Errorf("analytics delta points to missing inode revision %d:%d:%d", delta.FSID, delta.Inode, delta.Revision),
+			)
+		}
+		revision, err := schema.UnmarshalInodeRevision(value)
+		if err != nil {
+			return item, first, old, err
+		}
+		item.identity.Revision, item.identity.Known = delta.Revision, delta.Known
+		item.fact = makeFact(schema.ParsedKey{FSID: delta.FSID, Inode: delta.Inode, Revision: delta.Revision}, revision, config)
+		item.fact.Revision, item.fact.UID, item.fact.GID, item.fact.Known = delta.Revision, delta.UID, delta.GID, delta.Known
+		item.fact.CreatedAt, item.fact.LogicalSize = delta.CreatedAt, delta.LogicalSize
+		item.fact.Residency, item.fact.CreationBasis = delta.State, delta.CreationBasis
+		item.fact.IdentityGeneration, item.fact.IdentityContinuity = delta.IdentityGeneration, delta.IdentityContinuity
+		populateFactCalendar(&item.fact)
+		item.retainedRefs = delta.RetainedSnapshotRefs
+		return item, first, old, nil
+	}
+	if delta.Kind == schema.AnalyticsDeltaSourceState {
+		item.fact.Residency = delta.State
+		if delta.IdentityContinuity != schema.AnalyticsContinuityUnknown {
+			item.fact.IdentityContinuity = delta.IdentityContinuity
+		}
+		return item, first, old, nil
+	}
+	if err := applyReferenceDelta(&item, delta); err != nil {
+		return item, first, old, err
+	}
+	return item, first, old, nil
+}
+
+func applyReferenceDelta(item *buildFact, delta schema.AnalyticsDeltaRecord) error {
+	switch delta.ReferenceOperation {
+	case schema.AnalyticsReferencesIncrement:
+		item.retainedRefs++
+	case schema.AnalyticsReferencesDecrement:
+		if item.retainedRefs == 0 {
+			return fmt.Errorf("analytics retained-reference underflow for %d:%d:%d", delta.FSID, delta.Inode, delta.IdentityGeneration)
+		}
+		item.retainedRefs--
+	case schema.AnalyticsReferencesSet:
+		item.retainedRefs = delta.RetainedSnapshotRefs
+	default:
+		if delta.RetainedSnapshotRefs == 0 {
+			if item.retainedRefs == 0 {
+				return fmt.Errorf("analytics retained-reference underflow for legacy delta %d:%d:%d", delta.FSID, delta.Inode, delta.IdentityGeneration)
+			}
+			item.retainedRefs--
+		} else {
+			item.retainedRefs += delta.RetainedSnapshotRefs
+		}
+	}
+	if item.fact.Residency == schema.AnalyticsExpired && item.retainedRefs > 0 {
+		item.fact.Residency = schema.AnalyticsArchiveOnly
+	} else if item.fact.Residency == schema.AnalyticsArchiveOnly && item.retainedRefs == 0 {
+		item.fact.Residency = schema.AnalyticsExpired
+	}
+	return nil
+}
+
+func subtractCandidateViews(
+	ctx context.Context,
+	store Store,
+	generation, parentGeneration uint64,
+	facts []buildFact,
+) error {
 	aggregates := map[string]schema.AnalyticsAggregateRecord{}
 	summaries := map[string]schema.AnalyticsSummaryRecord{}
 	addAggregate := func(key []byte, size uint64, deletion bool) {
@@ -361,83 +437,46 @@ func subtractCandidateViews(ctx context.Context, store Store, generation, parent
 		aggregates[string(key)] = value
 	}
 	for _, item := range facts {
-		fact := item.fact
-		size := uint64(0)
-		if fact.Known&schema.KnownSize != 0 {
-			size = fact.LogicalSize
-		}
-		addBuckets := func(instant time.Time, deletion bool) {
-			year := time.Date(instant.Year(), 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
-			month := time.Date(instant.Year(), instant.Month(), 1, 0, 0, 0, 0, time.UTC).UnixNano()
-			weekday := (int(instant.Weekday()) + 6) % 7
-			week := time.Date(instant.Year(), instant.Month(), instant.Day()-weekday, 0, 0, 0, 0, time.UTC).UnixNano()
-			for _, bucket := range []struct {
-				granularity schema.AnalyticsGranularity
-				timestamp   int64
-			}{{schema.AnalyticsGranularityYear, year}, {schema.AnalyticsGranularityMonth, month}, {schema.AnalyticsGranularityWeek, week}} {
-				addAggregate(schema.GrowthTimeKey(bucket.granularity, bucket.timestamp, schema.TierUnknown), size, deletion)
-				if fact.PathGroup != "unknown" {
-					addAggregate(schema.GrowthPathKey(fact.PathGroup, bucket.granularity, bucket.timestamp), size, deletion)
-				}
-				if fact.Known&schema.KnownUID != 0 {
-					addAggregate(schema.UserChurnKey(fact.UID, bucket.granularity, bucket.timestamp), size, deletion)
-				}
-			}
-		}
-		if fact.CreationBasis != schema.AnalyticsTimeUnknown {
-			addBuckets(time.Unix(0, fact.CreatedAt).UTC(), false)
-		}
-		if item.lastComplete != 0 && (fact.Residency == schema.AnalyticsArchiveOnly || fact.Residency == schema.AnalyticsExpired) {
-			addBuckets(time.Unix(0, item.lastComplete).UTC(), true)
-		}
-		if fact.Known&schema.KnownUID != 0 {
-			statsKey := string(schema.UserStatsKey(fact.UID, fact.Residency))
-			stats := summaries[statsKey]
-			stats.ActiveFiles++
-			stats.ActiveBytes += size
-			summaries[statsKey] = stats
-			if fact.Residency == schema.AnalyticsLive {
-				key := string(schema.UserSummaryKey(fact.UID))
-				summary := summaries[key]
-				summary.ActiveFiles++
-				summary.ActiveBytes += size
-				summaries[key] = summary
-			}
-		}
-		if fact.Known&schema.KnownGID != 0 {
-			statsKey := string(schema.GroupStatsKey(fact.GID, fact.Residency))
-			stats := summaries[statsKey]
-			stats.ActiveFiles++
-			stats.ActiveBytes += size
-			summaries[statsKey] = stats
-			if fact.Residency == schema.AnalyticsLive {
-				key := string(schema.GroupSummaryKey(fact.GID))
-				summary := summaries[key]
-				summary.ActiveFiles++
-				summary.ActiveBytes += size
-				summaries[key] = summary
-			}
-		}
+		addFactToCandidateViews(item, addAggregate, summaries)
 	}
-	var puts []daemon.Mutation
+	puts, err := subtractAggregateMutations(ctx, store, generation, parentGeneration, aggregates)
+	if err != nil {
+		return err
+	}
+	summaryPuts, err := subtractSummaryMutations(ctx, store, generation, parentGeneration, summaries)
+	if err != nil {
+		return err
+	}
+	puts = append(puts, summaryPuts...)
+	return writeBatches(ctx, store, puts)
+}
+
+func subtractAggregateMutations(
+	ctx context.Context,
+	store Store,
+	generation, parentGeneration uint64,
+	aggregates map[string]schema.AnalyticsAggregateRecord,
+) ([]daemon.Mutation, error) {
+	puts := make([]daemon.Mutation, 0, len(aggregates))
 	for key, subtract := range aggregates {
 		logicalKey := []byte(key)
 		current, found, err := store.Get(ctx, schema.AnalyticsDerivedKey(generation, logicalKey))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !found {
 			current, found, err = getActiveDerived(ctx, store, parentGeneration, logicalKey)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if !found {
-			return fmt.Errorf("analytics parent aggregate %x is missing", logicalKey)
+			return nil, fmt.Errorf("analytics parent aggregate %x is missing", logicalKey)
 		}
 		record, err := schema.UnmarshalAnalyticsAggregateRecord(current)
-		if err != nil || record.BytesAdded < subtract.BytesAdded || record.BytesDeleted < subtract.BytesDeleted || record.FilesAdded < subtract.FilesAdded || record.FilesDeleted < subtract.FilesDeleted {
-			return errors.Join(err, fmt.Errorf("analytics aggregate subtraction underflow"))
+		if err != nil || record.BytesAdded < subtract.BytesAdded || record.BytesDeleted < subtract.BytesDeleted ||
+			record.FilesAdded < subtract.FilesAdded || record.FilesDeleted < subtract.FilesDeleted {
+			return nil, errors.Join(err, fmt.Errorf("analytics aggregate subtraction underflow"))
 		}
 		record.BytesAdded -= subtract.BytesAdded
 		record.BytesDeleted -= subtract.BytesDeleted
@@ -445,31 +484,42 @@ func subtractCandidateViews(ctx context.Context, store Store, generation, parent
 		record.FilesDeleted -= subtract.FilesDeleted
 		value, err := record.MarshalBinary()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if record == (schema.AnalyticsAggregateRecord{}) {
 			value = analyticsDerivedTombstone
 		}
 		puts = append(puts, daemon.Mutation{Key: schema.AnalyticsDerivedKey(generation, logicalKey), Value: value})
 	}
+	return puts, nil
+}
+
+func subtractSummaryMutations(
+	ctx context.Context,
+	store Store,
+	generation, parentGeneration uint64,
+	summaries map[string]schema.AnalyticsSummaryRecord,
+) ([]daemon.Mutation, error) {
+	puts := make([]daemon.Mutation, 0, len(summaries))
 	for key, subtract := range summaries {
 		logicalKey := []byte(key)
 		current, found, err := store.Get(ctx, schema.AnalyticsDerivedKey(generation, logicalKey))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !found {
 			current, found, err = getActiveDerived(ctx, store, parentGeneration, logicalKey)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if !found {
-			return fmt.Errorf("analytics parent summary %x is missing", logicalKey)
+			return nil, fmt.Errorf("analytics parent summary %x is missing", logicalKey)
 		}
 		record, err := schema.UnmarshalAnalyticsSummaryRecord(current)
-		if err != nil || record.ActiveBytes < subtract.ActiveBytes || record.ActiveFiles < subtract.ActiveFiles || record.UniqueBlobCount < subtract.UniqueBlobCount || record.UniqueBlobBytes < subtract.UniqueBlobBytes {
-			return errors.Join(err, fmt.Errorf("analytics summary subtraction underflow"))
+		if err != nil || record.ActiveBytes < subtract.ActiveBytes || record.ActiveFiles < subtract.ActiveFiles ||
+			record.UniqueBlobCount < subtract.UniqueBlobCount || record.UniqueBlobBytes < subtract.UniqueBlobBytes {
+			return nil, errors.Join(err, fmt.Errorf("analytics summary subtraction underflow"))
 		}
 		record.ActiveBytes -= subtract.ActiveBytes
 		record.ActiveFiles -= subtract.ActiveFiles
@@ -477,30 +527,116 @@ func subtractCandidateViews(ctx context.Context, store Store, generation, parent
 		record.UniqueBlobBytes -= subtract.UniqueBlobBytes
 		value, err := record.MarshalBinary()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if record == (schema.AnalyticsSummaryRecord{}) {
 			value = analyticsDerivedTombstone
 		}
 		puts = append(puts, daemon.Mutation{Key: schema.AnalyticsDerivedKey(generation, logicalKey), Value: value})
 	}
-	return writeBatches(ctx, store, puts)
+	return puts, nil
 }
 
-func writeDerivedTombstones[K comparable](ctx context.Context, store Store, generation uint64, previous, current map[K]buildFact) error {
+func addFactToCandidateViews(
+	item buildFact,
+	addAggregate func([]byte, uint64, bool),
+	summaries map[string]schema.AnalyticsSummaryRecord,
+) {
+	fact := item.fact
+	size := uint64(0)
+	if fact.Known&schema.KnownSize != 0 {
+		size = fact.LogicalSize
+	}
+	addBuckets := func(instant time.Time, deletion bool) {
+		year := time.Date(instant.Year(), 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+		month := time.Date(instant.Year(), instant.Month(), 1, 0, 0, 0, 0, time.UTC).UnixNano()
+		weekday := (int(instant.Weekday()) + 6) % 7
+		week := time.Date(instant.Year(), instant.Month(), instant.Day()-weekday, 0, 0, 0, 0, time.UTC).UnixNano()
+		for _, bucket := range []struct {
+			granularity schema.AnalyticsGranularity
+			timestamp   int64
+		}{{schema.AnalyticsGranularityYear, year}, {schema.AnalyticsGranularityMonth, month}, {schema.AnalyticsGranularityWeek, week}} {
+			addAggregate(schema.GrowthTimeKey(bucket.granularity, bucket.timestamp, schema.TierUnknown), size, deletion)
+			if fact.PathGroup != "unknown" {
+				addAggregate(schema.GrowthPathKey(fact.PathGroup, bucket.granularity, bucket.timestamp), size, deletion)
+			}
+			if fact.Known&schema.KnownUID != 0 {
+				addAggregate(schema.UserChurnKey(fact.UID, bucket.granularity, bucket.timestamp), size, deletion)
+			}
+		}
+	}
+	if fact.CreationBasis != schema.AnalyticsTimeUnknown {
+		addBuckets(time.Unix(0, fact.CreatedAt).UTC(), false)
+	}
+	if item.lastComplete != 0 && (fact.Residency == schema.AnalyticsArchiveOnly || fact.Residency == schema.AnalyticsExpired) {
+		addBuckets(time.Unix(0, item.lastComplete).UTC(), true)
+	}
+	addFactSummary(
+		summaries, fact.Known&schema.KnownUID != 0,
+		schema.UserStatsKey(fact.UID, fact.Residency), schema.UserSummaryKey(fact.UID), fact.Residency, size,
+	)
+	addFactSummary(
+		summaries, fact.Known&schema.KnownGID != 0,
+		schema.GroupStatsKey(fact.GID, fact.Residency), schema.GroupSummaryKey(fact.GID), fact.Residency, size,
+	)
+}
+
+func addFactSummary(
+	summaries map[string]schema.AnalyticsSummaryRecord,
+	known bool,
+	statsKey, summaryKey []byte,
+	residency schema.AnalyticsResidency,
+	size uint64,
+) {
+	if !known {
+		return
+	}
+	stats := summaries[string(statsKey)]
+	stats.ActiveFiles++
+	stats.ActiveBytes += size
+	summaries[string(statsKey)] = stats
+	if residency == schema.AnalyticsLive {
+		summary := summaries[string(summaryKey)]
+		summary.ActiveFiles++
+		summary.ActiveBytes += size
+		summaries[string(summaryKey)] = summary
+	}
+}
+
+func writeDerivedTombstones[K comparable](
+	ctx context.Context,
+	store Store,
+	generation uint64,
+	previous, current map[K]buildFact,
+) error {
 	var puts []daemon.Mutation
 	for key, old := range previous {
 		updated := current[key]
-		if old.fact.Known&schema.KnownUID == 0 || updated.fact.Known&schema.KnownUID != 0 && old.fact.UID == updated.fact.UID {
+		if old.fact.Known&schema.KnownUID == 0 ||
+			updated.fact.Known&schema.KnownUID != 0 && old.fact.UID == updated.fact.UID {
 			continue
 		}
 		appendTombstone := func(key []byte) {
-			puts = append(puts, daemon.Mutation{Key: schema.AnalyticsDerivedKey(generation, key), Value: analyticsDerivedTombstone})
+			puts = append(
+				puts,
+				daemon.Mutation{Key: schema.AnalyticsDerivedKey(generation, key), Value: analyticsDerivedTombstone},
+			)
 		}
 		appendTombstone(schema.UserInodeKey(old.fact.UID, old.identity.FSID, old.identity.Inode))
-		revisionValue, found, err := store.Get(ctx, schema.InodeRevisionKey(old.identity.FSID, old.identity.Inode, old.identity.Revision))
+		revisionValue, found, err := store.Get(
+			ctx,
+			schema.InodeRevisionKey(old.identity.FSID, old.identity.Inode, old.identity.Revision),
+		)
 		if err != nil || !found {
-			return errors.Join(err, fmt.Errorf("analytics fact revision %d:%d:%d is missing", old.identity.FSID, old.identity.Inode, old.identity.Revision))
+			return errors.Join(
+				err,
+				fmt.Errorf(
+					"analytics fact revision %d:%d:%d is missing",
+					old.identity.FSID,
+					old.identity.Inode,
+					old.identity.Revision,
+				),
+			)
 		}
 		revision, err := schema.UnmarshalInodeRevision(revisionValue)
 		if err != nil {
@@ -528,8 +664,19 @@ func populateFactCalendar(fact *schema.AnalyticsFactRecord) {
 	}
 }
 
-func loadActiveBuildFact(ctx context.Context, store Store, pinned pinnedGeneration, fsid uint32, inode, generation uint64) (buildFact, bool, error) {
-	value, found, err := getActiveDerived(ctx, store, pinned.epoch, schema.AnalyticsResidencyKey(fsid, inode, generation))
+func loadActiveBuildFact(
+	ctx context.Context,
+	store Store,
+	pinned pinnedGeneration,
+	fsid uint32,
+	inode, generation uint64,
+) (buildFact, bool, error) {
+	value, found, err := getActiveDerived(
+		ctx,
+		store,
+		pinned.epoch,
+		schema.AnalyticsResidencyKey(fsid, inode, generation),
+	)
 	if err != nil || !found {
 		return buildFact{}, false, err
 	}
@@ -539,7 +686,10 @@ func loadActiveBuildFact(ctx context.Context, store Store, pinned pinnedGenerati
 	}
 	segmentValue, found, err := store.Get(ctx, schema.AnalyticsFactSegmentKey(overlay.FactSegment))
 	if err != nil || !found {
-		return buildFact{}, false, errors.Join(err, fmt.Errorf("analytics overlay points to missing segment %d", overlay.FactSegment))
+		return buildFact{}, false, errors.Join(
+			err,
+			fmt.Errorf("analytics overlay points to missing segment %d", overlay.FactSegment),
+		)
 	}
 	rows, err := decodeSegment(segmentValue)
 	if err != nil || int(overlay.Row) >= len(rows.Identity) {
@@ -560,7 +710,12 @@ func loadActiveBuildFact(ctx context.Context, store Store, pinned pinnedGenerati
 		}
 		fact.SourcePath = revision.SourcePath
 	}
-	return buildFact{identity: rows.Identity[overlay.Row], fact: fact, retainedRefs: overlay.RetainedSnapshotRefs, lastComplete: overlay.LastCompleteCrawl}, true, nil
+	return buildFact{
+		identity:     rows.Identity[overlay.Row],
+		fact:         fact,
+		retainedRefs: overlay.RetainedSnapshotRefs,
+		lastComplete: overlay.LastCompleteCrawl,
+	}, true, nil
 }
 
 func catchUpStatus(ctx context.Context, store Store, processed uint32) (CatchUpResult, error) {
@@ -614,7 +769,9 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 		}
 		var bytes uint64
 		for _, item := range facts {
-			bytes += 256 + uint64(len(item.fact.SourcePath)+len(item.fact.SVM)+len(item.fact.Volume)+len(item.fact.PathGroup))
+			bytes += 256 + uint64(
+				len(item.fact.SourcePath)+len(item.fact.SVM)+len(item.fact.Volume)+len(item.fact.PathGroup),
+			)
 		}
 		if bytes > peakBytes {
 			peakBytes = bytes
@@ -622,12 +779,25 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 	}
 	if dryRun {
 		var facts uint64
-		_, _, err := streamAuthoritativeFacts(ctx, store, config, nil, config.SegmentRows, func(batch []buildFact, _ []byte) error {
-			observeBatch(batch)
-			facts += uint64(len(batch))
-			return nil
-		})
-		return LifecycleResult{Enabled: true, Generation: generation, Facts: facts, PeakFactsBuffered: peakFacts, PeakWorkingSetBytes: peakBytes}, err
+		_, _, err := streamAuthoritativeFacts(
+			ctx,
+			store,
+			config,
+			nil,
+			config.SegmentRows,
+			func(batch []buildFact, _ []byte) error {
+				observeBatch(batch)
+				facts += uint64(len(batch))
+				return nil
+			},
+		)
+		return LifecycleResult{
+			Enabled:             true,
+			Generation:          generation,
+			Facts:               facts,
+			PeakFactsBuffered:   peakFacts,
+			PeakWorkingSetBytes: peakBytes,
+		}, err
 	}
 
 	checkpoint, resumed, err := loadCompatibleBuildCheckpoint(ctx, store, generation, string(configJSON))
@@ -649,7 +819,9 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 	if !resumed {
 		now := time.Now().UnixNano()
 		checkpoint = schema.AnalyticsBuildCheckpointRecord{
-			BuildID:       schema.ID(sha256.Sum256(append(append([]byte(nil), configJSON...), uint64Bytes(uint64(now))...))),
+			BuildID: schema.ID(
+				sha256.Sum256(append(append([]byte(nil), configJSON...), uint64Bytes(uint64(now))...)),
+			),
 			FormatVersion: 1,
 			Generation:    generation,
 			ConfigJSON:    string(configJSON),
@@ -663,40 +835,47 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 
 	segments := append([]uint64(nil), checkpoint.CandidateSegments...)
 	ordinal := uint64(len(segments) + 1)
-	_, appliedCommit, err := streamAuthoritativeFacts(ctx, store, config, checkpoint.SourceKeyCursor, config.SegmentRows, func(facts []buildFact, sourceKey []byte) error {
-		observeBatch(facts)
-		segment := generation<<32 | ordinal
-		if segment == 0 {
-			return fmt.Errorf("analytics segment identifier overflow")
-		}
-		dictionaries, dictionaryPuts, err := segmentDictionaries(ctx, store, facts)
-		if err != nil {
-			return err
-		}
-		if err := writeBatches(ctx, store, dictionaryPuts); err != nil {
-			return err
-		}
-		puts, err := buildSegment(segment, generation, facts, dictionaries)
-		if err != nil {
-			return err
-		}
-		if err := writeBatches(ctx, store, puts); err != nil {
-			return err
-		}
-		if err := writeSegmentDerived(ctx, store, generation, 0, segment, facts); err != nil {
-			return err
-		}
-		segments = append(segments, segment)
-		checkpoint.SourceKeyCursor = append(checkpoint.SourceKeyCursor[:0], sourceKey...)
-		checkpoint.Facts += uint64(len(facts))
-		checkpoint.CandidateSegments = append(checkpoint.CandidateSegments, segment)
-		checkpoint.UpdatedAt = time.Now().UnixNano()
-		if err := saveBuildCheckpoint(ctx, store, checkpoint); err != nil {
-			return err
-		}
-		ordinal++
-		return nil
-	})
+	_, appliedCommit, err := streamAuthoritativeFacts(
+		ctx,
+		store,
+		config,
+		checkpoint.SourceKeyCursor,
+		config.SegmentRows,
+		func(facts []buildFact, sourceKey []byte) error {
+			observeBatch(facts)
+			segment := generation<<32 | ordinal
+			if segment == 0 {
+				return fmt.Errorf("analytics segment identifier overflow")
+			}
+			dictionaries, dictionaryPuts, err := segmentDictionaries(ctx, store, facts)
+			if err != nil {
+				return err
+			}
+			if err := writeBatches(ctx, store, dictionaryPuts); err != nil {
+				return err
+			}
+			puts, err := buildSegment(segment, generation, facts, dictionaries)
+			if err != nil {
+				return err
+			}
+			if err := writeBatches(ctx, store, puts); err != nil {
+				return err
+			}
+			if err := writeSegmentDerived(ctx, store, generation, 0, segment, facts); err != nil {
+				return err
+			}
+			segments = append(segments, segment)
+			checkpoint.SourceKeyCursor = append(checkpoint.SourceKeyCursor[:0], sourceKey...)
+			checkpoint.Facts += uint64(len(facts))
+			checkpoint.CandidateSegments = append(checkpoint.CandidateSegments, segment)
+			checkpoint.UpdatedAt = time.Now().UnixNano()
+			if err := saveBuildCheckpoint(ctx, store, checkpoint); err != nil {
+				return err
+			}
+			ordinal++
+			return nil
+		},
+	)
 	if err != nil {
 		return LifecycleResult{}, err
 	}
@@ -708,23 +887,38 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	watermark := schema.AnalyticsWatermarkRecord{RepositoryGeneration: generation, AppliedCommit: appliedCommit, ManifestGeneration: generation, AppliedAt: builtAt}
+	watermark := schema.AnalyticsWatermarkRecord{
+		RepositoryGeneration: generation,
+		AppliedCommit:        appliedCommit,
+		ManifestGeneration:   generation,
+		AppliedAt:            builtAt,
+	}
 	watermarkValue, err := watermark.MarshalBinary()
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: generation, Facts: checkpoint.Facts, BuiltAt: builtAt, ConfigJSON: string(configJSON)}
+	metadata := schema.AnalyticsMetadataRecord{
+		Enabled:    true,
+		Generation: generation,
+		Facts:      checkpoint.Facts,
+		BuiltAt:    builtAt,
+		ConfigJSON: string(configJSON),
+	}
 	metadataValue, err := metadata.MarshalBinary()
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	if err := store.WriteMutableBatch(ctx, []daemon.Mutation{{Key: schema.AnalyticsDerivedGenerationMarkerKey(generation), Value: []byte{schema.Version}}}, nil, true); err != nil {
+	if err := store.WriteMutableBatch(ctx,
+		[]daemon.Mutation{{Key: schema.AnalyticsDerivedGenerationMarkerKey(generation),
+			Value: []byte{schema.Version}}},
+		nil,
+		true); err != nil {
 		return LifecycleResult{}, fmt.Errorf("complete analytics candidate views: %w", err)
 	}
 	publication := []daemon.Mutation{
-		daemon.Mutation{Key: schema.AnalyticsManifestKey(generation), Value: manifestValue},
-		daemon.Mutation{Key: schema.AnalyticsWatermarkKey(generation), Value: watermarkValue},
-		daemon.Mutation{Key: schema.AnalyticsMetadataKey(), Value: metadataValue},
+		{Key: schema.AnalyticsManifestKey(generation), Value: manifestValue},
+		{Key: schema.AnalyticsWatermarkKey(generation), Value: watermarkValue},
+		{Key: schema.AnalyticsMetadataKey(), Value: metadataValue},
 	}
 	if err := store.WriteMutableBatch(ctx, publication, [][]byte{schema.AnalyticsBuildCheckpointKey()}, true); err != nil {
 		return LifecycleResult{}, fmt.Errorf("publish analytics generation: %w", err)
@@ -733,5 +927,15 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	return LifecycleResult{Enabled: true, Generation: generation, Facts: checkpoint.Facts, Removed: removed, BuiltAt: builtAt, BuildID: fmt.Sprintf("%x", checkpoint.BuildID), Resumed: resumed, PeakFactsBuffered: peakFacts, PeakWorkingSetBytes: peakBytes}, nil
+	return LifecycleResult{
+		Enabled:             true,
+		Generation:          generation,
+		Facts:               checkpoint.Facts,
+		Removed:             removed,
+		BuiltAt:             builtAt,
+		BuildID:             fmt.Sprintf("%x", checkpoint.BuildID),
+		Resumed:             resumed,
+		PeakFactsBuffered:   peakFacts,
+		PeakWorkingSetBytes: peakBytes,
+	}, nil
 }

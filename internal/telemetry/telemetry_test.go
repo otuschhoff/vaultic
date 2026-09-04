@@ -13,12 +13,18 @@ import (
 )
 
 func testBackup() Backup {
-	return Backup{Repository: "repo one", SnapshotID: "abc", Label: "daily", Summary: &archiver.Summary{BackupStart: time.Unix(0, 0), BackupEnd: time.Unix(2, 0), ProcessedBytes: 42}}
+	return Backup{
+		Repository: "repo one",
+		SnapshotID: "abc",
+		Label:      "daily",
+		Summary:    &archiver.Summary{BackupStart: time.Unix(0, 0), BackupEnd: time.Unix(2, 0), ProcessedBytes: 42},
+	}
 }
 
 func TestPublishInfluxV2(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v2/write" || r.URL.Query().Get("org") != "acme" || r.URL.Query().Get("bucket") != "backups" {
+		if r.URL.Path != "/api/v2/write" || r.URL.Query().Get("org") != "acme" ||
+			r.URL.Query().Get("bucket") != "backups" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
 		if r.Header.Get("Authorization") != "Token secret" {
@@ -31,7 +37,12 @@ func TestPublishInfluxV2(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	if err := Publish(context.Background(), Config{InfluxURL: server.URL, InfluxToken: "secret", InfluxOrg: "acme", InfluxBucket: "backups"}, testBackup()); err != nil {
+	if err := Publish(context.Background(),
+		Config{InfluxURL: server.URL,
+			InfluxToken:  "secret",
+			InfluxOrg:    "acme",
+			InfluxBucket: "backups"},
+		testBackup()); err != nil {
 		t.Fatal(err)
 	}
 }

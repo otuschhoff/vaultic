@@ -50,7 +50,12 @@ func TestRunForgetSafetyNet(t *testing.T) {
 	err = testRunForgetMayFail(t, env.gopts, ForgetOptions{
 		UnsafeAllowRemoveAll: true,
 	})
-	rtest.Assert(t, strings.Contains(err.Error(), `--unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified`), "wrong error message got %v", err)
+	rtest.Assert(
+		t,
+		strings.Contains(err.Error(), `--unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified`),
+		"wrong error message got %v",
+		err,
+	)
 
 	// disallow `forget` without options
 	err = testRunForgetMayFail(t, env.gopts, ForgetOptions{})

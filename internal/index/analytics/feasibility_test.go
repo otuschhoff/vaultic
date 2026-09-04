@@ -77,7 +77,14 @@ type feasibilityStore struct {
 func newFeasibilityStore(t *testing.T, facts uint64) *feasibilityStore {
 	t.Helper()
 	dir := t.TempDir()
-	return &feasibilityStore{dir: dir, values: map[string][]byte{}, segments: map[string]string{}, namespaces: map[string]uint64{}, writes: map[string]uint64{}, facts: facts}
+	return &feasibilityStore{
+		dir:        dir,
+		values:     map[string][]byte{},
+		segments:   map[string]string{},
+		namespaces: map[string]uint64{},
+		writes:     map[string]uint64{},
+		facts:      facts,
+	}
 }
 
 func (store *feasibilityStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
@@ -93,7 +100,11 @@ func (store *feasibilityStore) Get(_ context.Context, key []byte) ([]byte, bool,
 	return append([]byte(nil), value...), found, nil
 }
 
-func (store *feasibilityStore) ScanPrefix(_ context.Context, prefix, cursor []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
+func (store *feasibilityStore) ScanPrefix(
+	_ context.Context,
+	prefix, cursor []byte,
+	limit uint32,
+) ([]daemon.KeyValue, bool, error) {
 	keys := make([]string, 0)
 	for key := range store.values {
 		if strings.HasPrefix(key, string(prefix)) && (len(cursor) == 0 || bytes.Compare([]byte(key), cursor) >= 0) {
@@ -112,7 +123,12 @@ func (store *feasibilityStore) ScanPrefix(_ context.Context, prefix, cursor []by
 	return items, done, nil
 }
 
-func (store *feasibilityStore) WriteMutableBatch(_ context.Context, puts []daemon.Mutation, deletes [][]byte, _ bool) error {
+func (store *feasibilityStore) WriteMutableBatch(
+	_ context.Context,
+	puts []daemon.Mutation,
+	deletes [][]byte,
+	_ bool,
+) error {
 	for _, put := range puts {
 		if previous, found := store.values[string(put.Key)]; found {
 			store.namespaces[feasibilityNamespace(put.Key)] -= uint64(len(put.Key) + len(previous))
@@ -142,7 +158,12 @@ func (store *feasibilityStore) ingest(puts []daemon.Mutation, retainAllIndexes b
 		case "ai":
 			store.bitmaps++
 			parsed, err := schema.ParseKey(put.Key)
-			if retainAllIndexes || err == nil && ((parsed.Dimension == schema.AnalyticsDimensionUID && parsed.Value == 600) || (parsed.Dimension == schema.AnalyticsDimensionCalendarYear && parsed.Value == 2024)) {
+			if retainAllIndexes ||
+				err == nil &&
+					((parsed.Dimension == schema.AnalyticsDimensionUID &&
+						parsed.Value == 600) ||
+						(parsed.Dimension == schema.AnalyticsDimensionCalendarYear &&
+							parsed.Value == 2024)) {
 				store.values[string(put.Key)] = append([]byte(nil), put.Value...)
 			}
 		default:
@@ -295,7 +316,14 @@ func runFeasibilityProfile(t *testing.T, facts uint64, oracleQueries int) feasib
 		}
 	}
 	minimum, maximum := uint64(1<<20), uint64(10<<20)
-	named := Query{UIDs: []uint32{600}, Years: []int{2024}, SizeMin: &minimum, SizeMax: &maximum, Residencies: []string{"archive-only"}, IncludeIncomplete: true}
+	named := Query{
+		UIDs:              []uint32{600},
+		Years:             []int{2024},
+		SizeMin:           &minimum,
+		SizeMax:           &maximum,
+		Residencies:       []string{"archive-only"},
+		IncludeIncomplete: true,
+	}
 	t.Logf("analytics feasibility: starting cold named query")
 	queryStarted := time.Now()
 	result, err := Execute(context.Background(), store, named)
@@ -304,9 +332,18 @@ func runFeasibilityProfile(t *testing.T, facts uint64, oracleQueries int) feasib
 	}
 	broadDuration := time.Since(queryStarted)
 	oracleFacts := minUint64(facts, feasibilityOracleFacts)
-	t.Logf("analytics feasibility: cold named query completed in %s; starting %d-query oracle over %d facts", broadDuration, oracleQueries, oracleFacts)
+	t.Logf(
+		"analytics feasibility: cold named query completed in %s; starting %d-query oracle over %d facts",
+		broadDuration,
+		oracleQueries,
+		oracleFacts,
+	)
 	matches := runFeasibilityOracle(t, oracleFacts, oracleQueries)
-	t.Logf("analytics feasibility: oracle completed with %d/%d matches; starting cache measurements", matches, oracleQueries)
+	t.Logf(
+		"analytics feasibility: oracle completed with %d/%d matches; starting cache measurements",
+		matches,
+		oracleQueries,
+	)
 	for iteration := 0; iteration < 3; iteration++ {
 		if _, err := Execute(context.Background(), store, named); err != nil {
 			t.Fatal(err)
@@ -336,7 +373,8 @@ func runFeasibilityProfile(t *testing.T, facts uint64, oracleQueries int) feasib
 		}
 	}
 	catchDuration := time.Since(catchStarted)
-	core := store.namespaces["af"] + store.namespaces["am"] + store.namespaces["ai"] + store.namespaces["ad"] + store.namespaces["ar"] + store.namespaces["views"]
+	core := store.namespaces["af"] + store.namespaces["am"] + store.namespaces["ai"]
+	core += store.namespaces["ad"] + store.namespaces["ar"] + store.namespaces["views"]
 	var totalWrites uint64
 	for _, bytes := range store.writes {
 		totalWrites += bytes
@@ -344,7 +382,47 @@ func runFeasibilityProfile(t *testing.T, facts uint64, oracleQueries int) feasib
 	bytesFact := float64(core) / float64(facts)
 	projectedCore := uint64(bytesFact * 1_400_000_000)
 	projectedQuery := broadDuration.Seconds() * 1_400_000_000 / float64(facts)
-	profile := feasibilityProfile{SchemaVersion: 1, Facts: facts, Seed: feasibilitySeed, SegmentRows: feasibilitySegmentRows, GoVersion: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, CPUs: runtime.NumCPU(), Hardware: feasibilityHardware(), Date: time.Now().UTC().Format(time.RFC3339), Commit: feasibilityCommit(), Namespaces: store.namespaces, CoreBytes: core, CoreBytesFact: bytesFact, ProjectedCore: projectedCore, TotalWrites: totalWrites, WriteAmp: float64(totalWrites) / float64(core), BuildSeconds: buildDuration.Seconds(), BuildFactsSec: float64(facts) / buildDuration.Seconds(), BitmapBytes: store.namespaces["ai"], BitmapValues: feasibilityBitmapValues(store), BroadSeconds: broadDuration.Seconds(), BroadFiles: result.Files, ProjectedSecs: projectedQuery, OracleFacts: oracleFacts, OracleMatches: matches, OracleQueries: oracleQueries, CacheP95: latencies[94].Seconds(), CatchUpFacts: catchUpFacts, CatchUpSecs: catchDuration.Seconds(), CatchUpRate: float64(catchUpFacts) / catchDuration.Seconds(), RebuildSecs: buildDuration.Seconds(), Gates: map[string]string{}, Notes: []string{"Direct segment build avoids duplicating authoritative iv: input at 10M/100M.", "The 1,000-query oracle uses a deterministic 100,000-fact sample.", "The incremental profile contains 0.1% creations and 0.5% residency changes.", "Authoritative reconciliation CPU and write baselines are not available in the direct segment profile."}}
+	profile := feasibilityProfile{
+		SchemaVersion: 1,
+		Facts:         facts,
+		Seed:          feasibilitySeed,
+		SegmentRows:   feasibilitySegmentRows,
+		GoVersion:     runtime.Version(),
+		GOOS:          runtime.GOOS,
+		GOARCH:        runtime.GOARCH,
+		CPUs:          runtime.NumCPU(),
+		Hardware:      feasibilityHardware(),
+		Date:          time.Now().UTC().Format(time.RFC3339),
+		Commit:        feasibilityCommit(),
+		Namespaces:    store.namespaces,
+		CoreBytes:     core,
+		CoreBytesFact: bytesFact,
+		ProjectedCore: projectedCore,
+		TotalWrites:   totalWrites,
+		WriteAmp:      float64(totalWrites) / float64(core),
+		BuildSeconds:  buildDuration.Seconds(),
+		BuildFactsSec: float64(facts) / buildDuration.Seconds(),
+		BitmapBytes:   store.namespaces["ai"],
+		BitmapValues:  feasibilityBitmapValues(store),
+		BroadSeconds:  broadDuration.Seconds(),
+		BroadFiles:    result.Files,
+		ProjectedSecs: projectedQuery,
+		OracleFacts:   oracleFacts,
+		OracleMatches: matches,
+		OracleQueries: oracleQueries,
+		CacheP95:      latencies[94].Seconds(),
+		CatchUpFacts:  catchUpFacts,
+		CatchUpSecs:   catchDuration.Seconds(),
+		CatchUpRate:   float64(catchUpFacts) / catchDuration.Seconds(),
+		RebuildSecs:   buildDuration.Seconds(),
+		Gates:         map[string]string{},
+		Notes: []string{
+			"Direct segment build avoids duplicating authoritative iv: input at 10M/100M.",
+			"The 1,000-query oracle uses a deterministic 100,000-fact sample.",
+			"The incremental profile contains 0.1% creations and 0.5% residency changes.",
+			"Authoritative reconciliation CPU and write baselines are not available in the direct segment profile.",
+		},
+	}
 	profile.Gates["core_175gb"] = passFail(projectedCore <= 175_000_000_000)
 	profile.Gates["peak_250gb"] = passFail(projectedCore+10_000_000_000+core <= 250_000_000_000)
 	profile.Gates["broad_100m_120s"] = passFail(profile.BroadSeconds*100_000_000/float64(facts) <= 120)
@@ -382,7 +460,34 @@ func feasibilityFact(index uint64) buildFact {
 	} else if index%10 == 1 {
 		continuity = schema.AnalyticsContinuitySourceGeneration
 	}
-	return buildFact{identity: segmentIdentity{FSID: uint32(1 + index%32), Inode: index + 1, Generation: index + 1, Revision: index + 1, Known: known}, fact: schema.AnalyticsFactRecord{Revision: index + 1, UID: uid, GID: uint32(100 + mixed%256), Known: known, CreatedAt: created.UnixNano(), LogicalSize: size, CalendarYear: int32(year), CalendarMonth: uint8(month), ISOYear: int32(isoYear), Workweek: uint8(week), SVM: fmt.Sprintf("svm-%02d", mixed%64), Volume: fmt.Sprintf("volume-%03d", mixed%256), PathGroup: fmt.Sprintf("group-%04d", mixed%1024), Residency: feasibilityResidency(index + 1).State, CreationBasis: schema.AnalyticsBirthTime, IdentityGeneration: index + 1, IdentityContinuity: continuity}}
+	return buildFact{
+		identity: segmentIdentity{
+			FSID:       uint32(1 + index%32),
+			Inode:      index + 1,
+			Generation: index + 1,
+			Revision:   index + 1,
+			Known:      known,
+		},
+		fact: schema.AnalyticsFactRecord{
+			Revision:           index + 1,
+			UID:                uid,
+			GID:                uint32(100 + mixed%256),
+			Known:              known,
+			CreatedAt:          created.UnixNano(),
+			LogicalSize:        size,
+			CalendarYear:       int32(year),
+			CalendarMonth:      uint8(month),
+			ISOYear:            int32(isoYear),
+			Workweek:           uint8(week),
+			SVM:                fmt.Sprintf("svm-%02d", mixed%64),
+			Volume:             fmt.Sprintf("volume-%03d", mixed%256),
+			PathGroup:          fmt.Sprintf("group-%04d", mixed%1024),
+			Residency:          feasibilityResidency(index + 1).State,
+			CreationBasis:      schema.AnalyticsBirthTime,
+			IdentityGeneration: index + 1,
+			IdentityContinuity: continuity,
+		},
+	}
 }
 
 func feasibilityResidency(inode uint64) schema.AnalyticsResidencyRecord {
@@ -393,15 +498,31 @@ func feasibilityResidency(inode uint64) schema.AnalyticsResidencyRecord {
 	} else if inode%20 == 2 {
 		state = schema.AnalyticsUnknown
 	}
-	return schema.AnalyticsResidencyRecord{State: state, LastCompleteCrawl: 1735689600000000000, RetainedSnapshotRefs: retained, ClassificationEpoch: 1, FactSegment: (inode-1)/feasibilitySegmentRows + 1, Row: uint32((inode - 1) % feasibilitySegmentRows)}
+	return schema.AnalyticsResidencyRecord{
+		State:                state,
+		LastCompleteCrawl:    1735689600000000000,
+		RetainedSnapshotRefs: retained,
+		ClassificationEpoch:  1,
+		FactSegment:          (inode-1)/feasibilitySegmentRows + 1,
+		Row:                  uint32((inode - 1) % feasibilitySegmentRows),
+	}
 }
 
 func feasibilityDictionaries() dictionaries {
-	dict := dictionaries{ids: map[schema.AnalyticsDictionaryKind]map[string]uint32{}, values: map[schema.AnalyticsDictionaryKind][]string{}}
-	for kind, count := range map[schema.AnalyticsDictionaryKind]int{schema.AnalyticsDictionarySVM: 64, schema.AnalyticsDictionaryVolume: 256, schema.AnalyticsDictionaryPathGroup: 1024} {
+	dict := dictionaries{
+		ids:    map[schema.AnalyticsDictionaryKind]map[string]uint32{},
+		values: map[schema.AnalyticsDictionaryKind][]string{},
+	}
+	for kind, count := range map[schema.AnalyticsDictionaryKind]int{schema.AnalyticsDictionarySVM: 64,
+		schema.AnalyticsDictionaryVolume:    256,
+		schema.AnalyticsDictionaryPathGroup: 1024} {
 		dict.ids[kind] = map[string]uint32{}
-		prefix := map[schema.AnalyticsDictionaryKind]string{schema.AnalyticsDictionarySVM: "svm-", schema.AnalyticsDictionaryVolume: "volume-", schema.AnalyticsDictionaryPathGroup: "group-"}[kind]
-		width := map[schema.AnalyticsDictionaryKind]int{schema.AnalyticsDictionarySVM: 2, schema.AnalyticsDictionaryVolume: 3, schema.AnalyticsDictionaryPathGroup: 4}[kind]
+		prefix := map[schema.AnalyticsDictionaryKind]string{schema.AnalyticsDictionarySVM: "svm-",
+			schema.AnalyticsDictionaryVolume:    "volume-",
+			schema.AnalyticsDictionaryPathGroup: "group-"}[kind]
+		width := map[schema.AnalyticsDictionaryKind]int{schema.AnalyticsDictionarySVM: 2,
+			schema.AnalyticsDictionaryVolume:    3,
+			schema.AnalyticsDictionaryPathGroup: 4}[kind]
 		for index := 0; index < count; index++ {
 			value := fmt.Sprintf("%s%0*d", prefix, width, index)
 			dict.values[kind] = append(dict.values[kind], value)
@@ -420,7 +541,12 @@ func installFeasibilityMetadata(store *feasibilityStore, dict dictionaries, fact
 		return err
 	}
 	config, _ := json.Marshal(Config{SegmentRows: feasibilitySegmentRows, CacheAfter: 3}.normalized())
-	metadata, err := (schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, Facts: facts, BuiltAt: 1735689600000000000, ConfigJSON: string(config)}).MarshalBinary()
+	metadata,
+		err := (schema.AnalyticsMetadataRecord{Enabled: true,
+		Generation: 1,
+		Facts:      facts,
+		BuiltAt:    1735689600000000000,
+		ConfigJSON: string(config)}).MarshalBinary()
 	if err != nil {
 		return err
 	}
@@ -433,7 +559,11 @@ func publishFeasibilityManifest(store *feasibilityStore, segments []uint64, fact
 	if err != nil {
 		return err
 	}
-	watermark, err := (schema.AnalyticsWatermarkRecord{RepositoryGeneration: 1, AppliedCommit: facts, ManifestGeneration: 1, AppliedAt: time.Now().UnixNano()}).MarshalBinary()
+	watermark,
+		err := (schema.AnalyticsWatermarkRecord{RepositoryGeneration: 1,
+		AppliedCommit:      facts,
+		ManifestGeneration: 1,
+		AppliedAt:          time.Now().UnixNano()}).MarshalBinary()
 	if err != nil {
 		return err
 	}
@@ -527,13 +657,16 @@ func oracleMatches(fact schema.AnalyticsFactRecord, query Query) bool {
 		}
 		return len(values) == 0
 	}
-	if !containsUint32(query.UIDs, fact.UID) || !containsUint32(query.GIDs, fact.GID) || !containsInt(query.Years, int(fact.CalendarYear)) {
+	if !containsUint32(query.UIDs, fact.UID) || !containsUint32(query.GIDs, fact.GID) ||
+		!containsInt(query.Years, int(fact.CalendarYear)) {
 		return false
 	}
-	if query.SizeMin != nil && (fact.Known&schema.KnownSize == 0 || fact.LogicalSize < *query.SizeMin) || query.SizeMax != nil && (fact.Known&schema.KnownSize == 0 || fact.LogicalSize >= *query.SizeMax) {
+	if query.SizeMin != nil && (fact.Known&schema.KnownSize == 0 || fact.LogicalSize < *query.SizeMin) ||
+		query.SizeMax != nil && (fact.Known&schema.KnownSize == 0 || fact.LogicalSize >= *query.SizeMax) {
 		return false
 	}
-	if len(query.Residencies) != 0 && query.Residencies[0] == "archive-only" && fact.Residency != schema.AnalyticsArchiveOnly {
+	if len(query.Residencies) != 0 && query.Residencies[0] == "archive-only" &&
+		fact.Residency != schema.AnalyticsArchiveOnly {
 		return false
 	}
 	return true
@@ -552,7 +685,22 @@ func feasibilityResidencyBytes(facts uint64) uint64 {
 }
 
 func feasibilityOutboxBytes(facts uint64) uint64 {
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: 1, IdentityGeneration: 1, Revision: 1, UID: 600, GID: 100, Known: schema.KnownUID | schema.KnownGID | schema.KnownSize, CreatedAt: 1735689600000000000, LogicalSize: 1 << 20, CreationBasis: schema.AnalyticsBirthTime, IdentityContinuity: schema.AnalyticsContinuityProven, State: schema.AnalyticsLive, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaCreation,
+		FSID:                1,
+		Inode:               1,
+		IdentityGeneration:  1,
+		Revision:            1,
+		UID:                 600,
+		GID:                 100,
+		Known:               schema.KnownUID | schema.KnownGID | schema.KnownSize,
+		CreatedAt:           1735689600000000000,
+		LogicalSize:         1 << 20,
+		CreationBasis:       schema.AnalyticsBirthTime,
+		IdentityContinuity:  schema.AnalyticsContinuityProven,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: 1,
+	}
 	value, _ := delta.MarshalBinary()
 	return facts * uint64(len(schema.AnalyticsDeltaKey(1, 0))+len(value))
 }
@@ -593,7 +741,44 @@ func feasibilityHardware() string {
 }
 
 func feasibilityMarkdown(profile feasibilityProfile) string {
-	return fmt.Sprintf("# Phase 16 Analytics Feasibility: %d Facts\n\nDate: `%s`  \nCommit: `%s`  \nEnvironment: `%s`; `%s %s/%s`, %d CPUs  \nSeed: `%d`; segment rows: `%d`; codec: `json-columns-v1;zstd=3`\n\n| Metric | Result |\n|---|---:|\n| Core bytes/fact | %.3f |\n| Projected core at 1.4B | %.3f GB |\n| Logical write amplification | %.6fx |\n| Build/rebuild | %.3f s (%.0f facts/s) |\n| Cold named query | %.3f s (%d files) |\n| Projected query at 1.4B | %.3f s |\n| Oracle | %d/%d on %d facts |\n| Cached p95 | %.6f s |\n| Catch-up | %.3f s (%.0f facts/s) |\n\n## Namespace Bytes\n\n```json\n%s\n```\n\n## Gates\n\n```json\n%s\n```\n\nAuthoritative reconciliation CPU and metadata-write baselines are `not_measured` by the direct-segment profile.\n", profile.Facts, profile.Date, profile.Commit, profile.Hardware, profile.GoVersion, profile.GOOS, profile.GOARCH, profile.CPUs, profile.Seed, profile.SegmentRows, profile.CoreBytesFact, float64(profile.ProjectedCore)/1e9, profile.WriteAmp, profile.BuildSeconds, profile.BuildFactsSec, profile.BroadSeconds, profile.BroadFiles, profile.ProjectedSecs, profile.OracleMatches, profile.OracleQueries, profile.OracleFacts, profile.CacheP95, profile.CatchUpSecs, profile.CatchUpRate, mustJSON(profile.Namespaces), mustJSON(profile.Gates))
+	return fmt.Sprintf(
+		("# Phase 16 Analytics Feasibility: %d Facts\n\nDate: `%s`  \nCommit: `%s`  " +
+			"\nEnvironment: `%s`; `%s %s/%s`, %d CPUs  \nSeed: `%d`; segment rows: `%d`; " +
+			"codec: `json-columns-v1;zstd=3`\n\n| Metric | Result |\n|---|---:|\n| Core " +
+			"bytes/fact | %.3f |\n| Projected core at 1.4B | %.3f GB |\n| Logical write " +
+			"amplification | %.6fx |\n| Build/rebuild | %.3f s (%.0f facts/s) |\n| Cold " +
+			"named query | %.3f s (%d files) |\n| Projected query at 1.4B | %.3f s |\n| " +
+			"Oracle | %d/%d on %d facts |\n| Cached p95 | %.6f s |\n| Catch-up | %.3f s " +
+			"(%.0f facts/s) |\n\n## Namespace Bytes\n\n```json\n%s\n```\n\n## " +
+			"Gates\n\n```json\n%s\n```\n\nAuthoritative reconciliation CPU and metadata-write " +
+			"baselines are `not_measured` by the direct-segment profile.\n"),
+		profile.Facts,
+		profile.Date,
+		profile.Commit,
+		profile.Hardware,
+		profile.GoVersion,
+		profile.GOOS,
+		profile.GOARCH,
+		profile.CPUs,
+		profile.Seed,
+		profile.SegmentRows,
+		profile.CoreBytesFact,
+		float64(profile.ProjectedCore)/1e9,
+		profile.WriteAmp,
+		profile.BuildSeconds,
+		profile.BuildFactsSec,
+		profile.BroadSeconds,
+		profile.BroadFiles,
+		profile.ProjectedSecs,
+		profile.OracleMatches,
+		profile.OracleQueries,
+		profile.OracleFacts,
+		profile.CacheP95,
+		profile.CatchUpSecs,
+		profile.CatchUpRate,
+		mustJSON(profile.Namespaces),
+		mustJSON(profile.Gates),
+	)
 }
 
 func mustJSON(value any) string {

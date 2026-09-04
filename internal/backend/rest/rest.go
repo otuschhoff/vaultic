@@ -182,7 +182,9 @@ func (b *Backend) IsPermanentError(err error) bool {
 
 	var rerr *restError
 	if errors.As(err, &rerr) {
-		if rerr.StatusCode == http.StatusRequestedRangeNotSatisfiable || rerr.StatusCode == http.StatusUnauthorized || rerr.StatusCode == http.StatusForbidden || rerr.StatusCode == http.StatusInsufficientStorage {
+		if rerr.StatusCode == http.StatusRequestedRangeNotSatisfiable || rerr.StatusCode == http.StatusUnauthorized ||
+			rerr.StatusCode == http.StatusForbidden ||
+			rerr.StatusCode == http.StatusInsufficientStorage {
 			return true
 		}
 	}

@@ -418,7 +418,11 @@ func withCaptureStdout(t testing.TB, gopts global.Options, callback func(ctx con
 	return buf, err
 }
 
-func withCaptureStdoutStderr(t testing.TB, gopts global.Options, callback func(ctx context.Context, gopts global.Options) error) (*bytes.Buffer, *bytes.Buffer, error) {
+func withCaptureStdoutStderr(
+	t testing.TB,
+	gopts global.Options,
+	callback func(ctx context.Context, gopts global.Options) error,
+) (*bytes.Buffer, *bytes.Buffer, error) {
 	bufStdout := bytes.NewBuffer(nil)
 	bufStderr := bytes.NewBuffer(nil)
 	err := withTermStatusRaw(os.Stdin, bufStdout, bufStderr, gopts, callback)
@@ -432,7 +436,12 @@ func withTermStatus(t testing.TB, gopts global.Options, callback func(ctx contex
 	return withTermStatusRaw(os.Stdin, &logOutputter{t: t}, &logOutputter{t: t}, gopts, callback)
 }
 
-func withTermStatusRaw(stdin io.ReadCloser, stdout, stderr io.Writer, gopts global.Options, callback func(ctx context.Context, gopts global.Options) error) error {
+func withTermStatusRaw(
+	stdin io.ReadCloser,
+	stdout, stderr io.Writer,
+	gopts global.Options,
+	callback func(ctx context.Context, gopts global.Options) error,
+) error {
 	term, cancel := termstatus.Setup(stdin, stdout, stderr, gopts.Quiet)
 	gopts.Term = term
 	defer cancel()

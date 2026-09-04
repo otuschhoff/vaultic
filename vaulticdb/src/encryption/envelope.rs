@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use aes_gcm::{
     aead::{Aead, Payload},
@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{EncryptedObjectStore, EncryptionKey};
+pub use providers::ProviderCredentials;
 use providers::{KeyContext, KeyProvider};
 
 pub mod providers;
@@ -93,6 +94,14 @@ pub enum EncryptionMode {
     Off,
     Required,
     Initialize,
+}
+
+#[derive(Debug)]
+pub struct EncryptionConfig {
+    pub mode: EncryptionMode,
+    pub passphrase_file: Option<PathBuf>,
+    pub recovery_acknowledged: bool,
+    pub provider_credentials: ProviderCredentials,
 }
 
 #[derive(Debug, Clone)]
@@ -410,12 +419,13 @@ impl KeyManager {
 pub async fn configure(
     repository_id: &str,
     inner: Arc<dyn ObjectStore>,
+    config: &EncryptionConfig,
 ) -> Result<(
     Arc<dyn ObjectStore>,
     EncryptionStatus,
     Option<Arc<KeyManager>>,
 )> {
-    let mode = encryption_mode()?;
+    let mode = config.mode;
     let envelope = load_envelope(inner.as_ref(), repository_id).await?;
 
     if mode == EncryptionMode::Off {
@@ -425,12 +435,13 @@ pub async fn configure(
         return Ok((inner, disabled_status(), None));
     }
 
-    let passphrase = read_recovery_passphrase()?;
+    let passphrase = read_recovery_passphrase(config.passphrase_file.as_deref())?;
     let (envelope, dek, slot_id, recovery_unlock) = match envelope {
         Some(envelope) => {
             let (slot, dek) = unlock_envelope(
                 &envelope,
-                passphrase.as_deref().map(|value| value.as_slice()),
+                passphrase.as_deref().map(Vec::as_slice),
+                &config.provider_credentials,
             )
             .await?;
             let slot_id = slot.id.clone();
@@ -447,11 +458,7 @@ pub async fn configure(
         }
         None => bail!("metadata encryption is required but the key envelope is missing"),
     };
-    enforce_recovery_acknowledgement(
-        &envelope,
-        recovery_unlock,
-        env::var("VAULTICDB_ENCRYPTION_RECOVERY_ACK").as_deref() == Ok("true"),
-    )?;
+    enforce_recovery_acknowledgement(&envelope, recovery_unlock, config.recovery_acknowledged)?;
     let mut configured = encrypted_store(inner.clone(), repository_id, envelope, dek, &slot_id)?;
     configured.1.initializing = mode == EncryptionMode::Initialize;
     if mode == EncryptionMode::Initialize {
@@ -550,6 +557,7 @@ async fn migrate_plaintext_objects(
 async fn unlock_envelope<'a>(
     envelope: &'a KeyEnvelope,
     passphrase: Option<&[u8]>,
+    provider_credentials: &ProviderCredentials,
 ) -> Result<(&'a KeySlot, Zeroizing<Vec<u8>>)> {
     let mut slots = envelope.slots.iter().collect::<Vec<_>>();
     slots.sort_by_key(|slot| slot.priority);
@@ -562,7 +570,8 @@ async fn unlock_envelope<'a>(
             }
             continue;
         }
-        let Some(provider) = providers::from_environment(&slot.provider).await? else {
+        let Some(provider) = providers::from_config(&slot.provider, provider_credentials).await?
+        else {
             continue;
         };
         let wrapped = BASE64

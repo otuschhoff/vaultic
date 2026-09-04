@@ -20,12 +20,12 @@ type DefaultLayout struct {
 }
 
 var defaultLayoutPaths = map[backend.FileType]string{
-	backend.PackFile:     "data",
-	backend.SnapshotFile: "snapshots",
-	backend.IndexFile:    "index",
-	backend.LockFile:     "locks",
-	backend.KeyFile:      "keys",
-	backend.SlateDBFile:  "slatedb",
+	backend.PackFile:      "data",
+	backend.SnapshotFile:  "snapshots",
+	backend.IndexFile:     "index",
+	backend.LockFile:      "locks",
+	backend.KeyFile:       "keys",
+	backend.SlateDBFile:   "slatedb",
 	backend.BootstrapFile: "_vaultic/bootstrap",
 	backend.StagingFile:   "_vaultic/staging",
 }

@@ -16,145 +16,203 @@ import (
 	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
-func resolveBootstrapRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (string, string, *indexbroker.Client, error) {
+func resolveBootstrapRepository(
+	ctx context.Context,
+	gopts Options,
+	printer vaultic.Printer,
+) (string, string, *indexbroker.Client, error) {
 	profile, err := bootstrap.LoadProfile(gopts.BootstrapProfile)
 	if err != nil {
 		return "", "", nil, err
 	}
-	masterKey, err := resolveMasterKey(gopts)
+	masterKey, rootKey, topologyKey, brokerClient, err := resolveBootstrapCredentials(ctx, gopts)
 	if err != nil {
 		return "", "", nil, err
 	}
-	var brokerClient *indexbroker.Client
-	var topologyKey []byte
-	if gopts.KeyBrokerSocket != "" {
-		if masterKey != "" || gopts.MetadataKeyInDB || gopts.Password != "" || gopts.PasswordFile != "" || gopts.PasswordCommand != "" {
-			return "", "", nil, errors.Fatal("brokered bootstrap is mutually exclusive with password, direct-key, and key-in-DB routes")
-		}
-		if gopts.KeyBrokerReleaseManifest == "" {
-			return "", "", nil, errors.Fatal("--key-broker-release-manifest is required with brokered bootstrap")
-		}
-		brokerClient, err = indexbroker.Dial(ctx, gopts.KeyBrokerSocket)
-		if err != nil {
-			return "", "", nil, err
-		}
-		lease, leaseErr := brokerClient.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "topology-discovery", gopts.KeyBrokerLeaseDuration)
-		if leaseErr != nil {
-			errors.LogClose(brokerClient, "close bootstrap broker after lease failure", debug.Log)
-			return "", "", nil, leaseErr
-		}
-		topologyKey = append([]byte(nil), lease.Key...)
-		clear(lease.Key)
-	}
-	if masterKey == "" && len(topologyKey) == 0 {
-		return "", "", brokerClient, errors.Fatal("bootstrap topology authentication requires a broker lease or direct repository key")
-	}
-	var rootKey []byte
-	if masterKey != "" {
-		key, decodeErr := repository.DecodeMasterKey(masterKey)
-		if decodeErr != nil {
-			if brokerClient != nil {
-				errors.LogClose(brokerClient, "close bootstrap broker after key decode failure", debug.Log)
-			}
-			return "", "", nil, decodeErr
-		}
-		rootKey = key.EncryptionKey[:]
-	}
-	seeds := make(map[string]backend.Backend, len(profile.Seeds))
-	locations := make(map[string]string, len(profile.Seeds))
-	for _, seed := range profile.Seeds {
-		seedBackend, openErr := innerOpenBackend(ctx, seed.Location, gopts, gopts.Extended, false, printer)
-		if openErr != nil {
-			continue
-		}
-		seeds[seed.ID] = seedBackend
-		locations[seed.ID] = seed.Location
-	}
+	seeds, locations := openBootstrapSeeds(ctx, profile, gopts, printer)
 	defer func() {
 		for _, seed := range seeds {
 			errors.LogClose(seed, "close bootstrap seed", debug.Log)
 		}
 	}()
 	if len(seeds) == 0 {
-		if brokerClient != nil {
-			errors.LogClose(brokerClient, "close bootstrap broker without reachable seeds", debug.Log)
-		}
+		closeBootstrapBroker(brokerClient, "close bootstrap broker without reachable seeds")
 		return "", "", nil, errors.Fatal("no bootstrap seed backend is reachable")
 	}
-	var copies []bootstrap.Copy
-	var failures map[string]error
-	if len(topologyKey) > 0 {
-		copies, failures = bootstrap.DiscoverWithTopologyKey(ctx, seeds, topologyKey, profile.RepositoryID)
-		clear(topologyKey)
-	} else {
-		copies, failures = bootstrap.Discover(ctx, seeds, rootKey, profile.RepositoryID)
-	}
+	copies, failures := discoverBootstrapCopies(ctx, seeds, profile.RepositoryID, rootKey, topologyKey)
 	if len(copies) == 0 {
-		if brokerClient != nil {
-			errors.LogClose(brokerClient, "close bootstrap broker without authenticated topology", debug.Log)
-		}
+		closeBootstrapBroker(brokerClient, "close bootstrap broker without authenticated topology")
 		return "", "", nil, errors.Errorf("no authenticated bootstrap topology is reachable: %v", failures)
 	}
-	trusted := make([]bootstrap.Anchor, 0, 1)
-	if profile.AnchorFile != "" {
-		anchor, anchorErr := bootstrap.LoadAnchor(profile.AnchorFile)
-		if anchorErr != nil && !os.IsNotExist(anchorErr) {
-			if brokerClient != nil {
-				errors.LogClose(brokerClient, "close bootstrap broker after anchor failure", debug.Log)
-			}
-			return "", "", nil, anchorErr
-		}
-		if anchorErr == nil {
-			trusted = append(trusted, anchor)
-		}
-	}
-	winner, err := bootstrap.Resolve(copies, trusted...)
+	winner, err := resolveBootstrapTopology(profile.AnchorFile, copies)
 	if err != nil {
-		if brokerClient != nil {
-			errors.LogClose(brokerClient, "close bootstrap broker after topology resolution failure", debug.Log)
-		}
+		closeBootstrapBroker(brokerClient, "close bootstrap broker after topology resolution failure")
 		return "", "", nil, err
 	}
-	reachable := make([]vaultic.PlacementBackend, 0, len(winner.Manifest.Backends))
-	for _, declared := range winner.Manifest.Backends {
-		candidate, openErr := innerOpenBackend(ctx, declared.Location, gopts, gopts.Extended, false, printer)
-		if openErr != nil {
-			continue
-		}
-		errors.LogClose(candidate, "close bootstrap policy candidate", debug.Log)
-		reachable = append(reachable, declared)
-	}
-	if _, err := bootstrap.EvaluatePolicy(reachable, winner.Manifest.Policy); err != nil {
-		if brokerClient != nil {
-			errors.LogClose(brokerClient, "close bootstrap broker after policy failure", debug.Log)
-		}
+	if err := validateBootstrapPolicy(ctx, winner.Manifest, gopts, printer); err != nil {
+		closeBootstrapBroker(brokerClient, "close bootstrap broker after policy failure")
 		return "", "", nil, err
 	}
 	location := locations[winner.Seed]
 	if location == "" {
 		return "", "", brokerClient, errors.Fatal("winning bootstrap topology has no configured seed locator")
 	}
-	if profile.AnchorFile != "" {
-		if err := bootstrap.StoreAnchor(profile.AnchorFile, bootstrap.Anchor{RepositoryID: winner.Manifest.RepositoryID, Generation: winner.Manifest.Generation, SHA256: winner.SHA256}); err != nil {
-			if brokerClient != nil {
-				errors.LogClose(brokerClient, "close bootstrap broker after anchor update failure", debug.Log)
-			}
-			return "", "", nil, err
-		}
+	if err := storeBootstrapAnchor(profile.AnchorFile, winner); err != nil {
+		closeBootstrapBroker(brokerClient, "close bootstrap broker after anchor update failure")
+		return "", "", nil, err
 	}
-	if brokerClient != nil {
-		lease, leaseErr := brokerClient.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "repository-master-key", gopts.KeyBrokerLeaseDuration)
-		if leaseErr != nil {
-			errors.LogClose(brokerClient, "close bootstrap broker after repository lease failure", debug.Log)
-			return "", "", nil, leaseErr
-		}
-		masterKey = string(lease.Key)
-		clear(lease.Key)
+	masterKey, err = acquireBootstrapMasterKey(ctx, gopts, brokerClient, masterKey)
+	if err != nil {
+		return "", "", nil, err
 	}
 	return location, masterKey, brokerClient, nil
 }
 
-func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (*repository.Repository, error) {
+func resolveBootstrapCredentials(
+	ctx context.Context,
+	gopts Options,
+) (string, []byte, []byte, *indexbroker.Client, error) {
+	masterKey, err := resolveMasterKey(gopts)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	if gopts.KeyBrokerSocket == "" {
+		if masterKey == "" {
+			return "", nil, nil, nil, errors.Fatal(
+				"bootstrap topology authentication requires a broker lease or direct repository key",
+			)
+		}
+		key, err := repository.DecodeMasterKey(masterKey)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		return masterKey, append([]byte(nil), key.EncryptionKey[:]...), nil, nil, nil
+	}
+	if masterKey != "" || gopts.MetadataKeyInDB || gopts.Password != "" || gopts.PasswordFile != "" || gopts.PasswordCommand != "" {
+		return "", nil, nil, nil, errors.Fatal(
+			"brokered bootstrap is mutually exclusive with password, direct-key, and key-in-DB routes",
+		)
+	}
+	if gopts.KeyBrokerReleaseManifest == "" {
+		return "", nil, nil, nil, errors.Fatal("--key-broker-release-manifest is required with brokered bootstrap")
+	}
+	client, err := indexbroker.Dial(ctx, gopts.KeyBrokerSocket)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	lease, err := client.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, "topology-discovery", gopts.KeyBrokerLeaseDuration)
+	if err != nil {
+		closeBootstrapBroker(client, "close bootstrap broker after lease failure")
+		return "", nil, nil, nil, err
+	}
+	topologyKey := append([]byte(nil), lease.Key...)
+	clear(lease.Key)
+	return "", nil, topologyKey, client, nil
+}
+
+func openBootstrapSeeds(
+	ctx context.Context,
+	profile bootstrap.Profile,
+	gopts Options,
+	printer vaultic.Printer,
+) (map[string]backend.Backend, map[string]string) {
+	seeds := make(map[string]backend.Backend, len(profile.Seeds))
+	locations := make(map[string]string, len(profile.Seeds))
+	for _, seed := range profile.Seeds {
+		seedBackend, err := innerOpenBackend(ctx, seed.Location, gopts, gopts.Extended, false, printer)
+		if err == nil {
+			seeds[seed.ID] = seedBackend
+			locations[seed.ID] = seed.Location
+		}
+	}
+	return seeds, locations
+}
+
+func discoverBootstrapCopies(
+	ctx context.Context,
+	seeds map[string]backend.Backend,
+	repositoryID string,
+	rootKey, topologyKey []byte,
+) ([]bootstrap.Copy, map[string]error) {
+	if len(topologyKey) == 0 {
+		return bootstrap.Discover(ctx, seeds, rootKey, repositoryID)
+	}
+	copies, failures := bootstrap.DiscoverWithTopologyKey(ctx, seeds, topologyKey, repositoryID)
+	clear(topologyKey)
+	return copies, failures
+}
+
+func resolveBootstrapTopology(anchorFile string, copies []bootstrap.Copy) (bootstrap.Copy, error) {
+	trusted := make([]bootstrap.Anchor, 0, 1)
+	if anchorFile != "" {
+		anchor, err := bootstrap.LoadAnchor(anchorFile)
+		if err != nil && !os.IsNotExist(err) {
+			return bootstrap.Copy{}, err
+		}
+		if err == nil {
+			trusted = append(trusted, anchor)
+		}
+	}
+	return bootstrap.Resolve(copies, trusted...)
+}
+
+func validateBootstrapPolicy(ctx context.Context, manifest bootstrap.Manifest, gopts Options, printer vaultic.Printer) error {
+	reachable := make([]vaultic.PlacementBackend, 0, len(manifest.Backends))
+	for _, declared := range manifest.Backends {
+		candidate, err := innerOpenBackend(ctx, declared.Location, gopts, gopts.Extended, false, printer)
+		if err != nil {
+			continue
+		}
+		errors.LogClose(candidate, "close bootstrap policy candidate", debug.Log)
+		reachable = append(reachable, declared)
+	}
+	_, err := bootstrap.EvaluatePolicy(reachable, manifest.Policy)
+	return err
+}
+
+func storeBootstrapAnchor(anchorFile string, winner bootstrap.Copy) error {
+	if anchorFile == "" {
+		return nil
+	}
+	return bootstrap.StoreAnchor(anchorFile, bootstrap.Anchor{
+		RepositoryID: winner.Manifest.RepositoryID,
+		Generation:   winner.Manifest.Generation,
+		SHA256:       winner.SHA256,
+	})
+}
+
+func acquireBootstrapMasterKey(
+	ctx context.Context,
+	gopts Options,
+	client *indexbroker.Client,
+	masterKey string,
+) (string, error) {
+	if client == nil {
+		return masterKey, nil
+	}
+	lease, err := client.AcquireLease(
+		ctx, gopts.KeyBrokerReleaseManifest, "repository-master-key", gopts.KeyBrokerLeaseDuration,
+	)
+	if err != nil {
+		closeBootstrapBroker(client, "close bootstrap broker after repository lease failure")
+		return "", err
+	}
+	masterKey = string(lease.Key)
+	clear(lease.Key)
+	return masterKey, nil
+}
+
+func closeBootstrapBroker(client *indexbroker.Client, reason string) {
+	if client != nil {
+		errors.LogClose(client, reason, debug.Log)
+	}
+}
+
+func OpenDataPlaneRepository(
+	ctx context.Context,
+	gopts Options,
+	printer vaultic.Printer,
+) (*repository.Repository, error) {
 	if gopts.BootstrapProfile == "" {
 		return nil, errors.Fatal("data-plane-only mode requires --bootstrap-profile")
 	}
@@ -193,7 +251,14 @@ func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic
 	for _, declared := range manifest.Backends {
 		placementOptions := gopts
 		placementOptions.RepoHot = ""
-		destination, openErr := innerOpenBackend(ctx, declared.Location, placementOptions, placementOptions.Extended, false, printer)
+		destination, openErr := innerOpenBackend(
+			ctx,
+			declared.Location,
+			placementOptions,
+			placementOptions.Extended,
+			false,
+			printer,
+		)
 		if openErr != nil {
 			continue
 		}
@@ -210,7 +275,12 @@ func OpenDataPlaneRepository(ctx context.Context, gopts Options, printer vaultic
 	return repo, nil
 }
 
-func discoverBootstrapManifest(ctx context.Context, gopts Options, masterKey string, printer vaultic.Printer) (bootstrap.Manifest, error) {
+func discoverBootstrapManifest(
+	ctx context.Context,
+	gopts Options,
+	masterKey string,
+	printer vaultic.Printer,
+) (bootstrap.Manifest, error) {
 	profile, err := bootstrap.LoadProfile(gopts.BootstrapProfile)
 	if err != nil {
 		return bootstrap.Manifest{}, err

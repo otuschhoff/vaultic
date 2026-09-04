@@ -49,7 +49,9 @@ func TestIsExcludedByFile(t *testing.T) {
 			if tc.content == "" {
 				h = ""
 			}
-			if got := isExcludedByFile(foo, tagFilename, h, newRejectionCache(), fs.NewLocal(), func(msg string, args ...any) { t.Logf(msg, args...) }); tc.want != got {
+			logMessage := func(message string, args ...any) { t.Logf(message, args...) }
+			got := isExcludedByFile(foo, tagFilename, h, newRejectionCache(), fs.NewLocal(), logMessage)
+			if tc.want != got {
 				t.Fatalf("expected %v, got %v", tc.want, got)
 			}
 		})

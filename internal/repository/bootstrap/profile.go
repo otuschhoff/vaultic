@@ -11,14 +11,14 @@ import (
 )
 
 type Profile struct {
-	Format       uint   `toml:"format" json:"format"`
+	Format       uint   `toml:"format"        json:"format"`
 	RepositoryID string `toml:"repository_id" json:"repository_id"`
-	AnchorFile   string `toml:"anchor_file" json:"anchor_file"`
-	Seeds        []Seed `toml:"seed" json:"seeds"`
+	AnchorFile   string `toml:"anchor_file"   json:"anchor_file"`
+	Seeds        []Seed `toml:"seed"          json:"seeds"`
 }
 
 type Seed struct {
-	ID       string `toml:"id" json:"id"`
+	ID       string `toml:"id"       json:"id"`
 	Location string `toml:"location" json:"location"`
 }
 
@@ -84,7 +84,8 @@ func StoreAnchor(path string, anchor Anchor) error {
 		return fmt.Errorf("invalid bootstrap anchor")
 	}
 	if current, err := LoadAnchor(path); err == nil {
-		if current.RepositoryID != anchor.RepositoryID || anchor.Generation < current.Generation || anchor.Generation == current.Generation && anchor.SHA256 != current.SHA256 {
+		if current.RepositoryID != anchor.RepositoryID || anchor.Generation < current.Generation ||
+			anchor.Generation == current.Generation && anchor.SHA256 != current.SHA256 {
 			return fmt.Errorf("bootstrap anchor update would conflict or roll back")
 		}
 		if current == anchor {

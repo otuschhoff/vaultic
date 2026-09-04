@@ -19,7 +19,14 @@ type mockSaver struct {
 	mutex sync.Mutex
 }
 
-func (m *mockSaver) SaveBlobAsync(_ context.Context, _ vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, sizeInRepo int, err error)) {
+func (m *mockSaver) SaveBlobAsync(
+	_ context.Context,
+	_ vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+	cb func(newID vaultic.ID, known bool, sizeInRepo int, err error),
+) {
 	// Fake async operation
 	go func() {
 		m.mutex.Lock()

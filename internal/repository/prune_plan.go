@@ -53,7 +53,11 @@ func (r *Repository) PersistPrunePlan(ctx context.Context, observedIndexes, requ
 
 // CompletePrunePlan atomically promotes a pending phase-A claim to a ready
 // marker containing the exact deletion candidates.
-func (r *Repository) CompletePrunePlan(ctx context.Context, id string, observedIndexes, requiredIndexes, indexIDs, packIDs vaultic.IDSet) (*vaultic.PrunePlan, error) {
+func (r *Repository) CompletePrunePlan(
+	ctx context.Context,
+	id string,
+	observedIndexes, requiredIndexes, indexIDs, packIDs vaultic.IDSet,
+) (*vaultic.PrunePlan, error) {
 	plan := &vaultic.PrunePlan{
 		Version:         prunePlanVersion,
 		ID:              id,

@@ -30,7 +30,16 @@ const (
 	Debug
 )
 
-var severityNames = map[string]Severity{"emergency": Emergency, "alert": Alert, "critical": Critical, "error": Error, "warning": Warning, "notice": Notice, "info": Info, "debug": Debug}
+var severityNames = map[string]Severity{
+	"emergency": Emergency,
+	"alert":     Alert,
+	"critical":  Critical,
+	"error":     Error,
+	"warning":   Warning,
+	"notice":    Notice,
+	"info":      Info,
+	"debug":     Debug,
+}
 
 type Category string
 
@@ -206,7 +215,16 @@ func (exporter *SyslogExporter) format(target SyslogTarget, event Event) ([]byte
 	if target.Format == "rfc3164" {
 		return fmt.Appendf(nil, "<%d>%s %s %s: %s", priority, event.Time.Format("Jan _2 15:04:05"), exporter.hostname, exporter.appName, payload), nil
 	}
-	return fmt.Appendf(nil, "<%d>1 %s %s %s - %s - %s", priority, event.Time.UTC().Format(time.RFC3339Nano), exporter.hostname, exporter.appName, sanitizeSyslogToken(string(event.Category)), payload), nil
+	return fmt.Appendf(
+		nil,
+		"<%d>1 %s %s %s - %s - %s",
+		priority,
+		event.Time.UTC().Format(time.RFC3339Nano),
+		exporter.hostname,
+		exporter.appName,
+		sanitizeSyslogToken(string(event.Category)),
+		payload,
+	), nil
 }
 
 func sendSyslog(ctx context.Context, target SyslogTarget, message []byte) error {

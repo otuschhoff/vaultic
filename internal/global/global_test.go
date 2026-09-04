@@ -151,7 +151,13 @@ func TestResolveBootstrapRepositorySurvivesSeedLoss(t *testing.T) {
 		Backends: []vaultic.PlacementBackend{{ID: "surviving", Location: survivingLocation, FailureDomain: "site-a"}},
 		Policy:   vaultic.PlacementPolicy{MinCopies: 1, MinDomains: 1}, StagingBackends: []string{"surviving"},
 	}
-	projection := vaultic.Config{Version: 2, ID: "repo-a", PlacementBackends: manifest.Backends, PlacementPolicy: manifest.Policy, StagingBackends: manifest.StagingBackends}
+	projection := vaultic.Config{
+		Version:           2,
+		ID:                "repo-a",
+		PlacementBackends: manifest.Backends,
+		PlacementPolicy:   manifest.Policy,
+		StagingBackends:   manifest.StagingBackends,
+	}
 	manifest.RepositoryConfig, err = json.Marshal(projection)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +224,12 @@ func TestReadEmptyPassword(t *testing.T) {
 
 	opts.Password = "invalid"
 	_, err = readPassword(context.TODO(), opts, "test")
-	rtest.Assert(t, strings.Contains(err.Error(), "must not be specified together with providing a password via a cli option or environment variable"), "unexpected error message, got %v", err)
+	rtest.Assert(
+		t,
+		strings.Contains(err.Error(), "must not be specified together with providing a password via a cli option or environment variable"),
+		"unexpected error message, got %v",
+		err,
+	)
 }
 
 func TestAzureKeyVaultPasswordSourceValidation(t *testing.T) {

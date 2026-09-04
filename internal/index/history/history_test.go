@@ -122,13 +122,30 @@ func addSnapshot(t *testing.T, store *memoryStore, commit uint64, seed byte, roo
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.set(t, schema.SnapshotKey(snapshotID), schema.SnapshotRecord{CommitSequence: commit, RootFSID: root.FSID, RootInode: root.Inode, RootRevision: root.Revision, OriginalJSON: snapshotJSON(paths...)})
+	store.set(
+		t,
+		schema.SnapshotKey(snapshotID),
+		schema.SnapshotRecord{
+			CommitSequence: commit,
+			RootFSID:       root.FSID,
+			RootInode:      root.Inode,
+			RootRevision:   root.Revision,
+			OriginalJSON:   snapshotJSON(paths...),
+		},
+	)
 	store.set(t, schema.SnapshotCommitKey(commit, snapshotID), schema.SnapshotCommitRecord{SnapshotTimeUnixNano: int64(commit), RootKey: rootKey})
 	return vaultic.ID(snapshotID).String()
 }
 
 func inode(size uint64, source string) schema.InodeRevision {
-	return schema.InodeRevision{Size: size, MTime: int64(size), CTime: int64(size + 1), Known: schema.KnownSize | schema.KnownMTime | schema.KnownCTime | schema.KnownPath, SourcePath: source, Freshness: schema.FreshnessVerified}
+	return schema.InodeRevision{
+		Size:       size,
+		MTime:      int64(size),
+		CTime:      int64(size + 1),
+		Known:      schema.KnownSize | schema.KnownMTime | schema.KnownCTime | schema.KnownPath,
+		SourcePath: source,
+		Freshness:  schema.FreshnessVerified,
+	}
 }
 
 func dir(children ...schema.DirectoryChild) schema.DirectoryRevision {
@@ -310,9 +327,42 @@ func TestFileHistoryDistinguishesContentAndMetadataChanges(t *testing.T) {
 	file1 := schema.InodeRevisionKey(1, 10, 1)
 	file2 := schema.InodeRevisionKey(1, 10, 2)
 	file3 := schema.InodeRevisionKey(1, 10, 3)
-	store.set(t, file1, schema.InodeRevision{Size: 10, Known: schema.KnownSize, ContentMode: schema.ContentInline, ContentIDs: []schema.ID{contentA}, ContentCount: 1, Freshness: schema.FreshnessVerified})
-	store.set(t, file2, schema.InodeRevision{Size: 20, Known: schema.KnownSize, ContentMode: schema.ContentInline, ContentIDs: []schema.ID{contentA}, ContentCount: 1, Freshness: schema.FreshnessVerified})
-	store.set(t, file3, schema.InodeRevision{Size: 30, Known: schema.KnownSize, ContentMode: schema.ContentInline, ContentIDs: []schema.ID{contentB}, ContentCount: 1, Freshness: schema.FreshnessVerified})
+	store.set(
+		t,
+		file1,
+		schema.InodeRevision{
+			Size:         10,
+			Known:        schema.KnownSize,
+			ContentMode:  schema.ContentInline,
+			ContentIDs:   []schema.ID{contentA},
+			ContentCount: 1,
+			Freshness:    schema.FreshnessVerified,
+		},
+	)
+	store.set(
+		t,
+		file2,
+		schema.InodeRevision{
+			Size:         20,
+			Known:        schema.KnownSize,
+			ContentMode:  schema.ContentInline,
+			ContentIDs:   []schema.ID{contentA},
+			ContentCount: 1,
+			Freshness:    schema.FreshnessVerified,
+		},
+	)
+	store.set(
+		t,
+		file3,
+		schema.InodeRevision{
+			Size:         30,
+			Known:        schema.KnownSize,
+			ContentMode:  schema.ContentInline,
+			ContentIDs:   []schema.ID{contentB},
+			ContentCount: 1,
+			Freshness:    schema.FreshnessVerified,
+		},
+	)
 	store.set(t, root1, dir(schema.DirectoryChild{Name: "a.txt", Inode: 10, Type: schema.NodeFile, MetadataKey: file1}))
 	store.set(t, root2, dir(schema.DirectoryChild{Name: "a.txt", Inode: 10, Type: schema.NodeFile, MetadataKey: file2}))
 	store.set(t, root3, dir(schema.DirectoryChild{Name: "a.txt", Inode: 10, Type: schema.NodeFile, MetadataKey: file3}))

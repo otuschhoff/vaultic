@@ -36,7 +36,11 @@ func (store *fakeGCStore) Get(_ context.Context, key []byte) ([]byte, bool, erro
 	return append([]byte(nil), value...), found, nil
 }
 
-func (store *fakeGCStore) ScanPrefix(_ context.Context, prefix, after []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
+func (store *fakeGCStore) ScanPrefix(
+	_ context.Context,
+	prefix, after []byte,
+	limit uint32,
+) ([]daemon.KeyValue, bool, error) {
 	var keys []string
 	for key := range store.values {
 		if len(key) >= len(prefix) && key[:len(prefix)] == string(prefix) && (len(after) == 0 || key > string(after)) {
@@ -129,8 +133,15 @@ func TestGCClassificationUsesPlacementCostModel(t *testing.T) {
 		RetentionSource: schema.RetentionBackend, MinRetentionUntil: now.Add(90 * 24 * time.Hour).UnixNano(),
 	}}}
 	model := PlacementModel{Backends: []PlacementBackend{{
-		PlacementBackend: vaultic.PlacementBackend{ID: "archive", Role: PlacementRoleArchival, FailureDomain: "cloud", Offsite: true, PricePerGBMonth: 1, MinRetentionSeconds: 90 * 24 * 3600},
-		Hash:             7,
+		PlacementBackend: vaultic.PlacementBackend{
+			ID:                  "archive",
+			Role:                PlacementRoleArchival,
+			FailureDomain:       "cloud",
+			Offsite:             true,
+			PricePerGBMonth:     1,
+			MinRetentionSeconds: 90 * 24 * 3600,
+		},
+		Hash: 7,
 	}}}
 
 	classification, err := classifyPacksWithPlacement(gcClassificationInput{
@@ -189,8 +200,16 @@ var _ GCStore = (*fakeGCStore)(nil)
 func TestScanReferencedDataBlobsCollectsAnyReferenceState(t *testing.T) {
 	store := newFakeGCStore()
 	current, unresolved := vaultic.NewRandomID(), vaultic.NewRandomID()
-	store.set(t, schema.ReverseInodeKey(schema.ID(current), 1, 2), schema.ReverseInodeRecord{LatestRevision: 1, State: schema.ReferenceCurrent})
-	store.set(t, schema.ReverseManifestKey(schema.ID(unresolved), schema.ID(vaultic.NewRandomID())), schema.ReverseManifestRecord{State: schema.ReferenceUnresolved})
+	store.set(
+		t,
+		schema.ReverseInodeKey(schema.ID(current), 1, 2),
+		schema.ReverseInodeRecord{LatestRevision: 1, State: schema.ReferenceCurrent},
+	)
+	store.set(
+		t,
+		schema.ReverseManifestKey(schema.ID(unresolved), schema.ID(vaultic.NewRandomID())),
+		schema.ReverseManifestRecord{State: schema.ReferenceUnresolved},
+	)
 	referenced, err := scanReferencedDataBlobs(context.Background(), store)
 	if err != nil {
 		t.Fatal(err)
@@ -481,7 +500,8 @@ func TestPlanGCRepacksMixedPackAndDeletesWhollyUnreachablePack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packRecord.BlobCount != 1 || packRecord.PayloadSize == 0 || packRecord.PayloadSize+packRecord.HeaderSize != packRecord.PhysicalSize {
+	if packRecord.BlobCount != 1 || packRecord.PayloadSize == 0 ||
+		packRecord.PayloadSize+packRecord.HeaderSize != packRecord.PhysicalSize {
 		t.Fatalf("replacement pack record = %#v", packRecord)
 	}
 }
@@ -807,7 +827,11 @@ func TestPlanGCRetriesMultiplePendingPacksIndependently(t *testing.T) {
 		t.Fatalf("healthy pack catalog record survived: found=%t err=%v", found, err)
 	}
 	if _, found, err := store.Get(context.Background(), schema.PackKey(schema.ID(brokenPack))); err != nil || found {
-		t.Fatalf("broken pack catalog record = found=%t err=%v, want already gone from the out-of-band deletion", found, err)
+		t.Fatalf(
+			"broken pack catalog record = found=%t err=%v, want already gone from the out-of-band deletion",
+			found,
+			err,
+		)
 	}
 }
 
@@ -876,14 +900,24 @@ func TestPruneStaleLegacyIndexesRemovesCheckpointsReferencingDeletedPacks(t *tes
 	}
 
 	staleIndex := legacyindex.NewIndex()
-	staleIndex.StorePack(doomedPack, pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: doomedBlob, Type: vaultic.DataBlob}, Length: 6}})
-	staleIndex.StorePack(survivingPack, pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: survivingBlob, Type: vaultic.DataBlob}, Length: 5}})
+	staleIndex.StorePack(
+		doomedPack,
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: doomedBlob, Type: vaultic.DataBlob}, Length: 6}},
+	)
+	staleIndex.StorePack(
+		survivingPack,
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: survivingBlob, Type: vaultic.DataBlob}, Length: 5}},
+	)
 	staleIndex.Finalize()
 	staleIndexID, err := repo.SaveLegacyIndex(context.Background(), staleIndex)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.MarkIndexPublished(context.Background(), schema.ID(staleIndexID), []schema.ID{schema.ID(doomedPack), schema.ID(survivingPack)}); err != nil {
+	if _,
+		err := store.MarkIndexPublished(context.Background(),
+		schema.ID(staleIndexID),
+		[]schema.ID{schema.ID(doomedPack),
+			schema.ID(survivingPack)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -895,7 +929,10 @@ func TestPruneStaleLegacyIndexesRemovesCheckpointsReferencingDeletedPacks(t *tes
 	}
 
 	freshIndex := legacyindex.NewIndex()
-	freshIndex.StorePack(survivingPack, pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: survivingBlob, Type: vaultic.DataBlob}, Length: 5}})
+	freshIndex.StorePack(
+		survivingPack,
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: survivingBlob, Type: vaultic.DataBlob}, Length: 5}},
+	)
 	freshIndex.Finalize()
 	freshIndexID, err := repo.SaveLegacyIndex(context.Background(), freshIndex)
 	if err != nil {
@@ -915,10 +952,12 @@ func TestPruneStaleLegacyIndexesRemovesCheckpointsReferencingDeletedPacks(t *tes
 	if removed == 0 {
 		t.Fatalf("removed = %d, want at least 1", removed)
 	}
-	if _, found, err := store.Get(context.Background(), schema.ExportIndexCheckpointKey(schema.ID(staleIndexID))); err != nil || found {
+	if _, found, err := store.Get(context.Background(), schema.ExportIndexCheckpointKey(schema.ID(staleIndexID))); err != nil ||
+		found {
 		t.Fatalf("stale checkpoint survived: found=%t err=%v", found, err)
 	}
-	if _, found, err := store.Get(context.Background(), schema.ExportIndexCheckpointKey(schema.ID(freshIndexID))); err != nil || !found {
+	if _, found, err := store.Get(context.Background(), schema.ExportIndexCheckpointKey(schema.ID(freshIndexID))); err != nil ||
+		!found {
 		t.Fatalf("fresh checkpoint incorrectly removed: found=%t err=%v", found, err)
 	}
 	if _, err := repo.LoadUnpacked(context.Background(), vaultic.IndexFile, staleIndexID); err == nil {

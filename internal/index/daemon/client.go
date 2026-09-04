@@ -89,6 +89,11 @@ func DefaultSocket(repositoryID string) string {
 
 // Client is a validated connection to one vaulticdb endpoint.
 type Client struct {
+	KV
+	Txn
+	Role
+	Generation
+
 	conn       *grpc.ClientConn
 	rpc        vaulticdbv1.VaulticDBClient
 	process    *exec.Cmd
@@ -240,13 +245,16 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 }
 
 func validateEnsureOptions(options Options) error {
-	if options.EncryptionMode != "" && options.EncryptionMode != "off" && options.EncryptionMode != "required" && options.EncryptionMode != "initialize" {
+	if options.EncryptionMode != "" && options.EncryptionMode != "off" && options.EncryptionMode != "required" &&
+		options.EncryptionMode != "initialize" {
 		return fmt.Errorf("%w: unsupported metadata encryption mode %q", ErrUnavailable, options.EncryptionMode)
 	}
 	if options.RebuildInitialize && (options.BrokerSocket == "" || options.EncryptionMode != "required") {
 		return fmt.Errorf("%w: metadata rebuild initialization requires brokered required encryption", ErrUnavailable)
 	}
-	if (options.EncryptionMode == "required" || options.EncryptionMode == "initialize") && options.PassphraseFile == "" && options.BrokerSocket == "" {
+	if (options.EncryptionMode == "required" || options.EncryptionMode == "initialize") &&
+		options.PassphraseFile == "" &&
+		options.BrokerSocket == "" {
 		return fmt.Errorf("%w: metadata recovery passphrase file is required", ErrUnavailable)
 	}
 	if options.BrokerSocket != "" && options.BrokerManifest == "" {
@@ -261,7 +269,8 @@ func validateEnsureOptions(options Options) error {
 	if options.ObjectStore == "s3" && options.S3Bucket == "" {
 		return fmt.Errorf("%w: S3 bucket is not configured", ErrUnavailable)
 	}
-	if options.ObjectStore != "" && options.ObjectStore != "local" && options.ObjectStore != "memory" && options.ObjectStore != "s3" {
+	if options.ObjectStore != "" && options.ObjectStore != "local" && options.ObjectStore != "memory" &&
+		options.ObjectStore != "s3" {
 		return fmt.Errorf("%w: unsupported object store %q", ErrUnavailable, options.ObjectStore)
 	}
 	for _, network := range options.TCPAllowlist {
@@ -295,7 +304,11 @@ func connectExistingDaemon(ctx context.Context, options Options) (*Client, error
 	cancelProbe()
 	if connectErr == nil {
 		if options.RebuildInitialize {
-			vaulticerrors.LogCleanup("close existing vaulticdb client", func() error { return client.Close(ctx) }, log.Printf)
+			vaulticerrors.LogCleanup(
+				"close existing vaulticdb client",
+				func() error { return client.Close(ctx) },
+				log.Printf,
+			)
 			return nil, fmt.Errorf("%w: metadata rebuild initialization refuses an existing daemon", ErrUnavailable)
 		}
 		return client, nil
@@ -346,7 +359,10 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		cmd.Env = append(cmd.Env, "VAULTICDB_ENCRYPTION_RECOVERY_ACK=true")
 	}
 	if options.BrokerLease > 0 {
-		cmd.Env = append(cmd.Env, "VAULTICDB_BROKER_LEASE_SECONDS="+strconv.FormatUint(uint64(options.BrokerLease/time.Second), 10))
+		cmd.Env = append(
+			cmd.Env,
+			"VAULTICDB_BROKER_LEASE_SECONDS="+strconv.FormatUint(uint64(options.BrokerLease/time.Second), 10),
+		)
 	}
 	if options.RebuildInitialize {
 		cmd.Env = append(cmd.Env, "VAULTICDB_METADATA_REBUILD_INITIALIZE=true")
@@ -491,11 +507,23 @@ func cleanupOwnedArtifacts(options Options, processID int) {
 	if !daemonOwnsProcess(base, processID) {
 		return
 	}
-	vaulticerrors.LogCleanup("remove vaulticdb PID file", func() error { return os.Remove(metadataPath(base, ".pid")) }, log.Printf)
-	vaulticerrors.LogCleanup("remove vaulticdb capability file", func() error { return os.Remove(metadataPath(base, ".cap")) }, log.Printf)
+	vaulticerrors.LogCleanup(
+		"remove vaulticdb PID file",
+		func() error { return os.Remove(metadataPath(base, ".pid")) },
+		log.Printf,
+	)
+	vaulticerrors.LogCleanup(
+		"remove vaulticdb capability file",
+		func() error { return os.Remove(metadataPath(base, ".cap")) },
+		log.Printf,
+	)
 	if options.TCPAddress == "" {
 		if info, err := os.Lstat(options.Socket); err == nil && info.Mode()&os.ModeSocket != 0 {
-			vaulticerrors.LogCleanup("remove vaulticdb socket", func() error { return os.Remove(options.Socket) }, log.Printf)
+			vaulticerrors.LogCleanup(
+				"remove vaulticdb socket",
+				func() error { return os.Remove(options.Socket) },
+				log.Printf,
+			)
 		}
 	}
 }
@@ -529,6 +557,7 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{conn: conn, rpc: vaulticdbv1.NewVaulticDBClient(conn), options: options}
+	client.initializeSubclients()
 	if options.AuthToken != "" {
 		client.rpc = &authenticatedClient{VaulticDBClient: client.rpc, token: options.AuthToken}
 	}
@@ -568,47 +597,91 @@ type authenticatedClient struct {
 	token string
 }
 
-func (c *authenticatedClient) Health(ctx context.Context, in *vaulticdbv1.HealthRequest, opts ...grpc.CallOption) (*vaulticdbv1.HealthResponse, error) {
+func (c *authenticatedClient) Health(
+	ctx context.Context,
+	in *vaulticdbv1.HealthRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.HealthResponse, error) {
 	return c.VaulticDBClient.Health(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Capabilities(ctx context.Context, in *vaulticdbv1.CapabilitiesRequest, opts ...grpc.CallOption) (*vaulticdbv1.CapabilitiesResponse, error) {
+func (c *authenticatedClient) Capabilities(
+	ctx context.Context,
+	in *vaulticdbv1.CapabilitiesRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.CapabilitiesResponse, error) {
 	return c.VaulticDBClient.Capabilities(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Drain(ctx context.Context, in *vaulticdbv1.Empty, opts ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+func (c *authenticatedClient) Drain(
+	ctx context.Context,
+	in *vaulticdbv1.Empty,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.Empty, error) {
 	return c.VaulticDBClient.Drain(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Shutdown(ctx context.Context, in *vaulticdbv1.Empty, opts ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+func (c *authenticatedClient) Shutdown(
+	ctx context.Context,
+	in *vaulticdbv1.Empty,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.Empty, error) {
 	return c.VaulticDBClient.Shutdown(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Get(ctx context.Context, in *vaulticdbv1.GetRequest, opts ...grpc.CallOption) (*vaulticdbv1.GetResponse, error) {
+func (c *authenticatedClient) Get(
+	ctx context.Context,
+	in *vaulticdbv1.GetRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.GetResponse, error) {
 	return c.VaulticDBClient.Get(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) MultiGet(ctx context.Context, in *vaulticdbv1.MultiGetRequest, opts ...grpc.CallOption) (*vaulticdbv1.MultiGetResponse, error) {
+func (c *authenticatedClient) MultiGet(
+	ctx context.Context,
+	in *vaulticdbv1.MultiGetRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.MultiGetResponse, error) {
 	return c.VaulticDBClient.MultiGet(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Scan(ctx context.Context, in *vaulticdbv1.ScanRequest, opts ...grpc.CallOption) (*vaulticdbv1.ScanResponse, error) {
+func (c *authenticatedClient) Scan(
+	ctx context.Context,
+	in *vaulticdbv1.ScanRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.ScanResponse, error) {
 	return c.VaulticDBClient.Scan(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) WriteBatch(ctx context.Context, in *vaulticdbv1.WriteBatchRequest, opts ...grpc.CallOption) (*vaulticdbv1.WriteBatchResponse, error) {
+func (c *authenticatedClient) WriteBatch(
+	ctx context.Context,
+	in *vaulticdbv1.WriteBatchRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.WriteBatchResponse, error) {
 	return c.VaulticDBClient.WriteBatch(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Begin(ctx context.Context, in *vaulticdbv1.Empty, opts ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+func (c *authenticatedClient) Begin(
+	ctx context.Context,
+	in *vaulticdbv1.Empty,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.BeginResponse, error) {
 	return c.VaulticDBClient.Begin(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Commit(ctx context.Context, in *vaulticdbv1.TransactionRequest, opts ...grpc.CallOption) (*vaulticdbv1.CommitResponse, error) {
+func (c *authenticatedClient) Commit(
+	ctx context.Context,
+	in *vaulticdbv1.TransactionRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.CommitResponse, error) {
 	return c.VaulticDBClient.Commit(withAuth(ctx, c.token), in, opts...)
 }
 
-func (c *authenticatedClient) Rollback(ctx context.Context, in *vaulticdbv1.TransactionRequest, opts ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+func (c *authenticatedClient) Rollback(
+	ctx context.Context,
+	in *vaulticdbv1.TransactionRequest,
+	opts ...grpc.CallOption,
+) (*vaulticdbv1.Empty, error) {
 	return c.VaulticDBClient.Rollback(withAuth(ctx, c.token), in, opts...)
 }
 
@@ -661,27 +734,48 @@ func unixDialer(socket string) func(context.Context, string) (net.Conn, error) {
 }
 
 func (c *Client) validate(ctx context.Context) error {
-	health, err := c.rpc.Health(ctx, &vaulticdbv1.HealthRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	health, err := c.rpc.Health(
+		ctx,
+		&vaulticdbv1.HealthRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+	)
 	if err != nil {
 		return err
 	}
-	if !health.GetReady() || health.GetProtocolVersion() != ProtocolVersion || health.GetSchemaVersion() != SchemaVersion {
-		return fmt.Errorf("incompatible daemon: ready=%t protocol=%q schema=%q", health.GetReady(), health.GetProtocolVersion(), health.GetSchemaVersion())
+	if !health.GetReady() || health.GetProtocolVersion() != ProtocolVersion ||
+		health.GetSchemaVersion() != SchemaVersion {
+		return fmt.Errorf(
+			"incompatible daemon: ready=%t protocol=%q schema=%q",
+			health.GetReady(),
+			health.GetProtocolVersion(),
+			health.GetSchemaVersion(),
+		)
 	}
 	if health.GetRepositoryId() != "" && health.GetRepositoryId() != c.options.RepositoryID {
-		return fmt.Errorf("daemon repository identity %q does not match %q", health.GetRepositoryId(), c.options.RepositoryID)
+		return fmt.Errorf(
+			"daemon repository identity %q does not match %q",
+			health.GetRepositoryId(),
+			c.options.RepositoryID,
+		)
 	}
-	capabilities, err := c.rpc.Capabilities(ctx, &vaulticdbv1.CapabilitiesRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	capabilities, err := c.rpc.Capabilities(
+		ctx,
+		&vaulticdbv1.CapabilitiesRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+	)
 	if err != nil {
 		return err
 	}
 	if capabilities.GetProtocolVersion() != ProtocolVersion || capabilities.GetSchemaVersion() != SchemaVersion {
-		return fmt.Errorf("incompatible daemon capabilities: protocol=%q schema=%q", capabilities.GetProtocolVersion(), capabilities.GetSchemaVersion())
+		return fmt.Errorf(
+			"incompatible daemon capabilities: protocol=%q schema=%q",
+			capabilities.GetProtocolVersion(),
+			capabilities.GetSchemaVersion(),
+		)
 	}
 	if capabilities.GetTcpEnabled() != (c.options.TCPAddress != "") {
 		return fmt.Errorf("daemon transport does not match the requested endpoint")
 	}
-	if capabilities.GetMaxBatchItems() == 0 || capabilities.GetMaxMessageBytes() == 0 || capabilities.GetMaxPageItems() == 0 {
+	if capabilities.GetMaxBatchItems() == 0 || capabilities.GetMaxMessageBytes() == 0 ||
+		capabilities.GetMaxPageItems() == 0 {
 		return fmt.Errorf("daemon advertised invalid storage limits")
 	}
 	c.limits = Limits{
@@ -708,7 +802,22 @@ func (c *Client) auditEncryptionUnlock(ctx context.Context) {
 	if c.encryption.RecoveryUnlock {
 		severity = observability.Warning
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: severity, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "metadata key slot unlocked", Fields: map[string]any{"repository_id": c.options.RepositoryID, "slot_id": c.encryption.UnlockSlot, "dek_version": c.encryption.ActiveDEKVersion, "envelope_generation": c.encryption.EnvelopeGeneration, "recovery": c.encryption.RecoveryUnlock}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  severity,
+			Category:  observability.CategoryAuth,
+			Component: "vaulticdb",
+			Message:   "metadata key slot unlocked",
+			Fields: map[string]any{
+				"repository_id":       c.options.RepositoryID,
+				"slot_id":             c.encryption.UnlockSlot,
+				"dek_version":         c.encryption.ActiveDEKVersion,
+				"envelope_generation": c.encryption.EnvelopeGeneration,
+				"recovery":            c.encryption.RecoveryUnlock,
+			},
+		},
+	)
 }
 
 func (c *Client) RPC() vaulticdbv1.VaulticDBClient { return c.rpc }
@@ -719,71 +828,148 @@ func (c *Client) Limits() Limits { return c.limits }
 // Encryption returns the daemon's validated metadata-encryption state.
 func (c *Client) Encryption() EncryptionInfo { return c.encryption }
 
-// WriterStatus returns the daemon's current writer ownership and quiescence state.
-func (c *Client) WriterStatus(ctx context.Context) (WriterStatus, error) {
+func (c *Client) writerStatus(ctx context.Context) (WriterStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.WriterStatus(ctx, &vaulticdbv1.WriterStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	response, err := c.rpc.WriterStatus(
+		ctx,
+		&vaulticdbv1.WriterStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+	)
 	if err != nil {
 		return WriterStatus{}, err
 	}
 	return writerStatus(response), nil
 }
 
-func (c *Client) GenerationStatus(ctx context.Context) (GenerationStatus, error) {
+func (c *Client) generationStatus(ctx context.Context) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.GenerationStatus(ctx, &vaulticdbv1.GenerationStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
+	response, err := c.rpc.GenerationStatus(
+		ctx,
+		&vaulticdbv1.GenerationStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+	)
 	if err != nil {
 		return GenerationStatus{}, err
 	}
 	return generationStatus(response), nil
 }
 
-func (c *Client) ActivateGeneration(ctx context.Context, expected, candidate uint64, namespace, reportSHA256 string, observationWindow time.Duration) (GenerationStatus, error) {
+func (c *Client) activateGeneration(
+	ctx context.Context,
+	expected, candidate uint64,
+	namespace, reportSHA256 string,
+	observationWindow time.Duration,
+) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.ActivateGeneration(ctx, &vaulticdbv1.ActivateGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedActiveGeneration: expected, CandidateGeneration: candidate, CandidateNamespace: namespace, ReportSha256: reportSHA256, ObservationWindowMs: uint64(observationWindow.Milliseconds()), Approve: true})
+	response, err := c.rpc.ActivateGeneration(
+		ctx,
+		&vaulticdbv1.ActivateGenerationRequest{
+			RepositoryId:             c.options.RepositoryID,
+			Context:                  requestContext(ctx),
+			ExpectedActiveGeneration: expected,
+			CandidateGeneration:      candidate,
+			CandidateNamespace:       namespace,
+			ReportSha256:             reportSHA256,
+			ObservationWindowMs:      uint64(observationWindow.Milliseconds()),
+			Approve:                  true,
+		},
+	)
 	if err != nil {
 		return GenerationStatus{}, err
 	}
 	return generationStatus(response), nil
 }
 
-func (c *Client) QuarantineGeneration(ctx context.Context, expectedGeneration uint64, diagnosticSHA256 string) (GenerationStatus, error) {
+func (c *Client) quarantineGeneration(
+	ctx context.Context,
+	expectedGeneration uint64,
+	diagnosticSHA256 string,
+) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.QuarantineGeneration(ctx, &vaulticdbv1.QuarantineGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedActiveGeneration: expectedGeneration, DiagnosticSha256: diagnosticSHA256, HealingRequired: true})
+	response, err := c.rpc.QuarantineGeneration(
+		ctx,
+		&vaulticdbv1.QuarantineGenerationRequest{
+			RepositoryId:             c.options.RepositoryID,
+			Context:                  requestContext(ctx),
+			ExpectedActiveGeneration: expectedGeneration,
+			DiagnosticSha256:         diagnosticSHA256,
+			HealingRequired:          true,
+		},
+	)
 	if err != nil {
 		return GenerationStatus{}, err
 	}
 	return generationStatus(response), nil
 }
 
-func (c *Client) VerifyGeneration(ctx context.Context, expectedDecision uint64, reportSHA256 string) (GenerationStatus, error) {
+func (c *Client) verifyGeneration(
+	ctx context.Context,
+	expectedDecision uint64,
+	reportSHA256 string,
+) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.VerifyGeneration(ctx, &vaulticdbv1.VerifyGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedDecision: expectedDecision, ReportSha256: reportSHA256, PostActivationCheckClean: true})
+	response, err := c.rpc.VerifyGeneration(
+		ctx,
+		&vaulticdbv1.VerifyGenerationRequest{
+			RepositoryId:             c.options.RepositoryID,
+			Context:                  requestContext(ctx),
+			ExpectedDecision:         expectedDecision,
+			ReportSha256:             reportSHA256,
+			PostActivationCheckClean: true,
+		},
+	)
 	if err != nil {
 		return GenerationStatus{}, err
 	}
 	return generationStatus(response), nil
 }
 
-func (c *Client) RollbackGeneration(ctx context.Context, expectedDecision uint64, reportSHA256 string, observationWindow time.Duration) (GenerationStatus, error) {
+func (c *Client) rollbackGeneration(
+	ctx context.Context,
+	expectedDecision uint64,
+	reportSHA256 string,
+	observationWindow time.Duration,
+) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.RollbackGeneration(ctx, &vaulticdbv1.RollbackGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedDecision: expectedDecision, ReportSha256: reportSHA256, ObservationWindowMs: uint64(observationWindow.Milliseconds()), Acknowledge: true})
+	response, err := c.rpc.RollbackGeneration(
+		ctx,
+		&vaulticdbv1.RollbackGenerationRequest{
+			RepositoryId:        c.options.RepositoryID,
+			Context:             requestContext(ctx),
+			ExpectedDecision:    expectedDecision,
+			ReportSha256:        reportSHA256,
+			ObservationWindowMs: uint64(observationWindow.Milliseconds()),
+			Acknowledge:         true,
+		},
+	)
 	if err != nil {
 		return GenerationStatus{}, err
 	}
 	return generationStatus(response), nil
 }
 
-func (c *Client) RetireGeneration(ctx context.Context, expectedDecision, generation uint64, reportSHA256 string) (GenerationStatus, error) {
+func (c *Client) retireGeneration(
+	ctx context.Context,
+	expectedDecision, generation uint64,
+	reportSHA256 string,
+) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.RetireGeneration(ctx, &vaulticdbv1.RetireGenerationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), ExpectedDecision: expectedDecision, Generation: generation, ReportSha256: reportSHA256, Acknowledge: true})
+	response, err := c.rpc.RetireGeneration(
+		ctx,
+		&vaulticdbv1.RetireGenerationRequest{
+			RepositoryId:     c.options.RepositoryID,
+			Context:          requestContext(ctx),
+			ExpectedDecision: expectedDecision,
+			Generation:       generation,
+			ReportSha256:     reportSHA256,
+			Acknowledge:      true,
+		},
+	)
 	if err != nil {
 		return GenerationStatus{}, err
 	}
@@ -791,11 +977,23 @@ func (c *Client) RetireGeneration(ctx context.Context, expectedDecision, generat
 }
 
 func generationStatus(response *vaulticdbv1.GenerationStatusResponse) GenerationStatus {
-	return GenerationStatus{RepositoryID: response.GetRepositoryId(), Decision: response.GetDecision(), ActiveGeneration: response.GetActiveGeneration(), Namespace: response.GetNamespace(), PreviousGeneration: response.GetPreviousGeneration(), PreviousNamespace: response.GetPreviousNamespace(), State: response.GetState(), ReportSHA256: response.GetReportSha256(), DecidedAtUnixMS: response.GetDecidedAtUnixMs(), ObservationUntilUnixMS: response.GetObservationUntilUnixMs(), RetiredGeneration: response.GetRetiredGeneration(), DestructiveMaintenanceAllowed: response.GetDestructiveMaintenanceAllowed()}
+	return GenerationStatus{
+		RepositoryID:                  response.GetRepositoryId(),
+		Decision:                      response.GetDecision(),
+		ActiveGeneration:              response.GetActiveGeneration(),
+		Namespace:                     response.GetNamespace(),
+		PreviousGeneration:            response.GetPreviousGeneration(),
+		PreviousNamespace:             response.GetPreviousNamespace(),
+		State:                         response.GetState(),
+		ReportSHA256:                  response.GetReportSha256(),
+		DecidedAtUnixMS:               response.GetDecidedAtUnixMs(),
+		ObservationUntilUnixMS:        response.GetObservationUntilUnixMs(),
+		RetiredGeneration:             response.GetRetiredGeneration(),
+		DestructiveMaintenanceAllowed: response.GetDestructiveMaintenanceAllowed(),
+	}
 }
 
-// IdempotencyCommitted reports whether a durable transaction commit exists for key.
-func (c *Client) IdempotencyCommitted(ctx context.Context, key string) (bool, error) {
+func (c *Client) idempotencyCommitted(ctx context.Context, key string) (bool, error) {
 	if key == "" {
 		return false, fmt.Errorf("idempotency key is required")
 	}
@@ -813,33 +1011,54 @@ func (c *Client) IdempotencyCommitted(ctx context.Context, key string) (bool, er
 	return true, nil
 }
 
-// DemoteWriter quiesces and relinquishes the daemon's writable SlateDB handle.
-func (c *Client) DemoteWriter(ctx context.Context, reason string, force bool, timeout time.Duration) (WriterStatus, error) {
+func (c *Client) demoteWriter(
+	ctx context.Context,
+	reason string,
+	force bool,
+	timeout time.Duration,
+) (WriterStatus, error) {
 	if timeout <= 0 || timeout > 5*time.Minute {
 		return WriterStatus{}, fmt.Errorf("writer demotion timeout must be between 1ns and 5m")
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout+defaultRPCDeadline)
 	defer cancel()
-	response, err := c.rpc.DemoteWriter(ctx, &vaulticdbv1.DemoteWriterRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Force: force, TimeoutMs: uint64(timeout.Milliseconds()), Reason: reason})
+	response, err := c.rpc.DemoteWriter(
+		ctx,
+		&vaulticdbv1.DemoteWriterRequest{
+			RepositoryId: c.options.RepositoryID,
+			Context:      requestContext(ctx),
+			Force:        force,
+			TimeoutMs:    uint64(timeout.Milliseconds()),
+			Reason:       reason,
+		},
+	)
 	if err != nil {
 		return WriterStatus{}, err
 	}
 	return writerStatus(response), nil
 }
 
-// PromoteWriter requests a freshly fenced writable SlateDB handle.
-func (c *Client) PromoteWriter(ctx context.Context, reason string) (WriterStatus, error) {
-	return c.PromoteWriterWithTakeover(ctx, reason, false, 0)
-}
-
-// PromoteWriterWithTakeover conditionally replaces the exact crashed-writer epoch acknowledged by an operator.
-func (c *Client) PromoteWriterWithTakeover(ctx context.Context, reason string, forceTakeover bool, expectedActiveEpoch uint64) (WriterStatus, error) {
+func (c *Client) promoteWriterWithTakeover(
+	ctx context.Context,
+	reason string,
+	forceTakeover bool,
+	expectedActiveEpoch uint64,
+) (WriterStatus, error) {
 	if forceTakeover && expectedActiveEpoch == 0 {
 		return WriterStatus{}, fmt.Errorf("writer takeover requires the expected active epoch")
 	}
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.PromoteWriter(ctx, &vaulticdbv1.PromoteWriterRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Reason: reason, ForceTakeover: forceTakeover, ExpectedActiveEpoch: expectedActiveEpoch})
+	response, err := c.rpc.PromoteWriter(
+		ctx,
+		&vaulticdbv1.PromoteWriterRequest{
+			RepositoryId:        c.options.RepositoryID,
+			Context:             requestContext(ctx),
+			Reason:              reason,
+			ForceTakeover:       forceTakeover,
+			ExpectedActiveEpoch: expectedActiveEpoch,
+		},
+	)
 	if err != nil {
 		return WriterStatus{}, err
 	}
@@ -850,8 +1069,16 @@ func writerStatus(response *vaulticdbv1.WriterStatusResponse) WriterStatus {
 	role := strings.ToLower(strings.TrimPrefix(response.GetRole().String(), "WRITER_ROLE_"))
 	role = strings.ReplaceAll(role, "_", "-")
 	return WriterStatus{
-		InstanceID: response.GetInstanceId(), Role: role, CurrentEpoch: response.GetCurrentEpoch(), ObservedEpoch: response.GetObservedEpoch(),
-		TransitionReason: response.GetTransitionReason(), TransitionUnixMS: response.GetTransitionUnixMs(), ActiveWriteIntents: response.GetActiveWriteIntents(),
-		ActiveTransactions: response.GetActiveTransactions(), LastDurableSequence: response.GetLastDurableSequence(), IdleDeadlineUnixMS: response.GetIdleDeadlineUnixMs(), PromotionSafe: response.GetPromotionSafe(),
+		InstanceID:          response.GetInstanceId(),
+		Role:                role,
+		CurrentEpoch:        response.GetCurrentEpoch(),
+		ObservedEpoch:       response.GetObservedEpoch(),
+		TransitionReason:    response.GetTransitionReason(),
+		TransitionUnixMS:    response.GetTransitionUnixMs(),
+		ActiveWriteIntents:  response.GetActiveWriteIntents(),
+		ActiveTransactions:  response.GetActiveTransactions(),
+		LastDurableSequence: response.GetLastDurableSequence(),
+		IdleDeadlineUnixMS:  response.GetIdleDeadlineUnixMs(),
+		PromotionSafe:       response.GetPromotionSafe(),
 	}
 }

@@ -231,22 +231,6 @@ async fn release_writer_claim(store: &dyn ObjectStore, epoch: u64) -> Result<()>
         .context("release active writer claim")
 }
 
-fn transaction_idle_timeout_ms() -> Result<u64> {
-    let seconds = match env::var("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS") {
-        Ok(value) => value
-            .parse::<u64>()
-            .context("parse VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS")?,
-        Err(env::VarError::NotPresent) => DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS,
-        Err(error) => return Err(error.into()),
-    };
-    if seconds < 10 {
-        bail!("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS must be at least 10")
-    }
-    seconds
-        .checked_mul(1_000)
-        .context("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS is too large")
-}
-
 fn unix_time_ms() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

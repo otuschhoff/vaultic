@@ -44,11 +44,25 @@ var lockerInst = &locker{
 
 // LockRepo acquires a repository lock. The returned context is cancelled when
 // Unlock is called; cancelling the original context stops lock refresh.
-func LockRepo(ctx context.Context, repo *Repository, exclusive bool, retryLock time.Duration, printRetry func(msg string), logger func(format string, args ...any)) (func(), context.Context, error) {
+func LockRepo(
+	ctx context.Context,
+	repo *Repository,
+	exclusive bool,
+	retryLock time.Duration,
+	printRetry func(msg string),
+	logger func(format string, args ...any),
+) (func(), context.Context, error) {
 	return lockerInst.Lock(ctx, repo, exclusive, retryLock, printRetry, logger)
 }
 
-func (l *locker) Lock(ctx context.Context, r *Repository, exclusive bool, retryLock time.Duration, printRetry func(msg string), logger func(format string, args ...any)) (func(), context.Context, error) {
+func (l *locker) Lock(
+	ctx context.Context,
+	r *Repository,
+	exclusive bool,
+	retryLock time.Duration,
+	printRetry func(msg string),
+	logger func(format string, args ...any),
+) (func(), context.Context, error) {
 	var lock *lockHandle
 	var err error
 
@@ -88,7 +102,12 @@ retryLoop:
 		}
 	}
 	if isInvalidLock(err) {
-		return nil, ctx, errors.Fatalf("%v\n\nthe `unlock --remove-all` command can be used to remove invalid locks. Make sure that no other vaultic process is accessing the repository when running the command", err)
+		return nil, ctx, errors.Fatalf(
+			("%v\n\nthe `unlock --remove-all` command can be used to remove invalid locks. " +
+				"Make sure that no other vaultic process is accessing the repository when " +
+				"running the command"),
+			err,
+		)
 	}
 	if err != nil {
 		return nil, ctx, fmt.Errorf("unable to create lock in backend: %w", err)
@@ -121,7 +140,14 @@ type refreshLockRequest struct {
 	result chan bool
 }
 
-func (l *locker) refreshLocks(ctx context.Context, backend backend.Backend, unlocker *unlocker, refreshed chan<- struct{}, forceRefresh <-chan refreshLockRequest, logger func(format string, args ...any)) {
+func (l *locker) refreshLocks(
+	ctx context.Context,
+	backend backend.Backend,
+	unlocker *unlocker,
+	refreshed chan<- struct{},
+	forceRefresh <-chan refreshLockRequest,
+	logger func(format string, args ...any),
+) {
 	debug.Log("start")
 	lock := unlocker.lock
 	ticker := time.NewTicker(l.refreshInterval)
@@ -185,7 +211,13 @@ func (l *locker) refreshLocks(ctx context.Context, backend backend.Backend, unlo
 	}
 }
 
-func (l *locker) monitorLockRefresh(ctx context.Context, unlocker *unlocker, refreshed <-chan struct{}, forceRefresh chan<- refreshLockRequest, logger func(format string, args ...any)) {
+func (l *locker) monitorLockRefresh(
+	ctx context.Context,
+	unlocker *unlocker,
+	refreshed <-chan struct{},
+	forceRefresh chan<- refreshLockRequest,
+	logger func(format string, args ...any),
+) {
 	// time.Now() might use a monotonic timer which is paused during standby
 	// convert to unix time to ensure we compare real time values
 	lastRefresh := time.Now().UnixNano()
@@ -218,7 +250,8 @@ func (l *locker) monitorLockRefresh(ctx context.Context, unlocker *unlocker, ref
 			}
 			lastRefresh = time.Now().UnixNano()
 		case <-ticker.C:
-			if time.Now().UnixNano()-lastRefresh < l.refreshabilityTimeout.Nanoseconds() || refreshStaleLockResult != nil {
+			if time.Now().UnixNano()-lastRefresh < l.refreshabilityTimeout.Nanoseconds() ||
+				refreshStaleLockResult != nil {
 				continue
 			}
 
@@ -247,7 +280,13 @@ func (l *locker) monitorLockRefresh(ctx context.Context, unlocker *unlocker, ref
 	}
 }
 
-func tryRefreshStaleLock(ctx context.Context, be backend.Backend, lock *lockHandle, cancel context.CancelFunc, logger func(format string, args ...any)) bool {
+func tryRefreshStaleLock(
+	ctx context.Context,
+	be backend.Backend,
+	lock *lockHandle,
+	cancel context.CancelFunc,
+	logger func(format string, args ...any),
+) bool {
 	freeze := backend.AsBackend[backend.FreezeBackend](be)
 	if freeze != nil {
 		debug.Log("freezing backend")
@@ -292,12 +331,18 @@ func RemoveStaleLocks(ctx context.Context, repo *Repository) (uint, error) {
 // RemoveAllLocks removes all locks forcefully.
 func RemoveAllLocks(ctx context.Context, repo *Repository) (uint, error) {
 	var processed uint32
-	err := vaultic.ParallelList(ctx, repo, vaultic.LockFile, repo.Connections(), func(ctx context.Context, id vaultic.ID, _ int64) error {
-		err := (&internalRepository{repo}).RemoveUnpacked(ctx, vaultic.LockFile, id)
-		if err == nil {
-			atomic.AddUint32(&processed, 1)
-		}
-		return err
-	})
+	err := vaultic.ParallelList(
+		ctx,
+		repo,
+		vaultic.LockFile,
+		repo.Connections(),
+		func(ctx context.Context, id vaultic.ID, _ int64) error {
+			err := (&internalRepository{repo}).RemoveUnpacked(ctx, vaultic.LockFile, id)
+			if err == nil {
+				atomic.AddUint32(&processed, 1)
+			}
+			return err
+		},
+	)
 	return uint(processed), err
 }

@@ -374,12 +374,26 @@ func checkPackInner(ctx context.Context, r *Repository, id vaultic.ID, blobs pac
 	return checkPackInnerBackend(ctx, r, r.be, id, blobs, size, bufRd, dec)
 }
 
-func checkPackInnerBackend(ctx context.Context, r *Repository, source backend.Backend, id vaultic.ID, blobs pack.Blobs, size int64, bufRd *bufio.Reader, dec *zstd.Decoder) error {
+type partialReadError struct {
+	error
+}
 
-	type partialReadError struct {
-		error
-	}
+type streamedPack struct {
+	hash       vaultic.ID
+	header     []byte
+	blobErrors []error
+}
 
+func checkPackInnerBackend(
+	ctx context.Context,
+	r *Repository,
+	source backend.Backend,
+	id vaultic.ID,
+	blobs pack.Blobs,
+	size int64,
+	bufRd *bufio.Reader,
+	dec *zstd.Decoder,
+) error {
 	debug.Log("checking pack %v", id.String())
 
 	if len(blobs) == 0 {
@@ -405,60 +419,8 @@ func checkPackInnerBackend(ctx context.Context, r *Repository, source backend.Ba
 		errs = append(errs, errors.New("index for pack contains gaps / overlapping blobs"))
 	}
 
-	// calculate hash on-the-fly while reading the pack and capture pack header
-	var hash vaultic.ID
-	var hdrBuf []byte
-	// must use a separate slice from `errs` here as we're only interested in the last retry
-	var blobErrors []error
-	h := backend.Handle{Type: backend.PackFile, Name: id.String()}
-	err := source.Load(ctx, h, int(size), 0, func(rd io.Reader) error {
-		hrd := hashing.NewReader(rd, sha256.New())
-		bufRd.Reset(hrd)
-		// reset blob errors for each retry
-		blobErrors = nil
-
-		it := newPackBlobIterator(id, newBufReader(bufRd), 0, blobs, r.Key(), dec)
-		for {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			val, err := it.Next()
-			if err == errPackEOF {
-				break
-			} else if err != nil {
-				return &partialReadError{err}
-			}
-			debug.Log("  check blob %v: %v", val.Handle.ID, val.Handle)
-			if val.Err != nil {
-				debug.Log("  error verifying blob %v: %v", val.Handle.ID, val.Err)
-				blobErrors = append(blobErrors, fmt.Errorf("blob %v: %w", val.Handle.ID, val.Err))
-			}
-		}
-
-		// skip enough bytes until we reach the possible header start
-		curPos := lastBlobEnd
-		minHdrStart := int(size) - pack.MaxHeaderSize
-		if minHdrStart > curPos {
-			_, err := bufRd.Discard(minHdrStart - curPos)
-			if err != nil {
-				return &partialReadError{err}
-			}
-			curPos += minHdrStart - curPos
-		}
-
-		// read remainder, which should be the pack header
-		var err error
-		hdrBuf = make([]byte, int(size-int64(curPos)))
-		_, err = io.ReadFull(bufRd, hdrBuf)
-		if err != nil {
-			return &partialReadError{err}
-		}
-
-		hash = vaultic.IDFromHash(hrd.Sum(nil))
-		return nil
-	})
-	errs = append(errs, blobErrors...)
+	streamed, err := streamPackContents(ctx, r, source, id, blobs, size, lastBlobEnd, bufRd, dec)
+	errs = append(errs, streamed.blobErrors...)
 	if err != nil {
 		var e *partialReadError
 		isPartialReadError := errors.As(err, &e)
@@ -472,12 +434,12 @@ func checkPackInnerBackend(ctx context.Context, r *Repository, source backend.Ba
 		// completely failed to download such that there's no point in repairing anything.
 		return fmt.Errorf("download error: %w", err)
 	}
-	if !hash.Equal(id) {
-		debug.Log("pack ID does not match, want %v, got %v", id, hash)
-		return &ErrPackData{PackID: id, errs: append(errs, errors.Errorf("unexpected pack id %v", hash))}
+	if !streamed.hash.Equal(id) {
+		debug.Log("pack ID does not match, want %v, got %v", id, streamed.hash)
+		return &ErrPackData{PackID: id, errs: append(errs, errors.Errorf("unexpected pack id %v", streamed.hash))}
 	}
 
-	blobs, hdrSize, err := pack.List(r.Key(), bytes.NewReader(hdrBuf), int64(len(hdrBuf)))
+	blobs, hdrSize, err := pack.List(r.Key(), bytes.NewReader(streamed.header), int64(len(streamed.header)))
 	if err != nil {
 		return &ErrPackData{PackID: id, errs: append(errs, err)}
 	}
@@ -511,6 +473,58 @@ func checkPackInnerBackend(ctx context.Context, r *Repository, source backend.Ba
 	}
 
 	return nil
+}
+
+func streamPackContents(
+	ctx context.Context,
+	repository *Repository,
+	source backend.Backend,
+	id vaultic.ID,
+	blobs pack.Blobs,
+	size int64,
+	lastBlobEnd int,
+	buffer *bufio.Reader,
+	decoder *zstd.Decoder,
+) (streamed streamedPack, err error) {
+	handle := backend.Handle{Type: backend.PackFile, Name: id.String()}
+	err = source.Load(ctx, handle, int(size), 0, func(reader io.Reader) error {
+		hashingReader := hashing.NewReader(reader, sha256.New())
+		buffer.Reset(hashingReader)
+		streamed.blobErrors = nil
+		iterator := newPackBlobIterator(id, newBufReader(buffer), 0, blobs, repository.Key(), decoder)
+		for {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			value, nextErr := iterator.Next()
+			if errors.Is(nextErr, errPackEOF) {
+				break
+			}
+			if nextErr != nil {
+				return &partialReadError{nextErr}
+			}
+			debug.Log("  check blob %v: %v", value.Handle.ID, value.Handle)
+			if value.Err != nil {
+				debug.Log("  error verifying blob %v: %v", value.Handle.ID, value.Err)
+				streamed.blobErrors = append(streamed.blobErrors, fmt.Errorf("blob %v: %w", value.Handle.ID, value.Err))
+			}
+		}
+		position := lastBlobEnd
+		minimumHeaderStart := int(size) - pack.MaxHeaderSize
+		if minimumHeaderStart > position {
+			if _, err := buffer.Discard(minimumHeaderStart - position); err != nil {
+				return &partialReadError{err}
+			}
+			position = minimumHeaderStart
+		}
+		streamed.header = make([]byte, int(size-int64(position)))
+		if _, err := io.ReadFull(buffer, streamed.header); err != nil {
+			return &partialReadError{err}
+		}
+		streamed.hash = vaultic.IDFromHash(hashingReader.Sum(nil))
+		return nil
+	})
+	return streamed, err
 }
 
 type bufReader struct {

@@ -189,7 +189,12 @@ func collectPacks(ctx context.Context, index *legacyindex.Index) []legacyindex.P
 	return packs
 }
 
-func buildPackImport(ctx context.Context, statter PackStatter, sourceIndex schema.ID, indexedPack legacyindex.PackBlobs) (daemon.LegacyPackImport, *schema.CrawlDebtRecord, error) {
+func buildPackImport(
+	ctx context.Context,
+	statter PackStatter,
+	sourceIndex schema.ID,
+	indexedPack legacyindex.PackBlobs,
+) (daemon.LegacyPackImport, *schema.CrawlDebtRecord, error) {
 	packID := schema.ID(indexedPack.PackID)
 	record := schema.PackRecord{Lifecycle: schema.PackImported, SourceIndexIDs: []schema.ID{sourceIndex}}
 	blobs := make(map[schema.ID]schema.BlobRecord)

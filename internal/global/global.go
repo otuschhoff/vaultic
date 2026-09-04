@@ -29,7 +29,13 @@ import (
 // create the hot part of a hot/cold repository (shared repository ID). If
 // masterKey is non-nil it is reused instead of generating a new one (shared
 // master key between hot and cold parts).
-func CreateRepositoryWithConfig(ctx context.Context, gopts Options, cfg vaultic.Config, masterKey *crypto.Key, printer vaultic.Printer) (*repository.Repository, error) {
+func CreateRepositoryWithConfig(
+	ctx context.Context,
+	gopts Options,
+	cfg vaultic.Config,
+	masterKey *crypto.Key,
+	printer vaultic.Printer,
+) (*repository.Repository, error) {
 	repo, err := readRepo(gopts)
 	if err != nil {
 		return nil, err

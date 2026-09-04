@@ -10,7 +10,10 @@ import (
 )
 
 func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase6-packs", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{Socket: testSocket(t), RepositoryID: "phase6-packs", DaemonPath: daemonBinary(t), DataDir: t.TempDir()},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,8 +21,23 @@ func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.
 	store := NewSchemaStore(client)
 	blobID, packOne, packTwo := daemonTestID(31), daemonTestID(32), daemonTestID(33)
 	for _, published := range []PublishedPack{
-		{PackID: packOne, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 10, BlobCount: 1, Lifecycle: schema.PackExportPending}, Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packOne, Length: 10, Type: schema.BlobData}}}}},
-		{PackID: packTwo, Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 10, BlobCount: 1, Lifecycle: schema.PackExportPending}, Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packTwo, Length: 10, Type: schema.BlobData}}}}},
+		{PackID: packOne,
+			Record: schema.PackRecord{Type: schema.PackData,
+				PayloadSize: 10,
+				BlobCount:   1,
+				Lifecycle:   schema.PackExportPending},
+			Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packOne,
+				Length: 10,
+				Type:   schema.BlobData}}}}},
+
+		{PackID: packTwo,
+			Record: schema.PackRecord{Type: schema.PackData,
+				PayloadSize: 10,
+				BlobCount:   1,
+				Lifecycle:   schema.PackExportPending},
+			Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packTwo,
+				Length: 10,
+				Type:   schema.BlobData}}}}},
 	} {
 		if err := store.PublishPack(context.Background(), published); err != nil {
 			t.Fatal(err)
@@ -44,7 +62,15 @@ func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.
 }
 
 func TestSchemaStoreTwoPhasePackDeletion(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase8-gc-delete", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{
+			Socket:       testSocket(t),
+			RepositoryID: "phase8-gc-delete",
+			DaemonPath:   daemonBinary(t),
+			DataDir:      t.TempDir(),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +173,15 @@ func TestSchemaStoreTwoPhasePackDeletion(t *testing.T) {
 }
 
 func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase6-snapshot", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{
+			Socket:       testSocket(t),
+			RepositoryID: "phase6-snapshot",
+			DaemonPath:   daemonBinary(t),
+			DataDir:      t.TempDir(),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +192,17 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootKey := schema.DirectoryRevisionKey(0, 0, revision)
-	rootValue := encodeSchemaRecord(t, schema.DirectoryRevision{Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, 2, 1)}}, SourcePath: "/", Known: schema.KnownPath, Freshness: schema.FreshnessVerified})
+	rootValue := encodeSchemaRecord(
+		t,
+		schema.DirectoryRevision{
+			Children: []schema.DirectoryChild{
+				{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, 2, 1)},
+			},
+			SourcePath: "/",
+			Known:      schema.KnownPath,
+			Freshness:  schema.FreshnessVerified,
+		},
+	)
 	if err := store.PublishRevision(context.Background(), schema.CurrentDirectoryKey(0, 0), rootKey, rootValue, revision); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +210,10 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	if err := store.MarkExportPending(context.Background(), snapshotID, rootKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PublishSnapshotScope(context.Background(), SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"time":"2026-08-29T12:34:56Z","tree":"test"}`)}); err != nil {
+	if err := store.PublishSnapshotScope(context.Background(),
+		SnapshotScope{SnapshotID: snapshotID,
+			RootKey:      rootKey,
+			OriginalJSON: []byte(("{\"time\":\"2026-08-29T12:34:56Z\",\"tree\":\"test\"}"))}); err != nil {
 		t.Fatal(err)
 	}
 	checkpointValue, found, err := store.Get(context.Background(), schema.ExportCheckpointKey(snapshotID))
@@ -174,13 +221,17 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 		t.Fatalf("checkpoint: found=%t err=%v", found, err)
 	}
 	checkpoint, err := schema.UnmarshalExportCheckpointRecord(checkpointValue)
-	if err != nil || checkpoint.State != schema.ExportComplete || checkpoint.CommitSequence == 0 || !bytes.Equal(checkpoint.RootKey, rootKey) {
+	if err != nil || checkpoint.State != schema.ExportComplete || checkpoint.CommitSequence == 0 ||
+		!bytes.Equal(checkpoint.RootKey, rootKey) {
 		t.Fatalf("checkpoint = %#v, err=%v", checkpoint, err)
 	}
 	if _, found, err := store.Get(context.Background(), schema.SnapshotKey(snapshotID)); err != nil || !found {
 		t.Fatalf("snapshot scope: found=%t err=%v", found, err)
 	}
-	commitValue, found, err := store.Get(context.Background(), schema.SnapshotCommitKey(checkpoint.CommitSequence, snapshotID))
+	commitValue, found, err := store.Get(
+		context.Background(),
+		schema.SnapshotCommitKey(checkpoint.CommitSequence, snapshotID),
+	)
 	if err != nil || !found {
 		t.Fatalf("snapshot commit index: found=%t err=%v", found, err)
 	}
@@ -194,14 +245,27 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 }
 
 func TestSchemaStoreSnapshotMembershipDeltasPublishAndForget(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase16-snapshot-membership", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{
+			Socket:       testSocket(t),
+			RepositoryID: "phase16-snapshot-membership",
+			DaemonPath:   daemonBinary(t),
+			DataDir:      t.TempDir(),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
 	ctx := context.Background()
-	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: time.Now().UnixNano(), ConfigJSON: "{}"}
+	metadata := schema.AnalyticsMetadataRecord{
+		Enabled:    true,
+		Generation: 1,
+		BuiltAt:    time.Now().UnixNano(),
+		ConfigJSON: "{}",
+	}
 	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeSchemaRecord(t, metadata), true); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +283,12 @@ func TestSchemaStoreSnapshotMembershipDeltasPublishAndForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootKey := schema.DirectoryRevisionKey(1, 1, rootRevision)
-	root := schema.DirectoryRevision{Known: schema.KnownPath, SourcePath: "/", Freshness: schema.FreshnessVerified, Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: inodeKey}}}
+	root := schema.DirectoryRevision{
+		Known:      schema.KnownPath,
+		SourcePath: "/",
+		Freshness:  schema.FreshnessVerified,
+		Children:   []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: inodeKey}},
+	}
 	if err := store.PublishRevision(ctx, schema.CurrentDirectoryKey(1, 1), rootKey, encodeSchemaRecord(t, root), rootRevision); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +296,10 @@ func TestSchemaStoreSnapshotMembershipDeltasPublishAndForget(t *testing.T) {
 	if err := store.MarkExportPending(ctx, snapshotID, rootKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PublishSnapshotScope(ctx, SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"time":"2026-08-30T12:00:00Z"}`)}); err != nil {
+	if err := store.PublishSnapshotScope(ctx,
+		SnapshotScope{SnapshotID: snapshotID,
+			RootKey:      rootKey,
+			OriginalJSON: []byte(("{\"time\":\"2026-08-30T12:00:00Z\"}"))}); err != nil {
 		t.Fatal(err)
 	}
 	snapshotValue, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID))
@@ -243,7 +315,9 @@ func TestSchemaStoreSnapshotMembershipDeltasPublishAndForget(t *testing.T) {
 		t.Fatalf("snapshot publish delta: found=%t err=%v", found, err)
 	}
 	delta, err := schema.UnmarshalAnalyticsDeltaRecord(deltaValue)
-	if err != nil || delta.Kind != schema.AnalyticsDeltaRetainedReferences || delta.IdentityGeneration != inodeRevision || delta.RetainedSnapshotRefs != 1 {
+	if err != nil || delta.Kind != schema.AnalyticsDeltaRetainedReferences ||
+		delta.IdentityGeneration != inodeRevision ||
+		delta.RetainedSnapshotRefs != 1 {
 		t.Fatalf("snapshot publish delta = %#v, err=%v", delta, err)
 	}
 	if err := store.ForgetSnapshot(ctx, snapshotID); err != nil {
@@ -263,14 +337,27 @@ func TestSchemaStoreSnapshotMembershipDeltasPublishAndForget(t *testing.T) {
 }
 
 func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.T) {
-	client, err := Ensure(context.Background(), Options{Socket: testSocket(t), RepositoryID: "phase16-crawl-proof", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	client, err := Ensure(
+		context.Background(),
+		Options{
+			Socket:       testSocket(t),
+			RepositoryID: "phase16-crawl-proof",
+			DaemonPath:   daemonBinary(t),
+			DataDir:      t.TempDir(),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
 	ctx := context.Background()
-	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: time.Now().UnixNano(), ConfigJSON: "{}"}
+	metadata := schema.AnalyticsMetadataRecord{
+		Enabled:    true,
+		Generation: 1,
+		BuiltAt:    time.Now().UnixNano(),
+		ConfigJSON: "{}",
+	}
 	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeSchemaRecord(t, metadata), true); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +368,15 @@ func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.
 			t.Fatal(err)
 		}
 		record := schema.InodeRevision{Known: schema.KnownPath, SourcePath: path, Freshness: schema.FreshnessVerified}
-		if err := store.PublishRevision(ctx, schema.CurrentInodeKey(fsid, inode), schema.InodeRevisionKey(fsid, inode, revision), encodeSchemaRecord(t, record), revision); err != nil {
+		if err := store.PublishRevision(ctx,
+			schema.CurrentInodeKey(fsid,
+				inode),
+			schema.InodeRevisionKey(fsid,
+				inode,
+				revision),
+			encodeSchemaRecord(t,
+				record),
+			revision); err != nil {
 			t.Fatal(err)
 		}
 		return revision
@@ -295,17 +390,41 @@ func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.
 		rootKey := schema.DirectoryRevisionKey(1, uint64(snapshotByte)+100, rootRevision)
 		root := schema.DirectoryRevision{Known: schema.KnownPath, SourcePath: "/", Freshness: schema.FreshnessVerified}
 		if inodeRevision != 0 {
-			root.Children = []schema.DirectoryChild{{Name: "file", Inode: inode, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, inode, inodeRevision)}}
+			root.Children = []schema.DirectoryChild{
+				{
+					Name:        "file",
+					Inode:       inode,
+					Type:        schema.NodeFile,
+					MetadataKey: schema.InodeRevisionKey(1, inode, inodeRevision),
+				},
+			}
 		}
-		if err := store.PublishRevision(ctx, schema.CurrentDirectoryKey(1, uint64(snapshotByte)+100), rootKey, encodeSchemaRecord(t, root), rootRevision); err != nil {
+		if err := store.PublishRevision(ctx,
+			schema.CurrentDirectoryKey(1,
+				uint64(snapshotByte)+100),
+			rootKey,
+			encodeSchemaRecord(t,
+				root),
+			rootRevision); err != nil {
 			t.Fatal(err)
 		}
 		snapshotID := daemonTestID(snapshotByte)
 		if err := store.MarkExportPending(ctx, snapshotID, rootKey); err != nil {
 			t.Fatal(err)
 		}
-		claim := &AuthoritativeCrawlClaim{ScopeID: scope, RootFSID: 1, RootInode: uint64(snapshotByte) + 100, StartFence: startFence, Complete: complete, DebtKeys: debtKeys}
-		if err := store.PublishSnapshotScope(ctx, SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey, OriginalJSON: []byte(`{"time":"2026-08-30T12:00:00Z"}`), Crawl: claim}); err != nil {
+		claim := &AuthoritativeCrawlClaim{
+			ScopeID:    scope,
+			RootFSID:   1,
+			RootInode:  uint64(snapshotByte) + 100,
+			StartFence: startFence,
+			Complete:   complete,
+			DebtKeys:   debtKeys,
+		}
+		if err := store.PublishSnapshotScope(ctx,
+			SnapshotScope{SnapshotID: snapshotID,
+				RootKey:      rootKey,
+				OriginalJSON: []byte(("{\"time\":\"2026-08-30T12:00:00Z\"}")),
+				Crawl:        claim}); err != nil {
 			t.Fatal(err)
 		}
 		value, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID))
@@ -353,7 +472,9 @@ func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.
 	}
 	reappeared := publishInode(1, 2, "/replacement")
 	publishCrawl(104, scopeA, 2, reappeared, deletedCommit, true, nil)
-	if current := readBinding(scopeA, 2, reappeared); current.State != schema.AuthoritativeSourceLive || current.Continuity != schema.AnalyticsContinuityProven || current.Generation == first {
+	if current := readBinding(scopeA, 2, reappeared); current.State != schema.AuthoritativeSourceLive ||
+		current.Continuity != schema.AnalyticsContinuityProven ||
+		current.Generation == first {
 		t.Fatalf("proven reappearance binding = %#v", current)
 	}
 	if old := readBinding(scopeA, 2, first); old.State != schema.AuthoritativeSourceDeleted {
@@ -383,12 +504,15 @@ func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.
 	gapFirst := publishInode(1, 3, "/gap")
 	gapObserved := publishCrawl(105, scopeGap, 3, gapFirst, 1, true, nil)
 	publishCrawl(106, scopeGap, 0, 0, gapObserved, false, nil)
-	if uncertain := readBinding(scopeGap, 3, gapFirst); uncertain.State != schema.AuthoritativeSourceUnknown || uncertain.Continuity != schema.AnalyticsContinuityUnknown {
+	if uncertain := readBinding(scopeGap, 3, gapFirst); uncertain.State != schema.AuthoritativeSourceUnknown ||
+		uncertain.Continuity != schema.AnalyticsContinuityUnknown {
 		t.Fatalf("incomplete absence binding = %#v", uncertain)
 	}
 	gapReappeared := publishInode(1, 3, "/gap-replacement")
 	publishCrawl(107, scopeGap, 3, gapReappeared, gapObserved, false, nil)
-	if uncertain := readBinding(scopeGap, 3, gapReappeared); uncertain.State != schema.AuthoritativeSourceLive || uncertain.Continuity != schema.AnalyticsContinuityUnknown || uncertain.Generation == gapFirst {
+	if uncertain := readBinding(scopeGap, 3, gapReappeared); uncertain.State != schema.AuthoritativeSourceLive ||
+		uncertain.Continuity != schema.AnalyticsContinuityUnknown ||
+		uncertain.Generation == gapFirst {
 		t.Fatalf("gap reappearance binding = %#v", uncertain)
 	}
 	if old := readBinding(scopeGap, 3, gapFirst); old.State != schema.AuthoritativeSourceUnknown {
@@ -399,7 +523,11 @@ func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.
 	debtFirst := publishInode(1, 4, "/debt")
 	debtObserved := publishCrawl(108, scopeDebt, 4, debtFirst, 1, true, nil)
 	debtKey := schema.CrawlDebtKey(schema.ID{}, daemonTestID(205))
-	debt := schema.CrawlDebtRecord{PathOrTree: []byte("debt"), Reason: schema.DebtMissingInode, Status: schema.DebtPending}
+	debt := schema.CrawlDebtRecord{
+		PathOrTree: []byte("debt"),
+		Reason:     schema.DebtMissingInode,
+		Status:     schema.DebtPending,
+	}
 	if err := store.Put(ctx, debtKey, encodeSchemaRecord(t, debt), true); err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +551,12 @@ func TestAuthoritativeCrawlProofControlsAbsenceAndIdentityGeneration(t *testing.
 }
 
 func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
-	options := Options{Socket: testSocket(t), RepositoryID: "phase4-pack-import", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	options := Options{
+		Socket:       testSocket(t),
+		RepositoryID: "phase4-pack-import",
+		DaemonPath:   daemonBinary(t),
+		DataDir:      t.TempDir(),
+	}
 	client, err := Ensure(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -434,10 +567,22 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	source1, source2 := daemonTestID(1), daemonTestID(2)
 	pack1, pack2, blobID := daemonTestID(3), daemonTestID(4), daemonTestID(5)
 	location := func(packID schema.ID, offset uint64) map[schema.ID]schema.BlobRecord {
-		return map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: packID, Offset: offset, Length: 8, UncompressedSize: 7, Type: schema.BlobData}}}}
+		return map[schema.ID]schema.BlobRecord{
+			blobID: {
+				Locations: []schema.BlobLocation{
+					{PackID: packID, Offset: offset, Length: 8, UncompressedSize: 7, Type: schema.BlobData},
+				},
+			},
+		}
 	}
 	debtKey := schema.CrawlDebtKey(schema.ID{}, pack1)
-	debt := schema.CrawlDebtRecord{SourceIndexOrPack: pack1, SourceKnown: true, Reason: schema.DebtUnavailablePack, Status: schema.DebtPending, ErrorClass: "offline"}
+	debt := schema.CrawlDebtRecord{
+		SourceIndexOrPack: pack1,
+		SourceKnown:       true,
+		Reason:            schema.DebtUnavailablePack,
+		Status:            schema.DebtPending,
+		ErrorClass:        "offline",
+	}
 	first := LegacyPackImport{
 		SourceIndex: source1, PackID: pack1,
 		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 8, BlobCount: 1, Lifecycle: schema.PackImported},
@@ -456,8 +601,16 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	}
 	second := LegacyPackImport{
 		SourceIndex: source2, PackID: pack2,
-		Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 12, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 4, BlobCount: 1, Lifecycle: schema.PackImported},
-		Blobs:  location(pack2, 2),
+		Record: schema.PackRecord{
+			Type:              schema.PackData,
+			PhysicalSize:      12,
+			PhysicalSizeKnown: true,
+			PayloadSize:       8,
+			HeaderSize:        4,
+			BlobCount:         1,
+			Lifecycle:         schema.PackImported,
+		},
+		Blobs: location(pack2, 2),
 	}
 	if err := store.ImportLegacyPack(ctx, second); err != nil {
 		t.Fatal(err)
@@ -468,7 +621,8 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 		t.Fatalf("read imported blob: found=%t err=%v", found, err)
 	}
 	blob, err := schema.UnmarshalBlobRecord(blobValue)
-	if err != nil || len(blob.Locations) != 2 || blob.Locations[0].PackID != pack1 || blob.Locations[1].PackID != pack2 {
+	if err != nil || len(blob.Locations) != 2 || blob.Locations[0].PackID != pack1 ||
+		blob.Locations[1].PackID != pack2 {
 		t.Fatalf("imported blob locations = %#v, err=%v", blob.Locations, err)
 	}
 	packValue, found, err := store.Get(ctx, schema.PackKey(pack1))
@@ -476,7 +630,9 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 		t.Fatalf("read imported pack: found=%t err=%v", found, err)
 	}
 	packRecord, err := schema.UnmarshalPackRecord(packValue)
-	if err != nil || len(packRecord.SourceIndexIDs) != 2 || packRecord.SourceIndexIDs[0] != source1 || packRecord.SourceIndexIDs[1] != source2 || packRecord.PhysicalSize != 10 {
+	if err != nil || len(packRecord.SourceIndexIDs) != 2 || packRecord.SourceIndexIDs[0] != source1 ||
+		packRecord.SourceIndexIDs[1] != source2 ||
+		packRecord.PhysicalSize != 10 {
 		t.Fatalf("imported pack = %#v, err=%v", packRecord, err)
 	}
 	if err := store.MarkPackPublished(ctx, pack1); err != nil {
@@ -487,7 +643,8 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 		t.Fatalf("read published pack: found=%t err=%v", found, err)
 	}
 	packRecord, err = schema.UnmarshalPackRecord(packValue)
-	if err != nil || packRecord.Lifecycle != schema.PackPublished || len(packRecord.SourceIndexIDs) != 2 || packRecord.PhysicalSize != 10 {
+	if err != nil || packRecord.Lifecycle != schema.PackPublished || len(packRecord.SourceIndexIDs) != 2 ||
+		packRecord.PhysicalSize != 10 {
 		t.Fatalf("published imported pack = %#v, err=%v", packRecord, err)
 	}
 	aggregateValue, found, err := store.Get(ctx, schema.PackAggregateKey(schema.AggregateAll))
@@ -495,7 +652,9 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 		t.Fatalf("read aggregate: found=%t err=%v", found, err)
 	}
 	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
-	if err != nil || aggregate.PackCount != 2 || aggregate.PhysicalSize != 22 || aggregate.PayloadSize != 16 || aggregate.HeaderSize != 6 || aggregate.BlobCount != 2 {
+	if err != nil || aggregate.PackCount != 2 || aggregate.PhysicalSize != 22 || aggregate.PayloadSize != 16 ||
+		aggregate.HeaderSize != 6 ||
+		aggregate.BlobCount != 2 {
 		t.Fatalf("imported aggregate = %#v, err=%v", aggregate, err)
 	}
 	debtValue, found, err := store.Get(ctx, debtKey)

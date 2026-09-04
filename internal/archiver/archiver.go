@@ -345,7 +345,14 @@ func (arch *Archiver) wrapLoadTreeError(id vaultic.ID, err error) error {
 
 // saveDir stores a directory in the repo and returns the node. snPath is the
 // path within the current snapshot.
-func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, meta fs.File, previous data.TreeNodeIterator, complete fileCompleteFunc) (d futureNode, err error) {
+func (arch *Archiver) saveDir(
+	ctx context.Context,
+	snPath string,
+	dir string,
+	meta fs.File,
+	previous data.TreeNodeIterator,
+	complete fileCompleteFunc,
+) (d futureNode, err error) {
 	debug.Log("%v %v", snPath, dir)
 
 	treeNode, names, err := arch.dirToNodeAndEntries(snPath, dir, meta)
@@ -728,7 +735,13 @@ func join(elem ...string) string {
 
 // saveTree stores a Tree in the repo, returned is the tree. snPath is the path
 // within the current snapshot.
-func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, previous data.TreeNodeIterator, complete fileCompleteFunc) (futureNode, int, error) {
+func (arch *Archiver) saveTree(
+	ctx context.Context,
+	snPath string,
+	atree *tree,
+	previous data.TreeNodeIterator,
+	complete fileCompleteFunc,
+) (futureNode, int, error) {
 
 	var node *data.Node
 	if snPath != "/" {
@@ -755,77 +768,80 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 
 	// iterate over the nodes of atree in lexicographic (=deterministic) order
 	for _, name := range nodeNames {
-		subatree := atree.Nodes[name]
-
-		// test if context has been cancelled
 		if ctx.Err() != nil {
 			return futureNode{}, 0, ctx.Err()
 		}
-
-		// this is a leaf node
-		if subatree.Leaf() {
-			pathname := join(snPath, name)
-			oldNode, err := finder.Find(name)
-			err = arch.error(pathname, err)
-			if err != nil {
-				return futureNode{}, 0, err
-			}
-			if oldNode != nil && oldNode.Type == data.NodeTypeDir && oldNode.Subtree != nil && arch.ReuseSubtree(pathname, subatree.Path, oldNode) {
-				node := *oldNode
-				nodes = append(nodes, newFutureNodeWithResult(futureNodeResult{snPath: pathname, target: subatree.Path, node: &node}))
-				continue
-			}
-			fn, excluded, err := arch.save(ctx, pathname, subatree.Path, oldNode, subatree.Explicit)
-
-			if err != nil {
-				err = arch.error(subatree.Path, err)
-				if err == nil {
-					// ignore error
-					continue
-				}
-				return futureNode{}, 0, err
-			}
-
-			if !excluded {
-				nodes = append(nodes, fn)
-			}
-			continue
-		}
-
-		snItem := join(snPath, name) + "/"
-		start := time.Now()
-
-		oldNode, err := finder.Find(name)
-		err = arch.error(snItem, err)
+		child, include, err := arch.saveTreeChild(ctx, snPath, name, atree.Nodes[name], finder)
 		if err != nil {
 			return futureNode{}, 0, err
 		}
-		oldSubtree, err := arch.loadSubtree(ctx, oldNode)
-		if err != nil {
-			err = arch.error(join(snPath, name), err)
+		if include {
+			nodes = append(nodes, child)
 		}
-		if err != nil {
-			return futureNode{}, 0, err
-		}
-
-		// not a leaf node, archive subtree
-		fn, _, err := arch.saveTree(ctx, join(snPath, name), &subatree, oldSubtree, func(n *data.Node, is ItemStats) {
-			arch.trackItem(snItem, oldNode, n, is, time.Since(start))
-		})
-		if err != nil {
-			err = arch.error(join(snPath, name), err)
-			if err == nil {
-				// ignore error
-				continue
-			}
-			return futureNode{}, 0, err
-		}
-
-		nodes = append(nodes, fn)
 	}
 
 	fn := arch.treeSaver.Save(ctx, snPath, atree.FileInfoPath, node, nodes, complete)
 	return fn, len(nodes), nil
+}
+
+func (arch *Archiver) saveTreeChild(
+	ctx context.Context,
+	snapshotPath, name string,
+	subtree tree,
+	finder *data.TreeFinder,
+) (futureNode, bool, error) {
+	pathname := join(snapshotPath, name)
+	oldNode, err := finder.Find(name)
+	if subtree.Leaf() {
+		return arch.saveTreeLeaf(ctx, pathname, subtree, oldNode, err)
+	}
+	itemPath := pathname + "/"
+	start := time.Now()
+	if err = arch.error(itemPath, err); err != nil {
+		return futureNode{}, false, err
+	}
+	oldSubtree, err := arch.loadSubtree(ctx, oldNode)
+	if err != nil {
+		err = arch.error(pathname, err)
+	}
+	if err != nil {
+		return futureNode{}, false, err
+	}
+	child, _, err := arch.saveTree(ctx, pathname, &subtree, oldSubtree, func(node *data.Node, stats ItemStats) {
+		arch.trackItem(itemPath, oldNode, node, stats, time.Since(start))
+	})
+	if err != nil {
+		if err = arch.error(pathname, err); err != nil {
+			return futureNode{}, false, err
+		}
+		return futureNode{}, false, nil
+	}
+	return child, true, nil
+}
+
+func (arch *Archiver) saveTreeLeaf(
+	ctx context.Context,
+	pathname string,
+	subtree tree,
+	oldNode *data.Node,
+	findErr error,
+) (futureNode, bool, error) {
+	if err := arch.error(pathname, findErr); err != nil {
+		return futureNode{}, false, err
+	}
+	if oldNode != nil && oldNode.Type == data.NodeTypeDir && oldNode.Subtree != nil &&
+		arch.ReuseSubtree(pathname, subtree.Path, oldNode) {
+		node := *oldNode
+		return newFutureNodeWithResult(futureNodeResult{snPath: pathname, target: subtree.Path, node: &node}), true, nil
+	}
+	child, excluded, err := arch.save(ctx, pathname, subtree.Path, oldNode, subtree.Explicit)
+	if err != nil {
+		if err = arch.error(subtree.Path, err); err != nil {
+			return futureNode{}, false, err
+		}
+		return futureNode{}, false, nil
+	}
+	return child, !excluded, nil
 }
 
 func (arch *Archiver) dirPathToNode(snPath, target string) (node *data.Node, err error) {

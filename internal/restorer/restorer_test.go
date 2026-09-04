@@ -64,7 +64,13 @@ func saveFile(t testing.TB, repo vaultic.BlobSaver, data string) vaultic.ID {
 	return id
 }
 
-func saveDir(t testing.TB, repo vaultic.BlobSaver, nodes map[string]Node, inode uint64, getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage)) vaultic.ID {
+func saveDir(
+	t testing.TB,
+	repo vaultic.BlobSaver,
+	nodes map[string]Node,
+	inode uint64,
+	getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage),
+) vaultic.ID {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -147,7 +153,12 @@ func saveDir(t testing.TB, repo vaultic.BlobSaver, nodes map[string]Node, inode 
 	return data.TestSaveNodes(t, ctx, repo, tree)
 }
 
-func saveSnapshot(t testing.TB, repo vaultic.Repository, snapshot Snapshot, getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage)) (*data.Snapshot, vaultic.ID) {
+func saveSnapshot(
+	t testing.TB,
+	repo vaultic.Repository,
+	snapshot Snapshot,
+	getGenericAttributes func(attr *FileAttributes, isDir bool) (genericAttributes map[data.GenericAttributeType]json.RawMessage),
+) (*data.Snapshot, vaultic.ID) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

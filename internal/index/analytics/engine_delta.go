@@ -21,9 +21,18 @@ type dictionaries struct {
 	values map[schema.AnalyticsDictionaryKind][]string
 }
 
+var analyticsDictionaryKinds = []schema.AnalyticsDictionaryKind{
+	schema.AnalyticsDictionarySVM,
+	schema.AnalyticsDictionaryVolume,
+	schema.AnalyticsDictionaryPathGroup,
+}
+
 func makeDictionaries(facts []buildFact, existing map[schema.AnalyticsDictionaryKind]map[uint32]string) dictionaries {
-	result := dictionaries{ids: map[schema.AnalyticsDictionaryKind]map[string]uint32{}, values: map[schema.AnalyticsDictionaryKind][]string{}}
-	for _, kind := range []schema.AnalyticsDictionaryKind{schema.AnalyticsDictionarySVM, schema.AnalyticsDictionaryVolume, schema.AnalyticsDictionaryPathGroup} {
+	result := dictionaries{
+		ids:    map[schema.AnalyticsDictionaryKind]map[string]uint32{},
+		values: map[schema.AnalyticsDictionaryKind][]string{},
+	}
+	for _, kind := range analyticsDictionaryKinds {
 		set := map[string]struct{}{}
 		for id, value := range existing[kind] {
 			for len(result.values[kind]) < int(id) {
@@ -69,7 +78,7 @@ func makeDictionaries(facts []buildFact, existing map[schema.AnalyticsDictionary
 
 func marshalDictionaries(dict dictionaries) ([]daemon.Mutation, error) {
 	var puts []daemon.Mutation
-	for _, kind := range []schema.AnalyticsDictionaryKind{schema.AnalyticsDictionarySVM, schema.AnalyticsDictionaryVolume, schema.AnalyticsDictionaryPathGroup} {
+	for _, kind := range analyticsDictionaryKinds {
 		for index, value := range dict.values[kind] {
 			if value == "" {
 				continue
@@ -78,7 +87,10 @@ func marshalDictionaries(dict dictionaries) ([]daemon.Mutation, error) {
 			if err != nil {
 				return nil, err
 			}
-			puts = append(puts, daemon.Mutation{Key: schema.AnalyticsDictionaryKey(kind, uint32(index+1)), Value: encoded})
+			puts = append(
+				puts,
+				daemon.Mutation{Key: schema.AnalyticsDictionaryKey(kind, uint32(index+1)), Value: encoded},
+			)
 		}
 	}
 	return puts, nil
@@ -103,14 +115,37 @@ func buildSegment(segment, generation uint64, facts []buildFact, dict dictionari
 		rows.Size = append(rows.Size, item.fact.LogicalSize)
 		rows.SizeLog10 = append(rows.SizeLog10, item.fact.SizeLog10)
 	}
-	columnValues := []any{rows.Identity, rows.UID, rows.GID, rows.CreatedAt, rows.Basis, rows.Continuity, rows.Year, rows.Month, rows.ISOYear, rows.Workweek, rows.SVM, rows.Volume, rows.PathGroup, rows.Size, rows.SizeLog10}
+	columnValues := []any{
+		rows.Identity,
+		rows.UID,
+		rows.GID,
+		rows.CreatedAt,
+		rows.Basis,
+		rows.Continuity,
+		rows.Year,
+		rows.Month,
+		rows.ISOYear,
+		rows.Workweek,
+		rows.SVM,
+		rows.Volume,
+		rows.PathGroup,
+		rows.Size,
+		rows.SizeLog10,
+	}
 	record := schema.AnalyticsFactSegmentRecord{RowCount: uint32(len(facts))}
 	for index, values := range columnValues {
 		data, err := json.Marshal(values)
 		if err != nil {
 			return nil, err
 		}
-		record.Columns = append(record.Columns, schema.AnalyticsColumn{Kind: schema.AnalyticsColumnKind(index + 1), Codec: schema.AnalyticsCodecZstd, Data: analyticsZstdEncoder.EncodeAll(data, nil)})
+		record.Columns = append(
+			record.Columns,
+			schema.AnalyticsColumn{
+				Kind:  schema.AnalyticsColumnKind(index + 1),
+				Codec: schema.AnalyticsCodecZstd,
+				Data:  analyticsZstdEncoder.EncodeAll(data, nil),
+			},
+		)
 	}
 	value, err := record.MarshalBinary()
 	if err != nil {
@@ -121,11 +156,19 @@ func buildSegment(segment, generation uint64, facts []buildFact, dict dictionari
 	if err != nil {
 		return nil, err
 	}
-	puts := []daemon.Mutation{{Key: schema.AnalyticsFactSegmentKey(segment), Value: value}, {Key: schema.AnalyticsSegmentMetadataKey(segment), Value: metadataValue}}
+	puts := []daemon.Mutation{
+		{Key: schema.AnalyticsFactSegmentKey(segment), Value: value},
+		{Key: schema.AnalyticsSegmentMetadataKey(segment), Value: metadataValue},
+	}
 	for dimension, values := range indexValues(rows) {
 		for present, bitmap := range values {
 			matches := countBits(bitmap)
-			index := schema.AnalyticsDimensionIndexRecord{Codec: schema.AnalyticsCodecZstd, RowCount: uint32(len(facts)), MatchCount: matches, Bitmap: analyticsZstdEncoder.EncodeAll(bitmap, nil)}
+			index := schema.AnalyticsDimensionIndexRecord{
+				Codec:      schema.AnalyticsCodecZstd,
+				RowCount:   uint32(len(facts)),
+				MatchCount: matches,
+				Bitmap:     analyticsZstdEncoder.EncodeAll(bitmap, nil),
+			}
 			for row := range facts {
 				if bitSet(bitmap, row) && facts[row].fact.Known&schema.KnownSize != 0 {
 					index.LogicalBytes += facts[row].fact.LogicalSize
@@ -135,14 +178,29 @@ func buildSegment(segment, generation uint64, facts []buildFact, dict dictionari
 			if err != nil {
 				return nil, err
 			}
-			puts = append(puts, daemon.Mutation{Key: schema.AnalyticsDimensionIndexKey(dimension, present, segment), Value: encoded})
+			puts = append(
+				puts,
+				daemon.Mutation{Key: schema.AnalyticsDimensionIndexKey(dimension, present, segment), Value: encoded},
+			)
 		}
 	}
 	return puts, nil
 }
 
 func segmentMetadata(generation uint64, facts []buildFact) schema.AnalyticsSegmentMetadataRecord {
-	metadata := schema.AnalyticsSegmentMetadataRecord{RowCount: uint32(len(facts)), MinCreatedAt: facts[0].fact.CreatedAt, MaxCreatedAt: facts[0].fact.CreatedAt, MinLogicalSize: facts[0].fact.LogicalSize, MaxLogicalSize: facts[0].fact.LogicalSize, MinRevision: facts[0].identity.Revision, MaxRevision: facts[0].identity.Revision, FirstCommit: facts[0].identity.Revision, LastCommit: facts[0].identity.Revision, ClassificationEpoch: generation, CodecParameters: "json-columns-v1;zstd=3"}
+	metadata := schema.AnalyticsSegmentMetadataRecord{
+		RowCount:            uint32(len(facts)),
+		MinCreatedAt:        facts[0].fact.CreatedAt,
+		MaxCreatedAt:        facts[0].fact.CreatedAt,
+		MinLogicalSize:      facts[0].fact.LogicalSize,
+		MaxLogicalSize:      facts[0].fact.LogicalSize,
+		MinRevision:         facts[0].identity.Revision,
+		MaxRevision:         facts[0].identity.Revision,
+		FirstCommit:         facts[0].identity.Revision,
+		LastCommit:          facts[0].identity.Revision,
+		ClassificationEpoch: generation,
+		CodecParameters:     "json-columns-v1;zstd=3",
+	}
 	for _, item := range facts[1:] {
 		if item.fact.CreatedAt < metadata.MinCreatedAt {
 			metadata.MinCreatedAt = item.fact.CreatedAt
@@ -243,27 +301,55 @@ func executePinned(ctx context.Context, store Store, query Query, pinned pinnedG
 		return Result{}, err
 	}
 	if query.RequireCurrent && !headAvailable {
-		return Result{}, fmt.Errorf("require-current is unavailable: analytics Store does not expose an authoritative metadata head; pinned applied commit is %d", pinned.watermark.AppliedCommit)
+		return Result{}, fmt.Errorf(
+			"require-current is unavailable: analytics Store does not expose an authoritative metadata head; pinned applied commit is %d",
+			pinned.watermark.AppliedCommit,
+		)
 	}
 	if query.RequireCurrent && pinned.watermark.AppliedCommit < head {
-		return Result{}, fmt.Errorf("analytics is not current: applied commit %d, authoritative metadata head %d", pinned.watermark.AppliedCommit, head)
+		return Result{}, fmt.Errorf(
+			"analytics is not current: applied commit %d, authoritative metadata head %d",
+			pinned.watermark.AppliedCommit,
+			head,
+		)
 	}
 	if headAvailable && pinned.watermark.AppliedCommit < head && !query.AllowStale {
-		return Result{}, fmt.Errorf("analytics is stale: applied commit %d, authoritative metadata head %d; use allow-stale or catch up", pinned.watermark.AppliedCommit, head)
+		return Result{}, fmt.Errorf(
+			"analytics is stale: applied commit %d, authoritative metadata head %d; use allow-stale or catch up",
+			pinned.watermark.AppliedCommit,
+			head,
+		)
 	}
 	canonical, err := canonicalQuery(query)
 	if err != nil {
 		return Result{}, err
 	}
 	hash := sha256.Sum256(canonical)
-	cacheKey := schema.AnalyticsQueryResultKey(schema.ID(hash), pinned.watermark.RepositoryGeneration, pinned.epoch, pinned.watermark.AppliedCommit)
+	cacheKey := schema.AnalyticsQueryResultKey(
+		schema.ID(hash),
+		pinned.watermark.RepositoryGeneration,
+		pinned.epoch,
+		pinned.watermark.AppliedCommit,
+	)
 	if result, ok, err := readResultCache(ctx, store, cacheKey); err != nil {
 		return Result{}, err
 	} else if ok {
 		result.Cached = true
 		return result, nil
 	}
-	result := Result{SchemaVersion: 2, Generation: pinned.manifest.Generation, Watermark: WatermarkInfo{RepositoryGeneration: pinned.watermark.RepositoryGeneration, ClassificationEpoch: pinned.epoch, AppliedCommit: pinned.watermark.AppliedCommit, AppliedAt: pinned.watermark.AppliedAt, AuthoritativeHead: head, AuthoritativeHeadAvailable: headAvailable}, Explain: Explain{Source: "raw-segments"}}
+	result := Result{
+		SchemaVersion: 2,
+		Generation:    pinned.manifest.Generation,
+		Watermark: WatermarkInfo{
+			RepositoryGeneration:       pinned.watermark.RepositoryGeneration,
+			ClassificationEpoch:        pinned.epoch,
+			AppliedCommit:              pinned.watermark.AppliedCommit,
+			AppliedAt:                  pinned.watermark.AppliedAt,
+			AuthoritativeHead:          head,
+			AuthoritativeHeadAvailable: headAvailable,
+		},
+		Explain: Explain{Source: "raw-segments"},
+	}
 	if head > pinned.watermark.AppliedCommit {
 		result.Watermark.LagCommits = head - pinned.watermark.AppliedCommit
 	}
@@ -324,7 +410,16 @@ func executeRawSegments(ctx context.Context, store Store, query Query, pinned pi
 	return nil
 }
 
-func executeRawSegment(ctx context.Context, store Store, query Query, pinned pinnedGeneration, segment uint64, dict map[schema.AnalyticsDictionaryKind]map[uint32]string, groups map[string]*Group, result *Result) error {
+func executeRawSegment(
+	ctx context.Context,
+	store Store,
+	query Query,
+	pinned pinnedGeneration,
+	segment uint64,
+	dict map[schema.AnalyticsDictionaryKind]map[uint32]string,
+	groups map[string]*Group,
+	result *Result,
+) error {
 	segmentValue, present, err := store.Get(ctx, schema.AnalyticsFactSegmentKey(segment))
 	if err != nil {
 		return err
@@ -349,7 +444,11 @@ func executeRawSegment(ctx context.Context, store Store, query Query, pinned pin
 		}
 		result.Explain.RowsScanned++
 		fact := rowFact(rows, row, dict)
-		residencyKey := schema.AnalyticsResidencyKey(rows.Identity[row].FSID, rows.Identity[row].Inode, rows.Identity[row].Generation)
+		residencyKey := schema.AnalyticsResidencyKey(
+			rows.Identity[row].FSID,
+			rows.Identity[row].Inode,
+			rows.Identity[row].Generation,
+		)
 		residencyValue, present, err := getActiveDerived(ctx, store, pinned.epoch, residencyKey)
 		if err != nil {
 			return err
@@ -448,7 +547,11 @@ func pinLatest(ctx context.Context, store Store) (pinnedGeneration, bool, error)
 	return result, true, nil
 }
 
-func resolveManifestSegments(ctx context.Context, store Store, manifest schema.AnalyticsManifestRecord) ([]uint64, error) {
+func resolveManifestSegments(
+	ctx context.Context,
+	store Store,
+	manifest schema.AnalyticsManifestRecord,
+) ([]uint64, error) {
 	segments := append([]uint64(nil), manifest.Segments...)
 	current := manifest
 	for depth := 0; current.ParentGeneration != 0; depth++ {
@@ -457,7 +560,10 @@ func resolveManifestSegments(ctx context.Context, store Store, manifest schema.A
 		}
 		value, found, err := store.Get(ctx, schema.AnalyticsManifestKey(current.ParentGeneration))
 		if err != nil || !found {
-			return nil, errors.Join(err, fmt.Errorf("analytics manifest parent %d is missing", current.ParentGeneration))
+			return nil, errors.Join(
+				err,
+				fmt.Errorf("analytics manifest parent %d is missing", current.ParentGeneration),
+			)
 		}
 		parent, err := schema.UnmarshalAnalyticsManifestRecord(value)
 		if err != nil || parent.LayerDepth+1 != current.LayerDepth {
@@ -475,7 +581,23 @@ func decodeSegment(value []byte) (segmentRows, error) {
 		return segmentRows{}, err
 	}
 	var rows segmentRows
-	targets := []any{&rows.Identity, &rows.UID, &rows.GID, &rows.CreatedAt, &rows.Basis, &rows.Continuity, &rows.Year, &rows.Month, &rows.ISOYear, &rows.Workweek, &rows.SVM, &rows.Volume, &rows.PathGroup, &rows.Size, &rows.SizeLog10}
+	targets := []any{
+		&rows.Identity,
+		&rows.UID,
+		&rows.GID,
+		&rows.CreatedAt,
+		&rows.Basis,
+		&rows.Continuity,
+		&rows.Year,
+		&rows.Month,
+		&rows.ISOYear,
+		&rows.Workweek,
+		&rows.SVM,
+		&rows.Volume,
+		&rows.PathGroup,
+		&rows.Size,
+		&rows.SizeLog10,
+	}
 	if len(record.Columns) != len(targets) {
 		return rows, fmt.Errorf("analytics segment has %d columns, want %d", len(record.Columns), len(targets))
 	}
@@ -496,7 +618,21 @@ func decodeSegment(value []byte) (segmentRows, error) {
 			return rows, err
 		}
 	}
-	for _, length := range []int{len(rows.Identity), len(rows.UID), len(rows.GID), len(rows.CreatedAt), len(rows.Basis), len(rows.Continuity), len(rows.Year), len(rows.Month), len(rows.ISOYear), len(rows.Workweek), len(rows.SVM), len(rows.Volume), len(rows.PathGroup), len(rows.Size), len(rows.SizeLog10)} {
+	for _, length := range []int{len(rows.Identity),
+		len(rows.UID),
+		len(rows.GID),
+		len(rows.CreatedAt),
+		len(rows.Basis),
+		len(rows.Continuity),
+		len(rows.Year),
+		len(rows.Month),
+		len(rows.ISOYear),
+		len(rows.Workweek),
+		len(rows.SVM),
+		len(rows.Volume),
+		len(rows.PathGroup),
+		len(rows.Size),
+		len(rows.SizeLog10)} {
 		if length != int(record.RowCount) {
 			return rows, fmt.Errorf("analytics column row-count mismatch")
 		}
@@ -506,12 +642,31 @@ func decodeSegment(value []byte) (segmentRows, error) {
 
 func rowFact(rows segmentRows, row int, dict map[schema.AnalyticsDictionaryKind]map[uint32]string) schema.AnalyticsFactRecord {
 	identity := rows.Identity[row]
-	return schema.AnalyticsFactRecord{Revision: identity.Revision, UID: rows.UID[row], GID: rows.GID[row], Known: identity.Known, CreatedAt: rows.CreatedAt[row], LogicalSize: rows.Size[row], CalendarYear: rows.Year[row], CalendarMonth: rows.Month[row], ISOYear: rows.ISOYear[row], Workweek: rows.Workweek[row], SizeLog10: rows.SizeLog10[row], SVM: dictionaryValue(dict, schema.AnalyticsDictionarySVM, rows.SVM[row]), Volume: dictionaryValue(dict, schema.AnalyticsDictionaryVolume, rows.Volume[row]), PathGroup: dictionaryValue(dict, schema.AnalyticsDictionaryPathGroup, rows.PathGroup[row]), Residency: schema.AnalyticsUnknown, CreationBasis: rows.Basis[row], IdentityGeneration: identity.Generation, IdentityContinuity: rows.Continuity[row]}
+	return schema.AnalyticsFactRecord{
+		Revision:           identity.Revision,
+		UID:                rows.UID[row],
+		GID:                rows.GID[row],
+		Known:              identity.Known,
+		CreatedAt:          rows.CreatedAt[row],
+		LogicalSize:        rows.Size[row],
+		CalendarYear:       rows.Year[row],
+		CalendarMonth:      rows.Month[row],
+		ISOYear:            rows.ISOYear[row],
+		Workweek:           rows.Workweek[row],
+		SizeLog10:          rows.SizeLog10[row],
+		SVM:                dictionaryValue(dict, schema.AnalyticsDictionarySVM, rows.SVM[row]),
+		Volume:             dictionaryValue(dict, schema.AnalyticsDictionaryVolume, rows.Volume[row]),
+		PathGroup:          dictionaryValue(dict, schema.AnalyticsDictionaryPathGroup, rows.PathGroup[row]),
+		Residency:          schema.AnalyticsUnknown,
+		CreationBasis:      rows.Basis[row],
+		IdentityGeneration: identity.Generation,
+		IdentityContinuity: rows.Continuity[row],
+	}
 }
 
 func loadDictionaries(ctx context.Context, store Store) (map[schema.AnalyticsDictionaryKind]map[uint32]string, error) {
 	result := map[schema.AnalyticsDictionaryKind]map[uint32]string{}
-	for _, kind := range []schema.AnalyticsDictionaryKind{schema.AnalyticsDictionarySVM, schema.AnalyticsDictionaryVolume, schema.AnalyticsDictionaryPathGroup} {
+	for _, kind := range analyticsDictionaryKinds {
 		result[kind] = map[uint32]string{}
 		if err := scan(ctx, store, schema.AnalyticsDictionaryPrefix(kind), func(kv daemon.KeyValue) error {
 			key, err := schema.ParseKey(kv.Key)
@@ -531,7 +686,11 @@ func loadDictionaries(ctx context.Context, store Store) (map[schema.AnalyticsDic
 	return result, nil
 }
 
-func dictionaryValue(dict map[schema.AnalyticsDictionaryKind]map[uint32]string, kind schema.AnalyticsDictionaryKind, id uint32) string {
+func dictionaryValue(
+	dict map[schema.AnalyticsDictionaryKind]map[uint32]string,
+	kind schema.AnalyticsDictionaryKind,
+	id uint32,
+) string {
 	if id == 0 {
 		return "unknown"
 	}
@@ -557,7 +716,14 @@ type indexRequest struct {
 	name      string
 }
 
-func indexedCandidates(ctx context.Context, store Store, segment uint64, rows segmentRows, query Query, dict map[schema.AnalyticsDictionaryKind]map[uint32]string) ([]byte, []string, []string, error) {
+func indexedCandidates(
+	ctx context.Context,
+	store Store,
+	segment uint64,
+	rows segmentRows,
+	query Query,
+	dict map[schema.AnalyticsDictionaryKind]map[uint32]string,
+) ([]byte, []string, []string, error) {
 	requests := queryIndexes(query, dict)
 	var candidates []byte
 	var used, fallbacks []string
@@ -644,7 +810,18 @@ func queryIndexes(query Query, dict map[schema.AnalyticsDictionaryKind]map[uint3
 		kind      schema.AnalyticsDictionaryKind
 		name      string
 		values    []string
-	}{{schema.AnalyticsDimensionSVM, schema.AnalyticsDictionarySVM, "svm", query.SVMs}, {schema.AnalyticsDimensionVolume, schema.AnalyticsDictionaryVolume, "volume", query.Volumes}, {schema.AnalyticsDimensionPathGroup, schema.AnalyticsDictionaryPathGroup, "path-group", query.PathGroups}} {
+	}{{schema.AnalyticsDimensionSVM,
+		schema.AnalyticsDictionarySVM,
+		"svm",
+		query.SVMs},
+		{schema.AnalyticsDimensionVolume,
+			schema.AnalyticsDictionaryVolume,
+			"volume",
+			query.Volumes},
+		{schema.AnalyticsDimensionPathGroup,
+			schema.AnalyticsDictionaryPathGroup,
+			"path-group",
+			query.PathGroups}} {
 		if len(item.values) == 0 {
 			continue
 		}
@@ -671,7 +848,8 @@ func matchesComplete(fact schema.AnalyticsFactRecord, query Query) bool {
 	if len(query.CreationBases) != 0 && !hasString(query.CreationBases, creationBasisName(fact.CreationBasis)) {
 		return false
 	}
-	return len(query.IdentityContinuities) == 0 || hasString(query.IdentityContinuities, continuityName(fact.IdentityContinuity))
+	return len(query.IdentityContinuities) == 0 ||
+		hasString(query.IdentityContinuities, continuityName(fact.IdentityContinuity))
 }
 
 func creationBasisName(value schema.AnalyticsCreationBasis) string {
@@ -723,7 +901,12 @@ type viewRecord struct {
 	Result               Result   `json:"result"`
 }
 
-func readCompatibleView(ctx context.Context, store Store, query Query, pinned pinnedGeneration) (Result, bool, []string, error) {
+func readCompatibleView(
+	ctx context.Context,
+	store Store,
+	query Query,
+	pinned pinnedGeneration,
+) (Result, bool, []string, error) {
 	predicates, err := canonicalPredicates(query)
 	if err != nil {
 		return Result{}, false, nil, err
@@ -743,7 +926,9 @@ func readCompatibleView(ctx context.Context, store Store, query Query, pinned pi
 			fallbacks = append(fallbacks, "malformed")
 			return nil
 		}
-		if view.RepositoryGeneration != pinned.watermark.RepositoryGeneration || view.ClassificationEpoch != pinned.epoch || view.AppliedCommit != pinned.watermark.AppliedCommit {
+		if view.RepositoryGeneration != pinned.watermark.RepositoryGeneration ||
+			view.ClassificationEpoch != pinned.epoch ||
+			view.AppliedCommit != pinned.watermark.AppliedCommit {
 			fallbacks = append(fallbacks, "stale-generation")
 			return nil
 		}
@@ -885,13 +1070,26 @@ func updateCache(ctx context.Context, store Store, query Query, hash schema.ID, 
 			}
 			viewID := schema.ID(sha256.Sum256(append(append([]byte(nil), predicates...), shape...)))
 			now := time.Now().Unix()
-			view := viewRecord{Predicates: predicates, Shape: shape, GroupBy: append([]string(nil), query.GroupBy...), RepositoryGeneration: result.Watermark.RepositoryGeneration, ClassificationEpoch: result.Watermark.ClassificationEpoch, AppliedCommit: result.Watermark.AppliedCommit, ExpiresAt: now + config.CacheTTLSeconds, LastUsed: now, Result: result}
+			view := viewRecord{
+				Predicates:           predicates,
+				Shape:                shape,
+				GroupBy:              append([]string(nil), query.GroupBy...),
+				RepositoryGeneration: result.Watermark.RepositoryGeneration,
+				ClassificationEpoch:  result.Watermark.ClassificationEpoch,
+				AppliedCommit:        result.Watermark.AppliedCommit,
+				ExpiresAt:            now + config.CacheTTLSeconds,
+				LastUsed:             now,
+				Result:               result,
+			}
 			viewPayload, _ := json.Marshal(view)
 			viewValue, marshalErr := (schema.AnalyticsQueryRecord{Payload: viewPayload}).MarshalBinary()
 			if marshalErr != nil {
 				return marshalErr
 			}
-			puts = append(puts, daemon.Mutation{Key: schema.AnalyticsQueryViewKey(viewID, result.Generation), Value: viewValue})
+			puts = append(
+				puts,
+				daemon.Mutation{Key: schema.AnalyticsQueryViewKey(viewID, result.Generation), Value: viewValue},
+			)
 		}
 		if heat.Hits == config.CacheAfter && metadata.Generation == result.Generation {
 			metadata.CacheEntries++

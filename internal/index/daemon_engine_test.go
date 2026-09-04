@@ -203,7 +203,13 @@ func TestConfiguredRetentionAppliesOnlyToColdBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			if published.Record.RetentionSource != testCase.retention || published.Record.MinRetentionUntil != testCase.deadline {
-				t.Fatalf("retention = %v/%d, want %v/%d", published.Record.RetentionSource, published.Record.MinRetentionUntil, testCase.retention, testCase.deadline)
+				t.Fatalf(
+					"retention = %v/%d, want %v/%d",
+					published.Record.RetentionSource,
+					published.Record.MinRetentionUntil,
+					testCase.retention,
+					testCase.deadline,
+				)
 			}
 			if published.Record.StorageClass != "GLACIER" {
 				t.Fatalf("storage class = %q", published.Record.StorageClass)

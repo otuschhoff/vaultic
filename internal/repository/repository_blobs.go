@@ -20,7 +20,11 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 	for _, blob := range blobs {
 		debug.Log("blob %v found: %v", blob.Handle(), blob)
 		// load blob from pack
-		h := backend.Handle{Type: backend.PackFile, Name: blob.PackID().String(), IsMetadata: blob.Blob.Type.IsMetadata()}
+		h := backend.Handle{
+			Type:       backend.PackFile,
+			Name:       blob.PackID().String(),
+			IsMetadata: blob.Blob.Type.IsMetadata(),
+		}
 
 		switch {
 		case cap(buf) < int(blob.Blob.Length):
@@ -40,7 +44,14 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 		if err != nil {
 			return nil, err
 		}
-		it := newPackBlobIterator(blob.PackID(), newByteReader(buf), blob.Blob.Offset, pack.Blobs{blob.Blob}, r.key, decoder)
+		it := newPackBlobIterator(
+			blob.PackID(),
+			newByteReader(buf),
+			blob.Blob.Offset,
+			pack.Blobs{blob.Blob},
+			r.key,
+			decoder,
+		)
 		pbv, err := it.Next()
 
 		if err == nil {
@@ -129,7 +140,12 @@ func (r *Repository) getZstdDecoder() (*zstd.Decoder, error) {
 // is small enough, it will be packed together with other small blobs. The
 // caller must ensure that the id matches the data. Returned is the size data
 // occupies in the repo (compressed or not, including the encryption overhead).
-func (r *Repository) saveAndEncrypt(ctx context.Context, t vaultic.BlobType, data []byte, id vaultic.ID) (size int, err error) {
+func (r *Repository) saveAndEncrypt(
+	ctx context.Context,
+	t vaultic.BlobType,
+	data []byte,
+	id vaultic.ID,
+) (size int, err error) {
 	debug.Log("save id %v (%v, %d bytes)", id, t, len(data))
 
 	uncompressedLength := 0
@@ -160,7 +176,14 @@ func (r *Repository) saveAndEncrypt(ctx context.Context, t vaultic.BlobType, dat
 
 	if err := r.verifyCiphertext(ciphertext, uncompressedLength, id); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return 0, fmt.Errorf("Detected data corruption while saving blob %v: %w\nCorrupted blobs are either caused by hardware issues or software bugs. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting.", id, err)
+		return 0, fmt.Errorf(
+			("Detected data corruption while saving blob %v: %w\nCorrupted blobs are " +
+				"either caused by hardware issues or software bugs. Please open an issue at " +
+				"https://github.com/otuschhoff/vaultic/issues/new/choose for further " +
+				"troubleshooting."),
+			id,
+			err,
+		)
 	}
 
 	// find suitable packer and add blob
@@ -251,11 +274,19 @@ func (r *Repository) decompressUnpacked(p []byte) ([]byte, error) {
 
 // SaveUnpacked encrypts data and stores it in the backend. Returned is the
 // storage hash.
-func (r *Repository) SaveUnpacked(ctx context.Context, t vaultic.WriteableFileType, buf []byte) (id vaultic.ID, err error) {
+func (r *Repository) SaveUnpacked(
+	ctx context.Context,
+	t vaultic.WriteableFileType,
+	buf []byte,
+) (id vaultic.ID, err error) {
 	return r.saveUnpacked(ctx, t.ToFileType(), buf)
 }
 
-func (r *internalRepository) SaveUnpacked(ctx context.Context, t vaultic.FileType, buf []byte) (id vaultic.ID, err error) {
+func (r *internalRepository) SaveUnpacked(
+	ctx context.Context,
+	t vaultic.FileType,
+	buf []byte,
+) (id vaultic.ID, err error) {
 	return r.Repository.saveUnpacked(ctx, t, buf)
 }
 
@@ -277,7 +308,14 @@ func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf [
 
 	if err := r.verifyUnpacked(ciphertext, t, buf); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return vaultic.ID{}, fmt.Errorf("Detected data corruption while saving file of type %v: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting.", t, err)
+		return vaultic.ID{}, fmt.Errorf(
+			("Detected data corruption while saving file of type %v: %w\nCorrupted data is " +
+				"either caused by hardware issues or software bugs. Please open an issue at " +
+				"https://github.com/otuschhoff/vaultic/issues/new/choose for further " +
+				"troubleshooting."),
+			t,
+			err,
+		)
 	}
 
 	if t == vaultic.ConfigFile {

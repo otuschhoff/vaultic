@@ -22,10 +22,19 @@ func TestBackendPackVerifierRequiresPhysicalPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	pack := Pack{ID: packID, Type: "data", Size: int64(len(contents)), PayloadSize: 1, HeaderSize: uint64(len(contents) - 1), BlobCount: 1, SHA256: packID, Placements: []Placement{
-		{BackendID: "a", FailureDomain: "site-a", Size: int64(len(contents)), SHA256: packID},
-		{BackendID: "b", FailureDomain: "site-b", Offsite: true, Size: int64(len(contents)), SHA256: packID},
-	}}
+	pack := Pack{
+		ID:          packID,
+		Type:        "data",
+		Size:        int64(len(contents)),
+		PayloadSize: 1,
+		HeaderSize:  uint64(len(contents) - 1),
+		BlobCount:   1,
+		SHA256:      packID,
+		Placements: []Placement{
+			{BackendID: "a", FailureDomain: "site-a", Size: int64(len(contents)), SHA256: packID},
+			{BackendID: "b", FailureDomain: "site-b", Offsite: true, Size: int64(len(contents)), SHA256: packID},
+		},
+	}
 	verifier := BackendPackVerifier{Backends: map[string]backend.Backend{"a": first, "b": second}, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}}
 	if err := verifier.VerifyPack(ctx, pack); err != nil {
 		t.Fatal(err)

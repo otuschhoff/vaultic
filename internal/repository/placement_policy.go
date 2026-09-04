@@ -34,7 +34,12 @@ func placementDeleteAfter(now time.Time, keepDelete time.Duration, placement sch
 	return deadline
 }
 
-func placementEvictionAllowed(placements map[uint64]schema.PlacementRecord, backends map[uint64]PlacementBackend, policy vaultic.PlacementPolicy, removeBackend uint64) bool {
+func placementEvictionAllowed(
+	placements map[uint64]schema.PlacementRecord,
+	backends map[uint64]PlacementBackend,
+	policy vaultic.PlacementPolicy,
+	removeBackend uint64,
+) bool {
 	remaining := make(map[uint64]schema.PlacementRecord, len(placements))
 	for backend, placement := range placements {
 		if backend == removeBackend {

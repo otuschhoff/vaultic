@@ -58,10 +58,24 @@ func (f *genericBackendFactory[C, T]) StripPassword(s string) string {
 	}
 	return s
 }
-func (f *genericBackendFactory[C, T]) Create(ctx context.Context, cfg any, rt http.RoundTripper, lim limiter.Limiter, errorLog func(string, ...any)) (backend.Backend, error) {
+
+func (f *genericBackendFactory[C, T]) Create(
+	ctx context.Context,
+	cfg any,
+	rt http.RoundTripper,
+	lim limiter.Limiter,
+	errorLog func(string, ...any),
+) (backend.Backend, error) {
 	return f.createFn(ctx, *cfg.(*C), rt, lim, errorLog)
 }
-func (f *genericBackendFactory[C, T]) Open(ctx context.Context, cfg any, rt http.RoundTripper, lim limiter.Limiter, errorLog func(string, ...any)) (backend.Backend, error) {
+
+func (f *genericBackendFactory[C, T]) Open(
+	ctx context.Context,
+	cfg any,
+	rt http.RoundTripper,
+	lim limiter.Limiter,
+	errorLog func(string, ...any),
+) (backend.Backend, error) {
 	return f.openFn(ctx, *cfg.(*C), rt, lim, errorLog)
 }
 

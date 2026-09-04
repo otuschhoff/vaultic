@@ -121,10 +121,19 @@ func TestPromotePackResumesAfterCrashFollowingPublish(t *testing.T) {
 	}
 	crashErr := errors.New("injected crash after publish")
 	var published []vaultic.ID
-	_, err = promotePackBlobs(context.Background(), repo, engine, sourcePack, model.Backends[0].Hash, keep, vaultic.NewNoopPrinter(), func(successors []vaultic.ID) error {
-		published = append(published, successors...)
-		return crashErr
-	})
+	_, err = promotePackBlobs(
+		context.Background(),
+		repo,
+		engine,
+		sourcePack,
+		model.Backends[0].Hash,
+		keep,
+		vaultic.NewNoopPrinter(),
+		func(successors []vaultic.ID) error {
+			published = append(published, successors...)
+			return crashErr
+		},
+	)
 	if !errors.Is(err, crashErr) || len(published) == 0 {
 		t.Fatalf("crash result successors=%v err=%v", published, err)
 	}

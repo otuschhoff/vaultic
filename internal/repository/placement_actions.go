@@ -103,7 +103,11 @@ func (r *Repository) EvictPack(ctx context.Context, packID vaultic.ID, targetHas
 	return nil
 }
 
-func (r *Repository) placementIO(ctx context.Context, packID vaultic.ID, targetHash uint64) (backend.Backend, []backend.Backend, backend.Handle, uint64, error) {
+func (r *Repository) placementIO(
+	ctx context.Context,
+	packID vaultic.ID,
+	targetHash uint64,
+) (backend.Backend, []backend.Backend, backend.Handle, uint64, error) {
 	engine, ok := r.Engine().(*metadataindex.DaemonEngine)
 	if !ok {
 		return nil, nil, backend.Handle{}, 0, fmt.Errorf("placement I/O requires the SlateDB daemon engine")

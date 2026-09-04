@@ -43,7 +43,13 @@ const defaultPackerCount = 2
 
 // newPackerManager returns a new packer manager which writes temporary files
 // to a temporary directory
-func newPackerManager(key *crypto.Key, tpe vaultic.BlobType, packSize uint, packerCount int, queueFn func(ctx context.Context, t vaultic.BlobType, p *packer) error) *packerManager {
+func newPackerManager(
+	key *crypto.Key,
+	tpe vaultic.BlobType,
+	packSize uint,
+	packerCount int,
+	queueFn func(ctx context.Context, t vaultic.BlobType, p *packer) error,
+) *packerManager {
 	return &packerManager{
 		tpe:       tpe,
 		key:       key,
@@ -53,7 +59,14 @@ func newPackerManager(key *crypto.Key, tpe vaultic.BlobType, packSize uint, pack
 	}
 }
 
-func newConfiguredPackerManager(key *crypto.Key, tpe vaultic.BlobType, defaultSize, sizeLimit, currentSize uint64, growFactor uint32, packerCount int, queueFn func(context.Context, vaultic.BlobType, *packer) error) *packerManager {
+func newConfiguredPackerManager(
+	key *crypto.Key,
+	tpe vaultic.BlobType,
+	defaultSize, sizeLimit, currentSize uint64,
+	growFactor uint32,
+	packerCount int,
+	queueFn func(context.Context, vaultic.BlobType, *packer) error,
+) *packerManager {
 	return &packerManager{
 		tpe:       tpe,
 		key:       key,

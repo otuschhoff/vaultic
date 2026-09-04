@@ -87,8 +87,11 @@ Exit status is 12 if the password is incorrect.
 `,
 		DisableAutoGenTag: true,
 		GroupID:           cmdGroupDefault,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMount(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
 		},
 	}
@@ -110,7 +113,12 @@ type MountOptions struct {
 func (opts *MountOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.OwnerRoot, "owner-root", false, "use 'root' as the owner of files and dirs")
 	f.BoolVar(&opts.AllowOther, "allow-other", false, "allow other users to access the data in the mounted directory")
-	f.BoolVar(&opts.NoDefaultPermissions, "no-default-permissions", false, "for 'allow-other', ignore Unix permissions and allow users to read all snapshot files")
+	f.BoolVar(
+		&opts.NoDefaultPermissions,
+		"no-default-permissions",
+		false,
+		"for 'allow-other', ignore Unix permissions and allow users to read all snapshot files",
+	)
 
 	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
 

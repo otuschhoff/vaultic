@@ -70,7 +70,16 @@ func PromotePack(ctx context.Context, repo *Repository, packID vaultic.ID, targe
 	return promotePackBlobs(ctx, repo, engine, packID, targetBackend, keep, printer, nil)
 }
 
-func promotePackBlobs(ctx context.Context, repo *Repository, engine *metadataindex.DaemonEngine, packID vaultic.ID, targetBackend uint64, keep *gcBlobSet, printer vaultic.Printer, afterPublish func([]vaultic.ID) error) ([]vaultic.ID, error) {
+func promotePackBlobs(
+	ctx context.Context,
+	repo *Repository,
+	engine *metadataindex.DaemonEngine,
+	packID vaultic.ID,
+	targetBackend uint64,
+	keep *gcBlobSet,
+	printer vaultic.Printer,
+	afterPublish func([]vaultic.ID) error,
+) ([]vaultic.ID, error) {
 	store := engine.SchemaStore()
 	before, err := scanPacks(ctx, store)
 	if err != nil {

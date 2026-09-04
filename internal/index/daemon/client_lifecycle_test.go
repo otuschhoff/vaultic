@@ -375,7 +375,8 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 	if !capabilities.GetTcpEnabled() || capabilities.GetUnixSocket() {
 		t.Fatalf("unexpected transport capabilities: %#v", capabilities)
 	}
-	if capabilities.GetMaxBatchItems() != 10_000 || capabilities.GetMaxPageItems() != 1_000 || capabilities.GetMaxMessageBytes() != 16*1024*1024 || capabilities.GetMaxConcurrentRequests() != 128 {
+	if capabilities.GetMaxBatchItems() != 10_000 || capabilities.GetMaxPageItems() != 1_000 || capabilities.GetMaxMessageBytes() != 16*1024*1024 ||
+		capabilities.GetMaxConcurrentRequests() != 128 {
 		t.Fatalf("unexpected bounded-work capabilities: %#v", capabilities)
 	}
 
@@ -386,11 +387,17 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 		}
 		checks := map[string]func() error{
 			"health": func() error {
-				_, err := rpc.Health(context.Background(), &vaulticdbv1.HealthRequest{RepositoryId: options.RepositoryID, Context: requestContext(context.Background())})
+				_, err := rpc.Health(
+					context.Background(),
+					&vaulticdbv1.HealthRequest{RepositoryId: options.RepositoryID, Context: requestContext(context.Background())},
+				)
 				return err
 			},
 			"capabilities": func() error {
-				_, err := rpc.Capabilities(context.Background(), &vaulticdbv1.CapabilitiesRequest{RepositoryId: options.RepositoryID, Context: requestContext(context.Background())})
+				_, err := rpc.Capabilities(
+					context.Background(),
+					&vaulticdbv1.CapabilitiesRequest{RepositoryId: options.RepositoryID, Context: requestContext(context.Background())},
+				)
 				return err
 			},
 			"drain": func() error {
@@ -406,15 +413,27 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 				return err
 			},
 			"multi-get": func() error {
-				_, err := rpc.MultiGet(context.Background(), &vaulticdbv1.MultiGetRequest{Context: requestContext(context.Background()), Keys: [][]byte{[]byte("key")}})
+				_, err := rpc.MultiGet(
+					context.Background(),
+					&vaulticdbv1.MultiGetRequest{Context: requestContext(context.Background()), Keys: [][]byte{[]byte("key")}},
+				)
 				return err
 			},
 			"scan": func() error {
-				_, err := rpc.Scan(context.Background(), &vaulticdbv1.ScanRequest{Context: requestContext(context.Background()), Prefix: []byte("k"), PageSize: 1})
+				_, err := rpc.Scan(
+					context.Background(),
+					&vaulticdbv1.ScanRequest{Context: requestContext(context.Background()), Prefix: []byte("k"), PageSize: 1},
+				)
 				return err
 			},
 			"write-batch": func() error {
-				_, err := rpc.WriteBatch(context.Background(), &vaulticdbv1.WriteBatchRequest{Context: requestContext(context.Background()), Puts: []*vaulticdbv1.KeyValue{{Key: []byte("key"), Value: []byte("value")}}})
+				_, err := rpc.WriteBatch(
+					context.Background(),
+					&vaulticdbv1.WriteBatchRequest{
+						Context: requestContext(context.Background()),
+						Puts:    []*vaulticdbv1.KeyValue{{Key: []byte("key"), Value: []byte("value")}},
+					},
+				)
 				return err
 			},
 			"begin": func() error {
@@ -422,11 +441,17 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 				return err
 			},
 			"commit": func() error {
-				_, err := rpc.Commit(context.Background(), &vaulticdbv1.TransactionRequest{Context: requestContext(context.Background()), TransactionId: "unknown"})
+				_, err := rpc.Commit(
+					context.Background(),
+					&vaulticdbv1.TransactionRequest{Context: requestContext(context.Background()), TransactionId: "unknown"},
+				)
 				return err
 			},
 			"rollback": func() error {
-				_, err := rpc.Rollback(context.Background(), &vaulticdbv1.TransactionRequest{Context: requestContext(context.Background()), TransactionId: "unknown"})
+				_, err := rpc.Rollback(
+					context.Background(),
+					&vaulticdbv1.TransactionRequest{Context: requestContext(context.Background()), TransactionId: "unknown"},
+				)
 				return err
 			},
 		}
@@ -490,7 +515,10 @@ func TestEnsureTCPRejectsPeerOutsideAllowlist(t *testing.T) {
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected disallowed peer startup timeout, got %v", err)
 	}
-	if _, err := os.Stat(strings.TrimSuffix(tcpMetadataPath(options.TCPAddress), filepath.Ext(tcpMetadataPath(options.TCPAddress))) + ".pid"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(strings.TrimSuffix(tcpMetadataPath(options.TCPAddress), filepath.Ext(tcpMetadataPath(options.TCPAddress))) + ".pid"); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
 		t.Fatalf("TCP metadata remained after failed startup: %v", err)
 	}
 }

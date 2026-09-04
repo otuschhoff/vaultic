@@ -422,7 +422,14 @@ func cloneRewriteExcludes(excludePacks vaultic.IDSet) vaultic.IDSet {
 // This is used by repair index to only rewrite and delete the old indexes.
 //
 // Must not be called concurrently to any other MasterIndex operation.
-func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaultic.FileType], excludePacks vaultic.IDSet, oldIndexes vaultic.IDSet, extraObsolete vaultic.IDs, opts MasterIndexRewriteOpts) error {
+func (mi *MasterIndex) Rewrite(
+	ctx context.Context,
+	repo vaultic.Unpacked[vaultic.FileType],
+	excludePacks vaultic.IDSet,
+	oldIndexes vaultic.IDSet,
+	extraObsolete vaultic.IDs,
+	opts MasterIndexRewriteOpts,
+) error {
 	for _, idx := range mi.idx {
 		if !idx.Final() {
 			panic("internal error - index must be saved before calling MasterIndex.Rewrite")
@@ -652,7 +659,12 @@ func deleteObsoleteIndexes(ctx context.Context, repo vaultic.Unpacked[vaultic.Fi
 // It is only intended for use by prune with the UnsafeRecovery option.
 //
 // Must not be called concurrently to any other MasterIndex operation.
-func (mi *MasterIndex) SaveFallback(ctx context.Context, repo vaultic.SaverRemoverUnpacked[vaultic.FileType], excludePacks vaultic.IDSet, p vaultic.Counter) error {
+func (mi *MasterIndex) SaveFallback(
+	ctx context.Context,
+	repo vaultic.SaverRemoverUnpacked[vaultic.FileType],
+	excludePacks vaultic.IDSet,
+	p vaultic.Counter,
+) error {
 	p.SetMax(uint64(len(mi.Packs(excludePacks))))
 
 	mi.idxMutex.Lock()

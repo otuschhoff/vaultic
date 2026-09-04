@@ -54,7 +54,11 @@ type Options struct {
 }
 
 func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]Candidate, error) {
-	if options.Level < schema.VerificationHeader || options.Level > schema.VerificationFull || options.SampleCount < 0 || options.SamplePercent < 0 || options.SamplePercent > 100 || (options.SampleCount > 0 && options.SamplePercent > 0) {
+	if options.Level < schema.VerificationHeader || options.Level > schema.VerificationFull ||
+		options.SampleCount < 0 ||
+		options.SamplePercent < 0 ||
+		options.SamplePercent > 100 ||
+		(options.SampleCount > 0 && options.SamplePercent > 0) {
 		return nil, fmt.Errorf("invalid verification selection options")
 	}
 	var candidates []Candidate
@@ -82,7 +86,9 @@ func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]C
 			if err != nil {
 				return err
 			}
-			if placement.State != schema.PlacementLive || (len(options.Backends) > 0 && !options.Backends[placementKey.Backend]) || (len(options.StorageClasses) > 0 && !options.StorageClasses[placement.StorageClass]) {
+			if placement.State != schema.PlacementLive ||
+				(len(options.Backends) > 0 && !options.Backends[placementKey.Backend]) ||
+				(len(options.StorageClasses) > 0 && !options.StorageClasses[placement.StorageClass]) {
 				return nil
 			}
 			candidate := Candidate{PackID: parsed.ID, Backend: placementKey.Backend, Pack: pack, Placement: placement}
@@ -95,10 +101,14 @@ func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]C
 				}
 				candidate.HasState = true
 			}
-			if options.ErrorsOnly && (!candidate.HasState || (candidate.State.Result != schema.VerificationIntegrityError && candidate.State.Result != schema.VerificationOperationalError)) {
+			if options.ErrorsOnly &&
+				(!candidate.HasState ||
+					(candidate.State.Result != schema.VerificationIntegrityError &&
+						candidate.State.Result != schema.VerificationOperationalError)) {
 				return nil
 			}
-			if options.NotVerifiedSince != nil && lastSuccess(candidate.State, options.Level) >= *options.NotVerifiedSince {
+			if options.NotVerifiedSince != nil &&
+				lastSuccess(candidate.State, options.Level) >= *options.NotVerifiedSince {
 				return nil
 			}
 			candidate.score = sampleScore(options.Seed, candidate.PackID, candidate.Backend)
@@ -109,7 +119,10 @@ func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]C
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(candidates, func(i, j int) bool { return bytes.Compare(candidates[i].score[:], candidates[j].score[:]) < 0 })
+	sort.Slice(
+		candidates,
+		func(i, j int) bool { return bytes.Compare(candidates[i].score[:], candidates[j].score[:]) < 0 },
+	)
 	limit := len(candidates)
 	if options.SampleCount > 0 && options.SampleCount < limit {
 		limit = options.SampleCount
@@ -128,13 +141,16 @@ func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]C
 }
 
 func matchPack(pack schema.PackRecord, options Options, now int64) bool {
-	if len(options.Tiers) > 0 && !options.Tiers[pack.Tier] || len(options.PackTypes) > 0 && !options.PackTypes[pack.Type] {
+	if len(options.Tiers) > 0 && !options.Tiers[pack.Tier] ||
+		len(options.PackTypes) > 0 && !options.PackTypes[pack.Type] {
 		return false
 	}
-	if options.CreatedAfter != nil && (!pack.CreationTimeKnown || pack.CreationTime < *options.CreatedAfter) || options.CreatedBefore != nil && (!pack.CreationTimeKnown || pack.CreationTime >= *options.CreatedBefore) {
+	if options.CreatedAfter != nil && (!pack.CreationTimeKnown || pack.CreationTime < *options.CreatedAfter) ||
+		options.CreatedBefore != nil && (!pack.CreationTimeKnown || pack.CreationTime >= *options.CreatedBefore) {
 		return false
 	}
-	if options.MinSize != nil && (!pack.PhysicalSizeKnown || pack.PhysicalSize < *options.MinSize) || options.MaxSize != nil && (!pack.PhysicalSizeKnown || pack.PhysicalSize > *options.MaxSize) {
+	if options.MinSize != nil && (!pack.PhysicalSizeKnown || pack.PhysicalSize < *options.MinSize) ||
+		options.MaxSize != nil && (!pack.PhysicalSizeKnown || pack.PhysicalSize > *options.MaxSize) {
 		return false
 	}
 	switch options.RetentionStatus {
@@ -211,7 +227,16 @@ type classifiedError interface {
 	VerificationClassification() (schema.VerificationClassification, string, string)
 }
 
-func Run(ctx context.Context, store Store, verifier Verifier, warmer Warmer, candidates []Candidate, level schema.VerificationLevel, concurrency int, now func() time.Time) (Result, error) {
+func Run(
+	ctx context.Context,
+	store Store,
+	verifier Verifier,
+	warmer Warmer,
+	candidates []Candidate,
+	level schema.VerificationLevel,
+	concurrency int,
+	now func() time.Time,
+) (Result, error) {
 	if concurrency <= 0 {
 		return Result{}, fmt.Errorf("verification concurrency must be positive")
 	}
@@ -220,24 +245,8 @@ func Run(ctx context.Context, store Store, verifier Verifier, warmer Warmer, can
 	if _, err := rand.Read(runNonce[:]); err != nil {
 		return result, fmt.Errorf("generate verification run ID: %w", err)
 	}
-	if warmer != nil && level > schema.VerificationHeader {
-		if err := warmer.WarmupPlacements(ctx, candidates); err != nil {
-			classification := schema.VerificationWarmupTimeout
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
-				classification = schema.VerificationCancelled
-			}
-			failures := []error{err}
-			for _, candidate := range candidates {
-				completed := now()
-				outcome := daemon.VerificationOutcome{PackID: candidate.PackID, Backend: candidate.Backend, Level: level, CompletedAt: completed, RunID: verificationRunID(runNonce, candidate), Classification: classification}
-				if recordErr := recordOutcome(ctx, store, outcome); recordErr != nil {
-					failures = append(failures, recordErr)
-				} else {
-					result.OperationalErrors++
-				}
-			}
-			return result, errors.Join(failures...)
-		}
+	if err := warmupCandidates(ctx, store, warmer, candidates, level, runNonce, now, &result); err != nil {
+		return result, err
 	}
 	jobs := make(chan Candidate)
 	var mutex sync.Mutex
@@ -245,41 +254,7 @@ func Run(ctx context.Context, store Store, verifier Verifier, warmer Warmer, can
 	var workers sync.WaitGroup
 	for range concurrency {
 		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for candidate := range jobs {
-				completed := now()
-				outcome := daemon.VerificationOutcome{PackID: candidate.PackID, Backend: candidate.Backend, Level: level, CompletedAt: completed, RunID: verificationRunID(runNonce, candidate)}
-				verifyErr := verifier.VerifyPackPlacement(ctx, candidate.PackID, candidate.Backend, level)
-				if verifyErr != nil {
-					outcome.Classification = schema.VerificationTransport
-					if errors.Is(verifyErr, context.Canceled) || errors.Is(verifyErr, context.DeadlineExceeded) && ctx.Err() != nil {
-						outcome.Classification = schema.VerificationCancelled
-					} else if classified, ok := verifyErr.(classifiedError); ok {
-						outcome.Classification, outcome.Expected, outcome.Observed = classified.VerificationClassification()
-					}
-				}
-				if err := recordOutcome(ctx, store, outcome); err != nil {
-					mutex.Lock()
-					failures = append(failures, err)
-					mutex.Unlock()
-					continue
-				}
-				mutex.Lock()
-				switch {
-				case outcome.Classification == schema.VerificationNoError:
-					result.Verified++
-				case outcome.Classification.IsIntegrity():
-					result.IntegrityErrors++
-				default:
-					result.OperationalErrors++
-				}
-				if verifyErr != nil {
-					failures = append(failures, verifyErr)
-				}
-				mutex.Unlock()
-			}
-		}()
+		go verificationWorker(ctx, store, verifier, jobs, level, runNonce, now, &result, &failures, &mutex, &workers)
 	}
 sendLoop:
 	for _, candidate := range candidates {
@@ -292,6 +267,92 @@ sendLoop:
 	close(jobs)
 	workers.Wait()
 	return result, errors.Join(failures...)
+}
+
+func warmupCandidates(
+	ctx context.Context,
+	store Store,
+	warmer Warmer,
+	candidates []Candidate,
+	level schema.VerificationLevel,
+	nonce [32]byte,
+	now func() time.Time,
+	result *Result,
+) error {
+	if warmer == nil || level <= schema.VerificationHeader {
+		return nil
+	}
+	err := warmer.WarmupPlacements(ctx, candidates)
+	if err == nil {
+		return nil
+	}
+	classification := schema.VerificationWarmupTimeout
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
+		classification = schema.VerificationCancelled
+	}
+	failures := []error{err}
+	for _, candidate := range candidates {
+		outcome := daemon.VerificationOutcome{
+			PackID: candidate.PackID, Backend: candidate.Backend, Level: level, CompletedAt: now(),
+			RunID: verificationRunID(nonce, candidate), Classification: classification,
+		}
+		if recordErr := recordOutcome(ctx, store, outcome); recordErr != nil {
+			failures = append(failures, recordErr)
+		} else {
+			result.OperationalErrors++
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func verificationWorker(
+	ctx context.Context,
+	store Store,
+	verifier Verifier,
+	jobs <-chan Candidate,
+	level schema.VerificationLevel,
+	nonce [32]byte,
+	now func() time.Time,
+	result *Result,
+	failures *[]error,
+	mutex *sync.Mutex,
+	workers *sync.WaitGroup,
+) {
+	defer workers.Done()
+	for candidate := range jobs {
+		outcome := daemon.VerificationOutcome{
+			PackID: candidate.PackID, Backend: candidate.Backend, Level: level,
+			CompletedAt: now(), RunID: verificationRunID(nonce, candidate),
+		}
+		verifyErr := verifier.VerifyPackPlacement(ctx, candidate.PackID, candidate.Backend, level)
+		if verifyErr != nil {
+			outcome.Classification = schema.VerificationTransport
+			if errors.Is(verifyErr, context.Canceled) || errors.Is(verifyErr, context.DeadlineExceeded) && ctx.Err() != nil {
+				outcome.Classification = schema.VerificationCancelled
+			} else if classified, ok := verifyErr.(classifiedError); ok {
+				outcome.Classification, outcome.Expected, outcome.Observed = classified.VerificationClassification()
+			}
+		}
+		if err := recordOutcome(ctx, store, outcome); err != nil {
+			mutex.Lock()
+			*failures = append(*failures, err)
+			mutex.Unlock()
+			continue
+		}
+		mutex.Lock()
+		switch {
+		case outcome.Classification == schema.VerificationNoError:
+			result.Verified++
+		case outcome.Classification.IsIntegrity():
+			result.IntegrityErrors++
+		default:
+			result.OperationalErrors++
+		}
+		if verifyErr != nil {
+			*failures = append(*failures, verifyErr)
+		}
+		mutex.Unlock()
+	}
 }
 
 func verificationRunID(runNonce [32]byte, candidate Candidate) schema.ID {

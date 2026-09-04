@@ -24,7 +24,8 @@ type VerificationOutcome struct {
 }
 
 func (store *SchemaStore) RecordVerification(ctx context.Context, outcome VerificationOutcome) error {
-	if outcome.PackID == (schema.ID{}) || outcome.Backend == 0 || outcome.RunID == (schema.ID{}) || outcome.CompletedAt.IsZero() {
+	if outcome.PackID == (schema.ID{}) || outcome.Backend == 0 || outcome.RunID == (schema.ID{}) ||
+		outcome.CompletedAt.IsZero() {
 		return fmt.Errorf("invalid verification outcome identity")
 	}
 	for range revisionAllocationAttempts {
@@ -63,7 +64,17 @@ func (store *SchemaStore) recordVerification(ctx context.Context, outcome Verifi
 	if outcome.Classification == schema.VerificationNoError {
 		advanceVerificationSuccess(&state, outcome.Level, completed)
 		if state.OpenFindingID != (schema.ID{}) && outcome.Level >= state.FindingLevel {
-			event = &schema.VerificationEventRecord{Type: schema.VerificationResolved, FindingID: state.OpenFindingID, RunID: outcome.RunID, Level: state.FindingLevel, Classification: state.Classification, FirstDetected: state.FirstErrorAt, LastDetected: state.LastErrorAt, Occurrences: state.ConsecutiveFailures, Resolution: "successful verification"}
+			event = &schema.VerificationEventRecord{
+				Type:           schema.VerificationResolved,
+				FindingID:      state.OpenFindingID,
+				RunID:          outcome.RunID,
+				Level:          state.FindingLevel,
+				Classification: state.Classification,
+				FirstDetected:  state.FirstErrorAt,
+				LastDetected:   state.LastErrorAt,
+				Occurrences:    state.ConsecutiveFailures,
+				Resolution:     "successful verification",
+			}
 			state.OpenFindingID, state.FindingLevel, state.Classification = schema.ID{}, 0, schema.VerificationNoError
 			state.FirstErrorAt, state.LastErrorAt, state.ConsecutiveFailures = 0, 0, 0
 			state.Result = schema.VerificationHealthy
@@ -79,10 +90,28 @@ func (store *SchemaStore) recordVerification(ctx context.Context, outcome Verifi
 			state.OpenFindingID = verificationFindingID(outcome)
 			state.FirstErrorAt = completed
 			state.ConsecutiveFailures = 1
-			event = &schema.VerificationEventRecord{Type: schema.VerificationDetected, FindingID: state.OpenFindingID, RunID: outcome.RunID, Level: outcome.Level, Classification: outcome.Classification, FirstDetected: completed, LastDetected: completed, Occurrences: 1, Expected: outcome.Expected, Observed: outcome.Observed}
+			event = &schema.VerificationEventRecord{Type: schema.VerificationDetected,
+				FindingID:      state.OpenFindingID,
+				RunID:          outcome.RunID,
+				Level:          outcome.Level,
+				Classification: outcome.Classification,
+				FirstDetected:  completed,
+				LastDetected:   completed,
+				Occurrences:    1,
+				Expected:       outcome.Expected,
+				Observed:       outcome.Observed}
 		} else if state.Classification != outcome.Classification || state.FindingLevel != outcome.Level {
 			state.ConsecutiveFailures++
-			event = &schema.VerificationEventRecord{Type: schema.VerificationChanged, FindingID: state.OpenFindingID, RunID: outcome.RunID, Level: outcome.Level, Classification: outcome.Classification, FirstDetected: state.FirstErrorAt, LastDetected: completed, Occurrences: state.ConsecutiveFailures, Expected: outcome.Expected, Observed: outcome.Observed}
+			event = &schema.VerificationEventRecord{Type: schema.VerificationChanged,
+				FindingID:      state.OpenFindingID,
+				RunID:          outcome.RunID,
+				Level:          outcome.Level,
+				Classification: outcome.Classification,
+				FirstDetected:  state.FirstErrorAt,
+				LastDetected:   completed,
+				Occurrences:    state.ConsecutiveFailures,
+				Expected:       outcome.Expected,
+				Observed:       outcome.Observed}
 		} else {
 			state.ConsecutiveFailures++
 		}
@@ -128,7 +157,11 @@ func (store *SchemaStore) recordVerification(ctx context.Context, outcome Verifi
 	return nil
 }
 
-func advanceVerificationSuccess(state *schema.VerificationStateRecord, level schema.VerificationLevel, completed int64) {
+func advanceVerificationSuccess(
+	state *schema.VerificationStateRecord,
+	level schema.VerificationLevel,
+	completed int64,
+) {
 	if completed > state.HeaderVerifiedAt {
 		state.HeaderVerifiedAt = completed
 	}
@@ -152,7 +185,12 @@ func verificationFindingID(outcome VerificationOutcome) schema.ID {
 	return result
 }
 
-func appendVerificationEvent(ctx context.Context, transaction *Transaction, outcome VerificationOutcome, event schema.VerificationEventRecord) ([]Mutation, error) {
+func appendVerificationEvent(
+	ctx context.Context,
+	transaction *Transaction,
+	outcome VerificationOutcome,
+	event schema.VerificationEventRecord,
+) ([]Mutation, error) {
 	sequenceKey := schema.NextEventSequenceKey()
 	value, found, err := transaction.Get(ctx, sequenceKey)
 	if err != nil {
@@ -173,5 +211,16 @@ func appendVerificationEvent(ctx context.Context, transaction *Transaction, outc
 	if err != nil {
 		return nil, err
 	}
-	return []Mutation{{Key: schema.VerificationEventKey(uint64(outcome.CompletedAt.Unix()), sequence, outcome.PackID, outcome.Backend), Value: eventValue}, {Key: sequenceKey, Value: nextValue}}, nil
+	return []Mutation{
+		{
+			Key: schema.VerificationEventKey(
+				uint64(outcome.CompletedAt.Unix()),
+				sequence,
+				outcome.PackID,
+				outcome.Backend,
+			),
+			Value: eventValue,
+		},
+		{Key: sequenceKey, Value: nextValue},
+	}, nil
 }

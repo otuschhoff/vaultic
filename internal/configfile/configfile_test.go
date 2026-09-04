@@ -15,7 +15,8 @@ func TestLoadIncludesAndFlagPrecedence(t *testing.T) {
 	if err := os.WriteFile(base, []byte("[global]\nverbose = 1\n[backup]\nlabel = 'base'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(child, []byte("use-profiles = ['base.toml']\n[global]\nverbose = 2\n[backup]\nlabel = 'child'\n[[backup.snapshots]]\nname = 'home'\nsources = ['/home/me']\n"), 0600); err != nil {
+	if err := os.WriteFile(child, []byte(("use-profiles = ['base.toml']\n[global]\nverbose = 2\n[backup]\nlabel = " +
+		"'child'\n[[backup.snapshots]]\nname = 'home'\nsources = ['/home/me']\n")), 0600); err != nil {
 		t.Fatal(err)
 	}
 

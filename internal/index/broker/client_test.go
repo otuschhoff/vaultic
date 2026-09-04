@@ -17,7 +17,9 @@ import (
 )
 
 func TestExternalShareBindingCrossLanguageFixture(t *testing.T) {
-	value := capsule{Header: capsuleHeader{RepositoryID: "repo-a", Generation: 8, RootKeyVersion: 1, PolicyHash: "policy-hash"}}
+	value := capsule{
+		Header: capsuleHeader{RepositoryID: "repo-a", Generation: 8, RootKeyVersion: 1, PolicyHash: "policy-hash"},
+	}
 	member := memberShare{
 		MemberID:     "alice",
 		GroupID:      "operators",
@@ -63,7 +65,15 @@ func TestPreparePolicyMutationUsesSignedChallengeAndBase64Credential(t *testing.
 	}
 	digest := sha256.Sum256(executableData)
 	manifestPath := filepath.Join(t.TempDir(), "release.json")
-	manifest, err := json.Marshal(ReleaseManifest{Component: "vaultic", Version: 20, ReleaseIdentity: "release-a", ExecutableSHA256: hex.EncodeToString(digest[:]), Signature: "signature"})
+	manifest, err := json.Marshal(
+		ReleaseManifest{
+			Component:        "vaultic",
+			Version:          20,
+			ReleaseIdentity:  "release-a",
+			ExecutableSHA256: hex.EncodeToString(digest[:]),
+			Signature:        "signature",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,14 +84,24 @@ func TestPreparePolicyMutationUsesSignedChallengeAndBase64Credential(t *testing.
 	clientConnection, serverConnection := net.Pipe()
 	defer clientConnection.Close()
 	defer serverConnection.Close()
-	client := &Client{connection: clientConnection, reader: bufio.NewReader(clientConnection), protocol: protocolVersion, challenge: "challenge-a"}
+	client := &Client{
+		connection: clientConnection,
+		reader:     bufio.NewReader(clientConnection),
+		protocol:   protocolVersion,
+		challenge:  "challenge-a",
+	}
 	requestResult := make(chan map[string]any, 1)
 	go func() {
 		line, _ := bufio.NewReader(serverConnection).ReadBytes('\n')
 		var request map[string]any
 		_ = json.Unmarshal(line, &request)
 		requestResult <- request
-		_, _ = serverConnection.Write([]byte(`{"result":"policy_mutation_prepared","capsule":{"format":2},"capsule_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"))
+		_, _ = serverConnection.Write(
+			[]byte(
+				(`{"result":"policy_mutation_prepared","capsule":{"format":2},` +
+					`"capsule_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"),
+			),
+		)
 	}()
 
 	prepared, err := client.PreparePolicyMutation(
@@ -126,7 +146,15 @@ func TestPendingPolicyMutationUsesSignedChallenge(t *testing.T) {
 	}
 	digest := sha256.Sum256(executableData)
 	manifestPath := filepath.Join(t.TempDir(), "release.json")
-	manifest, err := json.Marshal(ReleaseManifest{Component: "vaultic", Version: 20, ReleaseIdentity: "release-a", ExecutableSHA256: hex.EncodeToString(digest[:]), Signature: "signature"})
+	manifest, err := json.Marshal(
+		ReleaseManifest{
+			Component:        "vaultic",
+			Version:          20,
+			ReleaseIdentity:  "release-a",
+			ExecutableSHA256: hex.EncodeToString(digest[:]),
+			Signature:        "signature",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,14 +164,24 @@ func TestPendingPolicyMutationUsesSignedChallenge(t *testing.T) {
 	clientConnection, serverConnection := net.Pipe()
 	defer clientConnection.Close()
 	defer serverConnection.Close()
-	client := &Client{connection: clientConnection, reader: bufio.NewReader(clientConnection), protocol: protocolVersion, challenge: "challenge-a"}
+	client := &Client{
+		connection: clientConnection,
+		reader:     bufio.NewReader(clientConnection),
+		protocol:   protocolVersion,
+		challenge:  "challenge-a",
+	}
 	requestResult := make(chan map[string]any, 1)
 	go func() {
 		line, _ := bufio.NewReader(serverConnection).ReadBytes('\n')
 		var request map[string]any
 		_ = json.Unmarshal(line, &request)
 		requestResult <- request
-		_, _ = serverConnection.Write([]byte(`{"result":"policy_mutation_prepared","capsule":{"format":2},"capsule_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"))
+		_, _ = serverConnection.Write(
+			[]byte(
+				(`{"result":"policy_mutation_prepared","capsule":{"format":2},` +
+					`"capsule_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"),
+			),
+		)
 	}()
 	prepared, err := client.PendingPolicyMutation(t.Context(), manifestPath)
 	if err != nil {
@@ -170,8 +208,25 @@ func TestIdentityRecoverySessionBypassesOnlyLostIdentitySignature(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := capsule{Header: capsuleHeader{Format: 2, RepositoryID: "repo-a", Generation: 4, BrokerIdentityPublicKey: base64.StdEncoding.EncodeToString(oldPublic)}}
-	transcript := SessionTranscript{Protocol: protocolVersion, SessionID: "session-a", RepositoryID: "repo-a", CapsuleGeneration: 4, EndpointBinding: "unix:/broker.sock", Nonce: "nonce", ExpiresUnixMS: uint64(time.Now().Add(time.Minute).UnixMilli()), HPKEPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), IdentityRecovery: true}
+	value := capsule{
+		Header: capsuleHeader{
+			Format:                  2,
+			RepositoryID:            "repo-a",
+			Generation:              4,
+			BrokerIdentityPublicKey: base64.StdEncoding.EncodeToString(oldPublic),
+		},
+	}
+	transcript := SessionTranscript{
+		Protocol:          protocolVersion,
+		SessionID:         "session-a",
+		RepositoryID:      "repo-a",
+		CapsuleGeneration: 4,
+		EndpointBinding:   "unix:/broker.sock",
+		Nonce:             "nonce",
+		ExpiresUnixMS:     uint64(time.Now().Add(time.Minute).UnixMilli()),
+		HPKEPublicKey:     base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		IdentityRecovery:  true,
+	}
 	encoded, err := json.Marshal(transcript)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +236,11 @@ func TestIdentityRecoverySessionBypassesOnlyLostIdentitySignature(t *testing.T) 
 	for offset := 0; offset < 16; offset += 2 {
 		parts = append(parts, strings.ToUpper(hex.EncodeToString(digest[offset:offset+2])))
 	}
-	session := SignedSession{Transcript: transcript, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(replacementPrivate, encoded)), Fingerprint: strings.Join(parts, "-")}
+	session := SignedSession{
+		Transcript:  transcript,
+		Signature:   base64.StdEncoding.EncodeToString(ed25519.Sign(replacementPrivate, encoded)),
+		Fingerprint: strings.Join(parts, "-"),
+	}
 	if err := value.verifySession(session, "unix:/broker.sock", time.Now(), true); err != nil {
 		t.Fatalf("acknowledged identity recovery session rejected: %v", err)
 	}

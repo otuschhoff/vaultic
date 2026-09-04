@@ -333,7 +333,14 @@ func placementsFromTier(pack schema.PackRecord, model PlacementModel) placementS
 	return result
 }
 
-func checkPlacementRecords(ctx context.Context, store Store, packs map[vaultic.ID]schema.PackRecord, model PlacementModel, result *CheckResult, maxFindings uint) error {
+func checkPlacementRecords(
+	ctx context.Context,
+	store Store,
+	packs map[vaultic.ID]schema.PackRecord,
+	model PlacementModel,
+	result *CheckResult,
+	maxFindings uint,
+) error {
 	placements, malformed, err := loadPlacements(ctx, store)
 	if err != nil {
 		return err
@@ -350,23 +357,8 @@ func checkPlacementRecords(ctx context.Context, store Store, packs map[vaultic.I
 		}
 	}
 	for packID, packPlacements := range placements {
-		for backend, placement := range packPlacements {
-			value, found, getErr := store.Get(ctx, schema.BackendPackKey(backend, schema.ID(packID)))
-			if getErr != nil {
-				return getErr
-			}
-			expected, encodeErr := (schema.BackendPackRecord{State: placement.State, Bytes: placement.Bytes, PlacedAt: placement.PlacedAt}).MarshalBinary()
-			if encodeErr != nil {
-				return encodeErr
-			}
-			if !found || !bytes.Equal(value, expected) {
-				result.BackendPackMismatch++
-				addFinding(result, maxFindings, Finding{Kind: "backend_pack_mismatch", Key: packID.String(), Want: fmt.Sprintf("backend=%016x", backend)})
-			}
-			if _, ok := backendByHash[backend]; len(model.Backends) != 0 && !ok {
-				result.UnknownPlacementBackends++
-				addFinding(result, maxFindings, Finding{Kind: "unknown_placement_backend", Key: packID.String(), Got: fmt.Sprintf("backend=%016x", backend)})
-			}
+		if err := checkPackPlacementRecords(ctx, store, packID, packPlacements, backendByHash, len(model.Backends), result, maxFindings); err != nil {
+			return err
 		}
 		pack, found := packs[packID]
 		if !found {
@@ -401,6 +393,37 @@ func checkPlacementRecords(ctx context.Context, store Store, packs map[vaultic.I
 		return nil
 	}); err != nil {
 		return err
+	}
+	return nil
+}
+
+func checkPackPlacementRecords(
+	ctx context.Context,
+	store Store,
+	packID vaultic.ID,
+	placements placementSet,
+	backends map[uint64]PlacementBackend,
+	backendCount int,
+	result *CheckResult,
+	maxFindings uint,
+) error {
+	for backend, placement := range placements {
+		value, found, err := store.Get(ctx, schema.BackendPackKey(backend, schema.ID(packID)))
+		if err != nil {
+			return err
+		}
+		expected, err := (schema.BackendPackRecord{State: placement.State, Bytes: placement.Bytes, PlacedAt: placement.PlacedAt}).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		if !found || !bytes.Equal(value, expected) {
+			result.BackendPackMismatch++
+			addFinding(result, maxFindings, Finding{Kind: "backend_pack_mismatch", Key: packID.String(), Want: fmt.Sprintf("backend=%016x", backend)})
+		}
+		if _, ok := backends[backend]; backendCount != 0 && !ok {
+			result.UnknownPlacementBackends++
+			addFinding(result, maxFindings, Finding{Kind: "unknown_placement_backend", Key: packID.String(), Got: fmt.Sprintf("backend=%016x", backend)})
+		}
 	}
 	return nil
 }

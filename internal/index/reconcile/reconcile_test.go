@@ -33,7 +33,8 @@ func TestDecodeDeferredObservationsStrict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observations) != 1 || observations[0].SnapshotPath != want.SnapshotPath || observations[0].SourcePath != want.SourcePath {
+	if len(observations) != 1 || observations[0].SnapshotPath != want.SnapshotPath ||
+		observations[0].SourcePath != want.SourcePath {
 		t.Fatalf("unexpected decoded observations: %#v", observations)
 	}
 
@@ -78,9 +79,18 @@ func TestAuthoritativeCrawlClaimIsExplicitAndFailsClosed(t *testing.T) {
 	if claim := (&Reconciler{}).AuthoritativeCrawlClaim(); claim != nil {
 		t.Fatalf("default reconciler produced authoritative claim: %#v", claim)
 	}
-	scope := AuthoritativeCrawlScope{ScopeID: testSchemaID(240), RootFSID: 1, RootInode: 2, StartFence: 3, Complete: true}
+	scope := AuthoritativeCrawlScope{
+		ScopeID:    testSchemaID(240),
+		RootFSID:   1,
+		RootInode:  2,
+		StartFence: 3,
+		Complete:   true,
+	}
 	debtKey := schema.CrawlDebtKey(schema.ID{}, testSchemaID(241))
-	reconciler := &Reconciler{options: Options{Authoritative: &scope}, crawlDebt: map[string][]byte{string(debtKey): debtKey}}
+	reconciler := &Reconciler{
+		options:   Options{Authoritative: &scope},
+		crawlDebt: map[string][]byte{string(debtKey): debtKey},
+	}
 	claim := reconciler.AuthoritativeCrawlClaim()
 	if claim == nil || !claim.Complete || len(claim.DebtKeys) != 1 || !bytes.Equal(claim.DebtKeys[0], debtKey) {
 		t.Fatalf("complete authoritative claim = %#v", claim)
@@ -99,15 +109,39 @@ func TestReplayDeferredUsesFreshAuthoritativeRevisions(t *testing.T) {
 	}
 	parsed, err := schema.ParseKey(root)
 	if err != nil || parsed.Kind != schema.KeyDirectoryRevision || len(store.published) != 1 || store.next != 2 {
-		t.Fatalf("root=%x parsed=%#v published=%d revisions=%d err=%v", root, parsed, len(store.published), store.next, err)
+		t.Fatalf(
+			"root=%x parsed=%#v published=%d revisions=%d err=%v",
+			root,
+			parsed,
+			len(store.published),
+			store.next,
+			err,
+		)
 	}
 }
 
 func deferredReplayFixture() (*fakeStore, []DeferredObservation) {
 	store := newFakeStore()
 	now := time.Now().UTC()
-	rootStat := DeferredStat{Name: "source", Mode: os.ModeDir | 0o755, DeviceID: 7, Inode: 10, Links: 1, ModTime: now, ChangeTime: now}
-	fileStat := DeferredStat{Name: "file", Mode: 0o644, DeviceID: 7, Inode: 11, Links: 1, Size: 4, ModTime: now, ChangeTime: now}
+	rootStat := DeferredStat{
+		Name:       "source",
+		Mode:       os.ModeDir | 0o755,
+		DeviceID:   7,
+		Inode:      10,
+		Links:      1,
+		ModTime:    now,
+		ChangeTime: now,
+	}
+	fileStat := DeferredStat{
+		Name:       "file",
+		Mode:       0o644,
+		DeviceID:   7,
+		Inode:      11,
+		Links:      1,
+		Size:       4,
+		ModTime:    now,
+		ChangeTime: now,
+	}
 	return store, []DeferredObservation{{
 		SnapshotPath: "/file", SourcePath: "/source/file", ParentPath: "/source",
 		Node: data.Node{Name: "file", Type: data.NodeTypeFile, Size: 4}, Stat: fileStat, ParentStat: rootStat,
@@ -166,7 +200,11 @@ func (store *fakeStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.K
 	return values, found, nil
 }
 
-func (store *fakeStore) ScanPrefix(_ context.Context, prefix, after []byte, pageSize uint32) ([]daemon.KeyValue, bool, error) {
+func (store *fakeStore) ScanPrefix(
+	_ context.Context,
+	prefix, after []byte,
+	pageSize uint32,
+) ([]daemon.KeyValue, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	keys := make([]string, 0)
@@ -194,11 +232,21 @@ func (store *fakeStore) AllocateRevision(context.Context) (uint64, error) {
 	return store.next, nil
 }
 
-func (store *fakeStore) PublishRevision(_ context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64) error {
+func (store *fakeStore) PublishRevision(
+	_ context.Context,
+	currentKey, revisionKey, revisionValue []byte,
+	revision uint64,
+) error {
 	return store.PublishRevisionBatch(context.Background(), currentKey, revisionKey, revisionValue, revision, nil, nil)
 }
 
-func (store *fakeStore) PublishRevisionBatch(_ context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64, relatedPuts []daemon.Mutation, relatedDeletes [][]byte) error {
+func (store *fakeStore) PublishRevisionBatch(
+	_ context.Context,
+	currentKey, revisionKey, revisionValue []byte,
+	revision uint64,
+	relatedPuts []daemon.Mutation,
+	relatedDeletes [][]byte,
+) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	pointer, err := (schema.CurrentPointer{Revision: revision, RecordKey: revisionKey}).MarshalBinary()
@@ -316,7 +364,14 @@ func TestImportedFileBecomesVerifiedAndThenReuses(t *testing.T) {
 	imported := schema.InodeRevision{ParentInode: 10, Known: schema.KnownParent, Freshness: schema.FreshnessImported}
 	seedCurrent(t, store, 1, 11, imported)
 	debtKey := schema.CrawlDebtKey(testSchemaID(90), testSchemaID(91))
-	store.values[string(debtKey)] = encode(t, schema.CrawlDebtRecord{PathOrTree: []byte("file"), Reason: schema.DebtUnknownFreshness, Status: schema.DebtPending})
+	store.values[string(debtKey)] = encode(
+		t,
+		schema.CrawlDebtRecord{
+			PathOrTree: []byte("file"),
+			Reason:     schema.DebtUnknownFreshness,
+			Status:     schema.DebtPending,
+		},
+	)
 
 	reconciler, err := New(ctx, filesystem, store, Options{Workers: 2, QueueDepth: 4})
 	if err != nil {
@@ -331,11 +386,16 @@ func TestImportedFileBecomesVerifiedAndThenReuses(t *testing.T) {
 	if err := reconciler.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if metrics := reconciler.Metrics(); metrics.Scanned != 1 || metrics.Reconciled != 1 || metrics.Reused != 0 || metrics.Failed != 0 {
+	if metrics := reconciler.Metrics(); metrics.Scanned != 1 || metrics.Reconciled != 1 || metrics.Reused != 0 ||
+		metrics.Failed != 0 {
 		t.Fatalf("first metrics = %#v", metrics)
 	}
 	record := currentInode(t, store, 1, 11)
-	if record.Freshness != schema.FreshnessVerified || record.Known != schema.KnownMTime|schema.KnownCTime|schema.KnownSize|schema.KnownMode|schema.KnownUID|schema.KnownGID|schema.KnownParent|schema.KnownPath || len(record.ContentIDs) != 2 {
+	wantKnown := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode
+	wantKnown |= schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath
+	if record.Freshness != schema.FreshnessVerified ||
+		record.Known != wantKnown ||
+		len(record.ContentIDs) != 2 {
 		t.Fatalf("verified record = %#v", record)
 	}
 	debt, err := schema.UnmarshalCrawlDebtRecord(store.values[string(debtKey)])
@@ -367,7 +427,12 @@ func TestImportedFileBecomesVerifiedAndThenReuses(t *testing.T) {
 func TestReconcileWritesPathVersionForOptedInBindingChanges(t *testing.T) {
 	store := newFakeStore()
 	filesystem := testFilesystem()
-	reconciler, err := New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	reconciler, err := New(
+		context.Background(),
+		filesystem,
+		store,
+		Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +458,12 @@ func TestReconcileWritesPathVersionForOptedInBindingChanges(t *testing.T) {
 	}
 
 	filesystem.entries["/root/file"] = fileInfo(1, 11, 8, 2)
-	reconciler, err = New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	reconciler, err = New(
+		context.Background(),
+		filesystem,
+		store,
+		Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +485,12 @@ func TestReconcileWritesPathVersionForOptedInBindingChanges(t *testing.T) {
 func TestReconcileWritesPathVersionTombstoneForDeletedIndexedPath(t *testing.T) {
 	store := newFakeStore()
 	filesystem := testFilesystem()
-	reconciler, err := New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	reconciler, err := New(
+		context.Background(),
+		filesystem,
+		store,
+		Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +501,12 @@ func TestReconcileWritesPathVersionTombstoneForDeletedIndexedPath(t *testing.T) 
 	}
 
 	delete(filesystem.entries, "/root/file")
-	reconciler, err = New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}})
+	reconciler, err = New(
+		context.Background(),
+		filesystem,
+		store,
+		Options{Workers: 1, QueueDepth: 4, PathIndexPaths: []string{"/file"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +655,14 @@ func TestUnavailableIdentityIsDeferredAndFailedDebtIsRetried(t *testing.T) {
 	filesystem = testFilesystem()
 	delete(filesystem.entries, "/root/file")
 	debtKey := schema.CrawlDebtKey(testSchemaID(92), testSchemaID(93))
-	store.values[string(debtKey)] = encode(t, schema.CrawlDebtRecord{PathOrTree: []byte("file"), Reason: schema.DebtUnknownFreshness, Status: schema.DebtPending})
+	store.values[string(debtKey)] = encode(
+		t,
+		schema.CrawlDebtRecord{
+			PathOrTree: []byte("file"),
+			Reason:     schema.DebtUnknownFreshness,
+			Status:     schema.DebtPending,
+		},
+	)
 	reconciler, err = New(context.Background(), filesystem, store, Options{Workers: 1, QueueDepth: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -585,7 +672,8 @@ func TestUnavailableIdentityIsDeferredAndFailedDebtIsRetried(t *testing.T) {
 		t.Fatal("missing live file did not fail reconciliation")
 	}
 	debt, err := schema.UnmarshalCrawlDebtRecord(store.values[string(debtKey)])
-	if err != nil || debt.Status != schema.DebtPending || debt.RetryCount != 1 || debt.ErrorClass != "not-found" || debt.LastAttemptUnixNano == 0 {
+	if err != nil || debt.Status != schema.DebtPending || debt.RetryCount != 1 || debt.ErrorClass != "not-found" ||
+		debt.LastAttemptUnixNano == 0 {
 		t.Fatalf("retried debt = %#v, err=%v", debt, err)
 	}
 }
@@ -666,7 +754,12 @@ func TestDefaultWorkerCountAppliesBackpressure(t *testing.T) {
 	gate := make(chan struct{})
 	filesystem := testFilesystem()
 	filesystem.gate = gate
-	reconciler, err := New(context.Background(), filesystem, newFakeStore(), Options{Workers: DefaultWorkers, QueueDepth: 1})
+	reconciler, err := New(
+		context.Background(),
+		filesystem,
+		newFakeStore(),
+		Options{Workers: DefaultWorkers, QueueDepth: 1},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +823,14 @@ func TestDaemonBackedPostImportReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	importKey := schema.InodeRevisionKey(fsid, inode, importRevision)
-	importValue := encode(t, schema.InodeRevision{ParentInode: parentInfo.Inode, Known: schema.KnownParent, Freshness: schema.FreshnessImported})
+	importValue := encode(
+		t,
+		schema.InodeRevision{
+			ParentInode: parentInfo.Inode,
+			Known:       schema.KnownParent,
+			Freshness:   schema.FreshnessImported,
+		},
+	)
 	if err := store.PublishRevision(context.Background(), schema.CurrentInodeKey(fsid, inode), importKey, importValue, importRevision); err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +871,8 @@ func TestDaemonBackedPostImportReconciliation(t *testing.T) {
 		t.Fatalf("verified revision: found=%t err=%v", found, err)
 	}
 	verified, err := schema.UnmarshalInodeRevision(verifiedValue)
-	if err != nil || verified.Freshness != schema.FreshnessVerified || verified.ParentInode != parentInfo.Inode || len(verified.ContentIDs) != 1 {
+	if err != nil || verified.Freshness != schema.FreshnessVerified || verified.ParentInode != parentInfo.Inode ||
+		len(verified.ContentIDs) != 1 {
 		t.Fatalf("verified revision = %#v, err=%v", verified, err)
 	}
 	debtValue, found, err := store.Get(context.Background(), debtKey)
@@ -848,11 +949,28 @@ func testFilesystem() *fakeFS {
 }
 
 func fileInfo(device, inode uint64, size int64, links uint64) fs.ExtendedFileInfo {
-	return fs.ExtendedFileInfo{DeviceID: device, Inode: inode, Size: size, Links: links, Mode: 0o644, UID: 3, GID: 4, ModTime: time.Unix(5, 6), ChangeTime: time.Unix(7, 8)}
+	return fs.ExtendedFileInfo{
+		DeviceID:   device,
+		Inode:      inode,
+		Size:       size,
+		Links:      links,
+		Mode:       0o644,
+		UID:        3,
+		GID:        4,
+		ModTime:    time.Unix(5, 6),
+		ChangeTime: time.Unix(7, 8),
+	}
 }
 
 func dirInfo(device, inode uint64) fs.ExtendedFileInfo {
-	return fs.ExtendedFileInfo{DeviceID: device, Inode: inode, Links: 1, Mode: os.ModeDir | 0o755, ModTime: time.Unix(5, 6), ChangeTime: time.Unix(7, 8)}
+	return fs.ExtendedFileInfo{
+		DeviceID:   device,
+		Inode:      inode,
+		Links:      1,
+		Mode:       os.ModeDir | 0o755,
+		ModTime:    time.Unix(5, 6),
+		ChangeTime: time.Unix(7, 8),
+	}
 }
 
 func fileNode(name string, id byte) *data.Node {

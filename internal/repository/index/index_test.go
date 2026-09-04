@@ -556,7 +556,11 @@ func TestIndexHas(t *testing.T) {
 	}
 
 	rtest.Assert(t, !idx.Has(vaultic.NewRandomBlobHandle()), "Index reports having a data blob not added to it")
-	rtest.Assert(t, !idx.Has(vaultic.BlobHandle{ID: tests[0].Handle().ID, Type: vaultic.TreeBlob}), "Index reports having a tree blob added to it with the same id as a data blob")
+	rtest.Assert(
+		t,
+		!idx.Has(vaultic.BlobHandle{ID: tests[0].Handle().ID, Type: vaultic.TreeBlob}),
+		"Index reports having a tree blob added to it with the same id as a data blob",
+	)
 }
 
 func TestMixedEachByPack(t *testing.T) {

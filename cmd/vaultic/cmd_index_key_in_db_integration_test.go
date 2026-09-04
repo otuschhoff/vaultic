@@ -89,15 +89,23 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 		},
 	}
 	addSlot := newIndexKeysAddSlotCommand(&environment.gopts, &keyOptions)
-	addSlot.SetArgs([]string{"--slot", "second-recovery", "--passphrase-file", secondPassphrase, "--priority", "10", "--recovery"})
+	addSlot.SetArgs(
+		[]string{"--slot", "second-recovery", "--passphrase-file", secondPassphrase, "--priority", "10", "--recovery"},
+	)
 	if err := addSlot.ExecuteContext(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ctx, repo, unlock, err = openWithReadLock(metadataRepositoryContext(t, ctx, keyOptions.Daemon, repositoryID), environment.gopts, true, printer)
+	ctx, repo, unlock, err = openWithReadLock(
+		metadataRepositoryContext(ctx, t, keyOptions.Daemon, repositoryID),
+		environment.gopts,
+		true,
+		printer,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = repo.Backend().Stat(ctx, backend.Handle{Type: backend.SlateDBFile, Name: "key-envelope-00000000000000000002.json", IsMetadata: true})
+	_, err = repo.Backend().
+		Stat(ctx, backend.Handle{Type: backend.SlateDBFile, Name: "key-envelope-00000000000000000002.json", IsMetadata: true})
 	unlock()
 	if err != nil {
 		t.Fatalf("automatic envelope mirror missing: %v", err)
@@ -201,23 +209,38 @@ func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	migration, err := client.PrepareCapsuleMigration(ctx, t.TempDir(), 1, "operators", 2, publicKey, []daemon.OfflineCapsuleMember{
-		{ID: "alice", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{1}, 32)},
-		{ID: "bob", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{2}, 32)},
-		{ID: "carol", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{3}, 32)},
-	})
+	migration, err := client.PrepareCapsuleMigration(
+		ctx,
+		t.TempDir(),
+		1,
+		"operators",
+		2,
+		publicKey,
+		[]daemon.OfflineCapsuleMember{
+			{ID: "alice", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{1}, 32)},
+			{ID: "bob", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{2}, 32)},
+			{ID: "carol", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{3}, 32)},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, found, err := client.GetMasterKey(ctx); err != nil || !found {
 		t.Fatalf("prepare did not retain database master key: found %t, err %v", found, err)
 	}
-	if err := backendStore.Save(ctx, backend.Handle{Type: backend.SlateDBFile, Name: "escrow-retire.json", IsMetadata: true}, backend.NewByteReader([]byte("wrapped escrow"), backendStore.Hasher())); err != nil {
+	if err := backendStore.Save(ctx,
+		backend.Handle{Type: backend.SlateDBFile,
+			Name:       "escrow-retire.json",
+			IsMetadata: true},
+		backend.NewByteReader([]byte("wrapped escrow"),
+			backendStore.Hasher())); err != nil {
 		t.Fatal(err)
 	}
 
 	proof := hmac.New(sha256.New, masterKey)
-	_, _ = proof.Write([]byte("vaultic-capsule-migration-finalize-v1\x00" + repositoryID + "\x00" + migration.CapsuleSHA256))
+	_, _ = proof.Write(
+		[]byte("vaultic-capsule-migration-finalize-v1\x00" + repositoryID + "\x00" + migration.CapsuleSHA256),
+	)
 	if err := client.FinalizeCapsuleMigration(ctx, migration.CapsuleSHA256, proof.Sum(nil)); err != nil {
 		t.Fatal(err)
 	}
@@ -307,10 +330,18 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 	}
 	capsuleDirectory := t.TempDir()
 	credentials := [][]byte{bytes.Repeat([]byte{1}, 32), []byte("bob's offline recovery passphrase")}
-	migration, err := daemonClient.PrepareCapsuleMigration(ctx, capsuleDirectory, 1, "operators", 2, publicIdentity, []daemon.OfflineCapsuleMember{
-		{ID: "alice", Provider: "offline-keyfile", Credential: credentials[0]},
-		{ID: "bob", Provider: "offline-argon2id", Credential: credentials[1]},
-	})
+	migration, err := daemonClient.PrepareCapsuleMigration(
+		ctx,
+		capsuleDirectory,
+		1,
+		"operators",
+		2,
+		publicIdentity,
+		[]daemon.OfflineCapsuleMember{
+			{ID: "alice", Provider: "offline-keyfile", Credential: credentials[0]},
+			{ID: "bob", Provider: "offline-argon2id", Credential: credentials[1]},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +423,15 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index, member := range []string{"alice", "bob"} {
-		contribution, err := capsule.ContributeOffline(session, "unix:"+socket, member, credentials[index], index == 0, capsule.Generation(), time.Now())
+		contribution, err := capsule.ContributeOffline(
+			session,
+			"unix:"+socket,
+			member,
+			credentials[index],
+			index == 0,
+			capsule.Generation(),
+			time.Now(),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -462,7 +501,12 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 	}
 }
 
-func metadataRepositoryContext(t *testing.T, ctx context.Context, options indexDaemonOptions, repositoryID string) context.Context {
+func metadataRepositoryContext(
+	ctx context.Context,
+	t *testing.T,
+	options indexDaemonOptions,
+	repositoryID string,
+) context.Context {
 	t.Helper()
 	ctx, err := indexDaemonContext(ctx, options, repositoryID)
 	if err != nil {

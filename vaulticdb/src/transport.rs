@@ -1,52 +1,3 @@
-#[derive(Debug)]
-enum Transport {
-    Unix(PathBuf),
-    Tcp(SocketAddr, Vec<IpNet>),
-}
-
-fn parse_transport(repository_id: &str, has_auth_token: bool) -> Result<Transport> {
-    let transport = env::var("VAULTICDB_TRANSPORT").unwrap_or_else(|_| "unix".to_owned());
-    match transport.as_str() {
-        "unix" => Ok(Transport::Unix(PathBuf::from(
-            env::var("VAULTICDB_SOCKET").unwrap_or_else(|_| default_socket_path(repository_id)),
-        ))),
-        "tcp" => {
-            if env::var("VAULTICDB_TCP_ALLOWLIST")
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-            {
-                bail!("VAULTICDB_TCP_ALLOWLIST is required when TCP transport is enabled")
-            }
-            if !has_auth_token {
-                bail!("a TCP authentication token is required when TCP transport is enabled")
-            }
-            let addr =
-                env::var("VAULTICDB_TCP_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_owned());
-            let allowlist = env::var("VAULTICDB_TCP_ALLOWLIST")?
-                .split(',')
-                .map(|value| value.trim().parse().context("invalid IP allowlist entry"))
-                .collect::<Result<Vec<IpNet>>>()?;
-            Ok(Transport::Tcp(
-                addr.parse().context("invalid VAULTICDB_TCP_ADDR")?,
-                allowlist,
-            ))
-        }
-        other => bail!("unsupported VAULTICDB_TRANSPORT {other:?}; expected unix or tcp"),
-    }
-}
-
-fn default_socket_path(repository_id: &str) -> String {
-    let runtime_dir =
-        env::var("VAULTICDB_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticdb".to_owned());
-    let digest = Sha256::digest(if repository_id.is_empty() {
-        b"default"
-    } else {
-        repository_id.as_bytes()
-    });
-    format!("{runtime_dir}/{digest:x}.sock")
-}
-
 fn repository_key(repository_id: &str) -> String {
     let digest = Sha256::digest(if repository_id.is_empty() {
         b"default"
@@ -54,29 +5,6 @@ fn repository_key(repository_id: &str) -> String {
         repository_id.as_bytes()
     });
     format!("{digest:x}")
-}
-
-fn read_auth_token() -> Result<Option<Zeroizing<String>>> {
-    let Some(descriptor) = env::var_os("VAULTICDB_TCP_AUTH_TOKEN_FD") else {
-        return Ok(None);
-    };
-    unsafe { env::remove_var("VAULTICDB_TCP_AUTH_TOKEN_FD") };
-    let descriptor: RawFd = descriptor
-        .to_string_lossy()
-        .parse()
-        .context("invalid TCP authentication-token descriptor")?;
-    if descriptor < 3 {
-        bail!("TCP authentication-token descriptor must not be a standard stream")
-    }
-    let mut input = unsafe { File::from_raw_fd(descriptor) }.take(64 * 1024 + 1);
-    let mut token = Zeroizing::new(String::new());
-    input
-        .read_to_string(&mut token)
-        .context("read TCP authentication token")?;
-    if token.is_empty() || token.len() > 64 * 1024 {
-        bail!("TCP authentication token must contain between 1 and 65536 bytes")
-    }
-    Ok(Some(token))
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -89,36 +17,27 @@ async fn main() -> Result<()> {
     {
         return publish_capsule_without_database(&arguments).await;
     }
-    if env::var_os("VAULTICDB_NATIVE_SMOKE").is_some() {
+    if Config::native_smoke_requested() {
         return native_smoke().await;
     }
 
-    let repository_id = env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default();
-    let auth_token = read_auth_token()?;
-    let transport = parse_transport(&repository_id, auth_token.is_some())?;
+    let Config {
+        repository_id,
+        daemon_id,
+        auth_token,
+        transport,
+        minimum_writer_tenure,
+        writer_idle_grace,
+        writer_transition_timeout,
+        storage: storage_config,
+    } = Config::from_env()?;
     let clock_started = Instant::now();
-    let minimum_writer_tenure = configured_duration(
-        "VAULTICDB_WRITER_MINIMUM_TENURE",
-        Duration::from_secs(30),
-        false,
-    )?
-    .expect("minimum writer tenure has a default");
-    let writer_idle_grace =
-        configured_duration("VAULTICDB_WRITER_IDLE_GRACE", Duration::ZERO, true)?;
-    let writer_transition_timeout = configured_duration(
-        "VAULTICDB_WRITER_TRANSITION_TIMEOUT",
-        Duration::from_secs(30),
-        false,
-    )?
-    .expect("writer transition timeout has a default");
     let mut state = DaemonState {
-        daemon_id: Arc::from(
-            env::var("VAULTICDB_DAEMON_ID").unwrap_or_else(|_| "vaulticdb-dev".to_owned()),
-        ),
+        daemon_id: Arc::from(daemon_id),
         repository_id: Arc::from(repository_id),
         auth_token: auth_token.map(Arc::new),
-        unix_socket: matches!(&transport, Transport::Unix(_)),
-        tcp_enabled: matches!(&transport, Transport::Tcp(_, _)),
+        unix_socket: matches!(&transport, TransportConfig::Unix(_)),
+        tcp_enabled: matches!(&transport, TransportConfig::Tcp { .. }),
         draining: Arc::new(AtomicBool::new(false)),
         writer_role: Arc::new(Mutex::new(WriterRoleState::read_write(
             1,
@@ -132,11 +51,11 @@ async fn main() -> Result<()> {
         clock_started,
         clock_started_unix_ms: unix_time_ms_i64()?,
     };
-    let tcp_enabled = matches!(transport, Transport::Tcp(_, _));
+    let tcp_enabled = matches!(transport, TransportConfig::Tcp { .. });
     let (shutdown, shutdown_rx) = watch::channel(false);
 
     match transport {
-        Transport::Unix(path) => {
+        TransportConfig::Unix(path) => {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
                 set_private_directory_permissions(parent)?;
@@ -158,7 +77,9 @@ async fn main() -> Result<()> {
                 remove_runtime_metadata(&path);
                 return Err(error);
             }
-            let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            let storage = Arc::new(
+                Storage::open(state.repository_id.as_ref(), &storage_config).await?,
+            );
             let (is_writer, epoch) = storage.writer_status_epoch().await;
             state.writer_role = Arc::new(Mutex::new(if is_writer {
                 WriterRoleState::read_write(epoch, clock_started, minimum_writer_tenure)
@@ -180,17 +101,8 @@ async fn main() -> Result<()> {
             result?;
             close_result?;
         }
-        Transport::Tcp(addr, allowlist) => {
-            let metadata_path = env::var("VAULTICDB_TCP_METADATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    PathBuf::from(
-                        env::var("VAULTICDB_RUNTIME_DIR")
-                            .unwrap_or_else(|_| "/tmp/vaulticdb".to_owned()),
-                    )
-                    .join("vaulticdb-tcp")
-                });
-            let listener = TcpListener::bind(addr).await.context("bind TCP listener")?;
+        TransportConfig::Tcp { address, allowlist, metadata_path } => {
+            let listener = TcpListener::bind(address).await.context("bind TCP listener")?;
             if let Some(parent) = metadata_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
                 set_private_directory_permissions(parent)?;
@@ -198,7 +110,9 @@ async fn main() -> Result<()> {
             let lock_path = metadata_path.with_extension("lock");
             let _lock = acquire_singleton_lock(&lock_path)?;
             write_runtime_metadata(&metadata_path, tcp_enabled)?;
-            let storage = Arc::new(Storage::open(state.repository_id.as_ref()).await?);
+            let storage = Arc::new(
+                Storage::open(state.repository_id.as_ref(), &storage_config).await?,
+            );
             let (is_writer, epoch) = storage.writer_status_epoch().await;
             state.writer_role = Arc::new(Mutex::new(if is_writer {
                 WriterRoleState::read_write(epoch, clock_started, minimum_writer_tenure)

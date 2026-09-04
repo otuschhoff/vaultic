@@ -20,7 +20,14 @@ type SnapshotRetentionHorizon struct {
 // RecordPromotionEligibility derives durable pack survival evidence from one
 // completed forget-policy evaluation. Stale evidence from older policies is
 // removed in the same metadata batch.
-func RecordPromotionEligibility(ctx context.Context, repo *Repository, store *daemon.SchemaStore, snapshots map[vaultic.ID]SnapshotRetentionHorizon, evaluatedAt time.Time, printer vaultic.Printer) error {
+func RecordPromotionEligibility(
+	ctx context.Context,
+	repo *Repository,
+	store *daemon.SchemaStore,
+	snapshots map[vaultic.ID]SnapshotRetentionHorizon,
+	evaluatedAt time.Time,
+	printer vaultic.Printer,
+) error {
 	blobHorizons := make(map[vaultic.ID]int64)
 	liveBlobs := make(map[vaultic.ID]struct{})
 	err := data.ForAllSnapshots(ctx, repo, repo, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, err error) error {
@@ -83,7 +90,12 @@ func RecordPromotionEligibility(ctx context.Context, repo *Repository, store *da
 	return store.WriteMutableBatch(ctx, puts, deletes, false)
 }
 
-func promotionEligibilityRecords(packMembers map[vaultic.ID][]vaultic.ID, liveBlobs map[vaultic.ID]struct{}, blobHorizons map[vaultic.ID]int64, evaluatedAt int64) map[vaultic.ID]schema.PromotionEligibilityRecord {
+func promotionEligibilityRecords(
+	packMembers map[vaultic.ID][]vaultic.ID,
+	liveBlobs map[vaultic.ID]struct{},
+	blobHorizons map[vaultic.ID]int64,
+	evaluatedAt int64,
+) map[vaultic.ID]schema.PromotionEligibilityRecord {
 	records := make(map[vaultic.ID]schema.PromotionEligibilityRecord)
 	for packID, members := range packMembers {
 		minimum := int64(math.MaxInt64)

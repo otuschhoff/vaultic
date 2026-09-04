@@ -206,7 +206,13 @@ func HistorySeries(ctx context.Context, store Store, options SeriesOptions) (Ser
 // covers yet and folds them into the series. A bucket that already exists on
 // disk wins, because the stored bucket may summarise events that retention has
 // since discarded, whereas the raw events only describe what is still present.
-func foldPendingRawEvents(ctx context.Context, store Store, granularity schema.HistoryGranularity, seen map[bucketKeyOf]bool, fold func(bucketKeyOf, schema.PackHistoryBucket)) error {
+func foldPendingRawEvents(
+	ctx context.Context,
+	store Store,
+	granularity schema.HistoryGranularity,
+	seen map[bucketKeyOf]bool,
+	fold func(bucketKeyOf, schema.PackHistoryBucket),
+) error {
 	scanned, err := ScanHistory(ctx, store, 0, 0)
 	if err != nil {
 		return err

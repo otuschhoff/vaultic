@@ -56,7 +56,8 @@ func (options Options) withDefaults() (Options, error) {
 	if options.Workers < 1 || options.QueueDepth < 1 || options.BatchSize < 1 || options.BatchSize > 10_000 {
 		return Options{}, fmt.Errorf("invalid reconciliation worker, queue, or batch limit")
 	}
-	if scope := options.Authoritative; scope != nil && (scope.ScopeID == (schema.ID{}) || scope.RootFSID == 0 || scope.RootInode == 0 || scope.StartFence == 0) {
+	if scope := options.Authoritative; scope != nil &&
+		(scope.ScopeID == (schema.ID{}) || scope.RootFSID == 0 || scope.RootInode == 0 || scope.StartFence == 0) {
 		return Options{}, fmt.Errorf("invalid authoritative reconciliation scope")
 	}
 	return options, nil
@@ -227,7 +228,14 @@ func (reconciler *Reconciler) AuthoritativeCrawlClaim() *daemon.AuthoritativeCra
 	reconciler.mu.Lock()
 	defer reconciler.mu.Unlock()
 	scope := *reconciler.options.Authoritative
-	claim := &daemon.AuthoritativeCrawlClaim{ScopeID: scope.ScopeID, RootFSID: scope.RootFSID, RootInode: scope.RootInode, StartFence: scope.StartFence, Complete: scope.Complete && reconciler.failed.Load() == 0 && reconciler.deferred.Load() == 0 && len(reconciler.errors) == 0}
+	claim := &daemon.AuthoritativeCrawlClaim{
+		ScopeID:    scope.ScopeID,
+		RootFSID:   scope.RootFSID,
+		RootInode:  scope.RootInode,
+		StartFence: scope.StartFence,
+		Complete: scope.Complete && reconciler.failed.Load() == 0 && reconciler.deferred.Load() == 0 &&
+			len(reconciler.errors) == 0,
+	}
 	for _, key := range reconciler.crawlDebt {
 		claim.DebtKeys = append(claim.DebtKeys, append([]byte(nil), key...))
 	}
@@ -237,7 +245,11 @@ func (reconciler *Reconciler) AuthoritativeCrawlClaim() *daemon.AuthoritativeCra
 
 // CanReuse permits the archiver fast path only for a complete verified inode
 // whose live metadata and ordered content match the previous backup node.
-func (reconciler *Reconciler) CanReuse(snapshotPath, sourcePath string, info *fs.ExtendedFileInfo, previous *data.Node) bool {
+func (reconciler *Reconciler) CanReuse(
+	snapshotPath, sourcePath string,
+	info *fs.ExtendedFileInfo,
+	previous *data.Node,
+) bool {
 	if info == nil || previous == nil || previous.Type != data.NodeTypeFile {
 		return false
 	}
@@ -254,7 +266,9 @@ func (reconciler *Reconciler) CanReuse(snapshotPath, sourcePath string, info *fs
 	}
 	required := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode | schema.KnownUID | schema.KnownGID
 	if record.Known&required != required || record.MTime != info.ModTime.UnixNano() || record.CTime != info.ChangeTime.UnixNano() ||
-		record.Size != uint64(info.Size) || record.Mode != uint32(info.Mode) || record.UID != info.UID || record.GID != info.GID {
+		record.Size != uint64(info.Size) || record.Mode != uint32(info.Mode) ||
+		record.UID != info.UID ||
+		record.GID != info.GID {
 		return false
 	}
 	if info.Links <= 1 {
@@ -263,7 +277,8 @@ func (reconciler *Reconciler) CanReuse(snapshotPath, sourcePath string, info *fs
 			return false
 		}
 		parent, identityErr := statIdentity(parentInfo)
-		if identityErr != nil || record.Known&schema.KnownParent == 0 || record.ParentInode != parent.inode || parent.fsid != identity.fsid {
+		if identityErr != nil || record.Known&schema.KnownParent == 0 || record.ParentInode != parent.inode ||
+			parent.fsid != identity.fsid {
 			return false
 		}
 	}
@@ -282,7 +297,10 @@ func (reconciler *Reconciler) CanReuse(snapshotPath, sourcePath string, info *fs
 }
 
 func (reconciler *Reconciler) currentInode(identity identity) (schema.InodeRevision, []schema.ID, bool, error) {
-	values, currentFound, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{schema.CurrentInodeKey(identity.fsid, identity.inode)})
+	values, currentFound, err := reconciler.store.MultiGet(
+		reconciler.ctx,
+		[][]byte{schema.CurrentInodeKey(identity.fsid, identity.inode)},
+	)
 	if err != nil || !currentFound[0] {
 		return schema.InodeRevision{}, nil, false, err
 	}
@@ -337,7 +355,12 @@ func (reconciler *Reconciler) contentIDs(record schema.InodeRevision) ([]schema.
 func (reconciler *Reconciler) loadPendingDebt() error {
 	var after []byte
 	for {
-		entries, done, err := reconciler.store.ScanPrefix(reconciler.ctx, []byte("q:"), after, uint32(min(reconciler.options.BatchSize, 10_000)))
+		entries, done, err := reconciler.store.ScanPrefix(
+			reconciler.ctx,
+			[]byte("q:"),
+			after,
+			uint32(min(reconciler.options.BatchSize, 10_000)),
+		)
 		if err != nil {
 			return err
 		}
@@ -365,7 +388,10 @@ func (reconciler *Reconciler) loadPendingDebt() error {
 func (reconciler *Reconciler) statWorker() {
 	defer reconciler.workers.Done()
 	for item := range reconciler.input {
-		prepared := preparedItem{workItem: *item, debtKeys: reconciler.debtByPath[normalizeSnapshotPath(item.snapshotPath)]}
+		prepared := preparedItem{
+			workItem: *item,
+			debtKeys: reconciler.debtByPath[normalizeSnapshotPath(item.snapshotPath)],
+		}
 		info, err := reconciler.filesystem.Lstat(item.sourcePath)
 		if err == nil {
 			prepared.stat = *info
@@ -429,13 +455,21 @@ func (reconciler *Reconciler) publishSnapshotRoot(published map[string]published
 		if name == "" || strings.Contains(name, "/") {
 			continue
 		}
-		children = append(children, schema.DirectoryChild{Name: name, Inode: item.identity.inode, Type: item.typeID, MetadataKey: item.key})
+		children = append(
+			children,
+			schema.DirectoryChild{Name: name, Inode: item.identity.inode, Type: item.typeID, MetadataKey: item.key},
+		)
 	}
 	if len(children) == 0 && len(reconciler.options.PathIndexPaths) == 0 {
 		return nil
 	}
 	sort.Slice(children, func(left, right int) bool { return children[left].Name < children[right].Name })
-	record := schema.DirectoryRevision{Children: children, SourcePath: "/", Known: schema.KnownPath, Freshness: schema.FreshnessVerified}
+	record := schema.DirectoryRevision{
+		Children:   children,
+		SourcePath: "/",
+		Known:      schema.KnownPath,
+		Freshness:  schema.FreshnessVerified,
+	}
 	value, err := record.MarshalBinary()
 	if err != nil {
 		return err
@@ -475,7 +509,10 @@ func (reconciler *Reconciler) publishSnapshotRoot(published map[string]published
 	return nil
 }
 
-func (reconciler *Reconciler) pathDeletionMutations(published map[string]publishedItem, revision uint64) ([]daemon.Mutation, error) {
+func (reconciler *Reconciler) pathDeletionMutations(
+	published map[string]publishedItem,
+	revision uint64,
+) ([]daemon.Mutation, error) {
 	if len(reconciler.options.PathIndexPaths) == 0 {
 		return nil, nil
 	}
@@ -541,7 +578,12 @@ func (reconciler *Reconciler) latestPathBinding(snapshotPath string) (schema.Pat
 	}
 }
 
-func (reconciler *Reconciler) processBatch(batch []preparedItem, directories *[]preparedItem, hardlinks map[identity][]preparedItem, published map[string]publishedItem) {
+func (reconciler *Reconciler) processBatch(
+	batch []preparedItem,
+	directories *[]preparedItem,
+	hardlinks map[identity][]preparedItem,
+	published map[string]publishedItem,
+) {
 	for _, item := range batch {
 		if item.deferred {
 			reconciler.deferred.Add(1)
@@ -566,7 +608,10 @@ func (reconciler *Reconciler) processBatch(batch []preparedItem, directories *[]
 	}
 }
 
-func (reconciler *Reconciler) publishHardlinks(hardlinks map[identity][]preparedItem, published map[string]publishedItem) {
+func (reconciler *Reconciler) publishHardlinks(
+	hardlinks map[identity][]preparedItem,
+	published map[string]publishedItem,
+) {
 	hardlinkIDs := make([]identity, 0, len(hardlinks))
 	for id := range hardlinks {
 		hardlinkIDs = append(hardlinkIDs, id)
@@ -604,7 +649,12 @@ func (reconciler *Reconciler) publishHardlinks(hardlinks map[identity][]prepared
 			continue
 		}
 		for _, item := range links {
-			published[item.sourcePath] = publishedItem{identity: item.identity, key: key, typeID: nodeType(item.node.Type), snapshotPath: item.snapshotPath}
+			published[item.sourcePath] = publishedItem{
+				identity:     item.identity,
+				key:          key,
+				typeID:       nodeType(item.node.Type),
+				snapshotPath: item.snapshotPath,
+			}
 		}
 	}
 }
@@ -634,13 +684,24 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 				}
 				continue
 			}
-			children = append(children, schema.DirectoryChild{Name: filepath.Base(child.snapshotPath), Inode: child.identity.inode, Type: child.typeID, MetadataKey: child.key})
+			children = append(
+				children,
+				schema.DirectoryChild{
+					Name:        filepath.Base(child.snapshotPath),
+					Inode:       child.identity.inode,
+					Type:        child.typeID,
+					MetadataKey: child.key,
+				},
+			)
 		}
+		known := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode
+		known |= schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath
 		record := schema.DirectoryRevision{
 			ParentInode: directory.parent.inode, Children: children,
 			MTime: directory.stat.ModTime.UnixNano(), CTime: directory.stat.ChangeTime.UnixNano(), Size: uint64(directory.stat.Size),
 			Mode: uint32(directory.stat.Mode), UID: directory.stat.UID, GID: directory.stat.GID,
-			Known:      schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode | schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath,
+			Known: known,
+
 			SourcePath: normalizeSnapshotPath(directory.snapshotPath), Freshness: schema.FreshnessVerified,
 		}
 		value, err := record.MarshalBinary()
@@ -659,7 +720,12 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			reconciler.changed.Add(1)
 			reconciler.reconciled.Add(1)
 		}
-		published[directory.sourcePath] = publishedItem{identity: directory.identity, key: key, typeID: schema.NodeDirectory, snapshotPath: directory.snapshotPath}
+		published[directory.sourcePath] = publishedItem{
+			identity:     directory.identity,
+			key:          key,
+			typeID:       schema.NodeDirectory,
+			snapshotPath: directory.snapshotPath,
+		}
 	}
 }
 
@@ -669,7 +735,12 @@ func (reconciler *Reconciler) publishInode(item preparedItem, published map[stri
 		reconciler.fail(item.sourcePath, err, item.debtKeys)
 		return
 	}
-	published[item.sourcePath] = publishedItem{identity: item.identity, key: key, typeID: nodeType(item.node.Type), snapshotPath: item.snapshotPath}
+	published[item.sourcePath] = publishedItem{
+		identity:     item.identity,
+		key:          key,
+		typeID:       nodeType(item.node.Type),
+		snapshotPath: item.snapshotPath,
+	}
 }
 
 func validateHardlinks(links []preparedItem) error {
@@ -679,7 +750,11 @@ func validateHardlinks(links []preparedItem) error {
 	first := links[0]
 	for _, item := range links[1:] {
 		if item.stat.Size != first.stat.Size || item.stat.Mode != first.stat.Mode || item.stat.UID != first.stat.UID || item.stat.GID != first.stat.GID ||
-			!item.stat.ModTime.Equal(first.stat.ModTime) || !item.stat.ChangeTime.Equal(first.stat.ChangeTime) || len(item.node.Content) != len(first.node.Content) {
+			!item.stat.ModTime.Equal(
+				first.stat.ModTime,
+			) ||
+			!item.stat.ChangeTime.Equal(first.stat.ChangeTime) ||
+			len(item.node.Content) != len(first.node.Content) {
 			return fmt.Errorf("hardlink aliases have inconsistent metadata or content")
 		}
 		for index := range item.node.Content {
@@ -708,10 +783,13 @@ func mergeDebtKeys(links []preparedItem) [][]byte {
 }
 
 func (reconciler *Reconciler) publishInodeRecord(item preparedItem, hardlink bool) ([]byte, error) {
+	known := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode
+	known |= schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath
 	record := schema.InodeRevision{
 		ParentInode: item.parent.inode, MTime: item.stat.ModTime.UnixNano(), CTime: item.stat.ChangeTime.UnixNano(),
 		Size: uint64(item.stat.Size), Mode: uint32(item.stat.Mode), UID: item.stat.UID, GID: item.stat.GID,
-		Known:      schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode | schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath,
+		Known: known,
+
 		SourcePath: normalizeSnapshotPath(item.snapshotPath), Freshness: schema.FreshnessVerified,
 	}
 	record.HasMultipleParents = item.HasMultipleParents
@@ -749,7 +827,12 @@ func (reconciler *Reconciler) publishInodeRecord(item preparedItem, hardlink boo
 	return key, nil
 }
 
-func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, directory bool, content []schema.ID) ([]byte, bool, error) {
+func (reconciler *Reconciler) publishRecord(
+	item preparedItem,
+	value []byte,
+	directory bool,
+	content []schema.ID,
+) ([]byte, bool, error) {
 	currentKey := schema.CurrentInodeKey(item.identity.fsid, item.identity.inode)
 	if directory {
 		currentKey = schema.CurrentDirectoryKey(item.identity.fsid, item.identity.inode)
@@ -760,44 +843,13 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 	}
 	writePathBinding := !found[0]
 	if found[0] {
-		pointer, decodeErr := schema.UnmarshalCurrentPointer(values[0].Value)
-		if decodeErr != nil {
-			return nil, false, decodeErr
+		reusedKey, pathChanged, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, directory, content)
+		if err != nil {
+			return nil, false, err
 		}
-		existing, valueFound, getErr := reconciler.store.MultiGet(reconciler.ctx, [][]byte{pointer.RecordKey})
-		if getErr != nil {
-			return nil, false, getErr
-		}
-		if valueFound[0] {
-			previousPath := ""
-			if directory {
-				if previous, decodeErr := schema.UnmarshalDirectoryRevision(existing[0].Value); decodeErr == nil {
-					previousPath = previous.SourcePath
-				}
-			} else if previous, decodeErr := schema.UnmarshalInodeRevision(existing[0].Value); decodeErr == nil {
-				previousPath = previous.SourcePath
-			}
-			if previousPath != "" && normalizeSnapshotPath(previousPath) != normalizeSnapshotPath(item.snapshotPath) {
-				writePathBinding = true
-			}
-		}
-		if valueFound[0] && bytes.Equal(existing[0].Value, value) {
-			if directory {
-				if err := reconciler.store.ResolveCrawlDebt(reconciler.ctx, item.debtKeys); err != nil {
-					return nil, false, err
-				}
-				return pointer.RecordKey, true, nil
-			}
-			record, decodeErr := schema.UnmarshalInodeRevision(existing[0].Value)
-			if decodeErr == nil && record.Freshness == schema.FreshnessVerified {
-				existingContent, contentErr := reconciler.contentIDs(record)
-				if contentErr == nil && equalSchemaIDs(existingContent, content) {
-					if err := reconciler.store.ResolveCrawlDebt(reconciler.ctx, item.debtKeys); err != nil {
-						return nil, false, err
-					}
-					return pointer.RecordKey, true, nil
-				}
-			}
+		writePathBinding = pathChanged
+		if reused {
+			return reusedKey, true, nil
 		}
 	}
 	revision, err := reconciler.store.AllocateRevision(reconciler.ctx)
@@ -808,7 +860,12 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 	if directory {
 		revisionKey = schema.DirectoryRevisionKey(item.identity.fsid, item.identity.inode, revision)
 	}
-	pathPuts, err := reconciler.pathVersionMutations(item, revisionKey, revision, nodeType(item.node.Type), directory, writePathBinding)
+	pathPuts, err := reconciler.pathVersionMutations(
+		item,
+		revision,
+		nodeType(item.node.Type),
+		writePathBinding,
+	)
 	if err != nil {
 		return nil, false, err
 	}
@@ -822,7 +879,55 @@ func (reconciler *Reconciler) publishRecord(item preparedItem, value []byte, dir
 	return revisionKey, false, nil
 }
 
-func (reconciler *Reconciler) pathVersionMutations(item preparedItem, revisionKey []byte, revision uint64, nodeType schema.NodeType, directory bool, writeBinding bool) ([]daemon.Mutation, error) {
+func (reconciler *Reconciler) reuseExistingRecord(
+	item preparedItem,
+	pointerValue, value []byte,
+	directory bool,
+	content []schema.ID,
+) ([]byte, bool, bool, error) {
+	pointer, err := schema.UnmarshalCurrentPointer(pointerValue)
+	if err != nil {
+		return nil, false, false, err
+	}
+	existing, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{pointer.RecordKey})
+	if err != nil || !found[0] {
+		return nil, false, false, err
+	}
+	previousPath := ""
+	if directory {
+		if previous, err := schema.UnmarshalDirectoryRevision(existing[0].Value); err == nil {
+			previousPath = previous.SourcePath
+		}
+	} else if previous, err := schema.UnmarshalInodeRevision(existing[0].Value); err == nil {
+		previousPath = previous.SourcePath
+	}
+	pathChanged := previousPath != "" && normalizeSnapshotPath(previousPath) != normalizeSnapshotPath(item.snapshotPath)
+	if !bytes.Equal(existing[0].Value, value) {
+		return nil, pathChanged, false, nil
+	}
+	reusable := directory
+	if !directory {
+		record, decodeErr := schema.UnmarshalInodeRevision(existing[0].Value)
+		if decodeErr == nil && record.Freshness == schema.FreshnessVerified {
+			existingContent, contentErr := reconciler.contentIDs(record)
+			reusable = contentErr == nil && equalSchemaIDs(existingContent, content)
+		}
+	}
+	if !reusable {
+		return nil, pathChanged, false, nil
+	}
+	if err := reconciler.store.ResolveCrawlDebt(reconciler.ctx, item.debtKeys); err != nil {
+		return nil, false, false, err
+	}
+	return pointer.RecordKey, pathChanged, true, nil
+}
+
+func (reconciler *Reconciler) pathVersionMutations(
+	item preparedItem,
+	revision uint64,
+	nodeType schema.NodeType,
+	writeBinding bool,
+) ([]daemon.Mutation, error) {
 	if !writeBinding {
 		return nil, nil
 	}
@@ -842,7 +947,12 @@ func (reconciler *Reconciler) pathVersionMutations(item preparedItem, revisionKe
 		key := schema.PathVersionKey(0, path, revision)
 		record := schema.PathVersionRecord{State: schema.PathOverflow}
 		if key != nil {
-			record = schema.PathVersionRecord{State: schema.PathBound, NodeType: nodeType, Inode: item.identity.inode, Revision: revision}
+			record = schema.PathVersionRecord{
+				State:    schema.PathBound,
+				NodeType: nodeType,
+				Inode:    item.identity.inode,
+				Revision: revision,
+			}
 		}
 		value, err := record.MarshalBinary()
 		if err != nil {

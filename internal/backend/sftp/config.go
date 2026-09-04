@@ -80,7 +80,11 @@ func ParseConfig(s string) (*Config, error) {
 
 	p := path.Clean(dir)
 	if strings.HasPrefix(p, "~") {
-		return nil, errors.New("sftp path starts with the tilde (~) character, that fails for most sftp servers.\nUse a relative directory, most servers interpret this as relative to the user's home directory")
+		return nil, errors.New(
+			("sftp path starts with the tilde (~) character, that fails for most sftp " +
+				"servers.\nUse a relative directory, most servers interpret this as relative " +
+				"to the user's home directory"),
+		)
 	}
 
 	cfg := NewConfig()

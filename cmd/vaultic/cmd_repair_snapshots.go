@@ -53,8 +53,11 @@ Exit status is 11 if the repository is already locked.
 Exit status is 12 if the password is incorrect.
 `,
 		DisableAutoGenTag: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRepairSnapshots(cmd.Context(), *globalOptions, opts, args, globalOptions.Term)
 		},
 	}
@@ -106,7 +109,11 @@ func handleUnreadableSnapshotFile(
 		return true, nil
 	}
 
-	return false, errors.Fatalf("snapshot file %[1]s is unreadable, use `vaultic repair snapshots --forget %[1]s` to remove it. Original error: %v", brokenID, err)
+	return false, errors.Fatalf(
+		"snapshot file %[1]s is unreadable, use `vaultic repair snapshots --forget %[1]s` to remove it. Original error: %v",
+		brokenID,
+		err,
+	)
 }
 
 func runRepairSnapshots(ctx context.Context, gopts global.Options, opts RepairOptions, args []string, term ui.Terminal) error {

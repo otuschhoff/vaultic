@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod role_tests {
     use super::*;
+    use std::env;
     use crate::proto::{KeyValue, WriteBatchRequest};
 
     #[tokio::test]
@@ -10,7 +11,10 @@ mod role_tests {
             env::set_var("VAULTICDB_OBJECT_STORE", "memory");
             env::set_var("VAULTICDB_DATABASE_PATH", format!("role-test-{suffix}"));
         }
-        let storage = Storage::open(&format!("role-repo-{suffix}")).await.unwrap();
+        let config = crate::Config::from_env().unwrap();
+        let storage = Storage::open(&format!("role-repo-{suffix}"), &config.storage)
+            .await
+            .unwrap();
         let request = WriteBatchRequest {
             puts: vec![KeyValue {
                 key: b"key".to_vec(),
@@ -51,7 +55,8 @@ mod role_tests {
                 format!("idempotency-test-{suffix}"),
             );
         }
-        let storage = Storage::open(&format!("idempotency-repo-{suffix}"))
+        let config = crate::Config::from_env().unwrap();
+        let storage = Storage::open(&format!("idempotency-repo-{suffix}"), &config.storage)
             .await
             .unwrap();
         let request = WriteBatchRequest {

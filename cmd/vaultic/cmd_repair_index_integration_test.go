@@ -24,7 +24,11 @@ func testRunRebuildIndex(t testing.TB, gopts global.Options) {
 }
 
 func testRebuildIndex(t *testing.T, backendTestHook global.BackendWrapper) {
-	repository.TestInjectKey(t, vaultic.TestParseID("b9883c60bed42db51be171ca52f055104b6ea7cfa2bc381c05b2b1f78231280c"), `{"mac":{"k":"maQ4ILA872XnDxHVEno94A==","r":"OptMBABwkgIsMQcHME8cBw=="},"encrypt":"janrR1efN7HyQ8kOZ9zhHixooZ/e+WelH0mT4v9WskQ="}`)
+	repository.TestInjectKey(
+		t,
+		vaultic.TestParseID("b9883c60bed42db51be171ca52f055104b6ea7cfa2bc381c05b2b1f78231280c"),
+		`{"mac":{"k":"maQ4ILA872XnDxHVEno94A==","r":"OptMBABwkgIsMQcHME8cBw=="},"encrypt":"janrR1efN7HyQ8kOZ9zhHixooZ/e+WelH0mT4v9WskQ="}`,
+	)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
@@ -112,7 +116,11 @@ func (b *appendOnlyBackend) Remove(_ context.Context, h backend.Handle) error {
 }
 
 func TestRebuildIndexFailsOnAppendOnly(t *testing.T) {
-	repository.TestInjectKey(t, vaultic.TestParseID("b9883c60bed42db51be171ca52f055104b6ea7cfa2bc381c05b2b1f78231280c"), `{"mac":{"k":"maQ4ILA872XnDxHVEno94A==","r":"OptMBABwkgIsMQcHME8cBw=="},"encrypt":"janrR1efN7HyQ8kOZ9zhHixooZ/e+WelH0mT4v9WskQ="}`)
+	repository.TestInjectKey(
+		t,
+		vaultic.TestParseID("b9883c60bed42db51be171ca52f055104b6ea7cfa2bc381c05b2b1f78231280c"),
+		`{"mac":{"k":"maQ4ILA872XnDxHVEno94A==","r":"OptMBABwkgIsMQcHME8cBw=="},"encrypt":"janrR1efN7HyQ8kOZ9zhHixooZ/e+WelH0mT4v9WskQ="}`,
+	)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 

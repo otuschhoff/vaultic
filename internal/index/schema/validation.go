@@ -37,7 +37,11 @@ func RebuildPackAggregates(records []PackRecord, updateSequence uint64) (map[Agg
 		if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) {
 			return nil, fmt.Errorf("%w: invalid pack record", ErrMalformed)
 		}
-		kind := map[PackType]AggregateKind{PackData: AggregateData, PackTree: AggregateTree, PackMixed: AggregateMixed, PackUnknown: AggregateUnknown}[record.Type]
+		kindByPackType := map[PackType]AggregateKind{
+			PackData: AggregateData, PackTree: AggregateTree,
+			PackMixed: AggregateMixed, PackUnknown: AggregateUnknown,
+		}
+		kind := kindByPackType[record.Type]
 		for _, aggregateKind := range []AggregateKind{kind, AggregateAll} {
 			aggregate := result[aggregateKind]
 			if err := accumulatePackAggregate(&aggregate, record); err != nil {
@@ -251,7 +255,11 @@ type InodeEdge struct {
 	Inode, Revision uint64
 }
 
-func RebuildReferenceCounts(manifestEdges []ManifestEdge, inodeEdges []InodeEdge, updateSequence uint64) map[ID]ReferenceCountRecord {
+func RebuildReferenceCounts(
+	manifestEdges []ManifestEdge,
+	inodeEdges []InodeEdge,
+	updateSequence uint64,
+) map[ID]ReferenceCountRecord {
 	manifestSets := map[ID]map[ID]struct{}{}
 	inodeSets := map[ID]map[InodeRef]struct{}{}
 	revisionSets := map[ID]map[[20]byte]struct{}{}
@@ -276,7 +284,13 @@ func RebuildReferenceCounts(manifestEdges []ManifestEdge, inodeEdges []InodeEdge
 	}
 	result := map[ID]ReferenceCountRecord{}
 	for blob, total := range totals {
-		result[blob] = ReferenceCountRecord{TotalReferences: total, DistinctInodes: uint64(len(inodeSets[blob])), DistinctRevisions: uint64(len(revisionSets[blob])), DistinctManifests: uint64(len(manifestSets[blob])), UpdateSequence: updateSequence}
+		result[blob] = ReferenceCountRecord{
+			TotalReferences:   total,
+			DistinctInodes:    uint64(len(inodeSets[blob])),
+			DistinctRevisions: uint64(len(revisionSets[blob])),
+			DistinctManifests: uint64(len(manifestSets[blob])),
+			UpdateSequence:    updateSequence,
+		}
 	}
 	return result
 }

@@ -112,7 +112,17 @@ type Report struct {
 }
 
 func NewPlan(repositoryID, namespace, dekPolicy string, authority daemon.GenerationStatus, inventory Inventory, key []byte, now time.Time) (Plan, error) {
-	plan := Plan{Format: Format, RepositoryID: repositoryID, AuthorityDecision: authority.Decision, SuspectGeneration: authority.ActiveGeneration, CandidateGeneration: authority.ActiveGeneration + 1, CandidateNamespace: namespace, TargetDEKPolicy: dekPolicy, CreatedAt: now.UTC(), Inventory: inventory}
+	plan := Plan{
+		Format:              Format,
+		RepositoryID:        repositoryID,
+		AuthorityDecision:   authority.Decision,
+		SuspectGeneration:   authority.ActiveGeneration,
+		CandidateGeneration: authority.ActiveGeneration + 1,
+		CandidateNamespace:  namespace,
+		TargetDEKPolicy:     dekPolicy,
+		CreatedAt:           now.UTC(),
+		Inventory:           inventory,
+	}
 	if authority.ActiveGeneration == ^uint64(0) {
 		return Plan{}, fmt.Errorf("metadata generation overflow")
 	}
@@ -137,13 +147,26 @@ func VerifyPlan(plan Plan, key []byte) error {
 }
 
 func NewReport(plan Plan, gates Gates, conflicts, omissions []string, outcomes []Source, counts map[string]uint64, key []byte, now time.Time) (Report, error) {
-	report := Report{Format: Format, PlanID: plan.ID, RepositoryID: plan.RepositoryID, Generation: plan.CandidateGeneration, CreatedAt: now.UTC(), Gates: gates, CriticalConflicts: conflicts, Omissions: omissions, CrawlDebt: append([]string(nil), plan.Inventory.RequiredCrawlDebt...), JournalOutcomes: outcomes, ObjectCounts: counts}
+	report := Report{
+		Format:            Format,
+		PlanID:            plan.ID,
+		RepositoryID:      plan.RepositoryID,
+		Generation:        plan.CandidateGeneration,
+		CreatedAt:         now.UTC(),
+		Gates:             gates,
+		CriticalConflicts: conflicts,
+		Omissions:         omissions,
+		CrawlDebt:         append([]string(nil), plan.Inventory.RequiredCrawlDebt...),
+		JournalOutcomes:   outcomes,
+		ObjectCounts:      counts,
+	}
 	report.ID, report.Signature = signArtifact(report, key)
 	return report, nil
 }
 
 func VerifyReport(report Report, plan Plan, key []byte) error {
-	if report.Format != Format || report.PlanID != plan.ID || report.RepositoryID != plan.RepositoryID || report.Generation != plan.CandidateGeneration || !report.Clean() {
+	if report.Format != Format || report.PlanID != plan.ID || report.RepositoryID != plan.RepositoryID || report.Generation != plan.CandidateGeneration ||
+		!report.Clean() {
 		return fmt.Errorf("healing report does not authorize this candidate")
 	}
 	id, signature := report.ID, report.Signature
@@ -157,7 +180,11 @@ func VerifyReport(report Report, plan Plan, key []byte) error {
 
 func (report Report) Clean() bool {
 	gates := report.Gates
-	return gates.Identity && gates.AntiRollback && gates.StructuralAEAD && gates.PacksAndBlobOffsets && gates.TreesAndSnapshots && gates.PlacementPolicy && gates.JournalCompletions && gates.LegacyComparison && gates.ReadOnlyInspection && len(report.CriticalConflicts) == 0
+	return gates.Identity && gates.AntiRollback && gates.StructuralAEAD && gates.PacksAndBlobOffsets && gates.TreesAndSnapshots && gates.PlacementPolicy &&
+		gates.JournalCompletions &&
+		gates.LegacyComparison &&
+		gates.ReadOnlyInspection &&
+		len(report.CriticalConflicts) == 0
 }
 
 func SignCheckpoint(checkpoint Checkpoint, key []byte) Checkpoint {
@@ -276,7 +303,9 @@ func (store Store) load(name string, destination any) error {
 }
 
 func validatePlanFields(plan Plan) error {
-	if plan.Format != Format || plan.RepositoryID == "" || plan.SuspectGeneration == 0 || plan.CandidateGeneration <= plan.SuspectGeneration || strings.TrimSpace(plan.CandidateNamespace) == "" || plan.CreatedAt.IsZero() {
+	if plan.Format != Format || plan.RepositoryID == "" || plan.SuspectGeneration == 0 || plan.CandidateGeneration <= plan.SuspectGeneration ||
+		strings.TrimSpace(plan.CandidateNamespace) == "" ||
+		plan.CreatedAt.IsZero() {
 		return fmt.Errorf("invalid healing plan")
 	}
 	for _, source := range plan.Inventory.Sources {

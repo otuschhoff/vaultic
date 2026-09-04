@@ -243,7 +243,15 @@ func Disable(ctx context.Context, store Store, purge, dryRun bool) (LifecycleRes
 }
 
 func makeFact(key schema.ParsedKey, revision schema.InodeRevision, config Config) schema.AnalyticsFactRecord {
-	fact := schema.AnalyticsFactRecord{Revision: key.Revision, UID: revision.UID, GID: revision.GID, LogicalSize: revision.Size, SourcePath: revision.SourcePath, Residency: schema.AnalyticsArchiveOnly, CreationBasis: schema.AnalyticsTimeUnknown}
+	fact := schema.AnalyticsFactRecord{
+		Revision:      key.Revision,
+		UID:           revision.UID,
+		GID:           revision.GID,
+		LogicalSize:   revision.Size,
+		SourcePath:    revision.SourcePath,
+		Residency:     schema.AnalyticsArchiveOnly,
+		CreationBasis: schema.AnalyticsTimeUnknown,
+	}
 	fact.Known = revision.Known
 	if revision.Known&schema.KnownCTime != 0 {
 		fact.CreatedAt, fact.CreationBasis = revision.CTime, schema.AnalyticsCTime
@@ -485,7 +493,21 @@ func (query Query) Validate() error {
 			return fmt.Errorf("size-log10 must be in 0..19, got %d", magnitude)
 		}
 	}
-	allowed := map[string]bool{"uid": true, "gid": true, "year": true, "month": true, "iso-year": true, "workweek": true, "svm": true, "volume": true, "path-group": true, "size-log10": true, "residency": true, "creation-basis": true, "identity-continuity": true}
+	allowed := map[string]bool{
+		"uid":                 true,
+		"gid":                 true,
+		"year":                true,
+		"month":               true,
+		"iso-year":            true,
+		"workweek":            true,
+		"svm":                 true,
+		"volume":              true,
+		"path-group":          true,
+		"size-log10":          true,
+		"residency":           true,
+		"creation-basis":      true,
+		"identity-continuity": true,
+	}
 	for _, name := range query.GroupBy {
 		if !allowed[name] {
 			return fmt.Errorf("unknown analytics group-by dimension %q", name)
@@ -566,10 +588,14 @@ func canonicalShape(query Query) ([]byte, error) {
 }
 
 func matches(f schema.AnalyticsFactRecord, q Query) bool {
-	if (len(q.UIDs) != 0 && (f.Known&schema.KnownUID == 0 || !hasUint32(q.UIDs, f.UID))) || (len(q.GIDs) != 0 && (f.Known&schema.KnownGID == 0 || !hasUint32(q.GIDs, f.GID))) || (q.SizeMin != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize < *q.SizeMin)) || (q.SizeMax != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize >= *q.SizeMax)) {
+	if (len(q.UIDs) != 0 && (f.Known&schema.KnownUID == 0 || !hasUint32(q.UIDs, f.UID))) ||
+		(len(q.GIDs) != 0 && (f.Known&schema.KnownGID == 0 || !hasUint32(q.GIDs, f.GID))) ||
+		(q.SizeMin != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize < *q.SizeMin)) ||
+		(q.SizeMax != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize >= *q.SizeMax)) {
 		return false
 	}
-	if !hasString(q.SVMs, f.SVM) || !hasString(q.Volumes, f.Volume) || !hasString(q.PathGroups, f.PathGroup) || !hasString(q.Residencies, residencyName(f.Residency)) {
+	if !hasString(q.SVMs, f.SVM) || !hasString(q.Volumes, f.Volume) || !hasString(q.PathGroups, f.PathGroup) ||
+		!hasString(q.Residencies, residencyName(f.Residency)) {
 		return false
 	}
 	if len(q.SizeLog10) != 0 && (f.Known&schema.KnownSize == 0 || !hasInt(q.SizeLog10, int(f.SizeLog10))) {
@@ -581,7 +607,8 @@ func matches(f schema.AnalyticsFactRecord, q Query) bool {
 	if q.CreatedSince != nil && f.CreatedAt < *q.CreatedSince || q.CreatedUntil != nil && f.CreatedAt >= *q.CreatedUntil {
 		return false
 	}
-	return hasInt(q.Years, int(f.CalendarYear)) && hasInt(q.Months, int(f.CalendarMonth)) && hasInt(q.ISOYears, int(f.ISOYear)) && hasInt(q.Workweeks, int(f.Workweek))
+	return hasInt(q.Years, int(f.CalendarYear)) && hasInt(q.Months, int(f.CalendarMonth)) && hasInt(q.ISOYears, int(f.ISOYear)) &&
+		hasInt(q.Workweeks, int(f.Workweek))
 }
 func hasUint32(values []uint32, value uint32) bool {
 	if len(values) == 0 {

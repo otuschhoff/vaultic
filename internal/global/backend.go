@@ -147,7 +147,15 @@ func openAndAuthenticate(ctx context.Context, location *repositoryLocation, prin
 			return nil, ctx, err
 		}
 		ctx = repository.WithMetadataLossRecovery(ctx)
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "repository", Message: "legacy metadata-loss recovery selected"})
+		_ = observability.Emit(
+			ctx,
+			observability.Event{
+				Severity:  observability.Warning,
+				Category:  observability.CategoryLifecycle,
+				Component: "repository",
+				Message:   "legacy metadata-loss recovery selected",
+			},
+		)
 	}
 
 	if gopts.KeyBrokerSocket == "" {
@@ -184,7 +192,11 @@ func validateBrokeredUnlockOptions(gopts Options) error {
 	if gopts.KeyBrokerReleaseManifest == "" {
 		return errors.Fatal("--key-broker-release-manifest is required with --key-broker-socket")
 	}
-	if gopts.MetadataKeyInDB || gopts.MasterKey != "" || gopts.MasterKeyFile != "" || gopts.MasterKeyCommand != "" || gopts.Password != "" || gopts.PasswordFile != "" || gopts.PasswordCommand != "" || gopts.AzureKeyVaultURL != "" || gopts.InsecureNoPassword {
+	if gopts.MetadataKeyInDB || gopts.MasterKey != "" || gopts.MasterKeyFile != "" || gopts.MasterKeyCommand != "" || gopts.Password != "" ||
+		gopts.PasswordFile != "" ||
+		gopts.PasswordCommand != "" ||
+		gopts.AzureKeyVaultURL != "" ||
+		gopts.InsecureNoPassword {
 		return errors.Fatal("brokered unlock is mutually exclusive with password, direct-key, Azure-secret, and key-in-DB routes")
 	}
 	return nil

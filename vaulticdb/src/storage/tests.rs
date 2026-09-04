@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use slatedb::object_store::{path::Path, ObjectStoreExt};
 
     #[tokio::test]

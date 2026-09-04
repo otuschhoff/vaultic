@@ -25,6 +25,7 @@ func TestCheckResultTreatsQuorumBypassAsDirty(t *testing.T) {
 		t.Fatal("quorum bypass was reported as a clean index check")
 	}
 }
+
 type auditedMemoryStore struct {
 	*memoryStore
 	audit daemon.EncryptionAudit
@@ -50,7 +51,8 @@ func TestCheckReportsEncryptionIntegrityAndRewriteDebt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.EncryptionEnabled || result.EncryptedObjects != 10 || result.EnvelopeGeneration != 4 || result.ActiveDEKVersion != 2 || result.Clean() || !result.HasWarnings() {
+	if !result.EncryptionEnabled || result.EncryptedObjects != 10 || result.EnvelopeGeneration != 4 || result.ActiveDEKVersion != 2 || result.Clean() ||
+		!result.HasWarnings() {
 		t.Fatalf("encryption audit was not reflected in check result: %+v", result)
 	}
 	wantKinds := []string{"metadata_object_plaintext", "metadata_encryption_invalid", "metadata_dek_rewrite_pending"}
@@ -67,17 +69,27 @@ func TestCheckVerificationStateDetectsProjectionDrift(t *testing.T) {
 	pack := schema.ID(packID)
 	backend := uint64(7)
 	placement := schema.PlacementRecord{State: schema.PlacementLive, Bytes: 10, LastVerifiedAt: 100, RetentionSource: schema.RetentionUnknown}
-	state := schema.VerificationStateRecord{LastAttemptAt: 100, LastAttemptLevel: schema.VerificationChecksum, HeaderVerifiedAt: 100, ChecksumVerifiedAt: 100, Result: schema.VerificationHealthy, LastRunID: schema.ID{1}}
+	state := schema.VerificationStateRecord{
+		LastAttemptAt:      100,
+		LastAttemptLevel:   schema.VerificationChecksum,
+		HeaderVerifiedAt:   100,
+		ChecksumVerifiedAt: 100,
+		Result:             schema.VerificationHealthy,
+		LastRunID:          schema.ID{1},
+	}
 	store.set(t, schema.PackPlacementKey(pack, backend), placement)
 	store.set(t, schema.VerificationStateKey(pack, backend), state)
 	result := CheckResult{}
-	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil || result.VerificationStateMismatch != 0 {
+	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil ||
+		result.VerificationStateMismatch != 0 {
 		t.Fatalf("consistent verification state reported drift: %+v, %v", result, err)
 	}
 	placement.LastVerifiedAt = 99
 	store.set(t, schema.PackPlacementKey(pack, backend), placement)
 	result = CheckResult{}
-	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil || result.VerificationStateMismatch != 1 || result.Clean() {
+	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil ||
+		result.VerificationStateMismatch != 1 ||
+		result.Clean() {
 		t.Fatalf("verification drift was not dirty: %+v, %v", result, err)
 	}
 }
@@ -214,10 +226,15 @@ func TestCheckAnalyticsConsistency(t *testing.T) {
 	generation := uint64(1)
 	store.set(t, schema.AnalyticsMetadataKey(), schema.AnalyticsMetadataRecord{Enabled: true, Generation: generation, Facts: 1, BuiltAt: time.Now().UnixNano()})
 	store.set(t, schema.AnalyticsManifestKey(generation), schema.AnalyticsManifestRecord{Generation: generation, Segments: []uint64{1}})
-	store.set(t, schema.AnalyticsWatermarkKey(generation), schema.AnalyticsWatermarkRecord{RepositoryGeneration: generation, ManifestGeneration: generation, AppliedAt: time.Now().UnixNano()})
+	store.set(
+		t,
+		schema.AnalyticsWatermarkKey(generation),
+		schema.AnalyticsWatermarkRecord{RepositoryGeneration: generation, ManifestGeneration: generation, AppliedAt: time.Now().UnixNano()},
+	)
 	store.values[string(schema.AnalyticsDerivedGenerationMarkerKey(generation))] = []byte{schema.Version}
 	result, err = CheckWithOptions(context.Background(), nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 1})
-	if err != nil || result.AnalyticsMismatch != 2 || result.Clean() || len(result.Findings) != 1 || result.Findings[0].Kind != "analytics_segment_pair_missing" {
+	if err != nil || result.AnalyticsMismatch != 2 || result.Clean() || len(result.Findings) != 1 ||
+		result.Findings[0].Kind != "analytics_segment_pair_missing" {
 		t.Fatalf("missing analytics segment not reported with finding cap: %+v, %v", result, err)
 	}
 }
@@ -378,7 +395,11 @@ func TestCheckFindsExportPackProvenanceDrift(t *testing.T) {
 		t.Fatalf("export = %#v, %v", result, err)
 	}
 	wrongPack := schema.ID(vaultic.NewRandomID())
-	store.set(t, schema.ExportIndexCheckpointKey(schema.ID(result.IndexIDs[0])), schema.ExportIndexCheckpointRecord{Sequence: 1, PackIDs: []schema.ID{wrongPack}})
+	store.set(
+		t,
+		schema.ExportIndexCheckpointKey(schema.ID(result.IndexIDs[0])),
+		schema.ExportIndexCheckpointRecord{Sequence: 1, PackIDs: []schema.ID{wrongPack}},
+	)
 	checked, err := Check(context.Background(), source, store, 10)
 	if err != nil || checked.FailedExports != 1 || checked.Clean() {
 		t.Fatalf("provenance drift check = %#v, %v", checked, err)

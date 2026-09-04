@@ -171,7 +171,12 @@ func newTestRepo(content []TestFile) *TestRepo {
 		filesPathToContent: filesPathToContent,
 		warmupJobs:         []*TestWarmupJob{},
 	}
-	repo.loader = func(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+	repo.loader = func(ctx context.Context,
+		packID vaultic.ID,
+		handles []vaultic.BlobHandle,
+		handleBlobFn func(blob vaultic.BlobHandle,
+			buf []byte,
+			err error) error) error {
 		entries := make([]*testPackBlob, 0, len(handles))
 		for _, h := range handles {
 			found := false
@@ -359,7 +364,12 @@ func TestErrorRestoreFiles(t *testing.T) {
 
 	loadError := errors.New("load error")
 	// loader always returns an error
-	repo.loader = func(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+	repo.loader = func(ctx context.Context,
+		packID vaultic.ID,
+		handles []vaultic.BlobHandle,
+		handleBlobFn func(blob vaultic.BlobHandle,
+			buf []byte,
+			err error) error) error {
 		return loadError
 	}
 
@@ -396,7 +406,12 @@ func TestFatalDownloadError(t *testing.T) {
 	repo := newTestRepo(content)
 
 	loader := repo.loader
-	repo.loader = func(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+	repo.loader = func(ctx context.Context,
+		packID vaultic.ID,
+		handles []vaultic.BlobHandle,
+		handleBlobFn func(blob vaultic.BlobHandle,
+			buf []byte,
+			err error) error) error {
 		ctr := 0
 		return loader(ctx, packID, handles, func(blob vaultic.BlobHandle, buf []byte, err error) error {
 			if ctr < 2 {

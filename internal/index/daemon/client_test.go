@@ -24,11 +24,15 @@ func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	target, err := observability.ParseSyslogTarget("udp://" + listener.LocalAddr().String() + "?categories=auth,integrity&min-severity=warning")
+	target, err := observability.ParseSyslogTarget(
+		"udp://" + listener.LocalAddr().String() + "?categories=auth,integrity&min-severity=warning",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observability.SetDefaultSyslog(observability.NewSyslogExporter([]observability.SyslogTarget{target}, "host", "vaultic"))
+	observability.SetDefaultSyslog(
+		observability.NewSyslogExporter([]observability.SyslogTarget{target}, "host", "vaultic"),
+	)
 	defer observability.SetDefaultSyslog(nil)
 	client := &Client{
 		options: Options{RepositoryID: "repo-a"},
@@ -52,7 +56,9 @@ func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {
 		messages[index] = string(buffer[:count])
 	}
 	joined := strings.Join(messages, "\n")
-	if !strings.Contains(joined, `"category":"auth"`) || !strings.Contains(joined, `"recovery":true`) || !strings.Contains(joined, `"category":"integrity"`) || !strings.Contains(joined, `"operation":"get"`) {
+	if !strings.Contains(joined, `"category":"auth"`) || !strings.Contains(joined, `"recovery":true`) ||
+		!strings.Contains(joined, `"category":"integrity"`) ||
+		!strings.Contains(joined, `"operation":"get"`) {
 		t.Fatalf("missing encryption security events: %s", joined)
 	}
 }
@@ -140,7 +146,15 @@ func TestMetadataRebuildInitializationRequiresBrokeredRequiredEncryption(t *test
 	if err == nil || !strings.Contains(err.Error(), "requires brokered required encryption") {
 		t.Fatalf("missing broker accepted for metadata rebuild: %v", err)
 	}
-	_, err = Ensure(context.Background(), Options{RebuildInitialize: true, EncryptionMode: "initialize", BrokerSocket: "/tmp/broker.sock", BrokerManifest: "/tmp/manifest"})
+	_, err = Ensure(
+		context.Background(),
+		Options{
+			RebuildInitialize: true,
+			EncryptionMode:    "initialize",
+			BrokerSocket:      "/tmp/broker.sock",
+			BrokerManifest:    "/tmp/manifest",
+		},
+	)
 	if err == nil || !strings.Contains(err.Error(), "requires brokered required encryption") {
 		t.Fatalf("wrong encryption mode accepted for metadata rebuild: %v", err)
 	}
@@ -148,13 +162,22 @@ func TestMetadataRebuildInitializationRequiresBrokeredRequiredEncryption(t *test
 
 func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 	dataDir := t.TempDir()
-	options := Options{Socket: testSocket(t), RepositoryID: "phase3-storage", DaemonPath: daemonBinary(t), DataDir: dataDir}
+	options := Options{
+		Socket:       testSocket(t),
+		RepositoryID: "phase3-storage",
+		DaemonPath:   daemonBinary(t),
+		DataDir:      dataDir,
+	}
 	client, err := Ensure(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	puts := []Mutation{{Key: []byte("b:a"), Value: []byte("one")}, {Key: []byte("b:b"), Value: []byte("two")}, {Key: []byte("b:c"), Value: []byte("three")}}
+	puts := []Mutation{
+		{Key: []byte("b:a"), Value: []byte("one")},
+		{Key: []byte("b:b"), Value: []byte("two")},
+		{Key: []byte("b:c"), Value: []byte("three")},
+	}
 	durable, err := client.WriteBatch(ctx, puts, nil, true, "")
 	if err != nil || !durable {
 		t.Fatalf("durable write = %t, %v", durable, err)
@@ -192,7 +215,8 @@ func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 	if err := transaction.WriteBatch(ctx, []Mutation{{Key: []byte("tx:rollback"), Value: []byte("hidden")}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if value, found, err := transaction.Get(ctx, []byte("tx:rollback")); err != nil || !found || string(value) != "hidden" {
+	if value, found, err := transaction.Get(ctx, []byte("tx:rollback")); err != nil || !found ||
+		string(value) != "hidden" {
 		t.Fatalf("transaction read = %q, %t, %v", value, found, err)
 	}
 	if _, found, err := client.Get(ctx, []byte("tx:rollback"), ""); err != nil || found {
@@ -254,7 +278,12 @@ func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 }
 
 func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
-	options := Options{Socket: testSocket(t), RepositoryID: "phase3-schema", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	options := Options{
+		Socket:       testSocket(t),
+		RepositoryID: "phase3-schema",
+		DaemonPath:   daemonBinary(t),
+		DataDir:      t.TempDir(),
+	}
 	client, err := Ensure(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +330,8 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	if err := store.CreateImmutable(ctx, key, changed); err == nil {
 		t.Fatal("immutable overwrite was accepted")
 	}
-	if err := store.Put(ctx, key, encoded, true); err == nil || !strings.Contains(err.Error(), "dedicated transactional") {
+	if err := store.Put(ctx, key, encoded, true); err == nil ||
+		!strings.Contains(err.Error(), "dedicated transactional") {
 		t.Fatalf("generic immutable write returned %v", err)
 	}
 	if err := store.Put(ctx, schema.PackKey(schema.ID{}), []byte("invalid"), true); err == nil {
@@ -315,12 +345,25 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	batchValues, batchFound, err := client.MultiGet(ctx, [][]byte{packKey, aggregateKey}, "")
-	if err != nil || !batchFound[0] || !batchFound[1] || !bytes.Equal(batchValues[0].Value, packValue) || !bytes.Equal(batchValues[1].Value, aggregateValue) {
+	if err != nil || !batchFound[0] || !batchFound[1] || !bytes.Equal(batchValues[0].Value, packValue) ||
+		!bytes.Equal(batchValues[1].Value, aggregateValue) {
 		t.Fatalf("mutable schema batch = %#v, %#v, %v", batchValues, batchFound, err)
 	}
 	blobKey := schema.BlobKey(daemonTestID(8))
-	blobValue := encodeSchemaRecord(t, schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: daemonTestID(9), Type: schema.BlobData}}})
-	packValue2 := encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 2, PhysicalSizeKnown: true, HeaderSize: 2, Lifecycle: schema.PackPublished})
+	blobValue := encodeSchemaRecord(
+		t,
+		schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: daemonTestID(9), Type: schema.BlobData}}},
+	)
+	packValue2 := encodeSchemaRecord(
+		t,
+		schema.PackRecord{
+			Type:              schema.PackData,
+			PhysicalSize:      2,
+			PhysicalSizeKnown: true,
+			HeaderSize:        2,
+			Lifecycle:         schema.PackPublished,
+		},
+	)
 	if err := store.PublishSchemaBatch(ctx, []Mutation{{Key: blobKey, Value: blobValue}, {Key: packKey, Value: packValue2}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -333,20 +376,28 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	if err != nil || !foundAfterConflict || !bytes.Equal(packAfterConflict, packValue2) {
 		t.Fatalf("mixed schema batch was not atomic: %q, %t, %v", packAfterConflict, foundAfterConflict, err)
 	}
-	if err := store.WriteMutableBatch(ctx, nil, [][]byte{packKey}, true); err == nil || !strings.Contains(err.Error(), "remain visible") {
+	if err := store.WriteMutableBatch(ctx, nil, [][]byte{packKey}, true); err == nil ||
+		!strings.Contains(err.Error(), "remain visible") {
 		t.Fatalf("pack deletion returned %v", err)
 	}
-	if err := store.WriteMutableBatch(ctx, []Mutation{{Key: aggregateKey, Value: aggregateValue}}, [][]byte{aggregateKey}, true); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	if err := store.WriteMutableBatch(ctx, []Mutation{{Key: aggregateKey, Value: aggregateValue}}, [][]byte{aggregateKey}, true); err == nil ||
+		!strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate mutable mutation returned %v", err)
 	}
-	if err := store.Put(ctx, schema.NextRevisionKey(), mustNextRevision(t, 100), true); err == nil || !strings.Contains(err.Error(), "AllocateRevision") {
+	if err := store.Put(ctx, schema.NextRevisionKey(), mustNextRevision(t, 100), true); err == nil ||
+		!strings.Contains(err.Error(), "AllocateRevision") {
 		t.Fatalf("generic revision-sequence write returned %v", err)
 	}
 	content := []schema.ID{daemonTestID(1), daemonTestID(2), daemonTestID(3)}
 	manifestID := schema.ContentManifestID(content)
 	reverseManifestKey := schema.ReverseManifestKey(content[0], manifestID)
 	reverseManifestValue := encodeSchemaRecord(t, schema.ReverseManifestRecord{State: schema.ReferenceCurrent})
-	manifestID, err = store.PublishContentManifest(ctx, content, []Mutation{{Key: reverseManifestKey, Value: reverseManifestValue}}, nil)
+	manifestID, err = store.PublishContentManifest(
+		ctx,
+		content,
+		[]Mutation{{Key: reverseManifestKey, Value: reverseManifestValue}},
+		nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,8 +409,12 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 	currentKey := schema.CurrentInodeKey(1, 2)
 	reverseInodeKey := schema.ReverseInodeKey(content[0], 1, 2)
-	reverseInodeValue := encodeSchemaRecord(t, schema.ReverseInodeRecord{LatestRevision: revision, State: schema.ReferenceCurrent})
-	if err := store.PublishRevisionBatch(ctx, currentKey, key, encoded, revision, []Mutation{{Key: reverseInodeKey, Value: reverseInodeValue}}, nil); err != nil {
+	reverseInodeValue := encodeSchemaRecord(
+		t,
+		schema.ReverseInodeRecord{LatestRevision: revision, State: schema.ReferenceCurrent},
+	)
+	reverseMutation := Mutation{Key: reverseInodeKey, Value: reverseInodeValue}
+	if err := store.PublishRevisionBatch(ctx, currentKey, key, encoded, revision, []Mutation{reverseMutation}, nil); err != nil {
 		t.Fatal(err)
 	}
 	pointerBytes, found, err := store.Get(ctx, currentKey)
@@ -376,7 +431,8 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	if err := store.PublishRevision(ctx, currentKey, key, []byte("different"), revision); err == nil {
 		t.Fatal("conflicting revision publication was accepted")
 	}
-	if err := store.PublishRevision(ctx, currentKey, schema.InodeRevisionKey(1, 2, revision-1), encoded, revision-1); err == nil || !strings.Contains(err.Error(), "newer") {
+	if err := store.PublishRevision(ctx, currentKey, schema.InodeRevisionKey(1, 2, revision-1), encoded, revision-1); err == nil ||
+		!strings.Contains(err.Error(), "newer") {
 		t.Fatalf("current-pointer regression returned %v", err)
 	}
 	if err := store.PublishRevision(ctx, currentKey, schema.InodeRevisionKey(1, 2, revision+1), []byte("invalid"), revision+1); err == nil {
@@ -388,7 +444,12 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 }
 
 func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
-	options := Options{Socket: testSocket(t), RepositoryID: "phase5-reconcile", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
+	options := Options{
+		Socket:       testSocket(t),
+		RepositoryID: "phase5-reconcile",
+		DaemonPath:   daemonBinary(t),
+		DataDir:      t.TempDir(),
+	}
 	client, err := Ensure(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -396,7 +457,12 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
 	ctx := context.Background()
-	analyticsMetadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: 1, BuiltAt: time.Now().UnixNano(), ConfigJSON: "{}"}
+	analyticsMetadata := schema.AnalyticsMetadataRecord{
+		Enabled:    true,
+		Generation: 1,
+		BuiltAt:    time.Now().UnixNano(),
+		ConfigJSON: "{}",
+	}
 	if err := store.Put(ctx, schema.AnalyticsMetadataKey(), encodeSchemaRecord(t, analyticsMetadata), true); err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +483,14 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 	currentKey := schema.CurrentInodeKey(3, 9)
 	revisionKey := schema.InodeRevisionKey(3, 9, revision)
 	debtKey := schema.CrawlDebtKey(daemonTestID(240), daemonTestID(241))
-	debtValue := encodeSchemaRecord(t, schema.CrawlDebtRecord{PathOrTree: []byte("dir/file"), Reason: schema.DebtUnknownFreshness, Status: schema.DebtPending})
+	debtValue := encodeSchemaRecord(
+		t,
+		schema.CrawlDebtRecord{
+			PathOrTree: []byte("dir/file"),
+			Reason:     schema.DebtUnknownFreshness,
+			Status:     schema.DebtPending,
+		},
+	)
 	if err := store.Put(ctx, debtKey, debtValue, true); err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +506,9 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 		t.Fatalf("transactional analytics delta: found=%t err=%v", found, err)
 	}
 	delta, err := schema.UnmarshalAnalyticsDeltaRecord(deltaValue)
-	if err != nil || delta.Kind != schema.AnalyticsDeltaCreation || delta.Revision != revision || delta.IdentityGeneration != revision || delta.State != schema.AnalyticsLive {
+	if err != nil || delta.Kind != schema.AnalyticsDeltaCreation || delta.Revision != revision ||
+		delta.IdentityGeneration != revision ||
+		delta.State != schema.AnalyticsLive {
 		t.Fatalf("transactional analytics delta = %#v, err=%v", delta, err)
 	}
 	if err := store.PublishReconciledRevision(ctx, reconciled); err != nil {
@@ -453,7 +528,9 @@ func TestSchemaStorePublishesReconciledRevisionAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	count, err := schema.UnmarshalReferenceCountRecord(countValue)
-	if err != nil || count.TotalReferences != 2 || count.DistinctInodes != 1 || count.DistinctRevisions != 1 || count.DistinctManifests != 1 || count.UpdateSequence != revision {
+	if err != nil || count.TotalReferences != 2 || count.DistinctInodes != 1 || count.DistinctRevisions != 1 ||
+		count.DistinctManifests != 1 ||
+		count.UpdateSequence != revision {
 		t.Fatalf("reference count = %#v, err=%v", count, err)
 	}
 	resolvedValue, _, err := store.Get(ctx, debtKey)

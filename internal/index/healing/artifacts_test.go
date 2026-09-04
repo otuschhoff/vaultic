@@ -10,7 +10,15 @@ import (
 func testPlan(t *testing.T) (Plan, []byte) {
 	t.Helper()
 	key := []byte("0123456789abcdef0123456789abcdef")
-	plan, err := NewPlan("repo", "candidate-2", "reuse-recovered", daemon.GenerationStatus{Decision: 3, ActiveGeneration: 1}, Inventory{Sources: []Source{{Kind: "legacy-index", ID: "index-a", Authority: 2, Authenticated: true}}}, key, time.Unix(100, 0))
+	plan, err := NewPlan(
+		"repo",
+		"candidate-2",
+		"reuse-recovered",
+		daemon.GenerationStatus{Decision: 3, ActiveGeneration: 1},
+		Inventory{Sources: []Source{{Kind: "legacy-index", ID: "index-a", Authority: 2, Authenticated: true}}},
+		key,
+		time.Unix(100, 0),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +35,17 @@ func TestPlanAndReportAuthentication(t *testing.T) {
 	if VerifyPlan(tampered, key) == nil {
 		t.Fatal("tampered plan was accepted")
 	}
-	gates := Gates{Identity: true, AntiRollback: true, StructuralAEAD: true, PacksAndBlobOffsets: true, TreesAndSnapshots: true, PlacementPolicy: true, JournalCompletions: true, LegacyComparison: true, ReadOnlyInspection: true}
+	gates := Gates{
+		Identity:            true,
+		AntiRollback:        true,
+		StructuralAEAD:      true,
+		PacksAndBlobOffsets: true,
+		TreesAndSnapshots:   true,
+		PlacementPolicy:     true,
+		JournalCompletions:  true,
+		LegacyComparison:    true,
+		ReadOnlyInspection:  true,
+	}
 	report, err := NewReport(plan, gates, nil, []string{"unprovable inode timestamps"}, nil, map[string]uint64{"packs": 4}, key, time.Unix(200, 0))
 	if err != nil {
 		t.Fatal(err)

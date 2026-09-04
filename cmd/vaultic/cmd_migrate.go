@@ -76,76 +76,73 @@ func checkMigrations(ctx context.Context, repo vaultic.Repository, printer vault
 	return nil
 }
 
-func applyMigrations(ctx context.Context, opts MigrateOptions, gopts global.Options, repo vaultic.Repository, args []string, term ui.Terminal, printer vaultic.Printer) error {
+func applyMigrations(ctx context.Context, opts MigrateOptions, gopts global.Options, repo vaultic.Repository,
+	args []string, term ui.Terminal, printer vaultic.Printer) error {
 	var firsterr error
 	for _, name := range args {
-		found := false
-		for _, m := range migrations.All {
-			if m.Name() == name {
-				found = true
-				ok, reason, err := m.Check(ctx, repo)
-				if err != nil {
-					return err
-				}
-
-				if !ok {
-					if !opts.Force {
-						if reason == "" {
-							reason = "check failed"
-						}
-						printer.E("migration %v cannot be applied: %v\nIf you want to apply this migration anyway, re-run with option --force\n", m.Name(), reason)
-						continue
-					}
-
-					printer.E("check for migration %v failed, continuing anyway\n", m.Name())
-				}
-
-				if m.RepoCheck() {
-					printer.P("checking repository integrity...\n")
-
-					checkOptions := CheckOptions{}
-					checkGopts := gopts
-					// the repository is already locked
-					checkGopts.NoLock = true
-
-					_, err = runCheck(ctx, checkOptions, checkGopts, []string{}, term)
-					if err != nil {
-						return err
-					}
-				}
-
-				printer.P("applying migration %v...\n", m.Name())
-				if err = m.Apply(ctx, repo); err != nil {
-					printer.E("migration %v failed: %v\n", m.Name(), err)
-					if firsterr == nil {
-						firsterr = err
-					}
-					continue
-				}
-
-				printer.P("migration %v: success\n", m.Name())
-			}
+		found, applyErr, err := applyNamedMigration(ctx, opts, gopts, repo, name, term, printer)
+		if err != nil {
+			return err
+		}
+		if firsterr == nil && applyErr != nil {
+			firsterr = applyErr
 		}
 		if !found {
 			printer.E("unknown migration %v", name)
 		}
 	}
-
 	return firsterr
+}
+
+func applyNamedMigration(ctx context.Context, opts MigrateOptions, gopts global.Options, repo vaultic.Repository,
+	name string, term ui.Terminal, printer vaultic.Printer) (bool, error, error) {
+	for _, migration := range migrations.All {
+		if migration.Name() != name {
+			continue
+		}
+		ok, reason, err := migration.Check(ctx, repo)
+		if err != nil {
+			return true, nil, err
+		}
+		if !ok && !opts.Force {
+			if reason == "" {
+				reason = "check failed"
+			}
+			printer.E("migration %v cannot be applied: %v\n"+
+				"If you want to apply this migration anyway, re-run with option --force\n", migration.Name(), reason)
+			return true, nil, nil
+		}
+		if !ok {
+			printer.E("check for migration %v failed, continuing anyway\n", migration.Name())
+		}
+		if migration.RepoCheck() {
+			printer.P("checking repository integrity...\n")
+			checkGopts := gopts
+			checkGopts.NoLock = true
+			if _, err := runCheck(ctx, CheckOptions{}, checkGopts, nil, term); err != nil {
+				return true, nil, err
+			}
+		}
+		printer.P("applying migration %v...\n", migration.Name())
+		if err := migration.Apply(ctx, repo); err != nil {
+			printer.E("migration %v failed: %v\n", migration.Name(), err)
+			return true, err, nil
+		}
+		printer.P("migration %v: success\n", migration.Name())
+		return true, nil, nil
+	}
+	return false, nil, nil
 }
 
 func runMigrate(ctx context.Context, opts MigrateOptions, gopts global.Options, args []string, term ui.Terminal) error {
 	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
-
 	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
 	if len(args) == 0 {
 		return checkMigrations(ctx, repo, printer)
 	}
-
 	return applyMigrations(ctx, opts, gopts, repo, args, term, printer)
 }

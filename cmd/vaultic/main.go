@@ -13,6 +13,10 @@ import (
 	godebug "runtime/debug"
 	"strings"
 
+	"github.com/otuschhoff/vaultic/cmd/vaultic/backupcmd"
+	"github.com/otuschhoff/vaultic/cmd/vaultic/indexcmd"
+	"github.com/otuschhoff/vaultic/cmd/vaultic/keycmd"
+	"github.com/otuschhoff/vaultic/cmd/vaultic/querycmd"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -90,7 +94,7 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 
 	// globalOptions is passed to commands by reference to allow PersistentPreRunE to modify it
 	cmd.AddCommand(
-		newBackupCommand(globalOptions),
+		backupcmd.NewCommand(globalOptions),
 		newCacheCommand(globalOptions),
 		newCatCommand(globalOptions),
 		newCheckCommand(globalOptions),
@@ -99,14 +103,14 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 		newDiffCommand(globalOptions),
 		newDumpCommand(globalOptions),
 		newFeaturesCommand(globalOptions),
-		newFindCommand(globalOptions),
+		querycmd.NewFindCommand(globalOptions),
 		newForgetCommand(globalOptions),
 		newGenerateCommand(globalOptions),
 		newInitCommand(globalOptions),
-		newIndexCommand(globalOptions),
-		newKeyCommand(globalOptions),
+		indexcmd.NewCommand(globalOptions),
+		keycmd.NewCommand(globalOptions),
 		newListCommand(globalOptions),
-		newLsCommand(globalOptions),
+		querycmd.NewLsCommand(globalOptions),
 		newMigrateCommand(globalOptions),
 		newMergeCommand(globalOptions),
 		newOptionsCommand(globalOptions),
@@ -118,12 +122,12 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 		newRestoreCommand(globalOptions),
 		newRewriteCommand(globalOptions),
 		newShowConfigCommand(globalOptions),
-		newSnapshotsCommand(globalOptions),
-		newStatsCommand(globalOptions),
+		querycmd.NewSnapshotsCommand(globalOptions),
+		querycmd.NewStatsCommand(globalOptions),
 		newTagCommand(globalOptions),
 		newUnlockCommand(globalOptions),
 		newVersionCommand(globalOptions),
-		newVerifyPacksCommand(globalOptions),
+		indexcmd.NewVerifyPacksCommand(globalOptions),
 	)
 
 	registerDebugCommand(cmd, globalOptions)
@@ -331,7 +335,7 @@ func main() {
 	switch {
 	case repository.IsAlreadyLocked(err):
 		exitMessage = fmt.Sprintf("%v\nthe `unlock` command can be used to remove stale locks", err)
-	case err == ErrInvalidSourceData:
+	case errors.Is(err, backupcmd.ErrInvalidSourceData):
 		exitMessage = fmt.Sprintf("Warning: %v", err)
 	case errors.IsFatal(err):
 		exitMessage = err.Error()
@@ -361,9 +365,9 @@ func exitCodeForError(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case err == ErrInvalidSourceData:
+	case errors.Is(err, backupcmd.ErrInvalidSourceData):
 		return 3
-	case errors.Is(err, errIndexDifferences), errors.Is(err, errIndexIncomplete):
+	case errors.Is(err, indexcmd.ErrDifferences), errors.Is(err, indexcmd.ErrIncomplete):
 		return 2
 	case errors.Is(err, ErrFailedToRemoveOneOrMoreSnapshots):
 		return 3

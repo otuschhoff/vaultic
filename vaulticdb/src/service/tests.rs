@@ -38,7 +38,7 @@ mod tests {
             unsafe { env::remove_var(key) };
         }
         assert!(
-            matches!(parse_transport("", false).unwrap(), Transport::Unix(path) if path == PathBuf::from(default_socket_path("")).as_path())
+            matches!(config::transport_from_env("", "/tmp/vaulticdb", false).unwrap(), TransportConfig::Unix(path) if path == PathBuf::from(config::default_socket_path("/tmp/vaulticdb", "")))
         );
     }
 
@@ -140,11 +140,11 @@ mod tests {
         unsafe { env::set_var("VAULTICDB_TRANSPORT", "tcp") };
         unsafe { env::remove_var("VAULTICDB_TCP_ALLOWLIST") };
         unsafe { env::remove_var("VAULTICDB_TCP_AUTH_TOKEN_FD") };
-        assert!(parse_transport("", false).is_err());
+        assert!(config::transport_from_env("", "/tmp/vaulticdb", false).is_err());
         unsafe { env::set_var("VAULTICDB_TCP_ALLOWLIST", "127.0.0.1/32,::1/128") };
-        assert!(parse_transport("", false).is_err());
+        assert!(config::transport_from_env("", "/tmp/vaulticdb", false).is_err());
         assert!(
-            matches!(parse_transport("", true).unwrap(), Transport::Tcp(_, networks) if networks.len() == 2)
+            matches!(config::transport_from_env("", "/tmp/vaulticdb", true).unwrap(), TransportConfig::Tcp { allowlist, .. } if allowlist.len() == 2)
         );
         for key in [
             "VAULTICDB_TRANSPORT",
@@ -163,7 +163,7 @@ mod tests {
         drop(writer);
         let descriptor = reader.into_raw_fd();
         unsafe { env::set_var("VAULTICDB_TCP_AUTH_TOKEN_FD", descriptor.to_string()) };
-        let token = read_auth_token().unwrap().unwrap();
+        let token = config::read_auth_token().unwrap().unwrap();
         assert_eq!(token.as_str(), "test-token");
         assert!(env::var_os("VAULTICDB_TCP_AUTH_TOKEN_FD").is_none());
         assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);

@@ -91,7 +91,17 @@ func (capture *DeferredCapture) Observe(snapshotPath, sourcePath string, node *d
 		subtree := *node.Subtree
 		copyNode.Subtree = &subtree
 	}
-	capture.items = append(capture.items, DeferredObservation{SnapshotPath: snapshotPath, SourcePath: sourcePath, Node: copyNode, Stat: deferredStat(info), ParentPath: parentPath, ParentStat: deferredStat(parent)})
+	capture.items = append(
+		capture.items,
+		DeferredObservation{
+			SnapshotPath: snapshotPath,
+			SourcePath:   sourcePath,
+			Node:         copyNode,
+			Stat:         deferredStat(info),
+			ParentPath:   parentPath,
+			ParentStat:   deferredStat(parent),
+		},
+	)
 }
 
 func (capture *DeferredCapture) Close() ([]DeferredObservation, error) {
@@ -152,9 +162,39 @@ func (filesystem *deferredFilesystem) Dir(path string) string {
 }
 
 func deferredStat(info *fs.ExtendedFileInfo) DeferredStat {
-	return DeferredStat{Name: info.Name, Mode: info.Mode, DeviceID: info.DeviceID, Inode: info.Inode, Links: info.Links, UID: info.UID, GID: info.GID, Device: info.Device, BlockSize: info.BlockSize, Blocks: info.Blocks, Size: info.Size, AccessTime: info.AccessTime, ModTime: info.ModTime, ChangeTime: info.ChangeTime}
+	return DeferredStat{
+		Name:       info.Name,
+		Mode:       info.Mode,
+		DeviceID:   info.DeviceID,
+		Inode:      info.Inode,
+		Links:      info.Links,
+		UID:        info.UID,
+		GID:        info.GID,
+		Device:     info.Device,
+		BlockSize:  info.BlockSize,
+		Blocks:     info.Blocks,
+		Size:       info.Size,
+		AccessTime: info.AccessTime,
+		ModTime:    info.ModTime,
+		ChangeTime: info.ChangeTime,
+	}
 }
 
 func (stat DeferredStat) extended() fs.ExtendedFileInfo {
-	return fs.ExtendedFileInfo{Name: stat.Name, Mode: stat.Mode, DeviceID: stat.DeviceID, Inode: stat.Inode, Links: stat.Links, UID: stat.UID, GID: stat.GID, Device: stat.Device, BlockSize: stat.BlockSize, Blocks: stat.Blocks, Size: stat.Size, AccessTime: stat.AccessTime, ModTime: stat.ModTime, ChangeTime: stat.ChangeTime}
+	return fs.ExtendedFileInfo{
+		Name:       stat.Name,
+		Mode:       stat.Mode,
+		DeviceID:   stat.DeviceID,
+		Inode:      stat.Inode,
+		Links:      stat.Links,
+		UID:        stat.UID,
+		GID:        stat.GID,
+		Device:     stat.Device,
+		BlockSize:  stat.BlockSize,
+		Blocks:     stat.Blocks,
+		Size:       stat.Size,
+		AccessTime: stat.AccessTime,
+		ModTime:    stat.ModTime,
+		ChangeTime: stat.ChangeTime,
+	}
 }

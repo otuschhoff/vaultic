@@ -114,7 +114,13 @@ type InodeHistoryResult struct {
 	Revisions     []InodeRevisionEntry `json:"revisions"`
 }
 
-func InodeHistory(ctx context.Context, store Store, fsid uint32, inode uint64, since, until uint64) (InodeHistoryResult, error) {
+func InodeHistory(
+	ctx context.Context,
+	store Store,
+	fsid uint32,
+	inode uint64,
+	since, until uint64,
+) (InodeHistoryResult, error) {
 	result := InodeHistoryResult{SchemaVersion: SchemaVersion, FSID: fsid, Inode: inode}
 	err := scan(ctx, store, schema.InodeRevisionPrefix(fsid, inode), func(kv daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(kv.Key)
@@ -194,7 +200,13 @@ func ResolvePathAtCommit(ctx context.Context, store Store, targetPath string, co
 	if err != nil {
 		return Binding{}, err
 	}
-	return Binding{Covered: resolved.covered, Present: resolved.present, Inode: resolved.inode, Revision: resolved.revision, NodeType: resolved.nodeType}, nil
+	return Binding{
+		Covered:  resolved.covered,
+		Present:  resolved.present,
+		Inode:    resolved.inode,
+		Revision: resolved.revision,
+		NodeType: resolved.nodeType,
+	}, nil
 }
 
 func FileHistory(ctx context.Context, store Store, targetPath string, options Options) (FileHistoryResult, error) {
@@ -219,10 +231,21 @@ func FileHistory(ctx context.Context, store Store, targetPath string, options Op
 	if metrics.SnapshotsScanned != 0 {
 		metrics.AveragePathComponents = float64(metrics.PathComponents) / float64(metrics.SnapshotsScanned)
 	}
-	return FileHistoryResult{SchemaVersion: SchemaVersion, Path: targetPath, Source: "walk", Changes: changes, Metrics: metrics}, nil
+	return FileHistoryResult{
+		SchemaVersion: SchemaVersion,
+		Path:          targetPath,
+		Source:        "walk",
+		Changes:       changes,
+		Metrics:       metrics,
+	}, nil
 }
 
-func FileHistoryFromPathIndex(ctx context.Context, store Store, targetPath string, options Options) (FileHistoryResult, bool, error) {
+func FileHistoryFromPathIndex(
+	ctx context.Context,
+	store Store,
+	targetPath string,
+	options Options,
+) (FileHistoryResult, bool, error) {
 	targetPath = cleanTargetPath(targetPath)
 	changes := make([]Change, 0)
 	err := scan(ctx, store, schema.PathVersionPrefix(0, targetPath), func(kv daemon.KeyValue) error {
@@ -244,7 +267,8 @@ func FileHistoryFromPathIndex(ctx context.Context, store Store, targetPath strin
 		if err != nil {
 			return err
 		}
-		present := record.State == schema.PathBound && binding.Present && binding.Inode == record.Inode && binding.Revision == record.Revision
+		present := record.State == schema.PathBound && binding.Present && binding.Inode == record.Inode &&
+			binding.Revision == record.Revision
 		change := Change{Path: targetPath, Commit: parsed.Revision, Covered: binding.Covered, Present: present}
 		if record.State == schema.PathOverflow {
 			change.Kind = "overflow"
@@ -262,7 +286,13 @@ func FileHistoryFromPathIndex(ctx context.Context, store Store, targetPath strin
 	if err != nil || len(changes) == 0 {
 		return FileHistoryResult{}, false, err
 	}
-	return FileHistoryResult{SchemaVersion: SchemaVersion, Path: targetPath, Source: "path-index", Changes: changes, Metrics: Metrics{BindingChanges: uint64(len(changes))}}, true, nil
+	return FileHistoryResult{
+		SchemaVersion: SchemaVersion,
+		Path:          targetPath,
+		Source:        "path-index",
+		Changes:       changes,
+		Metrics:       Metrics{BindingChanges: uint64(len(changes))},
+	}, true, nil
 }
 
 func loadSnapshots(ctx context.Context, store Store, since, until uint64) ([]snapshotEntry, error) {
@@ -287,13 +317,26 @@ func loadSnapshots(ctx context.Context, store Store, since, until uint64) ([]sna
 			return err
 		}
 		if !found {
-			return fmt.Errorf("snapshot commit %d references missing snapshot %s", parsed.Revision, vaultic.ID(parsed.ID).String())
+			return fmt.Errorf(
+				"snapshot commit %d references missing snapshot %s",
+				parsed.Revision,
+				vaultic.ID(parsed.ID).String(),
+			)
 		}
 		snapshot, err := schema.UnmarshalSnapshotRecord(snapshotValue)
 		if err != nil {
 			return err
 		}
-		entries = append(entries, snapshotEntry{ID: parsed.ID, Commit: parsed.Revision, Time: record.SnapshotTimeUnixNano, RootKey: append([]byte(nil), record.RootKey...), Paths: snapshotScopePaths(snapshot.OriginalJSON)})
+		entries = append(
+			entries,
+			snapshotEntry{
+				ID:      parsed.ID,
+				Commit:  parsed.Revision,
+				Time:    record.SnapshotTimeUnixNano,
+				RootKey: append([]byte(nil), record.RootKey...),
+				Paths:   snapshotScopePaths(snapshot.OriginalJSON),
+			},
+		)
 		return nil
 	})
 	return entries, err
@@ -326,14 +369,36 @@ func (r *resolver) resolve(ctx context.Context, snapshot snapshotEntry, targetPa
 		if err != nil || parsed.Kind != schema.KeyDirectoryRevision {
 			return result, fmt.Errorf("snapshot %s has invalid root key", vaultic.ID(snapshot.ID).String())
 		}
-		result.present, result.inode, result.revision, result.nodeType, result.key, result.chain = true, parsed.Inode, parsed.Revision, schema.NodeDirectory, snapshot.RootKey, [][]byte{append([]byte(nil), snapshot.RootKey...)}
+		result.present,
+			result.inode,
+			result.revision,
+			result.nodeType,
+			result.key,
+			result.chain = true,
+			parsed.Inode,
+			parsed.Revision,
+			schema.NodeDirectory,
+			snapshot.RootKey,
+			[][]byte{
+				append([]byte(nil), snapshot.RootKey...),
+			}
 		return result, nil
 	}
 	memo, err := r.resolveFromDirectory(ctx, snapshot.RootKey, parts)
 	if err != nil {
 		return result, err
 	}
-	result.present, result.inode, result.revision, result.nodeType, result.key, result.chain = memo.present, memo.inode, memo.revision, memo.nodeType, memo.key, memo.chain
+	result.present,
+		result.inode,
+		result.revision,
+		result.nodeType,
+		result.key,
+		result.chain = memo.present,
+		memo.inode,
+		memo.revision,
+		memo.nodeType,
+		memo.key,
+		memo.chain
 	if !result.present {
 		return result, nil
 	}
@@ -392,7 +457,13 @@ func (r *resolver) resolveFromDirectory(ctx context.Context, directoryKey []byte
 		if err != nil || parsed.Kind != schema.KeyDirectoryRevision {
 			return resolveMemo{}, fmt.Errorf("invalid directory key %x", directoryKey)
 		}
-		return resolveMemo{present: true, inode: parsed.Inode, revision: parsed.Revision, nodeType: schema.NodeDirectory, key: append([]byte(nil), directoryKey...)}, nil
+		return resolveMemo{
+			present:  true,
+			inode:    parsed.Inode,
+			revision: parsed.Revision,
+			nodeType: schema.NodeDirectory,
+			key:      append([]byte(nil), directoryKey...),
+		}, nil
 	}
 	cacheKey := string(directoryKey) + "\x00" + strings.Join(parts, "/")
 	if memo, ok := r.cache[cacheKey]; ok {
@@ -425,7 +496,14 @@ func (r *resolver) resolveFromDirectory(ctx context.Context, directoryKey []byte
 		return resolveMemo{}, err
 	}
 	if len(parts) == 1 {
-		memo := resolveMemo{present: true, inode: parsed.Inode, revision: parsed.Revision, nodeType: child.Type, key: append([]byte(nil), child.MetadataKey...), chain: [][]byte{append([]byte(nil), directoryKey...)}}
+		memo := resolveMemo{
+			present:  true,
+			inode:    parsed.Inode,
+			revision: parsed.Revision,
+			nodeType: child.Type,
+			key:      append([]byte(nil), child.MetadataKey...),
+			chain:    [][]byte{append([]byte(nil), directoryKey...)},
+		}
 		r.cache[cacheKey] = memo
 		return memo, nil
 	}
@@ -444,7 +522,14 @@ func (r *resolver) resolveFromDirectory(ctx context.Context, directoryKey []byte
 }
 
 func resultFromResolved(targetPath string, resolved resolvedPath) PathAtResult {
-	result := PathAtResult{SchemaVersion: SchemaVersion, Path: targetPath, SnapshotID: vaultic.ID(resolved.snapshot.ID).String(), Commit: resolved.snapshot.Commit, Covered: resolved.covered, Present: resolved.present}
+	result := PathAtResult{
+		SchemaVersion: SchemaVersion,
+		Path:          targetPath,
+		SnapshotID:    vaultic.ID(resolved.snapshot.ID).String(),
+		Commit:        resolved.snapshot.Commit,
+		Covered:       resolved.covered,
+		Present:       resolved.present,
+	}
 	if !resolved.present {
 		return result
 	}
@@ -504,7 +589,17 @@ func coalesceChanges(targetPath string, resolved []resolvedPath, annotate, inclu
 			previous = current
 			continue
 		}
-		change := Change{Kind: kind, Path: targetPath, Commit: current.snapshot.Commit, SnapshotID: vaultic.ID(current.snapshot.ID).String(), Covered: current.covered, Present: current.present, Inode: current.inode, Revision: current.revision, NodeType: nodeTypeName(current.nodeType)}
+		change := Change{
+			Kind:       kind,
+			Path:       targetPath,
+			Commit:     current.snapshot.Commit,
+			SnapshotID: vaultic.ID(current.snapshot.ID).String(),
+			Covered:    current.covered,
+			Present:    current.present,
+			Inode:      current.inode,
+			Revision:   current.revision,
+			NodeType:   nodeTypeName(current.nodeType),
+		}
 		if includeContent && current.present && current.inodeRec != nil {
 			currentContent := contentIdentity(current.inodeRec)
 			change.ContentID = currentContent

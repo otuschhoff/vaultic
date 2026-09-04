@@ -39,7 +39,11 @@ func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, erro
 	return append([]byte(nil), value...), ok, nil
 }
 
-func (store *memoryStore) ScanPrefix(_ context.Context, prefix, cursor []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
+func (store *memoryStore) ScanPrefix(
+	_ context.Context,
+	prefix, cursor []byte,
+	limit uint32,
+) ([]daemon.KeyValue, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if len(store.failScanPrefix) != 0 && bytes.Equal(prefix, store.failScanPrefix) {
@@ -139,15 +143,36 @@ func TestRebuildQueryCacheDisableAndReenable(t *testing.T) {
 	store := newMemoryStore()
 	created := time.Date(2019, time.December, 30, 12, 0, 0, 0, time.UTC).UnixNano()
 	known := schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath
-	first := schema.InodeRevision{CTime: created, Size: 1000, UID: 10, GID: 20, Known: known, SourcePath: "/svm-a/volume-a/qtree/file", Freshness: schema.FreshnessVerified}
+	first := schema.InodeRevision{
+		CTime:      created,
+		Size:       1000,
+		UID:        10,
+		GID:        20,
+		Known:      known,
+		SourcePath: "/svm-a/volume-a/qtree/file",
+		Freshness:  schema.FreshnessVerified,
+	}
 	later := first
 	later.Size = 100000
 	later.SourcePath = "/changed/path/file"
-	archive := schema.InodeRevision{MTime: created, Size: 10_000, UID: 11, GID: 21, Known: schema.KnownMTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath, SourcePath: "/svm-b/volume-b/other/file", Freshness: schema.FreshnessImported}
+	archive := schema.InodeRevision{
+		MTime:      created,
+		Size:       10_000,
+		UID:        11,
+		GID:        21,
+		Known:      schema.KnownMTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath,
+		SourcePath: "/svm-b/volume-b/other/file",
+		Freshness:  schema.FreshnessImported,
+	}
 	putRecord(t, store, schema.InodeRevisionKey(1, 100, 1), first)
 	putRecord(t, store, schema.InodeRevisionKey(1, 100, 2), later)
 	putRecord(t, store, schema.InodeRevisionKey(1, 200, 3), archive)
-	putRecord(t, store, schema.CurrentInodeKey(1, 100), schema.CurrentPointer{Revision: 2, RecordKey: schema.InodeRevisionKey(1, 100, 2)})
+	putRecord(
+		t,
+		store,
+		schema.CurrentInodeKey(1, 100),
+		schema.CurrentPointer{Revision: 2, RecordKey: schema.InodeRevisionKey(1, 100, 2)},
+	)
 	config := Config{PathGroupPrefixes: []string{"/svm-a/volume-a/qtree"}, CacheAfter: 2, CacheTTLSeconds: 60}
 	built, err := Enable(ctx, store, config, false)
 	if err != nil {
@@ -157,7 +182,19 @@ func TestRebuildQueryCacheDisableAndReenable(t *testing.T) {
 		t.Fatalf("unexpected build: %+v", built)
 	}
 
-	query := Query{Years: []int{2019}, Months: []int{12}, ISOYears: []int{2020}, Workweeks: []int{1}, SizeLog10: []int{3}, SVMs: []string{"svm-a"}, Volumes: []string{"volume-a"}, PathGroups: []string{"/svm-a/volume-a/qtree"}, Residencies: []string{"live"}, GroupBy: []string{"uid", "month", "workweek", "size-log10", "residency"}, IncludeIncomplete: true}
+	query := Query{
+		Years:             []int{2019},
+		Months:            []int{12},
+		ISOYears:          []int{2020},
+		Workweeks:         []int{1},
+		SizeLog10:         []int{3},
+		SVMs:              []string{"svm-a"},
+		Volumes:           []string{"volume-a"},
+		PathGroups:        []string{"/svm-a/volume-a/qtree"},
+		Residencies:       []string{"live"},
+		GroupBy:           []string{"uid", "month", "workweek", "size-log10", "residency"},
+		IncludeIncomplete: true,
+	}
 	result, err := Execute(ctx, store, query)
 	if err != nil {
 		t.Fatal(err)
@@ -223,17 +260,28 @@ func TestUnknownFieldsAndValidation(t *testing.T) {
 	if _, err := Enable(ctx, store, Config{}, false); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Execute(ctx, store, Query{GroupBy: []string{"uid", "gid", "year", "size-log10"}, IncludeIncomplete: true})
+	result, err := Execute(
+		ctx,
+		store,
+		Query{GroupBy: []string{"uid", "gid", "year", "size-log10"}, IncludeIncomplete: true},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Files != 1 || result.UnknownCreationTime != 1 || result.Groups[0].Dimensions["uid"] != "unknown" || result.Groups[0].Dimensions["size-log10"] != "unknown" {
+	if result.Files != 1 || result.UnknownCreationTime != 1 || result.Groups[0].Dimensions["uid"] != "unknown" ||
+		result.Groups[0].Dimensions["size-log10"] != "unknown" {
 		t.Fatalf("unknown provenance was lost: %+v", result)
 	}
-	if result, err = Execute(ctx, store, Query{UIDs: []uint32{0}, IncludeIncomplete: true}); err != nil || result.Files != 0 {
+	if result, err = Execute(ctx, store, Query{UIDs: []uint32{0}, IncludeIncomplete: true}); err != nil ||
+		result.Files != 0 {
 		t.Fatalf("unknown UID matched UID zero: %+v, %v", result, err)
 	}
-	for _, query := range []Query{{Months: []int{13}}, {Workweeks: []int{0}}, {GroupBy: []string{"bogus"}}, {Residencies: []string{"missing"}}, {SizeMin: uint64Pointer(10), SizeMax: uint64Pointer(10)}} {
+	for _, query := range []Query{{Months: []int{13}},
+		{Workweeks: []int{0}},
+		{GroupBy: []string{"bogus"}},
+		{Residencies: []string{"missing"}},
+		{SizeMin: uint64Pointer(10),
+			SizeMax: uint64Pointer(10)}} {
 		if _, err := Execute(ctx, store, query); err == nil {
 			t.Fatalf("invalid query accepted: %+v", query)
 		}
@@ -278,15 +326,42 @@ func TestRebuildResumesCandidateCheckpoints(t *testing.T) {
 		wantSourceKey        []byte
 		wantFirstWrites      int
 	}{
-		{name: "before candidate write", configureFailure: func(store *memoryStore) { store.failSegment = 1<<32 | 1 }, wantCheckpointCursor: 0, wantFirstWrites: 1},
-		{name: "after candidate write before checkpoint", configureFailure: func(store *memoryStore) { store.failCheckpointCursor = 2 }, wantCheckpointCursor: 0, wantFirstWrites: 2},
-		{name: "after candidate checkpoint", configureFailure: func(store *memoryStore) { store.failSegment = 1<<32 | 2 }, wantCheckpointCursor: 2, wantSourceKey: schema.InodeRevisionKey(1, 2, 2), wantFirstWrites: 1},
+		{
+			name:                 "before candidate write",
+			configureFailure:     func(store *memoryStore) { store.failSegment = 1<<32 | 1 },
+			wantCheckpointCursor: 0,
+			wantFirstWrites:      1,
+		},
+		{name: ("after candidate write before checkpoint"),
+			configureFailure:     func(store *memoryStore) { store.failCheckpointCursor = 2 },
+			wantCheckpointCursor: 0,
+			wantFirstWrites:      2},
+
+		{name: ("after candidate checkpoint"),
+			configureFailure:     func(store *memoryStore) { store.failSegment = 1<<32 | 2 },
+			wantCheckpointCursor: 2,
+			wantSourceKey: schema.InodeRevisionKey(1,
+				2,
+				2),
+			wantFirstWrites: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			store := newMemoryStore()
 			for index := 0; index < 4; index++ {
-				putRevision(t, store, 1, uint64(index+1), uint64(index+1), 10, 20, 100, time.Date(2024, 1, index+1, 0, 0, 0, 0, time.UTC), fmt.Sprintf("/svm/vol/group/%d", index), true)
+				putRevision(
+					t,
+					store,
+					1,
+					uint64(index+1),
+					uint64(index+1),
+					10,
+					20,
+					100,
+					time.Date(2024, 1, index+1, 0, 0, 0, 0, time.UTC),
+					fmt.Sprintf("/svm/vol/group/%d", index),
+					true,
+				)
 			}
 			test.configureFailure(store)
 			if _, err := Rebuild(ctx, store, Config{SegmentRows: 2}, false); err == nil {
@@ -322,7 +397,19 @@ func TestRebuildBoundsFactBufferAndKeepsViewsExactAcrossBatches(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
 	for index := 0; index < 7; index++ {
-		putRevision(t, store, 1, uint64(index+1), uint64(index+1), 42, 7, 10, time.Date(2024, 1, index+1, 0, 0, 0, 0, time.UTC), fmt.Sprintf("/svm/vol/group/%d", index), true)
+		putRevision(
+			t,
+			store,
+			1,
+			uint64(index+1),
+			uint64(index+1),
+			42,
+			7,
+			10,
+			time.Date(2024, 1, index+1, 0, 0, 0, 0, time.UTC),
+			fmt.Sprintf("/svm/vol/group/%d", index),
+			true,
+		)
 	}
 	result, err := Rebuild(ctx, store, Config{SegmentRows: 3}, false)
 	if err != nil || result.Facts != 7 || result.PeakFactsBuffered != 3 || result.PeakWorkingSetBytes == 0 {
@@ -347,8 +434,35 @@ func TestCatchUpCompactsAtManifestChainBound(t *testing.T) {
 			t.Fatal(err)
 		}
 		revision := uint64(index + 2)
-		putRevision(t, store, 1, revision, revision, uint32(revision), 1, 1, time.Date(2024, 1, index+2, 0, 0, 0, 0, time.UTC), fmt.Sprintf("/svm/vol/group/%d", revision), true)
-		delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: revision, IdentityGeneration: revision, Revision: revision, UID: uint32(revision), GID: 1, Known: schema.KnownUID | schema.KnownGID | schema.KnownSize, CreatedAt: int64(revision), LogicalSize: 1, CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: schema.AnalyticsContinuitySourceGeneration, State: schema.AnalyticsLive, ClassificationEpoch: status.Generation}
+		putRevision(
+			t,
+			store,
+			1,
+			revision,
+			revision,
+			uint32(revision),
+			1,
+			1,
+			time.Date(2024, 1, index+2, 0, 0, 0, 0, time.UTC),
+			fmt.Sprintf("/svm/vol/group/%d", revision),
+			true,
+		)
+		delta := schema.AnalyticsDeltaRecord{
+			Kind:                schema.AnalyticsDeltaCreation,
+			FSID:                1,
+			Inode:               revision,
+			IdentityGeneration:  revision,
+			Revision:            revision,
+			UID:                 uint32(revision),
+			GID:                 1,
+			Known:               schema.KnownUID | schema.KnownGID | schema.KnownSize,
+			CreatedAt:           int64(revision),
+			LogicalSize:         1,
+			CreationBasis:       schema.AnalyticsFirstSeen,
+			IdentityContinuity:  schema.AnalyticsContinuitySourceGeneration,
+			State:               schema.AnalyticsLive,
+			ClassificationEpoch: status.Generation,
+		}
 		putRecord(t, store, schema.AnalyticsDeltaKey(revision, 0), delta)
 		if _, err := CatchUp(ctx, store, CatchUpOptions{MaxDeltas: 1}); err != nil {
 			t.Fatal(err)
@@ -372,7 +486,22 @@ func TestConcurrentRebuildQueryAndCatchUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	putRevision(t, store, 1, 2, 2, 2, 1, 200, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), "/svm/vol/group/2", true)
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: 2, IdentityGeneration: 2, Revision: 2, UID: 2, GID: 1, Known: schema.KnownUID | schema.KnownGID | schema.KnownSize, CreatedAt: 2, LogicalSize: 200, CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: schema.AnalyticsContinuitySourceGeneration, State: schema.AnalyticsLive, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaCreation,
+		FSID:                1,
+		Inode:               2,
+		IdentityGeneration:  2,
+		Revision:            2,
+		UID:                 2,
+		GID:                 1,
+		Known:               schema.KnownUID | schema.KnownGID | schema.KnownSize,
+		CreatedAt:           2,
+		LogicalSize:         200,
+		CreationBasis:       schema.AnalyticsFirstSeen,
+		IdentityContinuity:  schema.AnalyticsContinuitySourceGeneration,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: 1,
+	}
 	putRecord(t, store, schema.AnalyticsDeltaKey(2, 0), delta)
 	errors := make(chan error, 3)
 	go func() {
@@ -426,7 +555,8 @@ func TestRebuildFailureBeforePointerFlipKeepsOldEpochAndResumes(t *testing.T) {
 		t.Fatalf("old epoch visibility = %+v, %v", old, err)
 	}
 	growth, err := Growth(ctx, store, GrowthOptions{Granularity: "month"})
-	if err != nil || growth.Explain.Source != "materialized-view" || len(growth.Buckets) != 1 || growth.Buckets[0].Files != 1 {
+	if err != nil || growth.Explain.Source != "materialized-view" || len(growth.Buckets) != 1 ||
+		growth.Buckets[0].Files != 1 {
 		t.Fatalf("failed candidate views became visible: %+v, %v", growth, err)
 	}
 	resumed, err := Rebuild(ctx, store, Config{SegmentRows: 1}, false)
@@ -440,39 +570,68 @@ func TestCorruptBuildCheckpointRebuildsWithoutSkippingFacts(t *testing.T) {
 		name    string
 		corrupt func(*testing.T, *memoryStore, schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord
 	}{
-		{name: "source cursor", corrupt: func(_ *testing.T, _ *memoryStore, checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
-			checkpoint.SourceKeyCursor = []byte("iv:corrupt")
-			return checkpoint
-		}},
-		{name: "segment ordinal", corrupt: func(_ *testing.T, _ *memoryStore, checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
-			checkpoint.CandidateSegments[0]++
-			return checkpoint
-		}},
-		{name: "segment metadata", corrupt: func(_ *testing.T, store *memoryStore, checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
-			store.values[string(schema.AnalyticsSegmentMetadataKey(checkpoint.CandidateSegments[0]))] = []byte("corrupt")
-			return checkpoint
-		}},
-		{name: "segment rows", corrupt: func(_ *testing.T, store *memoryStore, checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
-			store.values[string(schema.AnalyticsFactSegmentKey(checkpoint.CandidateSegments[0]))] = []byte("corrupt")
-			return checkpoint
-		}},
-		{name: "segment index", corrupt: func(t *testing.T, store *memoryStore, checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
-			for key := range store.values {
-				parsed, err := schema.ParseKey([]byte(key))
-				if err == nil && parsed.Kind == schema.KeyAnalyticsDimensionIndex && parsed.Generation == checkpoint.CandidateSegments[0] {
-					delete(store.values, key)
-					return checkpoint
+		{
+			name: "source cursor",
+			corrupt: func(
+				_ *testing.T, _ *memoryStore, checkpoint schema.AnalyticsBuildCheckpointRecord,
+			) schema.AnalyticsBuildCheckpointRecord {
+				checkpoint.SourceKeyCursor = []byte("iv:corrupt")
+				return checkpoint
+			},
+		},
+		{name: "segment ordinal",
+			corrupt: func(_ *testing.T,
+				_ *memoryStore,
+				checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
+				checkpoint.CandidateSegments[0]++
+				return checkpoint
+			}},
+		{name: "segment metadata",
+			corrupt: func(_ *testing.T,
+				store *memoryStore,
+				checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
+				store.values[string(schema.AnalyticsSegmentMetadataKey(checkpoint.CandidateSegments[0]))] = []byte("corrupt")
+				return checkpoint
+			}},
+		{name: "segment rows",
+			corrupt: func(_ *testing.T,
+				store *memoryStore,
+				checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
+				store.values[string(schema.AnalyticsFactSegmentKey(checkpoint.CandidateSegments[0]))] = []byte("corrupt")
+				return checkpoint
+			}},
+		{name: "segment index",
+			corrupt: func(t *testing.T,
+				store *memoryStore,
+				checkpoint schema.AnalyticsBuildCheckpointRecord) schema.AnalyticsBuildCheckpointRecord {
+				for key := range store.values {
+					parsed, err := schema.ParseKey([]byte(key))
+					if err == nil && parsed.Kind == schema.KeyAnalyticsDimensionIndex && parsed.Generation == checkpoint.CandidateSegments[0] {
+						delete(store.values, key)
+						return checkpoint
+					}
 				}
-			}
-			t.Fatal("candidate segment had no index")
-			return checkpoint
-		}},
+				t.Fatal("candidate segment had no index")
+				return checkpoint
+			}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			store := newMemoryStore()
 			for index := 0; index < 3; index++ {
-				putRevision(t, store, 1, uint64(index+1), uint64(index+1), uint32(10+index), 20, 100, time.Date(2024, 1, index+1, 0, 0, 0, 0, time.UTC), fmt.Sprintf("/svm/vol/group/%d", index), true)
+				putRevision(
+					t,
+					store,
+					1,
+					uint64(index+1),
+					uint64(index+1),
+					uint32(10+index),
+					20,
+					100,
+					time.Date(2024, 1, index+1, 0, 0, 0, 0, time.UTC),
+					fmt.Sprintf("/svm/vol/group/%d", index),
+					true,
+				)
 			}
 			store.failSegment = 1<<32 | 2
 			if _, err := Rebuild(ctx, store, Config{SegmentRows: 2}, false); err == nil {
@@ -505,7 +664,21 @@ func TestCatchUpCrashBeforeAndAfterPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	putRevision(t, store, 1, 2, 2, 9, 10, 200, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), "/svm/vol/group/b", true)
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: 2, IdentityGeneration: 2, Revision: 2, UID: 9, GID: 10, Known: schema.KnownUID | schema.KnownGID | schema.KnownSize, CreatedAt: 2, LogicalSize: 200, CreationBasis: schema.AnalyticsFirstSeen, State: schema.AnalyticsLive, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaCreation,
+		FSID:                1,
+		Inode:               2,
+		IdentityGeneration:  2,
+		Revision:            2,
+		UID:                 9,
+		GID:                 10,
+		Known:               schema.KnownUID | schema.KnownGID | schema.KnownSize,
+		CreatedAt:           2,
+		LogicalSize:         200,
+		CreationBasis:       schema.AnalyticsFirstSeen,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: 1,
+	}
 	putRecord(t, store, schema.AnalyticsDeltaKey(2, 0), delta)
 
 	store.failPublication = true
@@ -556,10 +729,26 @@ func TestCatchUpDoesNotScanAuthoritativeRevisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	putRevision(t, store, 1, 2, 2, 9, 10, 200, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), "/svm/vol/group/b", true)
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: 2, IdentityGeneration: 2, Revision: 2, UID: 9, GID: 10, Known: schema.KnownUID | schema.KnownGID | schema.KnownSize, CreatedAt: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC).UnixNano(), LogicalSize: 200, CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: schema.AnalyticsContinuitySourceGeneration, State: schema.AnalyticsLive, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaCreation,
+		FSID:                1,
+		Inode:               2,
+		IdentityGeneration:  2,
+		Revision:            2,
+		UID:                 9,
+		GID:                 10,
+		Known:               schema.KnownUID | schema.KnownGID | schema.KnownSize,
+		CreatedAt:           time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC).UnixNano(),
+		LogicalSize:         200,
+		CreationBasis:       schema.AnalyticsFirstSeen,
+		IdentityContinuity:  schema.AnalyticsContinuitySourceGeneration,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: 1,
+	}
 	putRecord(t, store, schema.AnalyticsDeltaKey(2, 0), delta)
 	store.failScanPrefix = []byte("iv:")
-	if result, err := CatchUp(ctx, store, CatchUpOptions{MaxDeltas: 1}); err != nil || result.Processed != 1 || result.AppliedCommit != 2 {
+	if result, err := CatchUp(ctx, store, CatchUpOptions{MaxDeltas: 1}); err != nil || result.Processed != 1 ||
+		result.AppliedCommit != 2 {
 		t.Fatalf("incremental catch-up = %+v, %v", result, err)
 	}
 	query, err := Execute(ctx, store, Query{IncludeIncomplete: true, AllowStale: true})
@@ -572,15 +761,46 @@ func TestCatchUpTombstonesParentGDPRMappingOnUIDChange(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
 	created := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	revision := schema.InodeRevision{CTime: created.UnixNano(), Size: 100, UID: 7, GID: 8, Known: schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath, SourcePath: "/svm/vol/group/a", Freshness: schema.FreshnessVerified, ContentMode: schema.ContentInline, ContentCount: 1, ContentIDs: []schema.ID{{1}}}
+	revision := schema.InodeRevision{
+		CTime:        created.UnixNano(),
+		Size:         100,
+		UID:          7,
+		GID:          8,
+		Known:        schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath,
+		SourcePath:   "/svm/vol/group/a",
+		Freshness:    schema.FreshnessVerified,
+		ContentMode:  schema.ContentInline,
+		ContentCount: 1,
+		ContentIDs:   []schema.ID{{1}},
+	}
 	putRecord(t, store, schema.InodeRevisionKey(1, 1, 1), revision)
-	putRecord(t, store, schema.CurrentInodeKey(1, 1), schema.CurrentPointer{Revision: 1, RecordKey: schema.InodeRevisionKey(1, 1, 1)})
+	putRecord(
+		t,
+		store,
+		schema.CurrentInodeKey(1, 1),
+		schema.CurrentPointer{Revision: 1, RecordKey: schema.InodeRevisionKey(1, 1, 1)},
+	)
 	if _, err := Enable(ctx, store, Config{}, false); err != nil {
 		t.Fatal(err)
 	}
 	revision.UID = 9
 	putRecord(t, store, schema.InodeRevisionKey(1, 1, 2), revision)
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: 1, IdentityGeneration: 1, Revision: 2, UID: 9, GID: 8, Known: revision.Known, CreatedAt: revision.CTime, LogicalSize: revision.Size, CreationBasis: schema.AnalyticsCTime, IdentityContinuity: schema.AnalyticsContinuityProven, State: schema.AnalyticsLive, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaCreation,
+		FSID:                1,
+		Inode:               1,
+		IdentityGeneration:  1,
+		Revision:            2,
+		UID:                 9,
+		GID:                 8,
+		Known:               revision.Known,
+		CreatedAt:           revision.CTime,
+		LogicalSize:         revision.Size,
+		CreationBasis:       schema.AnalyticsCTime,
+		IdentityContinuity:  schema.AnalyticsContinuityProven,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: 1,
+	}
 	putRecord(t, store, schema.AnalyticsDeltaKey(2, 0), delta)
 	if _, err := CatchUp(ctx, store, CatchUpOptions{MaxDeltas: 1}); err != nil {
 		t.Fatal(err)
@@ -602,16 +822,33 @@ func TestCatchUpStateUpdateAdjustsLayeredViewsExactly(t *testing.T) {
 	if _, err := Enable(ctx, store, Config{}, false); err != nil {
 		t.Fatal(err)
 	}
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: 1, Inode: 1, IdentityGeneration: 1, Revision: 1, State: schema.AnalyticsExpired, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaSourceState,
+		FSID:                1,
+		Inode:               1,
+		IdentityGeneration:  1,
+		Revision:            1,
+		State:               schema.AnalyticsExpired,
+		ClassificationEpoch: 1,
+	}
 	putRecord(t, store, schema.AnalyticsDeltaKey(2, 0), delta)
 	if _, err := CatchUp(ctx, store, CatchUpOptions{MaxDeltas: 1}); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := UserStats(ctx, store, UserStatsOptions{UIDs: []uint32{7}, Residencies: []string{"live", "expired"}, GroupBy: "user"})
-	if err != nil || len(stats.Rows) != 1 || stats.Rows[0].Residency != "expired" || stats.Rows[0].Files != 1 || stats.Rows[0].LogicalBytes != 100 {
+	stats, err := UserStats(
+		ctx,
+		store,
+		UserStatsOptions{UIDs: []uint32{7}, Residencies: []string{"live", "expired"}, GroupBy: "user"},
+	)
+	if err != nil || len(stats.Rows) != 1 || stats.Rows[0].Residency != "expired" || stats.Rows[0].Files != 1 ||
+		stats.Rows[0].LogicalBytes != 100 {
 		t.Fatalf("layered state views = %+v, %v", stats, err)
 	}
-	query, err := Execute(ctx, store, Query{UIDs: []uint32{7}, Residencies: []string{"expired"}, IncludeIncomplete: true, AllowStale: true})
+	query, err := Execute(
+		ctx,
+		store,
+		Query{UIDs: []uint32{7}, Residencies: []string{"expired"}, IncludeIncomplete: true, AllowStale: true},
+	)
 	if err != nil || query.Files != 1 || query.LogicalBytes != 100 {
 		t.Fatalf("layered state query = %+v, %v", query, err)
 	}
@@ -636,7 +873,21 @@ func TestDisabledCatchUpDoesNoWorkAndPurgeRemovesLifecycleState(t *testing.T) {
 	if _, err := Disable(ctx, store, false, false); err != nil {
 		t.Fatal(err)
 	}
-	delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: 1, Inode: 2, IdentityGeneration: 2, Revision: 2, UID: 9, GID: 10, Known: schema.KnownUID | schema.KnownGID | schema.KnownSize, CreatedAt: 2, LogicalSize: 200, CreationBasis: schema.AnalyticsFirstSeen, State: schema.AnalyticsLive, ClassificationEpoch: 1}
+	delta := schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaCreation,
+		FSID:                1,
+		Inode:               2,
+		IdentityGeneration:  2,
+		Revision:            2,
+		UID:                 9,
+		GID:                 10,
+		Known:               schema.KnownUID | schema.KnownGID | schema.KnownSize,
+		CreatedAt:           2,
+		LogicalSize:         200,
+		CreationBasis:       schema.AnalyticsFirstSeen,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: 1,
+	}
 	putRecord(t, store, schema.AnalyticsDeltaKey(2, 0), delta)
 	if result, err := CatchUp(ctx, store, CatchUpOptions{MaxDeltas: 1}); err != nil || result.Processed != 0 {
 		t.Fatalf("disabled catch-up = %+v, %v", result, err)
@@ -662,15 +913,60 @@ func TestProvenDeletionArchiveOnlyForgetExpiresAndUpdatesChurn(t *testing.T) {
 	store := newMemoryStore()
 	created := time.Date(2025, time.January, 4, 12, 0, 0, 0, time.UTC)
 	deleted := time.Date(2025, time.February, 5, 12, 0, 0, 0, time.UTC)
-	revision := schema.InodeRevision{CTime: created.UnixNano(), Size: 4096, UID: 42, GID: 7, Known: schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath, SourcePath: "/svm/vol/group/file", Freshness: schema.FreshnessVerified}
+	revision := schema.InodeRevision{
+		CTime:      created.UnixNano(),
+		Size:       4096,
+		UID:        42,
+		GID:        7,
+		Known:      schema.KnownCTime | schema.KnownSize | schema.KnownUID | schema.KnownGID | schema.KnownPath,
+		SourcePath: "/svm/vol/group/file",
+		Freshness:  schema.FreshnessVerified,
+	}
 	putRecord(t, store, schema.InodeRevisionKey(1, 2, 1), revision)
-	root := schema.DirectoryRevision{Known: schema.KnownPath, SourcePath: "/", Freshness: schema.FreshnessVerified, Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, 2, 1)}}}
+	root := schema.DirectoryRevision{
+		Known:      schema.KnownPath,
+		SourcePath: "/",
+		Freshness:  schema.FreshnessVerified,
+		Children: []schema.DirectoryChild{
+			{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: schema.InodeRevisionKey(1, 2, 1)},
+		},
+	}
 	putRecord(t, store, schema.DirectoryRevisionKey(1, 99, 2), root)
 	snapshotID := schema.ID{1}
-	putRecord(t, store, schema.SnapshotKey(snapshotID), schema.SnapshotRecord{CommitSequence: 9, RootFSID: 1, RootInode: 99, RootRevision: 2})
+	putRecord(
+		t,
+		store,
+		schema.SnapshotKey(snapshotID),
+		schema.SnapshotRecord{CommitSequence: 9, RootFSID: 1, RootInode: 99, RootRevision: 2},
+	)
 	scope := schema.ID{2}
-	putRecord(t, store, schema.AuthoritativeCrawlProofKey(scope, 10), schema.AuthoritativeCrawlProofRecord{ScopeID: scope, RootFSID: 1, RootInode: 99, StartFence: 1, EndCommit: 10, CompletedAt: deleted.UnixNano(), Complete: true, DebtFree: true})
-	putRecord(t, store, schema.AuthoritativeSourceBindingKey(scope, 1, 2, 1), schema.AuthoritativeSourceBindingRecord{Generation: 1, Revision: 1, State: schema.AuthoritativeSourceDeleted, Continuity: schema.AnalyticsContinuityProven, LastObservedCommit: 10})
+	putRecord(
+		t,
+		store,
+		schema.AuthoritativeCrawlProofKey(scope, 10),
+		schema.AuthoritativeCrawlProofRecord{
+			ScopeID:     scope,
+			RootFSID:    1,
+			RootInode:   99,
+			StartFence:  1,
+			EndCommit:   10,
+			CompletedAt: deleted.UnixNano(),
+			Complete:    true,
+			DebtFree:    true,
+		},
+	)
+	putRecord(
+		t,
+		store,
+		schema.AuthoritativeSourceBindingKey(scope, 1, 2, 1),
+		schema.AuthoritativeSourceBindingRecord{
+			Generation:         1,
+			Revision:           1,
+			State:              schema.AuthoritativeSourceDeleted,
+			Continuity:         schema.AnalyticsContinuityProven,
+			LastObservedCommit: 10,
+		},
+	)
 
 	if _, err := Enable(ctx, store, Config{}, false); err != nil {
 		t.Fatal(err)
@@ -680,10 +976,15 @@ func TestProvenDeletionArchiveOnlyForgetExpiresAndUpdatesChurn(t *testing.T) {
 		t.Fatalf("retained deleted generation = %+v, %v", result, err)
 	}
 	stats, err := UserStats(ctx, store, UserStatsOptions{GroupBy: "user"})
-	if err != nil || stats.Explain.Source != "materialized-view" || len(stats.Rows) != 1 || stats.Rows[0].Residency != "archive-only" {
+	if err != nil || stats.Explain.Source != "materialized-view" || len(stats.Rows) != 1 ||
+		stats.Rows[0].Residency != "archive-only" {
 		t.Fatalf("archive-only user stats = %+v, %v", stats, err)
 	}
-	churnKey := schema.UserChurnKey(42, schema.AnalyticsGranularityMonth, time.Date(2025, time.February, 1, 0, 0, 0, 0, time.UTC).UnixNano())
+	churnKey := schema.UserChurnKey(
+		42,
+		schema.AnalyticsGranularityMonth,
+		time.Date(2025, time.February, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
+	)
 	churnValue, found, err := store.Get(ctx, schema.AnalyticsDerivedKey(1, churnKey))
 	if err != nil || !found {
 		t.Fatalf("deletion churn: found=%t err=%v", found, err)

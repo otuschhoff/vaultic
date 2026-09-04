@@ -92,7 +92,14 @@ func (store *memoryStore) AllocateRevision(context.Context) (uint64, error) {
 	store.revisions++
 	return store.revisions, nil
 }
-func (store *memoryStore) PublishRevisionBatch(_ context.Context, currentKey, revisionKey, value []byte, revision uint64, related []daemon.Mutation, _ [][]byte) error {
+
+func (store *memoryStore) PublishRevisionBatch(
+	_ context.Context,
+	currentKey, revisionKey, value []byte,
+	revision uint64,
+	related []daemon.Mutation,
+	_ [][]byte,
+) error {
 	pointer, err := (schema.CurrentPointer{Revision: revision, RecordKey: revisionKey}).MarshalBinary()
 	if err != nil {
 		return err
@@ -105,7 +112,13 @@ func (store *memoryStore) PublishRevisionBatch(_ context.Context, currentKey, re
 	store.revisionsWritten++
 	return nil
 }
-func (store *memoryStore) PublishContentManifest(_ context.Context, ids []schema.ID, related []daemon.Mutation, _ [][]byte) (schema.ID, error) {
+
+func (store *memoryStore) PublishContentManifest(
+	_ context.Context,
+	ids []schema.ID,
+	related []daemon.Mutation,
+	_ [][]byte,
+) (schema.ID, error) {
 	for _, mutation := range related {
 		store.values[string(mutation.Key)] = append([]byte(nil), mutation.Value...)
 	}
@@ -115,7 +128,17 @@ func (store *memoryStore) PublishContentManifest(_ context.Context, ids []schema
 func encodedIndex(t *testing.T, packID, blobID vaultic.ID) []byte {
 	t.Helper()
 	idx := index.NewIndex()
-	idx.StorePack(packID, pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob}, Offset: 3, Length: 10, UncompressedLength: 8}})
+	idx.StorePack(
+		packID,
+		pack.Blobs{
+			{
+				BlobHandle:         vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob},
+				Offset:             3,
+				Length:             10,
+				UncompressedLength: 8,
+			},
+		},
+	)
 	var encoded bytes.Buffer
 	if err := idx.Encode(&encoded); err != nil {
 		t.Fatal(err)
@@ -174,10 +197,17 @@ func TestImportRecordsUnavailablePackDebtAsWarning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.CrawlDebtCreated != 1 || result.WarningsSeen != 1 || result.ErrorsSeen != 0 || store.imports[0].Debt == nil {
+	if result.CrawlDebtCreated != 1 || result.WarningsSeen != 1 || result.ErrorsSeen != 0 ||
+		store.imports[0].Debt == nil {
 		t.Fatalf("missing pack debt: %#v", result)
 	}
-	_, err = Import(context.Background(), source, fixedStatter{err: errors.New("offline")}, newMemoryStore(), Options{MaxErrors: 1})
+	_, err = Import(
+		context.Background(),
+		source,
+		fixedStatter{err: errors.New("offline")},
+		newMemoryStore(),
+		Options{MaxErrors: 1},
+	)
 	if err != nil {
 		t.Fatalf("warning counted against max errors: %v", err)
 	}
@@ -241,7 +271,8 @@ func TestImportRecordsKnownPackSmallerThanIndexedPayload(t *testing.T) {
 		t.Fatalf("missing inconsistent-size debt: %#v", result)
 	}
 	record := store.imports[0].Record
-	if !record.PhysicalSizeKnown || record.PhysicalSize != 5 || record.PayloadSize != 10 || record.HeaderSize != 0 || store.imports[0].Debt == nil {
+	if !record.PhysicalSizeKnown || record.PhysicalSize != 5 || record.PayloadSize != 10 || record.HeaderSize != 0 ||
+		store.imports[0].Debt == nil {
 		t.Fatalf("inconsistent pack metadata = %#v", record)
 	}
 	if _, err := record.MarshalBinary(); err != nil {
@@ -275,7 +306,8 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SnapshotsImported != 1 || result.NodesImported != 1 || result.CrawlDebtCreated < 3 || store.revisionsWritten != 1 {
+	if result.SnapshotsImported != 1 || result.NodesImported != 1 || result.CrawlDebtCreated < 3 ||
+		store.revisionsWritten != 1 {
 		t.Fatalf("unexpected tree import result: %#v, revisions=%d", result, store.revisionsWritten)
 	}
 	current := schema.CurrentInodeKey(7, 11)
@@ -291,7 +323,10 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Freshness != schema.FreshnessImported || record.Known != schema.KnownParent|schema.KnownPath || record.ParentInode != 10 || len(record.ContentIDs) != 1 || record.ContentIDs[0] != schema.ID(contentID) {
+	if record.Freshness != schema.FreshnessImported || record.Known != schema.KnownParent|schema.KnownPath ||
+		record.ParentInode != 10 ||
+		len(record.ContentIDs) != 1 ||
+		record.ContentIDs[0] != schema.ID(contentID) {
 		t.Fatalf("imported inode invented or lost facts: %#v", record)
 	}
 	if _, found := store.values[string(schema.ReverseInodeKey(schema.ID(contentID), 7, 11))]; !found {
@@ -310,11 +345,25 @@ func TestImportRealLegacyRepository(t *testing.T) {
 	repo, unpacked, be := repository.TestRepositoryWithVersion(t, vaultic.StableRepoVersion)
 	packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID()
 	packData := []byte("0123456789abcdef")
-	if err := be.Save(context.Background(), backend.Handle{Type: backend.PackFile, Name: packID.String()}, backend.NewByteReader(packData, be.Hasher())); err != nil {
+	if err := be.Save(context.Background(),
+		backend.Handle{Type: backend.PackFile,
+			Name: packID.String()},
+		backend.NewByteReader(packData,
+			be.Hasher())); err != nil {
 		t.Fatal(err)
 	}
 	idx := index.NewIndex()
-	idx.StorePack(packID, pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob}, Offset: 0, Length: 10, UncompressedLength: 8}})
+	idx.StorePack(
+		packID,
+		pack.Blobs{
+			{
+				BlobHandle:         vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob},
+				Offset:             0,
+				Length:             10,
+				UncompressedLength: 8,
+			},
+		},
+	)
 	idx.Finalize()
 	if _, err := idx.SaveIndex(context.Background(), unpacked); err != nil {
 		t.Fatal(err)
@@ -324,11 +373,15 @@ func TestImportRealLegacyRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.IndexesImported != 1 || result.PacksImported != 1 || result.BlobsImported != 1 || result.CrawlDebtCreated != 0 || len(store.imports) != 1 {
+	if result.IndexesImported != 1 || result.PacksImported != 1 || result.BlobsImported != 1 ||
+		result.CrawlDebtCreated != 0 ||
+		len(store.imports) != 1 {
 		t.Fatalf("unexpected real repository import: %#v", result)
 	}
 	imported := store.imports[0]
-	if imported.Record.PhysicalSize != uint64(len(packData)) || imported.Record.PayloadSize != 10 || imported.Record.HeaderSize != 6 || imported.Debt != nil {
+	if imported.Record.PhysicalSize != uint64(len(packData)) || imported.Record.PayloadSize != 10 ||
+		imported.Record.HeaderSize != 6 ||
+		imported.Debt != nil {
 		t.Fatalf("incorrect imported pack metadata: %#v", imported.Record)
 	}
 }
@@ -343,7 +396,9 @@ func TestImportClassifiesEmptyPackAsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PacksImported != 1 || result.BlobsImported != 0 || len(store.imports) != 1 || store.imports[0].Record.Type != schema.PackUnknown || store.imports[0].Record.HeaderSize != 9 {
+	if result.PacksImported != 1 || result.BlobsImported != 0 || len(store.imports) != 1 ||
+		store.imports[0].Record.Type != schema.PackUnknown ||
+		store.imports[0].Record.HeaderSize != 9 {
 		t.Fatalf("empty pack import = %#v, result=%#v", store.imports, result)
 	}
 }
@@ -366,7 +421,8 @@ func TestImportClassifiesMixedPack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PacksImported != 1 || len(store.imports) != 1 || store.imports[0].Record.Type != schema.PackMixed || store.imports[0].Record.BlobCount != 2 {
+	if result.PacksImported != 1 || len(store.imports) != 1 || store.imports[0].Record.Type != schema.PackMixed ||
+		store.imports[0].Record.BlobCount != 2 {
 		t.Fatalf("mixed pack import = %#v, result=%#v", store.imports, result)
 	}
 }
@@ -374,9 +430,15 @@ func TestImportClassifiesMixedPack(t *testing.T) {
 func TestSnapshotTraversalLimitsLeaveNoCheckpoint(t *testing.T) {
 	fileTree := treeJSON(t, &data.Node{Name: "file", Type: data.NodeTypeFile, DeviceID: 7, Inode: 12})
 	fileTreeID := vaultic.Hash(fileTree)
-	nestedTree := treeJSON(t, &data.Node{Name: "nested", Type: data.NodeTypeDir, DeviceID: 7, Inode: 11, Subtree: &fileTreeID})
+	nestedTree := treeJSON(
+		t,
+		&data.Node{Name: "nested", Type: data.NodeTypeDir, DeviceID: 7, Inode: 11, Subtree: &fileTreeID},
+	)
 	nestedTreeID := vaultic.Hash(nestedTree)
-	rootTree := treeJSON(t, &data.Node{Name: "top", Type: data.NodeTypeDir, DeviceID: 7, Inode: 10, Subtree: &nestedTreeID})
+	rootTree := treeJSON(
+		t,
+		&data.Node{Name: "top", Type: data.NodeTypeDir, DeviceID: 7, Inode: 10, Subtree: &nestedTreeID},
+	)
 	rootTreeID := vaultic.Hash(rootTree)
 	snapshotID := vaultic.NewRandomID()
 	snapshotJSON, err := json.Marshal(data.Snapshot{Tree: &rootTreeID})
@@ -410,9 +472,15 @@ func TestLargeContentManifestUsesCanonicalReverseSegments(t *testing.T) {
 	for index := range content {
 		binary.BigEndian.PutUint32(content[index][28:], uint32(index+1))
 	}
-	childTree := treeJSON(t, &data.Node{Name: "large", Type: data.NodeTypeFile, DeviceID: 7, Inode: 11, Content: content})
+	childTree := treeJSON(
+		t,
+		&data.Node{Name: "large", Type: data.NodeTypeFile, DeviceID: 7, Inode: 11, Content: content},
+	)
 	childTreeID := vaultic.Hash(childTree)
-	rootTree := treeJSON(t, &data.Node{Name: "top", Type: data.NodeTypeDir, DeviceID: 7, Inode: 10, Subtree: &childTreeID})
+	rootTree := treeJSON(
+		t,
+		&data.Node{Name: "top", Type: data.NodeTypeDir, DeviceID: 7, Inode: 10, Subtree: &childTreeID},
+	)
 	rootTreeID := vaultic.Hash(rootTree)
 	snapshotID := vaultic.NewRandomID()
 	snapshotJSON, err := json.Marshal(data.Snapshot{Tree: &rootTreeID})

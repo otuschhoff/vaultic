@@ -94,7 +94,14 @@ func (r *Repository) loadPackFromPlacements(ctx context.Context, handle backend.
 	return loadPackFromCandidates(ctx, r.placementReadCandidates(ctx, packID), handle, length, offset, fn)
 }
 
-func loadPackFromCandidates(ctx context.Context, candidates []placementReadCandidate, handle backend.Handle, length int, offset int64, fn func(io.Reader) error) error {
+func loadPackFromCandidates(
+	ctx context.Context,
+	candidates []placementReadCandidate,
+	handle backend.Handle,
+	length int,
+	offset int64,
+	fn func(io.Reader) error,
+) error {
 	var lastErr error
 	for _, candidate := range candidates {
 		warming, err := candidate.backend.Warmup(ctx, []backend.Handle{handle})

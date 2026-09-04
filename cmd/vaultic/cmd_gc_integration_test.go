@@ -199,7 +199,7 @@ func assertPackHistoryAfterGC(t *testing.T, env *testEnvironment, daemonOptions 
 	t.Helper()
 	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
 		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		config, err := daemonOptions.config("")
+		config, err := daemonOptions.Config("")
 		if err != nil {
 			return err
 		}

@@ -24,8 +24,11 @@ func newMergeCommand(globalOptions *global.Options) *cobra.Command {
 		Short:             "Merge snapshots into a new snapshot",
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMerge(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
 		},
 	}
@@ -131,7 +134,8 @@ func mergeTrees(ctx context.Context, repo vaultic.AppendRepository, saver vaulti
 			if err != nil {
 				return vaultic.ID{}, err
 			}
-			if previous := nodes[node.Name]; previous != nil && previous.Type == data.NodeTypeDir && node.Type == data.NodeTypeDir && previous.Subtree != nil && node.Subtree != nil {
+			if previous := nodes[node.Name]; previous != nil && previous.Type == data.NodeTypeDir && node.Type == data.NodeTypeDir && previous.Subtree != nil &&
+				node.Subtree != nil {
 				merged, err := mergeTrees(ctx, repo, saver, []vaultic.ID{*previous.Subtree, *node.Subtree})
 				if err != nil {
 					return vaultic.ID{}, err

@@ -20,7 +20,11 @@ func testManifest() Manifest {
 			{ID: "a", Location: "s3:https://storage.example/a", FailureDomain: "site-a"},
 			{ID: "b", Location: "azure:https://storage.example/b", FailureDomain: "site-b", Offsite: true},
 		},
-		Policy: vaultic.PlacementPolicy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, StagingBackends: []string{"a", "b"},
+		Policy: vaultic.PlacementPolicy{
+			MinCopies:  2,
+			MinDomains: 2,
+			MinOffsite: 1,
+		}, StagingBackends: []string{"a", "b"},
 	}
 }
 
@@ -47,7 +51,10 @@ func TestSealOpenAndResolveTopology(t *testing.T) {
 	if err != nil || derivedOpened.Generation != manifest.Generation || derivedDigest != digest {
 		t.Fatalf("derived-key open = %#v, %q, %v", derivedOpened, derivedDigest, err)
 	}
-	copy, err := Resolve([]Copy{{Seed: "a", Manifest: opened, SHA256: digest}}, Anchor{RepositoryID: "repo-a", Generation: 2, SHA256: digest})
+	copy, err := Resolve(
+		[]Copy{{Seed: "a", Manifest: opened, SHA256: digest}},
+		Anchor{RepositoryID: "repo-a", Generation: 2, SHA256: digest},
+	)
 	if err != nil || copy.Seed != "a" {
 		t.Fatalf("resolve = %#v, %v", copy, err)
 	}
@@ -56,7 +63,13 @@ func TestSealOpenAndResolveTopology(t *testing.T) {
 func TestTopologyConfigProjectionIsDigestBound(t *testing.T) {
 	vaultic.TestDisableCheckPolynomial(t)
 	manifest := testManifest()
-	cfg := vaultic.Config{Version: 2, ID: manifest.RepositoryID, PlacementBackends: manifest.Backends, PlacementPolicy: manifest.Policy, StagingBackends: manifest.StagingBackends}
+	cfg := vaultic.Config{
+		Version:           2,
+		ID:                manifest.RepositoryID,
+		PlacementBackends: manifest.Backends,
+		PlacementPolicy:   manifest.Policy,
+		StagingBackends:   manifest.StagingBackends,
+	}
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +107,14 @@ func TestTopologyRejectsRollbackConflictCredentialsAndWeakPlacement(t *testing.T
 	}
 	manifest = testManifest()
 	manifest.ConfigSHA256 = repeat("ab", 32)
-	if _, err := Resolve([]Copy{{Manifest: manifest, SHA256: repeat("11", 32)}}, Anchor{RepositoryID: "repo-a", Generation: 3, SHA256: repeat("22", 32)}); err == nil {
+	if _,
+		err := Resolve([]Copy{{Manifest: manifest,
+		SHA256: repeat("11",
+			32)}},
+		Anchor{RepositoryID: "repo-a",
+			Generation: 3,
+			SHA256: repeat("22",
+				32)}); err == nil {
 		t.Fatal("rolled-back topology was accepted")
 	}
 	if _, err := Resolve([]Copy{{Manifest: manifest, SHA256: repeat("11", 32)}, {Manifest: manifest, SHA256: repeat("22", 32)}}); err == nil {

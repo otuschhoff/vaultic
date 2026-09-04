@@ -43,7 +43,11 @@ func (r *Repository) DeferredUploadPlan() (DeferredUploadOptions, staging.Store,
 	for _, placement := range r.cfg.PlacementBackends {
 		configured[placement.ID] = placement
 	}
-	policy := staging.Policy{MinCopies: r.cfg.PlacementPolicy.MinCopies, MinDomains: r.cfg.PlacementPolicy.MinDomains, MinOffsite: r.cfg.PlacementPolicy.MinOffsite}
+	policy := staging.Policy{
+		MinCopies:  r.cfg.PlacementPolicy.MinCopies,
+		MinDomains: r.cfg.PlacementPolicy.MinDomains,
+		MinOffsite: r.cfg.PlacementPolicy.MinOffsite,
+	}
 	options := DeferredUploadOptions{Policy: policy}
 	mirrors := make(map[string]backend.Backend, len(r.cfg.StagingBackends))
 	mirrorPlacements := make(map[string]staging.MirrorPlacement, len(r.cfg.StagingBackends))
@@ -56,7 +60,10 @@ func (r *Repository) DeferredUploadPlan() (DeferredUploadOptions, staging.Store,
 		if !ok {
 			continue
 		}
-		options.Backends = append(options.Backends, DeferredBackend{ID: id, FailureDomain: placement.FailureDomain, Offsite: placement.Offsite, Backend: destination})
+		options.Backends = append(
+			options.Backends,
+			DeferredBackend{ID: id, FailureDomain: placement.FailureDomain, Offsite: placement.Offsite, Backend: destination},
+		)
 		mirrors[id] = destination
 		mirrorPlacements[id] = staging.MirrorPlacement{FailureDomain: placement.FailureDomain, Offsite: placement.Offsite}
 	}
@@ -88,7 +95,11 @@ type deferredPackSink struct {
 	result        DeferredUploadResult
 }
 
-func (r *Repository) WithDeferredBlobUploader(ctx context.Context, options DeferredUploadOptions, fn func(context.Context, vaultic.BlobSaverWithAsync) error) (DeferredUploadResult, error) {
+func (r *Repository) WithDeferredBlobUploader(
+	ctx context.Context,
+	options DeferredUploadOptions,
+	fn func(context.Context, vaultic.BlobSaverWithAsync) error,
+) (DeferredUploadResult, error) {
 	if len(options.Backends) == 0 {
 		return DeferredUploadResult{}, fmt.Errorf("deferred upload requires placement backends")
 	}
@@ -140,7 +151,14 @@ func (s *deferredBlobSaver) SaveBlob(ctx context.Context, blobType vaultic.BlobT
 	return id, false, size, err
 }
 
-func (s *deferredBlobSaver) SaveBlobAsync(ctx context.Context, blobType vaultic.BlobType, data []byte, id vaultic.ID, storeDuplicate bool, callback func(vaultic.ID, bool, int, error)) {
+func (s *deferredBlobSaver) SaveBlobAsync(
+	ctx context.Context,
+	blobType vaultic.BlobType,
+	data []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+	callback func(vaultic.ID, bool, int, error),
+) {
 	s.repo.mainWg.Go(func() error {
 		newID, known, size, err := s.SaveBlob(ctx, blobType, data, id, storeDuplicate)
 		callback(newID, known, size, err)
@@ -188,23 +206,51 @@ func (sink *deferredPackSink) savePacker(ctx context.Context, blobType vaultic.B
 			failures[destination.ID] = err
 			continue
 		}
-		placements = append(placements, staging.Placement{BackendID: destination.ID, FailureDomain: destination.FailureDomain, Offsite: destination.Offsite, Size: info.Size(), SHA256: packDigest})
+		placements = append(
+			placements,
+			staging.Placement{
+				BackendID:     destination.ID,
+				FailureDomain: destination.FailureDomain,
+				Offsite:       destination.Offsite,
+				Size:          info.Size(),
+				SHA256:        packDigest,
+			},
+		)
 		domains[destination.FailureDomain] = struct{}{}
 		if destination.Offsite {
 			offsite++
 		}
 	}
-	if uint(len(placements)) < sink.options.Policy.MinCopies || uint(len(domains)) < sink.options.Policy.MinDomains || offsite < sink.options.Policy.MinOffsite {
+	if uint(len(placements)) < sink.options.Policy.MinCopies || uint(len(domains)) < sink.options.Policy.MinDomains ||
+		offsite < sink.options.Policy.MinOffsite {
 		return fmt.Errorf("deferred pack %s placement policy unsatisfied: %v", packDigest, failures)
 	}
 	payloadSize := uint64(0)
 	for _, blob := range packer.Packer.Blobs() {
 		payloadSize += uint64(blob.Length)
 	}
-	packFact := staging.Pack{ID: packDigest, Type: blobType.String(), Size: info.Size(), PayloadSize: payloadSize, HeaderSize: uint64(info.Size()) - payloadSize, BlobCount: uint64(len(packer.Packer.Blobs())), SHA256: packDigest, Placements: placements}
+	packFact := staging.Pack{
+		ID:          packDigest,
+		Type:        blobType.String(),
+		Size:        info.Size(),
+		PayloadSize: payloadSize,
+		HeaderSize:  uint64(info.Size()) - payloadSize,
+		BlobCount:   uint64(len(packer.Packer.Blobs())),
+		SHA256:      packDigest,
+		Placements:  placements,
+	}
 	records := make([]staging.Record, 0, len(packer.Packer.Blobs()))
 	for _, blob := range packer.Packer.Blobs() {
-		payload, err := json.Marshal(staging.BlobFact{ID: blob.ID.String(), Type: blob.Type.String(), PackID: packDigest, Offset: blob.Offset, Length: blob.Length, UncompressedLength: blob.UncompressedLength})
+		payload, err := json.Marshal(
+			staging.BlobFact{
+				ID:                 blob.ID.String(),
+				Type:               blob.Type.String(),
+				PackID:             packDigest,
+				Offset:             blob.Offset,
+				Length:             blob.Length,
+				UncompressedLength: blob.UncompressedLength,
+			},
+		)
 		if err != nil {
 			return err
 		}

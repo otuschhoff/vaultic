@@ -195,7 +195,12 @@ func schemaFactForBlob(payload []byte) (SchemaFact, error) {
 	if fact.Length > uint(^uint32(0)) || fact.UncompressedLength > uint(^uint32(0)) {
 		return SchemaFact{}, fmt.Errorf("blob fact length overflow")
 	}
-	value, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: packID, Offset: uint64(fact.Offset), Length: uint32(fact.Length), UncompressedSize: uint32(fact.UncompressedLength), Type: blobType}}}).MarshalBinary()
+	value,
+		err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: packID,
+		Offset:           uint64(fact.Offset),
+		Length:           uint32(fact.Length),
+		UncompressedSize: uint32(fact.UncompressedLength),
+		Type:             blobType}}}).MarshalBinary()
 	return SchemaFact{Key: schema.BlobKey(blobID), Value: value}, err
 }
 
@@ -210,14 +215,31 @@ func schemaFactsForPack(pack Pack, createdAt time.Time) ([]SchemaFact, error) {
 	} else if pack.Type != "data" {
 		return nil, fmt.Errorf("invalid pack type %q", pack.Type)
 	}
-	packValue, err := (schema.PackRecord{Type: packType, PhysicalSize: uint64(pack.Size), PayloadSize: pack.PayloadSize, HeaderSize: pack.HeaderSize, BlobCount: pack.BlobCount, PhysicalSizeKnown: true, CreationTime: createdAt.Unix(), CreationTimeKnown: true, Lifecycle: schema.PackPublished, Tier: schema.TierUnknown, RetentionSource: schema.RetentionUnknown}).MarshalBinary()
+	packValue,
+		err := (schema.PackRecord{Type: packType,
+		PhysicalSize:      uint64(pack.Size),
+		PayloadSize:       pack.PayloadSize,
+		HeaderSize:        pack.HeaderSize,
+		BlobCount:         pack.BlobCount,
+		PhysicalSizeKnown: true,
+		CreationTime:      createdAt.Unix(),
+		CreationTimeKnown: true,
+		Lifecycle:         schema.PackPublished,
+		Tier:              schema.TierUnknown,
+		RetentionSource:   schema.RetentionUnknown}).MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 	facts := []SchemaFact{{Key: schema.PackKey(packID), Value: packValue}}
 	for _, placement := range pack.Placements {
 		backendID := backendHash(placement.BackendID)
-		placementValue, err := (schema.PlacementRecord{State: schema.PlacementLive, PlacedAt: createdAt.Unix(), PlacementTimeKnown: true, Bytes: uint64(placement.Size), RetentionSource: schema.RetentionUnknown, LastVerifiedAt: createdAt.Unix()}).MarshalBinary()
+		placementValue,
+			err := (schema.PlacementRecord{State: schema.PlacementLive,
+			PlacedAt:           createdAt.Unix(),
+			PlacementTimeKnown: true,
+			Bytes:              uint64(placement.Size),
+			RetentionSource:    schema.RetentionUnknown,
+			LastVerifiedAt:     createdAt.Unix()}).MarshalBinary()
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +247,11 @@ func schemaFactsForPack(pack Pack, createdAt time.Time) ([]SchemaFact, error) {
 		if err != nil {
 			return nil, err
 		}
-		facts = append(facts, SchemaFact{Key: schema.PackPlacementKey(packID, backendID), Value: placementValue}, SchemaFact{Key: schema.BackendPackKey(backendID, packID), Value: backendValue})
+		facts = append(
+			facts,
+			SchemaFact{Key: schema.PackPlacementKey(packID, backendID), Value: placementValue},
+			SchemaFact{Key: schema.BackendPackKey(backendID, packID), Value: backendValue},
+		)
 	}
 	return facts, nil
 }

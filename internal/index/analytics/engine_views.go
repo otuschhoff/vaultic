@@ -404,7 +404,14 @@ func Start(ctx context.Context, store Store, query Query) (schema.ID, error) {
 		return schema.ID{}, err
 	}
 	id := schema.ID(sha256.Sum256(append(canonical, uint64Bytes(uint64(time.Now().UnixNano()))...)))
-	record := schema.AnalyticsQueryJobRecord{State: schema.AnalyticsQueryPending, CanonicalQuery: canonical, RepositoryGeneration: pinned.watermark.RepositoryGeneration, ClassificationEpoch: pinned.epoch, AppliedCommit: pinned.watermark.AppliedCommit, UpdatedAt: time.Now().UnixNano()}
+	record := schema.AnalyticsQueryJobRecord{
+		State:                schema.AnalyticsQueryPending,
+		CanonicalQuery:       canonical,
+		RepositoryGeneration: pinned.watermark.RepositoryGeneration,
+		ClassificationEpoch:  pinned.epoch,
+		AppliedCommit:        pinned.watermark.AppliedCommit,
+		UpdatedAt:            time.Now().UnixNano(),
+	}
 	value, err := record.MarshalBinary()
 	if err != nil {
 		return schema.ID{}, err
@@ -447,7 +454,16 @@ func Resume(ctx context.Context, store Store, id schema.ID) (Result, error) {
 		}
 		return Result{}, err
 	}
-	result := Result{SchemaVersion: 2, Generation: pinned.manifest.Generation, Watermark: WatermarkInfo{RepositoryGeneration: record.RepositoryGeneration, ClassificationEpoch: record.ClassificationEpoch, AppliedCommit: record.AppliedCommit, AppliedAt: pinned.watermark.AppliedAt}}
+	result := Result{
+		SchemaVersion: 2,
+		Generation:    pinned.manifest.Generation,
+		Watermark: WatermarkInfo{
+			RepositoryGeneration: record.RepositoryGeneration,
+			ClassificationEpoch:  record.ClassificationEpoch,
+			AppliedCommit:        record.AppliedCommit,
+			AppliedAt:            pinned.watermark.AppliedAt,
+		},
+	}
 	if len(record.Result) != 0 {
 		if err := json.Unmarshal(record.Result, &result); err != nil {
 			return Result{}, fmt.Errorf("decode analytics job checkpoint: %w", err)

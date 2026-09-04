@@ -55,7 +55,12 @@ func (unwrapper *AzureKeyVaultUnwrapper) UnwrapMember(ctx context.Context, membe
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(keyURL.String(), "/")+"/unwrapkey?api-version=7.4", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		strings.TrimRight(keyURL.String(), "/")+"/unwrapkey?api-version=7.4",
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
 	}
@@ -97,7 +102,12 @@ func validateAzureKeyURL(reference string) (*url.URL, error) {
 	}
 	host := strings.ToLower(value.Hostname())
 	segments := strings.Split(strings.Trim(value.EscapedPath(), "/"), "/")
-	if value.Scheme != "https" || value.User != nil || value.RawQuery != "" || value.Fragment != "" || (!strings.HasSuffix(host, ".vault.azure.net") && !strings.HasSuffix(host, ".managedhsm.azure.net")) || len(segments) != 3 || segments[0] != "keys" || segments[1] == "" || segments[2] == "" {
+	if value.Scheme != "https" || value.User != nil || value.RawQuery != "" || value.Fragment != "" ||
+		(!strings.HasSuffix(host, ".vault.azure.net") && !strings.HasSuffix(host, ".managedhsm.azure.net")) ||
+		len(segments) != 3 ||
+		segments[0] != "keys" ||
+		segments[1] == "" ||
+		segments[2] == "" {
 		return nil, errors.New("Azure key reference must be a versioned Key Vault or Managed HSM HTTPS URL")
 	}
 	return value, nil

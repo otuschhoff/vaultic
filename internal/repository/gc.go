@@ -781,7 +781,10 @@ func loadExportIndexCheckpointKeys(ctx context.Context, store GCStore) (map[vaul
 // scanBlobCatalog reads the blob index once and returns blob types, pack
 // membership, and the payload bytes each blob contributes to each pack. The
 // byte map is what makes pack usage rebuildable from the blob index alone.
-func scanBlobCatalog(ctx context.Context, store GCStore) (map[vaultic.ID]schema.BlobType, map[vaultic.ID][]vaultic.ID, map[vaultic.ID]map[vaultic.ID]uint64, error) {
+func scanBlobCatalog(
+	ctx context.Context,
+	store GCStore,
+) (map[vaultic.ID]schema.BlobType, map[vaultic.ID][]vaultic.ID, map[vaultic.ID]map[vaultic.ID]uint64, error) {
 	blobTypes := make(map[vaultic.ID]schema.BlobType)
 	packMembers := make(map[vaultic.ID][]vaultic.ID)
 	packMemberBytes := make(map[vaultic.ID]map[vaultic.ID]uint64)
@@ -882,7 +885,14 @@ func scanGCPlacements(ctx context.Context, store GCStore) (map[vaultic.ID]map[ui
 	return placements, nil
 }
 
-func mixedPackRepackAllowed(record schema.PackRecord, memberBytes map[vaultic.ID]uint64, unreachable map[vaultic.ID]struct{}, placements map[uint64]schema.PlacementRecord, model PlacementModel, now time.Time) bool {
+func mixedPackRepackAllowed(
+	record schema.PackRecord,
+	memberBytes map[vaultic.ID]uint64,
+	unreachable map[vaultic.ID]struct{},
+	placements map[uint64]schema.PlacementRecord,
+	model PlacementModel,
+	now time.Time,
+) bool {
 	if len(placements) == 0 || len(model.Backends) == 0 {
 		return true
 	}
@@ -905,7 +915,8 @@ func mixedPackRepackAllowed(record schema.PackRecord, memberBytes map[vaultic.ID
 		if placement.RetentionSource != schema.RetentionUnknown && placement.MinRetentionUntil > now.UnixNano() {
 			remainingRetention = time.Duration(placement.MinRetentionUntil - now.UnixNano())
 		}
-		constrained := backend.PricePerGBMonth > 0 || backend.PricePerGBEgress > 0 || backend.PricePer1KRequests > 0 || backend.MinRetention() > 0 || placement.RetentionSource != schema.RetentionUnknown
+		constrained := backend.PricePerGBMonth > 0 || backend.PricePerGBEgress > 0 || backend.PricePer1KRequests > 0 || backend.MinRetention() > 0 ||
+			placement.RetentionSource != schema.RetentionUnknown
 		if !constrained {
 			continue
 		}

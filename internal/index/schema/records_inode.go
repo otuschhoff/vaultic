@@ -210,7 +210,13 @@ func UnmarshalAnalyticsFactRecord(data []byte) (AnalyticsFactRecord, error) {
 }
 
 func validAnalyticsFact(record AnalyticsFactRecord) bool {
-	if record.Revision == 0 || record.Known & ^knownFieldMask != 0 || record.Residency < AnalyticsLive || record.Residency > AnalyticsExpired || record.CreationBasis < AnalyticsCTime || record.CreationBasis > AnalyticsFirstSeen || record.IdentityContinuity > AnalyticsContinuitySourceGeneration || record.CalendarMonth > 12 || record.Workweek > 53 || record.SizeLog10 > 19 {
+	if record.Revision == 0 || record.Known & ^knownFieldMask != 0 || record.Residency < AnalyticsLive || record.Residency > AnalyticsExpired ||
+		record.CreationBasis < AnalyticsCTime ||
+		record.CreationBasis > AnalyticsFirstSeen ||
+		record.IdentityContinuity > AnalyticsContinuitySourceGeneration ||
+		record.CalendarMonth > 12 ||
+		record.Workweek > 53 ||
+		record.SizeLog10 > 19 {
 		return false
 	}
 	if record.IdentityContinuity == AnalyticsContinuitySourceGeneration && record.IdentityGeneration == 0 {

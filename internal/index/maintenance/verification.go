@@ -10,7 +10,13 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func checkVerificationState(ctx context.Context, store Store, packs map[vaultic.ID]schema.PackRecord, result *CheckResult, maxFindings uint) error {
+func checkVerificationState(
+	ctx context.Context,
+	store Store,
+	packs map[vaultic.ID]schema.PackRecord,
+	result *CheckResult,
+	maxFindings uint,
+) error {
 	states := make(map[string]schema.VerificationStateRecord)
 	if err := scan(ctx, store, schema.VerificationStatePrefix(), func(kv daemon.KeyValue) error {
 		key, err := schema.ParseKey(kv.Key)
@@ -43,7 +49,13 @@ func checkVerificationState(ctx context.Context, store Store, packs map[vaultic.
 		}
 		if placement.LastVerifiedAt != state.HeaderVerifiedAt {
 			result.VerificationStateMismatch++
-			addFinding(result, maxFindings, Finding{Kind: "verification_projection_mismatch", Key: verificationPlacementKey(key.ID, key.Backend), Want: fmt.Sprint(state.HeaderVerifiedAt), Got: fmt.Sprint(placement.LastVerifiedAt)})
+			addFinding(result,
+				maxFindings,
+				Finding{Kind: ("verification_projection_mismatch"),
+					Key: verificationPlacementKey(key.ID,
+						key.Backend),
+					Want: fmt.Sprint(state.HeaderVerifiedAt),
+					Got:  fmt.Sprint(placement.LastVerifiedAt)})
 		}
 		return nil
 	}); err != nil {
@@ -61,7 +73,15 @@ func checkVerificationState(ctx context.Context, store Store, packs map[vaultic.
 		if placement.LastVerifiedAt != 0 {
 			if _, found := states[verificationPlacementKey(key.ID, key.Backend)]; !found {
 				result.VerificationStateMismatch++
-				addFinding(result, maxFindings, Finding{Kind: "verification_state_missing", Key: verificationPlacementKey(key.ID, key.Backend), Want: fmt.Sprint(placement.LastVerifiedAt)})
+				addFinding(
+					result,
+					maxFindings,
+					Finding{
+						Kind: "verification_state_missing",
+						Key:  verificationPlacementKey(key.ID, key.Backend),
+						Want: fmt.Sprint(placement.LastVerifiedAt),
+					},
+				)
 			}
 		}
 		return nil

@@ -50,8 +50,11 @@ Exit status is 12 if the password is incorrect.
 `,
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRestore(cmd.Context(), opts, *globalOptions, globalOptions.Term, args)
 		},
 	}
@@ -90,7 +93,12 @@ func (opts *RestoreOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.Sparse, "sparse", false, "restore files as sparse")
 	f.BoolVar(&opts.Verify, "verify", false, "verify restored files content")
 	f.Var(&opts.Overwrite, "overwrite", "overwrite behavior, one of (always|if-changed|if-newer|never)")
-	f.BoolVar(&opts.Delete, "delete", false, "delete files from target directory if they do not exist in snapshot. Use '--dry-run -vv' to check what would be deleted")
+	f.BoolVar(
+		&opts.Delete,
+		"delete",
+		false,
+		"delete files from target directory if they do not exist in snapshot. Use '--dry-run -vv' to check what would be deleted",
+	)
 	if runtime.GOOS != "windows" {
 		f.BoolVar(&opts.OwnershipByName, "ownership-by-name", false, "restore file ownership by user name and group name (except POSIX ACLs)")
 	}

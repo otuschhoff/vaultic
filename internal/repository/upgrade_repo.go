@@ -19,10 +19,19 @@ type upgradeRepoV2Error struct {
 
 func (err *upgradeRepoV2Error) Error() string {
 	if err.ReuploadOldConfigError != nil {
-		return fmt.Sprintf("error uploading config (%v), re-uploading old config filed failed as well (%v), but there is a backup of the config file in %v", err.UploadNewConfigError, err.ReuploadOldConfigError, err.BackupFilePath)
+		return fmt.Sprintf(
+			"error uploading config (%v), re-uploading old config filed failed as well (%v), but there is a backup of the config file in %v",
+			err.UploadNewConfigError,
+			err.ReuploadOldConfigError,
+			err.BackupFilePath,
+		)
 	}
 
-	return fmt.Sprintf("error uploading config (%v), re-uploaded old config was successful, there is a backup of the config file in %v", err.UploadNewConfigError, err.BackupFilePath)
+	return fmt.Sprintf(
+		"error uploading config (%v), re-uploaded old config was successful, there is a backup of the config file in %v",
+		err.UploadNewConfigError,
+		err.BackupFilePath,
+	)
 }
 
 func (err *upgradeRepoV2Error) Unwrap() error {

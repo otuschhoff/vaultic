@@ -40,17 +40,22 @@ const (
 
 	// Below are windows specific attributes.
 
-	// TypeCreationTime is the GenericAttributeType used for storing creation time for windows files within the generic attributes map.
+	// TypeCreationTime is the GenericAttributeType used for storing creation time for windows files within the generic
+	// attributes map.
 	TypeCreationTime GenericAttributeType = "windows.creation_time"
-	// TypeFileAttributes is the GenericAttributeType used for storing file attributes for windows files within the generic attributes map.
+	// TypeFileAttributes is the GenericAttributeType used for storing file attributes for windows files within the
+	// generic attributes map.
 	TypeFileAttributes GenericAttributeType = "windows.file_attributes"
-	// TypeSecurityDescriptor is the GenericAttributeType used for storing security descriptors including owner, group, discretionary access control list (DACL), system access control list (SACL)) for windows files within the generic attributes map.
+	// TypeSecurityDescriptor is the GenericAttributeType used for storing security descriptors including owner, group,
+	// discretionary access control list (DACL), system access control list (SACL)) for windows files within the generic
+	// attributes map.
 	TypeSecurityDescriptor GenericAttributeType = "windows.security_descriptor"
 
 	// Generic Attributes for other OS types should be defined here.
 )
 
-// init is called when the package is initialized. Any new GenericAttributeTypes being created must be added here as well.
+// init is called when the package is initialized. Any new GenericAttributeTypes being created must be added here as
+// well.
 func init() {
 	storeGenericAttributeType(TypeCreationTime, TypeFileAttributes, TypeSecurityDescriptor)
 }
@@ -381,33 +386,46 @@ func deepEqual(map1, map2 map[GenericAttributeType]json.RawMessage) bool {
 	return true
 }
 
-// HandleUnknownGenericAttributesFound is used for handling and distinguing between scenarios related to future versions and cross-OS repositories
+// HandleUnknownGenericAttributesFound is used for handling and distinguing between scenarios related to future versions
+// and cross-OS repositories
 func HandleUnknownGenericAttributesFound(unknownAttribs []GenericAttributeType, warn func(msg string)) {
 	for _, unknownAttrib := range unknownAttribs {
 		handleUnknownGenericAttributeFound(unknownAttrib, warn)
 	}
 }
 
-// handleUnknownGenericAttributeFound is used for handling and distinguing between scenarios related to future versions and cross-OS repositories
+// handleUnknownGenericAttributeFound is used for handling and distinguing between scenarios related to future versions
+// and cross-OS repositories
 func handleUnknownGenericAttributeFound(genericAttributeType GenericAttributeType, warn func(msg string)) {
 	if checkGenericAttributeNameNotHandledAndPut(genericAttributeType) {
 		// Print the unique error only once for a given execution
 		os, exists := genericAttributesForOS[genericAttributeType]
 
 		if exists {
-			// If genericAttributesForOS contains an entry but we still got here, it means the specific node_xx.go for the current OS did not handle it and the repository may have been originally created on a different OS.
-			// The fact that node.go knows about the attribute, means it is not a new attribute. This may be a common situation if a repo is used across OSs.
-			debug.Log("Ignoring a generic attribute found in the repository: %s which may not be compatible with your OS. Compatible OS: %s", genericAttributeType, os)
+			// If genericAttributesForOS contains an entry but we still got here, it means the specific node_xx.go for
+			// the current OS did not handle it and the repository may have been originally created on a different OS.
+			// The fact that node.go knows about the attribute, means it is not a new attribute. This may be a common
+			// situation if a repo is used across OSs.
+			debug.Log(
+				"Ignoring a generic attribute found in the repository: %s which may not be compatible with your OS. Compatible OS: %s",
+				genericAttributeType,
+				os,
+			)
 		} else {
-			// If genericAttributesForOS in node.go does not know about this attribute, then the repository may have been created by a newer version which has a newer GenericAttributeType.
-			warn(fmt.Sprintf("Found an unrecognized generic attribute in the repository: %s. You may need to upgrade to latest version of vaultic.", genericAttributeType))
+			// If genericAttributesForOS in node.go does not know about this attribute, then the repository may have
+			// been created by a newer version which has a newer GenericAttributeType.
+			warn(fmt.Sprintf(("Found an unrecognized generic attribute in the repository: %s. You may need " +
+				"to upgrade to latest version of vaultic."), genericAttributeType))
 		}
 	}
 }
 
 // HandleAllUnknownGenericAttributesFound performs validations for all generic attributes of a node.
 // This is not used on windows currently because windows has handling for generic attributes.
-func HandleAllUnknownGenericAttributesFound(attributes map[GenericAttributeType]json.RawMessage, warn func(msg string)) error {
+func HandleAllUnknownGenericAttributesFound(
+	attributes map[GenericAttributeType]json.RawMessage,
+	warn func(msg string),
+) error {
 	for name := range attributes {
 		handleUnknownGenericAttributeFound(name, warn)
 	}
@@ -429,7 +447,12 @@ func checkGenericAttributeNameNotHandledAndPut(value GenericAttributeType) bool 
 // across different OS.
 
 // GenericAttributesToOSAttrs gets the os specific attribute from the generic attribute using reflection
-func GenericAttributesToOSAttrs(attrs map[GenericAttributeType]json.RawMessage, attributeType reflect.Type, attributeValuePtr *reflect.Value, keyPrefix string) (unknownAttribs []GenericAttributeType, err error) {
+func GenericAttributesToOSAttrs(
+	attrs map[GenericAttributeType]json.RawMessage,
+	attributeType reflect.Type,
+	attributeValuePtr *reflect.Value,
+	keyPrefix string,
+) (unknownAttribs []GenericAttributeType, err error) {
 	attributeValue := *attributeValuePtr
 
 	for key, rawMsg := range attrs {
@@ -463,7 +486,11 @@ func getFQKeyByIndex(attributeType reflect.Type, index int, keyPrefix string) Ge
 }
 
 // OSAttrsToGenericAttributes gets the generic attribute from the os specific attribute using reflection
-func OSAttrsToGenericAttributes(attributeType reflect.Type, attributeValuePtr *reflect.Value, keyPrefix string) (attrs map[GenericAttributeType]json.RawMessage, err error) {
+func OSAttrsToGenericAttributes(
+	attributeType reflect.Type,
+	attributeValuePtr *reflect.Value,
+	keyPrefix string,
+) (attrs map[GenericAttributeType]json.RawMessage, err error) {
 	attributeValue := *attributeValuePtr
 	attrs = make(map[GenericAttributeType]json.RawMessage)
 

@@ -390,7 +390,9 @@ const (
 )
 
 func (record ContentManifest) MarshalBinary() ([]byte, error) {
-	if record.TotalCount > MaxContentIDs || record.SegmentCount == 0 || record.Segment >= record.SegmentCount || len(record.ContentIDs) == 0 || len(record.ContentIDs) > int(MaxContentSegmentIDs) || uint64(len(record.ContentIDs)) > uint64(record.TotalCount) {
+	if record.TotalCount > MaxContentIDs || record.SegmentCount == 0 || record.Segment >= record.SegmentCount || len(record.ContentIDs) == 0 ||
+		len(record.ContentIDs) > int(MaxContentSegmentIDs) ||
+		uint64(len(record.ContentIDs)) > uint64(record.TotalCount) {
 		return nil, fmt.Errorf("%w: invalid content segment", ErrMalformed)
 	}
 	e := newEncoder()
@@ -429,7 +431,8 @@ func UnmarshalContentManifest(data []byte) (ContentManifest, error) {
 			return ContentManifest{}, err
 		}
 	}
-	if record.TotalCount > MaxContentIDs || record.SegmentCount == 0 || record.Segment >= record.SegmentCount || count == 0 || count > MaxContentSegmentIDs || count > record.TotalCount {
+	if record.TotalCount > MaxContentIDs || record.SegmentCount == 0 || record.Segment >= record.SegmentCount || count == 0 || count > MaxContentSegmentIDs ||
+		count > record.TotalCount {
 		return ContentManifest{}, fmt.Errorf("%w: invalid content segment", ErrMalformed)
 	}
 	return record, d.done()
@@ -456,7 +459,12 @@ func SegmentContent(ids []ID, maxPerSegment int) (ID, []ContentManifest, error) 
 	for segment := range count {
 		start := segment * maxPerSegment
 		end := min(start+maxPerSegment, len(ids))
-		records[segment] = ContentManifest{TotalCount: uint32(len(ids)), Segment: uint32(segment), SegmentCount: uint32(count), ContentIDs: append([]ID(nil), ids[start:end]...)}
+		records[segment] = ContentManifest{
+			TotalCount:   uint32(len(ids)),
+			Segment:      uint32(segment),
+			SegmentCount: uint32(count),
+			ContentIDs:   append([]ID(nil), ids[start:end]...),
+		}
 	}
 	return id, records, nil
 }

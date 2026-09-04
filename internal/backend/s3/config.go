@@ -19,19 +19,19 @@ type Config struct {
 	UseHTTP      bool
 	Bucket       string
 	Prefix       string
-	Layout       string `option:"layout" help:"use this backend layout (default: auto-detect) (deprecated)"`
+	Layout       string `option:"layout"        help:"use this backend layout (default: auto-detect) (deprecated)"`
 	StorageClass string `option:"storage-class" help:"set S3 storage class (STANDARD, STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING or REDUCED_REDUNDANCY)"`
 
-	EnableRestore  bool          `option:"enable-restore" help:"restore objects from GLACIER or DEEP_ARCHIVE storage classes (default: false, requires \"s3-restore\" feature flag)"`
-	RestoreDays    int           `option:"restore-days" help:"lifetime in days of restored object (default: 7)"`
+	EnableRestore  bool          `option:"enable-restore" help:"restore GLACIER or DEEP_ARCHIVE objects (requires s3-restore)"`
+	RestoreDays    int           `option:"restore-days"    help:"lifetime in days of restored object (default: 7)"`
 	RestoreTimeout time.Duration `option:"restore-timeout" help:"maximum time to wait for objects transition (default: 24h)"`
-	RestoreTier    string        `option:"restore-tier" help:"Retrieval tier at which the restore will be processed. (Standard, Bulk or Expedited) (default: Standard)"`
+	RestoreTier    string        `option:"restore-tier" help:"retrieval tier: Standard, Bulk, or Expedited (default: Standard)"`
 
-	Connections         uint   `option:"connections" help:"set a limit for the number of concurrent connections (default: 5)"`
-	MaxRetries          uint   `option:"retries" help:"set the number of retries attempted"`
-	Region              string `option:"region" help:"set region"`
-	BucketLookup        string `option:"bucket-lookup" help:"bucket lookup style: 'auto', 'dns', or 'path'"`
-	ListObjectsV1       bool   `option:"list-objects-v1" help:"use deprecated V1 api for ListObjects calls"`
+	Connections         uint   `option:"connections"           help:"set a limit for the number of concurrent connections (default: 5)"`
+	MaxRetries          uint   `option:"retries"               help:"set the number of retries attempted"`
+	Region              string `option:"region"                help:"set region"`
+	BucketLookup        string `option:"bucket-lookup"         help:"bucket lookup style: 'auto', 'dns', or 'path'"`
+	ListObjectsV1       bool   `option:"list-objects-v1"       help:"use deprecated V1 api for ListObjects calls"`
 	UnsafeAnonymousAuth bool   `option:"unsafe-anonymous-auth" help:"use anonymous authentication"`
 
 	// For testing only

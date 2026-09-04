@@ -50,15 +50,47 @@ func TestPlanDeterministicFiltersAndFreshness(t *testing.T) {
 	for number := byte(1); number <= 10; number++ {
 		var id schema.ID
 		id[0] = number
-		pack := schema.PackRecord{Type: schema.PackData, PhysicalSize: 100, PhysicalSizeKnown: true, PayloadSize: 90, HeaderSize: 10, CreationTime: 100, CreationTimeKnown: true, Lifecycle: schema.PackPublished, Tier: schema.TierCold, RetentionSource: schema.RetentionUnknown}
-		placement := schema.PlacementRecord{State: schema.PlacementLive, StorageClass: "GLACIER", PlacedAt: 100, PlacementTimeKnown: true, Bytes: 100, RetentionSource: schema.RetentionUnknown}
+		pack := schema.PackRecord{
+			Type:              schema.PackData,
+			PhysicalSize:      100,
+			PhysicalSizeKnown: true,
+			PayloadSize:       90,
+			HeaderSize:        10,
+			CreationTime:      100,
+			CreationTimeKnown: true,
+			Lifecycle:         schema.PackPublished,
+			Tier:              schema.TierCold,
+			RetentionSource:   schema.RetentionUnknown,
+		}
+		placement := schema.PlacementRecord{
+			State:              schema.PlacementLive,
+			StorageClass:       "GLACIER",
+			PlacedAt:           100,
+			PlacementTimeKnown: true,
+			Bytes:              100,
+			RetentionSource:    schema.RetentionUnknown,
+		}
 		packValue, _ := pack.MarshalBinary()
 		placementValue, _ := placement.MarshalBinary()
 		store.values[string(schema.PackKey(id))] = packValue
 		store.values[string(schema.PackPlacementKey(id, 7))] = placementValue
 	}
 	cutoff := int64(200)
-	options := Options{Level: schema.VerificationChecksum, Tiers: map[schema.PackTier]bool{schema.TierCold: true}, Backends: map[uint64]bool{7: true}, StorageClasses: map[string]bool{"GLACIER": true}, NotVerifiedSince: &cutoff, SampleCount: 3, Seed: 99}
+	options := Options{
+		Level: schema.VerificationChecksum,
+		Tiers: map[schema.PackTier]bool{
+			schema.TierUnknown:  false,
+			schema.TierHot:      false,
+			schema.TierCold:     true,
+			schema.TierMirrored: false,
+			schema.TierSingle:   false,
+		},
+		Backends:         map[uint64]bool{7: true},
+		StorageClasses:   map[string]bool{"GLACIER": true},
+		NotVerifiedSince: &cutoff,
+		SampleCount:      3,
+		Seed:             99,
+	}
 	first, err := Plan(context.Background(), store, options, time.Unix(300, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +107,14 @@ func TestPlanDeterministicFiltersAndFreshness(t *testing.T) {
 			t.Fatal("sample is not deterministic")
 		}
 	}
-	state := schema.VerificationStateRecord{LastAttemptAt: 250, LastAttemptLevel: schema.VerificationChecksum, HeaderVerifiedAt: 250, ChecksumVerifiedAt: 250, Result: schema.VerificationHealthy, LastRunID: schema.ID{1}}
+	state := schema.VerificationStateRecord{
+		LastAttemptAt:      250,
+		LastAttemptLevel:   schema.VerificationChecksum,
+		HeaderVerifiedAt:   250,
+		ChecksumVerifiedAt: 250,
+		Result:             schema.VerificationHealthy,
+		LastRunID:          schema.ID{1},
+	}
 	value, _ := state.MarshalBinary()
 	store.values[string(schema.VerificationStateKey(first[0].PackID, 7))] = value
 	allOptions := options
@@ -123,7 +162,16 @@ func (warmer failingWarmer) WarmupPlacements(context.Context, []Candidate) error
 func TestRunRecordsColdWarmupFailures(t *testing.T) {
 	store := &memoryStore{values: map[string][]byte{}}
 	candidates := []Candidate{{PackID: schema.ID{1}, Backend: 7}, {PackID: schema.ID{2}, Backend: 8}}
-	result, err := Run(context.Background(), store, nil, failingWarmer{err: context.DeadlineExceeded}, candidates, schema.VerificationChecksum, 1, func() time.Time { return time.Unix(100, 0) })
+	result, err := Run(
+		context.Background(),
+		store,
+		nil,
+		failingWarmer{err: context.DeadlineExceeded},
+		candidates,
+		schema.VerificationChecksum,
+		1,
+		func() time.Time { return time.Unix(100, 0) },
+	)
 	if err == nil || result.OperationalErrors != 2 || len(store.outcomes) != 2 {
 		t.Fatalf("warm-up result = %+v, outcomes=%+v, err=%v", result, store.outcomes, err)
 	}

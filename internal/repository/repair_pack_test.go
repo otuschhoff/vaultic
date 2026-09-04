@@ -36,7 +36,9 @@ func TestRepairBrokenPack(t *testing.T) {
 func testRepairBrokenPack(t *testing.T, version uint) {
 	tests := []struct {
 		name   string
-		damage func(t *testing.T, random *rand.Rand, repo *repository.Repository, be backend.Backend, packsBefore vaultic.IDSet) (vaultic.IDSet, vaultic.BlobSet)
+		damage func(
+			t *testing.T, random *rand.Rand, repo *repository.Repository, be backend.Backend, packsBefore vaultic.IDSet,
+		) (vaultic.IDSet, vaultic.BlobSet)
 	}{
 		{
 			"valid pack",
@@ -104,7 +106,15 @@ func testRepairBrokenPack(t *testing.T, version uint) {
 				buf, err := backendtest.LoadAll(context.TODO(), be, h)
 				rtest.OK(t, err)
 				rtest.OK(t, be.Remove(context.TODO(), h))
-				rtest.OK(t, repository.RepairIndex(context.TODO(), repo, repository.RepairIndexOptions{}, vaultic.NewNoopPrinter()))
+				rtest.OK(
+					t,
+					repository.RepairIndex(
+						context.TODO(),
+						repo,
+						repository.RepairIndexOptions{},
+						vaultic.NewNoopPrinter(),
+					),
+				)
 
 				rtest.OK(t, be.Save(context.TODO(), h, backend.NewByteReader(buf, be.Hasher())))
 

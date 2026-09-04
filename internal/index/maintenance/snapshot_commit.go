@@ -57,7 +57,11 @@ func checkSnapshotCommitIndex(ctx context.Context, store Store, result *CheckRes
 		if !found || !bytes.Equal(value, mutation.Value) {
 			result.SnapshotCommitMismatch++
 			parsed, _ := schema.ParseKey(mutation.Key)
-			addFinding(result, maxFindings, Finding{Kind: "snapshot_commit_drift", Key: vaultic.ID(parsed.ID).String(), Want: fmt.Sprintf("commit=%d", parsed.Revision)})
+			addFinding(
+				result,
+				maxFindings,
+				Finding{Kind: "snapshot_commit_drift", Key: vaultic.ID(parsed.ID).String(), Want: fmt.Sprintf("commit=%d", parsed.Revision)},
+			)
 		}
 	}
 	return scan(ctx, store, schema.SnapshotCommitPrefix(), func(entry daemon.KeyValue) error {
@@ -71,7 +75,11 @@ func checkSnapshotCommitIndex(ctx context.Context, store Store, result *CheckRes
 			return nil
 		}
 		result.SnapshotCommitMismatch++
-		addFinding(result, maxFindings, Finding{Kind: "stale_snapshot_commit", Key: vaultic.ID(parsed.ID).String(), Got: fmt.Sprintf("commit=%d", parsed.Revision)})
+		addFinding(
+			result,
+			maxFindings,
+			Finding{Kind: "stale_snapshot_commit", Key: vaultic.ID(parsed.ID).String(), Got: fmt.Sprintf("commit=%d", parsed.Revision)},
+		)
 		return nil
 	})
 }

@@ -48,7 +48,13 @@ func (r *Repository) VerifyPackPlacement(ctx context.Context, packID vaultic.ID,
 		return &PlacementVerificationError{Classification: classification, Stage: "stat", Expected: fmt.Sprint(expectedSize), Err: err}
 	}
 	if uint64(info.Size) != expectedSize {
-		return &PlacementVerificationError{Classification: schema.VerificationSizeMismatch, Stage: "size", Expected: fmt.Sprint(expectedSize), Observed: fmt.Sprint(info.Size), Err: fmt.Errorf("unexpected object size")}
+		return &PlacementVerificationError{
+			Classification: schema.VerificationSizeMismatch,
+			Stage:          "size",
+			Expected:       fmt.Sprint(expectedSize),
+			Observed:       fmt.Sprint(info.Size),
+			Err:            fmt.Errorf("unexpected object size"),
+		}
 	}
 	blobs, _, err := pack.List(r.Key(), backend.ReaderAt(ctx, target, handle), info.Size)
 	if err != nil {
@@ -63,7 +69,13 @@ func (r *Repository) VerifyPackPlacement(ctx context.Context, packID vaultic.ID,
 	}
 	observed := vaultic.Hash(buffer)
 	if observed != packID {
-		return &PlacementVerificationError{Classification: schema.VerificationChecksumMismatch, Stage: "checksum", Expected: packID.String(), Observed: observed.String(), Err: vaultic.ErrInvalidData}
+		return &PlacementVerificationError{
+			Classification: schema.VerificationChecksumMismatch,
+			Stage:          "checksum",
+			Expected:       packID.String(),
+			Observed:       observed.String(),
+			Err:            vaultic.ErrInvalidData,
+		}
 	}
 	if level == schema.VerificationChecksum {
 		return nil

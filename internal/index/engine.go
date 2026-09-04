@@ -183,7 +183,12 @@ func (e *LegacyEngine) StorePack(ctx context.Context, id vaultic.ID, blobs pack.
 	return e.master.StorePack(ctx, id, blobs, repo)
 }
 
-func (e *LegacyEngine) Load(ctx context.Context, repo vaultic.ListerLoaderUnpacked, progress vaultic.Counter, callback func(vaultic.ID, *legacyindex.Index, error) error) error {
+func (e *LegacyEngine) Load(
+	ctx context.Context,
+	repo vaultic.ListerLoaderUnpacked,
+	progress vaultic.Counter,
+	callback func(vaultic.ID, *legacyindex.Index, error) error,
+) error {
 	return e.master.Load(ctx, repo, progress, callback)
 }
 
@@ -256,7 +261,15 @@ func Resolve(ctx context.Context, be backend.Backend, repositoryID string) (Reso
 		return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt}, fmt.Errorf("decode slatedb manifest: trailing data")
 	}
 	if manifest.FormatVersion != ManifestFormatVersion || manifest.SchemaVersion != ManifestSchemaVersion {
-		return Resolution{Mode: ModeSlateDB, State: ManifestUnsupported, Manifest: &manifest}, fmt.Errorf("unsupported slatedb manifest format %d schema %q", manifest.FormatVersion, manifest.SchemaVersion)
+		return Resolution{
+			Mode:     ModeSlateDB,
+			State:    ManifestUnsupported,
+			Manifest: &manifest,
+		}, fmt.Errorf(
+			"unsupported slatedb manifest format %d schema %q",
+			manifest.FormatVersion,
+			manifest.SchemaVersion,
+		)
 	}
 	if !manifest.Authoritative || manifest.RepositoryID == "" || (repositoryID != "" && manifest.RepositoryID != repositoryID) {
 		return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt, Manifest: &manifest}, fmt.Errorf("invalid slatedb manifest repository or authority")
@@ -277,7 +290,9 @@ func Activate(ctx context.Context, be backend.Backend, repositoryID string) erro
 	if err != nil || resolution.State != ManifestAbsent {
 		return fmt.Errorf("cannot activate slatedb authority over existing namespace: %w", err)
 	}
-	payload, err := json.Marshal(Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: repositoryID, Authoritative: true})
+	payload, err := json.Marshal(
+		Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: repositoryID, Authoritative: true},
+	)
 	if err != nil {
 		return err
 	}

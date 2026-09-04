@@ -313,7 +313,10 @@ func FindTreeDirectory(ctx context.Context, repo vaultic.BlobLoader, id *vaultic
 		}
 		if node == nil {
 			if runtime.GOOS == "windows" && strings.Contains(dir, "\\") {
-				return nil, fmt.Errorf("path %s: not found; subfolder syntax currently requires forward slashes; check the output of `vaultic ls` for valid paths", subfolder)
+				return nil, fmt.Errorf(
+					"path %s: not found; subfolder syntax currently requires forward slashes; check the output of `vaultic ls` for valid paths",
+					subfolder,
+				)
 			}
 			return nil, fmt.Errorf("path %s: not found", subfolder)
 		}

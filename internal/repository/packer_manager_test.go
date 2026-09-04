@@ -63,14 +63,20 @@ func testPackerManager(t testing.TB) int64 {
 	rnd := rand.New(rand.NewSource(randomSeed))
 
 	savedBytes := 0
-	pm := newPackerManager(crypto.NewRandomKey(), vaultic.DataBlob, DefaultPackSize, defaultPackerCount, func(ctx context.Context, tp vaultic.BlobType, p *packer) error {
-		err := p.Finalize()
-		if err != nil {
-			return err
-		}
-		savedBytes += int(p.Size())
-		return nil
-	})
+	pm := newPackerManager(
+		crypto.NewRandomKey(),
+		vaultic.DataBlob,
+		DefaultPackSize,
+		defaultPackerCount,
+		func(ctx context.Context, tp vaultic.BlobType, p *packer) error {
+			err := p.Finalize()
+			if err != nil {
+				return err
+			}
+			savedBytes += int(p.Size())
+			return nil
+		},
+	)
 
 	blobBuf := make([]byte, maxBlobSize)
 
@@ -85,10 +91,16 @@ func testPackerManager(t testing.TB) int64 {
 func TestPackerManagerWithOversizeBlob(t *testing.T) {
 	packFiles := 0
 	sizeLimit := uint(512 * 1024)
-	pm := newPackerManager(crypto.NewRandomKey(), vaultic.DataBlob, sizeLimit, defaultPackerCount, func(ctx context.Context, tp vaultic.BlobType, p *packer) error {
-		packFiles++
-		return nil
-	})
+	pm := newPackerManager(
+		crypto.NewRandomKey(),
+		vaultic.DataBlob,
+		sizeLimit,
+		defaultPackerCount,
+		func(ctx context.Context, tp vaultic.BlobType, p *packer) error {
+			packFiles++
+			return nil
+		},
+	)
 
 	for _, i := range []uint{sizeLimit / 2, sizeLimit, sizeLimit / 3} {
 		_, err := pm.SaveBlob(context.TODO(), vaultic.DataBlob, vaultic.ID{}, make([]byte, i), 0)
@@ -115,9 +127,15 @@ func BenchmarkPackerManager(t *testing.B) {
 
 	for i := 0; i < t.N; i++ {
 		rnd.Seed(randomSeed)
-		pm := newPackerManager(crypto.NewRandomKey(), vaultic.DataBlob, DefaultPackSize, defaultPackerCount, func(ctx context.Context, t vaultic.BlobType, p *packer) error {
-			return nil
-		})
+		pm := newPackerManager(
+			crypto.NewRandomKey(),
+			vaultic.DataBlob,
+			DefaultPackSize,
+			defaultPackerCount,
+			func(ctx context.Context, t vaultic.BlobType, p *packer) error {
+				return nil
+			},
+		)
 		fillPacks(t, rnd, pm, blobBuf)
 	}
 }

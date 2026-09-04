@@ -30,6 +30,11 @@ use crate::encryption::recovery_capsule::{
     RecoveryCapsule, UnlockPolicy, UnwrappedMemberShare,
 };
 
+pub mod audit;
+pub mod peer;
+pub mod protocol;
+pub mod startup;
+
 type SessionKem = X25519HkdfSha256;
 type SessionKdf = HkdfSha256;
 type SessionAead = ChaCha20Poly1305;

@@ -139,7 +139,12 @@ func getNamedSecurityInfoLow(filePath string) (*windows.SECURITY_DESCRIPTOR, err
 }
 
 // setNamedSecurityInfoHigh sets the higher level SecurityDescriptor which requires admin permissions.
-func setNamedSecurityInfoHigh(filePath string, owner *windows.SID, group *windows.SID, dacl *windows.ACL, sacl *windows.ACL, control windows.SECURITY_DESCRIPTOR_CONTROL) error {
+func setNamedSecurityInfoHigh(filePath string,
+	owner *windows.SID,
+	group *windows.SID,
+	dacl *windows.ACL,
+	sacl *windows.ACL,
+	control windows.SECURITY_DESCRIPTOR_CONTROL) error {
 	securityInfo := highRestoreSecurityFlags
 
 	// Check if the original DACL was protected from inheritance and add the correct flag.

@@ -63,12 +63,15 @@ fn validate_capsule_mutation(
     Ok(capsule)
 }
 
-async fn publish_capsule_without_database(arguments: &[String]) -> Result<()> {
+pub(crate) async fn publish_capsule_without_database(arguments: &[String]) -> Result<()> {
     if arguments.len() != 5 {
         bail!("usage: vaulticdb publish-capsule CAPSULE_DIRECTORY CAPSULE_FILE SHA256 IDENTITY_RECOVERY");
     }
-    let repository_id =
-        env::var("VAULTICDB_REPOSITORY_ID").context("VAULTICDB_REPOSITORY_ID is required")?;
+    let config = Config::from_env()?;
+    let repository_id = config.repository_id;
+    if repository_id.is_empty() {
+        bail!("VAULTICDB_REPOSITORY_ID is required");
+    }
     let capsule_directory = PathBuf::from(&arguments[1]);
     let encoded = std::fs::read(&arguments[2])
         .with_context(|| format!("read recovery capsule {}", arguments[2]))?;
@@ -82,7 +85,7 @@ async fn publish_capsule_without_database(arguments: &[String]) -> Result<()> {
         &arguments[3],
         identity_recovery,
     )?;
-    let (_, object_store) = storage::object_store(&repository_id)?;
+    let (_, object_store) = storage::object_store(&repository_id, &config.storage.object_store)?;
     let mirror_path =
         encryption::recovery_capsule::publish_mirror(object_store.as_ref(), &capsule).await?;
     let local_path = encryption::recovery_capsule::publish_local(&capsule_directory, &capsule)?;
@@ -99,7 +102,75 @@ async fn publish_capsule_without_database(arguments: &[String]) -> Result<()> {
 }
 
 impl Service {
-    async fn transition_to_reader(
+    async fn handle_health(
+        &self,
+        request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        check_request(
+            &self.state,
+            &request,
+            request.get_ref().repository_id.as_str(),
+        )?;
+        check_context(request.get_ref().context.as_ref())?;
+        Ok(Response::new(HealthResponse {
+            daemon_id: self.state.daemon_id.to_string(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            repository_id: self.state.repository_id.to_string(),
+            slate_db_revision: String::new(),
+            ready: !self.state.draining.load(Ordering::Acquire),
+        }))
+    }
+
+    async fn handle_capabilities(
+        &self,
+        request: Request<CapabilitiesRequest>,
+    ) -> Result<Response<CapabilitiesResponse>, Status> {
+        check_request(
+            &self.state,
+            &request,
+            request.get_ref().repository_id.as_str(),
+        )?;
+        check_context(request.get_ref().context.as_ref())?;
+        let encryption = self.storage.encryption_status();
+        Ok(Response::new(CapabilitiesResponse {
+            daemon_id: self.state.daemon_id.to_string(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            repository_id: self.state.repository_id.to_string(),
+            unix_socket: self.state.unix_socket,
+            tcp_enabled: self.state.tcp_enabled,
+            max_batch_items: MAX_BATCH_ITEMS,
+            max_message_bytes: MAX_MESSAGE_BYTES,
+            max_page_items: MAX_PAGE_ITEMS,
+            max_concurrent_requests: MAX_CONCURRENT_REQUESTS as u32,
+            encryption_enabled: encryption.enabled,
+            encryption_algorithm: encryption.algorithm.to_owned(),
+            active_dek_version: encryption.active_dek_version,
+            envelope_generation: encryption.envelope_generation,
+            unlock_slot: encryption.unlock_slot.clone().unwrap_or_default(),
+            recovery_unlock: encryption.recovery_unlock,
+            writer_roles: true,
+            durable_idempotency: true,
+        }))
+    }
+
+    async fn handle_drain(&self, request: Request<Empty>) -> Result<Response<Empty>, Status> {
+        check_request(&self.state, &request, "")?;
+        check_context(request.get_ref().context.as_ref())?;
+        self.state.draining.store(true, Ordering::Release);
+        Ok(Response::new(Empty { context: None }))
+    }
+
+    async fn handle_shutdown(&self, request: Request<Empty>) -> Result<Response<Empty>, Status> {
+        check_request(&self.state, &request, "")?;
+        check_context(request.get_ref().context.as_ref())?;
+        self.state.draining.store(true, Ordering::Release);
+        let _ = self.shutdown.send(true);
+        Ok(Response::new(Empty { context: None }))
+    }
+
+    pub(crate) async fn transition_to_reader(
         &self,
         timeout: Duration,
         reason: String,
@@ -278,143 +349,4 @@ impl Service {
                 .unwrap_or_default(),
         })
     }
-}
-
-fn key_management_error(error: anyhow::Error) -> Status {
-    VaulticDbError::key_management(error).into()
-}
-
-fn role_error(error: RoleError) -> Status {
-    VaulticDbError::from(error).into()
-}
-
-fn unix_time_ms_i64() -> Result<i64, Status> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| Status::internal("system time is before Unix epoch"))?
-        .as_millis()
-        .try_into()
-        .map_err(|_| Status::internal("system time exceeds signed milliseconds"))
-}
-
-fn configured_duration(
-    name: &str,
-    default: Duration,
-    allow_disabled: bool,
-) -> Result<Option<Duration>> {
-    let Ok(value) = env::var(name) else {
-        return Ok((!allow_disabled || !default.is_zero()).then_some(default));
-    };
-    let value = value.trim();
-    if allow_disabled && (value.is_empty() || value == "0" || value.eq_ignore_ascii_case("off")) {
-        return Ok(None);
-    }
-    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
-        (number, 1u64)
-    } else if let Some(number) = value.strip_suffix('s') {
-        (number, 1_000)
-    } else if let Some(number) = value.strip_suffix('m') {
-        (number, 60_000)
-    } else if let Some(number) = value.strip_suffix('h') {
-        (number, 3_600_000)
-    } else {
-        bail!("{name} must use an ms, s, m, or h suffix")
-    };
-    let milliseconds = number
-        .parse::<u64>()
-        .with_context(|| format!("parse {name}"))?
-        .checked_mul(multiplier)
-        .with_context(|| format!("{name} is too large"))?;
-    if milliseconds == 0 {
-        bail!("{name} must be positive or explicitly disabled")
-    }
-    Ok(Some(Duration::from_millis(milliseconds)))
-}
-
-fn cloud_token(value: Vec<u8>) -> Result<Option<String>, Status> {
-    let value = Zeroizing::new(value);
-    if value.is_empty() {
-        return Ok(None);
-    }
-    String::from_utf8(value.to_vec())
-        .map(Some)
-        .map_err(|_| Status::invalid_argument("cloud bearer token is not valid UTF-8"))
-}
-
-fn check_storage_request<T>(
-    state: &DaemonState,
-    request: &Request<T>,
-    context: Option<&RequestContext>,
-) -> Result<(), Status> {
-    check_request(state, request, "")?;
-    check_context(context)?;
-    if state.draining.load(Ordering::Acquire) {
-        return Err(Status::unavailable("vaulticdb is draining"));
-    }
-    Ok(())
-}
-
-fn check_context(context: Option<&RequestContext>) -> Result<(), Status> {
-    let context = context.ok_or_else(|| Status::invalid_argument("request context is required"))?;
-    if context.request_id.is_empty() {
-        return Err(Status::invalid_argument("request ID is required"));
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| Status::internal("system time is before Unix epoch"))?
-        .as_millis() as i64;
-    if context.deadline_unix_ms > 0 && context.deadline_unix_ms <= now {
-        return Err(Status::deadline_exceeded("request deadline has expired"));
-    }
-    Ok(())
-}
-
-pub fn validate_write_batch(request: &WriteBatchRequest) -> Result<(), Status> {
-    let item_count = request
-        .puts
-        .len()
-        .checked_add(request.deletes.len())
-        .ok_or_else(|| Status::resource_exhausted("batch item count overflow"))?;
-    if item_count > MAX_BATCH_ITEMS as usize {
-        return Err(Status::resource_exhausted("batch item limit exceeded"));
-    }
-    if request.encoded_len() > MAX_MESSAGE_BYTES as usize {
-        return Err(Status::resource_exhausted("batch byte limit exceeded"));
-    }
-    Ok(())
-}
-
-pub fn validate_scan(request: &ScanRequest) -> Result<(), Status> {
-    if request.page_size == 0 || request.page_size > MAX_PAGE_ITEMS {
-        return Err(Status::invalid_argument(
-            "scan page size is outside the supported range",
-        ));
-    }
-    Ok(())
-}
-
-fn check_repository(state: &DaemonState, requested: &str) -> Result<(), Status> {
-    if requested.is_empty() || requested == state.repository_id.as_ref() {
-        return Ok(());
-    }
-    Err(Status::failed_precondition("repository identity mismatch"))
-}
-
-fn check_request<T>(
-    state: &DaemonState,
-    request: &Request<T>,
-    repository_id: &str,
-) -> Result<(), Status> {
-    if let Some(token) = &state.auth_token {
-        let expected = format!("Bearer {}", token.as_str());
-        if request
-            .metadata()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            != Some(expected.as_str())
-        {
-            return Err(Status::unauthenticated("invalid vaulticdb authorization"));
-        }
-    }
-    check_repository(state, repository_id)
 }

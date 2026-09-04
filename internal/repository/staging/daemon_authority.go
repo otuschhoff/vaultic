@@ -91,5 +91,8 @@ func (authority *DaemonAuthority) PublishSnapshot(ctx context.Context, commit Co
 	if err != nil {
 		return err
 	}
-	return authority.Store.PublishSnapshotScope(ctx, daemon.SnapshotScope{SnapshotID: snapshotID, RootKey: authority.plan.RootKey, OriginalJSON: authority.plan.SnapshotJSON})
+	return authority.Store.PublishSnapshotScope(
+		ctx,
+		daemon.SnapshotScope{SnapshotID: snapshotID, RootKey: authority.plan.RootKey, OriginalJSON: authority.plan.SnapshotJSON},
+	)
 }

@@ -24,7 +24,8 @@ type RewriteOpts struct {
 	// return nil to remove the node
 	RewriteNode        NodeRewriteFunc
 	KeepEmptyDirectory NodeKeepEmptyDirectoryFunc
-	// decide what to do with a tree that could not be loaded. Return nil to remove the node. By default the load error is returned which causes the operation to fail.
+	// decide what to do with a tree that could not be loaded. Return nil to remove the node. By default the load error
+	// is returned which causes the operation to fail.
 	RewriteFailedTree FailedTreeRewriteFunc
 
 	AllowUnstableSerialization bool
@@ -66,7 +67,10 @@ func NewTreeRewriter(opts RewriteOpts) *TreeRewriter {
 	return rw
 }
 
-func NewSnapshotSizeRewriter(rewriteNode NodeRewriteFunc, keepEmptyDirectoryFilter NodeKeepEmptyDirectoryFunc) (*TreeRewriter, QueryRewrittenSizeFunc) {
+func NewSnapshotSizeRewriter(
+	rewriteNode NodeRewriteFunc,
+	keepEmptyDirectoryFilter NodeKeepEmptyDirectoryFunc,
+) (*TreeRewriter, QueryRewrittenSizeFunc) {
 	var count uint
 	var size uint64
 
@@ -90,7 +94,13 @@ func NewSnapshotSizeRewriter(rewriteNode NodeRewriteFunc, keepEmptyDirectoryFilt
 	return t, ss
 }
 
-func (t *TreeRewriter) RewriteTree(ctx context.Context, loader vaultic.BlobLoader, saver vaultic.BlobSaver, nodepath string, nodeID vaultic.ID) (newNodeID vaultic.ID, err error) {
+func (t *TreeRewriter) RewriteTree(
+	ctx context.Context,
+	loader vaultic.BlobLoader,
+	saver vaultic.BlobSaver,
+	nodepath string,
+	nodeID vaultic.ID,
+) (newNodeID vaultic.ID, err error) {
 	// check if tree was already changed
 	newID, ok := t.replaces[nodeID]
 	if ok {
@@ -114,24 +124,9 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader vaultic.BlobLoade
 		return vaultic.ID{}, nil
 	}
 
-	if !t.opts.AllowUnstableSerialization {
-		// check that we can properly encode this tree without losing information
-		// The alternative of using json/Decoder.DisallowUnknownFields() doesn't work as we use
-		// a custom UnmarshalJSON to decode trees, see also https://github.com/golang/go/issues/41144
-		testID, err := data.SaveTree(ctx, saver, curTree)
-		if err != nil {
-			return vaultic.ID{}, err
-		}
-		if nodeID != testID {
-			return vaultic.ID{}, fmt.Errorf("cannot encode tree at %q without losing information", nodepath)
-		}
-
-		// reload the tree to get a new iterator
-		curTree, err = data.LoadTree(ctx, loader, nodeID)
-		if err != nil {
-			// shouldn't fail as the first load was successful
-			return vaultic.ID{}, fmt.Errorf("failed to reload tree %v: %w", nodeID, err)
-		}
+	curTree, err = t.verifyTreeSerialization(ctx, loader, saver, nodepath, nodeID, curTree)
+	if err != nil {
+		return vaultic.ID{}, err
 	}
 
 	debug.Log("filterTree: %s, nodeId: %s\n", nodepath, nodeID.Str())
@@ -144,35 +139,14 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader vaultic.BlobLoade
 		if item.Error != nil {
 			return vaultic.ID{}, item.Error
 		}
-		node := item.Node
-
-		path := path.Join(nodepath, node.Name)
-		node = t.opts.RewriteNode(node, path)
+		node, err := t.rewriteTreeNode(ctx, loader, saver, nodepath, item.Node)
+		if err != nil {
+			return vaultic.ID{}, err
+		}
 		if node == nil {
 			continue
 		}
-
-		if node.Type != data.NodeTypeDir {
-			err = tb.AddNode(node)
-			if err != nil {
-				return vaultic.ID{}, err
-			}
-			continue
-		}
-		// treat nil as null id
-		var subtree vaultic.ID
-		if node.Subtree != nil {
-			subtree = *node.Subtree
-		}
-		newID, err := t.RewriteTree(ctx, loader, saver, path, subtree)
-		if err != nil {
-			return vaultic.ID{}, err
-		} else if err == nil && newID.IsNull() {
-			continue
-		}
-		node.Subtree = &newID
-		err = tb.AddNode(node)
-		if err != nil {
+		if err := tb.AddNode(node); err != nil {
 			return vaultic.ID{}, err
 		}
 	}
@@ -192,4 +166,53 @@ func (t *TreeRewriter) RewriteTree(ctx context.Context, loader vaultic.BlobLoade
 		debug.Log("filterTree: save new tree for %s as %v\n", nodepath, newTreeID)
 	}
 	return newTreeID, err
+}
+
+func (t *TreeRewriter) verifyTreeSerialization(
+	ctx context.Context,
+	loader vaultic.BlobLoader,
+	saver vaultic.BlobSaver,
+	nodepath string,
+	nodeID vaultic.ID,
+	tree data.TreeNodeIterator,
+) (data.TreeNodeIterator, error) {
+	if t.opts.AllowUnstableSerialization {
+		return tree, nil
+	}
+	testID, err := data.SaveTree(ctx, saver, tree)
+	if err != nil {
+		return nil, err
+	}
+	if nodeID != testID {
+		return nil, fmt.Errorf("cannot encode tree at %q without losing information", nodepath)
+	}
+	tree, err = data.LoadTree(ctx, loader, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reload tree %v: %w", nodeID, err)
+	}
+	return tree, nil
+}
+
+func (t *TreeRewriter) rewriteTreeNode(
+	ctx context.Context,
+	loader vaultic.BlobLoader,
+	saver vaultic.BlobSaver,
+	nodepath string,
+	node *data.Node,
+) (*data.Node, error) {
+	childPath := path.Join(nodepath, node.Name)
+	node = t.opts.RewriteNode(node, childPath)
+	if node == nil || node.Type != data.NodeTypeDir {
+		return node, nil
+	}
+	var subtree vaultic.ID
+	if node.Subtree != nil {
+		subtree = *node.Subtree
+	}
+	newID, err := t.RewriteTree(ctx, loader, saver, childPath, subtree)
+	if err != nil || newID.IsNull() {
+		return nil, err
+	}
+	node.Subtree = &newID
+	return node, nil
 }

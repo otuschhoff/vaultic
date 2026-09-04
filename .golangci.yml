@@ -119,8 +119,6 @@ linters:
         linters: [forbidigo]
       - path: ^(internal/archiver/archiver_(error|tree)_test|internal/global/bootstrap|internal/index/analytics/(analytics_views_test|engine_(delta|rebuild|views))|internal/index/daemon/(client_(lifecycle|transaction)_test|schema_store_(gdpr|generation|import|publish|reconcile))|internal/index/schema/(keys_parse|records_(inode|snapshot)))\.go$
         linters: [gocognit]
-      - path: ^(cmd/vaultic/cmd_index_keys_files|internal/archiver/archiver_(error|integration)_test|internal/global/(backend|bootstrap|open|options)|internal/index/analytics/(analytics_views_test|engine_(delta|rebuild|views))|internal/index/daemon/(client_(generation|lifecycle|transaction)_test|client_rpc|schema_store_(gdpr|generation|import|publish|reconcile))|internal/index/schema/(keys_parse|records_(inode|snapshot))|internal/repository/repository_(blobs|engine|packs))\.go$
-        linters: [lll]
       - path: ^(cmd/vaultic/cmd_index_keys_files|internal/archiver/archiver_tree_test|internal/index/analytics/engine_(delta|views)|internal/index/daemon/schema_store_(generation|import|publish|reconcile)|internal/index/schema/records_inode|internal/repository/repository_blobs)\.go$
         linters: [nestif]
       - path: ^(internal/global/bootstrap|internal/repository/repository_blobs)\.go$

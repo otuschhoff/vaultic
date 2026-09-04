@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    env,
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
     sync::{
@@ -40,7 +39,6 @@ use vaulticdb::encryption::{
 
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
-const DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
 const MASTER_KEY_RECORD: &[u8] = b"meta:master-key";
 const CAPSULE_MIGRATION_RECORD: &[u8] = b"meta:capsule-migration";
 const CAPSULE_MIGRATION_FINALIZED_RECORD: &[u8] = b"meta:capsule-migration-finalized";
@@ -110,6 +108,23 @@ pub struct Storage {
     writer_epoch: AtomicU64,
 }
 
+#[derive(Debug)]
+pub(crate) struct BrokerLeaseConfig {
+    pub(crate) socket: PathBuf,
+    pub(crate) release_manifest: PathBuf,
+    pub(crate) lease_duration: std::time::Duration,
+}
+
+#[derive(Debug)]
+pub(crate) struct StorageConfig {
+    pub(crate) object_store: ObjectStoreConfig,
+    pub(crate) fencing_replica: Option<String>,
+    pub(crate) metadata_rebuild_initialize: bool,
+    pub(crate) broker: Option<BrokerLeaseConfig>,
+    pub(crate) encryption: envelope::EncryptionConfig,
+    pub(crate) transaction_idle_timeout_ms: u64,
+}
+
 enum Database {
     Writer(Db),
     Reader(DbReader),
@@ -126,39 +141,27 @@ impl Database {
 }
 
 impl Storage {
-    pub async fn open(repository_id: &str) -> Result<Self> {
-        let (path, object_store) = object_store(repository_id)?;
-        let coordination_store =
-            if env::var("VAULTICDB_OBJECT_STORE").as_deref() == Ok("replicated") {
-                let replica = env::var("VAULTICDB_FENCING_REPLICA")
-                    .context("replicated metadata requires VAULTICDB_FENCING_REPLICA")?;
-                replicated_replica_store(&replica, &crate::repository_key(repository_id))?
-            } else {
-                object_store.clone()
-            };
-        let recovery_initialize =
-            env::var("VAULTICDB_METADATA_REBUILD_INITIALIZE").as_deref() == Ok("true");
-        if recovery_initialize && env::var_os("VAULTICDB_BROKER_SOCKET").is_none() {
-            bail!("metadata rebuild initialization requires a broker metadata-DEK lease");
-        }
+    pub async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
+        let (path, object_store) = object_store(repository_id, &config.object_store)?;
+        let coordination_store = match &config.fencing_replica {
+            Some(replica) => replicated_replica_store(
+                &config.object_store,
+                replica,
+                &crate::repository_key(repository_id),
+            )?,
+            None => object_store.clone(),
+        };
+        let recovery_initialize = config.metadata_rebuild_initialize;
         if recovery_initialize && metadata_store_has_database_objects(object_store.as_ref()).await?
         {
             bail!("metadata rebuild initialization requires an empty candidate metadata store");
         }
         let mut broker_lease = None;
-        let (object_store, encryption, key_manager) = if let Ok(socket) =
-            env::var("VAULTICDB_BROKER_SOCKET")
-        {
-            let manifest = env::var("VAULTICDB_RELEASE_MANIFEST")
-                .context("VAULTICDB_RELEASE_MANIFEST is required with VAULTICDB_BROKER_SOCKET")?;
-            let ttl = env::var("VAULTICDB_BROKER_LEASE_SECONDS")
-                .unwrap_or_else(|_| "3600".to_owned())
-                .parse::<u64>()
-                .context("invalid VAULTICDB_BROKER_LEASE_SECONDS")?;
+        let (object_store, encryption, key_manager) = if let Some(broker) = &config.broker {
             let (lease, dek) = acquire_metadata_lease(
-                &socket,
-                std::path::Path::new(&manifest),
-                std::time::Duration::from_secs(ttl),
+                broker.socket.to_string_lossy().as_ref(),
+                &broker.release_manifest,
+                broker.lease_duration,
             )
             .await?;
             let configured = envelope::configure_brokered(
@@ -172,7 +175,7 @@ impl Storage {
             broker_lease = Some(lease);
             configured
         } else {
-            envelope::configure(repository_id, object_store).await?
+            envelope::configure(repository_id, object_store, &config.encryption).await?
         };
         let (database, writer_epoch) =
             match claim_writer_epoch(coordination_store.as_ref(), None).await? {
@@ -215,7 +218,7 @@ impl Storage {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
-            transaction_idle_timeout_ms: transaction_idle_timeout_ms()?,
+            transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
             broker_lease,
             writer_epoch: AtomicU64::new(writer_epoch),
         };

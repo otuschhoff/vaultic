@@ -34,7 +34,13 @@ var _ backend.Backend = &Local{}
 var errTooShort = fmt.Errorf("file is too short")
 
 func NewFactory() location.Factory {
-	return location.NewLimitedBackendFactory("local", ParseConfig, location.NoPassword, limiter.WrapBackendConstructor(Create), limiter.WrapBackendConstructor(Open))
+	return location.NewLimitedBackendFactory(
+		"local",
+		ParseConfig,
+		location.NoPassword,
+		limiter.WrapBackendConstructor(Create),
+		limiter.WrapBackendConstructor(Open),
+	)
 }
 
 func open(cfg Config) (*Local, error) {

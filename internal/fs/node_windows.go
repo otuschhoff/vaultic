@@ -218,7 +218,9 @@ func nodeRestoreGenericAttributes(node *data.Node, path string, warn func(msg st
 }
 
 // genericAttributesToWindowsAttrs converts the generic attributes map to a WindowsAttributes and also returns a string of unknown attributes that it could not convert.
-func genericAttributesToWindowsAttrs(attrs map[data.GenericAttributeType]json.RawMessage) (windowsAttributes data.WindowsAttributes, unknownAttribs []data.GenericAttributeType, err error) {
+func genericAttributesToWindowsAttrs(attrs map[data.GenericAttributeType]json.RawMessage) (windowsAttributes data.WindowsAttributes,
+	unknownAttribs []data.GenericAttributeType,
+	err error) {
 	waValue := reflect.ValueOf(&windowsAttributes).Elem()
 	unknownAttribs, err = data.GenericAttributesToOSAttrs(attrs, reflect.TypeOf(windowsAttributes), &waValue, "windows")
 	return windowsAttributes, unknownAttribs, err
@@ -427,7 +429,8 @@ func checkAndStoreEASupport(path string) (isEASupportedVolume bool, err error) {
 			// We just gracefully disallow extended attributes for cases.
 			return false, nil
 		} else {
-			debug.Log("Checking extended attributes. Prepared volume name: %s, actual volume name: %s, isEASupportedVolume: %v, err: %v", volumeName, volumeNameActual, isEASupportedVolume, err)
+			debug.Log(("Checking extended attributes. Prepared volume name: %s, actual volume name: " +
+				"%s, isEASupportedVolume: %v, err: %v"), volumeName, volumeNameActual, isEASupportedVolume, err)
 		}
 	}
 	if volumeNameActual != "" {

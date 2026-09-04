@@ -17,9 +17,9 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func saveSlateDBFile(t *testing.T, be backend.Backend, name string, payload []byte) {
+func saveSlateDBFile(ctx context.Context, t *testing.T, be backend.Backend, name string, payload []byte) {
 	t.Helper()
-	err := be.Save(context.Background(), backend.Handle{Type: backend.SlateDBFile, Name: name, IsMetadata: true}, backend.NewByteReader(payload, be.Hasher()))
+	err := be.Save(ctx, backend.Handle{Type: backend.SlateDBFile, Name: name, IsMetadata: true}, backend.NewByteReader(payload, be.Hasher()))
 	if err != nil {
 		t.Fatalf("save slatedb file %q: %v", name, err)
 	}
@@ -77,7 +77,7 @@ func TestResolveBackendManifestStates(t *testing.T) {
 
 	t.Run("partial namespace", func(t *testing.T) {
 		be := mem.New()
-		saveSlateDBFile(t, be, "lock", []byte("partial"))
+		saveSlateDBFile(ctx, t, be, "lock", []byte("partial"))
 		resolution, err := Resolve(ctx, be, "repo")
 		if err == nil || resolution.State != ManifestCorrupt {
 			t.Fatalf("Resolve = %#v, %v", resolution, err)
@@ -86,7 +86,7 @@ func TestResolveBackendManifestStates(t *testing.T) {
 
 	t.Run("malformed", func(t *testing.T) {
 		be := mem.New()
-		saveSlateDBFile(t, be, ManifestName, []byte("{"))
+		saveSlateDBFile(ctx, t, be, ManifestName, []byte("{"))
 		resolution, err := Resolve(ctx, be, "repo")
 		if err == nil || resolution.State != ManifestCorrupt {
 			t.Fatalf("Resolve = %#v, %v", resolution, err)
@@ -109,7 +109,13 @@ func TestResolveBackendManifestStates(t *testing.T) {
 
 	t.Run("unsupported", func(t *testing.T) {
 		be := mem.New()
-		saveSlateDBFile(t, be, ManifestName, manifestPayload(t, Manifest{FormatVersion: 2, SchemaVersion: ManifestSchemaVersion, RepositoryID: "repo", Authoritative: true}))
+		saveSlateDBFile(
+			ctx,
+			t,
+			be,
+			ManifestName,
+			manifestPayload(t, Manifest{FormatVersion: 2, SchemaVersion: ManifestSchemaVersion, RepositoryID: "repo", Authoritative: true}),
+		)
 		resolution, err := Resolve(ctx, be, "repo")
 		if err == nil || resolution.State != ManifestUnsupported {
 			t.Fatalf("Resolve = %#v, %v", resolution, err)
@@ -118,7 +124,16 @@ func TestResolveBackendManifestStates(t *testing.T) {
 
 	t.Run("wrong repository", func(t *testing.T) {
 		be := mem.New()
-		saveSlateDBFile(t, be, ManifestName, manifestPayload(t, Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: "other", Authoritative: true}))
+		saveSlateDBFile(
+			ctx,
+			t,
+			be,
+			ManifestName,
+			manifestPayload(
+				t,
+				Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: "other", Authoritative: true},
+			),
+		)
 		resolution, err := Resolve(ctx, be, "repo")
 		if err == nil || resolution.State != ManifestCorrupt {
 			t.Fatalf("Resolve = %#v, %v", resolution, err)
@@ -127,7 +142,13 @@ func TestResolveBackendManifestStates(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		be := mem.New()
-		saveSlateDBFile(t, be, ManifestName, manifestPayload(t, Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: "repo", Authoritative: true}))
+		saveSlateDBFile(
+			ctx,
+			t,
+			be,
+			ManifestName,
+			manifestPayload(t, Manifest{FormatVersion: ManifestFormatVersion, SchemaVersion: ManifestSchemaVersion, RepositoryID: "repo", Authoritative: true}),
+		)
 		resolution, err := Resolve(ctx, be, "repo")
 		if err != nil || resolution.Mode != ModeSlateDB || resolution.State != ManifestValid {
 			t.Fatalf("Resolve = %#v, %v", resolution, err)

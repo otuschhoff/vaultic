@@ -222,7 +222,13 @@ type TestWritableTreeMap struct {
 	TestTreeMap
 }
 
-func (t TestWritableTreeMap) SaveBlob(_ context.Context, tpe vaultic.BlobType, buf []byte, id vaultic.ID, _ bool) (newID vaultic.ID, known bool, size int, err error) {
+func (t TestWritableTreeMap) SaveBlob(
+	_ context.Context,
+	tpe vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	_ bool,
+) (newID vaultic.ID, known bool, size int, err error) {
 	if tpe != vaultic.TreeBlob {
 		return vaultic.ID{}, false, 0, fmt.Errorf("can only save trees")
 	}

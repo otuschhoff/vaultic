@@ -83,7 +83,8 @@ func (manifest Manifest) Validate() error {
 		manifestPolicy, _ := json.Marshal(manifest.Policy)
 		configuredStaging, _ := json.Marshal(cfg.StagingBackends)
 		manifestStaging, _ := json.Marshal(manifest.StagingBackends)
-		if !bytes.Equal(configuredBackends, manifestBackends) || !bytes.Equal(configuredPolicy, manifestPolicy) || !bytes.Equal(configuredStaging, manifestStaging) {
+		if !bytes.Equal(configuredBackends, manifestBackends) || !bytes.Equal(configuredPolicy, manifestPolicy) ||
+			!bytes.Equal(configuredStaging, manifestStaging) {
 			return fmt.Errorf("bootstrap repository config projection disagrees with topology")
 		}
 	}
@@ -158,7 +159,12 @@ func EvaluatePolicy(backends []vaultic.PlacementBackend, policy vaultic.Placemen
 		}
 	}
 	if uint(len(eligible)) < policy.MinCopies || uint(len(domains)) < policy.MinDomains || offsite < policy.MinOffsite {
-		return nil, fmt.Errorf("reachable backends cannot satisfy placement policy copies=%d domains=%d offsite=%d", policy.MinCopies, policy.MinDomains, policy.MinOffsite)
+		return nil, fmt.Errorf(
+			"reachable backends cannot satisfy placement policy copies=%d domains=%d offsite=%d",
+			policy.MinCopies,
+			policy.MinDomains,
+			policy.MinOffsite,
+		)
 	}
 	sort.Strings(eligible)
 	return eligible, nil
@@ -190,7 +196,13 @@ func Seal(manifest Manifest, rootKey []byte) ([]byte, string, error) {
 		return nil, "", err
 	}
 	aad := associatedData(manifest.RepositoryID, manifest.Generation)
-	sealed := sealedManifest{Format: Format, RepositoryID: manifest.RepositoryID, Generation: manifest.Generation, Nonce: nonce, Ciphertext: aead.Seal(nil, nonce, plaintext, aad)}
+	sealed := sealedManifest{
+		Format:       Format,
+		RepositoryID: manifest.RepositoryID,
+		Generation:   manifest.Generation,
+		Nonce:        nonce,
+		Ciphertext:   aead.Seal(nil, nonce, plaintext, aad),
+	}
 	encoded, err := json.Marshal(sealed)
 	return encoded, hex.EncodeToString(digest[:]), err
 }
@@ -276,7 +288,8 @@ func Resolve(copies []Copy, trusted ...Anchor) (Copy, error) {
 		}
 	}
 	for _, anchor := range trusted {
-		if anchor.RepositoryID != winner.Manifest.RepositoryID || winner.Manifest.Generation < anchor.Generation || winner.Manifest.Generation == anchor.Generation && winner.SHA256 != anchor.SHA256 {
+		if anchor.RepositoryID != winner.Manifest.RepositoryID || winner.Manifest.Generation < anchor.Generation ||
+			winner.Manifest.Generation == anchor.Generation && winner.SHA256 != anchor.SHA256 {
 			return Copy{}, fmt.Errorf("bootstrap topology violates trusted generation anchor")
 		}
 	}
@@ -316,18 +329,22 @@ func Publish(ctx context.Context, mirrors map[string]backend.Backend, generation
 }
 
 func Discover(ctx context.Context, seeds map[string]backend.Backend, rootKey []byte, repositoryID string) ([]Copy, map[string]error) {
-	return discover(ctx, seeds, repositoryID, func(encoded []byte) (Manifest, string, error) {
+	return discover(ctx, seeds, func(encoded []byte) (Manifest, string, error) {
 		return Open(encoded, rootKey, repositoryID)
 	})
 }
 
 func DiscoverWithTopologyKey(ctx context.Context, seeds map[string]backend.Backend, topologyKey []byte, repositoryID string) ([]Copy, map[string]error) {
-	return discover(ctx, seeds, repositoryID, func(encoded []byte) (Manifest, string, error) {
+	return discover(ctx, seeds, func(encoded []byte) (Manifest, string, error) {
 		return OpenWithTopologyKey(encoded, topologyKey, repositoryID)
 	})
 }
 
-func discover(ctx context.Context, seeds map[string]backend.Backend, repositoryID string, opener func([]byte) (Manifest, string, error)) ([]Copy, map[string]error) {
+func discover(
+	ctx context.Context,
+	seeds map[string]backend.Backend,
+	opener func([]byte) (Manifest, string, error),
+) ([]Copy, map[string]error) {
 	copies := make([]Copy, 0)
 	failures := make(map[string]error)
 	for seedID, seed := range seeds {
@@ -418,7 +435,9 @@ func containsCredential(location string) bool {
 	}
 	for key := range query {
 		key = strings.ToLower(key)
-		if strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "password") || strings.Contains(key, "access_key") || strings.Contains(key, "credential") || strings.Contains(key, "signature") {
+		if strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "password") || strings.Contains(key, "access_key") ||
+			strings.Contains(key, "credential") ||
+			strings.Contains(key, "signature") {
 			return true
 		}
 	}

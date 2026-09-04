@@ -61,7 +61,8 @@ func (unwrapper *AWSKMSUnwrapper) UnwrapMember(ctx context.Context, member Exter
 		if describeErr != nil {
 			return nil, VerifiedPrincipal{}, fmt.Errorf("AWS KMS DescribeKey: %w", describeErr)
 		}
-		if description.KeyMetadata == nil || description.KeyMetadata.Origin != types.OriginTypeAwsCloudhsm || aws.ToString(description.KeyMetadata.CustomKeyStoreId) == "" {
+		if description.KeyMetadata == nil || description.KeyMetadata.Origin != types.OriginTypeAwsCloudhsm ||
+			aws.ToString(description.KeyMetadata.CustomKeyStoreId) == "" {
 			return nil, VerifiedPrincipal{}, errors.New("AWS CloudHSM member key is not backed by a CloudHSM custom key store")
 		}
 	}
@@ -105,7 +106,9 @@ func stableAWSPrincipalARN(value, account string) (string, error) {
 
 func validateAWSKMSKeyReference(reference string) (string, error) {
 	parts := strings.Split(reference, ":")
-	if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != "kms" || parts[3] == "" || len(parts[4]) != 12 || !strings.HasPrefix(parts[5], "key/") || len(parts[5]) <= len("key/") {
+	if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != "kms" || parts[3] == "" || len(parts[4]) != 12 ||
+		!strings.HasPrefix(parts[5], "key/") ||
+		len(parts[5]) <= len("key/") {
 		return "", errors.New("AWS KMS key reference must be a full key ARN")
 	}
 	for _, character := range parts[4] {

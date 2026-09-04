@@ -140,7 +140,15 @@ func fsetEA(handle windows.Handle, attrs []extendedAttribute) error {
 // The code below was adapted from https://github.com/ambarve/go-winio/blob/a7564fd482feb903f9562a135f1317fd3b480739/zsyscall_windows.go
 // under MIT license.
 
-func getFileEA(handle windows.Handle, iosb *ioStatusBlock, buf *uint8, bufLen uint32, returnSingleEntry bool, eaList uintptr, eaListLen uint32, eaIndex *uint32, restartScan bool) (status ntStatus) {
+func getFileEA(handle windows.Handle,
+	iosb *ioStatusBlock,
+	buf *uint8,
+	bufLen uint32,
+	returnSingleEntry bool,
+	eaList uintptr,
+	eaListLen uint32,
+	eaIndex *uint32,
+	restartScan bool) (status ntStatus) {
 	var _p0 uint32
 	if returnSingleEntry {
 		_p0 = 1
@@ -149,7 +157,18 @@ func getFileEA(handle windows.Handle, iosb *ioStatusBlock, buf *uint8, bufLen ui
 	if restartScan {
 		_p1 = 1
 	}
-	r0, _, _ := syscall.SyscallN(procNtQueryEaFile.Addr(), uintptr(handle), uintptr(unsafe.Pointer(iosb)), uintptr(unsafe.Pointer(buf)), uintptr(bufLen), uintptr(_p0), eaList, uintptr(eaListLen), uintptr(unsafe.Pointer(eaIndex)), uintptr(_p1))
+	r0,
+		_,
+		_ := syscall.SyscallN(procNtQueryEaFile.Addr(),
+		uintptr(handle),
+		uintptr(unsafe.Pointer(iosb)),
+		uintptr(unsafe.Pointer(buf)),
+		uintptr(bufLen),
+		uintptr(_p0),
+		eaList,
+		uintptr(eaListLen),
+		uintptr(unsafe.Pointer(eaIndex)),
+		uintptr(_p1))
 	status = ntStatus(r0)
 	return
 }

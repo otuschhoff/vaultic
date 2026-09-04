@@ -180,7 +180,9 @@ func (c Config) ValidateExtensions() error {
 	if c.MaxPacksizeToleratePercent != nil && *c.MaxPacksizeToleratePercent > 100 {
 		return errors.Errorf("max_packsize_tolerate_percent must be <= 100, got %d", *c.MaxPacksizeToleratePercent)
 	}
-	for name, depth := range map[string]int{"svm_depth": c.AnalyticsSVMDepth, "volume_depth": c.AnalyticsVolumeDepth, "path_group_depth": c.AnalyticsPathGroupDepth} {
+	for name, depth := range map[string]int{"svm_depth": c.AnalyticsSVMDepth,
+		"volume_depth":     c.AnalyticsVolumeDepth,
+		"path_group_depth": c.AnalyticsPathGroupDepth} {
 		if depth < 0 {
 			return errors.Errorf("analytics %s must not be negative", name)
 		}

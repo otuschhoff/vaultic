@@ -153,7 +153,12 @@ func (res *Restorer) traverseTree(ctx context.Context, target string, treeID vau
 	return err
 }
 
-func (res *Restorer) traverseTreeInner(ctx context.Context, target, location string, treeID vaultic.ID, visitor treeVisitor) (filenames []string, hasRestored bool, err error) {
+func (res *Restorer) traverseTreeInner(
+	ctx context.Context,
+	target, location string,
+	treeID vaultic.ID,
+	visitor treeVisitor,
+) (filenames []string, hasRestored bool, err error) {
 	debug.Log("%v %v %v", target, location, treeID)
 	tree, err := data.LoadTree(ctx, res.repo, treeID)
 	if err != nil {
@@ -179,98 +184,78 @@ func (res *Restorer) traverseTreeInner(ctx context.Context, target, location str
 			// tracking too many files does not matter except for a slightly elevated memory usage
 			filenames = append(filenames, node.Name)
 		}
-
-		// ensure that the node name does not contain anything that refers to a
-		// top-level directory.
-		nodeName := filepath.Base(filepath.Join(string(filepath.Separator), node.Name))
-		if nodeName != node.Name {
-			debug.Log("node %q has invalid name %q", node.Name, nodeName)
-			err := res.sanitizeError(location, errors.Errorf("invalid child node name %s", node.Name))
-			if err != nil {
-				return nil, hasRestored, err
-			}
-			// force disable deletion to prevent unexpected behavior
-			res.opts.Delete = false
-			continue
-		}
-
-		nodeTarget := filepath.Join(target, nodeName)
-		nodeLocation := filepath.Join(location, nodeName)
-
-		if target == nodeTarget || !fs.HasPathPrefix(target, nodeTarget) {
-			debug.Log("target: %v %v", target, nodeTarget)
-			debug.Log("node %q has invalid target path %q", node.Name, nodeTarget)
-			err := res.sanitizeError(nodeLocation, errors.New("node has invalid path"))
-			if err != nil {
-				return nil, hasRestored, err
-			}
-			// force disable deletion to prevent unexpected behavior
-			res.opts.Delete = false
-			continue
-		}
-
-		// sockets cannot be restored
-		if node.Type == data.NodeTypeSocket {
-			continue
-		}
-
-		selectedForRestore, childMayBeSelected := res.SelectFilter(nodeLocation, node.Type == data.NodeTypeDir)
-		debug.Log("SelectFilter returned %v %v for %q", selectedForRestore, childMayBeSelected, nodeLocation)
-
-		if selectedForRestore {
-			hasRestored = true
-		}
-
-		if node.Type == data.NodeTypeDir {
-			if node.Subtree == nil {
-				return nil, hasRestored, errors.Errorf("Dir without subtree in tree %v", treeID.Str())
-			}
-
-			if selectedForRestore && visitor.enterDir != nil {
-				err = res.sanitizeError(nodeLocation, visitor.enterDir(node, nodeTarget, nodeLocation))
-				if err != nil {
-					return nil, hasRestored, err
-				}
-			}
-
-			// keep track of restored child status
-			// so metadata of the current directory are restored on leaveDir
-			childHasRestored := false
-			var childFilenames []string
-
-			if childMayBeSelected {
-				childFilenames, childHasRestored, err = res.traverseTreeInner(ctx, nodeTarget, nodeLocation, *node.Subtree, visitor)
-				err = res.sanitizeError(nodeLocation, err)
-				if err != nil {
-					return nil, hasRestored, err
-				}
-				// inform the parent directory to restore parent metadata on leaveDir if needed
-				if childHasRestored {
-					hasRestored = true
-				}
-			}
-
-			// metadata need to be restore when leaving the directory in both cases
-			// selected for restore or any child of any subtree have been restored
-			if (selectedForRestore || childHasRestored) && visitor.leaveDir != nil {
-				err = res.sanitizeError(nodeLocation, visitor.leaveDir(node, nodeTarget, nodeLocation, childFilenames))
-				if err != nil {
-					return nil, hasRestored, err
-				}
-			}
-
-			continue
-		}
-
-		if selectedForRestore {
-			err = res.sanitizeError(nodeLocation, visitor.visitNode(node, nodeTarget, nodeLocation))
-			if err != nil {
-				return nil, hasRestored, err
-			}
+		restored, err := res.traverseTreeNode(ctx, target, location, treeID, node, visitor)
+		hasRestored = hasRestored || restored
+		if err != nil {
+			return nil, hasRestored, err
 		}
 	}
 
 	return filenames, hasRestored, nil
+}
+
+func (res *Restorer) traverseTreeNode(
+	ctx context.Context,
+	target, location string,
+	treeID vaultic.ID,
+	node *data.Node,
+	visitor treeVisitor,
+) (bool, error) {
+	nodeName := filepath.Base(filepath.Join(string(filepath.Separator), node.Name))
+	if nodeName != node.Name {
+		debug.Log("node %q has invalid name %q", node.Name, nodeName)
+		if err := res.sanitizeError(location, errors.Errorf("invalid child node name %s", node.Name)); err != nil {
+			return false, err
+		}
+		res.opts.Delete = false
+		return false, nil
+	}
+	nodeTarget := filepath.Join(target, nodeName)
+	nodeLocation := filepath.Join(location, nodeName)
+	if target == nodeTarget || !fs.HasPathPrefix(target, nodeTarget) {
+		debug.Log("target: %v %v", target, nodeTarget)
+		debug.Log("node %q has invalid target path %q", node.Name, nodeTarget)
+		if err := res.sanitizeError(nodeLocation, errors.New("node has invalid path")); err != nil {
+			return false, err
+		}
+		res.opts.Delete = false
+		return false, nil
+	}
+	if node.Type == data.NodeTypeSocket {
+		return false, nil
+	}
+	selected, childMayBeSelected := res.SelectFilter(nodeLocation, node.Type == data.NodeTypeDir)
+	debug.Log("SelectFilter returned %v %v for %q", selected, childMayBeSelected, nodeLocation)
+	if node.Type != data.NodeTypeDir {
+		if selected {
+			return true, res.sanitizeError(nodeLocation, visitor.visitNode(node, nodeTarget, nodeLocation))
+		}
+		return false, nil
+	}
+	if node.Subtree == nil {
+		return selected, errors.Errorf("Dir without subtree in tree %v", treeID.Str())
+	}
+	if selected && visitor.enterDir != nil {
+		if err := res.sanitizeError(nodeLocation, visitor.enterDir(node, nodeTarget, nodeLocation)); err != nil {
+			return true, err
+		}
+	}
+	var childFilenames []string
+	childRestored := false
+	if childMayBeSelected {
+		var err error
+		childFilenames, childRestored, err = res.traverseTreeInner(ctx, nodeTarget, nodeLocation, *node.Subtree, visitor)
+		if err = res.sanitizeError(nodeLocation, err); err != nil {
+			return selected || childRestored, err
+		}
+	}
+	restored := selected || childRestored
+	if restored && visitor.leaveDir != nil {
+		if err := res.sanitizeError(nodeLocation, visitor.leaveDir(node, nodeTarget, nodeLocation, childFilenames)); err != nil {
+			return restored, err
+		}
+	}
+	return restored, nil
 }
 
 func (res *Restorer) restoreNodeTo(node *data.Node, target, location string) error {
@@ -562,7 +547,14 @@ func (res *Restorer) hasRestoredFile(location string) (metadataOnly bool, ok boo
 	return metadataOnly, ok
 }
 
-func (res *Restorer) withOverwriteCheck(ctx context.Context, node *data.Node, target, location string, isHardlink bool, buf []byte, cb func(updateMetadataOnly bool, matches *fileState) error) ([]byte, error) {
+func (res *Restorer) withOverwriteCheck(
+	ctx context.Context,
+	node *data.Node,
+	target, location string,
+	isHardlink bool,
+	buf []byte,
+	cb func(updateMetadataOnly bool, matches *fileState) error,
+) ([]byte, error) {
 	overwrite, err := shouldOverwrite(res.opts.Overwrite, node, target)
 	if err != nil {
 		return buf, err

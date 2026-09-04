@@ -61,8 +61,11 @@ Exit status is 12 if the password is incorrect.
 `,
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRewrite(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
 		},
 	}
@@ -383,7 +386,10 @@ func runRewrite(ctx context.Context, opts RewriteOptions, gopts global.Options, 
 	return nil
 }
 
-func gatherIncludeFilters(includeByNameFuncs []filter.IncludeByNameFunc, printer vaultic.Printer) (rewriteNode walker.NodeRewriteFunc, keepEmptyDirectory walker.NodeKeepEmptyDirectoryFunc) {
+func gatherIncludeFilters(
+	includeByNameFuncs []filter.IncludeByNameFunc,
+	printer vaultic.Printer,
+) (rewriteNode walker.NodeRewriteFunc, keepEmptyDirectory walker.NodeKeepEmptyDirectoryFunc) {
 	inSelectByName := func(nodepath string, node *data.Node) bool {
 		for _, include := range includeByNameFuncs {
 			matched, childMayMatch := include(nodepath)

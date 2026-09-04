@@ -252,21 +252,20 @@ fn derive_kek(passphrase: &[u8], config: &Argon2Config) -> Result<[u8; DEK_BYTES
     Ok(key)
 }
 
-fn read_recovery_passphrase() -> Result<Option<Zeroizing<Vec<u8>>>> {
-    let Some(path) = env::var_os("VAULTICDB_ENCRYPTION_PASSPHRASE_FILE") else {
+fn read_recovery_passphrase(path: Option<&std::path::Path>) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    let Some(path) = path else {
         return Ok(None);
     };
-    let path = PathBuf::from(path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(&path)
+        let metadata = std::fs::metadata(path)
             .with_context(|| format!("inspect recovery passphrase file {}", path.display()))?;
         if metadata.permissions().mode() & 0o077 != 0 {
             bail!("recovery passphrase file must not be accessible by group or others");
         }
     }
-    let mut value = std::fs::read(&path)
+    let mut value = std::fs::read(path)
         .with_context(|| format!("read recovery passphrase file {}", path.display()))?;
     while value.last().is_some_and(u8::is_ascii_whitespace) {
         value.pop();
@@ -275,20 +274,6 @@ fn read_recovery_passphrase() -> Result<Option<Zeroizing<Vec<u8>>>> {
         bail!("recovery passphrase file is empty");
     }
     Ok(Some(Zeroizing::new(value)))
-}
-
-fn encryption_mode() -> Result<EncryptionMode> {
-    match env::var("VAULTICDB_ENCRYPTION")
-        .unwrap_or_else(|_| "off".to_owned())
-        .as_str()
-    {
-        "off" => Ok(EncryptionMode::Off),
-        "required" => Ok(EncryptionMode::Required),
-        "initialize" => Ok(EncryptionMode::Initialize),
-        value => bail!(
-            "unsupported VAULTICDB_ENCRYPTION {value:?}; expected off, required, or initialize"
-        ),
-    }
 }
 
 fn slot_aad(repository_id: &str, slot_id: &str, dek_version: u32) -> Vec<u8> {

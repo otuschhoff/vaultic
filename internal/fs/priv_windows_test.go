@@ -27,7 +27,14 @@ func TestRestorePrivilegeBypassACL(t *testing.T) {
 	// Writable OpenFile needs explicit FILE_FLAG_BACKUP_SEMANTICS.
 	// Go with issue #73676 merged would allow: os.OpenFile(testPath, os.O_WRONLY|windows.O_FILE_FLAG_BACKUP_SEMANTICS, 0)
 	utf16Path := windows.StringToUTF16Ptr(testPath)
-	handle, err := windows.CreateFile(utf16Path, windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	handle,
+		err := windows.CreateFile(utf16Path,
+		windows.GENERIC_WRITE,
+		0,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0)
 	test.OK(t, errors.Wrapf(err, "failed to open file for writing: %s", testPath))
 	test.OK(t, windows.Close(handle))
 }
@@ -54,7 +61,13 @@ func testGetRestrictedFilePath(t *testing.T) string {
 	test.OK(t, errors.Wrap(err, "failed to parse SDDL: %s"))
 	dacl, _, err := sd.DACL()
 	test.OK(t, errors.Wrap(err, "failed to extract SD DACL"))
-	err = windows.SetNamedSecurityInfo(testPath, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	err = windows.SetNamedSecurityInfo(testPath,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil)
 	test.OK(t, errors.Wrapf(err, "failed to set SD: %s", testPath))
 
 	return testPath

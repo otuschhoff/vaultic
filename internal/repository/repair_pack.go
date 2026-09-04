@@ -97,7 +97,14 @@ func resolveBlobsForPacks(ctx context.Context, repo *Repository, ids vaultic.IDS
 	return packToBlobs, nil
 }
 
-func reuploadBlobsFromPack(ctx context.Context, repo *Repository, packID vaultic.ID, blobs pack.Blobs, printer vaultic.Printer, uploader vaultic.BlobSaverWithAsync) error {
+func reuploadBlobsFromPack(
+	ctx context.Context,
+	repo *Repository,
+	packID vaultic.ID,
+	blobs pack.Blobs,
+	printer vaultic.Printer,
+	uploader vaultic.BlobSaverWithAsync,
+) error {
 	err := repo.loadBlobsFromPack(ctx, packID, blobs, func(blob vaultic.BlobHandle, buf []byte, err error) error {
 		if err != nil {
 			printer.E("failed to load blob %v: %v", blob.ID, err)

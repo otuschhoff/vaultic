@@ -40,7 +40,12 @@ type packInfo struct {
 	files map[*fileInfo]struct{} // set of files that use blobs from this pack
 }
 
-type blobsLoaderFn func(ctx context.Context, packID vaultic.ID, blobs []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error
+type blobsLoaderFn func(ctx context.Context,
+	packID vaultic.ID,
+	blobs []vaultic.BlobHandle,
+	handleBlobFn func(blob vaultic.BlobHandle,
+		buf []byte,
+		err error) error) error
 type startWarmupFn func(context.Context, vaultic.IDSet) (vaultic.WarmupJob, error)
 
 // fileRestorer restores set of files
@@ -105,7 +110,10 @@ func (r *fileRestorer) targetPath(location string) string {
 	return filepath.Join(r.dst, location)
 }
 
-func (r *fileRestorer) forEachBlob(blobIDs []vaultic.ID, fn func(blob vaultic.PackBlob, idx int, fileOffset int64)) error {
+func (r *fileRestorer) forEachBlob(
+	blobIDs []vaultic.ID,
+	fn func(blob vaultic.PackBlob, idx int, fileOffset int64),
+) error {
 	if len(blobIDs) == 0 {
 		return nil
 	}
@@ -211,7 +219,9 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 			return err
 		}
 		if warmupJob.HandleCount() != 0 {
-			r.Info(fmt.Sprintf("warming up %d packs from cold storage, this may take a while...", warmupJob.HandleCount()))
+			r.Info(
+				fmt.Sprintf("warming up %d packs from cold storage, this may take a while...", warmupJob.HandleCount()),
+			)
 			if err := warmupJob.Wait(ctx); err != nil {
 				return err
 			}
@@ -386,7 +396,13 @@ func (r *fileRestorer) downloadBlobs(ctx context.Context, packID vaultic.ID,
 							file.inProgress = true
 							createSize = file.size
 						}
-						writeErr := r.filesWriter.writeToFile(r.targetPath(file.location), blobData, offset, createSize, file.sparse)
+						writeErr := r.filesWriter.writeToFile(
+							r.targetPath(file.location),
+							blobData,
+							offset,
+							createSize,
+							file.sparse,
+						)
 						r.reportBlobProgress(file, uint64(len(blobData)))
 						return writeErr
 					}

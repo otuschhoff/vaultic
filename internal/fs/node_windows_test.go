@@ -35,7 +35,10 @@ func testRestoreSecurityDescriptor(t *testing.T, sd string, tempDir string, file
 	sdInputBytes, err := base64.StdEncoding.DecodeString(sd)
 	test.OK(t, errors.Wrapf(err, "Error decoding SD for: %s", fileName))
 	// Wrap the security descriptor bytes in windows attributes and convert to generic attributes.
-	genericAttributes, err := data.WindowsAttrsToGenericAttributes(data.WindowsAttributes{CreationTime: nil, FileAttributes: nil, SecurityDescriptor: &sdInputBytes})
+	genericAttributes,
+		err := data.WindowsAttrsToGenericAttributes(data.WindowsAttributes{CreationTime: nil,
+		FileAttributes:     nil,
+		SecurityDescriptor: &sdInputBytes})
 	test.OK(t, errors.Wrapf(err, "Error constructing windows attributes for: %s", fileName))
 	// Construct a Node with the generic attributes.
 	expectedNode := getNode(fileName, fileType, genericAttributes)
@@ -327,7 +330,11 @@ func TestRestoreFileAttributes(t *testing.T) {
 	}
 }
 
-func runGenericAttributesTest(t *testing.T, tempDir string, genericAttributeName data.GenericAttributeType, genericAttributeExpected data.WindowsAttributes, warningExpected bool) {
+func runGenericAttributesTest(t *testing.T,
+	tempDir string,
+	genericAttributeName data.GenericAttributeType,
+	genericAttributeExpected data.WindowsAttributes,
+	warningExpected bool) {
 	genericAttributes, err := data.WindowsAttrsToGenericAttributes(genericAttributeExpected)
 	test.OK(t, err)
 	expectedNodes := []data.Node{
@@ -352,7 +359,12 @@ func runGenericAttributesTest(t *testing.T, tempDir string, genericAttributeName
 	}
 	runGenericAttributesTestForNodes(t, expectedNodes, tempDir, genericAttributeName, genericAttributeExpected, warningExpected)
 }
-func runGenericAttributesTestForNodes(t *testing.T, expectedNodes []data.Node, tempDir string, genericAttr data.GenericAttributeType, genericAttributeExpected data.WindowsAttributes, warningExpected bool) {
+func runGenericAttributesTestForNodes(t *testing.T,
+	expectedNodes []data.Node,
+	tempDir string,
+	genericAttr data.GenericAttributeType,
+	genericAttributeExpected data.WindowsAttributes,
+	warningExpected bool) {
 
 	for _, testNode := range expectedNodes {
 		testPath, node := restoreAndGetNode(t, tempDir, &testNode, warningExpected)
@@ -472,7 +484,14 @@ func TestRestoreExtendedAttributes(t *testing.T) {
 		var err error
 		utf16Path := windows.StringToUTF16Ptr(testPath)
 		if node.Type == data.NodeTypeFile || node.Type == data.NodeTypeDir {
-			handle, err = windows.CreateFile(utf16Path, windows.FILE_READ_EA, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+			handle,
+				err = windows.CreateFile(utf16Path,
+				windows.FILE_READ_EA,
+				0,
+				nil,
+				windows.OPEN_EXISTING,
+				windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS,
+				0)
 		}
 		test.OK(t, errors.Wrapf(err, "Error opening file/directory for: %s", testPath))
 		defer func() {

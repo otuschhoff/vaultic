@@ -77,7 +77,12 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 	return nil
 }
 
-func (store *SchemaStore) planPackImport(ctx context.Context, transaction *Transaction, imported LegacyPackImport, legacy bool) (packImportPlan, Limits, error) {
+func (store *SchemaStore) planPackImport(
+	ctx context.Context,
+	transaction *Transaction,
+	imported LegacyPackImport,
+	legacy bool,
+) (packImportPlan, Limits, error) {
 	state, err := loadPackImportState(ctx, transaction, &imported, legacy)
 	if err != nil {
 		return packImportPlan{}, Limits{}, err
@@ -107,7 +112,10 @@ func (store *SchemaStore) planPackImport(ctx context.Context, transaction *Trans
 
 func preparePackImport(imported *LegacyPackImport, legacy bool) error {
 	if imported.PackID == (schema.ID{}) || (legacy && imported.SourceIndex == (schema.ID{})) {
-		return fmt.Errorf("pack publication requires its identity%s", map[bool]string{true: " and source index", false: ""}[legacy])
+		return fmt.Errorf(
+			"pack publication requires its identity%s",
+			map[bool]string{true: " and source index", false: ""}[legacy],
+		)
 	}
 	wantLifecycle := schema.PackExportPending
 	if legacy {
@@ -135,7 +143,12 @@ func preparePackImport(imported *LegacyPackImport, legacy bool) error {
 	return nil
 }
 
-func loadPackImportState(ctx context.Context, transaction *Transaction, imported *LegacyPackImport, legacy bool) (packImportState, error) {
+func loadPackImportState(
+	ctx context.Context,
+	transaction *Transaction,
+	imported *LegacyPackImport,
+	legacy bool,
+) (packImportState, error) {
 	value, found, err := transaction.Get(ctx, schema.PackKey(imported.PackID))
 	if err != nil || !found {
 		if legacy && err == nil {
@@ -151,7 +164,11 @@ func loadPackImportState(ctx context.Context, transaction *Transaction, imported
 	return packImportState{oldRecord: &record}, nil
 }
 
-func planImportedBlobs(ctx context.Context, transaction *Transaction, imported LegacyPackImport) (packImportPlan, error) {
+func planImportedBlobs(
+	ctx context.Context,
+	transaction *Transaction,
+	imported LegacyPackImport,
+) (packImportPlan, error) {
 	plan := packImportPlan{puts: make([]Mutation, 0, len(imported.Blobs)+7)}
 	for blobID, incoming := range imported.Blobs {
 		key := schema.BlobKey(blobID)
@@ -207,7 +224,8 @@ func accumulateAllLocations(plan *packImportPlan, incoming schema.BlobRecord) er
 
 func planPackRecord(imported *LegacyPackImport, oldRecord *schema.PackRecord, plan *packImportPlan) error {
 	if oldRecord != nil {
-		if math.MaxUint64-oldRecord.BlobCount < plan.newLocationCount || math.MaxUint64-oldRecord.PayloadSize < plan.newPayloadSize {
+		if math.MaxUint64-oldRecord.BlobCount < plan.newLocationCount ||
+			math.MaxUint64-oldRecord.PayloadSize < plan.newPayloadSize {
 			return fmt.Errorf("pack catalog size overflow")
 		}
 		imported.Record.BlobCount = oldRecord.BlobCount + plan.newLocationCount
@@ -240,12 +258,21 @@ func planPackRecord(imported *LegacyPackImport, oldRecord *schema.PackRecord, pl
 		if err != nil {
 			return err
 		}
-		plan.puts = append(plan.puts, Mutation{Key: schema.RepackLineageKey(predecessor, imported.PackID), Value: value})
+		plan.puts = append(
+			plan.puts,
+			Mutation{Key: schema.RepackLineageKey(predecessor, imported.PackID), Value: value},
+		)
 	}
 	return nil
 }
 
-func planPackAggregatesAndDebt(ctx context.Context, transaction *Transaction, imported LegacyPackImport, oldRecord *schema.PackRecord, plan *packImportPlan) error {
+func planPackAggregatesAndDebt(
+	ctx context.Context,
+	transaction *Transaction,
+	imported LegacyPackImport,
+	oldRecord *schema.PackRecord,
+	plan *packImportPlan,
+) error {
 	aggregates, err := updatePackAggregates(ctx, transaction, oldRecord, imported.Record)
 	if err != nil {
 		return err
@@ -272,7 +299,12 @@ func planImportedDebt(imported LegacyPackImport, plan *packImportPlan) error {
 	return nil
 }
 
-func planResolvedUnavailableDebt(ctx context.Context, transaction *Transaction, packID schema.ID, plan *packImportPlan) error {
+func planResolvedUnavailableDebt(
+	ctx context.Context,
+	transaction *Transaction,
+	packID schema.ID,
+	plan *packImportPlan,
+) error {
 	key := schema.CrawlDebtKey(schema.ID{}, packID)
 	value, found, err := transaction.Get(ctx, key)
 	if err != nil || !found {
@@ -296,7 +328,14 @@ func planResolvedUnavailableDebt(ctx context.Context, transaction *Transaction, 
 	return nil
 }
 
-func planPackImportHistory(ctx context.Context, transaction *Transaction, imported LegacyPackImport, oldRecord *schema.PackRecord, plan *packImportPlan, legacy bool) error {
+func planPackImportHistory(
+	ctx context.Context,
+	transaction *Transaction,
+	imported LegacyPackImport,
+	oldRecord *schema.PackRecord,
+	plan *packImportPlan,
+	legacy bool,
+) error {
 	eventType := schema.EventCreated
 	if legacy {
 		eventType = schema.EventImported
@@ -348,7 +387,11 @@ func (store *SchemaStore) MarkPackPublished(ctx context.Context, packID schema.I
 	return fmt.Errorf("mark pack published: transaction conflict retry limit exceeded")
 }
 
-func (store *SchemaStore) MarkIndexPublished(ctx context.Context, indexID schema.ID, packIDs []schema.ID) (uint64, error) {
+func (store *SchemaStore) MarkIndexPublished(
+	ctx context.Context,
+	indexID schema.ID,
+	packIDs []schema.ID,
+) (uint64, error) {
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
 		sequence, err := store.markIndexPublishedOnce(ctx, indexID, packIDs)
@@ -367,7 +410,11 @@ func (store *SchemaStore) MarkIndexPublished(ctx context.Context, indexID schema
 	return 0, fmt.Errorf("mark index published: transaction conflict retry limit exceeded")
 }
 
-func (store *SchemaStore) markIndexPublishedOnce(ctx context.Context, indexID schema.ID, packIDs []schema.ID) (uint64, error) {
+func (store *SchemaStore) markIndexPublishedOnce(
+	ctx context.Context,
+	indexID schema.ID,
+	packIDs []schema.ID,
+) (uint64, error) {
 	if indexID == (schema.ID{}) || len(packIDs) == 0 {
 		return 0, fmt.Errorf("export index and pack IDs are required")
 	}
@@ -647,11 +694,21 @@ func (store *SchemaStore) markPackDeletePendingOnce(ctx context.Context, packID 
 			return fail(encodeErr)
 		}
 		puts = append(puts, Mutation{Key: schema.BackendPackKey(parsed.Backend, packID), Value: backendValue})
-		queueValue, encodeErr := (schema.PlacementDeleteRecord{Backend: parsed.Backend, PhysicalSize: placement.Bytes, Reason: "gc", RunID: schema.ID{}}).MarshalBinary()
+		queueValue,
+			encodeErr := (schema.PlacementDeleteRecord{Backend: parsed.Backend,
+			PhysicalSize: placement.Bytes,
+			Reason:       "gc",
+			RunID:        schema.ID{}}).MarshalBinary()
 		if encodeErr != nil {
 			return fail(encodeErr)
 		}
-		puts = append(puts, Mutation{Key: schema.PlacementDeleteQueueKey(placement.DeleteAfter, packID, parsed.Backend), Value: queueValue})
+		puts = append(
+			puts,
+			Mutation{
+				Key:   schema.PlacementDeleteQueueKey(placement.DeleteAfter, packID, parsed.Backend),
+				Value: queueValue,
+			},
+		)
 	}
 	history, err := packHistoryMutations(ctx, transaction, []PackEvent{{
 		PackID: packID,
@@ -889,7 +946,8 @@ func canonicalBlobRecord(record schema.BlobRecord) schema.BlobRecord {
 }
 
 func samePhysicalLocation(left, right schema.BlobLocation) bool {
-	return left.PackID == right.PackID && left.Offset == right.Offset && left.Length == right.Length && left.Type == right.Type
+	return left.PackID == right.PackID && left.Offset == right.Offset && left.Length == right.Length &&
+		left.Type == right.Type
 }
 
 func containsPhysicalLocation(locations []schema.BlobLocation, candidate schema.BlobLocation) bool {
@@ -910,7 +968,11 @@ func appendUniqueID(ids []schema.ID, candidate schema.ID) []schema.ID {
 	return append(ids, candidate)
 }
 
-func mergeImportedPackRecord(existing, incoming schema.PackRecord, source schema.ID, includeSource bool) schema.PackRecord {
+func mergeImportedPackRecord(
+	existing, incoming schema.PackRecord,
+	source schema.ID,
+	includeSource bool,
+) schema.PackRecord {
 	result := existing
 	if includeSource {
 		result.SourceIndexIDs = appendUniqueID(result.SourceIndexIDs, source)
@@ -954,7 +1016,8 @@ func applyPackLifetime(result *schema.PackRecord, existing, incoming schema.Pack
 	if existing.StorageClass == "" {
 		result.StorageClass = incoming.StorageClass
 	}
-	if isUnknownRetention(existing.RetentionSource) && !isUnknownRetention(incoming.RetentionSource) && result.CreationTimeKnown {
+	if isUnknownRetention(existing.RetentionSource) && !isUnknownRetention(incoming.RetentionSource) &&
+		result.CreationTimeKnown {
 		result.RetentionSource, result.MinRetentionUntil = incoming.RetentionSource, incoming.MinRetentionUntil
 	}
 	if incoming.DeleteAfter != 0 {

@@ -18,7 +18,14 @@ type plannerStore map[string][]byte
 
 func observationRecord(t *testing.T) Record {
 	t.Helper()
-	payload, err := json.Marshal(indexreconcile.DeferredObservation{SnapshotPath: "/", SourcePath: "/", Node: data.Node{Type: "dir"}, Stat: indexreconcile.DeferredStat{DeviceID: 1, Inode: 1}})
+	payload, err := json.Marshal(
+		indexreconcile.DeferredObservation{
+			SnapshotPath: "/",
+			SourcePath:   "/",
+			Node:         data.Node{Type: "dir"},
+			Stat:         indexreconcile.DeferredStat{DeviceID: 1, Inode: 1},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,16 +46,32 @@ func TestBuildDaemonCommitPlanDerivesProducerFacts(t *testing.T) {
 	}
 	snapshotJSON := []byte(`{"tree":"0123456789abcdef"}`)
 	segment := Segment{
-		Header:  Header{CreatedAt: time.Unix(100, 0)},
-		Packs:   []Pack{{ID: packID, Type: "data", Size: 100, PayloadSize: 7, HeaderSize: 93, BlobCount: 1, SHA256: packID, Placements: []Placement{{BackendID: "a", FailureDomain: "site-a", Size: 100, SHA256: packID}}}},
-		Records: []Record{{Kind: "blob-fact-v1", Payload: blobPayload}, {Kind: "prospective-snapshot-v1", Payload: snapshotJSON}, observationRecord(t)},
+		Header: Header{CreatedAt: time.Unix(100, 0)},
+		Packs: []Pack{
+			{
+				ID:          packID,
+				Type:        "data",
+				Size:        100,
+				PayloadSize: 7,
+				HeaderSize:  93,
+				BlobCount:   1,
+				SHA256:      packID,
+				Placements:  []Placement{{BackendID: "a", FailureDomain: "site-a", Size: 100, SHA256: packID}},
+			},
+		},
+		Records: []Record{
+			{Kind: "blob-fact-v1", Payload: blobPayload},
+			{Kind: "prospective-snapshot-v1", Payload: snapshotJSON},
+			observationRecord(t),
+		},
 	}
 	plan, err := BuildDaemonCommitPlan(context.Background(), plannerStore{}, []Segment{segment})
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(snapshotJSON)
-	if plan.SnapshotID != hex.EncodeToString(digest[:]) || string(plan.SnapshotJSON) != string(snapshotJSON) || len(plan.Puts) != 4 {
+	if plan.SnapshotID != hex.EncodeToString(digest[:]) || string(plan.SnapshotJSON) != string(snapshotJSON) ||
+		len(plan.Puts) != 4 {
 		t.Fatalf("derived plan = %#v", plan)
 	}
 }
@@ -58,15 +81,30 @@ func TestBuildDaemonCommitPlanMergesBlobLocationsAndRejectsMutableFacts(t *testi
 	firstPack := schema.ID{2}
 	secondPack := schema.ID{3}
 	snapshotID := schema.ID{4}
-	firstBlob, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: firstPack, Offset: 1, Length: 2, UncompressedSize: 3, Type: schema.BlobData}}}).MarshalBinary()
+	firstBlob,
+		err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: firstPack,
+		Offset:           1,
+		Length:           2,
+		UncompressedSize: 3,
+		Type:             schema.BlobData}}}).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondBlob, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: secondPack, Offset: 4, Length: 5, UncompressedSize: 6, Type: schema.BlobData}}}).MarshalBinary()
+	secondBlob,
+		err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: secondPack,
+		Offset:           4,
+		Length:           5,
+		UncompressedSize: 6,
+		Type:             schema.BlobData}}}).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := (schema.SnapshotRecord{CommitSequence: 1, RootFSID: 1, RootInode: 2, RootRevision: 3, OriginalJSON: []byte(`{"tree":"root"}`)}).MarshalBinary()
+	snapshot,
+		err := (schema.SnapshotRecord{CommitSequence: 1,
+		RootFSID:     1,
+		RootInode:    2,
+		RootRevision: 3,
+		OriginalJSON: []byte(`{"tree":"root"}`)}).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +116,11 @@ func TestBuildDaemonCommitPlanMergesBlobLocationsAndRejectsMutableFacts(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := BuildDaemonCommitPlan(context.Background(), plannerStore{string(schema.BlobKey(blobID)): firstBlob}, []Segment{{Records: []Record{snapshotFact, blobFact, observationRecord(t)}}})
+	plan, err := BuildDaemonCommitPlan(
+		context.Background(),
+		plannerStore{string(schema.BlobKey(blobID)): firstBlob},
+		[]Segment{{Records: []Record{snapshotFact, blobFact, observationRecord(t)}}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

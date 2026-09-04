@@ -1,0 +1,37 @@
+package indexcmd
+
+type BackendsOptions = indexBackendsOptions
+type CheckOptions = indexCheckOptions
+type DaemonOptions = indexDaemonOptions
+type ExportOptions = indexExportOptions
+type FileHistoryOptions = indexFileHistoryOptions
+type GCOptions = indexGCOptions
+type HistoryOptions = indexHistoryOptions
+type HistoryPruneOptions = indexHistoryPruneOptions
+type ImportOptions = indexImportOptions
+type KeysOptions = indexKeysOptions
+type PacksOptions = indexPacksOptions
+type PathAtOptions = indexPathAtOptions
+type PathIndexOptions = indexPathIndexOptions
+type RebuildPackStatsOptions = indexRebuildPackStatsOptions
+type StatsOptions = indexStatsOptions
+type BackendComparisonResult = BackendsResult
+
+var RetireLegacyQuorumBypasses = retireLegacyQuorumBypasses
+var RunBackends = runIndexBackends
+var RunCheck = runIndexCheck
+var RunExport = runIndexExport
+var RunFileHistory = runIndexFileHistory
+var RunGC = runIndexGC
+var RunHistory = runIndexHistory
+var RunHistoryPrune = runIndexHistoryPrune
+var RunImport = runIndexImport
+var RunPacks = runIndexPacks
+var RunPathAt = runIndexPathAt
+var RunPathIndex = runIndexPathIndex
+var RunRebuildPackStats = runIndexRebuildPackStats
+var RunStats = runIndexStats
+var OpenIndexStore = openIndexStore
+var NewKeysAddSlotCommand = newIndexKeysAddSlotCommand
+var IndexDaemonContext = indexDaemonContext
+var WriteNewProtectedJSON = writeNewProtectedJSON

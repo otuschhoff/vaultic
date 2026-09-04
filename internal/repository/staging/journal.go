@@ -190,7 +190,8 @@ func (roots PackRoots) Current(ctx context.Context) (vaultic.IDSet, error) {
 	}
 	protected := vaultic.NewIDSet()
 	for _, job := range jobs {
-		if job.State != StateSealedPending && job.State != StateExpired && job.State != StateRejected && !(job.State == StateAbandoned && job.Abandonment != nil && roots.Store.now().Before(job.Abandonment.DeleteAfter)) {
+		if job.State != StateSealedPending && job.State != StateExpired && job.State != StateRejected &&
+			(job.State != StateAbandoned || job.Abandonment == nil || !roots.Store.now().Before(job.Abandonment.DeleteAfter)) {
 			continue
 		}
 		segments, err := roots.Store.VerifyJob(ctx, job)
@@ -271,7 +272,8 @@ type encryptedObject struct {
 }
 
 func (header Header) Validate(now time.Time) error {
-	if header.Format != Format || header.RepositoryID == "" || header.JobID == "" || header.IdempotencyKey == "" || header.CreatedAt.IsZero() || !header.ExpiresAt.After(header.CreatedAt) {
+	if header.Format != Format || header.RepositoryID == "" || header.JobID == "" || header.IdempotencyKey == "" || header.CreatedAt.IsZero() ||
+		!header.ExpiresAt.After(header.CreatedAt) {
 		return fmt.Errorf("invalid ingest journal identity or lifetime")
 	}
 	if header.ExpiresAt.Before(now) {
@@ -357,14 +359,17 @@ func OpenSeal(encoded, key []byte, expected Header) (Seal, string, error) {
 }
 
 func SealCompletion(completion Completion, key []byte) ([]byte, string, error) {
-	if completion.State != StateCommitted || !validDigest(completion.SealSHA256) || completion.MetadataTransaction == "" || completion.SnapshotID == "" || completion.CompletedAt.IsZero() {
+	if completion.State != StateCommitted || !validDigest(completion.SealSHA256) || completion.MetadataTransaction == "" || completion.SnapshotID == "" ||
+		completion.CompletedAt.IsZero() {
 		return nil, "", fmt.Errorf("invalid journal completion")
 	}
 	return sealObject(completion, key, completion.Header, "completion", 0)
 }
 
 func SealAbandonment(abandonment Abandonment, key []byte) ([]byte, string, error) {
-	if abandonment.State != StateAbandoned || !validDigest(abandonment.SealSHA256) || abandonment.Reason == "" || abandonment.Acknowledgement == "" || abandonment.AbandonedAt.IsZero() || !abandonment.DeleteAfter.After(abandonment.AbandonedAt) {
+	if abandonment.State != StateAbandoned || !validDigest(abandonment.SealSHA256) || abandonment.Reason == "" || abandonment.Acknowledgement == "" ||
+		abandonment.AbandonedAt.IsZero() ||
+		!abandonment.DeleteAfter.After(abandonment.AbandonedAt) {
 		return nil, "", fmt.Errorf("invalid journal abandonment")
 	}
 	return sealObject(abandonment, key, abandonment.Header, "abandonment", 0)
@@ -378,7 +383,10 @@ func SealRejection(rejection Rejection, key []byte) ([]byte, string, error) {
 }
 
 func SealExtension(extension Extension, key []byte) ([]byte, string, error) {
-	if !validDigest(extension.SealSHA256) || extension.Generation == 0 || extension.Generation > 1 && !validDigest(extension.PreviousExtensionSHA256) || extension.ExtendedAt.IsZero() || !extension.ExpiresAt.After(extension.PreviousExpiresAt) || extension.ExtendedAt.After(extension.ExpiresAt) {
+	if !validDigest(extension.SealSHA256) || extension.Generation == 0 || extension.Generation > 1 && !validDigest(extension.PreviousExtensionSHA256) ||
+		extension.ExtendedAt.IsZero() ||
+		!extension.ExpiresAt.After(extension.PreviousExpiresAt) ||
+		extension.ExtendedAt.After(extension.ExpiresAt) {
 		return nil, "", fmt.Errorf("invalid journal expiry extension")
 	}
 	return sealObject(extension, key, extension.Header, "extension", extension.Generation)
@@ -396,7 +404,15 @@ func (store Store) PublishExtension(ctx context.Context, job Job, expiresAt time
 	if job.Extension != nil {
 		generation = job.Extension.Generation + 1
 	}
-	extension := Extension{Header: job.Header, SealSHA256: job.SealSHA256, Generation: generation, PreviousExtensionSHA256: job.ExtensionSHA256, PreviousExpiresAt: job.EffectiveExpiresAt(), ExpiresAt: expiresAt.UTC(), ExtendedAt: now}
+	extension := Extension{
+		Header:                  job.Header,
+		SealSHA256:              job.SealSHA256,
+		Generation:              generation,
+		PreviousExtensionSHA256: job.ExtensionSHA256,
+		PreviousExpiresAt:       job.EffectiveExpiresAt(),
+		ExpiresAt:               expiresAt.UTC(),
+		ExtendedAt:              now,
+	}
 	encoded, _, err := SealExtension(extension, store.Key)
 	if err != nil {
 		return Extension{}, err
@@ -431,7 +447,15 @@ func (store Store) PublishAbandonment(ctx context.Context, job Job, reason, ackn
 		delay = 24 * time.Hour
 	}
 	now := store.now()
-	abandonment := Abandonment{Header: job.Header, State: StateAbandoned, SealSHA256: job.SealSHA256, Reason: reason, Acknowledgement: acknowledgement, AbandonedAt: now, DeleteAfter: now.Add(delay)}
+	abandonment := Abandonment{
+		Header:          job.Header,
+		State:           StateAbandoned,
+		SealSHA256:      job.SealSHA256,
+		Reason:          reason,
+		Acknowledgement: acknowledgement,
+		AbandonedAt:     now,
+		DeleteAfter:     now.Add(delay),
+	}
 	encoded, _, err := SealAbandonment(abandonment, store.Key)
 	if err != nil {
 		return Abandonment{}, err
@@ -701,7 +725,9 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 			if err != nil {
 				return nil, err
 			}
-			if extension.SealSHA256 != job.SealSHA256 || extension.Generation != generation || extension.PreviousExpiresAt != previousExpiry || extension.PreviousExtensionSHA256 != previousDigest || !extension.ExpiresAt.After(extension.PreviousExpiresAt) {
+			if extension.SealSHA256 != job.SealSHA256 || extension.Generation != generation || extension.PreviousExpiresAt != previousExpiry ||
+				extension.PreviousExtensionSHA256 != previousDigest ||
+				!extension.ExpiresAt.After(extension.PreviousExpiresAt) {
 				return nil, fmt.Errorf("journal extension does not bind the discovered seal and expiry")
 			}
 			job.Extension = &extension
@@ -764,7 +790,8 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 }
 
 func (store Store) VerifyJob(ctx context.Context, job Job) ([]Segment, error) {
-	if job.State != StateSealedPending && job.State != StateCommitted && job.State != StateExpired && job.State != StateAbandoned && job.State != StateRejected {
+	if job.State != StateSealedPending && job.State != StateCommitted && job.State != StateExpired && job.State != StateAbandoned &&
+		job.State != StateRejected {
 		return nil, fmt.Errorf("journal %s is not a sealed reachability root", job.Header.JobID)
 	}
 	if len(job.Seal.SegmentSHA256) == 0 || job.Seal.Header != job.Header {
@@ -849,7 +876,9 @@ func ExtensionHandle(jobID string, generation uint64) backend.Handle {
 }
 
 func CheckQuota(quota Quota, activeJobs, principalJobs, stagedBytes uint64, oldest time.Time, additional uint64, now time.Time) error {
-	if quota.MaxJobs > 0 && activeJobs >= quota.MaxJobs || quota.MaxPerPrincipal > 0 && principalJobs >= quota.MaxPerPrincipal || quota.MaxBytes > 0 && stagedBytes+additional > quota.MaxBytes || quota.MaxAge > 0 && !oldest.IsZero() && now.Sub(oldest) > quota.MaxAge {
+	if quota.MaxJobs > 0 && activeJobs >= quota.MaxJobs || quota.MaxPerPrincipal > 0 && principalJobs >= quota.MaxPerPrincipal ||
+		quota.MaxBytes > 0 && stagedBytes+additional > quota.MaxBytes ||
+		quota.MaxAge > 0 && !oldest.IsZero() && now.Sub(oldest) > quota.MaxAge {
 		return fmt.Errorf("deferred staging quota exceeded")
 	}
 	return nil
@@ -911,7 +940,8 @@ func openObject(encoded, rootKey []byte, header Header, kind string, sequence ui
 	if err := decoder.Decode(&object); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return "", fmt.Errorf("decode encrypted journal object")
 	}
-	if object.Format != Format || object.RepositoryID != header.RepositoryID || object.JobID != header.JobID || object.Kind != kind || object.Sequence != sequence {
+	if object.Format != Format || object.RepositoryID != header.RepositoryID || object.JobID != header.JobID || object.Kind != kind ||
+		object.Sequence != sequence {
 		return "", fmt.Errorf("journal object context mismatch")
 	}
 	aead, err := journalAEAD(rootKey, header)

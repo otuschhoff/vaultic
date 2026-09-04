@@ -83,7 +83,14 @@ func openHandleForEA(nodeType data.NodeType, path string, writeAccess bool) (han
 	switch nodeType {
 	case data.NodeTypeFile, data.NodeTypeDir:
 		utf16Path := windows.StringToUTF16Ptr(path)
-		handle, err = windows.CreateFile(utf16Path, uint32(fileAccess), 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		handle,
+			err = windows.CreateFile(utf16Path,
+			uint32(fileAccess),
+			0,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS,
+			0)
 	default:
 		return 0, nil
 	}

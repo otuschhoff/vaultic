@@ -31,7 +31,11 @@ func saveEngineManifest(t *testing.T, be backend.Backend, manifest enginepkg.Man
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = be.Save(context.Background(), backend.Handle{Type: backend.SlateDBFile, Name: enginepkg.ManifestName, IsMetadata: true}, backend.NewByteReader(payload, be.Hasher()))
+	err = be.Save(
+		context.Background(),
+		backend.Handle{Type: backend.SlateDBFile, Name: enginepkg.ManifestName, IsMetadata: true},
+		backend.NewByteReader(payload, be.Hasher()),
+	)
 	if err != nil {
 		t.Fatalf("save manifest: %v", err)
 	}
@@ -132,7 +136,11 @@ func TestResolveEngineFromBackendFailsClosedWhenAuthoritativeDaemonUnavailable(t
 func TestResolveEngineFromBackendRejectsMalformedManifest(t *testing.T) {
 	be := mem.New()
 	repo := newEngineTestRepository(t, be)
-	err := be.Save(context.Background(), backend.Handle{Type: backend.SlateDBFile, Name: enginepkg.ManifestName}, backend.NewByteReader([]byte("{"), be.Hasher()))
+	err := be.Save(
+		context.Background(),
+		backend.Handle{Type: backend.SlateDBFile, Name: enginepkg.ManifestName},
+		backend.NewByteReader([]byte("{"), be.Hasher()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

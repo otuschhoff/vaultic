@@ -330,7 +330,11 @@ func TestRestoreLatest(t *testing.T) {
 }
 
 func TestRestoreWithPermissionFailure(t *testing.T) {
-	repository.TestInjectKey(t, vaultic.TestParseID("18493b1f93ad90b6bce7ed3afa93395a1f90e981f04145c03e5958cafa2ee33b"), `{"mac":{"k":"7ftgSq7jNM2HiGCyY9TYrg==","r":"o+1bB0wApwqoG7oAXOLyDw=="},"encrypt":"i57gVfyYp9HmXjzE0dSZyrkp2FN9LE75uWFjOuWze1M="}`)
+	repository.TestInjectKey(
+		t,
+		vaultic.TestParseID("18493b1f93ad90b6bce7ed3afa93395a1f90e981f04145c03e5958cafa2ee33b"),
+		`{"mac":{"k":"7ftgSq7jNM2HiGCyY9TYrg==","r":"o+1bB0wApwqoG7oAXOLyDw=="},"encrypt":"i57gVfyYp9HmXjzE0dSZyrkp2FN9LE75uWFjOuWze1M="}`,
+	)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 

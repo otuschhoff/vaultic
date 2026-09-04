@@ -19,7 +19,8 @@ func (r *Repository) UseDeferredJournalIndex(segments []staging.Segment) error {
 	blobs := make(map[string]pack.Blobs)
 	for _, segment := range segments {
 		for _, stagedPack := range segment.Packs {
-			if previous, ok := declared[stagedPack.ID]; ok && (previous.Size != stagedPack.Size || previous.SHA256 != stagedPack.SHA256 || previous.BlobCount != stagedPack.BlobCount) {
+			if previous, ok := declared[stagedPack.ID]; ok &&
+				(previous.Size != stagedPack.Size || previous.SHA256 != stagedPack.SHA256 || previous.BlobCount != stagedPack.BlobCount) {
 				return fmt.Errorf("conflicting staged pack facts for %s", stagedPack.ID)
 			}
 			declared[stagedPack.ID] = stagedPack
@@ -54,7 +55,15 @@ func (r *Repository) UseDeferredJournalIndex(segments []staging.Segment) error {
 			if stagedPack.Type != fact.Type || fact.Length == 0 || uint64(fact.Offset)+uint64(fact.Length) > stagedPack.PayloadSize {
 				return fmt.Errorf("invalid staged blob layout in pack %s", fact.PackID)
 			}
-			blobs[fact.PackID] = append(blobs[fact.PackID], pack.Blob{BlobHandle: vaultic.BlobHandle{Type: blobType, ID: blobID}, Offset: fact.Offset, Length: fact.Length, UncompressedLength: fact.UncompressedLength})
+			blobs[fact.PackID] = append(
+				blobs[fact.PackID],
+				pack.Blob{
+					BlobHandle:         vaultic.BlobHandle{Type: blobType, ID: blobID},
+					Offset:             fact.Offset,
+					Length:             fact.Length,
+					UncompressedLength: fact.UncompressedLength,
+				},
+			)
 		}
 	}
 	master := legacyindex.NewMasterIndex()

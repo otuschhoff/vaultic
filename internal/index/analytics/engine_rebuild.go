@@ -12,7 +12,12 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
 
-func loadCompatibleBuildCheckpoint(ctx context.Context, store Store, generation uint64, configJSON string) (schema.AnalyticsBuildCheckpointRecord, bool, error) {
+func loadCompatibleBuildCheckpoint(
+	ctx context.Context,
+	store Store,
+	generation uint64,
+	configJSON string,
+) (schema.AnalyticsBuildCheckpointRecord, bool, error) {
 	value, found, err := store.Get(ctx, schema.AnalyticsBuildCheckpointKey())
 	if err != nil || !found {
 		return schema.AnalyticsBuildCheckpointRecord{}, false, err
@@ -38,10 +43,19 @@ func saveBuildCheckpoint(ctx context.Context, store Store, checkpoint schema.Ana
 	if err != nil {
 		return err
 	}
-	return store.WriteMutableBatch(ctx, []daemon.Mutation{{Key: schema.AnalyticsBuildCheckpointKey(), Value: value}}, nil, true)
+	return store.WriteMutableBatch(
+		ctx,
+		[]daemon.Mutation{{Key: schema.AnalyticsBuildCheckpointKey(), Value: value}},
+		nil,
+		true,
+	)
 }
 
-func validateBuildCheckpoint(ctx context.Context, store Store, checkpoint schema.AnalyticsBuildCheckpointRecord) (bool, error) {
+func validateBuildCheckpoint(
+	ctx context.Context,
+	store Store,
+	checkpoint schema.AnalyticsBuildCheckpointRecord,
+) (bool, error) {
 	if len(checkpoint.CandidateSegments) == 0 && len(checkpoint.SourceKeyCursor) != 0 {
 		return false, nil
 	}
@@ -74,7 +88,8 @@ func validateBuildCheckpoint(ctx context.Context, store Store, checkpoint schema
 		}
 		for dimension, values := range indexValues(rows) {
 			for value := range values {
-				if _, found, err := store.Get(ctx, schema.AnalyticsDimensionIndexKey(dimension, value, segment)); err != nil || !found {
+				if _, found, err := store.Get(ctx, schema.AnalyticsDimensionIndexKey(dimension, value, segment)); err != nil ||
+					!found {
 					return false, err
 				}
 			}
@@ -125,7 +140,14 @@ func cleanupCandidateGeneration(ctx context.Context, store Store, generation uin
 	return store.WriteMutableBatch(ctx, nil, deletes, false)
 }
 
-func streamAuthoritativeFacts(ctx context.Context, store Store, config Config, afterKey []byte, batchSize int, consume func([]buildFact, []byte) error) (uint64, uint64, error) {
+func streamAuthoritativeFacts(
+	ctx context.Context,
+	store Store,
+	config Config,
+	afterKey []byte,
+	batchSize int,
+	consume func([]buildFact, []byte) error,
+) (uint64, uint64, error) {
 	bindings, _, err := store.ScanPrefix(ctx, []byte("asb:"), nil, 1)
 	if err != nil {
 		return 0, 0, err
@@ -136,7 +158,14 @@ func streamAuthoritativeFacts(ctx context.Context, store Store, config Config, a
 	return streamLegacyRevisions(ctx, store, config, afterKey, batchSize, consume)
 }
 
-func streamSourceBindings(ctx context.Context, store Store, config Config, afterKey []byte, batchSize int, consume func([]buildFact, []byte) error) (uint64, uint64, error) {
+func streamSourceBindings(
+	ctx context.Context,
+	store Store,
+	config Config,
+	afterKey []byte,
+	batchSize int,
+	consume func([]buildFact, []byte) error,
+) (uint64, uint64, error) {
 	var batch []buildFact
 	var cursor, lastKey []byte
 	var facts, applied uint64
@@ -149,56 +178,14 @@ func streamSourceBindings(ctx context.Context, store Store, config Config, after
 			return facts, applied, err
 		}
 		for _, item := range items {
-			key, err := schema.ParseKey(item.Key)
-			if err != nil || key.Kind != schema.KeyAuthoritativeSourceBinding {
-				return facts, applied, fmt.Errorf("invalid authoritative source binding key %x", item.Key)
-			}
-			binding, err := schema.UnmarshalAuthoritativeSourceBindingRecord(item.Value)
+			build, observedCommit, err := sourceBindingFact(ctx, store, config, item.Key, item.Value)
 			if err != nil {
 				return facts, applied, err
 			}
-			revisionKey := schema.InodeRevisionKey(key.FSID, key.Inode, binding.Revision)
-			value, found, err := store.Get(ctx, revisionKey)
-			if err != nil || !found {
-				return facts, applied, errors.Join(err, fmt.Errorf("source binding points to missing revision %d:%d:%d", key.FSID, key.Inode, binding.Revision))
-			}
-			revision, err := schema.UnmarshalInodeRevision(value)
-			if err != nil {
-				return facts, applied, err
-			}
-			fact := makeFact(schema.ParsedKey{FSID: key.FSID, Inode: key.Inode, Revision: binding.Revision}, revision, config)
-			fact.IdentityGeneration, fact.IdentityContinuity = binding.Generation, binding.Continuity
-			lastComplete := int64(0)
-			retained := uint64(0)
-			switch binding.State {
-			case schema.AuthoritativeSourceLive:
-				fact.Residency = schema.AnalyticsLive
-			case schema.AuthoritativeSourceDeleted:
-				proofValue, found, err := store.Get(ctx, schema.AuthoritativeCrawlProofKey(key.ID, binding.LastObservedCommit))
-				if err != nil || !found {
-					return facts, applied, errors.Join(err, fmt.Errorf("deleted source binding has no crawl proof"))
-				}
-				proof, err := schema.UnmarshalAuthoritativeCrawlProofRecord(proofValue)
-				if err != nil || !proof.Complete || !proof.DebtFree {
-					return facts, applied, errors.Join(err, fmt.Errorf("deleted source binding has invalid crawl proof"))
-				}
-				retained, err = retainedReferencesForIdentity(ctx, store, key.FSID, key.Inode, binding.Generation)
-				if err != nil {
-					return facts, applied, err
-				}
-				lastComplete = proof.CompletedAt
-				fact.Residency = schema.AnalyticsExpired
-				if retained != 0 {
-					fact.Residency = schema.AnalyticsArchiveOnly
-				}
-			default:
-				fact.Residency = schema.AnalyticsUnknown
-			}
-			identity := segmentIdentity{FSID: key.FSID, Inode: key.Inode, Generation: binding.Generation, Revision: binding.Revision, Known: fact.Known}
-			batch = append(batch, buildFact{identity: identity, fact: fact, retainedRefs: retained, lastComplete: lastComplete})
+			batch = append(batch, build)
 			facts++
-			if binding.LastObservedCommit > applied {
-				applied = binding.LastObservedCommit
+			if observedCommit > applied {
+				applied = observedCommit
 			}
 			lastKey = append(lastKey[:0], item.Key...)
 			if len(batch) == batchSize {
@@ -229,7 +216,81 @@ func streamSourceBindings(ctx context.Context, store Store, config Config, after
 	return facts, applied, nil
 }
 
-func streamLegacyRevisions(ctx context.Context, store Store, config Config, afterKey []byte, batchSize int, consume func([]buildFact, []byte) error) (uint64, uint64, error) {
+func sourceBindingFact(ctx context.Context, store Store, config Config, keyBytes, bindingBytes []byte) (buildFact, uint64, error) {
+	key, err := schema.ParseKey(keyBytes)
+	if err != nil || key.Kind != schema.KeyAuthoritativeSourceBinding {
+		return buildFact{}, 0, fmt.Errorf("invalid authoritative source binding key %x", keyBytes)
+	}
+	binding, err := schema.UnmarshalAuthoritativeSourceBindingRecord(bindingBytes)
+	if err != nil {
+		return buildFact{}, 0, err
+	}
+	value, found, err := store.Get(ctx, schema.InodeRevisionKey(key.FSID, key.Inode, binding.Revision))
+	if err != nil || !found {
+		return buildFact{}, 0, errors.Join(
+			err,
+			fmt.Errorf("source binding points to missing revision %d:%d:%d", key.FSID, key.Inode, binding.Revision),
+		)
+	}
+	revision, err := schema.UnmarshalInodeRevision(value)
+	if err != nil {
+		return buildFact{}, 0, err
+	}
+	fact := makeFact(schema.ParsedKey{FSID: key.FSID, Inode: key.Inode, Revision: binding.Revision}, revision, config)
+	fact.IdentityGeneration, fact.IdentityContinuity = binding.Generation, binding.Continuity
+	retained, lastComplete, err := sourceBindingResidency(ctx, store, key, binding, &fact)
+	if err != nil {
+		return buildFact{}, 0, err
+	}
+	identity := segmentIdentity{
+		FSID: key.FSID, Inode: key.Inode, Generation: binding.Generation, Revision: binding.Revision, Known: fact.Known,
+	}
+	return buildFact{identity: identity, fact: fact, retainedRefs: retained, lastComplete: lastComplete}, binding.LastObservedCommit, nil
+}
+
+func sourceBindingResidency(
+	ctx context.Context,
+	store Store,
+	key schema.ParsedKey,
+	binding schema.AuthoritativeSourceBindingRecord,
+	fact *schema.AnalyticsFactRecord,
+) (uint64, int64, error) {
+	switch binding.State {
+	case schema.AuthoritativeSourceLive:
+		fact.Residency = schema.AnalyticsLive
+		return 0, 0, nil
+	case schema.AuthoritativeSourceDeleted:
+		proofValue, found, err := store.Get(ctx, schema.AuthoritativeCrawlProofKey(key.ID, binding.LastObservedCommit))
+		if err != nil || !found {
+			return 0, 0, errors.Join(err, fmt.Errorf("deleted source binding has no crawl proof"))
+		}
+		proof, err := schema.UnmarshalAuthoritativeCrawlProofRecord(proofValue)
+		if err != nil || !proof.Complete || !proof.DebtFree {
+			return 0, 0, errors.Join(err, fmt.Errorf("deleted source binding has invalid crawl proof"))
+		}
+		retained, err := retainedReferencesForIdentity(ctx, store, key.FSID, key.Inode, binding.Generation)
+		if err != nil {
+			return 0, 0, err
+		}
+		fact.Residency = schema.AnalyticsExpired
+		if retained != 0 {
+			fact.Residency = schema.AnalyticsArchiveOnly
+		}
+		return retained, proof.CompletedAt, nil
+	default:
+		fact.Residency = schema.AnalyticsUnknown
+		return 0, 0, nil
+	}
+}
+
+func streamLegacyRevisions(
+	ctx context.Context,
+	store Store,
+	config Config,
+	afterKey []byte,
+	batchSize int,
+	consume func([]buildFact, []byte) error,
+) (uint64, uint64, error) {
 	var batch []buildFact
 	var cursor, lastKey []byte
 	var previousFSID uint32
@@ -278,7 +339,19 @@ func streamLegacyRevisions(ctx context.Context, store Store, config Config, afte
 			} else {
 				fact.Residency = schema.AnalyticsUnknown
 			}
-			batch = append(batch, buildFact{identity: segmentIdentity{FSID: key.FSID, Inode: key.Inode, Generation: key.Revision, Revision: key.Revision, Known: fact.Known}, fact: fact})
+			batch = append(
+				batch,
+				buildFact{
+					identity: segmentIdentity{
+						FSID:       key.FSID,
+						Inode:      key.Inode,
+						Generation: key.Revision,
+						Revision:   key.Revision,
+						Known:      fact.Known,
+					},
+					fact: fact,
+				},
+			)
 			facts++
 		}
 		if done {
@@ -302,7 +375,12 @@ func streamLegacyRevisions(ctx context.Context, store Store, config Config, afte
 	return facts, applied, nil
 }
 
-func retainedReferencesForIdentity(ctx context.Context, store Store, fsid uint32, inode, generation uint64) (uint64, error) {
+func retainedReferencesForIdentity(
+	ctx context.Context,
+	store Store,
+	fsid uint32,
+	inode, generation uint64,
+) (uint64, error) {
 	nextGeneration := uint64(0)
 	if err := scan(ctx, store, []byte("asb:"), func(kv daemon.KeyValue) error {
 		key, err := schema.ParseKey(kv.Key)
@@ -351,13 +429,21 @@ func retainedReferencesForIdentity(ctx context.Context, store Store, fsid uint32
 					if found, err := visit(child.MetadataKey, depth+1); err != nil || found {
 						return found, err
 					}
-				} else if parsed.Kind == schema.KeyInodeRevision && parsed.FSID == fsid && parsed.Inode == inode && parsed.Revision >= generation && (nextGeneration == 0 || parsed.Revision < nextGeneration) {
+				} else if parsed.Kind == schema.KeyInodeRevision &&
+					parsed.FSID == fsid &&
+					parsed.Inode == inode &&
+					parsed.Revision >= generation &&
+					(nextGeneration == 0 ||
+						parsed.Revision < nextGeneration) {
 					return true, nil
 				}
 			}
 			return false, nil
 		}
-		found, err := visit(schema.DirectoryRevisionKey(snapshot.RootFSID, snapshot.RootInode, snapshot.RootRevision), 0)
+		found, err := visit(
+			schema.DirectoryRevisionKey(snapshot.RootFSID, snapshot.RootInode, snapshot.RootRevision),
+			0,
+		)
 		if err != nil {
 			return err
 		}
@@ -376,7 +462,12 @@ func segmentDictionaries(ctx context.Context, store Store, facts []buildFact) (d
 		for _, entry := range []struct {
 			kind  schema.AnalyticsDictionaryKind
 			value string
-		}{{schema.AnalyticsDictionarySVM, item.fact.SVM}, {schema.AnalyticsDictionaryVolume, item.fact.Volume}, {schema.AnalyticsDictionaryPathGroup, item.fact.PathGroup}} {
+		}{{schema.AnalyticsDictionarySVM,
+			item.fact.SVM},
+			{schema.AnalyticsDictionaryVolume,
+				item.fact.Volume},
+			{schema.AnalyticsDictionaryPathGroup,
+				item.fact.PathGroup}} {
 			if entry.value == "" || entry.value == "unknown" {
 				continue
 			}
@@ -412,10 +503,22 @@ func segmentDictionaries(ctx context.Context, store Store, facts []buildFact) (d
 	return result, puts, nil
 }
 
-func writeSegmentDerived(ctx context.Context, store Store, generation, parentGeneration, segment uint64, facts []buildFact) error {
+func writeSegmentDerived(
+	ctx context.Context,
+	store Store,
+	generation, parentGeneration, segment uint64,
+	facts []buildFact,
+) error {
 	puts := make([]daemon.Mutation, 0, len(facts))
 	for row, item := range facts {
-		overlay := schema.AnalyticsResidencyRecord{State: item.fact.Residency, LastCompleteCrawl: item.lastComplete, RetainedSnapshotRefs: item.retainedRefs, ClassificationEpoch: generation, FactSegment: segment, Row: uint32(row)}
+		overlay := schema.AnalyticsResidencyRecord{
+			State:                item.fact.Residency,
+			LastCompleteCrawl:    item.lastComplete,
+			RetainedSnapshotRefs: item.retainedRefs,
+			ClassificationEpoch:  generation,
+			FactSegment:          segment,
+			Row:                  uint32(row),
+		}
 		encoded, err := overlay.MarshalBinary()
 		if err != nil {
 			return err
@@ -475,7 +578,14 @@ func collectAuthoritativeFacts(ctx context.Context, store Store, config Config) 
 		evidence := sourceBindings[currentKey]
 		if len(evidence) == 0 {
 			first := revisions[0]
-			evidence = []sourceEvidence{{generation: first.key.Revision, revision: first.key.Revision, state: schema.AuthoritativeSourceUnknown, continuity: schema.AnalyticsContinuityUnknown}}
+			evidence = []sourceEvidence{
+				{
+					generation: first.key.Revision,
+					revision:   first.key.Revision,
+					state:      schema.AuthoritativeSourceUnknown,
+					continuity: schema.AnalyticsContinuityUnknown,
+				},
+			}
 			if currentRevision != 0 {
 				evidence[0].state = schema.AuthoritativeSourceLive
 			}
@@ -492,13 +602,30 @@ func collectAuthoritativeFacts(ctx context.Context, store Store, config Config) 
 				}
 			}
 			if selected == nil {
-				return fmt.Errorf("source binding %d:%d generation %d points to missing revision %d", currentKey.fsid, currentKey.inode, source.generation, source.revision)
+				return fmt.Errorf(
+					"source binding %d:%d generation %d points to missing revision %d",
+					currentKey.fsid,
+					currentKey.inode,
+					source.generation,
+					source.revision,
+				)
 			}
 			fact := makeFact(selected.key, selected.record, config)
 			fact.IdentityGeneration = source.generation
 			fact.IdentityContinuity = source.continuity
-			identity := segmentIdentity{FSID: currentKey.fsid, Inode: currentKey.inode, Generation: source.generation, Revision: source.revision, Known: fact.Known}
-			membershipIdentity := segmentIdentity{FSID: identity.FSID, Inode: identity.Inode, Generation: identity.Generation, Revision: identity.Generation}
+			identity := segmentIdentity{
+				FSID:       currentKey.fsid,
+				Inode:      currentKey.inode,
+				Generation: source.generation,
+				Revision:   source.revision,
+				Known:      fact.Known,
+			}
+			membershipIdentity := segmentIdentity{
+				FSID:       identity.FSID,
+				Inode:      identity.Inode,
+				Generation: identity.Generation,
+				Revision:   identity.Generation,
+			}
 			retained := retainedReferences[membershipIdentity]
 			switch source.state {
 			case schema.AuthoritativeSourceLive:
@@ -512,7 +639,10 @@ func collectAuthoritativeFacts(ctx context.Context, store Store, config Config) 
 			default:
 				fact.Residency = schema.AnalyticsUnknown
 			}
-			facts = append(facts, buildFact{identity: identity, fact: fact, retainedRefs: retained, lastComplete: source.lastComplete})
+			facts = append(
+				facts,
+				buildFact{identity: identity, fact: fact, retainedRefs: retained, lastComplete: source.lastComplete},
+			)
 		}
 		revisions = revisions[:0]
 		return nil
@@ -580,7 +710,13 @@ func collectSourceEvidence(ctx context.Context, store Store) (map[struct {
 		if err != nil {
 			return err
 		}
-		evidence := sourceEvidence{generation: binding.Generation, revision: binding.Revision, state: binding.State, continuity: binding.Continuity, commit: binding.LastObservedCommit}
+		evidence := sourceEvidence{
+			generation: binding.Generation,
+			revision:   binding.Revision,
+			state:      binding.State,
+			continuity: binding.Continuity,
+			commit:     binding.LastObservedCommit,
+		}
 		if binding.State == schema.AuthoritativeSourceDeleted {
 			value, found, err := store.Get(ctx, schema.AuthoritativeCrawlProofKey(key.ID, binding.LastObservedCommit))
 			if err != nil || !found {
@@ -597,7 +733,8 @@ func collectSourceEvidence(ctx context.Context, store Store) (map[struct {
 			byGeneration[identity] = map[uint64]sourceEvidence{}
 		}
 		prior, found := byGeneration[identity][binding.Generation]
-		if !found || sourceStatePriority(evidence.state) > sourceStatePriority(prior.state) || sourceStatePriority(evidence.state) == sourceStatePriority(prior.state) && evidence.commit > prior.commit {
+		if !found || sourceStatePriority(evidence.state) > sourceStatePriority(prior.state) ||
+			sourceStatePriority(evidence.state) == sourceStatePriority(prior.state) && evidence.commit > prior.commit {
 			byGeneration[identity][binding.Generation] = evidence
 		}
 		if binding.LastObservedCommit > maxCommit {
@@ -687,9 +824,17 @@ func collectRetainedReferences(ctx context.Context, store Store, sourceBindings 
 					}
 				}
 				if generationRevision == 0 {
-					items, _, err := store.ScanPrefix(ctx, schema.InodeRevisionPrefix(parsed.FSID, parsed.Inode), nil, 1)
+					items, _, err := store.ScanPrefix(
+						ctx,
+						schema.InodeRevisionPrefix(parsed.FSID, parsed.Inode),
+						nil,
+						1,
+					)
 					if err != nil || len(items) == 0 {
-						return errors.Join(err, fmt.Errorf("snapshot inode %d:%d has no revision", parsed.FSID, parsed.Inode))
+						return errors.Join(
+							err,
+							fmt.Errorf("snapshot inode %d:%d has no revision", parsed.FSID, parsed.Inode),
+						)
 					}
 					generation, err := schema.ParseKey(items[0].Key)
 					if err != nil {
@@ -697,7 +842,11 @@ func collectRetainedReferences(ctx context.Context, store Store, sourceBindings 
 					}
 					generationRevision = generation.Revision
 				}
-				seenIdentities[segmentIdentity{FSID: parsed.FSID, Inode: parsed.Inode, Generation: generationRevision, Revision: generationRevision}] = struct{}{}
+				identity := segmentIdentity{
+					FSID: parsed.FSID, Inode: parsed.Inode,
+					Generation: generationRevision, Revision: generationRevision,
+				}
+				seenIdentities[identity] = struct{}{}
 			}
 			return nil
 		}
@@ -713,7 +862,12 @@ func collectRetainedReferences(ctx context.Context, store Store, sourceBindings 
 	return result, maxCommit, err
 }
 
-func visitInodeContent(ctx context.Context, store Store, record schema.InodeRevision, visit func(uint32, schema.ID) error) error {
+func visitInodeContent(
+	ctx context.Context,
+	store Store,
+	record schema.InodeRevision,
+	visit func(uint32, schema.ID) error,
+) error {
 	switch record.ContentMode {
 	case schema.ContentNone:
 		return nil

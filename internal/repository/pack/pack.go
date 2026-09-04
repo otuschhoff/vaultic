@@ -110,7 +110,13 @@ func (p *Packer) Finalize() error {
 
 	if err := verifyHeader(p.k, encryptedHeader, p.blobs); err != nil {
 		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
-		return fmt.Errorf("Detected data corruption while writing pack-file header: %w\nCorrupted data is either caused by hardware issues or software bugs. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting.", err)
+		return fmt.Errorf(
+			("Detected data corruption while writing pack-file header: %w\nCorrupted data " +
+				"is either caused by hardware issues or software bugs. Please open an issue " +
+				"at https://github.com/otuschhoff/vaultic/issues/new/choose for further " +
+				"troubleshooting."),
+			err,
+		)
 	}
 
 	// append the header

@@ -64,7 +64,8 @@ func (store *SchemaStore) MarkExportFailed(ctx context.Context, snapshotID schem
 // export checkpoint in one serializable transaction.
 func (store *SchemaStore) PublishSnapshotScope(ctx context.Context, scope SnapshotScope) error {
 	root, err := schema.ParseKey(scope.RootKey)
-	if err != nil || root.Kind != schema.KeyDirectoryRevision || root.Revision == 0 || scope.SnapshotID == (schema.ID{}) {
+	if err != nil || root.Kind != schema.KeyDirectoryRevision || root.Revision == 0 ||
+		scope.SnapshotID == (schema.ID{}) {
 		return fmt.Errorf("invalid snapshot scope")
 	}
 	if scope.Crawl != nil && (scope.Crawl.RootFSID != root.FSID || scope.Crawl.RootInode != root.Inode) {
@@ -116,7 +117,13 @@ type snapshotPublishPlan struct {
 	noop                bool
 }
 
-func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope SnapshotScope, root schema.ParsedKey, identities, crawlIdentities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord) error {
+func (store *SchemaStore) publishSnapshotScopeOnce(
+	ctx context.Context,
+	scope SnapshotScope,
+	root schema.ParsedKey,
+	identities, crawlIdentities []schema.ParsedKey,
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+) error {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
@@ -142,12 +149,20 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 	return nil
 }
 
-func (store *SchemaStore) completeSnapshotPlan(ctx context.Context, transaction *Transaction, scope SnapshotScope, identities, crawlIdentities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, plan *snapshotPublishPlan) error {
+func (store *SchemaStore) completeSnapshotPlan(
+	ctx context.Context,
+	transaction *Transaction,
+	scope SnapshotScope,
+	identities, crawlIdentities []schema.ParsedKey,
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	plan *snapshotPublishPlan,
+) error {
 	crawlGenerations := map[identityKey]uint64{}
 	if scope.Crawl != nil {
 		for _, identity := range crawlIdentities {
 			generation := identity.Revision
-			if _, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode); found && prior.State == schema.AuthoritativeSourceLive {
+			if _, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode); found &&
+				prior.State == schema.AuthoritativeSourceLive {
 				generation = prior.Generation
 			}
 			crawlGenerations[identityKey{identity.FSID, identity.Inode}] = generation
@@ -159,12 +174,21 @@ func (store *SchemaStore) completeSnapshotPlan(ctx context.Context, transaction 
 	if scope.Crawl == nil {
 		return nil
 	}
-	crawlPuts, err := store.authoritativeCrawlMutations(ctx, transaction, *scope.Crawl, crawlIdentities, bindings, plan.next, plan.analyticsGeneration)
+	crawlPuts, err := store.authoritativeCrawlMutations(
+		ctx,
+		transaction,
+		*scope.Crawl,
+		crawlIdentities,
+		bindings,
+		plan.next,
+		plan.analyticsGeneration,
+	)
 	if err != nil {
 		return err
 	}
 	for _, mutation := range crawlPuts {
-		if parsed, parseErr := schema.ParseKey(mutation.Key); parseErr == nil && parsed.Kind == schema.KeyAnalyticsDelta {
+		if parsed, parseErr := schema.ParseKey(mutation.Key); parseErr == nil &&
+			parsed.Kind == schema.KeyAnalyticsDelta {
 			mutation.Key = schema.AnalyticsDeltaKey(plan.next, plan.deltaOrdinal)
 			plan.deltaOrdinal++
 		}
@@ -173,7 +197,13 @@ func (store *SchemaStore) completeSnapshotPlan(ctx context.Context, transaction 
 	return nil
 }
 
-func planSnapshotAnalytics(ctx context.Context, transaction *Transaction, identities []schema.ParsedKey, crawlGenerations map[identityKey]uint64, plan *snapshotPublishPlan) error {
+func planSnapshotAnalytics(
+	ctx context.Context,
+	transaction *Transaction,
+	identities []schema.ParsedKey,
+	crawlGenerations map[identityKey]uint64,
+	plan *snapshotPublishPlan,
+) error {
 	if metadataValue, found, getErr := transaction.Get(ctx, schema.AnalyticsMetadataKey()); getErr != nil {
 		return getErr
 	} else if found {
@@ -185,7 +215,15 @@ func planSnapshotAnalytics(ctx context.Context, transaction *Transaction, identi
 				if crawlGeneration := crawlGenerations[identityKey{identity.FSID, identity.Inode}]; crawlGeneration != 0 {
 					generation = crawlGeneration
 				}
-				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: plan.next, State: schema.AnalyticsUnknown, RetainedSnapshotRefs: 1, ReferenceOperation: schema.AnalyticsReferencesIncrement, ClassificationEpoch: metadata.Generation}
+				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences,
+					FSID:                 identity.FSID,
+					Inode:                identity.Inode,
+					IdentityGeneration:   generation,
+					Revision:             plan.next,
+					State:                schema.AnalyticsUnknown,
+					RetainedSnapshotRefs: 1,
+					ReferenceOperation:   schema.AnalyticsReferencesIncrement,
+					ClassificationEpoch:  metadata.Generation}
 				encoded, encodeErr := delta.MarshalBinary()
 				if encodeErr != nil {
 					return encodeErr
@@ -198,7 +236,12 @@ func planSnapshotAnalytics(ctx context.Context, transaction *Transaction, identi
 	return nil
 }
 
-func planSnapshotBase(ctx context.Context, transaction *Transaction, scope SnapshotScope, root schema.ParsedKey) (snapshotPublishPlan, error) {
+func planSnapshotBase(
+	ctx context.Context,
+	transaction *Transaction,
+	scope SnapshotScope,
+	root schema.ParsedKey,
+) (snapshotPublishPlan, error) {
 	if _, found, err := transaction.Get(ctx, scope.RootKey); err != nil {
 		return snapshotPublishPlan{}, err
 	} else if !found {
@@ -252,13 +295,22 @@ func loadNextSnapshotRevision(ctx context.Context, transaction *Transaction, key
 
 func encodeSnapshotPublication(scope SnapshotScope, root schema.ParsedKey, next uint64) ([4][]byte, error) {
 	var values [4][]byte
-	record := schema.SnapshotRecord{CommitSequence: next, RootFSID: root.FSID, RootInode: root.Inode, RootRevision: root.Revision, OriginalJSON: append([]byte(nil), scope.OriginalJSON...)}
+	record := schema.SnapshotRecord{
+		CommitSequence: next,
+		RootFSID:       root.FSID,
+		RootInode:      root.Inode,
+		RootRevision:   root.Revision,
+		OriginalJSON:   append([]byte(nil), scope.OriginalJSON...),
+	}
 	var err error
 	values[0], err = record.MarshalBinary()
 	if err != nil {
 		return values, err
 	}
-	values[1], err = (schema.SnapshotCommitRecord{SnapshotTimeUnixNano: snapshotTimeUnixNano(scope.OriginalJSON), RootKey: append([]byte(nil), scope.RootKey...)}).MarshalBinary()
+	values[1],
+		err = (schema.SnapshotCommitRecord{SnapshotTimeUnixNano: snapshotTimeUnixNano(scope.OriginalJSON),
+		RootKey: append([]byte(nil),
+			scope.RootKey...)}).MarshalBinary()
 	if err != nil {
 		return values, err
 	}
@@ -282,7 +334,10 @@ type authoritativeCrawlPlan struct {
 	analyticsOrdinal uint32
 }
 
-func (store *SchemaStore) authoritativeScopeBindings(ctx context.Context, claim *AuthoritativeCrawlClaim) (map[string]schema.AuthoritativeSourceBindingRecord, error) {
+func (store *SchemaStore) authoritativeScopeBindings(
+	ctx context.Context,
+	claim *AuthoritativeCrawlClaim,
+) (map[string]schema.AuthoritativeSourceBindingRecord, error) {
 	result := map[string]schema.AuthoritativeSourceBindingRecord{}
 	if claim == nil {
 		return result, nil
@@ -314,7 +369,14 @@ func (store *SchemaStore) authoritativeScopeBindings(ctx context.Context, claim 
 	}
 }
 
-func (store *SchemaStore) authoritativeCrawlMutations(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64) ([]Mutation, error) {
+func (store *SchemaStore) authoritativeCrawlMutations(
+	ctx context.Context,
+	transaction *Transaction,
+	claim AuthoritativeCrawlClaim,
+	identities []schema.ParsedKey,
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	commit, analyticsGeneration uint64,
+) ([]Mutation, error) {
 	plan, err := planAuthoritativeCrawlProof(ctx, transaction, claim, commit)
 	if err != nil {
 		return nil, err
@@ -328,7 +390,12 @@ func (store *SchemaStore) authoritativeCrawlMutations(ctx context.Context, trans
 	return plan.mutations, nil
 }
 
-func planAuthoritativeCrawlProof(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, commit uint64) (authoritativeCrawlPlan, error) {
+func planAuthoritativeCrawlProof(
+	ctx context.Context,
+	transaction *Transaction,
+	claim AuthoritativeCrawlClaim,
+	commit uint64,
+) (authoritativeCrawlPlan, error) {
 	debtFree := true
 	for _, key := range claim.DebtKeys {
 		parsed, err := schema.ParseKey(key)
@@ -347,7 +414,16 @@ func planAuthoritativeCrawlProof(ctx context.Context, transaction *Transaction, 
 			debtFree = debtFree && debt.Status == schema.DebtResolved
 		}
 	}
-	proof := schema.AuthoritativeCrawlProofRecord{ScopeID: claim.ScopeID, RootFSID: claim.RootFSID, RootInode: claim.RootInode, StartFence: claim.StartFence, EndCommit: commit, CompletedAt: time.Now().UnixNano(), Complete: claim.Complete, DebtFree: debtFree}
+	proof := schema.AuthoritativeCrawlProofRecord{
+		ScopeID:     claim.ScopeID,
+		RootFSID:    claim.RootFSID,
+		RootInode:   claim.RootInode,
+		StartFence:  claim.StartFence,
+		EndCommit:   commit,
+		CompletedAt: time.Now().UnixNano(),
+		Complete:    claim.Complete,
+		DebtFree:    debtFree,
+	}
 	proofValue, err := proof.MarshalBinary()
 	if err != nil {
 		return authoritativeCrawlPlan{}, err
@@ -358,7 +434,15 @@ func planAuthoritativeCrawlProof(ctx context.Context, transaction *Transaction, 
 	}, nil
 }
 
-func planObservedAuthoritativeIdentities(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64, plan *authoritativeCrawlPlan) error {
+func planObservedAuthoritativeIdentities(
+	ctx context.Context,
+	transaction *Transaction,
+	claim AuthoritativeCrawlClaim,
+	identities []schema.ParsedKey,
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	commit, analyticsGeneration uint64,
+	plan *authoritativeCrawlPlan,
+) error {
 	for _, identity := range identities {
 		if err := planObservedAuthoritativeIdentity(ctx, transaction, claim, identity, bindings, commit, analyticsGeneration, plan); err != nil {
 			return err
@@ -367,7 +451,15 @@ func planObservedAuthoritativeIdentities(ctx context.Context, transaction *Trans
 	return nil
 }
 
-func planObservedAuthoritativeIdentity(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identity schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64, plan *authoritativeCrawlPlan) error {
+func planObservedAuthoritativeIdentity(
+	ctx context.Context,
+	transaction *Transaction,
+	claim AuthoritativeCrawlClaim,
+	identity schema.ParsedKey,
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	commit, analyticsGeneration uint64,
+	plan *authoritativeCrawlPlan,
+) error {
 	priorKey, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode)
 	if found {
 		value, exists, err := transaction.Get(ctx, priorKey)
@@ -385,7 +477,13 @@ func planObservedAuthoritativeIdentity(ctx context.Context, transaction *Transac
 	stateChanged := !found || prior.State != schema.AuthoritativeSourceLive
 	key := schema.AuthoritativeSourceBindingKey(claim.ScopeID, identity.FSID, identity.Inode, generation)
 	plan.observed[string(key)] = identity
-	binding := schema.AuthoritativeSourceBindingRecord{Generation: generation, Revision: identity.Revision, State: schema.AuthoritativeSourceLive, Continuity: continuity, LastObservedCommit: commit}
+	binding := schema.AuthoritativeSourceBindingRecord{
+		Generation:         generation,
+		Revision:           identity.Revision,
+		State:              schema.AuthoritativeSourceLive,
+		Continuity:         continuity,
+		LastObservedCommit: commit,
+	}
 	encoded, err := binding.MarshalBinary()
 	if err != nil {
 		return err
@@ -399,12 +497,19 @@ func planObservedAuthoritativeIdentity(ctx context.Context, transaction *Transac
 	if err != nil {
 		return err
 	}
-	plan.mutations = append(plan.mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, plan.analyticsOrdinal), Value: value})
+	plan.mutations = append(
+		plan.mutations,
+		Mutation{Key: schema.AnalyticsDeltaKey(commit, plan.analyticsOrdinal), Value: value},
+	)
 	plan.analyticsOrdinal++
 	return nil
 }
 
-func observedIdentityGeneration(identity schema.ParsedKey, prior schema.AuthoritativeSourceBindingRecord, found bool) (uint64, schema.AnalyticsIdentityContinuity, bool) {
+func observedIdentityGeneration(
+	identity schema.ParsedKey,
+	prior schema.AuthoritativeSourceBindingRecord,
+	found bool,
+) (uint64, schema.AnalyticsIdentityContinuity, bool) {
 	if found && prior.State == schema.AuthoritativeSourceLive {
 		return prior.Generation, prior.Continuity, false
 	}
@@ -414,14 +519,47 @@ func observedIdentityGeneration(identity schema.ParsedKey, prior schema.Authorit
 	return identity.Revision, schema.AnalyticsContinuityUnknown, true
 }
 
-func observedIdentityDelta(identity schema.ParsedKey, generation uint64, continuity schema.AnalyticsIdentityContinuity, analyticsGeneration uint64, newGeneration bool) schema.AnalyticsDeltaRecord {
+func observedIdentityDelta(
+	identity schema.ParsedKey,
+	generation uint64,
+	continuity schema.AnalyticsIdentityContinuity,
+	analyticsGeneration uint64,
+	newGeneration bool,
+) schema.AnalyticsDeltaRecord {
 	if newGeneration {
-		return schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, CreatedAt: time.Now().UnixNano(), CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
+		return schema.AnalyticsDeltaRecord{
+			Kind:                schema.AnalyticsDeltaCreation,
+			FSID:                identity.FSID,
+			Inode:               identity.Inode,
+			IdentityGeneration:  generation,
+			Revision:            identity.Revision,
+			CreatedAt:           time.Now().UnixNano(),
+			CreationBasis:       schema.AnalyticsFirstSeen,
+			IdentityContinuity:  continuity,
+			State:               schema.AnalyticsLive,
+			ClassificationEpoch: analyticsGeneration,
+		}
 	}
-	return schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
+	return schema.AnalyticsDeltaRecord{
+		Kind:                schema.AnalyticsDeltaSourceState,
+		FSID:                identity.FSID,
+		Inode:               identity.Inode,
+		IdentityGeneration:  generation,
+		Revision:            identity.Revision,
+		IdentityContinuity:  continuity,
+		State:               schema.AnalyticsLive,
+		ClassificationEpoch: analyticsGeneration,
+	}
 }
 
-func planMissingAuthoritativeIdentities(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64, plan *authoritativeCrawlPlan) error {
+func planMissingAuthoritativeIdentities(
+	ctx context.Context,
+	transaction *Transaction,
+	claim AuthoritativeCrawlClaim,
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	commit, analyticsGeneration uint64,
+	plan *authoritativeCrawlPlan,
+) error {
 	for keyString, prior := range bindings {
 		if _, found := plan.observed[keyString]; found || prior.State == schema.AuthoritativeSourceDeleted {
 			continue
@@ -454,12 +592,24 @@ func planMissingAuthoritativeIdentities(ctx context.Context, transaction *Transa
 		plan.mutations = append(plan.mutations, Mutation{Key: key, Value: encoded})
 		if analyticsGeneration != 0 {
 			parsed, _ := schema.ParseKey(key)
-			delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: parsed.FSID, Inode: parsed.Inode, IdentityGeneration: prior.Generation, Revision: prior.Revision, IdentityContinuity: prior.Continuity, State: analyticsState, ClassificationEpoch: analyticsGeneration}
+			delta := schema.AnalyticsDeltaRecord{
+				Kind:                schema.AnalyticsDeltaSourceState,
+				FSID:                parsed.FSID,
+				Inode:               parsed.Inode,
+				IdentityGeneration:  prior.Generation,
+				Revision:            prior.Revision,
+				IdentityContinuity:  prior.Continuity,
+				State:               analyticsState,
+				ClassificationEpoch: analyticsGeneration,
+			}
 			value, err := delta.MarshalBinary()
 			if err != nil {
 				return err
 			}
-			plan.mutations = append(plan.mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, plan.analyticsOrdinal), Value: value})
+			plan.mutations = append(
+				plan.mutations,
+				Mutation{Key: schema.AnalyticsDeltaKey(commit, plan.analyticsOrdinal), Value: value},
+			)
 			plan.analyticsOrdinal++
 		}
 	}
@@ -483,7 +633,11 @@ func hasUnknownGeneration(bindings map[string]schema.AuthoritativeSourceBindingR
 	return false
 }
 
-func currentSourceBinding(bindings map[string]schema.AuthoritativeSourceBindingRecord, fsid uint32, inode uint64) ([]byte, schema.AuthoritativeSourceBindingRecord, bool) {
+func currentSourceBinding(
+	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	fsid uint32,
+	inode uint64,
+) ([]byte, schema.AuthoritativeSourceBindingRecord, bool) {
 	var selectedKey []byte
 	var selected schema.AuthoritativeSourceBindingRecord
 	for keyString, record := range bindings {
@@ -491,7 +645,9 @@ func currentSourceBinding(bindings map[string]schema.AuthoritativeSourceBindingR
 		if err != nil || parsed.FSID != fsid || parsed.Inode != inode {
 			continue
 		}
-		if selectedKey == nil || sourceBindingPriority(record.State) > sourceBindingPriority(selected.State) || sourceBindingPriority(record.State) == sourceBindingPriority(selected.State) && record.LastObservedCommit > selected.LastObservedCommit {
+		if selectedKey == nil || sourceBindingPriority(record.State) > sourceBindingPriority(selected.State) ||
+			sourceBindingPriority(record.State) == sourceBindingPriority(selected.State) &&
+				record.LastObservedCommit > selected.LastObservedCommit {
 			selectedKey, selected = []byte(keyString), record
 		}
 	}
@@ -547,7 +703,12 @@ func (store *SchemaStore) ForgetSnapshot(ctx context.Context, snapshotID schema.
 	return fmt.Errorf("forget snapshot: transaction conflict retry limit exceeded")
 }
 
-func (store *SchemaStore) forgetSnapshotOnce(ctx context.Context, snapshotID schema.ID, record schema.SnapshotRecord, identities []schema.ParsedKey) error {
+func (store *SchemaStore) forgetSnapshotOnce(
+	ctx context.Context,
+	snapshotID schema.ID,
+	record schema.SnapshotRecord,
+	identities []schema.ParsedKey,
+) error {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
@@ -581,7 +742,14 @@ func (store *SchemaStore) forgetSnapshotOnce(ctx context.Context, snapshotID sch
 		metadata, decodeErr := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
 		if decodeErr == nil && metadata.Enabled {
 			for ordinal, identity := range identities {
-				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: identity.Revision, Revision: next, State: schema.AnalyticsUnknown, ReferenceOperation: schema.AnalyticsReferencesDecrement, ClassificationEpoch: metadata.Generation}
+				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences,
+					FSID:                identity.FSID,
+					Inode:               identity.Inode,
+					IdentityGeneration:  identity.Revision,
+					Revision:            next,
+					State:               schema.AnalyticsUnknown,
+					ReferenceOperation:  schema.AnalyticsReferencesDecrement,
+					ClassificationEpoch: metadata.Generation}
 				encoded, encodeErr := delta.MarshalBinary()
 				if encodeErr != nil {
 					return fail(encodeErr)
@@ -617,7 +785,10 @@ func (store *SchemaStore) snapshotIdentities(ctx context.Context, rootKey []byte
 			if err != nil || parsed.Kind != schema.KeyAuthoritativeSourceBinding {
 				return nil, fmt.Errorf("invalid authoritative source binding key %x", entry.Key)
 			}
-			generations[identityKey{parsed.FSID, parsed.Inode}] = append(generations[identityKey{parsed.FSID, parsed.Inode}], parsed.Generation)
+			generations[identityKey{parsed.FSID, parsed.Inode}] = append(
+				generations[identityKey{parsed.FSID, parsed.Inode}],
+				parsed.Generation,
+			)
 		}
 		if done {
 			break
@@ -635,9 +806,17 @@ func (store *SchemaStore) snapshotIdentities(ctx context.Context, rootKey []byte
 			}
 		}
 		if generation == 0 {
-			items, _, err := store.ScanPrefix(ctx, schema.InodeRevisionPrefix(identities[index].FSID, identities[index].Inode), nil, 1)
+			items, _, err := store.ScanPrefix(
+				ctx,
+				schema.InodeRevisionPrefix(identities[index].FSID, identities[index].Inode),
+				nil,
+				1,
+			)
 			if err != nil || len(items) == 0 {
-				return nil, errors.Join(err, fmt.Errorf("snapshot inode %d:%d has no revision", identities[index].FSID, identities[index].Inode))
+				return nil, errors.Join(
+					err,
+					fmt.Errorf("snapshot inode %d:%d has no revision", identities[index].FSID, identities[index].Inode),
+				)
 			}
 			parsed, err := schema.ParseKey(items[0].Key)
 			if err != nil {
@@ -654,7 +833,11 @@ func (store *SchemaStore) snapshotObservedIdentities(ctx context.Context, rootKe
 	return store.snapshotIdentityRevisions(ctx, rootKey, false)
 }
 
-func (store *SchemaStore) snapshotIdentityRevisions(ctx context.Context, rootKey []byte, oldest bool) ([]schema.ParsedKey, error) {
+func (store *SchemaStore) snapshotIdentityRevisions(
+	ctx context.Context,
+	rootKey []byte,
+	oldest bool,
+) ([]schema.ParsedKey, error) {
 	seenDirectories := map[string]struct{}{}
 	identities := map[string]schema.ParsedKey{}
 	var visit func([]byte) error
@@ -689,7 +872,10 @@ func (store *SchemaStore) snapshotIdentityRevisions(ctx context.Context, rootKey
 			if oldest {
 				items, _, err := store.ScanPrefix(ctx, schema.InodeRevisionPrefix(parsed.FSID, parsed.Inode), nil, 1)
 				if err != nil || len(items) == 0 {
-					return errors.Join(err, fmt.Errorf("snapshot inode %d:%d has no revision", parsed.FSID, parsed.Inode))
+					return errors.Join(
+						err,
+						fmt.Errorf("snapshot inode %d:%d has no revision", parsed.FSID, parsed.Inode),
+					)
 				}
 				generation, err = schema.ParseKey(items[0].Key)
 				if err != nil {
@@ -795,7 +981,12 @@ func (store *SchemaStore) CreateContentManifest(ctx context.Context, ids []schem
 
 // PublishContentManifest atomically creates canonical immutable segments and
 // applies their mutable reverse-reference updates.
-func (store *SchemaStore) PublishContentManifest(ctx context.Context, ids []schema.ID, relatedPuts []Mutation, relatedDeletes [][]byte) (schema.ID, error) {
+func (store *SchemaStore) PublishContentManifest(
+	ctx context.Context,
+	ids []schema.ID,
+	relatedPuts []Mutation,
+	relatedDeletes [][]byte,
+) (schema.ID, error) {
 	if err := validateRelatedMutations(relatedPuts, relatedDeletes); err != nil {
 		return schema.ID{}, err
 	}
@@ -836,7 +1027,9 @@ func (store *SchemaStore) PublishContentManifest(ctx context.Context, ids []sche
 			if found[offset] {
 				if !bytes.Equal(values[offset].Value, encoded[index]) {
 					rollbackTransaction(ctx, transaction)
-					return schema.ID{}, fmt.Errorf("immutable content manifest segment already exists with different data")
+					return schema.ID{}, fmt.Errorf(
+						"immutable content manifest segment already exists with different data",
+					)
 				}
 				continue
 			}
@@ -889,13 +1082,23 @@ func manifestBatchEnd(limits Limits, keys, values [][]byte, start int) (int, err
 
 // PublishRevision atomically creates an immutable revision and advances its
 // current pointer. A retry with identical revision bytes is idempotent.
-func (store *SchemaStore) PublishRevision(ctx context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64) error {
+func (store *SchemaStore) PublishRevision(
+	ctx context.Context,
+	currentKey, revisionKey, revisionValue []byte,
+	revision uint64,
+) error {
 	return store.PublishRevisionBatch(ctx, currentKey, revisionKey, revisionValue, revision, nil, nil)
 }
 
 // PublishRevisionBatch atomically creates an immutable revision, advances its
 // current pointer, and applies corresponding mutable reverse-reference data.
-func (store *SchemaStore) PublishRevisionBatch(ctx context.Context, currentKey, revisionKey, revisionValue []byte, revision uint64, relatedPuts []Mutation, relatedDeletes [][]byte) error {
+func (store *SchemaStore) PublishRevisionBatch(
+	ctx context.Context,
+	currentKey, revisionKey, revisionValue []byte,
+	revision uint64,
+	relatedPuts []Mutation,
+	relatedDeletes [][]byte,
+) error {
 	if err := validateRelatedMutations(relatedPuts, relatedDeletes); err != nil {
 		return err
 	}

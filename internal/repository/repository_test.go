@@ -408,7 +408,11 @@ func benchmarkLoadUnpacked(b *testing.B, version uint) {
 var repoFixture = filepath.Join("testdata", "test-repo.tar.gz")
 
 func TestRepositoryLoadIndex(t *testing.T) {
-	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(
+		t,
+		vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"),
+		`{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`,
+	)
 	repo, _ := repository.TestFromFixture(t, repoFixture)
 
 	rtest.OK(t, repo.LoadIndex(context.TODO(), vaultic.NoopTerminalCounterFactory))
@@ -462,7 +466,11 @@ func (be *damageOnceBackend) Load(ctx context.Context, h backend.Handle, length 
 }
 
 func TestRepositoryLoadUnpackedRetryBroken(t *testing.T) {
-	repository.TestInjectKey(t, vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"), `{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`)
+	repository.TestInjectKey(
+		t,
+		vaultic.TestParseID("7bb3065bfb17da7430dc4dde4741d6db3dd83fdb0829500cf105755e067f879a"),
+		`{"mac":{"k":"W1Y8bmQNJg6TAmuDt7lbpQ==","r":"r43DBmAdmwtQneoBTGAABQ=="},"encrypt":"JuZGBs6joRiLzqkyMWhmbZMLHe8+5oH6MDE5I6M8R/I="}`,
+	)
 	repodir := rtest.Env(t, repoFixture)
 
 	be, err := local.Open(context.TODO(), local.Config{Path: repodir, Connections: 2}, t.Logf)
@@ -556,7 +564,10 @@ func TestListPack(t *testing.T) {
 
 	// Forcibly cache pack file
 	packID := repo.LookupBlob(vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id})[0].PackID()
-	rtest.OK(t, be.Load(context.TODO(), backend.Handle{Type: backend.PackFile, IsMetadata: true, Name: packID.String()}, 0, 0, func(rd io.Reader) error { return nil }))
+	rtest.OK(
+		t,
+		be.Load(context.TODO(), backend.Handle{Type: backend.PackFile, IsMetadata: true, Name: packID.String()}, 0, 0, func(rd io.Reader) error { return nil }),
+	)
 
 	// Get size to list pack
 	var size int64
@@ -571,7 +582,11 @@ func TestListPack(t *testing.T) {
 	rtest.OK(t, err)
 	rtest.Assert(t, len(handles) == 1 && handles[0].ID == id, "unexpected blobs in pack: %v", handles)
 
-	rtest.Assert(t, !c.Has(backend.Handle{Type: backend.PackFile, Name: packID.String()}), "tree pack should no longer be cached as listPack does not set IsMetadata in the backend.Handle")
+	rtest.Assert(
+		t,
+		!c.Has(backend.Handle{Type: backend.PackFile, Name: packID.String()}),
+		"tree pack should no longer be cached as listPack does not set IsMetadata in the backend.Handle",
+	)
 }
 
 func TestNoDoubleInit(t *testing.T) {

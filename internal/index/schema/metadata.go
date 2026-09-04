@@ -87,7 +87,12 @@ type ReferenceCountRecord struct {
 
 func (record ReferenceCountRecord) MarshalBinary() ([]byte, error) {
 	e := newEncoder()
-	for _, value := range []uint64{record.TotalReferences, record.DistinctInodes, record.DistinctRevisions, record.DistinctManifests, record.ReachableSnapshots, record.UpdateSequence} {
+	for _, value := range []uint64{record.TotalReferences,
+		record.DistinctInodes,
+		record.DistinctRevisions,
+		record.DistinctManifests,
+		record.ReachableSnapshots,
+		record.UpdateSequence} {
 		e.u64(value)
 	}
 	return e.finish()
@@ -162,7 +167,12 @@ func UnmarshalGarbageCollectionRecord(data []byte) (GarbageCollectionRecord, err
 	if GCState(state) < GCCandidate || GCState(state) > GCRejected {
 		return GarbageCollectionRecord{}, fmt.Errorf("%w: invalid garbage-collection state", ErrMalformed)
 	}
-	return GarbageCollectionRecord{State: GCState(state), ObservedCommit: observed, DiscoveredUnixNano: discovered, RevalidatedCommit: revalidated}, d.done()
+	return GarbageCollectionRecord{
+		State:              GCState(state),
+		ObservedCommit:     observed,
+		DiscoveredUnixNano: discovered,
+		RevalidatedCommit:  revalidated,
+	}, d.done()
 }
 
 type DebtReason byte
@@ -195,7 +205,8 @@ type CrawlDebtRecord struct {
 }
 
 func (record CrawlDebtRecord) MarshalBinary() ([]byte, error) {
-	if record.Reason < DebtMissingInode || record.Reason > DebtUnavailablePack || record.Status < DebtPending || record.Status > DebtFailed {
+	if record.Reason < DebtMissingInode || record.Reason > DebtUnavailablePack || record.Status < DebtPending ||
+		record.Status > DebtFailed {
 		return nil, fmt.Errorf("%w: invalid crawl-debt state", ErrMalformed)
 	}
 	e := newEncoder()
@@ -247,7 +258,8 @@ func UnmarshalCrawlDebtRecord(data []byte) (CrawlDebtRecord, error) {
 	if record.ErrorClass, err = d.string(); err != nil {
 		return record, err
 	}
-	if record.Reason < DebtMissingInode || record.Reason > DebtUnavailablePack || record.Status < DebtPending || record.Status > DebtFailed {
+	if record.Reason < DebtMissingInode || record.Reason > DebtUnavailablePack || record.Status < DebtPending ||
+		record.Status > DebtFailed {
 		return CrawlDebtRecord{}, fmt.Errorf("%w: invalid crawl-debt state", ErrMalformed)
 	}
 	return record, d.done()
@@ -475,7 +487,8 @@ func UnmarshalExportIndexCheckpointRecord(data []byte) (ExportIndexCheckpointRec
 		if record.PackIDs[index], err = d.id(); err != nil {
 			return record, err
 		}
-		if record.PackIDs[index] == (ID{}) || (index > 0 && bytes.Compare(record.PackIDs[index-1][:], record.PackIDs[index][:]) >= 0) {
+		if record.PackIDs[index] == (ID{}) ||
+			(index > 0 && bytes.Compare(record.PackIDs[index-1][:], record.PackIDs[index][:]) >= 0) {
 			return record, fmt.Errorf("%w: export pack IDs are not uniquely sorted", ErrMalformed)
 		}
 	}

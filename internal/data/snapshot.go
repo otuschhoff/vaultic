@@ -114,7 +114,13 @@ func SaveSnapshot(ctx context.Context, repo vaultic.SaverUnpacked[vaultic.Writea
 // If the called function returns an error, this function is cancelled and
 // also returns this error.
 // If a snapshot ID is in excludeIDs, it will be ignored.
-func ForAllSnapshots(ctx context.Context, be vaultic.Lister, loader vaultic.LoaderUnpacked, excludeIDs vaultic.IDSet, fn func(vaultic.ID, *Snapshot, error) error) error {
+func ForAllSnapshots(
+	ctx context.Context,
+	be vaultic.Lister,
+	loader vaultic.LoaderUnpacked,
+	excludeIDs vaultic.IDSet,
+	fn func(vaultic.ID, *Snapshot, error) error,
+) error {
 	var m sync.Mutex
 
 	// For most snapshots decoding is nearly for free, thus just assume were only limited by IO

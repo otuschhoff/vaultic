@@ -77,7 +77,15 @@ func importSnapshots(ctx context.Context, source SnapshotSource, store TreeStore
 			return recordFinding(result, options, snapshotID, "snapshot-root", fmt.Errorf("snapshot has no root tree"))
 		}
 		beforeTrees, beforeNodes, beforeDebts := result.TreesVisited, result.NodesImported, result.CrawlDebtCreated
-		importer := treeImporter{ctx: ctx, source: source, store: store, options: options, result: result, snapshot: snapshotID, ancestors: make(map[vaultic.ID]struct{})}
+		importer := treeImporter{
+			ctx:       ctx,
+			source:    source,
+			store:     store,
+			options:   options,
+			result:    result,
+			snapshot:  snapshotID,
+			ancestors: make(map[vaultic.ID]struct{}),
+		}
 		_, _, err := importer.importTree(*snapshot.Tree, nil, "", 0)
 		if err != nil {
 			return err

@@ -62,7 +62,14 @@ func (f *failSaveSaver) SaveBlob(ctx context.Context, t vaultic.BlobType, buf []
 	return f.saver.SaveBlob(ctx, t, buf, id, storeDuplicate)
 }
 
-func (f *failSaveSaver) SaveBlobAsync(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, size int, err error)) {
+func (f *failSaveSaver) SaveBlobAsync(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+	cb func(newID vaultic.ID, known bool, size int, err error),
+) {
 	// limit concurrency to make test reliable
 	f.semaphore <- struct{}{}
 

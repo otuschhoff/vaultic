@@ -23,14 +23,12 @@ import (
 
 func newPruneCommand(globalOptions *global.Options) *cobra.Command {
 	var opts PruneOptions
-
 	cmd := &cobra.Command{
 		Use:   "prune [flags]",
 		Short: "Remove unneeded data from the repository",
 		Long: `
 The "prune" command checks the repository and removes data that is not
 referenced and therefore not needed any more.
-
 EXIT STATUS
 ===========
 
@@ -46,7 +44,6 @@ Exit status is 12 if the password is incorrect.
 			return runPrune(cmd.Context(), opts, *globalOptions, globalOptions.Term)
 		},
 	}
-
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
@@ -89,25 +86,70 @@ type PruneOptions struct {
 func (opts *PruneOptions) AddFlags(f *pflag.FlagSet) {
 	opts.AddLimitedFlags(f)
 	f.BoolVarP(&opts.DryRun, "dry-run", "n", false, "do not modify the repository, just print what would be done")
-	f.StringVarP(&opts.UnsafeNoSpaceRecovery, "unsafe-recover-no-free-space", "", "", "UNSAFE, READ THE DOCUMENTATION BEFORE USING! Try to recover a repository stuck with no free space. Do not use without trying out 'prune --max-repack-size 0' first.")
+	f.StringVarP(
+		&opts.UnsafeNoSpaceRecovery,
+		"unsafe-recover-no-free-space",
+		"",
+		"",
+		("UNSAFE, READ THE DOCUMENTATION BEFORE USING! Try to recover a repository " +
+			"stuck with no free space. Do not use without trying out 'prune " +
+			"--max-repack-size 0' first."),
+	)
 }
 
 func (opts *PruneOptions) AddLimitedFlags(f *pflag.FlagSet) {
 	var unused bool
-	f.StringVar(&opts.MaxUnused, "max-unused", "5%", "tolerate given `limit` of unused data (absolute value in bytes with suffixes k/K, m/M, g/G, t/T, a value in % or the word 'unlimited')")
-	f.StringVar(&opts.MaxRepackSize, "max-repack-size", "", "stop after repacking this much data in total (allowed suffixes for `size`: k/K, m/M, g/G, t/T)")
-	f.StringVar(&opts.MaxRepack, "max-repack", "", "stop after repacking this much data: a `size` (k/m/g/t), a percentage of the repo size (e.g. '10%') or 'unlimited'")
+	f.StringVar(
+		&opts.MaxUnused,
+		"max-unused",
+		"5%",
+		"tolerate given `limit` of unused data (absolute value in bytes with suffixes k/K, m/M, g/G, t/T, a value in % or the word 'unlimited')",
+	)
+	f.StringVar(
+		&opts.MaxRepackSize,
+		"max-repack-size",
+		"",
+		"stop after repacking this much data in total (allowed suffixes for `size`: k/K, m/M, g/G, t/T)",
+	)
+	f.StringVar(
+		&opts.MaxRepack,
+		"max-repack",
+		"",
+		"stop after repacking this much data: a `size` (k/m/g/t), a percentage of the repo size (e.g. '10%') or 'unlimited'",
+	)
 	f.BoolVar(&opts.RepackCacheableOnly, "repack-cacheable-only", false, "only repack packs which are cacheable")
 	f.BoolVar(&unused, "repack-small", false, "deprecated. Use --repack-smaller-than to specify a minimum size")
 	f.BoolVar(&opts.RepackUncompressed, "repack-uncompressed", false, "repack all uncompressed data")
 	f.BoolVar(&opts.RepackAll, "repack-all", false, "repack all packs (e.g. to change pack size or compression)")
-	f.BoolVar(&opts.FastRepack, "fast-repack", false, "skip re-reading pack contents, trust the index (faster, needs an intact index)")
-	f.BoolVar(&opts.EarlyDeleteIndex, "early-delete-index", false, "remove old index files before deleting packs (helps when the repository is out of free space)")
-	f.BoolVar(&opts.KeepDelete, "keep-delete", false, "two-phase prune: only repack and write the new index now; defer deleting superseded packs/indexes to a later prune (requires the two-phase-prune feature)")
-	f.BoolVar(&opts.InstantDelete, "instant-delete", true, "delete superseded packs/indexes in the same prune run (current behavior; the default)")
+	f.BoolVar(
+		&opts.FastRepack,
+		"fast-repack",
+		false,
+		"skip re-reading pack contents, trust the index (faster, needs an intact index)",
+	)
+	f.BoolVar(
+		&opts.EarlyDeleteIndex,
+		"early-delete-index",
+		false,
+		"remove old index files before deleting packs (helps when the repository is out of free space)",
+	)
+	f.BoolVar(
+		&opts.KeepDelete,
+		"keep-delete",
+		false,
+		"repack and write the new index now; defer deleting superseded data (requires two-phase-prune)",
+	)
+	f.BoolVar(
+		&opts.InstantDelete,
+		"instant-delete",
+		true,
+		"delete superseded packs/indexes in the same prune run (current behavior; the default)",
+	)
 	f.StringVar(&opts.SmallPackSize, "repack-smaller-than", "", "pack `below-limit` packfiles (allowed suffixes: m/M)")
-
-	err := f.MarkDeprecated("repack-small", "small files are automatically repacked. Use --repack-smaller-than to specify a minimum size")
+	err := f.MarkDeprecated(
+		"repack-small",
+		"small files are automatically repacked. Use --repack-smaller-than to specify a minimum size",
+	)
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
 		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
@@ -141,14 +183,12 @@ func verifyPruneOptions(opts *PruneOptions) error {
 	if maxUnused == "" {
 		return errors.Fatalf("invalid value for --max-unused: %q", opts.MaxUnused)
 	}
-
 	// parse MaxUnused either as unlimited, a percentage, or an absolute number of bytes
 	switch {
 	case maxUnused == "unlimited":
 		opts.maxUnusedBytes = func(_ uint64) uint64 {
 			return math.MaxUint64
 		}
-
 	case strings.HasSuffix(maxUnused, "%"):
 		maxUnused = strings.TrimSuffix(maxUnused, "%")
 		p, err := strconv.ParseFloat(maxUnused, 64)
@@ -159,11 +199,9 @@ func verifyPruneOptions(opts *PruneOptions) error {
 		if p < 0 {
 			return errors.Fatal("percentage for --max-unused must be positive")
 		}
-
 		if p >= 100 {
 			return errors.Fatal("percentage for --max-unused must be below 100%")
 		}
-
 		opts.maxUnusedBytes = func(used uint64) uint64 {
 			return uint64(p / (100 - p) * float64(used))
 		}
@@ -173,12 +211,10 @@ func verifyPruneOptions(opts *PruneOptions) error {
 		if err != nil {
 			return errors.Fatalf("invalid number of bytes %q for --max-unused: %v", opts.MaxUnused, err)
 		}
-
 		opts.maxUnusedBytes = func(_ uint64) uint64 {
 			return uint64(size)
 		}
 	}
-
 	if opts.SmallPackSize != "" {
 		size, err := ui.ParseBytes(opts.SmallPackSize)
 		if err != nil {
@@ -191,7 +227,9 @@ func verifyPruneOptions(opts *PruneOptions) error {
 
 	if opts.KeepDelete {
 		if !feature.Flag.Enabled(feature.TwoPhasePrune) {
-			return errors.Fatalf("--keep-delete requires the two-phase-prune feature (set VAULTIC_FEATURES=two-phase-prune=true)")
+			return errors.Fatalf(
+				"--keep-delete requires the two-phase-prune feature (set VAULTIC_FEATURES=two-phase-prune=true)",
+			)
 		}
 		if opts.EarlyDeleteIndex {
 			return errors.Fatalf("--keep-delete and --early-delete-index are mutually exclusive")
@@ -200,7 +238,6 @@ func verifyPruneOptions(opts *PruneOptions) error {
 			return errors.Fatalf("--keep-delete and --unsafe-recover-no-free-space are mutually exclusive")
 		}
 	}
-
 	return nil
 }
 
@@ -233,7 +270,6 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	if err != nil {
 		return err
 	}
-
 	if opts.RepackUncompressed && gopts.Compression == repository.CompressionOff {
 		return errors.Fatal("disabled compression and `--repack-uncompressed` are mutually exclusive")
 	}
@@ -241,7 +277,6 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	if gopts.NoLock && !opts.DryRun {
 		return errors.Fatal("--no-lock is only applicable in combination with --dry-run for prune command")
 	}
-
 	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
 
 	// Unsafe recovery, dry-run, and early-index deletion retain the established
@@ -262,7 +297,6 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 		}
 		return runPruneWithRepo(ctx, opts, gopts, repo, vaultic.NewIDSet(), printer)
 	}
-
 	// Claim phase A under a short exclusive lock. The pending durable marker
 	// prevents another prune from starting its own shared phase A while ordinary
 	// append writers may proceed after this lock is released.
@@ -278,7 +312,9 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	if repo.Config().PrunePlan != nil {
 		if opts.KeepDelete {
 			unlock()
-			return errors.Fatal("repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first")
+			return errors.Fatal(
+				"repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first",
+			)
 		}
 		err := repo.FinalizePrunePlan(ctx, printer)
 		unlock()
@@ -289,7 +325,6 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	if err != nil {
 		return err
 	}
-
 	// Phase A is additive: plan, repack, upload replacement packs/indexes, and
 	// atomically promote the claimed marker under a shared append lock.
 	ctx, repo, unlock, err = openWithLockPolicy(baseCtx, gopts, LockShared, lockOpenOptions{}, printer)
@@ -332,24 +367,31 @@ func finalizePrunePhaseB(ctx context.Context, gopts global.Options, printer vaul
 	return repo.FinalizePrunePlan(ctx, printer)
 }
 
-func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots vaultic.IDSet, printer vaultic.Printer) error {
+func runPruneWithRepo(
+	ctx context.Context,
+	opts PruneOptions,
+	gopts global.Options,
+	repo *repository.Repository,
+	ignoreSnapshots vaultic.IDSet,
+	printer vaultic.Printer,
+) error {
 	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
 		return err
 	}
 	if repo.Cache() == nil && !gopts.JSON {
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}
-
 	if repo.Config().PrunePlan != nil {
 		if opts.KeepDelete {
-			return errors.Fatal("repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first")
+			return errors.Fatal(
+				"repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first",
+			)
 		}
 		// Deferred cleanup is intentionally a standalone invocation: it gets
 		// one fresh index observation for revalidation, then deletes only the
 		// marker's exact candidates. A later prune can create a new plan.
 		return repo.FinalizePrunePlan(ctx, printer)
 	}
-
 	// Loading the index before snapshots is safe under this exclusive lock.
 	err := repo.LoadIndex(ctx, printer)
 	if err != nil {
@@ -357,13 +399,11 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 	}
 
 	popts := repository.PruneOptions{
-		DryRun:         opts.DryRun,
-		UnsafeRecovery: opts.unsafeRecovery,
-
-		MaxUnusedBytes: opts.maxUnusedBytes,
-		MaxRepackBytes: opts.MaxRepackBytes,
-		SmallPackBytes: opts.SmallPackBytes,
-
+		DryRun:              opts.DryRun,
+		UnsafeRecovery:      opts.unsafeRecovery,
+		MaxUnusedBytes:      opts.maxUnusedBytes,
+		MaxRepackBytes:      opts.MaxRepackBytes,
+		SmallPackBytes:      opts.SmallPackBytes,
 		RepackCacheableOnly: opts.RepackCacheableOnly,
 		RepackUncompressed:  opts.RepackUncompressed,
 		RepackAll:           opts.RepackAll,
@@ -373,20 +413,24 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 		KeepDelete:          opts.KeepDelete,
 	}
 
-	plan, err := repository.PlanPrune(ctx, popts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
-		return getUsedBlobs(ctx, repo, usedBlobs, ignoreSnapshots, printer)
-	}, printer)
+	plan, err := repository.PlanPrune(
+		ctx,
+		popts,
+		repo,
+		func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
+			return getUsedBlobs(ctx, repo, usedBlobs, ignoreSnapshots, printer)
+		},
+		printer,
+	)
 	if err != nil {
 		return err
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-
 	if popts.DryRun {
 		printer.P("\nWould have made the following changes:")
 	}
-
 	if !gopts.JSON {
 		err = printPruneStats(printer, plan.Stats())
 		if err != nil {
@@ -398,14 +442,21 @@ func runPruneWithRepo(ctx context.Context, opts PruneOptions, gopts global.Optio
 
 	// Trigger GC to reset garbage collection threshold
 	runtime.GC()
-
 	return plan.Execute(ctx, printer)
 }
 
 // runPrunePhaseAWithRepo runs the additive phase of a minimal-lock prune. It
 // is separate from runPruneWithRepo because forget --prune already owns an
 // exclusive lock and intentionally retains the classic single-window flow.
-func runPrunePhaseAWithRepo(ctx context.Context, opts PruneOptions, gopts global.Options, repo *repository.Repository, ignoreSnapshots vaultic.IDSet, markerID string, printer vaultic.Printer) error {
+func runPrunePhaseAWithRepo(
+	ctx context.Context,
+	opts PruneOptions,
+	gopts global.Options,
+	repo *repository.Repository,
+	ignoreSnapshots vaultic.IDSet,
+	markerID string,
+	printer vaultic.Printer,
+) error {
 	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
 		return err
 	}
@@ -415,7 +466,6 @@ func runPrunePhaseAWithRepo(ctx context.Context, opts PruneOptions, gopts global
 	if err := repo.LoadIndex(ctx, printer); err != nil {
 		return err
 	}
-
 	popts := repository.PruneOptions{
 		DryRun:              false,
 		MaxUnusedBytes:      opts.maxUnusedBytes,
@@ -428,9 +478,15 @@ func runPrunePhaseAWithRepo(ctx context.Context, opts PruneOptions, gopts global
 		MaxRepackPercent:    opts.maxRepackPercent,
 		KeepDelete:          true,
 	}
-	plan, err := repository.PlanPrune(ctx, popts, repo, func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
-		return getUsedBlobs(ctx, repo, usedBlobs, ignoreSnapshots, printer)
-	}, printer)
+	plan, err := repository.PlanPrune(
+		ctx,
+		popts,
+		repo,
+		func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error {
+			return getUsedBlobs(ctx, repo, usedBlobs, ignoreSnapshots, printer)
+		},
+		printer,
+	)
 	if err != nil {
 		return err
 	}
@@ -468,7 +524,10 @@ func printPruneStats(printer vaultic.Printer, stats repository.PruneStats) error
 		printer.V("unreferenced:                    %s", ui.FormatBytes(stats.Size.Unref))
 	}
 	printer.V("total:        %10d blobs / %s", stats.Blobs.Total, ui.FormatBytes(stats.Size.Total))
-	printer.V("unused size: %s of total size", ui.FormatPercent(stats.Size.Duplicate+stats.Size.Unused, stats.Size.Total))
+	printer.V(
+		"unused size: %s of total size",
+		ui.FormatPercent(stats.Size.Duplicate+stats.Size.Unused, stats.Size.Total),
+	)
 
 	printer.P("\nto repack:    %10d blobs / %s", stats.Blobs.Repack, ui.FormatBytes(stats.Size.Repack))
 	printer.P("this removes: %10d blobs / %s", stats.Blobs.Repackrm, ui.FormatBytes(stats.Size.Repackrm))
@@ -484,7 +543,6 @@ func printPruneStats(printer vaultic.Printer, stats repository.PruneStats) error
 	printer.V("totally used packs: %10d", stats.Packs.Used)
 	printer.V("partly used packs:  %10d", stats.Packs.PartlyUsed)
 	printer.V("unused packs:       %10d\n\n", stats.Packs.Unused)
-
 	printer.V("to keep:      %10d packs", stats.Packs.Keep)
 	printer.V("to repack:    %10d packs", stats.Packs.Repack)
 	printer.V("to delete:    %10d packs", stats.Packs.Remove)
@@ -494,7 +552,13 @@ func printPruneStats(printer vaultic.Printer, stats repository.PruneStats) error
 	return nil
 }
 
-func getUsedBlobs(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet, ignoreSnapshots vaultic.IDSet, printer vaultic.Printer) error {
+func getUsedBlobs(
+	ctx context.Context,
+	repo vaultic.Repository,
+	usedBlobs vaultic.FindBlobSet,
+	ignoreSnapshots vaultic.IDSet,
+	printer vaultic.Printer,
+) error {
 	var snapshotTrees vaultic.IDs
 	printer.P("loading all snapshots...")
 	err := data.ForAllSnapshots(ctx, repo, repo, ignoreSnapshots,
@@ -510,13 +574,11 @@ func getUsedBlobs(ctx context.Context, repo vaultic.Repository, usedBlobs vaulti
 	if err != nil {
 		return errors.Fatalf("failed loading snapshot: %v", err)
 	}
-
 	printer.P("finding data that is still in use for %d snapshots", len(snapshotTrees))
 
 	bar := printer.NewCounter("snapshots")
 	bar.SetMax(uint64(len(snapshotTrees)))
 	defer bar.Done()
-
 	err = data.FindUsedBlobs(ctx, repo, snapshotTrees, usedBlobs, bar)
 	if err != nil {
 		return errors.Fatalf("failed finding blobs: %v", err)

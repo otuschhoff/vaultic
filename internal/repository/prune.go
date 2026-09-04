@@ -145,9 +145,17 @@ type packActionState struct {
 
 // PlanPrune selects which files to rewrite and which to delete and which blobs to keep.
 // Also some summary statistics are returned.
-func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsedBlobs func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error, printer vaultic.Printer) (*PrunePlan, error) {
+func PlanPrune(
+	ctx context.Context,
+	opts PruneOptions,
+	repo *Repository,
+	getUsedBlobs func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error,
+	printer vaultic.Printer,
+) (*PrunePlan, error) {
 	if repo.Engine().Mode() == metadataindex.ModeSlateDB {
-		return nil, fmt.Errorf("prune is disabled for SlateDB-authoritative repositories; use 'vaultic index gc' instead")
+		return nil, fmt.Errorf(
+			"prune is disabled for SlateDB-authoritative repositories; use 'vaultic index gc' instead",
+		)
 	}
 	stats := PruneStats{MessageType: "summary"}
 
@@ -228,43 +236,17 @@ func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsed
 	return &plan, nil
 }
 
-func packInfoFromIndex(ctx context.Context, idx vaultic.ListBlobser, usedBlobs *index.AssociatedSet[uint8], stats *PruneStats, printer vaultic.Printer) (*index.AssociatedSet[uint8], map[vaultic.ID]packInfo, error) {
-	// iterate over all blobs in index to find out which blobs are duplicates
-	// The counter in usedBlobs describes how many instances of the blob exist in the repository index
-	// Thus 0 == blob is missing, 1 == blob exists once, >= 2 == duplicates exist
-	err := idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
-		bh := blob.Handle()
-		count, ok := usedBlobs.Get(bh)
-		if ok {
-			if count < math.MaxUint8 {
-				// don't overflow, but saturate count at 255
-				// this can lead to a non-optimal pack selection, but won't cause
-				// problems otherwise
-				count++
-			}
-
-			usedBlobs.Set(bh, count)
-		}
-	})
-	if err != nil {
+func packInfoFromIndex(
+	ctx context.Context,
+	idx vaultic.ListBlobser,
+	usedBlobs *index.AssociatedSet[uint8],
+	stats *PruneStats,
+	printer vaultic.Printer,
+) (*index.AssociatedSet[uint8], map[vaultic.ID]packInfo, error) {
+	if err := countUsedBlobOccurrences(ctx, idx, usedBlobs); err != nil {
 		return nil, nil, err
 	}
-
-	// Check if all used blobs have been found in index
-	missingBlobs := vaultic.NewBlobSet()
-	for bh, count := range usedBlobs.All() {
-		if count == 0 {
-			// blob does not exist in any pack files
-			missingBlobs.Insert(bh)
-		}
-	}
-
-	if len(missingBlobs) != 0 {
-		printer.E("%v not found in the index\n\n"+
-			"Integrity check failed: Data seems to be missing.\n"+
-			"Will not start prune to prevent (additional) data loss!\n"+
-			"Please report this error (along with the output of the 'prune' run) at\n"+
-			"https://github.com/otuschhoff/vaultic/issues/new/choose", missingBlobs)
+	if err := validateUsedBlobs(usedBlobs, printer); err != nil {
 		return nil, nil, ErrIndexIncomplete
 	}
 
@@ -283,52 +265,7 @@ func packInfoFromIndex(ctx context.Context, idx vaultic.ListBlobser, usedBlobs *
 	hasDuplicates := false
 	// iterate over all blobs in index to generate packInfo
 	err = idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
-		packID := blob.PackID()
-		h := blob.Handle()
-
-		ip := indexPack[packID]
-
-		// Set blob type if not yet set
-		if ip.tpe == vaultic.NumBlobTypes {
-			ip.tpe = h.Type
-		}
-
-		// mark mixed packs with "Invalid blob type"
-		if ip.tpe != h.Type {
-			ip.tpe = vaultic.InvalidBlob
-		}
-
-		size := uint64(blob.CiphertextLength())
-		dupCount, _ := usedBlobs.Get(h)
-		switch {
-		case dupCount >= 2:
-			hasDuplicates = true
-			// mark as unused for now, we will later on select one copy
-			ip.unusedSize += size
-			ip.unusedBlobs++
-			ip.duplicateBlobs++
-
-			// count as duplicate, will later on change one copy to be counted as used
-			stats.Size.Duplicate += size
-			stats.Blobs.Duplicate++
-		case dupCount == 1: // used blob, not duplicate
-			ip.usedSize += size
-			ip.usedBlobs++
-
-			stats.Size.Used += size
-			stats.Blobs.Used++
-		default: // unused blob
-			ip.unusedSize += size
-			ip.unusedBlobs++
-
-			stats.Size.Unused += size
-			stats.Blobs.Unused++
-		}
-		if !blob.IsCompressed() {
-			ip.uncompressed = true
-		}
-		// update indexPack
-		indexPack[packID] = ip
+		hasDuplicates = accountIndexedBlob(blob, usedBlobs, indexPack, stats) || hasDuplicates
 	})
 	if err != nil {
 		return nil, nil, err
@@ -399,6 +336,72 @@ func packInfoFromIndex(ctx context.Context, idx vaultic.ListBlobser, usedBlobs *
 	return usedBlobs, indexPack, nil
 }
 
+func countUsedBlobOccurrences(ctx context.Context, idx vaultic.ListBlobser, usedBlobs *index.AssociatedSet[uint8]) error {
+	return idx.ListBlobs(ctx, func(blob vaultic.PackBlob) {
+		handle := blob.Handle()
+		count, ok := usedBlobs.Get(handle)
+		if !ok {
+			return
+		}
+		if count < math.MaxUint8 {
+			count++
+		}
+		usedBlobs.Set(handle, count)
+	})
+}
+
+func validateUsedBlobs(usedBlobs *index.AssociatedSet[uint8], printer vaultic.Printer) error {
+	missing := vaultic.NewBlobSet()
+	for handle, count := range usedBlobs.All() {
+		if count == 0 {
+			missing.Insert(handle)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	printer.E("%v not found in the index\n\n"+
+		"Integrity check failed: Data seems to be missing.\n"+
+		"Will not start prune to prevent (additional) data loss!\n"+
+		"Please report this error (along with the output of the 'prune' run) at\n"+
+		"https://github.com/otuschhoff/vaultic/issues/new/choose", missing)
+	return ErrIndexIncomplete
+}
+
+func accountIndexedBlob(blob vaultic.PackBlob, usedBlobs *index.AssociatedSet[uint8], packs map[vaultic.ID]packInfo, stats *PruneStats) bool {
+	packID, handle := blob.PackID(), blob.Handle()
+	info := packs[packID]
+	if info.tpe == vaultic.NumBlobTypes {
+		info.tpe = handle.Type
+	}
+	if info.tpe != handle.Type {
+		info.tpe = vaultic.InvalidBlob
+	}
+	size := uint64(blob.CiphertextLength())
+	duplicateCount, _ := usedBlobs.Get(handle)
+	switch {
+	case duplicateCount >= 2:
+		info.unusedSize += size
+		info.unusedBlobs++
+		info.duplicateBlobs++
+		stats.Size.Duplicate += size
+		stats.Blobs.Duplicate++
+	case duplicateCount == 1:
+		info.usedSize += size
+		info.usedBlobs++
+		stats.Size.Used += size
+		stats.Blobs.Used++
+	default:
+		info.unusedSize += size
+		info.unusedBlobs++
+		stats.Size.Unused += size
+		stats.Blobs.Unused++
+	}
+	info.uncompressed = info.uncompressed || !blob.IsCompressed()
+	packs[packID] = info
+	return duplicateCount >= 2
+}
+
 // calculateTargetPacksize calculates the packsize as
 // 0.8 * max(4MB, third percentile of all packfile sizes)
 func calculateTargetPacksize(opts PruneOptions, indexPack map[vaultic.ID]packInfo) (targetPackSize uint) {
@@ -425,7 +428,12 @@ func calculateTargetPacksize(opts PruneOptions, indexPack map[vaultic.ID]packInf
 		// we ensure that no repacking happens if the repository already has no small pack files.
 		index := len(indexPack) * 3 / 100
 		targetPackSize = max(MinPackSize, uint(toSort[index].size)) * 4 / 5
-		debug.Log("targetPackSize %d, minimum pack size %d, 3rd percentile %d", targetPackSize, MinPackSize, toSort[index].size)
+		debug.Log(
+			"targetPackSize %d, minimum pack size %d, 3rd percentile %d",
+			targetPackSize,
+			MinPackSize,
+			toSort[index].size,
+		)
 	}
 
 	if opts.SmallPackBytes > 0 {
@@ -436,7 +444,14 @@ func calculateTargetPacksize(opts PruneOptions, indexPack map[vaultic.ID]packInf
 	return targetPackSize
 }
 
-func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, indexPack map[vaultic.ID]packInfo, stats *PruneStats, printer vaultic.Printer) (PrunePlan, error) {
+func decidePackAction(
+	ctx context.Context,
+	opts PruneOptions,
+	repo *Repository,
+	indexPack map[vaultic.ID]packInfo,
+	stats *PruneStats,
+	printer vaultic.Printer,
+) (PrunePlan, error) {
 	targetPackSize := calculateTargetPacksize(opts, indexPack)
 	state := packActionState{
 		opts:             opts,
@@ -546,7 +561,11 @@ func (state *packActionState) processPack(id vaultic.ID, packSize int64) (bool, 
 	return true, nil
 }
 
-func resolveMissingPacks(indexPack map[vaultic.ID]packInfo, stats *PruneStats, printer vaultic.Printer) (vaultic.IDSet, error) {
+func resolveMissingPacks(
+	indexPack map[vaultic.ID]packInfo,
+	stats *PruneStats,
+	printer vaultic.Printer,
+) (vaultic.IDSet, error) {
 
 	// missing packs that are not needed can be ignored
 	ignorePacks := vaultic.NewIDSet()
@@ -609,7 +628,12 @@ func sortRepackCandidates(repackCandidates []packInfoWithID, targetPackSize uint
 	})
 }
 
-func selectRepackPacks(opts PruneOptions, targetPackSize uint, repackCandidates []packInfoWithID, stats *PruneStats) vaultic.IDSet {
+func selectRepackPacks(
+	opts PruneOptions,
+	targetPackSize uint,
+	repackCandidates []packInfoWithID,
+	stats *PruneStats,
+) vaultic.IDSet {
 	repackPacks := vaultic.NewIDSet()
 	repack := func(id vaultic.ID, p packInfo) {
 		repackPacks.Insert(id)
@@ -669,7 +693,9 @@ func (plan *PrunePlan) BindPrunePlan(id string) {
 // plan.removePacks and plan.ignorePacks are modified in this function.
 func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) error {
 	if plan.opts.DryRun {
-		printer.V("Repeated prune dry-runs can report slightly different amounts of data to keep or repack. This is expected behavior.\n\n")
+		printer.V(
+			"Repeated prune dry-runs can report slightly different amounts of data to keep or repack. This is expected behavior.\n\n",
+		)
 		if len(plan.removePacksFirst) > 0 {
 			printer.V("Would have removed the following unreferenced packs:\n%v\n\n", plan.removePacksFirst)
 		}
@@ -763,7 +789,10 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 			return err
 		}
 		if plan.opts.KeepDelete {
-			printer.P("deferred prune plan %s saved; %d index files and %d packs kept for later revalidated deletion\n", marker.ID, len(obsoleteIndexes), len(packIDs))
+			printer.P(
+				"deferred prune plan %s saved; %d index files and %d packs kept for later revalidated deletion\n",
+				marker.ID, len(obsoleteIndexes), len(packIDs),
+			)
 			repo.clearIndex()
 			printer.P("done\n")
 			return nil
@@ -784,7 +813,12 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 	}
 
 	if plan.opts.UnsafeRecovery {
-		err := repo.idx.SaveFallback(ctx, &internalRepository{repo}, plan.ignorePacks, printer.NewCounter("packs processed"))
+		err := repo.idx.SaveFallback(
+			ctx,
+			&internalRepository{repo},
+			plan.ignorePacks,
+			printer.NewCounter("packs processed"),
+		)
 		if err != nil {
 			return errors.Fatalf("%s", err)
 		}
@@ -799,7 +833,14 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 
 // deleteFiles deletes the given fileList of fileType in parallel
 // if ignoreError=true, it will print a warning if there was an error, else it will abort.
-func deleteFiles(ctx context.Context, ignoreError bool, repo vaultic.RemoverUnpacked[vaultic.FileType], fileList vaultic.IDSet, fileType vaultic.FileType, printer vaultic.Printer) error {
+func deleteFiles(
+	ctx context.Context,
+	ignoreError bool,
+	repo vaultic.RemoverUnpacked[vaultic.FileType],
+	fileList vaultic.IDSet,
+	fileType vaultic.FileType,
+	printer vaultic.Printer,
+) error {
 	bar := printer.NewCounter("files deleted")
 	defer bar.Done()
 

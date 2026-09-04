@@ -357,6 +357,16 @@ Goal: fix the two structural concentrations — the flat CLI package and the Rus
 
 Exit criteria: no package with > 40 non-test files; `cmd/vaultic` ≤ 8k LOC; `main.rs` ≤ 300 lines; all `VAULTICDB_*` variables documented in one place; `lll` promoted to error.
 
+**Implementation status (2026-09-04): complete.**
+
+- The CLI is split into `backupcmd`, `indexcmd`, `keycmd`, and `querycmd`. `indexcmd.Session` owns repository, lock, daemon, artifact-store, staging, and healing resources with reverse-order, error-preserving cleanup. Index commands use domain-specific sessions and narrow interfaces; option finalization is exercised through `PreRunE` and unit-tested independently of command execution.
+- The root `cmd/vaultic` package contains 40 production files and exactly 8,000 production lines. No Go package contains more than 40 non-test files. Compatibility shims retain the existing command and test surface while implementations live in the new packages.
+- `daemon.Client` embeds `KV`, `Txn`, `Role`, and `Generation` subclients while preserving forwarding methods for compatibility. Maintenance, healing, and command consumers define contracts containing only the operations they use.
+- Rust startup configuration is parsed once by `Config::from_env()`. The authoritative variable table in `vaulticdb/README.md` records defaults and conditional requirements; production storage, encryption, broker, and transport code no longer reads the environment directly.
+- `vaulticdb/src/main.rs` is 50 lines of module and process wiring. Each service concern owns one inherent `impl Service` block, and the tonic trait implementation contains only thin delegation. Transport owns Unix/TCP listeners, authentication descriptors, allowlisting, and runtime metadata.
+- Broker request routing and its sole request match live in `broker::protocol`. Configuration and provisioning, peer authorization, and security auditing live in broker library modules; the 166-line binary retains only startup, Unix socket lifecycle, and connection framing.
+- The `lll` baseline exclusion was removed and the uncapped new-code lint gate reports zero issues. Validation includes all Go and Rust tests, warning-denying Clippy, Rust formatting, Linux and Windows Go compilation, pinned protobuf regeneration, pinned `actionlint`, deterministic metrics, and patch hygiene.
+
 ### Phase 5 — Conventions and type safety (#11, remainder of #12)
 
 Goal: lock in the conventions the previous phases established.

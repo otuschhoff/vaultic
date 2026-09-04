@@ -172,7 +172,8 @@ func commits(ctx context.Context, store Store) ([]uint64, error) {
 }
 
 func sameBinding(left, right indexhistory.Binding) bool {
-	return left.Covered == right.Covered && left.Present == right.Present && left.Inode == right.Inode && left.Revision == right.Revision && left.NodeType == right.NodeType
+	return left.Covered == right.Covered && left.Present == right.Present && left.Inode == right.Inode && left.Revision == right.Revision &&
+		left.NodeType == right.NodeType
 }
 
 func cleanPath(value string) string {

@@ -226,7 +226,13 @@ func (r *Repository) Close() error {
 // Also returns if the blob was already known before.
 // If the blob was not known before, it returns the number of bytes the blob
 // occupies in the repo (compressed or not, including encryption overhead).
-func (r *Repository) saveBlob(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool) (newID vaultic.ID, known bool, size int, err error) {
+func (r *Repository) saveBlob(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+) (newID vaultic.ID, known bool, size int, err error) {
 
 	if int64(len(buf)) > math.MaxUint32 {
 		return vaultic.ID{}, false, 0, fmt.Errorf("blob is larger than 4GB")
@@ -261,7 +267,14 @@ func (r *Repository) saveBlob(ctx context.Context, t vaultic.BlobType, buf []byt
 	return newID, known, size, err
 }
 
-func (r *Repository) saveBlobAsync(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, size int, err error)) {
+func (r *Repository) saveBlobAsync(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+	cb func(newID vaultic.ID, known bool, size int, err error),
+) {
 	r.mainWg.Go(func() error {
 		if ctx.Err() != nil {
 			// fail fast if the context is cancelled
@@ -292,7 +305,12 @@ var (
 // handleBlobFn is called at most once for each blob. If the callback returns an error,
 // then LoadBlobsFromPack will abort and not retry it. The buf passed to the callback is only valid within
 // this specific call. The callback must not keep a reference to buf.
-func (r *Repository) LoadBlobsFromPack(ctx context.Context, packID vaultic.ID, handles []vaultic.BlobHandle, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+func (r *Repository) LoadBlobsFromPack(
+	ctx context.Context,
+	packID vaultic.ID,
+	handles []vaultic.BlobHandle,
+	handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error,
+) error {
 	blobs, err := r.blobsInPack(packID, handles)
 	if err != nil {
 		return err
@@ -322,7 +340,12 @@ func (r *Repository) blobsInPack(packID vaultic.ID, handles []vaultic.BlobHandle
 	return blobs, nil
 }
 
-func (r *Repository) loadBlobsFromPack(ctx context.Context, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+func (r *Repository) loadBlobsFromPack(
+	ctx context.Context,
+	packID vaultic.ID,
+	blobs pack.Blobs,
+	handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error,
+) error {
 	decoder, err := r.getZstdDecoder()
 	if err != nil {
 		return err
@@ -330,7 +353,16 @@ func (r *Repository) loadBlobsFromPack(ctx context.Context, packID vaultic.ID, b
 	return streamPack(ctx, r.loadPackFromPlacements, r.LoadBlob, decoder, r.key, packID, blobs, handleBlobFn)
 }
 
-func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+func streamPack(
+	ctx context.Context,
+	beLoad backendLoadFn,
+	loadBlobFn loadBlobFn,
+	dec *zstd.Decoder,
+	key *crypto.Key,
+	packID vaultic.ID,
+	blobs pack.Blobs,
+	handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error,
+) error {
 	if len(blobs) == 0 {
 		// nothing to do
 		return nil
@@ -373,7 +405,16 @@ func streamPack(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn
 	return streamPackPart(ctx, beLoad, loadBlobFn, dec, key, packID, blobs[lowerIdx:], handleBlobFn)
 }
 
-func streamPackPart(ctx context.Context, beLoad backendLoadFn, loadBlobFn loadBlobFn, dec *zstd.Decoder, key *crypto.Key, packID vaultic.ID, blobs pack.Blobs, handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error) error {
+func streamPackPart(
+	ctx context.Context,
+	beLoad backendLoadFn,
+	loadBlobFn loadBlobFn,
+	dec *zstd.Decoder,
+	key *crypto.Key,
+	packID vaultic.ID,
+	blobs pack.Blobs,
+	handleBlobFn func(blob vaultic.BlobHandle, buf []byte, err error) error,
+) error {
 	h := backend.Handle{Type: backend.PackFile, Name: packID.String(), IsMetadata: blobs[0].Type.IsMetadata()}
 
 	dataStart := blobs[0].Offset

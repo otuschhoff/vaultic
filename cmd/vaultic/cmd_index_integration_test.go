@@ -68,7 +68,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 
 	var dryResultIndexes uint64
 	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexImport(ctx, indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, DryRun: true, SnapshotDepth: ^uint(0)}, gopts, gopts.Term)
+		result, runErr := runIndexImport(
+			ctx,
+			indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, DryRun: true, SnapshotDepth: ^uint(0)},
+			gopts,
+			gopts.Term,
+		)
 		dryResultIndexes = result.IndexesImported
 		return runErr
 	})
@@ -107,7 +112,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	}
 
 	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		_, runErr := runIndexImport(ctx, indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, SnapshotDepth: ^uint(0), SnapshotWorkBudget: 1}, gopts, gopts.Term)
+		_, runErr := runIndexImport(
+			ctx,
+			indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, SnapshotDepth: ^uint(0), SnapshotWorkBudget: 1},
+			gopts,
+			gopts.Term,
+		)
 		return runErr
 	})
 	if !errors.Is(err, errIndexIncomplete) {
@@ -117,7 +127,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	var resumed uint64
 	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexImport(ctx, indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, Activate: true, SnapshotDepth: ^uint(0)}, gopts, gopts.Term)
+		result, runErr := runIndexImport(
+			ctx,
+			indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, Activate: true, SnapshotDepth: ^uint(0)},
+			gopts,
+			gopts.Term,
+		)
 		resumed = result.IndexesResumed
 		return runErr
 	})
@@ -186,7 +201,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 		t.Fatalf("clean check: %v", err)
 	}
 	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, IncludeCrawlDebt: true, FailOnWarning: true, MaxFindings: 100}, gopts, gopts.Term)
+		result, runErr := runIndexCheck(
+			ctx,
+			indexCheckOptions{Daemon: daemonOptions, IncludeCrawlDebt: true, FailOnWarning: true, MaxFindings: 100},
+			gopts,
+			gopts.Term,
+		)
 		if result.PendingCrawlDebt == 0 || len(result.Findings) == 0 {
 			t.Fatalf("warning check = %#v", result)
 		}

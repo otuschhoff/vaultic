@@ -70,7 +70,12 @@ type InitOptions struct {
 func (opts *InitOptions) AddFlags(f *pflag.FlagSet) {
 	opts.SecondaryRepoOptions.AddFlags(f, "secondary", "to copy chunker parameters from")
 	f.BoolVar(&opts.CopyChunkerParameters, "copy-chunker-params", false, "copy chunker parameters from the secondary repository (useful with the copy command)")
-	f.StringVar(&opts.RepositoryVersion, "repository-version", "stable", "repository format version to use, allowed values are a format version, 'latest' and 'stable'")
+	f.StringVar(
+		&opts.RepositoryVersion,
+		"repository-version",
+		"stable",
+		"repository format version to use, allowed values are a format version, 'latest' and 'stable'",
+	)
 
 	f.StringVar(&opts.SetCompression, "set-compression", "", "set initial compression `level` (-7..22, 0=off) in the repository config")
 	f.StringVar(&opts.SetAppendOnly, "set-append-only", "", "set initial append-only `mode` (true|false)")

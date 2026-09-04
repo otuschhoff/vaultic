@@ -36,7 +36,10 @@ func (c *Client) GetMasterKey(ctx context.Context) ([]byte, bool, error) {
 func (c *Client) StoreMasterKey(ctx context.Context, masterKey []byte) error {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	_, err := c.rpc.StoreMasterKey(ctx, &vaulticdbv1.StoreMasterKeyRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), MasterKey: masterKey})
+	_, err := c.rpc.StoreMasterKey(
+		ctx,
+		&vaulticdbv1.StoreMasterKeyRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), MasterKey: masterKey},
+	)
 	return err
 }
 
@@ -61,18 +64,45 @@ type PublishedCapsuleMutation struct {
 	CapsuleSHA256 string `json:"capsule_sha256"`
 }
 
-func (c *Client) PublishCapsuleMutation(ctx context.Context, capsuleDirectory string, capsule []byte, capsuleSHA256 string, identityRecovery bool) (PublishedCapsuleMutation, error) {
+func (c *Client) PublishCapsuleMutation(
+	ctx context.Context,
+	capsuleDirectory string,
+	capsule []byte,
+	capsuleSHA256 string,
+	identityRecovery bool,
+) (PublishedCapsuleMutation, error) {
 	if capsuleDirectory == "" || len(capsule) == 0 || len(capsuleSHA256) != 64 {
 		return PublishedCapsuleMutation{}, errors.New("capsule directory, capsule, and SHA-256 digest are required")
 	}
-	response, err := c.rpc.PublishCapsuleMutation(ctx, &vaulticdbv1.PublishCapsuleMutationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), CapsuleDirectory: capsuleDirectory, Capsule: capsule, CapsuleSha256: capsuleSHA256, IdentityRecovery: identityRecovery})
+	response, err := c.rpc.PublishCapsuleMutation(
+		ctx,
+		&vaulticdbv1.PublishCapsuleMutationRequest{
+			RepositoryId:     c.options.RepositoryID,
+			Context:          requestContext(ctx),
+			CapsuleDirectory: capsuleDirectory,
+			Capsule:          capsule,
+			CapsuleSha256:    capsuleSHA256,
+			IdentityRecovery: identityRecovery,
+		},
+	)
 	if err != nil {
 		return PublishedCapsuleMutation{}, err
 	}
-	return PublishedCapsuleMutation{Generation: response.GetGeneration(), LocalPath: response.GetLocalPath(), MirrorPath: response.GetMirrorPath(), CapsuleSHA256: response.GetCapsuleSha256()}, nil
+	return PublishedCapsuleMutation{
+		Generation:    response.GetGeneration(),
+		LocalPath:     response.GetLocalPath(),
+		MirrorPath:    response.GetMirrorPath(),
+		CapsuleSHA256: response.GetCapsuleSha256(),
+	}, nil
 }
 
-func PublishCapsuleWithoutDatabase(ctx context.Context, options Options, capsuleDirectory string, capsule []byte, capsuleSHA256 string) (PublishedCapsuleMutation, error) {
+func PublishCapsuleWithoutDatabase(
+	ctx context.Context,
+	options Options,
+	capsuleDirectory string,
+	capsule []byte,
+	capsuleSHA256 string,
+) (PublishedCapsuleMutation, error) {
 	if options.DaemonPath == "" || options.RepositoryID == "" || capsuleDirectory == "" || len(capsule) == 0 || len(capsuleSHA256) != 64 {
 		return PublishedCapsuleMutation{}, errors.New("daemon path, repository ID, capsule directory, capsule, and SHA-256 digest are required")
 	}
@@ -144,32 +174,92 @@ func daemonEnvironment(options Options) []string {
 	return result
 }
 
-func (c *Client) PrepareCapsuleMigration(ctx context.Context, capsuleDirectory string, generation uint64, groupID string, threshold uint32, brokerIdentityPublicKey []byte, members []OfflineCapsuleMember) (CapsuleMigration, error) {
+func (c *Client) PrepareCapsuleMigration(
+	ctx context.Context,
+	capsuleDirectory string,
+	generation uint64,
+	groupID string,
+	threshold uint32,
+	brokerIdentityPublicKey []byte,
+	members []OfflineCapsuleMember,
+) (CapsuleMigration, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	requestMembers := make([]*vaulticdbv1.OfflineCapsuleMember, len(members))
 	for index, member := range members {
-		requestMembers[index] = &vaulticdbv1.OfflineCapsuleMember{MemberId: member.ID, Provider: member.Provider, Credential: append([]byte(nil), member.Credential...)}
+		requestMembers[index] = &vaulticdbv1.OfflineCapsuleMember{
+			MemberId:   member.ID,
+			Provider:   member.Provider,
+			Credential: append([]byte(nil), member.Credential...),
+		}
 		defer func(value []byte) {
 			for index := range value {
 				value[index] = 0
 			}
 		}(requestMembers[index].Credential)
 	}
-	response, err := c.rpc.PrepareCapsuleMigration(ctx, &vaulticdbv1.PrepareCapsuleMigrationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), CapsuleDirectory: capsuleDirectory, Generation: generation, GroupId: groupID, Threshold: threshold, BrokerIdentityPublicKey: brokerIdentityPublicKey, Members: requestMembers})
+	response, err := c.rpc.PrepareCapsuleMigration(
+		ctx,
+		&vaulticdbv1.PrepareCapsuleMigrationRequest{
+			RepositoryId:            c.options.RepositoryID,
+			Context:                 requestContext(ctx),
+			CapsuleDirectory:        capsuleDirectory,
+			Generation:              generation,
+			GroupId:                 groupID,
+			Threshold:               threshold,
+			BrokerIdentityPublicKey: brokerIdentityPublicKey,
+			Members:                 requestMembers,
+		},
+	)
 	if err != nil {
 		return CapsuleMigration{}, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "recovery capsule migration prepared", Fields: map[string]any{"repository_id": c.options.RepositoryID, "generation": response.GetGeneration(), "capsule_sha256": response.GetCapsuleSha256()}})
-	return CapsuleMigration{Generation: response.GetGeneration(), LocalPath: response.GetLocalPath(), MirrorPath: response.GetMirrorPath(), CapsuleSHA256: response.GetCapsuleSha256(), Capsule: response.GetCapsule()}, nil
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Warning,
+			Category:  observability.CategoryLifecycle,
+			Component: "vaulticdb",
+			Message:   "recovery capsule migration prepared",
+			Fields: map[string]any{
+				"repository_id":  c.options.RepositoryID,
+				"generation":     response.GetGeneration(),
+				"capsule_sha256": response.GetCapsuleSha256(),
+			},
+		},
+	)
+	return CapsuleMigration{
+		Generation:    response.GetGeneration(),
+		LocalPath:     response.GetLocalPath(),
+		MirrorPath:    response.GetMirrorPath(),
+		CapsuleSHA256: response.GetCapsuleSha256(),
+		Capsule:       response.GetCapsule(),
+	}, nil
 }
 
 func (c *Client) FinalizeCapsuleMigration(ctx context.Context, capsuleSHA256 string, brokerKeyProof []byte) error {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	_, err := c.rpc.FinalizeCapsuleMigration(ctx, &vaulticdbv1.FinalizeCapsuleMigrationRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), CapsuleSha256: capsuleSHA256, BrokerKeyProof: brokerKeyProof})
+	_, err := c.rpc.FinalizeCapsuleMigration(
+		ctx,
+		&vaulticdbv1.FinalizeCapsuleMigrationRequest{
+			RepositoryId:   c.options.RepositoryID,
+			Context:        requestContext(ctx),
+			CapsuleSha256:  capsuleSHA256,
+			BrokerKeyProof: brokerKeyProof,
+		},
+	)
 	if err == nil {
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "recovery capsule migration finalized and database master key removed", Fields: map[string]any{"repository_id": c.options.RepositoryID, "capsule_sha256": capsuleSHA256}})
+		_ = observability.Emit(
+			ctx,
+			observability.Event{
+				Severity:  observability.Warning,
+				Category:  observability.CategoryLifecycle,
+				Component: "vaulticdb",
+				Message:   "recovery capsule migration finalized and database master key removed",
+				Fields:    map[string]any{"repository_id": c.options.RepositoryID, "capsule_sha256": capsuleSHA256},
+			},
+		)
 	}
 	return err
 }
@@ -220,11 +310,30 @@ func (c *Client) CheckEncryption(ctx context.Context) (EncryptionAudit, error) {
 func (c *Client) AddLocalKeySlot(ctx context.Context, slotID string, passphrase []byte, priority uint32, recovery bool) (KeyStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.AddLocalKeySlot(ctx, &vaulticdbv1.AddLocalKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Passphrase: passphrase, Priority: priority, Recovery: recovery})
+	response, err := c.rpc.AddLocalKeySlot(
+		ctx,
+		&vaulticdbv1.AddLocalKeySlotRequest{
+			RepositoryId: c.options.RepositoryID,
+			Context:      requestContext(ctx),
+			SlotId:       slotID,
+			Passphrase:   passphrase,
+			Priority:     priority,
+			Recovery:     recovery,
+		},
+	)
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata key slot added", Fields: map[string]any{"slot_id": slotID, "provider": "local-argon2id", "envelope_generation": response.GetEnvelopeGeneration()}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Notice,
+			Category:  observability.CategoryLifecycle,
+			Component: "vaulticdb",
+			Message:   "metadata key slot added",
+			Fields:    map[string]any{"slot_id": slotID, "provider": "local-argon2id", "envelope_generation": response.GetEnvelopeGeneration()},
+		},
+	)
 	return keyStatus(response), nil
 }
 
@@ -232,11 +341,36 @@ func (c *Client) AddLocalKeySlot(ctx context.Context, slotID string, passphrase 
 func (c *Client) AddCloudKeySlot(ctx context.Context, slotID, provider, keyReference string, bearerToken []byte, priority uint32) (KeyStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.AddCloudKeySlot(ctx, &vaulticdbv1.AddCloudKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Provider: provider, KeyReference: keyReference, BearerToken: bearerToken, Priority: priority})
+	response, err := c.rpc.AddCloudKeySlot(
+		ctx,
+		&vaulticdbv1.AddCloudKeySlotRequest{
+			RepositoryId: c.options.RepositoryID,
+			Context:      requestContext(ctx),
+			SlotId:       slotID,
+			Provider:     provider,
+			KeyReference: keyReference,
+			BearerToken:  bearerToken,
+			Priority:     priority,
+		},
+	)
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata cloud key slot added", Fields: map[string]any{"slot_id": slotID, "provider": provider, "key_reference": keyReference, "envelope_generation": response.GetEnvelopeGeneration()}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Notice,
+			Category:  observability.CategoryLifecycle,
+			Component: "vaulticdb",
+			Message:   "metadata cloud key slot added",
+			Fields: map[string]any{
+				"slot_id":             slotID,
+				"provider":            provider,
+				"key_reference":       keyReference,
+				"envelope_generation": response.GetEnvelopeGeneration(),
+			},
+		},
+	)
 	return keyStatus(response), nil
 }
 
@@ -244,11 +378,23 @@ func (c *Client) AddCloudKeySlot(ctx context.Context, slotID, provider, keyRefer
 func (c *Client) RemoveKeySlot(ctx context.Context, slotID string) (KeyStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.RemoveKeySlot(ctx, &vaulticdbv1.RemoveKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID})
+	response, err := c.rpc.RemoveKeySlot(
+		ctx,
+		&vaulticdbv1.RemoveKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID},
+	)
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata key slot removed", Fields: map[string]any{"slot_id": slotID, "envelope_generation": response.GetEnvelopeGeneration()}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Warning,
+			Category:  observability.CategoryLifecycle,
+			Component: "vaulticdb",
+			Message:   "metadata key slot removed",
+			Fields:    map[string]any{"slot_id": slotID, "envelope_generation": response.GetEnvelopeGeneration()},
+		},
+	)
 	return keyStatus(response), nil
 }
 
@@ -256,11 +402,23 @@ func (c *Client) RemoveKeySlot(ctx context.Context, slotID string) (KeyStatus, e
 func (c *Client) RotateLocalKeySlot(ctx context.Context, slotID string, passphrase []byte) (KeyStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.RotateLocalKeySlot(ctx, &vaulticdbv1.RotateLocalKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Passphrase: passphrase})
+	response, err := c.rpc.RotateLocalKeySlot(
+		ctx,
+		&vaulticdbv1.RotateLocalKeySlotRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), SlotId: slotID, Passphrase: passphrase},
+	)
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "metadata KEK rotated", Fields: map[string]any{"slot_id": slotID, "envelope_generation": response.GetEnvelopeGeneration()}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Notice,
+			Category:  observability.CategoryAuth,
+			Component: "vaulticdb",
+			Message:   "metadata KEK rotated",
+			Fields:    map[string]any{"slot_id": slotID, "envelope_generation": response.GetEnvelopeGeneration()},
+		},
+	)
 	return keyStatus(response), nil
 }
 
@@ -272,7 +430,16 @@ func (c *Client) RotateDEK(ctx context.Context) (KeyStatus, error) {
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "vaulticdb", Message: "metadata DEK rotated", Fields: map[string]any{"dek_version": response.GetActiveDekVersion(), "envelope_generation": response.GetEnvelopeGeneration()}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Notice,
+			Category:  observability.CategoryLifecycle,
+			Component: "vaulticdb",
+			Message:   "metadata DEK rotated",
+			Fields:    map[string]any{"dek_version": response.GetActiveDekVersion(), "envelope_generation": response.GetEnvelopeGeneration()},
+		},
+	)
 	return keyStatus(response), nil
 }
 
@@ -280,7 +447,10 @@ func (c *Client) RotateDEK(ctx context.Context) (KeyStatus, error) {
 func (c *Client) RewriteDEK(ctx context.Context, maxObjects uint32) (DEKRewriteProgress, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.RewriteDek(ctx, &vaulticdbv1.RewriteDekRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), MaxObjects: maxObjects})
+	response, err := c.rpc.RewriteDek(
+		ctx,
+		&vaulticdbv1.RewriteDekRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), MaxObjects: maxObjects},
+	)
 	if err != nil {
 		return DEKRewriteProgress{}, err
 	}
@@ -291,11 +461,30 @@ func (c *Client) RewriteDEK(ctx context.Context, maxObjects uint32) (DEKRewriteP
 func (c *Client) EscrowMasterKey(ctx context.Context, escrowID, provider, keyReference string, bearerToken []byte) ([]byte, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.EscrowMasterKey(ctx, &vaulticdbv1.EscrowMasterKeyRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), EscrowId: escrowID, Provider: provider, KeyReference: keyReference, BearerToken: bearerToken})
+	response, err := c.rpc.EscrowMasterKey(
+		ctx,
+		&vaulticdbv1.EscrowMasterKeyRequest{
+			RepositoryId: c.options.RepositoryID,
+			Context:      requestContext(ctx),
+			EscrowId:     escrowID,
+			Provider:     provider,
+			KeyReference: keyReference,
+			BearerToken:  bearerToken,
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "repository master key escrowed", Fields: map[string]any{"escrow_id": escrowID, "provider": provider, "key_reference": keyReference}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Notice,
+			Category:  observability.CategoryAuth,
+			Component: "vaulticdb",
+			Message:   "repository master key escrowed",
+			Fields:    map[string]any{"escrow_id": escrowID, "provider": provider, "key_reference": keyReference},
+		},
+	)
 	return response.GetRecord(), nil
 }
 
@@ -303,24 +492,48 @@ func (c *Client) EscrowMasterKey(ctx context.Context, escrowID, provider, keyRef
 func (c *Client) RecoverEscrow(ctx context.Context, record, bearerToken []byte) ([]byte, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
-	response, err := c.rpc.RecoverEscrow(ctx, &vaulticdbv1.RecoverEscrowRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Record: record, BearerToken: bearerToken})
+	response, err := c.rpc.RecoverEscrow(
+		ctx,
+		&vaulticdbv1.RecoverEscrowRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx), Record: record, BearerToken: bearerToken},
+	)
 	if err != nil {
 		return nil, err
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryAuth, Component: "vaulticdb", Message: "repository master key recovered from escrow", Fields: map[string]any{"repository_id": c.options.RepositoryID}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Warning,
+			Category:  observability.CategoryAuth,
+			Component: "vaulticdb",
+			Message:   "repository master key recovered from escrow",
+			Fields:    map[string]any{"repository_id": c.options.RepositoryID},
+		},
+	)
 	return response.GetMasterKey(), nil
 }
 
 func keyStatus(response *vaulticdbv1.KeyStatusResponse) KeyStatus {
-	result := KeyStatus{EnvelopeGeneration: response.GetEnvelopeGeneration(), ActiveDEKVersion: response.GetActiveDekVersion(), Slots: make([]KeySlotInfo, len(response.GetSlots())), PendingCapsuleMigrationSHA256: response.GetPendingCapsuleMigrationSha256(), FinalizedCapsuleMigrationSHA256: response.GetFinalizedCapsuleMigrationSha256()}
+	result := KeyStatus{
+		EnvelopeGeneration:              response.GetEnvelopeGeneration(),
+		ActiveDEKVersion:                response.GetActiveDekVersion(),
+		Slots:                           make([]KeySlotInfo, len(response.GetSlots())),
+		PendingCapsuleMigrationSHA256:   response.GetPendingCapsuleMigrationSha256(),
+		FinalizedCapsuleMigrationSHA256: response.GetFinalizedCapsuleMigrationSha256(),
+	}
 	for index, slot := range response.GetSlots() {
-		result.Slots[index] = KeySlotInfo{ID: slot.GetId(), Provider: slot.GetProvider(), Priority: slot.GetPriority(), Recovery: slot.GetRecovery(), KeyReference: slot.GetKeyReference(), DEKVersion: slot.GetDekVersion()}
+		result.Slots[index] = KeySlotInfo{
+			ID:           slot.GetId(),
+			Provider:     slot.GetProvider(),
+			Priority:     slot.GetPriority(),
+			Recovery:     slot.GetRecovery(),
+			KeyReference: slot.GetKeyReference(),
+			DEKVersion:   slot.GetDekVersion(),
+		}
 	}
 	return result
 }
 
-// Get reads one binary record, optionally through a transaction.
-func (c *Client) Get(ctx context.Context, key []byte, transactionID string) ([]byte, bool, error) {
+func (c *Client) get(ctx context.Context, key []byte, transactionID string) ([]byte, bool, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	response, err := c.rpc.Get(ctx, &vaulticdbv1.GetRequest{
@@ -336,8 +549,7 @@ func (c *Client) Get(ctx context.Context, key []byte, transactionID string) ([]b
 	return response.GetValue(), response.GetFound(), nil
 }
 
-// MultiGet reads records in request order, preserving missing entries.
-func (c *Client) MultiGet(ctx context.Context, keys [][]byte, transactionID string) ([]KeyValue, []bool, error) {
+func (c *Client) multiGet(ctx context.Context, keys [][]byte, transactionID string) ([]KeyValue, []bool, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	if uint64(len(keys)) > uint64(c.limits.MaxBatchItems) {
@@ -369,9 +581,7 @@ func (c *Client) MultiGet(ctx context.Context, keys [][]byte, transactionID stri
 	return values, found, nil
 }
 
-// ScanPage reads one bounded page for a prefix. Pass the last returned key as
-// afterKey to continue without repeating it.
-func (c *Client) ScanPage(ctx context.Context, prefix, afterKey []byte, pageSize uint32, transactionID string) ([]KeyValue, bool, error) {
+func (c *Client) scanPage(ctx context.Context, prefix, afterKey []byte, pageSize uint32, transactionID string) ([]KeyValue, bool, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	if pageSize == 0 || pageSize > c.limits.MaxPageItems {
@@ -397,13 +607,13 @@ func (c *Client) ScanPage(ctx context.Context, prefix, afterKey []byte, pageSize
 	return entries, response.GetDone(), nil
 }
 
-// WriteBatch atomically applies a bounded set of puts and deletes.
-func (c *Client) WriteBatch(ctx context.Context, puts []Mutation, deletes [][]byte, awaitDurable bool, transactionID string) (bool, error) {
-	return c.WriteBatchWithIdempotency(ctx, puts, deletes, awaitDurable, transactionID, "")
-}
-
-// WriteBatchWithIdempotency atomically applies a batch and binds its durable result to key.
-func (c *Client) WriteBatchWithIdempotency(ctx context.Context, puts []Mutation, deletes [][]byte, awaitDurable bool, transactionID, idempotencyKey string) (bool, error) {
+func (c *Client) writeBatchWithIdempotency(
+	ctx context.Context,
+	puts []Mutation,
+	deletes [][]byte,
+	awaitDurable bool,
+	transactionID, idempotencyKey string,
+) (bool, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	if uint64(len(puts)+len(deletes)) > uint64(c.limits.MaxBatchItems) {
@@ -442,8 +652,7 @@ const (
 	transactionCommitUncertain
 )
 
-// Begin starts a serializable transaction.
-func (c *Client) Begin(ctx context.Context) (*Transaction, error) {
+func (c *Client) begin(ctx context.Context) (*Transaction, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	response, err := c.rpc.Begin(ctx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
@@ -544,7 +753,16 @@ func (c *Client) auditRPCError(ctx context.Context, operation string, err error)
 	if status.Code(err) != codes.DataLoss {
 		return
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "vaulticdb", Message: "encrypted metadata authentication failed", Fields: map[string]any{"repository_id": c.options.RepositoryID, "operation": operation}})
+	_ = observability.Emit(
+		ctx,
+		observability.Event{
+			Severity:  observability.Critical,
+			Category:  observability.CategoryIntegrity,
+			Component: "vaulticdb",
+			Message:   "encrypted metadata authentication failed",
+			Fields:    map[string]any{"repository_id": c.options.RepositoryID, "operation": operation},
+		},
+	)
 }
 
 // Close closes the RPC connection and shuts down only a daemon started by this client.

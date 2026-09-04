@@ -649,40 +649,16 @@ func validatePackFilter(filter PackFilter) error {
 	return nil
 }
 
-func packMatchesFilter(id vaultic.ID, record schema.PackRecord, placements placementSet, eligibility schema.PromotionEligibilityRecord, filter PackFilter, now time.Time) bool {
+func packMatchesFilter(
+	id vaultic.ID,
+	record schema.PackRecord,
+	placements placementSet,
+	eligibility schema.PromotionEligibilityRecord,
+	filter PackFilter,
+	now time.Time,
+) bool {
 	_ = id
-	if filter.Backend != "" {
-		backend := backendHashForName(filter.Backend, filter.PlacementModel)
-		placement, ok := placements[backend]
-		if !ok || placement.State == schema.PlacementEvicted {
-			return false
-		}
-	}
-	if filter.Class != "" && !placementClassMatches(placements, filter.Class) {
-		return false
-	}
-	if filter.NotOffsite && hasOffsitePlacement(placements, filter.PlacementModel) {
-		return false
-	}
-	if filter.PromotionDue && !promotionDue(record, placements, eligibility, filter.PlacementModel, now) {
-		return false
-	}
-	if filter.Tier != "" && normalizedTier(record) != parseTierName(filter.Tier) {
-		return false
-	}
-	if filter.Type != "" && record.Type != parsePackTypeName(filter.Type) {
-		return false
-	}
-	if filter.State != "" && record.Lifecycle != parseLifecycleName(filter.State) {
-		return false
-	}
-	if filter.DeletePending && record.Lifecycle != schema.PackDeletePending {
-		return false
-	}
-	if filter.MinSize != 0 && record.PhysicalSize < filter.MinSize {
-		return false
-	}
-	if filter.MaxSize != 0 && record.PhysicalSize > filter.MaxSize {
+	if !packPlacementMatches(record, placements, eligibility, filter, now) || !packBasicFieldsMatch(record, filter) {
 		return false
 	}
 	// A pack whose creation time is unknown must never satisfy a time filter:
@@ -713,6 +689,33 @@ func packMatchesFilter(id vaultic.ID, record schema.PackRecord, placements place
 		}
 	}
 	return true
+}
+
+func packPlacementMatches(
+	record schema.PackRecord,
+	placements placementSet,
+	eligibility schema.PromotionEligibilityRecord,
+	filter PackFilter,
+	now time.Time,
+) bool {
+	if filter.Backend != "" {
+		placement, ok := placements[backendHashForName(filter.Backend, filter.PlacementModel)]
+		if !ok || placement.State == schema.PlacementEvicted {
+			return false
+		}
+	}
+	return (filter.Class == "" || placementClassMatches(placements, filter.Class)) &&
+		(!filter.NotOffsite || !hasOffsitePlacement(placements, filter.PlacementModel)) &&
+		(!filter.PromotionDue || promotionDue(record, placements, eligibility, filter.PlacementModel, now))
+}
+
+func packBasicFieldsMatch(record schema.PackRecord, filter PackFilter) bool {
+	return (filter.Tier == "" || normalizedTier(record) == parseTierName(filter.Tier)) &&
+		(filter.Type == "" || record.Type == parsePackTypeName(filter.Type)) &&
+		(filter.State == "" || record.Lifecycle == parseLifecycleName(filter.State)) &&
+		(!filter.DeletePending || record.Lifecycle == schema.PackDeletePending) &&
+		(filter.MinSize == 0 || record.PhysicalSize >= filter.MinSize) &&
+		(filter.MaxSize == 0 || record.PhysicalSize <= filter.MaxSize)
 }
 
 func countPackFactsForPacks(record schema.PackRecord, result *PacksResult) {

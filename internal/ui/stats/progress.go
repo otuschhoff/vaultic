@@ -53,7 +53,13 @@ func (p *Progress) printProgress(runtime time.Duration, final bool) {
 		progressBase--
 	}
 
-	status := fmt.Sprintf("[%s] %s  %d / %d snapshots", ui.FormatDuration(runtime), ui.FormatPercent(progressBase, p.snapshotCount), p.processedSnapshotCount, p.snapshotCount)
+	status := fmt.Sprintf(
+		"[%s] %s  %d / %d snapshots",
+		ui.FormatDuration(runtime),
+		ui.FormatPercent(progressBase, p.snapshotCount),
+		p.processedSnapshotCount,
+		p.snapshotCount,
+	)
 
 	if p.processedFileCount > 0 {
 		status += fmt.Sprintf(", %v files", p.processedFileCount)

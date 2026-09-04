@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
 use aes_gcm::{
     aead::{Aead, Payload},
@@ -32,6 +32,24 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
+
+#[derive(Debug, Default)]
+pub struct ProviderCredentials {
+    token_files: HashMap<String, PathBuf>,
+}
+
+impl ProviderCredentials {
+    pub fn new(token_files: HashMap<String, PathBuf>) -> Self {
+        Self { token_files }
+    }
+
+    fn token(&self, provider: &str) -> Result<Option<String>> {
+        self.token_files
+            .get(provider)
+            .map(|path| token_from_file(path))
+            .transpose()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct KeyContext<'a> {
@@ -77,32 +95,53 @@ pub trait KeyProvider: Send + Sync {
     ) -> Result<Zeroizing<Vec<u8>>>;
 }
 
-pub async fn from_environment(provider: &str) -> Result<Option<Box<dyn KeyProvider>>> {
+pub async fn from_config(
+    provider: &str,
+    credentials: &ProviderCredentials,
+) -> Result<Option<Box<dyn KeyProvider>>> {
     match provider {
         "aws-kms" => Ok(Some(Box::new(AwsKmsProvider::from_environment().await))),
-        "azure-key-vault" => token_from_file("VAULTICDB_AZURE_TOKEN_FILE").map(|token| {
-            token.map(|value| Box::new(AzureKeyVaultProvider::new(value)) as Box<dyn KeyProvider>)
-        }),
-        "gcp-kms" => token_from_file("VAULTICDB_GCP_TOKEN_FILE").map(|token| {
-            token.map(|value| Box::new(GoogleCloudKmsProvider::new(value)) as Box<dyn KeyProvider>)
-        }),
-        "vault-transit" => token_from_file("VAULTICDB_VAULT_TOKEN_FILE").map(|token| {
-            token.map(|value| Box::new(VaultTransitProvider::new(value)) as Box<dyn KeyProvider>)
-        }),
-        "pkcs11" => token_from_file("VAULTICDB_PKCS11_PIN_FILE").map(|pin| {
-            pin.map(|value| Box::new(Pkcs11Provider::new(value)) as Box<dyn KeyProvider>)
-        }),
-        "yubikey-piv" => token_from_file("VAULTICDB_YUBIKEY_PIV_PIN_FILE").map(|pin| {
-            pin.map(|value| Box::new(YubikeyPivProvider::new(value)) as Box<dyn KeyProvider>)
-        }),
-        "fido2-hmac-secret" => token_from_file("VAULTICDB_FIDO2_SECRET_FILE").map(|secret| {
-            secret
-                .map(Fido2HmacSecretProvider::from_base64)
-                .transpose()
-                .map(|provider| provider.map(|value| Box::new(value) as Box<dyn KeyProvider>))
-        })?,
+        "azure-key-vault" => Ok(credentials
+            .token(provider)?
+            .map(|value| Box::new(AzureKeyVaultProvider::new(value)) as Box<dyn KeyProvider>)),
+        "gcp-kms" => Ok(credentials
+            .token(provider)?
+            .map(|value| Box::new(GoogleCloudKmsProvider::new(value)) as Box<dyn KeyProvider>)),
+        "vault-transit" => Ok(credentials
+            .token(provider)?
+            .map(|value| Box::new(VaultTransitProvider::new(value)) as Box<dyn KeyProvider>)),
+        "pkcs11" => Ok(credentials
+            .token(provider)?
+            .map(|value| Box::new(Pkcs11Provider::new(value)) as Box<dyn KeyProvider>)),
+        "yubikey-piv" => Ok(credentials
+            .token(provider)?
+            .map(|value| Box::new(YubikeyPivProvider::new(value)) as Box<dyn KeyProvider>)),
+        "fido2-hmac-secret" => credentials
+            .token(provider)?
+            .map(Fido2HmacSecretProvider::from_base64)
+            .transpose()
+            .map(|provider| provider.map(|value| Box::new(value) as Box<dyn KeyProvider>)),
         value => bail!("unsupported metadata key provider {value:?}"),
     }
+}
+
+fn token_from_file(path: &std::path::Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+            bail!("cloud token file must not be accessible by group or others");
+        }
+    }
+    let mut token = std::fs::read_to_string(path)
+        .with_context(|| format!("read cloud token file {}", path.display()))?;
+    while token.ends_with(char::is_whitespace) {
+        token.pop();
+    }
+    if token.is_empty() {
+        bail!("cloud token file is empty");
+    }
+    Ok(token)
 }
 
 pub async fn for_management(
@@ -134,29 +173,6 @@ pub async fn for_management(
         "aws-kms" => bail!("AWS KMS uses the SDK credential chain, not a bearer token"),
         value => bail!("unsupported metadata key provider {value:?}"),
     }
-}
-
-fn token_from_file(variable: &str) -> Result<Option<String>> {
-    let Some(path) = env::var_os(variable) else {
-        return Ok(None);
-    };
-    let path = PathBuf::from(path);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(&path)?.permissions().mode() & 0o077 != 0 {
-            bail!("cloud token file must not be accessible by group or others");
-        }
-    }
-    let mut token = std::fs::read_to_string(&path)
-        .with_context(|| format!("read cloud token file {}", path.display()))?;
-    while token.ends_with(char::is_whitespace) {
-        token.pop();
-    }
-    if token.is_empty() {
-        bail!("cloud token file is empty");
-    }
-    Ok(Some(token))
 }
 
 pub struct AwsKmsProvider {

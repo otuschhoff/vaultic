@@ -30,13 +30,33 @@ func TestSchemaStoreImportsSameLegacyPackConcurrently(t *testing.T) {
 	imports := []LegacyPackImport{
 		{
 			SourceIndex: daemonTestID(21), PackID: packID,
-			Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 20, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 12, BlobCount: 1, Lifecycle: schema.PackImported},
-			Blobs:  map[schema.ID]schema.BlobRecord{daemonTestID(22): {Locations: []schema.BlobLocation{{PackID: packID, Offset: 0, Length: 8, Type: schema.BlobData}}}},
+			Record: schema.PackRecord{
+				Type:              schema.PackData,
+				PhysicalSize:      20,
+				PhysicalSizeKnown: true,
+				PayloadSize:       8,
+				HeaderSize:        12,
+				BlobCount:         1,
+				Lifecycle:         schema.PackImported,
+			},
+			Blobs: map[schema.ID]schema.BlobRecord{
+				daemonTestID(22): {Locations: []schema.BlobLocation{{PackID: packID, Offset: 0, Length: 8, Type: schema.BlobData}}},
+			},
 		},
 		{
 			SourceIndex: daemonTestID(23), PackID: packID,
-			Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 20, PhysicalSizeKnown: true, PayloadSize: 8, HeaderSize: 12, BlobCount: 1, Lifecycle: schema.PackImported},
-			Blobs:  map[schema.ID]schema.BlobRecord{daemonTestID(24): {Locations: []schema.BlobLocation{{PackID: packID, Offset: 8, Length: 8, Type: schema.BlobData}}}},
+			Record: schema.PackRecord{
+				Type:              schema.PackData,
+				PhysicalSize:      20,
+				PhysicalSizeKnown: true,
+				PayloadSize:       8,
+				HeaderSize:        12,
+				BlobCount:         1,
+				Lifecycle:         schema.PackImported,
+			},
+			Blobs: map[schema.ID]schema.BlobRecord{
+				daemonTestID(24): {Locations: []schema.BlobLocation{{PackID: packID, Offset: 8, Length: 8, Type: schema.BlobData}}},
+			},
 		},
 	}
 	errors := make([]error, len(imports))
@@ -88,8 +108,15 @@ func TestSchemaStoreImportsLargeLegacyPackAcrossBatches(t *testing.T) {
 	}
 	imported := LegacyPackImport{
 		SourceIndex: daemonTestID(99), PackID: packID,
-		Record: schema.PackRecord{Type: schema.PackData, PhysicalSize: 73, PhysicalSizeKnown: true, PayloadSize: 73, BlobCount: 73, Lifecycle: schema.PackImported},
-		Blobs:  blobs, BatchSize: 1,
+		Record: schema.PackRecord{
+			Type:              schema.PackData,
+			PhysicalSize:      73,
+			PhysicalSizeKnown: true,
+			PayloadSize:       73,
+			BlobCount:         73,
+			Lifecycle:         schema.PackImported,
+		},
+		Blobs: blobs, BatchSize: 1,
 	}
 	if err := store.ImportLegacyPack(context.Background(), imported); err != nil {
 		t.Fatal(err)
@@ -201,20 +228,87 @@ func TestEverySchemaRecordPersistsByteForByteAcrossRestart(t *testing.T) {
 	indexCheckpoint := encodeSchemaRecord(t, schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 2})
 	snapshotCheckpoint := encodeSchemaRecord(t, schema.SnapshotImportCheckpointRecord{TreesVisited: 1, NodesImported: 2, DebtsCreated: 3})
 	records := []Mutation{
-		{Key: schema.BlobKey(id1), Value: encodeSchemaRecord(t, schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: id2, Offset: 1, Length: 2, UncompressedSize: 3, Type: schema.BlobData}}})},
-		{Key: schema.PackKey(id2), Value: encodeSchemaRecord(t, schema.PackRecord{Type: schema.PackData, PhysicalSize: 3, PhysicalSizeKnown: true, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, Lifecycle: schema.PackPublished})},
-		{Key: schema.PackAggregateKey(schema.AggregateAll), Value: encodeSchemaRecord(t, schema.PackAggregate{PackCount: 1, PhysicalSize: 3, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, UpdateSequence: 1})},
+		{
+			Key: schema.BlobKey(id1),
+			Value: encodeSchemaRecord(
+				t,
+				schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: id2, Offset: 1, Length: 2, UncompressedSize: 3, Type: schema.BlobData}}},
+			),
+		},
+		{
+			Key: schema.PackKey(id2),
+			Value: encodeSchemaRecord(
+				t,
+				schema.PackRecord{
+					Type:              schema.PackData,
+					PhysicalSize:      3,
+					PhysicalSizeKnown: true,
+					PayloadSize:       2,
+					HeaderSize:        1,
+					BlobCount:         1,
+					Lifecycle:         schema.PackPublished,
+				},
+			),
+		},
+		{
+			Key:   schema.PackAggregateKey(schema.AggregateAll),
+			Value: encodeSchemaRecord(t, schema.PackAggregate{PackCount: 1, PhysicalSize: 3, PayloadSize: 2, HeaderSize: 1, BlobCount: 1, UpdateSequence: 1}),
+		},
 		{Key: schema.CurrentInodeKey(1, 2), Value: inodePointer},
-		{Key: inodeKey, Value: encodeSchemaRecord(t, schema.InodeRevision{ParentInode: 1, Known: schema.KnownParent, ContentMode: schema.ContentInline, ContentIDs: []schema.ID{id1}, ContentCount: 1, Freshness: schema.FreshnessVerified})},
+		{
+			Key: inodeKey,
+			Value: encodeSchemaRecord(
+				t,
+				schema.InodeRevision{
+					ParentInode:  1,
+					Known:        schema.KnownParent,
+					ContentMode:  schema.ContentInline,
+					ContentIDs:   []schema.ID{id1},
+					ContentCount: 1,
+					Freshness:    schema.FreshnessVerified,
+				},
+			),
+		},
 		{Key: schema.CurrentDirectoryKey(1, 1), Value: directoryPointer},
-		{Key: directoryKey, Value: encodeSchemaRecord(t, schema.DirectoryRevision{Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: inodeKey}}})},
-		{Key: schema.SnapshotKey(id3), Value: encodeSchemaRecord(t, schema.SnapshotRecord{CommitSequence: 1, RootFSID: 1, RootInode: 1, RootRevision: 1, OriginalJSON: []byte("{}")})},
-		{Key: schema.ContentManifestKey(id3, 0), Value: encodeSchemaRecord(t, schema.ContentManifest{TotalCount: 1, SegmentCount: 1, ContentIDs: []schema.ID{id1}})},
+		{
+			Key: directoryKey,
+			Value: encodeSchemaRecord(
+				t,
+				schema.DirectoryRevision{Children: []schema.DirectoryChild{{Name: "file", Inode: 2, Type: schema.NodeFile, MetadataKey: inodeKey}}},
+			),
+		},
+		{
+			Key:   schema.SnapshotKey(id3),
+			Value: encodeSchemaRecord(t, schema.SnapshotRecord{CommitSequence: 1, RootFSID: 1, RootInode: 1, RootRevision: 1, OriginalJSON: []byte("{}")}),
+		},
+		{
+			Key:   schema.ContentManifestKey(id3, 0),
+			Value: encodeSchemaRecord(t, schema.ContentManifest{TotalCount: 1, SegmentCount: 1, ContentIDs: []schema.ID{id1}}),
+		},
 		{Key: schema.ReverseManifestKey(id1, id3), Value: encodeSchemaRecord(t, schema.ReverseManifestRecord{State: schema.ReferenceCurrent})},
 		{Key: schema.ReverseInodeKey(id1, 1, 2), Value: encodeSchemaRecord(t, schema.ReverseInodeRecord{LatestRevision: 1, State: schema.ReferenceCurrent})},
-		{Key: schema.ReferenceCountKey(id1), Value: encodeSchemaRecord(t, schema.ReferenceCountRecord{TotalReferences: 2, DistinctInodes: 1, DistinctRevisions: 1, DistinctManifests: 1, ReachableSnapshots: 1, UpdateSequence: 1})},
-		{Key: schema.GarbageCollectionKey(schema.GCBlob, id1), Value: encodeSchemaRecord(t, schema.GarbageCollectionRecord{State: schema.GCCandidate, ObservedCommit: 1})},
-		{Key: schema.CrawlDebtKey(id3, id2), Value: encodeSchemaRecord(t, schema.CrawlDebtRecord{PathOrTree: []byte("tree"), Reason: schema.DebtMissingDirectory, Status: schema.DebtPending})},
+		{
+			Key: schema.ReferenceCountKey(id1),
+			Value: encodeSchemaRecord(
+				t,
+				schema.ReferenceCountRecord{
+					TotalReferences:    2,
+					DistinctInodes:     1,
+					DistinctRevisions:  1,
+					DistinctManifests:  1,
+					ReachableSnapshots: 1,
+					UpdateSequence:     1,
+				},
+			),
+		},
+		{
+			Key:   schema.GarbageCollectionKey(schema.GCBlob, id1),
+			Value: encodeSchemaRecord(t, schema.GarbageCollectionRecord{State: schema.GCCandidate, ObservedCommit: 1}),
+		},
+		{
+			Key:   schema.CrawlDebtKey(id3, id2),
+			Value: encodeSchemaRecord(t, schema.CrawlDebtRecord{PathOrTree: []byte("tree"), Reason: schema.DebtMissingDirectory, Status: schema.DebtPending}),
+		},
 		{Key: schema.ImportCheckpointKey(id1), Value: indexCheckpoint},
 		{Key: schema.SnapshotImportCheckpointKey(id3), Value: snapshotCheckpoint},
 		{Key: schema.NextRevisionKey(), Value: nextRevision},
@@ -413,7 +507,8 @@ func TestClientRejectsWrongResponseKeys(t *testing.T) {
 	if _, _, err := client.Get(context.Background(), []byte("requested-key"), ""); err == nil || !strings.Contains(err.Error(), "wrong key") {
 		t.Fatalf("expected wrong point-read key error, got %v", err)
 	}
-	if _, _, err := client.MultiGet(context.Background(), [][]byte{[]byte("first"), []byte("second")}, ""); err == nil || !strings.Contains(err.Error(), "out-of-order") {
+	if _, _, err := client.MultiGet(context.Background(), [][]byte{[]byte("first"), []byte("second")}, ""); err == nil ||
+		!strings.Contains(err.Error(), "out-of-order") {
 		t.Fatalf("expected out-of-order multi-get error, got %v", err)
 	}
 }
@@ -470,7 +565,8 @@ func TestEnsureStartsDaemonRecoversStaleSocketAndCleansUp(t *testing.T) {
 	if err != nil || dir.Mode().Perm() != 0o700 {
 		t.Fatalf("directory permissions: %v, %v", dir.Mode(), err)
 	}
-	capabilities, err := client.RPC().Capabilities(context.Background(), &vaulticdbv1.CapabilitiesRequest{RepositoryId: "test-repo", Context: requestContext(context.Background())})
+	capabilities, err := client.RPC().
+		Capabilities(context.Background(), &vaulticdbv1.CapabilitiesRequest{RepositoryId: "test-repo", Context: requestContext(context.Background())})
 	if err != nil {
 		t.Fatal(err)
 	}

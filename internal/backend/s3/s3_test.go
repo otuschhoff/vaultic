@@ -118,18 +118,24 @@ func newMinioTestSuite(t testing.TB) (*test.Suite[s3.Config], func()) {
 			return &cfg, nil
 		},
 
-		Factory: location.NewHTTPBackendFactory("s3", s3.ParseConfig, location.NoPassword, func(ctx context.Context, cfg s3.Config, rt http.RoundTripper, errorLog func(string, ...any)) (be backend.Backend, err error) {
-			for i := range 50 {
-				be, err = s3.Create(ctx, cfg, rt, errorLog)
-				if err != nil {
-					t.Logf("s3 open: try %d: error %v", i, err)
-					time.Sleep(500 * time.Millisecond)
-					continue
+		Factory: location.NewHTTPBackendFactory(
+			"s3",
+			s3.ParseConfig,
+			location.NoPassword,
+			func(ctx context.Context, cfg s3.Config, rt http.RoundTripper, errorLog func(string, ...any)) (be backend.Backend, err error) {
+				for i := range 50 {
+					be, err = s3.Create(ctx, cfg, rt, errorLog)
+					if err != nil {
+						t.Logf("s3 open: try %d: error %v", i, err)
+						time.Sleep(500 * time.Millisecond)
+						continue
+					}
+					break
 				}
-				break
-			}
-			return be, err
-		}, s3.Open),
+				return be, err
+			},
+			s3.Open,
+		),
 	}, func() {
 		defer cancel()
 		defer cleanup()

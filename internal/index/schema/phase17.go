@@ -82,7 +82,11 @@ type VerificationStateRecord struct {
 }
 
 func (record VerificationStateRecord) validate() error {
-	if record.LastAttemptAt < 0 || record.HeaderVerifiedAt < 0 || record.ChecksumVerifiedAt < 0 || record.FullVerifiedAt < 0 || record.FirstErrorAt < 0 || record.LastErrorAt < 0 || !validVerificationResult(record.Result) {
+	if record.LastAttemptAt < 0 || record.HeaderVerifiedAt < 0 || record.ChecksumVerifiedAt < 0 ||
+		record.FullVerifiedAt < 0 ||
+		record.FirstErrorAt < 0 ||
+		record.LastErrorAt < 0 ||
+		!validVerificationResult(record.Result) {
 		return fmt.Errorf("%w: invalid verification state", ErrMalformed)
 	}
 	if record.LastAttemptAt == 0 {
@@ -92,7 +96,8 @@ func (record VerificationStateRecord) validate() error {
 	} else if !validVerificationLevel(record.LastAttemptLevel) || record.LastRunID == (ID{}) {
 		return fmt.Errorf("%w: incomplete verification attempt", ErrMalformed)
 	}
-	if record.FullVerifiedAt > 0 && (record.ChecksumVerifiedAt < record.FullVerifiedAt || record.HeaderVerifiedAt < record.FullVerifiedAt) {
+	if record.FullVerifiedAt > 0 &&
+		(record.ChecksumVerifiedAt < record.FullVerifiedAt || record.HeaderVerifiedAt < record.FullVerifiedAt) {
 		return fmt.Errorf("%w: full verification does not imply weaker levels", ErrMalformed)
 	}
 	if record.ChecksumVerifiedAt > 0 && record.HeaderVerifiedAt < record.ChecksumVerifiedAt {
@@ -103,13 +108,21 @@ func (record VerificationStateRecord) validate() error {
 		return fmt.Errorf("%w: finding and result disagree", ErrMalformed)
 	}
 	if hasFinding {
-		if !validVerificationLevel(record.FindingLevel) || record.Classification == VerificationNoError || !validVerificationClassification(record.Classification) || record.FirstErrorAt == 0 || record.LastErrorAt < record.FirstErrorAt || record.ConsecutiveFailures == 0 {
+		if !validVerificationLevel(record.FindingLevel) || record.Classification == VerificationNoError ||
+			!validVerificationClassification(record.Classification) ||
+			record.FirstErrorAt == 0 ||
+			record.LastErrorAt < record.FirstErrorAt ||
+			record.ConsecutiveFailures == 0 {
 			return fmt.Errorf("%w: incomplete verification finding", ErrMalformed)
 		}
 		if (record.Result == VerificationIntegrityError) != record.Classification.IsIntegrity() {
 			return fmt.Errorf("%w: verification finding class and result disagree", ErrMalformed)
 		}
-	} else if record.FindingLevel != 0 || record.Classification != VerificationNoError || record.FirstErrorAt != 0 || record.LastErrorAt != 0 || record.ConsecutiveFailures != 0 {
+	} else if record.FindingLevel != 0 ||
+		record.Classification != VerificationNoError ||
+		record.FirstErrorAt != 0 ||
+		record.LastErrorAt != 0 ||
+		record.ConsecutiveFailures != 0 {
 		return fmt.Errorf("%w: stale verification finding metadata", ErrMalformed)
 	}
 	return nil
@@ -210,7 +223,12 @@ type VerificationEventRecord struct {
 }
 
 func (record VerificationEventRecord) validate() error {
-	if !validVerificationEventType(record.Type) || record.FindingID == (ID{}) || record.RunID == (ID{}) || !validVerificationLevel(record.Level) || !validVerificationClassification(record.Classification) || record.FirstDetected <= 0 || record.LastDetected < record.FirstDetected || record.Occurrences == 0 {
+	if !validVerificationEventType(record.Type) || record.FindingID == (ID{}) || record.RunID == (ID{}) ||
+		!validVerificationLevel(record.Level) ||
+		!validVerificationClassification(record.Classification) ||
+		record.FirstDetected <= 0 ||
+		record.LastDetected < record.FirstDetected ||
+		record.Occurrences == 0 {
 		return fmt.Errorf("%w: invalid verification event", ErrMalformed)
 	}
 	if record.Type == VerificationResolved {
@@ -384,7 +402,9 @@ func compareDeletionSchedule(left, right DeletionSchedule) int {
 }
 
 func (record DeletionCertificateRecord) marshal(includeSignature bool) ([]byte, error) {
-	if record.ExecutedAt <= 0 || record.RunID == (ID{}) || record.SigningAlgorithm == "" || len(record.PublicKey) == 0 || (includeSignature && len(record.Signature) == 0) {
+	if record.ExecutedAt <= 0 || record.RunID == (ID{}) || record.SigningAlgorithm == "" ||
+		len(record.PublicKey) == 0 ||
+		(includeSignature && len(record.Signature) == 0) {
 		return nil, fmt.Errorf("%w: invalid deletion certificate", ErrMalformed)
 	}
 	if len(record.PurgedReferenceHashes) > 1<<24 || len(record.PendingDeletion) > 1<<24 {
@@ -406,7 +426,8 @@ func (record DeletionCertificateRecord) marshal(includeSignature bool) ([]byte, 
 	e.u32(uint32(len(record.PendingDeletion)))
 	previousSchedule := DeletionSchedule{}
 	for index, item := range record.PendingDeletion {
-		if item.PackID == (ID{}) || item.Backend == 0 || item.DeleteAfter < 0 || (index > 0 && compareDeletionSchedule(previousSchedule, item) >= 0) {
+		if item.PackID == (ID{}) || item.Backend == 0 || item.DeleteAfter < 0 ||
+			(index > 0 && compareDeletionSchedule(previousSchedule, item) >= 0) {
 			return nil, fmt.Errorf("%w: deletion schedules are not uniquely sorted", ErrMalformed)
 		}
 		e.id(item.PackID)

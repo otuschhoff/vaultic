@@ -184,7 +184,13 @@ func setupCache(s *repository.Repository, gopts Options, printer vaultic.Printer
 }
 
 // CreateRepository a repository with the given version and chunker polynomial.
-func CreateRepository(ctx context.Context, gopts Options, version uint, chunkerPolynomial *chunker.Pol, printer vaultic.Printer) (*repository.Repository, error) {
+func CreateRepository(
+	ctx context.Context,
+	gopts Options,
+	version uint,
+	chunkerPolynomial *chunker.Pol,
+	printer vaultic.Printer,
+) (*repository.Repository, error) {
 	if version < vaultic.MinRepoVersion || version > vaultic.MaxRepoVersion {
 		return nil, errors.Fatalf("only repository versions between %v and %v are allowed", vaultic.MinRepoVersion, vaultic.MaxRepoVersion)
 	}

@@ -34,7 +34,11 @@ func NewGoogleCloudKMSUnwrapper(token []byte, client *http.Client) (*GoogleCloud
 
 func (unwrapper *GoogleCloudKMSUnwrapper) Clear() { clear(unwrapper.token) }
 
-func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(ctx context.Context, member ExternalMemberContext, ciphertext []byte) ([]byte, VerifiedPrincipal, error) {
+func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(
+	ctx context.Context,
+	member ExternalMemberContext,
+	ciphertext []byte,
+) ([]byte, VerifiedPrincipal, error) {
 	project, err := validateGoogleKeyReference(member.KeyReference)
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
@@ -50,7 +54,12 @@ func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(ctx context.Context, memb
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://cloudkms.googleapis.com/v1/"+member.KeyReference+":decrypt", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"https://cloudkms.googleapis.com/v1/"+member.KeyReference+":decrypt",
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		return nil, VerifiedPrincipal{}, err
 	}
@@ -91,7 +100,10 @@ func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(ctx context.Context, memb
 
 func validateGoogleKeyReference(reference string) (string, error) {
 	segments := strings.Split(reference, "/")
-	if len(segments) != 8 || segments[0] != "projects" || segments[1] == "" || segments[2] != "locations" || segments[3] == "" || segments[4] != "keyRings" || segments[5] == "" || segments[6] != "cryptoKeys" || segments[7] == "" {
+	if len(segments) != 8 || segments[0] != "projects" || segments[1] == "" || segments[2] != "locations" || segments[3] == "" || segments[4] != "keyRings" ||
+		segments[5] == "" ||
+		segments[6] != "cryptoKeys" ||
+		segments[7] == "" {
 		return "", errors.New("Google Cloud KMS key reference must name a CryptoKey")
 	}
 	return segments[1], nil

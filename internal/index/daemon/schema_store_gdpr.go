@@ -54,7 +54,10 @@ type gdprForgetPlan struct {
 	targetPaths     map[string]struct{}
 }
 
-func (store *SchemaStore) ExecuteGDPRForget(ctx context.Context, request GDPRForgetRequest) (schema.DeletionCertificateRecord, error) {
+func (store *SchemaStore) ExecuteGDPRForget(
+	ctx context.Context,
+	request GDPRForgetRequest,
+) (schema.DeletionCertificateRecord, error) {
 	if request.ExecutedAt <= 0 || request.RunID == (schema.ID{}) || len(request.SigningKey) != ed25519.PrivateKeySize {
 		return schema.DeletionCertificateRecord{}, fmt.Errorf("invalid GDPR forget request")
 	}
@@ -67,7 +70,10 @@ func (store *SchemaStore) ExecuteGDPRForget(ctx context.Context, request GDPRFor
 	return schema.DeletionCertificateRecord{}, fmt.Errorf("GDPR forget transaction exceeded conflict retry limit")
 }
 
-func (store *SchemaStore) executeGDPRForget(ctx context.Context, request GDPRForgetRequest) (schema.DeletionCertificateRecord, error) {
+func (store *SchemaStore) executeGDPRForget(
+	ctx context.Context,
+	request GDPRForgetRequest,
+) (schema.DeletionCertificateRecord, error) {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return schema.DeletionCertificateRecord{}, err
@@ -99,7 +105,12 @@ func (store *SchemaStore) executeGDPRForget(ctx context.Context, request GDPRFor
 	return plan.certificate, nil
 }
 
-func (store *SchemaStore) planGDPRForget(ctx context.Context, transaction *Transaction, request GDPRForgetRequest, certificateKey []byte) (gdprForgetPlan, error) {
+func (store *SchemaStore) planGDPRForget(
+	ctx context.Context,
+	transaction *Transaction,
+	request GDPRForgetRequest,
+	certificateKey []byte,
+) (gdprForgetPlan, error) {
 	inventory, err := buildGDPRInventory(ctx, transaction, request.UID)
 	if err != nil {
 		return gdprForgetPlan{}, err
@@ -129,14 +140,28 @@ func (store *SchemaStore) planGDPRForget(ctx context.Context, transaction *Trans
 		return gdprForgetPlan{}, err
 	}
 	plan.deletes = append(plan.deletes, cleanupDeletes...)
-	counts, referencePlan, err := planGDPRReferenceRebuild(inventory, plan.remaining, plan.affectedBlobs, plan.affectedInodes, request.ExecutedAt)
+	counts, referencePlan, err := planGDPRReferenceRebuild(
+		inventory,
+		plan.remaining,
+		plan.affectedBlobs,
+		plan.affectedInodes,
+		request.ExecutedAt,
+	)
 	if err != nil {
 		return gdprForgetPlan{}, err
 	}
 	plan.puts = append(plan.puts, referencePlan.puts...)
 	plan.deletes = append(plan.deletes, referencePlan.deletes...)
 	var finalPuts []Mutation
-	plan.certificate, finalPuts, err = planGDPRCertificate(ctx, transaction, request, certificateKey, plan.purgedHashes, plan.affectedBlobs, counts)
+	plan.certificate, finalPuts, err = planGDPRCertificate(
+		ctx,
+		transaction,
+		request,
+		certificateKey,
+		plan.purgedHashes,
+		plan.affectedBlobs,
+		counts,
+	)
 	if err != nil {
 		return gdprForgetPlan{}, err
 	}
@@ -145,7 +170,12 @@ func (store *SchemaStore) planGDPRForget(ctx context.Context, transaction *Trans
 	return plan, nil
 }
 
-func findGDPRReplay(ctx context.Context, transaction *Transaction, request GDPRForgetRequest, certificateKey []byte) (*schema.DeletionCertificateRecord, error) {
+func findGDPRReplay(
+	ctx context.Context,
+	transaction *Transaction,
+	request GDPRForgetRequest,
+	certificateKey []byte,
+) (*schema.DeletionCertificateRecord, error) {
 	if value, found, err := transaction.Get(ctx, certificateKey); err != nil {
 		return nil, err
 	} else if found {
@@ -153,17 +183,22 @@ func findGDPRReplay(ctx context.Context, transaction *Transaction, request GDPRF
 		return &certificate, err
 	}
 	var replayed *schema.DeletionCertificateRecord
-	err := scanGDPRTransaction(ctx, transaction, schema.DeletionCertificatePrefix(request.UID), func(kv KeyValue) error {
-		certificate, err := schema.UnmarshalDeletionCertificateRecord(kv.Value)
-		if err != nil {
-			return err
-		}
-		if certificate.RunID == request.RunID {
-			copy := certificate
-			replayed = &copy
-		}
-		return nil
-	})
+	err := scanGDPRTransaction(
+		ctx,
+		transaction,
+		schema.DeletionCertificatePrefix(request.UID),
+		func(kv KeyValue) error {
+			certificate, err := schema.UnmarshalDeletionCertificateRecord(kv.Value)
+			if err != nil {
+				return err
+			}
+			if certificate.RunID == request.RunID {
+				copy := certificate
+				replayed = &copy
+			}
+			return nil
+		},
+	)
 	return replayed, err
 }
 
@@ -228,7 +263,10 @@ func planGDPRRevisionRedactions(inventory gdprInventory, uid uint32) (gdprForget
 			return gdprForgetPlan{}, err
 		}
 		plan.puts = append(plan.puts, Mutation{Key: revision.key, Value: value})
-		plan.deletes = append(plan.deletes, schema.HardlinkRefsKey(revision.parsed.FSID, revision.parsed.Inode, revision.parsed.Revision))
+		plan.deletes = append(
+			plan.deletes,
+			schema.HardlinkRefsKey(revision.parsed.FSID, revision.parsed.Inode, revision.parsed.Revision),
+		)
 	}
 	return plan, nil
 }
@@ -238,7 +276,11 @@ func gdprRecordHash(key, value []byte) schema.ID {
 	return schema.ID(sha256.Sum256(input))
 }
 
-func planGDPRDirectoryRedactions(directories []gdprDirectory, uid uint32, targets gdprForgetPlan) (gdprForgetPlan, error) {
+func planGDPRDirectoryRedactions(
+	directories []gdprDirectory,
+	uid uint32,
+	targets gdprForgetPlan,
+) (gdprForgetPlan, error) {
 	for _, directory := range directories {
 		if directory.record.Known&schema.KnownUID == 0 || directory.record.UID != uid {
 			continue
@@ -256,7 +298,10 @@ func planGDPRDirectoryRedactions(directories []gdprDirectory, uid uint32, target
 			directory.record.Size, directory.record.UID, directory.record.SourcePath = 0, 0, ""
 			directory.record.Known &^= schema.KnownSize | schema.KnownUID | schema.KnownPath
 			changed = true
-			result.deletes = append(result.deletes, schema.HardlinkRefsKey(directory.parsed.FSID, directory.parsed.Inode, directory.parsed.Revision))
+			result.deletes = append(
+				result.deletes,
+				schema.HardlinkRefsKey(directory.parsed.FSID, directory.parsed.Inode, directory.parsed.Revision),
+			)
 		}
 		if !changed {
 			continue
@@ -285,7 +330,12 @@ func pruneGDPRDirectoryChildren(record *schema.DirectoryRevision, targets map[st
 	return changed
 }
 
-func planGDPRPathDeletes(ctx context.Context, transaction *Transaction, targetPaths map[string]struct{}, targetRevisions map[[3]uint64]struct{}) ([][]byte, error) {
+func planGDPRPathDeletes(
+	ctx context.Context,
+	transaction *Transaction,
+	targetPaths map[string]struct{},
+	targetRevisions map[[3]uint64]struct{},
+) ([][]byte, error) {
 	var deletes [][]byte
 	err := scanGDPRTransaction(ctx, transaction, []byte("pv:"), func(kv KeyValue) error {
 		key, err := schema.ParseKey(kv.Key)
@@ -312,7 +362,12 @@ func planGDPRPathDeletes(ctx context.Context, transaction *Transaction, targetPa
 	return deletes, err
 }
 
-func planGDPRGlobalCleanup(ctx context.Context, transaction *Transaction, inventory gdprInventory, affectedBlobs map[schema.ID]struct{}) ([][]byte, error) {
+func planGDPRGlobalCleanup(
+	ctx context.Context,
+	transaction *Transaction,
+	inventory gdprInventory,
+	affectedBlobs map[schema.ID]struct{},
+) ([][]byte, error) {
 	var deletes [][]byte
 	for manifestID := range inventory.orphanedManifests {
 		for _, item := range inventory.manifests[manifestID] {
@@ -335,7 +390,13 @@ func planGDPRGlobalCleanup(ctx context.Context, transaction *Transaction, invent
 	return deletes, nil
 }
 
-func planGDPRReferenceRebuild(inventory gdprInventory, remaining []gdprRevision, affectedBlobs map[schema.ID]struct{}, affectedInodes map[[2]uint64]struct{}, executedAt int64) (map[schema.ID]schema.ReferenceCountRecord, gdprForgetPlan, error) {
+func planGDPRReferenceRebuild(
+	inventory gdprInventory,
+	remaining []gdprRevision,
+	affectedBlobs map[schema.ID]struct{},
+	affectedInodes map[[2]uint64]struct{},
+	executedAt int64,
+) (map[schema.ID]schema.ReferenceCountRecord, gdprForgetPlan, error) {
 	manifestEdges := make([]schema.ManifestEdge, 0)
 	for manifestID, segments := range inventory.manifests {
 		if _, orphaned := inventory.orphanedManifests[manifestID]; orphaned {
@@ -370,19 +431,38 @@ func planGDPRReferenceRebuild(inventory gdprInventory, remaining []gdprRevision,
 	return counts, plan, nil
 }
 
-func gdprRemainingInodeEdges(revisions []gdprRevision, manifests map[schema.ID][]gdprManifestSegment) ([]schema.InodeEdge, map[[52]byte]struct{}) {
+func gdprRemainingInodeEdges(
+	revisions []gdprRevision,
+	manifests map[schema.ID][]gdprManifestSegment,
+) ([]schema.InodeEdge, map[[52]byte]struct{}) {
 	edges := make([]schema.InodeEdge, 0)
 	blobs := make(map[[52]byte]struct{})
 	for _, revision := range revisions {
 		for _, blob := range gdprRevisionContent(revision.record, manifests) {
-			edges = append(edges, schema.InodeEdge{Blob: blob, FSID: revision.parsed.FSID, Inode: revision.parsed.Inode, Revision: revision.parsed.Revision})
+			edges = append(
+				edges,
+				schema.InodeEdge{
+					Blob:     blob,
+					FSID:     revision.parsed.FSID,
+					Inode:    revision.parsed.Inode,
+					Revision: revision.parsed.Revision,
+				},
+			)
 			blobs[gdprInodeBlobKey(blob, revision.parsed.FSID, revision.parsed.Inode)] = struct{}{}
 		}
 	}
 	return edges, blobs
 }
 
-func planGDPRCertificate(ctx context.Context, transaction *Transaction, request GDPRForgetRequest, certificateKey []byte, purgedHashes []schema.ID, affectedBlobs map[schema.ID]struct{}, counts map[schema.ID]schema.ReferenceCountRecord) (schema.DeletionCertificateRecord, []Mutation, error) {
+func planGDPRCertificate(
+	ctx context.Context,
+	transaction *Transaction,
+	request GDPRForgetRequest,
+	certificateKey []byte,
+	purgedHashes []schema.ID,
+	affectedBlobs map[schema.ID]struct{},
+	counts map[schema.ID]schema.ReferenceCountRecord,
+) (schema.DeletionCertificateRecord, []Mutation, error) {
 	pending, puts, events, err := planGDPRPackDeletion(ctx, transaction, affectedBlobs, counts, request)
 	if err != nil {
 		return schema.DeletionCertificateRecord{}, nil, err
@@ -467,7 +547,12 @@ func scanGDPRManifests(ctx context.Context, transaction *Transaction) (map[schem
 	return result, err
 }
 
-func scanGDPRTransaction(ctx context.Context, transaction *Transaction, prefix []byte, visit func(KeyValue) error) error {
+func scanGDPRTransaction(
+	ctx context.Context,
+	transaction *Transaction,
+	prefix []byte,
+	visit func(KeyValue) error,
+) error {
 	var cursor []byte
 	for {
 		items, done, err := transaction.ScanPage(ctx, prefix, cursor, 1_000)
@@ -534,14 +619,22 @@ func uniqueGDPRKeys(keys [][]byte) [][]byte {
 func gdprAnalyticsPrefixes() [][]byte {
 	return [][]byte{
 		schema.AnalyticsFactPrefix(), schema.AnalyticsFactSegmentPrefix(), schema.AnalyticsSegmentMetadataPrefix(),
-		[]byte("ai:"), []byte("ar:"), []byte("ad:"), schema.AnalyticsManifestPrefix(), schema.AnalyticsWatermarkPrefix(),
+		[]byte(
+			"ai:",
+		), []byte("ar:"), []byte("ad:"), schema.AnalyticsManifestPrefix(), schema.AnalyticsWatermarkPrefix(),
 		schema.AnalyticsCachePrefix(), []byte("av1:"), []byte("g:time:"), []byte("g:path:"), []byte("u:summary:"),
 		[]byte("g:summary:"), []byte("u:statsv1:"), []byte("g:statsv1:"), []byte("u:churn:"), []byte("u:inodes:"),
 		[]byte("u:blobs:"), []byte("u:blobv1:"), schema.AnalyticsBuildCheckpointKey(), schema.AnalyticsMetadataKey(),
 	}
 }
 
-func planGDPRPackDeletion(ctx context.Context, transaction *Transaction, affected map[schema.ID]struct{}, counts map[schema.ID]schema.ReferenceCountRecord, request GDPRForgetRequest) ([]schema.DeletionSchedule, []Mutation, []PackEvent, error) {
+func planGDPRPackDeletion(
+	ctx context.Context,
+	transaction *Transaction,
+	affected map[schema.ID]struct{},
+	counts map[schema.ID]schema.ReferenceCountRecord,
+	request GDPRForgetRequest,
+) ([]schema.DeletionSchedule, []Mutation, []PackEvent, error) {
 	eligible, packRecords, err := discoverGDPRDeletionPacks(ctx, transaction, affected, counts)
 	if err != nil {
 		return nil, nil, nil, err
@@ -583,12 +676,19 @@ func planGDPRPackDeletion(ctx context.Context, transaction *Transaction, affecte
 			return nil
 		}
 		schedule := schema.DeletionSchedule{PackID: parsed.ID, Backend: parsed.Backend, DeleteAfter: deleteAfter}
-		value, err := (schema.PlacementDeleteRecord{Backend: parsed.Backend, PhysicalSize: placement.Bytes, Reason: "gdpr-forget", RunID: request.RunID}).MarshalBinary()
+		value,
+			err := (schema.PlacementDeleteRecord{Backend: parsed.Backend,
+			PhysicalSize: placement.Bytes,
+			Reason:       "gdpr-forget",
+			RunID:        request.RunID}).MarshalBinary()
 		if err != nil {
 			return err
 		}
 		schedules = append(schedules, schedule)
-		puts = append(puts, Mutation{Key: schema.PlacementDeleteQueueKey(deleteAfter, parsed.ID, parsed.Backend), Value: value})
+		puts = append(
+			puts,
+			Mutation{Key: schema.PlacementDeleteQueueKey(deleteAfter, parsed.ID, parsed.Backend), Value: value},
+		)
 		scheduledPacks[parsed.ID] = struct{}{}
 		return nil
 	})
@@ -598,7 +698,12 @@ func planGDPRPackDeletion(ctx context.Context, transaction *Transaction, affecte
 	return finalizeGDPRPackDeletion(schedules, puts, scheduledPacks, packRecords, request)
 }
 
-func discoverGDPRDeletionPacks(ctx context.Context, transaction *Transaction, affected map[schema.ID]struct{}, counts map[schema.ID]schema.ReferenceCountRecord) (map[schema.ID]struct{}, map[schema.ID]schema.PackRecord, error) {
+func discoverGDPRDeletionPacks(
+	ctx context.Context,
+	transaction *Transaction,
+	affected map[schema.ID]struct{},
+	counts map[schema.ID]schema.ReferenceCountRecord,
+) (map[schema.ID]struct{}, map[schema.ID]schema.PackRecord, error) {
 	packBlobs, touchedPacks, err := scanGDPRPackBlobs(ctx, transaction, affected)
 	if err != nil {
 		return nil, nil, err
@@ -627,7 +732,11 @@ func discoverGDPRDeletionPacks(ctx context.Context, transaction *Transaction, af
 	return eligible, packRecords, nil
 }
 
-func scanGDPRPackBlobs(ctx context.Context, transaction *Transaction, affected map[schema.ID]struct{}) (map[schema.ID][]schema.ID, map[schema.ID]struct{}, error) {
+func scanGDPRPackBlobs(
+	ctx context.Context,
+	transaction *Transaction,
+	affected map[schema.ID]struct{},
+) (map[schema.ID][]schema.ID, map[schema.ID]struct{}, error) {
 	packBlobs := make(map[schema.ID][]schema.ID)
 	touchedPacks := make(map[schema.ID]struct{})
 	if err := scanGDPRTransaction(ctx, transaction, []byte("b:"), func(kv KeyValue) error {
@@ -661,7 +770,13 @@ func gdprPackHasReferences(blobs []schema.ID, counts map[schema.ID]schema.Refere
 	return false
 }
 
-func finalizeGDPRPackDeletion(schedules []schema.DeletionSchedule, puts []Mutation, scheduledPacks map[schema.ID]struct{}, packRecords map[schema.ID]schema.PackRecord, request GDPRForgetRequest) ([]schema.DeletionSchedule, []Mutation, []PackEvent, error) {
+func finalizeGDPRPackDeletion(
+	schedules []schema.DeletionSchedule,
+	puts []Mutation,
+	scheduledPacks map[schema.ID]struct{},
+	packRecords map[schema.ID]schema.PackRecord,
+	request GDPRForgetRequest,
+) ([]schema.DeletionSchedule, []Mutation, []PackEvent, error) {
 	var events []PackEvent
 	for pack := range scheduledPacks {
 		record := packRecords[pack]
@@ -674,7 +789,19 @@ func finalizeGDPRPackDeletion(schedules []schema.DeletionSchedule, puts []Mutati
 			return nil, nil, nil, err
 		}
 		puts = append(puts, Mutation{Key: schema.PackKey(pack), Value: value})
-		events = append(events, PackEvent{PackID: pack, Record: schema.PackHistoryEvent{Type: schema.EventDeletePending, PackType: record.Type, PhysicalSize: record.PhysicalSize, PayloadSize: record.PayloadSize, RunID: request.RunID}})
+		events = append(
+			events,
+			PackEvent{
+				PackID: pack,
+				Record: schema.PackHistoryEvent{
+					Type:         schema.EventDeletePending,
+					PackType:     record.Type,
+					PhysicalSize: record.PhysicalSize,
+					PayloadSize:  record.PayloadSize,
+					RunID:        request.RunID,
+				},
+			},
+		)
 	}
 	sort.Slice(schedules, func(i, j int) bool {
 		if schedules[i].PackID != schedules[j].PackID {

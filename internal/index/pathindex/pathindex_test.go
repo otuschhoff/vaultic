@@ -94,7 +94,17 @@ func addSnapshot(t *testing.T, store *memoryStore, commit uint64, seed byte, roo
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.set(t, schema.SnapshotKey(snapshotID), schema.SnapshotRecord{CommitSequence: commit, RootFSID: root.FSID, RootInode: root.Inode, RootRevision: root.Revision, OriginalJSON: []byte(`{"paths":["/"]}`)})
+	store.set(
+		t,
+		schema.SnapshotKey(snapshotID),
+		schema.SnapshotRecord{
+			CommitSequence: commit,
+			RootFSID:       root.FSID,
+			RootInode:      root.Inode,
+			RootRevision:   root.Revision,
+			OriginalJSON:   []byte(`{"paths":["/"]}`),
+		},
+	)
 	store.set(t, schema.SnapshotCommitKey(commit, snapshotID), schema.SnapshotCommitRecord{SnapshotTimeUnixNano: int64(commit), RootKey: rootKey})
 }
 
@@ -135,7 +145,12 @@ func TestPathIndexRebuildWritesOnlyBindingChanges(t *testing.T) {
 }
 
 func TestPathIndexKeyOrderingAndBoundary(t *testing.T) {
-	keys := [][]byte{schema.PathVersionKey(0, "a/b", 1), schema.PathVersionKey(0, "a/b", 2), schema.PathVersionKey(0, "a/b/c", 1), schema.PathVersionKey(0, "a/bc", 1)}
+	keys := [][]byte{
+		schema.PathVersionKey(0, "a/b", 1),
+		schema.PathVersionKey(0, "a/b", 2),
+		schema.PathVersionKey(0, "a/b/c", 1),
+		schema.PathVersionKey(0, "a/bc", 1),
+	}
 	if !sort.SliceIsSorted(keys, func(i, j int) bool { return bytes.Compare(keys[i], keys[j]) < 0 }) {
 		t.Fatalf("test keys are not in expected lexical order")
 	}

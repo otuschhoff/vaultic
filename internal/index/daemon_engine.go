@@ -166,7 +166,11 @@ func (policy TierPolicy) placementRecords(record schema.PackRecord, now time.Tim
 	return placements
 }
 
-func (policy TierPolicy) placementRecordFor(record schema.PackRecord, backendHash uint64, now time.Time) (schema.PlacementRecord, bool) {
+func (policy TierPolicy) placementRecordFor(
+	record schema.PackRecord,
+	backendHash uint64,
+	now time.Time,
+) (schema.PlacementRecord, bool) {
 	for _, backend := range policy.Backends {
 		if backend.Hash != backendHash || !backend.ingestEnabled() {
 			continue
@@ -231,7 +235,14 @@ func NewDaemonEngine(client *daemon.Client, legacy ...*LegacyEngine) *DaemonEngi
 	if len(legacy) > 0 && legacy[0] != nil {
 		projection = legacy[0]
 	}
-	return &DaemonEngine{legacy: projection, client: client, store: daemon.NewSchemaStore(client), pendingSnapshots: make(map[vaultic.ID][]byte), pendingPacks: make(map[vaultic.ID]struct{}), now: time.Now}
+	return &DaemonEngine{
+		legacy:           projection,
+		client:           client,
+		store:            daemon.NewSchemaStore(client),
+		pendingSnapshots: make(map[vaultic.ID][]byte),
+		pendingPacks:     make(map[vaultic.ID]struct{}),
+		now:              time.Now,
+	}
 }
 
 // SetTierPolicy records how this repository routes packs. It must be called
@@ -324,14 +335,23 @@ func (engine *DaemonEngine) PublishSnapshotScope(ctx context.Context, id vaultic
 
 // PublishSnapshotScopeWithCrawl is reserved for callers that can explicitly
 // certify an enumerated source scope. Ordinary backups publish no crawl proof.
-func (engine *DaemonEngine) PublishSnapshotScopeWithCrawl(ctx context.Context, id vaultic.ID, rootKey []byte, crawl *daemon.AuthoritativeCrawlClaim) error {
+func (engine *DaemonEngine) PublishSnapshotScopeWithCrawl(
+	ctx context.Context,
+	id vaultic.ID,
+	rootKey []byte,
+	crawl *daemon.AuthoritativeCrawlClaim,
+) error {
 	engine.mu.Lock()
 	originalJSON, found := engine.pendingSnapshots[id]
 	engine.mu.Unlock()
 	if !found {
 		return fmt.Errorf("snapshot %s has no pending compatibility projection", id.Str())
 	}
-	if err := engine.store.PublishSnapshotScope(ctx, daemon.SnapshotScope{SnapshotID: schema.ID(id), RootKey: rootKey, OriginalJSON: originalJSON, Crawl: crawl}); err != nil {
+	if err := engine.store.PublishSnapshotScope(ctx,
+		daemon.SnapshotScope{SnapshotID: schema.ID(id),
+			RootKey:      rootKey,
+			OriginalJSON: originalJSON,
+			Crawl:        crawl}); err != nil {
 		return err
 	}
 	engine.mu.Lock()
@@ -377,15 +397,33 @@ func (engine *DaemonEngine) AddPending(handle vaultic.BlobHandle, size uint) boo
 	return engine.legacy.AddPending(handle, size)
 }
 
-func (engine *DaemonEngine) StorePack(ctx context.Context, id vaultic.ID, blobs pack.Blobs, repo vaultic.SaverUnpacked[vaultic.FileType]) error {
+func (engine *DaemonEngine) StorePack(
+	ctx context.Context,
+	id vaultic.ID,
+	blobs pack.Blobs,
+	repo vaultic.SaverUnpacked[vaultic.FileType],
+) error {
 	return engine.storePack(ctx, id, blobs, repo, 0, false)
 }
 
-func (engine *DaemonEngine) StorePackSized(ctx context.Context, id vaultic.ID, blobs pack.Blobs, repo vaultic.SaverUnpacked[vaultic.FileType], physicalSize uint64) error {
+func (engine *DaemonEngine) StorePackSized(
+	ctx context.Context,
+	id vaultic.ID,
+	blobs pack.Blobs,
+	repo vaultic.SaverUnpacked[vaultic.FileType],
+	physicalSize uint64,
+) error {
 	return engine.storePack(ctx, id, blobs, repo, physicalSize, true)
 }
 
-func (engine *DaemonEngine) storePack(ctx context.Context, id vaultic.ID, blobs pack.Blobs, repo vaultic.SaverUnpacked[vaultic.FileType], physicalSize uint64, physicalSizeKnown bool) error {
+func (engine *DaemonEngine) storePack(
+	ctx context.Context,
+	id vaultic.ID,
+	blobs pack.Blobs,
+	repo vaultic.SaverUnpacked[vaultic.FileType],
+	physicalSize uint64,
+	physicalSizeKnown bool,
+) error {
 	clock := engine.now
 	if clock == nil {
 		clock = time.Now
@@ -418,7 +456,12 @@ func (engine *DaemonEngine) storePack(ctx context.Context, id vaultic.ID, blobs 
 	return nil
 }
 
-func (engine *DaemonEngine) Load(ctx context.Context, repo vaultic.ListerLoaderUnpacked, progress vaultic.Counter, callback func(vaultic.ID, *legacyindex.Index, error) error) error {
+func (engine *DaemonEngine) Load(
+	ctx context.Context,
+	repo vaultic.ListerLoaderUnpacked,
+	progress vaultic.Counter,
+	callback func(vaultic.ID, *legacyindex.Index, error) error,
+) error {
 	_ = callback
 	if err := engine.recoverPendingSnapshots(ctx, repo); err != nil {
 		return err
@@ -427,42 +470,9 @@ func (engine *DaemonEngine) Load(ctx context.Context, repo vaultic.ListerLoaderU
 	if err != nil {
 		return err
 	}
-	byPack := make(map[vaultic.ID]pack.Blobs)
-	var after []byte
-	for {
-		entries, done, err := engine.store.ScanPrefix(ctx, []byte("b:"), after, 10_000)
-		if err != nil {
-			return fmt.Errorf("load authoritative blob catalog: %w", err)
-		}
-		for _, entry := range entries {
-			parsed, parseErr := schema.ParseKey(entry.Key)
-			if parseErr != nil || parsed.Kind != schema.KeyBlob {
-				return fmt.Errorf("load authoritative blob catalog: invalid blob key")
-			}
-			record, decodeErr := schema.UnmarshalBlobRecord(entry.Value)
-			if decodeErr != nil {
-				return fmt.Errorf("load authoritative blob catalog: %w", decodeErr)
-			}
-			for _, location := range record.Locations {
-				blobType := vaultic.DataBlob
-				if location.Type == schema.BlobTree {
-					blobType = vaultic.TreeBlob
-				}
-				packID := vaultic.ID(location.PackID)
-				byPack[packID] = append(byPack[packID], pack.Blob{
-					BlobHandle: vaultic.BlobHandle{ID: vaultic.ID(parsed.ID), Type: blobType},
-					Offset:     uint(location.Offset), Length: uint(location.Length), UncompressedLength: uint(location.UncompressedSize),
-				})
-				progress.Add(1)
-			}
-			after = append(after[:0], entry.Key...)
-		}
-		if done {
-			break
-		}
-		if len(entries) == 0 {
-			return fmt.Errorf("load authoritative blob catalog: scan made no progress")
-		}
+	byPack, err := engine.loadBlobCatalog(ctx, progress)
+	if err != nil {
+		return err
 	}
 	projection := legacyindex.NewIndex()
 	recoveryProjection := legacyindex.NewIndex()
@@ -484,6 +494,47 @@ func (engine *DaemonEngine) Load(ctx context.Context, repo vaultic.ListerLoaderU
 		engine.mu.Unlock()
 	}
 	return nil
+}
+
+func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, progress vaultic.Counter) (map[vaultic.ID]pack.Blobs, error) {
+	byPack := make(map[vaultic.ID]pack.Blobs)
+	var after []byte
+	for {
+		entries, done, err := engine.store.ScanPrefix(ctx, []byte("b:"), after, 10_000)
+		if err != nil {
+			return nil, fmt.Errorf("load authoritative blob catalog: %w", err)
+		}
+		for _, entry := range entries {
+			parsed, err := schema.ParseKey(entry.Key)
+			if err != nil || parsed.Kind != schema.KeyBlob {
+				return nil, fmt.Errorf("load authoritative blob catalog: invalid blob key")
+			}
+			record, err := schema.UnmarshalBlobRecord(entry.Value)
+			if err != nil {
+				return nil, fmt.Errorf("load authoritative blob catalog: %w", err)
+			}
+			for _, location := range record.Locations {
+				blobType := vaultic.DataBlob
+				if location.Type == schema.BlobTree {
+					blobType = vaultic.TreeBlob
+				}
+				packID := vaultic.ID(location.PackID)
+				byPack[packID] = append(byPack[packID], pack.Blob{
+					BlobHandle: vaultic.BlobHandle{ID: vaultic.ID(parsed.ID), Type: blobType},
+					Offset:     uint(location.Offset), Length: uint(location.Length),
+					UncompressedLength: uint(location.UncompressedSize),
+				})
+				progress.Add(1)
+			}
+			after = append(after[:0], entry.Key...)
+		}
+		if done {
+			return byPack, nil
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("load authoritative blob catalog: scan made no progress")
+		}
+	}
 }
 
 func (engine *DaemonEngine) loadPendingPacks(ctx context.Context) (map[vaultic.ID]struct{}, error) {
@@ -539,7 +590,10 @@ func (engine *DaemonEngine) recoverPendingSnapshots(ctx context.Context, repo va
 				if loadErr != nil {
 					return fmt.Errorf("recover snapshot %s export: %w", snapshotID.Str(), loadErr)
 				}
-				if publishErr := engine.store.PublishSnapshotScope(ctx, daemon.SnapshotScope{SnapshotID: parsed.ID, RootKey: checkpoint.RootKey, OriginalJSON: originalJSON}); publishErr != nil {
+				if publishErr := engine.store.PublishSnapshotScope(ctx,
+					daemon.SnapshotScope{SnapshotID: parsed.ID,
+						RootKey:      checkpoint.RootKey,
+						OriginalJSON: originalJSON}); publishErr != nil {
 					return fmt.Errorf("recover snapshot %s export: %w", snapshotID.Str(), publishErr)
 				}
 			}
@@ -587,7 +641,14 @@ func (engine *DaemonEngine) Close() error {
 	return errors.Join(engine.legacy.Close(), engine.client.Close(context.Background()))
 }
 
-func schemaPack(id vaultic.ID, blobs pack.Blobs, physicalSize uint64, physicalSizeKnown bool, policy TierPolicy, now time.Time) (daemon.PublishedPack, error) {
+func schemaPack(
+	id vaultic.ID,
+	blobs pack.Blobs,
+	physicalSize uint64,
+	physicalSizeKnown bool,
+	policy TierPolicy,
+	now time.Time,
+) (daemon.PublishedPack, error) {
 	if len(blobs) == 0 {
 		return daemon.PublishedPack{}, fmt.Errorf("published pack %s contains no blobs", id.Str())
 	}

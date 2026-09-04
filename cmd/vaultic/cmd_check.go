@@ -35,17 +35,13 @@ func newCheckCommand(globalOptions *global.Options) *cobra.Command {
 		Long: `
 The "check" command tests the repository for errors and reports any errors it
 finds.
-
 By default, check verifies the structural consistency and integrity of
 snapshots, trees and pack files. To also verify the integrity of the actual
 backed-up data, use the --read-data or --read-data-subset flags.
-
 By default, check creates a new temporary cache directory to verify data.
 To reuse the existing cache, use the --with-cache flag.
-
 EXIT STATUS
 ===========
-
 Exit status is 0 if the command was successful.
 Exit status is 1 if there was any error.
 Exit status is 10 if the repository does not exist.
@@ -55,7 +51,6 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
 			summary, err := runCheck(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
 			if globalOptions.JSON {
 				if err != nil && summary.NumErrors == 0 {
@@ -66,10 +61,10 @@ Exit status is 12 if the password is incorrect.
 			return err
 		},
 		PreRunE: func(_ *cobra.Command, _ []string) error {
+			finalizeSnapshotFilter(&opts.SnapshotFilter)
 			return checkFlags(opts)
 		},
 	}
-
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
@@ -86,7 +81,14 @@ type CheckOptions struct {
 
 func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.ReadData, "read-data", false, "read all data blobs")
-	f.StringVar(&opts.ReadDataSubset, "read-data-subset", "", "read a `subset` of data packs, specified as 'n/t' for specific part, or either 'x%' or 'x.y%' or a size in bytes with suffixes k/K, m/M, g/G, t/T for a random subset")
+	f.StringVar(
+		&opts.ReadDataSubset,
+		"read-data-subset",
+		"",
+		("read a `subset` of data packs, specified as 'n/t' for specific part, or " +
+			"either 'x%' or 'x.y%' or a size in bytes with suffixes k/K, m/M, g/G, t/T " +
+			"for a random subset"),
+	)
 	var ignored bool
 	f.BoolVar(&ignored, "check-unused", false, "find unused blobs")
 	err := f.MarkDeprecated("check-unused", "`--check-unused` is deprecated and will be ignored")
@@ -95,7 +97,12 @@ func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
 	}
 	f.BoolVar(&opts.WithCache, "with-cache", false, "use existing cache, only read uncached data from repository")
-	f.BoolVar(&opts.CheckHotCold, "check-hot-cold", false, "for a hot/cold repository (--repo-hot): verify that the hot and cold parts agree")
+	f.BoolVar(
+		&opts.CheckHotCold,
+		"check-hot-cold",
+		false,
+		"for a hot/cold repository (--repo-hot): verify that the hot and cold parts agree",
+	)
 	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
 }
 
@@ -111,7 +118,9 @@ func checkFlags(opts CheckOptions) error {
 				return argumentError
 			}
 			if dataSubset[0] == 0 || dataSubset[1] == 0 || dataSubset[0] > dataSubset[1] {
-				return errors.Fatal("check flag --read-data-subset=n/t values must be positive integers, and n <= t, e.g. --read-data-subset=1/2")
+				return errors.Fatal(
+					"check flag --read-data-subset=n/t values must be positive integers, and n <= t, e.g. --read-data-subset=1/2",
+				)
 			}
 			if dataSubset[1] > totalBucketsMax {
 				return errors.Fatalf("check flag --read-data-subset=n/t t must be at most %d", totalBucketsMax)
@@ -126,7 +135,6 @@ func checkFlags(opts CheckOptions) error {
 				return errors.Fatal(
 					"check flag --read-data-subset=x% x must be above 0.0% and at most 100.0%")
 			}
-
 		} else {
 			fileSize, err := ui.ParseBytes(opts.ReadDataSubset)
 			if err != nil {
@@ -136,10 +144,8 @@ func checkFlags(opts CheckOptions) error {
 				return errors.Fatal(
 					"check flag --read-data-subset=n n must be above 0")
 			}
-
 		}
 	}
-
 	return nil
 }
 
@@ -170,7 +176,6 @@ func parsePercentage(s string) (float64, error) {
 		return 0, errors.Errorf(`parsePercentage: %q does not end in "%%"`, s)
 	}
 	s = s[:len(s)-1]
-
 	p, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0, errors.Errorf("parsePercentage: %w", err)
@@ -182,7 +187,9 @@ func parsePercentage(s string) (float64, error) {
 //
 //   - if --with-cache is specified, the default cache is used
 //   - if the user explicitly requested --no-cache, we don't use any cache
-//   - if the user provides --cache-dir, we use a cache in a temporary sub-directory of the specified directory and the sub-directory is deleted after the check
+//
+// - if the user provides --cache-dir, we use a cache in a temporary sub-directory of the specified directory and the
+// sub-directory is deleted after the check
 //   - by default, we use a cache in a temporary directory that is deleted after the check
 func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic.Printer) (cleanup func()) {
 	cleanup = func() {}
@@ -190,7 +197,6 @@ func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic
 		// use the default cache, no setup needed
 		return cleanup
 	}
-
 	if gopts.NoCache {
 		// don't use any cache, no setup needed
 		return cleanup
@@ -200,7 +206,6 @@ func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic
 	if cachedir == "" {
 		cachedir = cache.EnvDir()
 	}
-
 	if cachedir != "" {
 		// use a cache in a temporary directory
 		err := os.MkdirAll(cachedir, 0755)
@@ -217,23 +222,25 @@ func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic
 		gopts.NoCache = true
 		return cleanup
 	}
-
 	gopts.CacheDir = tempdir
 	printer.P("using temporary cache in %v\n", tempdir)
-
 	cleanup = func() {
 		err := os.RemoveAll(tempdir)
 		if err != nil {
 			printer.E("error removing temporary cache directory: %v\n", err)
 		}
 	}
-
 	return cleanup
 }
 
-func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args []string, term ui.Terminal) (checkSummary, error) {
+func runCheck(
+	ctx context.Context,
+	opts CheckOptions,
+	gopts global.Options,
+	args []string,
+	term ui.Terminal,
+) (checkSummary, error) {
 	summary := checkSummary{MessageType: "summary"}
-
 	var printer vaultic.Printer
 	if !gopts.JSON {
 		printer = progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
@@ -243,7 +250,6 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 
 	cleanup := prepareCheckCache(opts, &gopts, printer)
 	defer cleanup()
-
 	if !gopts.NoLock {
 		printer.P("create exclusive lock for repository\n")
 	}
@@ -254,25 +260,21 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		return summary, err
 	}
 	defer unlock()
-
 	chkr := checker.New(repo, opts.CheckUnused)
 	err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
 	if err != nil {
 		return summary, err
 	}
-
 	printer.P("load indexes\n")
 	hints, errs := chkr.LoadIndex(ctx, printer)
 	if ctx.Err() != nil {
 		return summary, ctx.Err()
 	}
-
 	salvagePacks := vaultic.NewIDSet()
 	errorsFound := handleCheckIndexResults(hints, errs, printer, &summary, salvagePacks)
 	if len(errs) != 0 {
 		return summary, errors.Fatal("repository contains errors")
 	}
-
 	packErrors, err := checkPackMetadata(ctx, repo, chkr, printer, &summary, salvagePacks)
 	if err != nil {
 		return summary, err
@@ -284,68 +286,26 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		return summary, err
 	}
 	errorsFound = errorsFound || structureErrors
-
-	// the following block only used for tests
-	if opts.CheckUnused {
-		unused, err := chkr.UnusedBlobs(ctx)
-		if err != nil {
-			return summary, err
-		}
-		for _, id := range unused {
-			printer.P("unused blob %v\n", id)
-			errorsFound = true
-		}
+	unusedErrors, err := checkUnusedBlobs(ctx, opts.CheckUnused, chkr, printer)
+	if err != nil {
+		return summary, err
 	}
-
+	errorsFound = errorsFound || unusedErrors
 	dataErrors, err := checkPackData(ctx, opts, chkr, printer, &summary, salvagePacks)
 	if err != nil {
 		return summary, err
 	}
 	errorsFound = errorsFound || dataErrors
-
-	if len(salvagePacks) > 0 {
-		printer.E("\nThe repository contains damaged pack files. These damaged files must be removed to repair the repository. " +
-			"This can be done using the following commands. Please read the troubleshooting guide at " +
-			"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
-		for id := range salvagePacks {
-			summary.BrokenPacks = append(summary.BrokenPacks, id.String())
-		}
-		printer.E("vaultic repair packs %v\nrestic repair snapshots --forget\n\n", strings.Join(summary.BrokenPacks, " "))
-		printer.E("Damaged pack files can be caused by backend problems, hardware problems or bugs in vaultic. " +
-			"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
-	}
-
-	if len(brokenSnapshots) > 0 {
-		printer.E("\nThe repository contains damaged snapshot files. These damaged files must be removed to repair the repository. " +
-			"This can be done using the following commands. Please read the troubleshooting guide at " +
-			"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
-		printer.E("vaultic repair snapshots --forget %s\n\n", strings.Join(brokenSnapshots, " "))
-		printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. " +
-			"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
-	}
-
+	reportDamagedFiles(printer, &summary, salvagePacks, brokenSnapshots)
 	if ctx.Err() != nil {
 		return summary, ctx.Err()
 	}
 
 	// for a hot/cold repository, verify that the hot and cold parts agree
-	if opts.CheckHotCold {
-		hot, cold, ok := repo.HotCold()
-		if !ok {
-			return summary, errors.Fatal("--check-hot-cold requires a hot/cold repository (--repo-hot)")
-		}
-		printer.P("check hot/cold integrity\n")
-		hcErrs := checker.CheckHotCold(ctx, hot, cold)
-		for _, hcErr := range hcErrs {
-			errorsFound = true
-			summary.NumErrors++
-			printer.E("%v\n", hcErr)
-		}
-		if len(hcErrs) == 0 && !errorsFound {
-			printer.P("hot and cold parts agree\n")
-		}
+	errorsFound, err = checkHotCold(ctx, opts.CheckHotCold, repo, printer, &summary, errorsFound)
+	if err != nil {
+		return summary, err
 	}
-
 	if errorsFound {
 		if len(salvagePacks) == 0 && len(brokenSnapshots) == 0 {
 			printer.E("\nThe repository is damaged and must be repaired. Please follow the troubleshooting guide at " +
@@ -357,7 +317,71 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	return summary, nil
 }
 
-func handleCheckIndexResults(hints, indexErrors []error, printer vaultic.Printer, summary *checkSummary, salvagePacks vaultic.IDSet) bool {
+func checkUnusedBlobs(ctx context.Context, enabled bool, chkr *checker.Checker, printer vaultic.Printer) (bool, error) {
+	if !enabled {
+		return false, nil
+	}
+	unused, err := chkr.UnusedBlobs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range unused {
+		printer.P("unused blob %v\n", id)
+	}
+	return len(unused) != 0, nil
+}
+
+func reportDamagedFiles(printer vaultic.Printer, summary *checkSummary, salvagePacks vaultic.IDSet, brokenSnapshots []string) {
+	if len(salvagePacks) > 0 {
+		printer.E("\nThe repository contains damaged pack files. These damaged files must be removed to repair the repository. " +
+			"This can be done using the following commands. Please read the troubleshooting guide at " +
+			"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
+		for id := range salvagePacks {
+			summary.BrokenPacks = append(summary.BrokenPacks, id.String())
+		}
+		printer.E("vaultic repair packs %v\nrestic repair snapshots --forget\n\n", strings.Join(summary.BrokenPacks, " "))
+		printer.E("Damaged pack files can be caused by backend problems, hardware problems or bugs in vaultic. " +
+			"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
+	}
+	if len(brokenSnapshots) == 0 {
+		return
+	}
+	printer.E("\nThe repository contains damaged snapshot files. These damaged files must be removed to repair the repository. " +
+		"This can be done using the following commands. Please read the troubleshooting guide at " +
+		"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
+	printer.E("vaultic repair snapshots --forget %s\n\n", strings.Join(brokenSnapshots, " "))
+	printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. " +
+		"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
+}
+
+func checkHotCold(ctx context.Context, enabled bool, repo *repository.Repository, printer vaultic.Printer,
+	summary *checkSummary, errorsFound bool) (bool, error) {
+	if !enabled {
+		return errorsFound, nil
+	}
+	hot, cold, ok := repo.HotCold()
+	if !ok {
+		return errorsFound, errors.Fatal("--check-hot-cold requires a hot/cold repository (--repo-hot)")
+	}
+	printer.P("check hot/cold integrity\n")
+	hotColdErrors := checker.CheckHotCold(ctx, hot, cold)
+	for _, hotColdErr := range hotColdErrors {
+		errorsFound = true
+		summary.NumErrors++
+		printer.E("%v\n", hotColdErr)
+	}
+	if len(hotColdErrors) == 0 && !errorsFound {
+		printer.P("hot and cold parts agree\n")
+	}
+	return errorsFound, nil
+}
+
+func handleCheckIndexResults(
+	hints, indexErrors []error,
+	printer vaultic.Printer,
+	summary *checkSummary,
+	salvagePacks vaultic.IDSet,
+) bool {
 	errorsFound := false
 	for _, hint := range hints {
 		switch hint := hint.(type) {
@@ -381,7 +405,9 @@ func handleCheckIndexResults(hints, indexErrors []error, printer vaultic.Printer
 		printer.S("Duplicate packs are non-critical, you can run `vaultic repair index' to correct this.\n")
 	}
 	if summary.HintPrune {
-		printer.S("Mixed packs with tree and data blobs are non-critical, you can run `vaultic prune` to correct this.\n")
+		printer.S(
+			"Mixed packs with tree and data blobs are non-critical, you can run `vaultic prune` to correct this.\n",
+		)
 	}
 	for _, err := range indexErrors {
 		printer.E("error: %v\n", err)
@@ -389,7 +415,9 @@ func handleCheckIndexResults(hints, indexErrors []error, printer vaultic.Printer
 	if len(indexErrors) != 0 {
 		summary.NumErrors += len(indexErrors)
 		summary.HintRepairIndex = true
-		printer.E("\nThe repository index is damaged and must be repaired. You must run `vaultic repair index' to correct this.\n\n")
+		printer.E(
+			"\nThe repository index is damaged and must be repaired. You must run `vaultic repair index' to correct this.\n\n",
+		)
 	}
 	return errorsFound
 }
@@ -433,7 +461,12 @@ func checkPackMetadata(
 	return errorsFound, ctx.Err()
 }
 
-func checkRepositoryStructure(ctx context.Context, chkr *checker.Checker, printer vaultic.Printer, summary *checkSummary) ([]string, bool, error) {
+func checkRepositoryStructure(
+	ctx context.Context,
+	chkr *checker.Checker,
+	printer vaultic.Printer,
+	summary *checkSummary,
+) ([]string, bool, error) {
 	printer.P("check snapshots, trees and blobs\n")
 	errChan := make(chan error)
 	brokenSnapshots := make([]string, 0)
@@ -510,7 +543,14 @@ func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,
 			return func(packs map[vaultic.ID]int64) map[vaultic.ID]int64 {
 				packCount := uint64(len(packs))
 				packs = selectPacksByBucket(packs, bucket, totalBuckets)
-				printer.P("read group #%d of %d %sdata packs (out of total %d packs in %d groups", bucket, len(packs), typeData, packCount, totalBuckets)
+				printer.P(
+					"read group #%d of %d %sdata packs (out of total %d packs in %d groups",
+					bucket,
+					len(packs),
+					typeData,
+					packCount,
+					totalBuckets,
+				)
 				return packs
 			}, nil
 		} else if strings.HasSuffix(opts.ReadDataSubset, "%") {
@@ -523,7 +563,6 @@ func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,
 				return selectRandomPacksByPercentage(packs, percentage)
 			}, nil
 		}
-
 		repoSize := int64(0)
 		return func(packs map[vaultic.ID]int64) map[vaultic.ID]int64 {
 			for _, size := range packs {
@@ -544,7 +583,6 @@ func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,
 			return packs
 		}, nil
 	}
-
 	return nil, nil
 }
 
@@ -571,12 +609,10 @@ func selectRandomPacksByPercentage(allPacks map[vaultic.ID]int64, percentage flo
 	timeNs := time.Now().UnixNano()
 	r := rand.New(rand.NewSource(timeNs))
 	idx := r.Perm(packCount)
-
 	var keys []vaultic.ID
 	for k := range allPacks {
 		keys = append(keys, k)
 	}
-
 	packs := make(map[vaultic.ID]int64)
 
 	for i := 0; i < packsToCheck; i++ {
@@ -642,7 +678,12 @@ func (*jsonErrorPrinter) VV(_ string, _ ...any) {}
 //
 // History is advisory: a failure to record must never change the outcome of
 // the check that discovered the orphans.
-func recordOrphanHistory(ctx context.Context, repo *repository.Repository, orphaned []vaultic.ID, printer vaultic.Printer) {
+func recordOrphanHistory(
+	ctx context.Context,
+	repo *repository.Repository,
+	orphaned []vaultic.ID,
+	printer vaultic.Printer,
+) {
 	engine, ok := repo.Engine().(*metadataindex.DaemonEngine)
 	if !ok {
 		return

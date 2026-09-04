@@ -21,13 +21,23 @@ func TestPlacementEvictionRefusesToDropBelowDurability(t *testing.T) {
 	if placementEvictionAllowed(map[uint64]schema.PlacementRecord{1: live(), 2: live()}, backends, policy, 2) {
 		t.Fatal("eviction of the only offsite copy was allowed")
 	}
-	if placementEvictionAllowed(map[uint64]schema.PlacementRecord{1: live(), 2: {State: schema.PlacementPending, Bytes: 1, RetentionSource: schema.RetentionUnknown}}, backends, policy, 1) {
+	if placementEvictionAllowed(
+		map[uint64]schema.PlacementRecord{1: live(), 2: {State: schema.PlacementPending, Bytes: 1, RetentionSource: schema.RetentionUnknown}},
+		backends,
+		policy,
+		1,
+	) {
 		t.Fatal("pending placement was counted as durable during eviction")
 	}
 	if placementEvictionAllowed(map[uint64]schema.PlacementRecord{1: live(), 2: live(), 3: live()}, backends, policy, 2) {
 		t.Fatal("two remaining placements in one failure domain were counted as durable")
 	}
-	if !placementEvictionAllowed(map[uint64]schema.PlacementRecord{1: live(), 2: live(), 3: live()}, backends, vaultic.PlacementPolicy{MinCopies: 1, MinDomains: 1}, 2) {
+	if !placementEvictionAllowed(
+		map[uint64]schema.PlacementRecord{1: live(), 2: live(), 3: live()},
+		backends,
+		vaultic.PlacementPolicy{MinCopies: 1, MinDomains: 1},
+		2,
+	) {
 		t.Fatal("eviction that preserves the configured durability was refused")
 	}
 }

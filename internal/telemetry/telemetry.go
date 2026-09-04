@@ -83,7 +83,12 @@ func publishInflux(ctx context.Context, cfg Config, backup Backup) error {
 	query.Set("precision", "ns")
 	endpoint.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(influxLine(backup)))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		endpoint.String(),
+		strings.NewReader(influxLine(backup)),
+	)
 	if err != nil {
 		return err
 	}
@@ -107,15 +112,42 @@ func send(req *http.Request, target string) error {
 func prometheusText(backup Backup) string {
 	s := backup.Summary
 	duration := s.BackupEnd.Sub(s.BackupStart).Seconds()
-	return fmt.Sprintf("vaultic_backup_success 1\nvaultic_backup_duration_seconds %s\nvaultic_backup_files_processed %d\nvaultic_backup_bytes_processed %d\nvaultic_backup_data_added_bytes %d\nvaultic_backup_snapshot_info{snapshot=%q,label=%q,repository=%q} 1\n",
-		strconv.FormatFloat(duration, 'f', -1, 64), s.Files.New+s.Files.Changed+s.Files.Unchanged, s.ProcessedBytes, s.DataSizeInRepo, backup.SnapshotID, backup.Label, backup.Repository)
+	return fmt.Sprintf(
+		("vaultic_backup_success 1\nvaultic_backup_duration_seconds " +
+			"%s\nvaultic_backup_files_processed %d\nvaultic_backup_bytes_processed " +
+			"%d\nvaultic_backup_data_added_bytes %d\nvaultic_backup_snapshot_info{snapshot=" +
+			"%q,label=%q,repository=%q} 1\n"),
+		strconv.FormatFloat(
+			duration,
+			'f',
+			-1,
+			64,
+		),
+		s.Files.New+s.Files.Changed+s.Files.Unchanged,
+		s.ProcessedBytes,
+		s.DataSizeInRepo,
+		backup.SnapshotID,
+		backup.Label,
+		backup.Repository,
+	)
 }
 
 func influxLine(backup Backup) string {
 	s := backup.Summary
-	tags := "repository=" + escapeTag(backup.Repository) + ",snapshot=" + escapeTag(backup.SnapshotID) + ",label=" + escapeTag(backup.Label)
-	fields := fmt.Sprintf("success=1i,files_processed=%di,bytes_processed=%di,data_added=%di,duration_seconds=%s",
-		s.Files.New+s.Files.Changed+s.Files.Unchanged, s.ProcessedBytes, s.DataSizeInRepo, strconv.FormatFloat(s.BackupEnd.Sub(s.BackupStart).Seconds(), 'f', -1, 64))
+	tags := "repository=" + escapeTag(
+		backup.Repository,
+	) + ",snapshot=" + escapeTag(
+		backup.SnapshotID,
+	) + ",label=" + escapeTag(
+		backup.Label,
+	)
+	fields := fmt.Sprintf(
+		"success=1i,files_processed=%di,bytes_processed=%di,data_added=%di,duration_seconds=%s",
+		s.Files.New+s.Files.Changed+s.Files.Unchanged,
+		s.ProcessedBytes,
+		s.DataSizeInRepo,
+		strconv.FormatFloat(s.BackupEnd.Sub(s.BackupStart).Seconds(), 'f', -1, 64),
+	)
 	return "vaultic_backup," + tags + " " + fields + " " + strconv.FormatInt(s.BackupEnd.UnixNano(), 10) + "\n"
 }
 

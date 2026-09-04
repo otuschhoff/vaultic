@@ -294,7 +294,27 @@ func (client *Client) Status(ctx context.Context) (Status, error) {
 	if response.Result != "status" || response.Protocol != protocolVersion {
 		return Status{}, fmt.Errorf("unexpected broker status response or protocol %q", response.Protocol)
 	}
-	return Status{Protocol: response.Protocol, Locked: response.Locked, RepositoryID: response.RepositoryID, CapsuleGeneration: response.CapsuleGeneration, CapsuleLogicalID: response.CapsuleLogicalID, PolicyHash: response.PolicyHash, EpochID: response.EpochID, ActiveSessions: response.ActiveSessions, ActiveLeases: response.ActiveLeases, MinimumCustodians: response.MinimumCustodians, PrincipalVerified: response.PrincipalVerified, HardwareVerified: response.HardwareVerified, CustodyAssumed: response.CustodyAssumed, Compliant: response.Compliant, Findings: response.Findings, PolicyMutationPending: response.PolicyMutationPending, PendingCapsuleGeneration: response.PendingCapsuleGeneration, PendingCapsuleSHA256: response.PendingCapsuleSHA256, IdentityRecovery: response.IdentityRecovery}, nil
+	return Status{
+		Protocol:                 response.Protocol,
+		Locked:                   response.Locked,
+		RepositoryID:             response.RepositoryID,
+		CapsuleGeneration:        response.CapsuleGeneration,
+		CapsuleLogicalID:         response.CapsuleLogicalID,
+		PolicyHash:               response.PolicyHash,
+		EpochID:                  response.EpochID,
+		ActiveSessions:           response.ActiveSessions,
+		ActiveLeases:             response.ActiveLeases,
+		MinimumCustodians:        response.MinimumCustodians,
+		PrincipalVerified:        response.PrincipalVerified,
+		HardwareVerified:         response.HardwareVerified,
+		CustodyAssumed:           response.CustodyAssumed,
+		Compliant:                response.Compliant,
+		Findings:                 response.Findings,
+		PolicyMutationPending:    response.PolicyMutationPending,
+		PendingCapsuleGeneration: response.PendingCapsuleGeneration,
+		PendingCapsuleSHA256:     response.PendingCapsuleSHA256,
+		IdentityRecovery:         response.IdentityRecovery,
+	}, nil
 }
 
 func (client *Client) CreateSession(ctx context.Context, ttl time.Duration) (SignedSession, error) {
@@ -333,8 +353,13 @@ func (client *Client) Lock(ctx context.Context) error {
 	return nil
 }
 
-func (client *Client) AcquireLease(ctx context.Context, manifestPath, capability string, ttl time.Duration) (Lease, error) {
-	if capability != "repository-master-key" && capability != "topology-discovery" && capability != "metadata-loss-recovery" {
+func (client *Client) AcquireLease(
+	ctx context.Context,
+	manifestPath, capability string,
+	ttl time.Duration,
+) (Lease, error) {
+	if capability != "repository-master-key" && capability != "topology-discovery" &&
+		capability != "metadata-loss-recovery" {
 		return Lease{}, fmt.Errorf("unsupported Vaultic broker capability %q", capability)
 	}
 	if ttl <= 0 || ttl > time.Hour || ttl%time.Second != 0 {
@@ -344,32 +369,65 @@ func (client *Client) AcquireLease(ctx context.Context, manifestPath, capability
 	if err != nil {
 		return Lease{}, err
 	}
-	request := map[string]any{"operation": "acquire_lease", "component": authorization["component"], "version": authorization["version"], "release_identity": authorization["release_identity"], "release_signature": authorization["release_signature"], "capability": capability, "ttl_seconds": uint64(ttl / time.Second), "challenge_response": authorization["challenge_response"]}
+	request := map[string]any{
+		"operation":          "acquire_lease",
+		"component":          authorization["component"],
+		"version":            authorization["version"],
+		"release_identity":   authorization["release_identity"],
+		"release_signature":  authorization["release_signature"],
+		"capability":         capability,
+		"ttl_seconds":        uint64(ttl / time.Second),
+		"challenge_response": authorization["challenge_response"],
+	}
 	var response responseEnvelope
 	if err := client.call(ctx, request, &response); err != nil {
 		return Lease{}, err
 	}
-	if response.Result != "lease" || response.LeaseID == "" || response.EpochID == nil || *response.EpochID == "" || response.KeyVersion == 0 {
+	if response.Result != "lease" || response.LeaseID == "" || response.EpochID == nil || *response.EpochID == "" ||
+		response.KeyVersion == 0 {
 		return Lease{}, errors.New("invalid broker lease response")
 	}
 	key, err := base64.StdEncoding.DecodeString(response.Key)
 	if err != nil || len(key) == 0 {
 		return Lease{}, errors.New("invalid broker repository key")
 	}
-	return Lease{LeaseID: response.LeaseID, EpochID: *response.EpochID, Capability: response.Capability, ExpiresUnixMS: response.ExpiresUnixMS, KeyVersion: response.KeyVersion, CapsuleGeneration: response.CapsuleGeneration, Key: key}, nil
+	return Lease{
+		LeaseID:           response.LeaseID,
+		EpochID:           *response.EpochID,
+		Capability:        response.Capability,
+		ExpiresUnixMS:     response.ExpiresUnixMS,
+		KeyVersion:        response.KeyVersion,
+		CapsuleGeneration: response.CapsuleGeneration,
+		Key:               key,
+	}, nil
 }
 
-func (client *Client) PreparePolicyMutation(ctx context.Context, manifestPath string, policy UnlockPolicy, members []OfflinePolicyMember, externalMembers []ExternalPolicyMember, acknowledgeDowngrade bool) (PreparedPolicyMutation, error) {
+func (client *Client) PreparePolicyMutation(
+	ctx context.Context,
+	manifestPath string,
+	policy UnlockPolicy,
+	members []OfflinePolicyMember,
+	externalMembers []ExternalPolicyMember,
+	acknowledgeDowngrade bool,
+) (PreparedPolicyMutation, error) {
 	authorization, err := client.authorizedOperation(manifestPath)
 	if err != nil {
 		return PreparedPolicyMutation{}, err
 	}
 	var response responseEnvelope
-	request := map[string]any{"operation": "prepare_policy_mutation", "authorization": authorization, "policy": policy, "members": members, "external_members": externalMembers, "acknowledge_downgrade": acknowledgeDowngrade}
+	request := map[string]any{
+		"operation":             "prepare_policy_mutation",
+		"authorization":         authorization,
+		"policy":                policy,
+		"members":               members,
+		"external_members":      externalMembers,
+		"acknowledge_downgrade": acknowledgeDowngrade,
+	}
 	if err := client.call(ctx, request, &response); err != nil {
 		return PreparedPolicyMutation{}, err
 	}
-	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 || len(response.CapsuleSHA256) != 64 {
+	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 ||
+		len(response.CapsuleSHA256) != 64 {
 		return PreparedPolicyMutation{}, errors.New("invalid prepared policy mutation response")
 	}
 	return PreparedPolicyMutation{Capsule: response.Capsule, CapsuleSHA256: response.CapsuleSHA256}, nil
@@ -384,7 +442,8 @@ func (client *Client) PendingPolicyMutation(ctx context.Context, manifestPath st
 	if err := client.call(ctx, map[string]any{"operation": "pending_policy_mutation", "authorization": authorization}, &response); err != nil {
 		return PreparedPolicyMutation{}, err
 	}
-	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 || len(response.CapsuleSHA256) != 64 {
+	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 ||
+		len(response.CapsuleSHA256) != 64 {
 		return PreparedPolicyMutation{}, errors.New("unexpected broker pending policy mutation response")
 	}
 	return PreparedPolicyMutation{Capsule: response.Capsule, CapsuleSHA256: response.CapsuleSHA256}, nil
@@ -447,9 +506,19 @@ func (client *Client) authorizedOperation(manifestPath string) (map[string]any, 
 	if client.protocol != protocolVersion || client.challenge == "" {
 		return nil, errors.New("broker authorization challenge is unavailable or already consumed")
 	}
-	challengeDigest := sha256.Sum256([]byte("vaultic-broker-lease-challenge-v1\x00" + protocolVersion + "\x00" + client.challenge + "\x00" + executableDigest))
+	challengeDigest := sha256.Sum256(
+		[]byte(
+			"vaultic-broker-lease-challenge-v1\x00" + protocolVersion + "\x00" + client.challenge + "\x00" + executableDigest,
+		),
+	)
 	client.challenge = ""
-	return map[string]any{"component": manifest.Component, "version": manifest.Version, "release_identity": manifest.ReleaseIdentity, "release_signature": manifest.Signature, "challenge_response": hex.EncodeToString(challengeDigest[:])}, nil
+	return map[string]any{
+		"component":          manifest.Component,
+		"version":            manifest.Version,
+		"release_identity":   manifest.ReleaseIdentity,
+		"release_signature":  manifest.Signature,
+		"challenge_response": hex.EncodeToString(challengeDigest[:]),
+	}, nil
 }
 
 func (client *Client) call(ctx context.Context, request any, response *responseEnvelope) error {
@@ -497,7 +566,10 @@ func LoadCapsule(path string) (*capsule, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, fmt.Errorf("decode recovery capsule: %w", err)
 	}
-	if value.Header.Format != 2 || value.Header.RepositoryID == "" || value.Header.Generation == 0 || len(value.Policy) == 0 || len(value.MetadataDEK) == 0 || len(value.RepositoryMasterKey) == 0 {
+	if value.Header.Format != 2 || value.Header.RepositoryID == "" || value.Header.Generation == 0 ||
+		len(value.Policy) == 0 ||
+		len(value.MetadataDEK) == 0 ||
+		len(value.RepositoryMasterKey) == 0 {
 		return nil, errors.New("invalid recovery capsule header")
 	}
 	return &value, nil
@@ -519,11 +591,35 @@ func (value *capsule) PolicyDefinition() (UnlockPolicy, error) {
 	return policy, nil
 }
 
-func (value *capsule) ContributeOffline(session SignedSession, endpoint, memberID string, credential []byte, keyfile bool, lastSeenGeneration uint64, now time.Time) (EncryptedContribution, error) {
-	return value.ContributeOfflineSession(session, endpoint, memberID, credential, keyfile, lastSeenGeneration, now, false)
+func (value *capsule) ContributeOffline(
+	session SignedSession,
+	endpoint, memberID string,
+	credential []byte,
+	keyfile bool,
+	lastSeenGeneration uint64,
+	now time.Time,
+) (EncryptedContribution, error) {
+	return value.ContributeOfflineSession(
+		session,
+		endpoint,
+		memberID,
+		credential,
+		keyfile,
+		lastSeenGeneration,
+		now,
+		false,
+	)
 }
 
-func (value *capsule) ContributeOfflineSession(session SignedSession, endpoint, memberID string, credential []byte, keyfile bool, lastSeenGeneration uint64, now time.Time, unverifiedSession bool) (EncryptedContribution, error) {
+func (value *capsule) ContributeOfflineSession(
+	session SignedSession,
+	endpoint, memberID string,
+	credential []byte,
+	keyfile bool,
+	lastSeenGeneration uint64,
+	now time.Time,
+	unverifiedSession bool,
+) (EncryptedContribution, error) {
 	if err := value.verifySession(session, endpoint, now, unverifiedSession); err != nil {
 		return EncryptedContribution{}, err
 	}
@@ -545,11 +641,26 @@ func (value *capsule) ContributeOfflineSession(session SignedSession, endpoint, 
 	return value.encryptContribution(session, *member, share, lastSeenGeneration, nil, unverifiedSession)
 }
 
-func (value *capsule) ContributeExternal(ctx context.Context, session SignedSession, endpoint, memberID string, unwrapper ExternalMemberUnwrapper, lastSeenGeneration uint64, now time.Time) (EncryptedContribution, error) {
+func (value *capsule) ContributeExternal(
+	ctx context.Context,
+	session SignedSession,
+	endpoint, memberID string,
+	unwrapper ExternalMemberUnwrapper,
+	lastSeenGeneration uint64,
+	now time.Time,
+) (EncryptedContribution, error) {
 	return value.ContributeExternalSession(ctx, session, endpoint, memberID, unwrapper, lastSeenGeneration, now, false)
 }
 
-func (value *capsule) ContributeExternalSession(ctx context.Context, session SignedSession, endpoint, memberID string, unwrapper ExternalMemberUnwrapper, lastSeenGeneration uint64, now time.Time, unverifiedSession bool) (EncryptedContribution, error) {
+func (value *capsule) ContributeExternalSession(
+	ctx context.Context,
+	session SignedSession,
+	endpoint, memberID string,
+	unwrapper ExternalMemberUnwrapper,
+	lastSeenGeneration uint64,
+	now time.Time,
+	unverifiedSession bool,
+) (EncryptedContribution, error) {
 	if err := value.verifySession(session, endpoint, now, unverifiedSession); err != nil {
 		return EncryptedContribution{}, err
 	}
@@ -563,7 +674,8 @@ func (value *capsule) ContributeExternalSession(ctx context.Context, session Sig
 	if member == nil {
 		return EncryptedContribution{}, fmt.Errorf("capsule has no member %q", memberID)
 	}
-	if (member.Principal == nil) == (member.Hardware == nil) || member.Provider == "offline-argon2id" || member.Provider == "offline-keyfile" {
+	if (member.Principal == nil) == (member.Hardware == nil) || member.Provider == "offline-argon2id" ||
+		member.Provider == "offline-keyfile" {
 		return EncryptedContribution{}, errors.New("member is not an identity-bound external provider")
 	}
 	purpose, err := value.externalSharePurpose(*member)
@@ -578,13 +690,29 @@ func (value *capsule) ContributeExternalSession(ctx context.Context, session Sig
 	if member.Hardware != nil {
 		hardwareCredentialID = member.Hardware.CredentialID
 	}
-	payload, principal, err := unwrapper.UnwrapMember(ctx, ExternalMemberContext{RepositoryID: value.Header.RepositoryID, Generation: value.Header.Generation, RootKeyVersion: value.Header.RootKeyVersion, PolicyHash: value.Header.PolicyHash, MemberID: member.MemberID, Provider: member.Provider, KeyReference: member.KeyReference, Purpose: purpose, HardwareCredentialID: hardwareCredentialID}, wrapper)
+	payload, principal, err := unwrapper.UnwrapMember(
+		ctx,
+		ExternalMemberContext{
+			RepositoryID:         value.Header.RepositoryID,
+			Generation:           value.Header.Generation,
+			RootKeyVersion:       value.Header.RootKeyVersion,
+			PolicyHash:           value.Header.PolicyHash,
+			MemberID:             member.MemberID,
+			Provider:             member.Provider,
+			KeyReference:         member.KeyReference,
+			Purpose:              purpose,
+			HardwareCredentialID: hardwareCredentialID,
+		},
+		wrapper,
+	)
 	if err != nil {
 		return EncryptedContribution{}, fmt.Errorf("unwrap external member: %w", err)
 	}
 	defer clear(payload)
 	if member.Principal != nil {
-		if principal.Authority != member.Principal.Authority || principal.TenantAccountOrProject != member.Principal.TenantAccountOrProject || principal.ImmutablePrincipalID != member.Principal.ImmutablePrincipalID {
+		if principal.Authority != member.Principal.Authority ||
+			principal.TenantAccountOrProject != member.Principal.TenantAccountOrProject ||
+			principal.ImmutablePrincipalID != member.Principal.ImmutablePrincipalID {
 			return EncryptedContribution{}, errors.New("provider-authenticated principal does not match capsule member")
 		}
 	} else if principal.Authority != member.Provider || principal.ImmutablePrincipalID != member.Hardware.CredentialID {
@@ -602,7 +730,14 @@ func (value *capsule) ContributeExternalSession(ctx context.Context, session Sig
 	return value.encryptContribution(session, *member, share, lastSeenGeneration, principalID, unverifiedSession)
 }
 
-func (value *capsule) encryptContribution(session SignedSession, member memberShare, share []byte, lastSeenGeneration uint64, principalID *string, unverifiedSession bool) (EncryptedContribution, error) {
+func (value *capsule) encryptContribution(
+	session SignedSession,
+	member memberShare,
+	share []byte,
+	lastSeenGeneration uint64,
+	principalID *string,
+	unverifiedSession bool,
+) (EncryptedContribution, error) {
 	payload, err := json.Marshal(struct {
 		MemberID                      string  `json:"member_id"`
 		ShareIndex                    uint8   `json:"share_index"`
@@ -610,7 +745,12 @@ func (value *capsule) encryptContribution(session SignedSession, member memberSh
 		LastSeenGeneration            uint64  `json:"last_seen_generation"`
 		PrincipalID                   *string `json:"principal_id"`
 		UnverifiedSessionAcknowledged bool    `json:"unverified_session_acknowledged"`
-	}{MemberID: member.MemberID, ShareIndex: member.ShareIndex, Share: share, LastSeenGeneration: lastSeenGeneration, PrincipalID: principalID, UnverifiedSessionAcknowledged: unverifiedSession})
+	}{MemberID: member.MemberID,
+		ShareIndex:                    member.ShareIndex,
+		Share:                         share,
+		LastSeenGeneration:            lastSeenGeneration,
+		PrincipalID:                   principalID,
+		UnverifiedSessionAcknowledged: unverifiedSession})
 	if err != nil {
 		return EncryptedContribution{}, err
 	}
@@ -644,11 +784,33 @@ func (value *capsule) encryptContribution(session SignedSession, member memberSh
 		return EncryptedContribution{}, errors.New("HPKE returned a truncated ciphertext")
 	}
 	ciphertext, tag := sealed[:len(sealed)-16], sealed[len(sealed)-16:]
-	return EncryptedContribution{SessionID: session.Transcript.SessionID, EncappedKey: base64.StdEncoding.EncodeToString(encapped), Ciphertext: base64.StdEncoding.EncodeToString(ciphertext), Tag: base64.StdEncoding.EncodeToString(tag)}, nil
+	return EncryptedContribution{
+		SessionID:   session.Transcript.SessionID,
+		EncappedKey: base64.StdEncoding.EncodeToString(encapped),
+		Ciphertext:  base64.StdEncoding.EncodeToString(ciphertext),
+		Tag:         base64.StdEncoding.EncodeToString(tag),
+	}, nil
 }
 
 func (value *capsule) externalSharePurpose(member memberShare) (string, error) {
-	binding, err := json.Marshal([]any{"vaultic-recovery-capsule-external-share", value.Header.RepositoryID, value.Header.Generation, value.Header.RootKeyVersion, value.Header.PolicyHash, member.GroupID, member.MemberID, member.ShareIndex, member.Threshold, member.ShareCount, member.Provider, member.KeyReference, member.Principal, member.Hardware})
+	binding, err := json.Marshal(
+		[]any{
+			"vaultic-recovery-capsule-external-share",
+			value.Header.RepositoryID,
+			value.Header.Generation,
+			value.Header.RootKeyVersion,
+			value.Header.PolicyHash,
+			member.GroupID,
+			member.MemberID,
+			member.ShareIndex,
+			member.Threshold,
+			member.ShareCount,
+			member.Provider,
+			member.KeyReference,
+			member.Principal,
+			member.Hardware,
+		},
+	)
 	if err != nil {
 		return "", err
 	}
@@ -660,15 +822,25 @@ func decodeExternalShare(purpose string, payload []byte) ([]byte, error) {
 	const magic = "VLTCAPSH1"
 	digest := sha256.Sum256([]byte(purpose))
 	prefix := len(magic) + len(digest)
-	if len(payload) <= prefix || string(payload[:len(magic)]) != magic || !bytes.Equal(payload[len(magic):prefix], digest[:]) {
+	if len(payload) <= prefix || string(payload[:len(magic)]) != magic ||
+		!bytes.Equal(payload[len(magic):prefix], digest[:]) {
 		return nil, errors.New("externally wrapped member share context mismatch")
 	}
 	return append([]byte(nil), payload[prefix:]...), nil
 }
 
-func (value *capsule) verifySession(session SignedSession, endpoint string, now time.Time, unverifiedSession bool) error {
+func (value *capsule) verifySession(
+	session SignedSession,
+	endpoint string,
+	now time.Time,
+	unverifiedSession bool,
+) error {
 	transcript := session.Transcript
-	if transcript.Protocol != protocolVersion || transcript.RepositoryID != value.Header.RepositoryID || transcript.CapsuleGeneration != value.Header.Generation || transcript.EndpointBinding != endpoint || transcript.ExpiresUnixMS <= uint64(now.UnixMilli()) || transcript.SessionID == "" {
+	if transcript.Protocol != protocolVersion || transcript.RepositoryID != value.Header.RepositoryID ||
+		transcript.CapsuleGeneration != value.Header.Generation ||
+		transcript.EndpointBinding != endpoint ||
+		transcript.ExpiresUnixMS <= uint64(now.UnixMilli()) ||
+		transcript.SessionID == "" {
 		return errors.New("unlock session transcript does not match capsule or endpoint")
 	}
 	encoded, err := json.Marshal(transcript)
@@ -702,14 +874,22 @@ func (value *capsule) verifySession(session SignedSession, endpoint string, now 
 func (value *capsule) unwrapMember(member memberShare, credential []byte, keyfile bool) ([]byte, error) {
 	var key []byte
 	if member.Provider == "offline-argon2id" && !keyfile {
-		if member.Argon2 == nil || member.Argon2.MemoryKiB < 64*1024 || member.Argon2.Iterations < 3 || member.Argon2.Parallelism == 0 {
+		if member.Argon2 == nil || member.Argon2.MemoryKiB < 64*1024 || member.Argon2.Iterations < 3 ||
+			member.Argon2.Parallelism == 0 {
 			return nil, errors.New("missing or weak Argon2id member parameters")
 		}
 		salt, err := base64.StdEncoding.DecodeString(member.Argon2.Salt)
 		if err != nil || len(salt) != 16 {
 			return nil, errors.New("invalid Argon2id salt")
 		}
-		key = argon2.IDKey(credential, salt, member.Argon2.Iterations, member.Argon2.MemoryKiB, uint8(member.Argon2.Parallelism), 32)
+		key = argon2.IDKey(
+			credential,
+			salt,
+			member.Argon2.Iterations,
+			member.Argon2.MemoryKiB,
+			uint8(member.Argon2.Parallelism),
+			32,
+		)
 	} else if member.Provider == "offline-keyfile" && keyfile {
 		if len(credential) < 32 {
 			return nil, errors.New("offline keyfile must contain at least 32 bytes")
@@ -732,7 +912,21 @@ func (value *capsule) unwrapMember(member memberShare, credential []byte, keyfil
 	if err != nil {
 		return nil, fmt.Errorf("decode wrapped member share: %w", err)
 	}
-	aad, err := json.Marshal([]any{"vaultic-recovery-capsule-share", value.Header.RepositoryID, value.Header.Generation, value.Header.RootKeyVersion, value.Header.PolicyHash, member.GroupID, member.MemberID, member.ShareIndex, member.Threshold, member.ShareCount, member.Provider})
+	aad, err := json.Marshal(
+		[]any{
+			"vaultic-recovery-capsule-share",
+			value.Header.RepositoryID,
+			value.Header.Generation,
+			value.Header.RootKeyVersion,
+			value.Header.PolicyHash,
+			member.GroupID,
+			member.MemberID,
+			member.ShareIndex,
+			member.Threshold,
+			member.ShareCount,
+			member.Provider,
+		},
+	)
 	if err != nil {
 		return nil, err
 	}

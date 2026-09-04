@@ -154,13 +154,49 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.BootstrapProfile, "bootstrap-profile", "", "credential-free bootstrap topology profile (default: $VAULTIC_BOOTSTRAP_PROFILE)")
 	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
 	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
-	f.StringVarP(&opts.PasswordCommand, "password-command", "", "", "shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)")
-	f.StringVar(&opts.AzureKeyVaultURL, "azure-key-vault-url", "", "Azure Key Vault `URL` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_URL)")
-	f.StringVar(&opts.AzureKeyVaultSecret, "azure-key-vault-secret", "", "Azure Key Vault secret `name` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_SECRET)")
-	f.StringVar(&opts.AzureKeyVaultSecretVersion, "azure-key-vault-secret-version", "", "optional Azure Key Vault secret `version` (default: $VAULTIC_AZURE_KEY_VAULT_SECRET_VERSION)")
-	f.DurationVar(&opts.AzureKeyVaultTimeout, "azure-key-vault-timeout", 30*time.Second, "startup SecretGet `timeout` (default: $VAULTIC_AZURE_KEY_VAULT_TIMEOUT or 30s)")
-	f.StringVar(&opts.MasterKey, "key", "", "master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)")
-	f.StringVar(&opts.MasterKeyFile, "key-file", "", "`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)")
+	f.StringVarP(
+		&opts.PasswordCommand,
+		"password-command",
+		"",
+		"",
+		"shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)",
+	)
+	f.StringVar(
+		&opts.AzureKeyVaultURL,
+		"azure-key-vault-url",
+		"",
+		"Azure Key Vault `URL` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_URL)",
+	)
+	f.StringVar(
+		&opts.AzureKeyVaultSecret,
+		"azure-key-vault-secret",
+		"",
+		"Azure Key Vault secret `name` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_SECRET)",
+	)
+	f.StringVar(
+		&opts.AzureKeyVaultSecretVersion,
+		"azure-key-vault-secret-version",
+		"",
+		"optional Azure Key Vault secret `version` (default: $VAULTIC_AZURE_KEY_VAULT_SECRET_VERSION)",
+	)
+	f.DurationVar(
+		&opts.AzureKeyVaultTimeout,
+		"azure-key-vault-timeout",
+		30*time.Second,
+		"startup SecretGet `timeout` (default: $VAULTIC_AZURE_KEY_VAULT_TIMEOUT or 30s)",
+	)
+	f.StringVar(
+		&opts.MasterKey,
+		"key",
+		"",
+		"master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)",
+	)
+	f.StringVar(
+		&opts.MasterKeyFile,
+		"key-file",
+		"",
+		"`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)",
+	)
 	f.StringVar(&opts.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
 	f.BoolVar(&opts.MetadataKeyInDB, "metadata-key-in-db", false, "unlock the repository master key from encrypted SlateDB metadata")
 	f.StringVar(&opts.MetadataDaemonSocket, "metadata-daemon-socket", "", "private vaulticdb Unix socket for key-in-DB unlock")
@@ -176,14 +212,29 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.MetadataVaultTokenFile, "metadata-key-db-vault-token-file", "", "protected Vault Transit token file for key-in-DB unlock")
 	f.StringVar(&opts.MetadataPKCS11PINFile, "metadata-key-db-pkcs11-pin-file", "", "protected PKCS#11 PIN file for key-in-DB unlock")
 	f.BoolVar(&opts.MetadataRecoveryUnlock, "metadata-recovery-ack", false, "acknowledge metadata recovery-slot use")
-	f.BoolVar(&opts.MetadataLossRecovery, "metadata-loss-recovery", false, "use the legacy JSON index after total SlateDB metadata loss (requires a direct master key)")
+	f.BoolVar(
+		&opts.MetadataLossRecovery,
+		"metadata-loss-recovery",
+		false,
+		"use the legacy JSON index after total SlateDB metadata loss (requires a direct master key)",
+	)
 	f.StringVar(&opts.KeyBrokerSocket, "key-broker-socket", "", "local vaultic-key-broker Unix socket")
 	f.StringVar(&opts.KeyBrokerReleaseManifest, "key-broker-release-manifest", "", "signed release manifest authorizing this Vaultic executable")
 	f.DurationVar(&opts.KeyBrokerLeaseDuration, "key-broker-lease", 15*time.Minute, "job-scoped repository-key lease lifetime")
 
 	f.StringVar(&opts.RepoHot, "repo-hot", "", "hot part of a hot/cold `repository` (cold storage; default: $VAULTIC_REPO_HOT)")
-	f.StringVar(&opts.WarmUpCommand, "warm-up-command", "", "warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)")
-	f.IntVar(&opts.WarmUpBatch, "warm-up-batch", 1, "warm-up `batch` size: packs per %ids invocation or parallel %id invocations (default: $VAULTIC_WARM_UP_BATCH)")
+	f.StringVar(
+		&opts.WarmUpCommand,
+		"warm-up-command",
+		"",
+		"warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)",
+	)
+	f.IntVar(
+		&opts.WarmUpBatch,
+		"warm-up-batch",
+		1,
+		"warm-up `batch` size: packs per %ids invocation or parallel %id invocations (default: $VAULTIC_WARM_UP_BATCH)",
+	)
 	f.DurationVar(&opts.WarmUpWait, "warm-up-wait", 0, "max `duration` to wait for warm-up to take effect (default: $VAULTIC_WARM_UP_WAIT)")
 	f.StringVar(&opts.WarmUpWaitCommand, "warm-up-wait-command", "", "`command` to wait for warmed-up data (default: $VAULTIC_WARM_UP_WAIT_COMMAND)")
 	f.BoolVarP(&opts.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
@@ -199,17 +250,36 @@ func (opts *Options) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&opts.CacheDir, "cache-dir", "", "set the cache `directory`. (default: use system default cache directory)")
 	f.BoolVar(&opts.NoCache, "no-cache", false, "do not use a local cache")
 	f.StringSliceVar(&opts.RootCertFilenames, "cacert", nil, "`file` to load root certificates from (default: use system certificates or $VAULTIC_CACERT)")
-	f.StringVar(&opts.TLSClientCertKeyFilename, "tls-client-cert", "", "path to a `file` containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)")
-	f.BoolVar(&opts.InsecureNoPassword, "insecure-no-password", false, "use an empty password for the repository, must be passed to every vaultic command (insecure)")
+	f.StringVar(
+		&opts.TLSClientCertKeyFilename,
+		"tls-client-cert",
+		"",
+		"path to a `file` containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)",
+	)
+	f.BoolVar(
+		&opts.InsecureNoPassword,
+		"insecure-no-password",
+		false,
+		"use an empty password for the repository, must be passed to every vaultic command (insecure)",
+	)
 	f.BoolVar(&opts.InsecureTLS, "insecure-tls", false, "skip TLS certificate verification when connecting to the repository (insecure)")
 	f.BoolVar(&opts.CleanupCache, "cleanup-cache", false, "auto remove old cache directories")
 	const compressionFlag = "compression"
-	f.Var(&opts.Compression, compressionFlag, "compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)")
+	f.Var(
+		&opts.Compression,
+		compressionFlag,
+		"compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)",
+	)
 	f.BoolVar(&opts.NoExtraVerify, "no-extra-verify", false, "skip additional verification of data before upload (see documentation)")
 	f.StringVar(&opts.PrometheusURL, "prometheus", env.Get("PROMETHEUS"), "Pushgateway `URL` for successful backup metrics (default: $VAULTIC_PROMETHEUS)")
 	f.StringVar(&opts.PrometheusUser, "prometheus-user", env.Get("PROMETHEUS_USER"), "Pushgateway username (default: $VAULTIC_PROMETHEUS_USER)")
 	f.StringVar(&opts.PrometheusPass, "prometheus-pass", env.Get("PROMETHEUS_PASS"), "Pushgateway password (default: $VAULTIC_PROMETHEUS_PASS)")
-	f.StringVar(&opts.InfluxURL, "influxdb-url", env.Get("INFLUXDB_URL"), "InfluxDB v2-compatible server `URL` for successful backup metrics (default: $VAULTIC_INFLUXDB_URL)")
+	f.StringVar(
+		&opts.InfluxURL,
+		"influxdb-url",
+		env.Get("INFLUXDB_URL"),
+		"InfluxDB v2-compatible server `URL` for successful backup metrics (default: $VAULTIC_INFLUXDB_URL)",
+	)
 	f.StringVar(&opts.InfluxToken, "influxdb-token", env.Get("INFLUXDB_TOKEN"), "InfluxDB API token (default: $VAULTIC_INFLUXDB_TOKEN)")
 	f.StringVar(&opts.InfluxOrg, "influxdb-org", env.Get("INFLUXDB_ORG"), "InfluxDB organization (default: $VAULTIC_INFLUXDB_ORG)")
 	f.StringVar(&opts.InfluxBucket, "influxdb-bucket", env.Get("INFLUXDB_BUCKET"), "InfluxDB bucket (default: $VAULTIC_INFLUXDB_BUCKET)")
@@ -372,10 +442,36 @@ func resolvePassword(opts *Options, envStr string) (string, error) {
 		defer cancel()
 		secret, err := keyvault.FetchSecret(ctx, opts.AzureKeyVaultURL, opts.AzureKeyVaultSecret, opts.AzureKeyVaultSecretVersion)
 		if err != nil {
-			_ = observability.Emit(ctx, observability.Event{Severity: observability.Error, Category: observability.CategoryAuth, Component: "keyvault", Message: "Azure Key Vault SecretGet failed", Fields: map[string]any{"vault_url": opts.AzureKeyVaultURL, "secret_name": opts.AzureKeyVaultSecret, "version_requested": opts.AzureKeyVaultSecretVersion != ""}})
+			_ = observability.Emit(
+				ctx,
+				observability.Event{
+					Severity:  observability.Error,
+					Category:  observability.CategoryAuth,
+					Component: "keyvault",
+					Message:   "Azure Key Vault SecretGet failed",
+					Fields: map[string]any{
+						"vault_url":         opts.AzureKeyVaultURL,
+						"secret_name":       opts.AzureKeyVaultSecret,
+						"version_requested": opts.AzureKeyVaultSecretVersion != "",
+					},
+				},
+			)
 			return "", err
 		}
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryAuth, Component: "keyvault", Message: "Azure Key Vault SecretGet completed", Fields: map[string]any{"vault_url": opts.AzureKeyVaultURL, "secret_name": opts.AzureKeyVaultSecret, "version_requested": opts.AzureKeyVaultSecretVersion != ""}})
+		_ = observability.Emit(
+			ctx,
+			observability.Event{
+				Severity:  observability.Notice,
+				Category:  observability.CategoryAuth,
+				Component: "keyvault",
+				Message:   "Azure Key Vault SecretGet completed",
+				Fields: map[string]any{
+					"vault_url":         opts.AzureKeyVaultURL,
+					"secret_name":       opts.AzureKeyVaultSecret,
+					"version_requested": opts.AzureKeyVaultSecretVersion != "",
+				},
+			},
+		)
 		return secret, nil
 	}
 	if opts.PasswordFile != "" && opts.PasswordCommand != "" {

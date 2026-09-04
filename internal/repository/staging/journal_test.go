@@ -19,11 +19,37 @@ func (failingJournalBackend) Save(context.Context, backend.Handle, backend.Rewin
 }
 
 func journalHeader(now time.Time) Header {
-	return Header{Format: 1, RepositoryID: "repo-a", JobID: "job-a", IdempotencyKey: "idem-a", CreatedAt: now, ExpiresAt: now.Add(time.Hour), CapsuleGeneration: 2, RepositoryKeyVersion: 1, ChunkerVersion: "rabin-v1", CompressionVersion: "zstd-v1", PlacementPolicyVersion: 3, SourceIdentitySHA256: strings.Repeat("ab", 32), ConsistencyEvidence: "full-crawl"}
+	return Header{
+		Format:                 1,
+		RepositoryID:           "repo-a",
+		JobID:                  "job-a",
+		IdempotencyKey:         "idem-a",
+		CreatedAt:              now,
+		ExpiresAt:              now.Add(time.Hour),
+		CapsuleGeneration:      2,
+		RepositoryKeyVersion:   1,
+		ChunkerVersion:         "rabin-v1",
+		CompressionVersion:     "zstd-v1",
+		PlacementPolicyVersion: 3,
+		SourceIdentitySHA256:   strings.Repeat("ab", 32),
+		ConsistencyEvidence:    "full-crawl",
+	}
 }
 
 func durablePack() Pack {
-	return Pack{ID: "pack-a", Type: "data", Size: 42, PayloadSize: 20, HeaderSize: 22, BlobCount: 1, SHA256: strings.Repeat("cd", 32), Placements: []Placement{{BackendID: "a", FailureDomain: "one", Size: 42, SHA256: strings.Repeat("cd", 32)}, {BackendID: "b", FailureDomain: "two", Offsite: true, Size: 42, SHA256: strings.Repeat("cd", 32)}}}
+	return Pack{
+		ID:          "pack-a",
+		Type:        "data",
+		Size:        42,
+		PayloadSize: 20,
+		HeaderSize:  22,
+		BlobCount:   1,
+		SHA256:      strings.Repeat("cd", 32),
+		Placements: []Placement{
+			{BackendID: "a", FailureDomain: "one", Size: 42, SHA256: strings.Repeat("cd", 32)},
+			{BackendID: "b", FailureDomain: "two", Offsite: true, Size: 42, SHA256: strings.Repeat("cd", 32)},
+		},
+	}
 }
 
 func TestSegmentsSealOnlyAfterDurabilityAndContinuousChain(t *testing.T) {
@@ -82,7 +108,14 @@ func TestQuotaAndCompletionFailClosed(t *testing.T) {
 	if err := CheckQuota(Quota{MaxBytes: 100}, 0, 0, 90, time.Time{}, 11, now); err == nil {
 		t.Fatal("byte quota was exceeded")
 	}
-	completion := Completion{Header: journalHeader(now), State: StateCommitted, SealSHA256: strings.Repeat("ab", 32), MetadataTransaction: "txn", SnapshotID: "snapshot", CompletedAt: now}
+	completion := Completion{
+		Header:              journalHeader(now),
+		State:               StateCommitted,
+		SealSHA256:          strings.Repeat("ab", 32),
+		MetadataTransaction: "txn",
+		SnapshotID:          "snapshot",
+		CompletedAt:         now,
+	}
 	if _, _, err := SealCompletion(completion, []byte("0123456789abcdef0123456789abcdef")); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +129,13 @@ func TestStoreVerifiesMirrorsBeforeSealAndDiscoversCompletion(t *testing.T) {
 	now := time.Now().UTC()
 	key := []byte("0123456789abcdef0123456789abcdef")
 	first, second := mem.New(), mem.New()
-	store := Store{Mirrors: map[string]backend.Backend{"a": first, "b": second}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
+	store := Store{
+		Mirrors:          map[string]backend.Backend{"a": first, "b": second},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:              key,
+		Policy:           Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+		Now:              func() time.Time { return now },
+	}
 	header := journalHeader(now)
 	segment := Segment{Header: header, Sequence: 1, Packs: []Pack{durablePack()}}
 	if _, err := store.PublishSegment(context.Background(), segment); err != nil {
@@ -110,7 +149,14 @@ func TestStoreVerifiesMirrorsBeforeSealAndDiscoversCompletion(t *testing.T) {
 	if err != nil || len(jobs) != 1 || jobs[0].State != StateSealedPending {
 		t.Fatalf("pending discovery = %#v, %v", jobs, err)
 	}
-	completion := Completion{Header: header, State: StateCommitted, SealSHA256: digest, MetadataTransaction: "txn-a", SnapshotID: "snapshot-a", CompletedAt: now}
+	completion := Completion{
+		Header:              header,
+		State:               StateCommitted,
+		SealSHA256:          digest,
+		MetadataTransaction: "txn-a",
+		SnapshotID:          "snapshot-a",
+		CompletedAt:         now,
+	}
 	encodedCompletion, _, err := SealCompletion(completion, key)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +174,13 @@ func TestStoreRefusesSealWhenMirrorSegmentIsMissingOrDifferent(t *testing.T) {
 	now := time.Now().UTC()
 	key := []byte("0123456789abcdef0123456789abcdef")
 	first, second := mem.New(), mem.New()
-	store := Store{Mirrors: map[string]backend.Backend{"a": first, "b": second}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
+	store := Store{
+		Mirrors:          map[string]backend.Backend{"a": first, "b": second},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:              key,
+		Policy:           Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+		Now:              func() time.Time { return now },
+	}
 	header := journalHeader(now)
 	segment := Segment{Header: header, Sequence: 1, Packs: []Pack{durablePack()}}
 	encoded, _, err := SealSegment(segment, key, store.Policy, now)
@@ -171,7 +223,13 @@ func TestPublishIsIdempotentCreateAndRejectsReplacement(t *testing.T) {
 func TestPackRootsProtectOnlySealedPendingJobs(t *testing.T) {
 	now := time.Now().UTC()
 	key := []byte("0123456789abcdef0123456789abcdef")
-	store := Store{Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now }}
+	store := Store{
+		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
+		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:              key,
+		Policy:           Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+		Now:              func() time.Time { return now },
+	}
 	header := journalHeader(now)
 	pack := durablePack()
 	pack.ID = strings.Repeat("12", 32)
@@ -187,7 +245,14 @@ func TestPackRootsProtectOnlySealedPendingJobs(t *testing.T) {
 	if err != nil || len(protected) != 1 {
 		t.Fatalf("pending roots = %#v, %v", protected, err)
 	}
-	completion := Completion{Header: header, State: StateCommitted, SealSHA256: sealDigest, MetadataTransaction: "txn", SnapshotID: "snapshot", CompletedAt: now}
+	completion := Completion{
+		Header:              header,
+		State:               StateCommitted,
+		SealSHA256:          sealDigest,
+		MetadataTransaction: "txn",
+		SnapshotID:          "snapshot",
+		CompletedAt:         now,
+	}
 	if err := store.PublishCompletion(context.Background(), completion); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +266,14 @@ func TestExpiredPackRootsRequireAcknowledgedAbandonmentAndSafetyDelay(t *testing
 	now := time.Now().UTC()
 	clock := now
 	key := []byte("0123456789abcdef0123456789abcdef")
-	store := Store{Mirrors: map[string]backend.Backend{"a": mem.New(), "b": mem.New()}, MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}}, Key: key, Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return clock }, AbandonmentSafetyDelay: time.Hour}
+	store := Store{
+		Mirrors:                map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
+		MirrorPlacements:       map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
+		Key:                    key,
+		Policy:                 Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+		Now:                    func() time.Time { return clock },
+		AbandonmentSafetyDelay: time.Hour,
+	}
 	header := journalHeader(now)
 	pack := durablePack()
 	pack.ID = strings.Repeat("34", 32)
@@ -240,9 +312,16 @@ func TestPublishJobUsesMirrorPolicyQuorum(t *testing.T) {
 	store := Store{
 		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New(), "c": failingJournalBackend{mem.New()}},
 		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}, "c": {FailureDomain: "three"}},
-		Key:              []byte("0123456789abcdef0123456789abcdef"), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now },
+		Key: []byte(
+			"0123456789abcdef0123456789abcdef",
+		), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now },
 	}
-	seal, _, segments, err := store.PublishJob(context.Background(), journalHeader(now), []Pack{durablePack()}, []Record{{Kind: "test", Payload: []byte(`{"ok":true}`)}})
+	seal, _, segments, err := store.PublishJob(
+		context.Background(),
+		journalHeader(now),
+		[]Pack{durablePack()},
+		[]Record{{Kind: "test", Payload: []byte(`{"ok":true}`)}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +342,9 @@ func TestRejectedJournalRemainsProtected(t *testing.T) {
 	store := Store{
 		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
 		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
-		Key:              []byte("0123456789abcdef0123456789abcdef"), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now },
+		Key: []byte(
+			"0123456789abcdef0123456789abcdef",
+		), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, Now: func() time.Time { return now },
 	}
 	pack := durablePack()
 	pack.ID = strings.Repeat("ef", 32)
@@ -296,7 +377,9 @@ func TestJournalExpiryExtensionIsAuthenticatedAndBounded(t *testing.T) {
 	store := Store{
 		Mirrors:          map[string]backend.Backend{"a": mem.New(), "b": mem.New()},
 		MirrorPlacements: map[string]MirrorPlacement{"a": {FailureDomain: "one"}, "b": {FailureDomain: "two", Offsite: true}},
-		Key:              []byte("0123456789abcdef0123456789abcdef"), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, MaxExtension: 4 * time.Hour, Now: func() time.Time { return now },
+		Key: []byte(
+			"0123456789abcdef0123456789abcdef",
+		), Policy: Policy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}, MaxExtension: 4 * time.Hour, Now: func() time.Time { return now },
 	}
 	if _, _, _, err := store.PublishJob(context.Background(), journalHeader(now), []Pack{durablePack()}, nil); err != nil {
 		t.Fatal(err)

@@ -32,7 +32,13 @@ type fileSaver struct {
 
 // newFileSaver returns a new file saver. A worker pool with fileWorkers is
 // started, it is stopped when ctx is cancelled.
-func newFileSaver(ctx context.Context, wg *errgroup.Group, uploader vaultic.BlobSaverAsync, chunkerFactory vaultic.ChunkerFactory, fileWorkers uint) *fileSaver {
+func newFileSaver(
+	ctx context.Context,
+	wg *errgroup.Group,
+	uploader vaultic.BlobSaverAsync,
+	chunkerFactory vaultic.ChunkerFactory,
+	fileWorkers uint,
+) *fileSaver {
 	ch := make(chan saveFileJob)
 	debug.Log("new file saver with %v file workers", fileWorkers)
 
@@ -66,7 +72,15 @@ type fileCompleteFunc func(*data.Node, ItemStats)
 // file is closed by Save. completeReading is only called if the file was read
 // successfully. complete is always called. If completeReading is called, then
 // this will always happen before calling complete. The callbacks must not block.
-func (s *fileSaver) Save(ctx context.Context, snPath string, target string, file fs.File, start func(), completeReading func(), complete fileCompleteFunc) futureNode {
+func (s *fileSaver) Save(
+	ctx context.Context,
+	snPath string,
+	target string,
+	file fs.File,
+	start func(),
+	completeReading func(),
+	complete fileCompleteFunc,
+) futureNode {
 	fn, ch := newFutureNode()
 	job := saveFileJob{
 		snPath: snPath,

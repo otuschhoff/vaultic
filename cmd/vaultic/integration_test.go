@@ -19,7 +19,11 @@ import (
 )
 
 func TestCheckRestoreNoLock(t *testing.T) {
-	repository.TestInjectKey(t, vaultic.TestParseID("a19acdab068765b022ffb81cb5aac83c5de4bf4fbce0d26e9ade8e636c6ae49f"), `{"mac":{"k":"TbkpCBdNYAvAwb+64r8VGw==","r":"Q5V1CnAvBQREgJAOQD40Bw=="},"encrypt":"SjCkTpms+XOUJR5LSsy2G+uO9ngG7H0L+IVwPV4u70A="}`)
+	repository.TestInjectKey(
+		t,
+		vaultic.TestParseID("a19acdab068765b022ffb81cb5aac83c5de4bf4fbce0d26e9ade8e636c6ae49f"),
+		`{"mac":{"k":"TbkpCBdNYAvAwb+64r8VGw==","r":"Q5V1CnAvBQREgJAOQD40Bw=="},"encrypt":"SjCkTpms+XOUJR5LSsy2G+uO9ngG7H0L+IVwPV4u70A="}`,
+	)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 

@@ -3,17 +3,18 @@ package main
 import (
 	"bufio"
 	"context"
-	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/otuschhoff/vaultic/cmd/vaultic/keycmd"
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func testRunKeyListOtherIDs(t testing.TB, gopts global.Options) []string {
@@ -36,9 +37,9 @@ func testRunKeyListOtherIDs(t testing.TB, gopts global.Options) []string {
 }
 
 func testRunKeyAddNewKey(t testing.TB, newPassword string, gopts global.Options) {
-	testKeyNewPassword = newPassword
+	keycmd.TestKeyNewPassword = newPassword
 	defer func() {
-		testKeyNewPassword = ""
+		keycmd.TestKeyNewPassword = ""
 	}()
 
 	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
@@ -48,9 +49,9 @@ func testRunKeyAddNewKey(t testing.TB, newPassword string, gopts global.Options)
 }
 
 func testRunKeyAddNewKeyUserHost(t testing.TB, gopts global.Options) {
-	testKeyNewPassword = "john's geheimnis"
+	keycmd.TestKeyNewPassword = "john's geheimnis"
 	defer func() {
-		testKeyNewPassword = ""
+		keycmd.TestKeyNewPassword = ""
 	}()
 
 	t.Log("adding key for john@example.com")
@@ -65,7 +66,7 @@ func testRunKeyAddNewKeyUserHost(t testing.TB, gopts global.Options) {
 	_ = withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
 		repo, err := global.OpenRepository(ctx, gopts, vaultic.NewNoopPrinter())
 		rtest.OK(t, err)
-		err = repo.SearchKey(ctx, testKeyNewPassword, 2, "")
+		err = repo.SearchKey(ctx, keycmd.TestKeyNewPassword, 2, "")
 		rtest.OK(t, err)
 
 		key, err := repository.LoadKey(ctx, repo, repo.KeyID())
@@ -77,9 +78,9 @@ func testRunKeyAddNewKeyUserHost(t testing.TB, gopts global.Options) {
 }
 
 func testRunKeyPasswd(t testing.TB, newPassword string, gopts global.Options) {
-	testKeyNewPassword = newPassword
+	keycmd.TestKeyNewPassword = newPassword
 	defer func() {
-		testKeyNewPassword = ""
+		keycmd.TestKeyNewPassword = ""
 	}()
 
 	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
@@ -89,9 +90,9 @@ func testRunKeyPasswd(t testing.TB, newPassword string, gopts global.Options) {
 }
 
 func testRunKeyPasswdUserHost(t testing.TB, newPassword string, gopts global.Options) {
-	testKeyNewPassword = newPassword
+	keycmd.TestKeyNewPassword = newPassword
 	defer func() {
-		testKeyNewPassword = ""
+		keycmd.TestKeyNewPassword = ""
 	}()
 
 	t.Log("changing password and setting key for john@example.com")
@@ -105,11 +106,11 @@ func testRunKeyPasswdUserHost(t testing.TB, newPassword string, gopts global.Opt
 	})
 	rtest.OK(t, err)
 
-	gopts.Password = testKeyNewPassword
+	gopts.Password = keycmd.TestKeyNewPassword
 	_ = withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
 		repo, err := global.OpenRepository(ctx, gopts, vaultic.NewNoopPrinter())
 		rtest.OK(t, err)
-		err = repo.SearchKey(ctx, testKeyNewPassword, 1, "")
+		err = repo.SearchKey(ctx, keycmd.TestKeyNewPassword, 1, "")
 		rtest.OK(t, err)
 
 		key, err := repository.LoadKey(ctx, repo, repo.KeyID())
@@ -228,9 +229,9 @@ func TestKeyProblems(t *testing.T) {
 		return &emptySaveBackend{r}, nil
 	}
 
-	testKeyNewPassword = "geheim2"
+	keycmd.TestKeyNewPassword = "geheim2"
 	defer func() {
-		testKeyNewPassword = ""
+		keycmd.TestKeyNewPassword = ""
 	}()
 
 	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {

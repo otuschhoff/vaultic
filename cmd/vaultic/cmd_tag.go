@@ -43,8 +43,11 @@ Exit status is 12 if the password is incorrect.
 `,
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTag(cmd.Context(), opts, *globalOptions, globalOptions.Term, args)
 		},
 	}
@@ -92,7 +95,14 @@ type changedSnapshotsSummary struct {
 	ChangedSnapshots int    `json:"changed_snapshots"`
 }
 
-func changeSnapshotMeta(ctx context.Context, repo *repository.Repository, sn *data.Snapshot, opts TagOptions, now time.Time, printFunc func(changedSnapshot)) (bool, error) {
+func changeSnapshotMeta(
+	ctx context.Context,
+	repo *repository.Repository,
+	sn *data.Snapshot,
+	opts TagOptions,
+	now time.Time,
+	printFunc func(changedSnapshot),
+) (bool, error) {
 	var changed bool
 
 	setTags, addTags, removeTags := opts.SetTags.Flatten(), opts.AddTags.Flatten(), opts.RemoveTags.Flatten()

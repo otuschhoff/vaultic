@@ -22,7 +22,12 @@ type directoryRecord struct {
 	names []string
 }
 
-func BuildDirectoryManifest(ctx context.Context, roots []string, workers, queueCapacity int, ignore func(string, os.FileInfo) bool) (*DirectoryManifest, error) {
+func BuildDirectoryManifest(
+	ctx context.Context,
+	roots []string,
+	workers, queueCapacity int,
+	ignore func(string, os.FileInfo) bool,
+) (*DirectoryManifest, error) {
 	if workers < 1 || queueCapacity < 1 {
 		return nil, fmt.Errorf("cwalk workers and queue capacity must be positive")
 	}
@@ -40,35 +45,7 @@ func BuildDirectoryManifest(ctx context.Context, roots []string, workers, queueC
 	defer cancel()
 	records := make(chan directoryRecord, queueCapacity)
 	writeDone := make(chan error, 1)
-	go func() {
-		batch := database.NewBatch()
-		defer batch.Close()
-		pending := 0
-		for record := range records {
-			encoded, err := json.Marshal(record.names)
-			if err == nil {
-				err = batch.Set(manifestKey(record.path), encoded, nil)
-			}
-			if err == nil {
-				pending++
-				if pending == 1024 {
-					err = batch.Commit(pebble.NoSync)
-					batch.Reset()
-					pending = 0
-				}
-			}
-			if err != nil {
-				cancel()
-				writeDone <- err
-				return
-			}
-		}
-		if pending > 0 {
-			writeDone <- batch.Commit(pebble.NoSync)
-			return
-		}
-		writeDone <- nil
-	}()
+	go writeDirectoryRecords(database, records, writeDone, cancel)
 
 	var walkersMu sync.Mutex
 	var walkers []*cwalk.Walker
@@ -88,59 +65,7 @@ func BuildDirectoryManifest(ctx context.Context, roots []string, workers, queueC
 		}
 	}()
 
-	var walkErr error
-	for _, root := range roots {
-		info, err := os.Lstat(root)
-		if err != nil {
-			walkErr = err
-			break
-		}
-		if !info.IsDir() {
-			continue
-		}
-		absoluteRoot, err := filepath.Abs(root)
-		if err != nil {
-			walkErr = err
-			break
-		}
-		var walker *cwalk.Walker
-		var resizeOnce sync.Once
-		callbacks := cwalk.Callbacks{OnReadDir: func(relative string, entries []os.DirEntry, err error) {
-			if relative == "" {
-				resizeOnce.Do(func() {
-					if resizeErr := walker.ResizeWorkers(workers); resizeErr != nil {
-						cancel()
-					}
-				})
-			}
-			if err != nil {
-				return
-			}
-			names := make([]string, len(entries))
-			for index, entry := range entries {
-				names[index] = entry.Name()
-			}
-			select {
-			case records <- directoryRecord{path: filepath.Join(absoluteRoot, filepath.FromSlash(relative)), names: names}:
-			case <-walkCtx.Done():
-				walker.Stop()
-			}
-		}}
-		walker = cwalk.NewWalker(absoluteRoot, 1, callbacks)
-		walker.SetLogger(discardLogger{})
-		if ignore != nil {
-			walker.SetIgnoreFunc(func(_ string, relative string, info os.FileInfo) bool {
-				return ignore(filepath.Join(absoluteRoot, filepath.FromSlash(relative)), info)
-			})
-		}
-		walkersMu.Lock()
-		walkers = append(walkers, walker)
-		walkersMu.Unlock()
-		if err := walker.Run(); err != nil {
-			walkErr = err
-			break
-		}
-	}
+	walkErr := walkManifestRoots(walkCtx, cancel, roots, workers, ignore, records, &walkersMu, &walkers)
 	close(monitorDone)
 	close(records)
 	writeErr := <-writeDone
@@ -155,6 +80,110 @@ func BuildDirectoryManifest(ctx context.Context, roots []string, workers, queueC
 		return nil, fmt.Errorf("write cwalk manifest: %w", writeErr)
 	}
 	return manifest, nil
+}
+
+func writeDirectoryRecords(database *pebble.DB, records <-chan directoryRecord, done chan<- error, cancel context.CancelFunc) {
+	batch := database.NewBatch()
+	defer func() { _ = batch.Close() }()
+	pending := 0
+	for record := range records {
+		encoded, err := json.Marshal(record.names)
+		if err == nil {
+			err = batch.Set(manifestKey(record.path), encoded, nil)
+		}
+		if err == nil {
+			pending++
+			if pending == 1024 {
+				err = batch.Commit(pebble.NoSync)
+				batch.Reset()
+				pending = 0
+			}
+		}
+		if err != nil {
+			cancel()
+			done <- err
+			return
+		}
+	}
+	if pending > 0 {
+		done <- batch.Commit(pebble.NoSync)
+		return
+	}
+	done <- nil
+}
+
+func walkManifestRoots(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	roots []string,
+	workers int,
+	ignore func(string, os.FileInfo) bool,
+	records chan<- directoryRecord,
+	walkersMu *sync.Mutex,
+	walkers *[]*cwalk.Walker,
+) error {
+	for _, root := range roots {
+		info, err := os.Lstat(root)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			continue
+		}
+		absoluteRoot, err := filepath.Abs(root)
+		if err != nil {
+			return err
+		}
+		walker := newManifestWalker(ctx, cancel, absoluteRoot, workers, ignore, records)
+		walkersMu.Lock()
+		*walkers = append(*walkers, walker)
+		walkersMu.Unlock()
+		if err := walker.Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newManifestWalker(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	root string,
+	workers int,
+	ignore func(string, os.FileInfo) bool,
+	records chan<- directoryRecord,
+) *cwalk.Walker {
+	var walker *cwalk.Walker
+	var resizeOnce sync.Once
+	callbacks := cwalk.Callbacks{OnReadDir: func(relative string, entries []os.DirEntry, err error) {
+		if relative == "" {
+			resizeOnce.Do(func() {
+				if resizeErr := walker.ResizeWorkers(workers); resizeErr != nil {
+					cancel()
+				}
+			})
+		}
+		if err != nil {
+			return
+		}
+		names := make([]string, len(entries))
+		for index, entry := range entries {
+			names[index] = entry.Name()
+		}
+		select {
+		case records <- directoryRecord{path: filepath.Join(root, filepath.FromSlash(relative)), names: names}:
+		case <-ctx.Done():
+			walker.Stop()
+		}
+	}}
+	walker = cwalk.NewWalker(root, 1, callbacks)
+	walker.SetLogger(discardLogger{})
+	if ignore != nil {
+		walker.SetIgnoreFunc(func(_ string, relative string, info os.FileInfo) bool {
+			return ignore(filepath.Join(root, filepath.FromSlash(relative)), info)
+		})
+	}
+	return walker
 }
 
 func (manifest *DirectoryManifest) Names(directory string) ([]string, bool, error) {

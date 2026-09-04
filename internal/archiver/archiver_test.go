@@ -423,13 +423,26 @@ func (repo *blobCountingSaver) count(exists bool, h vaultic.BlobHandle) {
 	repo.blobCountingRepo.m.Unlock()
 }
 
-func (repo *blobCountingSaver) SaveBlob(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool) (vaultic.ID, bool, int, error) {
+func (repo *blobCountingSaver) SaveBlob(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+) (vaultic.ID, bool, int, error) {
 	id, exists, size, err := repo.saver.SaveBlob(ctx, t, buf, id, storeDuplicate)
 	repo.count(exists, vaultic.BlobHandle{ID: id, Type: t})
 	return id, exists, size, err
 }
 
-func (repo *blobCountingSaver) SaveBlobAsync(ctx context.Context, t vaultic.BlobType, buf []byte, id vaultic.ID, storeDuplicate bool, cb func(newID vaultic.ID, known bool, size int, err error)) {
+func (repo *blobCountingSaver) SaveBlobAsync(
+	ctx context.Context,
+	t vaultic.BlobType,
+	buf []byte,
+	id vaultic.ID,
+	storeDuplicate bool,
+	cb func(newID vaultic.ID, known bool, size int, err error),
+) {
 	repo.saver.SaveBlobAsync(ctx, t, buf, id, storeDuplicate, func(newID vaultic.ID, known bool, size int, err error) {
 		repo.count(known, vaultic.BlobHandle{ID: newID, Type: t})
 		cb(newID, known, size, err)

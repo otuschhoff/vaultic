@@ -425,7 +425,11 @@ func updateDocker(sourceDir, version string) string {
 	builderName := fmt.Sprintf("vaultic-release-builder-%d", r.Int())
 	run("docker", "buildx", "create", "--name", builderName, "--driver", "docker-container", "--bootstrap")
 
-	buildCmd := fmt.Sprintf("docker buildx build --builder %s --platform linux/386,linux/amd64,linux/arm,linux/arm64 --pull -f docker/Dockerfile.release %q", builderName, sourceDir)
+	buildCmd := fmt.Sprintf(
+		"docker buildx build --builder %s --platform linux/386,linux/amd64,linux/arm,linux/arm64 --pull -f docker/Dockerfile.release %q",
+		builderName,
+		sourceDir,
+	)
 	run("sh", "-c", buildCmd+" --no-cache")
 
 	var publishCmds strings.Builder

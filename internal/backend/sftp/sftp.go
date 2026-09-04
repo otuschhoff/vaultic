@@ -51,7 +51,13 @@ var _ backend.Backend = &SFTP{}
 var errTooShort = fmt.Errorf("file is too short")
 
 func NewFactory() location.Factory {
-	return location.NewLimitedBackendFactory("sftp", ParseConfig, location.NoPassword, limiter.WrapBackendConstructor(Create), limiter.WrapBackendConstructor(Open))
+	return location.NewLimitedBackendFactory(
+		"sftp",
+		ParseConfig,
+		location.NoPassword,
+		limiter.WrapBackendConstructor(Create),
+		limiter.WrapBackendConstructor(Open),
+	)
 }
 
 func startClient(cfg Config, errorLog func(string, ...any)) (*SFTP, error) {
@@ -91,7 +97,10 @@ func startClient(cfg Config, errorLog func(string, ...any)) (*SFTP, error) {
 	bg, err := terminal.StartForeground(cmd)
 	if err != nil {
 		if errors.Is(err, exec.ErrDot) {
-			return nil, errors.Errorf("cannot implicitly run relative executable %v found in current directory, use -o sftp.command=./<command> to override", cmd.Path)
+			return nil, errors.Errorf(
+				"cannot implicitly run relative executable %v found in current directory, use -o sftp.command=./<command> to override",
+				cmd.Path,
+			)
 		}
 		return nil, err
 	}

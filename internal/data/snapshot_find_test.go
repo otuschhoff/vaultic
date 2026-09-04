@@ -39,7 +39,20 @@ func TestSnapshotFilterRusticOptions(t *testing.T) {
 		filter data.SnapshotFilter
 		want   *data.Snapshot
 	}{
-		{"aliases and ranges", data.SnapshotFilter{FilterHosts: []string{"filter-host"}, FilterPaths: [][]string{{"/a", "/b"}}, FilterTags: data.TagLists{{"two"}}, Labels: []string{"daily"}, SizeMin: 90, SizeMax: 110, SizeAddedMin: 9, SizeAddedMax: 11}, first},
+		{
+			"aliases and ranges",
+			data.SnapshotFilter{
+				FilterHosts:  []string{"filter-host"},
+				FilterPaths:  [][]string{{"/a", "/b"}},
+				FilterTags:   data.TagLists{{"two"}},
+				Labels:       []string{"daily"},
+				SizeMin:      90,
+				SizeMax:      110,
+				SizeAddedMin: 9,
+				SizeAddedMax: 11,
+			},
+			first,
+		},
 		{"jq", data.SnapshotFilter{FilterJQ: `.label == "daily" and .summary.data_added == 10`}, first},
 	}
 	for _, test := range filters {

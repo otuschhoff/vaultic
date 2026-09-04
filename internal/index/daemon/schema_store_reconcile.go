@@ -28,7 +28,11 @@ func (store *SchemaStore) UpdatePackUsage(ctx context.Context, usage map[schema.
 
 // UpdatePackUsageForRun records refreshed usage accounting and attributes the
 // resulting coalesced history events to one run.
-func (store *SchemaStore) UpdatePackUsageForRun(ctx context.Context, usage map[schema.ID]PackUsage, runID schema.ID) (uint64, error) {
+func (store *SchemaStore) UpdatePackUsageForRun(
+	ctx context.Context,
+	usage map[schema.ID]PackUsage,
+	runID schema.ID,
+) (uint64, error) {
 	ids := make([]schema.ID, 0, len(usage))
 	for id := range usage {
 		ids = append(ids, id)
@@ -48,7 +52,12 @@ func (store *SchemaStore) UpdatePackUsageForRun(ctx context.Context, usage map[s
 
 const packUsageBatchSize = 256
 
-func (store *SchemaStore) updatePackUsageBatch(ctx context.Context, ids []schema.ID, usage map[schema.ID]PackUsage, runID schema.ID) (uint64, error) {
+func (store *SchemaStore) updatePackUsageBatch(
+	ctx context.Context,
+	ids []schema.ID,
+	usage map[schema.ID]PackUsage,
+	runID schema.ID,
+) (uint64, error) {
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
 		count, err := store.updatePackUsageOnce(ctx, ids, usage, runID)
@@ -67,7 +76,12 @@ func (store *SchemaStore) updatePackUsageBatch(ctx context.Context, ids []schema
 	return 0, fmt.Errorf("update pack usage: transaction conflict retry limit exceeded")
 }
 
-func (store *SchemaStore) updatePackUsageOnce(ctx context.Context, ids []schema.ID, usage map[schema.ID]PackUsage, runID schema.ID) (uint64, error) {
+func (store *SchemaStore) updatePackUsageOnce(
+	ctx context.Context,
+	ids []schema.ID,
+	usage map[schema.ID]PackUsage,
+	runID schema.ID,
+) (uint64, error) {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -199,7 +213,12 @@ func applyPackAggregateDeltas(ctx context.Context, transaction *Transaction, cha
 	return puts, nil
 }
 
-func updatePackAggregates(ctx context.Context, transaction *Transaction, old *schema.PackRecord, current schema.PackRecord) ([]Mutation, error) {
+func updatePackAggregates(
+	ctx context.Context,
+	transaction *Transaction,
+	old *schema.PackRecord,
+	current schema.PackRecord,
+) ([]Mutation, error) {
 	keys := aggregateKeys()
 	values, found, err := transaction.MultiGet(ctx, keys)
 	if err != nil {
@@ -329,10 +348,16 @@ func aggregateKind(packType schema.PackType) schema.AggregateKind {
 }
 
 func subtractPackAggregate(aggregate *schema.PackAggregate, record schema.PackRecord) error {
-	if aggregate.PackCount == 0 || aggregate.PhysicalSize < record.PhysicalSize || aggregate.PayloadSize < record.PayloadSize || aggregate.HeaderSize < record.HeaderSize || aggregate.BlobCount < record.BlobCount {
+	if aggregate.PackCount == 0 || aggregate.PhysicalSize < record.PhysicalSize ||
+		aggregate.PayloadSize < record.PayloadSize ||
+		aggregate.HeaderSize < record.HeaderSize ||
+		aggregate.BlobCount < record.BlobCount {
 		return fmt.Errorf("pack aggregate underflow")
 	}
-	if record.UsageKnown && (aggregate.AccountedPackCount == 0 || aggregate.UsedPayloadBytes < record.UsedPayloadBytes || aggregate.UnusedPayloadBytes < record.UnusedPayloadBytes) {
+	if record.UsageKnown &&
+		(aggregate.AccountedPackCount == 0 ||
+			aggregate.UsedPayloadBytes < record.UsedPayloadBytes ||
+			aggregate.UnusedPayloadBytes < record.UnusedPayloadBytes) {
 		return fmt.Errorf("pack aggregate usage underflow")
 	}
 	aggregate.PackCount--
@@ -349,10 +374,16 @@ func subtractPackAggregate(aggregate *schema.PackAggregate, record schema.PackRe
 }
 
 func addPackAggregate(aggregate *schema.PackAggregate, record schema.PackRecord) error {
-	if aggregate.PackCount == math.MaxUint64 || math.MaxUint64-aggregate.PhysicalSize < record.PhysicalSize || math.MaxUint64-aggregate.PayloadSize < record.PayloadSize || math.MaxUint64-aggregate.HeaderSize < record.HeaderSize || math.MaxUint64-aggregate.BlobCount < record.BlobCount {
+	if aggregate.PackCount == math.MaxUint64 || math.MaxUint64-aggregate.PhysicalSize < record.PhysicalSize ||
+		math.MaxUint64-aggregate.PayloadSize < record.PayloadSize ||
+		math.MaxUint64-aggregate.HeaderSize < record.HeaderSize ||
+		math.MaxUint64-aggregate.BlobCount < record.BlobCount {
 		return fmt.Errorf("pack aggregate overflow")
 	}
-	if record.UsageKnown && (aggregate.AccountedPackCount == math.MaxUint64 || math.MaxUint64-aggregate.UsedPayloadBytes < record.UsedPayloadBytes || math.MaxUint64-aggregate.UnusedPayloadBytes < record.UnusedPayloadBytes) {
+	if record.UsageKnown &&
+		(aggregate.AccountedPackCount == math.MaxUint64 ||
+			math.MaxUint64-aggregate.UsedPayloadBytes < record.UsedPayloadBytes ||
+			math.MaxUint64-aggregate.UnusedPayloadBytes < record.UnusedPayloadBytes) {
 		return fmt.Errorf("pack aggregate usage overflow")
 	}
 	aggregate.PackCount++
@@ -375,7 +406,12 @@ func (store *SchemaStore) Put(ctx context.Context, key, value []byte, durable bo
 // WriteMutableBatch atomically updates independently mutable schema records.
 // Immutable records, current pointers, and the revision counter require their
 // dedicated transactional operations.
-func (store *SchemaStore) WriteMutableBatch(ctx context.Context, puts []Mutation, deletes [][]byte, durable bool) error {
+func (store *SchemaStore) WriteMutableBatch(
+	ctx context.Context,
+	puts []Mutation,
+	deletes [][]byte,
+	durable bool,
+) error {
 	if err := validateDistinctMutations(puts, deletes); err != nil {
 		return err
 	}
@@ -411,14 +447,24 @@ func (store *SchemaStore) PublishSchemaBatch(ctx context.Context, puts []Mutatio
 
 // PublishSchemaBatchWithIdempotency publishes one logical schema transaction and
 // permits an ambiguous commit to be recovered with the same durable key.
-func (store *SchemaStore) PublishSchemaBatchWithIdempotency(ctx context.Context, puts []Mutation, deletes [][]byte, idempotencyKey string) error {
+func (store *SchemaStore) PublishSchemaBatchWithIdempotency(
+	ctx context.Context,
+	puts []Mutation,
+	deletes [][]byte,
+	idempotencyKey string,
+) error {
 	if idempotencyKey == "" {
 		return fmt.Errorf("idempotency key is required")
 	}
 	return store.publishSchemaBatch(ctx, puts, deletes, idempotencyKey)
 }
 
-func (store *SchemaStore) publishSchemaBatch(ctx context.Context, puts []Mutation, deletes [][]byte, idempotencyKey string) error {
+func (store *SchemaStore) publishSchemaBatch(
+	ctx context.Context,
+	puts []Mutation,
+	deletes [][]byte,
+	idempotencyKey string,
+) error {
 	seen := make(map[string]struct{}, len(puts)+len(deletes))
 	immutableKeys := make([][]byte, 0, len(puts))
 	immutableIndexes := make([]int, 0, len(puts))
@@ -502,17 +548,53 @@ func validateMutableKey(key []byte) error {
 		return err
 	}
 	switch parsed.Kind {
-	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyTierAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
-		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
-		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
-		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility,
-		schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyAnalyticsBuildCheckpoint,
-		schema.KeyAnalyticsDictionary, schema.KeyAnalyticsFactSegment, schema.KeyAnalyticsSegmentMetadata, schema.KeyAnalyticsDimensionIndex,
-		schema.KeyAnalyticsResidency, schema.KeyAnalyticsWatermark, schema.KeyAnalyticsManifest, schema.KeyAnalyticsQueryResult,
-		schema.KeyAnalyticsQueryHeat, schema.KeyAnalyticsQueryView, schema.KeyAnalyticsQueryJob,
-		schema.KeyGrowthTime, schema.KeyGrowthPath, schema.KeyUserSummary, schema.KeyGroupSummary, schema.KeyUserStats, schema.KeyGroupStats, schema.KeyUserChurn,
-		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion,
+	case schema.KeyPack,
+		schema.KeyPackAggregate,
+		schema.KeyTierAggregate,
+		schema.KeyReverseManifest,
+		schema.KeyReverseInode,
+		schema.KeyReferenceCount,
+		schema.KeyGarbageCollection,
+		schema.KeyCrawlDebt,
+		schema.KeyImportCheckpoint,
+		schema.KeySnapshotImportCheckpoint,
+		schema.KeyExportCheckpoint,
+		schema.KeyPackHistoryBucket,
+		schema.KeyHistoryRawFloor,
+		schema.KeyHistoryEnabledAt,
+		schema.KeyPackPlacement,
+		schema.KeyBackendPack,
+		schema.KeyPlacementDeleteQueue,
+		schema.KeyPlacementRequest,
+		schema.KeyRepackLineage,
+		schema.KeyPromotionEligibility,
+		schema.KeyAnalyticsFact,
+		schema.KeyAnalyticsCache,
+		schema.KeyAnalyticsMetadata,
+		schema.KeyAnalyticsBuildCheckpoint,
+		schema.KeyAnalyticsDictionary,
+		schema.KeyAnalyticsFactSegment,
+		schema.KeyAnalyticsSegmentMetadata,
+		schema.KeyAnalyticsDimensionIndex,
+		schema.KeyAnalyticsResidency,
+		schema.KeyAnalyticsWatermark,
+		schema.KeyAnalyticsManifest,
+		schema.KeyAnalyticsQueryResult,
+		schema.KeyAnalyticsQueryHeat,
+		schema.KeyAnalyticsQueryView,
+		schema.KeyAnalyticsQueryJob,
+		schema.KeyGrowthTime,
+		schema.KeyGrowthPath,
+		schema.KeyUserSummary,
+		schema.KeyGroupSummary,
+		schema.KeyUserStats,
+		schema.KeyGroupStats,
+		schema.KeyUserChurn,
+		schema.KeyUserInode,
+		schema.KeyUserBlob,
+		schema.KeyUserBlobContribution,
+		schema.KeyAnalyticsDerivedMarker,
+		schema.KeyPathVersion,
 		schema.KeyUIDExclusionPolicy:
 		return nil
 	case schema.KeyPackHistory:
@@ -532,15 +614,47 @@ func validateMutableDeleteKey(key []byte) error {
 		return err
 	}
 	switch parsed.Kind {
-	case schema.KeyReverseManifest, schema.KeyReverseInode, schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyExportIndexCheckpoint,
-		schema.KeyPackHistory, schema.KeyPackHistoryBucket,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility,
-		schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyAnalyticsBuildCheckpoint,
-		schema.KeyAnalyticsDictionary, schema.KeyAnalyticsFactSegment, schema.KeyAnalyticsSegmentMetadata, schema.KeyAnalyticsDimensionIndex,
-		schema.KeyAnalyticsResidency, schema.KeyAnalyticsDelta, schema.KeyAnalyticsWatermark, schema.KeyAnalyticsManifest, schema.KeyAnalyticsQueryResult,
-		schema.KeyAnalyticsQueryHeat, schema.KeyAnalyticsQueryView, schema.KeyAnalyticsQueryJob,
-		schema.KeyGrowthTime, schema.KeyGrowthPath, schema.KeyUserSummary, schema.KeyGroupSummary, schema.KeyUserStats, schema.KeyGroupStats, schema.KeyUserChurn,
-		schema.KeyUserInode, schema.KeyUserBlob, schema.KeyUserBlobContribution, schema.KeyAnalyticsDerivedMarker, schema.KeyPathVersion,
+	case schema.KeyReverseManifest,
+		schema.KeyReverseInode,
+		schema.KeyReferenceCount,
+		schema.KeyGarbageCollection,
+		schema.KeyExportIndexCheckpoint,
+		schema.KeyPackHistory,
+		schema.KeyPackHistoryBucket,
+		schema.KeyPackPlacement,
+		schema.KeyBackendPack,
+		schema.KeyPlacementDeleteQueue,
+		schema.KeyPlacementRequest,
+		schema.KeyRepackLineage,
+		schema.KeyPromotionEligibility,
+		schema.KeyAnalyticsFact,
+		schema.KeyAnalyticsCache,
+		schema.KeyAnalyticsMetadata,
+		schema.KeyAnalyticsBuildCheckpoint,
+		schema.KeyAnalyticsDictionary,
+		schema.KeyAnalyticsFactSegment,
+		schema.KeyAnalyticsSegmentMetadata,
+		schema.KeyAnalyticsDimensionIndex,
+		schema.KeyAnalyticsResidency,
+		schema.KeyAnalyticsDelta,
+		schema.KeyAnalyticsWatermark,
+		schema.KeyAnalyticsManifest,
+		schema.KeyAnalyticsQueryResult,
+		schema.KeyAnalyticsQueryHeat,
+		schema.KeyAnalyticsQueryView,
+		schema.KeyAnalyticsQueryJob,
+		schema.KeyGrowthTime,
+		schema.KeyGrowthPath,
+		schema.KeyUserSummary,
+		schema.KeyGroupSummary,
+		schema.KeyUserStats,
+		schema.KeyGroupStats,
+		schema.KeyUserChurn,
+		schema.KeyUserInode,
+		schema.KeyUserBlob,
+		schema.KeyUserBlobContribution,
+		schema.KeyAnalyticsDerivedMarker,
+		schema.KeyPathVersion,
 		schema.KeyUIDExclusionPolicy:
 		// History is explicitly prunable: it is derived, advisory, and retained
 		// on its own schedule.
@@ -558,11 +672,31 @@ func validatePublishKey(key []byte) (bool, error) {
 	switch parsed.Kind {
 	case schema.KeyBlob, schema.KeyInodeRevision, schema.KeyDirectoryRevision, schema.KeySnapshot:
 		return true, nil
-	case schema.KeyPack, schema.KeyPackAggregate, schema.KeyTierAggregate, schema.KeyReverseManifest, schema.KeyReverseInode,
-		schema.KeyReferenceCount, schema.KeyGarbageCollection, schema.KeyCrawlDebt, schema.KeyImportCheckpoint,
-		schema.KeySnapshotImportCheckpoint, schema.KeyExportCheckpoint,
-		schema.KeyPackHistoryBucket, schema.KeyHistoryRawFloor, schema.KeyHistoryEnabledAt,
-		schema.KeyPackPlacement, schema.KeyBackendPack, schema.KeyPlacementDeleteQueue, schema.KeyPlacementRequest, schema.KeyRepackLineage, schema.KeyPromotionEligibility, schema.KeyAnalyticsFact, schema.KeyAnalyticsCache, schema.KeyAnalyticsMetadata, schema.KeyAnalyticsBuildCheckpoint, schema.KeyPathVersion:
+	case schema.KeyPack,
+		schema.KeyPackAggregate,
+		schema.KeyTierAggregate,
+		schema.KeyReverseManifest,
+		schema.KeyReverseInode,
+		schema.KeyReferenceCount,
+		schema.KeyGarbageCollection,
+		schema.KeyCrawlDebt,
+		schema.KeyImportCheckpoint,
+		schema.KeySnapshotImportCheckpoint,
+		schema.KeyExportCheckpoint,
+		schema.KeyPackHistoryBucket,
+		schema.KeyHistoryRawFloor,
+		schema.KeyHistoryEnabledAt,
+		schema.KeyPackPlacement,
+		schema.KeyBackendPack,
+		schema.KeyPlacementDeleteQueue,
+		schema.KeyPlacementRequest,
+		schema.KeyRepackLineage,
+		schema.KeyPromotionEligibility,
+		schema.KeyAnalyticsFact,
+		schema.KeyAnalyticsCache,
+		schema.KeyAnalyticsMetadata,
+		schema.KeyAnalyticsBuildCheckpoint,
+		schema.KeyPathVersion:
 		return false, nil
 	case schema.KeyPackHistory:
 		return true, nil

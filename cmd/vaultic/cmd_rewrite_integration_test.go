@@ -307,7 +307,11 @@ func TestRewriteExcludeIncludeContradiction(t *testing.T) {
 			},
 			gopts, []string{"quack"}, env.gopts.Term)
 	})
-	rtest.Assert(t, err != nil && strings.Contains(err.Error(), "exclude and include patterns are mutually exclusive"), `expected to fail command with message "exclude and include patterns are mutually exclusive"`)
+	rtest.Assert(
+		t,
+		err != nil && strings.Contains(err.Error(), "exclude and include patterns are mutually exclusive"),
+		`expected to fail command with message "exclude and include patterns are mutually exclusive"`,
+	)
 }
 
 func TestRewriteIncludeEmptyDirectory(t *testing.T) {

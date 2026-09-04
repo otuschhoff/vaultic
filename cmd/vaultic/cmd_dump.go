@@ -51,8 +51,11 @@ Exit status is 12 if the password is incorrect.
 `,
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDump(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
 		},
 	}
@@ -83,7 +86,15 @@ func splitPath(p string) []string {
 	return append(s, f)
 }
 
-func printFromTree(ctx context.Context, tree data.TreeNodeIterator, repo vaultic.BlobLoader, prefix string, pathComponents []string, d *dump.Dumper, canWriteArchiveFunc func() error) error {
+func printFromTree(
+	ctx context.Context,
+	tree data.TreeNodeIterator,
+	repo vaultic.BlobLoader,
+	prefix string,
+	pathComponents []string,
+	d *dump.Dumper,
+	canWriteArchiveFunc func() error,
+) error {
 	// If we print / we need to assume that there are multiple nodes at that
 	// level in the tree.
 	if pathComponents[0] == "" {
