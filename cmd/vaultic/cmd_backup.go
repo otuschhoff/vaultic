@@ -4,13 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -18,14 +14,11 @@ import (
 	"strings"
 	"time"
 
-	uppathdiff "github.com/otuschhoff/pathdiff"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/otuschhoff/vaultic/internal/archiver"
 	"github.com/otuschhoff/vaultic/internal/configfile"
-	"github.com/otuschhoff/vaultic/internal/crawl"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/env"
@@ -35,16 +28,9 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/hooks"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
-	"github.com/otuschhoff/vaultic/internal/index/analytics"
-	"github.com/otuschhoff/vaultic/internal/index/maintenance"
-	"github.com/otuschhoff/vaultic/internal/index/reconcile"
-	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
-	"github.com/otuschhoff/vaultic/internal/repository/staging"
-	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
-	"github.com/otuschhoff/vaultic/internal/ui/backup"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -134,6 +120,7 @@ type BackupOptions struct {
 	AcknowledgeMetadataBypass bool
 
 	readConcurrencyFlag *pflag.Flag
+	fsTestHook          func(fs.FS) fs.FS
 }
 
 func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
@@ -295,8 +282,6 @@ func (opts *BackupOptions) Finalize() error {
 	return nil
 }
 
-var backupFSTestHook func(fs fs.FS) fs.FS
-
 // ErrInvalidSourceData is used to report an incomplete backup
 var ErrInvalidSourceData = errors.New("at least one source file could not be read")
 
@@ -422,6 +407,16 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 
 // Check returns an error when an invalid combination of options was set.
 func (opts BackupOptions) Check(gopts global.Options, args []string) error {
+	if err := opts.validateDeferred(); err != nil {
+		return err
+	}
+	if err := opts.validateParent(); err != nil {
+		return err
+	}
+	return opts.validateStdin(gopts, args)
+}
+
+func (opts BackupOptions) validateDeferred() error {
 	if opts.DeferredMode != "" && !opts.AllowDeferredCommit {
 		return errors.Fatal("--deferred-mode requires --allow-deferred-commit")
 	}
@@ -437,6 +432,10 @@ func (opts BackupOptions) Check(gopts global.Options, args []string) error {
 	if opts.AllowDeferredCommit && opts.DeferredExpiry <= 0 {
 		return errors.Fatal("--deferred-expiry must be positive")
 	}
+	return nil
+}
+
+func (opts BackupOptions) validateParent() error {
 	if opts.UseCWalk && opts.CWalkConcurrency < 1 {
 		return errors.Fatal("--cwalk-concurrency must be at least 1")
 	}
@@ -452,6 +451,10 @@ func (opts BackupOptions) Check(gopts global.Options, args []string) error {
 	if opts.PathdiffRequireCoverage && !opts.UsePathdiff {
 		return errors.Fatal("--pathdiff-require-coverage requires --use-pathdiff")
 	}
+	return nil
+}
+
+func (opts BackupOptions) validateStdin(gopts global.Options, args []string) error {
 	if gopts.Password == "" && !gopts.InsecureNoPassword {
 		if opts.Stdin {
 			return errors.Fatal("cannot read both password and data from stdin")
@@ -648,521 +651,7 @@ func findParentSnapshot(ctx context.Context, repo vaultic.ListerLoaderUnpacked, 
 }
 
 func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, term ui.Terminal, args []string) error {
-	var vsscfg fs.VSSConfig
-	var err error
-
-	var printer backup.ProgressPrinter
-	if gopts.JSON {
-		printer = backup.NewJSONProgress(term, gopts.Verbosity)
-	} else {
-		printer = backup.NewTextProgress(term, gopts.Verbosity)
-	}
-	if runtime.GOOS == "windows" {
-		if vsscfg, err = fs.ParseVSSConfig(gopts.Extended); err != nil {
-			return err
-		}
-	}
-
-	err = opts.Check(gopts, args)
-	if err != nil {
-		return err
-	}
-
-	success := true
-	targets, err := collectTargets(opts, args, printer.E, term.InputRaw())
-	if err != nil {
-		if errors.Is(err, ErrInvalidSourceData) {
-			success = false
-		} else {
-			return err
-		}
-	}
-
-	timeStamp := time.Now()
-	backupStart := timeStamp
-	if opts.TimeStamp != "" {
-		timeStamp, err = time.ParseInLocation(global.TimeFormat, opts.TimeStamp, time.Local)
-		if err != nil {
-			return errors.Fatalf("error in time option: %v", err)
-		}
-	}
-
-	if gopts.Verbosity >= 2 && !gopts.JSON {
-		printer.P("open repository")
-	}
-	if opts.Init {
-		_, err := global.OpenRepository(ctx, gopts, printer)
-		if errors.Is(err, global.ErrNoRepository) {
-			if _, err := global.CreateRepository(ctx, gopts, vaultic.StableRepoVersion, nil, printer); err != nil {
-				return errors.Fatalf("initialize repository: %v", err)
-			}
-		} else if err != nil {
-			return err
-		}
-	}
-
-	deferredActive := opts.AllowDeferredCommit && opts.DeferredMode != "auto"
-	metadataBypassed := opts.DeferredMode == "data-plane-only"
-	var repo *repository.Repository
-	var unlock func()
-	if opts.DeferredMode == "data-plane-only" {
-		repo, err = global.OpenDataPlaneRepository(ctx, gopts, printer)
-		if err == nil {
-			unlock = func() { _ = repo.Close() }
-		}
-	} else {
-		ctx, repo, unlock, err = openWithAppendLock(ctx, gopts, opts.DryRun, printer)
-		if shouldUseDataPlaneFallback(err, opts) {
-			repo, err = global.OpenDataPlaneRepository(ctx, gopts, printer)
-			if err == nil {
-				deferredActive = true
-				metadataBypassed = true
-				unlock = func() { _ = repo.Close() }
-			}
-		} else if err == nil && opts.DeferredMode == "auto" {
-			if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok {
-				status, statusErr := engine.Client().WriterStatus(ctx)
-				if statusErr != nil || status.Role != "read-write" {
-					deferredActive = true
-				}
-			}
-		}
-	}
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if deferredActive {
-		severity := observability.Notice
-		message := "deferred backup mode selected"
-		if metadataBypassed {
-			severity = observability.Critical
-			message = "metadata bypassed for data-plane-only deferred crawl"
-		}
-		_ = observability.Emit(ctx, observability.Event{Severity: severity, Category: observability.CategoryLifecycle, Component: "backup", Message: message, Fields: map[string]any{"mode": opts.DeferredMode}})
-	}
-
-	progressReporter := backup.NewProgress(printer, gopts.Quiet, gopts.JSON, term.CanUpdateStatus())
-	defer progressReporter.Done()
-
-	// rejectByNameFuncs collect functions that can reject items from the backup based on path only
-	rejectByNameFuncs, err := collectRejectByNameFuncs(opts, repo, printer.E)
-	if err != nil {
-		return err
-	}
-
-	var parentSnapshot *data.Snapshot
-	if !opts.Stdin && !deferredActive {
-		parentSnapshot, err = findParentSnapshot(ctx, repo, opts, targets, timeStamp)
-		if err != nil {
-			return err
-		}
-
-		if !gopts.JSON {
-			if parentSnapshot != nil {
-				printer.P("using parent snapshot %v\n", parentSnapshot.ID().Str())
-			} else {
-				printer.P("no parent snapshot found, will read all files\n")
-			}
-		}
-	}
-
-	if !gopts.JSON && !deferredActive {
-		printer.V("load index files")
-	}
-	if !deferredActive {
-		err = repo.LoadIndex(ctx, printer)
-		if err != nil {
-			return err
-		}
-	}
-
-	targetFS := fs.NewLocal()
-	if runtime.GOOS == "windows" && opts.UseFsSnapshot {
-		if err = fs.HasSufficientPrivilegesForVSS(); err != nil {
-			return err
-		}
-
-		errorHandler := func(item string, err error) {
-			_ = progressReporter.Error(item, err)
-		}
-
-		messageHandler := func(msg string, args ...any) {
-			if !gopts.JSON {
-				printer.P(msg, args...)
-			}
-		}
-
-		localVss := fs.NewLocalVss(errorHandler, messageHandler, vsscfg)
-		defer localVss.DeleteSnapshots()
-		targetFS = localVss
-	}
-
-	if opts.Stdin || opts.StdinCommand {
-		if !gopts.JSON {
-			printer.V("read data from stdin")
-		}
-		filename := path.Join("/", opts.StdinFilename)
-		source := term.InputRaw()
-		if opts.StdinCommand {
-			source, err = fs.NewCommandReader(ctx, args, printer.E)
-			if err != nil {
-				return err
-			}
-		}
-		targetFS, err = fs.NewReader(filename, source, fs.ReaderOptions{
-			ModTime: timeStamp,
-			Mode:    0644,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to backup from stdin: %w", err)
-		}
-		targets = []string{filename}
-	}
-
-	if backupFSTestHook != nil {
-		targetFS = backupFSTestHook(targetFS)
-	}
-
-	pathdiffPlan := crawl.Plan{Reason: "pathdiff is disabled"}
-	if opts.UsePathdiff {
-		if !fs.IsLocal(targetFS) {
-			pathdiffPlan.Reason = "source does not use the plain local filesystem"
-		} else if parentSnapshot == nil {
-			pathdiffPlan.Reason = "no parent snapshot is available"
-		} else {
-			topology, topologyErr := crawl.LoadTopology(opts.PathdiffSVMMap)
-			if topologyErr != nil {
-				pathdiffPlan.Reason = topologyErr.Error()
-			} else {
-				service := crawl.NewPathdiffService(uppathdiff.NewClient(opts.PathdiffEndpoint))
-				pathdiffPlan, err = crawl.BuildPathdiffPlan(ctx, service, topology, targets, parentSnapshot.Time, backupStart)
-				if err != nil {
-					return fmt.Errorf("build pathdiff crawl plan: %w", err)
-				}
-			}
-		}
-		if !pathdiffPlan.Selective {
-			if opts.PathdiffRequireCoverage {
-				return errors.Fatalf("pathdiff coverage is required: %s", pathdiffPlan.Reason)
-			}
-			if !gopts.JSON {
-				printer.V("pathdiff coverage unverified, using full cwalk traversal: %s", pathdiffPlan.Reason)
-			}
-		} else if !gopts.JSON {
-			printer.V("pathdiff coverage verified; crawling %d changed subtrees", len(pathdiffPlan.ChangedDirs))
-		}
-	}
-
-	// rejectFuncs collect functions that can reject items from the backup based on path and file info
-	rejectFuncs, err := collectRejectFuncs(opts, targets, targetFS, printer.E)
-	if err != nil {
-		return err
-	}
-	var authoritativeEngine *enginepkg.DaemonEngine
-	var mandatorySelect archiver.SelectFunc
-	if engine, ok := repo.Engine().(*enginepkg.DaemonEngine); ok && !deferredActive {
-		authoritativeEngine = engine
-		excludedUIDs, err := analytics.ExcludedUIDs(ctx, engine.SchemaStore())
-		if err != nil {
-			return fmt.Errorf("load UID exclusion policy: %w", err)
-		}
-		if len(excludedUIDs) > 0 {
-			uidPolicy := archiver.RejectUIDs(excludedUIDs)
-			rejectFuncs = append(rejectFuncs, uidPolicy)
-			mandatorySelect = archiver.CombineRejects([]archiver.RejectFunc{uidPolicy})
-		}
-	}
-
-	selectByNameFilter := archiver.CombineRejectByNames(rejectByNameFuncs)
-	selectFilter := archiver.CombineRejects(rejectFuncs)
-
-	wg, wgCtx := errgroup.WithContext(ctx)
-	cancelCtx, cancel := context.WithCancel(wgCtx)
-	defer cancel()
-
-	if !opts.NoScan && !pathdiffPlan.Selective && !opts.UseCWalk {
-		sc := archiver.NewScanner(targetFS)
-		sc.SelectByName = selectByNameFilter
-		sc.Select = selectFilter
-		sc.Error = printer.ScannerError
-		sc.Result = progressReporter.ReportTotal
-
-		if !gopts.JSON {
-			printer.V("start scan on %v", targets)
-		}
-		wg.Go(func() error { return sc.Scan(cancelCtx, targets) })
-	}
-
-	archiverOptions := archiver.Options{ReadConcurrency: opts.ReadConcurrency}
-	if opts.UseCWalk && (!pathdiffPlan.Selective || len(pathdiffPlan.ChangedDirs) > 0) {
-		archiverOptions.CWalkConcurrency = opts.CWalkConcurrency
-		archiverOptions.CWalkQueue = 4096
-		if pathdiffPlan.Selective {
-			archiverOptions.CWalkRoots = pathdiffPlan.ChangedDirs
-		}
-	}
-	archiverRepository := repo.AppendTransaction()
-	if deferredActive {
-		archiverRepository = repo.DeferredTransaction()
-	}
-	arch := archiver.New(archiverRepository, targetFS, archiverOptions)
-	arch.SelectByName = selectByNameFilter
-	arch.Select = selectFilter
-	if pathdiffPlan.Selective {
-		arch.ReuseSubtree = func(_ string, sourcePath string, _ *data.Node) bool {
-			return pathdiffPlan.ReuseSubtree(sourcePath)
-		}
-	}
-	if mandatorySelect != nil {
-		arch.MandatorySelect = mandatorySelect
-	}
-	arch.WithAtime = opts.WithAtime
-
-	arch.Error = func(item string, err error) error {
-		success = false
-		reterr := progressReporter.Error(item, err)
-		// If we receive a fatal error during the execution of the snapshot,
-		// we abort the snapshot.
-		if reterr == nil && errors.IsFatal(err) {
-			reterr = err
-		}
-		return reterr
-	}
-	arch.CompleteItem = progressReporter.CompleteItem
-	arch.StartFile = progressReporter.StartFile
-	arch.CompleteBlob = progressReporter.CompleteBlob
-	arch.ExcludedItem = progressReporter.ExcludedItem
-
-	var reconciler *reconcile.Reconciler
-	var deferredCapture *reconcile.DeferredCapture
-	if authoritativeEngine != nil {
-		reconciler, err = reconcile.New(cancelCtx, targetFS, authoritativeEngine.SchemaStore(), reconcile.Options{PathIndexPaths: repo.Config().PathIndexPaths})
-		if err != nil {
-			return fmt.Errorf("start authoritative metadata reconciliation: %w", err)
-		}
-		reconcile.Attach(arch, reconciler)
-		arch.BeforeSnapshot = func() error {
-			if err := reconciler.Close(); err != nil {
-				return err
-			}
-			authoritativeEngine.SetNextSnapshotRoot(reconciler.RootKey())
-			return nil
-		}
-	}
-
-	if opts.IgnoreInode {
-		// --ignore-inode implies --ignore-ctime: on FUSE, the ctime is not
-		// reliable either.
-		arch.ChangeIgnoreFlags |= archiver.ChangeIgnoreCtime | archiver.ChangeIgnoreInode
-	}
-	if opts.IgnoreCtime {
-		arch.ChangeIgnoreFlags |= archiver.ChangeIgnoreCtime
-	}
-
-	snapshotOpts := archiver.SnapshotOptions{
-		Excludes:        opts.Excludes,
-		Tags:            opts.Tags.Flatten(),
-		BackupStart:     backupStart,
-		Time:            timeStamp,
-		Hostname:        opts.Host,
-		Label:           opts.Label,
-		ParentSnapshot:  parentSnapshot,
-		ProgramVersion:  "vaultic " + global.Version,
-		SkipIfUnchanged: opts.SkipIfUnchanged,
-	}
-	var deferredResult repository.DeferredUploadResult
-	var deferredStore staging.Store
-	if deferredActive {
-		deferredCapture = reconcile.NewDeferredCapture(targetFS)
-		previousReconcileNode := arch.ReconcileNode
-		arch.ReconcileNode = func(snapshotPath, sourcePath string, node *data.Node) {
-			previousReconcileNode(snapshotPath, sourcePath, node)
-			deferredCapture.Observe(snapshotPath, sourcePath, node)
-		}
-		uploadOptions, store, err := repo.DeferredUploadPlan()
-		if err != nil {
-			return err
-		}
-		quotaConfig := repo.Config().StagingQuota
-		quota := staging.Quota{MaxBytes: quotaConfig.MaxBytes, MaxJobs: quotaConfig.MaxJobs, MaxAge: time.Duration(quotaConfig.MaxAgeSeconds) * time.Second}
-		usage, err := store.ActiveUsage(ctx, repo.Config().ID)
-		if err != nil {
-			return fmt.Errorf("inspect deferred staging quota: %w", err)
-		}
-		if err := staging.CheckQuota(quota, usage.Jobs, 0, usage.Bytes, usage.OldestJobAt, 0, time.Now().UTC()); err != nil {
-			_ = observability.Emit(ctx, observability.Event{Severity: observability.Error, Category: observability.CategoryLifecycle, Component: "backup", Message: "deferred staging quota refused upload"})
-			return err
-		}
-		if quota.MaxBytes > 0 {
-			uploadOptions.MaxAdditionalBytes = quota.MaxBytes - usage.Bytes
-		}
-		deferredStore = store
-		snapshotOpts.DeferredUploader = func(ctx context.Context, fn func(context.Context, vaultic.BlobSaverWithAsync) error) error {
-			var uploadErr error
-			deferredResult, uploadErr = repo.WithDeferredBlobUploader(ctx, uploadOptions, fn)
-			return uploadErr
-		}
-	}
-
-	// resolve description (--description-from overrides --description)
-	if opts.DescriptionFrom != "" {
-		data, err := textfile.Read(opts.DescriptionFrom)
-		if err != nil {
-			return errors.Fatalf("unable to read description from %q: %v", opts.DescriptionFrom, err)
-		}
-		snapshotOpts.Description = strings.TrimSpace(string(data))
-	} else {
-		snapshotOpts.Description = opts.Description
-	}
-
-	// resolve delete protection (--delete-never wins over --delete-after)
-	if opts.DeleteNever {
-		snapshotOpts.Delete = &data.DeleteOption{Never: true}
-	} else if opts.DeleteAfter != "" {
-		dur, err := data.ParseDuration(opts.DeleteAfter)
-		if err != nil || dur.Zero() {
-			return errors.Fatalf("invalid --delete-after duration %q: %v", opts.DeleteAfter, err)
-		}
-		until := timeStamp.AddDate(dur.Years, dur.Months, dur.Days).Add(time.Duration(dur.Hours) * time.Hour)
-		snapshotOpts.Delete = &data.DeleteOption{After: &until}
-	}
-
-	if !gopts.JSON {
-		printer.V("start backup on %v", targets)
-	}
-	snapshot, id, summary, err := arch.Snapshot(ctx, targets, snapshotOpts)
-	var deferredJobID string
-	var deferredSeal staging.Seal
-	if err == nil && deferredActive {
-		observations, captureErr := deferredCapture.Close()
-		if captureErr != nil {
-			err = captureErr
-		}
-		deferredJobID = vaultic.NewRandomID().String()
-		snapshotPayload, marshalErr := json.Marshal(snapshot)
-		if marshalErr != nil {
-			err = marshalErr
-		} else if err == nil {
-			sourceDigest := sha256.Sum256([]byte(strings.Join(targets, "\x00")))
-			header := staging.Header{
-				Format: 1, RepositoryID: repo.Config().ID, JobID: deferredJobID, IdempotencyKey: deferredJobID,
-				CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(opts.DeferredExpiry),
-				CapsuleGeneration: 1, RepositoryKeyVersion: 1, ChunkerVersion: "rabin-v1",
-				CompressionVersion: fmt.Sprintf("repository-v%d", repo.Config().Version), PlacementPolicyVersion: 1,
-				SourceIdentitySHA256: hex.EncodeToString(sourceDigest[:]), ConsistencyEvidence: "full-crawl",
-			}
-			records := append(deferredResult.Records, staging.Record{Kind: "prospective-snapshot-v1", Payload: snapshotPayload})
-			for _, observation := range observations {
-				payload, marshalErr := json.Marshal(observation)
-				if marshalErr != nil {
-					err = marshalErr
-					break
-				}
-				records = append(records, staging.Record{Kind: reconcile.DeferredObservationKind, Payload: payload})
-			}
-			if err != nil {
-				return err
-			}
-			deferredSeal, _, _, err = deferredStore.PublishJob(ctx, header, deferredResult.Packs, records)
-			if err == nil {
-				_ = observability.Emit(ctx, observability.Event{Severity: observability.Info, Category: observability.CategoryIntegrity, Component: "backup", Message: "deferred pack durability verified", Fields: map[string]any{"job_id": deferredJobID, "pack_count": deferredSeal.PackCount, "protected_bytes": deferredSeal.ProtectedBytes}})
-				_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "staging", Message: "deferred ingest journal sealed", Fields: map[string]any{"job_id": deferredJobID, "expires_at": deferredSeal.Header.ExpiresAt}})
-			}
-		}
-	}
-	if reconciler != nil {
-		if reconcileErr := reconciler.Close(); reconcileErr != nil && err == nil {
-			err = fmt.Errorf("reconcile authoritative snapshot metadata: %w", reconcileErr)
-		} else if err == nil && !id.IsNull() {
-			rootKey := reconciler.RootKey()
-			if len(rootKey) == 0 {
-				err = fmt.Errorf("reconcile authoritative snapshot metadata: missing snapshot root")
-			} else if publishErr := authoritativeEngine.PublishSnapshotScope(ctx, id, rootKey); publishErr != nil {
-				err = fmt.Errorf("publish authoritative snapshot scope: %w", publishErr)
-			}
-		}
-	}
-
-	// cleanly shutdown all running goroutines
-	cancel()
-
-	// let's see if one returned an error
-	werr := wg.Wait()
-
-	// return original error
-	if err != nil {
-		return errors.Fatalf("unable to save snapshot: %v", err)
-	}
-	if deferredActive {
-		if werr != nil {
-			return werr
-		}
-		if !success {
-			return ErrInvalidSourceData
-		}
-		placements := make(map[string]uint64)
-		for _, pack := range deferredResult.Packs {
-			for _, placement := range pack.Placements {
-				placements[placement.BackendID]++
-			}
-		}
-		result := map[string]any{"state": "data_durable_metadata_pending", "job_id": deferredJobID, "packs": len(deferredResult.Packs), "protected_bytes": deferredSeal.ProtectedBytes, "placements": placements, "expires_at": deferredSeal.Header.ExpiresAt, "reason": opts.DeferredMode}
-		if gopts.JSON {
-			encoded, _ := json.Marshal(result)
-			term.Print(string(encoded))
-		} else {
-			printer.P("data durable; metadata pending (job %s, %d packs, expires in %s)\n", deferredJobID, len(deferredResult.Packs), opts.DeferredExpiry)
-		}
-		return nil
-	}
-
-	// Report finished execution
-	progressReporter.Finish(id, summary, opts.DryRun)
-	if !success {
-		return ErrInvalidSourceData
-	}
-
-	// Return errors before publishing telemetry: metrics represent only fully
-	// successful backups with a durable snapshot.
-	if werr != nil {
-		return werr
-	}
-	if authoritativeEngine != nil && !opts.DryRun {
-		model, placementErr := indexMaintenancePlacementModel(repo)
-		if placementErr == nil {
-			_, placementErr = maintenance.PlanPlacement(ctx, authoritativeEngine.SchemaStore(), maintenance.PlacementSchedulerOptions{Model: model, Now: time.Now()})
-		}
-		if placementErr == nil {
-			_, placementErr = maintenance.ExecutePlacement(ctx, authoritativeEngine.SchemaStore(), repositoryPlacementActions{repo: repo, printer: printer}, maintenance.PlacementWorkerOptions{
-				Model: model, Now: time.Now(), MaxRequests: 1,
-			})
-		}
-		if placementErr != nil {
-			printer.E("placement scheduler tick failed: %v\n", placementErr)
-		}
-	}
-	if err := telemetry.Publish(ctx, telemetry.Config{
-		PrometheusURL:  gopts.PrometheusURL,
-		PrometheusUser: gopts.PrometheusUser,
-		PrometheusPass: gopts.PrometheusPass,
-		InfluxURL:      gopts.InfluxURL,
-		InfluxToken:    gopts.InfluxToken,
-		InfluxOrg:      gopts.InfluxOrg,
-		InfluxBucket:   gopts.InfluxBucket,
-	}, telemetry.Backup{Repository: gopts.Repo, SnapshotID: id.String(), Label: snapshotOpts.Label, Summary: summary}); err != nil {
-		// The snapshot is already durable. Observability outages must not turn a
-		// completed backup into a failed one.
-		printer.E("telemetry publish failed: %v\n", err)
-	}
-	if opts.List {
-		if err := runLs(ctx, LsOptions{}, gopts, []string{id.String()}, term); err != nil {
-			// The snapshot is already durable. Keep the backup successful even if
-			// the optional post-backup listing cannot be rendered.
-			printer.E("listing created snapshot failed: %v\n", err)
-		}
-	}
-	return nil
+	return runBackupPipeline(ctx, opts, gopts, term, args)
 }
 
 func shouldUseDataPlaneFallback(openErr error, opts BackupOptions) bool {

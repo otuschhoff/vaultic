@@ -91,6 +91,7 @@ const (
 	KeyDeletionCertificate
 	KeyVerificationState
 	KeyVerificationEvent
+	keyKindCount
 )
 
 type AnalyticsDictionaryKind byte

@@ -209,8 +209,11 @@ func restoreAndVerify(t *testing.T, tempdir string, content []TestFile, files ma
 	t.Helper()
 	repo := newTestRepo(content)
 
-	r := newFileRestorer(tempdir, repo.loader, repo.Lookup, 2, sparse, false, repo.StartWarmup, nil,
-		repository.TestRepository(t).ChunkerFactory().ZeroChunk())
+	r := newFileRestorer(fileRestorerParams{
+		destination: tempdir, blobsLoader: repo.loader, index: repo.Lookup, connections: 2,
+		sparse: sparse, startWarmup: repo.StartWarmup,
+		zeroChunk: repository.TestRepository(t).ChunkerFactory().ZeroChunk(),
+	})
 
 	if files == nil {
 		r.files = repo.files
@@ -360,8 +363,11 @@ func TestErrorRestoreFiles(t *testing.T) {
 		return loadError
 	}
 
-	r := newFileRestorer(tempdir, repo.loader, repo.Lookup, 2, false, false, repo.StartWarmup, nil,
-		repository.TestRepository(t).ChunkerFactory().ZeroChunk())
+	r := newFileRestorer(fileRestorerParams{
+		destination: tempdir, blobsLoader: repo.loader, index: repo.Lookup, connections: 2,
+		startWarmup: repo.StartWarmup,
+		zeroChunk:   repository.TestRepository(t).ChunkerFactory().ZeroChunk(),
+	})
 	r.files = repo.files
 
 	err := r.restoreFiles(context.TODO())
@@ -402,8 +408,11 @@ func TestFatalDownloadError(t *testing.T) {
 		})
 	}
 
-	r := newFileRestorer(tempdir, repo.loader, repo.Lookup, 2, false, false, repo.StartWarmup, nil,
-		repository.TestRepository(t).ChunkerFactory().ZeroChunk())
+	r := newFileRestorer(fileRestorerParams{
+		destination: tempdir, blobsLoader: repo.loader, index: repo.Lookup, connections: 2,
+		startWarmup: repo.StartWarmup,
+		zeroChunk:   repository.TestRepository(t).ChunkerFactory().ZeroChunk(),
+	})
 	r.files = repo.files
 
 	var errors []string

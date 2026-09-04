@@ -140,7 +140,10 @@ func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions
 			return store.WriteMutableBatch(ctx, nil, [][]byte{entry.Key}, false)
 		}
 		if !backend.ingestEnabled() && request.Operation != schema.PlacementRequestEvict {
-			return failPlacementRequest(ctx, store, entry.Key, request, packID, pack, backend, options, errors.New("placement backend is not enabled for ingest"), &result)
+			return failPlacementRequest(ctx, placementFailure{
+				store: store, requestKey: entry.Key, request: request, packID: packID, pack: pack,
+				backend: backend, options: options, actionErr: errors.New("placement backend is not enabled for ingest"), result: &result,
+			})
 		}
 		if placementLimitReached(backend, pack.PhysicalSize, requestsUsed[backend.Hash], bytesUsed[backend.Hash], options) {
 			result.Deferred++
@@ -152,7 +155,10 @@ func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions
 				return err
 			}
 			if !allowed {
-				return failPlacementRequest(ctx, store, entry.Key, request, packID, pack, backend, options, errors.New("eviction would breach durability"), &result)
+				return failPlacementRequest(ctx, placementFailure{
+					store: store, requestKey: entry.Key, request: request, packID: packID, pack: pack,
+					backend: backend, options: options, actionErr: errors.New("eviction would breach durability"), result: &result,
+				})
 			}
 		}
 		request.Attempts++
@@ -180,7 +186,10 @@ func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions
 			if errors.Is(actionErr, ErrPlacementObsolete) {
 				return store.WriteMutableBatch(ctx, nil, [][]byte{entry.Key}, false)
 			}
-			return failPlacementRequest(ctx, store, entry.Key, request, packID, pack, backend, options, actionErr, &result)
+			return failPlacementRequest(ctx, placementFailure{
+				store: store, requestKey: entry.Key, request: request, packID: packID, pack: pack,
+				backend: backend, options: options, actionErr: actionErr, result: &result,
+			})
 		}
 		if err := completePlacementRequest(ctx, store, entry.Key, request.Operation, packID, pack, backend, options.Now); err != nil {
 			return err
@@ -260,34 +269,47 @@ func persistPlacementAttempt(ctx context.Context, store Store, requestKey []byte
 	return store.WriteMutableBatch(ctx, mutations, nil, false)
 }
 
-func failPlacementRequest(ctx context.Context, store Store, requestKey []byte, request schema.PlacementRequestRecord, packID vaultic.ID, pack schema.PackRecord, backend PlacementBackend, options PlacementWorkerOptions, actionErr error, result *PlacementWorkerResult) error {
-	request.LastError = actionErr.Error()
-	shift := min(max(request.Attempts, 1)-1, 16)
-	request.NotBefore = options.Now.Add(options.RetryBase * time.Duration(uint64(1)<<shift)).UnixNano()
-	requestValue, err := request.MarshalBinary()
+type placementFailure struct {
+	store      Store
+	requestKey []byte
+	request    schema.PlacementRequestRecord
+	packID     vaultic.ID
+	pack       schema.PackRecord
+	backend    PlacementBackend
+	options    PlacementWorkerOptions
+	actionErr  error
+	result     *PlacementWorkerResult
+}
+
+func failPlacementRequest(ctx context.Context, failure placementFailure) error {
+	failure.request.LastError = failure.actionErr.Error()
+	shift := min(max(failure.request.Attempts, 1)-1, 16)
+	failure.request.NotBefore = failure.options.Now.Add(failure.options.RetryBase * time.Duration(uint64(1)<<shift)).UnixNano()
+	requestValue, err := failure.request.MarshalBinary()
 	if err != nil {
 		return err
 	}
-	placement, err := currentPlacement(ctx, store, packID, backend.Hash)
+	placement, err := currentPlacement(ctx, failure.store, failure.packID, failure.backend.Hash)
 	if err != nil {
 		return err
 	}
 	placement.State = schema.PlacementFailed
-	placement.Bytes = pack.PhysicalSize
+	placement.Bytes = failure.pack.PhysicalSize
 	placement.DeleteAfter = 0
 	if placement.RetentionSource == 0 {
 		placement.RetentionSource = schema.RetentionUnknown
 	}
-	mutations, err := placementMutationsForMaintenance(schema.ID(packID), placementSet{backend.Hash: placement})
+	mutations, err := placementMutationsForMaintenance(schema.ID(failure.packID), placementSet{failure.backend.Hash: placement})
 	if err != nil {
 		return err
 	}
-	mutations = append(mutations, daemon.Mutation{Key: requestKey, Value: requestValue})
-	if err := store.WriteMutableBatch(ctx, mutations, nil, false); err != nil {
+	mutations = append(mutations, daemon.Mutation{Key: failure.requestKey, Value: requestValue})
+	if err := failure.store.WriteMutableBatch(ctx, mutations, nil, false); err != nil {
 		return err
 	}
-	result.Failed++
-	recordPlacementEvent(ctx, store, packID, pack, backend.Hash, schema.EventPlacementFailed, "scheduler_action_failed")
+	failure.result.Failed++
+	recordPlacementEvent(ctx, failure.store, failure.packID, failure.pack, failure.backend.Hash,
+		schema.EventPlacementFailed, "scheduler_action_failed")
 	return nil
 }
 

@@ -52,6 +52,86 @@ func TestReadRepo(t *testing.T) {
 	}
 }
 
+func TestResolveRepositoryLocationRejectsConflictingSources(t *testing.T) {
+	_, err := resolveRepositoryLocation(context.Background(), Options{
+		BootstrapProfile: "bootstrap.toml",
+		Repo:             "repository",
+	}, vaultic.NewNoopPrinter())
+	if !errors.IsFatal(err) || !strings.Contains(err.Error(), "--bootstrap-profile is mutually exclusive with --repo and --repository-file") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateBrokeredUnlockOptions(t *testing.T) {
+	conflictError := "brokered unlock is mutually exclusive with password, direct-key, Azure-secret, and key-in-DB routes"
+	tests := []struct {
+		name    string
+		options Options
+		wantErr string
+	}{
+		{
+			name:    "missing release manifest",
+			options: Options{KeyBrokerSocket: "broker.sock"},
+			wantErr: "--key-broker-release-manifest is required with --key-broker-socket",
+		},
+		{name: "metadata key in DB", options: Options{MetadataKeyInDB: true}, wantErr: conflictError},
+		{name: "direct key", options: Options{MasterKey: "key"}, wantErr: conflictError},
+		{name: "direct key file", options: Options{MasterKeyFile: "key-file"}, wantErr: conflictError},
+		{name: "direct key command", options: Options{MasterKeyCommand: "key-command"}, wantErr: conflictError},
+		{name: "password", options: Options{Password: "password"}, wantErr: conflictError},
+		{name: "password file", options: Options{PasswordFile: "password-file"}, wantErr: conflictError},
+		{name: "password command", options: Options{PasswordCommand: "password-command"}, wantErr: conflictError},
+		{name: "Azure secret", options: Options{AzureKeyVaultURL: "https://example.invalid"}, wantErr: conflictError},
+		{name: "insecure no password", options: Options{InsecureNoPassword: true}, wantErr: conflictError},
+		{
+			name: "valid",
+			options: Options{
+				KeyBrokerSocket:          "broker.sock",
+				KeyBrokerReleaseManifest: "release.json",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.options.KeyBrokerSocket == "" {
+				test.options.KeyBrokerSocket = "broker.sock"
+				test.options.KeyBrokerReleaseManifest = "release.json"
+			}
+			err := validateBrokeredUnlockOptions(test.options)
+			if test.wantErr == "" {
+				rtest.OK(t, err)
+				return
+			}
+			if !errors.IsFatal(err) || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateMetadataLossRecoveryOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+		wantErr bool
+	}{
+		{name: "direct key", options: Options{MetadataLossRecovery: true, MasterKey: "key"}},
+		{name: "broker", options: Options{MetadataLossRecovery: true, KeyBrokerSocket: "broker.sock"}},
+		{name: "missing key", options: Options{MetadataLossRecovery: true}, wantErr: true},
+		{name: "metadata key in DB", options: Options{MetadataLossRecovery: true, MetadataKeyInDB: true}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateMetadataLossRecoveryOptions(test.options)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestResolveBootstrapRepositorySurvivesSeedLoss(t *testing.T) {
 	ctx := context.Background()
 	tempDir := rtest.TempDir(t)

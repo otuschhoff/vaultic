@@ -234,6 +234,10 @@ func Execute(ctx context.Context, store Store, query Query) (Result, error) {
 		result.Explain.Source = "legacy-facts"
 		return result, err
 	}
+	return executePinned(ctx, store, query, pinned)
+}
+
+func executePinned(ctx context.Context, store Store, query Query, pinned pinnedGeneration) (Result, error) {
 	head, headAvailable, err := authoritativeHead(ctx, store)
 	if err != nil {
 		return Result{}, err
@@ -273,96 +277,41 @@ func Execute(ctx context.Context, store Store, query Query) (Result, error) {
 	} else {
 		result.Explain.ViewFallbacks = fallbacks
 	}
+	if err := executeRawSegments(ctx, store, query, pinned, &result); err != nil {
+		return Result{}, err
+	}
+	if err := updateCache(ctx, store, query, schema.ID(hash), cacheKey, result); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func executeRawSegments(ctx context.Context, store Store, query Query, pinned pinnedGeneration, result *Result) error {
 	dict, err := loadDictionaries(ctx, store)
 	if err != nil {
-		return Result{}, err
+		return err
 	}
 	groups := map[string]*Group{}
 	for _, segment := range pinned.manifest.Segments {
 		result.Explain.SegmentsConsidered++
 		metadataValue, present, err := store.Get(ctx, schema.AnalyticsSegmentMetadataKey(segment))
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		if !present {
-			return Result{}, fmt.Errorf("published analytics segment %d has no metadata", segment)
+			return fmt.Errorf("published analytics segment %d has no metadata", segment)
 		}
 		metadata, err := schema.UnmarshalAnalyticsSegmentMetadataRecord(metadataValue)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		if pruneSegment(metadata, query) {
 			result.Explain.SegmentsPruned++
 			continue
 		}
-		segmentValue, present, err := store.Get(ctx, schema.AnalyticsFactSegmentKey(segment))
-		if err != nil {
-			return Result{}, err
+		if err := executeRawSegment(ctx, store, query, pinned, segment, dict, groups, result); err != nil {
+			return err
 		}
-		if !present {
-			return Result{}, fmt.Errorf("published analytics segment %d is missing", segment)
-		}
-		rows, err := decodeSegment(segmentValue)
-		if err != nil {
-			return Result{}, err
-		}
-		candidates, used, fallbacks, err := indexedCandidates(ctx, store, segment, rows, query, dict)
-		if err != nil {
-			return Result{}, err
-		}
-		result.Explain.IndexesUsed = append(result.Explain.IndexesUsed, used...)
-		result.Explain.IndexFallbacks = append(result.Explain.IndexFallbacks, fallbacks...)
-		result.Explain.SegmentsScanned++
-		for row := range rows.Identity {
-			if candidates != nil && !bitSet(candidates, row) {
-				continue
-			}
-			result.Explain.RowsScanned++
-			fact := rowFact(rows, row, dict)
-			residencyKey := schema.AnalyticsResidencyKey(rows.Identity[row].FSID, rows.Identity[row].Inode, rows.Identity[row].Generation)
-			residencyValue, present, err := getActiveDerived(ctx, store, pinned.epoch, residencyKey)
-			if err != nil {
-				return Result{}, err
-			}
-			if present {
-				overlay, err := schema.UnmarshalAnalyticsResidencyRecord(residencyValue)
-				if err != nil {
-					return Result{}, err
-				}
-				if overlay.FactSegment != segment || overlay.Row != uint32(row) {
-					continue
-				}
-				if overlay.ClassificationEpoch <= pinned.epoch {
-					fact.Residency = overlay.State
-				}
-			}
-			if !matchesComplete(fact, query) {
-				continue
-			}
-			result.Files++
-			if fact.Known&schema.KnownSize != 0 {
-				result.LogicalBytes += fact.LogicalSize
-			}
-			if fact.CreationBasis == schema.AnalyticsTimeUnknown {
-				result.UnknownCreationTime++
-			}
-			dims := dimensions(fact, query.GroupBy)
-			if len(dims) != 0 {
-				key, _ := json.Marshal(dims)
-				group := groups[string(key)]
-				if group == nil {
-					group = &Group{Dimensions: dims}
-					groups[string(key)] = group
-				}
-				group.Files++
-				if fact.Known&schema.KnownSize != 0 {
-					group.LogicalBytes += fact.LogicalSize
-				}
-			}
-		}
-	}
-	for key := range groups {
-		_ = key
 	}
 	keys := make([]string, 0, len(groups))
 	for key := range groups {
@@ -372,10 +321,81 @@ func Execute(ctx context.Context, store Store, query Query) (Result, error) {
 	for _, key := range keys {
 		result.Groups = append(result.Groups, *groups[key])
 	}
-	if err := updateCache(ctx, store, query, schema.ID(hash), cacheKey, result); err != nil {
-		return Result{}, err
+	return nil
+}
+
+func executeRawSegment(ctx context.Context, store Store, query Query, pinned pinnedGeneration, segment uint64, dict map[schema.AnalyticsDictionaryKind]map[uint32]string, groups map[string]*Group, result *Result) error {
+	segmentValue, present, err := store.Get(ctx, schema.AnalyticsFactSegmentKey(segment))
+	if err != nil {
+		return err
 	}
-	return result, nil
+	if !present {
+		return fmt.Errorf("published analytics segment %d is missing", segment)
+	}
+	rows, err := decodeSegment(segmentValue)
+	if err != nil {
+		return err
+	}
+	candidates, used, fallbacks, err := indexedCandidates(ctx, store, segment, rows, query, dict)
+	if err != nil {
+		return err
+	}
+	result.Explain.IndexesUsed = append(result.Explain.IndexesUsed, used...)
+	result.Explain.IndexFallbacks = append(result.Explain.IndexFallbacks, fallbacks...)
+	result.Explain.SegmentsScanned++
+	for row := range rows.Identity {
+		if candidates != nil && !bitSet(candidates, row) {
+			continue
+		}
+		result.Explain.RowsScanned++
+		fact := rowFact(rows, row, dict)
+		residencyKey := schema.AnalyticsResidencyKey(rows.Identity[row].FSID, rows.Identity[row].Inode, rows.Identity[row].Generation)
+		residencyValue, present, err := getActiveDerived(ctx, store, pinned.epoch, residencyKey)
+		if err != nil {
+			return err
+		}
+		if present {
+			overlay, err := schema.UnmarshalAnalyticsResidencyRecord(residencyValue)
+			if err != nil {
+				return err
+			}
+			if overlay.FactSegment != segment || overlay.Row != uint32(row) {
+				continue
+			}
+			if overlay.ClassificationEpoch <= pinned.epoch {
+				fact.Residency = overlay.State
+			}
+		}
+		if !matchesComplete(fact, query) {
+			continue
+		}
+		addFactToResult(fact, query, groups, result)
+	}
+	return nil
+}
+
+func addFactToResult(fact schema.AnalyticsFactRecord, query Query, groups map[string]*Group, result *Result) {
+	result.Files++
+	if fact.Known&schema.KnownSize != 0 {
+		result.LogicalBytes += fact.LogicalSize
+	}
+	if fact.CreationBasis == schema.AnalyticsTimeUnknown {
+		result.UnknownCreationTime++
+	}
+	dims := dimensions(fact, query.GroupBy)
+	if len(dims) == 0 {
+		return
+	}
+	key, _ := json.Marshal(dims)
+	group := groups[string(key)]
+	if group == nil {
+		group = &Group{Dimensions: dims}
+		groups[string(key)] = group
+	}
+	group.Files++
+	if fact.Known&schema.KnownSize != 0 {
+		group.LogicalBytes += fact.LogicalSize
+	}
 }
 
 func authoritativeHead(ctx context.Context, store Store) (uint64, bool, error) {

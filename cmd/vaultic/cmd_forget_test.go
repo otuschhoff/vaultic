@@ -131,3 +131,38 @@ func TestForgetHostnameDefaulting(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateForgetPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    ForgetOptions
+		wantErr string
+	}{
+		{name: "retention policy", opts: ForgetOptions{Last: 1}},
+		{name: "missing policy", wantErr: "Fatal: no policy was specified, no snapshots will be removed"},
+		{
+			name:    "unsafe without filter",
+			opts:    ForgetOptions{UnsafeAllowRemoveAll: true},
+			wantErr: "Fatal: --unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified",
+		},
+		{
+			name: "unsafe with filter",
+			opts: ForgetOptions{
+				UnsafeAllowRemoveAll: true,
+				SnapshotFilter:       data.SnapshotFilter{Hosts: []string{"host"}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateForgetPolicy(test.opts, forgetPolicy(test.opts))
+			if test.wantErr == "" {
+				rtest.OK(t, err)
+				return
+			}
+			rtest.Assert(t, err != nil, "expected error %q", test.wantErr)
+			rtest.Equals(t, test.wantErr, err.Error())
+		})
+	}
+}

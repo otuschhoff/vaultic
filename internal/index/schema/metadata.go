@@ -493,167 +493,162 @@ func ValidateValue(key []byte, value []byte) error {
 	if err != nil {
 		return err
 	}
+	codec, err := codecForKey(key)
+	if err != nil {
+		return err
+	}
+	return codec.validate(parsed, value)
+}
+
+func validateAnalyticsValue(parsed ParsedKey, value []byte) error {
 	switch parsed.Kind {
-	case KeyBlob:
-		_, err = UnmarshalBlobRecord(value)
-	case KeyPack:
-		_, err = UnmarshalPackRecord(value)
 	case KeyPackAggregate, KeyTierAggregate:
-		_, err = UnmarshalPackAggregate(value)
-	case KeyPackHistory:
-		_, err = UnmarshalPackHistoryEvent(value)
-	case KeyPackHistoryBucket:
-		_, err = UnmarshalPackHistoryBucket(value)
-	case KeyHistoryRawFloor, KeyHistoryEnabledAt:
-		_, err = UnmarshalHistoryMarker(value)
-	case KeyPackPlacement:
-		_, err = UnmarshalPlacementRecord(value)
-	case KeyBackendPack:
-		_, err = UnmarshalBackendPackRecord(value)
-	case KeyPlacementDeleteQueue:
-		_, err = UnmarshalPlacementDeleteRecord(value)
-	case KeyPlacementRequest:
-		_, err = UnmarshalPlacementRequestRecord(value)
-	case KeyRepackLineage:
-		_, err = UnmarshalRepackLineageRecord(value)
-	case KeyPromotionEligibility:
-		_, err = UnmarshalPromotionEligibilityRecord(value)
-	case KeyUIDExclusionPolicy:
-		_, err = UnmarshalUIDExclusionPolicyRecord(value)
-	case KeyDeletionCertificate:
-		_, err = UnmarshalDeletionCertificateRecord(value)
-	case KeyVerificationState:
-		_, err = UnmarshalVerificationStateRecord(value)
-	case KeyVerificationEvent:
-		_, err = UnmarshalVerificationEventRecord(value)
+		_, err := UnmarshalPackAggregate(value)
+		return err
 	case KeyAnalyticsFact:
-		_, err = UnmarshalAnalyticsFactRecord(value)
+		_, err := UnmarshalAnalyticsFactRecord(value)
+		return err
 	case KeyAnalyticsCache:
 		if !json.Valid(value) {
-			err = fmt.Errorf("%w: invalid analytics cache JSON", ErrMalformed)
+			return fmt.Errorf("%w: invalid analytics cache JSON", ErrMalformed)
 		}
-	case KeyAnalyticsMetadata:
-		_, err = UnmarshalAnalyticsMetadataRecord(value)
-	case KeyAnalyticsBuildCheckpoint:
-		_, err = UnmarshalAnalyticsBuildCheckpointRecord(value)
+		return nil
 	case KeyAnalyticsDictionary:
-		_, err = UnmarshalAnalyticsDictionaryRecord(value)
+		_, err := UnmarshalAnalyticsDictionaryRecord(value)
+		return err
 	case KeyAnalyticsFactSegment:
-		_, err = UnmarshalAnalyticsFactSegmentRecord(value)
+		_, err := UnmarshalAnalyticsFactSegmentRecord(value)
+		return err
 	case KeyAnalyticsSegmentMetadata:
-		_, err = UnmarshalAnalyticsSegmentMetadataRecord(value)
+		_, err := UnmarshalAnalyticsSegmentMetadataRecord(value)
+		return err
 	case KeyAnalyticsDimensionIndex:
-		_, err = UnmarshalAnalyticsDimensionIndexRecord(value)
+		_, err := UnmarshalAnalyticsDimensionIndexRecord(value)
+		return err
 	case KeyAnalyticsResidency:
-		_, err = UnmarshalAnalyticsResidencyRecord(value)
+		_, err := UnmarshalAnalyticsResidencyRecord(value)
+		return err
 	case KeyAnalyticsDelta:
-		_, err = UnmarshalAnalyticsDeltaRecord(value)
+		_, err := UnmarshalAnalyticsDeltaRecord(value)
+		return err
+	default:
+		return validateAnalyticsProjectionValue(parsed, value)
+	}
+}
+
+func validateAnalyticsProjectionValue(parsed ParsedKey, value []byte) error {
+	switch parsed.Kind {
 	case KeyAuthoritativeCrawlProof:
-		var record AuthoritativeCrawlProofRecord
-		record, err = UnmarshalAuthoritativeCrawlProofRecord(value)
-		if err == nil && (record.ScopeID != parsed.ID || record.EndCommit != parsed.Commit) {
-			err = fmt.Errorf("%w: authoritative crawl proof key mismatch", ErrMalformed)
-		}
+		return validateAuthoritativeCrawlProof(parsed, value)
 	case KeyAuthoritativeSourceBinding:
-		var record AuthoritativeSourceBindingRecord
-		record, err = UnmarshalAuthoritativeSourceBindingRecord(value)
-		if err == nil && record.Generation != parsed.Generation {
-			err = fmt.Errorf("%w: authoritative source binding key mismatch", ErrMalformed)
-		}
+		return validateAuthoritativeSourceBinding(parsed, value)
 	case KeyAnalyticsWatermark:
-		_, err = UnmarshalAnalyticsWatermarkRecord(value)
+		_, err := UnmarshalAnalyticsWatermarkRecord(value)
+		return err
 	case KeyAnalyticsManifest:
-		_, err = UnmarshalAnalyticsManifestRecord(value)
+		_, err := UnmarshalAnalyticsManifestRecord(value)
+		return err
 	case KeyAnalyticsQueryResult, KeyAnalyticsQueryHeat, KeyAnalyticsQueryView:
-		_, err = UnmarshalAnalyticsQueryRecord(value)
+		_, err := UnmarshalAnalyticsQueryRecord(value)
+		return err
 	case KeyAnalyticsQueryJob:
-		_, err = UnmarshalAnalyticsQueryJobRecord(value)
-	case KeyGrowthTime, KeyGrowthPath, KeyUserChurn:
-		_, err = UnmarshalAnalyticsAggregateRecord(value)
-	case KeyUserSummary, KeyGroupSummary, KeyUserStats, KeyGroupStats:
-		_, err = UnmarshalAnalyticsSummaryRecord(value)
-	case KeyUserInode:
-		_, err = UnmarshalAnalyticsUserInodeRecord(value)
-	case KeyUserBlob, KeyUserBlobContribution:
-		_, err = UnmarshalAnalyticsUserBlobRecord(value)
+		_, err := UnmarshalAnalyticsQueryJobRecord(value)
+		return err
 	case KeyAnalyticsDerivedMarker:
 		if len(value) != 1 || value[0] != Version {
-			err = fmt.Errorf("%w: invalid analytics derived generation marker", ErrMalformed)
+			return fmt.Errorf("%w: invalid analytics derived generation marker", ErrMalformed)
 		}
-	case KeySnapshotCommit:
-		var record SnapshotCommitRecord
-		record, err = UnmarshalSnapshotCommitRecord(value)
-		if err == nil {
-			root, parseErr := ParseKey(record.RootKey)
-			if parseErr != nil || root.Kind != KeyDirectoryRevision || root.Revision == 0 {
-				err = fmt.Errorf("%w: snapshot commit root mismatch", ErrMalformed)
-			}
-		}
-	case KeyPathVersion:
-		_, err = UnmarshalPathVersionRecord(value)
-	case KeyNextEventSequence:
-		_, err = UnmarshalNextEventSequence(value)
-	case KeyCurrentInode, KeyCurrentDirectory:
-		var pointer CurrentPointer
-		pointer, err = UnmarshalCurrentPointer(value)
-		if err == nil {
-			target, parseErr := ParseKey(pointer.RecordKey)
-			expected := KeyInodeRevision
-			if parsed.Kind == KeyCurrentDirectory {
-				expected = KeyDirectoryRevision
-			}
-			if parseErr != nil || target.Kind != expected || target.FSID != parsed.FSID || target.Inode != parsed.Inode {
-				err = fmt.Errorf("%w: current pointer key mismatch", ErrMalformed)
-			}
-		}
-	case KeyInodeRevision:
-		_, err = UnmarshalInodeRevision(value)
-	case KeyDirectoryRevision:
-		var directory DirectoryRevision
-		directory, err = UnmarshalDirectoryRevision(value)
-		if err == nil {
-			for _, child := range directory.Children {
-				childKey, parseErr := ParseKey(child.MetadataKey)
-				if parseErr != nil || (parsed.FSID != 0 && childKey.FSID != parsed.FSID) {
-					err = fmt.Errorf("%w: directory child crosses filesystem boundary", ErrMalformed)
-					break
-				}
-			}
-		}
-	case KeySnapshot:
-		_, err = UnmarshalSnapshotRecord(value)
-	case KeyContentManifest:
-		var manifest ContentManifest
-		manifest, err = UnmarshalContentManifest(value)
-		if err == nil && manifest.Segment != parsed.Segment {
-			err = fmt.Errorf("%w: content manifest segment mismatch", ErrMalformed)
-		}
-	case KeyReverseManifest:
-		_, err = UnmarshalReverseManifestRecord(value)
-	case KeyReverseInode:
-		_, err = UnmarshalReverseInodeRecord(value)
-	case KeyReferenceCount:
-		_, err = UnmarshalReferenceCountRecord(value)
-	case KeyGarbageCollection:
-		_, err = UnmarshalGarbageCollectionRecord(value)
-	case KeyCrawlDebt:
-		_, err = UnmarshalCrawlDebtRecord(value)
-	case KeyImportCheckpoint:
-		_, err = UnmarshalImportCheckpointRecord(value)
-	case KeySnapshotImportCheckpoint:
-		_, err = UnmarshalSnapshotImportCheckpointRecord(value)
-	case KeyExportCheckpoint:
-		_, err = UnmarshalExportCheckpointRecord(value)
-	case KeyExportIndexCheckpoint:
-		_, err = UnmarshalExportIndexCheckpointRecord(value)
-	case KeyHardlinkRefs:
-		_, err = UnmarshalHardlinkRefsRecord(value)
-	case KeyNextRevision:
-		_, err = UnmarshalNextRevision(value)
-	case KeyNextExportSequence:
-		_, err = UnmarshalNextExportSequence(value)
+		return nil
 	default:
-		err = fmt.Errorf("%w: unsupported schema key", ErrMalformed)
+		return validateAnalyticsDerivedValue(parsed, value)
+	}
+}
+
+func validateAnalyticsDerivedValue(parsed ParsedKey, value []byte) error {
+	switch parsed.Kind {
+	case KeyGrowthTime, KeyGrowthPath, KeyUserChurn:
+		_, err := UnmarshalAnalyticsAggregateRecord(value)
+		return err
+	case KeyUserSummary, KeyGroupSummary, KeyUserStats, KeyGroupStats:
+		_, err := UnmarshalAnalyticsSummaryRecord(value)
+		return err
+	case KeyUserInode:
+		_, err := UnmarshalAnalyticsUserInodeRecord(value)
+		return err
+	case KeyUserBlob, KeyUserBlobContribution:
+		_, err := UnmarshalAnalyticsUserBlobRecord(value)
+		return err
+	default:
+		return unsupportedSchemaKey()
+	}
+}
+
+func validateAuthoritativeCrawlProof(parsed ParsedKey, value []byte) error {
+	record, err := UnmarshalAuthoritativeCrawlProofRecord(value)
+	if err == nil && (record.ScopeID != parsed.ID || record.EndCommit != parsed.Commit) {
+		return fmt.Errorf("%w: authoritative crawl proof key mismatch", ErrMalformed)
 	}
 	return err
+}
+
+func validateAuthoritativeSourceBinding(parsed ParsedKey, value []byte) error {
+	record, err := UnmarshalAuthoritativeSourceBindingRecord(value)
+	if err == nil && record.Generation != parsed.Generation {
+		return fmt.Errorf("%w: authoritative source binding key mismatch", ErrMalformed)
+	}
+	return err
+}
+
+func validateCurrentPointer(parsed ParsedKey, value []byte) error {
+	pointer, err := UnmarshalCurrentPointer(value)
+	if err != nil {
+		return err
+	}
+	target, parseErr := ParseKey(pointer.RecordKey)
+	expected := KeyInodeRevision
+	if parsed.Kind == KeyCurrentDirectory {
+		expected = KeyDirectoryRevision
+	}
+	if parseErr != nil || target.Kind != expected || target.FSID != parsed.FSID || target.Inode != parsed.Inode {
+		return fmt.Errorf("%w: current pointer key mismatch", ErrMalformed)
+	}
+	return nil
+}
+
+func validateDirectoryRevision(parsed ParsedKey, value []byte) error {
+	directory, err := UnmarshalDirectoryRevision(value)
+	if err != nil {
+		return err
+	}
+	for _, child := range directory.Children {
+		childKey, parseErr := ParseKey(child.MetadataKey)
+		if parseErr != nil || (parsed.FSID != 0 && childKey.FSID != parsed.FSID) {
+			return fmt.Errorf("%w: directory child crosses filesystem boundary", ErrMalformed)
+		}
+	}
+	return nil
+}
+
+func validateContentManifest(parsed ParsedKey, value []byte) error {
+	manifest, err := UnmarshalContentManifest(value)
+	if err == nil && manifest.Segment != parsed.Segment {
+		return fmt.Errorf("%w: content manifest segment mismatch", ErrMalformed)
+	}
+	return err
+}
+
+func validateSnapshotCommit(value []byte) error {
+	record, err := UnmarshalSnapshotCommitRecord(value)
+	if err != nil {
+		return err
+	}
+	root, parseErr := ParseKey(record.RootKey)
+	if parseErr != nil || root.Kind != KeyDirectoryRevision || root.Revision == 0 {
+		return fmt.Errorf("%w: snapshot commit root mismatch", ErrMalformed)
+	}
+	return nil
+}
+
+func unsupportedSchemaKey() error {
+	return fmt.Errorf("%w: unsupported schema key", ErrMalformed)
 }

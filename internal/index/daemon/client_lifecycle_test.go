@@ -42,6 +42,96 @@ func TestEnsureRejectsInsecureTCPConfiguration(t *testing.T) {
 
 }
 
+func TestValidateEnsureOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+		want    string
+	}{
+		{name: "encryption mode", options: Options{EncryptionMode: "unknown"}, want: "unsupported metadata encryption mode"},
+		{name: "rebuild", options: Options{RebuildInitialize: true}, want: "requires brokered required encryption"},
+		{name: "passphrase", options: Options{EncryptionMode: "required"}, want: "passphrase file is required"},
+		{name: "broker manifest", options: Options{BrokerSocket: "broker"}, want: "broker release manifest is required"},
+		{name: "recovery unlock", options: Options{RecoveryUnlock: true}, want: "recovery unlock requires a passphrase file"},
+		{name: "S3 bucket", options: Options{ObjectStore: "s3"}, want: "S3 bucket is not configured"},
+		{name: "object store", options: Options{ObjectStore: "unknown"}, want: "unsupported object store"},
+		{name: "allowlist", options: Options{TCPAllowlist: []string{"invalid"}}, want: "invalid TCP allowlist entry"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateEnsureOptions(test.options)
+			if err == nil || !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateEnsureOptions() = %v, want ErrUnavailable containing %q", err, test.want)
+			}
+		})
+	}
+	if err := validateEnsureOptions(Options{ObjectStore: "memory", TCPAllowlist: []string{"127.0.0.1/32"}}); err != nil {
+		t.Fatalf("validateEnsureOptions(valid) = %v", err)
+	}
+}
+
+func TestValidateDaemonStartOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+		want    string
+	}{
+		{name: "daemon path", options: Options{}, want: "daemon path is not configured"},
+		{name: "TCP allowlist", options: Options{DaemonPath: "daemon", TCPAddress: "127.0.0.1:1"}, want: "TCP allowlist is not configured"},
+		{
+			name:    "TCP token",
+			options: Options{DaemonPath: "daemon", TCPAddress: "127.0.0.1:1", TCPAllowlist: []string{"127.0.0.1/32"}},
+			want:    "TCP authentication token is not configured",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateDaemonStartOptions(test.options)
+			if err == nil || !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateDaemonStartOptions() = %v, want ErrUnavailable containing %q", err, test.want)
+			}
+		})
+	}
+	valid := Options{DaemonPath: "daemon", TCPAddress: "127.0.0.1:1", TCPAllowlist: []string{"127.0.0.1/32"}, AuthToken: "token"}
+	if err := validateDaemonStartOptions(valid); err != nil {
+		t.Fatalf("validateDaemonStartOptions(valid) = %v", err)
+	}
+}
+
+func TestPrepareDaemonCommand(t *testing.T) {
+	options := Options{
+		Socket: "/tmp/vaulticdb/test.sock", TCPAddress: "127.0.0.1:1234", TCPAllowlist: []string{"127.0.0.1/32"},
+		AuthToken: "secret", RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "memory",
+		RecoveryUnlock: true, BrokerLease: 3 * time.Second, RebuildInitialize: true,
+	}
+	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = authRead.Close()
+		_ = authWrite.Close()
+	})
+	if cmd.Path != options.DaemonPath || len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0] != authRead {
+		t.Fatalf("unexpected daemon command: path=%q extra-files=%v", cmd.Path, cmd.ExtraFiles)
+	}
+	environment := strings.Join(cmd.Env, "\n")
+	for _, entry := range []string{
+		"VAULTICDB_SOCKET=" + options.Socket,
+		"VAULTICDB_REPOSITORY_ID=" + options.RepositoryID,
+		"VAULTICDB_OBJECT_STORE=memory",
+		"VAULTICDB_TCP_AUTH_TOKEN_FD=3",
+		"VAULTICDB_TRANSPORT=tcp",
+		"VAULTICDB_ENCRYPTION_RECOVERY_ACK=true",
+		"VAULTICDB_BROKER_LEASE_SECONDS=3",
+		"VAULTICDB_METADATA_REBUILD_INITIALIZE=true",
+	} {
+		if !strings.Contains(environment, entry) {
+			t.Errorf("daemon environment missing %q: %s", entry, environment)
+		}
+	}
+}
+
 func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTIC_UNRELATED_SECRET", "must-not-be-inherited")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3-credential")

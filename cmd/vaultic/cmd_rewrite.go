@@ -186,19 +186,31 @@ func rewriteSnapshot(ctx context.Context, repo *repository.Repository, sn *data.
 		}
 	}
 
-	return filterAndReplaceSnapshot(ctx, repo, sn,
-		filter, opts.DryRun, opts.Forget, metadata, "rewrite", printer, len(includeByNameFuncs) > 0)
+	return filterAndReplaceSnapshot(ctx, rewriteRequest{
+		repo: repo, snapshot: sn, filter: filter, dryRun: opts.DryRun, forget: opts.Forget,
+		newMetadata: metadata, addTag: "rewrite", printer: printer,
+		keepEmptySnapshot: len(includeByNameFuncs) > 0,
+	})
 }
 
-func filterAndReplaceSnapshot(ctx context.Context, repo vaultic.Repository, sn *data.Snapshot,
-	filter rewriteFilterFunc, dryRun bool, forget bool, newMetadata *snapshotMetadata, addTag string, printer vaultic.Printer,
-	keepEmptySnapshot bool) (bool, error) {
+type rewriteRequest struct {
+	repo              vaultic.Repository
+	snapshot          *data.Snapshot
+	filter            rewriteFilterFunc
+	dryRun            bool
+	forget            bool
+	newMetadata       *snapshotMetadata
+	addTag            string
+	printer           vaultic.Printer
+	keepEmptySnapshot bool
+}
 
+func filterAndReplaceSnapshot(ctx context.Context, request rewriteRequest) (bool, error) {
 	var filteredTree vaultic.ID
 	var summary *data.SnapshotSummary
-	err := repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+	err := request.repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		var err error
-		filteredTree, summary, err = filter(ctx, sn, uploader)
+		filteredTree, summary, err = request.filter(ctx, request.snapshot, uploader)
 		return err
 	})
 	if err != nil {
@@ -206,85 +218,93 @@ func filterAndReplaceSnapshot(ctx context.Context, repo vaultic.Repository, sn *
 	}
 
 	if filteredTree.IsNull() {
-		if keepEmptySnapshot {
-			debug.Log("Snapshot %v not modified", sn)
-			return false, nil
-		}
-		if dryRun {
-			printer.P("would delete empty snapshot")
-		} else {
-			if err = repo.RemoveUnpacked(ctx, vaultic.WriteableSnapshotFile, *sn.ID()); err != nil {
-				return false, err
-			}
-			debug.Log("removed empty snapshot %v", sn.ID())
-			printer.P("removed empty snapshot %v", sn.ID().Str())
-		}
-		return true, nil
+		return handleEmptyRewriteSnapshot(ctx, request)
 	}
 
-	matchingSummary := true
-	if summary != nil {
-		matchingSummary = sn.Summary != nil && *summary == *sn.Summary
-	}
-
-	if filteredTree == *sn.Tree && newMetadata == nil && matchingSummary {
-		debug.Log("Snapshot %v not modified", sn)
+	if rewriteSnapshotUnchanged(request, filteredTree, summary) {
+		debug.Log("Snapshot %v not modified", request.snapshot)
 		return false, nil
 	}
 
-	debug.Log("Snapshot %v modified", sn)
-	if dryRun {
-		printer.P("would save new snapshot")
-
-		if forget {
-			printer.P("would remove old snapshot")
-		}
-
-		if newMetadata != nil && newMetadata.Time != nil {
-			printer.P("would set time to %s", newMetadata.Time)
-		}
-
-		if newMetadata != nil && newMetadata.Hostname != "" {
-			printer.P("would set hostname to %s", newMetadata.Hostname)
-		}
-
+	debug.Log("Snapshot %v modified", request.snapshot)
+	if request.dryRun {
+		printRewriteDryRun(request)
 		return true, nil
 	}
 
+	return saveRewrittenSnapshot(ctx, request, filteredTree, summary)
+}
+
+func handleEmptyRewriteSnapshot(ctx context.Context, request rewriteRequest) (bool, error) {
+	if request.keepEmptySnapshot {
+		debug.Log("Snapshot %v not modified", request.snapshot)
+		return false, nil
+	}
+	if request.dryRun {
+		request.printer.P("would delete empty snapshot")
+		return true, nil
+	}
+	if err := request.repo.RemoveUnpacked(ctx, vaultic.WriteableSnapshotFile, *request.snapshot.ID()); err != nil {
+		return false, err
+	}
+	debug.Log("removed empty snapshot %v", request.snapshot.ID())
+	request.printer.P("removed empty snapshot %v", request.snapshot.ID().Str())
+	return true, nil
+}
+
+func rewriteSnapshotUnchanged(request rewriteRequest, filteredTree vaultic.ID, summary *data.SnapshotSummary) bool {
+	matchingSummary := summary == nil || request.snapshot.Summary != nil && *summary == *request.snapshot.Summary
+	return filteredTree == *request.snapshot.Tree && request.newMetadata == nil && matchingSummary
+}
+
+func printRewriteDryRun(request rewriteRequest) {
+	request.printer.P("would save new snapshot")
+	if request.forget {
+		request.printer.P("would remove old snapshot")
+	}
+	if request.newMetadata != nil && request.newMetadata.Time != nil {
+		request.printer.P("would set time to %s", request.newMetadata.Time)
+	}
+	if request.newMetadata != nil && request.newMetadata.Hostname != "" {
+		request.printer.P("would set hostname to %s", request.newMetadata.Hostname)
+	}
+}
+
+func saveRewrittenSnapshot(ctx context.Context, request rewriteRequest, filteredTree vaultic.ID, summary *data.SnapshotSummary) (bool, error) {
 	// Always set the original snapshot id as this essentially a new snapshot.
-	sn.Original = sn.ID()
-	sn.Tree = &filteredTree
+	request.snapshot.Original = request.snapshot.ID()
+	request.snapshot.Tree = &filteredTree
 	if summary != nil {
-		sn.Summary = summary
+		request.snapshot.Summary = summary
 	}
 
-	if !forget {
-		sn.AddTags([]string{addTag})
+	if !request.forget {
+		request.snapshot.AddTags([]string{request.addTag})
 	}
 
-	if newMetadata != nil && newMetadata.Time != nil {
-		printer.P("setting time to %s", *newMetadata.Time)
-		sn.Time = *newMetadata.Time
+	if request.newMetadata != nil && request.newMetadata.Time != nil {
+		request.printer.P("setting time to %s", *request.newMetadata.Time)
+		request.snapshot.Time = *request.newMetadata.Time
 	}
 
-	if newMetadata != nil && newMetadata.Hostname != "" {
-		printer.P("setting host to %s", newMetadata.Hostname)
-		sn.Hostname = newMetadata.Hostname
+	if request.newMetadata != nil && request.newMetadata.Hostname != "" {
+		request.printer.P("setting host to %s", request.newMetadata.Hostname)
+		request.snapshot.Hostname = request.newMetadata.Hostname
 	}
 
 	// Save the new snapshot.
-	id, err := data.SaveSnapshot(ctx, repo, sn)
+	id, err := data.SaveSnapshot(ctx, request.repo, request.snapshot)
 	if err != nil {
 		return false, err
 	}
-	printer.P("saved new snapshot %v", id.Str())
+	request.printer.P("saved new snapshot %v", id.Str())
 
-	if forget {
-		if err = repo.RemoveUnpacked(ctx, vaultic.WriteableSnapshotFile, *sn.ID()); err != nil {
+	if request.forget {
+		if err = request.repo.RemoveUnpacked(ctx, vaultic.WriteableSnapshotFile, *request.snapshot.ID()); err != nil {
 			return false, err
 		}
-		debug.Log("removed old snapshot %v", sn.ID())
-		printer.P("removed old snapshot %v", sn.ID().Str())
+		debug.Log("removed old snapshot %v", request.snapshot.ID())
+		request.printer.P("removed old snapshot %v", request.snapshot.ID().Str())
 	}
 	return true, nil
 }

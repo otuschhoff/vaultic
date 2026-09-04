@@ -185,16 +185,13 @@ func TestBackupVSS(t *testing.T) {
 	opts := BackupOptions{UseFsSnapshot: true}
 
 	var testFS *vssDeleteOriginalFS
-	backupFSTestHook = func(fs fs.FS) fs.FS {
+	opts.fsTestHook = func(fs fs.FS) fs.FS {
 		testFS = &vssDeleteOriginalFS{
 			FS:       fs,
 			testdata: env.testdata,
 		}
 		return testFS
 	}
-	defer func() {
-		backupFSTestHook = nil
-	}()
 
 	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, opts, env.gopts)
 	testListSnapshots(t, env.gopts, 1)

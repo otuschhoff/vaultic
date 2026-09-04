@@ -133,7 +133,11 @@ func TestGCClassificationUsesPlacementCostModel(t *testing.T) {
 		Hash:             7,
 	}}}
 
-	classification, err := classifyPacksWithPlacement(packs, members, memberBytes, types, unreachable, nil, placements, model, now, 0)
+	classification, err := classifyPacksWithPlacement(gcClassificationInput{
+		packs: packs, packMembers: members, packMemberBytes: memberBytes,
+		blobTypes: types, unreachable: unreachable, placements: placements,
+		model: model, now: now,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

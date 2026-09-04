@@ -10,6 +10,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
@@ -243,4 +244,24 @@ func TestPrepareDefaultCheckCache(t *testing.T) {
 	// Verify that the cache directory has been removed
 	_, err = os.ReadDir(gopts.CacheDir)
 	rtest.Assert(t, errors.Is(err, os.ErrNotExist), "Expected cache directory to be removed, but it still exists")
+}
+
+func TestHandleCheckIndexResults(t *testing.T) {
+	packID := vaultic.NewRandomID()
+	summary := checkSummary{}
+	salvagePacks := vaultic.NewIDSet()
+	hints := []error{
+		&repository.ErrIncompletePackEntry{PackID: packID},
+		&repository.ErrDuplicatePacks{PackID: vaultic.NewRandomID()},
+		&repository.ErrMixedPack{PackID: vaultic.NewRandomID()},
+		errors.New("unknown hint"),
+	}
+
+	errorsFound := handleCheckIndexResults(hints, []error{errors.New("index failure")}, vaultic.NewNoopPrinter(), &summary, salvagePacks)
+
+	rtest.Assert(t, errorsFound, "expected critical hints to mark the repository damaged")
+	rtest.Equals(t, 2, summary.NumErrors)
+	rtest.Assert(t, summary.HintRepairIndex, "expected repair-index hint")
+	rtest.Assert(t, summary.HintPrune, "expected prune hint")
+	rtest.Assert(t, salvagePacks.Has(packID), "expected incomplete pack to be marked for salvage")
 }

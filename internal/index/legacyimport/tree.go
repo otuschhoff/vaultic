@@ -45,7 +45,10 @@ func importSnapshots(ctx context.Context, source SnapshotSource, store TreeStore
 	return data.ForAllSnapshots(ctx, source, source, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
 		result.SnapshotsSeen++
 		if loadErr != nil {
-			if err := writeDebt(ctx, store, options, result, snapshotID, vaultic.ID{}, "snapshot", schema.DebtMissingDirectory, "snapshot-decode-failed"); err != nil {
+			if err := writeDebt(ctx, debtWrite{
+				store: store, options: options, result: result, snapshot: snapshotID,
+				pathHint: "snapshot", reason: schema.DebtMissingDirectory, errorClass: "snapshot-decode-failed",
+			}); err != nil {
 				return err
 			}
 			return recordFinding(result, options, snapshotID, "decode-snapshot", loadErr)
@@ -65,7 +68,10 @@ func importSnapshots(ctx context.Context, source SnapshotSource, store TreeStore
 			}
 		}
 		if snapshot.Tree == nil || snapshot.Tree.IsNull() {
-			if err := writeDebt(ctx, store, options, result, snapshotID, vaultic.ID{}, "snapshot-root", schema.DebtMissingDirectory, "snapshot-root-missing"); err != nil {
+			if err := writeDebt(ctx, debtWrite{
+				store: store, options: options, result: result, snapshot: snapshotID,
+				pathHint: "snapshot-root", reason: schema.DebtMissingDirectory, errorClass: "snapshot-root-missing",
+			}); err != nil {
 				return err
 			}
 			return recordFinding(result, options, snapshotID, "snapshot-root", fmt.Errorf("snapshot has no root tree"))
@@ -76,7 +82,11 @@ func importSnapshots(ctx context.Context, source SnapshotSource, store TreeStore
 		if err != nil {
 			return err
 		}
-		if err := writeDebt(ctx, store, options, result, snapshotID, *snapshot.Tree, "snapshot-root", schema.DebtMissingInode, "legacy-snapshot-root-has-no-inode-identity"); err != nil {
+		if err := writeDebt(ctx, debtWrite{
+			store: store, options: options, result: result, snapshot: snapshotID, work: *snapshot.Tree,
+			pathHint: "snapshot-root", reason: schema.DebtMissingInode,
+			errorClass: "legacy-snapshot-root-has-no-inode-identity",
+		}); err != nil {
 			return err
 		}
 		if !options.DryRun {
@@ -99,7 +109,11 @@ func importSnapshots(ctx context.Context, source SnapshotSource, store TreeStore
 
 func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity, parentPath string, depth uint) ([]schema.DirectoryChild, bool, error) {
 	if _, cycle := importer.ancestors[treeID]; cycle {
-		if err := writeDebt(importer.ctx, importer.store, importer.options, importer.result, importer.snapshot, treeID, parentPath, schema.DebtMissingDirectory, "tree-cycle"); err != nil {
+		if err := writeDebt(importer.ctx, debtWrite{
+			store: importer.store, options: importer.options, result: importer.result,
+			snapshot: importer.snapshot, work: treeID, pathHint: parentPath,
+			reason: schema.DebtMissingDirectory, errorClass: "tree-cycle",
+		}); err != nil {
 			return nil, false, err
 		}
 		return nil, false, nil
@@ -108,7 +122,11 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 	defer delete(importer.ancestors, treeID)
 	tree, err := data.LoadTree(importer.ctx, importer.source, treeID)
 	if err != nil {
-		if debtErr := writeDebt(importer.ctx, importer.store, importer.options, importer.result, importer.snapshot, treeID, parentPath, schema.DebtMissingDirectory, "tree-load-failed"); debtErr != nil {
+		if debtErr := writeDebt(importer.ctx, debtWrite{
+			store: importer.store, options: importer.options, result: importer.result,
+			snapshot: importer.snapshot, work: treeID, pathHint: parentPath,
+			reason: schema.DebtMissingDirectory, errorClass: "tree-load-failed",
+		}); debtErr != nil {
 			return nil, false, debtErr
 		}
 		if findingErr := recordFinding(importer.result, importer.options, importer.snapshot, "load-tree", err); findingErr != nil {
@@ -148,23 +166,39 @@ func (importer *treeImporter) importNode(node *data.Node, parent *nodeIdentity, 
 	identity, identityKnown := legacyIdentity(node)
 	parentKnown := parent != nil
 	if !identityKnown || !parentKnown {
-		if err := writeDebt(importer.ctx, importer.store, importer.options, importer.result, importer.snapshot, workID(nodePath), nodePath, schema.DebtMissingInode, "legacy-node-identity-or-parent-unknown"); err != nil {
+		if err := writeDebt(importer.ctx, debtWrite{
+			store: importer.store, options: importer.options, result: importer.result,
+			snapshot: importer.snapshot, work: workID(nodePath), pathHint: nodePath,
+			reason: schema.DebtMissingInode, errorClass: "legacy-node-identity-or-parent-unknown",
+		}); err != nil {
 			return schema.DirectoryChild{}, false, err
 		}
 	}
-	if err := writeDebt(importer.ctx, importer.store, importer.options, importer.result, importer.snapshot, workID(nodePath), nodePath, schema.DebtUnknownFreshness, "legacy-metadata-not-live-verified"); err != nil {
+	if err := writeDebt(importer.ctx, debtWrite{
+		store: importer.store, options: importer.options, result: importer.result,
+		snapshot: importer.snapshot, work: workID(nodePath), pathHint: nodePath,
+		reason: schema.DebtUnknownFreshness, errorClass: "legacy-metadata-not-live-verified",
+	}); err != nil {
 		return schema.DirectoryChild{}, false, err
 	}
 	nodeType := convertNodeType(node.Type)
 	if node.Type == data.NodeTypeDir {
 		if node.Subtree == nil || node.Subtree.IsNull() {
-			if err := writeDebt(importer.ctx, importer.store, importer.options, importer.result, importer.snapshot, workID(nodePath), nodePath, schema.DebtMissingDirectory, "directory-subtree-missing"); err != nil {
+			if err := writeDebt(importer.ctx, debtWrite{
+				store: importer.store, options: importer.options, result: importer.result,
+				snapshot: importer.snapshot, work: workID(nodePath), pathHint: nodePath,
+				reason: schema.DebtMissingDirectory, errorClass: "directory-subtree-missing",
+			}); err != nil {
 				return schema.DirectoryChild{}, false, err
 			}
 			return schema.DirectoryChild{}, false, nil
 		}
 		if importer.options.SnapshotDepth > 0 && depth >= importer.options.SnapshotDepth {
-			if err := writeDebt(importer.ctx, importer.store, importer.options, importer.result, importer.snapshot, *node.Subtree, nodePath, schema.DebtMissingDirectory, "snapshot-depth-limit"); err != nil {
+			if err := writeDebt(importer.ctx, debtWrite{
+				store: importer.store, options: importer.options, result: importer.result,
+				snapshot: importer.snapshot, work: *node.Subtree, pathHint: nodePath,
+				reason: schema.DebtMissingDirectory, errorClass: "snapshot-depth-limit",
+			}); err != nil {
 				return schema.DirectoryChild{}, false, err
 			}
 			return schema.DirectoryChild{}, false, nil
@@ -382,25 +416,36 @@ func convertNodeType(nodeType data.NodeType) schema.NodeType {
 	}
 }
 
-func writeDebt(ctx context.Context, store Store, options Options, result *Result, snapshot, work vaultic.ID, pathHint string, reason schema.DebtReason, errorClass string) error {
-	if work.IsNull() {
-		work = workID(fmt.Sprintf("%d:%s", reason, pathHint))
+type debtWrite struct {
+	store      Store
+	options    Options
+	result     *Result
+	snapshot   vaultic.ID
+	work       vaultic.ID
+	pathHint   string
+	reason     schema.DebtReason
+	errorClass string
+}
+
+func writeDebt(ctx context.Context, debt debtWrite) error {
+	if debt.work.IsNull() {
+		debt.work = workID(fmt.Sprintf("%d:%s", debt.reason, debt.pathHint))
 	}
-	key := schema.CrawlDebtKey(schema.ID(snapshot), schema.ID(workID(fmt.Sprintf("%d:%s:%s", reason, work.String(), pathHint))))
+	key := schema.CrawlDebtKey(schema.ID(debt.snapshot), schema.ID(workID(fmt.Sprintf("%d:%s:%s", debt.reason, debt.work.String(), debt.pathHint))))
 	record := schema.CrawlDebtRecord{
-		SourceIndexOrPack: schema.ID(snapshot), SourceKnown: !snapshot.IsNull(), PathOrTree: []byte(pathHint),
-		Reason: reason, Status: schema.DebtPending, ErrorClass: errorClass,
+		SourceIndexOrPack: schema.ID(debt.snapshot), SourceKnown: !debt.snapshot.IsNull(), PathOrTree: []byte(debt.pathHint),
+		Reason: debt.reason, Status: schema.DebtPending, ErrorClass: debt.errorClass,
 	}
 	encoded, err := record.MarshalBinary()
 	if err != nil {
 		return err
 	}
-	if !options.DryRun {
-		if err := store.Put(ctx, key, encoded, true); err != nil {
+	if !debt.options.DryRun {
+		if err := debt.store.Put(ctx, key, encoded, true); err != nil {
 			return err
 		}
 	}
-	result.CrawlDebtCreated++
+	debt.result.CrawlDebtCreated++
 	return nil
 }
 

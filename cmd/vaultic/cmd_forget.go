@@ -242,13 +242,8 @@ func buildForgetPlan(ctx context.Context, opts ForgetOptions, repo vaultic.Repos
 		return forgetPlan{}, err
 	}
 	policy := forgetPolicy(opts)
-	if policy.Empty() {
-		if !opts.UnsafeAllowRemoveAll {
-			return forgetPlan{}, errors.Fatal("no policy was specified, no snapshots will be removed")
-		}
-		if opts.SnapshotFilter.Empty() {
-			return forgetPlan{}, errors.Fatal("--unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified")
-		}
+	if err := validateForgetPolicy(opts, policy); err != nil {
+		return forgetPlan{}, err
 	}
 
 	for keyJSON, snapshotGroup := range snapshotGroups {
@@ -310,6 +305,19 @@ func forgetPolicy(opts ForgetOptions) data.ExpirePolicy {
 		WithinYearly:        opts.WithinYearly,
 		Tags:                opts.KeepTags,
 	}
+}
+
+func validateForgetPolicy(opts ForgetOptions, policy data.ExpirePolicy) error {
+	if !policy.Empty() {
+		return nil
+	}
+	if !opts.UnsafeAllowRemoveAll {
+		return errors.Fatal("no policy was specified, no snapshots will be removed")
+	}
+	if opts.SnapshotFilter.Empty() {
+		return errors.Fatal("--unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified")
+	}
+	return nil
 }
 
 func (plan forgetPlan) revalidatedAgainst(initial vaultic.IDSet) forgetPlan {
@@ -468,16 +476,12 @@ func deleteForgetSnapshots(ctx context.Context, repo vaultic.Repository, ids vau
 }
 
 func runForgetLegacy(ctx context.Context, opts ForgetOptions, pruneOptions PruneOptions, gopts global.Options, term ui.Terminal, args []string) error {
-	err := verifyForgetOptions(&opts)
-	if err != nil {
+	if err := verifyForgetOptions(&opts); err != nil {
 		return err
 	}
-
-	err = verifyPruneOptions(&pruneOptions)
-	if err != nil {
+	if err := verifyPruneOptions(&pruneOptions); err != nil {
 		return err
 	}
-
 	if gopts.NoLock && !opts.DryRun {
 		return errors.Fatal("--no-lock is only applicable in combination with --dry-run for forget command")
 	}
@@ -489,30 +493,7 @@ func runForgetLegacy(ctx context.Context, opts ForgetOptions, pruneOptions Prune
 	}
 	defer unlock()
 
-	var snapshots data.Snapshots
-	removeSnIDs := vaultic.NewIDSet()
-
-	now := time.Now()
-	protected := 0
-	isProtected := func(sn *data.Snapshot) bool {
-		if opts.OverrideDeleteProtection || sn.Delete == nil {
-			return false
-		}
-		return sn.Delete.MustKeep(now)
-	}
-
-	err = opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
-		if err != nil {
-			return err
-		}
-		// honor delete protection: protected snapshots are kept, not removed
-		if isProtected(sn) {
-			protected++
-			return nil
-		}
-		snapshots = append(snapshots, sn)
-		return nil
-	})
+	snapshots, protected, err := findLegacyForgetSnapshots(ctx, opts, repo, args, time.Now())
 	if err != nil {
 		return err
 	}
@@ -520,134 +501,18 @@ func runForgetLegacy(ctx context.Context, opts ForgetOptions, pruneOptions Prune
 		printer.P("kept %d delete-protected snapshots\n", protected)
 	}
 
-	var jsonGroups []*ForgetGroup
-
-	if len(args) > 0 {
-		// When explicit snapshots args are given, remove them immediately.
-		for _, sn := range snapshots {
-			removeSnIDs.Insert(*sn.ID())
-		}
-	} else {
-		snapshotGroups, _, err := data.GroupSnapshots(snapshots, opts.GroupBy)
+	removeSnIDs, jsonGroups, err := selectLegacyForgetSnapshots(ctx, opts, gopts, printer, snapshots, args)
+	if err != nil {
+		return err
+	}
+	failedSnIDs := vaultic.NewIDSet()
+	if len(removeSnIDs) != 0 && !opts.DryRun {
+		failedSnIDs, err = deleteForgetSnapshots(ctx, repo, removeSnIDs, printer)
 		if err != nil {
 			return err
 		}
-
-		policy := data.ExpirePolicy{
-			Last:                int(opts.Last),
-			Minutely:            int(opts.Minutely),
-			Hourly:              int(opts.Hourly),
-			Daily:               int(opts.Daily),
-			Weekly:              int(opts.Weekly),
-			Monthly:             int(opts.Monthly),
-			QuarterYearly:       int(opts.QuarterYearly),
-			HalfYearly:          int(opts.HalfYearly),
-			Yearly:              int(opts.Yearly),
-			Within:              opts.Within,
-			WithinMinutely:      opts.WithinMinutely,
-			WithinHourly:        opts.WithinHourly,
-			WithinDaily:         opts.WithinDaily,
-			WithinWeekly:        opts.WithinWeekly,
-			WithinMonthly:       opts.WithinMonthly,
-			WithinQuarterYearly: opts.WithinQuarterYearly,
-			WithinHalfYearly:    opts.WithinHalfYearly,
-			WithinYearly:        opts.WithinYearly,
-			Tags:                opts.KeepTags,
-		}
-
-		if policy.Empty() {
-			if opts.UnsafeAllowRemoveAll {
-				if opts.SnapshotFilter.Empty() {
-					return errors.Fatal("--unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified")
-				}
-				// UnsafeAllowRemoveAll together with snapshot filter is fine
-			} else {
-				return errors.Fatal("no policy was specified, no snapshots will be removed")
-			}
-		}
-
-		printer.P("Applying Policy: %v\n", policy)
-
-		for k, snapshotGroup := range snapshotGroups {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			if gopts.Verbose >= 1 && !gopts.JSON {
-				err = PrintSnapshotGroupHeader(gopts.Term.OutputWriter(), k)
-				if err != nil {
-					return err
-				}
-			}
-
-			var key data.SnapshotGroupKey
-			if err := json.Unmarshal([]byte(k), &key); err != nil {
-				return err
-			}
-
-			var fg ForgetGroup
-			fg.Tags = key.Tags
-			fg.Host = key.Hostname
-			fg.Paths = key.Paths
-
-			keep, remove, reasons := data.ApplyPolicy(snapshotGroup, policy)
-
-			if !policy.Empty() && len(keep) == 0 {
-				return fmt.Errorf("refusing to delete last snapshot of snapshot group \"%v\"", key.String())
-			}
-			if len(keep) != 0 && !gopts.Quiet && !gopts.JSON {
-				printer.P("keep %d snapshots:\n", len(keep))
-				if err := PrintSnapshots(gopts.Term.OutputWriter(), keep, reasons, opts.Compact); err != nil {
-					return err
-				}
-				printer.P("\n")
-			}
-			fg.Keep = asJSONSnapshots(keep)
-
-			if len(remove) != 0 && !gopts.Quiet && !gopts.JSON {
-				printer.P("remove %d snapshots:\n", len(remove))
-				if err := PrintSnapshots(gopts.Term.OutputWriter(), remove, nil, opts.Compact); err != nil {
-					return err
-				}
-				printer.P("\n")
-			}
-			fg.Remove = asJSONSnapshots(remove)
-
-			fg.Reasons = asJSONKeeps(reasons)
-
-			jsonGroups = append(jsonGroups, &fg)
-
-			for _, sn := range remove {
-				removeSnIDs.Insert(*sn.ID())
-			}
-		}
-	}
-
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// these are the snapshots that failed to be removed
-	failedSnIDs := vaultic.NewIDSet()
-	if len(removeSnIDs) > 0 {
-		if !opts.DryRun {
-			bar := printer.NewCounter("files deleted")
-			err := vaultic.ParallelRemove(ctx, repo, removeSnIDs, vaultic.WriteableSnapshotFile, func(id vaultic.ID, err error) error {
-				if err != nil {
-					printer.E("unable to remove %v/%v from the repository\n", vaultic.SnapshotFile, id)
-					failedSnIDs.Insert(id)
-				} else {
-					printer.VV("removed %v/%v\n", vaultic.SnapshotFile, id)
-				}
-				return nil
-			}, bar)
-			bar.Done()
-			if err != nil {
-				return err
-			}
-		} else {
-			printer.P("Would have removed the following snapshots:\n%v\n\n", removeSnIDs)
-		}
+	} else if len(removeSnIDs) != 0 {
+		printer.P("Would have removed the following snapshots:\n%v\n\n", removeSnIDs)
 	}
 
 	if gopts.JSON && len(jsonGroups) > 0 {
@@ -672,6 +537,101 @@ func runForgetLegacy(ctx context.Context, opts ForgetOptions, pruneOptions Prune
 	}
 
 	return nil
+}
+
+//nolint:unused // retained as part of the dormant legacy forget implementation
+func findLegacyForgetSnapshots(ctx context.Context, opts ForgetOptions, repo vaultic.Repository, args []string, now time.Time) (data.Snapshots, int, error) {
+	var snapshots data.Snapshots
+	protected := 0
+	err := opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+		if err != nil {
+			return err
+		}
+		if !opts.OverrideDeleteProtection && sn.Delete != nil && sn.Delete.MustKeep(now) {
+			protected++
+			return nil
+		}
+		snapshots = append(snapshots, sn)
+		return nil
+	})
+	return snapshots, protected, err
+}
+
+//nolint:unused // retained as part of the dormant legacy forget implementation
+func selectLegacyForgetSnapshots(
+	ctx context.Context, opts ForgetOptions, gopts global.Options, printer vaultic.Printer,
+	snapshots data.Snapshots, args []string,
+) (vaultic.IDSet, []*ForgetGroup, error) {
+	removeIDs := vaultic.NewIDSet()
+	if len(args) != 0 {
+		for _, sn := range snapshots {
+			removeIDs.Insert(*sn.ID())
+		}
+		return removeIDs, nil, nil
+	}
+	snapshotGroups, _, err := data.GroupSnapshots(snapshots, opts.GroupBy)
+	if err != nil {
+		return nil, nil, err
+	}
+	policy := forgetPolicy(opts)
+	if err := validateForgetPolicy(opts, policy); err != nil {
+		return nil, nil, err
+	}
+	printer.P("Applying Policy: %v\n", policy)
+	jsonGroups := make([]*ForgetGroup, 0, len(snapshotGroups))
+	for keyJSON, snapshotGroup := range snapshotGroups {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		if gopts.Verbose >= 1 && !gopts.JSON {
+			if err := PrintSnapshotGroupHeader(gopts.Term.OutputWriter(), keyJSON); err != nil {
+				return nil, nil, err
+			}
+		}
+		group, remove, err := evaluateLegacyForgetGroup(opts, gopts, printer, keyJSON, snapshotGroup, policy)
+		if err != nil {
+			return nil, nil, err
+		}
+		jsonGroups = append(jsonGroups, group)
+		for _, sn := range remove {
+			removeIDs.Insert(*sn.ID())
+		}
+	}
+	return removeIDs, jsonGroups, nil
+}
+
+//nolint:unused // retained as part of the dormant legacy forget implementation
+func evaluateLegacyForgetGroup(
+	opts ForgetOptions, gopts global.Options, printer vaultic.Printer,
+	keyJSON string, snapshots data.Snapshots, policy data.ExpirePolicy,
+) (*ForgetGroup, data.Snapshots, error) {
+	var key data.SnapshotGroupKey
+	if err := json.Unmarshal([]byte(keyJSON), &key); err != nil {
+		return nil, nil, err
+	}
+	keep, remove, reasons := data.ApplyPolicy(snapshots, policy)
+	if !policy.Empty() && len(keep) == 0 {
+		return nil, nil, fmt.Errorf("refusing to delete last snapshot of snapshot group \"%v\"", key.String())
+	}
+	if len(keep) != 0 && !gopts.Quiet && !gopts.JSON {
+		printer.P("keep %d snapshots:\n", len(keep))
+		if err := PrintSnapshots(gopts.Term.OutputWriter(), keep, reasons, opts.Compact); err != nil {
+			return nil, nil, err
+		}
+		printer.P("\n")
+	}
+	if len(remove) != 0 && !gopts.Quiet && !gopts.JSON {
+		printer.P("remove %d snapshots:\n", len(remove))
+		if err := PrintSnapshots(gopts.Term.OutputWriter(), remove, nil, opts.Compact); err != nil {
+			return nil, nil, err
+		}
+		printer.P("\n")
+	}
+	group := &ForgetGroup{
+		Tags: key.Tags, Host: key.Hostname, Paths: key.Paths,
+		Keep: asJSONSnapshots(keep), Remove: asJSONSnapshots(remove), Reasons: asJSONKeeps(reasons),
+	}
+	return group, remove, nil
 }
 
 // ForgetGroup helps to print what is forgotten in JSON.

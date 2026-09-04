@@ -108,63 +108,41 @@ func (store *SchemaStore) PublishSnapshotScope(ctx context.Context, scope Snapsh
 	return fmt.Errorf("publish snapshot scope: transaction conflict retry limit exceeded")
 }
 
+type snapshotPublishPlan struct {
+	puts                []Mutation
+	next                uint64
+	analyticsGeneration uint64
+	deltaOrdinal        uint32
+	noop                bool
+}
+
 func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope SnapshotScope, root schema.ParsedKey, identities, crawlIdentities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord) error {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	fail := func(err error) error { rollbackTransaction(ctx, transaction); return err }
-	if _, found, err := transaction.Get(ctx, scope.RootKey); err != nil {
+	plan, err := planSnapshotBase(ctx, transaction, scope, root)
+	if err != nil {
 		return fail(err)
-	} else if !found {
-		return fail(fmt.Errorf("snapshot root revision is not durable"))
 	}
-	checkpointKey := schema.ExportCheckpointKey(scope.SnapshotID)
-	if value, found, err := transaction.Get(ctx, checkpointKey); err != nil {
-		return fail(err)
-	} else if !found {
-		return fail(fmt.Errorf("snapshot export checkpoint is missing"))
-	} else if checkpoint, decodeErr := schema.UnmarshalExportCheckpointRecord(value); decodeErr != nil || checkpoint.State != schema.ExportPending {
-		if decodeErr != nil {
-			return fail(decodeErr)
-		}
+	if plan.noop {
 		return transaction.Rollback(ctx)
 	}
-	nextKey := schema.NextRevisionKey()
-	next := uint64(1)
-	if value, found, err := transaction.Get(ctx, nextKey); err != nil {
-		return fail(err)
-	} else if found {
-		next, err = schema.UnmarshalNextRevision(value)
-		if err != nil {
-			return fail(err)
-		}
-	}
-	if next == math.MaxUint64 {
-		return fail(fmt.Errorf("repository revision sequence exhausted"))
-	}
-	record := schema.SnapshotRecord{CommitSequence: next, RootFSID: root.FSID, RootInode: root.Inode, RootRevision: root.Revision, OriginalJSON: append([]byte(nil), scope.OriginalJSON...)}
-	snapshotValue, err := record.MarshalBinary()
-	if err != nil {
+	if err := store.completeSnapshotPlan(ctx, transaction, scope, identities, crawlIdentities, bindings, &plan); err != nil {
 		return fail(err)
 	}
-	snapshotCommitValue, err := (schema.SnapshotCommitRecord{SnapshotTimeUnixNano: snapshotTimeUnixNano(scope.OriginalJSON), RootKey: append([]byte(nil), scope.RootKey...)}).MarshalBinary()
-	if err != nil {
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), plan.puts, nil); err != nil {
 		return fail(err)
 	}
-	checkpointValue, err := (schema.ExportCheckpointRecord{State: schema.ExportComplete, CommitSequence: next, Attempts: 1, RootKey: scope.RootKey}).MarshalBinary()
-	if err != nil {
-		return fail(err)
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
 	}
-	nextValue, err := schema.MarshalNextRevision(next + 1)
-	if err != nil {
-		return fail(err)
-	}
-	puts := []Mutation{
-		{Key: schema.SnapshotKey(scope.SnapshotID), Value: snapshotValue},
-		{Key: schema.SnapshotCommitKey(next, scope.SnapshotID), Value: snapshotCommitValue},
-		{Key: checkpointKey, Value: checkpointValue}, {Key: nextKey, Value: nextValue},
-	}
+	return nil
+}
+
+func (store *SchemaStore) completeSnapshotPlan(ctx context.Context, transaction *Transaction, scope SnapshotScope, identities, crawlIdentities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, plan *snapshotPublishPlan) error {
 	crawlGenerations := map[identityKey]uint64{}
 	if scope.Crawl != nil {
 		for _, identity := range crawlIdentities {
@@ -175,55 +153,133 @@ func (store *SchemaStore) publishSnapshotScopeOnce(ctx context.Context, scope Sn
 			crawlGenerations[identityKey{identity.FSID, identity.Inode}] = generation
 		}
 	}
-	analyticsGeneration := uint64(0)
-	deltaOrdinal := uint32(0)
+	if err := planSnapshotAnalytics(ctx, transaction, identities, crawlGenerations, plan); err != nil {
+		return err
+	}
+	if scope.Crawl == nil {
+		return nil
+	}
+	crawlPuts, err := store.authoritativeCrawlMutations(ctx, transaction, *scope.Crawl, crawlIdentities, bindings, plan.next, plan.analyticsGeneration)
+	if err != nil {
+		return err
+	}
+	for _, mutation := range crawlPuts {
+		if parsed, parseErr := schema.ParseKey(mutation.Key); parseErr == nil && parsed.Kind == schema.KeyAnalyticsDelta {
+			mutation.Key = schema.AnalyticsDeltaKey(plan.next, plan.deltaOrdinal)
+			plan.deltaOrdinal++
+		}
+		plan.puts = append(plan.puts, mutation)
+	}
+	return nil
+}
+
+func planSnapshotAnalytics(ctx context.Context, transaction *Transaction, identities []schema.ParsedKey, crawlGenerations map[identityKey]uint64, plan *snapshotPublishPlan) error {
 	if metadataValue, found, getErr := transaction.Get(ctx, schema.AnalyticsMetadataKey()); getErr != nil {
-		return fail(getErr)
+		return getErr
 	} else if found {
 		metadata, decodeErr := schema.UnmarshalAnalyticsMetadataRecord(metadataValue)
 		if decodeErr == nil && metadata.Enabled {
-			analyticsGeneration = metadata.Generation
+			plan.analyticsGeneration = metadata.Generation
 			for _, identity := range identities {
 				generation := identity.Revision
 				if crawlGeneration := crawlGenerations[identityKey{identity.FSID, identity.Inode}]; crawlGeneration != 0 {
 					generation = crawlGeneration
 				}
-				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: next, State: schema.AnalyticsUnknown, RetainedSnapshotRefs: 1, ReferenceOperation: schema.AnalyticsReferencesIncrement, ClassificationEpoch: metadata.Generation}
+				delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaRetainedReferences, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: plan.next, State: schema.AnalyticsUnknown, RetainedSnapshotRefs: 1, ReferenceOperation: schema.AnalyticsReferencesIncrement, ClassificationEpoch: metadata.Generation}
 				encoded, encodeErr := delta.MarshalBinary()
 				if encodeErr != nil {
-					return fail(encodeErr)
+					return encodeErr
 				}
-				puts = append(puts, Mutation{Key: schema.AnalyticsDeltaKey(next, deltaOrdinal), Value: encoded})
-				deltaOrdinal++
+				plan.puts = append(plan.puts, Mutation{Key: schema.AnalyticsDeltaKey(plan.next, plan.deltaOrdinal), Value: encoded})
+				plan.deltaOrdinal++
 			}
 		}
-	}
-	if scope.Crawl != nil {
-		crawlPuts, err := store.authoritativeCrawlMutations(ctx, transaction, *scope.Crawl, crawlIdentities, bindings, next, analyticsGeneration)
-		if err != nil {
-			return fail(err)
-		}
-		for _, mutation := range crawlPuts {
-			if parsed, parseErr := schema.ParseKey(mutation.Key); parseErr == nil && parsed.Kind == schema.KeyAnalyticsDelta {
-				mutation.Key = schema.AnalyticsDeltaKey(next, deltaOrdinal)
-				deltaOrdinal++
-			}
-			puts = append(puts, mutation)
-		}
-	}
-	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
-		return fail(err)
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		rollbackTransaction(ctx, transaction)
-		return err
 	}
 	return nil
+}
+
+func planSnapshotBase(ctx context.Context, transaction *Transaction, scope SnapshotScope, root schema.ParsedKey) (snapshotPublishPlan, error) {
+	if _, found, err := transaction.Get(ctx, scope.RootKey); err != nil {
+		return snapshotPublishPlan{}, err
+	} else if !found {
+		return snapshotPublishPlan{}, fmt.Errorf("snapshot root revision is not durable")
+	}
+	checkpointKey := schema.ExportCheckpointKey(scope.SnapshotID)
+	value, found, err := transaction.Get(ctx, checkpointKey)
+	if err != nil || !found {
+		if err == nil {
+			err = fmt.Errorf("snapshot export checkpoint is missing")
+		}
+		return snapshotPublishPlan{}, err
+	}
+	checkpoint, err := schema.UnmarshalExportCheckpointRecord(value)
+	if err != nil {
+		return snapshotPublishPlan{}, err
+	}
+	if checkpoint.State != schema.ExportPending {
+		return snapshotPublishPlan{noop: true}, nil
+	}
+	nextKey := schema.NextRevisionKey()
+	next, err := loadNextSnapshotRevision(ctx, transaction, nextKey)
+	if err != nil {
+		return snapshotPublishPlan{}, err
+	}
+	values, err := encodeSnapshotPublication(scope, root, next)
+	if err != nil {
+		return snapshotPublishPlan{}, err
+	}
+	return snapshotPublishPlan{next: next, puts: []Mutation{
+		{Key: schema.SnapshotKey(scope.SnapshotID), Value: values[0]},
+		{Key: schema.SnapshotCommitKey(next, scope.SnapshotID), Value: values[1]},
+		{Key: checkpointKey, Value: values[2]}, {Key: nextKey, Value: values[3]},
+	}}, nil
+}
+
+func loadNextSnapshotRevision(ctx context.Context, transaction *Transaction, key []byte) (uint64, error) {
+	next := uint64(1)
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		next, err = schema.UnmarshalNextRevision(value)
+	}
+	if err == nil && next == math.MaxUint64 {
+		err = fmt.Errorf("repository revision sequence exhausted")
+	}
+	return next, err
+}
+
+func encodeSnapshotPublication(scope SnapshotScope, root schema.ParsedKey, next uint64) ([4][]byte, error) {
+	var values [4][]byte
+	record := schema.SnapshotRecord{CommitSequence: next, RootFSID: root.FSID, RootInode: root.Inode, RootRevision: root.Revision, OriginalJSON: append([]byte(nil), scope.OriginalJSON...)}
+	var err error
+	values[0], err = record.MarshalBinary()
+	if err != nil {
+		return values, err
+	}
+	values[1], err = (schema.SnapshotCommitRecord{SnapshotTimeUnixNano: snapshotTimeUnixNano(scope.OriginalJSON), RootKey: append([]byte(nil), scope.RootKey...)}).MarshalBinary()
+	if err != nil {
+		return values, err
+	}
+	values[2], err = (schema.ExportCheckpointRecord{State: schema.ExportComplete, CommitSequence: next, Attempts: 1, RootKey: scope.RootKey}).MarshalBinary()
+	if err != nil {
+		return values, err
+	}
+	values[3], err = schema.MarshalNextRevision(next + 1)
+	return values, err
 }
 
 type identityKey struct {
 	fsid  uint32
 	inode uint64
+}
+
+type authoritativeCrawlPlan struct {
+	proof            schema.AuthoritativeCrawlProofRecord
+	mutations        []Mutation
+	observed         map[string]schema.ParsedKey
+	analyticsOrdinal uint32
 }
 
 func (store *SchemaStore) authoritativeScopeBindings(ctx context.Context, claim *AuthoritativeCrawlClaim) (map[string]schema.AuthoritativeSourceBindingRecord, error) {
@@ -259,20 +315,34 @@ func (store *SchemaStore) authoritativeScopeBindings(ctx context.Context, claim 
 }
 
 func (store *SchemaStore) authoritativeCrawlMutations(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64) ([]Mutation, error) {
+	plan, err := planAuthoritativeCrawlProof(ctx, transaction, claim, commit)
+	if err != nil {
+		return nil, err
+	}
+	if err := planObservedAuthoritativeIdentities(ctx, transaction, claim, identities, bindings, commit, analyticsGeneration, &plan); err != nil {
+		return nil, err
+	}
+	if err := planMissingAuthoritativeIdentities(ctx, transaction, claim, bindings, commit, analyticsGeneration, &plan); err != nil {
+		return nil, err
+	}
+	return plan.mutations, nil
+}
+
+func planAuthoritativeCrawlProof(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, commit uint64) (authoritativeCrawlPlan, error) {
 	debtFree := true
 	for _, key := range claim.DebtKeys {
 		parsed, err := schema.ParseKey(key)
 		if err != nil || parsed.Kind != schema.KeyCrawlDebt {
-			return nil, fmt.Errorf("invalid authoritative crawl debt key")
+			return authoritativeCrawlPlan{}, fmt.Errorf("invalid authoritative crawl debt key")
 		}
 		value, found, err := transaction.Get(ctx, key)
 		if err != nil {
-			return nil, err
+			return authoritativeCrawlPlan{}, err
 		}
 		if found {
 			debt, err := schema.UnmarshalCrawlDebtRecord(value)
 			if err != nil {
-				return nil, err
+				return authoritativeCrawlPlan{}, err
 			}
 			debtFree = debtFree && debt.Status == schema.DebtResolved
 		}
@@ -280,74 +350,94 @@ func (store *SchemaStore) authoritativeCrawlMutations(ctx context.Context, trans
 	proof := schema.AuthoritativeCrawlProofRecord{ScopeID: claim.ScopeID, RootFSID: claim.RootFSID, RootInode: claim.RootInode, StartFence: claim.StartFence, EndCommit: commit, CompletedAt: time.Now().UnixNano(), Complete: claim.Complete, DebtFree: debtFree}
 	proofValue, err := proof.MarshalBinary()
 	if err != nil {
-		return nil, err
+		return authoritativeCrawlPlan{}, err
 	}
-	mutations := []Mutation{{Key: schema.AuthoritativeCrawlProofKey(claim.ScopeID, commit), Value: proofValue}}
-	observed := make(map[string]schema.ParsedKey, len(identities))
-	var analyticsOrdinal uint32
+	return authoritativeCrawlPlan{
+		proof: proof, mutations: []Mutation{{Key: schema.AuthoritativeCrawlProofKey(claim.ScopeID, commit), Value: proofValue}},
+		observed: make(map[string]schema.ParsedKey),
+	}, nil
+}
+
+func planObservedAuthoritativeIdentities(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identities []schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64, plan *authoritativeCrawlPlan) error {
 	for _, identity := range identities {
-		priorKey, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode)
-		if found {
-			value, exists, err := transaction.Get(ctx, priorKey)
-			if err != nil {
-				return nil, err
-			}
-			if exists {
-				prior, err = schema.UnmarshalAuthoritativeSourceBindingRecord(value)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-		generation := identity.Revision
-		continuity := schema.AnalyticsContinuityUnknown
-		newGeneration := !found
-		sourceStateChanged := !found || prior.State != schema.AuthoritativeSourceLive
-		if found && prior.State == schema.AuthoritativeSourceLive {
-			generation, continuity, newGeneration = prior.Generation, prior.Continuity, false
-		} else if found && prior.State == schema.AuthoritativeSourceDeleted {
-			continuity = schema.AnalyticsContinuityProven
-			newGeneration = true
-		}
-		key := schema.AuthoritativeSourceBindingKey(claim.ScopeID, identity.FSID, identity.Inode, generation)
-		observed[string(key)] = identity
-		binding := schema.AuthoritativeSourceBindingRecord{Generation: generation, Revision: identity.Revision, State: schema.AuthoritativeSourceLive, Continuity: continuity, LastObservedCommit: commit}
-		encoded, err := binding.MarshalBinary()
-		if err != nil {
-			return nil, err
-		}
-		mutations = append(mutations, Mutation{Key: key, Value: encoded})
-		if analyticsGeneration != 0 && sourceStateChanged {
-			var delta schema.AnalyticsDeltaRecord
-			if newGeneration {
-				delta = schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, CreatedAt: time.Now().UnixNano(), CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
-			} else {
-				delta = schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
-			}
-			value, err := delta.MarshalBinary()
-			if err != nil {
-				return nil, err
-			}
-			mutations = append(mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, analyticsOrdinal), Value: value})
-			analyticsOrdinal++
+		if err := planObservedAuthoritativeIdentity(ctx, transaction, claim, identity, bindings, commit, analyticsGeneration, plan); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func planObservedAuthoritativeIdentity(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, identity schema.ParsedKey, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64, plan *authoritativeCrawlPlan) error {
+	priorKey, prior, found := currentSourceBinding(bindings, identity.FSID, identity.Inode)
+	if found {
+		value, exists, err := transaction.Get(ctx, priorKey)
+		if err != nil {
+			return err
+		}
+		if exists {
+			prior, err = schema.UnmarshalAuthoritativeSourceBindingRecord(value)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	generation, continuity, newGeneration := observedIdentityGeneration(identity, prior, found)
+	stateChanged := !found || prior.State != schema.AuthoritativeSourceLive
+	key := schema.AuthoritativeSourceBindingKey(claim.ScopeID, identity.FSID, identity.Inode, generation)
+	plan.observed[string(key)] = identity
+	binding := schema.AuthoritativeSourceBindingRecord{Generation: generation, Revision: identity.Revision, State: schema.AuthoritativeSourceLive, Continuity: continuity, LastObservedCommit: commit}
+	encoded, err := binding.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	plan.mutations = append(plan.mutations, Mutation{Key: key, Value: encoded})
+	if analyticsGeneration == 0 || !stateChanged {
+		return nil
+	}
+	delta := observedIdentityDelta(identity, generation, continuity, analyticsGeneration, newGeneration)
+	value, err := delta.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	plan.mutations = append(plan.mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, plan.analyticsOrdinal), Value: value})
+	plan.analyticsOrdinal++
+	return nil
+}
+
+func observedIdentityGeneration(identity schema.ParsedKey, prior schema.AuthoritativeSourceBindingRecord, found bool) (uint64, schema.AnalyticsIdentityContinuity, bool) {
+	if found && prior.State == schema.AuthoritativeSourceLive {
+		return prior.Generation, prior.Continuity, false
+	}
+	if found && prior.State == schema.AuthoritativeSourceDeleted {
+		return identity.Revision, schema.AnalyticsContinuityProven, true
+	}
+	return identity.Revision, schema.AnalyticsContinuityUnknown, true
+}
+
+func observedIdentityDelta(identity schema.ParsedKey, generation uint64, continuity schema.AnalyticsIdentityContinuity, analyticsGeneration uint64, newGeneration bool) schema.AnalyticsDeltaRecord {
+	if newGeneration {
+		return schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaCreation, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, CreatedAt: time.Now().UnixNano(), CreationBasis: schema.AnalyticsFirstSeen, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
+	}
+	return schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: identity.FSID, Inode: identity.Inode, IdentityGeneration: generation, Revision: identity.Revision, IdentityContinuity: continuity, State: schema.AnalyticsLive, ClassificationEpoch: analyticsGeneration}
+}
+
+func planMissingAuthoritativeIdentities(ctx context.Context, transaction *Transaction, claim AuthoritativeCrawlClaim, bindings map[string]schema.AuthoritativeSourceBindingRecord, commit, analyticsGeneration uint64, plan *authoritativeCrawlPlan) error {
 	for keyString, prior := range bindings {
-		if _, found := observed[keyString]; found || prior.State == schema.AuthoritativeSourceDeleted {
+		if _, found := plan.observed[keyString]; found || prior.State == schema.AuthoritativeSourceDeleted {
 			continue
 		}
 		key := []byte(keyString)
 		if value, found, err := transaction.Get(ctx, key); err != nil {
-			return nil, err
+			return err
 		} else if found {
 			prior, err = schema.UnmarshalAuthoritativeSourceBindingRecord(value)
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		state := schema.AuthoritativeSourceUnknown
 		analyticsState := schema.AnalyticsUnknown
-		if proof.Complete && proof.DebtFree && prior.LastObservedCommit <= claim.StartFence {
+		if plan.proof.Complete && plan.proof.DebtFree && prior.LastObservedCommit <= claim.StartFence {
 			state = schema.AuthoritativeSourceDeleted
 			analyticsState = schema.AnalyticsDeleted
 			if prior.State == schema.AuthoritativeSourceLive && !hasUnknownGeneration(bindings, keyString) {
@@ -359,21 +449,21 @@ func (store *SchemaStore) authoritativeCrawlMutations(ctx context.Context, trans
 		prior.State, prior.LastObservedCommit = state, commit
 		encoded, err := prior.MarshalBinary()
 		if err != nil {
-			return nil, err
+			return err
 		}
-		mutations = append(mutations, Mutation{Key: key, Value: encoded})
+		plan.mutations = append(plan.mutations, Mutation{Key: key, Value: encoded})
 		if analyticsGeneration != 0 {
 			parsed, _ := schema.ParseKey(key)
 			delta := schema.AnalyticsDeltaRecord{Kind: schema.AnalyticsDeltaSourceState, FSID: parsed.FSID, Inode: parsed.Inode, IdentityGeneration: prior.Generation, Revision: prior.Revision, IdentityContinuity: prior.Continuity, State: analyticsState, ClassificationEpoch: analyticsGeneration}
 			value, err := delta.MarshalBinary()
 			if err != nil {
-				return nil, err
+				return err
 			}
-			mutations = append(mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, analyticsOrdinal), Value: value})
-			analyticsOrdinal++
+			plan.mutations = append(plan.mutations, Mutation{Key: schema.AnalyticsDeltaKey(commit, plan.analyticsOrdinal), Value: value})
+			plan.analyticsOrdinal++
 		}
 	}
-	return mutations, nil
+	return nil
 }
 
 func hasUnknownGeneration(bindings map[string]schema.AuthoritativeSourceBindingRecord, currentKey string) bool {

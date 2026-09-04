@@ -100,7 +100,13 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		{CrawlDebtKey(id, second), KeyCrawlDebt}, {ImportCheckpointKey(id), KeyImportCheckpoint},
 		{SnapshotImportCheckpointKey(id), KeySnapshotImportCheckpoint}, {ExportCheckpointKey(id), KeyExportCheckpoint}, {ExportIndexCheckpointKey(id), KeyExportIndexCheckpoint},
 		{NextRevisionKey(), KeyNextRevision}, {NextExportSequenceKey(), KeyNextExportSequence},
+		{HardlinkRefsKey(3, 4, 5), KeyHardlinkRefs},
+		{UIDExclusionPolicyKey(600), KeyUIDExclusionPolicy},
+		{DeletionCertificateKey(600, 9, id), KeyDeletionCertificate},
+		{VerificationStateKey(id, 42), KeyVerificationState},
+		{VerificationEventKey(9, 2, id, 42), KeyVerificationEvent},
 	}
+	seen := make([]bool, keyKindCount)
 	for _, test := range keys {
 		parsed, err := ParseKey(test.key)
 		if err != nil {
@@ -108,6 +114,12 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		}
 		if parsed.Kind != test.kind {
 			t.Fatalf("parse %x kind %v, want %v", test.key, parsed.Kind, test.kind)
+		}
+		seen[test.kind] = true
+	}
+	for kind := KeyBlob; kind < keyKindCount; kind++ {
+		if !seen[kind] {
+			t.Errorf("KeyKind %d has no parsing case", kind)
 		}
 	}
 	for _, malformed := range [][]byte{nil, {}, []byte("b:"), append(BlobKey(id), 0), []byte("a:pack:bogus"), []byte("gc:x:")} {

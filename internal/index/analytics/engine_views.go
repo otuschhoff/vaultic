@@ -16,6 +16,27 @@ import (
 )
 
 func writeCandidateViews(ctx context.Context, store Store, generation, parentGeneration uint64, facts []buildFact) error {
+	aggregates, summaries := planCandidateViews(facts)
+	writer := candidateViewWriter{ctx: ctx, store: store, generation: generation, puts: make([]daemon.Mutation, 0, pageSize)}
+	for key, record := range aggregates {
+		if err := writer.writeAggregate(parentGeneration, []byte(key), record); err != nil {
+			return err
+		}
+	}
+	for key, record := range summaries {
+		if err := writer.writeSummary(parentGeneration, []byte(key), record); err != nil {
+			return err
+		}
+	}
+	for _, item := range facts {
+		if err := writer.writeFactContributions(item); err != nil {
+			return err
+		}
+	}
+	return writer.flush()
+}
+
+func planCandidateViews(facts []buildFact) (map[string]schema.AnalyticsAggregateRecord, map[string]schema.AnalyticsSummaryRecord) {
 	aggregates := map[string]schema.AnalyticsAggregateRecord{}
 	summaries := map[string]schema.AnalyticsSummaryRecord{}
 	addAggregate := func(key []byte, size uint64) {
@@ -101,129 +122,111 @@ func writeCandidateViews(ctx context.Context, store Store, generation, parentGen
 			}
 		}
 	}
-	puts := make([]daemon.Mutation, 0, pageSize)
-	appendPut := func(key []byte, value []byte) error {
-		puts = append(puts, daemon.Mutation{Key: schema.AnalyticsDerivedKey(generation, key), Value: value})
-		if len(puts) < pageSize {
-			return nil
-		}
-		if err := store.WriteMutableBatch(ctx, puts, nil, false); err != nil {
-			return err
-		}
-		puts = puts[:0]
+	return aggregates, summaries
+}
+
+type candidateViewWriter struct {
+	ctx        context.Context
+	store      Store
+	generation uint64
+	puts       []daemon.Mutation
+}
+
+func (writer *candidateViewWriter) append(key, value []byte) error {
+	writer.puts = append(writer.puts, daemon.Mutation{Key: schema.AnalyticsDerivedKey(writer.generation, key), Value: value})
+	if len(writer.puts) < pageSize {
 		return nil
 	}
-	for key, record := range aggregates {
-		derivedKey := schema.AnalyticsDerivedKey(generation, []byte(key))
-		if current, found, err := store.Get(ctx, derivedKey); err != nil {
-			return err
-		} else if found {
-			prior, err := schema.UnmarshalAnalyticsAggregateRecord(current)
-			if err != nil {
-				return err
-			}
-			record.BytesAdded += prior.BytesAdded
-			record.BytesDeleted += prior.BytesDeleted
-			record.FilesAdded += prior.FilesAdded
-			record.FilesDeleted += prior.FilesDeleted
-		} else if parentGeneration != 0 {
-			current, found, err := getActiveDerived(ctx, store, parentGeneration, []byte(key))
-			if err != nil {
-				return err
-			}
-			if found {
-				prior, err := schema.UnmarshalAnalyticsAggregateRecord(current)
-				if err != nil {
-					return err
-				}
-				record.BytesAdded += prior.BytesAdded
-				record.BytesDeleted += prior.BytesDeleted
-				record.FilesAdded += prior.FilesAdded
-				record.FilesDeleted += prior.FilesDeleted
-			}
-		}
-		value, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		if err := appendPut([]byte(key), value); err != nil {
-			return err
-		}
+	return writer.flush()
+}
+
+func (writer *candidateViewWriter) flush() error {
+	if err := writeBatches(writer.ctx, writer.store, writer.puts); err != nil {
+		return err
 	}
-	for key, record := range summaries {
-		derivedKey := schema.AnalyticsDerivedKey(generation, []byte(key))
-		if current, found, err := store.Get(ctx, derivedKey); err != nil {
-			return err
-		} else if found {
-			prior, err := schema.UnmarshalAnalyticsSummaryRecord(current)
-			if err != nil {
-				return err
-			}
-			record.ActiveBytes += prior.ActiveBytes
-			record.ActiveFiles += prior.ActiveFiles
-			record.UniqueBlobCount += prior.UniqueBlobCount
-			record.UniqueBlobBytes += prior.UniqueBlobBytes
-		} else if parentGeneration != 0 {
-			current, found, err := getActiveDerived(ctx, store, parentGeneration, []byte(key))
-			if err != nil {
-				return err
-			}
-			if found {
-				prior, err := schema.UnmarshalAnalyticsSummaryRecord(current)
-				if err != nil {
-					return err
-				}
-				record.ActiveBytes += prior.ActiveBytes
-				record.ActiveFiles += prior.ActiveFiles
-				record.UniqueBlobCount += prior.UniqueBlobCount
-				record.UniqueBlobBytes += prior.UniqueBlobBytes
-			}
-		}
-		value, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		if err := appendPut([]byte(key), value); err != nil {
-			return err
-		}
+	writer.puts = writer.puts[:0]
+	return nil
+}
+
+func (writer *candidateViewWriter) priorValue(parentGeneration uint64, key []byte) ([]byte, bool, error) {
+	current, found, err := writer.store.Get(writer.ctx, schema.AnalyticsDerivedKey(writer.generation, key))
+	if err != nil || found || parentGeneration == 0 {
+		return current, found, err
 	}
-	for _, item := range facts {
-		if item.fact.Known&schema.KnownUID == 0 {
-			continue
-		}
-		inodeValue, err := (schema.AnalyticsUserInodeRecord{LatestRevision: item.identity.Revision, PathSample: item.fact.SourcePath}).MarshalBinary()
-		if err != nil {
-			return err
-		}
-		if err := appendPut(schema.UserInodeKey(item.fact.UID, item.identity.FSID, item.identity.Inode), inodeValue); err != nil {
-			return err
-		}
-		if item.fact.CreatedAt == 0 {
-			continue
-		}
-		revisionValue, found, err := store.Get(ctx, schema.InodeRevisionKey(item.identity.FSID, item.identity.Inode, item.identity.Revision))
-		if err != nil || !found {
-			return errors.Join(err, fmt.Errorf("analytics fact revision %d:%d:%d is missing", item.identity.FSID, item.identity.Inode, item.identity.Revision))
-		}
-		revision, err := schema.UnmarshalInodeRevision(revisionValue)
-		if err != nil {
-			return err
-		}
-		if err := visitInodeContent(ctx, store, revision, func(ordinal uint32, blob schema.ID) error {
-			blobValue, err := (schema.AnalyticsUserBlobRecord{ReferenceCount: 1, FirstSeen: item.fact.CreatedAt}).MarshalBinary()
-			if err != nil {
-				return err
-			}
-			key := schema.UserBlobContributionKey(item.fact.UID, blob, item.identity.FSID, item.identity.Inode, item.identity.Generation, ordinal)
-			if err := appendPut(key, blobValue); err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
+	return getActiveDerived(writer.ctx, writer.store, parentGeneration, key)
+}
+
+func (writer *candidateViewWriter) writeAggregate(parentGeneration uint64, key []byte, record schema.AnalyticsAggregateRecord) error {
+	current, found, err := writer.priorValue(parentGeneration, key)
+	if err != nil {
+		return err
 	}
-	return writeBatches(ctx, store, puts)
+	if found {
+		prior, err := schema.UnmarshalAnalyticsAggregateRecord(current)
+		if err != nil {
+			return err
+		}
+		record.BytesAdded += prior.BytesAdded
+		record.BytesDeleted += prior.BytesDeleted
+		record.FilesAdded += prior.FilesAdded
+		record.FilesDeleted += prior.FilesDeleted
+	}
+	value, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return writer.append(key, value)
+}
+
+func (writer *candidateViewWriter) writeSummary(parentGeneration uint64, key []byte, record schema.AnalyticsSummaryRecord) error {
+	current, found, err := writer.priorValue(parentGeneration, key)
+	if err != nil {
+		return err
+	}
+	if found {
+		prior, err := schema.UnmarshalAnalyticsSummaryRecord(current)
+		if err != nil {
+			return err
+		}
+		record.ActiveBytes += prior.ActiveBytes
+		record.ActiveFiles += prior.ActiveFiles
+		record.UniqueBlobCount += prior.UniqueBlobCount
+		record.UniqueBlobBytes += prior.UniqueBlobBytes
+	}
+	value, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return writer.append(key, value)
+}
+
+func (writer *candidateViewWriter) writeFactContributions(item buildFact) error {
+	if item.fact.Known&schema.KnownUID == 0 {
+		return nil
+	}
+	inodeValue, err := (schema.AnalyticsUserInodeRecord{LatestRevision: item.identity.Revision, PathSample: item.fact.SourcePath}).MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if err := writer.append(schema.UserInodeKey(item.fact.UID, item.identity.FSID, item.identity.Inode), inodeValue); err != nil || item.fact.CreatedAt == 0 {
+		return err
+	}
+	revisionValue, found, err := writer.store.Get(writer.ctx, schema.InodeRevisionKey(item.identity.FSID, item.identity.Inode, item.identity.Revision))
+	if err != nil || !found {
+		return errors.Join(err, fmt.Errorf("analytics fact revision %d:%d:%d is missing", item.identity.FSID, item.identity.Inode, item.identity.Revision))
+	}
+	revision, err := schema.UnmarshalInodeRevision(revisionValue)
+	if err != nil {
+		return err
+	}
+	return visitInodeContent(writer.ctx, writer.store, revision, func(ordinal uint32, blob schema.ID) error {
+		blobValue, err := (schema.AnalyticsUserBlobRecord{ReferenceCount: 1, FirstSeen: item.fact.CreatedAt}).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		key := schema.UserBlobContributionKey(item.fact.UID, blob, item.identity.FSID, item.identity.Inode, item.identity.Generation, ordinal)
+		return writer.append(key, blobValue)
+	})
 }
 
 func cleanupOldDerived(ctx context.Context, store Store, generation uint64) (uint64, error) {

@@ -156,84 +156,104 @@ func (s *fileChunkState) readNextChunk(rd io.Reader, chnker vaultic.Chunker, dat
 	}
 }
 
+type saveFileParams struct {
+	chunker       vaultic.Chunker
+	chunkState    *fileChunkState
+	snapshotPath  string
+	target        string
+	file          fs.File
+	start         func()
+	finishReading func()
+	finish        func(futureNodeResult)
+}
+
+type fileSaveCompletion struct {
+	lock        sync.Mutex
+	result      *futureNodeResult
+	params      saveFileParams
+	remaining   int
+	isCompleted bool
+}
+
+func (completion *fileSaveCompletion) completeBlob() {
+	completion.lock.Lock()
+	defer completion.lock.Unlock()
+
+	completion.remaining--
+	if completion.remaining != 0 || completion.result.err != nil {
+		return
+	}
+	if completion.isCompleted {
+		panic("completed twice") //nolint:forbidigo // completion is a single-delivery invariant
+	}
+	for _, id := range completion.result.node.Content {
+		if id.IsNull() {
+			panic("completed file with null ID") //nolint:forbidigo // completed content IDs must be populated
+		}
+	}
+	completion.isCompleted = true
+	completion.params.finish(*completion.result)
+}
+
+func (completion *fileSaveCompletion) completeError(err error) {
+	completion.lock.Lock()
+	defer completion.lock.Unlock()
+
+	if completion.result.err != nil {
+		return
+	}
+	if completion.isCompleted {
+		panic("completed twice") //nolint:forbidigo // completion is a single-delivery invariant
+	}
+	completion.isCompleted = true
+	completion.result.err = fmt.Errorf("failed to save %v: %w", completion.params.target, err)
+	completion.result.node = nil
+	completion.result.stats = ItemStats{}
+	completion.params.finish(*completion.result)
+}
+
 // saveFile stores the file f in the repo, then closes it.
-func (s *fileSaver) saveFile(ctx context.Context, chnker vaultic.Chunker, chunkState *fileChunkState, snPath string, target string, f fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
-	start()
+func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
+	params.start()
 
 	fnr := futureNodeResult{
-		snPath: snPath,
-		target: target,
+		snPath: params.snapshotPath,
+		target: params.target,
 	}
-	var lock sync.Mutex
-	remaining := 0
-	isCompleted := false
+	completion := fileSaveCompletion{result: &fnr, params: params}
 
-	completeBlob := func() {
-		lock.Lock()
-		defer lock.Unlock()
+	debug.Log("%v", params.snapshotPath)
 
-		remaining--
-		if remaining == 0 && fnr.err == nil {
-			if isCompleted {
-				panic("completed twice")
-			}
-			for _, id := range fnr.node.Content {
-				if id.IsNull() {
-					panic("completed file with null ID")
-				}
-			}
-			isCompleted = true
-			finish(fnr)
-		}
-	}
-	completeError := func(err error) {
-		lock.Lock()
-		defer lock.Unlock()
-
-		if fnr.err == nil {
-			if isCompleted {
-				panic("completed twice")
-			}
-			isCompleted = true
-			fnr.err = fmt.Errorf("failed to save %v: %w", target, err)
-			fnr.node = nil
-			fnr.stats = ItemStats{}
-			finish(fnr)
-		}
-	}
-
-	debug.Log("%v", snPath)
-
-	node, err := s.NodeFromFileInfo(snPath, target, f, false)
+	node, err := s.NodeFromFileInfo(params.snapshotPath, params.target, params.file, false)
 	if err != nil {
-		_ = f.Close()
-		completeError(err)
+		_ = params.file.Close()
+		completion.completeError(err)
 		return
 	}
 
 	if node.Type != data.NodeTypeFile {
-		_ = f.Close()
-		completeError(errors.Errorf("node type %q is wrong", node.Type))
+		_ = params.file.Close()
+		completion.completeError(errors.Errorf("node type %q is wrong", node.Type))
 		return
 	}
 
-	chnker.Reset()
-	chunkState.reset()
+	params.chunker.Reset()
+	params.chunkState.reset()
 
 	node.Content = []vaultic.ID{}
 	node.Size = 0
 	var idx int
 	for {
 		buf := s.saveFilePool.Get()
-		chunkData, err := chunkState.readNextChunk(f, chnker, buf.Data)
+		chunkData, err := params.chunkState.readNextChunk(params.file, params.chunker, buf.Data)
 		if err == io.EOF {
 			buf.Release()
 			break
 		}
 		if err != nil {
 			buf.Release()
-			_ = f.Close()
-			completeError(err)
+			_ = params.file.Close()
+			completion.completeError(err)
 			return
 		}
 
@@ -244,62 +264,62 @@ func (s *fileSaver) saveFile(ctx context.Context, chnker vaultic.Chunker, chunkS
 		// test if the context has been cancelled, return the error
 		if ctx.Err() != nil {
 			buf.Release()
-			_ = f.Close()
-			completeError(ctx.Err())
+			_ = params.file.Close()
+			completion.completeError(ctx.Err())
 			return
 		}
 
 		// add a place to store the saveBlob result
 		pos := idx
 
-		lock.Lock()
+		completion.lock.Lock()
 		node.Content = append(node.Content, vaultic.ID{})
-		lock.Unlock()
+		completion.lock.Unlock()
 
 		s.uploader.SaveBlobAsync(ctx, vaultic.DataBlob, chunkData, vaultic.ID{}, false, func(newID vaultic.ID, known bool, sizeInRepo int, err error) {
 			defer buf.Release()
 			if err != nil {
-				completeError(err)
+				completion.completeError(err)
 				return
 			}
 
-			lock.Lock()
+			completion.lock.Lock()
 			if !known {
 				fnr.stats.DataBlobs++
 				fnr.stats.DataSize += uint64(len(chunkData))
 				fnr.stats.DataSizeInRepo += uint64(sizeInRepo)
 			}
 			node.Content[pos] = newID
-			lock.Unlock()
+			completion.lock.Unlock()
 
-			completeBlob()
+			completion.completeBlob()
 		})
 		idx++
 
 		// test if the context has been cancelled, return the error
 		if ctx.Err() != nil {
-			_ = f.Close()
-			completeError(ctx.Err())
+			_ = params.file.Close()
+			completion.completeError(ctx.Err())
 			return
 		}
 
 		s.CompleteBlob(uint64(len(chunkData)))
 	}
 
-	err = f.Close()
+	err = params.file.Close()
 	if err != nil {
-		completeError(err)
+		completion.completeError(err)
 		return
 	}
 
 	fnr.node = node
-	lock.Lock()
+	completion.lock.Lock()
 	// require one additional completeFuture() call to ensure that the future only completes
 	// after reaching the end of this method
-	remaining += idx + 1
-	lock.Unlock()
-	finishReading()
-	completeBlob()
+	completion.remaining += idx + 1
+	completion.lock.Unlock()
+	params.finishReading()
+	completion.completeBlob()
 }
 
 func (s *fileSaver) worker(ctx context.Context, jobs <-chan saveFileJob) {
@@ -318,16 +338,21 @@ func (s *fileSaver) worker(ctx context.Context, jobs <-chan saveFileJob) {
 			}
 		}
 
-		s.saveFile(ctx, chnker, chunkState, job.snPath, job.target, job.file, job.start, func() {
-			if job.completeReading != nil {
-				job.completeReading()
-			}
-		}, func(res futureNodeResult) {
-			if job.complete != nil {
-				job.complete(res.node, res.stats)
-			}
-			job.ch <- res
-			close(job.ch)
+		s.saveFile(ctx, saveFileParams{
+			chunker: chnker, chunkState: chunkState, snapshotPath: job.snPath,
+			target: job.target, file: job.file, start: job.start,
+			finishReading: func() {
+				if job.completeReading != nil {
+					job.completeReading()
+				}
+			},
+			finish: func(res futureNodeResult) {
+				if job.complete != nil {
+					job.complete(res.node, res.stats)
+				}
+				job.ch <- res
+				close(job.ch)
+			},
 		})
 	}
 }

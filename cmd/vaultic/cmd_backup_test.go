@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,11 +10,17 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func TestAutomaticDeferredFallbackDistinguishesUnavailableFromCorrupt(t *testing.T) {
@@ -65,6 +72,129 @@ func TestBackupCrawlOptionValidation(t *testing.T) {
 				t.Fatalf("Check() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestBackupValidateDeferred(t *testing.T) {
+	tests := []struct {
+		name string
+		opts BackupOptions
+		want string
+	}{
+		{"mode-requires-opt-in", BackupOptions{DeferredMode: "auto"}, "--deferred-mode requires"},
+		{"mode-is-enumerated", BackupOptions{AllowDeferredCommit: true, DeferredMode: "invalid"}, "requires --deferred-mode=auto"},
+		{"bypass-is-acknowledged", BackupOptions{AllowDeferredCommit: true, DeferredMode: "data-plane-only"}, "requires --acknowledge-metadata-bypass"},
+		{"incompatible-parent", BackupOptions{AllowDeferredCommit: true, DeferredMode: "auto", Parent: "latest"}, "deferred ingest cannot use"},
+		{"positive-expiry", BackupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}, "--deferred-expiry must be positive"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.opts.validateDeferred()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateDeferred() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBackupValidateStdin(t *testing.T) {
+	tests := []struct {
+		name  string
+		opts  BackupOptions
+		gopts global.Options
+		args  []string
+		want  string
+	}{
+		{"password-and-data", BackupOptions{Stdin: true}, global.Options{}, nil, "cannot read both password and data"},
+		{"password-and-files-from", BackupOptions{FilesFrom: []string{"-"}}, global.Options{}, nil, "unable to read password from stdin"},
+		{
+			"stdin-and-files-from", BackupOptions{Stdin: true, FilesFrom: []string{"list"}},
+			global.Options{InsecureNoPassword: true}, nil, "--stdin and --files-from cannot",
+		},
+		{"stdin-and-arguments", BackupOptions{Stdin: true}, global.Options{InsecureNoPassword: true}, []string{"source"}, "files/dirs were listed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.opts.validateStdin(test.gopts, test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateStdin() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBackupValidateParent(t *testing.T) {
+	opts := BackupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket", PathdiffSVMMap: "map"}
+	if err := opts.validateParent(); err != nil {
+		t.Fatalf("validateParent() error = %v", err)
+	}
+	opts.PathdiffRequireCoverage = true
+	if err := opts.validateParent(); err != nil {
+		t.Fatalf("validateParent() with coverage error = %v", err)
+	}
+}
+
+func TestBackupHooksWireCallbacks(t *testing.T) {
+	var reused, failed, reconciled, before, uploaded bool
+	var completed, started, blobs, excluded int
+	hooks := backupHooks{
+		reuseSubtree:   func(string, string, *data.Node) bool { reused = true; return true },
+		errorHandler:   func(string, error) error { failed = true; return nil },
+		beforeSnapshot: func() error { before = true; return nil },
+		reconcileNode:  func(string, string, *data.Node) { reconciled = true },
+		deferredUploader: func(_ context.Context, _ func(context.Context, vaultic.BlobSaverWithAsync) error) error {
+			uploaded = true
+			return nil
+		},
+		progress: backupProgressHooks{
+			completeItem: func(string, archiver.ItemAction, archiver.ItemStats, time.Duration) { completed++ },
+			startFile:    func(string) { started++ },
+			completeBlob: func(uint64) { blobs++ },
+			excludedItem: func(string) { excluded++ },
+		},
+	}
+	target := &archiver.Archiver{}
+	hooks.wireReuseSubtree(target)
+	hooks.wireError(target)
+	hooks.wireProgress(target)
+	hooks.wireReconciliation(target)
+	var snapshotOpts archiver.SnapshotOptions
+	hooks.wireDeferredUploader(&snapshotOpts)
+
+	if !target.ReuseSubtree("", "", nil) || target.Error("", errors.New("read")) != nil {
+		t.Fatal("wired reuse or error callback returned an unexpected result")
+	}
+	target.CompleteItem("", archiver.ItemAction(""), archiver.ItemStats{}, 0)
+	target.StartFile("")
+	target.CompleteBlob(0)
+	target.ExcludedItem("")
+	target.ReconcileNode("", "", nil)
+	if err := target.BeforeSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotOpts.DeferredUploader(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !reused || !failed || !reconciled || !before || !uploaded || completed != 1 || started != 1 || blobs != 1 || excluded != 1 {
+		t.Fatalf("callbacks not all invoked: reuse=%v error=%v reconcile=%v before=%v upload=%v progress=%d/%d/%d/%d",
+			reused, failed, reconciled, before, uploaded, completed, started, blobs, excluded)
+	}
+}
+
+func TestBackupHooksDeferredCaptureChainsReconciliation(t *testing.T) {
+	dir := rtest.TempDir(t)
+	source := filepath.Join(dir, "source")
+	rtest.OK(t, os.WriteFile(source, []byte("data"), 0600))
+	capture := reconcile.NewDeferredCapture(fs.NewLocal())
+	called := false
+	target := &archiver.Archiver{ReconcileNode: func(string, string, *data.Node) { called = true }}
+	hooks := backupHooks{deferredCapture: capture}
+	hooks.wireDeferredCapture(target)
+	target.ReconcileNode("/source", source, &data.Node{Name: "source"})
+	observations, err := capture.Close()
+	rtest.OK(t, err)
+	if !called || len(observations) != 1 {
+		t.Fatalf("deferred capture did not chain: prior=%v observations=%d", called, len(observations))
 	}
 }
 

@@ -11,6 +11,54 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+func newPackActionStateForTest(indexPack map[vaultic.ID]packInfo) *packActionState {
+	return &packActionState{
+		targetPackSize:   100,
+		indexPack:        indexPack,
+		stats:            &PruneStats{},
+		printer:          vaultic.NewNoopPrinter(),
+		removePacksFirst: vaultic.NewIDSet(),
+		removePacks:      vaultic.NewIDSet(),
+	}
+}
+
+func TestPackActionStateProcessPack(t *testing.T) {
+	t.Run("unindexed", func(t *testing.T) {
+		state := newPackActionStateForTest(map[vaultic.ID]packInfo{})
+		id := vaultic.NewRandomID()
+
+		processed, err := state.processPack(id, 42)
+		rtest.OK(t, err)
+		rtest.Equals(t, false, processed)
+		rtest.Assert(t, state.removePacksFirst.Has(id), "unindexed pack was not selected for early removal")
+		rtest.Equals(t, uint64(42), state.stats.Size.Unref)
+	})
+
+	t.Run("repack candidate", func(t *testing.T) {
+		id := vaultic.NewRandomID()
+		info := packInfo{usedBlobs: 1, unusedBlobs: 1, usedSize: 60, unusedSize: 40, tpe: vaultic.DataBlob}
+		state := newPackActionStateForTest(map[vaultic.ID]packInfo{id: info})
+
+		processed, err := state.processPack(id, 100)
+		rtest.OK(t, err)
+		rtest.Equals(t, true, processed)
+		rtest.Equals(t, 0, len(state.indexPack))
+		rtest.Equals(t, []packInfoWithID{{ID: id, packInfo: info}}, state.repackCandidates)
+		rtest.Equals(t, uint(1), state.stats.Packs.PartlyUsed)
+	})
+
+	t.Run("size mismatch", func(t *testing.T) {
+		id := vaultic.NewRandomID()
+		info := packInfo{usedBlobs: 1, usedSize: 99, tpe: vaultic.DataBlob}
+		state := newPackActionStateForTest(map[vaultic.ID]packInfo{id: info})
+
+		processed, err := state.processPack(id, 100)
+		rtest.Equals(t, false, processed)
+		rtest.Equals(t, ErrSizeNotMatching, err)
+		rtest.Assert(t, state.indexPack[id].usedBlobs == 1, "mismatched pack was removed from index map")
+	})
+}
+
 // TestPruneMaxUnusedDuplicate checks that MaxUnused correctly accounts for duplicates.
 //
 // Create a repository containing blobs a to d that are stored in packs as follows:

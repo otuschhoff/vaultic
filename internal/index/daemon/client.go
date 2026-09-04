@@ -217,21 +217,62 @@ func Connect(ctx context.Context, options Options) (*Client, error) {
 // daemon's singleton lock successfully starts it; other callers retry attach.
 func Ensure(ctx context.Context, options Options) (*Client, error) {
 	options = options.withDefaults()
+	if err := validateEnsureOptions(options); err != nil {
+		return nil, err
+	}
+	client, err := connectExistingDaemon(ctx, options)
+	if err != nil || client != nil {
+		return client, err
+	}
+	if err := validateDaemonStartOptions(options); err != nil {
+		return nil, err
+	}
+
+	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		return nil, err
+	}
+	client, err = startDaemon(ctx, options, cmd, authRead, authWrite)
+	if err != nil || client != nil {
+		return client, err
+	}
+	return awaitDaemonReady(ctx, options, cmd)
+}
+
+func validateEnsureOptions(options Options) error {
 	if options.EncryptionMode != "" && options.EncryptionMode != "off" && options.EncryptionMode != "required" && options.EncryptionMode != "initialize" {
-		return nil, fmt.Errorf("%w: unsupported metadata encryption mode %q", ErrUnavailable, options.EncryptionMode)
+		return fmt.Errorf("%w: unsupported metadata encryption mode %q", ErrUnavailable, options.EncryptionMode)
 	}
 	if options.RebuildInitialize && (options.BrokerSocket == "" || options.EncryptionMode != "required") {
-		return nil, fmt.Errorf("%w: metadata rebuild initialization requires brokered required encryption", ErrUnavailable)
+		return fmt.Errorf("%w: metadata rebuild initialization requires brokered required encryption", ErrUnavailable)
 	}
 	if (options.EncryptionMode == "required" || options.EncryptionMode == "initialize") && options.PassphraseFile == "" && options.BrokerSocket == "" {
-		return nil, fmt.Errorf("%w: metadata recovery passphrase file is required", ErrUnavailable)
+		return fmt.Errorf("%w: metadata recovery passphrase file is required", ErrUnavailable)
 	}
 	if options.BrokerSocket != "" && options.BrokerManifest == "" {
-		return nil, fmt.Errorf("%w: broker release manifest is required", ErrUnavailable)
+		return fmt.Errorf("%w: broker release manifest is required", ErrUnavailable)
 	}
 	if options.RecoveryUnlock && options.PassphraseFile == "" {
-		return nil, fmt.Errorf("%w: recovery unlock requires a passphrase file", ErrUnavailable)
+		return fmt.Errorf("%w: recovery unlock requires a passphrase file", ErrUnavailable)
 	}
+	if err := validateProtectedFiles(options); err != nil {
+		return err
+	}
+	if options.ObjectStore == "s3" && options.S3Bucket == "" {
+		return fmt.Errorf("%w: S3 bucket is not configured", ErrUnavailable)
+	}
+	if options.ObjectStore != "" && options.ObjectStore != "local" && options.ObjectStore != "memory" && options.ObjectStore != "s3" {
+		return fmt.Errorf("%w: unsupported object store %q", ErrUnavailable, options.ObjectStore)
+	}
+	for _, network := range options.TCPAllowlist {
+		if _, _, err := net.ParseCIDR(network); err != nil {
+			return fmt.Errorf("%w: invalid TCP allowlist entry %q: %w", ErrUnavailable, network, err)
+		}
+	}
+	return nil
+}
+
+func validateProtectedFiles(options Options) error {
 	for description, path := range map[string]string{
 		"metadata recovery passphrase": options.PassphraseFile,
 		"Azure KMS token":              options.AzureTokenFile,
@@ -241,21 +282,14 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 	} {
 		if path != "" {
 			if err := validateProtectedFile(path, description); err != nil {
-				return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+				return fmt.Errorf("%w: %w", ErrUnavailable, err)
 			}
 		}
 	}
-	if options.ObjectStore == "s3" && options.S3Bucket == "" {
-		return nil, fmt.Errorf("%w: S3 bucket is not configured", ErrUnavailable)
-	}
-	if options.ObjectStore != "" && options.ObjectStore != "local" && options.ObjectStore != "memory" && options.ObjectStore != "s3" {
-		return nil, fmt.Errorf("%w: unsupported object store %q", ErrUnavailable, options.ObjectStore)
-	}
-	for _, network := range options.TCPAllowlist {
-		if _, _, err := net.ParseCIDR(network); err != nil {
-			return nil, fmt.Errorf("%w: invalid TCP allowlist entry %q: %w", ErrUnavailable, network, err)
-		}
-	}
+	return nil
+}
+
+func connectExistingDaemon(ctx context.Context, options Options) (*Client, error) {
 	probeCtx, cancelProbe := context.WithTimeout(ctx, dialAttemptTimeout(options))
 	client, connectErr := Connect(probeCtx, options)
 	cancelProbe()
@@ -266,16 +300,23 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		}
 		return client, nil
 	}
+	return nil, nil
+}
+
+func validateDaemonStartOptions(options Options) error {
 	if options.DaemonPath == "" {
-		return nil, fmt.Errorf("%w: daemon path is not configured", ErrUnavailable)
+		return fmt.Errorf("%w: daemon path is not configured", ErrUnavailable)
 	}
 	if options.TCPAddress != "" && len(options.TCPAllowlist) == 0 {
-		return nil, fmt.Errorf("%w: TCP allowlist is not configured", ErrUnavailable)
+		return fmt.Errorf("%w: TCP allowlist is not configured", ErrUnavailable)
 	}
 	if options.TCPAddress != "" && options.AuthToken == "" {
-		return nil, fmt.Errorf("%w: TCP authentication token is not configured", ErrUnavailable)
+		return fmt.Errorf("%w: TCP authentication token is not configured", ErrUnavailable)
 	}
+	return nil
+}
 
+func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error) {
 	cmd := exec.Command(options.DaemonPath)
 	var daemonErrors bytes.Buffer
 	cmd.Stderr = &limitedWriter{writer: &daemonErrors, remaining: 64 * 1024}
@@ -315,7 +356,7 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 		var pipeErr error
 		authRead, authWrite, pipeErr = os.Pipe()
 		if pipeErr != nil {
-			return nil, fmt.Errorf("create vaulticdb authentication pipe: %w", pipeErr)
+			return nil, nil, nil, fmt.Errorf("create vaulticdb authentication pipe: %w", pipeErr)
 		}
 		cmd.ExtraFiles = append(cmd.ExtraFiles, authRead)
 		cmd.Env = append(cmd.Env, "VAULTICDB_TCP_AUTH_TOKEN_FD="+strconv.Itoa(3+len(cmd.ExtraFiles)-1))
@@ -328,6 +369,15 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 			"VAULTICDB_TCP_METADATA="+tcpMetadataPath(options.TCPAddress),
 		)
 	}
+	return cmd, authRead, authWrite, nil
+}
+
+func startDaemon(
+	ctx context.Context,
+	options Options,
+	cmd *exec.Cmd,
+	authRead, authWrite *os.File,
+) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		if authRead != nil {
 			vaulticerrors.LogClose(authRead, "close vaulticdb authentication reader", log.Printf)
@@ -350,7 +400,10 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 			return nil, fmt.Errorf("send vaulticdb authentication token: %w", errors.Join(writeErr, closeErr))
 		}
 	}
+	return nil, nil
+}
 
+func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Client, error) {
 	client, err := retryDial(ctx, options)
 	if err != nil {
 		_ = cmd.Process.Kill()

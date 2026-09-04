@@ -267,122 +267,23 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		return summary, ctx.Err()
 	}
 
-	errorsFound := false
 	salvagePacks := vaultic.NewIDSet()
-
-	for _, hint := range hints {
-		switch hint := hint.(type) {
-		case *repository.ErrIncompletePackEntry:
-			printer.E("%s", hint.Error())
-			salvagePacks.Insert(hint.PackID)
-			errorsFound = true
-			summary.NumErrors++
-		case *repository.ErrDuplicatePacks:
-			printer.S("%s", hint.Error())
-			summary.HintRepairIndex = true
-		case *repository.ErrMixedPack:
-			printer.S("%s", hint.Error())
-			summary.HintPrune = true
-		default:
-			printer.E("error: %v\n", hint)
-			errorsFound = true
-		}
-	}
-
-	if summary.HintRepairIndex {
-		printer.S("Duplicate packs are non-critical, you can run `vaultic repair index' to correct this.\n")
-	}
-	if summary.HintPrune {
-		printer.S("Mixed packs with tree and data blobs are non-critical, you can run `vaultic prune` to correct this.\n")
-	}
-
-	if len(errs) > 0 {
-		for _, err := range errs {
-			printer.E("error: %v\n", err)
-		}
-
-		summary.NumErrors += len(errs)
-		summary.HintRepairIndex = true
-		printer.E("\nThe repository index is damaged and must be repaired. You must run `vaultic repair index' to correct this.\n\n")
+	errorsFound := handleCheckIndexResults(hints, errs, printer, &summary, salvagePacks)
+	if len(errs) != 0 {
 		return summary, errors.Fatal("repository contains errors")
 	}
 
-	orphanedPacks := 0
-	orphanedIDs := make([]vaultic.ID, 0)
-	errChan := make(chan error)
-
-	printer.P("check all packs\n")
-	go chkr.Packs(ctx, errChan)
-
-	for err := range errChan {
-		var packErr *repository.ErrPackMetadata
-		if errors.As(err, &packErr) {
-			if packErr.Orphaned {
-				orphanedPacks++
-				orphanedIDs = append(orphanedIDs, packErr.ID)
-				printer.V("%v\n", err)
-			} else {
-				if packErr.Truncated || packErr.Missing {
-					salvagePacks.Insert(packErr.ID)
-				}
-				errorsFound = true
-				summary.NumErrors++
-				printer.E("%v\n", err)
-			}
-		} else {
-			errorsFound = true
-			printer.E("%v\n", err)
-		}
+	packErrors, err := checkPackMetadata(ctx, repo, chkr, printer, &summary, salvagePacks)
+	if err != nil {
+		return summary, err
 	}
+	errorsFound = errorsFound || packErrors
 
-	if orphanedPacks > 0 {
-		recordOrphanHistory(ctx, repo, orphanedIDs, printer)
-		summary.HintPrune = true
-		if !errorsFound {
-			// hide notice if repository is damaged
-			printer.P("%d additional files were found in the repo, which likely contain duplicate data.\nThis is non-critical, you can run `vaultic prune` to correct this.\n", orphanedPacks)
-		}
+	brokenSnapshots, structureErrors, err := checkRepositoryStructure(ctx, chkr, printer, &summary)
+	if err != nil {
+		return summary, err
 	}
-	if ctx.Err() != nil {
-		return summary, ctx.Err()
-	}
-
-	printer.P("check snapshots, trees and blobs\n")
-	errChan = make(chan error)
-	var brokenSnapshots []string
-	var wg sync.WaitGroup
-
-	wg.Go(func() {
-		bar := printer.NewCounter("snapshots")
-		defer bar.Done()
-		chkr.Structure(ctx, bar, errChan)
-	})
-
-	for err := range errChan {
-		errorsFound = true
-		switch e := err.(type) {
-		case *checker.TreeError:
-			printer.E("error for tree %v:\n", e.ID.Str())
-			for _, treeErr := range e.Errors {
-				summary.NumErrors++
-				printer.E("  %v\n", treeErr)
-			}
-		case *checker.SnapshotError:
-			printer.E("snapshot error %v: %v", e.ID, e.Message)
-			brokenSnapshots = append(brokenSnapshots, e.ID)
-		default:
-			summary.NumErrors++
-			printer.E("error: %v\n", err)
-		}
-	}
-
-	// Wait for the progress bar to be complete before printing more below.
-	// Must happen after `errChan` is read from in the above loop to avoid
-	// deadlocking in the case of errors.
-	wg.Wait()
-	if ctx.Err() != nil {
-		return summary, ctx.Err()
-	}
+	errorsFound = errorsFound || structureErrors
 
 	// the following block only used for tests
 	if opts.CheckUnused {
@@ -396,39 +297,31 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		}
 	}
 
-	readDataFilter, err := buildPacksFilter(opts, printer, chkr.IsFiltered())
+	dataErrors, err := checkPackData(ctx, opts, chkr, printer, &summary, salvagePacks)
 	if err != nil {
 		return summary, err
 	}
-
-	if readDataFilter != nil {
-		errChan := make(chan error)
-
-		go chkr.ReadPacks(ctx, readDataFilter, printer, errChan)
-
-		for err := range errChan {
-			errorsFound = true
-			summary.NumErrors++
-			printer.E("%v\n", err)
-			if err, ok := err.(*repository.ErrPackData); ok {
-				salvagePacks.Insert(err.PackID)
-			}
-		}
-	}
+	errorsFound = errorsFound || dataErrors
 
 	if len(salvagePacks) > 0 {
-		printer.E("\nThe repository contains damaged pack files. These damaged files must be removed to repair the repository. This can be done using the following commands. Please read the troubleshooting guide at https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
+		printer.E("\nThe repository contains damaged pack files. These damaged files must be removed to repair the repository. " +
+			"This can be done using the following commands. Please read the troubleshooting guide at " +
+			"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
 		for id := range salvagePacks {
 			summary.BrokenPacks = append(summary.BrokenPacks, id.String())
 		}
 		printer.E("vaultic repair packs %v\nrestic repair snapshots --forget\n\n", strings.Join(summary.BrokenPacks, " "))
-		printer.E("Damaged pack files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
+		printer.E("Damaged pack files can be caused by backend problems, hardware problems or bugs in vaultic. " +
+			"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
 	}
 
 	if len(brokenSnapshots) > 0 {
-		printer.E("\nThe repository contains damaged snapshot files. These damaged files must be removed to repair the repository. This can be done using the following commands. Please read the troubleshooting guide at https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
+		printer.E("\nThe repository contains damaged snapshot files. These damaged files must be removed to repair the repository. " +
+			"This can be done using the following commands. Please read the troubleshooting guide at " +
+			"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
 		printer.E("vaultic repair snapshots --forget %s\n\n", strings.Join(brokenSnapshots, " "))
-		printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
+		printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. " +
+			"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
 	}
 
 	if ctx.Err() != nil {
@@ -455,12 +348,146 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 
 	if errorsFound {
 		if len(salvagePacks) == 0 && len(brokenSnapshots) == 0 {
-			printer.E("\nThe repository is damaged and must be repaired. Please follow the troubleshooting guide at https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html .\n\n")
+			printer.E("\nThe repository is damaged and must be repaired. Please follow the troubleshooting guide at " +
+				"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html .\n\n")
 		}
 		return summary, errors.Fatal("repository contains errors")
 	}
 	printer.P("no errors were found\n")
 	return summary, nil
+}
+
+func handleCheckIndexResults(hints, indexErrors []error, printer vaultic.Printer, summary *checkSummary, salvagePacks vaultic.IDSet) bool {
+	errorsFound := false
+	for _, hint := range hints {
+		switch hint := hint.(type) {
+		case *repository.ErrIncompletePackEntry:
+			printer.E("%s", hint.Error())
+			salvagePacks.Insert(hint.PackID)
+			errorsFound = true
+			summary.NumErrors++
+		case *repository.ErrDuplicatePacks:
+			printer.S("%s", hint.Error())
+			summary.HintRepairIndex = true
+		case *repository.ErrMixedPack:
+			printer.S("%s", hint.Error())
+			summary.HintPrune = true
+		default:
+			printer.E("error: %v\n", hint)
+			errorsFound = true
+		}
+	}
+	if summary.HintRepairIndex {
+		printer.S("Duplicate packs are non-critical, you can run `vaultic repair index' to correct this.\n")
+	}
+	if summary.HintPrune {
+		printer.S("Mixed packs with tree and data blobs are non-critical, you can run `vaultic prune` to correct this.\n")
+	}
+	for _, err := range indexErrors {
+		printer.E("error: %v\n", err)
+	}
+	if len(indexErrors) != 0 {
+		summary.NumErrors += len(indexErrors)
+		summary.HintRepairIndex = true
+		printer.E("\nThe repository index is damaged and must be repaired. You must run `vaultic repair index' to correct this.\n\n")
+	}
+	return errorsFound
+}
+
+func checkPackMetadata(
+	ctx context.Context, repo *repository.Repository, chkr *checker.Checker,
+	printer vaultic.Printer, summary *checkSummary, salvagePacks vaultic.IDSet,
+) (bool, error) {
+	orphanedIDs := make([]vaultic.ID, 0)
+	errorsFound := false
+	errChan := make(chan error)
+	printer.P("check all packs\n")
+	go chkr.Packs(ctx, errChan)
+	for err := range errChan {
+		var packErr *repository.ErrPackMetadata
+		if !errors.As(err, &packErr) {
+			errorsFound = true
+			printer.E("%v\n", err)
+			continue
+		}
+		if packErr.Orphaned {
+			orphanedIDs = append(orphanedIDs, packErr.ID)
+			printer.V("%v\n", err)
+			continue
+		}
+		if packErr.Truncated || packErr.Missing {
+			salvagePacks.Insert(packErr.ID)
+		}
+		errorsFound = true
+		summary.NumErrors++
+		printer.E("%v\n", err)
+	}
+	if len(orphanedIDs) != 0 {
+		recordOrphanHistory(ctx, repo, orphanedIDs, printer)
+		summary.HintPrune = true
+		if !errorsFound {
+			printer.P("%d additional files were found in the repo, which likely contain duplicate data.\n"+
+				"This is non-critical, you can run `vaultic prune` to correct this.\n", len(orphanedIDs))
+		}
+	}
+	return errorsFound, ctx.Err()
+}
+
+func checkRepositoryStructure(ctx context.Context, chkr *checker.Checker, printer vaultic.Printer, summary *checkSummary) ([]string, bool, error) {
+	printer.P("check snapshots, trees and blobs\n")
+	errChan := make(chan error)
+	brokenSnapshots := make([]string, 0)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		bar := printer.NewCounter("snapshots")
+		defer bar.Done()
+		chkr.Structure(ctx, bar, errChan)
+	})
+	errorsFound := false
+	for err := range errChan {
+		errorsFound = true
+		var treeErr *checker.TreeError
+		var snapshotErr *checker.SnapshotError
+		switch {
+		case errors.As(err, &treeErr):
+			printer.E("error for tree %v:\n", treeErr.ID.Str())
+			for _, err := range treeErr.Errors {
+				summary.NumErrors++
+				printer.E("  %v\n", err)
+			}
+		case errors.As(err, &snapshotErr):
+			printer.E("snapshot error %v: %v", snapshotErr.ID, snapshotErr.Message)
+			brokenSnapshots = append(brokenSnapshots, snapshotErr.ID)
+		default:
+			summary.NumErrors++
+			printer.E("error: %v\n", err)
+		}
+	}
+	wg.Wait()
+	return brokenSnapshots, errorsFound, ctx.Err()
+}
+
+func checkPackData(
+	ctx context.Context, opts CheckOptions, chkr *checker.Checker,
+	printer vaultic.Printer, summary *checkSummary, salvagePacks vaultic.IDSet,
+) (bool, error) {
+	readDataFilter, err := buildPacksFilter(opts, printer, chkr.IsFiltered())
+	if err != nil || readDataFilter == nil {
+		return false, err
+	}
+	errChan := make(chan error)
+	go chkr.ReadPacks(ctx, readDataFilter, printer, errChan)
+	errorsFound := false
+	for err := range errChan {
+		errorsFound = true
+		summary.NumErrors++
+		printer.E("%v\n", err)
+		var packErr *repository.ErrPackData
+		if errors.As(err, &packErr) {
+			salvagePacks.Insert(packErr.PackID)
+		}
+	}
+	return errorsFound, nil
 }
 
 func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,

@@ -204,7 +204,11 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 		return nil, err
 	}
 
-	classification, err := classifyPacksWithPlacement(packs, packMembers, packMemberBytes, blobTypes, unreachable, existing, placements, model, time.Now(), opts.MinCandidateAge)
+	classification, err := classifyPacksWithPlacement(gcClassificationInput{
+		packs: packs, packMembers: packMembers, packMemberBytes: packMemberBytes,
+		blobTypes: blobTypes, unreachable: unreachable, existing: existing,
+		placements: placements, model: model, now: time.Now(), minAge: opts.MinCandidateAge,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +269,19 @@ type gcClassification struct {
 	packsScanned, wholePackCandidates, mixedPackCandidates, pendingAge uint64
 }
 
+type gcClassificationInput struct {
+	packs           map[vaultic.ID]schema.PackRecord
+	packMembers     map[vaultic.ID][]vaultic.ID
+	packMemberBytes map[vaultic.ID]map[vaultic.ID]uint64
+	blobTypes       map[vaultic.ID]schema.BlobType
+	unreachable     map[vaultic.ID]struct{}
+	existing        map[string]int64
+	placements      map[vaultic.ID]map[uint64]schema.PlacementRecord
+	model           PlacementModel
+	now             time.Time
+	minAge          time.Duration
+}
+
 func classifyPacks(
 	packs map[vaultic.ID]schema.PackRecord,
 	packMembers map[vaultic.ID][]vaultic.ID,
@@ -274,94 +291,99 @@ func classifyPacks(
 	now time.Time,
 	minAge time.Duration,
 ) (gcClassification, error) {
-	return classifyPacksWithPlacement(packs, packMembers, nil, blobTypes, unreachable, existing, nil, PlacementModel{}, now, minAge)
+	return classifyPacksWithPlacement(gcClassificationInput{
+		packs: packs, packMembers: packMembers, blobTypes: blobTypes,
+		unreachable: unreachable, existing: existing, now: now, minAge: minAge,
+	})
 }
 
-func classifyPacksWithPlacement(
-	packs map[vaultic.ID]schema.PackRecord,
-	packMembers map[vaultic.ID][]vaultic.ID,
-	packMemberBytes map[vaultic.ID]map[vaultic.ID]uint64,
-	blobTypes map[vaultic.ID]schema.BlobType,
-	unreachable map[vaultic.ID]struct{},
-	existing map[string]int64,
-	placements map[vaultic.ID]map[uint64]schema.PlacementRecord,
-	model PlacementModel,
-	now time.Time,
-	minAge time.Duration,
-) (gcClassification, error) {
+func classifyPacksWithPlacement(input gcClassificationInput) (gcClassification, error) {
 	result := gcClassification{
 		wholePacks: make(map[vaultic.ID][]vaultic.ID), mixedPacks: make(map[vaultic.ID]*gcBlobSet),
 		mixedPackMembers: make(map[vaultic.ID][]vaultic.ID), packBytes: make(map[vaultic.ID]uint64),
 	}
-	for packID, record := range packs {
+	for packID, record := range input.packs {
 		if record.Lifecycle != schema.PackPublished {
 			continue
 		}
-		members := packMembers[packID]
+		members := input.packMembers[packID]
 		if len(members) == 0 {
 			continue
 		}
 		result.packsScanned++
-		keep := newGCBlobSet()
-		allUnreachable := true
-		for _, blobID := range members {
-			if _, gone := unreachable[blobID]; gone {
-				continue
-			}
-			allUnreachable = false
-			keep.Insert(vaultic.BlobHandle{ID: blobID, Type: legacyBlobType(blobTypes[blobID])})
-		}
+		keep, allUnreachable := livePackMembers(members, input)
 		if !allUnreachable && keep.Len() == len(members) {
 			continue // pack is fully live; not a GC candidate at all
 		}
 
 		key := schema.GarbageCollectionKey(schema.GCPack, schema.ID(packID))
-		discovered := now
-		if previous, found := existing[string(key)]; found {
-			discovered = time.Unix(0, previous)
-		}
-		// A prior --discover-only pass only ever records blob-level
-		// candidates; honor the earliest of those timestamps too, so
-		// continuous unreachability is measured from when a blob was first
-		// observed, not only from when a pack was first classified.
-		for _, blobID := range members {
-			if _, gone := unreachable[blobID]; !gone {
-				continue
-			}
-			blobKey := schema.GarbageCollectionKey(schema.GCBlob, schema.ID(blobID))
-			if previous, found := existing[string(blobKey)]; found {
-				if candidate := time.Unix(0, previous); candidate.Before(discovered) {
-					discovered = candidate
-				}
-			}
-		}
+		discovered := packDiscoveredAt(key, members, input)
 		value, err := (schema.GarbageCollectionRecord{State: schema.GCRevalidated, DiscoveredUnixNano: discovered.UnixNano()}).MarshalBinary()
 		if err != nil {
 			return gcClassification{}, err
 		}
 		result.gcPuts = append(result.gcPuts, daemon.Mutation{Key: key, Value: value})
 
-		ready := now.Sub(discovered) >= minAge
-		if allUnreachable {
-			result.wholePackCandidates++
-			result.packBytes[packID] = record.PhysicalSize
-			if ready {
-				result.wholePacks[packID] = members
-			} else {
-				result.pendingAge++
-			}
-		} else {
-			result.mixedPackCandidates++
-			result.packBytes[packID] = record.PhysicalSize
-			if ready && mixedPackRepackAllowed(record, packMemberBytes[packID], unreachable, placements[packID], model, now) {
-				result.mixedPacks[packID] = keep
-				result.mixedPackMembers[packID] = members
-			} else {
-				result.pendingAge++
+		ready := input.now.Sub(discovered) >= input.minAge
+		classifyPackCandidate(&result, packID, record, members, keep, allUnreachable, ready, input)
+	}
+	return result, nil
+}
+
+func livePackMembers(members []vaultic.ID, input gcClassificationInput) (*gcBlobSet, bool) {
+	keep := newGCBlobSet()
+	allUnreachable := true
+	for _, blobID := range members {
+		if _, gone := input.unreachable[blobID]; gone {
+			continue
+		}
+		allUnreachable = false
+		keep.Insert(vaultic.BlobHandle{ID: blobID, Type: legacyBlobType(input.blobTypes[blobID])})
+	}
+	return keep, allUnreachable
+}
+
+func packDiscoveredAt(packKey []byte, members []vaultic.ID, input gcClassificationInput) time.Time {
+	discovered := input.now
+	if previous, found := input.existing[string(packKey)]; found {
+		discovered = time.Unix(0, previous)
+	}
+	for _, blobID := range members {
+		if _, gone := input.unreachable[blobID]; !gone {
+			continue
+		}
+		blobKey := schema.GarbageCollectionKey(schema.GCBlob, schema.ID(blobID))
+		if previous, found := input.existing[string(blobKey)]; found {
+			if candidate := time.Unix(0, previous); candidate.Before(discovered) {
+				discovered = candidate
 			}
 		}
 	}
-	return result, nil
+	return discovered
+}
+
+func classifyPackCandidate(
+	result *gcClassification, packID vaultic.ID, record schema.PackRecord,
+	members []vaultic.ID, keep *gcBlobSet, allUnreachable, ready bool, input gcClassificationInput,
+) {
+	result.packBytes[packID] = record.PhysicalSize
+	if allUnreachable {
+		result.wholePackCandidates++
+		if ready {
+			result.wholePacks[packID] = members
+		} else {
+			result.pendingAge++
+		}
+		return
+	}
+
+	result.mixedPackCandidates++
+	if ready && mixedPackRepackAllowed(record, input.packMemberBytes[packID], input.unreachable, input.placements[packID], input.model, input.now) {
+		result.mixedPacks[packID] = keep
+		result.mixedPackMembers[packID] = members
+	} else {
+		result.pendingAge++
+	}
 }
 
 // Execute performs the destructive part of a GC pass: retrying previously

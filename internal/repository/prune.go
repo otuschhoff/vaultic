@@ -130,6 +130,19 @@ type packInfoWithID struct {
 	mustCompress bool
 }
 
+type packActionState struct {
+	opts                  PruneOptions
+	repoVersion           uint
+	targetPackSize        uint
+	indexPack             map[vaultic.ID]packInfo
+	stats                 *PruneStats
+	printer               vaultic.Printer
+	removePacksFirst      vaultic.IDSet
+	removePacks           vaultic.IDSet
+	repackCandidates      []packInfoWithID
+	repackSmallCandidates []packInfoWithID
+}
+
 // PlanPrune selects which files to rewrite and which to delete and which blobs to keep.
 // Also some summary statistics are returned.
 func PlanPrune(ctx context.Context, opts PruneOptions, repo *Repository, getUsedBlobs func(ctx context.Context, repo vaultic.Repository, usedBlobs vaultic.FindBlobSet) error, printer vaultic.Printer) (*PrunePlan, error) {
@@ -424,97 +437,116 @@ func calculateTargetPacksize(opts PruneOptions, indexPack map[vaultic.ID]packInf
 }
 
 func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, indexPack map[vaultic.ID]packInfo, stats *PruneStats, printer vaultic.Printer) (PrunePlan, error) {
-	removePacksFirst := vaultic.NewIDSet()
-	removePacks := vaultic.NewIDSet()
-	repackPacks := vaultic.NewIDSet()
-
-	var repackCandidates []packInfoWithID
-	var repackSmallCandidates []packInfoWithID
-	repoVersion := repo.Config().Version
-
 	targetPackSize := calculateTargetPacksize(opts, indexPack)
-	// loop over all packs and decide what to do
-	bar := printer.NewCounter("packs processed")
-	bar.SetMax(uint64(len(indexPack)))
-	err := repo.List(ctx, vaultic.PackFile, func(id vaultic.ID, packSize int64) error {
-		p, ok := indexPack[id]
-		if !ok {
-			// Pack was not referenced in index and is not used  => immediately remove!
-			printer.V("will remove pack %v as it is unused and not indexed", id.Str())
-			removePacksFirst.Insert(id)
-			stats.Size.Unref += uint64(packSize)
-			return nil
-		}
-
-		if p.unusedSize+p.usedSize != uint64(packSize) && p.usedBlobs != 0 {
-			// Pack size does not fit and pack is needed => error
-			// If the pack is not needed, this is no error, the pack can
-			// and will be simply removed, see below.
-			printer.E("pack %s: calculated size %d does not match real size %d\nRun 'vaultic repair index'",
-				id.Str(), p.unusedSize+p.usedSize, packSize)
-			return ErrSizeNotMatching
-		}
-
-		// statistics
-		switch {
-		case p.usedBlobs == 0:
-			stats.Packs.Unused++
-		case p.unusedBlobs == 0:
-			stats.Packs.Used++
-		default:
-			stats.Packs.PartlyUsed++
-		}
-
-		if p.uncompressed {
-			stats.Size.Uncompressed += p.unusedSize + p.usedSize
-		}
-		mustCompress := false
-		if repoVersion >= 2 {
-			// repo v2: always repack tree blobs if uncompressed
-			// compress data blobs if requested
-			mustCompress = (p.tpe == vaultic.TreeBlob || opts.RepackUncompressed) && p.uncompressed
-		}
-
-		// decide what to do
-		switch {
-		case p.usedBlobs == 0:
-			// All blobs in pack are no longer used => remove pack!
-			removePacks.Insert(id)
-			stats.Blobs.Remove += p.unusedBlobs
-			stats.Size.Remove += p.unusedSize
-
-		case opts.RepackCacheableOnly && p.tpe == vaultic.DataBlob:
-			// if this is a data pack and --repack-cacheable-only is set => keep pack!
-			stats.Packs.Keep++
-
-		case opts.RepackAll && p.usedBlobs != 0:
-			// --repack-all: repack every pack that still has used blobs
-			repackCandidates = append(repackCandidates, packInfoWithID{ID: id, packInfo: p, mustCompress: mustCompress})
-
-		case p.unusedBlobs == 0 && p.tpe != vaultic.InvalidBlob && !mustCompress:
-			if packSize >= int64(targetPackSize) {
-				// All blobs in pack are used and not mixed => keep pack!
-				stats.Packs.Keep++
-			} else {
-				repackSmallCandidates = append(repackSmallCandidates, packInfoWithID{ID: id, packInfo: p, mustCompress: mustCompress})
-			}
-
-		default:
-			// all other packs are candidates for repacking
-			repackCandidates = append(repackCandidates, packInfoWithID{ID: id, packInfo: p, mustCompress: mustCompress})
-		}
-
-		delete(indexPack, id)
-		bar.Add(1)
-		return nil
-	})
-
-	bar.Done()
-	if err != nil {
+	state := packActionState{
+		opts:             opts,
+		repoVersion:      repo.Config().Version,
+		targetPackSize:   targetPackSize,
+		indexPack:        indexPack,
+		stats:            stats,
+		printer:          printer,
+		removePacksFirst: vaultic.NewIDSet(),
+		removePacks:      vaultic.NewIDSet(),
+	}
+	if err := state.listPacks(ctx, repo); err != nil {
 		return PrunePlan{}, err
 	}
 
-	// At this point indexPacks contains only missing packs!
+	ignorePacks, err := resolveMissingPacks(indexPack, stats, printer)
+	if err != nil {
+		return PrunePlan{}, err
+	}
+	state.includeSmallCandidates()
+	sortRepackCandidates(state.repackCandidates, targetPackSize)
+	repackPacks := selectRepackPacks(opts, targetPackSize, state.repackCandidates, stats)
+
+	stats.Packs.Unref = uint(len(state.removePacksFirst))
+	stats.Packs.Repack = uint(len(repackPacks))
+	stats.Packs.Remove = uint(len(state.removePacks))
+
+	if repo.Config().Version < 2 {
+		// compression not supported for repository format version 1
+		stats.Size.Uncompressed = 0
+	}
+
+	return PrunePlan{removePacksFirst: state.removePacksFirst,
+		removePacks: state.removePacks,
+		repackPacks: repackPacks,
+		ignorePacks: ignorePacks,
+	}, nil
+}
+
+func (state *packActionState) listPacks(ctx context.Context, repo *Repository) error {
+	bar := state.printer.NewCounter("packs processed")
+	bar.SetMax(uint64(len(state.indexPack)))
+	err := repo.List(ctx, vaultic.PackFile, func(id vaultic.ID, packSize int64) error {
+		processed, err := state.processPack(id, packSize)
+		if err != nil {
+			return err
+		}
+		if processed {
+			bar.Add(1)
+		}
+		return nil
+	})
+	bar.Done()
+	return err
+}
+
+func (state *packActionState) processPack(id vaultic.ID, packSize int64) (bool, error) {
+	p, ok := state.indexPack[id]
+	if !ok {
+		state.printer.V("will remove pack %v as it is unused and not indexed", id.Str())
+		state.removePacksFirst.Insert(id)
+		state.stats.Size.Unref += uint64(packSize)
+		return false, nil
+	}
+
+	if p.unusedSize+p.usedSize != uint64(packSize) && p.usedBlobs != 0 {
+		state.printer.E("pack %s: calculated size %d does not match real size %d\nRun 'vaultic repair index'",
+			id.Str(), p.unusedSize+p.usedSize, packSize)
+		return false, ErrSizeNotMatching
+	}
+
+	switch {
+	case p.usedBlobs == 0:
+		state.stats.Packs.Unused++
+	case p.unusedBlobs == 0:
+		state.stats.Packs.Used++
+	default:
+		state.stats.Packs.PartlyUsed++
+	}
+	if p.uncompressed {
+		state.stats.Size.Uncompressed += p.unusedSize + p.usedSize
+	}
+	mustCompress := state.repoVersion >= 2 &&
+		(p.tpe == vaultic.TreeBlob || state.opts.RepackUncompressed) && p.uncompressed
+	candidate := packInfoWithID{ID: id, packInfo: p, mustCompress: mustCompress}
+
+	switch {
+	case p.usedBlobs == 0:
+		state.removePacks.Insert(id)
+		state.stats.Blobs.Remove += p.unusedBlobs
+		state.stats.Size.Remove += p.unusedSize
+	case state.opts.RepackCacheableOnly && p.tpe == vaultic.DataBlob:
+		state.stats.Packs.Keep++
+	case state.opts.RepackAll && p.usedBlobs != 0:
+		state.repackCandidates = append(state.repackCandidates, candidate)
+	case p.unusedBlobs == 0 && p.tpe != vaultic.InvalidBlob && !mustCompress:
+		if packSize >= int64(state.targetPackSize) {
+			state.stats.Packs.Keep++
+		} else {
+			state.repackSmallCandidates = append(state.repackSmallCandidates, candidate)
+		}
+	default:
+		state.repackCandidates = append(state.repackCandidates, candidate)
+	}
+
+	delete(state.indexPack, id)
+	return true, nil
+}
+
+func resolveMissingPacks(indexPack map[vaultic.ID]packInfo, stats *PruneStats, printer vaultic.Printer) (vaultic.IDSet, error) {
 
 	// missing packs that are not needed can be ignored
 	ignorePacks := vaultic.NewIDSet()
@@ -532,7 +564,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 		for id := range indexPack {
 			printer.E("  %v", id)
 		}
-		return PrunePlan{}, ErrPacksMissing
+		return nil, ErrPacksMissing
 	}
 	if len(ignorePacks) != 0 {
 		printer.E("Missing but unneeded pack files are referenced in the index, will be repaired\n")
@@ -540,15 +572,20 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 			printer.E("will forget missing pack file %v", id)
 		}
 	}
+	return ignorePacks, nil
+}
 
-	if len(repackSmallCandidates) < 10 {
+func (state *packActionState) includeSmallCandidates() {
+	if len(state.repackSmallCandidates) < 10 {
 		// too few small files to be worth the trouble, this also prevents endlessly repacking
 		// if there is just a single pack file below the target size
-		stats.Packs.Keep += uint(len(repackSmallCandidates))
+		state.stats.Packs.Keep += uint(len(state.repackSmallCandidates))
 	} else {
-		repackCandidates = append(repackCandidates, repackSmallCandidates...)
+		state.repackCandidates = append(state.repackCandidates, state.repackSmallCandidates...)
 	}
+}
 
+func sortRepackCandidates(repackCandidates []packInfoWithID, targetPackSize uint) {
 	// Sort repackCandidates such that packs with highest ratio unused/used space are picked first.
 	// This is equivalent to sorting by unused / total space.
 	// Instead of unused[i] / used[i] > unused[j] / used[j] we use
@@ -570,7 +607,10 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 		}
 		return pi.unusedSize*pj.usedSize > pj.unusedSize*pi.usedSize
 	})
+}
 
+func selectRepackPacks(opts PruneOptions, targetPackSize uint, repackCandidates []packInfoWithID, stats *PruneStats) vaultic.IDSet {
+	repackPacks := vaultic.NewIDSet()
 	repack := func(id vaultic.ID, p packInfo) {
 		repackPacks.Insert(id)
 		stats.Blobs.Repack += p.unusedBlobs + p.usedBlobs
@@ -608,21 +648,7 @@ func decidePackAction(ctx context.Context, opts PruneOptions, repo *Repository, 
 			repack(p.ID, p.packInfo)
 		}
 	}
-
-	stats.Packs.Unref = uint(len(removePacksFirst))
-	stats.Packs.Repack = uint(len(repackPacks))
-	stats.Packs.Remove = uint(len(removePacks))
-
-	if repo.Config().Version < 2 {
-		// compression not supported for repository format version 1
-		stats.Size.Uncompressed = 0
-	}
-
-	return PrunePlan{removePacksFirst: removePacksFirst,
-		removePacks: removePacks,
-		repackPacks: repackPacks,
-		ignorePacks: ignorePacks,
-	}, nil
+	return repackPacks
 }
 
 func (plan *PrunePlan) Stats() PruneStats {

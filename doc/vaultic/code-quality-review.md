@@ -335,6 +335,17 @@ Goal: bring the top-complexity functions under the lint thresholds. One function
 
 Exit criteria: `funlen` (120/80) and `gocyclo` (30) promoted to error with ≤ 10 explicitly annotated exceptions; no function with cyclomatic complexity > 60.
 
+**Implementation status (2026-09-04): complete.**
+
+- Schema key parsing and value validation now dispatch through prefix-owned codecs. The exhaustive key-kind table verifies that every `KeyKind` is represented, while malformed and truncated-key coverage preserves exact rejection behavior.
+- Analytics consistency checking is organized as a `consistencyChecker` with invariant-specific methods. Corrupt values and store read failures are reported as unreadable findings without preventing independent checks from continuing.
+- Backup execution is split into target preparation, source and repository opening, archiver configuration, execution, and reporting. `backupHooks` owns callback wiring including deferred reconciliation capture, and option validation is separated into deferred, parent/pathdiff, and stdin checks.
+- Reconciled revision publication, pack import, and GDPR forget use explicit plan values and short transaction coordinators. Repository opening is separated into location resolution, authentication, and engine attachment.
+- The seven functions identified with large parameter lists now accept request structs. The remaining named hotspots were decomposed: `runCheck`, `runForgetLegacy`, `MasterIndex.Rewrite`, `decidePackAction`, and `Client.Ensure` now delegate to focused phases with direct tests for extracted decisions.
+- The temporary Phase 2 `funlen` and `gocyclo` exclusions were removed. The exhaustive uncapped golangci-lint v2.12 new-code gate reports zero issues with no `funlen` or `gocyclo` annotations; maximum measured cyclomatic complexity fell from 184 to 47.
+- Reproducible post-phase metrics are 469 production Go files, 99,302 non-generated production Go LOC, 4,032 functions, 58 functions over 100 lines, 8 over 150 lines, 21 functions with at least eight parameters, 18 files over 800 lines, 320 lines over 200 bytes, and 15,505 Rust LOC.
+- Validation covers all 2,109 Go tests and 88 Rust tests, strict Clippy and Rust formatting, the exhaustive Go lint gate, Linux and Windows compilation, deterministic metrics, retained Go and Rust size limits, and patch hygiene.
+
 ### Phase 4 — Package and module restructuring (#6, #7)
 
 Goal: fix the two structural concentrations — the flat CLI package and the Rust entrypoint — now that the code inside them is smaller.

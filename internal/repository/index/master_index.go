@@ -384,6 +384,38 @@ type MasterIndexRewriteOpts struct {
 	ObsoleteIndexFunc func(obsolete vaultic.IDSet)
 }
 
+type rewriteTask struct {
+	idx *Index
+}
+
+type rewritePipeline struct {
+	master       *MasterIndex
+	repo         vaultic.Unpacked[vaultic.FileType]
+	excludePacks vaultic.IDSet
+	progress     vaultic.Counter
+	opts         MasterIndexRewriteOpts
+	group        *errgroup.Group
+	ctx          context.Context
+	rewriteCh    chan rewriteTask
+	saveCh       chan *Index
+	obsolete     vaultic.IDSet
+}
+
+func rewriteIndexIDs(mi *MasterIndex, oldIndexes vaultic.IDSet) vaultic.IDSet {
+	if oldIndexes != nil {
+		return oldIndexes
+	}
+	return mi.IDs()
+}
+
+func cloneRewriteExcludes(excludePacks vaultic.IDSet) vaultic.IDSet {
+	excludePacks = excludePacks.Clone()
+	if excludePacks == nil {
+		return vaultic.NewIDSet()
+	}
+	return excludePacks
+}
+
 // Rewrite removes packs whose ID is in excludePacks from all known indexes.
 // It also removes the rewritten index files and those listed in extraObsolete.
 // If oldIndexes is not nil, then only the indexes in this set are processed.
@@ -397,14 +429,7 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaulti
 		}
 	}
 
-	var indexes vaultic.IDSet
-	if oldIndexes != nil {
-		// repair index adds new index entries for already existing pack files
-		// only remove the old (possibly broken) entries by only processing old indexes
-		indexes = oldIndexes
-	} else {
-		indexes = mi.IDs()
-	}
+	indexes := rewriteIndexIDs(mi, oldIndexes)
 
 	p := opts.SaveProgress
 	if p == nil {
@@ -417,36 +442,53 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaulti
 	mi.clear()
 	runtime.GC()
 
-	// copy excludePacks to prevent unintended sideeffects
-	excludePacks = excludePacks.Clone()
-	if excludePacks == nil {
-		excludePacks = vaultic.NewIDSet()
-	}
+	excludePacks = cloneRewriteExcludes(excludePacks)
 	debug.Log("start rebuilding index of %d indexes, excludePacks: %v", len(indexes), excludePacks)
-	wg, wgCtx := errgroup.WithContext(ctx)
+	group, groupCtx := errgroup.WithContext(ctx)
+	pipeline := rewritePipeline{
+		master:       mi,
+		repo:         repo,
+		excludePacks: excludePacks,
+		progress:     p,
+		opts:         opts,
+		group:        group,
+		ctx:          groupCtx,
+		rewriteCh:    make(chan rewriteTask),
+		saveCh:       make(chan *Index),
+		obsolete:     vaultic.NewIDSet(extraObsolete...),
+	}
+	pipeline.startLoaders(indexes)
+	pipeline.startRewriter()
+	pipeline.startSavers()
 
+	err := group.Wait()
+	p.Done()
+	if err != nil {
+		return fmt.Errorf("failed to rewrite indexes: %w", err)
+	}
+
+	return deleteObsoleteIndexes(ctx, repo, pipeline.obsolete, opts)
+}
+
+func (pipeline *rewritePipeline) startLoaders(indexes vaultic.IDSet) {
 	idxCh := make(chan vaultic.ID)
-	wg.Go(func() error {
+	pipeline.group.Go(func() error {
 		defer close(idxCh)
 		for id := range indexes {
 			select {
 			case idxCh <- id:
-			case <-wgCtx.Done():
-				return wgCtx.Err()
+			case <-pipeline.ctx.Done():
+				return pipeline.ctx.Err()
 			}
 		}
 		return nil
 	})
 
-	var rewriteWg sync.WaitGroup
-	type rewriteTask struct {
-		idx *Index
-	}
-	rewriteCh := make(chan rewriteTask)
+	var loaders sync.WaitGroup
 	loader := func() error {
-		defer rewriteWg.Done()
+		defer loaders.Done()
 		for id := range idxCh {
-			buf, err := repo.LoadUnpacked(wgCtx, vaultic.IndexFile, id)
+			buf, err := pipeline.repo.LoadUnpacked(pipeline.ctx, vaultic.IndexFile, id)
 			if err != nil {
 				return fmt.Errorf("LoadUnpacked(%v): %w", id.Str(), err)
 			}
@@ -454,129 +496,139 @@ func (mi *MasterIndex) Rewrite(ctx context.Context, repo vaultic.Unpacked[vaulti
 			if err != nil {
 				return err
 			}
-
 			select {
-			case rewriteCh <- rewriteTask{idx}:
-			case <-wgCtx.Done():
-				return wgCtx.Err()
+			case pipeline.rewriteCh <- rewriteTask{idx}:
+			case <-pipeline.ctx.Done():
+				return pipeline.ctx.Err()
 			}
-
 		}
 		return nil
 	}
-	// loading an index can take quite some time such that this is probably CPU-bound
-	// the index files are probably already cached at this point
-	loaderCount := runtime.GOMAXPROCS(0)
-	// run workers on ch
-	for range loaderCount {
-		rewriteWg.Add(1)
-		wg.Go(loader)
+	for range runtime.GOMAXPROCS(0) {
+		loaders.Add(1)
+		pipeline.group.Go(loader)
 	}
-	wg.Go(func() error {
-		rewriteWg.Wait()
-		close(rewriteCh)
+	pipeline.group.Go(func() error {
+		loaders.Wait()
+		close(pipeline.rewriteCh)
 		return nil
 	})
+}
 
-	obsolete := vaultic.NewIDSet(extraObsolete...)
-	saveCh := make(chan *Index)
+func (pipeline *rewritePipeline) startRewriter() {
+	pipeline.group.Go(pipeline.rewriteIndexes)
+}
 
-	wg.Go(func() error {
-		defer close(saveCh)
-		// duplicate packs must be tracked separately to allow the `EachByPack` loop to check
-		// for duplicate index entries with different blobs.
-		// this is necessary to work around a bug in vaultic < 0.10.0 where the blobs of
-		// a pack file could be split over multiple indexes.
-		packBlobsIDSet := vaultic.NewIDSet()
-		newIndex := NewIndex()
-		for task := range rewriteCh {
-			// always rewrite indexes that include a pack that must be removed or is a duplicate or that are not full
-			if len(task.idx.Packs().Intersect(excludePacks)) == 0 && Full(task.idx) && !Oversized(task.idx) {
-				// check that no pack index entry is a duplicate of an already processed one
-				idxPackBlobsIDSet := vaultic.NewIDSet()
-				for pbs := range task.idx.EachByPack(wgCtx, excludePacks) {
-					idxPackBlobsIDSet.Insert(PackBlobsHash(pbs))
-				}
-				if len(idxPackBlobsIDSet.Intersect(packBlobsIDSet)) == 0 {
-					// index is already up to date
-					// make sure that each pack is only stored exactly once in the index
-					packBlobsIDSet.Merge(idxPackBlobsIDSet)
-					p.Add(1)
-					continue
-				}
-			}
-
-			ids, err := task.idx.IDs()
-			if err != nil || len(ids) != 1 {
-				panic("internal error, index has no ID")
-			}
-			obsolete.Merge(vaultic.NewIDSet(ids...))
-
-			for pbs := range task.idx.EachByPack(wgCtx, excludePacks) {
-				// only filter pack blobs with matching packID and blobs
-				packBlobsID := PackBlobsHash(pbs)
-				if packBlobsIDSet.Has(packBlobsID) {
-					continue
-				}
-				packBlobsIDSet.Insert(packBlobsID)
-
-				newIndex.StorePack(pbs.PackID, pbs.Blobs)
-				if Full(newIndex) {
-					select {
-					case saveCh <- newIndex:
-					case <-wgCtx.Done():
-						return wgCtx.Err()
-					}
-					newIndex = NewIndex()
-				}
-			}
-			if wgCtx.Err() != nil {
-				return wgCtx.Err()
-			}
-			p.Add(1)
+func (pipeline *rewritePipeline) rewriteIndexes() error {
+	defer close(pipeline.saveCh)
+	// Track pack contents separately to handle indexes written by vaultic < 0.10.0,
+	// which could split one pack's blobs over multiple indexes.
+	packBlobsIDSet := vaultic.NewIDSet()
+	newIndex := NewIndex()
+	for task := range pipeline.rewriteCh {
+		if pipeline.keepCurrentIndex(task.idx, packBlobsIDSet) {
+			pipeline.progress.Add(1)
+			continue
 		}
 
-		select {
-		case saveCh <- newIndex:
-		case <-wgCtx.Done():
+		pipeline.markObsolete(task.idx)
+		var err error
+		newIndex, err = pipeline.copyIndexPacks(task.idx, packBlobsIDSet, newIndex)
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+		pipeline.progress.Add(1)
+	}
 
+	select {
+	case pipeline.saveCh <- newIndex:
+	case <-pipeline.ctx.Done():
+	}
+	return nil
+}
+
+func (pipeline *rewritePipeline) keepCurrentIndex(idx *Index, packBlobsIDSet vaultic.IDSet) bool {
+	if len(idx.Packs().Intersect(pipeline.excludePacks)) != 0 || !Full(idx) || Oversized(idx) {
+		return false
+	}
+
+	idxPackBlobsIDSet := vaultic.NewIDSet()
+	for pbs := range idx.EachByPack(pipeline.ctx, pipeline.excludePacks) {
+		idxPackBlobsIDSet.Insert(PackBlobsHash(pbs))
+	}
+	if len(idxPackBlobsIDSet.Intersect(packBlobsIDSet)) != 0 {
+		return false
+	}
+
+	packBlobsIDSet.Merge(idxPackBlobsIDSet)
+	return true
+}
+
+func (pipeline *rewritePipeline) markObsolete(idx *Index) {
+	ids, err := idx.IDs()
+	if err != nil || len(ids) != 1 {
+		//nolint:forbidigo // A finalized rewrite input must have exactly one ID.
+		panic("internal error, index has no ID")
+	}
+	pipeline.obsolete.Merge(vaultic.NewIDSet(ids...))
+}
+
+func (pipeline *rewritePipeline) copyIndexPacks(idx *Index, packBlobsIDSet vaultic.IDSet, newIndex *Index) (*Index, error) {
+	for pbs := range idx.EachByPack(pipeline.ctx, pipeline.excludePacks) {
+		packBlobsID := PackBlobsHash(pbs)
+		if packBlobsIDSet.Has(packBlobsID) {
+			continue
+		}
+		packBlobsIDSet.Insert(packBlobsID)
+
+		newIndex.StorePack(pbs.PackID, pbs.Blobs)
+		if Full(newIndex) {
+			select {
+			case pipeline.saveCh <- newIndex:
+			case <-pipeline.ctx.Done():
+				return nil, pipeline.ctx.Err()
+			}
+			newIndex = NewIndex()
+		}
+	}
+	if pipeline.ctx.Err() != nil {
+		return nil, pipeline.ctx.Err()
+	}
+	return newIndex, nil
+}
+
+func (pipeline *rewritePipeline) startSavers() {
 	var savers errgroup.Group
 	// encoding an index can take quite some time such that this can be CPU- or IO-bound
 	// do not add repo.Connections() here as there are already the loader goroutines.
 	savers.SetLimit(runtime.GOMAXPROCS(0))
 
-	for idx := range saveCh {
-		savers.Go(func() error {
-			idx.Finalize()
-			if len(idx.packs) == 0 {
+	pipeline.group.Go(func() error {
+		for idx := range pipeline.saveCh {
+			savers.Go(func() error {
+				idx.Finalize()
+				if len(idx.packs) == 0 {
+					return nil
+				}
+				id, err := idx.SaveIndex(pipeline.ctx, pipeline.repo)
+				if err != nil {
+					return err
+				}
+				// Retain the current rewritten view for callers that immediately
+				// revalidate a prune plan under the same exclusive lock.
+				pipeline.master.Insert(idx)
+				if pipeline.opts.SavedIndexFunc != nil {
+					pipeline.opts.SavedIndexFunc(id)
+				}
 				return nil
-			}
-			id, err := idx.SaveIndex(wgCtx, repo)
-			if err != nil {
-				return err
-			}
-			// Retain the current rewritten view for callers that immediately
-			// revalidate a prune plan under the same exclusive lock.
-			mi.Insert(idx)
-			if opts.SavedIndexFunc != nil {
-				opts.SavedIndexFunc(id)
-			}
-			return nil
-		})
-	}
+			})
+		}
+		return savers.Wait()
+	})
+}
 
-	wg.Go(savers.Wait)
-
-	err := wg.Wait()
-	p.Done()
-	if err != nil {
-		return fmt.Errorf("failed to rewrite indexes: %w", err)
-	}
-
-	p = vaultic.NoopCounter
+func deleteObsoleteIndexes(ctx context.Context, repo vaultic.Unpacked[vaultic.FileType], obsolete vaultic.IDSet, opts MasterIndexRewriteOpts) error {
+	p := vaultic.NoopCounter
 	if opts.DeleteProgress != nil {
 		p = opts.DeleteProgress()
 	}

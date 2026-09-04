@@ -14,6 +14,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type packImportState struct {
+	oldRecord *schema.PackRecord
+}
+
+type packImportPlan struct {
+	puts             []Mutation
+	newLocationCount uint64
+	newPayloadSize   uint64
+}
+
 // PublishPack atomically merges a newly-written pack's catalog entry, blob
 // locations, and aggregates. Retries are idempotent and preserve existing
 // duplicate blob locations from other packs.
@@ -42,6 +52,60 @@ func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPa
 }
 
 func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPackImport, legacy bool) error {
+	if err := preparePackImport(&imported, legacy); err != nil {
+		return err
+	}
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	plan, limits, err := store.planPackImport(ctx, transaction, imported, legacy)
+	if err != nil {
+		return fail(err)
+	}
+	if err := writeTransactionBatches(ctx, transaction, limits, plan.puts, nil); err != nil {
+		return fail(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	return nil
+}
+
+func (store *SchemaStore) planPackImport(ctx context.Context, transaction *Transaction, imported LegacyPackImport, legacy bool) (packImportPlan, Limits, error) {
+	state, err := loadPackImportState(ctx, transaction, &imported, legacy)
+	if err != nil {
+		return packImportPlan{}, Limits{}, err
+	}
+	sort.Slice(imported.Record.SourceIndexIDs, func(left, right int) bool {
+		return bytes.Compare(imported.Record.SourceIndexIDs[left][:], imported.Record.SourceIndexIDs[right][:]) < 0
+	})
+	plan, err := planImportedBlobs(ctx, transaction, imported)
+	if err != nil {
+		return packImportPlan{}, Limits{}, err
+	}
+	if err := planPackRecord(&imported, state.oldRecord, &plan); err != nil {
+		return packImportPlan{}, Limits{}, err
+	}
+	if err := planPackAggregatesAndDebt(ctx, transaction, imported, state.oldRecord, &plan); err != nil {
+		return packImportPlan{}, Limits{}, err
+	}
+	if err := planPackImportHistory(ctx, transaction, imported, state.oldRecord, &plan, legacy); err != nil {
+		return packImportPlan{}, Limits{}, err
+	}
+	limits := store.client.Limits()
+	if imported.BatchSize > 0 && imported.BatchSize < limits.MaxBatchItems {
+		limits.MaxBatchItems = imported.BatchSize
+	}
+	return plan, limits, nil
+}
+
+func preparePackImport(imported *LegacyPackImport, legacy bool) error {
 	if imported.PackID == (schema.ID{}) || (legacy && imported.SourceIndex == (schema.ID{})) {
 		return fmt.Errorf("pack publication requires its identity%s", map[bool]string{true: " and source index", false: ""}[legacy])
 	}
@@ -68,82 +132,86 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 	if locationCount != imported.Record.BlobCount || schema.ClassifyPack(locationTypes) != imported.Record.Type {
 		return fmt.Errorf("legacy pack record does not match its blob locations")
 	}
-	transaction, err := store.client.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	fail := func(err error) error {
-		rollbackTransaction(ctx, transaction)
-		return err
-	}
+	return nil
+}
 
-	packKey := schema.PackKey(imported.PackID)
-	packValue, packFound, err := transaction.Get(ctx, packKey)
-	if err != nil {
-		return fail(err)
-	}
-	var oldRecord *schema.PackRecord
-	if packFound {
-		record, decodeErr := schema.UnmarshalPackRecord(packValue)
-		if decodeErr != nil {
-			return fail(decodeErr)
-		}
-		oldRecord = &record
-		imported.Record = mergeImportedPackRecord(record, imported.Record, imported.SourceIndex, legacy)
-	} else {
-		if legacy {
+func loadPackImportState(ctx context.Context, transaction *Transaction, imported *LegacyPackImport, legacy bool) (packImportState, error) {
+	value, found, err := transaction.Get(ctx, schema.PackKey(imported.PackID))
+	if err != nil || !found {
+		if legacy && err == nil {
 			imported.Record.SourceIndexIDs = appendUniqueID(imported.Record.SourceIndexIDs, imported.SourceIndex)
 		}
+		return packImportState{}, err
 	}
-	sort.Slice(imported.Record.SourceIndexIDs, func(left, right int) bool {
-		return bytes.Compare(imported.Record.SourceIndexIDs[left][:], imported.Record.SourceIndexIDs[right][:]) < 0
-	})
+	record, err := schema.UnmarshalPackRecord(value)
+	if err != nil {
+		return packImportState{}, err
+	}
+	imported.Record = mergeImportedPackRecord(record, imported.Record, imported.SourceIndex, legacy)
+	return packImportState{oldRecord: &record}, nil
+}
 
-	puts := make([]Mutation, 0, len(imported.Blobs)+7)
-	var newLocationCount, newPayloadSize uint64
+func planImportedBlobs(ctx context.Context, transaction *Transaction, imported LegacyPackImport) (packImportPlan, error) {
+	plan := packImportPlan{puts: make([]Mutation, 0, len(imported.Blobs)+7)}
 	for blobID, incoming := range imported.Blobs {
 		key := schema.BlobKey(blobID)
-		value, found, getErr := transaction.Get(ctx, key)
-		if getErr != nil {
-			return fail(getErr)
+		value, found, err := transaction.Get(ctx, key)
+		if err != nil {
+			return packImportPlan{}, err
 		}
 		if found {
-			existing, decodeErr := schema.UnmarshalBlobRecord(value)
-			if decodeErr != nil {
-				return fail(decodeErr)
+			existing, err := schema.UnmarshalBlobRecord(value)
+			if err != nil {
+				return packImportPlan{}, err
 			}
-			for _, location := range incoming.Locations {
-				if !containsPhysicalLocation(existing.Locations, location) {
-					newLocationCount++
-					if math.MaxUint64-newPayloadSize < uint64(location.Length) {
-						return fail(fmt.Errorf("pack payload size overflow"))
-					}
-					newPayloadSize += uint64(location.Length)
-				}
+			if err := accumulateNewLocations(&plan, existing, incoming); err != nil {
+				return packImportPlan{}, err
 			}
 			incoming = mergeBlobRecords(existing, incoming)
-		} else {
-			newLocationCount += uint64(len(incoming.Locations))
-			for _, location := range incoming.Locations {
-				if math.MaxUint64-newPayloadSize < uint64(location.Length) {
-					return fail(fmt.Errorf("pack payload size overflow"))
-				}
-				newPayloadSize += uint64(location.Length)
-			}
+		} else if err := accumulateAllLocations(&plan, incoming); err != nil {
+			return packImportPlan{}, err
 		}
-		incoming = canonicalBlobRecord(incoming)
-		encoded, encodeErr := incoming.MarshalBinary()
-		if encodeErr != nil {
-			return fail(encodeErr)
+		encoded, err := canonicalBlobRecord(incoming).MarshalBinary()
+		if err != nil {
+			return packImportPlan{}, err
 		}
-		puts = append(puts, Mutation{Key: key, Value: encoded})
+		plan.puts = append(plan.puts, Mutation{Key: key, Value: encoded})
 	}
-	if oldRecord != nil {
-		if math.MaxUint64-oldRecord.BlobCount < newLocationCount || math.MaxUint64-oldRecord.PayloadSize < newPayloadSize {
-			return fail(fmt.Errorf("pack catalog size overflow"))
+	return plan, nil
+}
+
+func accumulateNewLocations(plan *packImportPlan, existing, incoming schema.BlobRecord) error {
+	for _, location := range incoming.Locations {
+		if containsPhysicalLocation(existing.Locations, location) {
+			continue
 		}
-		imported.Record.BlobCount = oldRecord.BlobCount + newLocationCount
-		imported.Record.PayloadSize = oldRecord.PayloadSize + newPayloadSize
+		plan.newLocationCount++
+		if math.MaxUint64-plan.newPayloadSize < uint64(location.Length) {
+			return fmt.Errorf("pack payload size overflow")
+		}
+		plan.newPayloadSize += uint64(location.Length)
+	}
+	return nil
+}
+
+func accumulateAllLocations(plan *packImportPlan, incoming schema.BlobRecord) error {
+	plan.newLocationCount += uint64(len(incoming.Locations))
+	for _, location := range incoming.Locations {
+		if math.MaxUint64-plan.newPayloadSize < uint64(location.Length) {
+			return fmt.Errorf("pack payload size overflow")
+		}
+		plan.newPayloadSize += uint64(location.Length)
+	}
+	return nil
+}
+
+func planPackRecord(imported *LegacyPackImport, oldRecord *schema.PackRecord, plan *packImportPlan) error {
+	if oldRecord != nil {
+		if math.MaxUint64-oldRecord.BlobCount < plan.newLocationCount || math.MaxUint64-oldRecord.PayloadSize < plan.newPayloadSize {
+			return fmt.Errorf("pack catalog size overflow")
+		}
+		imported.Record.BlobCount = oldRecord.BlobCount + plan.newLocationCount
+		imported.Record.PayloadSize = oldRecord.PayloadSize + plan.newPayloadSize
 	}
 	if imported.Record.PhysicalSizeKnown {
 		if imported.Record.PhysicalSize < imported.Record.PayloadSize {
@@ -153,78 +221,86 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 		}
 	}
 	clearStalePackUsage(&imported.Record)
-	encodedPack, err := imported.Record.MarshalBinary()
+	encoded, err := imported.Record.MarshalBinary()
 	if err != nil {
-		return fail(err)
+		return err
 	}
-	puts = append(puts, Mutation{Key: packKey, Value: encodedPack})
-	placementPuts, err := placementMutations(imported.PackID, imported.Placements)
+	plan.puts = append(plan.puts, Mutation{Key: schema.PackKey(imported.PackID), Value: encoded})
+	placements, err := placementMutations(imported.PackID, imported.Placements)
 	if err != nil {
-		return fail(err)
+		return err
 	}
-	puts = append(puts, placementPuts...)
+	plan.puts = append(plan.puts, placements...)
 	for _, predecessor := range imported.PredecessorPackIDs {
 		kind := imported.LineageKind
 		if kind == 0 {
 			kind = schema.LineageRepack
 		}
-		lineage, encodeErr := (schema.RepackLineageRecord{RunID: imported.RunID, Kind: kind}).MarshalBinary()
-		if encodeErr != nil {
-			return fail(encodeErr)
+		value, err := (schema.RepackLineageRecord{RunID: imported.RunID, Kind: kind}).MarshalBinary()
+		if err != nil {
+			return err
 		}
-		puts = append(puts, Mutation{Key: schema.RepackLineageKey(predecessor, imported.PackID), Value: lineage})
+		plan.puts = append(plan.puts, Mutation{Key: schema.RepackLineageKey(predecessor, imported.PackID), Value: value})
 	}
+	return nil
+}
 
+func planPackAggregatesAndDebt(ctx context.Context, transaction *Transaction, imported LegacyPackImport, oldRecord *schema.PackRecord, plan *packImportPlan) error {
 	aggregates, err := updatePackAggregates(ctx, transaction, oldRecord, imported.Record)
 	if err != nil {
-		return fail(err)
+		return err
 	}
-	puts = append(puts, aggregates...)
+	plan.puts = append(plan.puts, aggregates...)
 	if imported.Debt != nil {
-		if len(imported.DebtKey) == 0 {
-			return fail(fmt.Errorf("legacy pack debt requires a key"))
-		}
-		debtValue, encodeErr := imported.Debt.MarshalBinary()
-		if encodeErr != nil {
-			return fail(encodeErr)
-		}
-		if encodeErr = schema.ValidateValue(imported.DebtKey, debtValue); encodeErr != nil {
-			return fail(encodeErr)
-		}
-		puts = append(puts, Mutation{Key: imported.DebtKey, Value: debtValue})
-	} else {
-		debtKey := schema.CrawlDebtKey(schema.ID{}, imported.PackID)
-		debtValue, found, getErr := transaction.Get(ctx, debtKey)
-		if getErr != nil {
-			return fail(getErr)
-		}
-		if found {
-			debt, decodeErr := schema.UnmarshalCrawlDebtRecord(debtValue)
-			if decodeErr != nil {
-				return fail(decodeErr)
-			}
-			if debt.Reason == schema.DebtUnavailablePack && debt.Status != schema.DebtResolved {
-				debt.Status = schema.DebtResolved
-				debt.ErrorClass = ""
-				debt.LastAttemptUnixNano = time.Now().UnixNano()
-				encoded, encodeErr := debt.MarshalBinary()
-				if encodeErr != nil {
-					return fail(encodeErr)
-				}
-				puts = append(puts, Mutation{Key: debtKey, Value: encoded})
-			}
-		}
+		return planImportedDebt(imported, plan)
 	}
-	limits := store.client.Limits()
-	if imported.BatchSize > 0 && imported.BatchSize < limits.MaxBatchItems {
-		limits.MaxBatchItems = imported.BatchSize
+	return planResolvedUnavailableDebt(ctx, transaction, imported.PackID, plan)
+}
+
+func planImportedDebt(imported LegacyPackImport, plan *packImportPlan) error {
+	if len(imported.DebtKey) == 0 {
+		return fmt.Errorf("legacy pack debt requires a key")
 	}
+	value, err := imported.Debt.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if err := schema.ValidateValue(imported.DebtKey, value); err != nil {
+		return err
+	}
+	plan.puts = append(plan.puts, Mutation{Key: imported.DebtKey, Value: value})
+	return nil
+}
+
+func planResolvedUnavailableDebt(ctx context.Context, transaction *Transaction, packID schema.ID, plan *packImportPlan) error {
+	key := schema.CrawlDebtKey(schema.ID{}, packID)
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil || !found {
+		return err
+	}
+	debt, err := schema.UnmarshalCrawlDebtRecord(value)
+	if err != nil {
+		return err
+	}
+	if debt.Reason != schema.DebtUnavailablePack || debt.Status == schema.DebtResolved {
+		return nil
+	}
+	debt.Status = schema.DebtResolved
+	debt.ErrorClass = ""
+	debt.LastAttemptUnixNano = time.Now().UnixNano()
+	encoded, err := debt.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	plan.puts = append(plan.puts, Mutation{Key: key, Value: encoded})
+	return nil
+}
+
+func planPackImportHistory(ctx context.Context, transaction *Transaction, imported LegacyPackImport, oldRecord *schema.PackRecord, plan *packImportPlan, legacy bool) error {
 	eventType := schema.EventCreated
 	if legacy {
 		eventType = schema.EventImported
 	}
-	// A pack that supersedes others is a rewrite, not new data, so it is
-	// recorded with its lineage rather than as a plain creation.
 	if len(imported.PredecessorPackIDs) != 0 {
 		eventType = schema.EventRepackedInto
 		if imported.LineageKind == schema.LineagePromotion {
@@ -232,39 +308,24 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 		}
 	}
 	usedDelta, unusedDelta := usageDeltas(oldRecord, imported.Record)
-	events := []PackEvent{{
-		PackID: imported.PackID,
-		Record: schema.PackHistoryEvent{
-			Type: eventType, PackType: imported.Record.Type,
-			PhysicalSize: imported.Record.PhysicalSize, PayloadSize: imported.Record.PayloadSize,
-			UsedDelta: usedDelta, UnusedDelta: unusedDelta,
-			PredecessorPackIDs: imported.PredecessorPackIDs, RunID: imported.RunID,
-		},
-	}}
-	// A pack whose recorded tier became known, or moved, is a distinct
-	// transition from its creation and is recorded separately.
+	events := []PackEvent{{PackID: imported.PackID, Record: schema.PackHistoryEvent{
+		Type: eventType, PackType: imported.Record.Type,
+		PhysicalSize: imported.Record.PhysicalSize, PayloadSize: imported.Record.PayloadSize,
+		UsedDelta: usedDelta, UnusedDelta: unusedDelta,
+		PredecessorPackIDs: imported.PredecessorPackIDs, RunID: imported.RunID,
+	}}}
 	if oldRecord != nil && oldRecord.Tier != imported.Record.Tier {
-		events = append(events, PackEvent{
-			PackID: imported.PackID,
-			Record: schema.PackHistoryEvent{
-				Type: schema.EventTierChanged, PackType: imported.Record.Type,
-				PhysicalSize: imported.Record.PhysicalSize, PayloadSize: imported.Record.PayloadSize,
-				RunID: imported.RunID, ReasonCode: imported.Record.Tier.String(),
-			},
-		})
+		events = append(events, PackEvent{PackID: imported.PackID, Record: schema.PackHistoryEvent{
+			Type: schema.EventTierChanged, PackType: imported.Record.Type,
+			PhysicalSize: imported.Record.PhysicalSize, PayloadSize: imported.Record.PayloadSize,
+			RunID: imported.RunID, ReasonCode: imported.Record.Tier.String(),
+		}})
 	}
 	history, err := packHistoryMutations(ctx, transaction, events)
 	if err != nil {
-		return fail(err)
-	}
-	puts = append(puts, history...)
-	if err := writeTransactionBatches(ctx, transaction, limits, puts, nil); err != nil {
-		return fail(err)
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		rollbackTransaction(ctx, transaction)
 		return err
 	}
+	plan.puts = append(plan.puts, history...)
 	return nil
 }
 

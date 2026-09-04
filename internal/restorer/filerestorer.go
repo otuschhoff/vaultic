@@ -64,30 +64,34 @@ type fileRestorer struct {
 	Info  func(string)
 }
 
-func newFileRestorer(dst string,
-	blobsLoader blobsLoaderFn,
-	idx func(vaultic.BlobHandle) []vaultic.PackBlob,
-	connections uint,
-	sparse bool,
-	allowRecursiveDelete bool,
-	startWarmup startWarmupFn,
-	progress ProgressReporter,
-	zeroChunk vaultic.ID) *fileRestorer {
+type fileRestorerParams struct {
+	destination          string
+	blobsLoader          blobsLoaderFn
+	index                func(vaultic.BlobHandle) []vaultic.PackBlob
+	connections          uint
+	sparse               bool
+	allowRecursiveDelete bool
+	startWarmup          startWarmupFn
+	progress             ProgressReporter
+	zeroChunk            vaultic.ID
+}
+
+func newFileRestorer(params fileRestorerParams) *fileRestorer {
 
 	// as packs are streamed the concurrency is limited by IO
-	workerCount := int(connections)
+	workerCount := int(params.connections)
 
 	return &fileRestorer{
-		idx:                  idx,
-		blobsLoader:          blobsLoader,
-		startWarmup:          startWarmup,
-		filesWriter:          newFilesWriter(workerCount, allowRecursiveDelete),
-		zeroChunk:            zeroChunk,
-		sparse:               sparse,
-		progress:             progressOrNoop(progress),
-		allowRecursiveDelete: allowRecursiveDelete,
+		idx:                  params.index,
+		blobsLoader:          params.blobsLoader,
+		startWarmup:          params.startWarmup,
+		filesWriter:          newFilesWriter(workerCount, params.allowRecursiveDelete),
+		zeroChunk:            params.zeroChunk,
+		sparse:               params.sparse,
+		progress:             progressOrNoop(params.progress),
+		allowRecursiveDelete: params.allowRecursiveDelete,
 		workerCount:          workerCount,
-		dst:                  dst,
+		dst:                  params.destination,
 		Error:                restorerAbortOnAllErrors,
 		Info:                 func(_ string) {},
 	}

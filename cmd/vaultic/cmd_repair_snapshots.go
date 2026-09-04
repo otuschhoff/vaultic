@@ -191,11 +191,14 @@ func runRepairSnapshots(ctx context.Context, gopts global.Options, opts RepairOp
 		}
 
 		printer.P("\n%v", sn)
-		changed, err := filterAndReplaceSnapshot(ctx, repo, sn,
-			func(ctx context.Context, sn *data.Snapshot, uploader vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error) {
+		changed, err := filterAndReplaceSnapshot(ctx, rewriteRequest{
+			repo: repo, snapshot: sn,
+			filter: func(ctx context.Context, sn *data.Snapshot, uploader vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error) {
 				id, err := rewriter.RewriteTree(ctx, repo, uploader, "/", *sn.Tree)
 				return id, nil, err
-			}, opts.DryRun, opts.Forget, nil, "repaired", printer, false)
+			},
+			dryRun: opts.DryRun, forget: opts.Forget, addTag: "repaired", printer: printer,
+		})
 		if err != nil {
 			return errors.Fatalf("unable to rewrite snapshot ID %q: %v", sn.ID().Str(), err)
 		}

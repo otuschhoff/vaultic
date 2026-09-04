@@ -72,7 +72,10 @@ func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options
 		return nil, err
 	}
 
-	be, err := createOrOpenBackend(ctx, scheme, cfg, rt, lim, gopts, s, create, printer)
+	be, err := createOrOpenBackend(ctx, backendOpenRequest{
+		scheme: scheme, config: cfg, transport: rt, limiter: lim,
+		globalOptions: gopts, repository: s, create: create, printer: printer,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -134,31 +137,42 @@ func setupTransport(gopts Options) (http.RoundTripper, limiter.Limiter, error) {
 	return rt, lim, nil
 }
 
+type backendOpenRequest struct {
+	scheme        string
+	config        any
+	transport     http.RoundTripper
+	limiter       limiter.Limiter
+	globalOptions Options
+	repository    string
+	create        bool
+	printer       vaultic.Printer
+}
+
 // createOrOpenBackend creates or opens a backend using the appropriate factory method.
-func createOrOpenBackend(ctx context.Context, scheme string, cfg any, rt http.RoundTripper, lim limiter.Limiter, gopts Options, s string, create bool, printer vaultic.Printer) (backend.Backend, error) {
-	factory := gopts.Backends.Lookup(scheme)
+func createOrOpenBackend(ctx context.Context, request backendOpenRequest) (backend.Backend, error) {
+	factory := request.globalOptions.Backends.Lookup(request.scheme)
 	if factory == nil {
-		return nil, errors.Fatalf("invalid backend: %q", scheme)
+		return nil, errors.Fatalf("invalid backend: %q", request.scheme)
 	}
 
 	var be backend.Backend
 	var err error
-	if create {
-		be, err = factory.Create(ctx, cfg, rt, lim, printer.E)
+	if request.create {
+		be, err = factory.Create(ctx, request.config, request.transport, request.limiter, request.printer.E)
 	} else {
-		be, err = factory.Open(ctx, cfg, rt, lim, printer.E)
+		be, err = factory.Open(ctx, request.config, request.transport, request.limiter, request.printer.E)
 	}
 
 	if errors.Is(err, backend.ErrNoRepository) {
 		//nolint:staticcheck // capitalized error string is intentional
-		return nil, fmt.Errorf("Fatal: %w at %v: %w", ErrNoRepository, location.StripPassword(gopts.Backends, s), err)
+		return nil, fmt.Errorf("Fatal: %w at %v: %w", ErrNoRepository, location.StripPassword(request.globalOptions.Backends, request.repository), err)
 	}
 	if err != nil {
-		if create {
+		if request.create {
 			// init already wraps the error message
 			return nil, err
 		}
-		return nil, errors.Fatalf("unable to open repository at %v: %v", location.StripPassword(gopts.Backends, s), err)
+		return nil, errors.Fatalf("unable to open repository at %v: %v", location.StripPassword(request.globalOptions.Backends, request.repository), err)
 	}
 
 	return be, nil
