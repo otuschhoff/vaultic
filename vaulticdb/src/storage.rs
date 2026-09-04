@@ -567,7 +567,9 @@ impl Storage {
 
     pub async fn ensure_writer_fence(&self) -> Result<()> {
         let current = self.writer_epoch.load(Ordering::Acquire);
-        if current == 0 || active_writer_epoch(self.coordination_store.as_ref()).await? != Some(current) {
+        if current == 0
+            || active_writer_epoch(self.coordination_store.as_ref()).await? != Some(current)
+        {
             bail!("writer epoch is stale")
         }
         Ok(())
@@ -578,9 +580,11 @@ impl Storage {
     }
 
     pub async fn generation_authority(&self, repository_id: &str) -> Result<GenerationAuthority> {
-        Ok(read_generation_authority(self.coordination_store.as_ref(), repository_id)
-            .await?
-            .0)
+        Ok(
+            read_generation_authority(self.coordination_store.as_ref(), repository_id)
+                .await?
+                .0,
+        )
     }
 
     pub async fn quarantine_generation(
@@ -602,7 +606,10 @@ impl Storage {
             bail!("metadata generation is already under a recovery interlock")
         }
         let mut authority = current;
-        authority.decision = authority.decision.checked_add(1).context("generation decision overflow")?;
+        authority.decision = authority
+            .decision
+            .checked_add(1)
+            .context("generation decision overflow")?;
         authority.state = "healing-required".to_owned();
         authority.report_sha256 = diagnostic_sha256;
         authority.decided_at_ms = unix_time_ms()?;
@@ -632,7 +639,10 @@ impl Storage {
         let authority = GenerationAuthority {
             format: 1,
             repository_id: repository_id.to_owned(),
-            decision: current.decision.checked_add(1).context("generation decision overflow")?,
+            decision: current
+                .decision
+                .checked_add(1)
+                .context("generation decision overflow")?,
             active_generation: candidate_generation,
             namespace,
             previous_generation: current.active_generation,
@@ -665,7 +675,10 @@ impl Storage {
             bail!("metadata generation observation window has not elapsed")
         }
         let mut authority = current;
-        authority.decision = authority.decision.checked_add(1).context("generation decision overflow")?;
+        authority.decision = authority
+            .decision
+            .checked_add(1)
+            .context("generation decision overflow")?;
         authority.state = "healthy".to_owned();
         authority.report_sha256 = report_sha256;
         authority.decided_at_ms = unix_time_ms()?;
@@ -694,7 +707,10 @@ impl Storage {
         let authority = GenerationAuthority {
             format: 1,
             repository_id: repository_id.to_owned(),
-            decision: current.decision.checked_add(1).context("generation decision overflow")?,
+            decision: current
+                .decision
+                .checked_add(1)
+                .context("generation decision overflow")?,
             active_generation: current.previous_generation,
             namespace: current.previous_namespace,
             previous_generation: current.active_generation,
@@ -729,7 +745,10 @@ impl Storage {
             bail!("metadata generation is not eligible for retirement")
         }
         let mut authority = current;
-        authority.decision = authority.decision.checked_add(1).context("generation decision overflow")?;
+        authority.decision = authority
+            .decision
+            .checked_add(1)
+            .context("generation decision overflow")?;
         authority.previous_generation = 0;
         authority.previous_namespace.clear();
         authority.retired_generation = generation;
@@ -1188,84 +1207,90 @@ async fn active_writer_epoch(store: &dyn ObjectStore) -> Result<Option<u64>> {
 }
 
 async fn read_generation_authority(
-        store: &dyn ObjectStore,
-        repository_id: &str,
-    ) -> Result<(GenerationAuthority, Option<UpdateVersion>)> {
-        let path = ObjectPath::from(ACTIVE_GENERATION_PATH);
-        match store.get(&path).await {
-            Ok(result) => {
-                let version = UpdateVersion {
-                    e_tag: result.meta.e_tag.clone(),
-                    version: result.meta.version.clone(),
-                };
-                let bytes = result.bytes().await.context("read metadata generation authority")?;
-                let authority: GenerationAuthority =
-                    serde_json::from_slice(&bytes).context("decode metadata generation authority")?;
-                if authority.format != 1 || authority.repository_id != repository_id {
-                    bail!("metadata generation authority identity mismatch")
-                }
-                Ok((authority, Some(version)))
+    store: &dyn ObjectStore,
+    repository_id: &str,
+) -> Result<(GenerationAuthority, Option<UpdateVersion>)> {
+    let path = ObjectPath::from(ACTIVE_GENERATION_PATH);
+    match store.get(&path).await {
+        Ok(result) => {
+            let version = UpdateVersion {
+                e_tag: result.meta.e_tag.clone(),
+                version: result.meta.version.clone(),
+            };
+            let bytes = result
+                .bytes()
+                .await
+                .context("read metadata generation authority")?;
+            let authority: GenerationAuthority =
+                serde_json::from_slice(&bytes).context("decode metadata generation authority")?;
+            if authority.format != 1 || authority.repository_id != repository_id {
+                bail!("metadata generation authority identity mismatch")
             }
-            Err(slatedb::object_store::Error::NotFound { .. }) => Ok((
-                GenerationAuthority {
-                    format: 1,
-                    repository_id: repository_id.to_owned(),
-                    decision: 0,
-                    active_generation: 1,
-                    namespace: "default".to_owned(),
-                    previous_generation: 0,
-                    previous_namespace: String::new(),
-                    state: "healthy".to_owned(),
-                    report_sha256: String::new(),
-                    decided_at_ms: 0,
-                    observation_until_ms: 0,
-                    retired_generation: 0,
-                },
-                None,
-            )),
-            Err(error) => Err(error).context("read metadata generation authority"),
+            Ok((authority, Some(version)))
         }
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok((
+            GenerationAuthority {
+                format: 1,
+                repository_id: repository_id.to_owned(),
+                decision: 0,
+                active_generation: 1,
+                namespace: "default".to_owned(),
+                previous_generation: 0,
+                previous_namespace: String::new(),
+                state: "healthy".to_owned(),
+                report_sha256: String::new(),
+                decided_at_ms: 0,
+                observation_until_ms: 0,
+                retired_generation: 0,
+            },
+            None,
+        )),
+        Err(error) => Err(error).context("read metadata generation authority"),
     }
+}
 
-    async fn publish_generation_authority(
-        store: &dyn ObjectStore,
-        authority: &GenerationAuthority,
-        version: Option<UpdateVersion>,
-    ) -> Result<()> {
-        let encoded = serde_json::to_vec(authority).context("encode metadata generation authority")?;
-        let digest = Sha256::digest(&encoded);
-        let decision_path = ObjectPath::from(format!(
-            "{GENERATION_DECISION_PREFIX}/{:020}-{}",
-            authority.decision,
-            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
-        ));
-        store
-            .put_opts(
-                &decision_path,
-                encoded.clone().into(),
-                PutOptions::from(PutMode::Create),
-            )
-            .await
-            .context("publish immutable metadata generation decision")?;
-        let mode = version.map_or(PutMode::Create, PutMode::Update);
-        if let Err(error) = store
-            .put_opts(
-                &ObjectPath::from(ACTIVE_GENERATION_PATH),
-                encoded.into(),
-                PutOptions::from(mode),
-            )
-            .await
-        {
-            if matches!(
-                error,
-                slatedb::object_store::Error::AlreadyExists { .. }
-                    | slatedb::object_store::Error::Precondition { .. }
-            ) {
-                bail!("metadata generation authority changed concurrently")
-            }
-            return Err(error).context("activate metadata generation authority");
+async fn publish_generation_authority(
+    store: &dyn ObjectStore,
+    authority: &GenerationAuthority,
+    version: Option<UpdateVersion>,
+) -> Result<()> {
+    let encoded = serde_json::to_vec(authority).context("encode metadata generation authority")?;
+    let digest = Sha256::digest(&encoded);
+    let decision_path = ObjectPath::from(format!(
+        "{GENERATION_DECISION_PREFIX}/{:020}-{}",
+        authority.decision,
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ));
+    store
+        .put_opts(
+            &decision_path,
+            encoded.clone().into(),
+            PutOptions::from(PutMode::Create),
+        )
+        .await
+        .context("publish immutable metadata generation decision")?;
+    let mode = version.map_or(PutMode::Create, PutMode::Update);
+    if let Err(error) = store
+        .put_opts(
+            &ObjectPath::from(ACTIVE_GENERATION_PATH),
+            encoded.into(),
+            PutOptions::from(mode),
+        )
+        .await
+    {
+        if matches!(
+            error,
+            slatedb::object_store::Error::AlreadyExists { .. }
+                | slatedb::object_store::Error::Precondition { .. }
+        ) {
+            bail!("metadata generation authority changed concurrently")
         }
-        Ok(())
+        return Err(error).context("activate metadata generation authority");
+    }
+    Ok(())
 }
 
 async fn release_writer_claim(store: &dyn ObjectStore, epoch: u64) -> Result<()> {
@@ -1994,9 +2019,11 @@ mod tests {
         publish_generation_authority(object_store.as_ref(), &first, version.clone())
             .await
             .unwrap();
-        assert!(publish_generation_authority(object_store.as_ref(), &second, version)
-            .await
-            .is_err());
+        assert!(
+            publish_generation_authority(object_store.as_ref(), &second, version)
+                .await
+                .is_err()
+        );
         assert_eq!(
             read_generation_authority(object_store.as_ref(), "repo")
                 .await
@@ -2043,7 +2070,14 @@ mod tests {
         assert!(!storage.mutations_allowed("repo").await.unwrap());
 
         let activated = storage
-            .activate_generation("repo", 1, 2, "candidate-2".to_owned(), "bb".repeat(32), 60_000)
+            .activate_generation(
+                "repo",
+                1,
+                2,
+                "candidate-2".to_owned(),
+                "bb".repeat(32),
+                60_000,
+            )
             .await
             .unwrap();
         assert_eq!(activated.state, "post-activation");

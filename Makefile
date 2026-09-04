@@ -1,6 +1,6 @@
 PLATFORMS := macos-arm64 linux-amd64 linux-arm64
 
-.PHONY: all build clean test vaultic vaulticdb \
+.PHONY: all build clean test metrics vaultic vaulticdb \
 	vaulticdb-proto vaulticdb-musl vaulticdb-smoke
 
 BIN_DIR := bin
@@ -34,6 +34,9 @@ clean:
 
 test:
 	go test ./cmd/... ./internal/...
+
+metrics:
+	go run ./helpers/codemetrics -root .
 
 # --- vaultic (Go CLI) ---
 # Always built with CGO disabled (build.go defaults to CGO_ENABLED=0 unless

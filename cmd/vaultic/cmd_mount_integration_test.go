@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,30 @@ const (
 	mountSleep      = 5 * time.Millisecond
 	mountTestSubdir = "snapshots"
 )
+
+func requireFuse(t testing.TB) {
+	t.Helper()
+	if !rtest.RunFuseTest {
+		t.Skip("fuse tests disabled")
+	}
+	var paths []string
+	switch runtime.GOOS {
+	case "darwin":
+		paths = []string{"/Library/Filesystems/macfuse.fs", "/Library/Filesystems/osxfuse.fs"}
+	case "linux":
+		paths = []string{"/dev/fuse"}
+	case "freebsd":
+		paths = []string{"/dev/fuse", "/dev/fuse0"}
+	default:
+		return
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+	}
+	t.Skip("FUSE is not available")
+}
 
 func snapshotsDirExists(t testing.TB, dir string) bool {
 	f, err := os.Open(filepath.Join(dir, mountTestSubdir))
@@ -171,9 +196,7 @@ func checkSnapshots(t testing.TB, gopts global.Options, mountpoint string, snaps
 }
 
 func TestMount(t *testing.T) {
-	if !rtest.RunFuseTest {
-		t.Skip("Skipping fuse tests")
-	}
+	requireFuse(t)
 
 	env, cleanup := withTestEnvironment(t)
 	// must list snapshots more than once
@@ -269,9 +292,7 @@ func TestCheckMountpointOverlapSymlink(t *testing.T) {
 }
 
 func TestMountSameTimestamps(t *testing.T) {
-	if !rtest.RunFuseTest {
-		t.Skip("Skipping fuse tests")
-	}
+	requireFuse(t)
 
 	env, cleanup := withTestEnvironment(t)
 	// must list snapshots more than once

@@ -102,7 +102,24 @@ jobs:
         run: ./vaulticdb/generate-proto.sh && git diff --exit-code -- internal/index/proto
 
       - name: Check and test vaulticdb
-        run: cargo test --manifest-path vaulticdb/Cargo.toml
+        run: |
+          cargo fmt --manifest-path vaulticdb/Cargo.toml --check
+          cargo clippy --manifest-path vaulticdb/Cargo.toml --all-targets -- \
+            -D warnings \
+            -A clippy::too_many_lines \
+            -A clippy::cognitive_complexity \
+            -A clippy::unwrap_used \
+            -A clippy::expect_used \
+            -A clippy::too_many_arguments \
+            -A clippy::type_complexity \
+            -A clippy::chunks_exact_to_as_chunks \
+            -A clippy::large_enum_variant
+          cargo clippy --manifest-path vaulticdb/Cargo.toml --all-targets -- \
+            -W clippy::too_many_lines \
+            -W clippy::cognitive_complexity \
+            -W clippy::unwrap_used \
+            -W clippy::expect_used
+          cargo test --manifest-path vaulticdb/Cargo.toml --all-targets
 
       - name: Run native SlateDB smoke test
         run: VAULTICDB_NATIVE_SMOKE=1 cargo run --manifest-path vaulticdb/Cargo.toml --quiet

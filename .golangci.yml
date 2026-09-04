@@ -11,6 +11,16 @@ linters:
     - copyloopvar
     # make sure all errors returned by functions are handled
     - errcheck
+    # preserve wrapped error identity for errors.Is/errors.As callers
+    - errorlint
+    # keep switch statements over enums exhaustive
+    - exhaustive
+    # prevent production code from growing new panic paths
+    - forbidigo
+    # track oversized and complex functions while existing debt is baselined in CI
+    - funlen
+    - gocognit
+    - gocyclo
     # examine code and report suspicious constructs, such as Printf calls whose
     # arguments do not align with the format string
     - govet
@@ -18,6 +28,8 @@ linters:
     - importas
     # detect when assignments to existing variables are not used
     - ineffassign
+    - lll
+    - nestif
     - nolintlint
     # make sure names and comments are used according to the conventions
     - revive
@@ -25,7 +37,35 @@ linters:
     - staticcheck
     # find unused variables, functions, structs, types, etc.
     - unused
+    - contextcheck
   settings:
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    exhaustive:
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^panic$
+          msg: return an error or document the invariant with a targeted nolint directive
+      analyze-types: true
+    funlen:
+      lines: 120
+      statements: 80
+      ignore-comments: true
+    gocognit:
+      min-complexity: 30
+    gocyclo:
+      min-complexity: 30
+    lll:
+      line-length: 160
+      tab-width: 4
+    nestif:
+      min-complexity: 5
     depguard:
       rules:
         # Prevent backend packages from importing the internal/vaultic package to keep the architectural layers intact.
@@ -87,6 +127,7 @@ linters:
       - path: internal/backend/util/.*.go$
         text: "var-naming: avoid meaningless package names"
     paths:
+      - internal/index/proto/vaulticdb/v1/.*\.pb\.go$
       - third_party$
       - builtin$
       - examples$
@@ -96,6 +137,7 @@ formatters:
     - gofmt
   exclusions:
     paths:
+      - internal/index/proto/vaulticdb/v1/.*\.pb\.go$
       - third_party$
       - builtin$
       - examples$

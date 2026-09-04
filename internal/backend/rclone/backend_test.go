@@ -1,6 +1,7 @@
 package rclone_test
 
 import (
+	"bytes"
 	"os/exec"
 	"testing"
 
@@ -26,10 +27,14 @@ func newTestSuite(t testing.TB) *test.Suite[rclone.Config] {
 }
 
 func findRclone(t testing.TB) {
-	// try to find a rclone binary
-	_, err := exec.LookPath("rclone")
+	path, err := exec.LookPath("rclone")
 	if err != nil {
 		t.Skip(err)
+	}
+	command := exec.Command(path, "serve", "vaultic", "--help")
+	output, err := command.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("--stdio")) {
+		t.Skip("rclone does not support serve vaultic --stdio")
 	}
 }
 

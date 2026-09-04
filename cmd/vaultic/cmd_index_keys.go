@@ -960,6 +960,12 @@ func retireLegacyQuorumBypasses(ctx context.Context, destination backend.Backend
 		return 0, 0, fmt.Errorf("inventory mirrored escrow records: %w", err)
 	}
 	escrows := len(handles) - passwordKeys
+	sort.Slice(handles, func(i, j int) bool {
+		if handles[i].Type != handles[j].Type {
+			return handles[i].Type < handles[j].Type
+		}
+		return handles[i].Name < handles[j].Name
+	})
 	for _, handle := range handles {
 		if err := destination.Remove(ctx, handle); err != nil && !destination.IsNotExist(err) {
 			return passwordKeys, escrows, fmt.Errorf("remove %s: %w", handle.Name, err)

@@ -1,6 +1,7 @@
 package rclone
 
 import (
+	"bytes"
 	"context"
 	"os/exec"
 	"testing"
@@ -13,6 +14,7 @@ import (
 // vaultic should detect rclone exiting.
 func TestRcloneExit(t *testing.T) {
 	t.Parallel()
+	requireRcloneStdio(t)
 	dir := rtest.TempDir(t)
 	cfg := NewConfig()
 	cfg.Remote = dir
@@ -38,6 +40,19 @@ func TestRcloneExit(t *testing.T) {
 			Type: backend.PackFile,
 		})
 		rtest.Assert(t, err != nil, "expected an error")
+	}
+}
+
+func requireRcloneStdio(t testing.TB) {
+	t.Helper()
+	path, err := exec.LookPath("rclone")
+	if err != nil {
+		t.Skip(err)
+	}
+	command := exec.Command(path, "serve", "vaultic", "--help")
+	output, err := command.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("--stdio")) {
+		t.Skip("rclone does not support serve vaultic --stdio")
 	}
 }
 

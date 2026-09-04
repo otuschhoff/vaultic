@@ -41,18 +41,17 @@ pub mod proto {
 }
 
 use proto::{
-    vaultic_db_server::{VaulticDb, VaulticDbServer}, ActivateGenerationRequest,
-    AddCloudKeySlotRequest, AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest,
-    CapabilitiesResponse, CommitResponse, DemoteWriterRequest, Empty, EncryptionAuditResponse,
-    EscrowMasterKeyRequest, EscrowMasterKeyResponse, ExportKeyEnvelopeResponse,
-    FinalizeCapsuleMigrationRequest, GenerationStatusRequest, GenerationStatusResponse, GetRequest,
-    GetResponse, HealthRequest, HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse,
-    MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
-    PrepareCapsuleMigrationRequest,
-    PrepareCapsuleMigrationResponse, PromoteWriterRequest, PublishCapsuleMutationRequest,
-    PublishCapsuleMutationResponse, QuarantineGenerationRequest, RecoverEscrowRequest,
-    RemoveKeySlotRequest, RequestContext, RetireGenerationRequest, RewriteDekRequest,
-    RewriteDekResponse, RollbackGenerationRequest,
+    vaultic_db_server::{VaulticDb, VaulticDbServer},
+    ActivateGenerationRequest, AddCloudKeySlotRequest, AddLocalKeySlotRequest, BeginResponse,
+    CapabilitiesRequest, CapabilitiesResponse, CommitResponse, DemoteWriterRequest, Empty,
+    EncryptionAuditResponse, EscrowMasterKeyRequest, EscrowMasterKeyResponse,
+    ExportKeyEnvelopeResponse, FinalizeCapsuleMigrationRequest, GenerationStatusRequest,
+    GenerationStatusResponse, GetRequest, GetResponse, HealthRequest, HealthResponse, KeySlotInfo,
+    KeyStatusRequest, KeyStatusResponse, MasterKeyRequest, MasterKeyResponse, MultiGetRequest,
+    MultiGetResponse, PrepareCapsuleMigrationRequest, PrepareCapsuleMigrationResponse,
+    PromoteWriterRequest, PublishCapsuleMutationRequest, PublishCapsuleMutationResponse,
+    QuarantineGenerationRequest, RecoverEscrowRequest, RemoveKeySlotRequest, RequestContext,
+    RetireGenerationRequest, RewriteDekRequest, RewriteDekResponse, RollbackGenerationRequest,
     RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest, ScanResponse, StoreMasterKeyRequest,
     TransactionRequest, VerifyGenerationRequest, WriteBatchRequest, WriteBatchResponse,
     WriterStatusRequest, WriterStatusResponse,
@@ -1130,14 +1129,24 @@ impl Service {
     }
 
     async fn write_intent(&self) -> Result<WriteIntentGuard, Status> {
-        if !self.storage.mutations_allowed(&self.state.repository_id).await.map_err(generation_error)? {
-            return Err(Status::failed_precondition("metadata generation mutation interlock is active"));
+        if !self
+            .storage
+            .mutations_allowed(&self.state.repository_id)
+            .await
+            .map_err(generation_error)?
+        {
+            return Err(Status::failed_precondition(
+                "metadata generation mutation interlock is active",
+            ));
         }
         self.authority_intent().await
     }
 
     async fn authority_intent(&self) -> Result<WriteIntentGuard, Status> {
-        self.storage.ensure_writer_fence().await.map_err(generation_error)?;
+        self.storage
+            .ensure_writer_fence()
+            .await
+            .map_err(generation_error)?;
         self.state
             .writer_role
             .lock()

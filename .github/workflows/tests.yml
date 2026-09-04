@@ -245,6 +245,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Go ${{ env.latest_go }}
         uses: actions/setup-go@v7
@@ -256,7 +258,7 @@ jobs:
         with:
           # Required: the version of golangci-lint is required and must be specified without patch version: we always use the latest patch version.
           version: v2.12
-          args: --verbose --timeout 5m
+          args: --verbose --timeout 5m --new-from-rev=${{ github.event.pull_request.base.sha }}
 
         # only run golangci-lint for pull requests, otherwise ALL hints get
         # reported. We need to slowly address all issues until we can enable

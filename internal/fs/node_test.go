@@ -230,6 +230,8 @@ func TestNodeRestoreAt(t *testing.T) {
 				n3, err := meta.ToNode(true, t.Logf)
 				rtest.OK(t, err)
 				rtest.OK(t, meta.Close())
+				n2.ExtendedAttributes = testComparableXattrs(n2.ExtendedAttributes)
+				n3.ExtendedAttributes = testComparableXattrs(n3.ExtendedAttributes)
 				rtest.Assert(t, n2.Equals(*n3), "unexpected node info mismatch %v", cmp.Diff(n2, n3))
 
 				rtest.Assert(t, test.Name == n2.Name,
@@ -263,6 +265,19 @@ func TestNodeRestoreAt(t *testing.T) {
 			})
 		}
 	}
+}
+
+func testComparableXattrs(attrs []data.ExtendedAttribute) []data.ExtendedAttribute {
+	if runtime.GOOS != "darwin" {
+		return attrs
+	}
+	filtered := attrs[:0]
+	for _, attr := range attrs {
+		if attr.Name != "com.apple.provenance" {
+			filtered = append(filtered, attr)
+		}
+	}
+	return filtered
 }
 
 func AssertFsTimeEqual(t *testing.T, label string, nodeType data.NodeType, t1 time.Time, t2 time.Time) {

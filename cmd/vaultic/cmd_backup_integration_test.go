@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -640,7 +641,19 @@ func linkEqual(source, dest []string) bool {
 	return true
 }
 
+func testPython(t testing.TB) string {
+	t.Helper()
+	for _, name := range []string{"python3", "python"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	t.Skip("python interpreter not found")
+	return ""
+}
+
 func TestStdinFromCommand(t *testing.T) {
+	python := testPython(t)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
@@ -651,7 +664,7 @@ func TestStdinFromCommand(t *testing.T) {
 		StdinFilename: "stdin/subdir/file",
 	}
 
-	testRunBackup(t, filepath.Dir(env.testdata), []string{"python", "-c", "import sys; print('something'); sys.exit(0)"}, opts, env.gopts)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{python, "-c", "import sys; print('something'); sys.exit(0)"}, opts, env.gopts)
 	snapshots := testListSnapshots(t, env.gopts, 1)
 	files := testRunLs(t, env.gopts, snapshots[0].String())
 	rtest.Assert(t, includes(files, "/stdin/subdir/file"), "file %q missing from snapshot, got %v", "stdin/subdir/file", files)
@@ -660,6 +673,7 @@ func TestStdinFromCommand(t *testing.T) {
 }
 
 func TestStdinFromCommandNoOutput(t *testing.T) {
+	python := testPython(t)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
@@ -669,7 +683,7 @@ func TestStdinFromCommandNoOutput(t *testing.T) {
 		StdinFilename: "stdin",
 	}
 
-	err := testRunBackupAssumeFailure(t, filepath.Dir(env.testdata), []string{"python", "-c", "import sys; sys.exit(0)"}, opts, env.gopts)
+	err := testRunBackupAssumeFailure(t, filepath.Dir(env.testdata), []string{python, "-c", "import sys; sys.exit(0)"}, opts, env.gopts)
 	rtest.Assert(t, err != nil && err.Error() == "at least one source file could not be read", "No data error expected")
 	testListSnapshots(t, env.gopts, 1)
 
@@ -677,6 +691,7 @@ func TestStdinFromCommandNoOutput(t *testing.T) {
 }
 
 func TestStdinFromCommandFailExitCode(t *testing.T) {
+	python := testPython(t)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
@@ -686,7 +701,7 @@ func TestStdinFromCommandFailExitCode(t *testing.T) {
 		StdinFilename: "stdin",
 	}
 
-	err := testRunBackupAssumeFailure(t, filepath.Dir(env.testdata), []string{"python", "-c", "import sys; print('test'); sys.exit(1)"}, opts, env.gopts)
+	err := testRunBackupAssumeFailure(t, filepath.Dir(env.testdata), []string{python, "-c", "import sys; print('test'); sys.exit(1)"}, opts, env.gopts)
 	rtest.Assert(t, err != nil, "Expected error while backing up")
 
 	testListSnapshots(t, env.gopts, 0)
@@ -695,6 +710,7 @@ func TestStdinFromCommandFailExitCode(t *testing.T) {
 }
 
 func TestStdinFromCommandFailNoOutputAndExitCode(t *testing.T) {
+	python := testPython(t)
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
@@ -704,7 +720,7 @@ func TestStdinFromCommandFailNoOutputAndExitCode(t *testing.T) {
 		StdinFilename: "stdin",
 	}
 
-	err := testRunBackupAssumeFailure(t, filepath.Dir(env.testdata), []string{"python", "-c", "import sys; sys.exit(1)"}, opts, env.gopts)
+	err := testRunBackupAssumeFailure(t, filepath.Dir(env.testdata), []string{python, "-c", "import sys; sys.exit(1)"}, opts, env.gopts)
 	rtest.Assert(t, err != nil, "Expected error while backing up")
 
 	testListSnapshots(t, env.gopts, 0)

@@ -467,8 +467,16 @@ pub fn configure_brokered(
     dek_version: u32,
     capsule_generation: u64,
     initializing: bool,
-) -> Result<(Arc<dyn ObjectStore>, EncryptionStatus, Option<Arc<KeyManager>>)> {
-    if repository_id.is_empty() || dek.len() != DEK_BYTES || dek_version == 0 || capsule_generation == 0 {
+) -> Result<(
+    Arc<dyn ObjectStore>,
+    EncryptionStatus,
+    Option<Arc<KeyManager>>,
+)> {
+    if repository_id.is_empty()
+        || dek.len() != DEK_BYTES
+        || dek_version == 0
+        || capsule_generation == 0
+    {
         bail!("invalid brokered metadata encryption configuration");
     }
     let key: [u8; DEK_BYTES] = dek
