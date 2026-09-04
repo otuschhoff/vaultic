@@ -104,6 +104,37 @@ linters:
         - "-QF1008" # don't warn about specifying name of embedded field on access
   exclusions:
     rules:
+      # Phase 2 mechanically moved unchanged declarations into these new files,
+      # which makes --new-from-rev classify existing debt as new. Remove paths
+      # from this baseline as Phase 3 and Phase 4 modify the corresponding code.
+      - path: ^(internal/archiver/archiver_error_test|internal/repository/repository_packs)\.go$
+        linters: [contextcheck]
+      - path: ^internal/global/(backend|bootstrap)\.go$
+        linters: [depguard]
+      - path: ^(cmd/vaultic/cmd_index_keys_files|internal/index/daemon/(client_(generation|lifecycle|transaction)_test|client_rpc|schema_store_(gdpr|generation|import|publish|reconcile)))\.go$
+        linters: [errcheck]
+      - path: ^(cmd/vaultic/cmd_index_keys_files|internal/archiver/archiver_integration_test|internal/repository/repository_(engine|packs))\.go$
+        linters: [errorlint]
+      - path: ^internal/archiver/archiver_integration_test\.go$
+        linters: [forbidigo]
+      - path: ^(internal/archiver/archiver_(error|snapshot|tree)_test|internal/global/(backend|bootstrap|options)|internal/index/analytics/(analytics_views_test|engine_(delta|rebuild|views))|internal/index/daemon/(client_(lifecycle|transaction)_test|schema_store_(gdpr|import|publish))|internal/index/schema/keys_parse|internal/restorer/restorer_attributes_test)\.go$
+        linters: [funlen]
+      - path: ^(internal/archiver/archiver_(error|tree)_test|internal/global/(backend|bootstrap)|internal/index/analytics/(analytics_views_test|engine_(delta|rebuild|views))|internal/index/daemon/(client_(lifecycle|transaction)_test|schema_store_(gdpr|generation|import|publish|reconcile))|internal/index/schema/(keys_parse|records_(inode|snapshot)))\.go$
+        linters: [gocognit]
+      - path: ^(internal/global/(backend|bootstrap)|internal/index/analytics/(analytics_views_test|engine_(delta|rebuild|views))|internal/index/daemon/(client_(lifecycle|transaction)_test|schema_store_(gdpr|generation|import|publish))|internal/index/schema/keys_parse)\.go$
+        linters: [gocyclo]
+      - path: ^(cmd/vaultic/cmd_index_keys_files|internal/archiver/archiver_(error|integration)_test|internal/global/(backend|bootstrap|open|options)|internal/index/analytics/(analytics_views_test|engine_(delta|rebuild|views))|internal/index/daemon/(client_(generation|lifecycle|transaction)_test|client_rpc|schema_store_(gdpr|generation|import|publish|reconcile))|internal/index/schema/(keys_parse|records_(inode|snapshot))|internal/repository/repository_(blobs|engine|packs))\.go$
+        linters: [lll]
+      - path: ^(cmd/vaultic/cmd_index_keys_files|internal/archiver/archiver_tree_test|internal/global/backend|internal/index/analytics/engine_(delta|views)|internal/index/daemon/schema_store_(generation|import|publish|reconcile)|internal/index/schema/records_inode|internal/repository/repository_blobs)\.go$
+        linters: [nestif]
+      - path: ^(internal/global/bootstrap|internal/repository/repository_blobs)\.go$
+        linters: [nolintlint]
+      - path: ^(internal/global/backend|internal/index/analytics/engine_delta|internal/index/schema/records_(inode|snapshot))\.go$
+        linters: [revive]
+      - path: ^(cmd/vaultic/cmd_index_keys_files|internal/index/(daemon/schema_store_publish|schema/records_inode))\.go$
+        linters: [staticcheck]
+      - path: ^internal/index/(analytics/engine_(delta|rebuild)|daemon/client_generation_test)\.go$
+        linters: [unused]
       # revive: ignore unused parameters in tests
       - path: (_test\.go|testing\.go|backend/.*/tests\.go)
         text: "unused-parameter:"

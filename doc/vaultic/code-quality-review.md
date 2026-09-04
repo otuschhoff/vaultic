@@ -311,6 +311,16 @@ Goal: shrink the largest files without changing any function body. Pure moves, r
 
 Exit criteria: no non-generated Go file > 1,200 lines; no Rust file > 1,200 lines; `funlen`/`gocyclo` counts unchanged (this phase does not touch bodies).
 
+**Implementation status (2026-09-04): complete.**
+
+- The named daemon schema store, analytics engine, repository, and global entrypoints are split into same-package files by responsibility. The global size rule also required splitting schema records and keys, daemon client operations, index-key workflows, and Windows VSS operations; no package boundaries or APIs changed.
+- Oversized Go tests are split along the same feature seams in archiver, daemon client, restorer, and analytics. Every non-generated Go file is now at most 1,200 lines; the largest is `cmd/vaultic/cmd_backup.go` at 1,170 lines.
+- Rust production sections and complete `#[cfg(test)] mod tests` blocks are moved into sibling files through top-level `include!` boundaries. This preserves the original module namespace and private test access while reducing every Rust file below 1,200 lines; the largest is `vaulticdb/src/bin/vaultic-key-broker.rs` at 1,140 lines.
+- Canonical AST hashes for moved Go declarations match the Phase 1 commit, reconstructed moved Rust sources match after ignoring boundary-only blank lines, and Go function, parameter, and complexity counts are unchanged. The reproducible post-split metrics are 464 production Go files, 97,570 non-generated production Go LOC, 3,796 functions, 74 functions over 100 lines, 23 over 150 lines, 24 functions with at least eight parameters, 17 files over 800 lines, 333 lines over 200 bytes, and 15,501 Rust LOC.
+- No production function body, wire format, CLI flag, package boundary, or Rust module API changed. Validation-only adjustments make one pathdiff fixture relative to the current clock and document an intentional process-wide lock held across awaits in an extracted Rust test.
+- The exact golangci-lint v2.12 new-code gate reports zero issues. An explicit temporary Phase 2 exclusion rule covers only legacy linter categories in mechanically created files because `--new-from-rev` otherwise classifies unchanged moved declarations as new; Phase 3 and Phase 4 remove entries as those files change.
+- Validation covers all 1,838 Go tests and 88 Rust tests, strict Clippy and golangci-lint gates, Linux and Windows compilation, deterministic metrics and protobuf generation, actionlint, and moved-code plus patch-hygiene review.
+
 ### Phase 3 — Hotspot decomposition (#3, #4, part of #9)
 
 Goal: bring the top-complexity functions under the lint thresholds. One function per commit, each with tests for the newly extracted units.

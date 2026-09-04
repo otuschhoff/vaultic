@@ -78,7 +78,7 @@ func (client *fakePathdiffClient) Retention(context.Context) (time.Duration, err
 }
 
 func TestPathdiffServiceReportsObservationWindow(t *testing.T) {
-	since := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	since := time.Now().UTC().Add(-2 * time.Hour)
 	source := testTopology(t.TempDir()).Sources[0]
 	client := testPathdiffClient(since)
 	window, err := NewPathdiffService(client).Changes(t.Context(), ChangeQuery{Source: source, Start: since, End: since.Add(time.Hour)})
