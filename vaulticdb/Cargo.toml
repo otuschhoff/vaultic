@@ -2,6 +2,7 @@
 name = "vaulticdb"
 version = "0.1.0"
 edition = "2021"
+default-run = "vaulticdb"
 publish = false
 license = "BSD-2-Clause"
 description = "Vaultic SlateDB metadata service"

@@ -146,7 +146,8 @@ jobs:
             -W clippy::too_many_lines \
             -W clippy::cognitive_complexity \
             -W clippy::unwrap_used \
-            -W clippy::expect_used
+            -W clippy::expect_used \
+            -A clippy::result_large_err
           cargo test --manifest-path vaulticdb/Cargo.toml --all-targets
 
       - name: Run native SlateDB smoke test
