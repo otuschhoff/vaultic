@@ -97,7 +97,7 @@ jobs:
         run: cargo install cargo-zigbuild --version 0.23.2 --locked
 
       - name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+        run: sudo apt-get update && sudo apt-get install --yes libudev-dev musl-tools
 
       - name: Install protobuf compiler
         env:
