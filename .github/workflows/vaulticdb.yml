@@ -80,7 +80,7 @@ jobs:
 
       - name: Install Zig
         env:
-          ZIG_VERSION: 0.16.0
+          ZIG_VERSION: "0.16.0"
           ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
         run: |
           archive="$RUNNER_TEMP/zig.tar.xz"
@@ -101,7 +101,7 @@ jobs:
 
       - name: Install protobuf compiler
         env:
-          PROTOC_VERSION: 36.0
+          PROTOC_VERSION: "36.0"
           PROTOC_SHA256: bc8211ce760bd43ee21ddc145d6d9dbaeeabae205267a79d9054a240e367d4b4
         run: |
           archive="$RUNNER_TEMP/protoc.zip"
