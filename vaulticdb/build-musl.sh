@@ -30,6 +30,7 @@ fi
 
 mkdir -p "$out_dir"
 CARGO_NET_OFFLINE=${CARGO_NET_OFFLINE:-false} \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings -A linker_messages" \
     RUSTUP_TOOLCHAIN="$toolchain" cargo-zigbuild zigbuild --manifest-path "$repo_root/vaulticdb/Cargo.toml" \
     --target "$target" --release
 

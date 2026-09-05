@@ -4,11 +4,12 @@
 use std::{env, fs, io::Read, os::unix::fs::PermissionsExt};
 
 use anyhow::{bail, Context, Result};
-use base64::{
-    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
-    Engine,
-};
+#[cfg(not(target_env = "musl"))]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+#[cfg(not(target_env = "musl"))]
 use serde_json::json;
+#[cfg(not(target_env = "musl"))]
 use sha2::{Digest, Sha256};
 use vaulticdb::encryption::envelope::providers::{
     Fido2HmacSecretProvider, KeyContext, KeyProvider, YubikeyPivProvider,
