@@ -11,11 +11,15 @@ use base64::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use vaulticdb::encryption::envelope::providers::{
-    macos_secure_enclave_ephemeral_public_key, macos_secure_enclave_reference_parts,
-    macos_secure_enclave_unwrap_with_shared_secret, Fido2HmacSecretProvider, KeyContext,
-    KeyProvider, YubikeyPivProvider,
+    Fido2HmacSecretProvider, KeyContext, KeyProvider, YubikeyPivProvider,
 };
 use zeroize::{Zeroize, Zeroizing};
+
+#[cfg(target_os = "macos")]
+use vaulticdb::encryption::envelope::providers::{
+    macos_secure_enclave_ephemeral_public_key, macos_secure_enclave_reference_parts,
+    macos_secure_enclave_unwrap_with_shared_secret,
+};
 
 #[cfg(not(target_env = "musl"))]
 use ctap_hid_fido2::{
@@ -351,6 +355,7 @@ fn macos_secure_enclave_unwrap(_: &[String]) -> Result<()> {
     bail!("macOS Secure Enclave operations require macOS")
 }
 
+#[cfg(target_os = "macos")]
 fn macos_secure_enclave_label(application_tag: &str) -> String {
     format!("com.vaultic.secure-enclave.{application_tag}")
 }
