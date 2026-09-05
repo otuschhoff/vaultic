@@ -7,7 +7,7 @@ ARG TARGETARCH
 
 COPY --chown=build . /vaultic
 RUN go run helpers/build-release-binaries/main.go --platform $TARGETOS/$TARGETARCH --skip-compress
-RUN mv /output/restic_${TARGETOS}_${TARGETARCH} /output/vaultic
+RUN mv /output/vaultic_${TARGETOS}_${TARGETARCH} /output/vaultic
 
 
 FROM alpine:latest
@@ -17,8 +17,10 @@ LABEL org.opencontainers.image.description="Fast, secure, efficient backup progr
 LABEL org.opencontainers.image.url="https://vaultic.net"
 LABEL org.opencontainers.image.documentation="https://vaultic.readthedocs.io"
 LABEL org.opencontainers.image.source="https://github.com/otuschhoff/vaultic"
+LABEL org.opencontainers.image.licenses="BSD-2-Clause"
 
 COPY --from=helper /output/vaultic /usr/bin
+COPY ./LICENSE /usr/share/licenses/vaultic/LICENSE
 COPY ./docker/entrypoint.sh /entrypoint.sh
 RUN apk add --no-cache ca-certificates fuse openssh-client tzdata jq
 

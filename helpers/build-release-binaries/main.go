@@ -86,6 +86,19 @@ func mkdir(dir string) {
 	}
 }
 
+func stageLicense(sourceDir, outputDir string) error {
+	license, err := os.ReadFile(filepath.Join(sourceDir, "LICENSE"))
+	if err != nil {
+		return fmt.Errorf("read release license: %w", err)
+	}
+
+	err = os.WriteFile(filepath.Join(outputDir, "LICENSE"), license, 0644)
+	if err != nil {
+		return fmt.Errorf("write release license: %w", err)
+	}
+	return nil
+}
+
 func abs(dir string) string {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -331,6 +344,9 @@ func main() {
 	sourceDir := abs(options.SourceDir)
 	outputDir := abs(options.OutputDir)
 	mkdir(outputDir)
+	if err := stageLicense(sourceDir, outputDir); err != nil {
+		die("stage license: %v", err)
+	}
 
 	downloadModules(sourceDir)
 	buildTargets(sourceDir, outputDir, targets)

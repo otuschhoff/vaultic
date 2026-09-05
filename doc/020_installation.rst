@@ -210,6 +210,9 @@ are considered stable and releases are made regularly in a controlled manner.
 
 There are both pre-compiled binaries for different platforms as well as the source
 code available for download. Just download and run the one matching your system.
+The complete BSD 2-Clause license is distributed alongside the binaries as
+``LICENSE`` and is included in container images at
+``/usr/share/licenses/vaultic/LICENSE``.
 
 On your first installation, if you desire, you can verify the integrity of your
 downloads by testing the SHA-256 checksums listed in ``SHA256SUMS`` and verifying

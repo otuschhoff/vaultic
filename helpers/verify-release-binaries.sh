@@ -56,6 +56,7 @@ tar xzf "vaultic-${vaultic_version}.tar.gz"
 git clone -b "v${vaultic_version}" https://github.com/otuschhoff/vaultic.git
 rm -rf vaultic/.git
 diff -r vaultic vaultic-${vaultic_version}
+cmp LICENSE "vaultic-${vaultic_version}/LICENSE" || set_invalid "WARNING: RELEASE LICENSE DOES NOT MATCH TAGGED SOURCE!"
 
 
 highlight "Regenerating builder container"
@@ -98,6 +99,7 @@ extract_docker() {
     rm docker.tar
     for i in img/blobs/sha256/*; do
         tar -xvf "$i" -C img usr/bin/vaultic 2> /dev/null 1>&2 || true
+        tar -xvf "$i" -C img usr/share/licenses/vaultic/LICENSE 2> /dev/null 1>&2 || true
         if [[ -f img/usr/bin/vaultic ]]; then
             if [[ -f vaultic-docker ]]; then
                 set_invalid "WARNING: CONTAINER CONTAINS MULTIPLE RESTIC BINARIES"
@@ -105,6 +107,12 @@ extract_docker() {
             mv img/usr/bin/vaultic vaultic-docker
         fi
     done
+
+    if [[ ! -f img/usr/share/licenses/vaultic/LICENSE ]]; then
+        set_invalid "WARNING: CONTAINER DOES NOT CONTAIN THE VAULTIC LICENSE"
+    elif ! cmp -s img/usr/share/licenses/vaultic/LICENSE "vaultic-${vaultic_version}/LICENSE"; then
+        set_invalid "WARNING: CONTAINER LICENSE DOES NOT MATCH TAGGED SOURCE"
+    fi
     
     rm -rf img
     bzip2 vaultic-docker
