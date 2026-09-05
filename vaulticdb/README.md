@@ -12,8 +12,25 @@ adapter validates record families and immutability before writing them.
 Prerequisites:
 
 - Rust toolchain compatible with the pinned SlateDB revision
-- `protoc`
+- `protoc` 36.0
+- `protoc-gen-go` v1.36.10
+- `protoc-gen-go-grpc` 1.5.1
 - C toolchain for any generated binding checks
+
+Install the pinned Go generators before regenerating bindings:
+
+```sh
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+Install `protoc` 36.0 from the official [protobuf release](https://github.com/protocolbuffers/protobuf/releases/tag/v36.0), then regenerate and verify the checked-in Go bindings with:
+
+```sh
+./vaulticdb/generate-proto.sh
+git diff --exit-code -- internal/index/proto
+```
 
 Run the daemon on the default Unix socket:
 

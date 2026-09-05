@@ -5,20 +5,31 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 proto_dir="$repo_root/vaulticdb/proto"
 go_out="$repo_root/internal/index/proto"
 
-command -v protoc >/dev/null 2>&1 || {
-    echo "vaulticdb: protoc is required to generate protobuf bindings" >&2
-    exit 1
+require_version() {
+    tool=$1
+    expected=$2
+    install_hint=$3
+
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "vaulticdb: $tool is required" >&2
+        echo "$install_hint" >&2
+        exit 1
+    }
+
+    actual=$("$tool" --version 2>&1)
+    if [ "$actual" != "$expected" ]; then
+        echo "vaulticdb: expected $expected, found $actual" >&2
+        echo "$install_hint" >&2
+        exit 1
+    fi
 }
-command -v protoc-gen-go >/dev/null 2>&1 || {
-    echo "vaulticdb: protoc-gen-go is required" >&2
-    echo "install with: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest" >&2
-    exit 1
-}
-command -v protoc-gen-go-grpc >/dev/null 2>&1 || {
-    echo "vaulticdb: protoc-gen-go-grpc is required" >&2
-    echo "install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest" >&2
-    exit 1
-}
+
+require_version protoc "libprotoc 36.0" \
+    "install protoc 36.0 from https://github.com/protocolbuffers/protobuf/releases/tag/v36.0"
+require_version protoc-gen-go "protoc-gen-go v1.36.10" \
+    "install with: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10"
+require_version protoc-gen-go-grpc "protoc-gen-go-grpc 1.5.1" \
+    "install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1"
 
 mkdir -p "$go_out"
 protoc \

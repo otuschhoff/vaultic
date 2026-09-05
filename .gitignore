@@ -7,3 +7,4 @@
 /.vscode
 /dist/vaultic
 /bin/
+.DS_Store
