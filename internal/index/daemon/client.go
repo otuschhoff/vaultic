@@ -411,8 +411,8 @@ func startDaemon(
 		_, writeErr := io.WriteString(authWrite, options.AuthToken)
 		closeErr := authWrite.Close()
 		if writeErr != nil || closeErr != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			_ = cmd.Process.Kill() // Preserve the authentication write failure while terminating the unusable daemon.
+			_ = cmd.Wait()         // Reap the terminated daemon; its exit status cannot replace the authentication failure.
 			return nil, fmt.Errorf("send vaulticdb authentication token: %w", errors.Join(writeErr, closeErr))
 		}
 	}
@@ -422,11 +422,11 @@ func startDaemon(
 func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Client, error) {
 	client, err := retryDial(ctx, options)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = cmd.Process.Kill() // Preserve the readiness failure while terminating the unusable daemon.
+		_ = cmd.Wait()         // Reap the terminated daemon; its exit status cannot replace the readiness failure.
 		cleanupOwnedArtifacts(options, cmd.Process.Pid)
 		if options.EncryptionMode == "required" || options.EncryptionMode == "initialize" {
-			_ = observability.Emit(ctx, observability.Event{
+			observability.EmitBestEffort(ctx, observability.Event{
 				Severity: observability.Warning, Category: observability.CategoryAuth,
 				Component: "vaulticdb", Message: "encrypted metadata daemon failed during startup",
 				Fields: map[string]any{"repository_id": options.RepositoryID},
@@ -439,7 +439,7 @@ func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Cli
 		metadataPath = tcpMetadataPath(options.TCPAddress)
 	}
 	if !daemonOwnsProcess(metadataPath, cmd.Process.Pid) {
-		_ = cmd.Wait()
+		_ = cmd.Wait() // The daemon rejected ownership; waiting only reaps the child process.
 		cmd = nil
 	}
 	if options.PersistentDaemon {
@@ -600,89 +600,89 @@ type authenticatedClient struct {
 func (c *authenticatedClient) Health(
 	ctx context.Context,
 	in *vaulticdbv1.HealthRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.HealthResponse, error) {
-	return c.VaulticDBClient.Health(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Health(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Capabilities(
 	ctx context.Context,
 	in *vaulticdbv1.CapabilitiesRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.CapabilitiesResponse, error) {
-	return c.VaulticDBClient.Capabilities(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Capabilities(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Drain(
 	ctx context.Context,
 	in *vaulticdbv1.Empty,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.Empty, error) {
-	return c.VaulticDBClient.Drain(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Drain(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Shutdown(
 	ctx context.Context,
 	in *vaulticdbv1.Empty,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.Empty, error) {
-	return c.VaulticDBClient.Shutdown(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Shutdown(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Get(
 	ctx context.Context,
 	in *vaulticdbv1.GetRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.GetResponse, error) {
-	return c.VaulticDBClient.Get(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Get(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) MultiGet(
 	ctx context.Context,
 	in *vaulticdbv1.MultiGetRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.MultiGetResponse, error) {
-	return c.VaulticDBClient.MultiGet(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.MultiGet(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Scan(
 	ctx context.Context,
 	in *vaulticdbv1.ScanRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.ScanResponse, error) {
-	return c.VaulticDBClient.Scan(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Scan(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) WriteBatch(
 	ctx context.Context,
 	in *vaulticdbv1.WriteBatchRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.WriteBatchResponse, error) {
-	return c.VaulticDBClient.WriteBatch(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.WriteBatch(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Begin(
 	ctx context.Context,
 	in *vaulticdbv1.Empty,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.BeginResponse, error) {
-	return c.VaulticDBClient.Begin(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Begin(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Commit(
 	ctx context.Context,
 	in *vaulticdbv1.TransactionRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.CommitResponse, error) {
-	return c.VaulticDBClient.Commit(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Commit(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Rollback(
 	ctx context.Context,
 	in *vaulticdbv1.TransactionRequest,
-	opts ...grpc.CallOption,
+	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.Empty, error) {
-	return c.VaulticDBClient.Rollback(withAuth(ctx, c.token), in, opts...)
+	return c.VaulticDBClient.Rollback(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func withAuth(ctx context.Context, token string) context.Context {
@@ -802,7 +802,7 @@ func (c *Client) auditEncryptionUnlock(ctx context.Context) {
 	if c.encryption.RecoveryUnlock {
 		severity = observability.Warning
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  severity,

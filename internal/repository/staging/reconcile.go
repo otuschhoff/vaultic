@@ -76,7 +76,7 @@ func reconcile(ctx context.Context, store Store, authority Authority, verifier P
 		result.SnapshotID = job.Completion.SnapshotID
 		return result
 	}
-	if job.State != StateSealedPending && !(candidate && job.State == StateCommitted && job.Completion != nil) {
+	if job.State != StateSealedPending && (!candidate || job.State != StateCommitted || job.Completion == nil) {
 		return reconcileFailure(result, Reject(fmt.Errorf("journal state %q is not eligible for reconciliation", job.State)))
 	}
 	segments, err := store.VerifyJob(ctx, job)

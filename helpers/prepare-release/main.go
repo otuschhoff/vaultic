@@ -15,7 +15,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-var opts = struct {
+var options = struct {
 	Version string
 
 	IgnoreBranchName           bool
@@ -31,14 +31,14 @@ var opts = struct {
 var versionRegex = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 func init() {
-	pflag.BoolVar(&opts.IgnoreBranchName, "ignore-branch-name", false, "allow releasing from other branches than 'master'")
-	pflag.BoolVar(&opts.IgnoreUncommittedChanges, "ignore-uncommitted-changes", false, "allow uncommitted changes")
-	pflag.BoolVar(&opts.IgnoreChangelogVersion, "ignore-changelog-version", false, "ignore missing entry in CHANGELOG.md")
-	pflag.BoolVar(&opts.IgnoreChangelogReleaseDate, "ignore-changelog-release-date", false, "ignore missing subdir with date in changelog/")
-	pflag.BoolVar(&opts.IgnoreChangelogCurrent, "ignore-changelog-current", false, "ignore check if CHANGELOG.md is up to date")
-	pflag.BoolVar(&opts.IgnoreDockerBuildGoVersion, "ignore-docker-build-go-version", false, "ignore check if docker builder go version is up to date")
+	pflag.BoolVar(&options.IgnoreBranchName, "ignore-branch-name", false, "allow releasing from other branches than 'master'")
+	pflag.BoolVar(&options.IgnoreUncommittedChanges, "ignore-uncommitted-changes", false, "allow uncommitted changes")
+	pflag.BoolVar(&options.IgnoreChangelogVersion, "ignore-changelog-version", false, "ignore missing entry in CHANGELOG.md")
+	pflag.BoolVar(&options.IgnoreChangelogReleaseDate, "ignore-changelog-release-date", false, "ignore missing subdir with date in changelog/")
+	pflag.BoolVar(&options.IgnoreChangelogCurrent, "ignore-changelog-current", false, "ignore check if CHANGELOG.md is up to date")
+	pflag.BoolVar(&options.IgnoreDockerBuildGoVersion, "ignore-docker-build-go-version", false, "ignore check if docker builder go version is up to date")
 
-	pflag.StringVar(&opts.OutputDir, "output-dir", "", "use `dir` as output directory")
+	pflag.StringVar(&options.OutputDir, "output-dir", "", "use `dir` as output directory")
 
 	pflag.Parse()
 }
@@ -138,7 +138,7 @@ func getBranchName() string {
 }
 
 func preCheckBranchMaster() {
-	if opts.IgnoreBranchName {
+	if options.IgnoreBranchName {
 		return
 	}
 
@@ -149,7 +149,7 @@ func preCheckBranchMaster() {
 }
 
 func preCheckUncommittedChanges() {
-	if opts.IgnoreUncommittedChanges {
+	if options.IgnoreUncommittedChanges {
 		return
 	}
 
@@ -165,20 +165,19 @@ func preCheckVersionExists() {
 		die("error running 'git tag -l': %v", err)
 	}
 
-	sc := bufio.NewScanner(bytes.NewReader(buf))
-	for sc.Scan() {
-		if sc.Err() != nil {
-			die("error scanning version tags: %v", sc.Err())
+	scanner := bufio.NewScanner(bytes.NewReader(buf))
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "v"+options.Version {
+			die("tag v%v already exists", options.Version)
 		}
-
-		if strings.TrimSpace(sc.Text()) == "v"+opts.Version {
-			die("tag v%v already exists", opts.Version)
-		}
+	}
+	if err := scanner.Err(); err != nil {
+		die("error scanning version tags: %v", err)
 	}
 }
 
 func preCheckChangelogCurrent() {
-	if opts.IgnoreChangelogCurrent {
+	if options.IgnoreChangelogCurrent {
 		return
 	}
 
@@ -188,17 +187,17 @@ func preCheckChangelogCurrent() {
 	// check for uncommitted changes in changelog
 	if len(uncommittedChanges("CHANGELOG.md")) > 0 {
 		msg("committing file CHANGELOG.md")
-		run("git", "commit", "-m", fmt.Sprintf("Generate CHANGELOG.md for %v", opts.Version), "CHANGELOG.md")
+		run("git", "commit", "-m", fmt.Sprintf("Generate CHANGELOG.md for %v", options.Version), "CHANGELOG.md")
 	}
 }
 
 func preCheckChangelogRelease() bool {
-	if opts.IgnoreChangelogReleaseDate {
+	if options.IgnoreChangelogReleaseDate {
 		return true
 	}
 
 	for _, name := range readdir("changelog") {
-		if strings.HasPrefix(name, opts.Version+"_") {
+		if strings.HasPrefix(name, options.Version+"_") {
 			return true
 		}
 	}
@@ -208,7 +207,7 @@ func preCheckChangelogRelease() bool {
 
 func createChangelogRelease() {
 	date := time.Now().Format("2006-01-02")
-	targetDir := filepath.Join("changelog", fmt.Sprintf("%s_%s", opts.Version, date))
+	targetDir := filepath.Join("changelog", fmt.Sprintf("%s_%s", options.Version, date))
 	unreleasedDir := filepath.Join("changelog", "unreleased")
 	mkdir(targetDir)
 
@@ -229,12 +228,12 @@ func createChangelogRelease() {
 	run("git", "add", targetDir)
 	run("git", "add", "-u", unreleasedDir)
 
-	msg := fmt.Sprintf("Prepare changelog for %v", opts.Version)
+	msg := fmt.Sprintf("Prepare changelog for %v", options.Version)
 	run("git", "commit", "-m", msg, targetDir, unreleasedDir)
 }
 
 func preCheckChangelogVersion() {
-	if opts.IgnoreChangelogVersion {
+	if options.IgnoreChangelogVersion {
 		return
 	}
 
@@ -243,25 +242,25 @@ func preCheckChangelogVersion() {
 		die("unable to open CHANGELOG.md: %v", err)
 	}
 	defer func() {
-		_ = f.Close()
+		_ = f.Close() // Read-only changelog close cannot affect the completed scan.
 	}()
 
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if sc.Err() != nil {
-			die("error scanning: %v", sc.Err())
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if scanner.Err() != nil {
+			die("error scanning: %v", scanner.Err())
 		}
 
-		if strings.Contains(strings.TrimSpace(sc.Text()), fmt.Sprintf("Changelog for vaultic %v", opts.Version)) {
+		if strings.Contains(strings.TrimSpace(scanner.Text()), fmt.Sprintf("Changelog for vaultic %v", options.Version)) {
 			return
 		}
 	}
 
-	die("CHANGELOG.md does not contain version %v", opts.Version)
+	die("CHANGELOG.md does not contain version %v", options.Version)
 }
 
 func preCheckDockerBuilderGoVersion() {
-	if opts.IgnoreDockerBuildGoVersion {
+	if options.IgnoreDockerBuildGoVersion {
 		return
 	}
 
@@ -313,35 +312,35 @@ var versionPattern = `const Version = ".*"`
 const versionCodeFile = "internal/global/global.go"
 
 func updateVersion() {
-	err := os.WriteFile("VERSION", []byte(opts.Version+"\n"), 0644)
+	err := os.WriteFile("VERSION", []byte(options.Version+"\n"), 0644)
 	if err != nil {
 		die("unable to write version to file: %v", err)
 	}
 
-	newVersion := fmt.Sprintf("const Version = %q", opts.Version)
+	newVersion := fmt.Sprintf("const Version = %q", options.Version)
 	replace(versionCodeFile, versionPattern, newVersion)
 
 	if len(uncommittedChanges("VERSION")) > 0 || len(uncommittedChanges(versionCodeFile)) > 0 {
 		msg("committing version files")
-		run("git", "commit", "-m", fmt.Sprintf("Add version for %v", opts.Version), "VERSION", versionCodeFile)
+		run("git", "commit", "-m", fmt.Sprintf("Add version for %v", options.Version), "VERSION", versionCodeFile)
 	}
 }
 
 func updateVersionDev() {
-	err := os.WriteFile("VERSION", []byte(opts.Version+"-dev\n"), 0644)
+	err := os.WriteFile("VERSION", []byte(options.Version+"-dev\n"), 0644)
 	if err != nil {
 		die("unable to write version to file: %v", err)
 	}
 
-	newVersion := fmt.Sprintf(`const Version = "%s-dev (compiled manually)"`, opts.Version)
+	newVersion := fmt.Sprintf(`const Version = "%s-dev (compiled manually)"`, options.Version)
 	replace(versionCodeFile, versionPattern, newVersion)
 
 	msg("committing cmd/vaultic/global.go with dev version")
-	run("git", "commit", "-m", fmt.Sprintf("Set development version for %v", opts.Version), "VERSION", versionCodeFile)
+	run("git", "commit", "-m", fmt.Sprintf("Set development version for %v", options.Version), "VERSION", versionCodeFile)
 }
 
 func addTag() {
-	tagname := "v" + opts.Version
+	tagname := "v" + options.Version
 	msg("add tag %v", tagname)
 	run("git", "tag", "-a", "-s", "-m", tagname, tagname)
 }
@@ -452,8 +451,8 @@ func main() {
 		die("USAGE: release-version [OPTIONS] VERSION")
 	}
 
-	opts.Version = pflag.Args()[0]
-	if !versionRegex.MatchString(opts.Version) {
+	options.Version = pflag.Args()[0]
+	if !versionRegex.MatchString(options.Version) {
 		die("invalid new version")
 	}
 
@@ -468,12 +467,12 @@ func main() {
 	preCheckChangelogCurrent()
 	preCheckChangelogVersion()
 
-	if opts.OutputDir == "" {
-		opts.OutputDir = tempdir("build-output-")
+	if options.OutputDir == "" {
+		options.OutputDir = tempdir("build-output-")
 	}
 	sourceDir := tempdir("source-")
 
-	msg("using output dir %v", opts.OutputDir)
+	msg("using output dir %v", options.OutputDir)
 	msg("using source dir %v", sourceDir)
 
 	generateFiles()
@@ -481,19 +480,19 @@ func main() {
 	addTag()
 	updateVersionDev()
 
-	tarFilename := filepath.Join(opts.OutputDir, fmt.Sprintf("vaultic-%s.tar.gz", opts.Version))
-	exportTar(opts.Version, tarFilename)
+	tarFilename := filepath.Join(options.OutputDir, fmt.Sprintf("vaultic-%s.tar.gz", options.Version))
+	exportTar(options.Version, tarFilename)
 
 	extractTar(tarFilename, sourceDir)
-	runBuild(sourceDir, opts.OutputDir, opts.Version)
+	runBuild(sourceDir, options.OutputDir, options.Version)
 
-	sha256sums(opts.OutputDir, filepath.Join(opts.OutputDir, "SHA256SUMS"))
+	sha256sums(options.OutputDir, filepath.Join(options.OutputDir, "SHA256SUMS"))
 
-	signFiles(filepath.Join(opts.OutputDir, "SHA256SUMS"), tarFilename)
+	signFiles(filepath.Join(options.OutputDir, "SHA256SUMS"), tarFilename)
 
-	dockerCmds := updateDocker(sourceDir, opts.Version)
+	dockerCmds := updateDocker(sourceDir, options.Version)
 
-	msg("done, output dir is %v", opts.OutputDir)
+	msg("done, output dir is %v", options.OutputDir)
 
 	msg("now run:\n\ngit push --tags origin %s\n%s\n\nrm -rf %q", branch, dockerCmds, sourceDir)
 }

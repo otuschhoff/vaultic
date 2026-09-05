@@ -247,6 +247,8 @@ func (c *Checker) Packs(ctx context.Context, errChan chan<- error) {
 }
 
 // ReadPacks loads data from specified packs and checks the integrity.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[vaultic.ID]int64) map[vaultic.ID]int64, printer vaultic.Printer, errChan chan<- error) {
 	defer close(errChan)
 
@@ -298,6 +300,7 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[vaultic.I
 			bufRd := bufio.NewReaderSize(nil, maxStreamBufferSize)
 			dec, err := zstd.NewReader(nil)
 			if err != nil {
+				//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 				panic(err)
 			}
 			defer dec.Close()
@@ -356,7 +359,7 @@ func checkPack(ctx context.Context, r *Repository, id vaultic.ID, blobs pack.Blo
 	if err != nil {
 		if r.cache != nil {
 			// ignore error as there's not much we can do here
-			_ = r.cache.Forget(backend.Handle{Type: backend.PackFile, Name: id.String()})
+			_ = r.cache.Forget(backend.Handle{Type: backend.PackFile, Name: id.String()}) // Cache eviction cannot change repository integrity results.
 		}
 
 		// retry pack verification to detect transient errors

@@ -13,7 +13,7 @@ func TestBackupFailsWhenUsingInvalidPatterns(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	var err error
 
@@ -22,8 +22,8 @@ func TestBackupFailsWhenUsingInvalidPatterns(t *testing.T) {
 		t,
 		filepath.Dir(env.testdata),
 		[]string{"testdata"},
-		BackupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{Excludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
-		env.gopts,
+		backupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{Excludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --exclude: invalid pattern(s) provided:
@@ -35,8 +35,8 @@ func TestBackupFailsWhenUsingInvalidPatterns(t *testing.T) {
 		t,
 		filepath.Dir(env.testdata),
 		[]string{"testdata"},
-		BackupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
-		env.gopts,
+		backupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --iexclude: invalid pattern(s) provided:
@@ -48,7 +48,7 @@ func TestBackupFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	// Create an exclude file with some invalid patterns
 	excludeFile := env.base + "/excludefile"
@@ -64,8 +64,8 @@ func TestBackupFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 		t,
 		filepath.Dir(env.testdata),
 		[]string{"testdata"},
-		BackupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{ExcludeFiles: []string{excludeFile}}},
-		env.gopts,
+		backupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{ExcludeFiles: []string{excludeFile}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --exclude-file: invalid pattern(s) provided:
@@ -77,8 +77,8 @@ func TestBackupFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 		t,
 		filepath.Dir(env.testdata),
 		[]string{"testdata"},
-		BackupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludeFiles: []string{excludeFile}}},
-		env.gopts,
+		backupOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludeFiles: []string{excludeFile}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --iexclude-file: invalid pattern(s) provided:
@@ -90,7 +90,7 @@ func TestRestoreFailsWhenUsingInvalidPatterns(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	var err error
 
@@ -98,8 +98,8 @@ func TestRestoreFailsWhenUsingInvalidPatterns(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{Excludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
-		env.gopts,
+		restoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{Excludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --exclude: invalid pattern(s) provided:
@@ -110,8 +110,8 @@ func TestRestoreFailsWhenUsingInvalidPatterns(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
-		env.gopts,
+		restoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --iexclude: invalid pattern(s) provided:
@@ -122,8 +122,8 @@ func TestRestoreFailsWhenUsingInvalidPatterns(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{IncludePatternOptions: filter.IncludePatternOptions{Includes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
-		env.gopts,
+		restoreOptions{IncludePatternOptions: filter.IncludePatternOptions{Includes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --include: invalid pattern(s) provided:
@@ -134,8 +134,8 @@ func TestRestoreFailsWhenUsingInvalidPatterns(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{IncludePatternOptions: filter.IncludePatternOptions{InsensitiveIncludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
-		env.gopts,
+		restoreOptions{IncludePatternOptions: filter.IncludePatternOptions{InsensitiveIncludes: []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"}}},
+		env.globalOptions,
 	)
 
 	rtest.Equals(t, `Fatal: --iinclude: invalid pattern(s) provided:
@@ -147,7 +147,7 @@ func TestRestoreFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	// Create an include file with some invalid patterns
 	patternsFile := env.base + "/patternsFile"
@@ -159,8 +159,8 @@ func TestRestoreFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 	err := testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{IncludePatternOptions: filter.IncludePatternOptions{IncludeFiles: []string{patternsFile}}},
-		env.gopts,
+		restoreOptions{IncludePatternOptions: filter.IncludePatternOptions{IncludeFiles: []string{patternsFile}}},
+		env.globalOptions,
 	)
 	rtest.Equals(t, `Fatal: --include-file: invalid pattern(s) provided:
 *[._]log[.-][0-9]
@@ -169,8 +169,8 @@ func TestRestoreFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{ExcludeFiles: []string{patternsFile}}},
-		env.gopts,
+		restoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{ExcludeFiles: []string{patternsFile}}},
+		env.globalOptions,
 	)
 	rtest.Equals(t, `Fatal: --exclude-file: invalid pattern(s) provided:
 *[._]log[.-][0-9]
@@ -179,8 +179,8 @@ func TestRestoreFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{IncludePatternOptions: filter.IncludePatternOptions{InsensitiveIncludeFiles: []string{patternsFile}}},
-		env.gopts,
+		restoreOptions{IncludePatternOptions: filter.IncludePatternOptions{InsensitiveIncludeFiles: []string{patternsFile}}},
+		env.globalOptions,
 	)
 	rtest.Equals(t, `Fatal: --iinclude-file: invalid pattern(s) provided:
 *[._]log[.-][0-9]
@@ -189,8 +189,8 @@ func TestRestoreFailsWhenUsingInvalidPatternsFromFile(t *testing.T) {
 	err = testRunRestoreAssumeFailure(
 		t,
 		"latest",
-		RestoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludeFiles: []string{patternsFile}}},
-		env.gopts,
+		restoreOptions{ExcludePatternOptions: filter.ExcludePatternOptions{InsensitiveExcludeFiles: []string{patternsFile}}},
+		env.globalOptions,
 	)
 	rtest.Equals(t, `Fatal: --iexclude-file: invalid pattern(s) provided:
 *[._]log[.-][0-9]

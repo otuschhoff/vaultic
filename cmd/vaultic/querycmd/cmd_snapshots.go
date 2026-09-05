@@ -20,7 +20,7 @@ import (
 )
 
 func NewSnapshotsCommand(globalOptions *global.Options) *cobra.Command {
-	var opts SnapshotOptions
+	var options snapshotOptions
 
 	cmd := &cobra.Command{
 		Use:   "snapshots [flags] [snapshotID ...]",
@@ -40,20 +40,20 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           "default",
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
-			return opts.Finalize()
+			finalizeSnapshotFilter(&options.SnapshotFilter)
+			return options.Finalize()
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSnapshots(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runSnapshots(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// SnapshotOptions bundles all options for the snapshots command.
-type SnapshotOptions struct {
+// snapshotOptions bundles all options for the snapshots command.
+type snapshotOptions struct {
 	data.SnapshotFilter
 	Compact bool
 	last    bool // Deprecated in favour of Latest.
@@ -61,36 +61,37 @@ type SnapshotOptions struct {
 	GroupBy data.SnapshotGroupByOptions
 }
 
-func (opts *SnapshotOptions) AddFlags(f *pflag.FlagSet) {
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
-	f.BoolVarP(&opts.Compact, "compact", "c", false, "use compact output format")
-	f.BoolVar(&opts.last, "last", false, "only show the last snapshot for each host and path")
+func (options *snapshotOptions) AddFlags(f *pflag.FlagSet) {
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
+	f.BoolVarP(&options.Compact, "compact", "c", false, "use compact output format")
+	f.BoolVar(&options.last, "last", false, "only show the last snapshot for each host and path")
 	err := f.MarkDeprecated("last", "use --latest 1")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
+		// Flag registration is a construction-time invariant.
+		panic(err) //nolint:forbidigo // A missing flag here is a command-construction defect.
 	}
-	f.IntVar(&opts.Latest, "latest", 0, "only show the last `n` snapshots for each host and path")
-	f.VarP(&opts.GroupBy, "group-by", "g", "`group` snapshots by host, paths and/or tags, separated by comma")
+	f.IntVar(&options.Latest, "latest", 0, "only show the last `n` snapshots for each host and path")
+	f.VarP(&options.GroupBy, "group-by", "g", "`group` snapshots by host, paths and/or tags, separated by comma")
 }
 
-func (opts *SnapshotOptions) Finalize() error {
-	if opts.last && opts.Latest == 0 {
-		opts.Latest = 1
+func (options *snapshotOptions) Finalize() error {
+	if options.last && options.Latest == 0 {
+		options.Latest = 1
 	}
 	return nil
 }
 
-func runSnapshots(ctx context.Context, opts SnapshotOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+func runSnapshots(ctx context.Context, options snapshotOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
 	var snapshots data.Snapshots
-	err = opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	err = options.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -101,7 +102,7 @@ func runSnapshots(ctx context.Context, opts SnapshotOptions, gopts global.Option
 		return err
 	}
 
-	snapshotGroups, grouped, err := data.GroupSnapshots(snapshots, opts.GroupBy)
+	snapshotGroups, grouped, err := data.GroupSnapshots(snapshots, options.GroupBy)
 	if err != nil {
 		return err
 	}
@@ -111,19 +112,19 @@ func runSnapshots(ctx context.Context, opts SnapshotOptions, gopts global.Option
 			return ctx.Err()
 		}
 
-		if opts.Latest > 0 {
+		if options.Latest > 0 {
 			if grouped {
-				list = filterLatestSnapshotsInGroup(list, opts.Latest)
+				list = filterLatestSnapshotsInGroup(list, options.Latest)
 			} else {
-				list = filterLatestSnapshots(list, opts.Latest)
+				list = filterLatestSnapshots(list, options.Latest)
 			}
 		}
 		sort.Sort(sort.Reverse(list))
 		snapshotGroups[k] = list
 	}
 
-	if gopts.JSON {
-		err := printSnapshotGroupJSON(gopts.Term.OutputWriter(), snapshotGroups, grouped)
+	if globalOptions.JSON {
+		err := printSnapshotGroupJSON(globalOptions.Term.OutputWriter(), snapshotGroups, grouped)
 		if err != nil {
 			printer.E("error printing snapshots: %v", err)
 		}
@@ -136,12 +137,12 @@ func runSnapshots(ctx context.Context, opts SnapshotOptions, gopts global.Option
 		}
 
 		if grouped {
-			err := PrintSnapshotGroupHeader(gopts.Term.OutputWriter(), k)
+			err := PrintSnapshotGroupHeader(globalOptions.Term.OutputWriter(), k)
 			if err != nil {
 				return err
 			}
 		}
-		err := PrintSnapshots(gopts.Term.OutputWriter(), list, nil, opts.Compact)
+		err := PrintSnapshots(globalOptions.Term.OutputWriter(), list, nil, options.Compact)
 		if err != nil {
 			return err
 		}

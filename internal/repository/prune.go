@@ -329,6 +329,7 @@ func packInfoFromIndex(
 	// duplicates, this also applies to duplicates.
 	for _, count := range usedBlobs.All() {
 		if count != 1 {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("internal error during blob selection")
 		}
 	}
@@ -691,17 +692,11 @@ func (plan *PrunePlan) BindPrunePlan(id string) {
 // - rebuild the index while ignoring all files that will be deleted
 // - delete the files
 // plan.removePacks and plan.ignorePacks are modified in this function.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) error {
 	if plan.opts.DryRun {
-		printer.V(
-			"Repeated prune dry-runs can report slightly different amounts of data to keep or repack. This is expected behavior.\n\n",
-		)
-		if len(plan.removePacksFirst) > 0 {
-			printer.V("Would have removed the following unreferenced packs:\n%v\n\n", plan.removePacksFirst)
-		}
-		printer.V("Would have repacked and removed the following packs:\n%v\n\n", plan.repackPacks)
-		printer.V("Would have removed the following no longer used packs:\n%v\n\n", plan.removePacks)
-		// Always quit here if DryRun was set!
+		plan.reportDryRun(printer)
 		return nil
 	}
 
@@ -755,6 +750,7 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 		plan.ignorePacks.Merge(plan.removePacks)
 	}
 
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if plan.opts.UnsafeRecovery {
 		printer.P("deleting index files\n")
 		indexFiles := repo.idx.IDs()
@@ -829,6 +825,17 @@ func (plan *PrunePlan) Execute(ctx context.Context, printer vaultic.Printer) err
 
 	printer.P("done\n")
 	return nil
+}
+
+func (plan *PrunePlan) reportDryRun(printer vaultic.Printer) {
+	printer.V(
+		"Repeated prune dry-runs can report slightly different amounts of data to keep or repack. This is expected behavior.\n\n",
+	)
+	if len(plan.removePacksFirst) > 0 {
+		printer.V("Would have removed the following unreferenced packs:\n%v\n\n", plan.removePacksFirst)
+	}
+	printer.V("Would have repacked and removed the following packs:\n%v\n\n", plan.repackPacks)
+	printer.V("Would have removed the following no longer used packs:\n%v\n\n", plan.removePacks)
 }
 
 // deleteFiles deletes the given fileList of fileType in parallel

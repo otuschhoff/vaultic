@@ -139,18 +139,18 @@ The full documentation can be found at https://vaultic.readthedocs.io/ .
 	return cmd
 }
 
-func configureLogging(gopts global.Options) error {
+func configureLogging(globalOptions global.Options) error {
 	observability.SetDefaultSyslog(nil)
-	if gopts.LogFile != "" {
-		f, err := os.OpenFile(gopts.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if globalOptions.LogFile != "" {
+		f, err := os.OpenFile(globalOptions.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
-			return fmt.Errorf("open log file %q: %w", gopts.LogFile, err)
+			return fmt.Errorf("open log file %q: %w", globalOptions.LogFile, err)
 		}
 		log.SetOutput(io.MultiWriter(os.Stderr, f))
 	}
-	if len(gopts.SyslogTargets) > 0 {
-		targets := make([]observability.SyslogTarget, len(gopts.SyslogTargets))
-		for index, spec := range gopts.SyslogTargets {
+	if len(globalOptions.SyslogTargets) > 0 {
+		targets := make([]observability.SyslogTarget, len(globalOptions.SyslogTargets))
+		for index, spec := range globalOptions.SyslogTargets {
 			target, err := observability.ParseSyslogTarget(spec)
 			if err != nil {
 				return fmt.Errorf("invalid --syslog-target: %w", err)
@@ -163,9 +163,9 @@ func configureLogging(gopts global.Options) error {
 	return nil
 }
 
-func wrapProfileHooks(root *cobra.Command, gopts *global.Options) {
+func wrapProfileHooks(root *cobra.Command, globalOptions *global.Options) {
 	for _, cmd := range root.Commands() {
-		wrapProfileHooks(cmd, gopts)
+		wrapProfileHooks(cmd, globalOptions)
 	}
 	if root.RunE == nil {
 		return
@@ -173,11 +173,11 @@ func wrapProfileHooks(root *cobra.Command, gopts *global.Options) {
 
 	run := root.RunE
 	root.RunE = func(cmd *cobra.Command, args []string) (err error) {
-		ctx, span := observability.StartCommand(cmd.Context(), gopts.OpenTelemetry, cmd.Name())
+		ctx, span := observability.StartCommand(cmd.Context(), globalOptions.OpenTelemetry, cmd.Name())
 		defer span.End()
 		cmd.SetContext(ctx)
 
-		profile := gopts.Profile
+		profile := globalOptions.Profile
 		if profile == nil {
 			return run(cmd, args)
 		}
@@ -191,10 +191,10 @@ func wrapProfileHooks(root *cobra.Command, gopts *global.Options) {
 			BackupTags:    tags,
 		}
 		runner := hooks.Runner{
-			Stdout: gopts.Term.OutputWriter(),
-			Stderr: gopts.Term.OutputWriter(),
+			Stdout: globalOptions.Term.OutputWriter(),
+			Stderr: globalOptions.Term.OutputWriter(),
 			Warn: func(format string, args ...any) {
-				gopts.Term.Error(fmt.Sprintf(format, args...))
+				globalOptions.Term.Error(fmt.Sprintf(format, args...))
 			},
 		}
 		scopes := []configfile.Hooks{profile.Hooks["global"], profile.Hooks["repository"], profile.Hooks[cmd.Name()]}
@@ -217,12 +217,12 @@ func wrapProfileHooks(root *cobra.Command, gopts *global.Options) {
 	}
 }
 
-func applyProfile(cmd *cobra.Command, gopts *global.Options) error {
-	profile, err := configfile.Load(gopts.UseProfiles)
+func applyProfile(cmd *cobra.Command, globalOptions *global.Options) error {
+	profile, err := configfile.Load(globalOptions.UseProfiles)
 	if err != nil {
 		return err
 	}
-	gopts.Profile = profile
+	globalOptions.Profile = profile
 
 	// Profile values are defaults. Explicit CLI flags and VAULTIC_/RESTIC_
 	// environment variables take precedence over them.
@@ -284,13 +284,12 @@ func printExitError(globalOptions global.Options, code int, message string) {
 
 		err := json.NewEncoder(os.Stderr).Encode(jsonS)
 		if err != nil {
-			// ignore error as there's no good way to handle it
-			_, _ = fmt.Fprintf(os.Stderr, "JSON encode failed: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "JSON encode failed: %v\n", err) // stderr failure leaves no remaining error-reporting channel.
 			debug.Log("JSON encode failed: %v\n", err)
 			return
 		}
 	} else {
-		_, _ = fmt.Fprintf(os.Stderr, "%v\n", message)
+		_, _ = fmt.Fprintf(os.Stderr, "%v\n", message) // stderr failure leaves no remaining error-reporting channel.
 	}
 }
 
@@ -302,10 +301,10 @@ func main() {
 	log.SetOutput(logBuffer)
 
 	err := feature.Flag.Apply(env.Get("FEATURES"), func(s string) {
-		_, _ = fmt.Fprintln(os.Stderr, s)
+		_, _ = fmt.Fprintln(os.Stderr, s) // Feature warnings have no alternate output channel during startup.
 	})
 	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err) // The process exits immediately, so stderr failure cannot be recovered.
 		Exit(1)
 	}
 
@@ -322,11 +321,10 @@ func main() {
 		globalOptions.Term = term
 		ctx := createGlobalContext(os.Stderr)
 		err = newRootCommand(&globalOptions).ExecuteContext(ctx)
-		switch err {
-		case nil:
+		switch {
+		case err == nil:
 			err = ctx.Err()
-		case ErrOK:
-			// ErrOK overwrites context cancellation errors
+		case errors.Is(err, ErrOK):
 			err = nil
 		}
 	}()
@@ -346,9 +344,9 @@ func main() {
 
 		if logBuffer.Len() > 0 {
 			exitMessage += " also, the following messages were logged by a library:\n"
-			sc := bufio.NewScanner(logBuffer)
-			for sc.Scan() {
-				exitMessage += fmt.Sprintln(sc.Text())
+			scanner := bufio.NewScanner(logBuffer)
+			for scanner.Scan() {
+				exitMessage += fmt.Sprintln(scanner.Text())
 			}
 		}
 	}

@@ -15,6 +15,7 @@ import (
 
 func (c *Cache) filename(h backend.Handle) string {
 	if len(h.Name) < 2 {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("Name is empty or too short")
 	}
 	subdir := h.Name[:2]
@@ -31,7 +32,7 @@ func (c *Cache) canBeCached(t backend.FileType) bool {
 }
 
 // load returns a reader that yields the contents of the file with the
-// given handle. rd must be closed after use. If an error is returned, the
+// given handle. reader must be closed after use. If an error is returned, the
 // ReadCloser is nil. The bool return value indicates whether the requested
 // file exists in the cache. It can be true even when no reader is returned
 // because length or offset are out of bounds
@@ -48,19 +49,19 @@ func (c *Cache) load(h backend.Handle, length int, offset int64) (io.ReadCloser,
 
 	fi, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // Preserve the cache stat failure; this read-only handle has no buffered writes.
 		return nil, true, errors.WithStack(err)
 	}
 
 	size := fi.Size()
 	if size < offset+int64(length) {
-		_ = f.Close()
+		_ = f.Close() // Preserve the invalid cache-file failure; this read-only handle has no buffered writes.
 		return nil, true, errors.Errorf("cached file %v is too short", h)
 	}
 
 	if offset > 0 {
 		if _, err = f.Seek(offset, io.SeekStart); err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the seek failure; this read-only handle has no buffered writes.
 			return nil, true, err
 		}
 	}
@@ -72,9 +73,9 @@ func (c *Cache) load(h backend.Handle, length int, offset int64) (io.ReadCloser,
 }
 
 // save saves a file in the cache.
-func (c *Cache) save(h backend.Handle, rd io.Reader) error {
+func (c *Cache) save(h backend.Handle, reader io.Reader) error {
 	debug.Log("Save to cache: %v", h)
-	if rd == nil {
+	if reader == nil {
 		return errors.New("Save() called with nil reader")
 	}
 	if !c.canBeCached(h.Type) {
@@ -95,22 +96,22 @@ func (c *Cache) save(h backend.Handle, rd io.Reader) error {
 		return err
 	}
 
-	_, err = io.Copy(f, rd)
+	_, err = io.Copy(f, reader)
 	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
+		_ = f.Close()           // Preserve the cache write failure; Close only releases the incomplete file.
+		_ = os.Remove(f.Name()) // The incomplete cache file is harmless and replaced on the next load.
 		return errors.Wrap(err, "Copy")
 	}
 
 	// Close, then rename. Windows doesn't like the reverse order.
 	if err = f.Close(); err != nil {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(f.Name()) // The incomplete cache file is harmless and replaced on the next load.
 		return errors.WithStack(err)
 	}
 
 	err = os.Rename(f.Name(), finalname)
 	if err != nil {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(f.Name()) // The incomplete cache file is harmless and replaced on the next load.
 	}
 	if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
 		// On Windows, renaming over an existing file is ok

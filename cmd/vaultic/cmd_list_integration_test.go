@@ -14,34 +14,34 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunList(t testing.TB, gopts global.Options, params ...string) vaultic.IDs {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runList(ctx, gopts, params, gopts.Term, "")
+func testRunList(t testing.TB, globalOptions global.Options, params ...string) vaultic.IDs {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runList(ctx, globalOptions, params, globalOptions.Term, "")
 	})
 	rtest.OK(t, err)
 	return parseIDsFromReader(t, buf)
 }
 
-func parseIDsFromReader(t testing.TB, rd io.Reader) vaultic.IDs {
+func parseIDsFromReader(t testing.TB, reader io.Reader) vaultic.IDs {
 	t.Helper()
 	IDs := vaultic.IDs{}
-	sc := bufio.NewScanner(rd)
+	scanner := bufio.NewScanner(reader)
 
-	for sc.Scan() {
-		if len(sc.Text()) == 64 {
-			id, err := vaultic.ParseID(sc.Text())
+	for scanner.Scan() {
+		if len(scanner.Text()) == 64 {
+			id, err := vaultic.ParseID(scanner.Text())
 			if err != nil {
-				t.Logf("parse id %v: %v", sc.Text(), err)
+				t.Logf("parse id %v: %v", scanner.Text(), err)
 				continue
 			}
 			IDs = append(IDs, id)
 		} else {
 			// 'list blobs' is different because it lists the blobs together with the blob type
 			// e.g. "tree ac08ce34ba4f8123618661bef2425f7028ffb9ac740578a3ee88684d2523fee8"
-			parts := strings.Split(sc.Text(), " ")
+			parts := strings.Split(scanner.Text(), " ")
 			id, err := vaultic.ParseID(parts[len(parts)-1])
 			if err != nil {
-				t.Logf("parse id %v: %v", sc.Text(), err)
+				t.Logf("parse id %v: %v", scanner.Text(), err)
 				continue
 			}
 			IDs = append(IDs, id)
@@ -51,18 +51,18 @@ func parseIDsFromReader(t testing.TB, rd io.Reader) vaultic.IDs {
 	return IDs
 }
 
-func testListSnapshots(t testing.TB, gopts global.Options, expected int) vaultic.IDs {
+func testListSnapshots(t testing.TB, globalOptions global.Options, expected int) vaultic.IDs {
 	t.Helper()
-	snapshotIDs := testRunList(t, gopts, "snapshots")
+	snapshotIDs := testRunList(t, globalOptions, "snapshots")
 	rtest.Assert(t, len(snapshotIDs) == expected, "expected %v snapshot, got %v", expected, snapshotIDs)
 	return snapshotIDs
 }
 
 // extract blob set from repository index
-func testListBlobs(t testing.TB, gopts global.Options) (blobSetFromIndex vaultic.IDSet) {
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+func testListBlobs(t testing.TB, globalOptions global.Options) (blobSetFromIndex vaultic.IDSet) {
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -87,18 +87,18 @@ func TestListBlobs(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
 	// first backup
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, opts, env.gopts)
-	testListSnapshots(t, env.gopts, 1)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, options, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 1)
 
 	// run the `list blobs` command
-	resticIDs := testRunList(t, env.gopts, "blobs")
+	resticIDs := testRunList(t, env.globalOptions, "blobs")
 
 	// convert to set
 	testIDSet := vaultic.NewIDSet(resticIDs...)
-	blobSetFromIndex := testListBlobs(t, env.gopts)
+	blobSetFromIndex := testListBlobs(t, env.globalOptions)
 
 	rtest.Assert(t, blobSetFromIndex.Equals(testIDSet), "the set of vaultic.ID s should be equal")
 }
@@ -110,16 +110,16 @@ func TestPackfileListWithSnapshot(t *testing.T) {
 	testSetupBackupData(t, env)
 
 	// 3 backups, single file each
-	opts := BackupOptions{}
-	testRunBackup(t, env.testdata, []string{filepath.Join(env.testdata, "0", "0", "9", "40")}, opts, env.gopts)
-	testRunBackup(t, env.testdata, []string{filepath.Join(env.testdata, "0", "0", "9", "41")}, opts, env.gopts)
-	testRunBackup(t, env.testdata, []string{filepath.Join(env.testdata, "0", "0", "9", "42")}, opts, env.gopts)
-	testListSnapshots(t, env.gopts, 3)
+	options := backupOptions{}
+	testRunBackup(t, env.testdata, []string{filepath.Join(env.testdata, "0", "0", "9", "40")}, options, env.globalOptions)
+	testRunBackup(t, env.testdata, []string{filepath.Join(env.testdata, "0", "0", "9", "41")}, options, env.globalOptions)
+	testRunBackup(t, env.testdata, []string{filepath.Join(env.testdata, "0", "0", "9", "42")}, options, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 3)
 
 	// run packfilelist
-	packfiles := testRunList(t, env.gopts, "packs")
+	packfiles := testRunList(t, env.globalOptions, "packs")
 	rtest.Assert(t, len(packfiles) == 6, "expected 6 packfiles in repository, got %d", len(packfiles))
 
-	packfiles = testRunList(t, env.gopts, "packs", "latest")
+	packfiles = testRunList(t, env.globalOptions, "packs", "latest")
 	rtest.Assert(t, len(packfiles) == 2, "expected 2 packfiles in snapshot, got %d", len(packfiles))
 }

@@ -214,7 +214,7 @@ func (c *Client) PrepareCapsuleMigration(
 	if err != nil {
 		return CapsuleMigration{}, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Warning,
@@ -250,7 +250,7 @@ func (c *Client) FinalizeCapsuleMigration(ctx context.Context, capsuleSHA256 str
 		},
 	)
 	if err == nil {
-		_ = observability.Emit(
+		observability.EmitBestEffort(
 			ctx,
 			observability.Event{
 				Severity:  observability.Warning,
@@ -324,7 +324,7 @@ func (c *Client) AddLocalKeySlot(ctx context.Context, slotID string, passphrase 
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Notice,
@@ -356,7 +356,7 @@ func (c *Client) AddCloudKeySlot(ctx context.Context, slotID, provider, keyRefer
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Notice,
@@ -385,7 +385,7 @@ func (c *Client) RemoveKeySlot(ctx context.Context, slotID string) (KeyStatus, e
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Warning,
@@ -409,7 +409,7 @@ func (c *Client) RotateLocalKeySlot(ctx context.Context, slotID string, passphra
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Notice,
@@ -430,7 +430,7 @@ func (c *Client) RotateDEK(ctx context.Context) (KeyStatus, error) {
 	if err != nil {
 		return KeyStatus{}, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Notice,
@@ -475,7 +475,7 @@ func (c *Client) EscrowMasterKey(ctx context.Context, escrowID, provider, keyRef
 	if err != nil {
 		return nil, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Notice,
@@ -499,7 +499,7 @@ func (c *Client) RecoverEscrow(ctx context.Context, record, bearerToken []byte) 
 	if err != nil {
 		return nil, err
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Warning,
@@ -753,7 +753,7 @@ func (c *Client) auditRPCError(ctx context.Context, operation string, err error)
 	if status.Code(err) != codes.DataLoss {
 		return
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  observability.Critical,
@@ -781,7 +781,7 @@ func (c *Client) Close(ctx context.Context) error {
 			if shutdownCtx.Err() != nil {
 				result = shutdownCtx.Err()
 			}
-			_ = c.process.Process.Kill()
+			_ = c.process.Process.Kill() // Shutdown RPC already failed; process termination is fallback cleanup.
 		}
 	}
 	if err := c.conn.Close(); err != nil && result == nil {
@@ -796,7 +796,7 @@ func (c *Client) Close(ctx context.Context) error {
 				result = err
 			}
 		case <-shutdownCtx.Done():
-			_ = c.process.Process.Kill()
+			_ = c.process.Process.Kill() // The process exceeded its grace period; kill is final fallback cleanup.
 			<-wait
 			if result == nil {
 				result = shutdownCtx.Err()

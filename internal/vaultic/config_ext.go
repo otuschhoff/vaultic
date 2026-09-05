@@ -146,7 +146,9 @@ func (c Config) MaxPackSizeToleratePercent() uint32 {
 	return *c.MaxPacksizeToleratePercent
 }
 
-// Validate checks the extension fields of the config for consistency.
+// ValidateExtensions checks the extension fields of the config for consistency.
+//
+//nolint:gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (c Config) ValidateExtensions() error {
 	switch normalizeChunker(c.Chunker()) {
 	case ChunkerRabin, ChunkerFixedSize:

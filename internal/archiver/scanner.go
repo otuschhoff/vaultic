@@ -79,6 +79,7 @@ func (s *Scanner) scanTree(ctx context.Context, stats ScanStats, tree tree) (Sca
 	return stats, nil
 }
 
+//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (s *Scanner) scanCWalk(ctx context.Context, stats ScanStats, target string, explicit bool) (ScanStats, error) {
 	if ctx.Err() != nil {
 		return stats, nil

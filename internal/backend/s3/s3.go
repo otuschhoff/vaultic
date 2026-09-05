@@ -151,6 +151,7 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 	}
 
 	roleArn := env.Get("AWS_ASSUME_ROLE_ARN")
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if roleArn != "" {
 		// use the region provided by the configuration by default
 		awsRegion := cfg.Region
@@ -176,7 +177,7 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 			}
 		}
 
-		opts := credentials.STSAssumeRoleOptions{
+		assumeRoleOptions := credentials.STSAssumeRoleOptions{
 			RoleARN:         roleArn,
 			AccessKey:       c.AccessKeyID,
 			SecretKey:       c.SecretAccessKey,
@@ -187,7 +188,7 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 			Location:        awsRegion,
 		}
 
-		creds, err = credentials.NewSTSAssumeRole(stsEndpoint, opts)
+		creds, err = credentials.NewSTSAssumeRole(stsEndpoint, assumeRoleOptions)
 		if err != nil {
 			return nil, errors.Wrap(err, "creds.AssumeRole")
 		}
@@ -283,10 +284,10 @@ func (be *s3) useStorageClass(h backend.Handle) bool {
 }
 
 // Save stores data in the backend at the handle.
-func (be *s3) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (be *s3) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	objName := be.Filename(h)
 
-	opts := minio.PutObjectOptions{
+	putOptions := minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
 		// the only option with the high-level api is to let the library handle the checksum computation
 		SendContentMd5: true,
@@ -294,14 +295,14 @@ func (be *s3) Save(ctx context.Context, h backend.Handle, rd backend.RewindReade
 		PartSize: 200 * 1024 * 1024,
 	}
 	if be.useStorageClass(h) {
-		opts.StorageClass = be.cfg.StorageClass
+		putOptions.StorageClass = be.cfg.StorageClass
 	}
 
-	info, err := be.client.PutObject(ctx, be.cfg.Bucket, objName, io.NopCloser(rd), rd.Length(), opts)
+	info, err := be.client.PutObject(ctx, be.cfg.Bucket, objName, io.NopCloser(reader), reader.Length(), putOptions)
 
 	// sanity check
-	if err == nil && info.Size != rd.Length() {
-		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", info.Size, rd.Length())
+	if err == nil && info.Size != reader.Length() {
+		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", info.Size, reader.Length())
 	}
 
 	return errors.Wrap(err, "client.PutObject")
@@ -309,22 +310,22 @@ func (be *s3) Save(ctx context.Context, h backend.Handle, rd backend.RewindReade
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (be *s3) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
+func (be *s3) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	return util.DefaultLoad(ctx, h, length, offset, be.openReader, fn)
+	return util.DefaultLoad(ctx, h, length, offset, be.openReader, consume)
 }
 
 func (be *s3) openReader(ctx context.Context, h backend.Handle, length int, offset int64) (io.ReadCloser, error) {
 	objName := be.Filename(h)
-	opts := minio.GetObjectOptions{}
+	rangeOptions := minio.GetObjectOptions{}
 
 	var err error
 	if length > 0 {
-		err = opts.SetRange(offset, offset+int64(length)-1)
+		err = rangeOptions.SetRange(offset, offset+int64(length)-1)
 	} else if offset > 0 {
-		err = opts.SetRange(offset, 0)
+		err = rangeOptions.SetRange(offset, 0)
 	}
 
 	if err != nil {
@@ -332,19 +333,19 @@ func (be *s3) openReader(ctx context.Context, h backend.Handle, length int, offs
 	}
 
 	coreClient := minio.Core{Client: be.client}
-	rd, info, _, err := coreClient.GetObject(ctx, be.cfg.Bucket, objName, opts)
+	reader, info, _, err := coreClient.GetObject(ctx, be.cfg.Bucket, objName, rangeOptions)
 	if err != nil {
 		return nil, err
 	}
 
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) && length > 0 {
 		if info.Size > 0 && info.Size != int64(length) {
-			_ = rd.Close()
+			_ = reader.Close() // Preserve the callback failure; the object reader has no buffered writes.
 			return nil, minio.ErrorResponse{Code: "InvalidRange", Message: "vaultic-file-too-short"}
 		}
 	}
 
-	return rd, err
+	return reader, err
 }
 
 // Stat returns information about a blob.
@@ -352,9 +353,9 @@ func (be *s3) Stat(ctx context.Context, h backend.Handle) (bi backend.FileInfo, 
 	objName := be.Filename(h)
 	var obj *minio.Object
 
-	opts := minio.GetObjectOptions{}
+	getOptions := minio.GetObjectOptions{}
 
-	obj, err = be.client.GetObject(ctx, be.cfg.Bucket, objName, opts)
+	obj, err = be.client.GetObject(ctx, be.cfg.Bucket, objName, getOptions)
 	if err != nil {
 		return backend.FileInfo{}, errors.Wrap(err, "client.GetObject")
 	}
@@ -486,13 +487,15 @@ func (be *s3) requestRestore(ctx context.Context, filename string) (bool, error)
 		return false, nil
 	case warmupStatusWarmingUp:
 		return true, nil
+	default:
+		// Cold and lukewarm objects need a restore request.
 	}
 
-	opts := minio.RestoreRequest{}
-	opts.SetDays(be.cfg.RestoreDays)
-	opts.SetGlacierJobParameters(minio.GlacierJobParameters{Tier: minio.TierType(be.cfg.RestoreTier)})
+	restoreRequest := minio.RestoreRequest{}
+	restoreRequest.SetDays(be.cfg.RestoreDays)
+	restoreRequest.SetGlacierJobParameters(minio.GlacierJobParameters{Tier: minio.TierType(be.cfg.RestoreTier)})
 
-	if err := be.client.RestoreObject(ctx, be.cfg.Bucket, filename, "", opts); err != nil {
+	if err := be.client.RestoreObject(ctx, be.cfg.Bucket, filename, "", restoreRequest); err != nil {
 		var e minio.ErrorResponse
 		if errors.As(err, &e) {
 			switch e.Code {
@@ -587,6 +590,8 @@ func (be *s3) waitForRestore(ctx context.Context, filename string) error {
 			return nil
 		case warmupStatusCold:
 			return errors.New("waiting on S3 handle that is not warming up")
+		case warmupStatusWarmingUp:
+			// Continue polling until the restore completes.
 		}
 
 		select {

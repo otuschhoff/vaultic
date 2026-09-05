@@ -1,3 +1,5 @@
+use crate::ids::RepositoryId;
+
 pub fn macos_secure_enclave_hardware_bindings(reference: &str) -> Result<(String, String)> {
     let reference = parse_macos_secure_enclave_reference(reference)?;
     Ok((
@@ -107,7 +109,7 @@ fn parse_macos_secure_enclave_reference(reference: &str) -> Result<MacosSecureEn
 }
 
 struct OwnedKeyContext {
-    repository_id: String,
+    repository_id: RepositoryId,
     slot_id: String,
     key_reference: String,
     dek_version: u32,
@@ -117,7 +119,7 @@ struct OwnedKeyContext {
 impl From<&KeyContext<'_>> for OwnedKeyContext {
     fn from(context: &KeyContext<'_>) -> Self {
         Self {
-            repository_id: context.repository_id.to_owned(),
+            repository_id: context.repository_id.into(),
             slot_id: context.slot_id.to_owned(),
             key_reference: context.key_reference.to_owned(),
             dek_version: context.dek_version,
@@ -129,7 +131,7 @@ impl From<&KeyContext<'_>> for OwnedKeyContext {
 impl OwnedKeyContext {
     fn as_borrowed(&self) -> KeyContext<'_> {
         KeyContext {
-            repository_id: &self.repository_id,
+            repository_id: self.repository_id.as_str(),
             slot_id: &self.slot_id,
             key_reference: &self.key_reference,
             dek_version: self.dek_version,

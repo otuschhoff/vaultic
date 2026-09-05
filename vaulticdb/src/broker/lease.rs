@@ -386,17 +386,19 @@ fn decrypt_contribution(
 }
 
 mod base64_bytes {
+    //! Serde adapter for base64-encoded secret byte strings.
+
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use serde::{de::Error, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_str(&BASE64.encode(value))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
     where
         D: Deserializer<'de>,
     {

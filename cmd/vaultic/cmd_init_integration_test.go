@@ -12,21 +12,21 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunInit(t testing.TB, gopts global.Options) {
+func testRunInit(t testing.TB, globalOptions global.Options) {
 	repository.TestUseLowSecurityKDFParameters(t)
 	vaultic.TestDisableCheckPolynomial(t)
 	repository.TestSetLockTimeout(t, 0)
 
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runInit(ctx, InitOptions{}, gopts, nil, gopts.Term)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runInit(ctx, initOptions{}, globalOptions, nil, globalOptions.Term)
 	})
 	rtest.OK(t, err)
-	t.Logf("repository initialized at %v", gopts.Repo)
+	t.Logf("repository initialized at %v", globalOptions.Repo)
 
 	// create temporary junk files to verify that vaultic does not trip over them
 	for _, path := range []string{"index", "snapshots", "keys", "locks", filepath.Join("data", "00")} {
-		rtest.OK(t, os.MkdirAll(filepath.Join(gopts.Repo, path), 0700))
-		rtest.OK(t, os.WriteFile(filepath.Join(gopts.Repo, path, "tmp12345"), []byte("junk file"), 0o600))
+		rtest.OK(t, os.MkdirAll(filepath.Join(globalOptions.Repo, path), 0700))
+		rtest.OK(t, os.WriteFile(filepath.Join(globalOptions.Repo, path, "tmp12345"), []byte("junk file"), 0o600))
 	}
 }
 
@@ -36,35 +36,35 @@ func TestInitCopyChunkerParams(t *testing.T) {
 	env2, cleanup2 := withTestEnvironment(t)
 	defer cleanup2()
 
-	testRunInit(t, env2.gopts)
+	testRunInit(t, env2.globalOptions)
 
-	initOpts := InitOptions{
+	initOpts := initOptions{
 		SecondaryRepoOptions: global.SecondaryRepoOptions{
-			Repo:     env2.gopts.Repo,
-			Password: env2.gopts.Password,
+			Repo:     env2.globalOptions.Repo,
+			Password: env2.globalOptions.Password,
 		},
 	}
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runInit(ctx, initOpts, gopts, nil, gopts.Term)
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runInit(ctx, initOpts, globalOptions, nil, globalOptions.Term)
 	})
 	rtest.Assert(t, err != nil, "expected invalid init options to fail")
 
 	initOpts.CopyChunkerParameters = true
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runInit(ctx, initOpts, gopts, nil, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runInit(ctx, initOpts, globalOptions, nil, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 
 	var repo *repository.Repository
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		repo, err = global.OpenRepository(ctx, gopts, vaultic.NewNoopPrinter())
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		repo, err = global.OpenRepository(ctx, globalOptions, vaultic.NewNoopPrinter())
 		return err
 	})
 	rtest.OK(t, err)
 
 	var otherRepo *repository.Repository
-	err = withTermStatus(t, env2.gopts, func(ctx context.Context, gopts global.Options) error {
-		otherRepo, err = global.OpenRepository(ctx, gopts, vaultic.NewNoopPrinter())
+	err = withTermStatus(t, env2.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		otherRepo, err = global.OpenRepository(ctx, globalOptions, vaultic.NewNoopPrinter())
 		return err
 	})
 	rtest.OK(t, err)

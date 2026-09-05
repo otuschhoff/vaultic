@@ -95,6 +95,7 @@ func NewSalt() ([]byte, error) {
 	buf := make([]byte, saltLength)
 	n, err := rand.Read(buf)
 	if n != saltLength || err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unable to read enough random bytes for new salt")
 	}
 

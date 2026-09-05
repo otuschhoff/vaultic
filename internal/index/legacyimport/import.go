@@ -69,6 +69,7 @@ type Store interface {
 	Put(context.Context, []byte, []byte, bool) error
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (Result, error) {
 	var result Result
 	var workUsed uint64

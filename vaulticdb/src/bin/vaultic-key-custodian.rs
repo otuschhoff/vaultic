@@ -1,3 +1,6 @@
+//! Offline and hardware-backed key custodian command-line client.
+#![warn(unreachable_pub)]
+
 use std::{env, fs, io::Read, os::unix::fs::PermissionsExt};
 
 use anyhow::{bail, Context, Result};

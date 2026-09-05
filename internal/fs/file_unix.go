@@ -3,6 +3,7 @@
 package fs
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -15,10 +16,8 @@ func fixpath(name string) string {
 
 // isNotSupported returns true if the error is caused by an unsupported file system feature.
 func isNotSupported(err error) bool {
-	if perr, ok := err.(*os.PathError); ok && perr.Err == syscall.ENOTSUP {
-		return true
-	}
-	return false
+	var pathError *os.PathError
+	return errors.As(err, &pathError) && errors.Is(pathError.Err, syscall.ENOTSUP)
 }
 
 // chmod changes the mode of the named file to mode.

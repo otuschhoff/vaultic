@@ -89,12 +89,8 @@ func (record VerificationStateRecord) validate() error {
 		!validVerificationResult(record.Result) {
 		return fmt.Errorf("%w: invalid verification state", ErrMalformed)
 	}
-	if record.LastAttemptAt == 0 {
-		if record.LastAttemptLevel != 0 || record.LastRunID != (ID{}) {
-			return fmt.Errorf("%w: verification attempt metadata without attempt", ErrMalformed)
-		}
-	} else if !validVerificationLevel(record.LastAttemptLevel) || record.LastRunID == (ID{}) {
-		return fmt.Errorf("%w: incomplete verification attempt", ErrMalformed)
+	if err := record.validateAttempt(); err != nil {
+		return err
 	}
 	if record.FullVerifiedAt > 0 &&
 		(record.ChecksumVerifiedAt < record.FullVerifiedAt || record.HeaderVerifiedAt < record.FullVerifiedAt) {
@@ -103,27 +99,44 @@ func (record VerificationStateRecord) validate() error {
 	if record.ChecksumVerifiedAt > 0 && record.HeaderVerifiedAt < record.ChecksumVerifiedAt {
 		return fmt.Errorf("%w: checksum verification does not imply header", ErrMalformed)
 	}
+	return record.validateFinding()
+}
+
+func (record VerificationStateRecord) validateAttempt() error {
+	if record.LastAttemptAt == 0 {
+		if record.LastAttemptLevel != 0 || record.LastRunID != (ID{}) {
+			return fmt.Errorf("%w: verification attempt metadata without attempt", ErrMalformed)
+		}
+		return nil
+	}
+	if !validVerificationLevel(record.LastAttemptLevel) || record.LastRunID == (ID{}) {
+		return fmt.Errorf("%w: incomplete verification attempt", ErrMalformed)
+	}
+	return nil
+}
+
+func (record VerificationStateRecord) validateFinding() error {
 	hasFinding := record.OpenFindingID != (ID{})
 	if hasFinding != (record.Result == VerificationOperationalError || record.Result == VerificationIntegrityError) {
 		return fmt.Errorf("%w: finding and result disagree", ErrMalformed)
 	}
-	if hasFinding {
-		if !validVerificationLevel(record.FindingLevel) || record.Classification == VerificationNoError ||
-			!validVerificationClassification(record.Classification) ||
-			record.FirstErrorAt == 0 ||
-			record.LastErrorAt < record.FirstErrorAt ||
-			record.ConsecutiveFailures == 0 {
-			return fmt.Errorf("%w: incomplete verification finding", ErrMalformed)
+	if !hasFinding {
+		if record.FindingLevel != 0 ||
+			record.Classification != VerificationNoError ||
+			record.FirstErrorAt != 0 ||
+			record.LastErrorAt != 0 ||
+			record.ConsecutiveFailures != 0 {
+			return fmt.Errorf("%w: stale verification finding metadata", ErrMalformed)
 		}
-		if (record.Result == VerificationIntegrityError) != record.Classification.IsIntegrity() {
-			return fmt.Errorf("%w: verification finding class and result disagree", ErrMalformed)
-		}
-	} else if record.FindingLevel != 0 ||
-		record.Classification != VerificationNoError ||
-		record.FirstErrorAt != 0 ||
-		record.LastErrorAt != 0 ||
-		record.ConsecutiveFailures != 0 {
-		return fmt.Errorf("%w: stale verification finding metadata", ErrMalformed)
+		return nil
+	}
+	if !validVerificationLevel(record.FindingLevel) || record.Classification == VerificationNoError ||
+		!validVerificationClassification(record.Classification) || record.FirstErrorAt == 0 ||
+		record.LastErrorAt < record.FirstErrorAt || record.ConsecutiveFailures == 0 {
+		return fmt.Errorf("%w: incomplete verification finding", ErrMalformed)
+	}
+	if (record.Result == VerificationIntegrityError) != record.Classification.IsIntegrity() {
+		return fmt.Errorf("%w: verification finding class and result disagree", ErrMalformed)
 	}
 	return nil
 }

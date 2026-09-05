@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Storage persistence and generation authority tests.
+
     use super::*;
     use std::env;
     use slatedb::object_store::{path::Path, ObjectStoreExt};
@@ -282,10 +284,10 @@ mod tests {
             .unwrap();
         let first = GenerationAuthority {
             format: 1,
-            repository_id: "repo".to_owned(),
+            repository_id: "repo".into(),
             decision: current.decision + 1,
             active_generation: 2,
-            namespace: "candidate-a".to_owned(),
+            namespace: "candidate-a".into(),
             previous_generation: current.active_generation,
             previous_namespace: current.namespace.clone(),
             state: "post-activation".to_owned(),
@@ -295,7 +297,7 @@ mod tests {
             retired_generation: 0,
         };
         let mut second = first.clone();
-        second.namespace = "candidate-b".to_owned();
+        second.namespace = "candidate-b".into();
         publish_generation_authority(object_store.as_ref(), &first, version.clone())
             .await
             .unwrap();
@@ -354,7 +356,7 @@ mod tests {
                 "repo",
                 1,
                 2,
-                "candidate-2".to_owned(),
+                "candidate-2".into(),
                 "bb".repeat(32),
                 60_000,
             )

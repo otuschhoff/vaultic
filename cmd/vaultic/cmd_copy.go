@@ -21,7 +21,7 @@ import (
 )
 
 func newCopyCommand(globalOptions *global.Options) *cobra.Command {
-	var opts CopyOptions
+	var options copyOptions
 	cmd := &cobra.Command{
 		Use:   "copy [flags] [snapshotID ...]",
 		Short: "Copy snapshots from one repository to another",
@@ -52,86 +52,89 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCopy(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runCopy(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// CopyOptions bundles all options for the copy command.
-type CopyOptions struct {
+// copyOptions bundles all options for the copy command.
+type copyOptions struct {
 	global.SecondaryRepoOptions
 	data.SnapshotFilter
 }
 
-func (opts *CopyOptions) AddFlags(f *pflag.FlagSet) {
-	opts.SecondaryRepoOptions.AddFlags(f, "destination", "to copy snapshots from")
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
+func (options *copyOptions) AddFlags(f *pflag.FlagSet) {
+	options.SecondaryRepoOptions.AddFlags(f, "destination", "to copy snapshots from")
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
 }
 
-var errSentinelEndIteration = errors.New("end iteration")
-
 // collectAllSnapshots: select all snapshot trees to be copied
-func collectAllSnapshots(ctx context.Context, opts CopyOptions,
+func collectAllSnapshots(ctx context.Context, options copyOptions,
 	srcSnapshotLister vaultic.Lister, srcRepo vaultic.Repository,
 	dstSnapshotByOriginal map[vaultic.ID][]*data.Snapshot, args []string, printer vaultic.Printer,
 ) iter.Seq2[*data.Snapshot, error] {
 	return func(yield func(*data.Snapshot, error) bool) {
-		err := opts.SnapshotFilter.FindAll(ctx, srcSnapshotLister, srcRepo, args, func(_ string, sn *data.Snapshot, err error) error {
-			// check whether the destination has a snapshot with the same persistent ID which has similar snapshot fields
-			if err != nil {
-				if !yield(nil, err) {
-					return errSentinelEndIteration
-				}
-				return nil
-			}
-			srcOriginal := *sn.ID()
-			if sn.Original != nil {
-				srcOriginal = *sn.Original
-			}
-			if originalSns, ok := dstSnapshotByOriginal[srcOriginal]; ok {
-				isCopy := false
-				for _, originalSn := range originalSns {
-					if similarSnapshots(originalSn, sn) {
-						printer.V("\n%v", sn)
-						printer.V("skipping source snapshot %s, was already copied to snapshot %s", sn.ID().Str(), originalSn.ID().Str())
-						isCopy = true
-						break
-					}
-				}
-				if isCopy {
-					return nil
-				}
-			}
-			if !yield(sn, nil) {
-				return errSentinelEndIteration
-			}
-			return nil
+		err := options.SnapshotFilter.FindAll(ctx, srcSnapshotLister, srcRepo, args, func(_ string, sn *data.Snapshot, err error) error {
+			return yieldCopySnapshot(sn, err, dstSnapshotByOriginal, printer, yield)
 		})
-		if err != nil && !errors.Is(err, errSentinelEndIteration) {
+		if err != nil && !errors.Is(err, errors.ErrStopIteration) {
 			yield(nil, err)
 		}
 	}
 }
 
-func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
-	secondaryGopts, isFromRepo, err := opts.SecondaryRepoOptions.FillGlobalOpts(ctx, gopts, "destination")
+func yieldCopySnapshot(
+	snapshot *data.Snapshot,
+	findErr error,
+	destinationSnapshots map[vaultic.ID][]*data.Snapshot,
+	printer vaultic.Printer,
+	yield func(*data.Snapshot, error) bool,
+) error {
+	if findErr != nil {
+		if !yield(nil, findErr) {
+			return errors.ErrStopIteration
+		}
+		return nil
+	}
+	originalID := *snapshot.ID()
+	if snapshot.Original != nil {
+		originalID = *snapshot.Original
+	}
+	for _, destination := range destinationSnapshots[originalID] {
+		if similarSnapshots(destination, snapshot) {
+			printer.V("\n%v", snapshot)
+			printer.V(
+				"skipping source snapshot %s, was already copied to snapshot %s",
+				snapshot.ID().Str(), destination.ID().Str(),
+			)
+			return nil
+		}
+	}
+	if !yield(snapshot, nil) {
+		return errors.ErrStopIteration
+	}
+	return nil
+}
+
+func runCopy(ctx context.Context, options copyOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	secondaryGopts, isFromRepo, err := options.SecondaryRepoOptions.FillGlobalOpts(ctx, globalOptions, "destination")
 	if err != nil {
 		return err
 	}
 	if isFromRepo {
 		// swap global options, if the secondary repo was set via from-repo
-		gopts, secondaryGopts = secondaryGopts, gopts
+		globalOptions, secondaryGopts = secondaryGopts, globalOptions
 	}
 
-	ctx, srcRepo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, srcRepo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -163,7 +166,7 @@ func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args [
 	}
 
 	dstSnapshotByOriginal := make(map[vaultic.ID][]*data.Snapshot)
-	err = opts.SnapshotFilter.FindAll(ctx, dstSnapshotLister, dstRepo, nil, func(_ string, sn *data.Snapshot, err error) error {
+	err = options.SnapshotFilter.FindAll(ctx, dstSnapshotLister, dstRepo, nil, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -178,7 +181,7 @@ func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args [
 		return err
 	}
 
-	selectedSnapshots := collectAllSnapshots(ctx, opts, srcSnapshotLister, srcRepo, dstSnapshotByOriginal, args, printer)
+	selectedSnapshots := collectAllSnapshots(ctx, options, srcSnapshotLister, srcRepo, dstSnapshotByOriginal, args, printer)
 
 	if err := copyTreeBatched(ctx, srcRepo, dstRepo.AppendTransaction(), selectedSnapshots, printer); err != nil {
 		return err

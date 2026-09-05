@@ -25,13 +25,13 @@ type ExtendedFileInfo struct {
 	ModTime    time.Time // last (content) modification time stamp
 	ChangeTime time.Time // last status change time stamp
 
-	//nolint:unused // only used on Windows/Darwin
 	sys any // Value returned by os.FileInfo.Sys()
 }
 
 // ExtendedStat returns an ExtendedFileInfo constructed from the os.FileInfo.
 func ExtendedStat(fi os.FileInfo) *ExtendedFileInfo {
 	if fi == nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("os.FileInfo is nil")
 	}
 

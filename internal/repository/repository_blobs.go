@@ -175,12 +175,11 @@ func (r *Repository) saveAndEncrypt(
 	ciphertext = r.key.Seal(ciphertext, nonce, data, nil)
 
 	if err := r.verifyCiphertext(ciphertext, uncompressedLength, id); err != nil {
-		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
 		return 0, fmt.Errorf(
-			("Detected data corruption while saving blob %v: %w\nCorrupted blobs are " +
+			("detected data corruption while saving blob %v: %w\nCorrupted blobs are " +
 				"either caused by hardware issues or software bugs. Please open an issue at " +
 				"https://github.com/otuschhoff/vaultic/issues/new/choose for further " +
-				"troubleshooting."),
+				"troubleshooting"),
 			id,
 			err,
 		)
@@ -307,12 +306,11 @@ func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf [
 	ciphertext = r.key.Seal(ciphertext, nonce, p, nil)
 
 	if err := r.verifyUnpacked(ciphertext, t, buf); err != nil {
-		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
 		return vaultic.ID{}, fmt.Errorf(
-			("Detected data corruption while saving file of type %v: %w\nCorrupted data is " +
+			("detected data corruption while saving file of type %v: %w\nCorrupted data is " +
 				"either caused by hardware issues or software bugs. Please open an issue at " +
 				"https://github.com/otuschhoff/vaultic/issues/new/choose for further " +
-				"troubleshooting."),
+				"troubleshooting"),
 			t,
 			err,
 		)
@@ -333,6 +331,7 @@ func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf [
 	}
 
 	err = r.be.Save(ctx, h, backend.NewByteReader(ciphertext, r.be.Hasher()))
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if err != nil {
 		if t == vaultic.SnapshotFile {
 			if authority, ok := r.Engine().(snapshotAuthority); ok {

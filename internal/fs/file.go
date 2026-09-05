@@ -74,7 +74,7 @@ func Readdirnames(filesystem FS, dir string, flags int) ([]string, error) {
 
 	entries, err := f.Readdirnames(-1)
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // Preserve the directory-read failure; this handle has no buffered writes.
 		return nil, fmt.Errorf("readdirnames %v failed: %w", dir, err)
 	}
 

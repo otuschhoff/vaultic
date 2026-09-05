@@ -19,7 +19,6 @@ type IndexBlob struct {
 // AllIndexBlobs streams blob handles from each index file without building a master index.
 func AllIndexBlobs(ctx context.Context, lister vaultic.Lister, loader vaultic.LoaderUnpacked) iter.Seq[IndexBlob] {
 	return func(yield func(IndexBlob) bool) {
-		stopIteration := errors.New("stop index blob iteration")
 		err := index.ForAllIndexes(ctx, lister, loader, func(_ vaultic.ID, idx *index.Index, err error) error {
 			if err != nil {
 				return err
@@ -29,12 +28,12 @@ func AllIndexBlobs(ctx context.Context, lister vaultic.Lister, loader vaultic.Lo
 					return ctx.Err()
 				}
 				if !yield(IndexBlob{Handle: blob.Handle()}) {
-					return stopIteration
+					return errors.ErrStopIteration
 				}
 			}
 			return nil
 		})
-		if err != nil && !errors.Is(err, stopIteration) {
+		if err != nil && !errors.Is(err, errors.ErrStopIteration) {
 			yield(IndexBlob{Error: err})
 		}
 	}

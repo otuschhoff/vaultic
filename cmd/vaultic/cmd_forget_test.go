@@ -42,45 +42,45 @@ func TestForgetOptionValues(t *testing.T) {
 	const negValErrorMsg = "Fatal: negative values other than -1 are not allowed for --keep-*"
 	const negDurationValErrorMsg = "Fatal: durations containing negative values are not allowed for --keep-within*"
 	testCases := []struct {
-		input    ForgetOptions
+		input    forgetOptions
 		errorMsg string
 	}{
-		{ForgetOptions{Last: 1}, ""},
-		{ForgetOptions{Hourly: 1}, ""},
-		{ForgetOptions{Daily: 1}, ""},
-		{ForgetOptions{Weekly: 1}, ""},
-		{ForgetOptions{Monthly: 1}, ""},
-		{ForgetOptions{Yearly: 1}, ""},
-		{ForgetOptions{Last: 0}, ""},
-		{ForgetOptions{Hourly: 0}, ""},
-		{ForgetOptions{Daily: 0}, ""},
-		{ForgetOptions{Weekly: 0}, ""},
-		{ForgetOptions{Monthly: 0}, ""},
-		{ForgetOptions{Yearly: 0}, ""},
-		{ForgetOptions{Last: -1}, ""},
-		{ForgetOptions{Hourly: -1}, ""},
-		{ForgetOptions{Daily: -1}, ""},
-		{ForgetOptions{Weekly: -1}, ""},
-		{ForgetOptions{Monthly: -1}, ""},
-		{ForgetOptions{Yearly: -1}, ""},
-		{ForgetOptions{Last: -2}, negValErrorMsg},
-		{ForgetOptions{Hourly: -2}, negValErrorMsg},
-		{ForgetOptions{Daily: -2}, negValErrorMsg},
-		{ForgetOptions{Weekly: -2}, negValErrorMsg},
-		{ForgetOptions{Monthly: -2}, negValErrorMsg},
-		{ForgetOptions{Yearly: -2}, negValErrorMsg},
-		{ForgetOptions{Within: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
-		{ForgetOptions{WithinHourly: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
-		{ForgetOptions{WithinDaily: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
-		{ForgetOptions{WithinWeekly: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
-		{ForgetOptions{WithinMonthly: data.ParseDurationOrPanic("2y4m6d8h")}, ""},
-		{ForgetOptions{WithinYearly: data.ParseDurationOrPanic("2y4m6d8h")}, ""},
-		{ForgetOptions{Within: data.ParseDurationOrPanic("-1y2m3d3h")}, negDurationValErrorMsg},
-		{ForgetOptions{WithinHourly: data.ParseDurationOrPanic("1y-2m3d3h")}, negDurationValErrorMsg},
-		{ForgetOptions{WithinDaily: data.ParseDurationOrPanic("1y2m-3d3h")}, negDurationValErrorMsg},
-		{ForgetOptions{WithinWeekly: data.ParseDurationOrPanic("1y2m3d-3h")}, negDurationValErrorMsg},
-		{ForgetOptions{WithinMonthly: data.ParseDurationOrPanic("-2y4m6d8h")}, negDurationValErrorMsg},
-		{ForgetOptions{WithinYearly: data.ParseDurationOrPanic("2y-4m6d8h")}, negDurationValErrorMsg},
+		{forgetOptions{Last: 1}, ""},
+		{forgetOptions{Hourly: 1}, ""},
+		{forgetOptions{Daily: 1}, ""},
+		{forgetOptions{Weekly: 1}, ""},
+		{forgetOptions{Monthly: 1}, ""},
+		{forgetOptions{Yearly: 1}, ""},
+		{forgetOptions{Last: 0}, ""},
+		{forgetOptions{Hourly: 0}, ""},
+		{forgetOptions{Daily: 0}, ""},
+		{forgetOptions{Weekly: 0}, ""},
+		{forgetOptions{Monthly: 0}, ""},
+		{forgetOptions{Yearly: 0}, ""},
+		{forgetOptions{Last: -1}, ""},
+		{forgetOptions{Hourly: -1}, ""},
+		{forgetOptions{Daily: -1}, ""},
+		{forgetOptions{Weekly: -1}, ""},
+		{forgetOptions{Monthly: -1}, ""},
+		{forgetOptions{Yearly: -1}, ""},
+		{forgetOptions{Last: -2}, negValErrorMsg},
+		{forgetOptions{Hourly: -2}, negValErrorMsg},
+		{forgetOptions{Daily: -2}, negValErrorMsg},
+		{forgetOptions{Weekly: -2}, negValErrorMsg},
+		{forgetOptions{Monthly: -2}, negValErrorMsg},
+		{forgetOptions{Yearly: -2}, negValErrorMsg},
+		{forgetOptions{Within: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
+		{forgetOptions{WithinHourly: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
+		{forgetOptions{WithinDaily: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
+		{forgetOptions{WithinWeekly: data.ParseDurationOrPanic("1y2m3d3h")}, ""},
+		{forgetOptions{WithinMonthly: data.ParseDurationOrPanic("2y4m6d8h")}, ""},
+		{forgetOptions{WithinYearly: data.ParseDurationOrPanic("2y4m6d8h")}, ""},
+		{forgetOptions{Within: data.ParseDurationOrPanic("-1y2m3d3h")}, negDurationValErrorMsg},
+		{forgetOptions{WithinHourly: data.ParseDurationOrPanic("1y-2m3d3h")}, negDurationValErrorMsg},
+		{forgetOptions{WithinDaily: data.ParseDurationOrPanic("1y2m-3d3h")}, negDurationValErrorMsg},
+		{forgetOptions{WithinWeekly: data.ParseDurationOrPanic("1y2m3d-3h")}, negDurationValErrorMsg},
+		{forgetOptions{WithinMonthly: data.ParseDurationOrPanic("-2y4m6d8h")}, negDurationValErrorMsg},
+		{forgetOptions{WithinYearly: data.ParseDurationOrPanic("2y-4m6d8h")}, negDurationValErrorMsg},
 	}
 
 	for _, testCase := range testCases {
@@ -122,12 +122,12 @@ func TestForgetHostnameDefaulting(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			set := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
-			opts := ForgetOptions{}
-			opts.AddFlags(set)
+			options := forgetOptions{}
+			options.AddFlags(set)
 			err := set.Parse(tt.args)
 			rtest.Assert(t, err == nil, "expected no error for input")
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
-			rtest.Equals(t, tt.want, opts.Hosts)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
+			rtest.Equals(t, tt.want, options.Hosts)
 		})
 	}
 }
@@ -135,19 +135,19 @@ func TestForgetHostnameDefaulting(t *testing.T) {
 func TestValidateForgetPolicy(t *testing.T) {
 	tests := []struct {
 		name    string
-		opts    ForgetOptions
+		options forgetOptions
 		wantErr string
 	}{
-		{name: "retention policy", opts: ForgetOptions{Last: 1}},
+		{name: "retention policy", options: forgetOptions{Last: 1}},
 		{name: "missing policy", wantErr: "Fatal: no policy was specified, no snapshots will be removed"},
 		{
 			name:    "unsafe without filter",
-			opts:    ForgetOptions{UnsafeAllowRemoveAll: true},
+			options: forgetOptions{UnsafeAllowRemoveAll: true},
 			wantErr: "Fatal: --unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified",
 		},
 		{
 			name: "unsafe with filter",
-			opts: ForgetOptions{
+			options: forgetOptions{
 				UnsafeAllowRemoveAll: true,
 				SnapshotFilter:       data.SnapshotFilter{Hosts: []string{"host"}},
 			},
@@ -156,7 +156,7 @@ func TestValidateForgetPolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateForgetPolicy(test.opts, forgetPolicy(test.opts))
+			err := validateForgetPolicy(test.options, forgetPolicy(test.options))
 			if test.wantErr == "" {
 				rtest.OK(t, err)
 				return

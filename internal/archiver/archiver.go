@@ -203,14 +203,14 @@ func (o Options) applyDefaults() Options {
 }
 
 // New initializes a new archiver.
-func New(repo archiverRepo, filesystem fs.FS, opts Options) *Archiver {
+func New(repo archiverRepo, filesystem fs.FS, options Options) *Archiver {
 	arch := &Archiver{
 		Repo:            repo,
 		SelectByName:    func(_ string) bool { return true },
 		Select:          func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true },
 		MandatorySelect: func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true },
 		FS:              filesystem,
-		Options:         opts.applyDefaults(),
+		Options:         options.applyDefaults(),
 
 		CompleteItem:   func(string, ItemAction, ItemStats, time.Duration) {},
 		ReconcileNode:  func(string, string, *data.Node) {},
@@ -231,7 +231,7 @@ func (arch *Archiver) error(item string, err error) error {
 		return err
 	}
 
-	if err == context.Canceled {
+	if errors.Is(err, context.Canceled) {
 		return err
 	}
 
@@ -241,7 +241,7 @@ func (arch *Archiver) error(item string, err error) error {
 	}
 
 	errf := arch.Error(item, err)
-	if err != errf {
+	if !errors.Is(err, errf) {
 		debug.Log("item %v: error was filtered by handler, before: %q, after: %v", item, err, errf)
 	}
 	return errf
@@ -289,7 +289,7 @@ func (arch *Archiver) reconcileNode(snapshotPath, sourcePath string, node *data.
 // nodeFromFileInfo returns the vaultic node from an os.FileInfo.
 func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta toNoder, ignoreXattrListError bool) (*data.Node, error) {
 	node, err := meta.ToNode(ignoreXattrListError, func(format string, args ...any) {
-		_ = arch.error(filename, fmt.Errorf(format, args...))
+		_ = arch.error(filename, fmt.Errorf(format, args...)) // The callback itself records the item failure.
 	})
 	// node does not exist. This prevents all further processing for this file.
 	// If an error and a node are returned, then preserve as much data as possible (see below).
@@ -586,72 +586,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 
 	switch {
 	case fi.Mode.IsRegular():
-		debug.Log("  %v regular file", target)
-
-		// check if the file has not changed before performing a fopen operation (more expensive, specially
-		// in network filesystems)
-		if previous != nil && arch.ReuseNode(snPath, target, fi, previous) && !fileChanged(fi, previous, arch.ChangeIgnoreFlags) {
-			if arch.allBlobsPresent(previous) {
-				debug.Log("%v hasn't changed, using old list of blobs", target)
-				arch.trackItem(snPath, previous, previous, ItemStats{}, time.Since(start))
-				arch.CompleteBlob(previous.Size)
-				node, err := arch.nodeFromFileInfo(snPath, target, meta, false)
-				if err != nil {
-					return futureNode{}, false, err
-				}
-
-				// copy list of blobs
-				node.Content = previous.Content
-				arch.reconcileNode(snPath, target, node)
-
-				fn = newFutureNodeWithResult(futureNodeResult{
-					snPath: snPath,
-					target: target,
-					node:   node,
-				})
-				return fn, false, nil
-			}
-
-			debug.Log("%v hasn't changed, but contents are missing!", target)
-			// There are contents missing - inform user!
-			err := errors.Errorf("parts of %v not found in the repository index; storing the file again", target)
-			err = arch.error(abstarget, err)
-			if err != nil {
-				return futureNode{}, false, err
-			}
-		}
-
-		// reopen file and do an fstat() on the open file to check it is still
-		// a file (and has not been exchanged for e.g. a symlink)
-		err := meta.MakeReadable()
-		if err != nil {
-			debug.Log("MakeReadable() for %v returned error: %v", target, err)
-			return filterError(err)
-		}
-
-		fi, err := meta.Stat()
-		if err != nil {
-			debug.Log("stat() on opened file %v returned error: %v", target, err)
-			return filterError(err)
-		}
-
-		// make sure it's still a file
-		if !fi.Mode.IsRegular() {
-			err = errors.Errorf("file %q changed type, refusing to archive", target)
-			return filterError(err)
-		}
-
-		closeFile = false
-
-		// Save will close the file, we don't need to do that
-		fn = arch.fileSaver.Save(ctx, snPath, target, meta, func() {
-			arch.StartFile(snPath)
-		}, func() {
-			arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
-		}, func(node *data.Node, stats ItemStats) {
-			arch.reconcileNode(snPath, target, node)
-			arch.trackItem(snPath, previous, node, stats, time.Since(start))
-		})
+		return arch.saveRegularFile(ctx, snPath, target, abstarget, meta, fi, previous, start, &closeFile, filterError)
 
 	case fi.Mode.IsDir():
 		debug.Log("  %v dir", target)
@@ -697,6 +632,61 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	debug.Log("return after %.3f", time.Since(start).Seconds())
 
 	return fn, false, nil
+}
+
+func (arch *Archiver) saveRegularFile(
+	ctx context.Context,
+	snPath, target, absoluteTarget string,
+	meta fs.File,
+	fileInfo *fs.ExtendedFileInfo,
+	previous *data.Node,
+	start time.Time,
+	closeFile *bool,
+	filterError func(error) (futureNode, bool, error),
+) (futureNode, bool, error) {
+	debug.Log("  %v regular file", target)
+	if previous != nil && arch.ReuseNode(snPath, target, fileInfo, previous) &&
+		!fileChanged(fileInfo, previous, arch.ChangeIgnoreFlags) {
+		if arch.allBlobsPresent(previous) {
+			debug.Log("%v hasn't changed, using old list of blobs", target)
+			arch.trackItem(snPath, previous, previous, ItemStats{}, time.Since(start))
+			arch.CompleteBlob(previous.Size)
+			node, err := arch.nodeFromFileInfo(snPath, target, meta, false)
+			if err != nil {
+				return futureNode{}, false, err
+			}
+			node.Content = previous.Content
+			arch.reconcileNode(snPath, target, node)
+			return newFutureNodeWithResult(futureNodeResult{snPath: snPath, target: target, node: node}), false, nil
+		}
+		debug.Log("%v hasn't changed, but contents are missing!", target)
+		if err := arch.error(absoluteTarget, errors.Errorf(
+			"parts of %v not found in the repository index; storing the file again", target)); err != nil {
+			return futureNode{}, false, err
+		}
+	}
+	if err := meta.MakeReadable(); err != nil {
+		debug.Log("MakeReadable() for %v returned error: %v", target, err)
+		return filterError(err)
+	}
+	fileInfo, err := meta.Stat()
+	if err != nil {
+		debug.Log("stat() on opened file %v returned error: %v", target, err)
+		return filterError(err)
+	}
+	if !fileInfo.Mode.IsRegular() {
+		return filterError(errors.Errorf("file %q changed type, refusing to archive", target))
+	}
+	*closeFile = false
+	future := arch.fileSaver.Save(ctx, snPath, target, meta, func() {
+		arch.StartFile(snPath)
+	}, func() {
+		arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
+	}, func(node *data.Node, stats ItemStats) {
+		arch.reconcileNode(snPath, target, node)
+		arch.trackItem(snPath, previous, node, stats, time.Since(start))
+	})
+	return future, false, nil
 }
 
 // fileChanged tries to detect whether a file's content has changed compared
@@ -946,7 +936,7 @@ func (arch *Archiver) loadParentTree(ctx context.Context, sn *data.Snapshot) dat
 	tree, err := data.LoadTree(ctx, arch.Repo, *sn.Tree)
 	if err != nil {
 		debug.Log("unable to load tree %v: %v", *sn.Tree, err)
-		_ = arch.error("/", arch.wrapLoadTreeError(*sn.Tree, err))
+		_ = arch.error("/", arch.wrapLoadTreeError(*sn.Tree, err)) // The callback itself records the snapshot failure.
 		return nil
 	}
 	return tree
@@ -972,12 +962,12 @@ func (arch *Archiver) stopWorkers() {
 }
 
 // Snapshot saves several targets and returns a snapshot.
-func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*data.Snapshot, vaultic.ID, *Summary, error) {
-	if opts.DeferredUploader != nil && opts.ParentSnapshot != nil {
+func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOptions SnapshotOptions) (*data.Snapshot, vaultic.ID, *Summary, error) {
+	if snapshotOptions.DeferredUploader != nil && snapshotOptions.ParentSnapshot != nil {
 		return nil, vaultic.ID{}, nil, errors.New("deferred crawl cannot use a parent snapshot")
 	}
 	arch.summary = &Summary{
-		BackupStart: opts.BackupStart,
+		BackupStart: snapshotOptions.BackupStart,
 	}
 
 	cleanTargets, err := resolveRelativeTargets(arch.FS, targets)
@@ -989,120 +979,42 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 	if err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}
-	if arch.Options.CWalkConcurrency > 0 && fs.IsLocal(arch.FS) {
-		queueCapacity := arch.Options.CWalkQueue
-		if queueCapacity <= 0 {
-			queueCapacity = 4096
-		}
-		var selectMu sync.Mutex
-		roots := arch.Options.CWalkRoots
-		if len(roots) == 0 {
-			roots = targets
-		}
-		manifest, manifestErr := crawl.BuildDirectoryManifest(ctx, roots, arch.Options.CWalkConcurrency, queueCapacity, func(item string, _ os.FileInfo) bool {
-			selectMu.Lock()
-			defer selectMu.Unlock()
-			if !arch.SelectByName(item) {
-				return true
-			}
-			info, err := arch.FS.Lstat(item)
-			if err != nil {
-				return false
-			}
-			return !arch.MandatorySelect(item, info, arch.FS) || !arch.Select(item, info, arch.FS)
-		})
-		if manifestErr != nil {
-			debug.Log("cwalk manifest unavailable, using sequential traversal: %v", manifestErr)
-		} else {
-			arch.cwalkManifest = manifest
-			defer func() {
-				_ = manifest.Close()
-				arch.cwalkManifest = nil
-			}()
-		}
-	}
+	closeManifest := arch.prepareCWalkManifest(ctx, targets)
+	defer closeManifest()
 
-	var rootTreeID vaultic.ID
-
-	withUploader := arch.Repo.WithBlobUploader
-	if opts.DeferredUploader != nil {
-		withUploader = opts.DeferredUploader
-	}
-	err = withUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
-		wg, wgCtx := errgroup.WithContext(ctx)
-		start := time.Now()
-
-		wg.Go(func() error {
-			arch.runWorkers(wgCtx, wg, uploader)
-
-			debug.Log("starting snapshot")
-			fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *data.Node, is ItemStats) {
-				arch.trackItem("/", nil, nil, is, time.Since(start))
-			})
-			if err != nil {
-				return err
-			}
-
-			fnr := fn.take(wgCtx)
-			if fnr.err != nil {
-				return fnr.err
-			}
-
-			if wgCtx.Err() != nil {
-				return wgCtx.Err()
-			}
-
-			if nodeCount == 0 {
-				return errors.New("snapshot is empty")
-			}
-
-			rootTreeID = *fnr.node.Subtree
-			arch.stopWorkers()
-			return nil
-		})
-
-		err = wg.Wait()
-		debug.Log("err is %v", err)
-
-		if err != nil {
-			debug.Log("error while saving tree: %v", err)
-			return err
-		}
-		return nil
-	})
+	rootTreeID, err := arch.saveSnapshotTree(ctx, atree, snapshotOptions)
 	if err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}
 
-	if opts.ParentSnapshot != nil && opts.SkipIfUnchanged {
-		ps := opts.ParentSnapshot
+	if snapshotOptions.ParentSnapshot != nil && snapshotOptions.SkipIfUnchanged {
+		ps := snapshotOptions.ParentSnapshot
 		if ps.Tree != nil && rootTreeID.Equal(*ps.Tree) {
 			arch.summary.BackupEnd = time.Now()
 			return nil, vaultic.ID{}, arch.summary, nil
 		}
 	}
 
-	sn, err := data.NewSnapshot(targets, opts.Tags, opts.Hostname, opts.Time)
+	sn, err := data.NewSnapshot(targets, snapshotOptions.Tags, snapshotOptions.Hostname, snapshotOptions.Time)
 	if err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}
 
-	sn.ProgramVersion = opts.ProgramVersion
-	sn.Excludes = opts.Excludes
-	sn.Label = opts.Label
-	sn.Description = opts.Description
-	if opts.Delete != nil && opts.Delete.IsSet() {
-		sn.Delete = opts.Delete
+	sn.ProgramVersion = snapshotOptions.ProgramVersion
+	sn.Excludes = snapshotOptions.Excludes
+	sn.Label = snapshotOptions.Label
+	sn.Description = snapshotOptions.Description
+	if snapshotOptions.Delete != nil && snapshotOptions.Delete.IsSet() {
+		sn.Delete = snapshotOptions.Delete
 	}
-	if opts.ParentSnapshot != nil {
-		sn.Parent = opts.ParentSnapshot.ID()
+	if snapshotOptions.ParentSnapshot != nil {
+		sn.Parent = snapshotOptions.ParentSnapshot.ID()
 	}
 	sn.Tree = &rootTreeID
 	arch.summary.BackupEnd = time.Now()
 	sn.Summary = &data.SnapshotSummary{
-		BackupStart: arch.summary.BackupStart,
-		BackupEnd:   arch.summary.BackupEnd,
-
+		BackupStart:         arch.summary.BackupStart,
+		BackupEnd:           arch.summary.BackupEnd,
 		FilesNew:            arch.summary.Files.New,
 		FilesChanged:        arch.summary.Files.Changed,
 		FilesUnmodified:     arch.summary.Files.Unchanged,
@@ -1117,7 +1029,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		TotalBytesProcessed: arch.summary.ProcessedBytes,
 	}
 
-	if opts.DeferredUploader != nil {
+	if snapshotOptions.DeferredUploader != nil {
 		return sn, vaultic.ID{}, arch.summary, nil
 	}
 	if err := arch.BeforeSnapshot(); err != nil {
@@ -1129,4 +1041,91 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 	}
 
 	return sn, id, arch.summary, nil
+}
+
+func (arch *Archiver) saveSnapshotTree(ctx context.Context, tree *tree, snapshotOptions SnapshotOptions) (vaultic.ID, error) {
+	var rootTreeID vaultic.ID
+	withUploader := arch.Repo.WithBlobUploader
+	if snapshotOptions.DeferredUploader != nil {
+		withUploader = snapshotOptions.DeferredUploader
+	}
+	err := withUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		workers, workerContext := errgroup.WithContext(ctx)
+		started := time.Now()
+		workers.Go(func() error {
+			arch.runWorkers(workerContext, workers, uploader)
+			debug.Log("starting snapshot")
+			futureNode, nodeCount, err := arch.saveTree(
+				workerContext, "/", tree, arch.loadParentTree(workerContext, snapshotOptions.ParentSnapshot),
+				func(_ *data.Node, stats ItemStats) {
+					arch.trackItem("/", nil, nil, stats, time.Since(started))
+				},
+			)
+			if err != nil {
+				return err
+			}
+			result := futureNode.take(workerContext)
+			if result.err != nil {
+				return result.err
+			}
+			if workerContext.Err() != nil {
+				return workerContext.Err()
+			}
+			if nodeCount == 0 {
+				return errors.New("snapshot is empty")
+			}
+			rootTreeID = *result.node.Subtree
+			arch.stopWorkers()
+			return nil
+		})
+		err := workers.Wait()
+		debug.Log("err is %v", err)
+		if err != nil {
+			debug.Log("error while saving tree: %v", err)
+		}
+		return err
+	})
+	return rootTreeID, err
+}
+
+func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string) func() {
+	if arch.Options.CWalkConcurrency <= 0 || !fs.IsLocal(arch.FS) {
+		return func() {}
+	}
+	queueCapacity := arch.Options.CWalkQueue
+	if queueCapacity <= 0 {
+		queueCapacity = 4096
+	}
+	var selectMutex sync.Mutex
+	roots := arch.Options.CWalkRoots
+	if len(roots) == 0 {
+		roots = targets
+	}
+	manifest, err := crawl.BuildDirectoryManifest(
+		ctx,
+		roots,
+		arch.Options.CWalkConcurrency,
+		queueCapacity,
+		func(item string, _ os.FileInfo) bool {
+			selectMutex.Lock()
+			defer selectMutex.Unlock()
+			if !arch.SelectByName(item) {
+				return true
+			}
+			info, err := arch.FS.Lstat(item)
+			if err != nil {
+				return false
+			}
+			return !arch.MandatorySelect(item, info, arch.FS) || !arch.Select(item, info, arch.FS)
+		},
+	)
+	if err != nil {
+		debug.Log("cwalk manifest unavailable, using sequential traversal: %v", err)
+		return func() {}
+	}
+	arch.cwalkManifest = manifest
+	return func() {
+		_ = manifest.Close() // The walk result is already fixed; manifest removal is temporary cleanup.
+		arch.cwalkManifest = nil
+	}
 }

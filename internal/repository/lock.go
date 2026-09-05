@@ -196,7 +196,7 @@ func (l *locker) refreshLocks(
 			}
 
 			debug.Log("refreshing locks")
-			err := lock.refresh(context.TODO())
+			err := lock.refresh(ctx)
 			if err != nil {
 				logger("unable to refresh lock: %v\n", err)
 			} else {

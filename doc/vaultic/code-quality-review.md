@@ -35,6 +35,18 @@ The main maintainability risks are concentration, not correctness:
 
 Five packages hold ~45% of all non-test Go code: `cmd/vaultic` (18.5k), `internal/repository` (8.9k), `internal/index/schema` (5.9k), `internal/index/daemon` (5.5k), `internal/index/analytics` (5.4k). Almost every high-severity finding below lives in these five.
 
+Post-roadmap metrics preserve the original table above as the review baseline while recording the current enforced state:
+
+| Metric | Current value | Enforced outcome |
+|---|---:|---|
+| Go production files, excluding generated protobuf | 542 | Measured deterministically by `helpers/codemetrics` |
+| Go production LOC | 106,865 | Measured deterministically by `helpers/codemetrics` |
+| Go functions | 4,291 | 0 functions over 150 lines |
+| Largest non-generated production file | 1,192 lines | 0 files over 1,200 lines |
+| Go functions with cyclomatic complexity > 60 | 0 | Maximum measured complexity is 47 |
+| Production blank assignments | 173 | 0 unexplained discards |
+| Rust source | 48 files / 16,491 LOC | All hand-written modules have `//!` documentation |
+
 ---
 
 ## 2. Error handling
@@ -269,7 +281,7 @@ Exit criteria: `go test ./...` and `cargo test --all-targets` are green on a sto
 
 **Implementation status (2026-09-04): complete.**
 
-- `.golangci.yml` now enables all nine debt linters at the thresholds above. PR CI checks only code changed from the pull request base SHA (`fetch-depth: 0` + `--new-from-rev`), while the exact golangci-lint v2.12 configuration validates cleanly. A local run over every changed Phase 0 package reported zero new issues; 676 legacy issues remain behind the baseline.
+- Phase 0 enabled all nine debt linters at the thresholds above and initially checked code changed from the pull request base SHA. Phase 5 subsequently removed that temporary revision baseline; the exact uncapped golangci-lint v2.12 configuration now validates the full repository with zero issues.
 - Rust CI now runs `cargo fmt --check`, a strict default Clippy pass, an informational debt pass, and `cargo test --all-targets`. The strict pass allows eight recorded legacy categories (`too_many_lines`, `cognitive_complexity`, `unwrap_used`, `expect_used`, `too_many_arguments`, `type_complexity`, `chunks_exact_to_as_chunks`, and `large_enum_variant`); all other warnings are fatal. The informational pass currently reports 43 warnings.
 - `make metrics` runs `helpers/codemetrics` and reports the review metrics reproducibly. Its first baseline is 440 production Go files, 96,903 non-generated production Go LOC, 3,773 functions, 74 functions over 100 lines, 23 over 150 lines, 20 files over 800 lines, 334 lines over 200 bytes, and 15,207 Rust LOC.
 - Environment-sensitive tests now select `python3`/`python`, capability-probe the exact `rclone serve vaultic --stdio` interface, skip FUSE tests when macFUSE/OSXFUSE is absent, and ignore only the OS-managed `com.apple.provenance` xattr in assertions. Legacy quorum bypass deletion is sorted, removing its iteration-order flake.
@@ -378,6 +390,18 @@ Goal: lock in the conventions the previous phases established.
 - Consider `internal/index` → `internal/metadata` rename once the `indexcmd` split has reduced the number of import sites.
 
 Exit criteria: all Phase 0 linters at error level with no baseline file; §1 metrics table shows zero functions > 150 lines, zero non-generated files > 1,200 lines, zero `_ =` discards without a helper or comment.
+
+**Implementation status: complete.**
+
+- `CONTRIBUTING.md` now defines the established object-role names, unexported command option casing, descriptive local names, wrapped error style, hard and preferred size limits, checkpoint-before-await cancellation ordering, and callback/interface injection at command boundaries.
+- Staticcheck package-comment checks `ST1000` and `ST1020` are enabled repository-wide. Package documentation was added across the affected index, healing, and staging packages, and the uncapped full-repository lint gate passes without a revision filter or baseline file.
+- The four local iteration sentinels are unified as `internal/errors.ErrStopIteration`. Every concrete command option type is unexported, and the command tree contains no remaining `gopts`, `opts`, `rd`, or `sc` identifiers.
+- Rust uses transparent serde newtypes for `RepositoryId`, `SessionId`, `MemberId`, and `Namespace` through repository, broker, recovery, envelope, provider, generation, and daemon domains. Public visibility was reduced to crate scope where external exposure is unnecessary, `unreachable_pub` is enforced, and every hand-written source module has `//!` documentation.
+- The analytics publication mutex belongs to `daemon.SchemaStore`; password input and forget Phase A behavior are invocation-scoped callbacks. The former package globals `analyticsPublishMu`, `testKeyNewPassword`, and `forgetPhaseATestHook` no longer exist.
+- Renaming `internal/index` to `internal/metadata` was evaluated and deferred. The package split removed the motivating command alias conflict, while a rename would churn 13 packages and 126 Go import sites without improving a current ownership boundary.
+- Strict `funlen` (120 lines / 80 statements), `gocyclo` (30), `gocognit` (30), `nestif` (5), `lll` (160), exhaustive enum handling, panic policy, documentation, and stale-annotation checks are active. Ten source-local legacy hard-gate exceptions remain, matching the Phase 3 ceiling; there are no path or revision debt baselines.
+- Final deterministic metrics are 542 production Go files, 106,865 production Go LOC, 4,291 Go functions, zero functions over 150 lines, a largest production file of 1,192 lines, and 173 explained language-mechanics or cleanup assignments with zero unexplained discards. Maximum measured cyclomatic complexity is 47.
+- Validation covers all 2,203 Go tests, all 82 Rust tests, strict full-repository Go lint, warning-denying Clippy, Rust formatting, Linux and Windows Go compilation, pinned protobuf regeneration, pinned `actionlint`, deterministic metrics, the discard audit, and patch hygiene.
 
 ### Sequencing and risk controls
 

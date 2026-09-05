@@ -130,7 +130,7 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 			if err != nil {
 				return fmt.Errorf("acquire capsule proof lease: %w", err)
 			}
-			defer func() { _ = brokerClient.Close() }()
+			defer vaulticerrors.CloseQuietly(brokerClient)
 			lease, err := brokerClient.AcquireLease(
 				command.Context(),
 				globalOptions.KeyBrokerReleaseManifest,
@@ -141,7 +141,10 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 				return fmt.Errorf("acquire capsule proof lease: %w", err)
 			}
 			proof := hmac.New(sha256.New, lease.Key)
-			_, _ = proof.Write([]byte("vaultic-capsule-migration-finalize-v1\x00" + options.RepositoryID + "\x00" + state.CapsuleSHA256))
+			// hash.Hash writes are specified to return a nil error.
+			_, _ = proof.Write(
+				[]byte("vaultic-capsule-migration-finalize-v1\x00" + options.RepositoryID + "\x00" + state.CapsuleSHA256),
+			)
 			brokerKeyProof := proof.Sum(nil)
 			clear(lease.Key)
 			defer clear(brokerKeyProof)
@@ -155,7 +158,7 @@ func newIndexKeysQuorumFinalizeCommand(globalOptions *global.Options, options *i
 			if err != nil {
 				return fmt.Errorf("capsule migration finalized but legacy bypass retirement is incomplete; rerun migrate-finalize: %w", err)
 			}
-			_ = observability.Emit(
+			observability.EmitBestEffort(
 				command.Context(),
 				observability.Event{
 					Severity:  observability.Critical,
@@ -386,9 +389,9 @@ func newIndexKeysEscrowCreateCommand(globalOptions *global.Options, options *ind
 	command.Flags().StringVar(&commandOptions.KeyReference, "key-reference", "", "versioned cloud KMS key reference")
 	command.Flags().StringVar(&bearerTokenFile, "bearer-token-file", "", "protected provider token or PKCS#11 PIN file")
 	command.Flags().StringVar(&recordFile, "record-file", "", "also write a mode-0600 standalone recovery record")
-	_ = command.MarkFlagRequired("escrow-id")
-	_ = command.MarkFlagRequired("provider")
-	_ = command.MarkFlagRequired("key-reference")
+	mustMarkFlagRequired(command, "escrow-id")
+	mustMarkFlagRequired(command, "provider")
+	mustMarkFlagRequired(command, "key-reference")
 	return command
 }
 
@@ -439,8 +442,8 @@ func newIndexKeysEscrowRecoverCommand(options *indexKeysOptions) *cobra.Command 
 	command.Flags().StringVar(&recordFile, "record-file", "", "standalone escrow JSON record")
 	command.Flags().StringVar(&bearerTokenFile, "bearer-token-file", "", "protected provider token or PKCS#11 PIN file")
 	command.Flags().StringVar(&outputKeyFile, "output-key-file", "", "new mode-0600 file for vaultic --key-file")
-	_ = command.MarkFlagRequired("record-file")
-	_ = command.MarkFlagRequired("output-key-file")
+	mustMarkFlagRequired(command, "record-file")
+	mustMarkFlagRequired(command, "output-key-file")
 	return command
 }
 
@@ -476,8 +479,8 @@ func newIndexKeysRotateDEKCommand(globalOptions *global.Options, options *indexK
 			if !resume {
 				status, rotateErr := client.RotateDEK(ctx)
 				if rotateErr != nil {
-					_, _, _ = mirrorCurrentEnvelope(ctx, repo.Backend(), client)
-					return rotateErr
+					_, _, mirrorErr := mirrorCurrentEnvelope(ctx, repo.Backend(), client)
+					return vaulticerrors.Join(rotateErr, mirrorErr)
 				}
 				if _, _, mirrorErr := mirrorCurrentEnvelope(ctx, repo.Backend(), client); mirrorErr != nil {
 					return mirrorErr
@@ -488,8 +491,8 @@ func newIndexKeysRotateDEKCommand(globalOptions *global.Options, options *indexK
 			for {
 				progress, rewriteErr := client.RewriteDEK(ctx, batchSize)
 				if rewriteErr != nil {
-					_, _, _ = mirrorCurrentEnvelope(ctx, repo.Backend(), client)
-					return rewriteErr
+					_, _, mirrorErr := mirrorCurrentEnvelope(ctx, repo.Backend(), client)
+					return vaulticerrors.Join(rewriteErr, mirrorErr)
 				}
 				total += progress.Rewritten
 				if progress.Remaining == 0 {
@@ -584,7 +587,7 @@ func newIndexKeysStatusCommand(globalOptions *global.Options, options *indexKeys
 			if err != nil {
 				return err
 			}
-			defer func() { _ = brokerClient.Close() }()
+			defer vaulticerrors.CloseQuietly(brokerClient)
 			quorum, err := brokerClient.Status(command.Context())
 			if err != nil {
 				return err
@@ -689,7 +692,7 @@ func newIndexKeysAddSlotCommand(globalOptions *global.Options, options *indexKey
 	command.Flags().StringVar(&bearerTokenFile, "bearer-token-file", "", "mode-0600 Azure or GCP access-token file")
 	command.Flags().Uint32Var(&priority, "priority", 100, "unlock priority (lower is preferred)")
 	command.Flags().BoolVar(&recovery, "recovery", false, "mark this slot as an offline recovery mechanism")
-	_ = command.MarkFlagRequired("slot")
+	mustMarkFlagRequired(command, "slot")
 	return command
 }
 
@@ -735,7 +738,7 @@ func newIndexKeysRemoveSlotCommand(globalOptions *global.Options, options *index
 	}
 	command.Flags().StringVar(&slotID, "slot", "", "metadata key slot ID")
 	command.Flags().BoolVar(&confirmation.Confirm, "confirm", false, "confirm permanent removal of the wrapping slot")
-	_ = command.MarkFlagRequired("slot")
+	mustMarkFlagRequired(command, "slot")
 	return command
 }
 
@@ -763,8 +766,8 @@ func newIndexKeysRotateKEKCommand(globalOptions *global.Options, options *indexK
 	}
 	command.Flags().StringVar(&slotID, "slot", "", "local metadata key slot ID")
 	command.Flags().StringVar(&passphraseFile, "passphrase-file", "", "mode-0600 file containing the replacement passphrase")
-	_ = command.MarkFlagRequired("slot")
-	_ = command.MarkFlagRequired("passphrase-file")
+	mustMarkFlagRequired(command, "slot")
+	mustMarkFlagRequired(command, "passphrase-file")
 	return command
 }
 

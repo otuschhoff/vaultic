@@ -1,3 +1,5 @@
+//! gRPC handlers for metadata generation authority transitions.
+
 use tonic::{Request, Response, Status};
 
 use crate::{
@@ -14,12 +16,12 @@ use super::{check_context, check_request, Service};
 
 pub(super) fn status_response(authority: GenerationAuthority) -> GenerationStatusResponse {
     GenerationStatusResponse {
-        repository_id: authority.repository_id,
+        repository_id: authority.repository_id.into_string(),
         decision: authority.decision,
         active_generation: authority.active_generation,
-        namespace: authority.namespace,
+        namespace: authority.namespace.into_string(),
         previous_generation: authority.previous_generation,
-        previous_namespace: authority.previous_namespace,
+        previous_namespace: authority.previous_namespace.into_string(),
         state: authority.state.clone(),
         report_sha256: authority.report_sha256,
         decided_at_unix_ms: authority.decided_at_ms.min(i64::MAX as u64) as i64,
@@ -64,7 +66,7 @@ impl Service {
                 &request.repository_id,
                 request.expected_active_generation,
                 request.candidate_generation,
-                request.candidate_namespace,
+                request.candidate_namespace.into(),
                 request.report_sha256,
                 request.observation_window_ms,
             )

@@ -159,12 +159,12 @@ async fn read_generation_authority(
         Err(slatedb::object_store::Error::NotFound { .. }) => Ok((
             GenerationAuthority {
                 format: 1,
-                repository_id: repository_id.to_owned(),
+                repository_id: repository_id.into(),
                 decision: 0,
                 active_generation: 1,
-                namespace: "default".to_owned(),
+                namespace: "default".into(),
                 previous_generation: 0,
-                previous_namespace: String::new(),
+                previous_namespace: Namespace::default(),
                 state: "healthy".to_owned(),
                 report_sha256: String::new(),
                 decided_at_ms: 0,

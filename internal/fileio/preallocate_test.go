@@ -1,6 +1,7 @@
 package fileio
 
 import (
+	"errors"
 	"os"
 	"path"
 	"strconv"
@@ -24,7 +25,7 @@ func TestPreallocate(t *testing.T) {
 			}()
 
 			err = PreallocateFile(wr, i)
-			if err == syscall.ENOTSUP {
+			if errors.Is(err, syscall.ENOTSUP) {
 				t.SkipNow()
 			}
 			test.OK(t, err)

@@ -221,7 +221,7 @@ func TestErrorBackend(t *testing.T) {
 		defer wg.Done()
 
 		buf, err := backendtest.LoadAll(context.TODO(), be, h)
-		if err == testErr {
+		if errors.Is(err, testErr) {
 			return
 		}
 

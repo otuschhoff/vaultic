@@ -289,6 +289,8 @@ func placementsFromTier(pack schema.PackRecord, model PlacementModel) placementS
 	}
 	selected := make([]PlacementBackend, 0, len(model.Backends))
 	switch pack.Tier {
+	case schema.TierUnknown:
+		return nil
 	case schema.TierSingle:
 		if backend, ok := model.backendByRole("primary"); ok {
 			selected = append(selected, backend)

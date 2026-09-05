@@ -113,16 +113,12 @@ type GCPlan struct {
 // to confirm reachability before scheduling any deletion. Reachability is
 // always re-verified this way immediately before Execute performs any
 // destructive action; the reverse-reference scan only narrows the search.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vaultic.Printer) (*GCPlan, error) {
-	if repo.Engine().Mode() != metadataindex.ModeSlateDB {
-		return nil, fmt.Errorf("gc requires a SlateDB-authoritative repository; use prune for legacy repositories")
-	}
-	engine, ok := repo.Engine().(*metadataindex.DaemonEngine)
-	if !ok {
-		return nil, fmt.Errorf("gc requires the SlateDB daemon engine")
-	}
-	if repo.Connections() < 2 {
-		return nil, fmt.Errorf("gc requires a backend connection limit of at least two")
+	engine, err := validateGCRepository(repo)
+	if err != nil {
+		return nil, err
 	}
 	store := engine.SchemaStore()
 	if opts.StagedRoots == nil {
@@ -220,20 +216,8 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 	plan.Stats.WholePackCandidates = classification.wholePackCandidates
 	plan.Stats.MixedPackCandidates = classification.mixedPackCandidates
 	plan.Stats.PendingAge = classification.pendingAge
-	if opts.StagedRoots != nil {
-		staged, err := opts.StagedRoots.Current(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("load staged journal roots: %w", err)
-		}
-		for packID := range staged {
-			delete(plan.wholePacks, packID)
-			delete(plan.mixedPacks, packID)
-			delete(plan.mixedPackMembers, packID)
-			delete(plan.retryPacks, packID)
-		}
-		plan.Stats.WholePackCandidates = uint64(len(plan.wholePacks))
-		plan.Stats.MixedPackCandidates = uint64(len(plan.mixedPacks))
-		plan.Stats.PendingRetries = uint64(len(plan.retryPacks))
+	if err := plan.excludeStagedRoots(ctx); err != nil {
+		return nil, err
 	}
 
 	if len(classification.gcPuts) != 0 && !opts.DryRun {
@@ -254,6 +238,40 @@ func PlanGC(ctx context.Context, opts GCOptions, repo *Repository, printer vault
 		plan.Stats.PacksAccounted = applied
 	}
 	return plan, nil
+}
+
+func validateGCRepository(repo *Repository) (*metadataindex.DaemonEngine, error) {
+	if repo.Engine().Mode() != metadataindex.ModeSlateDB {
+		return nil, fmt.Errorf("gc requires a SlateDB-authoritative repository; use prune for legacy repositories")
+	}
+	engine, ok := repo.Engine().(*metadataindex.DaemonEngine)
+	if !ok {
+		return nil, fmt.Errorf("gc requires the SlateDB daemon engine")
+	}
+	if repo.Connections() < 2 {
+		return nil, fmt.Errorf("gc requires a backend connection limit of at least two")
+	}
+	return engine, nil
+}
+
+func (plan *GCPlan) excludeStagedRoots(ctx context.Context) error {
+	if plan.opts.StagedRoots == nil {
+		return nil
+	}
+	staged, err := plan.opts.StagedRoots.Current(ctx)
+	if err != nil {
+		return fmt.Errorf("load staged journal roots: %w", err)
+	}
+	for packID := range staged {
+		delete(plan.wholePacks, packID)
+		delete(plan.mixedPacks, packID)
+		delete(plan.mixedPackMembers, packID)
+		delete(plan.retryPacks, packID)
+	}
+	plan.Stats.WholePackCandidates = uint64(len(plan.wholePacks))
+	plan.Stats.MixedPackCandidates = uint64(len(plan.mixedPacks))
+	plan.Stats.PendingRetries = uint64(len(plan.retryPacks))
+	return nil
 }
 
 // gcClassification is the pure, side-effect-free result of deciding, for each

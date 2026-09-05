@@ -178,7 +178,7 @@ func searchKey(ctx context.Context, s *Repository, password string, maxKeys int,
 		return nil
 	})
 
-	if err == context.Canceled {
+	if errors.Is(err, context.Canceled) {
 		err = nil
 	}
 
@@ -292,7 +292,7 @@ func AddKey(ctx context.Context, s *Repository, password, username, hostname str
 	}
 
 	if newkey.Hostname == "" {
-		newkey.Hostname, _ = os.Hostname()
+		newkey.Hostname, _ = os.Hostname() // Hostname is optional key metadata and may remain empty.
 	}
 
 	if newkey.Username == "" {
@@ -306,6 +306,7 @@ func AddKey(ctx context.Context, s *Repository, password, username, hostname str
 	var err error
 	newkey.Salt, err = crypto.NewSalt()
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unable to read enough random bytes for salt: " + err.Error())
 	}
 

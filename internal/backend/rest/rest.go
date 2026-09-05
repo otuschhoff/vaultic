@@ -130,28 +130,28 @@ func (b *Backend) Hasher() hash.Hash {
 }
 
 // Save stores data in the backend at the handle.
-func (b *Backend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (b *Backend) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// make sure that client.Post() cannot close the reader by wrapping it
 	req, err := http.NewRequestWithContext(ctx,
-		http.MethodPost, b.Filename(h), io.NopCloser(rd))
+		http.MethodPost, b.Filename(h), io.NopCloser(reader))
 	if err != nil {
 		return errors.WithStack(err)
 	}
 	req.GetBody = func() (io.ReadCloser, error) {
-		if err := rd.Rewind(); err != nil {
+		if err := reader.Rewind(); err != nil {
 			return nil, err
 		}
-		return io.NopCloser(rd), nil
+		return io.NopCloser(reader), nil
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Accept", ContentTypeV2)
 
 	// explicitly set the content length, this prevents chunked encoding and
 	// let's the server know what's coming.
-	req.ContentLength = rd.Length()
+	req.ContentLength = reader.Length()
 
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -194,14 +194,14 @@ func (b *Backend) IsPermanentError(err error) bool {
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (b *Backend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
+func (b *Backend) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
 	r, err := b.openReader(ctx, h, length, offset)
 	if err != nil {
 		return err
 	}
-	err = fn(r)
+	err = consume(r)
 	if err != nil {
-		_ = r.Close() // ignore error here
+		_ = r.Close() // Preserve the response-read failure; the body has no buffered writes.
 		return err
 	}
 
@@ -213,7 +213,7 @@ func (b *Backend) Load(ctx context.Context, h backend.Handle, length int, offset
 	// so we wait for EOF before closing body.
 	var buf [1]byte
 	_, err = r.Read(buf[:])
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		err = nil
 	}
 
@@ -242,12 +242,12 @@ func (b *Backend) openReader(ctx context.Context, h backend.Handle, length int, 
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		_ = drainAndClose(resp)
+		_ = drainAndClose(resp) // Preserve the unexpected-status error after best-effort connection reuse.
 		return nil, &restError{h, resp.StatusCode, resp.Status}
 	}
 
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) && length > 0 && resp.ContentLength != int64(length) {
-		_ = drainAndClose(resp)
+		_ = drainAndClose(resp) // Preserve the content-range error after best-effort connection reuse.
 		return nil, &restError{h, http.StatusRequestedRangeNotSatisfiable, "partial out of bounds read"}
 	}
 
@@ -341,7 +341,7 @@ func (b *Backend) List(ctx context.Context, t backend.FileType, fn func(backend.
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		_ = drainAndClose(resp)
+		_ = drainAndClose(resp) // Preserve the HTTP status error after best-effort connection reuse.
 		return &restError{backend.Handle{Type: t}, resp.StatusCode, resp.Status}
 	}
 

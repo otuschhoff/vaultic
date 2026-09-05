@@ -79,6 +79,7 @@ func (record DirectoryRevision) MarshalBinary() ([]byte, error) {
 	return e.finish()
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func UnmarshalDirectoryRevision(data []byte) (DirectoryRevision, error) {
 	d, err := newDecoder(data)
 	if err != nil {

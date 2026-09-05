@@ -2,6 +2,7 @@ package data_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -140,7 +141,7 @@ func TestFindAllSubpathError(t *testing.T) {
 	test.OK(t, (&data.SnapshotFilter{}).FindAll(context.TODO(), repo, repo,
 		[]string{"latest:subfolder", desiredSnapshot.ID().Str() + ":subfolder"},
 		func(id string, sn *data.Snapshot, err error) error {
-			if err == data.ErrInvalidSnapshotSyntax {
+			if errors.Is(err, data.ErrInvalidSnapshotSyntax) {
 				count++
 				return nil
 			}

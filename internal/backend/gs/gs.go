@@ -51,14 +51,14 @@ func NewFactory() location.Factory {
 	return location.NewHTTPBackendFactory("gs", ParseConfig, location.NoPassword, Create, Open)
 }
 
-func getStorageClient(rt http.RoundTripper) (*storage.Client, error) {
+func getStorageClient(ctx context.Context, rt http.RoundTripper) (*storage.Client, error) {
 	// create a new HTTP client
 	httpClient := &http.Client{
 		Transport: rt,
 	}
 
 	// create a new context with the HTTP client stored at the oauth2.HTTPClient key
-	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
 	var ts oauth2.TokenSource
 	if token := os.Getenv("GOOGLE_ACCESS_TOKEN"); token != "" {
@@ -86,16 +86,16 @@ func getStorageClient(rt http.RoundTripper) (*storage.Client, error) {
 
 func (be *gs) bucketExists(ctx context.Context, bucket *storage.BucketHandle) (bool, error) {
 	_, err := bucket.Attrs(ctx)
-	if err == storage.ErrBucketNotExist {
+	if errors.Is(err, storage.ErrBucketNotExist) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-func open(cfg Config, rt http.RoundTripper) (*gs, error) {
+func open(ctx context.Context, cfg Config, rt http.RoundTripper) (*gs, error) {
 	debug.Log("open, config %#v", cfg)
 
-	gcsClient, err := getStorageClient(rt)
+	gcsClient, err := getStorageClient(ctx, rt)
 	if err != nil {
 		return nil, errors.Wrap(err, "getStorageClient")
 	}
@@ -114,8 +114,8 @@ func open(cfg Config, rt http.RoundTripper) (*gs, error) {
 }
 
 // Open opens the gs backend at the specified bucket.
-func Open(_ context.Context, cfg Config, rt http.RoundTripper, _ func(string, ...any)) (backend.Backend, error) {
-	return open(cfg, rt)
+func Open(ctx context.Context, cfg Config, rt http.RoundTripper, _ func(string, ...any)) (backend.Backend, error) {
+	return open(ctx, cfg, rt)
 }
 
 // Create opens the gs backend at the specified bucket and attempts to creates
@@ -124,7 +124,7 @@ func Open(_ context.Context, cfg Config, rt http.RoundTripper, _ func(string, ..
 // The service account must have the "storage.buckets.create" permission to
 // create a bucket the does not yet exist.
 func Create(ctx context.Context, cfg Config, rt http.RoundTripper, _ func(string, ...any)) (backend.Backend, error) {
-	be, err := open(cfg, rt)
+	be, err := open(ctx, cfg, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,8 @@ func Create(ctx context.Context, cfg Config, rt http.RoundTripper, _ func(string
 	// Try to determine if the bucket exists. If it does not, try to create it.
 	exists, err := be.bucketExists(ctx, be.bucket)
 	if err != nil {
-		if e, ok := err.(*googleapi.Error); ok && e.Code == http.StatusForbidden {
+		e := &googleapi.Error{}
+		if errors.As(err, &e) {
 			// the bucket might exist!
 			// however, the client doesn't have storage.bucket.get permission
 			return be, nil
@@ -188,14 +189,14 @@ func (be *gs) Hasher() hash.Hash {
 }
 
 // Save stores data in the backend at the handle.
-func (be *gs) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (be *gs) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	objName := be.Filename(h)
 
 	// Set chunk size to zero to disable resumable uploads.
 	//
 	// With a non-zero chunk size (the default is
 	// googleapi.DefaultUploadChunkSize, 8MB), Insert will buffer data from
-	// rd in chunks of this size so it can upload these chunks in
+	// reader in chunks of this size so it can upload these chunks in
 	// individual requests.
 	//
 	// This chunking allows the library to automatically handle network
@@ -203,14 +204,14 @@ func (be *gs) Save(ctx context.Context, h backend.Handle, rd backend.RewindReade
 	// file.
 	//
 	// Unfortunately, this buffering doesn't play nicely with
-	// --limit-upload, which applies a rate limit to rd. This rate limit
-	// ends up only limiting the read from rd into the buffer rather than
+	// --limit-upload, which applies a rate limit to reader. This rate limit
+	// ends up only limiting the read from reader into the buffer rather than
 	// the network traffic itself. This results in poor network rate limit
 	// behavior, where individual chunks are written to the network at full
 	// bandwidth for several seconds, followed by several seconds of no
 	// network traffic as the next chunk is read through the rate limiter.
 	//
-	// By disabling chunking, rd is passed further down the request stack,
+	// By disabling chunking, reader is passed further down the request stack,
 	// where there is less (but some) buffering, which ultimately results
 	// in better rate limiting behavior.
 	//
@@ -218,8 +219,8 @@ func (be *gs) Save(ctx context.Context, h backend.Handle, rd backend.RewindReade
 	// uploads are not providing significant benefit anyways.
 	w := be.bucket.Object(objName).NewWriter(ctx)
 	w.ChunkSize = 0
-	w.MD5 = rd.Hash()
-	wbytes, err := io.Copy(w, rd)
+	w.MD5 = reader.Hash()
+	wbytes, err := io.Copy(w, reader)
 	cerr := w.Close()
 	if err == nil {
 		err = cerr
@@ -230,19 +231,19 @@ func (be *gs) Save(ctx context.Context, h backend.Handle, rd backend.RewindReade
 	}
 
 	// sanity check
-	if wbytes != rd.Length() {
-		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", wbytes, rd.Length())
+	if wbytes != reader.Length() {
+		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", wbytes, reader.Length())
 	}
 	return nil
 }
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (be *gs) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
+func (be *gs) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	return util.DefaultLoad(ctx, h, length, offset, be.openReader, fn)
+	return util.DefaultLoad(ctx, h, length, offset, be.openReader, consume)
 }
 
 func (be *gs) openReader(ctx context.Context, h backend.Handle, length int, offset int64) (io.ReadCloser, error) {
@@ -259,7 +260,7 @@ func (be *gs) openReader(ctx context.Context, h backend.Handle, length int, offs
 	}
 
 	if length > 0 && r.Attrs.Size < offset+int64(length) {
-		_ = r.Close()
+		_ = r.Close() // Preserve the read callback failure; the object reader has no buffered writes.
 		return nil, &googleapi.Error{Code: http.StatusRequestedRangeNotSatisfiable, Message: "vaultic-file-too-short"}
 	}
 
@@ -309,7 +310,7 @@ func (be *gs) List(ctx context.Context, t backend.FileType, fn func(backend.File
 
 	for {
 		attrs, err := itr.Next()
-		if err == iterator.Done {
+		if errors.Is(err, iterator.Done) {
 			break
 		}
 		if err != nil {

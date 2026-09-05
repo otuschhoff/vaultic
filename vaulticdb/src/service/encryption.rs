@@ -1,3 +1,5 @@
+//! gRPC handlers for encryption keys, envelopes, escrow, and capsules.
+
 use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 use zeroize::Zeroizing;

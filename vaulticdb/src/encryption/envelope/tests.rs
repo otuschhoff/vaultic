@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Key envelope lifecycle tests.
+
     use super::*;
     use async_trait::async_trait;
     use sha2::{Digest, Sha256};

@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Metadata object encryption tests.
+
     use super::*;
     use futures_util::TryStreamExt;
     use slatedb::object_store::{memory::InMemory, ObjectStoreExt};

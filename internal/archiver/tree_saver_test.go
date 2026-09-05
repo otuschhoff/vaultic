@@ -128,7 +128,7 @@ func TestTreeSaverError(t *testing.T) {
 			if err == nil {
 				t.Errorf("expected error not found")
 			}
-			if err != errTest {
+			if !errors.Is(err, errTest) {
 				t.Fatalf("unexpected error found: %v", err)
 			}
 		})

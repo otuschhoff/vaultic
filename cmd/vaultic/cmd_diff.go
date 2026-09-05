@@ -18,7 +18,7 @@ import (
 )
 
 func newDiffCommand(globalOptions *global.Options) *cobra.Command {
-	var opts DiffOptions
+	var options diffOptions
 
 	cmd := &cobra.Command{
 		Use:   "diff [flags] snapshotID snapshotID",
@@ -54,21 +54,21 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDiff(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runDiff(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// DiffOptions collects all options for the diff command.
-type DiffOptions struct {
+// diffOptions collects all options for the diff command.
+type diffOptions struct {
 	ShowMetadata bool
 }
 
-func (opts *DiffOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.ShowMetadata, "metadata", false, "print changes in metadata")
+func (options *diffOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.ShowMetadata, "metadata", false, "print changes in metadata")
 }
 
 func loadSnapshot(ctx context.Context, be vaultic.Lister, repo vaultic.LoaderUnpacked, desc string) (*data.Snapshot, string, error) {
@@ -83,7 +83,7 @@ func loadSnapshot(ctx context.Context, be vaultic.Lister, repo vaultic.LoaderUnp
 // Comparer collects all things needed to compare two snapshots.
 type Comparer struct {
 	repo        vaultic.BlobLoader
-	opts        DiffOptions
+	options     diffOptions
 	printChange func(change *Change)
 	printError  func(string, ...any)
 }
@@ -166,6 +166,8 @@ func updateBlobs(repo vaultic.Loader, blobs vaultic.AssociatedBlobSet, stats *Di
 			stats.DataBlobs++
 		case vaultic.TreeBlob:
 			stats.TreeBlobs++
+		case vaultic.InvalidBlob, vaultic.NumBlobTypes:
+			// Sentinel blob types have no statistics bucket.
 		}
 
 		size, found := repo.LookupBlobSize(h)
@@ -203,7 +205,7 @@ func (c *Comparer) printDir(ctx context.Context, mode string, stats *DiffStat, b
 
 		if node.Type == data.NodeTypeDir {
 			err := c.printDir(ctx, mode, stats, blobs, name, *node.Subtree)
-			if err != nil && err != context.Canceled {
+			if err != nil && !errors.Is(err, context.Canceled) {
 				c.printError("error: %v", err)
 			}
 		}
@@ -232,7 +234,7 @@ func (c *Comparer) collectDir(ctx context.Context, blobs vaultic.AssociatedBlobS
 
 		if node.Type == data.NodeTypeDir {
 			err := c.collectDir(ctx, blobs, *node.Subtree)
-			if err != nil && err != context.Canceled {
+			if err != nil && !errors.Is(err, context.Canceled) {
 				c.printError("error: %v", err)
 			}
 		}
@@ -241,6 +243,7 @@ func (c *Comparer) collectDir(ctx context.Context, blobs vaultic.AssociatedBlobS
 	return ctx.Err()
 }
 
+//nolint:gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (c *Comparer) diffTree(ctx context.Context, stats *DiffStatsContainer, prefix string, id1, id2 vaultic.ID) error {
 	debug.Log("diffing %v to %v", id1, id2)
 	tree1, err := data.LoadTree(ctx, c.repo, id1)
@@ -302,7 +305,7 @@ func (c *Comparer) diffTree(ctx context.Context, stats *DiffStatsContainer, pref
 					// probable bitrot detected
 					mod += "?"
 				}
-			} else if c.opts.ShowMetadata && !node1.Equals(*node2) {
+			} else if c.options.ShowMetadata && !node1.Equals(*node2) {
 				mod += "U"
 			}
 
@@ -317,7 +320,7 @@ func (c *Comparer) diffTree(ctx context.Context, stats *DiffStatsContainer, pref
 				} else {
 					err = c.diffTree(ctx, stats, name, *node1.Subtree, *node2.Subtree)
 				}
-				if err != nil && err != context.Canceled {
+				if err != nil && !errors.Is(err, context.Canceled) {
 					c.printError("error: %v", err)
 				}
 			}
@@ -331,7 +334,7 @@ func (c *Comparer) diffTree(ctx context.Context, stats *DiffStatsContainer, pref
 
 			if node1.Type == data.NodeTypeDir {
 				err := c.printDir(ctx, "-", &stats.Removed, stats.BlobsBefore, prefix, *node1.Subtree)
-				if err != nil && err != context.Canceled {
+				if err != nil && !errors.Is(err, context.Canceled) {
 					c.printError("error: %v", err)
 				}
 			}
@@ -345,7 +348,7 @@ func (c *Comparer) diffTree(ctx context.Context, stats *DiffStatsContainer, pref
 
 			if node2.Type == data.NodeTypeDir {
 				err := c.printDir(ctx, "+", &stats.Added, stats.BlobsAfter, prefix, *node2.Subtree)
-				if err != nil && err != context.Canceled {
+				if err != nil && !errors.Is(err, context.Canceled) {
 					c.printError("error: %v", err)
 				}
 			}
@@ -355,14 +358,14 @@ func (c *Comparer) diffTree(ctx context.Context, stats *DiffStatsContainer, pref
 	return ctx.Err()
 }
 
-func runDiff(ctx context.Context, opts DiffOptions, gopts global.Options, args []string, term ui.Terminal) error {
+func runDiff(ctx context.Context, options diffOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) != 2 {
 		return errors.Fatalf("specify two snapshot IDs")
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -383,7 +386,7 @@ func runDiff(ctx context.Context, opts DiffOptions, gopts global.Options, args [
 		return err
 	}
 
-	if !gopts.JSON {
+	if !globalOptions.JSON {
 		printer.P("comparing snapshot %v to %v:\n\n", sn1.ID().Str(), sn2.ID().Str())
 	}
 	if err = repo.LoadIndex(ctx, printer); err != nil {
@@ -410,15 +413,15 @@ func runDiff(ctx context.Context, opts DiffOptions, gopts global.Options, args [
 
 	c := &Comparer{
 		repo:       repo,
-		opts:       opts,
+		options:    options,
 		printError: printer.E,
 		printChange: func(change *Change) {
 			printer.S("%-5s%v", change.Modifier, change.Path)
 		},
 	}
 
-	if gopts.JSON {
-		enc := json.NewEncoder(gopts.Term.OutputWriter())
+	if globalOptions.JSON {
+		enc := json.NewEncoder(globalOptions.Term.OutputWriter())
 		c.printChange = func(change *Change) {
 			err := enc.Encode(change)
 			if err != nil {
@@ -427,7 +430,7 @@ func runDiff(ctx context.Context, opts DiffOptions, gopts global.Options, args [
 		}
 	}
 
-	if gopts.Quiet {
+	if globalOptions.Quiet {
 		c.printChange = func(_ *Change) {}
 	}
 
@@ -451,8 +454,8 @@ func runDiff(ctx context.Context, opts DiffOptions, gopts global.Options, args [
 	updateBlobs(repo, stats.BlobsBefore.Sub(both).Sub(stats.BlobsCommon), &stats.Removed, printer.E)
 	updateBlobs(repo, stats.BlobsAfter.Sub(both).Sub(stats.BlobsCommon), &stats.Added, printer.E)
 
-	if gopts.JSON {
-		err := json.NewEncoder(gopts.Term.OutputWriter()).Encode(stats)
+	if globalOptions.JSON {
+		err := json.NewEncoder(globalOptions.Term.OutputWriter()).Encode(stats)
 		if err != nil {
 			printer.E("JSON encode failed: %v", err)
 		}

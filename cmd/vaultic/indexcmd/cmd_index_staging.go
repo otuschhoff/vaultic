@@ -73,7 +73,7 @@ func newIndexStagingExtendCommand(globalOptions *global.Options) *cobra.Command 
 				if err != nil {
 					return err
 				}
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					ctx,
 					observability.Event{
 						Severity:  observability.Warning,
@@ -135,7 +135,7 @@ func runIndexStagingRestore(
 	if err != nil {
 		return err
 	}
-	defer func() { _ = repo.Close() }()
+	defer func() { _ = repo.Close() }() // Read-only staging inspection has no buffered repository writes.
 	store, err := newStagingStore(repo)
 	if err != nil {
 		return err
@@ -228,7 +228,7 @@ func restoreStagingSnapshot(
 			return err
 		}
 	}
-	_ = observability.Emit(ctx, observability.Event{
+	observability.EmitBestEffort(ctx, observability.Event{
 		Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "staging",
 		Message: "emergency deferred journal restore completed", Fields: map[string]any{"job_id": job.Header.JobID, "dry_run": dryRun},
 	})
@@ -266,7 +266,7 @@ func newIndexStagingRejectCommand(globalOptions *global.Options) *cobra.Command 
 				if err != nil {
 					return err
 				}
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					ctx,
 					observability.Event{
 						Severity:  observability.Warning,
@@ -369,7 +369,7 @@ func handleStagingReconcileResult(
 	if err != nil {
 		return err
 	}
-	_ = observability.Emit(ctx, observability.Event{
+	observability.EmitBestEffort(ctx, observability.Event{
 		Severity: severity, Category: category, Component: "staging", Message: "deferred ingest reconciliation finished",
 		Fields: map[string]any{"job_id": result.JobID, "disposition": result.Disposition},
 	})
@@ -499,7 +499,7 @@ func newIndexStagingAbandonCommand(globalOptions *global.Options) *cobra.Command
 				if err != nil {
 					return err
 				}
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					ctx,
 					observability.Event{
 						Severity:  observability.Critical,

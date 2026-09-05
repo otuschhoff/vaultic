@@ -203,7 +203,7 @@ fn wrap_offline_share(
         )
         .map_err(|_| anyhow::anyhow!("wrap member share"))?;
     Ok(MemberShare {
-        member_id: member_id.to_owned(),
+        member_id: member_id.into(),
         group_id: group_id.to_owned(),
         share_index,
         threshold,
@@ -247,8 +247,8 @@ async fn wrap_external_share(
         .key_provider
         .wrap(
             &KeyContext {
-                repository_id: &header.repository_id,
-                slot_id: &member.member_id,
+                repository_id: header.repository_id.as_str(),
+                slot_id: member.member_id.as_str(),
                 key_reference: &member.key_reference,
                 dek_version: header.root_key_version,
                 purpose: &purpose,

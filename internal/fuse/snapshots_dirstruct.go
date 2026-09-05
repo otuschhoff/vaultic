@@ -61,6 +61,8 @@ func NewSnapshotsDirStructure(root *Root, pathTemplates []string, timeTemplate s
 // pathsFromSn generates the paths from pathTemplate and timeTemplate
 // where the variables are replaced by the snapshot data.
 // The time is given as suffix if the pathTemplate ends with "%T".
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func pathsFromSn(pathTemplate string, timeTemplate string, sn *data.Snapshot) (paths []string, timeSuffix string) {
 	timeformat := sn.Time.Format(timeTemplate)
 
@@ -211,6 +213,8 @@ func uniqueName(entries map[string]*MetaDirData, prefix, name string) string {
 // makeDirs inserts all paths generated from pathTemplates and
 // TimeTemplate for all given snapshots into d.names.
 // Also adds d.latest links if "%T" is at end of a path template
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (d *SnapshotsDirStructure) makeDirs(snapshots data.Snapshots) {
 	entries := make(map[string]*MetaDirData)
 

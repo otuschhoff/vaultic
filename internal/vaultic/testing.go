@@ -10,6 +10,7 @@ import (
 func TestParseID(s string) ID {
 	id, err := ParseID(s)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(fmt.Sprintf("unable to parse string %q as ID: %v", s, err))
 	}
 
@@ -31,6 +32,7 @@ func NewRandomID() ID {
 	id := ID{}
 	_, err := io.ReadFull(rand.Reader, id[:])
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	return id

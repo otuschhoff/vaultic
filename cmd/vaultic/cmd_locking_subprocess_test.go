@@ -27,11 +27,11 @@ func TestLockingCLIHelper(t *testing.T) {
 	if err := json.Unmarshal([]byte(os.Getenv("VAULTIC_LOCKING_ARGS")), &args); err != nil {
 		os.Exit(2)
 	}
-	gopts := global.Options{Backends: all.Backends()}
+	globalOptions := global.Options{Backends: all.Backends()}
 	term, cancel := termstatus.Setup(os.Stdin, os.Stdout, os.Stderr, false)
 	defer cancel()
-	gopts.Term = term
-	root := newRootCommand(&gopts)
+	globalOptions.Term = term
+	root := newRootCommand(&globalOptions)
 	root.SetArgs(args)
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)
@@ -58,7 +58,7 @@ func TestCrossProcessAppendBackups(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 
 	pathA := filepath.Join(env.testdata, "0", "0", "9", "2")
 	pathB := filepath.Join(env.testdata, "0", "0", "9", "3")
@@ -84,15 +84,15 @@ func TestCrossProcessAppendBackups(t *testing.T) {
 	if err := second.Wait(); err != nil {
 		t.Fatalf("second subprocess backup failed: %v\n%s", err, secondOutput.String())
 	}
-	testListSnapshots(t, env.gopts, 2)
-	testRunCheck(t, env.gopts)
+	testListSnapshots(t, env.globalOptions, 2)
+	testRunCheck(t, env.globalOptions)
 }
 
 func TestCrossProcessBackupAndPrune(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	createPrunableRepo(t, env)
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 
 	path := filepath.Join(env.testdata, "0", "0", "9", "2")
 	commonEnv := []string{
@@ -120,7 +120,7 @@ func TestCrossProcessBackupAndPrune(t *testing.T) {
 
 	// Either the append backup completed or it cleanly observed the short
 	// exclusive phase-B window. In both cases prune must leave a clean repo.
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 }
 
 func isExpectedLockConflict(output string) bool {

@@ -173,6 +173,7 @@ func always(_ time.Time, nr int) int {
 // for use with policies based on time relative to latest.
 func findLatestTimestamp(list Snapshots) time.Time {
 	if len(list) == 0 {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("list of snapshots is empty")
 	}
 
@@ -278,6 +279,8 @@ func PolicyRetentionHorizon(reason KeepReason, policy ExpirePolicy) (RetentionHo
 // ApplyPolicy returns the snapshots from list that are to be kept and removed
 // according to the policy p. list is sorted in the process. reasons contains
 // the reasons to keep each snapshot, it is in the same order as keep.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func ApplyPolicy(list Snapshots, p ExpirePolicy) (keep, remove Snapshots, reasons []KeepReason) {
 	// sort newest snapshots first
 	sort.Stable(list)
@@ -347,6 +350,7 @@ func ApplyPolicy(list Snapshots, p ExpirePolicy) (keep, remove Snapshots, reason
 		// Now update the other buckets and see if they have some counts left.
 		for i, b := range buckets {
 			// -1 means "keep all"
+			//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 			if b.Count > 0 || b.Count == -1 {
 				val := b.bucker(cur.Time, nr)
 				// also keep the oldest snapshot if the bucket has some counts left. This maximizes the
@@ -368,6 +372,7 @@ func ApplyPolicy(list Snapshots, p ExpirePolicy) (keep, remove Snapshots, reason
 
 		// If the timestamp is within range, and the snapshot is an hourly/daily/weekly/monthly/yearly snapshot, then keep it
 		for i, b := range bucketsWithin {
+			//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 			if !b.Within.Zero() {
 				t := latest.AddDate(-b.Within.Years, -b.Within.Months, -b.Within.Days).Add(time.Hour * time.Duration(-b.Within.Hours))
 

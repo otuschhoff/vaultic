@@ -35,7 +35,7 @@ func registerMountCommand(cmdRoot *cobra.Command, globalOptions *global.Options)
 }
 
 func newMountCommand(globalOptions *global.Options) *cobra.Command {
-	var opts MountOptions
+	var options mountOptions
 
 	cmd := &cobra.Command{
 		Use:   "mount [flags] mountpoint",
@@ -88,20 +88,20 @@ Exit status is 12 if the password is incorrect.
 		DisableAutoGenTag: true,
 		GroupID:           cmdGroupDefault,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMount(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runMount(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// MountOptions collects all options for the mount command.
-type MountOptions struct {
+// mountOptions collects all options for the mount command.
+type mountOptions struct {
 	OwnerRoot            bool
 	AllowOther           bool
 	NoDefaultPermissions bool
@@ -110,32 +110,35 @@ type MountOptions struct {
 	PathTemplates []string
 }
 
-func (opts *MountOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.OwnerRoot, "owner-root", false, "use 'root' as the owner of files and dirs")
-	f.BoolVar(&opts.AllowOther, "allow-other", false, "allow other users to access the data in the mounted directory")
+func (options *mountOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.OwnerRoot, "owner-root", false, "use 'root' as the owner of files and dirs")
+	f.BoolVar(&options.AllowOther, "allow-other", false, "allow other users to access the data in the mounted directory")
 	f.BoolVar(
-		&opts.NoDefaultPermissions,
+		&options.NoDefaultPermissions,
 		"no-default-permissions",
 		false,
 		"for 'allow-other', ignore Unix permissions and allow users to read all snapshot files",
 	)
 
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
 
-	f.StringArrayVar(&opts.PathTemplates, "path-template", nil, "set `template` for path names (can be specified multiple times)")
-	f.StringVar(&opts.TimeTemplate, "snapshot-template", time.RFC3339, "set `template` to use for snapshot dirs")
-	f.StringVar(&opts.TimeTemplate, "time-template", time.RFC3339, "set `template` to use for times")
-	_ = f.MarkDeprecated("snapshot-template", "use --time-template")
+	f.StringArrayVar(&options.PathTemplates, "path-template", nil, "set `template` for path names (can be specified multiple times)")
+	f.StringVar(&options.TimeTemplate, "snapshot-template", time.RFC3339, "set `template` to use for snapshot dirs")
+	f.StringVar(&options.TimeTemplate, "time-template", time.RFC3339, "set `template` to use for times")
+	if err := f.MarkDeprecated("snapshot-template", "use --time-template"); err != nil {
+		// Flag registration is a construction-time invariant.
+		panic(err) //nolint:forbidigo // A missing flag here is a command-construction defect.
+	}
 }
 
-func runMount(ctx context.Context, opts MountOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+func runMount(ctx context.Context, options mountOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
-	if opts.TimeTemplate == "" {
+	if options.TimeTemplate == "" {
 		return errors.Fatal("time template string cannot be empty")
 	}
 
-	if strings.HasPrefix(opts.TimeTemplate, "/") || strings.HasSuffix(opts.TimeTemplate, "/") {
+	if strings.HasPrefix(options.TimeTemplate, "/") || strings.HasSuffix(options.TimeTemplate, "/") {
 		return errors.Fatal("time template string cannot start or end with '/'")
 	}
 
@@ -144,14 +147,14 @@ func runMount(ctx context.Context, opts MountOptions, gopts global.Options, args
 	}
 
 	mountpoint := args[0]
-	if err := validateMountpoint(mountpoint, gopts); err != nil {
+	if err := validateMountpoint(mountpoint, globalOptions); err != nil {
 		return err
 	}
 
 	debug.Log("start mount")
 	defer debug.Log("finish mount")
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -170,11 +173,11 @@ func runMount(ctx context.Context, opts MountOptions, gopts global.Options, args
 		systemFuse.MaxReadahead(128 * 1024),
 	}
 
-	if opts.AllowOther {
+	if options.AllowOther {
 		mountOptions = append(mountOptions, systemFuse.AllowOther())
 
 		// let the kernel check permissions unless it is explicitly disabled
-		if !opts.NoDefaultPermissions {
+		if !options.NoDefaultPermissions {
 			mountOptions = append(mountOptions, systemFuse.DefaultPermissions())
 		}
 	}
@@ -189,10 +192,10 @@ func runMount(ctx context.Context, opts MountOptions, gopts global.Options, args
 	}
 
 	cfg := fuse.Config{
-		OwnerIsRoot:   opts.OwnerRoot,
-		Filter:        opts.SnapshotFilter,
-		TimeTemplate:  opts.TimeTemplate,
-		PathTemplates: opts.PathTemplates,
+		OwnerIsRoot:   options.OwnerRoot,
+		Filter:        options.SnapshotFilter,
+		TimeTemplate:  options.TimeTemplate,
+		PathTemplates: options.PathTemplates,
 	}
 	root := fuse.NewRoot(repo, cfg)
 	// load repository before reporting the mountpoint
@@ -230,7 +233,7 @@ func runMount(ctx context.Context, opts MountOptions, gopts global.Options, args
 	return err
 }
 
-func validateMountpoint(mountpoint string, gopts global.Options) error {
+func validateMountpoint(mountpoint string, globalOptions global.Options) error {
 	// Check the existence of the mount point at the earliest stage to
 	// prevent unnecessary computations while opening the repository.
 	stat, err := os.Stat(mountpoint)
@@ -250,7 +253,7 @@ func validateMountpoint(mountpoint string, gopts global.Options) error {
 	// Refuse to mount onto (or under, or over) the local repository directory.
 	// Doing so makes the FUSE server read its own backend files through the
 	// mount it just created, deadlocking the kernel (GH #5234).
-	loc, err := location.Parse(gopts.Backends, gopts.Repo)
+	loc, err := location.Parse(globalOptions.Backends, globalOptions.Repo)
 	if err != nil {
 		return err
 	}

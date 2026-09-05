@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var opts = struct {
+var options = struct {
 	Verbose        bool
 	SourceDir      string
 	OutputDir      string
@@ -28,14 +28,14 @@ var opts = struct {
 }{}
 
 func init() {
-	pflag.BoolVarP(&opts.Verbose, "verbose", "v", false, "be verbose")
-	pflag.StringVarP(&opts.SourceDir, "source", "s", "/vaultic", "path to the source code `directory`")
-	pflag.StringVarP(&opts.OutputDir, "output", "o", "/output", "path to the output `directory`")
-	pflag.StringVar(&opts.Tags, "tags", "", "additional build `tags`")
-	pflag.StringVar(&opts.PlatformSubset, "platform-subset", "", "specify `n/t` to only build this subset")
-	pflag.StringVarP(&opts.Platform, "platform", "p", "", "specify `os/arch` to only build this specific platform")
-	pflag.BoolVar(&opts.SkipCompress, "skip-compress", false, "skip binary compression step")
-	pflag.StringVar(&opts.Version, "version", "", "use `x.y.z` as the version for output files")
+	pflag.BoolVarP(&options.Verbose, "verbose", "v", false, "be verbose")
+	pflag.StringVarP(&options.SourceDir, "source", "s", "/vaultic", "path to the source code `directory`")
+	pflag.StringVarP(&options.OutputDir, "output", "o", "/output", "path to the output `directory`")
+	pflag.StringVar(&options.Tags, "tags", "", "additional build `tags`")
+	pflag.StringVar(&options.PlatformSubset, "platform-subset", "", "specify `n/t` to only build this subset")
+	pflag.StringVarP(&options.Platform, "platform", "p", "", "specify `os/arch` to only build this specific platform")
+	pflag.BoolVar(&options.SkipCompress, "skip-compress", false, "skip binary compression step")
+	pflag.StringVar(&options.Version, "version", "", "use `x.y.z` as the version for output files")
 	pflag.Parse()
 }
 
@@ -57,7 +57,7 @@ func msg(f string, args ...any) {
 }
 
 func verbose(f string, args ...any) {
-	if !opts.Verbose {
+	if !options.Verbose {
 		return
 	}
 	if !strings.HasSuffix(f, "\n") {
@@ -97,8 +97,8 @@ func abs(dir string) string {
 func build(sourceDir, outputDir, goos, goarch string) (filename string) {
 	filename = fmt.Sprintf("%v_%v_%v", "vaultic", goos, goarch)
 
-	if opts.Version != "" {
-		filename = fmt.Sprintf("%v_%v_%v_%v", "vaultic", opts.Version, goos, goarch)
+	if options.Version != "" {
+		filename = fmt.Sprintf("%v_%v_%v_%v", "vaultic", options.Version, goos, goarch)
 	}
 
 	if goos == "windows" {
@@ -109,8 +109,8 @@ func build(sourceDir, outputDir, goos, goarch string) (filename string) {
 	// disable_grpc_modules is necessary to reduce the binary size since cloud.google.com/go/storage v1.44.0
 	// see https://github.com/googleapis/google-cloud-go/issues/11448
 	tags := "selfupdate,disable_grpc_modules"
-	if opts.Tags != "" {
-		tags += "," + opts.Tags
+	if options.Tags != "" {
+		tags += "," + options.Tags
 	}
 
 	c := exec.Command("go", "build",
@@ -198,7 +198,7 @@ func buildForTarget(sourceDir, outputDir, goos, goarch string) (filename string)
 	filename = build(sourceDir, outputDir, goos, goarch)
 	touch(filepath.Join(outputDir, filename), mtime)
 	chmod(filepath.Join(outputDir, filename), 0755)
-	if !opts.SkipCompress {
+	if !options.SkipCompress {
 		filename = compress(goos, outputDir, filename)
 	}
 	return filename
@@ -237,7 +237,9 @@ func buildTargets(sourceDir, outputDir string, targets map[string][]string) {
 		return nil
 	})
 
-	_ = wg.Wait()
+	if err := wg.Wait(); err != nil {
+		die("build failed: %v", err)
+	}
 	msg("build finished in %.3fs", time.Since(start).Seconds())
 }
 
@@ -316,18 +318,18 @@ func main() {
 	}
 
 	targets := defaultBuildTargets
-	if opts.PlatformSubset != "" {
+	if options.PlatformSubset != "" {
 		var err error
-		targets, err = selectSubset(opts.PlatformSubset, targets)
+		targets, err = selectSubset(options.PlatformSubset, targets)
 		if err != nil {
 			die("%s", err)
 		}
-	} else if opts.Platform != "" {
-		targets = buildPlatformList([]string{opts.Platform})
+	} else if options.Platform != "" {
+		targets = buildPlatformList([]string{options.Platform})
 	}
 
-	sourceDir := abs(opts.SourceDir)
-	outputDir := abs(opts.OutputDir)
+	sourceDir := abs(options.SourceDir)
+	outputDir := abs(options.OutputDir)
 	mkdir(outputDir)
 
 	downloadModules(sourceDir)

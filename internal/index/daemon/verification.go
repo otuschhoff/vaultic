@@ -37,6 +37,7 @@ func (store *SchemaStore) RecordVerification(ctx context.Context, outcome Verifi
 	return fmt.Errorf("record verification: transaction conflict retry limit exceeded")
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (store *SchemaStore) recordVerification(ctx context.Context, outcome VerificationOutcome) error {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
@@ -61,6 +62,7 @@ func (store *SchemaStore) recordVerification(ctx context.Context, outcome Verifi
 	completed := outcome.CompletedAt.Unix()
 	state.LastAttemptAt, state.LastAttemptLevel, state.LastRunID = completed, outcome.Level, outcome.RunID
 	var event *schema.VerificationEventRecord
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if outcome.Classification == schema.VerificationNoError {
 		advanceVerificationSuccess(&state, outcome.Level, completed)
 		if state.OpenFindingID != (schema.ID{}) && outcome.Level >= state.FindingLevel {
@@ -122,6 +124,7 @@ func (store *SchemaStore) recordVerification(ctx context.Context, outcome Verifi
 		return fail(err)
 	}
 	puts := []Mutation{{Key: stateKey, Value: encodedState}}
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if outcome.Classification == schema.VerificationNoError {
 		placementKey := schema.PackPlacementKey(outcome.PackID, outcome.Backend)
 		if placementValue, exists, getErr := transaction.Get(ctx, placementKey); getErr != nil {

@@ -35,9 +35,9 @@ type repoInfo struct {
 	Total repoInfoType            `json:"total"`
 }
 
-func runRepoInfo(ctx context.Context, gopts global.Options, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+func runRepoInfo(ctx context.Context, globalOptions global.Options, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -60,7 +60,7 @@ func runRepoInfo(ctx context.Context, gopts global.Options, term ui.Terminal) er
 		info.Total.Size += entry.Size
 	}
 
-	if gopts.JSON {
+	if globalOptions.JSON {
 		return json.NewEncoder(term.OutputWriter()).Encode(info)
 	}
 	for _, name := range []string{"data", "key", "snapshot", "index"} {

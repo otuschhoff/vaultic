@@ -15,7 +15,7 @@ import (
 func ReadPassword(ctx context.Context, inFd int, out io.Writer, prompt string) (password string, err error) {
 	state, err := term.GetState(inFd)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "unable to get terminal state: %v\n", err)
+		_, _ = fmt.Fprintf(out, "unable to get terminal state: %v\n", err) // Terminal diagnostics have no alternate output channel.
 		return "", err
 	}
 
@@ -39,7 +39,7 @@ func ReadPassword(ctx context.Context, inFd int, out io.Writer, prompt string) (
 	case <-ctx.Done():
 		err := term.Restore(inFd, state)
 		if err != nil {
-			_, _ = fmt.Fprintf(out, "unable to restore terminal state: %v\n", err)
+			_, _ = fmt.Fprintf(out, "unable to restore terminal state: %v\n", err) // Terminal diagnostics have no alternate output channel.
 		}
 		return "", ctx.Err()
 	case <-done:

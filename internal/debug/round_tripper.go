@@ -17,20 +17,20 @@ type eofDetectRoundTripper struct {
 
 type eofDetectReader struct {
 	eofSeen bool
-	rd      io.ReadCloser
+	reader  io.ReadCloser
 }
 
-func (rd *eofDetectReader) Read(p []byte) (n int, err error) {
-	n, err = rd.rd.Read(p)
+func (reader *eofDetectReader) Read(p []byte) (n int, err error) {
+	n, err = reader.reader.Read(p)
 	if err == io.EOF {
-		rd.eofSeen = true
+		reader.eofSeen = true
 	}
 	return n, err
 }
 
-func (rd *eofDetectReader) Close() error {
-	if !rd.eofSeen {
-		buf, err := io.ReadAll(rd)
+func (reader *eofDetectReader) Close() error {
+	if !reader.eofSeen {
+		buf, err := io.ReadAll(reader)
 		msg := fmt.Sprintf("body not drained, %d bytes not read", len(buf))
 		if err != nil {
 			msg += fmt.Sprintf(", error: %v", err)
@@ -43,16 +43,16 @@ func (rd *eofDetectReader) Close() error {
 			msg += fmt.Sprintf(", body: %q", buf)
 		}
 
-		_, _ = fmt.Fprintln(os.Stderr, msg)
+		_, _ = fmt.Fprintln(os.Stderr, msg) // Debug stderr has no alternate reporting channel.
 		Log("%s: %+v", msg, errors.New("Close()"))
 	}
-	return rd.rd.Close()
+	return reader.reader.Close()
 }
 
 func (tr eofDetectRoundTripper) RoundTrip(req *http.Request) (res *http.Response, err error) {
 	res, err = tr.RoundTripper.RoundTrip(req)
 	if res != nil && res.Body != nil {
-		res.Body = &eofDetectReader{rd: res.Body}
+		res.Body = &eofDetectReader{reader: res.Body}
 	}
 	return res, err
 }

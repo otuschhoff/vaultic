@@ -14,6 +14,8 @@ import (
 
 // UseDeferredJournalIndex installs an in-memory index derived from an authenticated
 // journal. It never publishes or mutates authoritative repository metadata.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (r *Repository) UseDeferredJournalIndex(segments []staging.Segment) error {
 	declared := make(map[string]staging.Pack)
 	blobs := make(map[string]pack.Blobs)

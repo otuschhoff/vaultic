@@ -68,25 +68,8 @@ func (manifest Manifest) Validate() error {
 	if !validDigest(manifest.ConfigSHA256) || manifest.PreviousSHA256 != "" && !validDigest(manifest.PreviousSHA256) {
 		return fmt.Errorf("invalid bootstrap topology digest")
 	}
-	if len(manifest.RepositoryConfig) > 0 {
-		cfg, err := manifest.ConfigProjection()
-		if err != nil {
-			return err
-		}
-		digest := sha256.Sum256(manifest.RepositoryConfig)
-		if hex.EncodeToString(digest[:]) != manifest.ConfigSHA256 || cfg.ID != manifest.RepositoryID {
-			return fmt.Errorf("bootstrap repository config projection identity or digest mismatch")
-		}
-		configuredBackends, _ := json.Marshal(cfg.PlacementBackends)
-		manifestBackends, _ := json.Marshal(manifest.Backends)
-		configuredPolicy, _ := json.Marshal(cfg.PlacementPolicy)
-		manifestPolicy, _ := json.Marshal(manifest.Policy)
-		configuredStaging, _ := json.Marshal(cfg.StagingBackends)
-		manifestStaging, _ := json.Marshal(manifest.StagingBackends)
-		if !bytes.Equal(configuredBackends, manifestBackends) || !bytes.Equal(configuredPolicy, manifestPolicy) ||
-			!bytes.Equal(configuredStaging, manifestStaging) {
-			return fmt.Errorf("bootstrap repository config projection disagrees with topology")
-		}
+	if err := manifest.validateConfigProjection(); err != nil {
+		return err
 	}
 	if len(manifest.Backends) == 0 || len(manifest.StagingBackends) == 0 {
 		return fmt.Errorf("bootstrap topology requires backends and staging mirrors")
@@ -120,6 +103,31 @@ func (manifest Manifest) Validate() error {
 	}
 	_, err := EvaluatePolicy(manifest.Backends, manifest.Policy)
 	return err
+}
+
+func (manifest Manifest) validateConfigProjection() error {
+	if len(manifest.RepositoryConfig) == 0 {
+		return nil
+	}
+	cfg, err := manifest.ConfigProjection()
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(manifest.RepositoryConfig)
+	if hex.EncodeToString(digest[:]) != manifest.ConfigSHA256 || cfg.ID != manifest.RepositoryID {
+		return fmt.Errorf("bootstrap repository config projection identity or digest mismatch")
+	}
+	configuredBackends, _ := json.Marshal(cfg.PlacementBackends)
+	manifestBackends, _ := json.Marshal(manifest.Backends)
+	configuredPolicy, _ := json.Marshal(cfg.PlacementPolicy)
+	manifestPolicy, _ := json.Marshal(manifest.Policy)
+	configuredStaging, _ := json.Marshal(cfg.StagingBackends)
+	manifestStaging, _ := json.Marshal(manifest.StagingBackends)
+	if !bytes.Equal(configuredBackends, manifestBackends) || !bytes.Equal(configuredPolicy, manifestPolicy) ||
+		!bytes.Equal(configuredStaging, manifestStaging) {
+		return fmt.Errorf("bootstrap repository config projection disagrees with topology")
+	}
+	return nil
 }
 
 func (manifest Manifest) ConfigProjection() (vaultic.Config, error) {

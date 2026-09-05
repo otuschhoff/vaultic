@@ -28,8 +28,8 @@ func (r *Repository) PlacePack(ctx context.Context, packID vaultic.ID, targetHas
 	}
 	name := file.Name()
 	defer func() {
-		_ = file.Close()
-		_ = os.Remove(name)
+		_ = file.Close()    // Successful upload paths sync and read the file before this cleanup.
+		_ = os.Remove(name) // The temporary placement file is never authoritative repository state.
 	}()
 	var loadErr error
 	loaded := false

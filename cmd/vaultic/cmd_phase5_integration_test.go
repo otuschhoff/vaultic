@@ -20,8 +20,8 @@ func TestProfileAppliesBackupAndGlobalFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gopts := global.Options{}
-	root := newRootCommand(&gopts)
+	globalOptions := global.Options{}
+	root := newRootCommand(&globalOptions)
 	if err := root.PersistentFlags().Set("use-profile", profilePath); err != nil {
 		t.Fatal(err)
 	}
@@ -29,10 +29,10 @@ func TestProfileAppliesBackupAndGlobalFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := applyProfile(backup, &gopts); err != nil {
+	if err := applyProfile(backup, &globalOptions); err != nil {
 		t.Fatal(err)
 	}
-	if !gopts.Quiet {
+	if !globalOptions.Quiet {
 		t.Fatal("profile did not set global quiet flag")
 	}
 	if got := backup.Flags().Lookup("label").Value.String(); got != "nightly" {
@@ -62,12 +62,12 @@ func TestBackupPublishesInfluxV2Metrics(t *testing.T) {
 	}))
 	defer server.Close()
 
-	env.gopts.InfluxURL = server.URL
-	env.gopts.InfluxToken = "secret"
-	env.gopts.InfluxOrg = "vaultic"
-	env.gopts.InfluxBucket = "backups"
-	if err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runBackup(ctx, BackupOptions{Label: "nightly"}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0")})
+	env.globalOptions.InfluxURL = server.URL
+	env.globalOptions.InfluxToken = "secret"
+	env.globalOptions.InfluxOrg = "vaultic"
+	env.globalOptions.InfluxBucket = "backups"
+	if err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runBackup(ctx, backupOptions{Label: "nightly"}, globalOptions, globalOptions.Term, []string{filepath.Join(env.testdata, "0")})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +81,10 @@ func TestBackupInitCreatesMissingRepository(t *testing.T) {
 	defer cleanup()
 	testSetupBackupData(t, env)
 
-	if err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runBackup(ctx, BackupOptions{Init: true}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0")})
+	if err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runBackup(ctx, backupOptions{Init: true}, globalOptions, globalOptions.Term, []string{filepath.Join(env.testdata, "0")})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	testListSnapshots(t, env.gopts, 1)
+	testListSnapshots(t, env.globalOptions, 1)
 }

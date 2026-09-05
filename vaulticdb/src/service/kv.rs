@@ -1,3 +1,5 @@
+//! Request validation and key-value read handlers.
+
 use std::sync::atomic::Ordering;
 
 use prost::Message;

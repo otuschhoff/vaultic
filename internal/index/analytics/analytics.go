@@ -27,6 +27,20 @@ type Store interface {
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 }
 
+type publicationLocker interface {
+	LockAnalyticsPublication()
+	UnlockAnalyticsPublication()
+}
+
+func lockAnalyticsPublication(store Store) (func(), error) {
+	locker, ok := store.(publicationLocker)
+	if !ok {
+		return nil, fmt.Errorf("analytics store does not support publication locking")
+	}
+	locker.LockAnalyticsPublication()
+	return locker.UnlockAnalyticsPublication, nil
+}
+
 type metadataHeadStore interface {
 	MetadataHead(context.Context) (uint64, error)
 }
@@ -113,101 +127,6 @@ func Status(ctx context.Context, store Store) (schema.AnalyticsMetadataRecord, e
 
 func Enable(ctx context.Context, store Store, config Config, dryRun bool) (LifecycleResult, error) {
 	return Rebuild(ctx, store, config, dryRun)
-}
-
-func rebuildLegacy(ctx context.Context, store Store, config Config, dryRun bool) (LifecycleResult, error) {
-	if err := config.Validate(); err != nil {
-		return LifecycleResult{}, err
-	}
-	config = config.normalized()
-	old, err := Status(ctx, store)
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-	generation := old.Generation + 1
-	if generation == 0 {
-		generation = 1
-	}
-	if !dryRun {
-		building := old
-		building.Enabled = false
-		building.Facts = 0
-		building.CacheEntries = 0
-		value, err := building.MarshalBinary()
-		if err != nil {
-			return LifecycleResult{}, err
-		}
-		if err := store.WriteMutableBatch(ctx, []daemon.Mutation{{Key: schema.AnalyticsMetadataKey(), Value: value}}, nil, false); err != nil {
-			return LifecycleResult{}, err
-		}
-	}
-	removed, err := purgePrefixes(ctx, store, dryRun, schema.AnalyticsFactPrefix(), schema.AnalyticsCachePrefix())
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-
-	var facts uint64
-	var previous schema.ParsedKey
-	havePrevious := false
-	var mutations []daemon.Mutation
-	err = scan(ctx, store, []byte("iv:"), func(kv daemon.KeyValue) error {
-		parsed, err := schema.ParseKey(kv.Key)
-		if err != nil || parsed.Kind != schema.KeyInodeRevision {
-			return fmt.Errorf("invalid inode revision key %x", kv.Key)
-		}
-		if havePrevious && parsed.FSID == previous.FSID && parsed.Inode == previous.Inode {
-			return nil
-		}
-		havePrevious, previous = true, parsed
-		revision, err := schema.UnmarshalInodeRevision(kv.Value)
-		if err != nil {
-			return err
-		}
-		fact := makeFact(parsed, revision, config)
-		if current, found, err := store.Get(ctx, schema.CurrentInodeKey(parsed.FSID, parsed.Inode)); err != nil {
-			return err
-		} else if found {
-			pointer, err := schema.UnmarshalCurrentPointer(current)
-			if err != nil {
-				return err
-			}
-			fact.Residency = schema.AnalyticsLive
-			_ = pointer
-		}
-		value, err := fact.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		mutations = append(mutations, daemon.Mutation{Key: schema.AnalyticsFactKey(parsed.FSID, parsed.Inode), Value: value})
-		facts++
-		if len(mutations) == pageSize && !dryRun {
-			if err := store.WriteMutableBatch(ctx, mutations, nil, false); err != nil {
-				return err
-			}
-			mutations = mutations[:0]
-		}
-		return nil
-	})
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-	builtAt := time.Now().UnixNano()
-	configJSON, err := json.Marshal(config)
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-	metadata := schema.AnalyticsMetadataRecord{Enabled: true, Generation: generation, Facts: facts, BuiltAt: builtAt, ConfigJSON: string(configJSON)}
-	value, err := metadata.MarshalBinary()
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-	if !dryRun {
-		mutations = append(mutations, daemon.Mutation{Key: schema.AnalyticsMetadataKey(), Value: value})
-		if err := store.WriteMutableBatch(ctx, mutations, nil, false); err != nil {
-			return LifecycleResult{}, err
-		}
-	}
-	return LifecycleResult{Enabled: true, Generation: generation, Facts: facts, Removed: removed, BuiltAt: builtAt}, nil
 }
 
 func Disable(ctx context.Context, store Store, purge, dryRun bool) (LifecycleResult, error) {
@@ -478,20 +397,8 @@ func (query Query) Validate() error {
 	if query.SizeMin != nil && query.SizeMax != nil && *query.SizeMin >= *query.SizeMax {
 		return fmt.Errorf("size-min must be less than exclusive size-max")
 	}
-	for _, month := range query.Months {
-		if month < 1 || month > 12 {
-			return fmt.Errorf("month must be in 1..12, got %d", month)
-		}
-	}
-	for _, week := range query.Workweeks {
-		if week < 1 || week > 53 {
-			return fmt.Errorf("workweek must be in 1..53, got %d", week)
-		}
-	}
-	for _, magnitude := range query.SizeLog10 {
-		if magnitude < 0 || magnitude > 19 {
-			return fmt.Errorf("size-log10 must be in 0..19, got %d", magnitude)
-		}
+	if err := query.validateNumericDimensions(); err != nil {
+		return err
 	}
 	allowed := map[string]bool{
 		"uid":                 true,
@@ -513,6 +420,29 @@ func (query Query) Validate() error {
 			return fmt.Errorf("unknown analytics group-by dimension %q", name)
 		}
 	}
+	return query.validateCategoricalDimensions()
+}
+
+func (query Query) validateNumericDimensions() error {
+	for _, month := range query.Months {
+		if month < 1 || month > 12 {
+			return fmt.Errorf("month must be in 1..12, got %d", month)
+		}
+	}
+	for _, week := range query.Workweeks {
+		if week < 1 || week > 53 {
+			return fmt.Errorf("workweek must be in 1..53, got %d", week)
+		}
+	}
+	for _, magnitude := range query.SizeLog10 {
+		if magnitude < 0 || magnitude > 19 {
+			return fmt.Errorf("size-log10 must be in 0..19, got %d", magnitude)
+		}
+	}
+	return nil
+}
+
+func (query Query) validateCategoricalDimensions() error {
 	for _, residency := range query.Residencies {
 		if residency != "live" && residency != "archive-only" && residency != "unknown" && residency != "deleted" && residency != "expired" {
 			return fmt.Errorf("unknown analytics residency %q", residency)
@@ -588,10 +518,7 @@ func canonicalShape(query Query) ([]byte, error) {
 }
 
 func matches(f schema.AnalyticsFactRecord, q Query) bool {
-	if (len(q.UIDs) != 0 && (f.Known&schema.KnownUID == 0 || !hasUint32(q.UIDs, f.UID))) ||
-		(len(q.GIDs) != 0 && (f.Known&schema.KnownGID == 0 || !hasUint32(q.GIDs, f.GID))) ||
-		(q.SizeMin != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize < *q.SizeMin)) ||
-		(q.SizeMax != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize >= *q.SizeMax)) {
+	if !matchesIdentityAndSize(f, q) {
 		return false
 	}
 	if !hasString(q.SVMs, f.SVM) || !hasString(q.Volumes, f.Volume) || !hasString(q.PathGroups, f.PathGroup) ||
@@ -602,13 +529,28 @@ func matches(f schema.AnalyticsFactRecord, q Query) bool {
 		return false
 	}
 	if f.CreationBasis == schema.AnalyticsTimeUnknown {
-		return len(q.Years) == 0 && len(q.Months) == 0 && len(q.ISOYears) == 0 && len(q.Workweeks) == 0 && q.CreatedSince == nil && q.CreatedUntil == nil
+		return matchesUnknownCreationTime(q)
 	}
 	if q.CreatedSince != nil && f.CreatedAt < *q.CreatedSince || q.CreatedUntil != nil && f.CreatedAt >= *q.CreatedUntil {
 		return false
 	}
 	return hasInt(q.Years, int(f.CalendarYear)) && hasInt(q.Months, int(f.CalendarMonth)) && hasInt(q.ISOYears, int(f.ISOYear)) &&
 		hasInt(q.Workweeks, int(f.Workweek))
+}
+
+func matchesIdentityAndSize(f schema.AnalyticsFactRecord, q Query) bool {
+	if (len(q.UIDs) != 0 && (f.Known&schema.KnownUID == 0 || !hasUint32(q.UIDs, f.UID))) ||
+		(len(q.GIDs) != 0 && (f.Known&schema.KnownGID == 0 || !hasUint32(q.GIDs, f.GID))) ||
+		(q.SizeMin != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize < *q.SizeMin)) ||
+		(q.SizeMax != nil && (f.Known&schema.KnownSize == 0 || f.LogicalSize >= *q.SizeMax)) {
+		return false
+	}
+	return true
+}
+
+func matchesUnknownCreationTime(q Query) bool {
+	return len(q.Years) == 0 && len(q.Months) == 0 && len(q.ISOYears) == 0 && len(q.Workweeks) == 0 &&
+		q.CreatedSince == nil && q.CreatedUntil == nil
 }
 func hasUint32(values []uint32, value uint32) bool {
 	if len(values) == 0 {
@@ -663,6 +605,8 @@ func residencyName(value schema.AnalyticsResidency) string {
 		return "unknown"
 	}
 }
+
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func dimensions(f schema.AnalyticsFactRecord, names []string) map[string]string {
 	if len(names) == 0 {
 		return nil

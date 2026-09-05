@@ -57,6 +57,7 @@ func newProgress(printer ProgressPrinter, interval time.Duration) *Progress {
 		estimator:    *newRateEstimator(time.Now()),
 	}
 	p.Updater = *progress.NewUpdater(interval, func(_ time.Duration, final bool) {
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if final {
 			p.printer.Reset()
 		} else {

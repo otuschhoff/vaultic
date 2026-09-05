@@ -1,3 +1,5 @@
+//! Stable daemon error taxonomy and gRPC status mapping.
+
 use anyhow::Error as AnyError;
 use bytes::Bytes;
 use prost::Message;

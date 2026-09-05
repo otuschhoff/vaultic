@@ -24,6 +24,7 @@ type connectionLimitedBackend struct {
 func NewBackend(be backend.Backend) backend.Backend {
 	sem, err := newSemaphore(be.Properties().Connections)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 

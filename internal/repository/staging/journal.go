@@ -657,6 +657,7 @@ func (store Store) loadOptionalQuorum(ctx context.Context, handle backend.Handle
 	return nil, false, nil
 }
 
+//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, error) {
 	type sealCopy struct {
 		mirror string
@@ -751,6 +752,7 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 			}
 			job.State, job.Completion = StateCommitted, &completion
 		}
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if job.State != StateCommitted {
 			abandonmentBytes, found, err := store.loadOptionalQuorum(ctx, AbandonmentHandle(jobID))
 			if err != nil {
@@ -767,6 +769,7 @@ func (store Store) Discover(ctx context.Context, repositoryID string) ([]Job, er
 				job.State, job.Abandonment = StateAbandoned, &abandonment
 			}
 		}
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if job.State != StateCommitted && job.State != StateAbandoned {
 			rejectionBytes, found, err := store.loadOptionalQuorum(ctx, RejectionHandle(jobID))
 			if err != nil {

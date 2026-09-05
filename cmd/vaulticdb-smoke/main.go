@@ -29,6 +29,7 @@ func main() {
 		}),
 	)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	defer conn.Close()
@@ -40,16 +41,20 @@ func main() {
 	}
 	health, err := client.Health(ctx, &vaulticdbv1.HealthRequest{Context: requestContext})
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	capabilities, err := client.Capabilities(ctx, &vaulticdbv1.CapabilitiesRequest{Context: requestContext})
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	if !health.GetReady() || capabilities.GetProtocolVersion() != "vaulticdb.v1" {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("vaulticdb returned invalid health or capability response")
 	}
 	if _, err := client.Shutdown(ctx, &vaulticdbv1.Empty{Context: requestContext}); err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	fmt.Printf("vaulticdb smoke ok: daemon=%s protocol=%s schema=%s\n", health.GetDaemonId(), health.GetProtocolVersion(), health.GetSchemaVersion())

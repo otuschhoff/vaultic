@@ -16,6 +16,7 @@ import (
 
 type memoryStore struct {
 	mu                     sync.Mutex
+	publicationMu          sync.Mutex
 	values                 map[string][]byte
 	failPublication        bool
 	failDeltaDelete        bool
@@ -30,6 +31,14 @@ type memoryStore struct {
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{values: map[string][]byte{}, writeCounts: map[string]int{}}
+}
+
+func (store *memoryStore) LockAnalyticsPublication() {
+	store.publicationMu.Lock()
+}
+
+func (store *memoryStore) UnlockAnalyticsPublication() {
+	store.publicationMu.Unlock()
 }
 
 func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {

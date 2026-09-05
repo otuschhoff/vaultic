@@ -38,12 +38,12 @@ func TestCheckRestoreNoLock(t *testing.T) {
 	})
 	rtest.OK(t, err)
 
-	env.gopts.NoLock = true
+	env.globalOptions.NoLock = true
 
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 
-	snapshotIDs := testListSnapshots(t, env.gopts, 4)
-	testRunRestore(t, env.gopts, filepath.Join(env.base, "restore"), snapshotIDs[0].String())
+	snapshotIDs := testListSnapshots(t, env.globalOptions, 4)
+	testRunRestore(t, env.globalOptions, filepath.Join(env.base, "restore"), snapshotIDs[0].String())
 }
 
 // a listOnceBackend only allows listing once per filetype
@@ -87,28 +87,28 @@ func TestListOnce(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	env.gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
 		return newOrderedListOnceBackend(r), nil
 	}
-	pruneOpts := PruneOptions{MaxUnused: "0"}
-	checkOpts := CheckOptions{ReadData: true, CheckUnused: true}
+	pruneOpts := pruneOptions{MaxUnused: "0"}
+	checkOpts := checkOptions{ReadData: true, CheckUnused: true}
 
 	createPrunableRepo(t, env)
-	testRunPrune(t, env.gopts, pruneOpts)
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		_, err := runCheck(context.TODO(), checkOpts, gopts, nil, gopts.Term)
+	testRunPrune(t, env.globalOptions, pruneOpts)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		_, err := runCheck(ctx, checkOpts, globalOptions, nil, globalOptions.Term)
 		return err
 	}))
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runRebuildIndex(context.TODO(), RepairIndexOptions{}, gopts, gopts.Term)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runRebuildIndex(ctx, repairIndexOptions{}, globalOptions, globalOptions.Term)
 	}))
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runRebuildIndex(context.TODO(), RepairIndexOptions{ReadAllPacks: true}, gopts, gopts.Term)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runRebuildIndex(ctx, repairIndexOptions{ReadAllPacks: true}, globalOptions, globalOptions.Term)
 	}))
 }
 
 type writeToOnly struct {
-	rd io.Reader
+	reader io.Reader
 }
 
 func (r *writeToOnly) Read(_ []byte) (n int, err error) {
@@ -116,7 +116,7 @@ func (r *writeToOnly) Read(_ []byte) (n int, err error) {
 }
 
 func (r *writeToOnly) WriteTo(w io.Writer) (int64, error) {
-	return io.Copy(w, r.rd)
+	return io.Copy(w, r.reader)
 }
 
 type onlyLoadWithWriteToBackend struct {
@@ -124,10 +124,10 @@ type onlyLoadWithWriteToBackend struct {
 }
 
 func (be *onlyLoadWithWriteToBackend) Load(ctx context.Context, h backend.Handle,
-	length int, offset int64, fn func(rd io.Reader) error) error {
+	length int, offset int64, fn func(reader io.Reader) error) error {
 
-	return be.Backend.Load(ctx, h, length, offset, func(rd io.Reader) error {
-		return fn(&writeToOnly{rd: rd})
+	return be.Backend.Load(ctx, h, length, offset, func(reader io.Reader) error {
+		return fn(&writeToOnly{reader: reader})
 	})
 }
 
@@ -136,43 +136,43 @@ func TestBackendLoadWriteTo(t *testing.T) {
 	defer cleanup()
 
 	// setup backend which only works if it's WriteTo method is correctly propagated upwards
-	env.gopts.BackendInnerTestHook = func(r backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendInnerTestHook = func(r backend.Backend) (backend.Backend, error) {
 		return &onlyLoadWithWriteToBackend{Backend: r}, nil
 	}
 
 	testSetupBackupData(t, env)
 
 	// add some data, but make sure that it isn't cached during upload
-	opts := BackupOptions{}
-	env.gopts.NoCache = true
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, opts, env.gopts)
+	options := backupOptions{}
+	env.globalOptions.NoCache = true
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, options, env.globalOptions)
 
 	// loading snapshots must still work
-	env.gopts.NoCache = false
-	testListSnapshots(t, env.gopts, 1)
+	env.globalOptions.NoCache = false
+	testListSnapshots(t, env.globalOptions, 1)
 }
 
 func TestFindListOnce(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	env.gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
 		return newOrderedListOnceBackend(r), nil
 	}
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, opts, env.gopts)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, opts, env.gopts)
-	secondSnapshot := testListSnapshots(t, env.gopts, 2)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "3")}, opts, env.gopts)
-	thirdSnapshot := vaultic.NewIDSet(testListSnapshots(t, env.gopts, 3)...)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, options, env.globalOptions)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, options, env.globalOptions)
+	secondSnapshot := testListSnapshots(t, env.globalOptions, 2)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "3")}, options, env.globalOptions)
+	thirdSnapshot := vaultic.NewIDSet(testListSnapshots(t, env.globalOptions, 3)...)
 
 	var snapshotIDs vaultic.IDSet
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		ctx, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -210,7 +210,7 @@ type failConfigOnceBackend struct {
 }
 
 func (be *failConfigOnceBackend) Load(ctx context.Context, h backend.Handle,
-	length int, offset int64, fn func(rd io.Reader) error) error {
+	length int, offset int64, fn func(reader io.Reader) error) error {
 
 	if !be.failedOnce && h.Type == backend.ConfigFile {
 		be.failedOnce = true
@@ -233,7 +233,7 @@ func TestBackendRetryConfig(t *testing.T) {
 
 	var wrappedBackend *failConfigOnceBackend
 	// cause config loading to fail once
-	env.gopts.BackendInnerTestHook = func(r backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendInnerTestHook = func(r backend.Backend) (backend.Backend, error) {
 		wrappedBackend = &failConfigOnceBackend{Backend: r}
 		return wrappedBackend, nil
 	}
@@ -243,7 +243,7 @@ func TestBackendRetryConfig(t *testing.T) {
 	rtest.Assert(t, wrappedBackend != nil && wrappedBackend.failedOnce, "config loading was not retried on init")
 	wrappedBackend = nil
 
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, backupOptions{}, env.globalOptions)
 	rtest.Assert(t, wrappedBackend != nil, "backend not wrapped on backup")
 	rtest.Assert(t, wrappedBackend != nil && wrappedBackend.failedOnce, "config loading was not retried on init")
 }

@@ -88,7 +88,9 @@ func (store *SchemaStore) executeGDPRForget(
 		return fail(err)
 	}
 	if replayed != nil {
-		_ = transaction.Rollback(ctx)
+		if err := transaction.Rollback(ctx); err != nil {
+			return schema.DeletionCertificateRecord{}, fmt.Errorf("close replayed GDPR transaction: %w", err)
+		}
 		return *replayed, nil
 	}
 

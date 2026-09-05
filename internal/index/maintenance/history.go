@@ -154,6 +154,8 @@ func applyEventToBucket(bucket *schema.PackHistoryBucket, event schema.PackHisto
 	case schema.EventDeleted:
 		bucket.PacksDeleted++
 		bucket.BytesDeleted = addSaturating(bucket.BytesDeleted, event.PhysicalSize)
+	default:
+		// Other events do not change rollup counters.
 	}
 }
 
@@ -193,6 +195,8 @@ func RollupHistory(ctx context.Context, store Store, dryRun bool) (RollupResult,
 			result.Partial++
 		case schema.CoverageReconstructed:
 			result.Reconstructed++
+		default:
+			// Complete coverage needs no separate counter.
 		}
 		storageKey := schema.PackHistoryBucketKey(key.granularity, key.start, key.backend, key.packType)
 		if storageKey == nil {
@@ -269,6 +273,8 @@ type HistoryRetentionResult struct {
 // what allows raw events to be discarded without losing the periods they
 // describe, and the raw floor it records is what later marks the affected
 // buckets partial rather than silently complete.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func PruneHistory(ctx context.Context, store Store, options HistoryRetentionOptions) (HistoryRetentionResult, error) {
 	result := HistoryRetentionResult{SchemaVersion: IntrospectSchemaVersion}
 	now := options.Now
@@ -326,6 +332,7 @@ func PruneHistory(ctx context.Context, store Store, options HistoryRetentionOpti
 		return result, nil
 	}
 	puts := make([]daemon.Mutation, 0, 1)
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if result.NewRawFloor != 0 {
 		// The floor is only advanced, never lowered, so a later pass cannot
 		// claim coverage it does not have.

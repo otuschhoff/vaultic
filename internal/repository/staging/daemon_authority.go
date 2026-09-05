@@ -46,6 +46,7 @@ func (authority *DaemonAuthority) LookupIdempotency(ctx context.Context, _ Job, 
 	if err != nil {
 		return CommitResult{}, false, Reject(err)
 	}
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if committed {
 		plan.RootKey, err = authority.Store.ExportCheckpointRoot(ctx, snapshotID)
 		if err != nil {

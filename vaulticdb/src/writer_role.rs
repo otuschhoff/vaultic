@@ -1,3 +1,5 @@
+//! Metadata writer-role state machine and fencing transitions.
+
 use std::time::{Duration, Instant};
 
 use thiserror::Error;

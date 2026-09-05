@@ -23,11 +23,8 @@ import (
 	"github.com/otuschhoff/vaultic/internal/walker"
 )
 
-// errFindDone is returned from the tree walk when all requested tree IDs were found.
-var errFindDone = errors.New("find: all tree IDs found")
-
 func NewFindCommand(globalOptions *global.Options) *cobra.Command {
-	var opts FindOptions
+	var options findOptions
 
 	cmd := &cobra.Command{
 		Use:   "find [flags] PATTERN...",
@@ -58,20 +55,20 @@ vaultic find --pack 025c1d06`,
 		GroupID:           "default",
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runFind(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runFind(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// FindOptions bundles all options for the find command.
-type FindOptions struct {
+// findOptions bundles all options for the find command.
+type findOptions struct {
 	Oldest             string
 	Newest             string
 	Snapshots          []string
@@ -84,20 +81,20 @@ type FindOptions struct {
 	data.SnapshotFilter
 }
 
-func (opts *FindOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVarP(&opts.Oldest, "oldest", "O", "", "oldest modification date/time")
-	f.StringVarP(&opts.Newest, "newest", "N", "", "newest modification date/time")
-	f.StringArrayVarP(&opts.Snapshots, "snapshot", "s", nil, "snapshot `id` to search in (can be given multiple times)")
-	f.BoolVar(&opts.BlobID, "blob", false, "pattern is a blob-ID")
-	f.BoolVar(&opts.TreeID, "tree", false, "pattern is a tree-ID")
-	f.BoolVar(&opts.PackID, "pack", false, "pattern is a pack-ID")
-	f.BoolVar(&opts.ShowPackID, "show-pack-id", false, "display the pack-ID the blobs belong to (with --blob or --tree)")
-	f.BoolVarP(&opts.CaseInsensitive, "ignore-case", "i", false, "ignore case for pattern")
-	f.BoolVarP(&opts.Reverse, "reverse", "R", false, "reverse sort order oldest to newest")
-	f.BoolVarP(&opts.ListLong, "long", "l", false, "use a long listing format showing size and mode")
-	f.BoolVar(&opts.HumanReadable, "human-readable", false, "print sizes in human readable format")
+func (options *findOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVarP(&options.Oldest, "oldest", "O", "", "oldest modification date/time")
+	f.StringVarP(&options.Newest, "newest", "N", "", "newest modification date/time")
+	f.StringArrayVarP(&options.Snapshots, "snapshot", "s", nil, "snapshot `id` to search in (can be given multiple times)")
+	f.BoolVar(&options.BlobID, "blob", false, "pattern is a blob-ID")
+	f.BoolVar(&options.TreeID, "tree", false, "pattern is a tree-ID")
+	f.BoolVar(&options.PackID, "pack", false, "pattern is a pack-ID")
+	f.BoolVar(&options.ShowPackID, "show-pack-id", false, "display the pack-ID the blobs belong to (with --blob or --tree)")
+	f.BoolVarP(&options.CaseInsensitive, "ignore-case", "i", false, "ignore case for pattern")
+	f.BoolVarP(&options.Reverse, "reverse", "R", false, "reverse sort order oldest to newest")
+	f.BoolVarP(&options.ListLong, "long", "l", false, "use a long listing format showing size and mode")
+	f.BoolVar(&options.HumanReadable, "human-readable", false, "print sizes in human readable format")
 
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
 }
 
 type findPattern struct {
@@ -144,6 +141,19 @@ type statefulOutput struct {
 		E(string, ...any)
 	}
 	stdout io.Writer
+	err    error
+}
+
+func (s *statefulOutput) write(data []byte) {
+	if s.err == nil {
+		_, s.err = s.stdout.Write(data)
+	}
+}
+
+func (s *statefulOutput) printf(format string, args ...any) {
+	if s.err == nil {
+		_, s.err = fmt.Fprintf(s.stdout, format, args...)
+	}
 }
 
 func (s *statefulOutput) PrintPatternJSON(path string, node *data.Node) {
@@ -172,21 +182,21 @@ func (s *statefulOutput) PrintPatternJSON(path string, node *data.Node) {
 		return
 	}
 	if !s.inuse {
-		_, _ = s.stdout.Write([]byte("["))
+		s.write([]byte("["))
 		s.inuse = true
 	}
 	if s.newsn != s.oldsn {
 		if s.oldsn != nil {
-			_, _ = fmt.Fprintf(s.stdout, "],\"hits\":%d,\"snapshot\":%q},", s.hits, s.oldsn.ID())
+			s.printf("],\"hits\":%d,\"snapshot\":%q},", s.hits, s.oldsn.ID())
 		}
-		_, _ = s.stdout.Write([]byte(`{"matches":[`))
+		s.write([]byte(`{"matches":[`))
 		s.oldsn = s.newsn
 		s.hits = 0
 	}
 	if s.hits > 0 {
-		_, _ = s.stdout.Write([]byte(","))
+		s.write([]byte(","))
 	}
-	_, _ = s.stdout.Write(b)
+	s.write(b)
 	s.hits++
 }
 
@@ -231,13 +241,13 @@ func (s *statefulOutput) PrintObjectJSON(kind, id, nodepath, treeID string, sn *
 		return
 	}
 	if !s.inuse {
-		_, _ = s.stdout.Write([]byte("["))
+		s.write([]byte("["))
 		s.inuse = true
 	}
 	if s.hits > 0 {
-		_, _ = s.stdout.Write([]byte(","))
+		s.write([]byte(","))
 	}
-	_, _ = s.stdout.Write(b)
+	s.write(b)
 	s.hits++
 }
 
@@ -260,19 +270,19 @@ func (s *statefulOutput) PrintObject(kind, id, nodepath, treeID string, sn *data
 	}
 }
 
-func (s *statefulOutput) Finish() {
+func (s *statefulOutput) Finish() error {
 	if s.JSON {
 		// do some finishing up
 		if s.oldsn != nil {
-			_, _ = fmt.Fprintf(s.stdout, "],\"hits\":%d,\"snapshot\":%q}", s.hits, s.oldsn.ID())
+			s.printf("],\"hits\":%d,\"snapshot\":%q}", s.hits, s.oldsn.ID())
 		}
 		if s.inuse {
-			_, _ = s.stdout.Write([]byte("]\n"))
+			s.write([]byte("]\n"))
 		} else {
-			_, _ = s.stdout.Write([]byte("[]\n"))
+			s.write([]byte("[]\n"))
 		}
-		return
 	}
+	return s.err
 }
 
 // Finder bundles information needed to find a file or directory.
@@ -378,7 +388,7 @@ func (f *Finder) findTree(treeID vaultic.ID, nodepath string) error {
 		// looking for blobs)
 		if f.itemsFound >= len(f.treeIDs) && len(f.blobIDs) == 0 {
 			// Return an error to terminate the Walk
-			return errFindDone
+			return errors.ErrStopIteration
 		}
 	}
 	return nil
@@ -439,8 +449,6 @@ func (f *Finder) findNodeBlobs(ctx context.Context, snapshot *data.Snapshot, par
 	return nil
 }
 
-var errAllPacksFound = errors.New("all packs found")
-
 func (f *Finder) addBlobHandle(h vaultic.BlobHandle) error {
 	switch h.Type {
 	case vaultic.DataBlob:
@@ -493,11 +501,11 @@ func (f *Finder) packsToBlobs(ctx context.Context, packs []string) error {
 		delete(packIDs, idStr)
 		// Stop searching when all packs have been found
 		if len(packIDs) == 0 {
-			return errAllPacksFound
+			return errors.ErrStopIteration
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, errAllPacksFound) {
+	if err != nil && !errors.Is(err, errors.ErrStopIteration) {
 		return err
 	}
 
@@ -603,24 +611,24 @@ func (f *Finder) findObjectsPacks() {
 	}
 }
 
-func parseFindPattern(opts FindOptions, args []string) (findPattern, error) {
+func parseFindPattern(options findOptions, args []string) (findPattern, error) {
 	var err error
 	pat := findPattern{pattern: args}
-	if opts.CaseInsensitive {
+	if options.CaseInsensitive {
 		for i := range pat.pattern {
 			pat.pattern[i] = strings.ToLower(pat.pattern[i])
 		}
 		pat.ignoreCase = true
 	}
 
-	if opts.Oldest != "" {
-		if pat.oldest, err = parseTime(opts.Oldest); err != nil {
+	if options.Oldest != "" {
+		if pat.oldest, err = parseTime(options.Oldest); err != nil {
 			return findPattern{}, err
 		}
 	}
 
-	if opts.Newest != "" {
-		if pat.newest, err = parseTime(opts.Newest); err != nil {
+	if options.Newest != "" {
+		if pat.newest, err = parseTime(options.Newest); err != nil {
 			return findPattern{}, err
 		}
 	}
@@ -631,29 +639,29 @@ func parseFindPattern(opts FindOptions, args []string) (findPattern, error) {
 	return pat, nil
 }
 
-func validateFindIDOptions(opts FindOptions) error {
-	if (opts.BlobID && opts.TreeID) ||
-		(opts.BlobID && opts.PackID) ||
-		(opts.TreeID && opts.PackID) {
+func validateFindIDOptions(options findOptions) error {
+	if (options.BlobID && options.TreeID) ||
+		(options.BlobID && options.PackID) ||
+		(options.TreeID && options.PackID) {
 		return errors.Fatal("cannot have several ID types")
 	}
 	return nil
 }
 
-func (f *Finder) prepareIDSearch(ctx context.Context, opts FindOptions) error {
-	if opts.BlobID {
+func (f *Finder) prepareIDSearch(ctx context.Context, options findOptions) error {
+	if options.BlobID {
 		f.blobIDs = make(map[string]struct{}, len(f.pat.pattern))
 		for _, pattern := range f.pat.pattern {
 			f.blobIDs[pattern] = struct{}{}
 		}
 	}
-	if opts.TreeID {
+	if options.TreeID {
 		f.treeIDs = make(map[string]struct{}, len(f.pat.pattern))
 		for _, pattern := range f.pat.pattern {
 			f.treeIDs[pattern] = struct{}{}
 		}
 	}
-	if opts.PackID {
+	if options.PackID {
 		return f.packsToBlobs(ctx, f.pat.pattern)
 	}
 	return nil
@@ -662,7 +670,7 @@ func (f *Finder) prepareIDSearch(ctx context.Context, opts FindOptions) error {
 func (f *Finder) searchSnapshots(ctx context.Context, snapshots []*data.Snapshot) error {
 	for _, snapshot := range snapshots {
 		if len(f.blobIDs) > 0 || len(f.treeIDs) > 0 {
-			if err := f.findIDs(ctx, snapshot); err != nil && !errors.Is(err, errFindDone) {
+			if err := f.findIDs(ctx, snapshot); err != nil && !errors.Is(err, errors.ErrStopIteration) {
 				return err
 			}
 			continue
@@ -674,20 +682,20 @@ func (f *Finder) searchSnapshots(ctx context.Context, snapshots []*data.Snapshot
 	return nil
 }
 
-func runFind(ctx context.Context, opts FindOptions, gopts global.Options, args []string, term ui.Terminal) error {
+func runFind(ctx context.Context, options findOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) == 0 {
 		return errors.Fatal("wrong number of arguments")
 	}
-	if err := validateFindIDOptions(opts); err != nil {
+	if err := validateFindIDOptions(options); err != nil {
 		return err
 	}
-	pat, err := parseFindPattern(opts, args)
+	pat, err := parseFindPattern(options, args)
 	if err != nil {
 		return err
 	}
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -702,17 +710,20 @@ func runFind(ctx context.Context, opts FindOptions, gopts global.Options, args [
 	}
 
 	f := &Finder{
-		repo:    repo,
-		pat:     pat,
-		out:     statefulOutput{ListLong: opts.ListLong, HumanReadable: opts.HumanReadable, JSON: gopts.JSON, printer: printer, stdout: term.OutputRaw()},
+		repo: repo,
+		pat:  pat,
+		out: statefulOutput{
+			ListLong: options.ListLong, HumanReadable: options.HumanReadable,
+			JSON: globalOptions.JSON, printer: printer, stdout: term.OutputRaw(),
+		},
 		printer: printer,
 	}
-	if err := f.prepareIDSearch(ctx, opts); err != nil {
+	if err := f.prepareIDSearch(ctx, options); err != nil {
 		return err
 	}
 
 	var filteredSnapshots []*data.Snapshot
-	err = opts.SnapshotFilter.FindAll(ctx, snapshotLister, repo, opts.Snapshots, func(_ string, sn *data.Snapshot, err error) error {
+	err = options.SnapshotFilter.FindAll(ctx, snapshotLister, repo, options.Snapshots, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -724,7 +735,7 @@ func runFind(ctx context.Context, opts FindOptions, gopts global.Options, args [
 	}
 
 	sort.Slice(filteredSnapshots, func(i, j int) bool {
-		if opts.Reverse {
+		if options.Reverse {
 			return filteredSnapshots[i].Time.Before(filteredSnapshots[j].Time)
 		}
 		return filteredSnapshots[i].Time.After(filteredSnapshots[j].Time)
@@ -733,9 +744,11 @@ func runFind(ctx context.Context, opts FindOptions, gopts global.Options, args [
 	if err := f.searchSnapshots(ctx, filteredSnapshots); err != nil {
 		return err
 	}
-	f.out.Finish()
+	if err := f.out.Finish(); err != nil {
+		return fmt.Errorf("write find output: %w", err)
+	}
 
-	if opts.ShowPackID && (len(f.blobIDs) > 0 || len(f.treeIDs) > 0) {
+	if options.ShowPackID && (len(f.blobIDs) > 0 || len(f.treeIDs) > 0) {
 		f.findObjectsPacks()
 	}
 

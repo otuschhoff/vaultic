@@ -34,15 +34,15 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
-	environment.gopts.BackendTestHook = nil
-	testRunInit(t, environment.gopts)
+	environment.globalOptions.BackendTestHook = nil
+	testRunInit(t, environment.globalOptions)
 	term, cancelTerm := termstatus.Setup(os.Stdin, io.Discard, io.Discard, true)
 	defer cancelTerm()
-	environment.gopts.Term = term
+	environment.globalOptions.Term = term
 
 	ctx := context.Background()
-	printer := progress.NewTerminalPrinter(true, 0, environment.gopts.Term)
-	ctx, repo, unlock, err := openWithReadLock(ctx, environment.gopts, true, printer)
+	printer := progress.NewTerminalPrinter(true, 0, environment.globalOptions.Term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, environment.globalOptions, true, printer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 			EncryptionMode: "required", PassphraseFile: passphraseFile,
 		},
 	}
-	addSlot := newIndexKeysAddSlotCommand(&environment.gopts, &keyOptions)
+	addSlot := newIndexKeysAddSlotCommand(&environment.globalOptions, &keyOptions)
 	addSlot.SetArgs(
 		[]string{"--slot", "second-recovery", "--passphrase-file", secondPassphrase, "--priority", "10", "--recovery"},
 	)
@@ -97,7 +97,7 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 	}
 	ctx, repo, unlock, err = openWithReadLock(
 		metadataRepositoryContext(ctx, t, keyOptions.Daemon, repositoryID),
-		environment.gopts,
+		environment.globalOptions,
 		true,
 		printer,
 	)
@@ -111,7 +111,7 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 		t.Fatalf("automatic envelope mirror missing: %v", err)
 	}
 
-	keyInDBOptions := environment.gopts
+	keyInDBOptions := environment.globalOptions
 	keyInDBOptions.Password = ""
 	keyInDBOptions.PasswordFile = ""
 	keyInDBOptions.PasswordCommand = ""
@@ -140,7 +140,7 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 	if err := os.WriteFile(recoveredKeyFile, append(masterKey, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	recoveryOptions := environment.gopts
+	recoveryOptions := environment.globalOptions
 	recoveryOptions.Password = ""
 	recoveryOptions.PasswordFile = ""
 	recoveryOptions.PasswordCommand = ""
@@ -160,15 +160,15 @@ func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
-	environment.gopts.BackendTestHook = nil
-	testRunInit(t, environment.gopts)
+	environment.globalOptions.BackendTestHook = nil
+	testRunInit(t, environment.globalOptions)
 	term, cancelTerm := termstatus.Setup(os.Stdin, io.Discard, io.Discard, true)
 	defer cancelTerm()
-	environment.gopts.Term = term
+	environment.globalOptions.Term = term
 
 	ctx := context.Background()
-	printer := progress.NewTerminalPrinter(true, 0, environment.gopts.Term)
-	ctx, repo, unlock, err := openWithReadLock(ctx, environment.gopts, true, printer)
+	printer := progress.NewTerminalPrinter(true, 0, environment.globalOptions.Term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, environment.globalOptions, true, printer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,15 +283,15 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
-	environment.gopts.BackendTestHook = nil
-	testRunInit(t, environment.gopts)
+	environment.globalOptions.BackendTestHook = nil
+	testRunInit(t, environment.globalOptions)
 	term, cancelTerm := termstatus.Setup(os.Stdin, io.Discard, io.Discard, true)
 	defer cancelTerm()
-	environment.gopts.Term = term
+	environment.globalOptions.Term = term
 
 	ctx := context.Background()
-	printer := progress.NewTerminalPrinter(true, 0, environment.gopts.Term)
-	ctx, repo, unlock, err := openWithReadLock(ctx, environment.gopts, true, printer)
+	printer := progress.NewTerminalPrinter(true, 0, environment.globalOptions.Term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, environment.globalOptions, true, printer)
 	if err != nil {
 		t.Fatal(err)
 	}

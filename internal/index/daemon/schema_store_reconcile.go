@@ -166,6 +166,8 @@ type packChange struct {
 // of each aggregate. Calling updatePackAggregates per pack inside a single
 // transaction would be wrong: the reads would not observe the pending puts from
 // earlier packs, so every delta but the last would be lost.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func applyPackAggregateDeltas(ctx context.Context, transaction *Transaction, changes []packChange) ([]Mutation, error) {
 	keys := aggregateKeys()
 	values, found, err := transaction.MultiGet(ctx, keys)
@@ -459,6 +461,7 @@ func (store *SchemaStore) PublishSchemaBatchWithIdempotency(
 	return store.publishSchemaBatch(ctx, puts, deletes, idempotencyKey)
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (store *SchemaStore) publishSchemaBatch(
 	ctx context.Context,
 	puts []Mutation,
@@ -501,6 +504,7 @@ func (store *SchemaStore) publishSchemaBatch(
 		return err
 	}
 	remainingPuts := append([]Mutation(nil), puts...)
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if len(immutableKeys) > 0 {
 		values, found, err := transaction.MultiGet(ctx, immutableKeys)
 		if err != nil {

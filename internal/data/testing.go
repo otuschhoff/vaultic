@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -44,7 +45,7 @@ func (fs *fakeFileSystem) saveFile(ctx context.Context, uploader vaultic.BlobSav
 	blobs = vaultic.IDs{}
 	for {
 		chunk, err := fs.chunker.Next(fs.buf)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 
@@ -174,6 +175,7 @@ func TestSetSnapshotID(_ testing.TB, sn *Snapshot, id vaultic.ID) {
 func ParseDurationOrPanic(s string) Duration {
 	d, err := ParseDuration(s)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 

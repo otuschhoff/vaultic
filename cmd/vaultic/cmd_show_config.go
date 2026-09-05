@@ -37,16 +37,16 @@ Exit status is 1 if there was any error.
 	return cmd
 }
 
-func runShowConfig(ctx context.Context, gopts global.Options, args []string, printer vaultic.Printer) error {
+func runShowConfig(ctx context.Context, globalOptions global.Options, args []string, printer vaultic.Printer) error {
 	if len(args) > 0 {
 		return errors.Fatal("the show-config command expects no arguments - please see `vaultic help show-config` for usage")
 	}
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	_, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	return printConfig(repo.Config(), gopts, printer)
+	return printConfig(repo.Config(), globalOptions, printer)
 }

@@ -22,7 +22,7 @@ type GoogleCloudKMSUnwrapper struct {
 func NewGoogleCloudKMSUnwrapper(token []byte, client *http.Client) (*GoogleCloudKMSUnwrapper, error) {
 	token = bytes.TrimSpace(token)
 	if len(token) == 0 {
-		return nil, errors.New("Google Cloud bearer token is required")
+		return nil, errors.New("google Cloud bearer token is required")
 	}
 	if client == nil {
 		client = http.DefaultClient
@@ -67,12 +67,13 @@ func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(
 	request.Header.Set("Content-Type", "application/json")
 	response, err := unwrapper.client.Do(request)
 	if err != nil {
-		return nil, VerifiedPrincipal{}, fmt.Errorf("Google Cloud KMS decrypt: %w", err)
+		return nil, VerifiedPrincipal{}, fmt.Errorf("google Cloud KMS decrypt: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// The bounded drain is only for HTTP connection reuse after a complete status error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProviderResponse))
-		return nil, VerifiedPrincipal{}, fmt.Errorf("Google Cloud KMS decrypt returned HTTP %d", response.StatusCode)
+		return nil, VerifiedPrincipal{}, fmt.Errorf("google Cloud KMS decrypt returned HTTP %d", response.StatusCode)
 	}
 	var result struct {
 		Plaintext       string `json:"plaintext"`
@@ -84,11 +85,11 @@ func (unwrapper *GoogleCloudKMSUnwrapper) UnwrapMember(
 		return nil, VerifiedPrincipal{}, fmt.Errorf("decode Google Cloud KMS response: %w", err)
 	}
 	if member.Provider == "gcp-cloud-hsm" && result.ProtectionLevel != "HSM" {
-		return nil, VerifiedPrincipal{}, errors.New("Google Cloud HSM member key is not HSM protected")
+		return nil, VerifiedPrincipal{}, errors.New("google Cloud HSM member key is not HSM protected")
 	}
 	plaintext, err := base64.StdEncoding.DecodeString(result.Plaintext)
 	if err != nil || len(plaintext) == 0 {
-		return nil, VerifiedPrincipal{}, errors.New("Google Cloud KMS returned invalid plaintext")
+		return nil, VerifiedPrincipal{}, errors.New("google Cloud KMS returned invalid plaintext")
 	}
 	principal, err := unwrapper.lookupPrincipal(ctx, project)
 	if err != nil {
@@ -104,7 +105,7 @@ func validateGoogleKeyReference(reference string) (string, error) {
 		segments[5] == "" ||
 		segments[6] != "cryptoKeys" ||
 		segments[7] == "" {
-		return "", errors.New("Google Cloud KMS key reference must name a CryptoKey")
+		return "", errors.New("google Cloud KMS key reference must name a CryptoKey")
 	}
 	return segments[1], nil
 }
@@ -117,11 +118,11 @@ func (unwrapper *GoogleCloudKMSUnwrapper) lookupPrincipal(ctx context.Context, p
 	}
 	response, err := unwrapper.client.Do(request)
 	if err != nil {
-		return VerifiedPrincipal{}, errors.New("Google token introspection request failed")
+		return VerifiedPrincipal{}, errors.New("google token introspection request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return VerifiedPrincipal{}, fmt.Errorf("Google token introspection returned HTTP %d", response.StatusCode)
+		return VerifiedPrincipal{}, fmt.Errorf("google token introspection returned HTTP %d", response.StatusCode)
 	}
 	var claims struct {
 		Subject   string          `json:"sub"`
@@ -137,7 +138,7 @@ func (unwrapper *GoogleCloudKMSUnwrapper) lookupPrincipal(ctx context.Context, p
 		identity = claims.Email
 	}
 	if identity == "" || !positiveGoogleTokenLifetime(claims.ExpiresIn) {
-		return VerifiedPrincipal{}, errors.New("Google token identity has no immutable subject or current lifetime")
+		return VerifiedPrincipal{}, errors.New("google token identity has no immutable subject or current lifetime")
 	}
 	return VerifiedPrincipal{Authority: "gcp-iam", TenantAccountOrProject: project, ImmutablePrincipalID: identity}, nil
 }

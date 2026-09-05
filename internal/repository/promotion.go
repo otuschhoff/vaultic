@@ -129,6 +129,7 @@ func promotePackBlobs(
 	return successors, nil
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func findPublishedRepackSuccessors(ctx context.Context, store *daemon.SchemaStore, source vaultic.ID, targetBackend uint64) ([]vaultic.ID, error) {
 	var successors []vaultic.ID
 	var after []byte

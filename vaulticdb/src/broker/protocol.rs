@@ -1,3 +1,5 @@
+//! Broker request/response wire protocol and connection negotiation.
+
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rand::RngCore;
@@ -16,6 +18,7 @@ use crate::{
         ExternalMemberProtection, HardwareBinding, MemberCredential, MemberProtection,
         MemberProvider, PrincipalBinding, RecoveryCapsule, UnlockPolicy,
     },
+    ids::MemberId,
 };
 
 pub const PROTOCOL_VERSION: &str = "vaultic-key-broker.v1";
@@ -33,7 +36,7 @@ pub struct AuthorizedOperation {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfflinePolicyMember {
-    pub member_id: String,
+    pub member_id: MemberId,
     pub provider: MemberProvider,
     pub credential: String,
 }
@@ -41,7 +44,7 @@ pub struct OfflinePolicyMember {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalPolicyMember {
-    pub member_id: String,
+    pub member_id: MemberId,
     pub provider: MemberProvider,
     pub key_reference: String,
     pub principal: Option<PrincipalBinding>,
@@ -156,7 +159,7 @@ pub async fn handle_request(
             Ok(BrokerResponse::Status {
                 protocol: PROTOCOL_VERSION,
                 locked: status.locked,
-                repository_id: status.repository_id,
+                repository_id: status.repository_id.into_string(),
                 capsule_generation: status.capsule_generation,
                 capsule_logical_id: status.capsule_logical_id,
                 policy_hash: status.policy_hash,
@@ -183,8 +186,11 @@ pub async fn handle_request(
                 "auth",
                 "session_created",
                 &[
-                    ("session_id", session.transcript.session_id.clone()),
-                    ("repository_id", session.transcript.repository_id.clone()),
+                    ("session_id", session.transcript.session_id.to_string()),
+                    (
+                        "repository_id",
+                        session.transcript.repository_id.to_string(),
+                    ),
                     (
                         "capsule_generation",
                         session.transcript.capsule_generation.to_string(),
@@ -213,7 +219,7 @@ pub async fn handle_request(
                     "contribution_accepted"
                 },
                 &[
-                    ("session_id", session_id),
+                    ("session_id", session_id.to_string()),
                     ("unlocked", unlocked.to_string()),
                 ],
             );
@@ -385,7 +391,7 @@ pub async fn handle_request(
                 "lifecycle",
                 "policy_mutation_prepared",
                 &[
-                    ("repository_id", capsule.header.repository_id.clone()),
+                    ("repository_id", capsule.header.repository_id.to_string()),
                     ("capsule_generation", capsule.header.generation.to_string()),
                     ("capsule_sha256", capsule_sha256.clone()),
                 ],

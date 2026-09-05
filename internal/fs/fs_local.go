@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -129,7 +130,9 @@ func newLocalFile(name string, flag int, metadataOnly bool) (*localFile, error) 
 		if err != nil {
 			return nil, err
 		}
-		_ = setFlags(f)
+		if err := setFlags(f); err != nil {
+			return nil, errors.Join(err, f.Close())
+		}
 	}
 	return &localFile{
 		name: name,
@@ -140,6 +143,7 @@ func newLocalFile(name string, flag int, metadataOnly bool) (*localFile, error) 
 
 func (f *localFile) MakeReadable() error {
 	if f.f != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("file is already readable")
 	}
 

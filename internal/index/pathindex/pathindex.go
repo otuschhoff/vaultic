@@ -67,6 +67,7 @@ func PruneBefore(ctx context.Context, store Store, beforeCommit uint64, dryRun b
 	return uint64(len(deletes)), store.WriteMutableBatch(ctx, nil, deletes, false)
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func expectedMutations(ctx context.Context, store Store, paths []string, result *BuildResult) ([]daemon.Mutation, error) {
 	commits, err := commits(ctx, store)
 	if err != nil {

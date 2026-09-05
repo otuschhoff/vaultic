@@ -46,6 +46,7 @@ func (d *Dumper) DumpTree(ctx context.Context, tree data.TreeNodeIterator, rootP
 		case "zip":
 			return d.dumpZip(ctx, ch)
 		default:
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("unknown dump format")
 		}
 	})

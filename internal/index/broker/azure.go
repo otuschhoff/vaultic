@@ -24,7 +24,7 @@ type AzureKeyVaultUnwrapper struct {
 func NewAzureKeyVaultUnwrapper(token []byte, client *http.Client) (*AzureKeyVaultUnwrapper, error) {
 	token = bytes.TrimSpace(token)
 	if len(token) == 0 {
-		return nil, errors.New("Azure Key Vault bearer token is required")
+		return nil, errors.New("azure Key Vault bearer token is required")
 	}
 	if client == nil {
 		client = http.DefaultClient
@@ -68,12 +68,13 @@ func (unwrapper *AzureKeyVaultUnwrapper) UnwrapMember(ctx context.Context, membe
 	request.Header.Set("Content-Type", "application/json")
 	response, err := unwrapper.client.Do(request)
 	if err != nil {
-		return nil, VerifiedPrincipal{}, fmt.Errorf("Azure Key Vault unwrapKey: %w", err)
+		return nil, VerifiedPrincipal{}, fmt.Errorf("azure Key Vault unwrapKey: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// The bounded drain is only for HTTP connection reuse after a complete status error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProviderResponse))
-		return nil, VerifiedPrincipal{}, fmt.Errorf("Azure Key Vault unwrapKey returned HTTP %d", response.StatusCode)
+		return nil, VerifiedPrincipal{}, fmt.Errorf("azure Key Vault unwrapKey returned HTTP %d", response.StatusCode)
 	}
 	var result struct {
 		Value string `json:"value"`
@@ -85,7 +86,7 @@ func (unwrapper *AzureKeyVaultUnwrapper) UnwrapMember(ctx context.Context, membe
 	}
 	plaintext, err := base64.RawURLEncoding.DecodeString(result.Value)
 	if err != nil || len(plaintext) == 0 {
-		return nil, VerifiedPrincipal{}, errors.New("Azure Key Vault returned invalid plaintext")
+		return nil, VerifiedPrincipal{}, errors.New("azure Key Vault returned invalid plaintext")
 	}
 	principal, err := azureTokenPrincipal(string(unwrapper.token))
 	if err != nil {
@@ -108,7 +109,7 @@ func validateAzureKeyURL(reference string) (*url.URL, error) {
 		segments[0] != "keys" ||
 		segments[1] == "" ||
 		segments[2] == "" {
-		return nil, errors.New("Azure key reference must be a versioned Key Vault or Managed HSM HTTPS URL")
+		return nil, errors.New("azure key reference must be a versioned Key Vault or Managed HSM HTTPS URL")
 	}
 	return value, nil
 }
@@ -116,7 +117,7 @@ func validateAzureKeyURL(reference string) (*url.URL, error) {
 func azureTokenPrincipal(token string) (VerifiedPrincipal, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return VerifiedPrincipal{}, errors.New("Azure bearer token is not a JWT with verifiable provider-bound claims")
+		return VerifiedPrincipal{}, errors.New("azure bearer token is not a JWT with verifiable provider-bound claims")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -132,7 +133,7 @@ func azureTokenPrincipal(token string) (VerifiedPrincipal, error) {
 		return VerifiedPrincipal{}, errors.New("decode Azure bearer token claims")
 	}
 	if claims.TenantID == "" || claims.ObjectID == "" || !azureVaultAudience(claims.Audience) || claims.Expires <= time.Now().Unix() {
-		return VerifiedPrincipal{}, errors.New("Azure bearer token lacks current Key Vault tenant, object, audience, or expiry claims")
+		return VerifiedPrincipal{}, errors.New("azure bearer token lacks current Key Vault tenant, object, audience, or expiry claims")
 	}
 	return VerifiedPrincipal{Authority: "entra", TenantAccountOrProject: claims.TenantID, ImmutablePrincipalID: claims.ObjectID}, nil
 }

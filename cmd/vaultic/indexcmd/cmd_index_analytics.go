@@ -704,7 +704,7 @@ func newIndexGDPRExecuteForgetCommand(globalOptions *global.Options) *cobra.Comm
 			}
 			globalOptions.Term.Print(ui.ToJSONString(result))
 			certificate := result.(schema.DeletionCertificateRecord)
-			_ = observability.Emit(
+			observability.EmitBestEffort(
 				command.Context(),
 				observability.Event{
 					Severity:  observability.Notice,
@@ -720,7 +720,7 @@ func newIndexGDPRExecuteForgetCommand(globalOptions *global.Options) *cobra.Comm
 				},
 			)
 			if len(certificate.PendingDeletion) > 0 {
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					command.Context(),
 					observability.Event{
 						Severity:  observability.Notice,
@@ -894,7 +894,7 @@ func newIndexGDPRSetPolicyCommand(globalOptions *global.Options) *cobra.Command 
 				},
 			)
 			if err == nil {
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					command.Context(),
 					observability.Event{
 						Severity:  observability.Notice,
@@ -947,7 +947,7 @@ func newIndexGDPRAuditCommand(globalOptions *global.Options) *cobra.Command {
 			globalOptions.Term.Print(ui.ToJSONString(result))
 			if err == nil {
 				audit := result.(analytics.GDPRAuditResult)
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					command.Context(),
 					observability.Event{
 						Severity:  observability.Notice,

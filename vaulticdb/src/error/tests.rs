@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Error-to-status mapping tests.
+
     use super::*;
 
     fn decode_detail(status: &Status) -> ErrorDetail {

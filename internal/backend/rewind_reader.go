@@ -58,6 +58,7 @@ func NewByteReader(buf []byte, hasher hash.Hash) *ByteReader {
 		// must never fail according to interface
 		_, err := hasher.Write(buf)
 		if err != nil {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic(err)
 		}
 		hash = hasher.Sum(nil)

@@ -65,6 +65,7 @@ func nextNumber(input string) (num int, rest string, err error) {
 
 	num, err = strconv.Atoi(n)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 

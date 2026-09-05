@@ -112,7 +112,7 @@ func (b *Local) IsPermanentError(err error) bool {
 }
 
 // Save stores data in the backend at the handle.
-func (b *Local) Save(_ context.Context, h backend.Handle, rd backend.RewindReader) (err error) {
+func (b *Local) Save(_ context.Context, h backend.Handle, reader backend.RewindReader) (err error) {
 	finalname := b.Filename(h)
 	dir := filepath.Dir(finalname)
 
@@ -156,20 +156,20 @@ func (b *Local) Save(_ context.Context, h backend.Handle, rd backend.RewindReade
 	}(f)
 
 	// preallocate disk space
-	if size := rd.Length(); size > 0 {
+	if size := reader.Length(); size > 0 {
 		if err := fileio.PreallocateFile(f, size); err != nil {
 			debug.Log("Failed to preallocate %v with size %v: %v", finalname, size, err)
 		}
 	}
 
 	// save data, then sync
-	wbytes, err := io.Copy(f, rd)
+	wbytes, err := io.Copy(f, reader)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 	// sanity check
-	if wbytes != rd.Length() {
-		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", wbytes, rd.Length())
+	if wbytes != reader.Length() {
+		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", wbytes, reader.Length())
 	}
 
 	// Ignore error if filesystem does not support fsync.
@@ -210,8 +210,8 @@ var tempFile = os.CreateTemp // Overridden by test.
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (b *Local) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
-	return util.DefaultLoad(ctx, h, length, offset, b.openReader, fn)
+func (b *Local) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
+	return util.DefaultLoad(ctx, h, length, offset, b.openReader, consume)
 }
 
 func (b *Local) openReader(_ context.Context, h backend.Handle, length int, offset int64) (io.ReadCloser, error) {
@@ -222,20 +222,20 @@ func (b *Local) openReader(_ context.Context, h backend.Handle, length int, offs
 
 	fi, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // Preserve the stat failure; this read-only handle has no buffered writes.
 		return nil, err
 	}
 
 	size := fi.Size()
 	if size < offset+int64(length) {
-		_ = f.Close()
+		_ = f.Close() // Preserve the short-file failure; this read-only handle has no buffered writes.
 		return nil, errTooShort
 	}
 
 	if offset > 0 {
 		_, err = f.Seek(offset, 0)
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the seek failure; this read-only handle has no buffered writes.
 			return nil, err
 		}
 	}

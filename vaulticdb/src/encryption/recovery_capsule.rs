@@ -1,3 +1,5 @@
+//! Recovery capsule policies, shares, persistence, and key reconstruction.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -24,6 +26,7 @@ use slatedb::object_store::{
 use zeroize::Zeroizing;
 
 use super::envelope::providers::{KeyContext, KeyProvider};
+use crate::ids::{MemberId, RepositoryId};
 
 pub const CAPSULE_FORMAT: u32 = 2;
 pub const ROOT_KEY_BYTES: usize = 32;
@@ -50,7 +53,7 @@ pub struct RecoveryCapsule {
 pub struct CapsuleHeader {
     pub format: u32,
     pub logical_id: String,
-    pub repository_id: String,
+    pub repository_id: RepositoryId,
     pub generation: u64,
     pub root_key_version: u32,
     pub metadata_dek_version: u32,
@@ -73,7 +76,7 @@ pub enum PolicyIntent {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UnlockPolicy {
     Member {
-        member_id: String,
+        member_id: MemberId,
     },
     AnyOf {
         policies: Vec<UnlockPolicy>,
@@ -84,14 +87,14 @@ pub enum UnlockPolicy {
     Threshold {
         group_id: String,
         required: u8,
-        members: Vec<String>,
+        members: Vec<MemberId>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemberShare {
-    pub member_id: String,
+    pub member_id: MemberId,
     pub group_id: String,
     pub share_index: u8,
     pub threshold: u8,
@@ -173,7 +176,7 @@ pub struct RecoveredKeys {
 
 #[derive(Debug, Clone)]
 pub struct UnwrappedMemberShare {
-    pub member_id: String,
+    pub member_id: MemberId,
     pub share_index: u8,
     pub plaintext: Zeroizing<Vec<u8>>,
 }
@@ -198,7 +201,7 @@ pub enum MemberProtection<'a> {
 }
 
 pub struct CapsuleBuilder {
-    repository_id: String,
+    repository_id: RepositoryId,
     generation: u64,
     root_key_version: u32,
     metadata_dek_version: u32,
@@ -207,7 +210,7 @@ pub struct CapsuleBuilder {
 }
 
 impl CapsuleBuilder {
-    pub fn new(repository_id: impl Into<String>, generation: u64) -> Self {
+    pub fn new(repository_id: impl Into<RepositoryId>, generation: u64) -> Self {
         Self {
             repository_id: repository_id.into(),
             generation,
@@ -257,7 +260,7 @@ impl CapsuleBuilder {
         let policy = UnlockPolicy::Threshold {
             group_id: group_id.to_owned(),
             required,
-            members: member_ids.into_iter().collect(),
+            members: member_ids.into_iter().map(MemberId::from).collect(),
         };
         self.create_offline_policy(policy, credentials, metadata_dek, repository_master_key)
     }
@@ -278,7 +281,7 @@ impl CapsuleBuilder {
         let policy_member_ids = policy.member_ids()?;
         let credential_ids = credentials
             .iter()
-            .map(|(member_id, _)| (*member_id).to_owned())
+            .map(|(member_id, _)| MemberId::from(*member_id))
             .collect::<BTreeSet<_>>();
         if credential_ids.len() != credentials.len() || credential_ids != policy_member_ids {
             bail!("credentials must match policy members exactly");
@@ -359,7 +362,7 @@ impl CapsuleBuilder {
         let policy_member_ids = policy.member_ids()?;
         let protection_ids = protections
             .iter()
-            .map(|(member_id, _)| (*member_id).to_owned())
+            .map(|(member_id, _)| MemberId::from(*member_id))
             .collect::<BTreeSet<_>>();
         if protection_ids.len() != protections.len() || protection_ids != policy_member_ids {
             bail!("member protections must match policy members exactly");
@@ -648,7 +651,7 @@ impl RecoveryCapsule {
         self.validate()?;
         let mut shares = Vec::new();
         for member in &self.members {
-            let Some(credential) = credentials.get(&member.member_id) else {
+            let Some(credential) = credentials.get(member.member_id.as_str()) else {
                 continue;
             };
             if let Ok(share) = self.unwrap_offline_member(&member.member_id, credential) {
@@ -672,7 +675,7 @@ impl RecoveryCapsule {
         let plaintext = unwrap_offline_share(&self.header, member, credential)?;
         validate_shamir_share(plaintext.as_slice())?;
         Ok(UnwrappedMemberShare {
-            member_id: member_id.to_owned(),
+            member_id: member_id.into(),
             share_index: member.share_index,
             plaintext,
         })
@@ -697,8 +700,8 @@ impl RecoveryCapsule {
         let plaintext = provider
             .unwrap(
                 &KeyContext {
-                    repository_id: &self.header.repository_id,
-                    slot_id: &member.member_id,
+                    repository_id: self.header.repository_id.as_str(),
+                    slot_id: member.member_id.as_str(),
                     key_reference: &member.key_reference,
                     dek_version: self.header.root_key_version,
                     purpose: &purpose,
@@ -710,7 +713,7 @@ impl RecoveryCapsule {
         let plaintext = decode_external_share(&purpose, plaintext.as_slice())?;
         validate_shamir_share(plaintext.as_slice())?;
         Ok(UnwrappedMemberShare {
-            member_id: member_id.to_owned(),
+            member_id: member_id.into(),
             share_index: member.share_index,
             plaintext,
         })

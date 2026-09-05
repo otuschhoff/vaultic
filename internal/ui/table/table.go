@@ -51,6 +51,7 @@ func (t *Table) AddColumn(header, format string) {
 	t.columns = append(t.columns, header)
 	tmpl, err := template.New("template for " + header).Funcs(funcmap).Parse(format)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 
@@ -112,6 +113,8 @@ func printLine(w io.Writer, print func(io.Writer, string) error, sep string, dat
 }
 
 // Write prints the table to w.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (t *Table) Write(w io.Writer) error {
 	columns := len(t.templates)
 	if columns == 0 {

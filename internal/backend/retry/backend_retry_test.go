@@ -160,7 +160,7 @@ func TestBackendListRetryErrorFn(t *testing.T) {
 		return nil
 	})
 
-	if err != ErrTest {
+	if !errors.Is(err, ErrTest) {
 		t.Fatalf("wrong error returned, want %v, got %v", ErrTest, err)
 	}
 
@@ -209,7 +209,7 @@ func TestBackendListRetryErrorBackend(t *testing.T) {
 		return nil
 	})
 
-	if err != ErrBackendTest {
+	if !errors.Is(err, ErrBackendTest) {
 		t.Fatalf("wrong error returned, want %v, got %v", ErrBackendTest, err)
 	}
 
@@ -467,7 +467,7 @@ func TestBackendRetryPermanent(t *testing.T) {
 }
 
 func assertIsCanceled(t *testing.T, err error) {
-	test.Assert(t, err == context.Canceled, "got unexpected err %v", err)
+	test.Assert(t, errors.Is(err, context.Canceled), "got unexpected err %v", err)
 }
 
 func TestBackendCanceledContext(t *testing.T) {
@@ -590,7 +590,7 @@ func TestNotifyWithCancelError(t *testing.T) {
 	cancel()
 
 	err := retryNotifyErrorWithSuccess(operation, backoff.WithContext(&backoff.ZeroBackOff{}, ctx), notify, success)
-	test.Assert(t, err == context.Canceled, "wrong error message %v", err)
+	test.Assert(t, errors.Is(err, context.Canceled), "wrong error message %v", err)
 }
 
 type testClock struct {

@@ -179,7 +179,7 @@ func (r *Repository) listPack(ctx context.Context, id vaultic.ID, size int64) (p
 	if err != nil {
 		if r.cache != nil {
 			// ignore error as there is not much we can do here
-			_ = r.cache.Forget(h)
+			_ = r.cache.Forget(h) // Cache eviction cannot change the authoritative metadata-engine result.
 		}
 
 		// retry on error
@@ -454,7 +454,7 @@ func streamPackPart(
 		}
 
 		val, err := it.Next()
-		if err == errPackEOF {
+		if errors.Is(err, errPackEOF) {
 			break
 		} else if err != nil {
 			return err

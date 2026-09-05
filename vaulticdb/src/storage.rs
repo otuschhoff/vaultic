@@ -1,3 +1,5 @@
+//! SlateDB storage, object-store coordination, transactions, and generation state.
+
 use std::{
     collections::HashMap,
     ops::Bound::{Excluded, Unbounded},
@@ -36,6 +38,7 @@ use vaulticdb::encryption::{
     self,
     envelope::{self, EncryptionStatus, KeyManager},
 };
+use vaulticdb::ids::{Namespace, RepositoryId};
 
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
@@ -54,19 +57,19 @@ const GENERATION_DECISION_PREFIX: &str = "_vaultic/metadata-authority-decisions"
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GenerationAuthority {
-    pub format: u32,
-    pub repository_id: String,
-    pub decision: u64,
-    pub active_generation: u64,
-    pub namespace: String,
-    pub previous_generation: u64,
-    pub previous_namespace: String,
-    pub state: String,
-    pub report_sha256: String,
-    pub decided_at_ms: u64,
-    pub observation_until_ms: u64,
-    pub retired_generation: u64,
+pub(crate) struct GenerationAuthority {
+    pub(crate) format: u32,
+    pub(crate) repository_id: RepositoryId,
+    pub(crate) decision: u64,
+    pub(crate) active_generation: u64,
+    pub(crate) namespace: Namespace,
+    pub(crate) previous_generation: u64,
+    pub(crate) previous_namespace: Namespace,
+    pub(crate) state: String,
+    pub(crate) report_sha256: String,
+    pub(crate) decided_at_ms: u64,
+    pub(crate) observation_until_ms: u64,
+    pub(crate) retired_generation: u64,
 }
 
 struct TransactionSlot {
@@ -81,7 +84,7 @@ struct EncryptionPolicy {
     required: bool,
     algorithm: String,
     object_format: u32,
-    repository_id: String,
+    repository_id: RepositoryId,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,7 +96,7 @@ struct IdempotencyRecord {
     durable: bool,
 }
 
-pub struct Storage {
+pub(crate) struct Storage {
     database: RwLock<Database>,
     database_path: String,
     object_store: Arc<dyn ObjectStore>,
@@ -141,7 +144,7 @@ impl Database {
 }
 
 impl Storage {
-    pub async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
+    pub(crate) async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
         let (path, object_store) = object_store(repository_id, &config.object_store)?;
         let coordination_store = match &config.fencing_replica {
             Some(replica) => replicated_replica_store(
@@ -242,28 +245,28 @@ impl Storage {
         Ok(storage)
     }
 
-    pub fn broker_lease_monitor(&self) -> Option<(tokio::sync::watch::Receiver<bool>, u64)> {
+    pub(crate) fn broker_lease_monitor(&self) -> Option<(tokio::sync::watch::Receiver<bool>, u64)> {
         self.broker_lease
             .as_ref()
             .map(|lease| (lease.disconnected(), lease.expires_unix_ms))
     }
 
-    pub fn encryption_status(&self) -> &EncryptionStatus {
+    pub(crate) fn encryption_status(&self) -> &EncryptionStatus {
         &self.encryption
     }
 
-    pub async fn writer_status_epoch(&self) -> (bool, u64) {
+    pub(crate) async fn writer_status_epoch(&self) -> (bool, u64) {
         (
             matches!(&*self.database.read().await, Database::Writer(_)),
             self.writer_epoch.load(Ordering::Acquire),
         )
     }
 
-    pub fn last_durable_sequence(&self) -> u64 {
+    pub(crate) fn last_durable_sequence(&self) -> u64 {
         self.last_durable_sequence.load(Ordering::Acquire)
     }
 
-    pub fn key_manager(&self) -> Result<&Arc<KeyManager>, Status> {
+    pub(crate) fn key_manager(&self) -> Result<&Arc<KeyManager>, Status> {
         self.key_manager.as_ref().ok_or_else(|| {
             Status::failed_precondition("key management requires metadata encryption")
         })
@@ -289,7 +292,7 @@ impl Storage {
             required: true,
             algorithm: self.encryption.algorithm.to_owned(),
             object_format: 1,
-            repository_id: repository_id.to_owned(),
+            repository_id: repository_id.into(),
         };
         if let Some(value) = existing {
             let actual: EncryptionPolicy =
@@ -338,7 +341,7 @@ impl Storage {
             .context("persist metadata rebuild handoff")
     }
 
-    pub async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
+    pub(crate) async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
         if self.broker_lease.is_some() {
             return Err(Status::failed_precondition(
                 "repository master key is authoritative only in the recovery capsule",
@@ -354,7 +357,7 @@ impl Storage {
             .map(|value| value.map(|bytes| bytes.to_vec()))
     }
 
-    pub async fn store_master_key(&self, master_key: &[u8]) -> Result<(), Status> {
+    pub(crate) async fn store_master_key(&self, master_key: &[u8]) -> Result<(), Status> {
         if self.broker_lease.is_some() {
             return Err(Status::failed_precondition(
                 "master-key-in-DB is prohibited in brokered mode",
@@ -388,7 +391,10 @@ impl Storage {
             .map_err(storage_error)
     }
 
-    pub async fn record_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
+    pub(crate) async fn record_capsule_migration(
+        &self,
+        capsule_sha256: &str,
+    ) -> Result<(), Status> {
         if capsule_sha256.len() != 64
             || !capsule_sha256
                 .bytes()
@@ -422,7 +428,7 @@ impl Storage {
             .map_err(storage_error)
     }
 
-    pub async fn capsule_migration_status(
+    pub(crate) async fn capsule_migration_status(
         &self,
     ) -> Result<(Option<String>, Option<String>), Status> {
         let pending = self
@@ -440,7 +446,10 @@ impl Storage {
         Ok((pending, finalized))
     }
 
-    pub async fn finalize_capsule_migration(&self, capsule_sha256: &str) -> Result<(), Status> {
+    pub(crate) async fn finalize_capsule_migration(
+        &self,
+        capsule_sha256: &str,
+    ) -> Result<(), Status> {
         let pending = self.read_value(CAPSULE_MIGRATION_RECORD).await?;
         let Some(pending) = pending else {
             let finalized = self.read_value(CAPSULE_MIGRATION_FINALIZED_RECORD).await?;
@@ -471,7 +480,7 @@ impl Storage {
         db.flush().await.map_err(storage_error)
     }
 
-    pub async fn close(&self) -> Result<()> {
+    pub(crate) async fn close(&self) -> Result<()> {
         self.transactions.write().await.clear();
         let database = self.database.write().await;
         let was_writer = matches!(&*database, Database::Writer(_));
@@ -490,7 +499,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn demote(&self) -> Result<()> {
+    pub(crate) async fn demote(&self) -> Result<()> {
         if !self.transactions.read().await.is_empty() {
             bail!("active transactions prevent writer demotion")
         }
@@ -530,7 +539,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn promote(&self, takeover_epoch: Option<u64>) -> Result<u64> {
+    pub(crate) async fn promote(&self, takeover_epoch: Option<u64>) -> Result<u64> {
         let epoch = claim_writer_epoch(self.coordination_store.as_ref(), takeover_epoch)
             .await?
             .context("another VaulticDB instance acquired the next writer epoch")?;
@@ -555,11 +564,11 @@ impl Storage {
         Ok(epoch)
     }
 
-    pub async fn active_transactions(&self) -> usize {
+    pub(crate) async fn active_transactions(&self) -> usize {
         self.transactions.read().await.len()
     }
 
-    pub async fn refresh_writer_fence(&self) -> Result<u64> {
+    pub(crate) async fn refresh_writer_fence(&self) -> Result<u64> {
         let current = self.writer_epoch.load(Ordering::Acquire);
         let epoch = claim_writer_epoch(self.coordination_store.as_ref(), Some(current))
             .await?
@@ -568,7 +577,7 @@ impl Storage {
         Ok(epoch)
     }
 
-    pub async fn ensure_writer_fence(&self) -> Result<()> {
+    pub(crate) async fn ensure_writer_fence(&self) -> Result<()> {
         let current = self.writer_epoch.load(Ordering::Acquire);
         if current == 0
             || active_writer_epoch(self.coordination_store.as_ref()).await? != Some(current)
@@ -578,11 +587,14 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn mutations_allowed(&self, repository_id: &str) -> Result<bool> {
+    pub(crate) async fn mutations_allowed(&self, repository_id: &str) -> Result<bool> {
         Ok(self.generation_authority(repository_id).await?.state == "healthy")
     }
 
-    pub async fn generation_authority(&self, repository_id: &str) -> Result<GenerationAuthority> {
+    pub(crate) async fn generation_authority(
+        &self,
+        repository_id: &str,
+    ) -> Result<GenerationAuthority> {
         Ok(
             read_generation_authority(self.coordination_store.as_ref(), repository_id)
                 .await?
@@ -590,7 +602,7 @@ impl Storage {
         )
     }
 
-    pub async fn quarantine_generation(
+    pub(crate) async fn quarantine_generation(
         &self,
         repository_id: &str,
         expected_generation: u64,
@@ -620,12 +632,12 @@ impl Storage {
         Ok(authority)
     }
 
-    pub async fn activate_generation(
+    pub(crate) async fn activate_generation(
         &self,
         repository_id: &str,
         expected_generation: u64,
         candidate_generation: u64,
-        namespace: String,
+        namespace: Namespace,
         report_sha256: String,
         observation_window_ms: u64,
     ) -> Result<GenerationAuthority> {
@@ -641,7 +653,7 @@ impl Storage {
         let decided_at_ms = unix_time_ms()?;
         let authority = GenerationAuthority {
             format: 1,
-            repository_id: repository_id.to_owned(),
+            repository_id: repository_id.into(),
             decision: current
                 .decision
                 .checked_add(1)
@@ -662,7 +674,7 @@ impl Storage {
         Ok(authority)
     }
 
-    pub async fn verify_generation(
+    pub(crate) async fn verify_generation(
         &self,
         repository_id: &str,
         expected_decision: u64,
@@ -689,7 +701,7 @@ impl Storage {
         Ok(authority)
     }
 
-    pub async fn rollback_generation(
+    pub(crate) async fn rollback_generation(
         &self,
         repository_id: &str,
         expected_decision: u64,
@@ -709,7 +721,7 @@ impl Storage {
         let decided_at_ms = unix_time_ms()?;
         let authority = GenerationAuthority {
             format: 1,
-            repository_id: repository_id.to_owned(),
+            repository_id: repository_id.into(),
             decision: current
                 .decision
                 .checked_add(1)
@@ -730,7 +742,7 @@ impl Storage {
         Ok(authority)
     }
 
-    pub async fn retire_generation(
+    pub(crate) async fn retire_generation(
         &self,
         repository_id: &str,
         expected_decision: u64,
@@ -753,7 +765,7 @@ impl Storage {
             .checked_add(1)
             .context("generation decision overflow")?;
         authority.previous_generation = 0;
-        authority.previous_namespace.clear();
+        authority.previous_namespace = Namespace::default();
         authority.retired_generation = generation;
         authority.report_sha256 = report_sha256;
         authority.decided_at_ms = unix_time_ms()?;
@@ -778,7 +790,11 @@ impl Storage {
         }
     }
 
-    pub async fn get(&self, key: &[u8], transaction_id: &str) -> Result<GetResponse, Status> {
+    pub(crate) async fn get(
+        &self,
+        key: &[u8],
+        transaction_id: &str,
+    ) -> Result<GetResponse, Status> {
         validate_key(key)?;
         let value = if transaction_id.is_empty() {
             self.read_value(key).await?
@@ -806,7 +822,7 @@ impl Storage {
         })
     }
 
-    pub async fn scan(
+    pub(crate) async fn scan(
         &self,
         prefix: &[u8],
         after_key: &[u8],
@@ -843,7 +859,7 @@ impl Storage {
         collect_page(&mut iterator, page_size).await
     }
 
-    pub async fn write_batch(&self, request: &WriteBatchRequest) -> Result<bool, Status> {
+    pub(crate) async fn write_batch(&self, request: &WriteBatchRequest) -> Result<bool, Status> {
         validate_mutations(request)?;
         self.assert_current_writer_epoch().await?;
         if request.transaction_id.is_empty() {
@@ -915,7 +931,7 @@ impl Storage {
         Ok(false)
     }
 
-    pub async fn begin(&self) -> Result<String, Status> {
+    pub(crate) async fn begin(&self) -> Result<String, Status> {
         self.assert_current_writer_epoch().await?;
         let mut transactions = self.transactions.write().await;
         let now = unix_time_ms().map_err(storage_status)?;
@@ -955,7 +971,11 @@ impl Storage {
         Ok(id)
     }
 
-    pub async fn commit(&self, transaction_id: &str, idempotency_key: &str) -> Result<(), Status> {
+    pub(crate) async fn commit(
+        &self,
+        transaction_id: &str,
+        idempotency_key: &str,
+    ) -> Result<(), Status> {
         self.assert_current_writer_epoch().await?;
         let request_digest = transaction_digest(transaction_id);
         let record_key = idempotency_record_key(idempotency_key)?;
@@ -1001,7 +1021,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn rollback(&self, transaction_id: &str) -> Result<(), Status> {
+    pub(crate) async fn rollback(&self, transaction_id: &str) -> Result<(), Status> {
         let transaction = self.remove_transaction(transaction_id).await?;
         let transaction = transaction
             .transaction

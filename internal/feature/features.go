@@ -42,6 +42,7 @@ func getDefault(phase state) bool {
 	case Beta, Stable:
 		return true
 	default:
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unknown feature phase")
 	}
 }
@@ -96,6 +97,7 @@ func (f *FlagSet) Apply(flags string, logWarning func(string)) error {
 		case Deprecated:
 			logWarning(fmt.Sprintf("feature flag %q is always disabled and will be removed in a future release", fname))
 		default:
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("unknown feature phase")
 		}
 	}
@@ -106,6 +108,7 @@ func (f *FlagSet) Apply(flags string, logWarning func(string)) error {
 func (f *FlagSet) Enabled(name FlagName) bool {
 	isEnabled, ok := f.enabled[name]
 	if !ok {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(fmt.Sprintf("unknown feature flag %v", name))
 	}
 

@@ -14,17 +14,17 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunLsWithOpts(t testing.TB, gopts global.Options, opts LsOptions, args []string) []byte {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.Quiet = true
-		return runLs(context.TODO(), opts, gopts, args, gopts.Term)
+func testRunLsWithOpts(t testing.TB, globalOptions global.Options, options lsOptions, args []string) []byte {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.Quiet = true
+		return runLs(context.TODO(), options, globalOptions, args, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 	return buf.Bytes()
 }
 
-func testRunLs(t testing.TB, gopts global.Options, snapshotID string) []string {
-	out := testRunLsWithOpts(t, gopts, LsOptions{}, []string{snapshotID})
+func testRunLs(t testing.TB, globalOptions global.Options, snapshotID string) []string {
+	out := testRunLsWithOpts(t, globalOptions, lsOptions{}, []string{snapshotID})
 	return strings.Split(string(out), "\n")
 }
 
@@ -41,16 +41,16 @@ func TestRunLsNcdu(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 	// backup such that there are multiple toplevel elements
-	testRunBackup(t, env.testdata+"/0", []string{"."}, opts, env.gopts)
+	testRunBackup(t, env.testdata+"/0", []string{"."}, options, env.globalOptions)
 
 	for _, paths := range [][]string{
 		{"latest"},
 		{"latest", "/0"},
 		{"latest", "/0", "/0/9"},
 	} {
-		ncdu := testRunLsWithOpts(t, env.gopts, LsOptions{Ncdu: true}, paths)
+		ncdu := testRunLsWithOpts(t, env.globalOptions, lsOptions{Ncdu: true}, paths)
 		assertIsValidJSON(t, ncdu)
 	}
 }
@@ -62,8 +62,8 @@ func TestRunLsSort(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
-	testRunBackup(t, env.testdata+"/0", []string{"for_cmd_ls"}, opts, env.gopts)
+	options := backupOptions{}
+	testRunBackup(t, env.testdata+"/0", []string{"for_cmd_ls"}, options, env.globalOptions)
 
 	for _, test := range []struct {
 		mode     SortMode
@@ -100,7 +100,7 @@ func TestRunLsSort(t *testing.T) {
 			},
 		},
 	} {
-		out := testRunLsWithOpts(t, env.gopts, LsOptions{Sort: test.mode}, []string{"latest"})
+		out := testRunLsWithOpts(t, env.globalOptions, lsOptions{Sort: test.mode}, []string{"latest"})
 		fileList := strings.Split(string(out), "\n")
 		rtest.Equals(t, test.expected, fileList, fmt.Sprintf("mismatch for mode %v", test.mode))
 	}
@@ -120,13 +120,13 @@ func TestRunLsJson(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
-	testRunBackup(t, env.testdata, []string{"0/for_cmd_ls"}, opts, env.gopts)
-	snapshotIDs := testListSnapshots(t, env.gopts, 1)
+	options := backupOptions{}
+	testRunBackup(t, env.testdata, []string{"0/for_cmd_ls"}, options, env.globalOptions)
+	snapshotIDs := testListSnapshots(t, env.globalOptions, 1)
 
-	env.gopts.Quiet = true
-	env.gopts.JSON = true
-	buf := testRunLsWithOpts(t, env.gopts, LsOptions{}, []string{"latest"})
+	env.globalOptions.Quiet = true
+	env.globalOptions.JSON = true
+	buf := testRunLsWithOpts(t, env.globalOptions, lsOptions{}, []string{"latest"})
 	byteLines := bytes.Split(buf, []byte{'\n'})
 
 	// partial copy of snapshot structure from cmd_ls

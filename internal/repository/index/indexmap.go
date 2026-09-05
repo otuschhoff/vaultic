@@ -178,7 +178,7 @@ func (m *indexMap) hash(id vaultic.ID) uint {
 	// much easier than breaking the whole algorithm.
 	mh := maphash.Hash{}
 	mh.SetSeed(m.mh.Seed())
-	_, _ = mh.Write(id[:])
+	_, _ = mh.Write(id[:]) // hash.Hash writes are specified to return a nil error.
 	h := uint(mh.Sum64())
 	return h & uint(len(m.buckets)-1)
 }
@@ -196,6 +196,7 @@ func (m *indexMap) len() uint { return m.numentries }
 func (m *indexMap) newEntry() (*indexEntry, uint) {
 	entry, idx := m.blockList.Alloc()
 	if idx != bloomCleanID(idx) {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("repository index size overflow")
 	}
 	return entry, idx
@@ -291,6 +292,7 @@ func (h *hashedArrayTree) index(pos uint) (idx uint, subIdx uint) {
 
 func (h *hashedArrayTree) Ref(pos uint) *indexEntry {
 	if pos >= h.size {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("array index out of bounds")
 	}
 

@@ -54,6 +54,7 @@ func CopyBlobs(
 	return repack(ctx, repo, dstRepo, dstUploader, packs, keepBlobs, p, logf)
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func repack(
 	ctx context.Context,
 	repo *Repository,

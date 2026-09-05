@@ -9,9 +9,9 @@ import (
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
-func testRunTag(t testing.TB, opts TagOptions, gopts global.Options) {
-	rtest.OK(t, withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runTag(context.TODO(), opts, gopts, gopts.Term, []string{})
+func testRunTag(t testing.TB, options tagOptions, globalOptions global.Options) {
+	rtest.OK(t, withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runTag(context.TODO(), options, globalOptions, globalOptions.Term, []string{})
 	}))
 }
 
@@ -20,9 +20,9 @@ func TestTag(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	testRunCheck(t, env.gopts)
-	newest, _ := testRunSnapshots(t, env.gopts)
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	newest, _ := testRunSnapshots(t, env.globalOptions)
 	if newest == nil {
 		t.Fatal("expected a new backup, got nil")
 	}
@@ -33,9 +33,9 @@ func TestTag(t *testing.T) {
 		"expected original ID to be nil, got %v", newest.Original)
 	originalID := *newest.ID
 
-	testRunTag(t, TagOptions{SetTags: data.TagLists{[]string{"NL"}}}, env.gopts)
-	testRunCheck(t, env.gopts)
-	newest, _ = testRunSnapshots(t, env.gopts)
+	testRunTag(t, tagOptions{SetTags: data.TagLists{[]string{"NL"}}}, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	newest, _ = testRunSnapshots(t, env.globalOptions)
 	if newest == nil {
 		t.Fatal("expected a backup, got nil")
 	}
@@ -45,9 +45,9 @@ func TestTag(t *testing.T) {
 	rtest.Assert(t, *newest.Original == originalID,
 		"expected original ID to be set to the first snapshot id")
 
-	testRunTag(t, TagOptions{AddTags: data.TagLists{[]string{"CH"}}}, env.gopts)
-	testRunCheck(t, env.gopts)
-	newest, _ = testRunSnapshots(t, env.gopts)
+	testRunTag(t, tagOptions{AddTags: data.TagLists{[]string{"CH"}}}, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	newest, _ = testRunSnapshots(t, env.globalOptions)
 	if newest == nil {
 		t.Fatal("expected a backup, got nil")
 	}
@@ -57,9 +57,9 @@ func TestTag(t *testing.T) {
 	rtest.Assert(t, *newest.Original == originalID,
 		"expected original ID to be set to the first snapshot id")
 
-	testRunTag(t, TagOptions{RemoveTags: data.TagLists{[]string{"NL"}}}, env.gopts)
-	testRunCheck(t, env.gopts)
-	newest, _ = testRunSnapshots(t, env.gopts)
+	testRunTag(t, tagOptions{RemoveTags: data.TagLists{[]string{"NL"}}}, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	newest, _ = testRunSnapshots(t, env.globalOptions)
 	if newest == nil {
 		t.Fatal("expected a backup, got nil")
 	}
@@ -69,10 +69,10 @@ func TestTag(t *testing.T) {
 	rtest.Assert(t, *newest.Original == originalID,
 		"expected original ID to be set to the first snapshot id")
 
-	testRunTag(t, TagOptions{AddTags: data.TagLists{[]string{"US", "RU"}}}, env.gopts)
-	testRunTag(t, TagOptions{RemoveTags: data.TagLists{[]string{"CH", "US", "RU"}}}, env.gopts)
-	testRunCheck(t, env.gopts)
-	newest, _ = testRunSnapshots(t, env.gopts)
+	testRunTag(t, tagOptions{AddTags: data.TagLists{[]string{"US", "RU"}}}, env.globalOptions)
+	testRunTag(t, tagOptions{RemoveTags: data.TagLists{[]string{"CH", "US", "RU"}}}, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	newest, _ = testRunSnapshots(t, env.globalOptions)
 	if newest == nil {
 		t.Fatal("expected a backup, got nil")
 	}
@@ -83,9 +83,9 @@ func TestTag(t *testing.T) {
 		"expected original ID to be set to the first snapshot id")
 
 	// Check special case of removing all tags.
-	testRunTag(t, TagOptions{SetTags: data.TagLists{[]string{""}}}, env.gopts)
-	testRunCheck(t, env.gopts)
-	newest, _ = testRunSnapshots(t, env.gopts)
+	testRunTag(t, tagOptions{SetTags: data.TagLists{[]string{""}}}, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	newest, _ = testRunSnapshots(t, env.globalOptions)
 	if newest == nil {
 		t.Fatal("expected a backup, got nil")
 	}

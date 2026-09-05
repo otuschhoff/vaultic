@@ -2,11 +2,10 @@ package main
 
 import "github.com/otuschhoff/vaultic/cmd/vaultic/querycmd"
 
-type FindOptions = querycmd.FindOptions
-type LsOptions = querycmd.LsOptions
-type SnapshotOptions = querycmd.SnapshotOptions
+type findOptions = querycmd.FindConfig
+type lsOptions = querycmd.LsConfig
+type snapshotOptions = querycmd.SnapshotConfig
 type SnapshotGroup = querycmd.SnapshotGroup
-type StatsOptions = querycmd.StatsOptions
 type SortMode = querycmd.SortMode
 
 const (

@@ -19,6 +19,7 @@ func RepairIndex(ctx context.Context, repo *Repository, opts RepairIndexOptions,
 	packSizeFromIndex := make(map[vaultic.ID]int64)
 	removePacks := vaultic.NewIDSet()
 
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if opts.ReadAllPacks {
 		// get list of old index files but start with empty index
 		err := repo.List(ctx, vaultic.IndexFile, func(id vaultic.ID, _ int64) error {

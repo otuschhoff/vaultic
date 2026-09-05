@@ -89,6 +89,7 @@ func Transport(opts TransportOptions) (http.RoundTripper, error) {
 	// ensure that http2 connections are closed if they are broken
 	h2, err := http2.ConfigureTransports(tr)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) {

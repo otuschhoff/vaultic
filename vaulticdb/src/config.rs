@@ -1,3 +1,5 @@
+//! Environment-backed daemon, transport, storage, and encryption configuration.
+
 use std::{
     collections::HashMap,
     env,
@@ -17,6 +19,7 @@ use crate::storage::{
     BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, StorageConfig,
 };
 use vaulticdb::encryption::envelope::{EncryptionConfig, EncryptionMode, ProviderCredentials};
+use vaulticdb::ids::RepositoryId;
 
 const DEFAULT_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
 
@@ -32,7 +35,7 @@ pub(crate) enum TransportConfig {
 
 #[derive(Debug)]
 pub(crate) struct Config {
-    pub(crate) repository_id: String,
+    pub(crate) repository_id: RepositoryId,
     pub(crate) daemon_id: String,
     pub(crate) auth_token: Option<Zeroizing<String>>,
     pub(crate) transport: TransportConfig,
@@ -49,10 +52,12 @@ impl Config {
 
     pub(crate) fn from_env() -> Result<Self> {
         let auth_token = read_auth_token()?;
-        let repository_id = env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default();
+        let repository_id =
+            RepositoryId::new(env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default());
         let runtime_dir =
             env::var("VAULTICDB_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticdb".to_owned());
-        let transport = transport_from_env(&repository_id, &runtime_dir, auth_token.is_some())?;
+        let transport =
+            transport_from_env(repository_id.as_str(), &runtime_dir, auth_token.is_some())?;
         let storage = storage_from_env()?;
         Ok(Self {
             repository_id,

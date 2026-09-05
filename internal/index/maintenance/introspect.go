@@ -189,6 +189,7 @@ func validateStatsOptions(options StatsOptions) error {
 	return nil
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func statsFromAggregates(ctx context.Context, store Store, options StatsOptions, result *StatsResult) error {
 	all, found, err := readAggregate(ctx, store, schema.PackAggregateKey(schema.AggregateAll))
 	if err != nil {
@@ -235,7 +236,7 @@ func statsFromAggregates(ctx context.Context, store Store, options StatsOptions,
 	}
 	// The type dimension is the only one that can report mixed and unknown
 	// counts without a scan.
-	for kind, target := range map[schema.AggregateKind]*uint64{
+	for kind, target := range map[schema.AggregateKind]*uint64{ //nolint:exhaustive // Only mixed and unknown counts populate these fields.
 		schema.AggregateMixed: &result.MixedTypePacks, schema.AggregateUnknown: &result.UnknownTypePacks,
 	} {
 		aggregate, ok, readErr := readAggregate(ctx, store, schema.PackAggregateKey(kind))
@@ -328,18 +329,6 @@ func packMatchesStatsFilter(record schema.PackRecord, placements placementSet, o
 	return true
 }
 
-func statsDimensionKey(dimension string, record schema.PackRecord) string {
-	switch dimension {
-	case "tier":
-		return normalizedTier(record).String()
-	case "type":
-		return packTypeName(record.Type)
-	case "state":
-		return lifecycleName(record.Lifecycle)
-	}
-	return "unknown"
-}
-
 func accumulateStatsGroup(group *StatsGroup, record schema.PackRecord) {
 	group.PackCount++
 	group.PhysicalSize += record.PhysicalSize
@@ -362,6 +351,8 @@ func countPackFacts(record schema.PackRecord, result *StatsResult) {
 		result.UnknownTypePacks++
 	case schema.PackMixed:
 		result.MixedTypePacks++
+	default:
+		// Data and tree packs need no exceptional-type counter.
 	}
 	if record.RetentionSource == 0 || record.RetentionSource == schema.RetentionUnknown {
 		result.RetentionUnknownPacks++
@@ -923,8 +914,9 @@ func packTypeName(value schema.PackType) string {
 		return "tree"
 	case schema.PackMixed:
 		return "mixed"
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }
 
 func parsePackTypeName(name string) schema.PackType {
@@ -996,8 +988,9 @@ func retentionSourceName(value schema.RetentionSource) string {
 		return "config"
 	case schema.RetentionBackend:
 		return "backend"
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }
 
 func aggregateKindName(kind schema.AggregateKind) string {
@@ -1010,6 +1003,8 @@ func aggregateKindName(kind schema.AggregateKind) string {
 		return "mixed"
 	case schema.AggregateUnknown:
 		return "unknown"
+	case schema.AggregateAll:
+		return "all"
 	}
 	return "all"
 }

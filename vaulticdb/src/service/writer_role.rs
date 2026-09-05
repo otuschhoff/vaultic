@@ -1,3 +1,5 @@
+//! Writer-role status, promotion, demotion, and idle-yield handlers.
+
 use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};

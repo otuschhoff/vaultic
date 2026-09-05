@@ -26,7 +26,7 @@ import (
 )
 
 func NewLsCommand(globalOptions *global.Options) *cobra.Command {
-	var opts LsOptions
+	var options lsOptions
 
 	cmd := &cobra.Command{
 		Use:   "ls [flags] snapshotID [dir...]",
@@ -63,19 +63,19 @@ Exit status is 12 if the password is incorrect.
 		DisableAutoGenTag: true,
 		GroupID:           "default",
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLs(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runLs(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// LsOptions collects all options for the ls command.
-type LsOptions struct {
+// lsOptions collects all options for the ls command.
+type lsOptions struct {
 	ListLong bool
 	data.SnapshotFilter
 	Recursive     bool
@@ -85,14 +85,14 @@ type LsOptions struct {
 	Reverse       bool
 }
 
-func (opts *LsOptions) AddFlags(f *pflag.FlagSet) {
-	initSingleSnapshotFilter(f, &opts.SnapshotFilter)
-	f.BoolVarP(&opts.ListLong, "long", "l", false, "use a long listing format showing size and mode")
-	f.BoolVar(&opts.Recursive, "recursive", false, "include files in subfolders of the listed directories")
-	f.BoolVar(&opts.HumanReadable, "human-readable", false, "print sizes in human readable format")
-	f.BoolVar(&opts.Ncdu, "ncdu", false, "output NCDU export format (pipe into 'ncdu -f -')")
-	f.VarP(&opts.Sort, "sort", "s", "sort output by (name|size|time=mtime|atime|ctime|extension)")
-	f.BoolVar(&opts.Reverse, "reverse", false, "reverse sorted output")
+func (options *lsOptions) AddFlags(f *pflag.FlagSet) {
+	initSingleSnapshotFilter(f, &options.SnapshotFilter)
+	f.BoolVarP(&options.ListLong, "long", "l", false, "use a long listing format showing size and mode")
+	f.BoolVar(&options.Recursive, "recursive", false, "include files in subfolders of the listed directories")
+	f.BoolVar(&options.HumanReadable, "human-readable", false, "print sizes in human readable format")
+	f.BoolVar(&options.Ncdu, "ncdu", false, "output NCDU export format (pipe into 'ncdu -f -')")
+	f.VarP(&options.Sort, "sort", "s", "sort output by (name|size|time=mtime|atime|ctime|extension)")
+	f.BoolVar(&options.Reverse, "reverse", false, "reverse sorted output")
 }
 
 type lsPrinter interface {
@@ -386,14 +386,14 @@ func (w lsWalker) leaveDir(path string) error {
 	return w.printer.LeaveDir(path)
 }
 
-func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	termPrinter := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	paths, err := validateLsOptions(opts, gopts, args)
+func runLs(ctx context.Context, options lsOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	termPrinter := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	paths, err := validateLsOptions(options, globalOptions, args)
 	if err != nil {
 		return err
 	}
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, termPrinter)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, termPrinter)
 	if err != nil {
 		return err
 	}
@@ -408,9 +408,9 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 		return err
 	}
 
-	printer := newLsPrinter(opts, gopts, termPrinter, paths)
+	printer := newLsPrinter(options, globalOptions, termPrinter, paths)
 
-	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, snapshotLister, repo, args[0])
+	sn, subfolder, err := options.SnapshotFilter.FindLatest(ctx, snapshotLister, repo, args[0])
 	if err != nil {
 		return err
 	}
@@ -424,7 +424,7 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 		return err
 	}
 
-	walk := lsWalker{printer: printer, paths: paths, recursive: opts.Recursive}
+	walk := lsWalker{printer: printer, paths: paths, recursive: options.Recursive}
 	err = walker.Walk(ctx, repo, *sn.Tree, walker.WalkVisitor{
 		ProcessNode: walk.processNode,
 		LeaveDir:    walk.leaveDir,
@@ -437,17 +437,17 @@ func runLs(ctx context.Context, opts LsOptions, gopts global.Options, args []str
 	return printer.Close()
 }
 
-func validateLsOptions(opts LsOptions, gopts global.Options, args []string) (lsPathFilter, error) {
+func validateLsOptions(options lsOptions, globalOptions global.Options, args []string) (lsPathFilter, error) {
 	if len(args) == 0 {
 		return nil, errors.Fatal("no snapshot ID specified, specify snapshot ID or use special ID 'latest'")
 	}
-	if opts.Ncdu && gopts.JSON {
+	if options.Ncdu && globalOptions.JSON {
 		return nil, errors.Fatal("only either '--json' or '--ncdu' can be specified")
 	}
-	if opts.Sort != SortModeName && opts.Ncdu {
+	if options.Sort != SortModeName && options.Ncdu {
 		return nil, errors.Fatal("--sort and --ncdu are mutually exclusive")
 	}
-	if opts.Reverse && opts.Ncdu {
+	if options.Reverse && options.Ncdu {
 		return nil, errors.Fatal("--reverse and --ncdu are mutually exclusive")
 	}
 	paths := lsPathFilter(args[1:])
@@ -459,25 +459,25 @@ func validateLsOptions(opts LsOptions, gopts global.Options, args []string) (lsP
 	return paths, nil
 }
 
-func newLsPrinter(opts LsOptions, gopts global.Options, termPrinter interface {
+func newLsPrinter(options lsOptions, globalOptions global.Options, termPrinter interface {
 	P(msg string, args ...any)
 	S(msg string, args ...any)
 }, paths lsPathFilter) lsPrinter {
 	var printer lsPrinter
-	if gopts.JSON {
-		printer = &jsonLsPrinter{enc: json.NewEncoder(gopts.Term.OutputWriter())}
-	} else if opts.Ncdu {
-		printer = &ncduLsPrinter{out: gopts.Term.OutputWriter()}
+	if globalOptions.JSON {
+		printer = &jsonLsPrinter{enc: json.NewEncoder(globalOptions.Term.OutputWriter())}
+	} else if options.Ncdu {
+		printer = &ncduLsPrinter{out: globalOptions.Term.OutputWriter()}
 	} else {
 		printer = &textLsPrinter{
 			dirs:          paths,
-			ListLong:      opts.ListLong,
-			HumanReadable: opts.HumanReadable,
+			ListLong:      options.ListLong,
+			HumanReadable: options.HumanReadable,
 			termPrinter:   termPrinter,
 		}
 	}
-	if opts.Sort != SortModeName || opts.Reverse {
-		return &sortedPrinter{printer: printer, sortMode: opts.Sort, reverse: opts.Reverse}
+	if options.Sort != SortModeName || options.Reverse {
+		return &sortedPrinter{printer: printer, sortMode: options.Sort, reverse: options.Reverse}
 	}
 	return printer
 }

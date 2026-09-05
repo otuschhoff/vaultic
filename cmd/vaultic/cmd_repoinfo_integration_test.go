@@ -12,13 +12,13 @@ func TestRepoInfo(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	env.gopts.BackendTestHook = nil
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	env.globalOptions.BackendTestHook = nil
 
 	var result repoInfo
-	buf, err := withCaptureStdout(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = true
-		return runRepoInfo(ctx, gopts, gopts.Term)
+	buf, err := withCaptureStdout(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = true
+		return runRepoInfo(ctx, globalOptions, globalOptions.Term)
 	})
 	if err != nil {
 		t.Fatal(err)

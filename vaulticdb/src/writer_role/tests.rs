@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Writer-role state machine tests.
+
     use super::*;
 
     #[test]

@@ -71,6 +71,7 @@ func Load(names []string) (*Profile, error) {
 	return p, nil
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (p *Profile) load(path string, stack []string) error {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -115,6 +116,7 @@ func (p *Profile) load(path string, stack []string) error {
 				return fmt.Errorf("profile %q: %w", path, err)
 			}
 		}
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if name == "global" {
 			if value, ok := section["group-by"]; ok {
 				for _, command := range []string{"backup", "forget", "snapshots"} {

@@ -147,302 +147,323 @@ type Options struct {
 	compressionFromEnv bool
 }
 
-func (opts *Options) AddFlags(f *pflag.FlagSet) {
-	f.StringSliceVarP(&opts.UseProfiles, "use-profile", "P", nil, "load TOML `profile` (repeatable; default: vaultic.toml)")
-	f.StringVarP(&opts.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $VAULTIC_REPOSITORY)")
-	f.StringVarP(&opts.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)")
-	f.StringVar(&opts.BootstrapProfile, "bootstrap-profile", "", "credential-free bootstrap topology profile (default: $VAULTIC_BOOTSTRAP_PROFILE)")
-	f.StringVarP(&opts.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
-	f.StringVarP(&opts.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
+func (globalOptions *Options) AddFlags(f *pflag.FlagSet) {
+	globalOptions.addRepositoryAccessFlags(f)
+
+	f.StringVar(&globalOptions.RepoHot, "repo-hot", "", "hot part of a hot/cold `repository` (cold storage; default: $VAULTIC_REPO_HOT)")
+	f.StringVar(
+		&globalOptions.WarmUpCommand,
+		"warm-up-command",
+		"",
+		"warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)",
+	)
+	f.IntVar(
+		&globalOptions.WarmUpBatch,
+		"warm-up-batch",
+		1,
+		"warm-up `batch` size: packs per %ids invocation or parallel %id invocations (default: $VAULTIC_WARM_UP_BATCH)",
+	)
+	f.DurationVar(&globalOptions.WarmUpWait, "warm-up-wait", 0, "max `duration` to wait for warm-up to take effect (default: $VAULTIC_WARM_UP_WAIT)")
+	f.StringVar(&globalOptions.WarmUpWaitCommand, "warm-up-wait-command", "", "`command` to wait for warmed-up data (default: $VAULTIC_WARM_UP_WAIT_COMMAND)")
+	f.BoolVarP(&globalOptions.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
+	f.StringVar(&globalOptions.LogFile, "log-file", env.Get("LOG_FILE"), "write library log messages to `file` (default: $VAULTIC_LOG_FILE)")
+	f.StringVar(&globalOptions.LogLevel, "log-level", env.Get("LOG_LEVEL"), "minimum log `level` (debug, info, warn, error; default: $VAULTIC_LOG_LEVEL)")
+	f.BoolVar(&globalOptions.NoProgress, "no-progress", false, "disable live progress output")
+	f.DurationVar(&globalOptions.ProgressInterval, "progress-interval", 0, "refresh live progress every `duration` (default: $VAULTIC_PROGRESS_INTERVAL)")
+	// use empty parameter name as `-v, --verbose n` instead of the correct `--verbose=n` is confusing
+	f.CountVarP(&globalOptions.Verbose, "verbose", "v", "be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)")
+	f.BoolVar(&globalOptions.NoLock, "no-lock", false, "do not lock the repository, this allows some operations on read-only repositories")
+	f.DurationVar(
+		&globalOptions.RetryLock, "retry-lock", 0,
+		"retry to lock the repository if it is already locked, takes a value like 5m or 2h (default: no retries)",
+	)
+	f.BoolVarP(&globalOptions.JSON, "json", "", false, "set output mode to JSON for commands that support it")
+	f.StringVar(&globalOptions.CacheDir, "cache-dir", "", "set the cache `directory`. (default: use system default cache directory)")
+	f.BoolVar(&globalOptions.NoCache, "no-cache", false, "do not use a local cache")
+	f.StringSliceVar(
+		&globalOptions.RootCertFilenames, "cacert", nil,
+		"`file` to load root certificates from (default: use system certificates or $VAULTIC_CACERT)",
+	)
+	f.StringVar(
+		&globalOptions.TLSClientCertKeyFilename,
+		"tls-client-cert",
+		"",
+		"path to a `file` containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)",
+	)
+	f.BoolVar(
+		&globalOptions.InsecureNoPassword,
+		"insecure-no-password",
+		false,
+		"use an empty password for the repository, must be passed to every vaultic command (insecure)",
+	)
+	f.BoolVar(&globalOptions.InsecureTLS, "insecure-tls", false, "skip TLS certificate verification when connecting to the repository (insecure)")
+	f.BoolVar(&globalOptions.CleanupCache, "cleanup-cache", false, "auto remove old cache directories")
+	const compressionFlag = "compression"
+	f.Var(
+		&globalOptions.Compression,
+		compressionFlag,
+		"compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)",
+	)
+	f.BoolVar(&globalOptions.NoExtraVerify, "no-extra-verify", false, "skip additional verification of data before upload (see documentation)")
+	globalOptions.addTelemetryFlags(f)
+	globalOptions.noExtraVerifyFlag = f.Lookup("no-extra-verify")
+	f.IntVar(&globalOptions.Limits.UploadKb, "limit-upload", 0, "limits uploads to a maximum `rate` in KiB/s. (default: unlimited)")
+	f.IntVar(&globalOptions.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
+	const packSizeFlag = "pack-size"
+	f.UintVar(&globalOptions.PackSize, packSizeFlag, 0, "set target pack `size` in MiB, created pack files may be larger (default: $VAULTIC_PACK_SIZE)")
+	f.UintVar(&globalOptions.TreePackSize, "tree-pack-size", 0, "set target tree pack size in MiB (profile/runtime override)")
+	f.UintVar(&globalOptions.DataPackSize, "data-pack-size", 0, "set target data pack size in MiB (profile/runtime override)")
+	f.StringSliceVarP(&globalOptions.Options, "option", "o", []string{}, "set extended option (`key=value`, can be specified multiple times)")
+	f.StringVar(&globalOptions.HTTPUserAgent, "http-user-agent", "", "set a http user agent for outgoing http requests")
+	f.DurationVar(&globalOptions.StuckRequestTimeout, "stuck-request-timeout", 5*time.Minute, "`duration` after which to retry stuck requests")
+
+	globalOptions.applyEnvironment(f, packSizeFlag, compressionFlag)
+}
+
+func (globalOptions *Options) addRepositoryAccessFlags(f *pflag.FlagSet) {
+	f.StringSliceVarP(&globalOptions.UseProfiles, "use-profile", "P", nil, "load TOML `profile` (repeatable; default: vaultic.toml)")
+	f.StringVarP(&globalOptions.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $VAULTIC_REPOSITORY)")
+	f.StringVarP(&globalOptions.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)")
+	f.StringVar(&globalOptions.BootstrapProfile, "bootstrap-profile", "", "credential-free bootstrap topology profile (default: $VAULTIC_BOOTSTRAP_PROFILE)")
+	f.StringVarP(&globalOptions.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
+	f.StringVarP(&globalOptions.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
 	f.StringVarP(
-		&opts.PasswordCommand,
+		&globalOptions.PasswordCommand,
 		"password-command",
 		"",
 		"",
 		"shell `command` to obtain the repository password from (default: $VAULTIC_PASSWORD_COMMAND)",
 	)
 	f.StringVar(
-		&opts.AzureKeyVaultURL,
+		&globalOptions.AzureKeyVaultURL,
 		"azure-key-vault-url",
 		"",
 		"Azure Key Vault `URL` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_URL)",
 	)
 	f.StringVar(
-		&opts.AzureKeyVaultSecret,
+		&globalOptions.AzureKeyVaultSecret,
 		"azure-key-vault-secret",
 		"",
 		"Azure Key Vault secret `name` containing the repository passphrase (default: $VAULTIC_AZURE_KEY_VAULT_SECRET)",
 	)
 	f.StringVar(
-		&opts.AzureKeyVaultSecretVersion,
+		&globalOptions.AzureKeyVaultSecretVersion,
 		"azure-key-vault-secret-version",
 		"",
 		"optional Azure Key Vault secret `version` (default: $VAULTIC_AZURE_KEY_VAULT_SECRET_VERSION)",
 	)
 	f.DurationVar(
-		&opts.AzureKeyVaultTimeout,
+		&globalOptions.AzureKeyVaultTimeout,
 		"azure-key-vault-timeout",
 		30*time.Second,
 		"startup SecretGet `timeout` (default: $VAULTIC_AZURE_KEY_VAULT_TIMEOUT or 30s)",
 	)
 	f.StringVar(
-		&opts.MasterKey,
+		&globalOptions.MasterKey,
 		"key",
 		"",
 		"master `key` (base64-encoded JSON) to open the repository directly, bypassing password keys (default: $VAULTIC_KEY)",
 	)
 	f.StringVar(
-		&opts.MasterKeyFile,
+		&globalOptions.MasterKeyFile,
 		"key-file",
 		"",
 		"`file` containing the master key (base64-encoded JSON) to open the repository directly (default: $VAULTIC_KEY_FILE)",
 	)
-	f.StringVar(&opts.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
-	f.BoolVar(&opts.MetadataKeyInDB, "metadata-key-in-db", false, "unlock the repository master key from encrypted SlateDB metadata")
-	f.StringVar(&opts.MetadataDaemonSocket, "metadata-daemon-socket", "", "private vaulticdb Unix socket for key-in-DB unlock")
-	f.StringVar(&opts.MetadataDaemonPath, "metadata-daemon-path", "", "start this vaulticdb binary for key-in-DB unlock")
-	f.StringVar(&opts.MetadataDaemonDataDir, "metadata-daemon-data-dir", "", "local vaulticdb data directory for key-in-DB unlock")
-	f.StringVar(&opts.MetadataDaemonObjectStore, "metadata-daemon-object-store", "", "vaulticdb object store for key-in-DB unlock")
-	f.StringVar(&opts.MetadataDaemonS3Bucket, "metadata-daemon-s3-bucket", "", "vaulticdb S3 bucket for key-in-DB unlock")
-	f.StringVar(&opts.MetadataDaemonS3Prefix, "metadata-daemon-s3-prefix", "", "vaulticdb S3 prefix for key-in-DB unlock")
-	f.StringVar(&opts.MetadataEncryptionMode, "metadata-encryption-mode", "", "metadata encryption mode for key-in-DB unlock")
-	f.StringVar(&opts.MetadataPassphraseFile, "metadata-passphrase-file", "", "protected metadata recovery passphrase file")
-	f.StringVar(&opts.MetadataAzureTokenFile, "metadata-key-db-azure-token-file", "", "protected Azure KMS token file for key-in-DB unlock")
-	f.StringVar(&opts.MetadataGCPTokenFile, "metadata-key-db-gcp-token-file", "", "protected Google KMS token file for key-in-DB unlock")
-	f.StringVar(&opts.MetadataVaultTokenFile, "metadata-key-db-vault-token-file", "", "protected Vault Transit token file for key-in-DB unlock")
-	f.StringVar(&opts.MetadataPKCS11PINFile, "metadata-key-db-pkcs11-pin-file", "", "protected PKCS#11 PIN file for key-in-DB unlock")
-	f.BoolVar(&opts.MetadataRecoveryUnlock, "metadata-recovery-ack", false, "acknowledge metadata recovery-slot use")
+	f.StringVar(&globalOptions.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
+	f.BoolVar(&globalOptions.MetadataKeyInDB, "metadata-key-in-db", false, "unlock the repository master key from encrypted SlateDB metadata")
+	f.StringVar(&globalOptions.MetadataDaemonSocket, "metadata-daemon-socket", "", "private vaulticdb Unix socket for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonPath, "metadata-daemon-path", "", "start this vaulticdb binary for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonDataDir, "metadata-daemon-data-dir", "", "local vaulticdb data directory for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonObjectStore, "metadata-daemon-object-store", "", "vaulticdb object store for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonS3Bucket, "metadata-daemon-s3-bucket", "", "vaulticdb S3 bucket for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonS3Prefix, "metadata-daemon-s3-prefix", "", "vaulticdb S3 prefix for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataEncryptionMode, "metadata-encryption-mode", "", "metadata encryption mode for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataPassphraseFile, "metadata-passphrase-file", "", "protected metadata recovery passphrase file")
+	f.StringVar(&globalOptions.MetadataAzureTokenFile, "metadata-key-db-azure-token-file", "", "protected Azure KMS token file for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataGCPTokenFile, "metadata-key-db-gcp-token-file", "", "protected Google KMS token file for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataVaultTokenFile, "metadata-key-db-vault-token-file", "", "protected Vault Transit token file for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataPKCS11PINFile, "metadata-key-db-pkcs11-pin-file", "", "protected PKCS#11 PIN file for key-in-DB unlock")
+	f.BoolVar(&globalOptions.MetadataRecoveryUnlock, "metadata-recovery-ack", false, "acknowledge metadata recovery-slot use")
 	f.BoolVar(
-		&opts.MetadataLossRecovery,
+		&globalOptions.MetadataLossRecovery,
 		"metadata-loss-recovery",
 		false,
 		"use the legacy JSON index after total SlateDB metadata loss (requires a direct master key)",
 	)
-	f.StringVar(&opts.KeyBrokerSocket, "key-broker-socket", "", "local vaultic-key-broker Unix socket")
-	f.StringVar(&opts.KeyBrokerReleaseManifest, "key-broker-release-manifest", "", "signed release manifest authorizing this Vaultic executable")
-	f.DurationVar(&opts.KeyBrokerLeaseDuration, "key-broker-lease", 15*time.Minute, "job-scoped repository-key lease lifetime")
+	f.StringVar(&globalOptions.KeyBrokerSocket, "key-broker-socket", "", "local vaultic-key-broker Unix socket")
+	f.StringVar(&globalOptions.KeyBrokerReleaseManifest, "key-broker-release-manifest", "", "signed release manifest authorizing this Vaultic executable")
+	f.DurationVar(&globalOptions.KeyBrokerLeaseDuration, "key-broker-lease", 15*time.Minute, "job-scoped repository-key lease lifetime")
+}
 
-	f.StringVar(&opts.RepoHot, "repo-hot", "", "hot part of a hot/cold `repository` (cold storage; default: $VAULTIC_REPO_HOT)")
+func (globalOptions *Options) addTelemetryFlags(f *pflag.FlagSet) {
 	f.StringVar(
-		&opts.WarmUpCommand,
-		"warm-up-command",
-		"",
-		"warm-up `command` for cold storage, with %id/%path/%ids/%paths (default: $VAULTIC_WARM_UP_COMMAND)",
+		&globalOptions.PrometheusURL, "prometheus", env.Get("PROMETHEUS"),
+		"Pushgateway `URL` for successful backup metrics (default: $VAULTIC_PROMETHEUS)",
 	)
-	f.IntVar(
-		&opts.WarmUpBatch,
-		"warm-up-batch",
-		1,
-		"warm-up `batch` size: packs per %ids invocation or parallel %id invocations (default: $VAULTIC_WARM_UP_BATCH)",
-	)
-	f.DurationVar(&opts.WarmUpWait, "warm-up-wait", 0, "max `duration` to wait for warm-up to take effect (default: $VAULTIC_WARM_UP_WAIT)")
-	f.StringVar(&opts.WarmUpWaitCommand, "warm-up-wait-command", "", "`command` to wait for warmed-up data (default: $VAULTIC_WARM_UP_WAIT_COMMAND)")
-	f.BoolVarP(&opts.Quiet, "quiet", "q", false, "do not output comprehensive progress report")
-	f.StringVar(&opts.LogFile, "log-file", env.Get("LOG_FILE"), "write library log messages to `file` (default: $VAULTIC_LOG_FILE)")
-	f.StringVar(&opts.LogLevel, "log-level", env.Get("LOG_LEVEL"), "minimum log `level` (debug, info, warn, error; default: $VAULTIC_LOG_LEVEL)")
-	f.BoolVar(&opts.NoProgress, "no-progress", false, "disable live progress output")
-	f.DurationVar(&opts.ProgressInterval, "progress-interval", 0, "refresh live progress every `duration` (default: $VAULTIC_PROGRESS_INTERVAL)")
-	// use empty parameter name as `-v, --verbose n` instead of the correct `--verbose=n` is confusing
-	f.CountVarP(&opts.Verbose, "verbose", "v", "be verbose (specify multiple times or a level using --verbose=n``, max level/times is 2)")
-	f.BoolVar(&opts.NoLock, "no-lock", false, "do not lock the repository, this allows some operations on read-only repositories")
-	f.DurationVar(&opts.RetryLock, "retry-lock", 0, "retry to lock the repository if it is already locked, takes a value like 5m or 2h (default: no retries)")
-	f.BoolVarP(&opts.JSON, "json", "", false, "set output mode to JSON for commands that support it")
-	f.StringVar(&opts.CacheDir, "cache-dir", "", "set the cache `directory`. (default: use system default cache directory)")
-	f.BoolVar(&opts.NoCache, "no-cache", false, "do not use a local cache")
-	f.StringSliceVar(&opts.RootCertFilenames, "cacert", nil, "`file` to load root certificates from (default: use system certificates or $VAULTIC_CACERT)")
+	f.StringVar(&globalOptions.PrometheusUser, "prometheus-user", env.Get("PROMETHEUS_USER"), "Pushgateway username (default: $VAULTIC_PROMETHEUS_USER)")
+	f.StringVar(&globalOptions.PrometheusPass, "prometheus-pass", env.Get("PROMETHEUS_PASS"), "Pushgateway password (default: $VAULTIC_PROMETHEUS_PASS)")
 	f.StringVar(
-		&opts.TLSClientCertKeyFilename,
-		"tls-client-cert",
-		"",
-		"path to a `file` containing PEM encoded TLS client certificate and private key (default: $VAULTIC_TLS_CLIENT_CERT)",
-	)
-	f.BoolVar(
-		&opts.InsecureNoPassword,
-		"insecure-no-password",
-		false,
-		"use an empty password for the repository, must be passed to every vaultic command (insecure)",
-	)
-	f.BoolVar(&opts.InsecureTLS, "insecure-tls", false, "skip TLS certificate verification when connecting to the repository (insecure)")
-	f.BoolVar(&opts.CleanupCache, "cleanup-cache", false, "auto remove old cache directories")
-	const compressionFlag = "compression"
-	f.Var(
-		&opts.Compression,
-		compressionFlag,
-		"compression mode (only available for repository format version 2), one of (auto|off|fastest|better|max) (default: $VAULTIC_COMPRESSION)",
-	)
-	f.BoolVar(&opts.NoExtraVerify, "no-extra-verify", false, "skip additional verification of data before upload (see documentation)")
-	f.StringVar(&opts.PrometheusURL, "prometheus", env.Get("PROMETHEUS"), "Pushgateway `URL` for successful backup metrics (default: $VAULTIC_PROMETHEUS)")
-	f.StringVar(&opts.PrometheusUser, "prometheus-user", env.Get("PROMETHEUS_USER"), "Pushgateway username (default: $VAULTIC_PROMETHEUS_USER)")
-	f.StringVar(&opts.PrometheusPass, "prometheus-pass", env.Get("PROMETHEUS_PASS"), "Pushgateway password (default: $VAULTIC_PROMETHEUS_PASS)")
-	f.StringVar(
-		&opts.InfluxURL,
+		&globalOptions.InfluxURL,
 		"influxdb-url",
 		env.Get("INFLUXDB_URL"),
 		"InfluxDB v2-compatible server `URL` for successful backup metrics (default: $VAULTIC_INFLUXDB_URL)",
 	)
-	f.StringVar(&opts.InfluxToken, "influxdb-token", env.Get("INFLUXDB_TOKEN"), "InfluxDB API token (default: $VAULTIC_INFLUXDB_TOKEN)")
-	f.StringVar(&opts.InfluxOrg, "influxdb-org", env.Get("INFLUXDB_ORG"), "InfluxDB organization (default: $VAULTIC_INFLUXDB_ORG)")
-	f.StringVar(&opts.InfluxBucket, "influxdb-bucket", env.Get("INFLUXDB_BUCKET"), "InfluxDB bucket (default: $VAULTIC_INFLUXDB_BUCKET)")
-	f.BoolVar(&opts.OpenTelemetry, "opentelemetry", false, "emit OpenTelemetry spans through the configured global provider")
-	f.StringSliceVar(&opts.SyslogTargets, "syslog-target", nil, "syslog target `URL` (repeatable; udp, tcp, tls, unix, or unixgram)")
-	opts.noExtraVerifyFlag = f.Lookup("no-extra-verify")
-	f.IntVar(&opts.Limits.UploadKb, "limit-upload", 0, "limits uploads to a maximum `rate` in KiB/s. (default: unlimited)")
-	f.IntVar(&opts.Limits.DownloadKb, "limit-download", 0, "limits downloads to a maximum `rate` in KiB/s. (default: unlimited)")
-	const packSizeFlag = "pack-size"
-	f.UintVar(&opts.PackSize, packSizeFlag, 0, "set target pack `size` in MiB, created pack files may be larger (default: $VAULTIC_PACK_SIZE)")
-	f.UintVar(&opts.TreePackSize, "tree-pack-size", 0, "set target tree pack size in MiB (profile/runtime override)")
-	f.UintVar(&opts.DataPackSize, "data-pack-size", 0, "set target data pack size in MiB (profile/runtime override)")
-	f.StringSliceVarP(&opts.Options, "option", "o", []string{}, "set extended option (`key=value`, can be specified multiple times)")
-	f.StringVar(&opts.HTTPUserAgent, "http-user-agent", "", "set a http user agent for outgoing http requests")
-	f.DurationVar(&opts.StuckRequestTimeout, "stuck-request-timeout", 5*time.Minute, "`duration` after which to retry stuck requests")
+	f.StringVar(&globalOptions.InfluxToken, "influxdb-token", env.Get("INFLUXDB_TOKEN"), "InfluxDB API token (default: $VAULTIC_INFLUXDB_TOKEN)")
+	f.StringVar(&globalOptions.InfluxOrg, "influxdb-org", env.Get("INFLUXDB_ORG"), "InfluxDB organization (default: $VAULTIC_INFLUXDB_ORG)")
+	f.StringVar(&globalOptions.InfluxBucket, "influxdb-bucket", env.Get("INFLUXDB_BUCKET"), "InfluxDB bucket (default: $VAULTIC_INFLUXDB_BUCKET)")
+	f.BoolVar(&globalOptions.OpenTelemetry, "opentelemetry", false, "emit OpenTelemetry spans through the configured global provider")
+	f.StringSliceVar(&globalOptions.SyslogTargets, "syslog-target", nil, "syslog target `URL` (repeatable; udp, tcp, tls, unix, or unixgram)")
+}
 
-	opts.Repo = env.Get("REPOSITORY")
-	opts.RepositoryFile = env.Get("REPOSITORY_FILE")
-	opts.BootstrapProfile = env.Get("BOOTSTRAP_PROFILE")
-	opts.PasswordFile = env.Get("PASSWORD_FILE")
-	opts.KeyHint = env.Get("KEY_HINT")
-	opts.PasswordCommand = env.Get("PASSWORD_COMMAND")
-	opts.AzureKeyVaultURL = env.Get("AZURE_KEY_VAULT_URL")
-	opts.AzureKeyVaultSecret = env.Get("AZURE_KEY_VAULT_SECRET")
-	opts.AzureKeyVaultSecretVersion = env.Get("AZURE_KEY_VAULT_SECRET_VERSION")
+func (globalOptions *Options) applyEnvironment(f *pflag.FlagSet, packSizeFlag, compressionFlag string) {
+	globalOptions.Repo = env.Get("REPOSITORY")
+	globalOptions.RepositoryFile = env.Get("REPOSITORY_FILE")
+	globalOptions.BootstrapProfile = env.Get("BOOTSTRAP_PROFILE")
+	globalOptions.PasswordFile = env.Get("PASSWORD_FILE")
+	globalOptions.KeyHint = env.Get("KEY_HINT")
+	globalOptions.PasswordCommand = env.Get("PASSWORD_COMMAND")
+	globalOptions.AzureKeyVaultURL = env.Get("AZURE_KEY_VAULT_URL")
+	globalOptions.AzureKeyVaultSecret = env.Get("AZURE_KEY_VAULT_SECRET")
+	globalOptions.AzureKeyVaultSecretVersion = env.Get("AZURE_KEY_VAULT_SECRET_VERSION")
 	if value := env.Get("AZURE_KEY_VAULT_TIMEOUT"); value != "" {
 		if timeout, err := time.ParseDuration(value); err == nil {
-			opts.AzureKeyVaultTimeout = timeout
+			globalOptions.AzureKeyVaultTimeout = timeout
 		}
 	}
-	opts.MasterKey = env.Get("KEY")
-	opts.MasterKeyFile = env.Get("KEY_FILE")
-	opts.MasterKeyCommand = env.Get("KEY_COMMAND")
-	opts.MetadataKeyInDB = env.Get("METADATA_KEY_IN_DB") == "true"
-	opts.MetadataDaemonSocket = env.Get("METADATA_DAEMON_SOCKET")
-	opts.MetadataDaemonPath = env.Get("METADATA_DAEMON_PATH")
-	opts.MetadataDaemonDataDir = env.Get("METADATA_DAEMON_DATA_DIR")
-	opts.MetadataDaemonObjectStore = env.Get("METADATA_DAEMON_OBJECT_STORE")
-	opts.MetadataDaemonS3Bucket = env.Get("METADATA_DAEMON_S3_BUCKET")
-	opts.MetadataDaemonS3Prefix = env.Get("METADATA_DAEMON_S3_PREFIX")
-	opts.MetadataEncryptionMode = env.Get("METADATA_ENCRYPTION_MODE")
-	opts.MetadataPassphraseFile = env.Get("METADATA_PASSPHRASE_FILE")
-	opts.MetadataAzureTokenFile = env.Get("METADATA_AZURE_TOKEN_FILE")
-	opts.MetadataGCPTokenFile = env.Get("METADATA_GCP_TOKEN_FILE")
-	opts.MetadataVaultTokenFile = env.Get("METADATA_VAULT_TOKEN_FILE")
-	opts.MetadataPKCS11PINFile = env.Get("METADATA_PKCS11_PIN_FILE")
-	opts.MetadataRecoveryUnlock = env.Get("METADATA_RECOVERY_ACK") == "true"
-	opts.MetadataLossRecovery = env.Get("METADATA_LOSS_RECOVERY") == "true"
-	opts.KeyBrokerSocket = env.Get("KEY_BROKER_SOCKET")
-	opts.KeyBrokerReleaseManifest = env.Get("KEY_BROKER_RELEASE_MANIFEST")
+	globalOptions.MasterKey = env.Get("KEY")
+	globalOptions.MasterKeyFile = env.Get("KEY_FILE")
+	globalOptions.MasterKeyCommand = env.Get("KEY_COMMAND")
+	globalOptions.MetadataKeyInDB = env.Get("METADATA_KEY_IN_DB") == "true"
+	globalOptions.MetadataDaemonSocket = env.Get("METADATA_DAEMON_SOCKET")
+	globalOptions.MetadataDaemonPath = env.Get("METADATA_DAEMON_PATH")
+	globalOptions.MetadataDaemonDataDir = env.Get("METADATA_DAEMON_DATA_DIR")
+	globalOptions.MetadataDaemonObjectStore = env.Get("METADATA_DAEMON_OBJECT_STORE")
+	globalOptions.MetadataDaemonS3Bucket = env.Get("METADATA_DAEMON_S3_BUCKET")
+	globalOptions.MetadataDaemonS3Prefix = env.Get("METADATA_DAEMON_S3_PREFIX")
+	globalOptions.MetadataEncryptionMode = env.Get("METADATA_ENCRYPTION_MODE")
+	globalOptions.MetadataPassphraseFile = env.Get("METADATA_PASSPHRASE_FILE")
+	globalOptions.MetadataAzureTokenFile = env.Get("METADATA_AZURE_TOKEN_FILE")
+	globalOptions.MetadataGCPTokenFile = env.Get("METADATA_GCP_TOKEN_FILE")
+	globalOptions.MetadataVaultTokenFile = env.Get("METADATA_VAULT_TOKEN_FILE")
+	globalOptions.MetadataPKCS11PINFile = env.Get("METADATA_PKCS11_PIN_FILE")
+	globalOptions.MetadataRecoveryUnlock = env.Get("METADATA_RECOVERY_ACK") == "true"
+	globalOptions.MetadataLossRecovery = env.Get("METADATA_LOSS_RECOVERY") == "true"
+	globalOptions.KeyBrokerSocket = env.Get("KEY_BROKER_SOCKET")
+	globalOptions.KeyBrokerReleaseManifest = env.Get("KEY_BROKER_RELEASE_MANIFEST")
 	if value := env.Get("KEY_BROKER_LEASE"); value != "" {
 		if duration, err := time.ParseDuration(value); err == nil {
-			opts.KeyBrokerLeaseDuration = duration
+			globalOptions.KeyBrokerLeaseDuration = duration
 		}
 	}
-	opts.RepoHot = env.Get("REPO_HOT")
-	opts.WarmUpCommand = env.Get("WARM_UP_COMMAND")
+	globalOptions.RepoHot = env.Get("REPO_HOT")
+	globalOptions.WarmUpCommand = env.Get("WARM_UP_COMMAND")
 	if v := env.Get("WARM_UP_BATCH"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			opts.WarmUpBatch = n
+			globalOptions.WarmUpBatch = n
 		}
 	}
 	if v := env.Get("WARM_UP_WAIT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
-			opts.WarmUpWait = d
+			globalOptions.WarmUpWait = d
 		}
 	}
-	opts.WarmUpWaitCommand = env.Get("WARM_UP_WAIT_COMMAND")
+	globalOptions.WarmUpWaitCommand = env.Get("WARM_UP_WAIT_COMMAND")
 	if v := env.Get("CACERT"); v != "" {
-		opts.RootCertFilenames = strings.Split(v, ",")
+		globalOptions.RootCertFilenames = strings.Split(v, ",")
 	}
-	opts.TLSClientCertKeyFilename = env.Get("TLS_CLIENT_CERT")
-	opts.packSizeFlag = f.Lookup(packSizeFlag)
-	opts.compressionFlag = f.Lookup(compressionFlag)
+	globalOptions.TLSClientCertKeyFilename = env.Get("TLS_CLIENT_CERT")
+	globalOptions.packSizeFlag = f.Lookup(packSizeFlag)
+	globalOptions.compressionFlag = f.Lookup(compressionFlag)
 
 	if v := env.Get("HTTP_USER_AGENT"); v != "" {
-		opts.HTTPUserAgent = v
+		globalOptions.HTTPUserAgent = v
 	}
 }
 
-func (opts *Options) PreRun(needsPassword bool) error {
+func (globalOptions *Options) PreRun(needsPassword bool) error {
 	progress.ClearIntervalOverride()
-	if opts.NoProgress && opts.ProgressInterval > 0 {
+	if globalOptions.NoProgress && globalOptions.ProgressInterval > 0 {
 		return errors.Fatal("--no-progress and --progress-interval cannot be used together")
 	}
-	if opts.NoProgress {
+	if globalOptions.NoProgress {
 		progress.SetIntervalOverride(0)
-	} else if opts.ProgressInterval > 0 {
-		progress.SetIntervalOverride(opts.ProgressInterval)
+	} else if globalOptions.ProgressInterval > 0 {
+		progress.SetIntervalOverride(globalOptions.ProgressInterval)
 	}
-	if opts.LogLevel != "" {
-		switch opts.LogLevel {
+	if globalOptions.LogLevel != "" {
+		switch globalOptions.LogLevel {
 		case "debug", "info", "warn", "error":
 		default:
-			return errors.Fatalf("invalid --log-level %q (expected debug, info, warn, or error)", opts.LogLevel)
+			return errors.Fatalf("invalid --log-level %q (expected debug, info, warn, or error)", globalOptions.LogLevel)
 		}
 	}
-	if envVal := env.Get("PACK_SIZE"); envVal != "" && !opts.packSizeFlag.Changed {
+	if envVal := env.Get("PACK_SIZE"); envVal != "" && !globalOptions.packSizeFlag.Changed {
 		targetPackSize, err := strconv.ParseUint(envVal, 10, 32)
 		if err != nil {
 			// Failing fast here keeps backups from running for a long time with the wrong pack size.
 			return errors.Fatalf("invalid value for VAULTIC_PACK_SIZE (legacy: RESTIC_PACK_SIZE) %q: %v", envVal, err)
 		}
-		opts.PackSize = uint(targetPackSize)
-		opts.packSizeFromEnv = true
+		globalOptions.PackSize = uint(targetPackSize)
+		globalOptions.packSizeFromEnv = true
 	}
-	if envVal := env.Get("COMPRESSION"); envVal != "" && !opts.compressionFlag.Changed {
-		if err := opts.Compression.Set(envVal); err != nil {
+	if envVal := env.Get("COMPRESSION"); envVal != "" && !globalOptions.compressionFlag.Changed {
+		if err := globalOptions.Compression.Set(envVal); err != nil {
 			return errors.Fatalf("invalid value for VAULTIC_COMPRESSION (legacy: RESTIC_COMPRESSION) %q: %v", envVal, err)
 		}
-		opts.compressionFromEnv = true
+		globalOptions.compressionFromEnv = true
 	}
 
 	// set verbosity, default is one
-	opts.Verbosity = 1
-	if opts.Quiet && opts.Verbose > 0 {
+	globalOptions.Verbosity = 1
+	if globalOptions.Quiet && globalOptions.Verbose > 0 {
 		return errors.Fatal("--quiet and --verbose cannot be specified at the same time")
 	}
 
 	switch {
-	case opts.Verbose >= 2:
-		opts.Verbosity = 3
-	case opts.Verbose > 0:
-		opts.Verbosity = 2
-	case opts.Quiet:
-		opts.Verbosity = 0
+	case globalOptions.Verbose >= 2:
+		globalOptions.Verbosity = 3
+	case globalOptions.Verbose > 0:
+		globalOptions.Verbosity = 2
+	case globalOptions.Quiet:
+		globalOptions.Verbosity = 0
 	}
 
 	// parse extended options
-	extendedOpts, err := options.Parse(opts.Options)
+	extendedOpts, err := options.Parse(globalOptions.Options)
 	if err != nil {
 		return err
 	}
-	opts.Extended = extendedOpts
-	if !needsPassword || opts.KeyBrokerSocket != "" {
+	globalOptions.Extended = extendedOpts
+	if !needsPassword || globalOptions.KeyBrokerSocket != "" {
 		return nil
 	}
-	pwd, err := resolvePassword(opts, "VAULTIC_PASSWORD")
+	pwd, err := resolvePassword(context.Background(), globalOptions, "VAULTIC_PASSWORD")
 	if err != nil {
 		return errors.Fatalf("Resolving password failed: %v", err)
 	}
-	opts.Password = pwd
+	globalOptions.Password = pwd
 	return nil
 }
 
 // resolvePassword determines the password to be used for opening the repository.
-func resolvePassword(opts *Options, envStr string) (string, error) {
-	keyVaultConfigured := opts.AzureKeyVaultURL != "" || opts.AzureKeyVaultSecret != "" || opts.AzureKeyVaultSecretVersion != ""
+func resolvePassword(ctx context.Context, globalOptions *Options, envStr string) (string, error) {
+	keyVaultConfigured := globalOptions.AzureKeyVaultURL != "" || globalOptions.AzureKeyVaultSecret != "" || globalOptions.AzureKeyVaultSecretVersion != ""
 	if keyVaultConfigured {
-		if opts.AzureKeyVaultURL == "" || opts.AzureKeyVaultSecret == "" {
+		if globalOptions.AzureKeyVaultURL == "" || globalOptions.AzureKeyVaultSecret == "" {
 			return "", errors.Fatalf("Azure Key Vault URL and secret name must be specified together")
 		}
-		if opts.PasswordFile != "" || opts.PasswordCommand != "" || resolvePasswordEnv(envStr) != "" {
+		if globalOptions.PasswordFile != "" || globalOptions.PasswordCommand != "" || resolvePasswordEnv(envStr) != "" {
 			return "", errors.Fatalf("Azure Key Vault and other password sources are mutually exclusive")
 		}
-		if opts.AzureKeyVaultTimeout <= 0 {
+		if globalOptions.AzureKeyVaultTimeout <= 0 {
 			return "", errors.Fatalf("Azure Key Vault timeout must be positive")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), opts.AzureKeyVaultTimeout)
+		ctx, cancel := context.WithTimeout(ctx, globalOptions.AzureKeyVaultTimeout)
 		defer cancel()
-		secret, err := keyvault.FetchSecret(ctx, opts.AzureKeyVaultURL, opts.AzureKeyVaultSecret, opts.AzureKeyVaultSecretVersion)
+		secret, err := keyvault.FetchSecret(ctx, globalOptions.AzureKeyVaultURL, globalOptions.AzureKeyVaultSecret, globalOptions.AzureKeyVaultSecretVersion)
 		if err != nil {
-			_ = observability.Emit(
+			observability.EmitBestEffort(
 				ctx,
 				observability.Event{
 					Severity:  observability.Error,
@@ -450,15 +471,15 @@ func resolvePassword(opts *Options, envStr string) (string, error) {
 					Component: "keyvault",
 					Message:   "Azure Key Vault SecretGet failed",
 					Fields: map[string]any{
-						"vault_url":         opts.AzureKeyVaultURL,
-						"secret_name":       opts.AzureKeyVaultSecret,
-						"version_requested": opts.AzureKeyVaultSecretVersion != "",
+						"vault_url":         globalOptions.AzureKeyVaultURL,
+						"secret_name":       globalOptions.AzureKeyVaultSecret,
+						"version_requested": globalOptions.AzureKeyVaultSecretVersion != "",
 					},
 				},
 			)
 			return "", err
 		}
-		_ = observability.Emit(
+		observability.EmitBestEffort(
 			ctx,
 			observability.Event{
 				Severity:  observability.Notice,
@@ -466,19 +487,19 @@ func resolvePassword(opts *Options, envStr string) (string, error) {
 				Component: "keyvault",
 				Message:   "Azure Key Vault SecretGet completed",
 				Fields: map[string]any{
-					"vault_url":         opts.AzureKeyVaultURL,
-					"secret_name":       opts.AzureKeyVaultSecret,
-					"version_requested": opts.AzureKeyVaultSecretVersion != "",
+					"vault_url":         globalOptions.AzureKeyVaultURL,
+					"secret_name":       globalOptions.AzureKeyVaultSecret,
+					"version_requested": globalOptions.AzureKeyVaultSecretVersion != "",
 				},
 			},
 		)
 		return secret, nil
 	}
-	if opts.PasswordFile != "" && opts.PasswordCommand != "" {
+	if globalOptions.PasswordFile != "" && globalOptions.PasswordCommand != "" {
 		return "", errors.Fatalf("Password file and command are mutually exclusive options")
 	}
-	if opts.PasswordCommand != "" {
-		args, err := backend.SplitShellStrings(opts.PasswordCommand)
+	if globalOptions.PasswordCommand != "" {
+		args, err := backend.SplitShellStrings(globalOptions.PasswordCommand)
 		if err != nil {
 			return "", err
 		}
@@ -490,8 +511,8 @@ func resolvePassword(opts *Options, envStr string) (string, error) {
 		}
 		return strings.TrimSpace(string(output)), nil
 	}
-	if opts.PasswordFile != "" {
-		return LoadPasswordFromFile(opts.PasswordFile)
+	if globalOptions.PasswordFile != "" {
+		return LoadPasswordFromFile(globalOptions.PasswordFile)
 	}
 
 	if pwd := resolvePasswordEnv(envStr); pwd != "" {
@@ -520,9 +541,9 @@ func LoadPasswordFromFile(pwdFile string) (string, error) {
 // resolveMasterKey determines the master key (if any) from the --key,
 // --key-file and --key-command options (or their environment equivalents).
 // The options are mutually exclusive.
-func resolveMasterKey(gopts Options) (string, error) {
+func resolveMasterKey(globalOptions Options) (string, error) {
 	set := 0
-	for _, v := range []string{gopts.MasterKey, gopts.MasterKeyFile, gopts.MasterKeyCommand} {
+	for _, v := range []string{globalOptions.MasterKey, globalOptions.MasterKeyFile, globalOptions.MasterKeyCommand} {
 		if v != "" {
 			set++
 		}
@@ -534,15 +555,15 @@ func resolveMasterKey(gopts Options) (string, error) {
 		return "", errors.Fatal("--key, --key-file and --key-command are mutually exclusive")
 	}
 
-	if gopts.MasterKey != "" {
-		return gopts.MasterKey, nil
+	if globalOptions.MasterKey != "" {
+		return globalOptions.MasterKey, nil
 	}
-	if gopts.MasterKeyFile != "" {
-		return LoadPasswordFromFile(gopts.MasterKeyFile)
+	if globalOptions.MasterKeyFile != "" {
+		return LoadPasswordFromFile(globalOptions.MasterKeyFile)
 	}
 
 	// --key-command
-	args, err := backend.SplitShellStrings(gopts.MasterKeyCommand)
+	args, err := backend.SplitShellStrings(globalOptions.MasterKeyCommand)
 	if err != nil {
 		return "", err
 	}
@@ -558,19 +579,19 @@ func resolveMasterKey(gopts Options) (string, error) {
 // readPassword reads the password from a password file, the environment
 // variable VAULTIC_PASSWORD or prompts the user. If the context is canceled,
 // the function leaks the password reading goroutine.
-func readPassword(ctx context.Context, gopts Options, prompt string) (string, error) {
-	if gopts.InsecureNoPassword {
-		if gopts.Password != "" {
+func readPassword(ctx context.Context, globalOptions Options, prompt string) (string, error) {
+	if globalOptions.InsecureNoPassword {
+		if globalOptions.Password != "" {
 			return "", errors.Fatal("--insecure-no-password must not be specified together with providing a password via a cli option or environment variable")
 		}
 		return "", nil
 	}
 
-	if gopts.Password != "" {
-		return gopts.Password, nil
+	if globalOptions.Password != "" {
+		return globalOptions.Password, nil
 	}
 
-	password, err := gopts.Term.ReadPassword(ctx, prompt)
+	password, err := globalOptions.Term.ReadPassword(ctx, prompt)
 	if err != nil {
 		return "", fmt.Errorf("unable to read password: %w", err)
 	}

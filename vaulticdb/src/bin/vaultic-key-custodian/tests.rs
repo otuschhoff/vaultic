@@ -1,5 +1,7 @@
 #[cfg(all(test, not(target_env = "musl")))]
 mod tests {
+    //! Custodian binary integration tests.
+
     use super::*;
 
     #[test]

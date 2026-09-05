@@ -83,13 +83,13 @@ func waitForMount(t testing.TB, dir string) {
 	t.Errorf("subdir %q of dir %s never appeared", mountTestSubdir, dir)
 }
 
-func testRunMount(t testing.TB, gopts global.Options, dir string, wg *sync.WaitGroup) {
+func testRunMount(t testing.TB, globalOptions global.Options, dir string, wg *sync.WaitGroup) {
 	defer wg.Done()
-	opts := MountOptions{
+	options := mountOptions{
 		TimeTemplate: time.RFC3339,
 	}
-	rtest.OK(t, withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runMount(context.TODO(), opts, gopts, []string{dir}, gopts.Term)
+	rtest.OK(t, withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runMount(context.TODO(), options, globalOptions, []string{dir}, globalOptions.Term)
 	}))
 }
 
@@ -116,12 +116,12 @@ func listSnapshots(t testing.TB, dir string) []string {
 	return names
 }
 
-func checkSnapshots(t testing.TB, gopts global.Options, mountpoint string, snapshotIDs vaultic.IDs, expectedSnapshotsInFuseDir int) {
+func checkSnapshots(t testing.TB, globalOptions global.Options, mountpoint string, snapshotIDs vaultic.IDs, expectedSnapshotsInFuseDir int) {
 	t.Logf("checking for %d snapshots: %v", len(snapshotIDs), snapshotIDs)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go testRunMount(t, gopts, mountpoint, &wg)
+	go testRunMount(t, globalOptions, mountpoint, &wg)
 	waitForMount(t, mountpoint)
 	defer wg.Wait()
 	defer testRunUmount(t, mountpoint)
@@ -130,7 +130,7 @@ func checkSnapshots(t testing.TB, gopts global.Options, mountpoint string, snaps
 		t.Fatal(`virtual directory "snapshots" doesn't exist`)
 	}
 
-	ids := listSnapshots(t, gopts.Repo)
+	ids := listSnapshots(t, globalOptions.Repo)
 	t.Logf("found %v snapshots in repo: %v", len(ids), ids)
 
 	namesInSnapshots := listSnapshots(t, mountpoint)
@@ -154,9 +154,9 @@ func checkSnapshots(t testing.TB, gopts global.Options, mountpoint string, snaps
 		}
 	}
 
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -200,39 +200,39 @@ func TestMount(t *testing.T) {
 
 	env, cleanup := withTestEnvironment(t)
 	// must list snapshots more than once
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
-	checkSnapshots(t, env.gopts, env.mountpoint, []vaultic.ID{}, 0)
+	checkSnapshots(t, env.globalOptions, env.mountpoint, []vaultic.ID{}, 0)
 
 	rtest.SetupTarTestFixture(t, env.testdata, filepath.Join("testdata", "backup-data.tar.gz"))
 
 	// first backup
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	snapshotIDs := testRunList(t, env.gopts, "snapshots")
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	snapshotIDs := testRunList(t, env.globalOptions, "snapshots")
 	rtest.Assert(t, len(snapshotIDs) == 1,
 		"expected one snapshot, got %v", snapshotIDs)
 
-	checkSnapshots(t, env.gopts, env.mountpoint, snapshotIDs, 2)
+	checkSnapshots(t, env.globalOptions, env.mountpoint, snapshotIDs, 2)
 
 	// second backup, implicit incremental
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	snapshotIDs = testRunList(t, env.gopts, "snapshots")
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	snapshotIDs = testRunList(t, env.globalOptions, "snapshots")
 	rtest.Assert(t, len(snapshotIDs) == 2,
 		"expected two snapshots, got %v", snapshotIDs)
 
-	checkSnapshots(t, env.gopts, env.mountpoint, snapshotIDs, 3)
+	checkSnapshots(t, env.globalOptions, env.mountpoint, snapshotIDs, 3)
 
 	// third backup, explicit incremental
-	bopts := BackupOptions{Parent: snapshotIDs[0].String()}
-	testRunBackup(t, "", []string{env.testdata}, bopts, env.gopts)
-	snapshotIDs = testRunList(t, env.gopts, "snapshots")
+	bopts := backupOptions{Parent: snapshotIDs[0].String()}
+	testRunBackup(t, "", []string{env.testdata}, bopts, env.globalOptions)
+	snapshotIDs = testRunList(t, env.globalOptions, "snapshots")
 	rtest.Assert(t, len(snapshotIDs) == 3,
 		"expected three snapshots, got %v", snapshotIDs)
 
-	checkSnapshots(t, env.gopts, env.mountpoint, snapshotIDs, 4)
+	checkSnapshots(t, env.globalOptions, env.mountpoint, snapshotIDs, 4)
 }
 
 func TestCheckMountpointOverlap(t *testing.T) {
@@ -296,7 +296,7 @@ func TestMountSameTimestamps(t *testing.T) {
 
 	env, cleanup := withTestEnvironment(t)
 	// must list snapshots more than once
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 	defer cleanup()
 
 	rtest.SetupTarTestFixture(t, env.base, filepath.Join("testdata", "repo-same-timestamps.tar.gz"))
@@ -307,5 +307,5 @@ func TestMountSameTimestamps(t *testing.T) {
 		vaultic.TestParseID("5fd0d8b2ef0fa5d23e58f1e460188abb0f525c0f0c4af8365a1280c807a80a1b"),
 	}
 
-	checkSnapshots(t, env.gopts, env.mountpoint, ids, 4)
+	checkSnapshots(t, env.globalOptions, env.mountpoint, ids, 4)
 }

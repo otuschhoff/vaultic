@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -16,7 +17,10 @@ const revisionAllocationAttempts = 128
 
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
-type SchemaStore struct{ client *Client }
+type SchemaStore struct {
+	client        *Client
+	publicationMu sync.Mutex
+}
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.
 func (s *SchemaStore) CheckEncryption(ctx context.Context) (EncryptionAudit, error) {
@@ -85,6 +89,14 @@ type ReconciledRevision struct {
 }
 
 func NewSchemaStore(client *Client) *SchemaStore { return &SchemaStore{client: client} }
+
+func (store *SchemaStore) LockAnalyticsPublication() {
+	store.publicationMu.Lock()
+}
+
+func (store *SchemaStore) UnlockAnalyticsPublication() {
+	store.publicationMu.Unlock()
+}
 
 func (store *SchemaStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	if _, err := schema.ParseKey(key); err != nil {

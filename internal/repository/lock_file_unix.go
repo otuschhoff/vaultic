@@ -36,7 +36,7 @@ func (l *lockHandle) processExists() bool {
 		return false
 	}
 	defer func() {
-		_ = proc.Release()
+		_ = proc.Release() // The process existence result is complete; Release only drops the local handle.
 	}()
 
 	debug.Log("sending SIGHUP to process %d\n", l.PID)

@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Key broker behavior tests.
+
     use super::*;
     use crate::encryption::{
         envelope::providers::{KeyContext, KeyProvider},
@@ -363,7 +365,7 @@ mod tests {
         let policy = UnlockPolicy::Threshold {
             group_id: "new-operators".to_owned(),
             required: 2,
-            members: vec!["dana".to_owned(), "erin".to_owned(), "frank".to_owned()],
+            members: vec!["dana".into(), "erin".into(), "frank".into()],
         };
         let protections = [
             ("dana", MemberCredential::Passphrase(b"dana passphrase")),
@@ -539,7 +541,7 @@ mod tests {
         let policy = UnlockPolicy::Threshold {
             group_id: "operators".to_owned(),
             required: 2,
-            members: vec!["alice".to_owned(), "cloud".to_owned()],
+            members: vec!["alice".into(), "cloud".into()],
         };
         let protections = [
             (
@@ -641,7 +643,7 @@ mod tests {
         let malformed_share = encrypt_contribution_payload(
             &session,
             &ContributionPayload {
-                member_id: "alice".to_owned(),
+                member_id: "alice".into(),
                 share_index: capsule.members[0].share_index,
                 share: vec![0],
                 last_seen_generation: 4,
@@ -688,7 +690,7 @@ mod tests {
         let poisoned = encrypt_contribution_payload(
             &poisoned_session,
             &ContributionPayload {
-                member_id: "alice".to_owned(),
+                member_id: "alice".into(),
                 share_index: capsule
                     .members
                     .iter()

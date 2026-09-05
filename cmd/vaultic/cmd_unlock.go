@@ -12,7 +12,7 @@ import (
 )
 
 func newUnlockCommand(globalOptions *global.Options) *cobra.Command {
-	var opts UnlockOptions
+	var options unlockOptions
 
 	cmd := &cobra.Command{
 		Use:   "unlock",
@@ -31,31 +31,31 @@ Exit status is 1 if there was any error.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUnlock(cmd.Context(), opts, *globalOptions, globalOptions.Term)
+			return runUnlock(cmd.Context(), options, *globalOptions, globalOptions.Term)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// UnlockOptions collects all options for the unlock command.
-type UnlockOptions struct {
+// unlockOptions collects all options for the unlock command.
+type unlockOptions struct {
 	RemoveAll bool
 }
 
-func (opts *UnlockOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.RemoveAll, "remove-all", false, "remove all locks, even non-stale ones")
+func (options *unlockOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.RemoveAll, "remove-all", false, "remove all locks, even non-stale ones")
 }
 
-func runUnlock(ctx context.Context, opts UnlockOptions, gopts global.Options, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	repo, err := global.OpenRepository(ctx, gopts, printer)
+func runUnlock(ctx context.Context, options unlockOptions, globalOptions global.Options, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	repo, err := global.OpenRepository(ctx, globalOptions, printer)
 	if err != nil {
 		return err
 	}
 
 	fn := repository.RemoveStaleLocks
-	if opts.RemoveAll {
+	if options.RemoveAll {
 		fn = repository.RemoveAllLocks
 	}
 

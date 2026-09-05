@@ -19,9 +19,9 @@ import (
 )
 
 func findHash(buf []byte, filename string) (hash []byte, err error) {
-	sc := bufio.NewScanner(bytes.NewReader(buf))
-	for sc.Scan() {
-		data := strings.Split(sc.Text(), "  ")
+	scanner := bufio.NewScanner(bytes.NewReader(buf))
+	for scanner.Scan() {
+		data := strings.Split(scanner.Text(), "  ")
 		if len(data) != 2 {
 			continue
 		}
@@ -35,35 +35,38 @@ func findHash(buf []byte, filename string) (hash []byte, err error) {
 			return h, nil
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan checksum list: %w", err)
+	}
 
 	return nil, fmt.Errorf("hash for file %v not found", filename)
 }
 
 func extractToFile(buf []byte, filename, target string, printf func(string, ...any)) error {
-	var rd io.Reader = bytes.NewReader(buf)
+	var reader io.Reader = bytes.NewReader(buf)
 	switch filepath.Ext(filename) {
 	case ".bz2":
-		rd = bzip2.NewReader(rd)
+		reader = bzip2.NewReader(reader)
 	case ".zip":
-		zrd, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+		zipReader, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 		if err != nil {
 			return err
 		}
 
-		if len(zrd.File) != 1 {
+		if len(zipReader.File) != 1 {
 			return errors.New("ZIP archive contains more than one file")
 		}
 
-		file, err := zrd.File[0].Open()
+		file, err := zipReader.File[0].Open()
 		if err != nil {
 			return err
 		}
 
 		defer func() {
-			_ = file.Close()
+			_ = file.Close() // Preserve the download failure; Close only releases the incomplete file.
 		}()
 
-		rd = file
+		reader = file
 	}
 
 	// Write everything to a temp file
@@ -73,19 +76,19 @@ func extractToFile(buf []byte, filename, target string, printf func(string, ...a
 		return err
 	}
 
-	n, err := io.Copy(newFile, rd)
+	n, err := io.Copy(newFile, reader)
 	if err != nil {
-		_ = newFile.Close()
-		_ = os.Remove(newFile.Name())
+		_ = newFile.Close()           // Preserve the copy failure while releasing the incomplete update.
+		_ = os.Remove(newFile.Name()) // The incomplete update is never selected for installation.
 		return err
 	}
 	if err = newFile.Sync(); err != nil {
-		_ = newFile.Close()
-		_ = os.Remove(newFile.Name())
+		_ = newFile.Close()           // Preserve the sync failure while releasing the incomplete update.
+		_ = os.Remove(newFile.Name()) // The incomplete update is never selected for installation.
 		return err
 	}
 	if err = newFile.Close(); err != nil {
-		_ = os.Remove(newFile.Name())
+		_ = os.Remove(newFile.Name()) // A failed cleanup cannot replace the more actionable close failure.
 		return err
 	}
 

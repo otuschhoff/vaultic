@@ -20,7 +20,7 @@ import (
 )
 
 func newRewriteCommand(globalOptions *global.Options) *cobra.Command {
-	var opts RewriteOptions
+	var options rewriteOptions
 
 	cmd := &cobra.Command{
 		Use:   "rewrite [flags] [snapshotID ...]",
@@ -62,15 +62,15 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRewrite(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runRewrite(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
@@ -104,8 +104,8 @@ func (sma snapshotMetadataArgs) convert() (*snapshotMetadata, error) {
 	return &snapshotMetadata{Hostname: sma.Hostname, Time: timeStamp}, nil
 }
 
-// RewriteOptions collects all options for the rewrite command.
-type RewriteOptions struct {
+// rewriteOptions collects all options for the rewrite command.
+type rewriteOptions struct {
 	Forget          bool
 	DryRun          bool
 	SnapshotSummary bool
@@ -116,84 +116,87 @@ type RewriteOptions struct {
 	filter.IncludePatternOptions
 }
 
-func (opts *RewriteOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVarP(&opts.Forget, "forget", "", false, "remove original snapshots after creating new ones")
-	f.BoolVarP(&opts.DryRun, "dry-run", "n", false, "do not do anything, just print what would be done")
-	f.StringVar(&opts.Metadata.Hostname, "new-host", "", "replace hostname")
-	f.StringVar(&opts.Metadata.Time, "new-time", "", "replace time of the backup")
-	f.BoolVarP(&opts.SnapshotSummary, "snapshot-summary", "s", false, "create snapshot summary record if it does not exist")
+func (options *rewriteOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVarP(&options.Forget, "forget", "", false, "remove original snapshots after creating new ones")
+	f.BoolVarP(&options.DryRun, "dry-run", "n", false, "do not do anything, just print what would be done")
+	f.StringVar(&options.Metadata.Hostname, "new-host", "", "replace hostname")
+	f.StringVar(&options.Metadata.Time, "new-time", "", "replace time of the backup")
+	f.BoolVarP(&options.SnapshotSummary, "snapshot-summary", "s", false, "create snapshot summary record if it does not exist")
 
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
-	opts.ExcludePatternOptions.Add(f)
-	opts.IncludePatternOptions.Add(f)
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
+	options.ExcludePatternOptions.Add(f)
+	options.IncludePatternOptions.Add(f)
 }
 
 // rewriteFilterFunc returns the filtered tree ID or an error. If a snapshot summary is returned, the snapshot will
 // be updated accordingly.
 type rewriteFilterFunc func(ctx context.Context, sn *data.Snapshot, uploader vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error)
 
-func rewriteSnapshot(ctx context.Context, repo *repository.Repository, sn *data.Snapshot, opts RewriteOptions, printer vaultic.Printer) (bool, error) {
+func rewriteSnapshot(ctx context.Context, repo *repository.Repository, sn *data.Snapshot, options rewriteOptions, printer vaultic.Printer) (bool, error) {
 	if sn.Tree == nil {
 		return false, errors.Errorf("snapshot %v has nil tree", sn.ID().Str())
 	}
 
-	rejectByNameFuncs, err := opts.ExcludePatternOptions.CollectPatterns(printer.E)
+	rejectByNameFuncs, err := options.ExcludePatternOptions.CollectPatterns(printer.E)
 	if err != nil {
 		return false, err
 	}
 
-	includeByNameFuncs, err := opts.IncludePatternOptions.CollectPatterns(printer.E)
+	includeByNameFuncs, err := options.IncludePatternOptions.CollectPatterns(printer.E)
 	if err != nil {
 		return false, err
 	}
 
-	metadata, err := opts.Metadata.convert()
+	metadata, err := options.Metadata.convert()
 
 	if err != nil {
 		return false, err
 	}
 
-	condInclude := len(includeByNameFuncs) > 0
-	condExclude := len(rejectByNameFuncs) > 0
-	var filter rewriteFilterFunc
-
-	if condInclude || condExclude || opts.SnapshotSummary {
-		var rewriteNode walker.NodeRewriteFunc
-		var keepEmptyDirectoryFunc walker.NodeKeepEmptyDirectoryFunc
-		if condInclude {
-			rewriteNode, keepEmptyDirectoryFunc = gatherIncludeFilters(includeByNameFuncs, printer)
-		} else {
-			rewriteNode = gatherExcludeFilters(rejectByNameFuncs, printer)
-		}
-
-		rewriter, querySize := walker.NewSnapshotSizeRewriter(rewriteNode, keepEmptyDirectoryFunc)
-
-		filter = func(ctx context.Context, sn *data.Snapshot, uploader vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error) {
-			id, err := rewriter.RewriteTree(ctx, repo, uploader, "/", *sn.Tree)
-			if err != nil {
-				return vaultic.ID{}, nil, err
-			}
-			ss := querySize()
-			summary := &data.SnapshotSummary{}
-			if sn.Summary != nil {
-				*summary = *sn.Summary
-			}
-			summary.TotalFilesProcessed = ss.FileCount
-			summary.TotalBytesProcessed = ss.FileSize
-			return id, summary, err
-		}
-
-	} else {
-		filter = func(_ context.Context, sn *data.Snapshot, _ vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error) {
-			return *sn.Tree, nil, nil
-		}
-	}
+	filter := newRewriteFilter(repo, includeByNameFuncs, rejectByNameFuncs, options.SnapshotSummary, printer)
 
 	return filterAndReplaceSnapshot(ctx, rewriteRequest{
-		repo: repo, snapshot: sn, filter: filter, dryRun: opts.DryRun, forget: opts.Forget,
+		repo: repo, snapshot: sn, filter: filter, dryRun: options.DryRun, forget: options.Forget,
 		newMetadata: metadata, addTag: "rewrite", printer: printer,
 		keepEmptySnapshot: len(includeByNameFuncs) > 0,
 	})
+}
+
+func newRewriteFilter(
+	repo *repository.Repository,
+	includeByNameFuncs []filter.IncludeByNameFunc,
+	rejectByNameFuncs []filter.RejectByNameFunc,
+	withSnapshotSummary bool,
+	printer vaultic.Printer,
+) rewriteFilterFunc {
+	if len(includeByNameFuncs) == 0 && len(rejectByNameFuncs) == 0 && !withSnapshotSummary {
+		return func(_ context.Context, snapshot *data.Snapshot, _ vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error) {
+			return *snapshot.Tree, nil, nil
+		}
+	}
+
+	var rewriteNode walker.NodeRewriteFunc
+	var keepEmptyDirectory walker.NodeKeepEmptyDirectoryFunc
+	if len(includeByNameFuncs) > 0 {
+		rewriteNode, keepEmptyDirectory = gatherIncludeFilters(includeByNameFuncs, printer)
+	} else {
+		rewriteNode = gatherExcludeFilters(rejectByNameFuncs, printer)
+	}
+	rewriter, querySize := walker.NewSnapshotSizeRewriter(rewriteNode, keepEmptyDirectory)
+	return func(ctx context.Context, snapshot *data.Snapshot, uploader vaultic.BlobSaver) (vaultic.ID, *data.SnapshotSummary, error) {
+		id, err := rewriter.RewriteTree(ctx, repo, uploader, "/", *snapshot.Tree)
+		if err != nil {
+			return vaultic.ID{}, nil, err
+		}
+		size := querySize()
+		summary := &data.SnapshotSummary{}
+		if snapshot.Summary != nil {
+			*summary = *snapshot.Summary
+		}
+		summary.TotalFilesProcessed = size.FileCount
+		summary.TotalBytesProcessed = size.FileSize
+		return id, summary, nil
+	}
 }
 
 type rewriteRequest struct {
@@ -312,16 +315,16 @@ func saveRewrittenSnapshot(ctx context.Context, request rewriteRequest, filtered
 	return true, nil
 }
 
-func runRewrite(ctx context.Context, opts RewriteOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	hasExcludes := !opts.ExcludePatternOptions.Empty()
-	hasIncludes := !opts.IncludePatternOptions.Empty()
-	if !opts.SnapshotSummary && !hasExcludes && !hasIncludes && opts.Metadata.empty() {
+func runRewrite(ctx context.Context, options rewriteOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	hasExcludes := !options.ExcludePatternOptions.Empty()
+	hasIncludes := !options.IncludePatternOptions.Empty()
+	if !options.SnapshotSummary && !hasExcludes && !hasIncludes && options.Metadata.empty() {
 		return errors.Fatal("Nothing to do: no excludes/includes provided and no new metadata provided")
 	} else if hasExcludes && hasIncludes {
 		return errors.Fatal("exclude and include patterns are mutually exclusive")
 	}
 
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
 	var (
 		repo   *repository.Repository
@@ -329,11 +332,11 @@ func runRewrite(ctx context.Context, opts RewriteOptions, gopts global.Options, 
 		err    error
 	)
 
-	if opts.Forget {
+	if options.Forget {
 		printer.P("create exclusive lock for repository")
-		ctx, repo, unlock, err = openWithExclusiveLock(ctx, gopts, opts.DryRun, printer)
+		ctx, repo, unlock, err = openWithExclusiveLock(ctx, globalOptions, options.DryRun, printer)
 	} else {
-		ctx, repo, unlock, err = openWithAppendLock(ctx, gopts, opts.DryRun, printer)
+		ctx, repo, unlock, err = openWithAppendLock(ctx, globalOptions, options.DryRun, printer)
 	}
 	if err != nil {
 		return err
@@ -350,12 +353,12 @@ func runRewrite(ctx context.Context, opts RewriteOptions, gopts global.Options, 
 	}
 
 	changedCount := 0
-	err = opts.SnapshotFilter.FindAll(ctx, snapshotLister, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	err = options.SnapshotFilter.FindAll(ctx, snapshotLister, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
 		printer.P("\n%v", sn)
-		changed, err := rewriteSnapshot(ctx, repo, sn, opts, printer)
+		changed, err := rewriteSnapshot(ctx, repo, sn, options, printer)
 		if err != nil {
 			return errors.Fatalf("unable to rewrite snapshot ID %q: %v", sn.ID().Str(), err)
 		}
@@ -369,14 +372,15 @@ func runRewrite(ctx context.Context, opts RewriteOptions, gopts global.Options, 
 	}
 
 	printer.P("")
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if changedCount == 0 {
-		if !opts.DryRun {
+		if !options.DryRun {
 			printer.P("no snapshots were modified")
 		} else {
 			printer.P("no snapshots would be modified")
 		}
 	} else {
-		if !opts.DryRun {
+		if !options.DryRun {
 			printer.P("modified %v snapshots", changedCount)
 		} else {
 			printer.P("would modify %v snapshots", changedCount)

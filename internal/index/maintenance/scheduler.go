@@ -86,6 +86,7 @@ type placementEventStore interface {
 
 var ErrPlacementObsolete = schema.ErrPlacementObsolete
 
+//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions, options PlacementWorkerOptions) (PlacementWorkerResult, error) {
 	var result PlacementWorkerResult
 	if actions == nil {
@@ -316,9 +317,8 @@ func failPlacementRequest(ctx context.Context, failure placementFailure) error {
 		return err
 	}
 	failure.result.Failed++
-	recordPlacementEvent(ctx, failure.store, failure.packID, failure.pack, failure.backend.Hash,
+	return recordPlacementEvent(ctx, failure.store, failure.packID, failure.pack, failure.backend.Hash,
 		schema.EventPlacementFailed, "scheduler_action_failed")
-	return nil
 }
 
 func completePlacementRequest(
@@ -370,8 +370,7 @@ func completePlacementRequest(
 	if err := store.WriteMutableBatch(ctx, puts, [][]byte{requestKey}, false); err != nil {
 		return err
 	}
-	recordPlacementEvent(ctx, store, packID, pack, backend.Hash, eventType, reason)
-	return nil
+	return recordPlacementEvent(ctx, store, packID, pack, backend.Hash, eventType, reason)
 }
 
 func currentPlacement(ctx context.Context, store Store, packID vaultic.ID, backend uint64) (schema.PlacementRecord, error) {
@@ -390,12 +389,12 @@ func recordPlacementEvent(
 	backend uint64,
 	eventType schema.PackEventType,
 	reason string,
-) {
+) error {
 	eventStore, ok := store.(placementEventStore)
 	if !ok {
-		return
+		return nil
 	}
-	_ = eventStore.RecordPackEvents(ctx, []daemon.PackEvent{{
+	return eventStore.RecordPackEvents(ctx, []daemon.PackEvent{{
 		PackID: schema.ID(packID), Record: schema.PackHistoryEvent{
 			Type: eventType, PackType: pack.Type, Backend: backend,
 			PhysicalSize: pack.PhysicalSize, PayloadSize: pack.PayloadSize, ReasonCode: reason,
@@ -424,6 +423,7 @@ func evictionPreservesDurability(
 	return durable(remaining, backends, policy), nil
 }
 
+//nolint:gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerOptions) (PlacementSchedulerResult, error) {
 	result := PlacementSchedulerResult{SchemaVersion: IntrospectSchemaVersion}
 	if options.Now.IsZero() {
@@ -471,6 +471,7 @@ func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerO
 		if status.PendingPromotion {
 			result.PendingPromotion++
 		}
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if !status.Durable || len(status.MissingBackends) != 0 || status.PendingPromotion || len(status.ExcessBackends) != 0 {
 			if !status.Durable && status.Deadline != 0 && (result.OldestUnsatisfiedDeadline == 0 || status.Deadline < result.OldestUnsatisfiedDeadline) {
 				result.OldestUnsatisfiedDeadline = status.Deadline
@@ -486,10 +487,13 @@ func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerO
 			if deadline == 0 {
 				deadline = uint64(options.Now.Unix())
 			}
-			if operation == schema.PlacementRequestPromote {
+			switch operation {
+			case schema.PlacementRequestPromote:
 				deadline = math.MaxUint64 - 1
-			} else if operation == schema.PlacementRequestEvict {
+			case schema.PlacementRequestEvict:
 				deadline = math.MaxUint64
+			case schema.PlacementRequestPlace:
+				// Keep the policy-derived deadline for ordinary placement.
 			}
 			key := schema.PlacementRequestKey(deadline, schema.ID(packID))
 			var existingValue []byte

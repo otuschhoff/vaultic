@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/global"
-	"github.com/otuschhoff/vaultic/internal/test"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
@@ -20,13 +19,13 @@ func TestAppendWriterConcurrency(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 
 	first := filepath.Join(env.testdata, "0", "0", "9", "2")
 	second := filepath.Join(env.testdata, "0", "0", "9", "3")
-	testRunBackup(t, "", []string{first}, BackupOptions{Host: "append-source-a"}, env.gopts)
-	testRunBackup(t, "", []string{second}, BackupOptions{Host: "append-source-b"}, env.gopts)
-	sources := testListSnapshots(t, env.gopts, 2)
+	testRunBackup(t, "", []string{first}, backupOptions{Host: "append-source-a"}, env.globalOptions)
+	testRunBackup(t, "", []string{second}, backupOptions{Host: "append-source-b"}, env.globalOptions)
+	sources := testListSnapshots(t, env.globalOptions, 2)
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 3)
@@ -34,16 +33,19 @@ func TestAppendWriterConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(host string) {
 			defer wg.Done()
-			errs <- withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-				return runBackup(ctx, BackupOptions{Host: host}, gopts, gopts.Term, []string{first})
+			errs <- withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+				return runBackup(ctx, backupOptions{Host: host}, globalOptions, globalOptions.Term, []string{first})
 			})
 		}(host)
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs <- withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runMerge(ctx, MergeOptions{Label: "append-concurrent-merge"}, gopts, []string{sources[0].String(), sources[1].String()}, gopts.Term)
+		errs <- withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return runMerge(
+				ctx, mergeOptions{Label: "append-concurrent-merge"}, globalOptions,
+				[]string{sources[0].String(), sources[1].String()}, globalOptions.Term,
+			)
 		})
 	}()
 
@@ -53,8 +55,8 @@ func TestAppendWriterConcurrency(t *testing.T) {
 		rtest.OK(t, err)
 	}
 
-	testListSnapshots(t, env.gopts, 5)
-	testRunCheck(t, env.gopts)
+	testListSnapshots(t, env.globalOptions, 5)
+	testRunCheck(t, env.globalOptions)
 }
 
 func TestAppendBackupAndCopyConcurrency(t *testing.T) {
@@ -62,34 +64,34 @@ func TestAppendBackupAndCopyConcurrency(t *testing.T) {
 	defer cleanupDestination()
 	source, cleanupSource := withTestEnvironment(t)
 	defer cleanupSource()
-	destination.gopts.BackendTestHook = nil
-	source.gopts.BackendTestHook = nil
+	destination.globalOptions.BackendTestHook = nil
+	source.globalOptions.BackendTestHook = nil
 	testSetupBackupData(t, destination)
 	testSetupBackupData(t, source)
 
 	sourcePath := filepath.Join(source.testdata, "0", "0", "9")
 	destinationPath := filepath.Join(destination.testdata, "0", "0", "9", "2")
-	testRunBackup(t, "", []string{sourcePath}, BackupOptions{Host: "copy-source"}, source.gopts)
-	sourceID := testListSnapshots(t, source.gopts, 1)[0]
+	testRunBackup(t, "", []string{sourcePath}, backupOptions{Host: "copy-source"}, source.globalOptions)
+	sourceID := testListSnapshots(t, source.globalOptions, 1)[0]
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs <- withTermStatus(t, destination.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runBackup(ctx, BackupOptions{Host: "copy-concurrent-backup"}, gopts, gopts.Term, []string{destinationPath})
+		errs <- withTermStatus(t, destination.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return runBackup(ctx, backupOptions{Host: "copy-concurrent-backup"}, globalOptions, globalOptions.Term, []string{destinationPath})
 		})
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs <- withTermStatus(t, destination.gopts, func(ctx context.Context, gopts global.Options) error {
-			opts := CopyOptions{SecondaryRepoOptions: global.SecondaryRepoOptions{
+		errs <- withTermStatus(t, destination.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			options := copyOptions{SecondaryRepoOptions: global.SecondaryRepoOptions{
 				Repo:     source.repo,
-				Password: test.TestPassword,
+				Password: rtest.TestPassword,
 			}}
-			return runCopy(ctx, opts, gopts, []string{sourceID.String()}, gopts.Term)
+			return runCopy(ctx, options, globalOptions, []string{sourceID.String()}, globalOptions.Term)
 		})
 	}()
 	wg.Wait()
@@ -98,6 +100,6 @@ func TestAppendBackupAndCopyConcurrency(t *testing.T) {
 		rtest.OK(t, err)
 	}
 
-	testListSnapshots(t, destination.gopts, 2)
-	testRunCheck(t, destination.gopts)
+	testListSnapshots(t, destination.globalOptions, 2)
+	testRunCheck(t, destination.globalOptions)
 }

@@ -16,11 +16,11 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunFind(t testing.TB, wantJSON bool, opts FindOptions, gopts global.Options, pattern string) []byte {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = wantJSON
+func testRunFind(t testing.TB, wantJSON bool, options findOptions, globalOptions global.Options, pattern string) []byte {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = wantJSON
 
-		return runFind(ctx, opts, gopts, []string{pattern}, gopts.Term)
+		return runFind(ctx, options, globalOptions, []string{pattern}, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 	return buf.Bytes()
@@ -31,18 +31,18 @@ func TestFind(t *testing.T) {
 	defer cleanup()
 
 	datafile := testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, "", []string{env.testdata}, opts, env.gopts)
+	testRunBackup(t, "", []string{env.testdata}, options, env.globalOptions)
 
-	results := testRunFind(t, false, FindOptions{}, env.gopts, "unexistingfile")
+	results := testRunFind(t, false, findOptions{}, env.globalOptions, "unexistingfile")
 	rtest.Assert(t, len(results) == 0, "unexisting file found in repo (%v)", datafile)
 
-	results = testRunFind(t, false, FindOptions{}, env.gopts, "testfile")
+	results = testRunFind(t, false, findOptions{}, env.globalOptions, "testfile")
 	lines := strings.Split(string(results), "\n")
 	rtest.Assert(t, len(lines) == 2, "expected one file found in repo (%v)", datafile)
 
-	results = testRunFind(t, false, FindOptions{}, env.gopts, "testfile*")
+	results = testRunFind(t, false, findOptions{}, env.globalOptions, "testfile*")
 	lines = strings.Split(string(results), "\n")
 	rtest.Assert(t, len(lines) == 4, "expected three files found in repo (%v)", datafile)
 }
@@ -67,30 +67,30 @@ func TestFindJSON(t *testing.T) {
 	defer cleanup()
 
 	datafile := testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, "", []string{env.testdata}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
-	snapshot, _ := testRunSnapshots(t, env.gopts)
+	testRunBackup(t, "", []string{env.testdata}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
+	snapshot, _ := testRunSnapshots(t, env.globalOptions)
 
-	results := testRunFind(t, true, FindOptions{}, env.gopts, "unexistingfile")
+	results := testRunFind(t, true, findOptions{}, env.globalOptions, "unexistingfile")
 	matches := []testMatches{}
 	rtest.OK(t, json.Unmarshal(results, &matches))
 	rtest.Assert(t, len(matches) == 0, "expected no match in repo (%v)", datafile)
 
-	results = testRunFind(t, true, FindOptions{}, env.gopts, "testfile")
+	results = testRunFind(t, true, findOptions{}, env.globalOptions, "testfile")
 	rtest.OK(t, json.Unmarshal(results, &matches))
 	rtest.Assert(t, len(matches) == 1, "expected a single snapshot in repo (%v)", datafile)
 	rtest.Assert(t, len(matches[0].Matches) == 1, "expected a single file to match (%v)", datafile)
 	rtest.Assert(t, matches[0].Hits == 1, "expected hits to show 1 match (%v)", datafile)
 
-	results = testRunFind(t, true, FindOptions{}, env.gopts, "testfile*")
+	results = testRunFind(t, true, findOptions{}, env.globalOptions, "testfile*")
 	rtest.OK(t, json.Unmarshal(results, &matches))
 	rtest.Assert(t, len(matches) == 1, "expected a single snapshot in repo (%v)", datafile)
 	rtest.Assert(t, len(matches[0].Matches) == 3, "expected 3 files to match (%v)", datafile)
 	rtest.Assert(t, matches[0].Hits == 3, "expected hits to show 3 matches (%v)", datafile)
 
-	results = testRunFind(t, true, FindOptions{TreeID: true}, env.gopts, snapshot.Tree.String())
+	results = testRunFind(t, true, findOptions{TreeID: true}, env.globalOptions, snapshot.Tree.String())
 	rtest.OK(t, json.Unmarshal(results, &matches))
 	rtest.Assert(t, len(matches) == 1, "expected a single snapshot in repo (%v)", matches)
 	rtest.Assert(t, len(matches[0].Matches) == 3, "expected 3 files to match (%v)", matches[0].Matches)
@@ -102,15 +102,15 @@ func TestFindSorting(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
 	// first backup
-	testRunBackup(t, "", []string{env.testdata}, opts, env.gopts)
-	sn1 := testListSnapshots(t, env.gopts, 1)[0]
+	testRunBackup(t, "", []string{env.testdata}, options, env.globalOptions)
+	sn1 := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	// second backup
-	testRunBackup(t, "", []string{env.testdata}, opts, env.gopts)
-	snapshots := testListSnapshots(t, env.gopts, 2)
+	testRunBackup(t, "", []string{env.testdata}, options, env.globalOptions)
+	snapshots := testListSnapshots(t, env.globalOptions, 2)
 	// get id of new snapshot without depending on file order returned by filesystem
 	sn2 := snapshots[0]
 	if sn1.Equal(sn2) {
@@ -118,14 +118,14 @@ func TestFindSorting(t *testing.T) {
 	}
 
 	// first vaultic find - with default FindOptions{}
-	results := testRunFind(t, true, FindOptions{}, env.gopts, "testfile")
+	results := testRunFind(t, true, findOptions{}, env.globalOptions, "testfile")
 	lines := strings.Split(string(results), "\n")
 	rtest.Assert(t, len(lines) == 2, "expected two lines of output, found %d", len(lines))
 	matches := []testMatches{}
 	rtest.OK(t, json.Unmarshal(results, &matches))
 
 	// run second vaultic find with --reverse, sort oldest to newest
-	resultsReverse := testRunFind(t, true, FindOptions{Reverse: true}, env.gopts, "testfile")
+	resultsReverse := testRunFind(t, true, findOptions{Reverse: true}, env.globalOptions, "testfile")
 	lines = strings.Split(string(resultsReverse), "\n")
 	rtest.Assert(t, len(lines) == 2, "expected two lines of output, found %d", len(lines))
 	matchesReverse := []testMatches{}
@@ -142,7 +142,7 @@ func TestFindInvalidTimeRange(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	err := runFind(context.TODO(), FindOptions{Oldest: "2026-01-01", Newest: "2020-01-01"}, env.gopts, []string{"quack"}, env.gopts.Term)
+	err := runFind(context.TODO(), findOptions{Oldest: "2026-01-01", Newest: "2020-01-01"}, env.globalOptions, []string{"quack"}, env.globalOptions.Term)
 	rtest.Assert(t, err != nil && err.Error() == "Fatal: --oldest must specify a time before --newest",
 		"unexpected error message: %v", err)
 }
@@ -165,13 +165,13 @@ func TestFindPackfile(t *testing.T) {
 
 	// backup
 	backupPath := env.testdata + "/0/0/9"
-	testRunBackup(t, "", []string{backupPath}, BackupOptions{}, env.gopts)
-	sn1 := testListSnapshots(t, env.gopts, 1)[0]
+	testRunBackup(t, "", []string{backupPath}, backupOptions{}, env.globalOptions)
+	sn1 := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	// do all the testing wrapped inside withTermStatus()
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -190,8 +190,8 @@ func TestFindPackfile(t *testing.T) {
 
 		rtest.OK(t, err)
 		rtest.Assert(t, !packID.IsNull(), "expected a tree packfile ID")
-		findOptions := FindOptions{PackID: true}
-		results := testRunFind(t, true, findOptions, env.gopts, packID.String())
+		findOptions := findOptions{PackID: true}
+		results := testRunFind(t, true, findOptions, env.globalOptions, packID.String())
 
 		// get the json records
 		jsonResult := []JSONOutput{}
@@ -223,15 +223,15 @@ func TestFindPackID(t *testing.T) {
 	numberOfFiles := len(dirEntries)
 
 	// backup
-	testRunBackup(t, "", []string{dir009}, BackupOptions{}, env.gopts)
-	sn1 := testListSnapshots(t, env.gopts, 1)[0]
+	testRunBackup(t, "", []string{dir009}, backupOptions{}, env.globalOptions)
+	sn1 := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	// extract packfile ID from repository index
 	dataPackID := vaultic.ID{}
 	treePackID := vaultic.ID{}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -253,7 +253,7 @@ func TestFindPackID(t *testing.T) {
 	// look for data packfile
 	rtest.Assert(t, !dataPackID.IsNull(), "expected to find data packfile in repo")
 	packID := dataPackID.String()
-	out := testRunFind(t, true, FindOptions{PackID: true}, env.gopts, packID)
+	out := testRunFind(t, true, findOptions{PackID: true}, env.globalOptions, packID)
 
 	findRes := []JSONOutput{}
 	rtest.OK(t, json.Unmarshal(out, &findRes))
@@ -261,10 +261,10 @@ func TestFindPackID(t *testing.T) {
 		numberOfFiles, len(findRes))
 
 	// corrupt the data pack file; find must fall back to the index
-	be := captureBackend(&env.gopts)
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		_, _, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	be := captureBackend(&env.globalOptions)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		_, _, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -276,7 +276,7 @@ func TestFindPackID(t *testing.T) {
 	})
 	rtest.OK(t, err)
 
-	out = testRunFind(t, true, FindOptions{PackID: true}, env.gopts, dataPackID.String())
+	out = testRunFind(t, true, findOptions{PackID: true}, env.globalOptions, dataPackID.String())
 	findRes = []JSONOutput{}
 	rtest.OK(t, json.Unmarshal(out, &findRes))
 	rtest.Assert(t, len(findRes) == numberOfFiles, "expected %d entries for broken packfile, got %d",
@@ -285,7 +285,7 @@ func TestFindPackID(t *testing.T) {
 	// look for tree packfile
 	rtest.Assert(t, !treePackID.IsNull(), "expected to find tree packfile in repo")
 	packID = treePackID.String()
-	out = testRunFind(t, true, FindOptions{PackID: true}, env.gopts, packID)
+	out = testRunFind(t, true, findOptions{PackID: true}, env.globalOptions, packID)
 
 	findRes = []JSONOutput{}
 	rtest.OK(t, json.Unmarshal(out, &findRes))

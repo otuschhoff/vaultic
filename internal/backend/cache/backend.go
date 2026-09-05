@@ -52,37 +52,38 @@ func autoCacheTypes(h backend.Handle) bool {
 		return true
 	case backend.PackFile:
 		return h.IsMetadata
+	default:
+		return false
 	}
-	return false
 }
 
 // Save stores a new file in the backend and the cache.
-func (b *cacheBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (b *cacheBackend) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	if !autoCacheTypes(h) {
-		return b.Backend.Save(ctx, h, rd)
+		return b.Backend.Save(ctx, h, reader)
 	}
 
 	debug.Log("Save(%v): auto-store in the cache", h)
 
 	// make sure the reader is at the start
-	err := rd.Rewind()
+	err := reader.Rewind()
 	if err != nil {
 		return err
 	}
 
 	// first, save in the backend
-	err = b.Backend.Save(ctx, h, rd)
+	err = b.Backend.Save(ctx, h, reader)
 	if err != nil {
 		return err
 	}
 
 	// next, save in the cache
-	err = rd.Rewind()
+	err = reader.Rewind()
 	if err != nil {
 		return err
 	}
 
-	err = b.Cache.save(h, rd)
+	err = b.Cache.save(h, reader)
 	if err != nil {
 		debug.Log("unable to save %v to cache: %v", h, err)
 		return err
@@ -121,12 +122,12 @@ func (b *cacheBackend) cacheFile(ctx context.Context, h backend.Handle) error {
 	// test again, maybe the file was cached in the meantime
 	if !b.Cache.Has(h) {
 		// nope, it's still not in the cache, pull it from the repo and save it
-		err := b.Backend.Load(ctx, h, 0, 0, func(rd io.Reader) error {
-			return b.Cache.save(h, rd)
+		err := b.Backend.Load(ctx, h, 0, 0, func(reader io.Reader) error {
+			return b.Cache.save(h, reader)
 		})
 		if err != nil {
 			// try to remove from the cache, ignore errors
-			_, _ = b.Cache.remove(h)
+			_, _ = b.Cache.remove(h) // A failed cache eviction cannot change the authoritative backend result.
 		}
 		return err
 	}
@@ -135,22 +136,22 @@ func (b *cacheBackend) cacheFile(ctx context.Context, h backend.Handle) error {
 }
 
 // loadFromCache will try to load the file from the cache.
-func (b *cacheBackend) loadFromCache(h backend.Handle, length int, offset int64, consumer func(rd io.Reader) error) (bool, error) {
-	rd, inCache, err := b.Cache.load(h, length, offset)
+func (b *cacheBackend) loadFromCache(h backend.Handle, length int, offset int64, consumer func(reader io.Reader) error) (bool, error) {
+	reader, inCache, err := b.Cache.load(h, length, offset)
 	if err != nil {
 		return inCache, err
 	}
 
-	err = consumer(rd)
+	err = consumer(reader)
 	if err != nil {
-		_ = rd.Close() // ignore secondary errors
+		_ = reader.Close() // Preserve the consumer failure; this cache reader has no buffered writes.
 		return true, err
 	}
-	return true, rd.Close()
+	return true, reader.Close()
 }
 
 // Load loads a file from the cache or the backend.
-func (b *cacheBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, consumer func(rd io.Reader) error) error {
+func (b *cacheBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, consumer func(reader io.Reader) error) error {
 	b.inProgressMutex.Lock()
 	waitForFinish, inProgress := b.inProgress[h]
 	b.inProgressMutex.Unlock()
@@ -203,7 +204,7 @@ func (b *cacheBackend) Stat(ctx context.Context, h backend.Handle) (backend.File
 	fi, err := b.Backend.Stat(ctx, h)
 	if err != nil && b.Backend.IsNotExist(err) {
 		// try to remove from the cache, ignore errors
-		_, _ = b.Cache.remove(h)
+		_, _ = b.Cache.remove(h) // A failed cache eviction cannot change the authoritative backend result.
 	}
 
 	return fi, err

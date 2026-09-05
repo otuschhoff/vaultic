@@ -45,21 +45,18 @@ func removexattr(path, name string) error {
 }
 
 func handleXattrErr(err error) error {
-	switch e := err.(type) {
-	case nil:
+	if err == nil {
 		return nil
-
-	case *xattr.Error:
+	}
+	var xattrError *xattr.Error
+	if errors.As(err, &xattrError) {
 		// On Linux, xattr calls on files in an SMB/CIFS mount can return
 		// ENOATTR instead of ENOTSUP.  BSD can return EOPNOTSUPP.
-		if e.Err == syscall.ENOTSUP || e.Err == syscall.EOPNOTSUPP || e.Err == xattr.ENOATTR {
+		if errors.Is(xattrError.Err, syscall.ENOTSUP) || errors.Is(xattrError.Err, syscall.EOPNOTSUPP) || errors.Is(xattrError.Err, xattr.ENOATTR) {
 			return nil
 		}
-		return errors.WithStack(e)
-
-	default:
-		return errors.WithStack(e)
 	}
+	return errors.WithStack(err)
 }
 
 func nodeRestoreExtendedAttributes(node *data.Node, path string, xattrSelectFilter func(xattrName string) bool) error {

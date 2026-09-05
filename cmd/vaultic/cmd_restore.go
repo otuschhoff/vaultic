@@ -21,7 +21,7 @@ import (
 )
 
 func newRestoreCommand(globalOptions *global.Options) *cobra.Command {
-	var opts RestoreOptions
+	var options restoreOptions
 
 	cmd := &cobra.Command{
 		Use:   "restore [flags] snapshotID",
@@ -51,20 +51,20 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRestore(cmd.Context(), opts, *globalOptions, globalOptions.Term, args)
+			return runRestore(cmd.Context(), options, *globalOptions, globalOptions.Term, args)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// RestoreOptions collects all options for the restore command.
-type RestoreOptions struct {
+// restoreOptions collects all options for the restore command.
+type restoreOptions struct {
 	filter.ExcludePatternOptions
 	filter.IncludePatternOptions
 	Target string
@@ -79,88 +79,68 @@ type RestoreOptions struct {
 	OwnershipByName     bool
 }
 
-func (opts *RestoreOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVarP(&opts.Target, "target", "t", "", "directory to extract data to")
+func (options *restoreOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVarP(&options.Target, "target", "t", "", "directory to extract data to")
 
-	opts.ExcludePatternOptions.Add(f)
-	opts.IncludePatternOptions.Add(f)
+	options.ExcludePatternOptions.Add(f)
+	options.IncludePatternOptions.Add(f)
 
-	f.StringArrayVar(&opts.ExcludeXattrPattern, "exclude-xattr", nil, "exclude xattr by `pattern` (can be specified multiple times)")
-	f.StringArrayVar(&opts.IncludeXattrPattern, "include-xattr", nil, "include xattr by `pattern` (can be specified multiple times)")
+	f.StringArrayVar(&options.ExcludeXattrPattern, "exclude-xattr", nil, "exclude xattr by `pattern` (can be specified multiple times)")
+	f.StringArrayVar(&options.IncludeXattrPattern, "include-xattr", nil, "include xattr by `pattern` (can be specified multiple times)")
 
-	initSingleSnapshotFilter(f, &opts.SnapshotFilter)
-	f.BoolVar(&opts.DryRun, "dry-run", false, "do not write any data, just show what would be done")
-	f.BoolVar(&opts.Sparse, "sparse", false, "restore files as sparse")
-	f.BoolVar(&opts.Verify, "verify", false, "verify restored files content")
-	f.Var(&opts.Overwrite, "overwrite", "overwrite behavior, one of (always|if-changed|if-newer|never)")
+	initSingleSnapshotFilter(f, &options.SnapshotFilter)
+	f.BoolVar(&options.DryRun, "dry-run", false, "do not write any data, just show what would be done")
+	f.BoolVar(&options.Sparse, "sparse", false, "restore files as sparse")
+	f.BoolVar(&options.Verify, "verify", false, "verify restored files content")
+	f.Var(&options.Overwrite, "overwrite", "overwrite behavior, one of (always|if-changed|if-newer|never)")
 	f.BoolVar(
-		&opts.Delete,
+		&options.Delete,
 		"delete",
 		false,
 		"delete files from target directory if they do not exist in snapshot. Use '--dry-run -vv' to check what would be deleted",
 	)
 	if runtime.GOOS != "windows" {
-		f.BoolVar(&opts.OwnershipByName, "ownership-by-name", false, "restore file ownership by user name and group name (except POSIX ACLs)")
+		f.BoolVar(&options.OwnershipByName, "ownership-by-name", false, "restore file ownership by user name and group name (except POSIX ACLs)")
 	}
 }
 
-func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
+func runRestore(ctx context.Context, options restoreOptions, globalOptions global.Options,
 	term ui.Terminal, args []string) error {
 
 	var printer restoreui.ProgressPrinter
-	if gopts.JSON {
-		printer = restoreui.NewJSONProgress(term, gopts.Verbosity)
+	if globalOptions.JSON {
+		printer = restoreui.NewJSONProgress(term, globalOptions.Verbosity)
 	} else {
-		printer = restoreui.NewTextProgress(term, gopts.Verbosity)
+		printer = restoreui.NewTextProgress(term, globalOptions.Verbosity)
 	}
 
-	excludePatternFns, err := opts.ExcludePatternOptions.CollectPatterns(printer.E)
+	excludePatternFns, err := options.ExcludePatternOptions.CollectPatterns(printer.E)
 	if err != nil {
 		return err
 	}
 
-	includePatternFns, err := opts.IncludePatternOptions.CollectPatterns(printer.E)
+	includePatternFns, err := options.IncludePatternOptions.CollectPatterns(printer.E)
 	if err != nil {
 		return err
 	}
 
 	hasExcludes := len(excludePatternFns) > 0
 	hasIncludes := len(includePatternFns) > 0
-
-	switch {
-	case len(args) == 0:
-		return errors.Fatal("no snapshot ID specified")
-	case len(args) > 1:
-		return errors.Fatalf("more than one snapshot ID specified: %v", args)
-	}
-
-	if opts.Target == "" {
-		return errors.Fatal("please specify a directory to restore to (--target)")
-	}
-
-	if hasExcludes && hasIncludes {
-		return errors.Fatal("exclude and include patterns are mutually exclusive")
-	}
-
-	if opts.DryRun && opts.Verify {
-		return errors.Fatal("--dry-run and --verify are mutually exclusive")
-	}
-
-	if opts.Delete && filepath.Clean(opts.Target) == "/" && !hasExcludes && !hasIncludes {
-		return errors.Fatal("'--target / --delete' must be combined with an include or exclude filter")
+	if err := validateRestoreOptions(options, args, hasExcludes, hasIncludes); err != nil {
+		return err
 	}
 
 	snapshotIDString := args[0]
 
-	debug.Log("restore %v to %v", snapshotIDString, opts.Target)
+	debug.Log("restore %v to %v", snapshotIDString, options.Target)
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, repo, repo, snapshotIDString)
+	sn, subfolder, err := options.SnapshotFilter.FindLatest(ctx, repo, repo, snapshotIDString)
 	if err != nil {
 		return errors.Fatalf("failed to find snapshot: %v", err)
 	}
@@ -175,14 +155,14 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 		return err
 	}
 
-	progress := restoreui.NewProgress(printer, gopts.Quiet, gopts.JSON, term.CanUpdateStatus())
+	progress := restoreui.NewProgress(printer, globalOptions.Quiet, globalOptions.JSON, term.CanUpdateStatus())
 	res := restorer.NewRestorer(repo, sn, restorer.Options{
-		DryRun:          opts.DryRun,
-		Sparse:          opts.Sparse,
+		DryRun:          options.DryRun,
+		Sparse:          options.Sparse,
 		Progress:        progress,
-		Overwrite:       opts.Overwrite,
-		Delete:          opts.Delete,
-		OwnershipByName: opts.OwnershipByName,
+		Overwrite:       options.Overwrite,
+		Delete:          options.Delete,
+		OwnershipByName: options.OwnershipByName,
 	})
 
 	totalErrors := 0
@@ -194,12 +174,95 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 		printer.E("Warning: %s\n", message)
 	}
 	res.Info = func(message string) {
-		if gopts.JSON {
+		if globalOptions.JSON {
 			return
 		}
 		printer.P("Info: %s\n", message)
 	}
 
+	configureRestoreFilter(res, excludePatternFns, includePatternFns, hasExcludes, hasIncludes)
+
+	res.XattrSelectFilter, err = getXattrSelectFilter(options, printer)
+	if err != nil {
+		return err
+	}
+
+	if !globalOptions.JSON {
+		printer.P("restoring %s to %s\n", res.Snapshot(), options.Target)
+	}
+
+	countRestoredFiles, err := res.RestoreTo(ctx, options.Target)
+	if err != nil {
+		return err
+	}
+
+	progress.Finish()
+
+	if totalErrors > 0 {
+		return errors.Fatalf("There were %d errors", totalErrors)
+	}
+
+	if options.Verify {
+		return verifyRestoredFiles(ctx, res, printer, options.Target, countRestoredFiles, totalErrors, globalOptions.JSON)
+	}
+
+	return nil
+}
+
+func validateRestoreOptions(options restoreOptions, args []string, hasExcludes, hasIncludes bool) error {
+	switch {
+	case len(args) == 0:
+		return errors.Fatal("no snapshot ID specified")
+	case len(args) > 1:
+		return errors.Fatalf("more than one snapshot ID specified: %v", args)
+	case options.Target == "":
+		return errors.Fatal("please specify a directory to restore to (--target)")
+	case hasExcludes && hasIncludes:
+		return errors.Fatal("exclude and include patterns are mutually exclusive")
+	case options.DryRun && options.Verify:
+		return errors.Fatal("--dry-run and --verify are mutually exclusive")
+	case options.Delete && filepath.Clean(options.Target) == "/" && !hasExcludes && !hasIncludes:
+		return errors.Fatal("'--target / --delete' must be combined with an include or exclude filter")
+	default:
+		return nil
+	}
+}
+
+func verifyRestoredFiles(
+	ctx context.Context,
+	restore *restorer.Restorer,
+	printer restoreui.ProgressPrinter,
+	target string,
+	countRestoredFiles uint64,
+	totalErrors int,
+	jsonOutput bool,
+) error {
+	if !jsonOutput {
+		printer.P("verifying files in %s\n", target)
+	}
+	started := time.Now()
+	bar := printer.NewCounterTerminalOnly("files verified")
+	count, err := restore.VerifyFiles(ctx, target, countRestoredFiles, bar)
+	if err != nil {
+		return err
+	}
+	if totalErrors > 0 {
+		return errors.Fatalf("There were %d errors", totalErrors)
+	}
+	if !jsonOutput {
+		printer.P("finished verifying %d files in %s (took %s)\n", count, target,
+			time.Since(started).Round(time.Millisecond))
+	}
+	return nil
+}
+
+func configureRestoreFilter(
+	restorer *restorer.Restorer,
+	excludePatternFns []filter.RejectByNameFunc,
+	includePatternFns []filter.IncludeByNameFunc,
+	hasExcludes bool,
+	hasIncludes bool,
+) {
 	selectExcludeFilter := func(item string, isDir bool) (selectedForRestore bool, childMayBeSelected bool) {
 		matched := false
 		for _, rejectFn := range excludePatternFns {
@@ -240,82 +303,39 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 	}
 
 	if hasExcludes {
-		res.SelectFilter = selectExcludeFilter
+		restorer.SelectFilter = selectExcludeFilter
 	} else if hasIncludes {
-		res.SelectFilter = selectIncludeFilter
+		restorer.SelectFilter = selectIncludeFilter
 	}
-
-	res.XattrSelectFilter, err = getXattrSelectFilter(opts, printer)
-	if err != nil {
-		return err
-	}
-
-	if !gopts.JSON {
-		printer.P("restoring %s to %s\n", res.Snapshot(), opts.Target)
-	}
-
-	countRestoredFiles, err := res.RestoreTo(ctx, opts.Target)
-	if err != nil {
-		return err
-	}
-
-	progress.Finish()
-
-	if totalErrors > 0 {
-		return errors.Fatalf("There were %d errors", totalErrors)
-	}
-
-	if opts.Verify {
-		if !gopts.JSON {
-			printer.P("verifying files in %s\n", opts.Target)
-		}
-		var count int
-		t0 := time.Now()
-		bar := printer.NewCounterTerminalOnly("files verified")
-		count, err = res.VerifyFiles(ctx, opts.Target, countRestoredFiles, bar)
-		if err != nil {
-			return err
-		}
-		if totalErrors > 0 {
-			return errors.Fatalf("There were %d errors", totalErrors)
-		}
-
-		if !gopts.JSON {
-			printer.P("finished verifying %d files in %s (took %s)\n", count, opts.Target,
-				time.Since(t0).Round(time.Millisecond))
-		}
-	}
-
-	return nil
 }
 
-func getXattrSelectFilter(opts RestoreOptions, printer vaultic.Printer) (func(xattrName string) bool, error) {
-	hasXattrExcludes := len(opts.ExcludeXattrPattern) > 0
-	hasXattrIncludes := len(opts.IncludeXattrPattern) > 0
+func getXattrSelectFilter(options restoreOptions, printer vaultic.Printer) (func(xattrName string) bool, error) {
+	hasXattrExcludes := len(options.ExcludeXattrPattern) > 0
+	hasXattrIncludes := len(options.IncludeXattrPattern) > 0
 
 	if hasXattrExcludes && hasXattrIncludes {
 		return nil, errors.Fatal("exclude and include xattr patterns are mutually exclusive")
 	}
 
 	if hasXattrExcludes {
-		if err := filter.ValidatePatterns(opts.ExcludeXattrPattern); err != nil {
+		if err := filter.ValidatePatterns(options.ExcludeXattrPattern); err != nil {
 			return nil, errors.Fatalf("--exclude-xattr: %s", err)
 		}
 
 		return func(xattrName string) bool {
-			shouldReject := filter.RejectByPattern(opts.ExcludeXattrPattern, printer.E)(xattrName)
+			shouldReject := filter.RejectByPattern(options.ExcludeXattrPattern, printer.E)(xattrName)
 			return !shouldReject
 		}, nil
 	}
 
 	if hasXattrIncludes {
 		// User has either input include xattr pattern(s) or we're using our default include pattern
-		if err := filter.ValidatePatterns(opts.IncludeXattrPattern); err != nil {
+		if err := filter.ValidatePatterns(options.IncludeXattrPattern); err != nil {
 			return nil, errors.Fatalf("--include-xattr: %s", err)
 		}
 
 		return func(xattrName string) bool {
-			shouldInclude, _ := filter.IncludeByPattern(opts.IncludeXattrPattern, printer.E)(xattrName)
+			shouldInclude, _ := filter.IncludeByPattern(options.IncludeXattrPattern, printer.E)(xattrName)
 			return shouldInclude
 		}, nil
 	}

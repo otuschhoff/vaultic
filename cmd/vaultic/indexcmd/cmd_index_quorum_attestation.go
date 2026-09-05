@@ -81,7 +81,7 @@ func newIndexKeysQuorumGenerateAttestationKeyCommand(globalOptions *global.Optio
 				return fmt.Errorf("write attestation private key: %w", err)
 			}
 			if err := writeNewProtectedValue(publicKeyPath, base64.StdEncoding.EncodeToString(publicKey)); err != nil {
-				_ = os.Remove(privateKeyPath)
+				_ = os.Remove(privateKeyPath) // The key was not published, and a stale partial file is never loaded.
 				return fmt.Errorf("write attestation public key: %w", err)
 			}
 			result := map[string]any{"private_key": privateKeyPath, "public_key": publicKeyPath, "algorithm": "Ed25519"}
@@ -95,8 +95,8 @@ func newIndexKeysQuorumGenerateAttestationKeyCommand(globalOptions *global.Optio
 	}
 	command.Flags().StringVar(&privateKeyPath, "private-key", "", "new mode-0600 attestation private-key file")
 	command.Flags().StringVar(&publicKeyPath, "public-key", "", "new mode-0600 pinned attestation public-key file")
-	_ = command.MarkFlagRequired("private-key")
-	_ = command.MarkFlagRequired("public-key")
+	mustMarkFlagRequired(command, "private-key")
+	mustMarkFlagRequired(command, "public-key")
 	return command
 }
 
@@ -197,9 +197,9 @@ func newIndexKeysQuorumAttestBypassesCommand(globalOptions *global.Options) *cob
 			false,
 			"attest that offline shares map to distinct human custodians",
 		)
-	_ = command.MarkFlagRequired("capsule")
-	_ = command.MarkFlagRequired("private-key")
-	_ = command.MarkFlagRequired("output")
+	mustMarkFlagRequired(command, "capsule")
+	mustMarkFlagRequired(command, "private-key")
+	mustMarkFlagRequired(command, "output")
 	return command
 }
 
@@ -216,7 +216,7 @@ func writeNewProtectedValue(path, value string) error {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) // The protected file write already failed; a stale partial file is never loaded.
 	}
 	return err
 }

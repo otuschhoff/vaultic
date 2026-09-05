@@ -29,7 +29,6 @@ func CheckHotCold(ctx context.Context, hot, cold backend.Backend) (errs []error)
 // compareFileType compares all files of type t between hot and cold.
 func compareFileType(ctx context.Context, hot, cold backend.Backend, t backend.FileType) (errs []error) {
 	// collect file names+sizes from both sides
-	type entry struct{ size int64 }
 	collect := func(be backend.Backend) (map[string]int64, error) {
 		m := map[string]int64{}
 		err := be.List(ctx, t, func(fi backend.FileInfo) error {

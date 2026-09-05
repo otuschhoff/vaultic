@@ -18,43 +18,43 @@ import (
 )
 
 func newMergeCommand(globalOptions *global.Options) *cobra.Command {
-	var opts MergeOptions
+	var options mergeOptions
 	cmd := &cobra.Command{
 		Use:               "merge [flags] snapshotID [snapshotID ...]",
 		Short:             "Merge snapshots into a new snapshot",
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMerge(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runMerge(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-type MergeOptions struct {
+type mergeOptions struct {
 	data.SnapshotFilter
 	Label string
 }
 
-func (opts *MergeOptions) AddFlags(f *pflag.FlagSet) {
+func (options *mergeOptions) AddFlags(f *pflag.FlagSet) {
 	// Kept separate from initMultiSnapshotFilter because merge requires explicit
 	// source snapshots; filters constrain latest/N resolution only.
 	// pflag.FlagSet satisfies this small interface.
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
-	f.StringVar(&opts.Label, "label", "", "label for the merged snapshot (default: newest source)")
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
+	f.StringVar(&options.Label, "label", "", "label for the merged snapshot (default: newest source)")
 }
 
-func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args []string, term ui.Terminal) error {
+func runMerge(ctx context.Context, options mergeOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) < 2 {
 		return errors.Fatal("merge requires at least two snapshots")
 	}
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, false, printer)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithAppendLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args
 	}
 
 	var snapshots data.Snapshots
-	if err := opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	if err := options.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -105,14 +105,14 @@ func runMerge(ctx context.Context, opts MergeOptions, gopts global.Options, args
 	for _, snapshot := range snapshots {
 		newest.MergedSnapshots = append(newest.MergedSnapshots, *snapshot.ID())
 	}
-	if opts.Label != "" {
-		newest.Label = opts.Label
+	if options.Label != "" {
+		newest.Label = options.Label
 	}
 	id, err := data.SaveSnapshot(ctx, appendRepo, &newest)
 	if err != nil {
 		return err
 	}
-	if gopts.JSON {
+	if globalOptions.JSON {
 		return json.NewEncoder(term.OutputWriter()).Encode(newest)
 	}
 	printer.S("merged %d snapshots into %s", len(snapshots), id.Str())

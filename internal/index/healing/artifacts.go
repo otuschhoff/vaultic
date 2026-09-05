@@ -27,8 +27,8 @@ func DeriveKey(repositoryKey []byte, repositoryID string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid healing key derivation input")
 	}
 	mac := hmac.New(sha256.New, repositoryKey)
-	_, _ = mac.Write([]byte("vaultic-metadata-healing-v1\x00"))
-	_, _ = mac.Write([]byte(repositoryID))
+	_, _ = mac.Write([]byte("vaultic-metadata-healing-v1\x00")) // hash.Hash writes are specified to return a nil error.
+	_, _ = mac.Write([]byte(repositoryID))                      // hash.Hash writes are specified to return a nil error.
 	return mac.Sum(nil), nil
 }
 
@@ -320,7 +320,7 @@ func signArtifact(value any, key []byte) (string, string) {
 	encoded, _ := json.Marshal(value)
 	digest := sha256.Sum256(encoded)
 	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(digest[:])
+	_, _ = mac.Write(digest[:]) // hash.Hash writes are specified to return a nil error.
 	return hex.EncodeToString(digest[:]), hex.EncodeToString(mac.Sum(nil))
 }
 

@@ -50,6 +50,8 @@ func (t BlobType) String() string {
 		return "tree"
 	case InvalidBlob:
 		return "invalid"
+	case NumBlobTypes:
+		return fmt.Sprintf("<BlobType %d>", t)
 	}
 
 	return fmt.Sprintf("<BlobType %d>", t)
@@ -71,6 +73,8 @@ func (t BlobType) MarshalJSON() ([]byte, error) {
 		return []byte(`"data"`), nil
 	case TreeBlob:
 		return []byte(`"tree"`), nil
+	case InvalidBlob, NumBlobTypes:
+		return nil, errors.New("unknown blob type")
 	}
 
 	return nil, errors.New("unknown blob type")

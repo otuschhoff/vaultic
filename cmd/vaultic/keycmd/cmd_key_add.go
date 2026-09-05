@@ -15,7 +15,7 @@ import (
 )
 
 func newKeyAddCommand(globalOptions *global.Options) *cobra.Command {
-	var opts KeyAddOptions
+	var options keyAddOptions
 
 	cmd := &cobra.Command{
 		Use:   "add",
@@ -34,57 +34,73 @@ Exit status is 12 if the password is incorrect.
 	`,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runKeyAdd(cmd.Context(), *globalOptions, opts, args, globalOptions.Term)
+			return runKeyAdd(cmd.Context(), *globalOptions, options, args, globalOptions.Term)
 		},
 	}
 
-	opts.Add(cmd.Flags())
+	options.Add(cmd.Flags())
 	return cmd
 }
 
-type KeyAddOptions struct {
+type keyAddOptions struct {
 	NewPasswordFile    string
 	InsecureNoPassword bool
 	Username           string
 	Hostname           string
 }
 
-func (opts *KeyAddOptions) Add(flags *pflag.FlagSet) {
-	flags.StringVarP(&opts.NewPasswordFile, "new-password-file", "", "", "`file` from which to read the new password")
-	flags.BoolVar(&opts.InsecureNoPassword, "new-insecure-no-password", false, "add an empty password for the repository (insecure)")
-	flags.StringVarP(&opts.Username, "user", "", "", "the username for new key")
-	flags.StringVarP(&opts.Hostname, "host", "", "", "the hostname for new key")
+func (options *keyAddOptions) Add(flags *pflag.FlagSet) {
+	flags.StringVarP(&options.NewPasswordFile, "new-password-file", "", "", "`file` from which to read the new password")
+	flags.BoolVar(&options.InsecureNoPassword, "new-insecure-no-password", false, "add an empty password for the repository (insecure)")
+	flags.StringVarP(&options.Username, "user", "", "", "the username for new key")
+	flags.StringVarP(&options.Hostname, "host", "", "", "the hostname for new key")
 }
 
-func runKeyAdd(ctx context.Context, gopts global.Options, opts KeyAddOptions, args []string, term ui.Terminal) error {
+func runKeyAdd(ctx context.Context, globalOptions global.Options, options keyAddOptions, args []string, term ui.Terminal) error {
+	return runKeyAddWithPassword(ctx, globalOptions, options, args, term, func() (string, error) {
+		return getNewPassword(ctx, globalOptions, options.NewPasswordFile, options.InsecureNoPassword)
+	})
+}
+
+func RunAddWithPassword(
+	ctx context.Context, globalOptions global.Options, options keyAddOptions, args []string,
+	term ui.Terminal, readPassword func() (string, error),
+) error {
+	return runKeyAddWithPassword(ctx, globalOptions, options, args, term, readPassword)
+}
+
+func runKeyAddWithPassword(
+	ctx context.Context, globalOptions global.Options, options keyAddOptions, args []string,
+	term ui.Terminal, readPassword func() (string, error),
+) error {
 	if len(args) > 0 {
 		return fmt.Errorf("the key add command expects no arguments, only options - please see `vaultic help key add` for usage and flags")
 	}
 
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 	// Key validation may remove a newly-created broken key. It is therefore not
 	// an append-only transaction and must use the exclusive lock policy.
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	return addKey(ctx, repo, gopts, opts, printer)
+	return addKey(ctx, repo, options, printer, readPassword)
 }
 
-func addKey(ctx context.Context, repo *repository.Repository, gopts global.Options, opts KeyAddOptions, printer vaultic.Printer) error {
-	pw, err := getNewPassword(ctx, gopts, opts.NewPasswordFile, opts.InsecureNoPassword)
+func addKey(ctx context.Context, repo *repository.Repository, options keyAddOptions, printer vaultic.Printer, readPassword func() (string, error)) error {
+	password, err := readPassword()
 	if err != nil {
 		return err
 	}
 
-	id, err := repository.AddKey(ctx, repo, pw, opts.Username, opts.Hostname, repo.Key())
+	id, err := repository.AddKey(ctx, repo, password, options.Username, options.Hostname, repo.Key())
 	if err != nil {
 		return errors.Fatalf("creating new key failed: %v", err)
 	}
 
-	err = switchToNewKeyAndRemoveIfBroken(ctx, repo, id, pw)
+	err = switchToNewKeyAndRemoveIfBroken(ctx, repo, id, password)
 	if err != nil {
 		return err
 	}
@@ -94,14 +110,7 @@ func addKey(ctx context.Context, repo *repository.Repository, gopts global.Optio
 	return nil
 }
 
-// TestKeyNewPassword is used to set a new password during integration testing.
-var TestKeyNewPassword string
-
-func getNewPassword(ctx context.Context, gopts global.Options, newPasswordFile string, insecureNoPassword bool) (string, error) {
-	if TestKeyNewPassword != "" {
-		return TestKeyNewPassword, nil
-	}
-
+func getNewPassword(ctx context.Context, globalOptions global.Options, newPasswordFile string, insecureNoPassword bool) (string, error) {
 	if insecureNoPassword {
 		if newPasswordFile != "" {
 			return "", fmt.Errorf("only either --new-password-file or --new-insecure-no-password may be specified")
@@ -122,12 +131,12 @@ func getNewPassword(ctx context.Context, gopts global.Options, newPasswordFile s
 
 	// Since we already have an open repository, temporary remove the password
 	// to prompt the user for the passwd.
-	newopts := gopts
-	newopts.Password = ""
+	passwordOptions := globalOptions
+	passwordOptions.Password = ""
 	// empty passwords are already handled above
-	newopts.InsecureNoPassword = false
+	passwordOptions.InsecureNoPassword = false
 
-	return global.ReadPasswordTwice(ctx, newopts,
+	return global.ReadPasswordTwice(ctx, passwordOptions,
 		"enter new password: ",
 		"enter password again: ")
 }

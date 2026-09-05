@@ -17,13 +17,13 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunRepairSnapshot(t testing.TB, gopts global.Options, forget bool) {
-	opts := RepairOptions{
+func testRunRepairSnapshot(t testing.TB, globalOptions global.Options, forget bool) {
+	options := repairOptions{
 		Forget: forget,
 	}
 
-	rtest.OK(t, withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runRepairSnapshots(context.TODO(), gopts, opts, nil, gopts.Term)
+	rtest.OK(t, withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runRepairSnapshots(context.TODO(), globalOptions, options, nil, globalOptions.Term)
 	}))
 }
 
@@ -47,29 +47,29 @@ func TestRepairSnapshotsWithLostData(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	createRandomFile(t, env, "foo/bar/file", 512*1024)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	testListSnapshots(t, env.gopts, 1)
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 1)
 	// damage repository
-	removePacksExcept(env.gopts, t, vaultic.NewIDSet(), false)
+	removePacksExcept(env.globalOptions, t, vaultic.NewIDSet(), false)
 
 	createRandomFile(t, env, "foo/bar/file2", 256*1024)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	snapshotIDs := testListSnapshots(t, env.gopts, 2)
-	testRunCheckMustFail(t, env.gopts)
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	snapshotIDs := testListSnapshots(t, env.globalOptions, 2)
+	testRunCheckMustFail(t, env.globalOptions)
 
 	// repair but keep broken snapshots
-	testRunRebuildIndex(t, env.gopts)
-	testRunRepairSnapshot(t, env.gopts, false)
-	testListSnapshots(t, env.gopts, 4)
-	testRunCheckMustFail(t, env.gopts)
+	testRunRebuildIndex(t, env.globalOptions)
+	testRunRepairSnapshot(t, env.globalOptions, false)
+	testListSnapshots(t, env.globalOptions, 4)
+	testRunCheckMustFail(t, env.globalOptions)
 
 	// repository must be ok after removing the broken snapshots
-	testRunForget(t, env.gopts, ForgetOptions{}, snapshotIDs[0].String(), snapshotIDs[1].String())
-	testListSnapshots(t, env.gopts, 2)
-	_, _, err := testRunCheckOutput(t, env.gopts, false)
+	testRunForget(t, env.globalOptions, forgetOptions{}, snapshotIDs[0].String(), snapshotIDs[1].String())
+	testListSnapshots(t, env.globalOptions, 2)
+	_, _, err := testRunCheckOutput(t, env.globalOptions, false)
 	rtest.OK(t, err)
 }
 
@@ -77,28 +77,28 @@ func TestRepairSnapshotsWithLostTree(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	createRandomFile(t, env, "foo/bar/file", 12345)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	oldSnapshot := testListSnapshots(t, env.gopts, 1)
-	oldPacks := testRunList(t, env.gopts, "packs")
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	oldSnapshot := testListSnapshots(t, env.globalOptions, 1)
+	oldPacks := testRunList(t, env.globalOptions, "packs")
 
 	// keep foo/bar unchanged
 	createRandomFile(t, env, "foo/bar2", 1024)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	testListSnapshots(t, env.gopts, 2)
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 2)
 
 	// remove tree for foo/bar and the now completely broken first snapshot
-	removePacks(env.gopts, t, vaultic.NewIDSet(oldPacks...))
-	testRunForget(t, env.gopts, ForgetOptions{}, oldSnapshot[0].String())
-	testRunCheckMustFail(t, env.gopts)
+	removePacks(env.globalOptions, t, vaultic.NewIDSet(oldPacks...))
+	testRunForget(t, env.globalOptions, forgetOptions{}, oldSnapshot[0].String())
+	testRunCheckMustFail(t, env.globalOptions)
 
 	// repair
-	testRunRebuildIndex(t, env.gopts)
-	testRunRepairSnapshot(t, env.gopts, true)
-	testListSnapshots(t, env.gopts, 1)
-	_, _, err := testRunCheckOutput(t, env.gopts, false)
+	testRunRebuildIndex(t, env.globalOptions)
+	testRunRepairSnapshot(t, env.globalOptions, true)
+	testListSnapshots(t, env.globalOptions, 1)
+	_, _, err := testRunCheckOutput(t, env.globalOptions, false)
 	rtest.OK(t, err)
 }
 
@@ -106,22 +106,22 @@ func TestRepairSnapshotsWithLostRootTree(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	createRandomFile(t, env, "foo/bar/file", 12345)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	testListSnapshots(t, env.gopts, 1)
-	oldPacks := testRunList(t, env.gopts, "packs")
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 1)
+	oldPacks := testRunList(t, env.globalOptions, "packs")
 
 	// remove all trees
-	removePacks(env.gopts, t, vaultic.NewIDSet(oldPacks...))
-	testRunCheckMustFail(t, env.gopts)
+	removePacks(env.globalOptions, t, vaultic.NewIDSet(oldPacks...))
+	testRunCheckMustFail(t, env.globalOptions)
 
 	// repair
-	testRunRebuildIndex(t, env.gopts)
-	testRunRepairSnapshot(t, env.gopts, true)
-	testListSnapshots(t, env.gopts, 0)
-	_, _, err := testRunCheckOutput(t, env.gopts, false)
+	testRunRebuildIndex(t, env.globalOptions)
+	testRunRepairSnapshot(t, env.globalOptions, true)
+	testListSnapshots(t, env.globalOptions, 0)
+	_, _, err := testRunCheckOutput(t, env.globalOptions, false)
 	rtest.OK(t, err)
 }
 
@@ -129,24 +129,24 @@ func TestRepairSnapshotsIntact(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, BackupOptions{}, env.gopts)
-	oldSnapshotIDs := testListSnapshots(t, env.gopts, 1)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, backupOptions{}, env.globalOptions)
+	oldSnapshotIDs := testListSnapshots(t, env.globalOptions, 1)
 
 	// use an exclude that will not exclude anything
-	testRunRepairSnapshot(t, env.gopts, false)
-	snapshotIDs := testListSnapshots(t, env.gopts, 1)
+	testRunRepairSnapshot(t, env.globalOptions, false)
+	snapshotIDs := testListSnapshots(t, env.globalOptions, 1)
 	rtest.Assert(t, reflect.DeepEqual(oldSnapshotIDs, snapshotIDs), "unexpected snapshot id mismatch %v vs. %v", oldSnapshotIDs, snapshotIDs)
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 }
 
 func TestRepairSnapshotsBrokenSnapshots(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	// create backup
-	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, BackupOptions{}, env.gopts)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, backupOptions{}, env.globalOptions)
 
 	// create zero length file in snapshots/
 	// will fail with
@@ -163,13 +163,13 @@ func TestRepairSnapshotsBrokenSnapshots(t *testing.T) {
 	rtest.OK(t, os.WriteFile(filepath.Join(env.repo, "snapshots", target), contents, 0o600))
 
 	// run repair snapshots
-	repairOpts := RepairOptions{Forget: true}
-	env.gopts.BackendTestHook = nil
-	_, err = withCaptureStdout(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runRepairSnapshots(ctx, gopts, repairOpts, []string{"1d204771", target[:8]}, gopts.Term)
+	repairOpts := repairOptions{Forget: true}
+	env.globalOptions.BackendTestHook = nil
+	_, err = withCaptureStdout(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runRepairSnapshots(ctx, globalOptions, repairOpts, []string{"1d204771", target[:8]}, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 
 	// verify that there are no snapshot errors
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 }

@@ -136,7 +136,7 @@ func newIndexEncryptCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().StringVar(&options.RepositoryID, "repository-id", "", "repository identity bound to encrypted metadata")
-	_ = command.MarkFlagRequired("repository-id")
+	mustMarkFlagRequired(command, "repository-id")
 	return command
 }
 
@@ -371,7 +371,7 @@ func newIndexKeysQuorumMutationCommand(globalOptions *global.Options, options *i
 			}
 			defer cleanup()
 			if acknowledgeDowngrade {
-				_ = observability.Emit(
+				observability.EmitBestEffort(
 					command.Context(),
 					observability.Event{
 						Severity:  observability.Critical,
@@ -426,8 +426,8 @@ func newIndexKeysQuorumMutationCommand(globalOptions *global.Options, options *i
 			"mode-0600 cloud member enrollment JSON file (repeatable; all resulting external members required)",
 		)
 	command.Flags().BoolVar(&acknowledgeDowngrade, "acknowledge-policy-downgrade", false, "acknowledge a reduction in effective quorum strength")
-	_ = command.MarkFlagRequired("capsule")
-	_ = command.MarkFlagRequired("capsule-directory")
+	mustMarkFlagRequired(command, "capsule")
+	mustMarkFlagRequired(command, "capsule-directory")
 	return command
 }
 
@@ -487,12 +487,12 @@ func resultingMutationPolicy(current indexbroker.UnlockPolicy, operation string,
 func publishAndActivatePolicyMutation(ctx context.Context, globalOptions *global.Options, options *indexKeysOptions, operation,
 	capsuleDirectory string, status indexbroker.Status, prepared indexbroker.PreparedPolicyMutation,
 ) error {
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index",
+	observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index",
 		Message: "recovery capsule policy mutation prepared",
 		Fields:  map[string]any{"repository_id": options.RepositoryID, "operation": operation, "capsule_sha256": prepared.CapsuleSHA256}})
 	published, err := publishPreparedPolicyMutation(ctx, options, status, capsuleDirectory, prepared)
 	if err != nil {
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "index",
+		observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Warning, Category: observability.CategoryLifecycle, Component: "index",
 			Message: "recovery capsule policy mutation publication interrupted; candidate retained for resume",
 			Fields:  map[string]any{"repository_id": options.RepositoryID, "operation": operation, "capsule_sha256": prepared.CapsuleSHA256}})
 		return fmt.Errorf("publish policy mutation (candidate retained; run quorum resume-mutation): %w", err)
@@ -500,7 +500,7 @@ func publishAndActivatePolicyMutation(ctx context.Context, globalOptions *global
 	if published.CapsuleSHA256 != prepared.CapsuleSHA256 {
 		return fmt.Errorf("published capsule digest does not match broker candidate")
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index",
+	observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Notice, Category: observability.CategoryLifecycle, Component: "index",
 		Message: "recovery capsule generation published to local and repository mirrors",
 		Fields: map[string]any{"repository_id": options.RepositoryID, "generation": published.Generation,
 			"capsule_sha256": published.CapsuleSHA256, "local_path": published.LocalPath, "mirror_path": published.MirrorPath}})
@@ -508,11 +508,11 @@ func publishAndActivatePolicyMutation(ctx context.Context, globalOptions *global
 	if err != nil {
 		return fmt.Errorf("capsule was published but broker activation connection failed: %w", err)
 	}
-	defer func() { _ = activationClient.Close() }()
+	defer vaulticerrors.CloseQuietly(activationClient)
 	if err := activationClient.ActivatePolicyMutation(ctx, globalOptions.KeyBrokerReleaseManifest, prepared.CapsuleSHA256); err != nil {
 		return fmt.Errorf("capsule was published but broker activation failed: %w", err)
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index",
+	observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index",
 		Message: "recovery capsule policy generation activated",
 		Fields: map[string]any{
 			"repository_id":  options.RepositoryID,
@@ -521,7 +521,7 @@ func publishAndActivatePolicyMutation(ctx context.Context, globalOptions *global
 			"capsule_sha256": published.CapsuleSHA256,
 		}})
 	if status.IdentityRecovery {
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryAuth, Component: "index",
+		observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryAuth, Component: "index",
 			Message: "broker identity recovery completed and fresh identity pinned",
 			Fields:  map[string]any{"repository_id": options.RepositoryID, "generation": published.Generation, "capsule_sha256": published.CapsuleSHA256}})
 	}
@@ -573,11 +573,11 @@ func newIndexKeysQuorumResumeMutationCommand(globalOptions *global.Options, opti
 			if err != nil {
 				return fmt.Errorf("capsule was published but broker activation connection failed: %w", err)
 			}
-			defer func() { _ = activationClient.Close() }()
+			defer vaulticerrors.CloseQuietly(activationClient)
 			if err := activationClient.ActivatePolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest, prepared.CapsuleSHA256); err != nil {
 				return fmt.Errorf("capsule was published but broker activation failed: %w", err)
 			}
-			_ = observability.Emit(
+			observability.EmitBestEffort(
 				command.Context(),
 				observability.Event{
 					Severity:  observability.Critical,
@@ -611,7 +611,7 @@ func newIndexKeysQuorumResumeMutationCommand(globalOptions *global.Options, opti
 		},
 	}
 	command.Flags().StringVar(&capsuleDirectory, "capsule-directory", "", "deterministic local capsule generation directory")
-	_ = command.MarkFlagRequired("capsule-directory")
+	mustMarkFlagRequired(command, "capsule-directory")
 	return command
 }
 
@@ -630,11 +630,11 @@ func newIndexKeysQuorumCancelMutationCommand(globalOptions *global.Options) *cob
 			if err != nil {
 				return err
 			}
-			defer func() { _ = client.Close() }()
+			defer vaulticerrors.CloseQuietly(client)
 			if err := client.CancelPolicyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest); err != nil {
 				return err
 			}
-			_ = observability.Emit(
+			observability.EmitBestEffort(
 				command.Context(),
 				observability.Event{
 					Severity:  observability.Warning,
@@ -807,7 +807,7 @@ func readPolicyDefinition(path string, policy *indexbroker.UnlockPolicy) error {
 	if err != nil {
 		return fmt.Errorf("open resulting policy %q: %w", path, err)
 	}
-	defer func() { _ = file.Close() }()
+	defer vaulticerrors.CloseQuietly(file)
 	decoder := json.NewDecoder(io.LimitReader(file, 1024*1024))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(policy); err != nil {
@@ -1030,7 +1030,7 @@ func newIndexKeysQuorumVerifyCommand(globalOptions *global.Options) *cobra.Comma
 			if err != nil {
 				return err
 			}
-			defer func() { _ = client.Close() }()
+			defer vaulticerrors.CloseQuietly(client)
 			status, err := client.Status(command.Context())
 			if err != nil {
 				return err
@@ -1056,8 +1056,8 @@ func newIndexKeysQuorumVerifyCommand(globalOptions *global.Options) *cobra.Comma
 	}
 	command.Flags().StringVar(&capsulePath, "capsule", "", "local immutable recovery capsule")
 	command.Flags().StringVar(&brokerSocket, "broker-socket", "", "local key-broker Unix socket")
-	_ = command.MarkFlagRequired("capsule")
-	_ = command.MarkFlagRequired("broker-socket")
+	mustMarkFlagRequired(command, "capsule")
+	mustMarkFlagRequired(command, "broker-socket")
 	return command
 }
 

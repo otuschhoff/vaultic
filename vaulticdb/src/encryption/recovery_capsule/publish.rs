@@ -121,13 +121,13 @@ impl FileSync {
 }
 
 impl UnlockPolicy {
-    fn member_ids(&self) -> Result<BTreeSet<String>> {
+    fn member_ids(&self) -> Result<BTreeSet<MemberId>> {
         let mut ids = BTreeSet::new();
         self.collect_member_ids(&mut ids)?;
         Ok(ids)
     }
 
-    fn collect_member_ids(&self, ids: &mut BTreeSet<String>) -> Result<()> {
+    fn collect_member_ids(&self, ids: &mut BTreeSet<MemberId>) -> Result<()> {
         match self {
             Self::Member { member_id } => {
                 if member_id.is_empty() || !ids.insert(member_id.clone()) {
@@ -164,7 +164,7 @@ impl UnlockPolicy {
         Ok(())
     }
 
-    fn satisfied_by(&self, members: &BTreeSet<String>) -> bool {
+    fn satisfied_by(&self, members: &BTreeSet<MemberId>) -> bool {
         match self {
             Self::Member { member_id } => members.contains(member_id),
             Self::AnyOf { policies } => policies.iter().any(|policy| policy.satisfied_by(members)),
@@ -245,7 +245,7 @@ fn validate_policy(policy: &UnlockPolicy, members: &[MemberShare], path: &str) -
 }
 
 struct DistributedShare {
-    member_id: String,
+    member_id: MemberId,
     group_id: String,
     share_index: u8,
     threshold: u8,

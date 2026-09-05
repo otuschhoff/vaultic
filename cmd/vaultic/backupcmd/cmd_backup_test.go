@@ -24,15 +24,15 @@ import (
 )
 
 func TestAutomaticDeferredFallbackDistinguishesUnavailableFromCorrupt(t *testing.T) {
-	opts := BackupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}
-	if !shouldUseDataPlaneFallback(fmt.Errorf("connect: %w", enginepkg.ErrUnavailable), opts) {
+	options := backupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}
+	if !shouldUseDataPlaneFallback(fmt.Errorf("connect: %w", enginepkg.ErrUnavailable), options) {
 		t.Fatal("operational metadata unavailability did not select deferred fallback")
 	}
-	if shouldUseDataPlaneFallback(fmt.Errorf("corrupt metadata manifest"), opts) {
+	if shouldUseDataPlaneFallback(fmt.Errorf("corrupt metadata manifest"), options) {
 		t.Fatal("metadata corruption bypassed explicit acknowledgement")
 	}
-	opts.AcknowledgeMetadataBypass = true
-	if !shouldUseDataPlaneFallback(fmt.Errorf("corrupt metadata manifest"), opts) {
+	options.AcknowledgeMetadataBypass = true
+	if !shouldUseDataPlaneFallback(fmt.Errorf("corrupt metadata manifest"), options) {
 		t.Fatal("acknowledged metadata corruption did not select deferred fallback")
 	}
 }
@@ -55,23 +55,23 @@ func TestBackupCrawlFlags(t *testing.T) {
 func TestBackupCrawlOptionValidation(t *testing.T) {
 	globalOptions := global.Options{InsecureNoPassword: true}
 	tests := []struct {
-		name string
-		opts BackupOptions
-		want string
+		name    string
+		options backupOptions
+		want    string
 	}{
-		{"invalid-workers", BackupOptions{UseCWalk: true}, "--cwalk-concurrency must be at least 1"},
-		{"pathdiff-needs-cwalk", BackupOptions{UsePathdiff: true}, "--use-pathdiff requires --use-cwalk"},
-		{"pathdiff-needs-endpoint", BackupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true}, "--use-pathdiff requires --pathdiff-endpoint"},
+		{"invalid-workers", backupOptions{UseCWalk: true}, "--cwalk-concurrency must be at least 1"},
+		{"pathdiff-needs-cwalk", backupOptions{UsePathdiff: true}, "--use-pathdiff requires --use-cwalk"},
+		{"pathdiff-needs-endpoint", backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true}, "--use-pathdiff requires --pathdiff-endpoint"},
 		{
 			"pathdiff-needs-map",
-			BackupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket"},
+			backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket"},
 			"--use-pathdiff requires --pathdiff-svm-map",
 		},
-		{"coverage-needs-pathdiff", BackupOptions{PathdiffRequireCoverage: true}, "--pathdiff-require-coverage requires --use-pathdiff"},
+		{"coverage-needs-pathdiff", backupOptions{PathdiffRequireCoverage: true}, "--pathdiff-require-coverage requires --use-pathdiff"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.opts.Check(globalOptions, nil)
+			err := test.options.Check(globalOptions, nil)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Check() error = %v, want %q", err, test.want)
 			}
@@ -81,19 +81,19 @@ func TestBackupCrawlOptionValidation(t *testing.T) {
 
 func TestBackupValidateDeferred(t *testing.T) {
 	tests := []struct {
-		name string
-		opts BackupOptions
-		want string
+		name    string
+		options backupOptions
+		want    string
 	}{
-		{"mode-requires-opt-in", BackupOptions{DeferredMode: "auto"}, "--deferred-mode requires"},
-		{"mode-is-enumerated", BackupOptions{AllowDeferredCommit: true, DeferredMode: "invalid"}, "requires --deferred-mode=auto"},
-		{"bypass-is-acknowledged", BackupOptions{AllowDeferredCommit: true, DeferredMode: "data-plane-only"}, "requires --acknowledge-metadata-bypass"},
-		{"incompatible-parent", BackupOptions{AllowDeferredCommit: true, DeferredMode: "auto", Parent: "latest"}, "deferred ingest cannot use"},
-		{"positive-expiry", BackupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}, "--deferred-expiry must be positive"},
+		{"mode-requires-opt-in", backupOptions{DeferredMode: "auto"}, "--deferred-mode requires"},
+		{"mode-is-enumerated", backupOptions{AllowDeferredCommit: true, DeferredMode: "invalid"}, "requires --deferred-mode=auto"},
+		{"bypass-is-acknowledged", backupOptions{AllowDeferredCommit: true, DeferredMode: "data-plane-only"}, "requires --acknowledge-metadata-bypass"},
+		{"incompatible-parent", backupOptions{AllowDeferredCommit: true, DeferredMode: "auto", Parent: "latest"}, "deferred ingest cannot use"},
+		{"positive-expiry", backupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}, "--deferred-expiry must be positive"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.opts.validateDeferred()
+			err := test.options.validateDeferred()
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validateDeferred() error = %v, want %q", err, test.want)
 			}
@@ -103,23 +103,23 @@ func TestBackupValidateDeferred(t *testing.T) {
 
 func TestBackupValidateStdin(t *testing.T) {
 	tests := []struct {
-		name  string
-		opts  BackupOptions
-		gopts global.Options
-		args  []string
-		want  string
+		name          string
+		options       backupOptions
+		globalOptions global.Options
+		args          []string
+		want          string
 	}{
-		{"password-and-data", BackupOptions{Stdin: true}, global.Options{}, nil, "cannot read both password and data"},
-		{"password-and-files-from", BackupOptions{FilesFrom: []string{"-"}}, global.Options{}, nil, "unable to read password from stdin"},
+		{"password-and-data", backupOptions{Stdin: true}, global.Options{}, nil, "cannot read both password and data"},
+		{"password-and-files-from", backupOptions{FilesFrom: []string{"-"}}, global.Options{}, nil, "unable to read password from stdin"},
 		{
-			"stdin-and-files-from", BackupOptions{Stdin: true, FilesFrom: []string{"list"}},
+			"stdin-and-files-from", backupOptions{Stdin: true, FilesFrom: []string{"list"}},
 			global.Options{InsecureNoPassword: true}, nil, "--stdin and --files-from cannot",
 		},
-		{"stdin-and-arguments", BackupOptions{Stdin: true}, global.Options{InsecureNoPassword: true}, []string{"source"}, "files/dirs were listed"},
+		{"stdin-and-arguments", backupOptions{Stdin: true}, global.Options{InsecureNoPassword: true}, []string{"source"}, "files/dirs were listed"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.opts.validateStdin(test.gopts, test.args)
+			err := test.options.validateStdin(test.globalOptions, test.args)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validateStdin() error = %v, want %q", err, test.want)
 			}
@@ -128,12 +128,12 @@ func TestBackupValidateStdin(t *testing.T) {
 }
 
 func TestBackupValidateParent(t *testing.T) {
-	opts := BackupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket", PathdiffSVMMap: "map"}
-	if err := opts.validateParent(); err != nil {
+	options := backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket", PathdiffSVMMap: "map"}
+	if err := options.validateParent(); err != nil {
 		t.Fatalf("validateParent() error = %v", err)
 	}
-	opts.PathdiffRequireCoverage = true
-	if err := opts.validateParent(); err != nil {
+	options.PathdiffRequireCoverage = true
+	if err := options.validateParent(); err != nil {
 		t.Fatalf("validateParent() with coverage error = %v", err)
 	}
 }
@@ -250,18 +250,18 @@ func TestCollectTargets(t *testing.T) {
 	rtest.OK(t, err)
 	rtest.OK(t, f3.Close())
 
-	opts := BackupOptions{
+	options := backupOptions{
 		FilesFrom:         []string{f1.Name()},
 		FilesFromVerbatim: []string{f2.Name()},
 		FilesFromRaw:      []string{f3.Name()},
 	}
 
-	targets, err := collectTargets(opts, []string{filepath.Join(dir, "cmdline arg")}, t.Logf, nil)
+	targets, err := collectTargets(options, []string{filepath.Join(dir, "cmdline arg")}, t.Logf, nil)
 	rtest.OK(t, err)
 	sort.Strings(targets)
 	rtest.Equals(t, expect, targets)
 
-	_, err = collectTargets(opts, []string{filepath.Join(dir, "cmdline arg"), filepath.Join(dir, "non-existing-file")}, t.Logf, nil)
+	_, err = collectTargets(options, []string{filepath.Join(dir, "cmdline arg"), filepath.Join(dir, "non-existing-file")}, t.Logf, nil)
 	rtest.Assert(t, errors.Is(err, ErrInvalidSourceData), "expected error when not all targets exist")
 }
 

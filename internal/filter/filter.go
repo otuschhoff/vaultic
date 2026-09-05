@@ -145,6 +145,7 @@ func hasDoubleWildcard(list Pattern) (ok bool, pos int) {
 	return false, 0
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func match(pattern Pattern, strs []string) (matched bool, err error) {
 	if ok, pos := hasDoubleWildcard(pattern); ok {
 		// gradually expand '**' into separate wildcards
@@ -182,6 +183,7 @@ func match(pattern Pattern, strs []string) (matched bool, err error) {
 		return false, nil
 	}
 
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if len(pattern.parts) <= len(strs) {
 		minOffset := 0
 		maxOffset := len(strs) - len(pattern.parts)

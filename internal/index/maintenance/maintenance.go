@@ -441,6 +441,7 @@ func aggregateTargets(
 	return targets
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func RebuildPackAggregates(ctx context.Context, store Store, dryRun bool) (RebuildResult, error) {
 	packs, err := loadPacks(ctx, store)
 	if err != nil {
@@ -785,6 +786,7 @@ func checkSnapshots(
 		return nil
 	}
 	for id := range legacy {
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if _, found := slatedb[id]; !found {
 			checkpoint, checkpointFound, err := store.Get(ctx, schema.SnapshotImportCheckpointKey(schema.ID(id)))
 			if err != nil {

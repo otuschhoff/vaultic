@@ -76,6 +76,7 @@ func (idx *Index) addToPacks(id vaultic.ID) uint32 {
 	// packIndex is stored as a uint32 in each indexEntry; guard against
 	// an (unrealistic) overflow so the cast below can never wrap.
 	if uint64(len(idx.packs)) > math.MaxUint32 {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("repository index pack count overflow")
 	}
 	return uint32(len(idx.packs) - 1)
@@ -84,6 +85,7 @@ func (idx *Index) addToPacks(id vaultic.ID) uint32 {
 func (idx *Index) store(packIndex uint32, blob pack.Blob) {
 	// assert that offset and length fit into uint32!
 	if blob.Offset > math.MaxUint32 || blob.Length > math.MaxUint32 || blob.UncompressedLength > math.MaxUint32 {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("offset or length does not fit in uint32. You have packs > 4GB!")
 	}
 
@@ -159,6 +161,7 @@ func (idx *Index) StorePack(id vaultic.ID, blobs pack.Blobs) {
 	defer idx.m.Unlock()
 
 	if idx.final {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("store new item in finalized index")
 	}
 
@@ -333,6 +336,7 @@ func (idx *Index) generatePackList() ([]packJSON, error) {
 		for e := range m.values() {
 			packID := idx.packs[e.packIndex]
 			if packID.IsNull() {
+				//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 				panic("null pack id")
 			}
 
@@ -394,6 +398,7 @@ func (idx *Index) SaveIndex(ctx context.Context, repo vaultic.SaverUnpacked[vaul
 	ierr := idx.SetID(id)
 	if ierr != nil {
 		// logic bug
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(ierr)
 	}
 	return id, err

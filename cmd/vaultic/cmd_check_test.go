@@ -188,12 +188,12 @@ func TestPrepareCheckCache(t *testing.T) {
 	tmpDirBase := t.TempDir()
 
 	testCases := []struct {
-		opts           CheckOptions
+		options        checkOptions
 		withValidCache bool
 	}{
-		{CheckOptions{WithCache: true}, true},   // Shouldn't create temp directory
-		{CheckOptions{WithCache: false}, true},  // Should create temp directory
-		{CheckOptions{WithCache: false}, false}, // Should create cache directory first, then temp directory
+		{checkOptions{WithCache: true}, true},   // Shouldn't create temp directory
+		{checkOptions{WithCache: false}, true},  // Should create temp directory
+		{checkOptions{WithCache: false}, false}, // Should create cache directory first, then temp directory
 	}
 
 	for _, testCase := range testCases {
@@ -203,12 +203,12 @@ func TestPrepareCheckCache(t *testing.T) {
 				err := os.Remove(tmpDirBase)
 				rtest.OK(t, err)
 			}
-			gopts := global.Options{CacheDir: tmpDirBase}
-			cleanup := prepareCheckCache(testCase.opts, &gopts, vaultic.NewNoopPrinter())
+			globalOptions := global.Options{CacheDir: tmpDirBase}
+			cleanup := prepareCheckCache(testCase.options, &globalOptions, vaultic.NewNoopPrinter())
 			files, err := os.ReadDir(tmpDirBase)
 			rtest.OK(t, err)
 
-			if !testCase.opts.WithCache {
+			if !testCase.options.WithCache {
 				// If using a temporary cache directory, the cache directory should exist
 				// listing all directories inside tmpDirBase (cacheDir)
 				// one directory should be tmpDir created by prepareCheckCache with 'vaultic-check-cache-' in path
@@ -233,16 +233,16 @@ func TestPrepareCheckCache(t *testing.T) {
 }
 
 func TestPrepareDefaultCheckCache(t *testing.T) {
-	gopts := global.Options{CacheDir: ""}
-	cleanup := prepareCheckCache(CheckOptions{}, &gopts, vaultic.NewNoopPrinter())
-	_, err := os.ReadDir(gopts.CacheDir)
+	globalOptions := global.Options{CacheDir: ""}
+	cleanup := prepareCheckCache(checkOptions{}, &globalOptions, vaultic.NewNoopPrinter())
+	_, err := os.ReadDir(globalOptions.CacheDir)
 	rtest.OK(t, err)
 
 	// Call the cleanup function to remove the temporary cache directory
 	cleanup()
 
 	// Verify that the cache directory has been removed
-	_, err = os.ReadDir(gopts.CacheDir)
+	_, err = os.ReadDir(globalOptions.CacheDir)
 	rtest.Assert(t, errors.Is(err, os.ErrNotExist), "Expected cache directory to be removed, but it still exists")
 }
 

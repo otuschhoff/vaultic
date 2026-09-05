@@ -42,14 +42,14 @@ Exit status is 12 if the password is incorrect.
 	return cmd
 }
 
-func runRecover(ctx context.Context, gopts global.Options, term ui.Terminal) error {
+func runRecover(ctx context.Context, globalOptions global.Options, term ui.Terminal) error {
 	hostname, err := os.Hostname()
 	if err != nil {
 		return err
 	}
 
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -71,45 +71,10 @@ func runRecover(ctx context.Context, gopts global.Options, term ui.Terminal) err
 		return err
 	}
 
-	// trees maps a tree ID to whether or not it is referenced by a different
-	// tree. If it is not referenced, we have a root tree.
-	trees := make(map[vaultic.ID]bool)
-
-	err = repo.ListBlobs(ctx, func(blob vaultic.PackBlob) {
-		h := blob.Handle()
-		if h.Type == vaultic.TreeBlob {
-			trees[h.ID] = false
-		}
-	})
+	trees, err := findRecoverTrees(ctx, repo, printer)
 	if err != nil {
 		return err
 	}
-
-	printer.P("load %d trees\n", len(trees))
-	bar := printer.NewCounter("trees loaded")
-	bar.SetMax(uint64(len(trees)))
-	for id := range trees {
-		tree, err := data.LoadTree(ctx, repo, id)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil {
-			printer.E("unable to load tree %v: %v\n", id.Str(), err)
-			continue
-		}
-
-		for item := range tree {
-			if item.Error != nil {
-				return item.Error
-			}
-			node := item.Node
-			if node.Type == data.NodeTypeDir && node.Subtree != nil {
-				trees[*node.Subtree] = true
-			}
-		}
-		bar.Add(1)
-	}
-	bar.Done()
 
 	printer.P("load snapshots\n")
 	err = data.ForAllSnapshots(ctx, snapshotLister, repo, nil, func(_ vaultic.ID, sn *data.Snapshot, _ error) error {
@@ -172,6 +137,42 @@ func runRecover(ctx context.Context, gopts global.Options, term ui.Terminal) err
 
 	return createSnapshot(ctx, printer, "/recover", hostname, []string{"recovered"}, repo, &treeID)
 
+}
+
+func findRecoverTrees(ctx context.Context, repo *repository.Repository, printer vaultic.Printer) (map[vaultic.ID]bool, error) {
+	trees := make(map[vaultic.ID]bool)
+	if err := repo.ListBlobs(ctx, func(blob vaultic.PackBlob) {
+		handle := blob.Handle()
+		if handle.Type == vaultic.TreeBlob {
+			trees[handle.ID] = false
+		}
+	}); err != nil {
+		return nil, err
+	}
+	printer.P("load %d trees\n", len(trees))
+	bar := printer.NewCounter("trees loaded")
+	bar.SetMax(uint64(len(trees)))
+	for id := range trees {
+		tree, err := data.LoadTree(ctx, repo, id)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			printer.E("unable to load tree %v: %v\n", id.Str(), err)
+			continue
+		}
+		for item := range tree {
+			if item.Error != nil {
+				return nil, item.Error
+			}
+			if item.Node.Type == data.NodeTypeDir && item.Node.Subtree != nil {
+				trees[*item.Node.Subtree] = true
+			}
+		}
+		bar.Add(1)
+	}
+	bar.Done()
+	return trees, nil
 }
 
 func createSnapshot(

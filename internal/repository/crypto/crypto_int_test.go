@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -137,7 +138,7 @@ func TestCrypto(t *testing.T) {
 		// change mac, this must fail
 		ciphertext[len(ciphertext)-8] ^= 0x23
 
-		if _, err = k.Open(buf[:0], nonce, ciphertext, nil); err != ErrUnauthenticated {
+		if _, err = k.Open(buf[:0], nonce, ciphertext, nil); !errors.Is(err, ErrUnauthenticated) {
 			t.Fatal("wrong MAC value not detected")
 		}
 		// reset mac
@@ -145,7 +146,7 @@ func TestCrypto(t *testing.T) {
 
 		// tamper with nonce, this must fail
 		nonce[2] ^= 0x88
-		if _, err = k.Open(buf[:0], nonce, ciphertext, nil); err != ErrUnauthenticated {
+		if _, err = k.Open(buf[:0], nonce, ciphertext, nil); !errors.Is(err, ErrUnauthenticated) {
 			t.Fatal("tampered nonce not detected")
 		}
 		// reset nonce
@@ -153,7 +154,7 @@ func TestCrypto(t *testing.T) {
 
 		// tamper with message, this must fail
 		ciphertext[16+5] ^= 0x85
-		if _, err = k.Open(buf[:0], nonce, ciphertext, nil); err != ErrUnauthenticated {
+		if _, err = k.Open(buf[:0], nonce, ciphertext, nil); !errors.Is(err, ErrUnauthenticated) {
 			t.Fatal("tampered message not detected")
 		}
 

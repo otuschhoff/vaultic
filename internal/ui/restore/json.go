@@ -82,6 +82,7 @@ func (t *jsonPrinter) CompleteItem(messageType restorer.ItemAction, item string,
 	case restorer.ActionDeleted:
 		action = "deleted"
 	default:
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unknown message type")
 	}
 

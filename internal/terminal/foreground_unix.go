@@ -30,7 +30,7 @@ func startForeground(cmd *exec.Cmd) (bg func() error, err error) {
 	// only move child process to foreground if vaultic is in the foreground
 	prev, err := tcgetpgrp(int(tty.Fd()))
 	if err != nil {
-		_ = tty.Close()
+		_ = tty.Close() // Preserve the foreground-query failure; the descriptor has no buffered writes.
 		return nil, err
 	}
 
@@ -50,14 +50,14 @@ func startForeground(cmd *exec.Cmd) (bg func() error, err error) {
 	// start the process
 	err = cmd.Start()
 	if err != nil {
-		_ = tty.Close()
+		_ = tty.Close() // Preserve the child-start failure; the descriptor has no buffered writes.
 		return nil, errors.Wrap(err, "cmd.Start")
 	}
 
 	// move the command's process group into the foreground
 	err = tcsetpgrp(int(tty.Fd()), cmd.Process.Pid)
 	if err != nil {
-		_ = tty.Close()
+		_ = tty.Close() // Preserve the foreground-transfer failure; the descriptor has no buffered writes.
 		return nil, err
 	}
 
@@ -68,7 +68,7 @@ func startForeground(cmd *exec.Cmd) (bg func() error, err error) {
 		// reset the foreground process group
 		err = tcsetpgrp(int(tty.Fd()), prev)
 		if err != nil {
-			_ = tty.Close()
+			_ = tty.Close() // Preserve the process-group restore failure; the descriptor has no buffered writes.
 			return err
 		}
 

@@ -119,6 +119,8 @@ func (policy TierPolicy) placementRecords(record schema.PackRecord, now time.Tim
 	}
 	selected := make([]PlacementBackendPolicy, 0, len(policy.Backends))
 	switch record.Tier {
+	case schema.TierUnknown:
+		return nil
 	case schema.TierSingle:
 		if backend, ok := policy.backendByRole("primary"); ok {
 			selected = append(selected, backend)

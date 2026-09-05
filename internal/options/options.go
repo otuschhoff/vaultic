@@ -159,6 +159,7 @@ func (o Options) Apply(ns string, dst any) error {
 		}
 
 		if _, ok := fields[tag]; ok {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("option tag " + tag + " is not unique in " + v.Type().Name())
 		}
 
@@ -212,6 +213,7 @@ func (o Options) Apply(ns string, dst any) error {
 			v.Field(i).SetInt(int64(d))
 
 		default:
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("type " + v.Type().Field(i).Type.Name() + " not handled")
 		}
 	}

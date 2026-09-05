@@ -1,3 +1,5 @@
+//! Broker startup configuration, identity provisioning, and socket hardening.
+
 use std::{
     collections::BTreeSet,
     ffi::OsString,
@@ -19,6 +21,7 @@ use tokio::{net::UnixStream, sync::Mutex};
 use zeroize::Zeroizing;
 
 use crate::encryption::recovery_capsule::{discover_latest, RecoveryCapsule};
+use crate::ids::RepositoryId;
 
 use super::{audit::emit_security_event, Capability, ClientAuthorization, KeyBroker};
 
@@ -27,7 +30,7 @@ use super::{audit::emit_security_event, Capability, ClientAuthorization, KeyBrok
 struct BrokerConfig {
     format: u32,
     capsule_directory: PathBuf,
-    repository_id: String,
+    repository_id: RepositoryId,
     identity_key_path: PathBuf,
     socket_path: PathBuf,
     #[serde(default)]
@@ -64,14 +67,14 @@ pub fn load(config_path: &Path) -> Result<BrokerStartup> {
     }
     require_private_regular_file(&config.identity_key_path)?;
     let (_, capsule): (_, RecoveryCapsule) =
-        discover_latest(&config.capsule_directory, &config.repository_id)?
+        discover_latest(&config.capsule_directory, config.repository_id.as_str())?
             .context("no recovery capsule generation found")?;
     emit_security_event(
         "notice",
         "integrity",
         "capsule_discovered",
         &[
-            ("repository_id", config.repository_id.clone()),
+            ("repository_id", config.repository_id.to_string()),
             ("capsule_generation", capsule.header.generation.to_string()),
             ("capsule_logical_id", capsule.header.logical_id.clone()),
         ],

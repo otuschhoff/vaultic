@@ -598,6 +598,7 @@ func (record PackRecord) MarshalBinary() ([]byte, error) {
 	return e.finish()
 }
 
+//nolint:gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func UnmarshalPackRecord(data []byte) (PackRecord, error) {
 	d, err := newDecoder(data)
 	if err != nil {
@@ -652,6 +653,7 @@ func UnmarshalPackRecord(data []byte) (PackRecord, error) {
 	// Phase 3 records end here. They decode as tier-unknown and
 	// retention-unknown rather than being assigned a synthesized tier.
 	record.Tier, record.RetentionSource = TierUnknown, RetentionUnknown
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if d.at < len(d.data) {
 		value, err = d.u8()
 		record.Tier = PackTier(value)

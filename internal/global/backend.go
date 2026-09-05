@@ -22,13 +22,13 @@ import (
 // ReadPasswordTwice calls ReadPassword two times and returns an error when the
 // passwords don't match. If the context is canceled, the function leaks the
 // password reading goroutine.
-func ReadPasswordTwice(ctx context.Context, gopts Options, prompt1, prompt2 string) (string, error) {
-	pw1, err := readPassword(ctx, gopts, prompt1)
+func ReadPasswordTwice(ctx context.Context, globalOptions Options, prompt1, prompt2 string) (string, error) {
+	pw1, err := readPassword(ctx, globalOptions, prompt1)
 	if err != nil {
 		return "", err
 	}
-	if gopts.Term.InputIsTerminal() {
-		pw2, err := readPassword(ctx, gopts, prompt2)
+	if globalOptions.Term.InputIsTerminal() {
+		pw2, err := readPassword(ctx, globalOptions, prompt2)
 		if err != nil {
 			return "", err
 		}
@@ -41,20 +41,20 @@ func ReadPasswordTwice(ctx context.Context, gopts Options, prompt1, prompt2 stri
 	return pw1, nil
 }
 
-func readRepo(gopts Options) (string, error) {
-	if gopts.Repo == "" && gopts.RepositoryFile == "" {
+func readRepo(globalOptions Options) (string, error) {
+	if globalOptions.Repo == "" && globalOptions.RepositoryFile == "" {
 		return "", errors.Fatal("Please specify repository location (-r or --repository-file)")
 	}
 
-	repo := gopts.Repo
-	if gopts.RepositoryFile != "" {
+	repo := globalOptions.Repo
+	if globalOptions.RepositoryFile != "" {
 		if repo != "" {
 			return "", errors.Fatal("Options -r and --repository-file are mutually exclusive, please specify only one")
 		}
 
-		s, err := textfile.Read(gopts.RepositoryFile)
+		s, err := textfile.Read(globalOptions.RepositoryFile)
 		if errors.Is(err, os.ErrNotExist) {
-			return "", errors.Fatalf("%s does not exist", gopts.RepositoryFile)
+			return "", errors.Fatalf("%s does not exist", globalOptions.RepositoryFile)
 		}
 		if err != nil {
 			return "", err
@@ -69,15 +69,15 @@ func readRepo(gopts Options) (string, error) {
 const maxKeys = 20
 
 type repositoryLocation struct {
-	gopts              Options
+	globalOptions      Options
 	repository         string
 	bootstrapMasterKey string
 	bootstrapBroker    *indexbroker.Client
 }
 
 // OpenRepository reads the password and opens the repository.
-func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer) (*repository.Repository, error) {
-	location, err := resolveRepositoryLocation(ctx, gopts, printer)
+func OpenRepository(ctx context.Context, globalOptions Options, printer vaultic.Printer) (*repository.Repository, error) {
+	location, err := resolveRepositoryLocation(ctx, globalOptions, printer)
 	if err != nil {
 		return nil, err
 	}
@@ -91,27 +91,27 @@ func OpenRepository(ctx context.Context, gopts Options, printer vaultic.Printer)
 	if err != nil {
 		return nil, err
 	}
-	if err := attachEngine(openCtx, s, location.gopts, printer); err != nil {
+	if err := attachEngine(openCtx, s, location.globalOptions, printer); err != nil {
 		return nil, err
 	}
 
 	return s, nil
 }
 
-func resolveRepositoryLocation(ctx context.Context, gopts Options, printer vaultic.Printer) (repositoryLocation, error) {
-	location := repositoryLocation{gopts: gopts}
-	if gopts.BootstrapProfile != "" {
-		if gopts.Repo != "" || gopts.RepositoryFile != "" {
+func resolveRepositoryLocation(ctx context.Context, globalOptions Options, printer vaultic.Printer) (repositoryLocation, error) {
+	location := repositoryLocation{globalOptions: globalOptions}
+	if globalOptions.BootstrapProfile != "" {
+		if globalOptions.Repo != "" || globalOptions.RepositoryFile != "" {
 			return repositoryLocation{}, errors.Fatal("--bootstrap-profile is mutually exclusive with --repo and --repository-file")
 		}
 		var err error
-		location.gopts.Repo, location.bootstrapMasterKey, location.bootstrapBroker, err = resolveBootstrapRepository(ctx, gopts, printer)
+		location.globalOptions.Repo, location.bootstrapMasterKey, location.bootstrapBroker, err = resolveBootstrapRepository(ctx, globalOptions, printer)
 		if err != nil {
 			return repositoryLocation{}, err
 		}
 	}
 
-	repo, err := readRepo(location.gopts)
+	repo, err := readRepo(location.globalOptions)
 	if err != nil {
 		if location.bootstrapBroker != nil {
 			errors.LogClose(location.bootstrapBroker, "close bootstrap broker", debug.Log)
@@ -124,17 +124,17 @@ func resolveRepositoryLocation(ctx context.Context, gopts Options, printer vault
 }
 
 func openAndAuthenticate(ctx context.Context, location *repositoryLocation, printer vaultic.Printer) (*repository.Repository, context.Context, error) {
-	gopts := location.gopts
-	be, err := innerOpenBackend(ctx, location.repository, gopts, gopts.Extended, false, printer)
+	globalOptions := location.globalOptions
+	be, err := innerOpenBackend(ctx, location.repository, globalOptions, globalOptions.Extended, false, printer)
 	if err != nil {
 		return nil, ctx, err
 	}
 
-	if err := hasRepositoryConfig(ctx, be, location.repository, gopts); err != nil {
+	if err := hasRepositoryConfig(ctx, be, location.repository, globalOptions); err != nil {
 		return nil, ctx, err
 	}
 
-	s, err := createRepositoryInstance(be, gopts)
+	s, err := createRepositoryInstance(be, globalOptions)
 	if err != nil {
 		return nil, ctx, err
 	}
@@ -142,12 +142,12 @@ func openAndAuthenticate(ctx context.Context, location *repositoryLocation, prin
 		return nil, ctx, err
 	}
 
-	if gopts.MetadataLossRecovery {
-		if err := validateMetadataLossRecoveryOptions(gopts); err != nil {
+	if globalOptions.MetadataLossRecovery {
+		if err := validateMetadataLossRecoveryOptions(globalOptions); err != nil {
 			return nil, ctx, err
 		}
 		ctx = repository.WithMetadataLossRecovery(ctx)
-		_ = observability.Emit(
+		observability.EmitBestEffort(
 			ctx,
 			observability.Event{
 				Severity:  observability.Warning,
@@ -158,11 +158,11 @@ func openAndAuthenticate(ctx context.Context, location *repositoryLocation, prin
 		)
 	}
 
-	if gopts.KeyBrokerSocket == "" {
-		if gopts.MetadataKeyInDB {
-			ctx, err = authenticateWithMetadataKey(ctx, s, gopts)
+	if globalOptions.KeyBrokerSocket == "" {
+		if globalOptions.MetadataKeyInDB {
+			ctx, err = authenticateWithMetadataKey(ctx, s, globalOptions)
 		} else {
-			err = decryptRepository(ctx, s, &gopts, printer)
+			err = decryptRepository(ctx, s, &globalOptions, printer)
 		}
 		if err != nil {
 			return nil, ctx, err
@@ -181,40 +181,41 @@ func authenticateRepository(ctx context.Context, s *repository.Repository, locat
 		}
 		return err
 	}
-	if location.gopts.KeyBrokerSocket != "" {
-		return authenticateWithBroker(ctx, s, location.gopts)
+	if location.globalOptions.KeyBrokerSocket != "" {
+		return authenticateWithBroker(ctx, s, location.globalOptions)
 	}
 
 	return nil
 }
 
-func validateBrokeredUnlockOptions(gopts Options) error {
-	if gopts.KeyBrokerReleaseManifest == "" {
+func validateBrokeredUnlockOptions(globalOptions Options) error {
+	if globalOptions.KeyBrokerReleaseManifest == "" {
 		return errors.Fatal("--key-broker-release-manifest is required with --key-broker-socket")
 	}
-	if gopts.MetadataKeyInDB || gopts.MasterKey != "" || gopts.MasterKeyFile != "" || gopts.MasterKeyCommand != "" || gopts.Password != "" ||
-		gopts.PasswordFile != "" ||
-		gopts.PasswordCommand != "" ||
-		gopts.AzureKeyVaultURL != "" ||
-		gopts.InsecureNoPassword {
+	if globalOptions.MetadataKeyInDB || globalOptions.MasterKey != "" || globalOptions.MasterKeyFile != "" ||
+		globalOptions.MasterKeyCommand != "" || globalOptions.Password != "" ||
+		globalOptions.PasswordFile != "" ||
+		globalOptions.PasswordCommand != "" ||
+		globalOptions.AzureKeyVaultURL != "" ||
+		globalOptions.InsecureNoPassword {
 		return errors.Fatal("brokered unlock is mutually exclusive with password, direct-key, Azure-secret, and key-in-DB routes")
 	}
 	return nil
 }
 
-func authenticateWithBroker(ctx context.Context, s *repository.Repository, gopts Options) error {
-	if err := validateBrokeredUnlockOptions(gopts); err != nil {
+func authenticateWithBroker(ctx context.Context, s *repository.Repository, globalOptions Options) error {
+	if err := validateBrokeredUnlockOptions(globalOptions); err != nil {
 		return err
 	}
-	client, err := indexbroker.Dial(ctx, gopts.KeyBrokerSocket)
+	client, err := indexbroker.Dial(ctx, globalOptions.KeyBrokerSocket)
 	if err != nil {
 		return err
 	}
 	capability := "repository-master-key"
-	if gopts.MetadataLossRecovery {
+	if globalOptions.MetadataLossRecovery {
 		capability = "metadata-loss-recovery"
 	}
-	lease, err := client.AcquireLease(ctx, gopts.KeyBrokerReleaseManifest, capability, gopts.KeyBrokerLeaseDuration)
+	lease, err := client.AcquireLease(ctx, globalOptions.KeyBrokerReleaseManifest, capability, globalOptions.KeyBrokerLeaseDuration)
 	if err != nil {
 		errors.LogClose(client, "close key broker after lease failure", debug.Log)
 		return err
@@ -234,19 +235,20 @@ func authenticateWithBroker(ctx context.Context, s *repository.Repository, gopts
 	return nil
 }
 
-func validateMetadataLossRecoveryOptions(gopts Options) error {
-	if gopts.KeyBrokerSocket == "" && (gopts.MetadataKeyInDB || (gopts.MasterKey == "" && gopts.MasterKeyFile == "" && gopts.MasterKeyCommand == "")) {
+func validateMetadataLossRecoveryOptions(globalOptions Options) error {
+	if globalOptions.KeyBrokerSocket == "" && (globalOptions.MetadataKeyInDB ||
+		(globalOptions.MasterKey == "" && globalOptions.MasterKeyFile == "" && globalOptions.MasterKeyCommand == "")) {
 		return errors.Fatal("metadata-loss recovery requires --key, --key-file, or --key-command and cannot use --metadata-key-in-db")
 	}
 	return nil
 }
 
-func authenticateWithMetadataKey(ctx context.Context, s *repository.Repository, gopts Options) (context.Context, error) {
+func authenticateWithMetadataKey(ctx context.Context, s *repository.Repository, globalOptions Options) (context.Context, error) {
 	resolution, err := metadataindex.Resolve(ctx, s.Backend(), "")
 	if err != nil || resolution.Mode != metadataindex.ModeSlateDB || resolution.Manifest == nil {
 		return ctx, errors.Fatalf("discover repository identity for key-in-DB unlock: %v", err)
 	}
-	options := metadataDaemonOptions(gopts, resolution.Manifest.RepositoryID)
+	options := metadataDaemonOptions(globalOptions, resolution.Manifest.RepositoryID)
 	ctx = repository.WithDaemonOptions(ctx, options)
 	var client *daemon.Client
 	if options.DaemonPath != "" {
@@ -273,31 +275,31 @@ func authenticateWithMetadataKey(ctx context.Context, s *repository.Repository, 
 	return ctx, err
 }
 
-func metadataDaemonOptions(gopts Options, repositoryID string) daemon.Options {
+func metadataDaemonOptions(globalOptions Options, repositoryID string) daemon.Options {
 	return daemon.Options{
-		Socket:           gopts.MetadataDaemonSocket,
+		Socket:           globalOptions.MetadataDaemonSocket,
 		RepositoryID:     repositoryID,
-		DaemonPath:       gopts.MetadataDaemonPath,
+		DaemonPath:       globalOptions.MetadataDaemonPath,
 		PersistentDaemon: true,
-		DataDir:          gopts.MetadataDaemonDataDir,
-		ObjectStore:      gopts.MetadataDaemonObjectStore,
-		S3Bucket:         gopts.MetadataDaemonS3Bucket,
-		S3Prefix:         gopts.MetadataDaemonS3Prefix,
-		EncryptionMode:   gopts.MetadataEncryptionMode,
-		PassphraseFile:   gopts.MetadataPassphraseFile,
-		AzureTokenFile:   gopts.MetadataAzureTokenFile,
-		GCPTokenFile:     gopts.MetadataGCPTokenFile,
-		VaultTokenFile:   gopts.MetadataVaultTokenFile,
-		PKCS11PINFile:    gopts.MetadataPKCS11PINFile,
-		RecoveryUnlock:   gopts.MetadataRecoveryUnlock,
+		DataDir:          globalOptions.MetadataDaemonDataDir,
+		ObjectStore:      globalOptions.MetadataDaemonObjectStore,
+		S3Bucket:         globalOptions.MetadataDaemonS3Bucket,
+		S3Prefix:         globalOptions.MetadataDaemonS3Prefix,
+		EncryptionMode:   globalOptions.MetadataEncryptionMode,
+		PassphraseFile:   globalOptions.MetadataPassphraseFile,
+		AzureTokenFile:   globalOptions.MetadataAzureTokenFile,
+		GCPTokenFile:     globalOptions.MetadataGCPTokenFile,
+		VaultTokenFile:   globalOptions.MetadataVaultTokenFile,
+		PKCS11PINFile:    globalOptions.MetadataPKCS11PINFile,
+		RecoveryUnlock:   globalOptions.MetadataRecoveryUnlock,
 	}
 }
 
-func attachEngine(ctx context.Context, s *repository.Repository, gopts Options, printer vaultic.Printer) error {
-	if err := applyRepoConfig(s, gopts); err != nil {
+func attachEngine(ctx context.Context, s *repository.Repository, globalOptions Options, printer vaultic.Printer) error {
+	if err := applyRepoConfig(s, globalOptions); err != nil {
 		return err
 	}
-	placementFailures := attachPlacementBackends(ctx, s, gopts, printer)
+	placementFailures := attachPlacementBackends(ctx, s, globalOptions, printer)
 	if len(s.Config().StagingBackends) > 0 {
 		_, store, err := s.DeferredUploadPlan()
 		if err != nil {
@@ -312,20 +314,20 @@ func attachEngine(ctx context.Context, s *repository.Repository, gopts Options, 
 		return errors.Fatalf("resolve repository metadata engine: %v", err)
 	}
 
-	printRepositoryInfo(s, gopts, printer)
-	if gopts.NoCache {
+	printRepositoryInfo(s, globalOptions, printer)
+	if globalOptions.NoCache {
 		return nil
 	}
-	return setupCache(s, gopts, printer)
+	return setupCache(s, globalOptions, printer)
 }
 
-func attachPlacementBackends(ctx context.Context, s *repository.Repository, gopts Options, printer vaultic.Printer) map[string]error {
+func attachPlacementBackends(ctx context.Context, s *repository.Repository, globalOptions Options, printer vaultic.Printer) map[string]error {
 	placementFailures := make(map[string]error)
 	for _, placement := range s.Config().PlacementBackends {
 		if placement.Location == "" {
 			continue
 		}
-		placementOptions := gopts
+		placementOptions := globalOptions
 		placementOptions.RepoHot = ""
 		placementBackend, err := innerOpenBackend(ctx, placement.Location, placementOptions, placementOptions.Extended, false, printer)
 		if err != nil {

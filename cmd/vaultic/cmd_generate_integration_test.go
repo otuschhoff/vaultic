@@ -9,17 +9,17 @@ import (
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
-func testRunGenerate(t testing.TB, gopts global.Options, opts generateOptions) ([]byte, error) {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runGenerate(opts, gopts, []string{}, gopts.Term)
+func testRunGenerate(t testing.TB, globalOptions global.Options, options generateOptions) ([]byte, error) {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, capturedOptions global.Options) error {
+		return runGenerate(options, capturedOptions, []string{}, capturedOptions.Term)
 	})
 	return buf.Bytes(), err
 }
 
 func TestGenerateStdout(t *testing.T) {
 	testCases := []struct {
-		name string
-		opts generateOptions
+		name    string
+		options generateOptions
 	}{
 		{"bash", generateOptions{BashCompletionFile: "-"}},
 		{"fish", generateOptions{FishCompletionFile: "-"}},
@@ -29,7 +29,7 @@ func TestGenerateStdout(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			output, err := testRunGenerate(t, global.Options{}, tc.opts)
+			output, err := testRunGenerate(t, global.Options{}, tc.options)
 			rtest.OK(t, err)
 			rtest.Assert(t, strings.Contains(string(output), "# "+tc.name+" completion for vaultic"), "has no expected completion header")
 		})

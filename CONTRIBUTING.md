@@ -205,6 +205,44 @@ what the tests are there for.
 More details of how to structure tests can be found here at
 [writing tests](https://vaultic.readthedocs.io/en/stable/090_participating.html#writing-tests).
 
+Code Conventions
+----------------
+
+Use names that describe both ownership and behavior:
+
+* `Client` communicates with a service or process boundary.
+* `Store` persists or retrieves domain records.
+* `Engine` coordinates a stateful implementation behind a stable interface.
+* `Authority` owns the decision or fencing state for a domain transition.
+
+Command option structs are implementation details. Name them after the command
+using lower camel case and an `Options` suffix, for example `backupOptions`, and
+keep them unexported. Prefer descriptive local names such as `globalOptions`,
+`reader`, and `scanner` over abbreviations such as `gopts`, `opts`, `rd`, or
+`sc`.
+
+Errors start with a lowercase letter and do not end with punctuation. Add
+operation context with `%w` so callers can continue to use `errors.Is` and
+`errors.As`. Use a package sentinel only when callers need to branch on a
+stable condition; reuse a shared sentinel instead of creating local variants.
+Cleanup errors must be returned, joined to the primary error, or handled by a
+helper whose name and documentation state why the error is best effort.
+
+Keep production functions at or below 150 lines and non-generated source files
+at or below 1,200 lines. Prefer the stricter linter target of 120 lines and 80
+statements for newly written functions. Split work at domain phases and return
+named plan or result values rather than introducing loosely related helpers.
+
+For cancellable asynchronous work, checkpoint durable state before awaiting or
+blocking on the next operation. After the wait returns, check the context again
+before publishing completion. This checkpoint-then-await order ensures a
+cancelled invocation can resume without repeating an unrecorded side effect.
+
+Keep package dependencies directed. When a lower-level package needs behavior
+owned by a command or a higher layer, define a narrow callback or interface and
+inject it at the command layer. Do not add a reverse import merely to reach the
+concrete implementation.
+
 Git Commits
 -----------
 

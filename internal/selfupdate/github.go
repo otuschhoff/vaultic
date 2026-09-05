@@ -87,18 +87,18 @@ func GitHubLatestRelease(ctx context.Context, owner, repo string) (Release, erro
 			var msg githubError
 			jerr := json.NewDecoder(res.Body).Decode(&msg)
 			if jerr == nil {
-				_ = res.Body.Close()
+				_ = res.Body.Close() // Preserve the response-read failure; the body has no buffered writes.
 				return Release{}, fmt.Errorf("unexpected status %v (%v) returned, message:\n  %v", res.StatusCode, res.Status, msg.Message)
 			}
 		}
 
-		_ = res.Body.Close()
+		_ = res.Body.Close() // Preserve the HTTP status failure after consuming the response.
 		return Release{}, fmt.Errorf("unexpected status %v (%v) returned", res.StatusCode, res.Status)
 	}
 
 	buf, err := io.ReadAll(res.Body)
 	if err != nil {
-		_ = res.Body.Close()
+		_ = res.Body.Close() // Preserve the response decode failure; the body has no buffered writes.
 		return Release{}, err
 	}
 
@@ -138,13 +138,13 @@ func getGithubData(ctx context.Context, url string) ([]byte, error) {
 	}
 
 	if res.StatusCode != http.StatusOK {
-		_ = res.Body.Close()
+		_ = res.Body.Close() // Preserve the asset response failure; the body has no buffered writes.
 		return nil, fmt.Errorf("unexpected status %v (%v) returned", res.StatusCode, res.Status)
 	}
 
 	buf, err := io.ReadAll(res.Body)
 	if err != nil {
-		_ = res.Body.Close()
+		_ = res.Body.Close() // Preserve the asset decode failure; the body has no buffered writes.
 		return nil, err
 	}
 

@@ -4,7 +4,7 @@ import "io"
 
 // CloseQuietly documents cleanup whose failure cannot affect the operation.
 func CloseQuietly(closer io.Closer) {
-	_ = closer.Close()
+	_ = closer.Close() // This helper is only for cleanup that cannot change the operation result.
 }
 
 // LogClose closes a resource and reports a best-effort cleanup failure.

@@ -28,7 +28,7 @@ import (
 )
 
 func newCheckCommand(globalOptions *global.Options) *cobra.Command {
-	var opts CheckOptions
+	var options checkOptions
 	cmd := &cobra.Command{
 		Use:   "check [flags]",
 		Short: "Check the repository for errors",
@@ -51,7 +51,7 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			summary, err := runCheck(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			summary, err := runCheck(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 			if globalOptions.JSON {
 				if err != nil && summary.NumErrors == 0 {
 					summary.NumErrors = 1
@@ -61,16 +61,16 @@ Exit status is 12 if the password is incorrect.
 			return err
 		},
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
-			return checkFlags(opts)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
+			return checkFlags(options)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// CheckOptions bundles all options for the 'check' command.
-type CheckOptions struct {
+// checkOptions bundles all options for the 'check' command.
+type checkOptions struct {
 	ReadData       bool
 	ReadDataSubset string
 	CheckUnused    bool
@@ -79,10 +79,10 @@ type CheckOptions struct {
 	data.SnapshotFilter
 }
 
-func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.ReadData, "read-data", false, "read all data blobs")
+func (options *checkOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.ReadData, "read-data", false, "read all data blobs")
 	f.StringVar(
-		&opts.ReadDataSubset,
+		&options.ReadDataSubset,
 		"read-data-subset",
 		"",
 		("read a `subset` of data packs, specified as 'n/t' for specific part, or " +
@@ -94,57 +94,61 @@ func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 	err := f.MarkDeprecated("check-unused", "`--check-unused` is deprecated and will be ignored")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
+		// Flag registration is a construction-time invariant.
+		panic(err) //nolint:forbidigo // A missing flag here is a command-construction defect.
 	}
-	f.BoolVar(&opts.WithCache, "with-cache", false, "use existing cache, only read uncached data from repository")
+	f.BoolVar(&options.WithCache, "with-cache", false, "use existing cache, only read uncached data from repository")
 	f.BoolVar(
-		&opts.CheckHotCold,
+		&options.CheckHotCold,
 		"check-hot-cold",
 		false,
 		"for a hot/cold repository (--repo-hot): verify that the hot and cold parts agree",
 	)
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
 }
 
-func checkFlags(opts CheckOptions) error {
-	if opts.ReadData && opts.ReadDataSubset != "" {
+func checkFlags(options checkOptions) error {
+	if options.ReadData && options.ReadDataSubset != "" {
 		return errors.Fatal("check flags --read-data and --read-data-subset cannot be used together")
 	}
-	if opts.ReadDataSubset != "" {
-		dataSubset, err := stringToIntSlice(opts.ReadDataSubset)
-		argumentError := errors.Fatal("check flag --read-data-subset has invalid value, please see documentation")
-		if err == nil {
-			if len(dataSubset) != 2 {
-				return argumentError
-			}
-			if dataSubset[0] == 0 || dataSubset[1] == 0 || dataSubset[0] > dataSubset[1] {
-				return errors.Fatal(
-					"check flag --read-data-subset=n/t values must be positive integers, and n <= t, e.g. --read-data-subset=1/2",
-				)
-			}
-			if dataSubset[1] > totalBucketsMax {
-				return errors.Fatalf("check flag --read-data-subset=n/t t must be at most %d", totalBucketsMax)
-			}
-		} else if strings.HasSuffix(opts.ReadDataSubset, "%") {
-			percentage, err := parsePercentage(opts.ReadDataSubset)
-			if err != nil {
-				return argumentError
-			}
+	if options.ReadDataSubset == "" {
+		return nil
+	}
+	return validateReadDataSubset(options.ReadDataSubset)
+}
 
-			if percentage <= 0.0 || percentage > 100.0 {
-				return errors.Fatal(
-					"check flag --read-data-subset=x% x must be above 0.0% and at most 100.0%")
-			}
-		} else {
-			fileSize, err := ui.ParseBytes(opts.ReadDataSubset)
-			if err != nil {
-				return argumentError
-			}
-			if fileSize <= 0.0 {
-				return errors.Fatal(
-					"check flag --read-data-subset=n n must be above 0")
-			}
+func validateReadDataSubset(value string) error {
+	argumentError := errors.Fatal("check flag --read-data-subset has invalid value, please see documentation")
+	if dataSubset, err := stringToIntSlice(value); err == nil {
+		if len(dataSubset) != 2 {
+			return argumentError
 		}
+		if dataSubset[0] == 0 || dataSubset[1] == 0 || dataSubset[0] > dataSubset[1] {
+			return errors.Fatal(
+				"check flag --read-data-subset=n/t values must be positive integers, and n <= t, e.g. --read-data-subset=1/2",
+			)
+		}
+		if dataSubset[1] > totalBucketsMax {
+			return errors.Fatalf("check flag --read-data-subset=n/t t must be at most %d", totalBucketsMax)
+		}
+		return nil
+	}
+	if strings.HasSuffix(value, "%") {
+		percentage, err := parsePercentage(value)
+		if err != nil {
+			return argumentError
+		}
+		if percentage <= 0.0 || percentage > 100.0 {
+			return errors.Fatal("check flag --read-data-subset=x% x must be above 0.0% and at most 100.0%")
+		}
+		return nil
+	}
+	fileSize, err := ui.ParseBytes(value)
+	if err != nil {
+		return argumentError
+	}
+	if fileSize <= 0.0 {
+		return errors.Fatal("check flag --read-data-subset=n n must be above 0")
 	}
 	return nil
 }
@@ -191,18 +195,18 @@ func parsePercentage(s string) (float64, error) {
 // - if the user provides --cache-dir, we use a cache in a temporary sub-directory of the specified directory and the
 // sub-directory is deleted after the check
 //   - by default, we use a cache in a temporary directory that is deleted after the check
-func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic.Printer) (cleanup func()) {
+func prepareCheckCache(options checkOptions, globalOptions *global.Options, printer vaultic.Printer) (cleanup func()) {
 	cleanup = func() {}
-	if opts.WithCache {
+	if options.WithCache {
 		// use the default cache, no setup needed
 		return cleanup
 	}
-	if gopts.NoCache {
+	if globalOptions.NoCache {
 		// don't use any cache, no setup needed
 		return cleanup
 	}
 
-	cachedir := gopts.CacheDir
+	cachedir := globalOptions.CacheDir
 	if cachedir == "" {
 		cachedir = cache.EnvDir()
 	}
@@ -211,7 +215,7 @@ func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic
 		err := os.MkdirAll(cachedir, 0755)
 		if err != nil {
 			printer.E("unable to create cache directory %s, disabling cache: %v", cachedir, err)
-			gopts.NoCache = true
+			globalOptions.NoCache = true
 			return cleanup
 		}
 	}
@@ -219,10 +223,10 @@ func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic
 	if err != nil {
 		// if an error occurs, don't use any cache
 		printer.E("unable to create temporary directory for cache during check, disabling cache: %v\n", err)
-		gopts.NoCache = true
+		globalOptions.NoCache = true
 		return cleanup
 	}
-	gopts.CacheDir = tempdir
+	globalOptions.CacheDir = tempdir
 	printer.P("using temporary cache in %v\n", tempdir)
 	cleanup = func() {
 		err := os.RemoveAll(tempdir)
@@ -235,33 +239,33 @@ func prepareCheckCache(opts CheckOptions, gopts *global.Options, printer vaultic
 
 func runCheck(
 	ctx context.Context,
-	opts CheckOptions,
-	gopts global.Options,
+	options checkOptions,
+	globalOptions global.Options,
 	args []string,
 	term ui.Terminal,
 ) (checkSummary, error) {
 	summary := checkSummary{MessageType: "summary"}
 	var printer vaultic.Printer
-	if !gopts.JSON {
-		printer = progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	if !globalOptions.JSON {
+		printer = progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 	} else {
 		printer = newJSONErrorPrinter(term)
 	}
 
-	cleanup := prepareCheckCache(opts, &gopts, printer)
+	cleanup := prepareCheckCache(options, &globalOptions, printer)
 	defer cleanup()
-	if !gopts.NoLock {
+	if !globalOptions.NoLock {
 		printer.P("create exclusive lock for repository\n")
 	}
 	// Check needs a coherent repository view across indexes, packs, and
 	// snapshots. Keep its exclusive lock even though its cache writes are local.
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return summary, err
 	}
 	defer unlock()
-	chkr := checker.New(repo, opts.CheckUnused)
-	err = chkr.LoadSnapshots(ctx, &opts.SnapshotFilter, args)
+	chkr := checker.New(repo, options.CheckUnused)
+	err = chkr.LoadSnapshots(ctx, &options.SnapshotFilter, args)
 	if err != nil {
 		return summary, err
 	}
@@ -286,12 +290,12 @@ func runCheck(
 		return summary, err
 	}
 	errorsFound = errorsFound || structureErrors
-	unusedErrors, err := checkUnusedBlobs(ctx, opts.CheckUnused, chkr, printer)
+	unusedErrors, err := checkUnusedBlobs(ctx, options.CheckUnused, chkr, printer)
 	if err != nil {
 		return summary, err
 	}
 	errorsFound = errorsFound || unusedErrors
-	dataErrors, err := checkPackData(ctx, opts, chkr, printer, &summary, salvagePacks)
+	dataErrors, err := checkPackData(ctx, options, chkr, printer, &summary, salvagePacks)
 	if err != nil {
 		return summary, err
 	}
@@ -302,7 +306,7 @@ func runCheck(
 	}
 
 	// for a hot/cold repository, verify that the hot and cold parts agree
-	errorsFound, err = checkHotCold(ctx, opts.CheckHotCold, repo, printer, &summary, errorsFound)
+	errorsFound, err = checkHotCold(ctx, options.CheckHotCold, repo, printer, &summary, errorsFound)
 	if err != nil {
 		return summary, err
 	}
@@ -384,17 +388,20 @@ func handleCheckIndexResults(
 ) bool {
 	errorsFound := false
 	for _, hint := range hints {
-		switch hint := hint.(type) {
-		case *repository.ErrIncompletePackEntry:
-			printer.E("%s", hint.Error())
-			salvagePacks.Insert(hint.PackID)
+		var incompletePack *repository.ErrIncompletePackEntry
+		var duplicatePacks *repository.ErrDuplicatePacks
+		var mixedPack *repository.ErrMixedPack
+		switch {
+		case errors.As(hint, &incompletePack):
+			printer.E("%s", incompletePack.Error())
+			salvagePacks.Insert(incompletePack.PackID)
 			errorsFound = true
 			summary.NumErrors++
-		case *repository.ErrDuplicatePacks:
-			printer.S("%s", hint.Error())
+		case errors.As(hint, &duplicatePacks):
+			printer.S("%s", duplicatePacks.Error())
 			summary.HintRepairIndex = true
-		case *repository.ErrMixedPack:
-			printer.S("%s", hint.Error())
+		case errors.As(hint, &mixedPack):
+			printer.S("%s", mixedPack.Error())
 			summary.HintPrune = true
 		default:
 			printer.E("error: %v\n", hint)
@@ -501,10 +508,10 @@ func checkRepositoryStructure(
 }
 
 func checkPackData(
-	ctx context.Context, opts CheckOptions, chkr *checker.Checker,
+	ctx context.Context, options checkOptions, chkr *checker.Checker,
 	printer vaultic.Printer, summary *checkSummary, salvagePacks vaultic.IDSet,
 ) (bool, error) {
-	readDataFilter, err := buildPacksFilter(opts, printer, chkr.IsFiltered())
+	readDataFilter, err := buildPacksFilter(options, printer, chkr.IsFiltered())
 	if err != nil || readDataFilter == nil {
 		return false, err
 	}
@@ -523,20 +530,20 @@ func checkPackData(
 	return errorsFound, nil
 }
 
-func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,
+func buildPacksFilter(options checkOptions, printer vaultic.Printer,
 	filteredStatus bool) (func(packs map[vaultic.ID]int64) map[vaultic.ID]int64, error) {
 	typeData := ""
 	if filteredStatus {
 		typeData = "filtered "
 	}
 	switch {
-	case opts.ReadData:
+	case options.ReadData:
 		return func(packs map[vaultic.ID]int64) map[vaultic.ID]int64 {
 			printer.P("read all %sdata", typeData)
 			return packs
 		}, nil
-	case opts.ReadDataSubset != "":
-		dataSubset, err := stringToIntSlice(opts.ReadDataSubset)
+	case options.ReadDataSubset != "":
+		dataSubset, err := stringToIntSlice(options.ReadDataSubset)
 		if err == nil {
 			bucket := dataSubset[0]
 			totalBuckets := dataSubset[1]
@@ -553,8 +560,8 @@ func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,
 				)
 				return packs
 			}, nil
-		} else if strings.HasSuffix(opts.ReadDataSubset, "%") {
-			percentage, err := parsePercentage(opts.ReadDataSubset)
+		} else if strings.HasSuffix(options.ReadDataSubset, "%") {
+			percentage, err := parsePercentage(options.ReadDataSubset)
 			if err != nil {
 				return nil, err
 			}
@@ -568,7 +575,7 @@ func buildPacksFilter(opts CheckOptions, printer vaultic.Printer,
 			for _, size := range packs {
 				repoSize += size
 			}
-			subsetSize, _ := ui.ParseBytes(opts.ReadDataSubset)
+			subsetSize, _ := ui.ParseBytes(options.ReadDataSubset)
 			if subsetSize > repoSize {
 				subsetSize = repoSize
 			}

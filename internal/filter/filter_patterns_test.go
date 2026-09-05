@@ -1,6 +1,7 @@
 package filter_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/filter"
@@ -14,7 +15,8 @@ func TestValidPatterns(t *testing.T) {
 
 		rtest.Assert(t, err != nil, "Expected invalid patterns to be detected")
 
-		if ip, ok := err.(*filter.InvalidPatternError); ok {
+		ip := &filter.InvalidPatternError{}
+		if errors.As(err, &ip) {
 			rtest.Equals(t, ip.InvalidPatterns, []string{"*[._]log[.-][0-9]", "!*[._]log[.-][0-9]"})
 		} else {
 			t.Errorf("wrong error type %v", err)

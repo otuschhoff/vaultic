@@ -1,3 +1,5 @@
+//! gRPC service implementation and request coordination.
+
 use std::{
     future::Future,
     path::PathBuf,
@@ -14,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::{sync::watch, sync::Mutex};
 use tonic::{Request, Response, Status};
 use vaulticdb::encryption;
+use vaulticdb::ids::RepositoryId;
 
 use crate::{
     config::Config,
@@ -56,7 +59,7 @@ pub(crate) use writer_role::unix_time_ms_i64;
 #[derive(Clone)]
 pub(crate) struct DaemonState {
     pub(crate) daemon_id: Arc<str>,
-    pub(crate) repository_id: Arc<str>,
+    pub(crate) repository_id: RepositoryId,
     pub(crate) auth_token: Option<Arc<Zeroizing<String>>>,
     pub(crate) unix_socket: bool,
     pub(crate) tcp_enabled: bool,

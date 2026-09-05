@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -17,13 +16,13 @@ import (
 var (
 	analyticsZstdEncoder = mustAnalyticsZstdEncoder()
 	analyticsZstdDecoder = mustAnalyticsZstdDecoder()
-	analyticsPublishMu   sync.Mutex
 )
 
 func mustAnalyticsZstdEncoder() *zstd.Encoder {
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)))
 	if err != nil {
-		panic(err) //nolint:forbidigo // fixed options must initialize before package use
+		// Fixed options must initialize before package use.
+		panic(err) //nolint:forbidigo // Fixed encoder options must initialize before package use.
 	}
 	return encoder
 }
@@ -31,7 +30,8 @@ func mustAnalyticsZstdEncoder() *zstd.Encoder {
 func mustAnalyticsZstdDecoder() *zstd.Decoder {
 	decoder, err := zstd.NewReader(nil)
 	if err != nil {
-		panic(err) //nolint:forbidigo // fixed options must initialize before package use
+		// Fixed options must initialize before package use.
+		panic(err) //nolint:forbidigo // Fixed decoder options must initialize before package use.
 	}
 	return decoder
 }
@@ -75,15 +75,6 @@ type buildFact struct {
 	lastComplete int64
 }
 
-type sourceEvidence struct {
-	generation   uint64
-	revision     uint64
-	state        schema.AuthoritativeSourceState
-	continuity   schema.AnalyticsIdentityContinuity
-	lastComplete int64
-	commit       uint64
-}
-
 type pinnedGeneration struct {
 	epoch     uint64
 	manifest  schema.AnalyticsManifestRecord
@@ -115,11 +106,15 @@ func CatchUpStatus(ctx context.Context, store Store) (CatchUpResult, error) {
 // CatchUp consumes a bounded ordered prefix of the analytics outbox. Derived
 // state is rebuilt and published before any covered delta is reclaimed.
 func CatchUp(ctx context.Context, store Store, options CatchUpOptions) (CatchUpResult, error) {
-	analyticsPublishMu.Lock()
-	defer analyticsPublishMu.Unlock()
+	unlock, err := lockAnalyticsPublication(store)
+	if err != nil {
+		return CatchUpResult{}, err
+	}
+	defer unlock()
 	return catchUp(ctx, store, options)
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func catchUp(ctx context.Context, store Store, options CatchUpOptions) (CatchUpResult, error) {
 	metadata, err := Status(ctx, store)
 	if err != nil {
@@ -166,6 +161,7 @@ func catchUp(ctx context.Context, store Store, options CatchUpOptions) (CatchUpR
 		deletes = append(deletes, append([]byte(nil), item.Key...))
 	}
 
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if pinned, found, pinErr := pinLatest(ctx, store); pinErr != nil {
 		return CatchUpResult{}, pinErr
 	} else if !found || pinned.watermark.AppliedCommit < lastCommit {
@@ -225,6 +221,7 @@ func publishDeltaGeneration(
 		return err
 	}
 	segment := generation<<32 | 1
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if len(facts) != 0 {
 		dictionaries, dictionaryPuts, err := segmentDictionaries(ctx, store, facts)
 		if err != nil {
@@ -740,11 +737,15 @@ func catchUpStatus(ctx context.Context, store Store, processed uint32) (CatchUpR
 }
 
 func Rebuild(ctx context.Context, store Store, config Config, dryRun bool) (LifecycleResult, error) {
-	analyticsPublishMu.Lock()
-	defer analyticsPublishMu.Unlock()
+	unlock, err := lockAnalyticsPublication(store)
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	defer unlock()
 	return rebuild(ctx, store, config, dryRun)
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (LifecycleResult, error) {
 	if err := config.Validate(); err != nil {
 		return LifecycleResult{}, err
@@ -778,26 +779,7 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 		}
 	}
 	if dryRun {
-		var facts uint64
-		_, _, err := streamAuthoritativeFacts(
-			ctx,
-			store,
-			config,
-			nil,
-			config.SegmentRows,
-			func(batch []buildFact, _ []byte) error {
-				observeBatch(batch)
-				facts += uint64(len(batch))
-				return nil
-			},
-		)
-		return LifecycleResult{
-			Enabled:             true,
-			Generation:          generation,
-			Facts:               facts,
-			PeakFactsBuffered:   peakFacts,
-			PeakWorkingSetBytes: peakBytes,
-		}, err
+		return rebuildDryRun(ctx, store, config, generation, observeBatch, &peakFacts, &peakBytes)
 	}
 
 	checkpoint, resumed, err := loadCompatibleBuildCheckpoint(ctx, store, generation, string(configJSON))
@@ -881,6 +863,42 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 	}
 	checkpoint.AppliedCommit = appliedCommit
 
+	return publishRebuild(ctx, store, checkpoint, configJSON, generation, segments, resumed, peakFacts, peakBytes)
+}
+
+func rebuildDryRun(
+	ctx context.Context,
+	store Store,
+	config Config,
+	generation uint64,
+	observeBatch func([]buildFact),
+	peakFacts, peakBytes *uint64,
+) (LifecycleResult, error) {
+	var facts uint64
+	_, _, err := streamAuthoritativeFacts(ctx, store, config, nil, config.SegmentRows, func(batch []buildFact, _ []byte) error {
+		observeBatch(batch)
+		facts += uint64(len(batch))
+		return nil
+	})
+	return LifecycleResult{
+		Enabled:             true,
+		Generation:          generation,
+		Facts:               facts,
+		PeakFactsBuffered:   *peakFacts,
+		PeakWorkingSetBytes: *peakBytes,
+	}, err
+}
+
+func publishRebuild(
+	ctx context.Context,
+	store Store,
+	checkpoint schema.AnalyticsBuildCheckpointRecord,
+	configJSON []byte,
+	generation uint64,
+	segments []uint64,
+	resumed bool,
+	peakFacts, peakBytes uint64,
+) (LifecycleResult, error) {
 	builtAt := time.Now().UnixNano()
 	manifest := schema.AnalyticsManifestRecord{Generation: generation, Segments: segments}
 	manifestValue, err := manifest.MarshalBinary()
@@ -889,7 +907,7 @@ func rebuild(ctx context.Context, store Store, config Config, dryRun bool) (Life
 	}
 	watermark := schema.AnalyticsWatermarkRecord{
 		RepositoryGeneration: generation,
-		AppliedCommit:        appliedCommit,
+		AppliedCommit:        checkpoint.AppliedCommit,
 		ManifestGeneration:   generation,
 		AppliedAt:            builtAt,
 	}

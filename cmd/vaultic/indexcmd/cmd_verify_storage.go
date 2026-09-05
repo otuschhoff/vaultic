@@ -172,7 +172,7 @@ func runVerifyStorage(ctx context.Context, options verifyStorageOptions, globalO
 	} else if result.OperationalErrors > 0 {
 		severity = observability.Warning
 	}
-	_ = observability.Emit(
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  severity,

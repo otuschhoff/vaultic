@@ -86,8 +86,13 @@ func runIndexStats(ctx context.Context, options indexStatsOptions, globalOptions
 	// Rebuilding mutates aggregates and therefore needs the exclusive view.
 	open := openWithReadLock
 	if options.Rebuild && !options.DryRun {
-		open = func(ctx context.Context, gopts global.Options, _ bool, printer vaultic.Printer) (context.Context, *repository.Repository, func(), error) {
-			return openWithExclusiveLock(ctx, gopts, false, printer)
+		open = func(
+			ctx context.Context,
+			globalOptions global.Options,
+			_ bool,
+			printer vaultic.Printer,
+		) (context.Context, *repository.Repository, func(), error) {
+			return openWithExclusiveLock(ctx, globalOptions, false, printer)
 		}
 	}
 	ctx, repo, unlock, err := open(ctx, globalOptions, globalOptions.NoLock, printer)

@@ -548,11 +548,13 @@ func resultFromResolved(targetPath string, resolved resolvedPath) PathAtResult {
 	return result
 }
 
+//nolint:gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func coalesceChanges(targetPath string, resolved []resolvedPath, annotate, includeContent bool) []Change {
 	changes := make([]Change, 0)
 	var previous resolvedPath
 	for index, current := range resolved {
 		kind := "created"
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if index > 0 {
 			switch {
 			case !previous.covered && !current.covered:

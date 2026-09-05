@@ -18,27 +18,27 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunRestore(t testing.TB, gopts global.Options, dir string, snapshotID string) {
-	testRunRestoreExcludes(t, gopts, dir, snapshotID, nil)
+func testRunRestore(t testing.TB, globalOptions global.Options, dir string, snapshotID string) {
+	testRunRestoreExcludes(t, globalOptions, dir, snapshotID, nil)
 }
 
-func testRunRestoreExcludes(t testing.TB, gopts global.Options, dir string, snapshotID string, excludes []string) {
-	opts := RestoreOptions{
+func testRunRestoreExcludes(t testing.TB, globalOptions global.Options, dir string, snapshotID string, excludes []string) {
+	options := restoreOptions{
 		Target: dir,
 	}
-	opts.Excludes = excludes
+	options.Excludes = excludes
 
-	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID, opts, gopts))
+	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID, options, globalOptions))
 }
 
-func testRunRestoreAssumeFailure(t testing.TB, snapshotID string, opts RestoreOptions, gopts global.Options) error {
-	return withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runRestore(ctx, opts, gopts, gopts.Term, []string{snapshotID})
+func testRunRestoreAssumeFailure(t testing.TB, snapshotID string, options restoreOptions, globalOptions global.Options) error {
+	return withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runRestore(ctx, options, globalOptions, globalOptions.Term, []string{snapshotID})
 	})
 }
 
-func testRunRestoreLatest(t testing.TB, gopts global.Options, dir string, paths []string, hosts []string) {
-	opts := RestoreOptions{
+func testRunRestoreLatest(t testing.TB, globalOptions global.Options, dir string, paths []string, hosts []string) {
+	options := restoreOptions{
 		Target: dir,
 		SnapshotFilter: data.SnapshotFilter{
 			Hosts: hosts,
@@ -46,41 +46,41 @@ func testRunRestoreLatest(t testing.TB, gopts global.Options, dir string, paths 
 		},
 	}
 
-	rtest.OK(t, testRunRestoreAssumeFailure(t, "latest", opts, gopts))
+	rtest.OK(t, testRunRestoreAssumeFailure(t, "latest", options, globalOptions))
 }
 
-func testRunRestoreIncludes(t testing.TB, gopts global.Options, dir string, snapshotID vaultic.ID, includes []string) {
-	opts := RestoreOptions{
+func testRunRestoreIncludes(t testing.TB, globalOptions global.Options, dir string, snapshotID vaultic.ID, includes []string) {
+	options := restoreOptions{
 		Target: dir,
 	}
-	opts.Includes = includes
+	options.Includes = includes
 
-	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID.String(), opts, gopts))
+	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID.String(), options, globalOptions))
 }
 
-func testRunRestoreIncludesFromFile(t testing.TB, gopts global.Options, dir string, snapshotID vaultic.ID, includesFile string) {
-	opts := RestoreOptions{
+func testRunRestoreIncludesFromFile(t testing.TB, globalOptions global.Options, dir string, snapshotID vaultic.ID, includesFile string) {
+	options := restoreOptions{
 		Target: dir,
 	}
-	opts.IncludeFiles = []string{includesFile}
+	options.IncludeFiles = []string{includesFile}
 
-	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID.String(), opts, gopts))
+	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID.String(), options, globalOptions))
 }
 
-func testRunRestoreExcludesFromFile(t testing.TB, gopts global.Options, dir string, snapshotID vaultic.ID, excludesFile string) {
-	opts := RestoreOptions{
+func testRunRestoreExcludesFromFile(t testing.TB, globalOptions global.Options, dir string, snapshotID vaultic.ID, excludesFile string) {
+	options := restoreOptions{
 		Target: dir,
 	}
-	opts.ExcludeFiles = []string{excludesFile}
+	options.ExcludeFiles = []string{excludesFile}
 
-	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID.String(), opts, gopts))
+	rtest.OK(t, testRunRestoreAssumeFailure(t, snapshotID.String(), options, globalOptions))
 }
 
 func TestRestoreMustFailWhenUsingBothIncludesAndExcludes(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	// Add both include and exclude patterns
 	includePatterns := []string{"dir1/*include_me.txt", "dir2/**", "dir4/**/*_me.txt"}
@@ -88,13 +88,13 @@ func TestRestoreMustFailWhenUsingBothIncludesAndExcludes(t *testing.T) {
 
 	restoredir := filepath.Join(env.base, "restore")
 
-	restoreOpts := RestoreOptions{
+	restoreOpts := restoreOptions{
 		Target: restoredir,
 	}
 	restoreOpts.Includes = includePatterns
 	restoreOpts.Excludes = excludePatterns
 
-	err := testRunRestoreAssumeFailure(t, "latest", restoreOpts, env.gopts)
+	err := testRunRestoreAssumeFailure(t, "latest", restoreOpts, env.globalOptions)
 	rtest.Assert(t, err != nil && strings.Contains(err.Error(), "exclude and include patterns are mutually exclusive"),
 		"expected: %s error, got %v", "exclude and include patterns are mutually exclusive", err)
 }
@@ -116,7 +116,7 @@ func TestRestoreIncludes(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	// Create test files and directories
 	for _, testFile := range testfiles {
@@ -125,18 +125,18 @@ func TestRestoreIncludes(t *testing.T) {
 		rtest.OK(t, appendRandomData(fullPath, testFile.size))
 	}
 
-	opts := BackupOptions{}
+	options := backupOptions{}
 
 	// Perform backup
-	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
-	snapshotID := testListSnapshots(t, env.gopts, 1)[0]
+	snapshotID := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	// Restore using includes
 	includePatterns := []string{"dir1/*include_me.txt", "dir2/**", "dir4/**/*_me.txt"}
 	restoredir := filepath.Join(env.base, "restore")
-	testRunRestoreIncludes(t, env.gopts, restoredir, snapshotID, includePatterns)
+	testRunRestoreIncludes(t, env.globalOptions, restoredir, snapshotID, includePatterns)
 
 	testRestoreFileInclusions := func(t *testing.T) {
 		// Check that only the included files are restored
@@ -162,7 +162,7 @@ func TestRestoreIncludes(t *testing.T) {
 
 	restoredir = filepath.Join(env.base, "restore-include-from-file")
 
-	testRunRestoreIncludesFromFile(t, env.gopts, restoredir, snapshotID, patternsFile)
+	testRunRestoreIncludesFromFile(t, env.globalOptions, restoredir, snapshotID, patternsFile)
 
 	testRestoreFileInclusions(t)
 }
@@ -182,7 +182,7 @@ func TestRestoreFilter(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	for _, testFile := range testfiles {
 		p := filepath.Join(env.testdata, testFile.name)
@@ -190,15 +190,15 @@ func TestRestoreFilter(t *testing.T) {
 		rtest.OK(t, appendRandomData(p, testFile.size))
 	}
 
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
-	snapshotID := testListSnapshots(t, env.gopts, 1)[0]
+	snapshotID := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	// no restore filter should restore all files
-	testRunRestore(t, env.gopts, filepath.Join(env.base, "restore0"), snapshotID.String())
+	testRunRestore(t, env.globalOptions, filepath.Join(env.base, "restore0"), snapshotID.String())
 	for _, testFile := range testfiles {
 		rtest.OK(t, testFileSize(filepath.Join(env.base, "restore0", "testdata", testFile.name), int64(testFile.size)))
 	}
@@ -220,7 +220,7 @@ func TestRestoreFilter(t *testing.T) {
 
 	// restore with excludes
 	restoredir := filepath.Join(env.base, "restore-with-excludes")
-	testRunRestoreExcludes(t, env.gopts, restoredir, snapshotID.String(), excludePatterns)
+	testRunRestoreExcludes(t, env.globalOptions, restoredir, snapshotID.String(), excludePatterns)
 	testRestoredFileExclusions(t, restoredir)
 
 	// Create an exclude file with some patterns
@@ -232,7 +232,7 @@ func TestRestoreFilter(t *testing.T) {
 
 	// restore with excludes from file
 	restoredir = filepath.Join(env.base, "restore-with-exclude-from-file")
-	testRunRestoreExcludesFromFile(t, env.gopts, restoredir, snapshotID, patternsFile)
+	testRunRestoreExcludesFromFile(t, env.globalOptions, restoredir, snapshotID, patternsFile)
 
 	testRestoredFileExclusions(t, restoredir)
 }
@@ -241,7 +241,7 @@ func TestRestore(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	for i := range 10 {
 		p := filepath.Join(env.testdata, fmt.Sprintf("foo/bar/testfile%v", i))
@@ -249,14 +249,14 @@ func TestRestore(t *testing.T) {
 		rtest.OK(t, appendRandomData(p, uint(rand.Intn(2<<21))))
 	}
 
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
 	// Restore latest without any filters
 	restoredir := filepath.Join(env.base, "restore")
-	testRunRestoreLatest(t, env.gopts, restoredir, nil, nil)
+	testRunRestoreLatest(t, env.globalOptions, restoredir, nil, nil)
 
 	diff := directoriesContentsDiff(t, env.testdata, filepath.Join(restoredir, filepath.Base(env.testdata)))
 	rtest.Assert(t, diff == "", "directories are not equal %v", diff)
@@ -266,13 +266,13 @@ func TestRestoreLatest(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	p := filepath.Join(env.testdata, "testfile.c")
 	rtest.OK(t, os.MkdirAll(filepath.Dir(p), 0755))
 	rtest.OK(t, appendRandomData(p, 100))
 
-	opts := BackupOptions{}
+	options := backupOptions{}
 
 	// chdir manually here so we can get the current directory. This is not the
 	// same as the temp dir returned by os.MkdirTemp() on darwin.
@@ -284,16 +284,16 @@ func TestRestoreLatest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	testRunBackup(t, "", []string{filepath.Base(env.testdata)}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, "", []string{filepath.Base(env.testdata)}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
 	rtest.OK(t, os.Remove(p))
 	rtest.OK(t, appendRandomData(p, 101))
-	testRunBackup(t, "", []string{filepath.Base(env.testdata)}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, "", []string{filepath.Base(env.testdata)}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
 	// Restore latest without any filters
-	testRunRestoreLatest(t, env.gopts, filepath.Join(env.base, "restore0"), nil, nil)
+	testRunRestoreLatest(t, env.globalOptions, filepath.Join(env.base, "restore0"), nil, nil)
 	rtest.OK(t, testFileSize(filepath.Join(env.base, "restore0", "testdata", "testfile.c"), int64(101)))
 
 	// Setup test files in different directories backed up in different snapshots
@@ -301,27 +301,27 @@ func TestRestoreLatest(t *testing.T) {
 
 	rtest.OK(t, os.MkdirAll(filepath.Dir(p1), 0755))
 	rtest.OK(t, appendRandomData(p1, 102))
-	testRunBackup(t, "", []string{"p1"}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, "", []string{"p1"}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
 	p2 := filepath.Join(curdir, filepath.FromSlash("p2/testfile.c"))
 
 	rtest.OK(t, os.MkdirAll(filepath.Dir(p2), 0755))
 	rtest.OK(t, appendRandomData(p2, 103))
-	testRunBackup(t, "", []string{"p2"}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, "", []string{"p2"}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
 	p1rAbs := filepath.Join(env.base, "restore1", "p1/testfile.c")
 	p2rAbs := filepath.Join(env.base, "restore2", "p2/testfile.c")
 
-	testRunRestoreLatest(t, env.gopts, filepath.Join(env.base, "restore1"), []string{filepath.Dir(p1)}, nil)
+	testRunRestoreLatest(t, env.globalOptions, filepath.Join(env.base, "restore1"), []string{filepath.Dir(p1)}, nil)
 	rtest.OK(t, testFileSize(p1rAbs, int64(102)))
 	if _, err := os.Stat(p2rAbs); os.IsNotExist(err) {
 		rtest.Assert(t, os.IsNotExist(err),
 			"expected %v to not exist in restore, but it exists, err %v", p2rAbs, err)
 	}
 
-	testRunRestoreLatest(t, env.gopts, filepath.Join(env.base, "restore2"), []string{filepath.Dir(p2)}, nil)
+	testRunRestoreLatest(t, env.globalOptions, filepath.Join(env.base, "restore2"), []string{filepath.Dir(p2)}, nil)
 	rtest.OK(t, testFileSize(p2rAbs, int64(103)))
 	if _, err := os.Stat(p1rAbs); os.IsNotExist(err) {
 		rtest.Assert(t, os.IsNotExist(err),
@@ -341,13 +341,13 @@ func TestRestoreWithPermissionFailure(t *testing.T) {
 	datafile := filepath.Join("testdata", "repo-restore-permissions-test.tar.gz")
 	rtest.SetupTarTestFixture(t, env.base, datafile)
 
-	snapshots := testListSnapshots(t, env.gopts, 1)
+	snapshots := testListSnapshots(t, env.globalOptions, 1)
 
-	testRunRestore(t, env.gopts, filepath.Join(env.base, "restore"), snapshots[0].String())
+	testRunRestore(t, env.globalOptions, filepath.Join(env.base, "restore"), snapshots[0].String())
 
 	// make sure that all files have been restored, regardless of any
 	// permission errors
-	files := testRunLs(t, env.gopts, snapshots[0].String())
+	files := testRunLs(t, env.globalOptions, snapshots[0].String())
 	for _, filename := range files {
 		fi, err := os.Lstat(filepath.Join(env.base, "restore", filename))
 		rtest.OK(t, err)
@@ -370,31 +370,31 @@ func TestRestoreNoMetadataOnIgnoredIntermediateDirs(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	p := filepath.Join(env.testdata, "subdir1", "subdir2", "subdir3", "file.ext")
 	rtest.OK(t, os.MkdirAll(filepath.Dir(p), 0755))
 	rtest.OK(t, appendRandomData(p, 200))
 	rtest.OK(t, setZeroModTime(filepath.Join(env.testdata, "subdir1", "subdir2")))
 
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, opts, env.gopts)
-	testRunCheck(t, env.gopts)
+	testRunBackup(t, filepath.Dir(env.testdata), []string{filepath.Base(env.testdata)}, options, env.globalOptions)
+	testRunCheck(t, env.globalOptions)
 
-	snapshotID := testListSnapshots(t, env.gopts, 1)[0]
+	snapshotID := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	// restore with filter "*.ext", this should restore "file.ext", but
 	// since the directories are ignored and only created because of
 	// "file.ext", no meta data should be restored for them.
-	testRunRestoreIncludes(t, env.gopts, filepath.Join(env.base, "restore0"), snapshotID, []string{"*.ext"})
+	testRunRestoreIncludes(t, env.globalOptions, filepath.Join(env.base, "restore0"), snapshotID, []string{"*.ext"})
 
 	f1 := filepath.Join(env.base, "restore0", "testdata", "subdir1", "subdir2")
 	_, err := os.Stat(f1)
 	rtest.OK(t, err)
 
 	// restore with filter "*", this should restore meta data on everything.
-	testRunRestoreIncludes(t, env.gopts, filepath.Join(env.base, "restore1"), snapshotID, []string{"*"})
+	testRunRestoreIncludes(t, env.globalOptions, filepath.Join(env.base, "restore1"), snapshotID, []string{"*"})
 
 	f2 := filepath.Join(env.base, "restore1", "testdata", "subdir1", "subdir2")
 	fi, err := os.Stat(f2)
@@ -413,11 +413,11 @@ func TestRestoreDefaultLayout(t *testing.T) {
 	rtest.SetupTarTestFixture(t, env.base, datafile)
 
 	// check the repo
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 
 	// restore latest snapshot
 	target := filepath.Join(env.base, "restore")
-	testRunRestoreLatest(t, env.gopts, target, nil, nil)
+	testRunRestoreLatest(t, env.globalOptions, target, nil, nil)
 
 	rtest.RemoveAll(t, filepath.Join(env.base, "repo"))
 	rtest.RemoveAll(t, target)

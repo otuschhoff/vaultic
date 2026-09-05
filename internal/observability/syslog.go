@@ -241,9 +241,13 @@ func sendSyslog(ctx context.Context, target SyslogTarget, message []byte) error 
 	}
 	defer connection.Close()
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = connection.SetDeadline(deadline)
+		if err := connection.SetDeadline(deadline); err != nil {
+			return err
+		}
 	} else {
-		_ = connection.SetDeadline(time.Now().Add(target.Timeout))
+		if err := connection.SetDeadline(time.Now().Add(target.Timeout)); err != nil {
+			return err
+		}
 	}
 	if target.Network == "tcp" || target.Network == "tls" || target.Network == "unix" {
 		message = fmt.Appendf(nil, "%d %s", len(message), message)
@@ -288,4 +292,10 @@ func Emit(ctx context.Context, event Event) error {
 		log.Printf("observability: emit %s/%s event: %v", event.Category, event.Component, err)
 	}
 	return err
+}
+
+// EmitBestEffort emits advisory telemetry without changing the caller's outcome.
+func EmitBestEffort(ctx context.Context, event Event) {
+	// Emit logs delivery failures, so callers do not need a second reporting path.
+	_ = Emit(ctx, event)
 }

@@ -121,7 +121,7 @@ func goroutineNum() int {
 	runtime.Stack(b, false)
 	var num int
 
-	_, _ = fmt.Sscanf(string(b), "goroutine %d ", &num)
+	_, _ = fmt.Sscanf(string(b), "goroutine %d ", &num) // A non-matching diagnostic stack line intentionally leaves goroutine zero.
 	return num
 }
 

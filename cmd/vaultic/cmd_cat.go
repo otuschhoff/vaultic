@@ -62,14 +62,14 @@ func validateCatArgs(args []string) error {
 	return nil
 }
 
-func runCat(ctx context.Context, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+func runCat(ctx context.Context, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
 	if err := validateCatArgs(args); err != nil {
 		return err
 	}
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,19 @@ func runCat(ctx context.Context, gopts global.Options, args []string, term ui.Te
 		}
 	}
 
-	switch tpe {
+	return catObject(ctx, repo, tpe, args, id, printer, term)
+}
+
+func catObject(
+	ctx context.Context,
+	repo *repository.Repository,
+	objectType string,
+	args []string,
+	id vaultic.ID,
+	printer vaultic.Printer,
+	term ui.Terminal,
+) error {
+	switch objectType {
 	case "config":
 		buf, err := json.MarshalIndent(repo.Config(), "", "  ")
 		if err != nil {
@@ -150,66 +162,69 @@ func runCat(ctx context.Context, gopts global.Options, args []string, term ui.Te
 		printer.S(string(buf))
 		return nil
 
+	case "pack", "blob", "tree":
+		return catRawObject(ctx, repo, objectType, args, id, printer, term)
+
+	default:
+		return errors.Fatal("invalid type")
+	}
+}
+
+func catRawObject(
+	ctx context.Context,
+	repo *repository.Repository,
+	objectType string,
+	args []string,
+	id vaultic.ID,
+	printer vaultic.Printer,
+	term ui.Terminal,
+) error {
+	switch objectType {
 	case "pack":
 		buf, err := repo.LoadRaw(ctx, vaultic.PackFile, id)
-		// allow returning broken pack files
 		if buf == nil {
 			return err
 		}
-
 		hash := vaultic.Hash(buf)
 		if !hash.Equal(id) {
 			printer.E("Warning: hash of data does not match ID, want\n  %v\ngot:\n  %v", id.String(), hash.String())
 		}
-
 		_, err = term.OutputRaw().Write(buf)
 		return err
-
 	case "blob":
-		err = repo.LoadIndex(ctx, printer)
-		if err != nil {
+		if err := repo.LoadIndex(ctx, printer); err != nil {
 			return err
 		}
-
-		for _, t := range []vaultic.BlobType{vaultic.DataBlob, vaultic.TreeBlob} {
-			if _, ok := repo.LookupBlobSize(vaultic.BlobHandle{Type: t, ID: id}); !ok {
+		for _, blobType := range []vaultic.BlobType{vaultic.DataBlob, vaultic.TreeBlob} {
+			if _, ok := repo.LookupBlobSize(vaultic.BlobHandle{Type: blobType, ID: id}); !ok {
 				continue
 			}
-
-			buf, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: t, ID: id}, nil)
+			buf, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: blobType, ID: id}, nil)
 			if err != nil {
 				return err
 			}
-
 			_, err = term.OutputRaw().Write(buf)
 			return err
 		}
-
 		return errors.Fatal("blob not found")
-
 	case "tree":
-		sn, subfolder, err := data.FindSnapshot(ctx, repo, repo, args[1])
+		snapshot, subfolder, err := data.FindSnapshot(ctx, repo, repo, args[1])
 		if err != nil {
 			return errors.Fatalf("could not find snapshot: %v", err)
 		}
-
-		err = repo.LoadIndex(ctx, printer)
+		if err := repo.LoadIndex(ctx, printer); err != nil {
+			return err
+		}
+		snapshot.Tree, err = data.FindTreeDirectory(ctx, repo, snapshot.Tree, subfolder)
 		if err != nil {
 			return err
 		}
-
-		sn.Tree, err = data.FindTreeDirectory(ctx, repo, sn.Tree, subfolder)
-		if err != nil {
-			return err
-		}
-
-		buf, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: *sn.Tree}, nil)
+		buf, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: *snapshot.Tree}, nil)
 		if err != nil {
 			return err
 		}
 		_, err = term.OutputRaw().Write(buf)
 		return err
-
 	default:
 		return errors.Fatal("invalid type")
 	}

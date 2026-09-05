@@ -37,18 +37,18 @@ import (
 )
 
 type backupRun struct {
-	ctx       context.Context
-	opts      BackupOptions
-	gopts     global.Options
-	term      ui.Terminal
-	args      []string
-	printer   backup.ProgressPrinter
-	progress  *backup.Progress
-	success   bool
-	targets   []string
-	timeStamp time.Time
-	start     time.Time
-	vssConfig fs.VSSConfig
+	ctx           context.Context
+	options       backupOptions
+	globalOptions global.Options
+	term          ui.Terminal
+	args          []string
+	printer       backup.ProgressPrinter
+	progress      *backup.Progress
+	success       bool
+	targets       []string
+	timeStamp     time.Time
+	start         time.Time
+	vssConfig     fs.VSSConfig
 
 	repo                *repository.Repository
 	deferredActive      bool
@@ -134,14 +134,14 @@ func (hooks *backupHooks) wireDeferredCapture(target *archiver.Archiver) {
 	}
 }
 
-func (hooks *backupHooks) wireDeferredUploader(opts *archiver.SnapshotOptions) {
+func (hooks *backupHooks) wireDeferredUploader(options *archiver.SnapshotOptions) {
 	if hooks.deferredUploader != nil {
-		opts.DeferredUploader = hooks.deferredUploader
+		options.DeferredUploader = hooks.deferredUploader
 	}
 }
 
-func runBackupPipeline(ctx context.Context, opts BackupOptions, gopts global.Options, term ui.Terminal, args []string) error {
-	run := &backupRun{ctx: ctx, opts: opts, gopts: gopts, term: term, args: args, success: true}
+func runBackupPipeline(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string) error {
+	run := &backupRun{ctx: ctx, options: options, globalOptions: globalOptions, term: term, args: args, success: true}
 	if err := prepareBackupTargets(run); err != nil {
 		return err
 	}
@@ -176,22 +176,22 @@ func (run *backupRun) close() {
 }
 
 func prepareBackupTargets(run *backupRun) error {
-	if run.gopts.JSON {
-		run.printer = backup.NewJSONProgress(run.term, run.gopts.Verbosity)
+	if run.globalOptions.JSON {
+		run.printer = backup.NewJSONProgress(run.term, run.globalOptions.Verbosity)
 	} else {
-		run.printer = backup.NewTextProgress(run.term, run.gopts.Verbosity)
+		run.printer = backup.NewTextProgress(run.term, run.globalOptions.Verbosity)
 	}
 	if runtime.GOOS == "windows" {
-		config, err := fs.ParseVSSConfig(run.gopts.Extended)
+		config, err := fs.ParseVSSConfig(run.globalOptions.Extended)
 		if err != nil {
 			return err
 		}
 		run.vssConfig = config
 	}
-	if err := run.opts.Check(run.gopts, run.args); err != nil {
+	if err := run.options.Check(run.globalOptions, run.args); err != nil {
 		return err
 	}
-	targets, err := collectTargets(run.opts, run.args, run.printer.E, run.term.InputRaw())
+	targets, err := collectTargets(run.options, run.args, run.printer.E, run.term.InputRaw())
 	if err != nil && !errors.Is(err, ErrInvalidSourceData) {
 		return err
 	}
@@ -201,8 +201,8 @@ func prepareBackupTargets(run *backupRun) error {
 	run.targets = targets
 	run.timeStamp = time.Now()
 	run.start = run.timeStamp
-	if run.opts.TimeStamp != "" {
-		run.timeStamp, err = time.ParseInLocation(global.TimeFormat, run.opts.TimeStamp, time.Local)
+	if run.options.TimeStamp != "" {
+		run.timeStamp, err = time.ParseInLocation(global.TimeFormat, run.options.TimeStamp, time.Local)
 		if err != nil {
 			return errors.Fatalf("error in time option: %v", err)
 		}
@@ -211,15 +211,15 @@ func prepareBackupTargets(run *backupRun) error {
 }
 
 func initializeBackupRepository(run *backupRun) error {
-	if run.gopts.Verbosity >= 2 && !run.gopts.JSON {
+	if run.globalOptions.Verbosity >= 2 && !run.globalOptions.JSON {
 		run.printer.P("open repository")
 	}
-	if !run.opts.Init {
+	if !run.options.Init {
 		return nil
 	}
-	_, err := global.OpenRepository(run.ctx, run.gopts, run.printer)
+	_, err := global.OpenRepository(run.ctx, run.globalOptions, run.printer)
 	if errors.Is(err, global.ErrNoRepository) {
-		_, err = global.CreateRepository(run.ctx, run.gopts, vaultic.StableRepoVersion, nil, run.printer)
+		_, err = global.CreateRepository(run.ctx, run.globalOptions, vaultic.StableRepoVersion, nil, run.printer)
 		if err != nil {
 			return errors.Fatalf("initialize repository: %v", err)
 		}
@@ -232,7 +232,7 @@ func openBackupSources(ctx context.Context, run *backupRun) (context.Context, er
 	if err != nil {
 		return ctx, err
 	}
-	run.progress = backup.NewProgress(run.printer, run.gopts.Quiet, run.gopts.JSON, run.term.CanUpdateStatus())
+	run.progress = backup.NewProgress(run.printer, run.globalOptions.Quiet, run.globalOptions.JSON, run.term.CanUpdateStatus())
 	if err := loadBackupParent(run); err != nil {
 		return ctx, err
 	}
@@ -240,16 +240,16 @@ func openBackupSources(ctx context.Context, run *backupRun) (context.Context, er
 }
 
 func openBackupRepository(ctx context.Context, run *backupRun) (context.Context, error) {
-	run.deferredActive = run.opts.AllowDeferredCommit && run.opts.DeferredMode != "auto"
-	run.metadataBypassed = run.opts.DeferredMode == "data-plane-only"
+	run.deferredActive = run.options.AllowDeferredCommit && run.options.DeferredMode != "auto"
+	run.metadataBypassed = run.options.DeferredMode == "data-plane-only"
 	var err error
 	if run.metadataBypassed {
-		run.repo, err = global.OpenDataPlaneRepository(ctx, run.gopts, run.printer)
+		run.repo, err = global.OpenDataPlaneRepository(ctx, run.globalOptions, run.printer)
 		if err == nil {
-			run.closeRepo = func() { _ = run.repo.Close() }
+			run.closeRepo = func() { errors.CloseQuietly(run.repo) }
 		}
 	} else {
-		ctx, run.repo, run.closeRepo, err = openWithAppendLock(ctx, run.gopts, run.opts.DryRun, run.printer)
+		ctx, run.repo, run.closeRepo, err = openWithAppendLock(ctx, run.globalOptions, run.options.DryRun, run.printer)
 		run.ctx = ctx
 		err = applyDeferredFallback(run, err)
 	}
@@ -263,18 +263,18 @@ func openBackupRepository(ctx context.Context, run *backupRun) (context.Context,
 }
 
 func applyDeferredFallback(run *backupRun, openErr error) error {
-	if shouldUseDataPlaneFallback(openErr, run.opts) {
-		repo, err := global.OpenDataPlaneRepository(run.ctx, run.gopts, run.printer)
+	if shouldUseDataPlaneFallback(openErr, run.options) {
+		repo, err := global.OpenDataPlaneRepository(run.ctx, run.globalOptions, run.printer)
 		if err != nil {
 			return err
 		}
 		run.repo = repo
 		run.deferredActive = true
 		run.metadataBypassed = true
-		run.closeRepo = func() { _ = repo.Close() }
+		run.closeRepo = func() { errors.CloseQuietly(repo) }
 		return nil
 	}
-	if openErr != nil || run.opts.DeferredMode != "auto" {
+	if openErr != nil || run.options.DeferredMode != "auto" {
 		return openErr
 	}
 	if engine, ok := run.repo.Engine().(*enginepkg.DaemonEngine); ok {
@@ -291,29 +291,29 @@ func emitDeferredMode(run *backupRun) {
 		severity = observability.Critical
 		message = "metadata bypassed for data-plane-only deferred crawl"
 	}
-	_ = observability.Emit(run.ctx, observability.Event{
+	observability.EmitBestEffort(run.ctx, observability.Event{
 		Severity: severity, Category: observability.CategoryLifecycle,
-		Component: "backup", Message: message, Fields: map[string]any{"mode": run.opts.DeferredMode},
+		Component: "backup", Message: message, Fields: map[string]any{"mode": run.options.DeferredMode},
 	})
 }
 
 func loadBackupParent(run *backupRun) error {
-	if !run.opts.Stdin && !run.deferredActive {
-		parent, err := findParentSnapshot(run.ctx, run.repo, run.opts, run.targets, run.timeStamp)
+	if !run.options.Stdin && !run.deferredActive {
+		parent, err := findParentSnapshot(run.ctx, run.repo, run.options, run.targets, run.timeStamp)
 		if err != nil {
 			return err
 		}
 		run.parent = parent
-		if !run.gopts.JSON && parent != nil {
+		if !run.globalOptions.JSON && parent != nil {
 			run.printer.P("using parent snapshot %v\n", parent.ID().Str())
-		} else if !run.gopts.JSON {
+		} else if !run.globalOptions.JSON {
 			run.printer.P("no parent snapshot found, will read all files\n")
 		}
 	}
 	if run.deferredActive {
 		return nil
 	}
-	if !run.gopts.JSON {
+	if !run.globalOptions.JSON {
 		run.printer.V("load index files")
 	}
 	return run.repo.LoadIndex(run.ctx, run.printer)
@@ -321,13 +321,15 @@ func loadBackupParent(run *backupRun) error {
 
 func openBackupFilesystem(run *backupRun) error {
 	run.targetFS = fs.NewLocal()
-	if runtime.GOOS == "windows" && run.opts.UseFsSnapshot {
+	if runtime.GOOS == "windows" && run.options.UseFsSnapshot {
 		if err := fs.HasSufficientPrivilegesForVSS(); err != nil {
 			return err
 		}
-		errorHandler := func(item string, err error) { _ = run.progress.Error(item, err) }
+		errorHandler := func(item string, err error) {
+			_ = run.progress.Error(item, err) // Progress rendering cannot supersede the item error it is reporting.
+		}
 		messageHandler := func(msg string, args ...any) {
-			if !run.gopts.JSON {
+			if !run.globalOptions.JSON {
 				run.printer.P(msg, args...)
 			}
 		}
@@ -335,23 +337,23 @@ func openBackupFilesystem(run *backupRun) error {
 		run.targetFS = localVSS
 		run.closeSource = localVSS.DeleteSnapshots
 	}
-	if run.opts.Stdin || run.opts.StdinCommand {
+	if run.options.Stdin || run.options.StdinCommand {
 		return openBackupStdin(run)
 	}
-	if run.opts.FSTestHook != nil {
-		run.targetFS = run.opts.FSTestHook(run.targetFS)
+	if run.options.FSTestHook != nil {
+		run.targetFS = run.options.FSTestHook(run.targetFS)
 	}
 	return nil
 }
 
 func openBackupStdin(run *backupRun) error {
-	if !run.gopts.JSON {
+	if !run.globalOptions.JSON {
 		run.printer.V("read data from stdin")
 	}
-	filename := path.Join("/", run.opts.StdinFilename)
+	filename := path.Join("/", run.options.StdinFilename)
 	source := run.term.InputRaw()
 	var err error
-	if run.opts.StdinCommand {
+	if run.options.StdinCommand {
 		source, err = fs.NewCommandReader(run.ctx, run.args, run.printer.E)
 		if err != nil {
 			return err
@@ -362,8 +364,8 @@ func openBackupStdin(run *backupRun) error {
 		return fmt.Errorf("failed to backup from stdin: %w", err)
 	}
 	run.targets = []string{filename}
-	if run.opts.FSTestHook != nil {
-		run.targetFS = run.opts.FSTestHook(run.targetFS)
+	if run.options.FSTestHook != nil {
+		run.targetFS = run.options.FSTestHook(run.targetFS)
 	}
 	return nil
 }
@@ -380,9 +382,9 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	cancelCtx, cancel := context.WithCancel(groupCtx)
 	run.group, run.cancel = group, cancel
 	configureBackupScanner(cancelCtx, run, selectByName, selectItem)
-	options := archiver.Options{ReadConcurrency: run.opts.ReadConcurrency}
-	if run.opts.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
-		options.CWalkConcurrency, options.CWalkQueue = run.opts.CWalkConcurrency, 4096
+	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency}
+	if run.options.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
+		options.CWalkConcurrency, options.CWalkQueue = run.options.CWalkConcurrency, 4096
 		if run.pathdiffPlan.Selective {
 			options.CWalkRoots = run.pathdiffPlan.ChangedDirs
 		}
@@ -394,7 +396,7 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	run.archiver = archiver.New(repo, run.targetFS, options)
 	run.archiver.SelectByName, run.archiver.Select = selectByName, selectItem
 	run.archiver.MandatorySelect = mandatory
-	run.archiver.WithAtime = run.opts.WithAtime
+	run.archiver.WithAtime = run.options.WithAtime
 	if err := configureBackupHooks(cancelCtx, run); err != nil {
 		return err
 	}
@@ -404,27 +406,27 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 
 func configurePathdiff(run *backupRun) error {
 	run.pathdiffPlan = crawl.Plan{Reason: "pathdiff is disabled"}
-	if !run.opts.UsePathdiff {
+	if !run.options.UsePathdiff {
 		return nil
 	}
 	if !fs.IsLocal(run.targetFS) {
 		run.pathdiffPlan.Reason = "source does not use the plain local filesystem"
 	} else if run.parent == nil {
 		run.pathdiffPlan.Reason = "no parent snapshot is available"
-	} else if topology, err := crawl.LoadTopology(run.opts.PathdiffSVMMap); err != nil {
+	} else if topology, err := crawl.LoadTopology(run.options.PathdiffSVMMap); err != nil {
 		run.pathdiffPlan.Reason = err.Error()
 	} else {
-		service := crawl.NewPathdiffService(uppathdiff.NewClient(run.opts.PathdiffEndpoint))
+		service := crawl.NewPathdiffService(uppathdiff.NewClient(run.options.PathdiffEndpoint))
 		plan, err := crawl.BuildPathdiffPlan(run.ctx, service, topology, run.targets, run.parent.Time, run.start)
 		if err != nil {
 			return fmt.Errorf("build pathdiff crawl plan: %w", err)
 		}
 		run.pathdiffPlan = plan
 	}
-	if !run.pathdiffPlan.Selective && run.opts.PathdiffRequireCoverage {
+	if !run.pathdiffPlan.Selective && run.options.PathdiffRequireCoverage {
 		return errors.Fatalf("pathdiff coverage is required: %s", run.pathdiffPlan.Reason)
 	}
-	if run.gopts.JSON {
+	if run.globalOptions.JSON {
 		return nil
 	}
 	if run.pathdiffPlan.Selective {
@@ -436,11 +438,11 @@ func configurePathdiff(run *backupRun) error {
 }
 
 func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiver.SelectFunc, archiver.SelectFunc, error) {
-	byName, err := collectRejectByNameFuncs(run.opts, run.repo, run.printer.E)
+	byName, err := collectRejectByNameFuncs(run.options, run.repo, run.printer.E)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	rejects, err := collectRejectFuncs(run.opts, run.targets, run.targetFS, run.printer.E)
+	rejects, err := collectRejectFuncs(run.options, run.targets, run.targetFS, run.printer.E)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -461,13 +463,13 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 }
 
 func configureBackupScanner(ctx context.Context, run *backupRun, byName archiver.SelectByNameFunc, selectItem archiver.SelectFunc) {
-	if run.opts.NoScan || run.pathdiffPlan.Selective || run.opts.UseCWalk {
+	if run.options.NoScan || run.pathdiffPlan.Selective || run.options.UseCWalk {
 		return
 	}
 	scanner := archiver.NewScanner(run.targetFS)
 	scanner.SelectByName, scanner.Select = byName, selectItem
 	scanner.Error, scanner.Result = run.printer.ScannerError, run.progress.ReportTotal
-	if !run.gopts.JSON {
+	if !run.globalOptions.JSON {
 		run.printer.V("start scan on %v", run.targets)
 	}
 	run.group.Go(func() error { return scanner.Scan(ctx, run.targets) })
@@ -525,34 +527,34 @@ func configureReconciliationHooks(ctx context.Context, run *backupRun) error {
 }
 
 func configureBackupChangeFlags(run *backupRun) {
-	if run.opts.IgnoreInode {
+	if run.options.IgnoreInode {
 		run.archiver.ChangeIgnoreFlags |= archiver.ChangeIgnoreCtime | archiver.ChangeIgnoreInode
 	}
-	if run.opts.IgnoreCtime {
+	if run.options.IgnoreCtime {
 		run.archiver.ChangeIgnoreFlags |= archiver.ChangeIgnoreCtime
 	}
 }
 
 func configureSnapshotOptions(run *backupRun) error {
 	run.snapshotOpts = archiver.SnapshotOptions{
-		Excludes: run.opts.Excludes, Tags: run.opts.Tags.Flatten(),
-		BackupStart: run.start, Time: run.timeStamp, Hostname: run.opts.Host,
-		Label: run.opts.Label, ParentSnapshot: run.parent,
-		ProgramVersion: "vaultic " + global.Version, SkipIfUnchanged: run.opts.SkipIfUnchanged,
+		Excludes: run.options.Excludes, Tags: run.options.Tags.Flatten(),
+		BackupStart: run.start, Time: run.timeStamp, Hostname: run.options.Host,
+		Label: run.options.Label, ParentSnapshot: run.parent,
+		ProgramVersion: "vaultic " + global.Version, SkipIfUnchanged: run.options.SkipIfUnchanged,
 	}
 	if run.deferredActive {
 		if err := configureDeferredUploader(run); err != nil {
 			return err
 		}
 	}
-	if run.opts.DescriptionFrom != "" {
-		value, err := textfile.Read(run.opts.DescriptionFrom)
+	if run.options.DescriptionFrom != "" {
+		value, err := textfile.Read(run.options.DescriptionFrom)
 		if err != nil {
-			return errors.Fatalf("unable to read description from %q: %v", run.opts.DescriptionFrom, err)
+			return errors.Fatalf("unable to read description from %q: %v", run.options.DescriptionFrom, err)
 		}
 		run.snapshotOpts.Description = strings.TrimSpace(string(value))
 	} else {
-		run.snapshotOpts.Description = run.opts.Description
+		run.snapshotOpts.Description = run.options.Description
 	}
 	return configureDeleteProtection(run)
 }
@@ -572,7 +574,7 @@ func configureDeferredUploader(run *backupRun) error {
 		return fmt.Errorf("inspect deferred staging quota: %w", err)
 	}
 	if err := staging.CheckQuota(quota, usage.Jobs, 0, usage.Bytes, usage.OldestJobAt, 0, time.Now().UTC()); err != nil {
-		_ = observability.Emit(run.ctx, observability.Event{
+		observability.EmitBestEffort(run.ctx, observability.Event{
 			Severity: observability.Error, Category: observability.CategoryLifecycle,
 			Component: "backup", Message: "deferred staging quota refused upload",
 		})
@@ -592,16 +594,16 @@ func configureDeferredUploader(run *backupRun) error {
 }
 
 func configureDeleteProtection(run *backupRun) error {
-	if run.opts.DeleteNever {
+	if run.options.DeleteNever {
 		run.snapshotOpts.Delete = &data.DeleteOption{Never: true}
 		return nil
 	}
-	if run.opts.DeleteAfter == "" {
+	if run.options.DeleteAfter == "" {
 		return nil
 	}
-	duration, err := data.ParseDuration(run.opts.DeleteAfter)
+	duration, err := data.ParseDuration(run.options.DeleteAfter)
 	if err != nil || duration.Zero() {
-		return errors.Fatalf("invalid --delete-after duration %q: %v", run.opts.DeleteAfter, err)
+		return errors.Fatalf("invalid --delete-after duration %q: %v", run.options.DeleteAfter, err)
 	}
 	until := run.timeStamp.AddDate(duration.Years, duration.Months, duration.Days).Add(time.Duration(duration.Hours) * time.Hour)
 	run.snapshotOpts.Delete = &data.DeleteOption{After: &until}
@@ -609,7 +611,7 @@ func configureDeleteProtection(run *backupRun) error {
 }
 
 func executeBackup(run *backupRun) error {
-	if !run.gopts.JSON {
+	if !run.globalOptions.JSON {
 		run.printer.V("start backup on %v", run.targets)
 	}
 	var err error
@@ -643,7 +645,7 @@ func publishDeferredBackup(run *backupRun) error {
 	header := staging.Header{
 		Format: 1, RepositoryID: run.repo.Config().ID,
 		JobID: run.deferredJobID, IdempotencyKey: run.deferredJobID,
-		CreatedAt: now, ExpiresAt: now.Add(run.opts.DeferredExpiry),
+		CreatedAt: now, ExpiresAt: now.Add(run.options.DeferredExpiry),
 		CapsuleGeneration: 1, RepositoryKeyVersion: 1, ChunkerVersion: "rabin-v1",
 		CompressionVersion:     fmt.Sprintf("repository-v%d", run.repo.Config().Version),
 		PlacementPolicyVersion: 1, SourceIdentitySHA256: hex.EncodeToString(sourceDigest[:]),
@@ -659,7 +661,7 @@ func publishDeferredBackup(run *backupRun) error {
 	}
 	run.deferredSeal, _, _, err = run.deferredStore.PublishJob(run.ctx, header, run.deferredResult.Packs, records)
 	if err == nil {
-		_ = observability.Emit(run.ctx, observability.Event{
+		observability.EmitBestEffort(run.ctx, observability.Event{
 			Severity: observability.Info, Category: observability.CategoryIntegrity,
 			Component: "backup", Message: "deferred pack durability verified",
 			Fields: map[string]any{
@@ -667,7 +669,7 @@ func publishDeferredBackup(run *backupRun) error {
 				"protected_bytes": run.deferredSeal.ProtectedBytes,
 			},
 		})
-		_ = observability.Emit(run.ctx, observability.Event{
+		observability.EmitBestEffort(run.ctx, observability.Event{
 			Severity: observability.Notice, Category: observability.CategoryLifecycle,
 			Component: "staging", Message: "deferred ingest journal sealed",
 			Fields: map[string]any{"job_id": run.deferredJobID, "expires_at": run.deferredSeal.Header.ExpiresAt},
@@ -700,7 +702,7 @@ func reportBackup(run *backupRun) error {
 	if run.deferredActive {
 		return reportDeferredBackup(run)
 	}
-	run.progress.Finish(run.snapshotID, run.summary, run.opts.DryRun)
+	run.progress.Finish(run.snapshotID, run.summary, run.options.DryRun)
 	if !run.success {
 		return ErrInvalidSourceData
 	}
@@ -709,8 +711,8 @@ func reportBackup(run *backupRun) error {
 	}
 	runPlacementScheduler(run)
 	publishBackupTelemetry(run)
-	if run.opts.List {
-		if err := querycmd.RunLs(run.ctx, querycmd.LsOptions{}, run.gopts, []string{run.snapshotID.String()}, run.term); err != nil {
+	if run.options.List {
+		if err := querycmd.RunLsDefault(run.ctx, run.globalOptions, []string{run.snapshotID.String()}, run.term); err != nil {
 			run.printer.E("listing created snapshot failed: %v\n", err)
 		}
 	}
@@ -734,20 +736,20 @@ func reportDeferredBackup(run *backupRun) error {
 		"state": "data_durable_metadata_pending", "job_id": run.deferredJobID,
 		"packs": len(run.deferredResult.Packs), "protected_bytes": run.deferredSeal.ProtectedBytes,
 		"placements": placements, "expires_at": run.deferredSeal.Header.ExpiresAt,
-		"reason": run.opts.DeferredMode,
+		"reason": run.options.DeferredMode,
 	}
-	if run.gopts.JSON {
+	if run.globalOptions.JSON {
 		encoded, _ := json.Marshal(result)
 		run.term.Print(string(encoded))
 	} else {
 		run.printer.P("data durable; metadata pending (job %s, %d packs, expires in %s)\n",
-			run.deferredJobID, len(run.deferredResult.Packs), run.opts.DeferredExpiry)
+			run.deferredJobID, len(run.deferredResult.Packs), run.options.DeferredExpiry)
 	}
 	return nil
 }
 
 func runPlacementScheduler(run *backupRun) {
-	if run.authoritativeEngine == nil || run.opts.DryRun {
+	if run.authoritativeEngine == nil || run.options.DryRun {
 		return
 	}
 	model, err := indexcmd.MaintenancePlacementModel(run.repo)
@@ -768,12 +770,12 @@ func runPlacementScheduler(run *backupRun) {
 
 func publishBackupTelemetry(run *backupRun) {
 	err := telemetry.Publish(run.ctx, telemetry.Config{
-		PrometheusURL: run.gopts.PrometheusURL, PrometheusUser: run.gopts.PrometheusUser,
-		PrometheusPass: run.gopts.PrometheusPass, InfluxURL: run.gopts.InfluxURL,
-		InfluxToken: run.gopts.InfluxToken, InfluxOrg: run.gopts.InfluxOrg,
-		InfluxBucket: run.gopts.InfluxBucket,
+		PrometheusURL: run.globalOptions.PrometheusURL, PrometheusUser: run.globalOptions.PrometheusUser,
+		PrometheusPass: run.globalOptions.PrometheusPass, InfluxURL: run.globalOptions.InfluxURL,
+		InfluxToken: run.globalOptions.InfluxToken, InfluxOrg: run.globalOptions.InfluxOrg,
+		InfluxBucket: run.globalOptions.InfluxBucket,
 	}, telemetry.Backup{
-		Repository: run.gopts.Repo, SnapshotID: run.snapshotID.String(),
+		Repository: run.globalOptions.Repo, SnapshotID: run.snapshotID.String(),
 		Label: run.snapshotOpts.Label, Summary: run.summary,
 	})
 	if err != nil {

@@ -78,18 +78,21 @@ func startClient(cfg Config, errorLog func(string, ...any)) (*SFTP, error) {
 	}
 
 	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			errorLog("subprocess %v: %v\n", program, sc.Text())
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			errorLog("subprocess %v: %v\n", program, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			errorLog("subprocess %v: read stderr: %v\n", program, err)
 		}
 	}()
 
 	// get stdin and stdout
-	wr, err := cmd.StdinPipe()
+	stdinWriter, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, errors.Wrap(err, "cmd.StdinPipe")
 	}
-	rd, err := cmd.StdoutPipe()
+	stdoutReader, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, errors.Wrap(err, "cmd.StdoutPipe")
 	}
@@ -116,7 +119,7 @@ func startClient(cfg Config, errorLog func(string, ...any)) (*SFTP, error) {
 	}()
 
 	// open the SFTP session
-	client, err := sftp.NewClientPipe(rd, wr,
+	client, err := sftp.NewClientPipe(stdoutReader, stdinWriter,
 		// write multiple packets (32kb) in parallel per file
 		// not strictly necessary as we use ReadFromWithConcurrency
 		sftp.UseConcurrentWrites(true),
@@ -324,6 +327,7 @@ func tempSuffix() string {
 	var nonce [16]byte
 	_, err := rand.Read(nonce[:])
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	return hex.EncodeToString(nonce[:])
@@ -342,7 +346,7 @@ func setFileReadonly(client *sftp.Client, path string, mode os.FileMode) error {
 }
 
 // Save stores data in the backend at the handle.
-func (r *SFTP) Save(_ context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (r *SFTP) Save(_ context.Context, h backend.Handle, reader backend.RewindReader) error {
 	if err := r.clientError(); err != nil {
 		return err
 	}
@@ -374,7 +378,7 @@ func (r *SFTP) Save(_ context.Context, h backend.Handle, rd backend.RewindReader
 	if err == nil {
 		err = f.Chmod(r.Modes.File)
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the chmod failure; Close only releases the empty remote file.
 			return errors.Wrapf(err, "Chmod %v", tmpFilename)
 		}
 	}
@@ -393,17 +397,17 @@ func (r *SFTP) Save(_ context.Context, h backend.Handle, rd backend.RewindReader
 	}()
 
 	// save data, make sure to use the optimized sftp upload method
-	wbytes, err := f.ReadFromWithConcurrency(rd, 0)
+	wbytes, err := f.ReadFromWithConcurrency(reader, 0)
 	if err != nil {
-		_ = f.Close()
-		err = r.checkNoSpace(dirname, rd.Length(), err)
+		_ = f.Close() // Preserve the upload failure; Close only releases the incomplete remote file.
+		err = r.checkNoSpace(dirname, reader.Length(), err)
 		return errors.Wrapf(err, "Write %v", tmpFilename)
 	}
 
 	// sanity check
-	if wbytes != rd.Length() {
-		_ = f.Close()
-		return errors.Errorf("Write %v: wrote %d bytes instead of the expected %d bytes", tmpFilename, wbytes, rd.Length())
+	if wbytes != reader.Length() {
+		_ = f.Close() // Preserve the length mismatch; Close only releases the invalid remote file.
+		return errors.Errorf("Write %v: wrote %d bytes instead of the expected %d bytes", tmpFilename, wbytes, reader.Length())
 	}
 	err = f.Close()
 	if err != nil {
@@ -430,7 +434,8 @@ func (r *SFTP) checkNoSpace(dir string, size int64, origErr error) error {
 	// but pkg/sftp doesn't export it and OpenSSH's sftp-server
 	// sends FX_FAILURE instead.
 
-	e, ok := origErr.(*sftp.StatusError)
+	e := &sftp.StatusError{}
+	ok := errors.As(origErr, &e)
 	_, hasExt := r.c.HasExtension("statvfs@openssh.com")
 	if !ok || e.FxCode() != sftp.ErrSSHFxFailure || !hasExt {
 		return origErr
@@ -450,23 +455,23 @@ func (r *SFTP) checkNoSpace(dir string, size int64, origErr error) error {
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (r *SFTP) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
+func (r *SFTP) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
 	if err := r.clientError(); err != nil {
 		return err
 	}
 
-	return util.DefaultLoad(ctx, h, length, offset, r.openReader, func(rd io.Reader) error {
+	return util.DefaultLoad(ctx, h, length, offset, r.openReader, func(reader io.Reader) error {
 		if length == 0 || !feature.Flag.Enabled(feature.BackendErrorRedesign) {
-			return fn(rd)
+			return consume(reader)
 		}
 
 		// there is no direct way to efficiently check whether the file is too short
-		// rd is already a LimitedReader which can be used to track the number of bytes read
-		err := fn(rd)
+		// reader is already a LimitedReader which can be used to track the number of bytes read
+		err := consume(reader)
 
-		// check the underlying reader to be agnostic to however fn() handles the returned error
-		_, rderr := rd.Read([]byte{0})
-		if rderr == io.EOF && rd.(*util.LimitedReadCloser).N != 0 {
+		// check the underlying reader to be agnostic to however consume() handles the returned error
+		_, readErr := reader.Read([]byte{0})
+		if readErr == io.EOF && reader.(*util.LimitedReadCloser).N != 0 {
 			// file is too short
 			return fmt.Errorf("%w: %w", errTooShort, err)
 		}
@@ -484,7 +489,7 @@ func (r *SFTP) openReader(_ context.Context, h backend.Handle, length int, offse
 	if offset > 0 {
 		_, err = f.Seek(offset, 0)
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the seek failure; this remote file is opened read-only.
 			return nil, errors.Wrapf(err, "Seek %v", r.Filename(h))
 		}
 	}

@@ -305,12 +305,15 @@ func (record InodeRevision) MarshalBinary() ([]byte, error) {
 	e.u32(uint32(record.Known))
 	e.u8(byte(record.ContentMode))
 	e.u32(record.ContentCount)
-	if record.ContentMode == ContentInline {
+	switch record.ContentMode {
+	case ContentInline:
 		for _, id := range record.ContentIDs {
 			e.id(id)
 		}
-	} else if record.ContentMode == ContentManifestRef {
+	case ContentManifestRef:
 		e.id(record.ContentManifestID)
+	case ContentNone:
+		// Records without content have no content identifiers.
 	}
 	e.id(record.FileContentHash)
 	e.bool(record.HashKnown)
@@ -321,6 +324,7 @@ func (record InodeRevision) MarshalBinary() ([]byte, error) {
 	return e.finish()
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func UnmarshalInodeRevision(data []byte) (InodeRevision, error) {
 	d, err := newDecoder(data)
 	if err != nil {
@@ -364,6 +368,7 @@ func UnmarshalInodeRevision(data []byte) (InodeRevision, error) {
 	if record.ContentCount, err = d.u32(); err != nil {
 		return record, err
 	}
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if record.ContentMode == ContentInline {
 		if record.ContentCount == 0 || record.ContentCount > MaxInlineContentIDs || uint64(record.ContentCount)*32 > uint64(len(data)) {
 			return record, fmt.Errorf("%w: invalid inline content count", ErrMalformed)

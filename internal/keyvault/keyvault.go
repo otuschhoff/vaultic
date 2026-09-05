@@ -27,7 +27,7 @@ var newSecretClient = func(vaultURL string) (secretClient, error) {
 
 func FetchSecret(ctx context.Context, vaultURL, name, version string) (string, error) {
 	if strings.TrimSpace(vaultURL) == "" || strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("Azure Key Vault URL and secret name are required")
+		return "", fmt.Errorf("azure Key Vault URL and secret name are required")
 	}
 	client, err := newSecretClient(vaultURL)
 	if err != nil {

@@ -22,6 +22,18 @@ import (
 	"github.com/spf13/pflag"
 )
 
+func mustMarkFlagRequired(command *cobra.Command, name string) {
+	if err := command.MarkFlagRequired(name); err != nil {
+		panic(fmt.Sprintf("mark flag %q required: %v", name, err)) //nolint:forbidigo // Registered flags must exist during construction.
+	}
+}
+
+func mustMarkPersistentFlagRequired(command *cobra.Command, name string) {
+	if err := command.MarkPersistentFlagRequired(name); err != nil {
+		panic(fmt.Sprintf("mark persistent flag %q required: %v", name, err)) //nolint:forbidigo // Registered flags must exist during construction.
+	}
+}
+
 type indexDaemonOptions struct {
 	Socket            string
 	TCPAddress        string
@@ -327,7 +339,7 @@ func prepareMetadataRebuild(ctx context.Context, options indexImportOptions, glo
 	if globalOptions.KeyBrokerSocket == "" || options.Daemon.BrokerSocket != globalOptions.KeyBrokerSocket {
 		return fmt.Errorf("metadata rebuild requires the repository and candidate daemon to use the same key broker")
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index",
+	observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index",
 		Message: "authenticated metadata rebuild started", Fields: map[string]any{"candidate": candidate}})
 	return nil
 }
@@ -350,7 +362,7 @@ func activateImportedIndex(ctx context.Context, options indexImportOptions, repo
 		return fmt.Errorf("activate SlateDB authority: %w", err)
 	}
 	if options.Daemon.RebuildInitialize {
-		_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index",
+		observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index",
 			Message: "authenticated metadata rebuild activated", Fields: map[string]any{"candidate": rebuildCandidateName(options.Daemon)}})
 	}
 	return nil
@@ -371,7 +383,7 @@ func validateRebuiltIndex(ctx context.Context, options indexImportOptions, repo 
 	if !validation.Clean() || validation.HasWarnings() {
 		return fmt.Errorf("rebuilt metadata candidate failed validation: %d findings, %d warnings", len(validation.Findings), validation.Warnings)
 	}
-	_ = observability.Emit(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index",
+	observability.EmitBestEffort(ctx, observability.Event{Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index",
 		Message: "authenticated metadata rebuild candidate validated",
 		Fields:  map[string]any{"candidate": rebuildCandidateName(options.Daemon), "packs": result.PacksImported, "blobs": result.BlobsImported}})
 	return nil
@@ -657,9 +669,12 @@ func checkIndexQuorum(ctx context.Context, options indexCheckOptions, globalOpti
 		return err
 	}
 	quorum, err := brokerClient.Status(ctx)
-	_ = brokerClient.Close()
+	closeErr := brokerClient.Close()
 	if err != nil {
-		return err
+		return errors.Join(err, closeErr)
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if err := matchQuorumCapsule(capsule.RepositoryID(), capsule.Generation(), capsule.LogicalID(), capsule.PolicyHash(), quorum); err != nil {
 		return err

@@ -23,7 +23,8 @@ const (
 	StagingFile
 )
 
-// Keep in sync with vaultic.FileType.String().
+// String returns the backend path name for the file type.
+// Keep its result in sync with vaultic.FileType.String.
 func (t FileType) String() string {
 	s := "invalid"
 	switch t {

@@ -171,7 +171,7 @@ func dirStats(t testing.TB, dir string) (stat dirStat) {
 
 type testEnvironment struct {
 	base, cache, repo, mountpoint, testdata string
-	gopts                                   global.Options
+	globalOptions                           global.Options
 }
 
 type logOutputter struct {
@@ -212,7 +212,7 @@ func withTestEnvironment(t testing.TB) (env *testEnvironment, cleanup func()) {
 	rtest.OK(t, os.MkdirAll(env.cache, 0700))
 	rtest.OK(t, os.MkdirAll(env.repo, 0700))
 
-	env.gopts = global.Options{
+	env.globalOptions = global.Options{
 		Repo:        env.repo,
 		Quiet:       true,
 		CacheDir:    env.cache,
@@ -239,16 +239,16 @@ func withTestEnvironment(t testing.TB) (env *testEnvironment, cleanup func()) {
 
 func testSetupBackupData(t testing.TB, env *testEnvironment) string {
 	datafile := filepath.Join("testdata", "backup-data.tar.gz")
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 	rtest.SetupTarTestFixture(t, env.testdata, datafile)
 	return datafile
 }
 
-func listPacks(gopts global.Options, t *testing.T) vaultic.IDSet {
+func listPacks(globalOptions global.Options, t *testing.T) vaultic.IDSet {
 	var packs vaultic.IDSet
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		ctx, r, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		ctx, r, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -263,11 +263,11 @@ func listPacks(gopts global.Options, t *testing.T) vaultic.IDSet {
 	return packs
 }
 
-func listTreePacks(gopts global.Options, t *testing.T) vaultic.IDSet {
+func listTreePacks(globalOptions global.Options, t *testing.T) vaultic.IDSet {
 	var treePacks vaultic.IDSet
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		ctx, r, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		ctx, r, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -283,9 +283,9 @@ func listTreePacks(gopts global.Options, t *testing.T) vaultic.IDSet {
 	return treePacks
 }
 
-func captureBackend(gopts *global.Options) func() backend.Backend {
+func captureBackend(globalOptions *global.Options) func() backend.Backend {
 	var be backend.Backend
-	gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
+	globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
 		be = r
 		return r, nil
 	}
@@ -294,11 +294,11 @@ func captureBackend(gopts *global.Options) func() backend.Backend {
 	}
 }
 
-func removePacks(gopts global.Options, t testing.TB, remove vaultic.IDSet) {
-	be := captureBackend(&gopts)
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		ctx, _, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+func removePacks(globalOptions global.Options, t testing.TB, remove vaultic.IDSet) {
+	be := captureBackend(&globalOptions)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		ctx, _, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -310,11 +310,11 @@ func removePacks(gopts global.Options, t testing.TB, remove vaultic.IDSet) {
 	rtest.OK(t, err)
 }
 
-func removePacksExcept(gopts global.Options, t testing.TB, keep vaultic.IDSet, removeTreePacks bool) {
-	be := captureBackend(&gopts)
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		ctx, r, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+func removePacksExcept(globalOptions global.Options, t testing.TB, keep vaultic.IDSet, removeTreePacks bool) {
+	be := captureBackend(&globalOptions)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		ctx, r, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -343,8 +343,8 @@ func includes(haystack []string, needle string) bool {
 	return slices.Contains(haystack, needle)
 }
 
-func loadSnapshotMap(t testing.TB, gopts global.Options) map[string]struct{} {
-	snapshotIDs := testRunList(t, gopts, "snapshots")
+func loadSnapshotMap(t testing.TB, globalOptions global.Options) map[string]struct{} {
+	snapshotIDs := testRunList(t, globalOptions, "snapshots")
 
 	m := make(map[string]struct{})
 	for _, id := range snapshotIDs {
@@ -365,11 +365,11 @@ func lastSnapshot(old, new map[string]struct{}) (map[string]struct{}, string) {
 	return old, ""
 }
 
-func testLoadSnapshot(t testing.TB, gopts global.Options, id vaultic.ID) *data.Snapshot {
+func testLoadSnapshot(t testing.TB, globalOptions global.Options, id vaultic.ID) *data.Snapshot {
 	var snapshot *data.Snapshot
-	err := withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err := withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		rtest.OK(t, err)
 		defer unlock()
 
@@ -412,41 +412,45 @@ func testFileSize(filename string, size int64) error {
 	return nil
 }
 
-func withCaptureStdout(t testing.TB, gopts global.Options, callback func(ctx context.Context, gopts global.Options) error) (*bytes.Buffer, error) {
+func withCaptureStdout(
+	t testing.TB,
+	globalOptions global.Options,
+	callback func(ctx context.Context, globalOptions global.Options) error,
+) (*bytes.Buffer, error) {
 	buf := bytes.NewBuffer(nil)
-	err := withTermStatusRaw(os.Stdin, buf, &logOutputter{t: t}, gopts, callback)
+	err := withTermStatusRaw(os.Stdin, buf, &logOutputter{t: t}, globalOptions, callback)
 	return buf, err
 }
 
 func withCaptureStdoutStderr(
 	t testing.TB,
-	gopts global.Options,
-	callback func(ctx context.Context, gopts global.Options) error,
+	globalOptions global.Options,
+	callback func(ctx context.Context, globalOptions global.Options) error,
 ) (*bytes.Buffer, *bytes.Buffer, error) {
 	bufStdout := bytes.NewBuffer(nil)
 	bufStderr := bytes.NewBuffer(nil)
-	err := withTermStatusRaw(os.Stdin, bufStdout, bufStderr, gopts, callback)
+	err := withTermStatusRaw(os.Stdin, bufStdout, bufStderr, globalOptions, callback)
 	return bufStdout, bufStderr, err
 }
 
-func withTermStatus(t testing.TB, gopts global.Options, callback func(ctx context.Context, gopts global.Options) error) error {
+func withTermStatus(t testing.TB, globalOptions global.Options, callback func(ctx context.Context, globalOptions global.Options) error) error {
 	// stdout and stderr are written to by printer functions etc. That is the written data
 	// usually consists of one or multiple lines and therefore can be handled well
 	// by t.Log.
-	return withTermStatusRaw(os.Stdin, &logOutputter{t: t}, &logOutputter{t: t}, gopts, callback)
+	return withTermStatusRaw(os.Stdin, &logOutputter{t: t}, &logOutputter{t: t}, globalOptions, callback)
 }
 
 func withTermStatusRaw(
 	stdin io.ReadCloser,
 	stdout, stderr io.Writer,
-	gopts global.Options,
-	callback func(ctx context.Context, gopts global.Options) error,
+	globalOptions global.Options,
+	callback func(ctx context.Context, globalOptions global.Options) error,
 ) error {
-	term, cancel := termstatus.Setup(stdin, stdout, stderr, gopts.Quiet)
-	gopts.Term = term
+	term, cancel := termstatus.Setup(stdin, stdout, stderr, globalOptions.Quiet)
+	globalOptions.Term = term
 	defer cancel()
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 
-	return callback(ctx, gopts)
+	return callback(ctx, globalOptions)
 }

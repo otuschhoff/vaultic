@@ -19,25 +19,25 @@ import (
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 )
 
-func testRunPrune(t testing.TB, gopts global.Options, opts PruneOptions) {
+func testRunPrune(t testing.TB, globalOptions global.Options, options pruneOptions) {
 	t.Helper()
-	rtest.OK(t, testRunPruneOutput(t, gopts, opts))
+	rtest.OK(t, testRunPruneOutput(t, globalOptions, options))
 }
 
-func testRunPruneMustFail(t testing.TB, gopts global.Options, opts PruneOptions) {
+func testRunPruneMustFail(t testing.TB, globalOptions global.Options, options pruneOptions) {
 	t.Helper()
-	err := testRunPruneOutput(t, gopts, opts)
+	err := testRunPruneOutput(t, globalOptions, options)
 	rtest.Assert(t, err != nil, "expected non nil error")
 }
 
-func testRunPruneOutput(t testing.TB, gopts global.Options, opts PruneOptions) error {
-	oldHook := gopts.BackendTestHook
-	gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) { return newListOnceBackend(r), nil }
+func testRunPruneOutput(t testing.TB, globalOptions global.Options, options pruneOptions) error {
+	oldHook := globalOptions.BackendTestHook
+	globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) { return newListOnceBackend(r), nil }
 	defer func() {
-		gopts.BackendTestHook = oldHook
+		globalOptions.BackendTestHook = oldHook
 	}()
-	return withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runPrune(context.TODO(), opts, gopts, gopts.Term)
+	return withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runPrune(context.TODO(), options, globalOptions, globalOptions.Term)
 	})
 }
 
@@ -52,56 +52,56 @@ func testPruneVariants(t *testing.T, unsafeNoSpaceRecovery bool) {
 		suffix = "-recovery"
 	}
 	t.Run("0"+suffix, func(t *testing.T) {
-		opts := PruneOptions{MaxUnused: "0%", unsafeRecovery: unsafeNoSpaceRecovery}
-		checkOpts := CheckOptions{ReadData: true, CheckUnused: !unsafeNoSpaceRecovery}
-		testPrune(t, opts, checkOpts)
+		options := pruneOptions{MaxUnused: "0%", unsafeRecovery: unsafeNoSpaceRecovery}
+		checkOpts := checkOptions{ReadData: true, CheckUnused: !unsafeNoSpaceRecovery}
+		testPrune(t, options, checkOpts)
 	})
 
 	t.Run("50"+suffix, func(t *testing.T) {
-		opts := PruneOptions{MaxUnused: "50%", unsafeRecovery: unsafeNoSpaceRecovery}
-		checkOpts := CheckOptions{ReadData: true}
-		testPrune(t, opts, checkOpts)
+		options := pruneOptions{MaxUnused: "50%", unsafeRecovery: unsafeNoSpaceRecovery}
+		checkOpts := checkOptions{ReadData: true}
+		testPrune(t, options, checkOpts)
 	})
 
 	t.Run("unlimited"+suffix, func(t *testing.T) {
-		opts := PruneOptions{MaxUnused: "unlimited", unsafeRecovery: unsafeNoSpaceRecovery}
-		checkOpts := CheckOptions{ReadData: true}
-		testPrune(t, opts, checkOpts)
+		options := pruneOptions{MaxUnused: "unlimited", unsafeRecovery: unsafeNoSpaceRecovery}
+		checkOpts := checkOptions{ReadData: true}
+		testPrune(t, options, checkOpts)
 	})
 
 	t.Run("CacheableOnly"+suffix, func(t *testing.T) {
-		opts := PruneOptions{MaxUnused: "5%", RepackCacheableOnly: true, unsafeRecovery: unsafeNoSpaceRecovery}
-		checkOpts := CheckOptions{ReadData: true}
-		testPrune(t, opts, checkOpts)
+		options := pruneOptions{MaxUnused: "5%", RepackCacheableOnly: true, unsafeRecovery: unsafeNoSpaceRecovery}
+		checkOpts := checkOptions{ReadData: true}
+		testPrune(t, options, checkOpts)
 	})
 }
 
 func createPrunableRepo(t *testing.T, env *testEnvironment) {
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, opts, env.gopts)
-	firstSnapshot := testListSnapshots(t, env.gopts, 1)[0]
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, options, env.globalOptions)
+	firstSnapshot := testListSnapshots(t, env.globalOptions, 1)[0]
 
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, opts, env.gopts)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "3")}, opts, env.gopts)
-	testListSnapshots(t, env.gopts, 3)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, options, env.globalOptions)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "3")}, options, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 3)
 
-	testRunForgetJSON(t, env.gopts)
-	testRunForget(t, env.gopts, ForgetOptions{}, firstSnapshot.String())
+	testRunForgetJSON(t, env.globalOptions)
+	testRunForget(t, env.globalOptions, forgetOptions{}, firstSnapshot.String())
 }
 
-func testRunForgetJSON(t testing.TB, gopts global.Options, args ...string) {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = true
-		opts := ForgetOptions{
+func testRunForgetJSON(t testing.TB, globalOptions global.Options, args ...string) {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = true
+		options := forgetOptions{
 			DryRun: true,
 			Last:   1,
 		}
-		pruneOpts := PruneOptions{
+		pruneOpts := pruneOptions{
 			MaxUnused: "5%",
 		}
-		return runForget(context.TODO(), opts, pruneOpts, gopts, gopts.Term, args)
+		return runForget(context.TODO(), options, pruneOpts, globalOptions, globalOptions.Term, args)
 	})
 	rtest.OK(t, err)
 
@@ -116,112 +116,112 @@ func testRunForgetJSON(t testing.TB, gopts global.Options, args ...string) {
 		"Expected 2 snapshots to be removed, got %v", len(forgets[0].Remove))
 }
 
-func testPrune(t *testing.T, pruneOpts PruneOptions, checkOpts CheckOptions) {
+func testPrune(t *testing.T, pruneOpts pruneOptions, checkOpts checkOptions) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
 	createPrunableRepo(t, env)
-	testRunPrune(t, env.gopts, pruneOpts)
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		_, err := runCheck(context.TODO(), checkOpts, gopts, nil, gopts.Term)
+	testRunPrune(t, env.globalOptions, pruneOpts)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		_, err := runCheck(context.TODO(), checkOpts, globalOptions, nil, globalOptions.Term)
 		return err
 	}))
 }
 
-var pruneDefaultOptions = PruneOptions{MaxUnused: "5%"}
+var pruneDefaultOptions = pruneOptions{MaxUnused: "5%"}
 
 func TestPruneWithDamagedRepository(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
 	datafile := filepath.Join("testdata", "backup-data.tar.gz")
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	rtest.SetupTarTestFixture(t, env.testdata, datafile)
-	opts := BackupOptions{}
+	options := backupOptions{}
 
 	// create and delete snapshot to create unused blobs
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, opts, env.gopts)
-	firstSnapshot := testListSnapshots(t, env.gopts, 1)[0]
-	testRunForget(t, env.gopts, ForgetOptions{}, firstSnapshot.String())
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, options, env.globalOptions)
+	firstSnapshot := testListSnapshots(t, env.globalOptions, 1)[0]
+	testRunForget(t, env.globalOptions, forgetOptions{}, firstSnapshot.String())
 
-	oldPacks := listPacks(env.gopts, t)
+	oldPacks := listPacks(env.globalOptions, t)
 
 	// create new snapshot, but lose all data
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "3")}, opts, env.gopts)
-	testListSnapshots(t, env.gopts, 1)
-	removePacksExcept(env.gopts, t, oldPacks, false)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "3")}, options, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 1)
+	removePacksExcept(env.globalOptions, t, oldPacks, false)
 
-	oldHook := env.gopts.BackendTestHook
-	env.gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) { return newListOnceBackend(r), nil }
+	oldHook := env.globalOptions.BackendTestHook
+	env.globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) { return newListOnceBackend(r), nil }
 	defer func() {
-		env.gopts.BackendTestHook = oldHook
+		env.globalOptions.BackendTestHook = oldHook
 	}()
 	// prune should fail
-	rtest.Equals(t, repository.ErrPacksMissing, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runPrune(context.TODO(), pruneDefaultOptions, gopts, gopts.Term)
+	rtest.Equals(t, repository.ErrPacksMissing, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runPrune(context.TODO(), pruneDefaultOptions, globalOptions, globalOptions.Term)
 	}), "prune should have reported index not complete error")
 }
 
 // Test repos for edge cases
 func TestEdgeCaseRepos(t *testing.T) {
-	opts := CheckOptions{}
+	options := checkOptions{}
 
 	// repo where index is completely missing
 	// => check and prune should fail
 	t.Run("no-index", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-index-missing.tar.gz", opts, pruneDefaultOptions, false, false)
+		testEdgeCaseRepo(t, "repo-index-missing.tar.gz", options, pruneDefaultOptions, false, false)
 	})
 
 	// repo where an existing and used blob is missing from the index
 	// => check and prune should fail
 	t.Run("index-missing-blob", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-index-missing-blob.tar.gz", opts, pruneDefaultOptions, false, false)
+		testEdgeCaseRepo(t, "repo-index-missing-blob.tar.gz", options, pruneDefaultOptions, false, false)
 	})
 
 	// repo where a blob is missing
 	// => check and prune should fail
 	t.Run("missing-data", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-data-missing.tar.gz", opts, pruneDefaultOptions, false, false)
+		testEdgeCaseRepo(t, "repo-data-missing.tar.gz", options, pruneDefaultOptions, false, false)
 	})
 
 	// repo where blobs which are not needed are missing or in invalid pack files
 	// => check should fail and prune should repair this
 	t.Run("missing-unused-data", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-unused-data-missing.tar.gz", opts, pruneDefaultOptions, false, true)
+		testEdgeCaseRepo(t, "repo-unused-data-missing.tar.gz", options, pruneDefaultOptions, false, true)
 	})
 
 	// repo where data exists that is not referenced
 	// => check and prune should fully work
 	t.Run("unreferenced-data", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-unreferenced-data.tar.gz", opts, pruneDefaultOptions, true, true)
+		testEdgeCaseRepo(t, "repo-unreferenced-data.tar.gz", options, pruneDefaultOptions, true, true)
 	})
 
 	// repo where an obsolete index still exists
 	// => check and prune should fully work
 	t.Run("obsolete-index", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-obsolete-index.tar.gz", opts, pruneDefaultOptions, true, true)
+		testEdgeCaseRepo(t, "repo-obsolete-index.tar.gz", options, pruneDefaultOptions, true, true)
 	})
 
 	// repo which contains mixed (data/tree) packs
 	// => check and prune should fully work
 	t.Run("mixed-packs", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-mixed.tar.gz", opts, pruneDefaultOptions, true, true)
+		testEdgeCaseRepo(t, "repo-mixed.tar.gz", options, pruneDefaultOptions, true, true)
 	})
 
 	// repo which contains duplicate blobs
 	// => checking for unused data should report an error and prune resolves the
 	// situation
-	opts = CheckOptions{
+	options = checkOptions{
 		ReadData:    true,
 		CheckUnused: true,
 	}
 	t.Run("duplicates", func(t *testing.T) {
-		testEdgeCaseRepo(t, "repo-duplicates.tar.gz", opts, pruneDefaultOptions, false, true)
+		testEdgeCaseRepo(t, "repo-duplicates.tar.gz", options, pruneDefaultOptions, false, true)
 	})
 }
 
-func testEdgeCaseRepo(t *testing.T, tarfile string, optionsCheck CheckOptions, optionsPrune PruneOptions, checkOK, pruneOK bool) {
+func testEdgeCaseRepo(t *testing.T, tarfile string, optionsCheck checkOptions, optionsPrune pruneOptions, checkOK, pruneOK bool) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 
@@ -229,21 +229,21 @@ func testEdgeCaseRepo(t *testing.T, tarfile string, optionsCheck CheckOptions, o
 	rtest.SetupTarTestFixture(t, env.base, datafile)
 
 	if checkOK {
-		testRunCheck(t, env.gopts)
+		testRunCheck(t, env.globalOptions)
 	} else {
-		rtest.Assert(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			_, err := runCheck(context.TODO(), optionsCheck, gopts, nil, gopts.Term)
+		rtest.Assert(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runCheck(context.TODO(), optionsCheck, globalOptions, nil, globalOptions.Term)
 			return err
 		}) != nil,
 			"check should have reported an error")
 	}
 
 	if pruneOK {
-		testRunPrune(t, env.gopts, optionsPrune)
-		testRunCheck(t, env.gopts)
+		testRunPrune(t, env.globalOptions, optionsPrune)
+		testRunCheck(t, env.globalOptions)
 	} else {
-		rtest.Assert(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runPrune(context.TODO(), optionsPrune, gopts, gopts.Term)
+		rtest.Assert(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return runPrune(context.TODO(), optionsPrune, globalOptions, globalOptions.Term)
 		}) != nil,
 			"prune should have reported an error")
 	}
@@ -256,11 +256,11 @@ func TestPruneRepackSmallerThanSmoke(t *testing.T) {
 	// the implementation is already unit tested, so just check that
 	// the setting reaches its goal
 	createPrunableRepo(t, env)
-	testRunPrune(t, env.gopts, PruneOptions{
+	testRunPrune(t, env.globalOptions, pruneOptions{
 		SmallPackSize: "4M",
 		MaxUnused:     "5%",
 	})
-	testRunPruneMustFail(t, env.gopts, PruneOptions{
+	testRunPruneMustFail(t, env.globalOptions, pruneOptions{
 		SmallPackSize: "500M",
 		MaxUnused:     "5%",
 	})
@@ -272,14 +272,14 @@ func TestPruneJSON(t *testing.T) {
 
 	createPrunableRepo(t, env)
 
-	buf, err := withCaptureStdout(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = true
-		oldHook := gopts.BackendTestHook
-		gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) { return newListOnceBackend(r), nil }
+	buf, err := withCaptureStdout(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = true
+		oldHook := globalOptions.BackendTestHook
+		globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) { return newListOnceBackend(r), nil }
 		defer func() {
-			gopts.BackendTestHook = oldHook
+			globalOptions.BackendTestHook = oldHook
 		}()
-		return runPrune(ctx, pruneDefaultOptions, gopts, gopts.Term)
+		return runPrune(ctx, pruneDefaultOptions, globalOptions, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 
@@ -298,8 +298,8 @@ func TestPruneRepackAll(t *testing.T) {
 	defer cleanup()
 
 	createPrunableRepo(t, env)
-	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "5%", RepackAll: true})
-	testRunCheck(t, env.gopts)
+	testRunPrune(t, env.globalOptions, pruneOptions{MaxUnused: "5%", RepackAll: true})
+	testRunCheck(t, env.globalOptions)
 }
 
 // TestPruneMaxRepackPercent verifies --max-repack accepts a percentage of the
@@ -309,8 +309,8 @@ func TestPruneMaxRepackPercent(t *testing.T) {
 	defer cleanup()
 
 	createPrunableRepo(t, env)
-	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", MaxRepack: "50%"})
-	testRunCheck(t, env.gopts)
+	testRunPrune(t, env.globalOptions, pruneOptions{MaxUnused: "0%", MaxRepack: "50%"})
+	testRunCheck(t, env.globalOptions)
 }
 
 // TestPruneMaxRepackInvalid verifies invalid --max-repack values are rejected.
@@ -319,8 +319,8 @@ func TestPruneMaxRepackInvalid(t *testing.T) {
 	defer cleanup()
 
 	createPrunableRepo(t, env)
-	testRunPruneMustFail(t, env.gopts, PruneOptions{MaxUnused: "5%", MaxRepack: "150%"})
-	testRunPruneMustFail(t, env.gopts, PruneOptions{MaxUnused: "5%", MaxRepack: "12x"})
+	testRunPruneMustFail(t, env.globalOptions, pruneOptions{MaxUnused: "5%", MaxRepack: "150%"})
+	testRunPruneMustFail(t, env.globalOptions, pruneOptions{MaxUnused: "5%", MaxRepack: "12x"})
 }
 
 // TestPruneEarlyDeleteIndex verifies --early-delete-index prunes consistently.
@@ -329,8 +329,8 @@ func TestPruneEarlyDeleteIndex(t *testing.T) {
 	defer cleanup()
 
 	createPrunableRepo(t, env)
-	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", EarlyDeleteIndex: true})
-	testRunCheck(t, env.gopts)
+	testRunPrune(t, env.globalOptions, pruneOptions{MaxUnused: "0%", EarlyDeleteIndex: true})
+	testRunCheck(t, env.globalOptions)
 }
 
 // TestPruneTwoPhase verifies the two-phase prune flow: --keep-delete performs
@@ -345,10 +345,10 @@ func TestPruneTwoPhase(t *testing.T) {
 	createPrunableRepo(t, env)
 
 	// phase 1: repack + write new index, defer deletion
-	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%", KeepDelete: true})
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	testRunPrune(t, env.globalOptions, pruneOptions{MaxUnused: "0%", KeepDelete: true})
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -363,13 +363,13 @@ func TestPruneTwoPhase(t *testing.T) {
 	// is the expected, safe intermediate state of two-phase prune (no data is
 	// lost or unreachable). Verify the repo is still fully readable instead of
 	// requiring a strict-clean check here.
-	testListSnapshots(t, env.gopts, 2)
+	testListSnapshots(t, env.globalOptions, 2)
 
 	// phase 2: default instant-delete removes the deferred packs/indexes
-	testRunPrune(t, env.gopts, PruneOptions{MaxUnused: "0%"})
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	testRunPrune(t, env.globalOptions, pruneOptions{MaxUnused: "0%"})
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -380,7 +380,7 @@ func TestPruneTwoPhase(t *testing.T) {
 		return nil
 	}))
 	// now the duplicate index entries are gone and the repo must be clean
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 }
 
 // TestPruneTwoPhaseRequiresFeature verifies --keep-delete is gated behind the
@@ -392,7 +392,7 @@ func TestPruneTwoPhaseRequiresFeature(t *testing.T) {
 	defer cleanup()
 
 	createPrunableRepo(t, env)
-	testRunPruneMustFail(t, env.gopts, PruneOptions{MaxUnused: "0%", KeepDelete: true})
+	testRunPruneMustFail(t, env.globalOptions, pruneOptions{MaxUnused: "0%", KeepDelete: true})
 }
 
 // TestPruneConcurrencySoak is the Phase 4 chaos test: run a lock-free backup
@@ -412,9 +412,9 @@ func TestPruneConcurrencySoak(t *testing.T) {
 
 	// seed a few snapshots so forget/prune have something to work with
 	for i := 0; i < 3; i++ {
-		testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
+		testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, backupOptions{}, env.globalOptions)
 	}
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 
 	var wg sync.WaitGroup
 	backupResult := make(chan error, 1)
@@ -423,8 +423,11 @@ func TestPruneConcurrencySoak(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		backupResult <- withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runBackup(ctx, BackupOptions{Host: "lock-free-soak"}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0", "0", "9", "2")})
+		backupResult <- withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return runBackup(
+				ctx, backupOptions{Host: "lock-free-soak"}, globalOptions, globalOptions.Term,
+				[]string{filepath.Join(env.testdata, "0", "0", "9", "2")},
+			)
 		})
 	}()
 
@@ -432,8 +435,8 @@ func TestPruneConcurrencySoak(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runPrune(ctx, PruneOptions{MaxUnused: "50%"}, gopts, gopts.Term)
+		_ = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return runPrune(ctx, pruneOptions{MaxUnused: "50%"}, globalOptions, globalOptions.Term)
 		})
 	}()
 
@@ -443,7 +446,7 @@ func TestPruneConcurrencySoak(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = testRunForgetMayFail(t, env.gopts, ForgetOptions{Last: 1, DryRun: true})
+		_ = testRunForgetMayFail(t, env.globalOptions, forgetOptions{Last: 1, DryRun: true})
 	}()
 
 	wg.Wait()
@@ -458,9 +461,9 @@ func TestPruneConcurrencySoak(t *testing.T) {
 	// also have a durable snapshot; this catches accidental dry-run behavior
 	// without assuming how many seeded snapshots concurrent forget retains.
 	var backupSnapshots int
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
-		_, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -478,7 +481,7 @@ func TestPruneConcurrencySoak(t *testing.T) {
 	} else {
 		rtest.Equals(t, 0, backupSnapshots)
 	}
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 }
 
 func TestLockFreeFeatureBackupRemainsWritable(t *testing.T) {
@@ -487,11 +490,11 @@ func TestLockFreeFeatureBackupRemainsWritable(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, BackupOptions{}, env.gopts)
-	testListSnapshots(t, env.gopts, 2)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, backupOptions{}, env.globalOptions)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9", "2")}, backupOptions{}, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 2)
 }
 
 func TestLockFreeAppendRetainsSharedLock(t *testing.T) {
@@ -500,13 +503,13 @@ func TestLockFreeAppendRetainsSharedLock(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 	before, err := os.ReadDir(filepath.Join(env.repo, "locks"))
 	rtest.OK(t, err)
 
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
-		_, _, unlock, err := openWithAppendLock(ctx, gopts, false, printer)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, globalOptions.Term)
+		_, _, unlock, err := openWithAppendLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -528,13 +531,13 @@ func TestLockFreeReadSkipsLockFile(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 	before, err := os.ReadDir(filepath.Join(env.repo, "locks"))
 	rtest.OK(t, err)
 
-	rtest.OK(t, withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(false, 0, gopts.Term)
-		_, _, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	rtest.OK(t, withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(false, 0, globalOptions.Term)
+		_, _, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -557,7 +560,7 @@ type blockFirstIndexSaveBackend struct {
 	release <-chan struct{}
 }
 
-func (b *blockFirstIndexSaveBackend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (b *blockFirstIndexSaveBackend) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	if h.Type == backend.IndexFile {
 		blocked := false
 		b.once.Do(func() {
@@ -572,7 +575,7 @@ func (b *blockFirstIndexSaveBackend) Save(ctx context.Context, h backend.Handle,
 			}
 		}
 	}
-	return b.Backend.Save(ctx, h, rd)
+	return b.Backend.Save(ctx, h, reader)
 }
 
 // TestPrunePhaseAAllowsBackup proves the minimal-lock boundary: after the
@@ -587,14 +590,14 @@ func TestPrunePhaseAAllowsBackup(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	env.gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
 		return &blockFirstIndexSaveBackend{Backend: r, once: &once, entered: entered, release: release}, nil
 	}
 
 	pruneResult := make(chan error, 1)
 	go func() {
-		pruneResult <- withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return runPrune(ctx, PruneOptions{MaxUnused: "0%"}, gopts, gopts.Term)
+		pruneResult <- withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return runPrune(ctx, pruneOptions{MaxUnused: "0%"}, globalOptions, globalOptions.Term)
 		})
 	}()
 
@@ -604,13 +607,16 @@ func TestPrunePhaseAAllowsBackup(t *testing.T) {
 		t.Fatal("prune phase A did not begin index upload")
 	}
 
-	backupErr := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		return runBackup(ctx, BackupOptions{Host: "phase-a-backup"}, gopts, gopts.Term, []string{filepath.Join(env.testdata, "0", "0", "9", "2")})
+	backupErr := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		return runBackup(
+			ctx, backupOptions{Host: "phase-a-backup"}, globalOptions, globalOptions.Term,
+			[]string{filepath.Join(env.testdata, "0", "0", "9", "2")},
+		)
 	})
 	rtest.OK(t, backupErr)
 	close(release)
 	rtest.OK(t, <-pruneResult)
-	testRunCheck(t, env.gopts)
+	testRunCheck(t, env.globalOptions)
 }
 
 func TestNoLockBackupWritesSnapshot(t *testing.T) {
@@ -619,9 +625,9 @@ func TestNoLockBackupWritesSnapshot(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	env.gopts.BackendTestHook = nil
-	env.gopts.NoLock = true
+	env.globalOptions.BackendTestHook = nil
+	env.globalOptions.NoLock = true
 
-	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, BackupOptions{}, env.gopts)
-	testListSnapshots(t, env.gopts, 1)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata, "0", "0", "9")}, backupOptions{}, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 1)
 }

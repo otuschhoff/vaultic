@@ -1,3 +1,5 @@
+//! Local, cloud, PKCS#11, and hardware key wrapping providers.
+
 use std::{collections::HashMap, path::PathBuf};
 
 use aes_gcm::{
@@ -175,12 +177,12 @@ pub async fn for_management(
     }
 }
 
-pub struct AwsKmsProvider {
+pub(crate) struct AwsKmsProvider {
     client: AwsKmsClient,
 }
 
 impl AwsKmsProvider {
-    pub async fn from_environment() -> Self {
+    pub(crate) async fn from_environment() -> Self {
         let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
         Self {
             client: AwsKmsClient::new(&config),
@@ -235,13 +237,13 @@ impl KeyProvider for AwsKmsProvider {
     }
 }
 
-pub struct AzureKeyVaultProvider {
+pub(crate) struct AzureKeyVaultProvider {
     client: Client,
     bearer_token: Zeroizing<String>,
 }
 
 impl AzureKeyVaultProvider {
-    pub fn new(bearer_token: String) -> Self {
+    pub(crate) fn new(bearer_token: String) -> Self {
         Self {
             client: Client::new(),
             bearer_token: Zeroizing::new(bearer_token),
@@ -335,13 +337,13 @@ fn validate_azure_key_reference(reference: &str) -> Result<()> {
     Ok(())
 }
 
-pub struct GoogleCloudKmsProvider {
+pub(crate) struct GoogleCloudKmsProvider {
     client: Client,
     bearer_token: Zeroizing<String>,
 }
 
 impl GoogleCloudKmsProvider {
-    pub fn new(bearer_token: String) -> Self {
+    pub(crate) fn new(bearer_token: String) -> Self {
         Self {
             client: Client::new(),
             bearer_token: Zeroizing::new(bearer_token),
@@ -438,13 +440,13 @@ async fn google_call(
         .context("decode Google Cloud KMS response")
 }
 
-pub struct VaultTransitProvider {
+pub(crate) struct VaultTransitProvider {
     client: Client,
     token: Zeroizing<String>,
 }
 
 impl VaultTransitProvider {
-    pub fn new(token: String) -> Self {
+    pub(crate) fn new(token: String) -> Self {
         Self {
             client: Client::new(),
             token: Zeroizing::new(token),
@@ -579,12 +581,12 @@ fn vault_transit_endpoint(reference: &str, operation: &str) -> Result<reqwest::U
     Ok(url)
 }
 
-pub struct Pkcs11Provider {
+pub(crate) struct Pkcs11Provider {
     pin: Zeroizing<String>,
 }
 
 impl Pkcs11Provider {
-    pub fn new(pin: String) -> Self {
+    pub(crate) fn new(pin: String) -> Self {
         Self {
             pin: Zeroizing::new(pin),
         }

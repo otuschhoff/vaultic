@@ -1,4 +1,6 @@
 #![allow(clippy::result_large_err)]
+//! Unix-socket key broker daemon and administrative command entry point.
+#![warn(unreachable_pub)]
 
 use std::{env, fs, path::PathBuf, sync::Arc};
 

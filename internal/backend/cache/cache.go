@@ -42,7 +42,7 @@ func readVersion(dir string) (v uint, err error) {
 
 const cacheVersion = 1
 
-var cacheLayoutPaths = map[backend.FileType]string{
+var cacheLayoutPaths = map[backend.FileType]string{ //nolint:exhaustive // Only immutable data files are cacheable.
 	backend.PackFile:     "data",
 	backend.SnapshotFile: "snapshots",
 	backend.IndexFile:    "index",
@@ -63,7 +63,7 @@ func writeCachedirTag(dir string) error {
 
 	debug.Log("Create CACHEDIR.TAG at %v", dir)
 	if _, err := f.Write([]byte(cachedirTagSignature)); err != nil {
-		_ = f.Close()
+		_ = f.Close() // Preserve the cache stat failure; this read-only handle has no buffered writes.
 		return errors.WithStack(err)
 	}
 

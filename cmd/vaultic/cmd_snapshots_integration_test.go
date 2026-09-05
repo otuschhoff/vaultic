@@ -13,12 +13,12 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunSnapshots(t testing.TB, gopts global.Options) (newest *Snapshot, snapmap map[vaultic.ID]Snapshot) {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = true
+func testRunSnapshots(t testing.TB, globalOptions global.Options) (newest *Snapshot, snapmap map[vaultic.ID]Snapshot) {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = true
 
-		opts := SnapshotOptions{}
-		return runSnapshots(ctx, opts, gopts, []string{}, gopts.Term)
+		options := snapshotOptions{}
+		return runSnapshots(ctx, options, globalOptions, []string{}, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 
@@ -38,18 +38,18 @@ func testRunSnapshots(t testing.TB, gopts global.Options) (newest *Snapshot, sna
 func snapshotsGroupTestData(t *testing.T, env *testEnvironment, keepPath bool) string {
 	testSetupBackupData(t, env)
 	// two backups on the same host but with different paths
-	opts := BackupOptions{Host: "testhost", TimeStamp: time.Now().Format(time.DateTime)}
-	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, opts, env.gopts)
+	options := backupOptions{Host: "testhost", TimeStamp: time.Now().Format(time.DateTime)}
+	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, options, env.globalOptions)
 	// Use later timestamp for second backup
-	opts.TimeStamp = time.Now().Add(time.Second).Format(time.DateTime)
-	snapshotsIDs := loadSnapshotMap(t, env.gopts)
+	options.TimeStamp = time.Now().Add(time.Second).Format(time.DateTime)
+	snapshotsIDs := loadSnapshotMap(t, env.globalOptions)
 
 	targets := []string{"testdata/0"}
 	if keepPath {
 		targets = []string{"testdata"}
 	}
-	testRunBackup(t, filepath.Dir(env.testdata), targets, opts, env.gopts)
-	_, secondSnapshotID := lastSnapshot(snapshotsIDs, loadSnapshotMap(t, env.gopts))
+	testRunBackup(t, filepath.Dir(env.testdata), targets, options, env.globalOptions)
+	_, secondSnapshotID := lastSnapshot(snapshotsIDs, loadSnapshotMap(t, env.globalOptions))
 
 	return secondSnapshotID
 }
@@ -59,11 +59,11 @@ func TestSnapshotsGroupByAndLatest(t *testing.T) {
 	defer cleanup()
 
 	secondSnapshotID := snapshotsGroupTestData(t, env, false)
-	buf, err := withCaptureStdout(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = true
+	buf, err := withCaptureStdout(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = true
 		// only group by host but not path
-		opts := SnapshotOptions{GroupBy: data.SnapshotGroupByOptions{Host: true}, Latest: 1}
-		return runSnapshots(ctx, opts, gopts, []string{}, gopts.Term)
+		options := snapshotOptions{GroupBy: data.SnapshotGroupByOptions{Host: true}, Latest: 1}
+		return runSnapshots(ctx, options, globalOptions, []string{}, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 	snapshots := []SnapshotGroup{}
@@ -82,10 +82,10 @@ func TestSnapshotsLatest(t *testing.T) {
 
 	secondSnapshotID := snapshotsGroupTestData(t, env, true)
 
-	buf, err := withCaptureStdout(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.JSON = true
-		opts := SnapshotOptions{Latest: 1}
-		return runSnapshots(ctx, opts, gopts, []string{}, gopts.Term)
+	buf, err := withCaptureStdout(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.JSON = true
+		options := snapshotOptions{Latest: 1}
+		return runSnapshots(ctx, options, globalOptions, []string{}, globalOptions.Term)
 	})
 	rtest.OK(t, err)
 	snapshots := []Snapshot{}

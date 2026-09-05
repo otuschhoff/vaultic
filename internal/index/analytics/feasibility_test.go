@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,13 +66,14 @@ type feasibilityProfile struct {
 }
 
 type feasibilityStore struct {
-	dir        string
-	values     map[string][]byte
-	segments   map[string]string
-	namespaces map[string]uint64
-	writes     map[string]uint64
-	facts      uint64
-	bitmaps    uint64
+	dir           string
+	values        map[string][]byte
+	segments      map[string]string
+	namespaces    map[string]uint64
+	writes        map[string]uint64
+	facts         uint64
+	bitmaps       uint64
+	publicationMu sync.Mutex
 }
 
 func newFeasibilityStore(t *testing.T, facts uint64) *feasibilityStore {
@@ -85,6 +87,14 @@ func newFeasibilityStore(t *testing.T, facts uint64) *feasibilityStore {
 		writes:     map[string]uint64{},
 		facts:      facts,
 	}
+}
+
+func (store *feasibilityStore) LockAnalyticsPublication() {
+	store.publicationMu.Lock()
+}
+
+func (store *feasibilityStore) UnlockAnalyticsPublication() {
+	store.publicationMu.Unlock()
 }
 
 func (store *feasibilityStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
@@ -493,9 +503,10 @@ func feasibilityFact(index uint64) buildFact {
 func feasibilityResidency(inode uint64) schema.AnalyticsResidencyRecord {
 	state := schema.AnalyticsLive
 	retained := uint64(0)
-	if inode%20 == 1 {
+	switch inode % 20 {
+	case 1:
 		state, retained = schema.AnalyticsArchiveOnly, 1
-	} else if inode%20 == 2 {
+	case 2:
 		state = schema.AnalyticsUnknown
 	}
 	return schema.AnalyticsResidencyRecord{

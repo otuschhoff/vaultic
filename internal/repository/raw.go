@@ -24,7 +24,7 @@ func (r *Repository) LoadRaw(ctx context.Context, t vaultic.FileType, id vaultic
 		if r.cache != nil {
 			// Cleanup cache to make sure it's not the cached copy that is broken.
 			// Ignore error as there's not much we can do in that case.
-			_ = r.cache.Forget(h)
+			_ = r.cache.Forget(h) // Cache eviction cannot change the authoritative backend result.
 		}
 
 		buf, err = loadRaw(ctx, r.be, h)

@@ -7,7 +7,6 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/pathindex"
-	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
 
 func checkPathVersionIndex(ctx context.Context, store Store, paths []string, result *CheckResult, maxFindings uint) error {
@@ -63,16 +62,4 @@ func (store *pathIndexDryRunStore) WriteMutableBatch(_ context.Context, puts []d
 		store.deletes[string(key)] = struct{}{}
 	}
 	return nil
-}
-
-func countPathVersionRecords(ctx context.Context, store Store) (uint64, error) {
-	var count uint64
-	err := scan(ctx, store, []byte("pv:"), func(entry daemon.KeyValue) error {
-		if parsed, err := schema.ParseKey(entry.Key); err != nil || parsed.Kind != schema.KeyPathVersion {
-			return fmt.Errorf("invalid path-version key %q", entry.Key)
-		}
-		count++
-		return nil
-	})
-	return count, err
 }

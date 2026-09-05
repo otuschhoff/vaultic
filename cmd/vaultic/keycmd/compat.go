@@ -1,7 +1,7 @@
 package keycmd
 
-type AddOptions = KeyAddOptions
-type PasswdOptions = KeyPasswdOptions
+type AddConfig = keyAddOptions
+type PasswdConfig = keyPasswdOptions
 
 var RunAdd = runKeyAdd
 var RunList = runKeyList

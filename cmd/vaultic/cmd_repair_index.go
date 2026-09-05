@@ -12,7 +12,7 @@ import (
 )
 
 func newRepairIndexCommand(globalOptions *global.Options) *cobra.Command {
-	var opts RepairIndexOptions
+	var options repairIndexOptions
 
 	cmd := &cobra.Command{
 		Use:   "index [flags]",
@@ -32,25 +32,25 @@ Exit status is 12 if the password is incorrect.
 `,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRebuildIndex(cmd.Context(), opts, *globalOptions, globalOptions.Term)
+			return runRebuildIndex(cmd.Context(), options, *globalOptions, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// RepairIndexOptions collects all options for the repair index command.
-type RepairIndexOptions struct {
+// repairIndexOptions collects all options for the repair index command.
+type repairIndexOptions struct {
 	ReadAllPacks bool
 }
 
-func (opts *RepairIndexOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.ReadAllPacks, "read-all-packs", false, "read all pack files to generate new index from scratch")
+func (options *repairIndexOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.ReadAllPacks, "read-all-packs", false, "read all pack files to generate new index from scratch")
 }
 
 func newRebuildIndexCommand(globalOptions *global.Options) *cobra.Command {
-	var opts RepairIndexOptions
+	var options repairIndexOptions
 
 	replacement := newRepairIndexCommand(globalOptions)
 	cmd := &cobra.Command{
@@ -59,21 +59,21 @@ func newRebuildIndexCommand(globalOptions *global.Options) *cobra.Command {
 		Long:              replacement.Long,
 		Deprecated:        `Use "repair index" instead`,
 		DisableAutoGenTag: true,
-		// must create a new instance of the run function as it captures opts
+		// must create a new instance of the run function as it captures options
 		// by reference
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRebuildIndex(cmd.Context(), opts, *globalOptions, globalOptions.Term)
+			return runRebuildIndex(cmd.Context(), options, *globalOptions, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-func runRebuildIndex(ctx context.Context, opts RepairIndexOptions, gopts global.Options, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+func runRebuildIndex(ctx context.Context, options repairIndexOptions, globalOptions global.Options, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func runRebuildIndex(ctx context.Context, opts RepairIndexOptions, gopts global.
 	}
 
 	err = repository.RepairIndex(ctx, repo, repository.RepairIndexOptions{
-		ReadAllPacks: opts.ReadAllPacks,
+		ReadAllPacks: options.ReadAllPacks,
 	}, printer)
 	if err != nil {
 		return err

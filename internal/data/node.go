@@ -179,6 +179,7 @@ func (node Node) MarshalJSON() ([]byte, error) {
 	name := strconv.Quote(node.Name)
 	nj.Name = name[1 : len(name)-1]
 	if nj.LinkTargetRaw != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("LinkTargetRaw must not be set manually")
 	}
 	if !utf8.ValidString(node.LinkTarget) {

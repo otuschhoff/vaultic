@@ -29,17 +29,17 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	testSetupBackupData(t, env)
 
 	doomedTarget := filepath.Join(env.testdata, "0", "0", "9")
-	testRunBackup(t, "", []string{doomedTarget}, BackupOptions{}, env.gopts)
-	doomedSnapshot := testListSnapshots(t, env.gopts, 1)[0]
+	testRunBackup(t, "", []string{doomedTarget}, backupOptions{}, env.globalOptions)
+	doomedSnapshot := testListSnapshots(t, env.globalOptions, 1)[0]
 
 	retainedTarget := filepath.Join(env.testdata, "0", "0", "9", "2")
-	testRunBackup(t, "", []string{retainedTarget}, BackupOptions{}, env.gopts)
-	testListSnapshots(t, env.gopts, 2)
+	testRunBackup(t, "", []string{retainedTarget}, backupOptions{}, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 2)
 
-	testRunForget(t, env.gopts, ForgetOptions{}, doomedSnapshot.String())
-	retained := testListSnapshots(t, env.gopts, 1)[0]
+	testRunForget(t, env.globalOptions, forgetOptions{}, doomedSnapshot.String())
+	retained := testListSnapshots(t, env.globalOptions, 1)[0]
 
-	env.gopts.BackendTestHook = nil
+	env.globalOptions.BackendTestHook = nil
 
 	daemonPath, err := filepath.Abs(filepath.Join("..", "..", "vaulticdb", "target", "debug", "vaulticdb"))
 	if err != nil {
@@ -63,10 +63,10 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	daemonOptions := indexDaemonOptions{Socket: socket}
 
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		result, runErr := runIndexImport(ctx, indexImportOptions{
 			Daemon: daemonOptions, FromLegacy: true, Resume: true, Activate: true, SnapshotDepth: ^uint(0),
-		}, gopts, gopts.Term)
+		}, globalOptions, globalOptions.Term)
 		if result.SnapshotsImported == 0 {
 			t.Fatalf("full import did not import any snapshots: %#v", result)
 		}
@@ -78,8 +78,8 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 
 	// GC only ever considers published packs; export transitions freshly
 	// imported/backed-up packs out of export-pending.
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Full: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Full: true}, globalOptions, globalOptions.Term)
 		if result.PacksSelected == 0 {
 			t.Fatalf("export did not publish any packs: %#v", result)
 		}
@@ -89,11 +89,11 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	packsBefore := listPacks(env.gopts, t)
+	packsBefore := listPacks(env.globalOptions, t)
 
 	// --discover-only must not delete or repack anything.
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		stats, runErr := runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions, DiscoverOnly: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		stats, runErr := runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions, DiscoverOnly: true}, globalOptions, globalOptions.Term)
 		if stats.BlobCandidates == 0 {
 			t.Fatalf("discover-only found no candidates: %#v", stats)
 		}
@@ -105,13 +105,13 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packsAfterDiscover := listPacks(env.gopts, t); len(packsAfterDiscover) != len(packsBefore) {
+	if packsAfterDiscover := listPacks(env.globalOptions, t); len(packsAfterDiscover) != len(packsBefore) {
 		t.Fatalf("discover-only changed pack count: before=%d after=%d", len(packsBefore), len(packsAfterDiscover))
 	}
 
 	// A high age requirement must postpone sweeping a freshly discovered candidate.
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		stats, runErr := runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions, MinCandidateAge: 24 * time.Hour}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		stats, runErr := runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions, MinCandidateAge: 24 * time.Hour}, globalOptions, globalOptions.Term)
 		if stats.PendingAge == 0 {
 			t.Fatalf("min-candidate-age did not postpone any candidate: %#v", stats)
 		}
@@ -135,9 +135,9 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 
 	// The real sweep must free at least one pack.
 	var stats repository.GCStats
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		var runErr error
-		stats, runErr = runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions}, gopts, gopts.Term)
+		stats, runErr = runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	if err != nil {
@@ -155,14 +155,14 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 		t.Fatalf("gc left %d packs unaccountable: %#v", stats.PacksUnaccountable, stats)
 	}
 
-	packsAfter := listPacks(env.gopts, t)
+	packsAfter := listPacks(env.globalOptions, t)
 	if len(packsAfter) >= len(packsBefore) {
 		t.Fatalf("gc did not reduce pack count: before=%d after=%d", len(packsBefore), len(packsAfter))
 	}
 
 	// A repeated run should find nothing new to reclaim.
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		converged, runErr := runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		converged, runErr := runIndexGC(ctx, indexGCOptions{Daemon: daemonOptions}, globalOptions, globalOptions.Term)
 		if converged.PacksDeleted != 0 || converged.PacksRepacked != 0 {
 			t.Fatalf("converged gc unexpectedly freed more: %#v", converged)
 		}
@@ -174,8 +174,8 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 
 	// index check must report a fully consistent, non-drifted catalog: gc
 	// automatically re-exports and prunes stale legacy indexes internally.
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 10}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 10}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	if err != nil {
@@ -185,8 +185,8 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	// The retained snapshot's data must still restore byte-for-byte, and
 	// restic-style CheckUnused must find nothing left dangling.
 	restoreDir := filepath.Join(env.base, "restore-after-gc")
-	testRunRestore(t, env.gopts, restoreDir, retained.String())
-	testRunCheck(t, env.gopts)
+	testRunRestore(t, env.globalOptions, restoreDir, retained.String())
+	testRunCheck(t, env.globalOptions)
 
 	assertPackHistoryAfterGC(t, env, daemonOptions, packsBefore)
 }
@@ -197,14 +197,14 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 // coverage flags.
 func assertPackHistoryAfterGC(t *testing.T, env *testEnvironment, daemonOptions indexDaemonOptions, packsBefore vaultic.IDSet) {
 	t.Helper()
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, gopts.Term)
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
 		config, err := daemonOptions.Config("")
 		if err != nil {
 			return err
 		}
 		ctx = repository.WithDaemonOptions(ctx, config)
-		ctx, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+		ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}
@@ -257,7 +257,7 @@ func assertPackHistoryAfterGC(t *testing.T, env *testEnvironment, daemonOptions 
 
 		// History must remain readable for packs that are gone from both the
 		// backend and the catalog.
-		packsNow := listPacks(env.gopts, t)
+		packsNow := listPacks(env.globalOptions, t)
 		var describedAndGone int
 		for id := range packsBefore {
 			if packsNow.Has(id) {

@@ -19,9 +19,9 @@ import (
 
 // Restorer is used to restore a snapshot to a directory.
 type Restorer struct {
-	repo vaultic.Repository
-	sn   *data.Snapshot
-	opts Options
+	repo    vaultic.Repository
+	sn      *data.Snapshot
+	options Options
 
 	fileList map[string]bool
 
@@ -98,11 +98,11 @@ func (c *OverwriteBehavior) Type() string {
 }
 
 // NewRestorer creates a restorer preloaded with the content from the snapshot id.
-func NewRestorer(repo vaultic.Repository, sn *data.Snapshot, opts Options) *Restorer {
-	opts.Progress = progressOrNoop(opts.Progress)
+func NewRestorer(repo vaultic.Repository, sn *data.Snapshot, options Options) *Restorer {
+	options.Progress = progressOrNoop(options.Progress)
 	r := &Restorer{
 		repo:              repo,
-		opts:              opts,
+		options:           options,
 		fileList:          make(map[string]bool),
 		Error:             restorerAbortOnAllErrors,
 		SelectFilter:      func(string, bool) (bool, bool) { return true, true },
@@ -122,9 +122,8 @@ type treeVisitor struct {
 }
 
 func (res *Restorer) sanitizeError(location string, err error) error {
-	switch err {
-	case nil, context.Canceled, context.DeadlineExceeded:
-		// Context errors are permanent.
+	switch {
+	case err == nil, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return err
 	default:
 		return res.Error(location, err)
@@ -166,7 +165,7 @@ func (res *Restorer) traverseTreeInner(
 		return nil, hasRestored, res.sanitizeError(location, err)
 	}
 
-	if res.opts.Delete {
+	if res.options.Delete {
 		filenames = make([]string, 0)
 	}
 	for item := range tree {
@@ -179,7 +178,7 @@ func (res *Restorer) traverseTreeInner(
 			return nil, hasRestored, ctx.Err()
 		}
 
-		if res.opts.Delete {
+		if res.options.Delete {
 			// just track all files included in the tree node to simplify the control flow.
 			// tracking too many files does not matter except for a slightly elevated memory usage
 			filenames = append(filenames, node.Name)
@@ -207,7 +206,7 @@ func (res *Restorer) traverseTreeNode(
 		if err := res.sanitizeError(location, errors.Errorf("invalid child node name %s", node.Name)); err != nil {
 			return false, err
 		}
-		res.opts.Delete = false
+		res.options.Delete = false
 		return false, nil
 	}
 	nodeTarget := filepath.Join(target, nodeName)
@@ -218,7 +217,7 @@ func (res *Restorer) traverseTreeNode(
 		if err := res.sanitizeError(nodeLocation, errors.New("node has invalid path")); err != nil {
 			return false, err
 		}
-		res.opts.Delete = false
+		res.options.Delete = false
 		return false, nil
 	}
 	if node.Type == data.NodeTypeSocket {
@@ -259,7 +258,7 @@ func (res *Restorer) traverseTreeNode(
 }
 
 func (res *Restorer) restoreNodeTo(node *data.Node, target, location string) error {
-	if !res.opts.DryRun {
+	if !res.options.DryRun {
 		debug.Log("restoreNode %v %v %v", node.Name, target, location)
 		if err := fs.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return errors.Wrap(err, "RemoveNode")
@@ -272,16 +271,16 @@ func (res *Restorer) restoreNodeTo(node *data.Node, target, location string) err
 		}
 	}
 
-	res.opts.Progress.AddProgress(location, ActionOtherRestored, 0, 0)
+	res.options.Progress.AddProgress(location, ActionOtherRestored, 0, 0)
 	return res.restoreNodeMetadataTo(node, target, location)
 }
 
 func (res *Restorer) restoreNodeMetadataTo(node *data.Node, target, location string) error {
-	if res.opts.DryRun {
+	if res.options.DryRun {
 		return nil
 	}
 	debug.Log("restoreNodeMetadata %v %v %v", node.Name, target, location)
-	err := fs.NodeRestoreMetadata(node, target, res.Warn, res.XattrSelectFilter, res.opts.OwnershipByName)
+	err := fs.NodeRestoreMetadata(node, target, res.Warn, res.XattrSelectFilter, res.options.OwnershipByName)
 	if err != nil {
 		debug.Log("node.RestoreMetadata(%s) error %v", target, err)
 	}
@@ -289,7 +288,7 @@ func (res *Restorer) restoreNodeMetadataTo(node *data.Node, target, location str
 }
 
 func (res *Restorer) restoreHardlinkAt(node *data.Node, target, path, location string) error {
-	if !res.opts.DryRun {
+	if !res.options.DryRun {
 		if err := fs.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return errors.Wrap(err, "RemoveCreateHardlink")
 		}
@@ -299,13 +298,13 @@ func (res *Restorer) restoreHardlinkAt(node *data.Node, target, path, location s
 		}
 	}
 
-	res.opts.Progress.AddProgress(location, ActionOtherRestored, 0, 0)
+	res.options.Progress.AddProgress(location, ActionOtherRestored, 0, 0)
 	// TODO investigate if hardlinks have separate metadata on any supported system
 	return res.restoreNodeMetadataTo(node, path, location)
 }
 
 func (res *Restorer) ensureDir(target string) error {
-	if res.opts.DryRun {
+	if res.options.DryRun {
 		return nil
 	}
 
@@ -327,32 +326,16 @@ func (res *Restorer) ensureDir(target string) error {
 
 // RestoreTo creates the directories and files in the snapshot below dst.
 // Before an item is created, res.Filter is called.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) {
+	dst, err := res.prepareRestoreTarget(dst)
+	if err != nil {
+		return 0, err
+	}
 	restoredFileCount := uint64(0)
-	var err error
-	if !filepath.IsAbs(dst) {
-		dst, err = filepath.Abs(dst)
-		if err != nil {
-			return restoredFileCount, errors.Wrap(err, "Abs")
-		}
-	}
-
-	if !res.opts.DryRun {
-		// ensure that the target directory exists and is actually a directory
-		// Using ensureDir is too aggressive here as it also removes unexpected files
-		if err := fs.MkdirAll(dst, 0700); err != nil {
-			return restoredFileCount, fmt.Errorf("cannot create target directory: %w", err)
-		}
-	}
-
 	idx := data.NewHardlinkIndex[string]()
-	filerestorer := newFileRestorer(fileRestorerParams{
-		destination: dst, blobsLoader: res.repo.LoadBlobsFromPack, index: res.repo.LookupBlob,
-		connections: res.repo.Connections(), sparse: res.opts.Sparse, allowRecursiveDelete: res.opts.Delete,
-		startWarmup: res.repo.StartWarmup, progress: res.opts.Progress, zeroChunk: res.repo.ChunkerFactory().ZeroChunk(),
-	})
-	filerestorer.Error = res.Error
-	filerestorer.Info = res.Info
+	filerestorer := res.createFileRestorer(dst)
 
 	debug.Log("first pass for %q", dst)
 
@@ -363,7 +346,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 		enterDir: func(_ *data.Node, target, location string) error {
 			debug.Log("first pass, enterDir: mkdir %q, leaveDir should restore metadata", location)
 			if location != string(filepath.Separator) {
-				res.opts.Progress.AddFile(0)
+				res.options.Progress.AddFile(0)
 			}
 			return res.ensureDir(target)
 		},
@@ -375,25 +358,26 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			}
 
 			if node.Type != data.NodeTypeFile {
-				res.opts.Progress.AddFile(0)
+				res.options.Progress.AddFile(0)
 				return nil
 			}
 
 			if node.Links > 1 {
 				if idx.Has(node.Inode, node.DeviceID) {
 					// a hardlinked file does not increase the restore size
-					res.opts.Progress.AddFile(0)
+					res.options.Progress.AddFile(0)
 					return nil
 				}
 				idx.Add(node.Inode, node.DeviceID, location)
 			}
 
 			buf, err = res.withOverwriteCheck(ctx, node, target, location, false, buf, func(updateMetadataOnly bool, matches *fileState) error {
+				//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 				if updateMetadataOnly {
-					res.opts.Progress.AddSkippedFile(location, node.Size)
+					res.options.Progress.AddSkippedFile(location, node.Size)
 				} else {
-					res.opts.Progress.AddFile(node.Size)
-					if !res.opts.DryRun {
+					res.options.Progress.AddFile(node.Size)
+					if !res.options.DryRun {
 						filerestorer.addFile(location, node.Content, int64(node.Size), matches)
 					} else {
 						action := ActionFileUpdated
@@ -401,7 +385,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 							action = ActionFileRestored
 						}
 						// immediately mark as completed
-						res.opts.Progress.AddProgress(location, action, node.Size, node.Size)
+						res.options.Progress.AddProgress(location, action, node.Size, node.Size)
 					}
 				}
 				res.trackFile(location, updateMetadataOnly)
@@ -417,7 +401,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 		return 0, err
 	}
 
-	if !res.opts.DryRun {
+	if !res.options.DryRun {
 		err = filerestorer.restoreFiles(ctx)
 		if err != nil {
 			return 0, err
@@ -451,7 +435,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			return nil
 		},
 		leaveDir: func(node *data.Node, target, location string, expectedFilenames []string) error {
-			if res.opts.Delete {
+			if res.options.Delete {
 				if err := res.removeUnexpectedFiles(ctx, target, location, expectedFilenames); err != nil {
 					return err
 				}
@@ -463,7 +447,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 
 			err := res.restoreNodeMetadataTo(node, target, location)
 			if err == nil {
-				res.opts.Progress.AddProgress(location, ActionDirRestored, 0, 0)
+				res.options.Progress.AddProgress(location, ActionDirRestored, 0, 0)
 			}
 			return err
 		},
@@ -471,8 +455,37 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	return restoredFileCount, err
 }
 
+func (res *Restorer) createFileRestorer(destination string) *fileRestorer {
+	restore := newFileRestorer(fileRestorerParams{
+		destination: destination, blobsLoader: res.repo.LoadBlobsFromPack, index: res.repo.LookupBlob,
+		connections: res.repo.Connections(), sparse: res.options.Sparse, allowRecursiveDelete: res.options.Delete,
+		startWarmup: res.repo.StartWarmup, progress: res.options.Progress, zeroChunk: res.repo.ChunkerFactory().ZeroChunk(),
+	})
+	restore.Error = res.Error
+	restore.Info = res.Info
+	return restore
+}
+
+func (res *Restorer) prepareRestoreTarget(dst string) (string, error) {
+	if !filepath.IsAbs(dst) {
+		absolute, err := filepath.Abs(dst)
+		if err != nil {
+			return "", errors.Wrap(err, "Abs")
+		}
+		dst = absolute
+	}
+	if !res.options.DryRun {
+		if err := fs.MkdirAll(dst, 0700); err != nil {
+			return "", fmt.Errorf("cannot create target directory: %w", err)
+		}
+	}
+	return dst, nil
+}
+
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (res *Restorer) removeUnexpectedFiles(ctx context.Context, target, location string, expectedFilenames []string) error {
-	if !res.opts.Delete {
+	if !res.options.Delete {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("internal error")
 	}
 
@@ -507,6 +520,7 @@ func (res *Restorer) removeUnexpectedFiles(ctx context.Context, target, location
 		// TODO pass a proper value to the isDir parameter once this becomes relevant for the filters
 		selectedForRestore, _ := res.SelectFilter(nodeLocation, false)
 		// only delete files that were selected for restore
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if selectedForRestore {
 			// First collect all files that will be deleted
 			var filesToDelete []string
@@ -521,7 +535,7 @@ func (res *Restorer) removeUnexpectedFiles(ctx context.Context, target, location
 				return err
 			}
 
-			if !res.opts.DryRun {
+			if !res.options.DryRun {
 				// Perform the deletion
 				if err := fs.RemoveAll(nodeTarget); err != nil {
 					return err
@@ -530,7 +544,7 @@ func (res *Restorer) removeUnexpectedFiles(ctx context.Context, target, location
 
 			// Report paths as deleted only after successful removal
 			for i := len(filesToDelete) - 1; i >= 0; i-- {
-				res.opts.Progress.ReportDeletion(filesToDelete[i])
+				res.options.Progress.ReportDeletion(filesToDelete[i])
 			}
 		}
 	}
@@ -555,7 +569,7 @@ func (res *Restorer) withOverwriteCheck(
 	buf []byte,
 	cb func(updateMetadataOnly bool, matches *fileState) error,
 ) ([]byte, error) {
-	overwrite, err := shouldOverwrite(res.opts.Overwrite, node, target)
+	overwrite, err := shouldOverwrite(res.options.Overwrite, node, target)
 	if err != nil {
 		return buf, err
 	} else if !overwrite {
@@ -563,7 +577,7 @@ func (res *Restorer) withOverwriteCheck(
 		if isHardlink {
 			size = 0
 		}
-		res.opts.Progress.AddSkippedFile(location, size)
+		res.options.Progress.AddSkippedFile(location, size)
 		return buf, nil
 	}
 
@@ -571,7 +585,7 @@ func (res *Restorer) withOverwriteCheck(
 	updateMetadataOnly := false
 	if node.Type == data.NodeTypeFile && !isHardlink {
 		// if a file fails to verify, then matches is nil which results in restoring from scratch
-		matches, buf, _ = res.verifyFile(ctx, target, node, false, res.opts.Overwrite == OverwriteIfChanged, buf)
+		matches, buf, _ = res.verifyFile(ctx, target, node, false, res.options.Overwrite == OverwriteIfChanged, buf)
 		// skip files that are already correct completely
 		updateMetadataOnly = !matches.NeedsRestore()
 	}
@@ -599,8 +613,9 @@ func shouldOverwrite(overwrite OverwriteBehavior, node *data.Node, destination s
 	case OverwriteNever:
 		// file exists
 		return false, nil
+	default:
+		panic("unknown overwrite behavior") //nolint:forbidigo // Validation guarantees a known overwrite mode.
 	}
-	panic("unknown overwrite behavior")
 }
 
 // Snapshot returns the snapshot this restorer is configured to use.
@@ -711,7 +726,7 @@ func (res *Restorer) verifyFile(ctx context.Context, target string, node *data.N
 		return nil, buf, err
 	}
 	defer func() {
-		_ = f.Close()
+		_ = f.Close() // Preserve the restore failure; file finalization is handled on successful paths.
 	}()
 
 	fi, err := f.Stat()
@@ -750,7 +765,7 @@ func (res *Restorer) verifyFile(ctx context.Context, target string, node *data.N
 		buf = buf[:length]
 
 		_, err = f.ReadAt(buf, offset)
-		if err == io.EOF && !failFast {
+		if errors.Is(err, io.EOF) && !failFast {
 			sizeMatches = false
 			break
 		}

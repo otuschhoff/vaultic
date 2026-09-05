@@ -68,6 +68,7 @@ func poly1305PrepareKey(nonce []byte, key *MACKey) [32]byte {
 
 	cipher, err := aes.NewCipher(key.K[:])
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	cipher.Encrypt(k[16:], nonce[:])
@@ -92,16 +93,19 @@ func NewRandomKey() *Key {
 
 	n, err := rand.Read(k.EncryptionKey[:])
 	if n != aesKeySize || err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unable to read enough random bytes for encryption key")
 	}
 
 	n, err = rand.Read(k.MACKey.K[:])
 	if n != macKeySizeK || err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unable to read enough random bytes for MAC encryption key")
 	}
 
 	n, err = rand.Read(k.MACKey.R[:])
 	if n != macKeySizeR || err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unable to read enough random bytes for MAC key")
 	}
 
@@ -114,6 +118,7 @@ func NewRandomNonce() []byte {
 	iv := make([]byte, ivSize)
 	n, err := rand.Read(iv)
 	if n != ivSize || err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("unable to read enough random bytes for iv")
 	}
 	return iv
@@ -242,18 +247,22 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 // plaintext's storage for the encrypted output, use plaintext[:0] as dst.
 func (k *Key) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 	if !k.Valid() {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("key is invalid")
 	}
 
 	if len(additionalData) > 0 {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("additional data is not supported")
 	}
 
 	if len(nonce) != ivSize {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("incorrect nonce length")
 	}
 
 	if !validNonce(nonce) {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("nonce is invalid")
 	}
 
@@ -261,6 +270,7 @@ func (k *Key) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 
 	c, err := aes.NewCipher(k.EncryptionKey[:])
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(fmt.Sprintf("unable to create cipher: %v", err))
 	}
 	e := cipher.NewCTR(c, nonce)
@@ -290,6 +300,7 @@ func (k *Key) Open(dst, nonce, ciphertext, _ []byte) ([]byte, error) {
 
 	// check parameters
 	if len(nonce) != ivSize {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("incorrect nonce length")
 	}
 
@@ -314,6 +325,7 @@ func (k *Key) Open(dst, nonce, ciphertext, _ []byte) ([]byte, error) {
 
 	c, err := aes.NewCipher(k.EncryptionKey[:])
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(fmt.Sprintf("unable to create cipher: %v", err))
 	}
 	e := cipher.NewCTR(c, nonce)

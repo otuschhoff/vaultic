@@ -24,7 +24,7 @@ import (
 )
 
 func NewStatsCommand(globalOptions *global.Options) *cobra.Command {
-	var opts StatsOptions
+	var options statsOptions
 
 	cmd := &cobra.Command{
 		Use:   "stats [flags] [snapshot ID] [...]",
@@ -64,49 +64,50 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           "default",
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStats(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runStats(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	must(cmd.RegisterFlagCompletionFunc("mode", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{countModeRestoreSize, countModeUniqueFilesByContents, countModeBlobsPerFile, countModeRawData}, cobra.ShellCompDirectiveDefault
 	}))
 	return cmd
 }
 
-// StatsOptions collects all options for the stats command.
-type StatsOptions struct {
+// statsOptions collects all options for the stats command.
+type statsOptions struct {
 	// the mode of counting to perform (see consts for available modes)
 	countMode string
 
 	data.SnapshotFilter
 }
 
-func (opts *StatsOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVar(&opts.countMode, "mode", countModeRestoreSize, "counting mode: restore-size (default), files-by-contents, blobs-per-file or raw-data")
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
+func (options *statsOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVar(&options.countMode, "mode", countModeRestoreSize, "counting mode: restore-size (default), files-by-contents, blobs-per-file or raw-data")
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
 }
 
 func must(err error) {
 	if err != nil {
-		panic(fmt.Sprintf("error during setup: %v", err)) //nolint:forbidigo // flag registration is a construction-time invariant
+		// Flag registration is a construction-time invariant.
+		panic(fmt.Sprintf("error during setup: %v", err)) //nolint:forbidigo // This helper enforces command-construction invariants.
 	}
 }
 
-func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	err := verifyStatsInput(opts)
+func runStats(ctx context.Context, options statsOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	err := verifyStatsInput(options)
 	if err != nil {
 		return err
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -120,11 +121,11 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 		return err
 	}
 
-	if opts.countMode == countModeDebug {
+	if options.countMode == countModeDebug {
 		return statsDebug(ctx, repo, printer)
 	}
 
-	if !gopts.JSON {
+	if !globalOptions.JSON {
 		printer.S("scanning...")
 	}
 
@@ -137,7 +138,7 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 	}
 
 	var snapshots data.Snapshots
-	err = opts.SnapshotFilter.FindAll(ctx, snapshotLister, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	err = options.SnapshotFilter.FindAll(ctx, snapshotLister, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -148,11 +149,11 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 		return err
 	}
 
-	statsProgress := statsui.NewProgress(term, gopts.Quiet, gopts.JSON, uint64(len(snapshots)))
+	statsProgress := statsui.NewProgress(term, globalOptions.Quiet, globalOptions.JSON, uint64(len(snapshots)))
 	defer statsProgress.Done()
 
 	for _, sn := range snapshots {
-		err = statsWalkSnapshot(ctx, sn, repo, opts, stats, statsProgress)
+		err = statsWalkSnapshot(ctx, sn, repo, options, stats, statsProgress)
 		if err != nil {
 			return fmt.Errorf("error walking snapshot: %w", err)
 		}
@@ -161,7 +162,7 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 		return ctx.Err()
 	}
 
-	if opts.countMode == countModeRawData {
+	if options.countMode == countModeRawData {
 		if err := countRawDataBlobs(repo, stats, statsProgress); err != nil {
 			return err
 		}
@@ -169,7 +170,7 @@ func runStats(ctx context.Context, opts StatsOptions, gopts global.Options, args
 	// stop progress bar to prevent mangled output
 	statsProgress.Done()
 
-	return printStats(gopts, printer, opts.countMode, stats)
+	return printStats(globalOptions, printer, options.countMode, stats)
 }
 
 func countRawDataBlobs(repo *repository.Repository, stats *statsContainer, progress *statsui.Progress) error {
@@ -201,13 +202,13 @@ func countRawDataBlobs(repo *repository.Repository, stats *statsContainer, progr
 }
 
 func printStats(
-	gopts global.Options,
+	globalOptions global.Options,
 	printer interface{ S(string, ...any) },
 	mode string,
 	stats *statsContainer,
 ) error {
-	if gopts.JSON {
-		if err := json.NewEncoder(gopts.Term.OutputWriter()).Encode(stats); err != nil {
+	if globalOptions.JSON {
+		if err := json.NewEncoder(globalOptions.Term.OutputWriter()).Encode(stats); err != nil {
 			return fmt.Errorf("encoding output: %w", err)
 		}
 		return nil
@@ -240,7 +241,7 @@ func statsWalkSnapshot(
 	ctx context.Context,
 	snapshot *data.Snapshot,
 	repo vaultic.Loader,
-	opts StatsOptions,
+	options statsOptions,
 	stats *statsContainer,
 	sp *statsui.Progress,
 ) error {
@@ -251,7 +252,7 @@ func statsWalkSnapshot(
 
 	stats.SnapshotsCount++
 
-	if opts.countMode == countModeRawData {
+	if options.countMode == countModeRawData {
 		// count just the sizes of unique blobs; we don't need to walk the tree
 		// ourselves in this case, since a nifty function does it for us
 		return data.FindUsedBlobs(ctx, repo, vaultic.IDs{*snapshot.Tree}, stats.blobs, vaultic.NoopCounter)
@@ -259,7 +260,7 @@ func statsWalkSnapshot(
 
 	hardLinkIndex := data.NewHardlinkIndex[struct{}]()
 	err := walker.Walk(ctx, repo, *snapshot.Tree, walker.WalkVisitor{
-		ProcessNode: statsWalkTree(repo, opts, stats, hardLinkIndex, sp),
+		ProcessNode: statsWalkTree(repo, options, stats, hardLinkIndex, sp),
 	})
 	if err != nil {
 		return fmt.Errorf("walking tree %s: %w", *snapshot.Tree, err)
@@ -270,19 +271,19 @@ func statsWalkSnapshot(
 
 func statsWalkTree(
 	repo vaultic.Loader,
-	opts StatsOptions,
+	options statsOptions,
 	stats *statsContainer,
 	hardLinkIndex *data.HardlinkIndex[struct{}],
 	progress *statsui.Progress,
 ) walker.WalkFunc {
 	return func(parentTreeID vaultic.ID, npath string, node *data.Node, nodeErr error) error {
-		return processStatsNode(repo, opts, stats, hardLinkIndex, progress, parentTreeID, npath, node, nodeErr)
+		return processStatsNode(repo, options, stats, hardLinkIndex, progress, parentTreeID, npath, node, nodeErr)
 	}
 }
 
 func processStatsNode(
 	repo vaultic.Loader,
-	opts StatsOptions,
+	options statsOptions,
 	stats *statsContainer,
 	hardLinkIndex *data.HardlinkIndex[struct{}],
 	progress *statsui.Progress,
@@ -295,12 +296,12 @@ func processStatsNode(
 		return nodeErr
 	}
 	progress.Update(1, 0, uint64(node.Size))
-	if opts.countMode == countModeUniqueFilesByContents || opts.countMode == countModeBlobsPerFile {
-		if err := countUniqueStatsNode(repo, opts, stats, progress, parentTreeID, npath, node); err != nil {
+	if options.countMode == countModeUniqueFilesByContents || options.countMode == countModeBlobsPerFile {
+		if err := countUniqueStatsNode(repo, options, stats, progress, parentTreeID, npath, node); err != nil {
 			return err
 		}
 	}
-	if opts.countMode == countModeRestoreSize {
+	if options.countMode == countModeRestoreSize {
 		stats.TotalFileCount++
 		if node.Links == 1 || node.Type == data.NodeTypeDir || !hardLinkIndex.Has(node.Inode, node.DeviceID) || node.Inode == 0 {
 			if node.Links != 1 && node.Type != data.NodeTypeDir {
@@ -314,7 +315,7 @@ func processStatsNode(
 
 func countUniqueStatsNode(
 	repo vaultic.Loader,
-	opts StatsOptions,
+	options statsOptions,
 	stats *statsContainer,
 	progress *statsui.Progress,
 	parentTreeID vaultic.ID,
@@ -326,7 +327,7 @@ func countUniqueStatsNode(
 		return nil
 	}
 	stats.uniqueFiles[fileID] = struct{}{}
-	if opts.countMode == countModeUniqueFilesByContents {
+	if options.countMode == countModeUniqueFilesByContents {
 		stats.TotalSize += node.Size
 		stats.TotalFileCount++
 		return nil
@@ -362,16 +363,16 @@ func makeFileIDByContents(node *data.Node) fileID {
 	return sha256.Sum256(bb)
 }
 
-func verifyStatsInput(opts StatsOptions) error {
+func verifyStatsInput(options statsOptions) error {
 	// require a recognized counting mode
-	switch opts.countMode {
+	switch options.countMode {
 	case countModeRestoreSize:
 	case countModeUniqueFilesByContents:
 	case countModeBlobsPerFile:
 	case countModeRawData:
 	case countModeDebug:
 	default:
-		return fmt.Errorf("unknown counting mode: %s (use the -h flag to get a list of supported modes)", opts.countMode)
+		return fmt.Errorf("unknown counting mode: %s (use the -h flag to get a list of supported modes)", options.countMode)
 	}
 
 	return nil
@@ -553,7 +554,9 @@ func (s sizeHistogram) String() string {
 		t.AddRow(lines[i])
 	}
 
-	_ = t.Write(&out)
+	if err := t.Write(&out); err != nil {
+		return fmt.Sprintf("unable to render size histogram: %v", err)
+	}
 
 	if len(s.oversized) > 0 {
 		fmt.Fprintf(&out, "Oversized: %v\n", s.oversized)

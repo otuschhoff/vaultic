@@ -1,3 +1,5 @@
+//! Transaction and write-batch gRPC handlers.
+
 use prost::Message;
 use std::time::Instant;
 use tonic::{Request, Response, Status};

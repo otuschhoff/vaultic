@@ -1,3 +1,6 @@
+//! VaulticDB metadata daemon entry point and transport runtime.
+#![warn(unreachable_pub)]
+
 use std::{
     env,
     fs::File,
@@ -31,7 +34,10 @@ mod replication;
 mod service;
 mod storage;
 
-pub mod proto {
+#[allow(dead_code, unreachable_pub)]
+mod proto {
+    //! Generated gRPC protocol bindings used by the daemon implementation.
+
     tonic::include_proto!("vaulticdb.v1");
 }
 

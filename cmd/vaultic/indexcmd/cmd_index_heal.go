@@ -156,7 +156,7 @@ func newIndexHealPlanCommand(globalOptions *global.Options) *cobra.Command {
 					if err := artifactStore.SavePlan(plan); err != nil {
 						return err
 					}
-					_ = observability.Emit(
+					observability.EmitBestEffort(
 						command.Context(),
 						observability.Event{
 							Severity:  observability.Critical,
@@ -175,7 +175,7 @@ func newIndexHealPlanCommand(globalOptions *global.Options) *cobra.Command {
 	addHealFlags(command, &options.indexHealOptions)
 	command.Flags().StringVar(&options.CandidateNamespace, "candidate-namespace", "", "dedicated immutable candidate metadata namespace")
 	command.Flags().BoolVar(&options.FreshDEK, "fresh-metadata-dek", false, "require a fresh capsule generation before candidate writes")
-	_ = command.MarkFlagRequired("candidate-namespace")
+	mustMarkFlagRequired(command, "candidate-namespace")
 	return command
 }
 
@@ -193,7 +193,7 @@ func newIndexHealExecuteCommand(globalOptions *global.Options) *cobra.Command {
 	addHealArtifactFlag(command, &options.indexHealOptions)
 	options.Candidate.AddFlags(command.Flags())
 	command.Flags().StringVar(&options.PlanID, "plan", "", "signed healing plan ID")
-	_ = command.MarkFlagRequired("plan")
+	mustMarkFlagRequired(command, "plan")
 	return command
 }
 
@@ -211,7 +211,7 @@ func newIndexHealVerifyCommand(globalOptions *global.Options) *cobra.Command {
 	addHealArtifactFlag(command, &options.indexHealOptions)
 	options.Candidate.AddFlags(command.Flags())
 	command.Flags().StringVar(&options.PlanID, "plan", "", "signed healing plan ID")
-	_ = command.MarkFlagRequired("plan")
+	mustMarkFlagRequired(command, "plan")
 	return command
 }
 
@@ -297,7 +297,7 @@ func activateHealingCandidate(
 			return fmt.Errorf("acquire fresh candidate writer fence after authority activation: %w", err)
 		}
 	}
-	_ = observability.Emit(ctx, observability.Event{
+	observability.EmitBestEffort(ctx, observability.Event{
 		Severity: observability.Critical, Category: observability.CategoryLifecycle, Component: "index-heal",
 		Message: "candidate metadata generation activated",
 		Fields: map[string]any{
@@ -355,7 +355,7 @@ func newIndexHealRollbackCommand(globalOptions *global.Options) *cobra.Command {
 					if err != nil {
 						return err
 					}
-					_ = observability.Emit(
+					observability.EmitBestEffort(
 						command.Context(),
 						observability.Event{
 							Severity:  observability.Critical,
@@ -805,7 +805,7 @@ func completePostActivationVerification(
 	if err != nil {
 		return fmt.Errorf("complete post-activation verification: %w", err)
 	}
-	_ = observability.Emit(ctx, observability.Event{
+	observability.EmitBestEffort(ctx, observability.Event{
 		Severity: observability.Critical, Category: observability.CategoryIntegrity, Component: "index-heal",
 		Message: "post-activation metadata verification completed",
 		Fields:  map[string]any{"plan_id": plan.ID, "generation": verified.ActiveGeneration, "decision": verified.Decision},

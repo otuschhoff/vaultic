@@ -1,6 +1,7 @@
 package walker
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"testing"
@@ -210,7 +211,7 @@ func checkErrorReturned(errForPath string) checkFunc {
 			if err == nil {
 				t.Errorf("expected error for %v, got nil", errForPath)
 			}
-			rtest.Assert(t, err == expectedErr, "expected error for %v, got %v", errForPath, err)
+			rtest.Assert(t, errors.Is(err, expectedErr), "expected error for %v, got %v", errForPath, err)
 		}
 
 		return walker, leaveDir, final

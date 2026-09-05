@@ -38,13 +38,13 @@ Exit status is 12 if the password is incorrect.
 	return cmd
 }
 
-func runKeyRemove(ctx context.Context, gopts global.Options, args []string, term ui.Terminal) error {
+func runKeyRemove(ctx context.Context, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) != 1 {
 		return fmt.Errorf("key remove expects one argument as the key id")
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}

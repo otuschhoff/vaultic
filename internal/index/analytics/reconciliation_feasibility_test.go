@@ -477,7 +477,7 @@ func reconciliationMarkdown(profile reconciliationProfile) string {
 	)
 }
 
-func joinLines(values []string) string { return fmt.Sprintf("%s", joinWith(values, "\n- ")) }
+func joinLines(values []string) string { return joinWith(values, "\n- ") }
 
 func joinWith(values []string, separator string) string {
 	if len(values) == 0 {

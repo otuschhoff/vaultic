@@ -1,3 +1,5 @@
+//! Key broker sessions, authorization, contribution handling, and leases.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -29,6 +31,7 @@ use crate::encryption::recovery_capsule::{
     validate_shamir_share, CapsuleBuilder, MemberCredential, MemberProtection, RecoveredKeys,
     RecoveryCapsule, UnlockPolicy, UnwrappedMemberShare,
 };
+use crate::ids::{MemberId, RepositoryId, SessionId};
 
 pub mod audit;
 pub mod peer;
@@ -71,8 +74,8 @@ pub enum Capability {
 #[serde(deny_unknown_fields)]
 pub struct SessionTranscript {
     pub protocol: String,
-    pub session_id: String,
-    pub repository_id: String,
+    pub session_id: SessionId,
+    pub repository_id: RepositoryId,
     pub capsule_generation: u64,
     pub endpoint_binding: String,
     pub nonce: String,
@@ -92,7 +95,7 @@ pub struct SignedSession {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptedContribution {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub encapped_key: String,
     pub ciphertext: String,
     pub tag: String,
@@ -101,7 +104,7 @@ pub struct EncryptedContribution {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContributionPayload {
-    member_id: String,
+    member_id: MemberId,
     share_index: u8,
     #[serde(with = "base64_bytes")]
     share: Vec<u8>,
@@ -114,7 +117,7 @@ struct ContributionPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlockStatus {
     pub locked: bool,
-    pub repository_id: String,
+    pub repository_id: RepositoryId,
     pub capsule_generation: u64,
     pub capsule_logical_id: String,
     pub policy_hash: String,
@@ -205,7 +208,7 @@ struct SessionState {
     signed: SignedSession,
     private_key: <SessionKem as KemTrait>::PrivateKey,
     contributions: Vec<UnwrappedMemberShare>,
-    member_ids: BTreeSet<String>,
+    member_ids: BTreeSet<MemberId>,
     share_indexes: BTreeSet<(String, u8)>,
     principal_ids: BTreeSet<String>,
 }
@@ -230,7 +233,7 @@ struct PendingPolicyMutation {
 pub struct KeyBroker {
     capsule: RecoveryCapsule,
     identity: SigningKey,
-    sessions: BTreeMap<String, SessionState>,
+    sessions: BTreeMap<SessionId, SessionState>,
     epoch: Option<UnlockEpoch>,
     leases: BTreeMap<String, LeaseState>,
     authorizations: Vec<ClientAuthorization>,
@@ -359,7 +362,7 @@ impl KeyBroker {
         }
         let mut rng = StdRng::from_os_rng();
         let (private_key, public_key) = SessionKem::gen_keypair(&mut rng);
-        let session_id = random_id(&mut rng);
+        let session_id = SessionId::from(random_id(&mut rng));
         let transcript = SessionTranscript {
             protocol: "vaultic-key-broker.v1".to_owned(),
             session_id: session_id.clone(),

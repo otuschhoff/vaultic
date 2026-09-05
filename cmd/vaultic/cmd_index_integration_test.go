@@ -34,8 +34,8 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, env)
-	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
-	env.gopts.BackendTestHook = nil
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	env.globalOptions.BackendTestHook = nil
 
 	daemonPath, err := filepath.Abs(filepath.Join("..", "..", "vaulticdb", "target", "debug", "vaulticdb"))
 	if err != nil {
@@ -67,12 +67,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	daemonOptions := indexDaemonOptions{Socket: socket}
 
 	var dryResultIndexes uint64
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		result, runErr := runIndexImport(
 			ctx,
 			indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, DryRun: true, SnapshotDepth: ^uint(0)},
-			gopts,
-			gopts.Term,
+			globalOptions,
+			globalOptions.Term,
 		)
 		dryResultIndexes = result.IndexesImported
 		return runErr
@@ -83,8 +83,8 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if entries, _, err := store.ScanPrefix(context.Background(), []byte("p:"), nil, 10); err != nil || len(entries) != 0 {
 		t.Fatalf("dry-run wrote pack records: entries=%d err=%v", len(entries), err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, DryRun: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, DryRun: true}, globalOptions, globalOptions.Term)
 		if result.PacksSelected != 0 || result.IndexesWritten != 0 {
 			t.Fatalf("legacy-only dry-run export = %#v", result)
 		}
@@ -93,15 +93,15 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 1}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 1}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	if !errors.Is(err, errIndexDifferences) {
 		t.Fatalf("legacy-only check error = %v", err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: daemonOptions, DryRun: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: daemonOptions, DryRun: true}, globalOptions, globalOptions.Term)
 		if result.AggregatesChanged != 5 {
 			t.Fatalf("legacy-only aggregate dry-run = %#v", result)
 		}
@@ -111,12 +111,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 		t.Fatal(err)
 	}
 
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		_, runErr := runIndexImport(
 			ctx,
 			indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, SnapshotDepth: ^uint(0), SnapshotWorkBudget: 1},
-			gopts,
-			gopts.Term,
+			globalOptions,
+			globalOptions.Term,
 		)
 		return runErr
 	})
@@ -126,12 +126,12 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	var resumed uint64
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		result, runErr := runIndexImport(
 			ctx,
 			indexImportOptions{Daemon: daemonOptions, FromLegacy: true, Resume: true, Activate: true, SnapshotDepth: ^uint(0)},
-			gopts,
-			gopts.Term,
+			globalOptions,
+			globalOptions.Term,
 		)
 		resumed = result.IndexesResumed
 		return runErr
@@ -140,16 +140,16 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 		t.Fatalf("resumed activation indexes=%d err=%v", resumed, err)
 	}
 	var exported, selected, exportSequence uint64
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, PacksPerIndex: 2, Verify: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, PacksPerIndex: 2, Verify: true}, globalOptions, globalOptions.Term)
 		exported, selected, exportSequence = result.IndexesWritten, result.PacksSelected, result.ExportSequence
 		return runErr
 	})
 	if err != nil || exported == 0 || selected == 0 {
 		t.Fatalf("checkpointed export indexes=%d packs=%d err=%v", exported, selected, err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions}, globalOptions, globalOptions.Term)
 		if result.PacksSelected != 0 || result.IndexesWritten != 0 {
 			t.Fatalf("resumed export = %#v", result)
 		}
@@ -158,8 +158,8 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Since: exportSequence}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Since: exportSequence}, globalOptions, globalOptions.Term)
 		if result.PacksSelected != 0 || result.IndexesWritten != 0 {
 			t.Fatalf("since export = %#v", result)
 		}
@@ -169,8 +169,11 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 		t.Fatal(err)
 	}
 	var fullExportSequence uint64
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Full: true, Verify: true, PacksPerIndex: 1}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(
+			ctx, indexExportOptions{Daemon: daemonOptions, Full: true, Verify: true, PacksPerIndex: 1},
+			globalOptions, globalOptions.Term,
+		)
 		if result.PacksSelected == 0 || result.IndexesWritten == 0 {
 			t.Fatalf("full export = %#v", result)
 		}
@@ -180,8 +183,8 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Since: exportSequence, DryRun: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexExport(ctx, indexExportOptions{Daemon: daemonOptions, Since: exportSequence, DryRun: true}, globalOptions, globalOptions.Term)
 		if result.PacksSelected == 0 || result.IndexesWritten != 0 || fullExportSequence <= exportSequence {
 			t.Fatalf("positive since export = %#v, full sequence=%d", result, fullExportSequence)
 		}
@@ -192,20 +195,20 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	}
 
 	check := func() error {
-		return withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 10}, gopts, gopts.Term)
+		return withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 10}, globalOptions, globalOptions.Term)
 			return runErr
 		})
 	}
 	if err := check(); err != nil {
 		t.Fatalf("clean check: %v", err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		result, runErr := runIndexCheck(
 			ctx,
 			indexCheckOptions{Daemon: daemonOptions, IncludeCrawlDebt: true, FailOnWarning: true, MaxFindings: 100},
-			gopts,
-			gopts.Term,
+			globalOptions,
+			globalOptions.Term,
 		)
 		if result.PendingCrawlDebt == 0 || len(result.Findings) == 0 {
 			t.Fatalf("warning check = %#v", result)
@@ -225,8 +228,8 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if err := check(); !errors.Is(err, errIndexDifferences) {
 		t.Fatalf("corrupt check error = %v", err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: daemonOptions, DryRun: true}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: daemonOptions, DryRun: true}, globalOptions, globalOptions.Term)
 		if result.AggregatesChanged == 0 {
 			t.Fatal("dry-run did not report aggregate drift")
 		}
@@ -238,8 +241,8 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if err := check(); !errors.Is(err, errIndexDifferences) {
 		t.Fatalf("dry-run unexpectedly repaired aggregate: %v", err)
 	}
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		_, runErr := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: daemonOptions}, gopts, gopts.Term)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		_, runErr := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: daemonOptions}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	if err != nil {
@@ -264,9 +267,9 @@ func assertCompareDetectsMissingAndExtraObjects(t *testing.T, env *testEnvironme
 	// A clean repository must compare clean, so the findings below are
 	// attributable to the damage and not to a permanently noisy comparison.
 	var clean BackendsResult
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		var runErr error
-		clean, runErr = runIndexBackends(ctx, indexBackendsOptions{Daemon: daemonOptions, Compare: true}, gopts, gopts.Term)
+		clean, runErr = runIndexBackends(ctx, indexBackendsOptions{Daemon: daemonOptions, Compare: true}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	if err != nil {
@@ -314,9 +317,9 @@ func assertCompareDetectsMissingAndExtraObjects(t *testing.T, env *testEnvironme
 	}
 
 	var damaged BackendsResult
-	err = withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		var runErr error
-		damaged, runErr = runIndexBackends(ctx, indexBackendsOptions{Daemon: daemonOptions, Compare: true}, gopts, gopts.Term)
+		damaged, runErr = runIndexBackends(ctx, indexBackendsOptions{Daemon: daemonOptions, Compare: true}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	// A pack missing on the backend is a difference, so a non-zero exit is
@@ -353,17 +356,17 @@ func assertIntrospectionAnswersWithoutListing(t *testing.T, env *testEnvironment
 	// Every listing from here on would be a violation of the criterion, so the
 	// backend is wrapped to record them.
 	counter := &listCountingBackend{calls: map[backend.FileType]int{}}
-	previousHook := env.gopts.BackendTestHook
-	env.gopts.BackendTestHook = func(inner backend.Backend) (backend.Backend, error) {
+	previousHook := env.globalOptions.BackendTestHook
+	env.globalOptions.BackendTestHook = func(inner backend.Backend) (backend.Backend, error) {
 		counter.Backend = inner
 		return counter, nil
 	}
-	defer func() { env.gopts.BackendTestHook = previousHook }()
+	defer func() { env.globalOptions.BackendTestHook = previousHook }()
 
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		// Pack counts and sizes, without a filter, must come from the constant-
 		// time aggregates.
-		stats, runErr := runIndexStats(ctx, indexStatsOptions{Daemon: daemonOptions}, gopts, gopts.Term)
+		stats, runErr := runIndexStats(ctx, indexStatsOptions{Daemon: daemonOptions}, globalOptions, globalOptions.Term)
 		if runErr != nil {
 			return runErr
 		}
@@ -380,7 +383,7 @@ func assertIntrospectionAnswersWithoutListing(t *testing.T, env *testEnvironment
 		// Composition by tier and type.
 		grouped, runErr := runIndexStats(ctx, indexStatsOptions{
 			Daemon: daemonOptions, GroupBy: []string{"tier", "type"},
-		}, gopts, gopts.Term)
+		}, globalOptions, globalOptions.Term)
 		if runErr != nil {
 			return runErr
 		}
@@ -391,7 +394,7 @@ func assertIntrospectionAnswersWithoutListing(t *testing.T, env *testEnvironment
 		// Individual packs, from the catalog.
 		packs, runErr := runIndexPacks(ctx, indexPacksOptions{
 			Daemon: daemonOptions, Sort: "size", Limit: 5,
-		}, gopts, gopts.Term)
+		}, globalOptions, globalOptions.Term)
 		if runErr != nil {
 			return runErr
 		}
@@ -402,7 +405,7 @@ func assertIntrospectionAnswersWithoutListing(t *testing.T, env *testEnvironment
 		// Per-backend composition without touching the backend.
 		backends, runErr := runIndexBackends(ctx, indexBackendsOptions{
 			Daemon: daemonOptions, NoList: true,
-		}, gopts, gopts.Term)
+		}, globalOptions, globalOptions.Term)
 		if runErr != nil {
 			return runErr
 		}
@@ -420,7 +423,7 @@ func assertIntrospectionAnswersWithoutListing(t *testing.T, env *testEnvironment
 		history, runErr := runIndexHistory(ctx, indexHistoryOptions{
 			Daemon: daemonOptions, Metric: "created", Bucket: "hour",
 			Histogram: true, Forecast: true, AllowIncomplete: true,
-		}, gopts, gopts.Term)
+		}, globalOptions, globalOptions.Term)
 		if runErr != nil {
 			return runErr
 		}
@@ -448,9 +451,9 @@ func assertIntrospectionAnswersWithoutListing(t *testing.T, env *testEnvironment
 func repositoryID(t *testing.T, env *testEnvironment) string {
 	t.Helper()
 	var id string
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		printer := progress.NewTerminalPrinter(false, gopts.Verbosity, gopts.Term)
-		ctx, repo, unlock, err := openWithReadLock(ctx, gopts, false, printer)
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, globalOptions.Term)
+		_, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
 		if err != nil {
 			return err
 		}

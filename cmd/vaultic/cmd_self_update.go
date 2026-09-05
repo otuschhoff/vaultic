@@ -23,7 +23,7 @@ func registerSelfUpdateCommand(cmd *cobra.Command, globalOptions *global.Options
 }
 
 func newSelfUpdateCommand(globalOptions *global.Options) *cobra.Command {
-	var opts SelfUpdateOptions
+	var options selfUpdateOptions
 
 	cmd := &cobra.Command{
 		Use:   "self-update [flags]",
@@ -42,36 +42,36 @@ Exit status is 1 if there was any error.
 `,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSelfUpdate(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runSelfUpdate(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// SelfUpdateOptions collects all options for the update-vaultic command.
-type SelfUpdateOptions struct {
+// selfUpdateOptions collects all options for the update-vaultic command.
+type selfUpdateOptions struct {
 	Output string
 }
 
-func (opts *SelfUpdateOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVar(&opts.Output, "output", "", "Save the downloaded file as `filename` (default: running binary itself)")
+func (options *selfUpdateOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVar(&options.Output, "output", "", "Save the downloaded file as `filename` (default: running binary itself)")
 }
 
-func runSelfUpdate(ctx context.Context, opts SelfUpdateOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	if opts.Output == "" {
+func runSelfUpdate(ctx context.Context, options selfUpdateOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	if options.Output == "" {
 		file, err := os.Executable()
 		if err != nil {
 			return errors.Wrap(err, "unable to find executable")
 		}
 
-		opts.Output = file
+		options.Output = file
 	}
 
-	fi, err := os.Lstat(opts.Output)
+	fi, err := os.Lstat(options.Output)
 	if err != nil {
-		dirname := filepath.Dir(opts.Output)
+		dirname := filepath.Dir(options.Output)
 		di, err := os.Lstat(dirname)
 		if err != nil {
 			return err
@@ -81,14 +81,14 @@ func runSelfUpdate(ctx context.Context, opts SelfUpdateOptions, gopts global.Opt
 		}
 	} else {
 		if !fi.Mode().IsRegular() {
-			return errors.Fatalf("output path %v is not a normal file, use --output to specify a different file path", opts.Output)
+			return errors.Fatalf("output path %v is not a normal file, use --output to specify a different file path", options.Output)
 		}
 	}
 
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
-	printer.P("writing vaultic to %v", opts.Output)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	printer.P("writing vaultic to %v", options.Output)
 
-	v, err := selfupdate.DownloadLatestStableRelease(ctx, opts.Output, global.Version, printer.P)
+	v, err := selfupdate.DownloadLatestStableRelease(ctx, options.Output, global.Version, printer.P)
 	if err != nil {
 		return errors.Fatalf("unable to update vaultic: %v", err)
 	}

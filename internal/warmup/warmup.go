@@ -126,7 +126,7 @@ func (r *Runner) runParallel(ctx context.Context, handles []backend.Handle, path
 	errCh := make(chan error, len(handles))
 
 	for _, h := range handles {
-		h := h
+
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

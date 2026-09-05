@@ -132,6 +132,7 @@ func (r *fileRestorer) forEachBlob(
 	return nil
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 
 	packs := make(map[vaultic.ID]*packInfo) // all packs
@@ -299,6 +300,7 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 			})
 			if err != nil {
 				// restoreFiles should have caught this error before
+				//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 				panic(err)
 			}
 		} else if packsMap, ok := file.blobs.(map[vaultic.ID][]fileBlobInfo); ok {
@@ -321,9 +323,8 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 }
 
 func (r *fileRestorer) sanitizeError(file *fileInfo, err error) error {
-	switch err {
-	case nil, context.Canceled, context.DeadlineExceeded:
-		// Context errors are permanent.
+	switch {
+	case err == nil, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return err
 	default:
 		return r.Error(file.location, err)

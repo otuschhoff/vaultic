@@ -355,7 +355,7 @@ func TestPathVersionKeyOrderingAndTerminators(t *testing.T) {
 		t.Fatalf("path-version key parsed as %#v err=%v", parsed, err)
 	}
 	ordered := [][]byte{self1, self2, child, sibling}
-	if !(bytes.Compare(ordered[0], ordered[1]) < 0 && bytes.Compare(ordered[1], ordered[2]) < 0 && bytes.Compare(ordered[2], ordered[3]) < 0) {
+	if bytes.Compare(ordered[0], ordered[1]) >= 0 || bytes.Compare(ordered[1], ordered[2]) >= 0 || bytes.Compare(ordered[2], ordered[3]) >= 0 {
 		t.Fatalf("path-version ordering is wrong: %x %x %x %x", self1, self2, child, sibling)
 	}
 	if prefix := PathVersionPrefix(1, "a/b"); !bytes.HasPrefix(self1, prefix) || bytes.HasPrefix(sibling, prefix) {

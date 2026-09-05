@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Recovery capsule policy and reconstruction tests.
+
     use super::*;
     use async_trait::async_trait;
 
@@ -116,7 +118,7 @@ mod tests {
         let policy = UnlockPolicy::Threshold {
             group_id: "operators".to_owned(),
             required: 2,
-            members: vec!["alice".to_owned(), "bob".to_owned()],
+            members: vec!["alice".into(), "bob".into()],
         };
         let capsule = CapsuleBuilder::new("repo-a", 8)
             .broker_identity_public_key(&[9; 32])
@@ -211,10 +213,10 @@ mod tests {
                     group_id: "operators".to_owned(),
                     required: 2,
                     members: vec![
-                        "enclave".to_owned(),
-                        "gcp".to_owned(),
-                        "offline".to_owned(),
-                        "yubikey".to_owned(),
+                        "enclave".into(),
+                        "gcp".into(),
+                        "offline".into(),
+                        "yubikey".into(),
                     ],
                 },
                 &[
@@ -341,7 +343,7 @@ mod tests {
         let header = CapsuleHeader {
             format: 2,
             logical_id: "unused".to_owned(),
-            repository_id: "repo-a".to_owned(),
+            repository_id: "repo-a".into(),
             generation: 8,
             root_key_version: 1,
             metadata_dek_version: 1,
@@ -352,7 +354,7 @@ mod tests {
             policy_intent: PolicyIntent::Quorum,
         };
         let member = MemberShare {
-            member_id: "alice".to_owned(),
+            member_id: "alice".into(),
             group_id: "operators".to_owned(),
             share_index: 1,
             threshold: 2,
@@ -397,7 +399,7 @@ mod tests {
         mirror.validate().unwrap();
 
         let mut foreign = mirror;
-        foreign.header.repository_id = "repo-b".to_owned();
+        foreign.header.repository_id = "repo-b".into();
         assert!(foreign.validate().is_err());
     }
 
@@ -415,15 +417,15 @@ mod tests {
                 UnlockPolicy::AnyOf {
                     policies: vec![
                         UnlockPolicy::Member {
-                            member_id: "yubikey-primary".to_owned(),
+                            member_id: "yubikey-primary".into(),
                         },
                         UnlockPolicy::Member {
-                            member_id: "yubikey-backup".to_owned(),
+                            member_id: "yubikey-backup".into(),
                         },
                     ],
                 },
                 UnlockPolicy::Member {
-                    member_id: "offline-password".to_owned(),
+                    member_id: "offline-password".into(),
                 },
             ],
         };

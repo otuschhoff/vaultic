@@ -42,7 +42,7 @@ func checkTar(t *testing.T, testDir string, srcTar *bytes.Buffer) error {
 
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

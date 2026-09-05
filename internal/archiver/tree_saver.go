@@ -91,7 +91,7 @@ func (s *treeSaver) save(ctx context.Context, job *saveTreeJob) (*data.Node, Ite
 		// return the error if it wasn't ignored
 		if fnr.err != nil {
 			debug.Log("err for %v: %v", fnr.snPath, fnr.err)
-			if fnr.err == context.Canceled {
+			if errors.Is(fnr.err, context.Canceled) {
 				return nil, stats, fnr.err
 			}
 
@@ -114,7 +114,7 @@ func (s *treeSaver) save(ctx context.Context, job *saveTreeJob) (*data.Node, Ite
 		if err != nil && errors.Is(err, data.ErrTreeNotOrdered) && lastNode != nil && fnr.node.Equals(*lastNode) {
 			debug.Log("insert %v failed: %v", fnr.node.Name, err)
 			// ignore error if an _identical_ node already exists, but nevertheless issue a warning
-			_ = s.errFn(fnr.target, err)
+			_ = s.errFn(fnr.target, err) // The callback records the failed tree item for the aggregate result.
 			err = nil
 		}
 		if err != nil {

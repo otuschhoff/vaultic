@@ -41,22 +41,22 @@ Exit status is 12 if the password is incorrect.
 	return cmd
 }
 
-func runKeyList(ctx context.Context, gopts global.Options, args []string, term ui.Terminal) error {
+func runKeyList(ctx context.Context, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) > 0 {
 		return fmt.Errorf("the key list command expects no arguments, only options - please see `vaultic help key list` for usage and flags")
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	return listKeys(ctx, repo, gopts, printer)
+	return listKeys(ctx, repo, globalOptions, printer)
 }
 
-func listKeys(ctx context.Context, s *repository.Repository, gopts global.Options, printer vaultic.Printer) error {
+func listKeys(ctx context.Context, s *repository.Repository, globalOptions global.Options, printer vaultic.Printer) error {
 	type keyInfo struct {
 		Current  bool   `json:"current"`
 		ID       string `json:"id"`
@@ -95,8 +95,8 @@ func listKeys(ctx context.Context, s *repository.Repository, gopts global.Option
 		return err
 	}
 
-	if gopts.JSON {
-		return json.NewEncoder(gopts.Term.OutputWriter()).Encode(keys)
+	if globalOptions.JSON {
+		return json.NewEncoder(globalOptions.Term.OutputWriter()).Encode(keys)
 	}
 
 	tab := table.New()
@@ -109,5 +109,5 @@ func listKeys(ctx context.Context, s *repository.Repository, gopts global.Option
 		tab.AddRow(key)
 	}
 
-	return tab.Write(gopts.Term.OutputWriter())
+	return tab.Write(globalOptions.Term.OutputWriter())
 }

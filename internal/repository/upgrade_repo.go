@@ -106,7 +106,7 @@ func UpgradeRepo(ctx context.Context, repo *Repository) error {
 		return repoError
 	}
 
-	_ = os.Remove(backupFileName)
-	_ = os.Remove(tempdir)
+	_ = os.Remove(backupFileName) // The repository upgrade is committed; this local backup is advisory.
+	_ = os.Remove(tempdir)        // The repository upgrade is committed; this temporary directory is advisory.
 	return nil
 }

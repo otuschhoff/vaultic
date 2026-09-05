@@ -47,7 +47,7 @@ func NewFactory() location.Factory {
 func run(errorLog func(string, ...any), command string, args ...string) (*StdioConn, *sync.WaitGroup, chan struct{}, func() error, error) {
 	cmd := exec.Command(command, args...)
 
-	p, err := cmd.StderrPipe()
+	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -58,9 +58,12 @@ func run(errorLog func(string, ...any), command string, args ...string) (*StdioC
 	// start goroutine to add a prefix to all messages printed by to stderr by rclone
 	wg.Go(func() {
 		defer close(waitCh)
-		sc := bufio.NewScanner(p)
-		for sc.Scan() {
-			errorLog("rclone: %v\n", sc.Text())
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			errorLog("rclone: %v\n", scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			errorLog("rclone: read stderr: %v\n", err)
 		}
 		debug.Log("command has exited, closing waitCh")
 	})
@@ -74,7 +77,7 @@ func run(errorLog func(string, ...any), command string, args ...string) (*StdioC
 	if err != nil {
 		// close first pipe and ignore subsequent errors
 		_ = r.Close()
-		_ = stdin.Close()
+		_ = stdin.Close() // Preserve the command-start failure; stdin was never handed to a running child.
 		return nil, nil, nil, nil, err
 	}
 
@@ -217,7 +220,7 @@ func newBackend(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog f
 		debug.Log("Wait returned %v", err)
 		be.waitResult = err
 		// close our side of the pipes to rclone, ignore errors
-		_ = stdioConn.CloseAll()
+		_ = stdioConn.CloseAll() // Preserve the protocol setup failure while tearing down both pipes.
 	})
 
 	// send an HTTP request to the base URL, see if the server is there
@@ -240,7 +243,7 @@ func newBackend(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog f
 	if err != nil {
 		// ignore subsequent errors
 		_ = bg()
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Kill() // Preserve the protocol failure; process termination is best-effort teardown.
 
 		// wait for rclone to exit
 		wg.Wait()
@@ -258,7 +261,7 @@ func newBackend(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog f
 		return nil, fmt.Errorf("error talking HTTP to rclone: %w", err)
 	}
 
-	_ = res.Body.Close()
+	_ = res.Body.Close() // The response body is fully consumed; closing cannot change the decoded result.
 	debug.Log("HTTP status %q returned, moving instance to background", res.Status)
 	err = bg()
 	if err != nil {
@@ -287,7 +290,7 @@ func Open(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog func(st
 
 	restBackend, err := rest.Open(ctx, restConfig, debug.RoundTripper(be.tr), errorLog)
 	if err != nil {
-		_ = be.Close()
+		_ = be.Close() // Preserve the backend setup failure while releasing the partial client.
 		return nil, err
 	}
 
@@ -316,7 +319,7 @@ func Create(ctx context.Context, cfg Config, lim limiter.Limiter, errorLog func(
 
 	restBackend, err := rest.Create(ctx, restConfig, debug.RoundTripper(be.tr), errorLog)
 	if err != nil {
-		_ = be.Close()
+		_ = be.Close() // Preserve the backend setup failure while releasing the partial client.
 		return nil, err
 	}
 

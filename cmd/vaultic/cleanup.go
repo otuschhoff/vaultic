@@ -26,13 +26,12 @@ func createGlobalContext(stderr io.Writer) context.Context {
 func cleanupHandler(c <-chan os.Signal, cancel context.CancelFunc, stderr io.Writer) {
 	s := <-c
 	debug.Log("signal %v received, cleaning up", s)
-	// ignore error as there's no good way to handle it
-	_, _ = fmt.Fprintf(stderr, "\rsignal %v received, cleaning up \n", s)
+	_, _ = fmt.Fprintf(stderr, "\rsignal %v received, cleaning up \n", s) // Signal cleanup has no alternate output channel.
 
 	if val, _ := env.Lookup("DEBUG_STACKTRACE_SIGINT"); val != "" {
-		_, _ = stderr.Write([]byte("\n--- STACKTRACE START ---\n\n"))
-		_, _ = stderr.Write([]byte(debug.DumpStacktrace()))
-		_, _ = stderr.Write([]byte("\n--- STACKTRACE END ---\n"))
+		_, _ = stderr.Write([]byte("\n--- STACKTRACE START ---\n\n")) // Diagnostic output cannot be recovered after stderr fails.
+		_, _ = stderr.Write([]byte(debug.DumpStacktrace()))           // Diagnostic output cannot be recovered after stderr fails.
+		_, _ = stderr.Write([]byte("\n--- STACKTRACE END ---\n"))     // Diagnostic output cannot be recovered after stderr fails.
 	}
 
 	cancel()

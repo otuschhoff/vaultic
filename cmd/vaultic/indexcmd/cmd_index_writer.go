@@ -38,7 +38,7 @@ func newIndexWriterCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	options.Daemon.AddFlags(command.PersistentFlags())
 	command.PersistentFlags().StringVar(&options.RepositoryID, "repository-id", "", "repository identity bound to metadata writer ownership")
-	_ = command.MarkPersistentFlagRequired("repository-id")
+	mustMarkPersistentFlagRequired(command, "repository-id")
 	command.AddCommand(
 		newIndexWriterStatusCommand(globalOptions, &options),
 		newIndexWriterDemoteCommand(globalOptions, &options),

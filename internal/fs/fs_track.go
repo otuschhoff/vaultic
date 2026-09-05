@@ -33,6 +33,7 @@ func newTrackFile(stack []byte, filename string, file File) *trackFile {
 	f := &trackFile{file}
 	runtime.SetFinalizer(f, func(_ any) {
 		fmt.Fprintf(os.Stderr, "file %s not closed\n\nStacktrack:\n%s\n", filename, stack)
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("file " + filename + " not closed")
 	})
 	return f

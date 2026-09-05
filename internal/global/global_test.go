@@ -239,7 +239,7 @@ func TestAzureKeyVaultPasswordSourceValidation(t *testing.T) {
 		{AzureKeyVaultURL: "https://example.vault.azure.net", AzureKeyVaultSecret: "vaultic", PasswordFile: "password"},
 		{AzureKeyVaultURL: "https://example.vault.azure.net", AzureKeyVaultSecret: "vaultic", AzureKeyVaultTimeout: -1},
 	} {
-		if _, err := resolvePassword(&opts, "VAULTIC_PASSWORD"); err == nil {
+		if _, err := resolvePassword(context.Background(), &opts, "VAULTIC_PASSWORD"); err == nil {
 			t.Fatalf("expected invalid Key Vault options %#v to fail", opts)
 		}
 	}

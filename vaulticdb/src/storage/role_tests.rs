@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod role_tests {
+    //! Storage writer-role integration tests.
+
     use super::*;
     use std::env;
     use crate::proto::{KeyValue, WriteBatchRequest};

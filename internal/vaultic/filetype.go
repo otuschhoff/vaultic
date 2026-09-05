@@ -17,7 +17,8 @@ const (
 	StagingFile
 )
 
-// Keep in sync with backend.FileType.String().
+// String returns the repository path name for the file type.
+// Keep its result in sync with backend.FileType.String.
 func (t FileType) String() string {
 	s := "invalid"
 	switch t {
@@ -57,6 +58,7 @@ func (w *WriteableFileType) ToFileType() FileType {
 	case WriteableSnapshotFile:
 		return SnapshotFile
 	default:
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("invalid WriteableFileType")
 	}
 }

@@ -40,6 +40,7 @@ func subtreesCollector(tree TreeNodeIterator) (TreeNodeIterator, func() vaultic.
 			isComplete = true
 		}, func() vaultic.IDs {
 			if !isComplete {
+				//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 				panic("tree was not read completely")
 			}
 			return subtrees
@@ -91,6 +92,8 @@ func loadTreeWorker(
 }
 
 // filterTree receives the result of a tree load and queues new trees for loading and processing.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func filterTrees(ctx context.Context, repo vaultic.Loader, trees vaultic.IDs, loaderChan chan<- trackedID, hugeTreeLoaderChan chan<- trackedID,
 	in <-chan trackedTreeItem, skip func(tree vaultic.ID) bool, p vaultic.Counter) {
 
@@ -111,6 +114,7 @@ func filterTrees(ctx context.Context, repo vaultic.Loader, trees vaultic.IDs, lo
 
 	for {
 		// if no tree is waiting to be sent, pick the next one
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if loadCh == nil && len(backlog) > 0 {
 			// process last added ids first, that is traverse the tree in depth-first order
 			ln := len(backlog) - 1

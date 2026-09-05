@@ -1,3 +1,5 @@
+//! Chunked authenticated encryption for metadata object stores.
+
 use std::{
     fmt::{Debug, Display, Formatter},
     ops::Range,
@@ -19,13 +21,15 @@ use slatedb::object_store::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::ids::RepositoryId;
+
 const MAGIC: &[u8; 8] = b"VLTDBENC";
 const FORMAT_VERSION: u8 = 1;
 const ALGORITHM_AES_256_GCM: u8 = 1;
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 const HEADER_SIZE: usize = 8 + 1 + 1 + 4 + 4 + 8 + NONCE_SIZE;
-pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
+const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 
 pub mod envelope;
 pub mod recovery_capsule;
@@ -54,21 +58,21 @@ pub fn is_integrity_error(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 #[derive(Clone)]
-pub struct EncryptedObjectStore {
+pub(crate) struct EncryptedObjectStore {
     inner: Arc<dyn ObjectStore>,
-    repository_id: Arc<str>,
+    repository_id: RepositoryId,
     keyring: Arc<RwLock<Keyring>>,
     chunk_size: usize,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct EncryptionKey {
-    pub version: u32,
+pub(crate) struct EncryptionKey {
+    pub(crate) version: u32,
     key: Box<[u8; 32]>,
 }
 
 impl EncryptionKey {
-    pub fn new(version: u32, key: [u8; 32]) -> Self {
+    pub(crate) fn new(version: u32, key: [u8; 32]) -> Self {
         let key = Box::new(key);
         #[cfg(unix)]
         unsafe {
@@ -123,9 +127,9 @@ impl Display for EncryptedObjectStore {
 }
 
 impl EncryptedObjectStore {
-    pub fn new(
+    pub(crate) fn new(
         inner: Arc<dyn ObjectStore>,
-        repository_id: impl Into<Arc<str>>,
+        repository_id: impl Into<RepositoryId>,
         keys: Vec<EncryptionKey>,
         write_version: u32,
     ) -> anyhow::Result<Self> {
@@ -176,7 +180,7 @@ impl EncryptedObjectStore {
             .map_err(|_| encryption_error(EncryptionError::Header))
     }
 
-    pub fn install_write_key(&self, key: EncryptionKey) -> anyhow::Result<()> {
+    pub(crate) fn install_write_key(&self, key: EncryptionKey) -> anyhow::Result<()> {
         if key.version == 0 {
             anyhow::bail!("metadata encryption key version must be non-zero");
         }
@@ -196,7 +200,7 @@ impl EncryptedObjectStore {
         Ok(())
     }
 
-    pub fn retire_read_keys_before(&self, version: u32) -> anyhow::Result<()> {
+    pub(crate) fn retire_read_keys_before(&self, version: u32) -> anyhow::Result<()> {
         let mut keyring = self
             .keyring
             .write()

@@ -348,7 +348,6 @@ type testService struct {
 	vaulticdbv1.UnimplementedVaulticDBServer
 	protocol      string
 	schema        string
-	repo          string
 	blockShutdown bool
 	corruptKeys   bool
 }

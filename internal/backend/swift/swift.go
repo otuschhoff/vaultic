@@ -83,16 +83,13 @@ func Open(ctx context.Context, cfg Config, rt http.RoundTripper, _ func(string, 
 	}
 
 	// Ensure container exists
-	switch _, _, err := be.conn.Container(ctx, be.container); err {
-	case nil:
-		// Container exists
-
-	case swift.ContainerNotFound:
+	switch _, _, err := be.conn.Container(ctx, be.container); {
+	case err == nil:
+	case errors.Is(err, swift.ContainerNotFound):
 		err = be.createContainer(ctx, cfg.DefaultContainerPolicy)
 		if err != nil {
 			return nil, errors.Wrap(err, "beSwift.createContainer")
 		}
-
 	default:
 		return nil, errors.Wrap(err, "conn.Container")
 	}
@@ -125,8 +122,8 @@ func (be *beSwift) Hasher() hash.Hash {
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (be *beSwift) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
-	return util.DefaultLoad(ctx, h, length, offset, be.openReader, fn)
+func (be *beSwift) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
+	return util.DefaultLoad(ctx, h, length, offset, be.openReader, consume)
 }
 
 func (be *beSwift) openReader(ctx context.Context, h backend.Handle, length int, offset int64) (io.ReadCloser, error) {
@@ -149,11 +146,11 @@ func (be *beSwift) openReader(ctx context.Context, h backend.Handle, length int,
 
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) && length > 0 {
 		// get response length, but don't cause backend calls
-		cctx, cancel := context.WithCancel(context.Background())
+		cctx, cancel := context.WithCancel(ctx)
 		cancel()
 		objLength, e := obj.Length(cctx)
 		if e == nil && objLength != int64(length) {
-			_ = obj.Close()
+			_ = obj.Close() // Preserve the object-read failure; the reader has no buffered writes.
 			return nil, &swift.Error{StatusCode: http.StatusRequestedRangeNotSatisfiable, Text: "vaultic-file-too-short"}
 		}
 	}
@@ -162,13 +159,13 @@ func (be *beSwift) openReader(ctx context.Context, h backend.Handle, length int,
 }
 
 // Save stores data in the backend at the handle.
-func (be *beSwift) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (be *beSwift) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	objName := be.Filename(h)
 	encoding := "binary/octet-stream"
 
-	hdr := swift.Headers{"Content-Length": strconv.FormatInt(rd.Length(), 10)}
+	hdr := swift.Headers{"Content-Length": strconv.FormatInt(reader.Length(), 10)}
 	_, err := be.conn.ObjectPut(ctx,
-		be.container, objName, rd, true, hex.EncodeToString(rd.Hash()),
+		be.container, objName, reader, true, hex.EncodeToString(reader.Hash()),
 		encoding, hdr)
 	// swift does not return the upload length
 
@@ -202,8 +199,8 @@ func (be *beSwift) List(ctx context.Context, t backend.FileType, fn func(backend
 	prefix += "/"
 
 	err := be.conn.ObjectsWalk(ctx, be.container, &swift.ObjectsOpts{Prefix: prefix},
-		func(ctx context.Context, opts *swift.ObjectsOpts) (any, error) {
-			newObjects, err := be.conn.Objects(ctx, be.container, opts)
+		func(ctx context.Context, listOptions *swift.ObjectsOpts) (any, error) {
+			newObjects, err := be.conn.Objects(ctx, be.container, listOptions)
 
 			if err != nil {
 				return nil, errors.Wrap(err, "conn.ObjectNames")

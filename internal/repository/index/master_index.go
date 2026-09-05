@@ -340,6 +340,7 @@ func (mi *MasterIndex) prepareIncrementalLoad(ctx context.Context, indexList vau
 	// the first index is always final so this can't actually fail
 	loadedIDList, err := mi.idx[0].IDs()
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("internal error - failed to get index IDs")
 	}
 	loadedIDs := vaultic.NewIDSet(loadedIDList...)
@@ -432,6 +433,7 @@ func (mi *MasterIndex) Rewrite(
 ) error {
 	for _, idx := range mi.idx {
 		if !idx.Final() {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("internal error - index must be saved before calling MasterIndex.Rewrite")
 		}
 	}
@@ -574,7 +576,8 @@ func (pipeline *rewritePipeline) keepCurrentIndex(idx *Index, packBlobsIDSet vau
 func (pipeline *rewritePipeline) markObsolete(idx *Index) {
 	ids, err := idx.IDs()
 	if err != nil || len(ids) != 1 {
-		//nolint:forbidigo // A finalized rewrite input must have exactly one ID.
+		// A finalized rewrite input must have exactly one ID.
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("internal error, index has no ID")
 	}
 	pipeline.obsolete.Merge(vaultic.NewIDSet(ids...))
@@ -685,6 +688,7 @@ func (mi *MasterIndex) SaveFallback(
 			if idx.Final() {
 				ids, err := idx.IDs()
 				if err != nil {
+					//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 					panic("internal error - finalized index without ID")
 				}
 				debug.Log("adding index ids %v to supersedes field", ids)
@@ -758,6 +762,8 @@ func (mi *MasterIndex) saveFullIndex(ctx context.Context, r vaultic.SaverUnpacke
 }
 
 // ListPacks returns the blobs of the specified pack files grouped by pack file.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (mi *MasterIndex) ListPacks(ctx context.Context, packs vaultic.IDSet) <-chan PackBlobs {
 	out := make(chan PackBlobs)
 	go func() {

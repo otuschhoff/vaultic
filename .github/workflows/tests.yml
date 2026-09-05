@@ -258,12 +258,7 @@ jobs:
         with:
           # Required: the version of golangci-lint is required and must be specified without patch version: we always use the latest patch version.
           version: v2.12
-          args: --verbose --timeout 5m --new-from-rev=${{ github.event.pull_request.base.sha }}
-
-        # only run golangci-lint for pull requests, otherwise ALL hints get
-        # reported. We need to slowly address all issues until we can enable
-        # linting the master branch :)
-        if: github.event_name == 'pull_request'
+          args: --verbose --timeout 5m --max-issues-per-linter=0 --max-same-issues=0
 
       - name: Check go.mod/go.sum
         run: |

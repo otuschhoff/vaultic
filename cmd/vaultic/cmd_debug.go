@@ -64,33 +64,33 @@ Exit status is 12 if the password is incorrect.
 }
 
 func newDebugExamineCommand(globalOptions *global.Options) *cobra.Command {
-	var opts DebugExamineOptions
+	var options debugExamineOptions
 
 	cmd := &cobra.Command{
 		Use:               "examine pack-ID...",
 		Short:             "Examine a pack file",
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDebugExamine(cmd.Context(), *globalOptions, opts, args, globalOptions.Term)
+			return runDebugExamine(cmd.Context(), *globalOptions, options, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-type DebugExamineOptions struct {
+type debugExamineOptions struct {
 	TryRepair     bool
 	RepairByte    bool
 	ExtractPack   bool
 	ReuploadBlobs bool
 }
 
-func (opts *DebugExamineOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.ExtractPack, "extract-pack", false, "write blobs to the current directory")
-	f.BoolVar(&opts.ReuploadBlobs, "reupload-blobs", false, "reupload blobs to the repository")
-	f.BoolVar(&opts.TryRepair, "try-repair", false, "try to repair broken blobs with single bit flips")
-	f.BoolVar(&opts.RepairByte, "repair-byte", false, "try to repair broken blobs by trying bytes")
+func (options *debugExamineOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.ExtractPack, "extract-pack", false, "write blobs to the current directory")
+	f.BoolVar(&options.ReuploadBlobs, "reupload-blobs", false, "reupload blobs to the repository")
+	f.BoolVar(&options.TryRepair, "try-repair", false, "try to repair broken blobs with single bit flips")
+	f.BoolVar(&options.RepairByte, "repair-byte", false, "try to repair broken blobs by trying bytes")
 }
 
 func prettyPrintJSON(wr io.Writer, item interface{}) error {
@@ -117,14 +117,14 @@ func debugPrintSnapshots(ctx context.Context, repo *repository.Repository, wr io
 	})
 }
 
-func runDebugDump(ctx context.Context, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+func runDebugDump(ctx context.Context, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
 	if len(args) != 1 {
 		return errors.Fatal("type not specified")
 	}
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
@@ -134,20 +134,20 @@ func runDebugDump(ctx context.Context, gopts global.Options, args []string, term
 
 	switch tpe {
 	case "indexes":
-		return repository.DumpIndexes(ctx, repo, gopts.Term.OutputWriter(), printer)
+		return repository.DumpIndexes(ctx, repo, globalOptions.Term.OutputWriter(), printer)
 	case "snapshots":
-		return debugPrintSnapshots(ctx, repo, gopts.Term.OutputWriter())
+		return debugPrintSnapshots(ctx, repo, globalOptions.Term.OutputWriter())
 	case "packs":
-		return repository.DumpPacks(ctx, repo, gopts.Term.OutputWriter(), printer)
+		return repository.DumpPacks(ctx, repo, globalOptions.Term.OutputWriter(), printer)
 	case "all":
 		printer.S("snapshots:")
-		err := debugPrintSnapshots(ctx, repo, gopts.Term.OutputWriter())
+		err := debugPrintSnapshots(ctx, repo, globalOptions.Term.OutputWriter())
 		if err != nil {
 			return err
 		}
 
 		printer.S("indexes:")
-		err = repository.DumpIndexes(ctx, repo, gopts.Term.OutputWriter(), printer)
+		err = repository.DumpIndexes(ctx, repo, globalOptions.Term.OutputWriter(), printer)
 		if err != nil {
 			return err
 		}
@@ -158,14 +158,14 @@ func runDebugDump(ctx context.Context, gopts global.Options, args []string, term
 	}
 }
 
-func runDebugExamine(ctx context.Context, gopts global.Options, opts DebugExamineOptions, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+func runDebugExamine(ctx context.Context, globalOptions global.Options, options debugExamineOptions, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
-	if opts.ExtractPack && gopts.NoLock {
+	if options.ExtractPack && globalOptions.NoLock {
 		return fmt.Errorf("--extract-pack and --no-lock are mutually exclusive")
 	}
 
-	ctx, repo, unlock, err := openWithAppendLock(ctx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithAppendLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -194,10 +194,10 @@ func runDebugExamine(ctx context.Context, gopts global.Options, opts DebugExamin
 	}
 
 	examineOpts := repository.ExaminePackOptions{
-		TryRepair:     opts.TryRepair,
-		RepairByte:    opts.RepairByte,
-		ExtractPack:   opts.ExtractPack,
-		ReuploadBlobs: opts.ReuploadBlobs,
+		TryRepair:     options.TryRepair,
+		RepairByte:    options.RepairByte,
+		ExtractPack:   options.ExtractPack,
+		ReuploadBlobs: options.ReuploadBlobs,
 	}
 	for _, id := range ids {
 		err := repository.ExaminePack(ctx, repo, id, examineOpts, printer)

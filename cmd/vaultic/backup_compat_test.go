@@ -2,7 +2,7 @@ package main
 
 import "github.com/otuschhoff/vaultic/cmd/vaultic/backupcmd"
 
-type BackupOptions = backupcmd.BackupOptions
+type backupOptions = backupcmd.BackupConfig
 
 var runBackup = backupcmd.Run
 var ErrInvalidSourceData = backupcmd.ErrInvalidSourceData

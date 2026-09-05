@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Key provider binding and authentication tests.
+
     use super::*;
 
     #[test]

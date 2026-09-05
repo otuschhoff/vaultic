@@ -272,11 +272,11 @@ func Dial(ctx context.Context, socket string) (*Client, error) {
 	client := &Client{connection: connection, reader: bufio.NewReaderSize(connection, maxResponse)}
 	var response responseEnvelope
 	if err := client.call(ctx, map[string]any{"operation": "negotiate", "protocols": []string{protocolVersion}}, &response); err != nil {
-		_ = connection.Close()
+		_ = connection.Close() // Preserve the handshake failure; the connection is not usable.
 		return nil, fmt.Errorf("negotiate key broker protocol: %w", err)
 	}
 	if response.Result != "negotiated" || response.Protocol != protocolVersion || response.Challenge == "" {
-		_ = connection.Close()
+		_ = connection.Close() // Preserve the authentication failure; the connection is not usable.
 		return nil, errors.New("key broker returned an invalid protocol negotiation")
 	}
 	client.protocol = response.Protocol
@@ -873,6 +873,7 @@ func (value *capsule) verifySession(
 
 func (value *capsule) unwrapMember(member memberShare, credential []byte, keyfile bool) ([]byte, error) {
 	var key []byte
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if member.Provider == "offline-argon2id" && !keyfile {
 		if member.Argon2 == nil || member.Argon2.MemoryKiB < 64*1024 || member.Argon2.Iterations < 3 ||
 			member.Argon2.Parallelism == 0 {

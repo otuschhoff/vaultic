@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     let clock_started = Instant::now();
     let mut state = DaemonState {
         daemon_id: Arc::from(daemon_id),
-        repository_id: Arc::from(repository_id),
+        repository_id: repository_id.clone(),
         auth_token: auth_token.map(Arc::new),
         unix_socket: matches!(&transport, TransportConfig::Unix(_)),
         tcp_enabled: matches!(&transport, TransportConfig::Tcp { .. }),

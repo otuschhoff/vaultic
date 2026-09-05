@@ -149,6 +149,7 @@ func ResolveSnapshotRoot(snapshot SnapshotRecord, revisions map[string][]byte) (
 	return UnmarshalDirectoryRevision(encoded)
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func ValidateDirectoryGraph(root InodeRef, directories map[InodeRef]DirectoryNode) error {
 	rootNode, ok := directories[root]
 	if !ok {

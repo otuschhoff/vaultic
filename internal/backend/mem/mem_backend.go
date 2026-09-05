@@ -102,6 +102,7 @@ func (be *MemoryBackend) Save(ctx context.Context, h backend.Handle, rd backend.
 	// must never fail according to interface
 	_, err = beHash.Write(buf)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 	if !bytes.Equal(beHash.Sum(nil), rd.Hash()) {

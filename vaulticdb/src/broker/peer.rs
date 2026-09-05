@@ -1,3 +1,5 @@
+//! Unix peer process inspection and installation-path trust checks.
+
 use std::{
     fs,
     os::{fd::AsRawFd, unix::fs::MetadataExt},

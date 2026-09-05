@@ -1,3 +1,5 @@
+//! Quorum-aware replicated object-store implementation.
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::future::try_join_all;
@@ -11,7 +13,7 @@ use std::{fmt, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
-pub struct ReplicatedObjectStore {
+pub(crate) struct ReplicatedObjectStore {
     stores: Arc<Vec<Replica>>,
 }
 
@@ -22,7 +24,7 @@ struct Replica {
 }
 
 impl ReplicatedObjectStore {
-    pub fn new(stores: Vec<(String, Arc<dyn ObjectStore>)>) -> Result<Self> {
+    pub(crate) fn new(stores: Vec<(String, Arc<dyn ObjectStore>)>) -> Result<Self> {
         if stores.len() < 2 {
             return Err(generic_error(
                 "replicated object store requires at least two replicas",

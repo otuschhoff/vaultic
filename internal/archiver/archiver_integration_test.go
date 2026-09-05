@@ -445,7 +445,7 @@ func TestMetadataBackupErrorFiltering(t *testing.T) {
 	// check that errors from reading extended metadata are properly filtered
 	node, err := arch.nodeFromFileInfo("file", filename+"invalid", nonExistNoder, false)
 	rtest.Assert(t, node != nil, "node is missing")
-	rtest.Assert(t, err == replacementErr, "expected %v got %v", replacementErr, err)
+	rtest.Assert(t, errors.Is(err, replacementErr), "expected %v got %v", replacementErr, err)
 	rtest.Assert(t, filteredErr != nil, "missing inner error")
 
 	// check that errors from reading irregular file are not filtered

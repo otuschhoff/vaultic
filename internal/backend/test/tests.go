@@ -582,6 +582,7 @@ func (s *Suite[C]) TestSave(t *testing.T) {
 		// must never fail according to interface
 		_, err := beHasher.Write(data)
 		if err != nil {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic(err)
 		}
 		beHash = beHasher.Sum(nil)
@@ -638,7 +639,7 @@ func (s *Suite[C]) TestSaveError(t *testing.T) {
 	h := backend.Handle{Type: backend.PackFile, Name: id.String()}
 	err := b.Save(context.TODO(), h, &incompleteByteReader{ByteReader: *backend.NewByteReader(data, b.Hasher())})
 	// try to delete possible leftovers
-	_ = s.delayedRemove(t, b, h)
+	_ = s.delayedRemove(t, b, h) // delayedRemove reports every retry failure through the test handle.
 	if err == nil {
 		t.Fatal("incomplete upload did not fail")
 	}
@@ -680,7 +681,7 @@ func (s *Suite[C]) TestSaveWrongHash(t *testing.T) {
 	if err2 != nil {
 		t.Fatal(err2)
 	}
-	_ = s.delayedRemove(t, b, h)
+	_ = s.delayedRemove(t, b, h) // delayedRemove reports every retry failure through the test handle.
 	if err == nil {
 		t.Fatal("upload with wrong hash did not fail")
 	}

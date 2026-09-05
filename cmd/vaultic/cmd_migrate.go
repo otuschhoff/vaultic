@@ -14,7 +14,7 @@ import (
 )
 
 func newMigrateCommand(globalOptions *global.Options) *cobra.Command {
-	var opts MigrateOptions
+	var options migrateOptions
 
 	cmd := &cobra.Command{
 		Use:   "migrate [flags] [migration name] [...]",
@@ -36,21 +36,21 @@ Exit status is 12 if the password is incorrect.
 		DisableAutoGenTag: true,
 		GroupID:           cmdGroupDefault,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMigrate(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runMigrate(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// MigrateOptions bundles all options for the 'check' command.
-type MigrateOptions struct {
+// migrateOptions bundles all options for the 'check' command.
+type migrateOptions struct {
 	Force bool
 }
 
-func (opts *MigrateOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVarP(&opts.Force, "force", "f", false, `apply a migration a second time`)
+func (options *migrateOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVarP(&options.Force, "force", "f", false, `apply a migration a second time`)
 }
 
 func checkMigrations(ctx context.Context, repo vaultic.Repository, printer vaultic.Printer) error {
@@ -76,11 +76,11 @@ func checkMigrations(ctx context.Context, repo vaultic.Repository, printer vault
 	return nil
 }
 
-func applyMigrations(ctx context.Context, opts MigrateOptions, gopts global.Options, repo vaultic.Repository,
+func applyMigrations(ctx context.Context, options migrateOptions, globalOptions global.Options, repo vaultic.Repository,
 	args []string, term ui.Terminal, printer vaultic.Printer) error {
 	var firsterr error
 	for _, name := range args {
-		found, applyErr, err := applyNamedMigration(ctx, opts, gopts, repo, name, term, printer)
+		found, applyErr, err := applyNamedMigration(ctx, options, globalOptions, repo, name, term, printer)
 		if err != nil {
 			return err
 		}
@@ -94,7 +94,7 @@ func applyMigrations(ctx context.Context, opts MigrateOptions, gopts global.Opti
 	return firsterr
 }
 
-func applyNamedMigration(ctx context.Context, opts MigrateOptions, gopts global.Options, repo vaultic.Repository,
+func applyNamedMigration(ctx context.Context, options migrateOptions, globalOptions global.Options, repo vaultic.Repository,
 	name string, term ui.Terminal, printer vaultic.Printer) (bool, error, error) {
 	for _, migration := range migrations.All {
 		if migration.Name() != name {
@@ -104,7 +104,7 @@ func applyNamedMigration(ctx context.Context, opts MigrateOptions, gopts global.
 		if err != nil {
 			return true, nil, err
 		}
-		if !ok && !opts.Force {
+		if !ok && !options.Force {
 			if reason == "" {
 				reason = "check failed"
 			}
@@ -117,9 +117,9 @@ func applyNamedMigration(ctx context.Context, opts MigrateOptions, gopts global.
 		}
 		if migration.RepoCheck() {
 			printer.P("checking repository integrity...\n")
-			checkGopts := gopts
+			checkGopts := globalOptions
 			checkGopts.NoLock = true
-			if _, err := runCheck(ctx, CheckOptions{}, checkGopts, nil, term); err != nil {
+			if _, err := runCheck(ctx, checkOptions{}, checkGopts, nil, term); err != nil {
 				return true, nil, err
 			}
 		}
@@ -134,9 +134,9 @@ func applyNamedMigration(ctx context.Context, opts MigrateOptions, gopts global.
 	return false, nil, nil
 }
 
-func runMigrate(ctx context.Context, opts MigrateOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+func runMigrate(ctx context.Context, options migrateOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -144,5 +144,5 @@ func runMigrate(ctx context.Context, opts MigrateOptions, gopts global.Options, 
 	if len(args) == 0 {
 		return checkMigrations(ctx, repo, printer)
 	}
-	return applyMigrations(ctx, opts, gopts, repo, args, term, printer)
+	return applyMigrations(ctx, options, globalOptions, repo, args, term, printer)
 }

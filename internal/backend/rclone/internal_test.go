@@ -20,7 +20,7 @@ func TestRcloneExit(t *testing.T) {
 	cfg.Remote = dir
 	be, err := Open(context.TODO(), cfg, nil, t.Logf)
 	var e *exec.Error
-	if errors.As(err, &e) && e.Err == exec.ErrNotFound {
+	if errors.As(err, &e) && errors.Is(e.Err, exec.ErrNotFound) {
 		t.Skipf("program %q not found", e.Name)
 		return
 	}

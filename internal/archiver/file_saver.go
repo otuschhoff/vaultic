@@ -97,7 +97,7 @@ func (s *fileSaver) Save(
 	case s.ch <- job:
 	case <-ctx.Done():
 		debug.Log("not sending job, context is cancelled: %v", ctx.Err())
-		_ = file.Close()
+		_ = file.Close() // Preserve the stat failure; this source file has no buffered writes.
 		close(ch)
 	}
 
@@ -128,13 +128,14 @@ func (s *fileChunkState) reset() {
 	s.closed = false
 }
 
-// readNextChunk reads from rd and returns the next chunk of data. io.EOF is
+// readNextChunk reads from reader and returns the next chunk of data. io.EOF is
 // returned when all chunks have been read.
-func (s *fileChunkState) readNextChunk(rd io.Reader, chnker vaultic.Chunker, data []byte) ([]byte, error) {
+func (s *fileChunkState) readNextChunk(reader io.Reader, chnker vaultic.Chunker, data []byte) ([]byte, error) {
 	data = data[:0]
 	for {
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if s.bpos >= s.bmax {
-			n, err := io.ReadFull(rd, s.readBuf)
+			n, err := io.ReadFull(reader, s.readBuf)
 
 			if err == io.ErrUnexpectedEOF {
 				err = nil
@@ -198,11 +199,13 @@ func (completion *fileSaveCompletion) completeBlob() {
 		return
 	}
 	if completion.isCompleted {
-		panic("completed twice") //nolint:forbidigo // completion is a single-delivery invariant
+		// Completion is a single-delivery invariant.
+		panic("completed twice") //nolint:forbidigo // A second delivery is an internal state-machine defect.
 	}
 	for _, id := range completion.result.node.Content {
 		if id.IsNull() {
-			panic("completed file with null ID") //nolint:forbidigo // completed content IDs must be populated
+			// Completed content IDs must be populated.
+			panic("completed file with null ID") //nolint:forbidigo // Completed content must always have an assigned ID.
 		}
 	}
 	completion.isCompleted = true
@@ -217,7 +220,8 @@ func (completion *fileSaveCompletion) completeError(err error) {
 		return
 	}
 	if completion.isCompleted {
-		panic("completed twice") //nolint:forbidigo // completion is a single-delivery invariant
+		// Completion is a single-delivery invariant.
+		panic("completed twice") //nolint:forbidigo // A second delivery is an internal state-machine defect.
 	}
 	completion.isCompleted = true
 	completion.result.err = fmt.Errorf("failed to save %v: %w", completion.params.target, err)
@@ -240,13 +244,13 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 
 	node, err := s.NodeFromFileInfo(params.snapshotPath, params.target, params.file, false)
 	if err != nil {
-		_ = params.file.Close()
+		_ = params.file.Close() // Preserve the node-conversion failure for this read-only source.
 		completion.completeError(err)
 		return
 	}
 
 	if node.Type != data.NodeTypeFile {
-		_ = params.file.Close()
+		_ = params.file.Close() // Preserve the invalid-node failure for this read-only source.
 		completion.completeError(errors.Errorf("node type %q is wrong", node.Type))
 		return
 	}
@@ -260,13 +264,13 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	for {
 		buf := s.saveFilePool.Get()
 		chunkData, err := params.chunkState.readNextChunk(params.file, params.chunker, buf.Data)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			buf.Release()
 			break
 		}
 		if err != nil {
 			buf.Release()
-			_ = params.file.Close()
+			_ = params.file.Close() // Preserve the chunk-read failure for this read-only source.
 			completion.completeError(err)
 			return
 		}
@@ -278,7 +282,7 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 		// test if the context has been cancelled, return the error
 		if ctx.Err() != nil {
 			buf.Release()
-			_ = params.file.Close()
+			_ = params.file.Close() // Preserve cancellation as the operation result.
 			completion.completeError(ctx.Err())
 			return
 		}
@@ -312,7 +316,7 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 
 		// test if the context has been cancelled, return the error
 		if ctx.Err() != nil {
-			_ = params.file.Close()
+			_ = params.file.Close() // Preserve cancellation as the operation result.
 			completion.completeError(ctx.Err())
 			return
 		}

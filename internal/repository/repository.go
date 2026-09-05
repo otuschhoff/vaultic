@@ -337,6 +337,7 @@ func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.En
 	if err != nil {
 		return nil, err
 	}
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if resolution.Mode == enginepkg.ModeSlateDB {
 		if recovery, _ := ctx.Value(metadataLossRecoveryContextKey{}).(bool); recovery {
 			engine := enginepkg.NewRecoveryLegacyEngine(r.idx)
@@ -474,6 +475,8 @@ func (r *Repository) DataPackSizeBytes() uint64 {
 func (r *Repository) packSizing(t vaultic.BlobType) (size, limit uint64, growFactor uint32) {
 	cfg := r.Config()
 	switch t {
+	case vaultic.InvalidBlob, vaultic.NumBlobTypes:
+		return uint64(r.opts.PackSize), 0, 0
 	case vaultic.TreeBlob:
 		if r.opts.TreePackSize != 0 {
 			return r.opts.TreePackSize, r.opts.TreePackSizeLimit, r.opts.TreePackGrowFactor
@@ -676,7 +679,7 @@ func (r *Repository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []
 			for _, blob := range blobs {
 				h := backend.Handle{Type: backend.PackFile, Name: blob.PackID().String(), IsMetadata: blob.Blob.Type.IsMetadata()}
 				// ignore errors as there's not much we can do here
-				_ = r.cache.Forget(h)
+				_ = r.cache.Forget(h) // Cache eviction cannot change the authoritative backend result.
 			}
 		}
 

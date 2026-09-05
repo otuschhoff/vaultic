@@ -15,7 +15,7 @@ import (
 )
 
 func newConfigCommand(globalOptions *global.Options) *cobra.Command {
-	var opts ConfigOptions
+	var options configOptions
 
 	cmd := &cobra.Command{
 		Use:   "config [flags]",
@@ -42,19 +42,19 @@ Exit status is 1 if there was any error.
 			return runConfig(
 				cmd.Context(),
 				cmd.Flags(),
-				opts,
+				options,
 				*globalOptions,
 				args,
 				progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term),
 			)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// ConfigOptions bundles all options for the config command.
-type ConfigOptions struct {
+// configOptions bundles all options for the config command.
+type configOptions struct {
 	setVersion      string
 	setCompression  string
 	setAppendOnly   string
@@ -75,36 +75,41 @@ type ConfigOptions struct {
 	setMaxPacksizeToleratePercent string
 }
 
-func (opts *ConfigOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVar(&opts.setVersion, "set-version", "", "set the repository `version` (1 or 2; upgrade via 'migrate' instead when possible)")
-	f.StringVar(&opts.setCompression, "set-compression", "", "set compression `level` (-7..22, 0=off) or 'unset'")
-	f.StringVar(&opts.setAppendOnly, "set-append-only", "", "set append-only `mode` (true|false|unset)")
-	f.StringVar(&opts.setExtraVerify, "set-extra-verify", "", "verify data before upload (true|false|unset; default true)")
-	f.StringVar(&opts.setChunker, "set-chunker", "", "set chunker `type` (rabin|fixed_size|unset)")
-	f.StringVar(&opts.setChunkSize, "set-chunk-size", "", "set average/fixed chunk `size` in bytes (or 'unset')")
-	f.StringVar(&opts.setChunkMinSize, "set-chunk-min-size", "", "set minimum chunk `size` in bytes (or 'unset')")
-	f.StringVar(&opts.setChunkMaxSize, "set-chunk-max-size", "", "set maximum chunk `size` in bytes (or 'unset')")
-	f.StringVar(&opts.setTreePackSize, "set-treepack-size", "", "set target tree pack `size` in bytes (or 'unset')")
-	f.StringVar(&opts.setTreePackGrowfactor, "set-treepack-growfactor", "", "set tree pack grow `factor` (or 'unset')")
-	f.StringVar(&opts.setTreePackSizeLimit, "set-treepack-size-limit", "", "set tree pack size `limit` in bytes (or 'unset')")
-	f.StringVar(&opts.setDataPackSize, "set-datapack-size", "", "set target data pack `size` in bytes (or 'unset')")
-	f.StringVar(&opts.setDataPackGrowfactor, "set-datapack-growfactor", "", "set data pack grow `factor` (or 'unset')")
-	f.StringVar(&opts.setDataPackSizeLimit, "set-datapack-size-limit", "", "set data pack size `limit` in bytes (or 'unset')")
-	f.StringVar(&opts.setMinPacksizeToleratePercent, "set-min-packsize-tolerate-percent", "", "tolerated minimum pack size in `percent` of target (or 'unset')")
+func (options *configOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVar(&options.setVersion, "set-version", "", "set the repository `version` (1 or 2; upgrade via 'migrate' instead when possible)")
+	f.StringVar(&options.setCompression, "set-compression", "", "set compression `level` (-7..22, 0=off) or 'unset'")
+	f.StringVar(&options.setAppendOnly, "set-append-only", "", "set append-only `mode` (true|false|unset)")
+	f.StringVar(&options.setExtraVerify, "set-extra-verify", "", "verify data before upload (true|false|unset; default true)")
+	f.StringVar(&options.setChunker, "set-chunker", "", "set chunker `type` (rabin|fixed_size|unset)")
+	f.StringVar(&options.setChunkSize, "set-chunk-size", "", "set average/fixed chunk `size` in bytes (or 'unset')")
+	f.StringVar(&options.setChunkMinSize, "set-chunk-min-size", "", "set minimum chunk `size` in bytes (or 'unset')")
+	f.StringVar(&options.setChunkMaxSize, "set-chunk-max-size", "", "set maximum chunk `size` in bytes (or 'unset')")
+	f.StringVar(&options.setTreePackSize, "set-treepack-size", "", "set target tree pack `size` in bytes (or 'unset')")
+	f.StringVar(&options.setTreePackGrowfactor, "set-treepack-growfactor", "", "set tree pack grow `factor` (or 'unset')")
+	f.StringVar(&options.setTreePackSizeLimit, "set-treepack-size-limit", "", "set tree pack size `limit` in bytes (or 'unset')")
+	f.StringVar(&options.setDataPackSize, "set-datapack-size", "", "set target data pack `size` in bytes (or 'unset')")
+	f.StringVar(&options.setDataPackGrowfactor, "set-datapack-growfactor", "", "set data pack grow `factor` (or 'unset')")
+	f.StringVar(&options.setDataPackSizeLimit, "set-datapack-size-limit", "", "set data pack size `limit` in bytes (or 'unset')")
 	f.StringVar(
-		&opts.setMaxPacksizeToleratePercent,
+		&options.setMinPacksizeToleratePercent,
+		"set-min-packsize-tolerate-percent",
+		"",
+		"tolerated minimum pack size in `percent` of target (or 'unset')",
+	)
+	f.StringVar(
+		&options.setMaxPacksizeToleratePercent,
 		"set-max-packsize-tolerate-percent",
 		"",
 		"tolerated maximum pack size in `percent` of target, 0=unlimited (or 'unset')",
 	)
 }
 
-func runConfig(ctx context.Context, flags *pflag.FlagSet, opts ConfigOptions, gopts global.Options, args []string, printer vaultic.Printer) error {
+func runConfig(ctx context.Context, flags *pflag.FlagSet, options configOptions, globalOptions global.Options, args []string, printer vaultic.Printer) error {
 	if len(args) > 0 {
 		return errors.Fatal("the config command expects no arguments, only options - please see `vaultic help config` for usage and flags")
 	}
 
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -113,94 +118,66 @@ func runConfig(ctx context.Context, flags *pflag.FlagSet, opts ConfigOptions, go
 	changed := false
 	err = repo.UpdateConfig(ctx, func(cfg *vaultic.Config) error {
 		var applyErr error
-		changed, applyErr = opts.apply(flags, cfg)
+		changed, applyErr = options.apply(flags, cfg)
 		return applyErr
 	})
 	if err != nil {
 		return err
 	}
 
-	if changed && !gopts.JSON {
+	if changed && !globalOptions.JSON {
 		printer.S("saved new config")
 	}
 
-	return printConfig(repo.Config(), gopts, printer)
+	return printConfig(repo.Config(), globalOptions, printer)
 }
 
 // apply applies the --set-* options to cfg. It reports whether anything changed.
-func (opts *ConfigOptions) apply(flags *pflag.FlagSet, cfg *vaultic.Config) (bool, error) {
+func (options *configOptions) apply(flags *pflag.FlagSet, cfg *vaultic.Config) (bool, error) {
 	changed := false
 	set := func(name string) bool { return flags.Changed(name) }
 
 	if set("set-version") {
-		v, err := strconv.ParseUint(opts.setVersion, 10, 32)
+		v, err := strconv.ParseUint(options.setVersion, 10, 32)
 		if err != nil || v < uint64(vaultic.MinRepoVersion) || v > uint64(vaultic.MaxRepoVersion) {
-			return false, errors.Fatalf("invalid repository version %q", opts.setVersion)
+			return false, errors.Fatalf("invalid repository version %q", options.setVersion)
 		}
 		cfg.Version = uint(v)
 		changed = true
 	}
 	if set("set-compression") {
-		if err := setOptionalInt(opts.setCompression, -7, 22, &cfg.Compression, "compression"); err != nil {
+		if err := setOptionalInt(options.setCompression, -7, 22, &cfg.Compression, "compression"); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 	if set("set-append-only") {
-		if _, err := parseOptionalBool(opts.setAppendOnly, &cfg.AppendOnlyFlag); err != nil {
+		if _, err := parseOptionalBool(options.setAppendOnly, &cfg.AppendOnlyFlag); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 	if set("set-extra-verify") {
-		if err := setOptionalBoolPtr(opts.setExtraVerify, &cfg.ExtraVerify); err != nil {
+		if err := setOptionalBoolPtr(options.setExtraVerify, &cfg.ExtraVerify); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 
-	chunkerChanged := false
-	if set("set-chunker") {
-		switch strings.ToLower(opts.setChunker) {
-		case "unset", "":
-			cfg.ChunkerType = ""
-		case "rabin":
-			cfg.ChunkerType = vaultic.ChunkerRabin
-		case "fixed_size", "fixedsize":
-			cfg.ChunkerType = vaultic.ChunkerFixedSize
-		default:
-			return false, errors.Fatalf("invalid chunker %q, must be one of (rabin|fixed_size|unset)", opts.setChunker)
-		}
-		chunkerChanged = true
-	}
-	if set("set-chunk-size") {
-		if err := setOptionalUint64(opts.setChunkSize, &cfg.ChunkSizeBytes); err != nil {
-			return false, err
-		}
-		chunkerChanged = true
-	}
-	if set("set-chunk-min-size") {
-		if err := setOptionalUint64(opts.setChunkMinSize, &cfg.ChunkMinSizeBytes); err != nil {
-			return false, err
-		}
-		chunkerChanged = true
-	}
-	if set("set-chunk-max-size") {
-		if err := setOptionalUint64(opts.setChunkMaxSize, &cfg.ChunkMaxSizeBytes); err != nil {
-			return false, err
-		}
-		chunkerChanged = true
+	chunkerChanged, err := options.applyChunkerConfig(flags, cfg)
+	if err != nil {
+		return false, err
 	}
 	changed = changed || chunkerChanged
 
-	if err := applyPackConfig(flags, "set-treepack-", opts.setTreePackSize, opts.setTreePackGrowfactor, opts.setTreePackSizeLimit,
+	if err := applyPackConfig(flags, "set-treepack-", options.setTreePackSize, options.setTreePackGrowfactor, options.setTreePackSizeLimit,
 		&cfg.TreePackSizeBytes, &cfg.TreePackGrowFactor, &cfg.TreePackSizeLimitBytes); err != nil {
 		return false, err
 	}
 	if flags.Changed("set-treepack-size") || flags.Changed("set-treepack-growfactor") || flags.Changed("set-treepack-size-limit") {
 		changed = true
 	}
-	if err := applyPackConfig(flags, "set-datapack-", opts.setDataPackSize, opts.setDataPackGrowfactor, opts.setDataPackSizeLimit,
+	if err := applyPackConfig(flags, "set-datapack-", options.setDataPackSize, options.setDataPackGrowfactor, options.setDataPackSizeLimit,
 		&cfg.DataPackSizeBytes, &cfg.DataPackGrowFactor, &cfg.DataPackSizeLimitBytes); err != nil {
 		return false, err
 	}
@@ -209,18 +186,54 @@ func (opts *ConfigOptions) apply(flags *pflag.FlagSet, cfg *vaultic.Config) (boo
 	}
 
 	if set("set-min-packsize-tolerate-percent") {
-		if err := setOptionalUint32(opts.setMinPacksizeToleratePercent, 100, &cfg.MinPacksizeToleratePercent, "min_packsize_tolerate_percent"); err != nil {
+		if err := setOptionalUint32(options.setMinPacksizeToleratePercent, 100, &cfg.MinPacksizeToleratePercent, "min_packsize_tolerate_percent"); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 	if set("set-max-packsize-tolerate-percent") {
-		if err := setOptionalUint32(opts.setMaxPacksizeToleratePercent, 100, &cfg.MaxPacksizeToleratePercent, "max_packsize_tolerate_percent"); err != nil {
+		if err := setOptionalUint32(options.setMaxPacksizeToleratePercent, 100, &cfg.MaxPacksizeToleratePercent, "max_packsize_tolerate_percent"); err != nil {
 			return false, err
 		}
 		changed = true
 	}
 
+	return changed, nil
+}
+
+func (options *configOptions) applyChunkerConfig(flags *pflag.FlagSet, cfg *vaultic.Config) (bool, error) {
+	changed := false
+	if flags.Changed("set-chunker") {
+		switch strings.ToLower(options.setChunker) {
+		case "unset", "":
+			cfg.ChunkerType = ""
+		case "rabin":
+			cfg.ChunkerType = vaultic.ChunkerRabin
+		case "fixed_size", "fixedsize":
+			cfg.ChunkerType = vaultic.ChunkerFixedSize
+		default:
+			return false, errors.Fatalf("invalid chunker %q, must be one of (rabin|fixed_size|unset)", options.setChunker)
+		}
+		changed = true
+	}
+	values := []struct {
+		flag  string
+		value string
+		dest  *uint64
+	}{
+		{"set-chunk-size", options.setChunkSize, &cfg.ChunkSizeBytes},
+		{"set-chunk-min-size", options.setChunkMinSize, &cfg.ChunkMinSizeBytes},
+		{"set-chunk-max-size", options.setChunkMaxSize, &cfg.ChunkMaxSizeBytes},
+	}
+	for _, value := range values {
+		if !flags.Changed(value.flag) {
+			continue
+		}
+		if err := setOptionalUint64(value.value, value.dest); err != nil {
+			return false, err
+		}
+		changed = true
+	}
 	return changed, nil
 }
 
@@ -315,8 +328,8 @@ func parseOptionalBool(s string, dst *bool) (bool, error) {
 }
 
 // printConfig prints the config as JSON (for --json) or as key: value lines.
-func printConfig(cfg vaultic.Config, gopts global.Options, printer vaultic.Printer) error {
-	if gopts.JSON {
+func printConfig(cfg vaultic.Config, globalOptions global.Options, printer vaultic.Printer) error {
+	if globalOptions.JSON {
 		data, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			return err

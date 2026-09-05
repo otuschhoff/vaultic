@@ -145,7 +145,7 @@ func newIndexPathAtCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().StringVar(&options.Snapshot, "snapshot", "", "snapshot id to resolve within")
-	_ = command.MarkFlagRequired("snapshot")
+	mustMarkFlagRequired(command, "snapshot")
 	return command
 }
 

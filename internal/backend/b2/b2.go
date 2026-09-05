@@ -68,14 +68,14 @@ func newClient(ctx context.Context, cfg Config, rt http.RoundTripper) (*b2.Clien
 	}
 
 	sniffer := &sniffingRoundTripper{RoundTripper: rt}
-	opts := []b2.ClientOption{b2.Transport(sniffer)}
+	clientOptions := []b2.ClientOption{b2.Transport(sniffer)}
 
 	// if the connection B2 fails, this can cause the client to hang
 	// cancel the connection after a minute to at least provide some feedback to the user
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	c, err := b2.NewClient(ctx, cfg.AccountID, cfg.Key.Unwrap(), opts...)
-	if err == context.DeadlineExceeded {
+	c, err := b2.NewClient(ctx, cfg.AccountID, cfg.Key.Unwrap(), clientOptions...)
+	if errors.Is(err, context.DeadlineExceeded) {
 		if sniffer.lastErr != nil {
 			return nil, sniffer.lastErr
 		}
@@ -177,23 +177,23 @@ func (be *b2Backend) IsPermanentError(err error) bool {
 
 // Load runs fn with a reader that yields the contents of the file at h at the
 // given offset.
-func (be *b2Backend) Load(ctx context.Context, h backend.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
+func (be *b2Backend) Load(ctx context.Context, h backend.Handle, length int, offset int64, consume func(reader io.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	return util.DefaultLoad(ctx, h, length, offset, be.openReader, func(rd io.Reader) error {
+	return util.DefaultLoad(ctx, h, length, offset, be.openReader, func(reader io.Reader) error {
 		if length == 0 {
-			return fn(rd)
+			return consume(reader)
 		}
 
 		// there is no direct way to efficiently check whether the file is too short
 		// use a LimitedReader to track the number of bytes read
-		limrd := &io.LimitedReader{R: rd, N: int64(length)}
-		err := fn(limrd)
+		limitedReader := &io.LimitedReader{R: reader, N: int64(length)}
+		err := consume(limitedReader)
 
-		// check the underlying reader to be agnostic to however fn() handles the returned error
-		_, rderr := rd.Read([]byte{0})
-		if rderr == io.EOF && limrd.N != 0 {
+		// check the underlying reader to be agnostic to however consume() handles the returned error
+		_, readErr := reader.Read([]byte{0})
+		if readErr == io.EOF && limitedReader.N != 0 {
 			// file is too short
 			return fmt.Errorf("%w: %w", errTooShort, err)
 		}
@@ -220,7 +220,7 @@ func (be *b2Backend) openReader(ctx context.Context, h backend.Handle, length in
 }
 
 // Save stores data in the backend at the handle.
-func (be *b2Backend) Save(ctx context.Context, h backend.Handle, rd backend.RewindReader) error {
+func (be *b2Backend) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -229,17 +229,17 @@ func (be *b2Backend) Save(ctx context.Context, h backend.Handle, rd backend.Rewi
 
 	// b2 always requires sha1 checksums for uploaded file parts
 	w := obj.NewWriter(ctx)
-	n, err := io.Copy(w, rd)
+	n, err := io.Copy(w, reader)
 
 	if err != nil {
-		_ = w.Close()
+		_ = w.Close() // Preserve the upload-copy failure; Close only aborts the incomplete writer.
 		return errors.Wrap(err, "Copy")
 	}
 
 	// sanity check
-	if n != rd.Length() {
-		_ = w.Close()
-		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", n, rd.Length())
+	if n != reader.Length() {
+		_ = w.Close() // Preserve the length mismatch; Close only aborts the invalid upload.
+		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", n, reader.Length())
 	}
 	return errors.Wrap(w.Close(), "Close")
 }

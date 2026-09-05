@@ -19,7 +19,7 @@ type DefaultLayout struct {
 	join func(...string) string
 }
 
-var defaultLayoutPaths = map[backend.FileType]string{
+var defaultLayoutPaths = map[backend.FileType]string{ //nolint:exhaustive // ConfigFile is stored at the repository root.
 	backend.PackFile:      "data",
 	backend.SnapshotFile:  "snapshots",
 	backend.IndexFile:     "index",

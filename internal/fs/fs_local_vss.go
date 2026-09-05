@@ -149,6 +149,8 @@ func (fs *LocalVss) isMountPointIncluded(mountPoint string) bool {
 // If the path is not yet available as a snapshot, a snapshot is created.
 // If creation of a snapshot fails the file's original path is returned as
 // a fallback.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (fs *LocalVss) snapshotPath(path string) string {
 	fixPath := fixpath(path)
 
@@ -168,6 +170,7 @@ func (fs *LocalVss) snapshotPath(path string) string {
 	// ensure snapshot for volume exists
 	_, snapshotExists := fs.snapshots[volumeNameLower]
 	_, snapshotFailed := fs.failedSnapshots[volumeNameLower]
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if !snapshotExists && !snapshotFailed {
 		fs.mutex.RUnlock()
 		fs.mutex.Lock()
@@ -217,6 +220,7 @@ func (fs *LocalVss) snapshotPath(path string) string {
 	}
 
 	var snapshotPath string
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if snapshot, ok := fs.snapshots[volumeNameLower]; ok {
 		// handle case when data is inside mountpoint
 		for mountPoint, info := range snapshot.mountPointInfo {
@@ -233,6 +237,7 @@ func (fs *LocalVss) snapshotPath(path string) string {
 				// the same path or below mountPoint and operation is case-insensitive
 				relativeToMount, err := filepath.Rel(mountPoint, fixPath)
 				if err != nil {
+					//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 					panic(err)
 				}
 

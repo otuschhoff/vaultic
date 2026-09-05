@@ -39,7 +39,7 @@ func Walk(ctx context.Context, repo vaultic.BlobLoader, root vaultic.ID, visitor
 	err = visitor.ProcessNode(root, "/", nil, err)
 
 	if err != nil {
-		if err == ErrSkipNode {
+		if errors.Is(err, ErrSkipNode) {
 			err = nil
 		}
 		return err
@@ -70,7 +70,7 @@ func walk(ctx context.Context, repo vaultic.BlobLoader, prefix string, parentTre
 		if node.Type != data.NodeTypeDir {
 			err := visitor.ProcessNode(parentTreeID, p, node, nil)
 			if err != nil {
-				if err == ErrSkipNode {
+				if errors.Is(err, ErrSkipNode) {
 					// skip the remaining entries in this tree
 					break
 				}
@@ -88,7 +88,7 @@ func walk(ctx context.Context, repo vaultic.BlobLoader, prefix string, parentTre
 		subtree, err := data.LoadTree(ctx, repo, *node.Subtree)
 		err = visitor.ProcessNode(parentTreeID, p, node, err)
 		if err != nil {
-			if err == ErrSkipNode {
+			if errors.Is(err, ErrSkipNode) {
 				continue
 			}
 

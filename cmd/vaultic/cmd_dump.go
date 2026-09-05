@@ -23,7 +23,7 @@ import (
 )
 
 func newDumpCommand(globalOptions *global.Options) *cobra.Command {
-	var opts DumpOptions
+	var options dumpOptions
 	cmd := &cobra.Command{
 		Use:   "dump [flags] snapshotID file",
 		Short: "Print backed-up files or folders to stdout",
@@ -52,29 +52,29 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDump(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runDump(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// DumpOptions collects all options for the dump command.
-type DumpOptions struct {
+// dumpOptions collects all options for the dump command.
+type dumpOptions struct {
 	data.SnapshotFilter
 	Archive string
 	Target  string
 }
 
-func (opts *DumpOptions) AddFlags(f *pflag.FlagSet) {
-	initSingleSnapshotFilter(f, &opts.SnapshotFilter)
-	f.StringVarP(&opts.Archive, "archive", "a", "tar", "set archive `format` as \"tar\", \"tar.gz\", \"zip\", or \"auto\"")
-	f.StringVarP(&opts.Target, "target", "t", "", "write the output to target `path`")
+func (options *dumpOptions) AddFlags(f *pflag.FlagSet) {
+	initSingleSnapshotFilter(f, &options.SnapshotFilter)
+	f.StringVarP(&options.Archive, "archive", "a", "tar", "set archive `format` as \"tar\", \"tar.gz\", \"zip\", or \"auto\"")
+	f.StringVarP(&options.Target, "target", "t", "", "write the output to target `path`")
 }
 
 func splitPath(p string) []string {
@@ -145,18 +145,18 @@ func printFromTree(
 	return fmt.Errorf("path %q not found in snapshot", item)
 }
 
-func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args []string, term ui.Terminal) error {
+func runDump(ctx context.Context, options dumpOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) != 2 {
 		return errors.Fatal("no file and no snapshot ID specified")
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
-	archive := resolveDumpArchive(opts.Archive, opts.Target)
+	archive := resolveDumpArchive(options.Archive, options.Target)
 	switch archive {
 	case "tar", "tar.gz", "zip":
 	default:
-		return fmt.Errorf("unknown archive format %q", opts.Archive)
+		return fmt.Errorf("unknown archive format %q", options.Archive)
 	}
 
 	snapshotIDString := args[0]
@@ -166,13 +166,13 @@ func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args [
 
 	splittedPath := splitPath(path.Clean(pathToPrint))
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	sn, subfolder, err := opts.SnapshotFilter.FindLatest(ctx, repo, repo, snapshotIDString)
+	sn, subfolder, err := options.SnapshotFilter.FindLatest(ctx, repo, repo, snapshotIDString)
 	if err != nil {
 		return errors.Fatalf("failed to find snapshot: %v", err)
 	}
@@ -195,13 +195,13 @@ func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args [
 	outputFileWriter := term.OutputRaw()
 	canWriteArchiveFunc := checkStdoutArchive(term)
 
-	if opts.Target != "" {
-		file, err := os.Create(opts.Target)
+	if options.Target != "" {
+		file, err := os.Create(options.Target)
 		if err != nil {
 			return fmt.Errorf("cannot dump to file: %w", err)
 		}
 		defer func() {
-			_ = file.Close()
+			errors.CloseQuietly(file)
 		}()
 
 		outputFileWriter = file

@@ -40,7 +40,7 @@ Exit status is 12 if the password is incorrect.
 	return cmd
 }
 
-func runRepairPacks(ctx context.Context, gopts global.Options, term ui.Terminal, args []string) error {
+func runRepairPacks(ctx context.Context, globalOptions global.Options, term ui.Terminal, args []string) error {
 	ids := vaultic.NewIDSet()
 	for _, arg := range args {
 		id, err := vaultic.ParseID(arg)
@@ -53,9 +53,9 @@ func runRepairPacks(ctx context.Context, gopts global.Options, term ui.Terminal,
 		return errors.Fatal("no ids specified")
 	}
 
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func runRepairPacks(ctx context.Context, gopts global.Options, term ui.Terminal,
 			return err
 		}
 		if _, err := io.Copy(f, bytes.NewReader(buf)); err != nil {
-			_ = f.Close()
+			errors.CloseQuietly(f)
 			return err
 		}
 		if err := f.Close(); err != nil {

@@ -48,14 +48,14 @@ func (p LockPolicy) String() string {
 	}
 }
 
-func effectiveLockPolicy(policy LockPolicy, opts lockOpenOptions) LockPolicy {
-	if opts.DryRun {
+func effectiveLockPolicy(policy LockPolicy, options lockOpenOptions) LockPolicy {
+	if options.DryRun {
 		return LockNone
 	}
-	if policy != LockExclusive && opts.AllowNoLock {
+	if policy != LockExclusive && options.AllowNoLock {
 		return LockNone
 	}
-	if policy == LockShared && opts.LockFreeRead && feature.Flag.Enabled(feature.LockFree) {
+	if policy == LockShared && options.LockFreeRead && feature.Flag.Enabled(feature.LockFree) {
 		return LockNone
 	}
 	return policy
@@ -63,23 +63,23 @@ func effectiveLockPolicy(policy LockPolicy, opts lockOpenOptions) LockPolicy {
 
 func openWithLockPolicy(
 	ctx context.Context,
-	gopts global.Options,
+	globalOptions global.Options,
 	policy LockPolicy,
-	opts lockOpenOptions,
+	options lockOpenOptions,
 	printer vaultic.Printer,
 ) (context.Context, *repository.Repository, func(), error) {
-	return internalcli.OpenRepository(ctx, gopts, internalcli.LockPolicy(policy), internalcli.OpenOptions{
-		DryRun: opts.DryRun, AllowNoLock: opts.AllowNoLock, LockFreeRead: opts.LockFreeRead,
+	return internalcli.OpenRepository(ctx, globalOptions, internalcli.LockPolicy(policy), internalcli.OpenOptions{
+		DryRun: options.DryRun, AllowNoLock: options.AllowNoLock, LockFreeRead: options.LockFreeRead,
 	}, printer)
 }
 
 func openWithReadLock(
 	ctx context.Context,
-	gopts global.Options,
+	globalOptions global.Options,
 	noLock bool,
 	printer vaultic.Printer,
 ) (context.Context, *repository.Repository, func(), error) {
-	return openWithLockPolicy(ctx, gopts, LockShared, lockOpenOptions{
+	return openWithLockPolicy(ctx, globalOptions, LockShared, lockOpenOptions{
 		AllowNoLock:  noLock,
 		LockFreeRead: true,
 	}, printer)
@@ -87,23 +87,23 @@ func openWithReadLock(
 
 func openWithAppendLock(
 	ctx context.Context,
-	gopts global.Options,
+	globalOptions global.Options,
 	dryRun bool,
 	printer vaultic.Printer,
 ) (context.Context, *repository.Repository, func(), error) {
-	return openWithLockPolicy(ctx, gopts, LockShared, lockOpenOptions{
+	return openWithLockPolicy(ctx, globalOptions, LockShared, lockOpenOptions{
 		DryRun:      dryRun,
-		AllowNoLock: gopts.NoLock,
+		AllowNoLock: globalOptions.NoLock,
 	}, printer)
 }
 
 func openWithExclusiveLock(
 	ctx context.Context,
-	gopts global.Options,
+	globalOptions global.Options,
 	dryRun bool,
 	printer vaultic.Printer,
 ) (context.Context, *repository.Repository, func(), error) {
-	return openWithLockPolicy(ctx, gopts, LockExclusive, lockOpenOptions{
+	return openWithLockPolicy(ctx, globalOptions, LockExclusive, lockOpenOptions{
 		DryRun: dryRun,
 	}, printer)
 }

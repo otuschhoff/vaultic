@@ -109,6 +109,7 @@ func (r *packerManager) mergePackers() ([]*packer, error) {
 		}
 
 		r.packers[i] = nil
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if p == nil {
 			p = packer
 		} else if p.Size()+packer.Size() < r.packSizer.target() {

@@ -374,7 +374,7 @@ func storePlainBlob(id vaultic.ID, prefix string, plain []byte, printer vaultic.
 
 	_, err = f.Write(plain)
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // Preserve the write failure; Close only releases the incomplete diagnostic file.
 		return err
 	}
 

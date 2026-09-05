@@ -102,6 +102,7 @@ func (id *ID) UnmarshalJSON(b []byte) error {
 // IDFromHash returns the ID for the hash.
 func IDFromHash(hash []byte) (id ID) {
 	if len(hash) != idSize {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("invalid hash type, not enough/too many bytes")
 	}
 

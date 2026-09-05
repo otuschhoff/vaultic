@@ -48,10 +48,11 @@ func newFilesWriter(count int, allowRecursiveDelete bool) *filesWriter {
 	cache, err := simplelru.NewLRU[string, *partialFile](count+50, func(_ string, wr *partialFile) {
 		// close the file only when it is not in use
 		if wr.users == 0 {
-			_ = wr.Close()
+			_ = wr.Close() // Eviction is cleanup after completed writes; per-write errors were already returned.
 		}
 	})
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err) // can't happen
 	}
 
@@ -69,16 +70,17 @@ func openFile(path string) (*os.File, error) {
 	}
 	fi, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // Preserve the stat failure; no writes were performed.
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		_ = f.Close()
+		_ = f.Close() // Preserve the non-regular-file failure; no writes were performed.
 		return nil, fmt.Errorf("unexpected file type %v at %q", fi.Mode().Type(), path)
 	}
 	return f, nil
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete bool) (*os.File, error) {
 	f, err := fs.OpenFile(path, fs.O_CREATE|fs.O_WRONLY|fs.O_NOFOLLOW, 0600)
 	if err != nil && fs.IsAccessDenied(err) {
@@ -104,7 +106,7 @@ func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete
 		// stat to check that we've opened a regular file
 		fi, err = f.Stat()
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the stat failure; no writes were performed.
 			return nil, err
 		}
 	}
@@ -119,6 +121,7 @@ func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete
 		}
 	}
 
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if mustReplace {
 		// close handle if we still have it
 		if f != nil {
@@ -144,7 +147,7 @@ func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete
 		}
 		fi, err = f.Stat()
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the stat failure on the replacement file.
 			return nil, err
 		}
 	}
@@ -153,17 +156,18 @@ func createFile(path string, createSize int64, sparse bool, allowRecursiveDelete
 }
 
 func ensureSize(f *os.File, fi os.FileInfo, createSize int64, sparse bool) (*os.File, error) {
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if sparse {
 		err := truncateSparse(f, createSize)
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the sparse-truncate failure for the new file.
 			return nil, err
 		}
 	} else if fi.Size() > createSize {
 		// file is too long must shorten it
 		err := f.Truncate(createSize)
 		if err != nil {
-			_ = f.Close()
+			_ = f.Close() // Preserve the truncate failure for the new file.
 			return nil, err
 		}
 	} else if createSize > 0 {

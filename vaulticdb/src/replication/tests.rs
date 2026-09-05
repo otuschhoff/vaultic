@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Replicated object-store quorum tests.
+
     use super::*;
     use slatedb::object_store::{memory::InMemory, ObjectStoreExt, PutMode};
 

@@ -132,8 +132,7 @@ func newLock(ctx context.Context, repo vaultic.Unpacked[vaultic.FileType], exclu
 	time.Sleep(waitBeforeLockCheck)
 
 	if err = lock.checkForOtherLocks(ctx); err != nil {
-		_ = lock.unlock(ctx)
-		return nil, err
+		return nil, errors.Join(err, lock.unlock(ctx))
 	}
 
 	return lock, nil
@@ -197,7 +196,8 @@ func (l *lockHandle) checkForOtherLocks(ctx context.Context) error {
 			return nil
 		}
 		// lock conflicts are permanent
-		if _, ok := err.(*alreadyLockedError); ok {
+		alreadyLockedError := &alreadyLockedError{}
+		if errors.As(err, &alreadyLockedError) {
 			return err
 		}
 	}
@@ -287,7 +287,7 @@ func delayedCancelContext(parentCtx context.Context, delay time.Duration) (conte
 			return
 		}
 
-		_ = cancelableDelay(ctx, delay)
+		_ = cancelableDelay(ctx, delay) // Either cancellation path only controls when this goroutine exits.
 		cancel()
 	}()
 

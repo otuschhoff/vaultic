@@ -167,12 +167,12 @@ func isDirExcludedByFile(dir, tagFilename, header string, fsInst fs.FS, warnf fu
 		return false
 	}
 	defer func() {
-		_ = f.Close()
+		_ = f.Close() // Preserve the read failure; this read-only handle has no buffered writes.
 	}()
 	buf := make([]byte, len(header))
 	_, err = io.ReadFull(f, buf)
 	// EOF is handled with a dedicated message, otherwise the warning were too cryptic
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		warnf("invalid (too short) signature in exclusion tagfile %q\n", tf)
 		return false
 	}
@@ -265,6 +265,7 @@ func RejectByDevice(samples []string, filesystem fs.FS) (RejectFunc, error) {
 		allowed, err := deviceMap.IsAllowed(fs.Clean(item), fi.DeviceID, fs)
 		if err != nil {
 			// this should not happen
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic(fmt.Sprintf("error checking device ID of %v: %v", item, err))
 		}
 

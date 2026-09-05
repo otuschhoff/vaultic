@@ -16,10 +16,10 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-func testRunRebuildIndex(t testing.TB, gopts global.Options) {
-	rtest.OK(t, withTermStatus(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.Quiet = true
-		return runRebuildIndex(context.TODO(), RepairIndexOptions{}, gopts, gopts.Term)
+func testRunRebuildIndex(t testing.TB, globalOptions global.Options) {
+	rtest.OK(t, withTermStatus(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.Quiet = true
+		return runRebuildIndex(ctx, repairIndexOptions{}, globalOptions, globalOptions.Term)
 	}))
 }
 
@@ -35,7 +35,7 @@ func testRebuildIndex(t *testing.T, backendTestHook global.BackendWrapper) {
 	datafile := filepath.Join("..", "..", "internal", "checker", "testdata", "duplicate-packs-in-index-test-repo.tar.gz")
 	rtest.SetupTarTestFixture(t, env.base, datafile)
 
-	out, _, err := testRunCheckOutput(t, env.gopts, false)
+	out, _, err := testRunCheckOutput(t, env.globalOptions, false)
 	if !strings.Contains(out, "contained in several indexes") {
 		t.Fatalf("did not find checker hint for packs in several indexes")
 	}
@@ -48,11 +48,11 @@ func testRebuildIndex(t *testing.T, backendTestHook global.BackendWrapper) {
 		t.Fatalf("did not find hint for repair index command")
 	}
 
-	env.gopts.BackendTestHook = backendTestHook
-	testRunRebuildIndex(t, env.gopts)
+	env.globalOptions.BackendTestHook = backendTestHook
+	testRunRebuildIndex(t, env.globalOptions)
 
-	env.gopts.BackendTestHook = nil
-	out, _, err = testRunCheckOutput(t, env.gopts, false)
+	env.globalOptions.BackendTestHook = nil
+	out, _, err = testRunCheckOutput(t, env.globalOptions, false)
 	if len(out) != 0 {
 		t.Fatalf("expected no output from the checker, got: %v", out)
 	}
@@ -73,16 +73,16 @@ type indexErrorBackend struct {
 	hasErred bool
 }
 
-func (b *indexErrorBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, consumer func(rd io.Reader) error) error {
-	return b.Backend.Load(ctx, h, length, offset, func(rd io.Reader) error {
+func (b *indexErrorBackend) Load(ctx context.Context, h backend.Handle, length int, offset int64, consumer func(reader io.Reader) error) error {
+	return b.Backend.Load(ctx, h, length, offset, func(reader io.Reader) error {
 		// protect hasErred
 		b.lock.Lock()
 		defer b.lock.Unlock()
 		if !b.hasErred && h.Type == backend.IndexFile {
 			b.hasErred = true
-			return consumer(errorReadCloser{rd})
+			return consumer(errorReadCloser{reader})
 		}
-		return consumer(rd)
+		return consumer(reader)
 	})
 }
 
@@ -127,12 +127,12 @@ func TestRebuildIndexFailsOnAppendOnly(t *testing.T) {
 	datafile := filepath.Join("..", "..", "internal", "checker", "testdata", "duplicate-packs-in-index-test-repo.tar.gz")
 	rtest.SetupTarTestFixture(t, env.base, datafile)
 
-	env.gopts.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendTestHook = func(r backend.Backend) (backend.Backend, error) {
 		return &appendOnlyBackend{r}, nil
 	}
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.Quiet = true
-		return runRebuildIndex(context.TODO(), RepairIndexOptions{}, gopts, gopts.Term)
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.Quiet = true
+		return runRebuildIndex(ctx, repairIndexOptions{}, globalOptions, globalOptions.Term)
 	})
 
 	if err == nil {

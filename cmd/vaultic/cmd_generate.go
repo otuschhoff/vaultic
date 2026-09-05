@@ -16,7 +16,7 @@ import (
 )
 
 func newGenerateCommand(globalOptions *global.Options) *cobra.Command {
-	var opts generateOptions
+	var options generateOptions
 
 	cmd := &cobra.Command{
 		Use:     "generate [flags]",
@@ -34,10 +34,10 @@ Exit status is 1 if there was any error.
 `,
 		DisableAutoGenTag: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runGenerate(opts, *globalOptions, args, globalOptions.Term)
+			return runGenerate(options, *globalOptions, args, globalOptions.Term)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
@@ -49,12 +49,12 @@ type generateOptions struct {
 	PowerShellCompletionFile string
 }
 
-func (opts *generateOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVar(&opts.ManDir, "man", "", "write man pages to `directory`")
-	f.StringVar(&opts.BashCompletionFile, "bash-completion", "", "write bash completion `file` (`-` for stdout)")
-	f.StringVar(&opts.FishCompletionFile, "fish-completion", "", "write fish completion `file` (`-` for stdout)")
-	f.StringVar(&opts.ZSHCompletionFile, "zsh-completion", "", "write zsh completion `file` (`-` for stdout)")
-	f.StringVar(&opts.PowerShellCompletionFile, "powershell-completion", "", "write powershell completion `file` (`-` for stdout)")
+func (options *generateOptions) AddFlags(f *pflag.FlagSet) {
+	f.StringVar(&options.ManDir, "man", "", "write man pages to `directory`")
+	f.StringVar(&options.BashCompletionFile, "bash-completion", "", "write bash completion `file` (`-` for stdout)")
+	f.StringVar(&options.FishCompletionFile, "fish-completion", "", "write fish completion `file` (`-` for stdout)")
+	f.StringVar(&options.ZSHCompletionFile, "zsh-completion", "", "write zsh completion `file` (`-` for stdout)")
+	f.StringVar(&options.PowerShellCompletionFile, "powershell-completion", "", "write powershell completion `file` (`-` for stdout)")
 }
 
 func writeManpages(root *cobra.Command, dir string, printer vaultic.Printer) error {
@@ -75,7 +75,7 @@ func writeManpages(root *cobra.Command, dir string, printer vaultic.Printer) err
 	return doc.GenManTree(root, header, dir)
 }
 
-func writeCompletion(filename string, shell string, generate func(w io.Writer) error, printer vaultic.Printer, gopts global.Options) (err error) {
+func writeCompletion(filename string, shell string, generate func(w io.Writer) error, printer vaultic.Printer, globalOptions global.Options) (err error) {
 	printer.PT("writing %s completion file to %v", shell, filename)
 	var outWriter io.Writer
 	if filename != "-" {
@@ -87,19 +87,19 @@ func writeCompletion(filename string, shell string, generate func(w io.Writer) e
 		defer func() { err = outFile.Close() }()
 		outWriter = outFile
 	} else {
-		outWriter = gopts.Term.OutputWriter()
+		outWriter = globalOptions.Term.OutputWriter()
 	}
 
 	err = generate(outWriter)
 	return
 }
 
-func checkStdoutForSingleShell(opts generateOptions) error {
+func checkStdoutForSingleShell(options generateOptions) error {
 	completionFileOpts := []string{
-		opts.BashCompletionFile,
-		opts.FishCompletionFile,
-		opts.ZSHCompletionFile,
-		opts.PowerShellCompletionFile,
+		options.BashCompletionFile,
+		options.FishCompletionFile,
+		options.ZSHCompletionFile,
+		options.PowerShellCompletionFile,
 	}
 	seenIsStdout := false
 	for _, completionFileOpt := range completionFileOpts {
@@ -113,56 +113,57 @@ func checkStdoutForSingleShell(opts generateOptions) error {
 	return nil
 }
 
-func runGenerate(opts generateOptions, gopts global.Options, args []string, term ui.Terminal) error {
+func runGenerate(options generateOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) > 0 {
 		return errors.Fatal("the generate command expects no arguments, only options - please see `vaultic help generate` for usage and flags")
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 	cmdRoot := newRootCommand(&global.Options{})
 
-	if opts.ManDir != "" {
-		err := writeManpages(cmdRoot, opts.ManDir, printer)
+	if options.ManDir != "" {
+		err := writeManpages(cmdRoot, options.ManDir, printer)
 		if err != nil {
 			return err
 		}
 	}
 
-	err := checkStdoutForSingleShell(opts)
+	err := checkStdoutForSingleShell(options)
 	if err != nil {
 		return err
 	}
 
-	if opts.BashCompletionFile != "" {
-		err := writeCompletion(opts.BashCompletionFile, "bash", cmdRoot.GenBashCompletion, printer, gopts)
+	if options.BashCompletionFile != "" {
+		err := writeCompletion(options.BashCompletionFile, "bash", cmdRoot.GenBashCompletion, printer, globalOptions)
 		if err != nil {
 			return err
 		}
 	}
 
-	if opts.FishCompletionFile != "" {
-		err := writeCompletion(opts.FishCompletionFile, "fish", func(w io.Writer) error { return cmdRoot.GenFishCompletion(w, true) }, printer, gopts)
+	if options.FishCompletionFile != "" {
+		generateFish := func(w io.Writer) error { return cmdRoot.GenFishCompletion(w, true) }
+		err := writeCompletion(options.FishCompletionFile, "fish", generateFish, printer, globalOptions)
 		if err != nil {
 			return err
 		}
 	}
 
-	if opts.ZSHCompletionFile != "" {
-		err := writeCompletion(opts.ZSHCompletionFile, "zsh", cmdRoot.GenZshCompletion, printer, gopts)
+	if options.ZSHCompletionFile != "" {
+		err := writeCompletion(options.ZSHCompletionFile, "zsh", cmdRoot.GenZshCompletion, printer, globalOptions)
 		if err != nil {
 			return err
 		}
 	}
 
-	if opts.PowerShellCompletionFile != "" {
-		err := writeCompletion(opts.PowerShellCompletionFile, "powershell", cmdRoot.GenPowerShellCompletion, printer, gopts)
+	if options.PowerShellCompletionFile != "" {
+		err := writeCompletion(options.PowerShellCompletionFile, "powershell", cmdRoot.GenPowerShellCompletion, printer, globalOptions)
 		if err != nil {
 			return err
 		}
 	}
 
 	var empty generateOptions
-	if opts == empty {
+	if options == empty {
 		return errors.Fatal("nothing to do, please specify at least one output file/dir")
 	}
 

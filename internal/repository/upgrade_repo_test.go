@@ -65,7 +65,11 @@ func TestUpgradeRepoV2Failure(t *testing.T) {
 		t.Fatal("expected error returned from Apply(), got nil")
 	}
 
-	upgradeErr := err.(*upgradeRepoV2Error)
+	upgradeErr := func() *upgradeRepoV2Error {
+		target := &upgradeRepoV2Error{}
+		_ = errors.As(err, &target)
+		return target
+	}()
 	if upgradeErr.UploadNewConfigError == nil {
 		t.Fatal("expected upload error, got nil")
 	}

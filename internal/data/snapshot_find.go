@@ -399,7 +399,7 @@ func (f *SnapshotFilter) FindAll(
 
 	// collect the matching snapshots so that --filter-last can be applied
 	var filtered Snapshots
-	err := ForAllSnapshots(ctx, be, loader, nil, func(id vaultic.ID, sn *Snapshot, err error) error {
+	err := ForAllSnapshots(ctx, be, loader, nil, func(_ vaultic.ID, sn *Snapshot, err error) error {
 		if err == nil && !f.matches(sn) {
 			return nil
 		}

@@ -38,6 +38,7 @@ func SchemaFactRecord(key, value []byte) (Record, error) {
 	return Record{Kind: SchemaFactKind, Payload: payload}, nil
 }
 
+//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func BuildDaemonCommitPlan(ctx context.Context, store schemaReader, segments []Segment) (DaemonCommitPlan, error) {
 	if store == nil {
 		return DaemonCommitPlan{}, fmt.Errorf("schema store is required")
@@ -50,6 +51,7 @@ func BuildDaemonCommitPlan(ctx context.Context, store schemaReader, segments []S
 		}
 		parsed, _ := schema.ParseKey(fact.Key)
 		key := string(fact.Key)
+		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 		if parsed.Kind == schema.KeyBlob {
 			value, ok := planned[key]
 			if !ok {
@@ -268,7 +270,7 @@ func schemaID(value string) (schema.ID, error) {
 
 func backendHash(value string) uint64 {
 	hash := fnv.New64a()
-	_, _ = hash.Write([]byte(value))
+	_, _ = hash.Write([]byte(value)) // hash.Hash writes are specified to return a nil error.
 	if result := hash.Sum64(); result != 0 {
 		return result
 	}

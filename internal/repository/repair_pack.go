@@ -65,13 +65,15 @@ func RepairPacks(ctx context.Context, repo *Repository, ids vaultic.IDSet, print
 	printer.P("removing salvaged pack files")
 	// if we fail to delete the damaged pack files, then prune will remove them later on
 	bar = printer.NewCounter("files deleted")
-	_ = vaultic.ParallelRemove(ctx, &internalRepository{repo}, ids, vaultic.PackFile, func(id vaultic.ID, err error) error {
+	if err := vaultic.ParallelRemove(ctx, &internalRepository{repo}, ids, vaultic.PackFile, func(id vaultic.ID, err error) error {
 		// only log errors while deleting pack files
 		if err != nil {
 			printer.E("failed to delete pack file %v: %v", id, err)
 		}
 		return nil
-	}, bar)
+	}, bar); err != nil {
+		return err
+	}
 	bar.Done()
 
 	return nil
@@ -112,6 +114,7 @@ func reuploadBlobsFromPack(
 		}
 		id, _, _, err := uploader.SaveBlob(ctx, blob.Type, buf, vaultic.ID{}, true)
 		if err == nil && !id.Equal(blob.ID) {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("pack id mismatch during upload")
 		}
 		return err

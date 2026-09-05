@@ -22,7 +22,7 @@ import (
 )
 
 func newPruneCommand(globalOptions *global.Options) *cobra.Command {
-	var opts PruneOptions
+	var options pruneOptions
 	cmd := &cobra.Command{
 		Use:   "prune [flags]",
 		Short: "Remove unneeded data from the repository",
@@ -41,15 +41,15 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runPrune(cmd.Context(), opts, *globalOptions, globalOptions.Term)
+			return runPrune(cmd.Context(), options, *globalOptions, globalOptions.Term)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// PruneOptions collects all options for the cleanup command.
-type PruneOptions struct {
+// pruneOptions collects all options for the cleanup command.
+type pruneOptions struct {
 	DryRun                bool
 	UnsafeNoSpaceRecovery string
 
@@ -83,11 +83,11 @@ type PruneOptions struct {
 	SmallPackBytes uint64
 }
 
-func (opts *PruneOptions) AddFlags(f *pflag.FlagSet) {
-	opts.AddLimitedFlags(f)
-	f.BoolVarP(&opts.DryRun, "dry-run", "n", false, "do not modify the repository, just print what would be done")
+func (options *pruneOptions) AddFlags(f *pflag.FlagSet) {
+	options.AddLimitedFlags(f)
+	f.BoolVarP(&options.DryRun, "dry-run", "n", false, "do not modify the repository, just print what would be done")
 	f.StringVarP(
-		&opts.UnsafeNoSpaceRecovery,
+		&options.UnsafeNoSpaceRecovery,
 		"unsafe-recover-no-free-space",
 		"",
 		"",
@@ -97,103 +97,104 @@ func (opts *PruneOptions) AddFlags(f *pflag.FlagSet) {
 	)
 }
 
-func (opts *PruneOptions) AddLimitedFlags(f *pflag.FlagSet) {
+func (options *pruneOptions) AddLimitedFlags(f *pflag.FlagSet) {
 	var unused bool
 	f.StringVar(
-		&opts.MaxUnused,
+		&options.MaxUnused,
 		"max-unused",
 		"5%",
 		"tolerate given `limit` of unused data (absolute value in bytes with suffixes k/K, m/M, g/G, t/T, a value in % or the word 'unlimited')",
 	)
 	f.StringVar(
-		&opts.MaxRepackSize,
+		&options.MaxRepackSize,
 		"max-repack-size",
 		"",
 		"stop after repacking this much data in total (allowed suffixes for `size`: k/K, m/M, g/G, t/T)",
 	)
 	f.StringVar(
-		&opts.MaxRepack,
+		&options.MaxRepack,
 		"max-repack",
 		"",
 		"stop after repacking this much data: a `size` (k/m/g/t), a percentage of the repo size (e.g. '10%') or 'unlimited'",
 	)
-	f.BoolVar(&opts.RepackCacheableOnly, "repack-cacheable-only", false, "only repack packs which are cacheable")
+	f.BoolVar(&options.RepackCacheableOnly, "repack-cacheable-only", false, "only repack packs which are cacheable")
 	f.BoolVar(&unused, "repack-small", false, "deprecated. Use --repack-smaller-than to specify a minimum size")
-	f.BoolVar(&opts.RepackUncompressed, "repack-uncompressed", false, "repack all uncompressed data")
-	f.BoolVar(&opts.RepackAll, "repack-all", false, "repack all packs (e.g. to change pack size or compression)")
+	f.BoolVar(&options.RepackUncompressed, "repack-uncompressed", false, "repack all uncompressed data")
+	f.BoolVar(&options.RepackAll, "repack-all", false, "repack all packs (e.g. to change pack size or compression)")
 	f.BoolVar(
-		&opts.FastRepack,
+		&options.FastRepack,
 		"fast-repack",
 		false,
 		"skip re-reading pack contents, trust the index (faster, needs an intact index)",
 	)
 	f.BoolVar(
-		&opts.EarlyDeleteIndex,
+		&options.EarlyDeleteIndex,
 		"early-delete-index",
 		false,
 		"remove old index files before deleting packs (helps when the repository is out of free space)",
 	)
 	f.BoolVar(
-		&opts.KeepDelete,
+		&options.KeepDelete,
 		"keep-delete",
 		false,
 		"repack and write the new index now; defer deleting superseded data (requires two-phase-prune)",
 	)
 	f.BoolVar(
-		&opts.InstantDelete,
+		&options.InstantDelete,
 		"instant-delete",
 		true,
 		"delete superseded packs/indexes in the same prune run (current behavior; the default)",
 	)
-	f.StringVar(&opts.SmallPackSize, "repack-smaller-than", "", "pack `below-limit` packfiles (allowed suffixes: m/M)")
+	f.StringVar(&options.SmallPackSize, "repack-smaller-than", "", "pack `below-limit` packfiles (allowed suffixes: m/M)")
 	err := f.MarkDeprecated(
 		"repack-small",
 		"small files are automatically repacked. Use --repack-smaller-than to specify a minimum size",
 	)
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
+		// Flag registration is a construction-time invariant.
+		panic(err) //nolint:forbidigo // A missing flag here is a command-construction defect.
 	}
 }
 
-func verifyPruneOptions(opts *PruneOptions) error {
-	opts.MaxRepackBytes = math.MaxUint64
-	if len(opts.MaxRepackSize) > 0 {
-		size, err := ui.ParseBytes(opts.MaxRepackSize)
+func verifyPruneOptions(options *pruneOptions) error {
+	options.MaxRepackBytes = math.MaxUint64
+	if len(options.MaxRepackSize) > 0 {
+		size, err := ui.ParseBytes(options.MaxRepackSize)
 		if err != nil {
 			return err
 		}
-		opts.MaxRepackBytes = uint64(size)
+		options.MaxRepackBytes = uint64(size)
 	}
 	// --max-repack supersedes --max-repack-size (size, %, or unlimited)
-	if len(opts.MaxRepack) > 0 {
-		bytes, pct, err := parseMaxRepack(opts.MaxRepack)
+	if len(options.MaxRepack) > 0 {
+		bytes, pct, err := parseMaxRepack(options.MaxRepack)
 		if err != nil {
 			return err
 		}
-		opts.MaxRepackBytes = bytes
-		opts.maxRepackPercent = pct
+		options.MaxRepackBytes = bytes
+		options.maxRepackPercent = pct
 	}
-	if opts.UnsafeNoSpaceRecovery != "" {
+	if options.UnsafeNoSpaceRecovery != "" {
 		// prevent repacking data to make sure users cannot get stuck.
-		opts.MaxRepackBytes = 0
+		options.MaxRepackBytes = 0
 	}
 
-	maxUnused := strings.TrimSpace(opts.MaxUnused)
+	maxUnused := strings.TrimSpace(options.MaxUnused)
 	if maxUnused == "" {
-		return errors.Fatalf("invalid value for --max-unused: %q", opts.MaxUnused)
+		return errors.Fatalf("invalid value for --max-unused: %q", options.MaxUnused)
 	}
 	// parse MaxUnused either as unlimited, a percentage, or an absolute number of bytes
 	switch {
 	case maxUnused == "unlimited":
-		opts.maxUnusedBytes = func(_ uint64) uint64 {
+		options.maxUnusedBytes = func(_ uint64) uint64 {
 			return math.MaxUint64
 		}
 	case strings.HasSuffix(maxUnused, "%"):
 		maxUnused = strings.TrimSuffix(maxUnused, "%")
 		p, err := strconv.ParseFloat(maxUnused, 64)
 		if err != nil {
-			return errors.Fatalf("invalid percentage %q passed for --max-unused: %v", opts.MaxUnused, err)
+			return errors.Fatalf("invalid percentage %q passed for --max-unused: %v", options.MaxUnused, err)
 		}
 
 		if p < 0 {
@@ -202,39 +203,39 @@ func verifyPruneOptions(opts *PruneOptions) error {
 		if p >= 100 {
 			return errors.Fatal("percentage for --max-unused must be below 100%")
 		}
-		opts.maxUnusedBytes = func(used uint64) uint64 {
+		options.maxUnusedBytes = func(used uint64) uint64 {
 			return uint64(p / (100 - p) * float64(used))
 		}
 
 	default:
 		size, err := ui.ParseBytes(maxUnused)
 		if err != nil {
-			return errors.Fatalf("invalid number of bytes %q for --max-unused: %v", opts.MaxUnused, err)
+			return errors.Fatalf("invalid number of bytes %q for --max-unused: %v", options.MaxUnused, err)
 		}
-		opts.maxUnusedBytes = func(_ uint64) uint64 {
+		options.maxUnusedBytes = func(_ uint64) uint64 {
 			return uint64(size)
 		}
 	}
-	if opts.SmallPackSize != "" {
-		size, err := ui.ParseBytes(opts.SmallPackSize)
+	if options.SmallPackSize != "" {
+		size, err := ui.ParseBytes(options.SmallPackSize)
 		if err != nil {
-			return errors.Fatalf("invalid number of bytes %q for --repack-smaller-than: %v", opts.SmallPackSize, err)
+			return errors.Fatalf("invalid number of bytes %q for --repack-smaller-than: %v", options.SmallPackSize, err)
 		} else if size <= 0 {
 			return errors.Fatalf("--repack-smaller-than must be larger than zero")
 		}
-		opts.SmallPackBytes = uint64(size)
+		options.SmallPackBytes = uint64(size)
 	}
 
-	if opts.KeepDelete {
+	if options.KeepDelete {
 		if !feature.Flag.Enabled(feature.TwoPhasePrune) {
 			return errors.Fatalf(
 				"--keep-delete requires the two-phase-prune feature (set VAULTIC_FEATURES=two-phase-prune=true)",
 			)
 		}
-		if opts.EarlyDeleteIndex {
+		if options.EarlyDeleteIndex {
 			return errors.Fatalf("--keep-delete and --early-delete-index are mutually exclusive")
 		}
-		if len(opts.UnsafeNoSpaceRecovery) > 0 {
+		if len(options.UnsafeNoSpaceRecovery) > 0 {
 			return errors.Fatalf("--keep-delete and --unsafe-recover-no-free-space are mutually exclusive")
 		}
 	}
@@ -265,43 +266,43 @@ func parseMaxRepack(s string) (bytes uint64, percent float64, err error) {
 	return uint64(size), 0, nil
 }
 
-func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term ui.Terminal) error {
-	err := verifyPruneOptions(&opts)
+func runPrune(ctx context.Context, options pruneOptions, globalOptions global.Options, term ui.Terminal) error {
+	err := verifyPruneOptions(&options)
 	if err != nil {
 		return err
 	}
-	if opts.RepackUncompressed && gopts.Compression == repository.CompressionOff {
+	if options.RepackUncompressed && globalOptions.Compression == repository.CompressionOff {
 		return errors.Fatal("disabled compression and `--repack-uncompressed` are mutually exclusive")
 	}
 
-	if gopts.NoLock && !opts.DryRun {
+	if globalOptions.NoLock && !options.DryRun {
 		return errors.Fatal("--no-lock is only applicable in combination with --dry-run for prune command")
 	}
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
 	// Unsafe recovery, dry-run, and early-index deletion retain the established
 	// all-exclusive execution path. Their semantics either intentionally break
 	// normal ordering or need immediate deletion to free space.
-	if opts.UnsafeNoSpaceRecovery != "" || opts.DryRun || opts.EarlyDeleteIndex {
-		ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun && gopts.NoLock, printer)
+	if options.UnsafeNoSpaceRecovery != "" || options.DryRun || options.EarlyDeleteIndex {
+		ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, options.DryRun && globalOptions.NoLock, printer)
 		if err != nil {
 			return err
 		}
 		defer unlock()
-		if opts.UnsafeNoSpaceRecovery != "" {
+		if options.UnsafeNoSpaceRecovery != "" {
 			repoID := repo.Config().ID
-			if opts.UnsafeNoSpaceRecovery != repoID {
+			if options.UnsafeNoSpaceRecovery != repoID {
 				return errors.Fatalf("must pass id '%s' to --unsafe-recover-no-free-space", repoID)
 			}
-			opts.unsafeRecovery = true
+			options.unsafeRecovery = true
 		}
-		return runPruneWithRepo(ctx, opts, gopts, repo, vaultic.NewIDSet(), printer)
+		return runPruneWithRepo(ctx, options, globalOptions, repo, vaultic.NewIDSet(), printer)
 	}
 	// Claim phase A under a short exclusive lock. The pending durable marker
 	// prevents another prune from starting its own shared phase A while ordinary
 	// append writers may proceed after this lock is released.
 	baseCtx := ctx
-	ctx, repo, unlock, err := openWithExclusiveLock(baseCtx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(baseCtx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -310,7 +311,7 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 		return err
 	}
 	if repo.Config().PrunePlan != nil {
-		if opts.KeepDelete {
+		if options.KeepDelete {
 			unlock()
 			return errors.Fatal(
 				"repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first",
@@ -327,7 +328,7 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 	}
 	// Phase A is additive: plan, repack, upload replacement packs/indexes, and
 	// atomically promote the claimed marker under a shared append lock.
-	ctx, repo, unlock, err = openWithLockPolicy(baseCtx, gopts, LockShared, lockOpenOptions{}, printer)
+	ctx, repo, unlock, err = openWithLockPolicy(baseCtx, globalOptions, LockShared, lockOpenOptions{}, printer)
 	if err != nil {
 		return err
 	}
@@ -335,11 +336,11 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 		unlock()
 		return errors.Fatal("prune phase A claim changed before additive work began")
 	}
-	phaseAOpts := opts
+	phaseAOpts := options
 	phaseAOpts.KeepDelete = true
-	err = runPrunePhaseAWithRepo(ctx, phaseAOpts, gopts, repo, vaultic.NewIDSet(), marker.ID, printer)
+	err = runPrunePhaseAWithRepo(ctx, phaseAOpts, globalOptions, repo, vaultic.NewIDSet(), marker.ID, printer)
 	unlock()
-	if err != nil || opts.KeepDelete {
+	if err != nil || options.KeepDelete {
 		return err
 	}
 	if repo.Config().PrunePlan == nil {
@@ -349,11 +350,11 @@ func runPrune(ctx context.Context, opts PruneOptions, gopts global.Options, term
 
 	// Phase B is the only exclusive window: re-open, revalidate the durable
 	// marker against current indexes, and delete only marker-listed candidates.
-	return finalizePrunePhaseB(baseCtx, gopts, printer)
+	return finalizePrunePhaseB(baseCtx, globalOptions, printer)
 }
 
-func finalizePrunePhaseB(ctx context.Context, gopts global.Options, printer vaultic.Printer) error {
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+func finalizePrunePhaseB(ctx context.Context, globalOptions global.Options, printer vaultic.Printer) error {
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -369,8 +370,8 @@ func finalizePrunePhaseB(ctx context.Context, gopts global.Options, printer vaul
 
 func runPruneWithRepo(
 	ctx context.Context,
-	opts PruneOptions,
-	gopts global.Options,
+	options pruneOptions,
+	globalOptions global.Options,
 	repo *repository.Repository,
 	ignoreSnapshots vaultic.IDSet,
 	printer vaultic.Printer,
@@ -378,11 +379,11 @@ func runPruneWithRepo(
 	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
 		return err
 	}
-	if repo.Cache() == nil && !gopts.JSON {
+	if repo.Cache() == nil && !globalOptions.JSON {
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}
 	if repo.Config().PrunePlan != nil {
-		if opts.KeepDelete {
+		if options.KeepDelete {
 			return errors.Fatal(
 				"repository already contains a deferred prune plan; run prune without --keep-delete to finalize it first",
 			)
@@ -399,18 +400,18 @@ func runPruneWithRepo(
 	}
 
 	popts := repository.PruneOptions{
-		DryRun:              opts.DryRun,
-		UnsafeRecovery:      opts.unsafeRecovery,
-		MaxUnusedBytes:      opts.maxUnusedBytes,
-		MaxRepackBytes:      opts.MaxRepackBytes,
-		SmallPackBytes:      opts.SmallPackBytes,
-		RepackCacheableOnly: opts.RepackCacheableOnly,
-		RepackUncompressed:  opts.RepackUncompressed,
-		RepackAll:           opts.RepackAll,
-		FastRepack:          opts.FastRepack,
-		EarlyDeleteIndex:    opts.EarlyDeleteIndex,
-		MaxRepackPercent:    opts.maxRepackPercent,
-		KeepDelete:          opts.KeepDelete,
+		DryRun:              options.DryRun,
+		UnsafeRecovery:      options.unsafeRecovery,
+		MaxUnusedBytes:      options.maxUnusedBytes,
+		MaxRepackBytes:      options.MaxRepackBytes,
+		SmallPackBytes:      options.SmallPackBytes,
+		RepackCacheableOnly: options.RepackCacheableOnly,
+		RepackUncompressed:  options.RepackUncompressed,
+		RepackAll:           options.RepackAll,
+		FastRepack:          options.FastRepack,
+		EarlyDeleteIndex:    options.EarlyDeleteIndex,
+		MaxRepackPercent:    options.maxRepackPercent,
+		KeepDelete:          options.KeepDelete,
 	}
 
 	plan, err := repository.PlanPrune(
@@ -431,13 +432,13 @@ func runPruneWithRepo(
 	if popts.DryRun {
 		printer.P("\nWould have made the following changes:")
 	}
-	if !gopts.JSON {
+	if !globalOptions.JSON {
 		err = printPruneStats(printer, plan.Stats())
 		if err != nil {
 			return err
 		}
 	} else {
-		gopts.Term.Print(ui.ToJSONString(plan.Stats()))
+		globalOptions.Term.Print(ui.ToJSONString(plan.Stats()))
 	}
 
 	// Trigger GC to reset garbage collection threshold
@@ -450,8 +451,8 @@ func runPruneWithRepo(
 // exclusive lock and intentionally retains the classic single-window flow.
 func runPrunePhaseAWithRepo(
 	ctx context.Context,
-	opts PruneOptions,
-	gopts global.Options,
+	options pruneOptions,
+	globalOptions global.Options,
 	repo *repository.Repository,
 	ignoreSnapshots vaultic.IDSet,
 	markerID string,
@@ -460,7 +461,7 @@ func runPrunePhaseAWithRepo(
 	if err := requireLegacyMetadataMutation(repo, "prune"); err != nil {
 		return err
 	}
-	if repo.Cache() == nil && !gopts.JSON {
+	if repo.Cache() == nil && !globalOptions.JSON {
 		printer.S("warning: running prune without a cache, this may be very slow!")
 	}
 	if err := repo.LoadIndex(ctx, printer); err != nil {
@@ -468,14 +469,14 @@ func runPrunePhaseAWithRepo(
 	}
 	popts := repository.PruneOptions{
 		DryRun:              false,
-		MaxUnusedBytes:      opts.maxUnusedBytes,
-		MaxRepackBytes:      opts.MaxRepackBytes,
-		SmallPackBytes:      opts.SmallPackBytes,
-		RepackCacheableOnly: opts.RepackCacheableOnly,
-		RepackUncompressed:  opts.RepackUncompressed,
-		RepackAll:           opts.RepackAll,
-		FastRepack:          opts.FastRepack,
-		MaxRepackPercent:    opts.maxRepackPercent,
+		MaxUnusedBytes:      options.maxUnusedBytes,
+		MaxRepackBytes:      options.MaxRepackBytes,
+		SmallPackBytes:      options.SmallPackBytes,
+		RepackCacheableOnly: options.RepackCacheableOnly,
+		RepackUncompressed:  options.RepackUncompressed,
+		RepackAll:           options.RepackAll,
+		FastRepack:          options.FastRepack,
+		MaxRepackPercent:    options.maxRepackPercent,
 		KeepDelete:          true,
 	}
 	plan, err := repository.PlanPrune(
@@ -494,12 +495,12 @@ func runPrunePhaseAWithRepo(
 		return ctx.Err()
 	}
 	plan.BindPrunePlan(markerID)
-	if !gopts.JSON {
+	if !globalOptions.JSON {
 		if err := printPruneStats(printer, plan.Stats()); err != nil {
 			return err
 		}
 	} else {
-		gopts.Term.Print(ui.ToJSONString(plan.Stats()))
+		globalOptions.Term.Print(ui.ToJSONString(plan.Stats()))
 	}
 	runtime.GC()
 	if err := plan.Execute(ctx, printer); err != nil {

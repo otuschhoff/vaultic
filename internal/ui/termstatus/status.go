@@ -19,7 +19,7 @@ var _ ui.Terminal = &terminal{}
 // updated. When the output is redirected to a file, the status lines are not
 // printed.
 type terminal struct {
-	rd               io.ReadCloser
+	reader           io.ReadCloser
 	inFd             uintptr
 	wr               io.Writer
 	fd               uintptr
@@ -86,7 +86,7 @@ func Setup(stdin io.ReadCloser, stdout, stderr io.Writer, quiet bool) (ui.Termin
 
 	return term, func() {
 		if term.outputWriter != nil {
-			_ = term.outputWriter.Close()
+			_ = term.outputWriter.Close() // Shutdown has no error return; all queued terminal output is flushed next.
 		}
 		term.Flush()
 		// shutdown termstatus
@@ -95,10 +95,10 @@ func Setup(stdin io.ReadCloser, stdout, stderr io.Writer, quiet bool) (ui.Termin
 	}
 }
 
-func new(rd io.ReadCloser, wr io.Writer, errWriter io.Writer, disableStatus bool) *terminal {
+func new(reader io.ReadCloser, writer io.Writer, errWriter io.Writer, disableStatus bool) *terminal {
 	t := &terminal{
-		rd:        rd,
-		wr:        wr,
+		reader:    reader,
+		wr:        writer,
 		errWriter: errWriter,
 		msg:       make(chan message),
 		status:    make(chan status),
@@ -109,14 +109,14 @@ func new(rd io.ReadCloser, wr io.Writer, errWriter io.Writer, disableStatus bool
 		return t
 	}
 
-	if d, ok := rd.(fder); ok {
+	if d, ok := reader.(fder); ok {
 		if tty.InputIsTerminal(d.Fd()) {
 			t.inFd = d.Fd()
 			t.inputIsTerminal = true
 		}
 	}
 
-	if d, ok := wr.(fder); ok {
+	if d, ok := writer.(fder); ok {
 		if tty.CanUpdateStatus(d.Fd()) {
 			// only use the fancy status code when we're running on a real terminal.
 			t.canUpdateStatus = true
@@ -140,7 +140,7 @@ func (t *terminal) InputIsTerminal() bool {
 
 // InputRaw returns the input reader.
 func (t *terminal) InputRaw() io.ReadCloser {
-	return t.rd
+	return t.reader
 }
 
 func (t *terminal) ReadPassword(ctx context.Context, prompt string) (string, error) {
@@ -151,17 +151,17 @@ func (t *terminal) ReadPassword(ctx context.Context, prompt string) (string, err
 	if t.OutputIsTerminal() {
 		t.Print("reading repository password from stdin")
 	}
-	return readPassword(t.rd)
+	return readPassword(t.reader)
 }
 
 // readPassword reads the password from the given reader directly.
 func readPassword(in io.Reader) (password string, err error) {
-	sc := bufio.NewScanner(in)
-	sc.Scan()
-	if sc.Err() != nil {
-		return "", fmt.Errorf("readPassword: %w", sc.Err())
+	scanner := bufio.NewScanner(in)
+	scanner.Scan()
+	if scanner.Err() != nil {
+		return "", fmt.Errorf("readPassword: %w", scanner.Err())
 	}
-	return sc.Text(), nil
+	return scanner.Text(), nil
 }
 
 // CanUpdateStatus return whether the status output is updated in place.
@@ -257,7 +257,7 @@ func (t *terminal) run(ctx context.Context) {
 
 func (t *terminal) logWriteErr(err error) {
 	if err != nil {
-		_, _ = fmt.Fprintf(t.errWriter, "write failed: %v\n", err)
+		_, _ = fmt.Fprintf(t.errWriter, "write failed: %v\n", err) // Reporting a writer failure has no independent fallback channel.
 	}
 }
 

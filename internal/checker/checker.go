@@ -197,10 +197,12 @@ func (c *Checker) Structure(ctx context.Context, p vaultic.Counter, errChan chan
 	// StreamTrees should not return an error because no worker returns an
 	// error, so panic if that has changed somehow.
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err)
 	}
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (c *Checker) checkTree(id vaultic.ID, tree data.TreeNodeIterator) (errs []error) {
 	debug.Log("checking tree %v", id)
 
@@ -276,6 +278,7 @@ func (c *Checker) checkTree(id vaultic.ID, tree data.TreeNodeIterator) (errs []e
 // UnusedBlobs returns all blobs that have never been referenced.
 func (c *Checker) UnusedBlobs(ctx context.Context) (blobs vaultic.BlobHandles, err error) {
 	if !c.trackUnused {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("only works when tracking blob references")
 	}
 	c.blobRefs.Lock()

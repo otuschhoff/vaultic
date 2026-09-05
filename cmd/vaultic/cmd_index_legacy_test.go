@@ -20,46 +20,46 @@ import (
 func TestIntrospectionRefusesLegacyRepositoriesExplicitly(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
-	testRunInit(t, env.gopts)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata)}, BackupOptions{}, env.gopts)
-	env.gopts.BackendTestHook = nil
+	testRunInit(t, env.globalOptions)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata)}, backupOptions{}, env.globalOptions)
+	env.globalOptions.BackendTestHook = nil
 
-	for name, run := range map[string]func(ctx context.Context, gopts global.Options) error{
-		"stats": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexStats(ctx, indexStatsOptions{}, gopts, gopts.Term)
+	for name, run := range map[string]func(ctx context.Context, globalOptions global.Options) error{
+		"stats": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexStats(ctx, indexStatsOptions{}, globalOptions, globalOptions.Term)
 			return err
 		},
-		"packs": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexPacks(ctx, indexPacksOptions{Sort: "id"}, gopts, gopts.Term)
+		"packs": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexPacks(ctx, indexPacksOptions{Sort: "id"}, globalOptions, globalOptions.Term)
 			return err
 		},
-		"history": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexHistory(ctx, indexHistoryOptions{Metric: "bytes", Bucket: "day"}, gopts, gopts.Term)
+		"history": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexHistory(ctx, indexHistoryOptions{Metric: "bytes", Bucket: "day"}, globalOptions, globalOptions.Term)
 			return err
 		},
-		"history prune": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexHistoryPrune(ctx, indexHistoryPruneOptions{DryRun: true}, gopts, gopts.Term)
+		"history prune": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexHistoryPrune(ctx, indexHistoryPruneOptions{DryRun: true}, globalOptions, globalOptions.Term)
 			return err
 		},
-		"backends --compare": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexBackends(ctx, indexBackendsOptions{Compare: true}, gopts, gopts.Term)
+		"backends --compare": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexBackends(ctx, indexBackendsOptions{Compare: true}, globalOptions, globalOptions.Term)
 			return err
 		},
-		"file-history": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexFileHistory(ctx, indexFileHistoryOptions{}, "a.txt", gopts, gopts.Term)
+		"file-history": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexFileHistory(ctx, indexFileHistoryOptions{}, "a.txt", globalOptions, globalOptions.Term)
 			return err
 		},
-		"path-at": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexPathAt(ctx, indexPathAtOptions{Snapshot: vaultic.NewRandomID().String()}, "a.txt", gopts, gopts.Term)
+		"path-at": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexPathAt(ctx, indexPathAtOptions{Snapshot: vaultic.NewRandomID().String()}, "a.txt", globalOptions, globalOptions.Term)
 			return err
 		},
-		"path-index": func(ctx context.Context, gopts global.Options) error {
-			_, err := runIndexPathIndex(ctx, indexPathIndexOptions{Paths: []string{"a.txt"}}, gopts, gopts.Term)
+		"path-index": func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexPathIndex(ctx, indexPathIndexOptions{Paths: []string{"a.txt"}}, globalOptions, globalOptions.Term)
 			return err
 		},
 	} {
-		err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-			return run(ctx, gopts)
+		err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			return run(ctx, globalOptions)
 		})
 		if !errors.Is(err, maintenance.ErrLegacyRepository) {
 			t.Errorf("index %s on a legacy repository returned %v, want ErrLegacyRepository", name, err)
@@ -74,14 +74,14 @@ func TestIntrospectionRefusesLegacyRepositoriesExplicitly(t *testing.T) {
 func TestBackendsRunsReducedOnLegacyRepositories(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
-	testRunInit(t, env.gopts)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata)}, BackupOptions{}, env.gopts)
-	env.gopts.BackendTestHook = nil
+	testRunInit(t, env.globalOptions)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata)}, backupOptions{}, env.globalOptions)
+	env.globalOptions.BackendTestHook = nil
 
 	var result BackendsResult
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		var runErr error
-		result, runErr = runIndexBackends(ctx, indexBackendsOptions{}, gopts, gopts.Term)
+		result, runErr = runIndexBackends(ctx, indexBackendsOptions{}, globalOptions, globalOptions.Term)
 		return runErr
 	})
 	if err != nil {
@@ -134,17 +134,17 @@ func (target *listCountingBackend) List(ctx context.Context, fileType backend.Fi
 func TestBackendsNoListIssuesNoDataListingsEndToEnd(t *testing.T) {
 	env, cleanup := withTestEnvironment(t)
 	defer cleanup()
-	testRunInit(t, env.gopts)
-	testRunBackup(t, "", []string{filepath.Join(env.testdata)}, BackupOptions{}, env.gopts)
+	testRunInit(t, env.globalOptions)
+	testRunBackup(t, "", []string{filepath.Join(env.testdata)}, backupOptions{}, env.globalOptions)
 
 	counter := &listCountingBackend{calls: map[backend.FileType]int{}}
-	env.gopts.BackendTestHook = func(inner backend.Backend) (backend.Backend, error) {
+	env.globalOptions.BackendTestHook = func(inner backend.Backend) (backend.Backend, error) {
 		counter.Backend = inner
 		return counter, nil
 	}
 
-	err := withTermStatus(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
-		result, runErr := runIndexBackends(ctx, indexBackendsOptions{NoList: true}, gopts, gopts.Term)
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexBackends(ctx, indexBackendsOptions{NoList: true}, globalOptions, globalOptions.Term)
 		for _, report := range result.Backends {
 			if report.Listed {
 				t.Errorf("%s backend claimed to be listed under --no-list", report.Role)

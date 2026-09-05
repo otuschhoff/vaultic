@@ -19,7 +19,7 @@ import (
 )
 
 func newTagCommand(globalOptions *global.Options) *cobra.Command {
-	var opts TagOptions
+	var options tagOptions
 
 	cmd := &cobra.Command{
 		Use:   "tag [flags] [snapshotID ...]",
@@ -44,20 +44,20 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTag(cmd.Context(), opts, *globalOptions, globalOptions.Term, args)
+			return runTag(cmd.Context(), options, *globalOptions, globalOptions.Term, args)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// TagOptions bundles all options for the 'tag' command.
-type TagOptions struct {
+// tagOptions bundles all options for the 'tag' command.
+type tagOptions struct {
 	data.SnapshotFilter
 	SetTags    data.TagLists
 	AddTags    data.TagLists
@@ -71,17 +71,17 @@ type TagOptions struct {
 	setLabelFlag, setDescriptionFlag, setDeleteFlag *pflag.Flag
 }
 
-func (opts *TagOptions) AddFlags(f *pflag.FlagSet) {
-	f.Var(&opts.SetTags, "set", "`tags` which will replace the existing tags in the format `tag[,tag,...]` (can be given multiple times)")
-	f.Var(&opts.AddTags, "add", "`tags` which will be added to the existing tags in the format `tag[,tag,...]` (can be given multiple times)")
-	f.Var(&opts.RemoveTags, "remove", "`tags` which will be removed from the existing tags in the format `tag[,tag,...]` (can be given multiple times)")
-	f.StringVar(&opts.SetLabel, "set-label", "", "set the snapshot `label` (use empty string to clear)")
-	f.StringVar(&opts.SetDescription, "set-description", "", "set the snapshot `description` (use empty string to clear)")
-	f.StringVar(&opts.SetDelete, "set-delete", "", "set delete protection: `never`, a `duration` (e.g. 10d) or 'none' to clear")
-	opts.setLabelFlag = f.Lookup("set-label")
-	opts.setDescriptionFlag = f.Lookup("set-description")
-	opts.setDeleteFlag = f.Lookup("set-delete")
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, true)
+func (options *tagOptions) AddFlags(f *pflag.FlagSet) {
+	f.Var(&options.SetTags, "set", "`tags` which will replace the existing tags in the format `tag[,tag,...]` (can be given multiple times)")
+	f.Var(&options.AddTags, "add", "`tags` which will be added to the existing tags in the format `tag[,tag,...]` (can be given multiple times)")
+	f.Var(&options.RemoveTags, "remove", "`tags` which will be removed from the existing tags in the format `tag[,tag,...]` (can be given multiple times)")
+	f.StringVar(&options.SetLabel, "set-label", "", "set the snapshot `label` (use empty string to clear)")
+	f.StringVar(&options.SetDescription, "set-description", "", "set the snapshot `description` (use empty string to clear)")
+	f.StringVar(&options.SetDelete, "set-delete", "", "set delete protection: `never`, a `duration` (e.g. 10d) or 'none' to clear")
+	options.setLabelFlag = f.Lookup("set-label")
+	options.setDescriptionFlag = f.Lookup("set-description")
+	options.setDeleteFlag = f.Lookup("set-delete")
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, true)
 }
 
 type changedSnapshot struct {
@@ -99,13 +99,13 @@ func changeSnapshotMeta(
 	ctx context.Context,
 	repo *repository.Repository,
 	sn *data.Snapshot,
-	opts TagOptions,
+	options tagOptions,
 	now time.Time,
 	printFunc func(changedSnapshot),
 ) (bool, error) {
 	var changed bool
 
-	setTags, addTags, removeTags := opts.SetTags.Flatten(), opts.AddTags.Flatten(), opts.RemoveTags.Flatten()
+	setTags, addTags, removeTags := options.SetTags.Flatten(), options.AddTags.Flatten(), options.RemoveTags.Flatten()
 	if len(setTags) != 0 {
 		// Setting the tag to an empty string really means no tags.
 		if len(setTags) == 1 && setTags[0] == "" {
@@ -120,24 +120,24 @@ func changeSnapshotMeta(
 		}
 	}
 
-	if opts.setLabelFlag != nil && opts.setLabelFlag.Changed {
-		sn.Label = opts.SetLabel
+	if options.setLabelFlag != nil && options.setLabelFlag.Changed {
+		sn.Label = options.SetLabel
 		changed = true
 	}
-	if opts.setDescriptionFlag != nil && opts.setDescriptionFlag.Changed {
-		sn.Description = opts.SetDescription
+	if options.setDescriptionFlag != nil && options.setDescriptionFlag.Changed {
+		sn.Description = options.SetDescription
 		changed = true
 	}
-	if opts.setDeleteFlag != nil && opts.setDeleteFlag.Changed {
-		switch strings.ToLower(opts.SetDelete) {
+	if options.setDeleteFlag != nil && options.setDeleteFlag.Changed {
+		switch strings.ToLower(options.SetDelete) {
 		case "none", "":
 			sn.Delete = nil
 		case "never":
 			sn.Delete = &data.DeleteOption{Never: true}
 		default:
-			dur, err := data.ParseDuration(opts.SetDelete)
+			dur, err := data.ParseDuration(options.SetDelete)
 			if err != nil || dur.Zero() {
-				return false, errors.Errorf("invalid --set-delete value %q (use 'never', 'none' or a duration)", opts.SetDelete)
+				return false, errors.Errorf("invalid --set-delete value %q (use 'never', 'none' or a duration)", options.SetDelete)
 			}
 			until := now.AddDate(dur.Years, dur.Months, dur.Days).Add(time.Duration(dur.Hours) * time.Hour)
 			sn.Delete = &data.DeleteOption{After: &until}
@@ -171,22 +171,22 @@ func changeSnapshotMeta(
 	return changed, nil
 }
 
-func runTag(ctx context.Context, opts TagOptions, gopts global.Options, term ui.Terminal, args []string) error {
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+func runTag(ctx context.Context, options tagOptions, globalOptions global.Options, term ui.Terminal, args []string) error {
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
-	tagsChanged := len(opts.SetTags) != 0 || len(opts.AddTags) != 0 || len(opts.RemoveTags) != 0
-	metaChanged := (opts.setLabelFlag != nil && opts.setLabelFlag.Changed) ||
-		(opts.setDescriptionFlag != nil && opts.setDescriptionFlag.Changed) ||
-		(opts.setDeleteFlag != nil && opts.setDeleteFlag.Changed)
+	tagsChanged := len(options.SetTags) != 0 || len(options.AddTags) != 0 || len(options.RemoveTags) != 0
+	metaChanged := (options.setLabelFlag != nil && options.setLabelFlag.Changed) ||
+		(options.setDescriptionFlag != nil && options.setDescriptionFlag.Changed) ||
+		(options.setDeleteFlag != nil && options.setDeleteFlag.Changed)
 	if !tagsChanged && !metaChanged {
 		return errors.Fatal("nothing to do!")
 	}
-	if len(opts.SetTags) != 0 && (len(opts.AddTags) != 0 || len(opts.RemoveTags) != 0) {
+	if len(options.SetTags) != 0 && (len(options.AddTags) != 0 || len(options.RemoveTags) != 0) {
 		return errors.Fatal("--set and --add/--remove cannot be given at the same time")
 	}
 
 	printer.P("create exclusive lock for repository")
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func runTag(ctx context.Context, opts TagOptions, gopts global.Options, term ui.
 		}
 	}
 
-	if gopts.JSON {
+	if globalOptions.JSON {
 		printFunc = func(c changedSnapshot) {
 			term.Print(ui.ToJSONString(c))
 		}
@@ -215,11 +215,11 @@ func runTag(ctx context.Context, opts TagOptions, gopts global.Options, term ui.
 	}
 
 	now := time.Now()
-	err = opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	err = options.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
-		changed, err := changeSnapshotMeta(ctx, repo, sn, opts, now, printFunc)
+		changed, err := changeSnapshotMeta(ctx, repo, sn, options, now, printFunc)
 		if err != nil {
 			printer.E("unable to modify snapshot ID %q, ignoring: %v", sn.ID(), err)
 			return nil

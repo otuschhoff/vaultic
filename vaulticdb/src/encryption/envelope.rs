@@ -1,3 +1,5 @@
+//! Metadata key envelopes, slots, rotation, escrow, and provider integration.
+
 use std::{path::PathBuf, sync::Arc};
 
 use aes_gcm::{
@@ -16,6 +18,7 @@ use tokio::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{EncryptedObjectStore, EncryptionKey};
+use crate::ids::RepositoryId;
 pub use providers::ProviderCredentials;
 use providers::{KeyContext, KeyProvider};
 
@@ -35,31 +38,31 @@ const ROTATION_AAD_PREFIX: &str = "vaulticdb-dek-rotation";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KeyEnvelope {
-    pub format: u32,
-    pub repository_id: String,
-    pub generation: u64,
-    pub active_dek_version: u32,
-    pub slots: Vec<KeySlot>,
+pub(crate) struct KeyEnvelope {
+    pub(crate) format: u32,
+    pub(crate) repository_id: RepositoryId,
+    pub(crate) generation: u64,
+    pub(crate) active_dek_version: u32,
+    pub(crate) slots: Vec<KeySlot>,
     #[serde(default)]
-    pub rotations: Vec<DekRotation>,
+    pub(crate) rotations: Vec<DekRotation>,
     #[serde(default)]
-    pub retired_through_dek_version: u32,
+    pub(crate) retired_through_dek_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DekRotation {
-    pub version: u32,
-    pub wrapped_dek: String,
-    pub nonce: String,
+pub(crate) struct DekRotation {
+    pub(crate) version: u32,
+    pub(crate) wrapped_dek: String,
+    pub(crate) nonce: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EscrowRecord {
     pub format: u32,
-    pub repository_id: String,
+    pub repository_id: RepositoryId,
     pub escrow_id: String,
     pub provider: String,
     pub key_reference: String,
@@ -68,25 +71,25 @@ pub struct EscrowRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KeySlot {
-    pub id: String,
-    pub provider: String,
-    pub priority: u32,
-    pub recovery: bool,
-    pub key_reference: String,
-    pub dek_version: u32,
-    pub wrapped_dek: String,
-    pub nonce: String,
-    pub argon2: Option<Argon2Config>,
+pub(crate) struct KeySlot {
+    pub(crate) id: String,
+    pub(crate) provider: String,
+    pub(crate) priority: u32,
+    pub(crate) recovery: bool,
+    pub(crate) key_reference: String,
+    pub(crate) dek_version: u32,
+    pub(crate) wrapped_dek: String,
+    pub(crate) nonce: String,
+    pub(crate) argon2: Option<Argon2Config>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Argon2Config {
-    pub salt: String,
-    pub memory_kib: u32,
-    pub iterations: u32,
-    pub parallelism: u32,
+pub(crate) struct Argon2Config {
+    pub(crate) salt: String,
+    pub(crate) memory_kib: u32,
+    pub(crate) iterations: u32,
+    pub(crate) parallelism: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,7 +725,7 @@ fn new_local_envelope(
     Ok((
         KeyEnvelope {
             format: ENVELOPE_FORMAT,
-            repository_id: repository_id.to_owned(),
+            repository_id: repository_id.into(),
             generation: 1,
             active_dek_version: 1,
             slots: vec![KeySlot {

@@ -2,7 +2,7 @@ package vaultic_test
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -43,7 +43,8 @@ func TestFind(t *testing.T) {
 	}
 
 	f, err = vaultic.Find(context.TODO(), m, vaultic.SnapshotFile, "NotAPrefix")
-	if _, ok := err.(*vaultic.NoIDByPrefixError); !ok || !strings.Contains(err.Error(), "NotAPrefix") {
+	noIDByPrefixError := &vaultic.NoIDByPrefixError{}
+	if !errors.As(err, &noIDByPrefixError) {
 		t.Error("Expected no snapshots to be found.")
 	}
 	if !f.IsNull() {
@@ -53,7 +54,8 @@ func TestFind(t *testing.T) {
 	// Try to match with a prefix longer than any ID.
 	extraLengthID := samples[0].String() + "f"
 	f, err = vaultic.Find(context.TODO(), m, vaultic.SnapshotFile, extraLengthID)
-	if _, ok := err.(*vaultic.NoIDByPrefixError); !ok || !strings.Contains(err.Error(), extraLengthID) {
+	noIDByPrefixError = &vaultic.NoIDByPrefixError{}
+	if !errors.As(err, &noIDByPrefixError) {
 		t.Errorf("Wrong error %v for no snapshots matched", err)
 	}
 	if !f.IsNull() {
@@ -62,7 +64,8 @@ func TestFind(t *testing.T) {
 
 	// Use a prefix that will match the prefix of multiple Ids in `samples`.
 	f, err = vaultic.Find(context.TODO(), m, vaultic.SnapshotFile, "20bdc140")
-	if _, ok := err.(*vaultic.MultipleIDMatchesError); !ok {
+	multipleIDMatchesError := &vaultic.MultipleIDMatchesError{}
+	if !errors.As(err, &multipleIDMatchesError) {
 		t.Errorf("Wrong error %v for multiple snapshots", err)
 	}
 	if !f.IsNull() {

@@ -20,7 +20,7 @@ import (
 )
 
 func newInitCommand(globalOptions *global.Options) *cobra.Command {
-	var opts InitOptions
+	var options initOptions
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -37,15 +37,15 @@ Exit status is 1 if there was any error.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInit(cmd.Context(), opts, *globalOptions, args, globalOptions.Term)
+			return runInit(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// InitOptions bundles all options for the init command.
-type InitOptions struct {
+// initOptions bundles all options for the init command.
+type initOptions struct {
 	global.SecondaryRepoOptions
 	CopyChunkerParameters bool
 	RepositoryVersion     string
@@ -67,71 +67,77 @@ type InitOptions struct {
 	HotOnly bool
 }
 
-func (opts *InitOptions) AddFlags(f *pflag.FlagSet) {
-	opts.SecondaryRepoOptions.AddFlags(f, "secondary", "to copy chunker parameters from")
-	f.BoolVar(&opts.CopyChunkerParameters, "copy-chunker-params", false, "copy chunker parameters from the secondary repository (useful with the copy command)")
+func (options *initOptions) AddFlags(f *pflag.FlagSet) {
+	options.SecondaryRepoOptions.AddFlags(f, "secondary", "to copy chunker parameters from")
+	f.BoolVar(
+		&options.CopyChunkerParameters, "copy-chunker-params", false,
+		"copy chunker parameters from the secondary repository (useful with the copy command)",
+	)
 	f.StringVar(
-		&opts.RepositoryVersion,
+		&options.RepositoryVersion,
 		"repository-version",
 		"stable",
 		"repository format version to use, allowed values are a format version, 'latest' and 'stable'",
 	)
 
-	f.StringVar(&opts.SetCompression, "set-compression", "", "set initial compression `level` (-7..22, 0=off) in the repository config")
-	f.StringVar(&opts.SetAppendOnly, "set-append-only", "", "set initial append-only `mode` (true|false)")
-	f.StringVar(&opts.SetExtraVerify, "set-extra-verify", "", "verify data before upload (true|false; default true)")
-	f.StringVar(&opts.SetChunker, "set-chunker", "", "set chunker `type` (rabin|fixed_size)")
-	f.StringVar(&opts.SetChunkSize, "set-chunk-size", "", "set average/fixed chunk `size` in bytes")
-	f.StringVar(&opts.SetChunkMinSize, "set-chunk-min-size", "", "set minimum chunk `size` in bytes")
-	f.StringVar(&opts.SetChunkMaxSize, "set-chunk-max-size", "", "set maximum chunk `size` in bytes")
-	f.StringVar(&opts.SetTreePackSize, "set-treepack-size", "", "set target tree pack `size` in bytes")
-	f.StringVar(&opts.SetDataPackSize, "set-datapack-size", "", "set target data pack `size` in bytes")
-	f.BoolVar(&opts.HotOnly, "hot-only", false, "only initialize the hot part of a hot/cold repository (requires --repo-hot; the cold repository must exist)")
+	f.StringVar(&options.SetCompression, "set-compression", "", "set initial compression `level` (-7..22, 0=off) in the repository config")
+	f.StringVar(&options.SetAppendOnly, "set-append-only", "", "set initial append-only `mode` (true|false)")
+	f.StringVar(&options.SetExtraVerify, "set-extra-verify", "", "verify data before upload (true|false; default true)")
+	f.StringVar(&options.SetChunker, "set-chunker", "", "set chunker `type` (rabin|fixed_size)")
+	f.StringVar(&options.SetChunkSize, "set-chunk-size", "", "set average/fixed chunk `size` in bytes")
+	f.StringVar(&options.SetChunkMinSize, "set-chunk-min-size", "", "set minimum chunk `size` in bytes")
+	f.StringVar(&options.SetChunkMaxSize, "set-chunk-max-size", "", "set maximum chunk `size` in bytes")
+	f.StringVar(&options.SetTreePackSize, "set-treepack-size", "", "set target tree pack `size` in bytes")
+	f.StringVar(&options.SetDataPackSize, "set-datapack-size", "", "set target data pack `size` in bytes")
+	f.BoolVar(
+		&options.HotOnly, "hot-only", false,
+		"only initialize the hot part of a hot/cold repository (requires --repo-hot; the cold repository must exist)",
+	)
 }
 
-func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args []string, term ui.Terminal) error {
+func runInit(ctx context.Context, options initOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
 	if len(args) > 0 {
 		return errors.Fatal("the init command expects no arguments, only options - please see `vaultic help init` for usage and flags")
 	}
 
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 
-	if opts.HotOnly {
-		return runInitHotOnly(ctx, opts, gopts, printer)
+	if options.HotOnly {
+		return runInitHotOnly(ctx, globalOptions, printer)
 	}
 
 	var version uint
-	switch opts.RepositoryVersion {
+	switch options.RepositoryVersion {
 	case "latest", "":
 		version = vaultic.MaxRepoVersion
 	case "stable":
 		version = vaultic.StableRepoVersion
 	default:
-		v, err := strconv.ParseUint(opts.RepositoryVersion, 10, 32)
+		v, err := strconv.ParseUint(options.RepositoryVersion, 10, 32)
 		if err != nil {
 			return errors.Fatal("invalid repository version")
 		}
 		version = uint(v)
 	}
 
-	chunkerPolynomial, err := maybeReadChunkerPolynomial(ctx, opts, gopts, printer)
+	chunkerPolynomial, err := maybeReadChunkerPolynomial(ctx, options, globalOptions, printer)
 	if err != nil {
 		return err
 	}
 
-	s, err := global.CreateRepository(ctx, gopts, version, chunkerPolynomial, printer)
+	s, err := global.CreateRepository(ctx, globalOptions, version, chunkerPolynomial, printer)
 	if err != nil {
 		return errors.Fatalf("%s", err)
 	}
 
 	// apply initial in-repo config (from --set-* flags)
-	if err := opts.applyConfig(ctx, s); err != nil {
+	if err := options.applyConfig(ctx, s); err != nil {
 		return err
 	}
 
-	if !gopts.JSON {
-		printer.P("created vaultic repository %v at %s", s.Config().ID[:10], location.StripPassword(gopts.Backends, gopts.Repo))
-		if opts.CopyChunkerParameters && chunkerPolynomial != nil {
+	if !globalOptions.JSON {
+		printer.P("created vaultic repository %v at %s", s.Config().ID[:10], location.StripPassword(globalOptions.Backends, globalOptions.Repo))
+		if options.CopyChunkerParameters && chunkerPolynomial != nil {
 			printer.P(" with chunker parameters copied from secondary repository")
 		}
 		printer.P("")
@@ -143,25 +149,25 @@ func runInit(ctx context.Context, opts InitOptions, gopts global.Options, args [
 		status := initSuccess{
 			MessageType: "initialized",
 			ID:          s.Config().ID,
-			Repository:  location.StripPassword(gopts.Backends, gopts.Repo),
+			Repository:  location.StripPassword(globalOptions.Backends, globalOptions.Repo),
 		}
-		return json.NewEncoder(gopts.Term.OutputWriter()).Encode(status)
+		return json.NewEncoder(globalOptions.Term.OutputWriter()).Encode(status)
 	}
 
 	return nil
 }
 
 // runInitHotOnly initializes only the hot part of a hot/cold repository. The
-// cold repository (gopts.Repo) must already exist; the hot part
-// (gopts.RepoHot) is created and receives the metadata (config marked is_hot,
+// cold repository (globalOptions.Repo) must already exist; the hot part
+// (globalOptions.RepoHot) is created and receives the metadata (config marked is_hot,
 // keys, snapshots, indexes).
-func runInitHotOnly(ctx context.Context, opts InitOptions, gopts global.Options, printer vaultic.Printer) error {
-	if gopts.RepoHot == "" {
+func runInitHotOnly(ctx context.Context, globalOptions global.Options, printer vaultic.Printer) error {
+	if globalOptions.RepoHot == "" {
 		return errors.Fatal("--hot-only requires --repo-hot to be set")
 	}
 
 	// open the existing cold repository to read its config (chunker params)
-	coldGopts := gopts
+	coldGopts := globalOptions
 	coldGopts.RepoHot = "" // open the cold repo as a normal repository
 	cold, err := global.OpenRepository(ctx, coldGopts, printer)
 	if err != nil {
@@ -173,11 +179,11 @@ func runInitHotOnly(ctx context.Context, opts InitOptions, gopts global.Options,
 	hotCfg := cold.Config()
 	hotCfg.IsHot = true
 	masterKey := cold.Key()
-	defer func() { _ = cold.Close() }()
+	defer func() { _ = cold.Close() }() // The hot repository owns the operation result; cold close is teardown only.
 
 	// create the hot repository at RepoHot with the cold repo's config and key
-	hotGopts := gopts
-	hotGopts.Repo = gopts.RepoHot
+	hotGopts := globalOptions
+	hotGopts.Repo = globalOptions.RepoHot
 	hotGopts.RepoHot = ""
 	hot, err := global.CreateRepositoryWithConfig(ctx, hotGopts, hotCfg, masterKey, printer)
 	if err != nil {
@@ -190,71 +196,73 @@ func runInitHotOnly(ctx context.Context, opts InitOptions, gopts global.Options,
 	}
 
 	printer.P("initialized hot repository %v at %s (cold repository: %s)",
-		hot.Config().ID[:10], location.StripPassword(gopts.Backends, gopts.RepoHot),
-		location.StripPassword(gopts.Backends, gopts.Repo))
+		hot.Config().ID[:10], location.StripPassword(globalOptions.Backends, globalOptions.RepoHot),
+		location.StripPassword(globalOptions.Backends, globalOptions.Repo))
 	return nil
 }
 
 // applyConfig applies the --set-* init flags to the new repository config.
-func (opts *InitOptions) applyConfig(ctx context.Context, s *repository.Repository) error {
-	return s.UpdateConfig(ctx, func(cfg *vaultic.Config) error {
-		if opts.SetCompression != "" {
-			if err := setOptionalInt(opts.SetCompression, -7, 22, &cfg.Compression, "compression"); err != nil {
-				return err
-			}
-		}
-		if opts.SetAppendOnly != "" {
-			if _, err := parseOptionalBool(opts.SetAppendOnly, &cfg.AppendOnlyFlag); err != nil {
-				return err
-			}
-		}
-		if opts.SetExtraVerify != "" {
-			if err := setOptionalBoolPtr(opts.SetExtraVerify, &cfg.ExtraVerify); err != nil {
-				return err
-			}
-		}
-		if opts.SetChunker != "" {
-			switch strings.ToLower(opts.SetChunker) {
-			case "rabin":
-				cfg.ChunkerType = vaultic.ChunkerRabin
-			case "fixed_size", "fixedsize":
-				cfg.ChunkerType = vaultic.ChunkerFixedSize
-			default:
-				return errors.Fatalf("invalid chunker %q, must be one of (rabin|fixed_size)", opts.SetChunker)
-			}
-		}
-		if opts.SetChunkSize != "" {
-			if err := setOptionalUint64(opts.SetChunkSize, &cfg.ChunkSizeBytes); err != nil {
-				return err
-			}
-		}
-		if opts.SetChunkMinSize != "" {
-			if err := setOptionalUint64(opts.SetChunkMinSize, &cfg.ChunkMinSizeBytes); err != nil {
-				return err
-			}
-		}
-		if opts.SetChunkMaxSize != "" {
-			if err := setOptionalUint64(opts.SetChunkMaxSize, &cfg.ChunkMaxSizeBytes); err != nil {
-				return err
-			}
-		}
-		if opts.SetTreePackSize != "" {
-			if err := setOptionalUint64(opts.SetTreePackSize, &cfg.TreePackSizeBytes); err != nil {
-				return err
-			}
-		}
-		if opts.SetDataPackSize != "" {
-			if err := setOptionalUint64(opts.SetDataPackSize, &cfg.DataPackSizeBytes); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+func (options *initOptions) applyConfig(ctx context.Context, s *repository.Repository) error {
+	return s.UpdateConfig(ctx, options.applyConfigValues)
 }
 
-func maybeReadChunkerPolynomial(ctx context.Context, opts InitOptions, gopts global.Options, printer vaultic.Printer) (*chunker.Pol, error) {
-	if opts.CopyChunkerParameters {
-		otherGopts, _, err := opts.SecondaryRepoOptions.FillGlobalOpts(ctx, gopts, "secondary")
+func (options *initOptions) applyConfigValues(cfg *vaultic.Config) error {
+	if options.SetCompression != "" {
+		if err := setOptionalInt(options.SetCompression, -7, 22, &cfg.Compression, "compression"); err != nil {
+			return err
+		}
+	}
+	if options.SetAppendOnly != "" {
+		if _, err := parseOptionalBool(options.SetAppendOnly, &cfg.AppendOnlyFlag); err != nil {
+			return err
+		}
+	}
+	if options.SetExtraVerify != "" {
+		if err := setOptionalBoolPtr(options.SetExtraVerify, &cfg.ExtraVerify); err != nil {
+			return err
+		}
+	}
+	if options.SetChunker != "" {
+		switch strings.ToLower(options.SetChunker) {
+		case "rabin":
+			cfg.ChunkerType = vaultic.ChunkerRabin
+		case "fixed_size", "fixedsize":
+			cfg.ChunkerType = vaultic.ChunkerFixedSize
+		default:
+			return errors.Fatalf("invalid chunker %q, must be one of (rabin|fixed_size)", options.SetChunker)
+		}
+	}
+	if options.SetChunkSize != "" {
+		if err := setOptionalUint64(options.SetChunkSize, &cfg.ChunkSizeBytes); err != nil {
+			return err
+		}
+	}
+	if options.SetChunkMinSize != "" {
+		if err := setOptionalUint64(options.SetChunkMinSize, &cfg.ChunkMinSizeBytes); err != nil {
+			return err
+		}
+	}
+	if options.SetChunkMaxSize != "" {
+		if err := setOptionalUint64(options.SetChunkMaxSize, &cfg.ChunkMaxSizeBytes); err != nil {
+			return err
+		}
+	}
+	if options.SetTreePackSize != "" {
+		if err := setOptionalUint64(options.SetTreePackSize, &cfg.TreePackSizeBytes); err != nil {
+			return err
+		}
+	}
+	if options.SetDataPackSize != "" {
+		if err := setOptionalUint64(options.SetDataPackSize, &cfg.DataPackSizeBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func maybeReadChunkerPolynomial(ctx context.Context, options initOptions, globalOptions global.Options, printer vaultic.Printer) (*chunker.Pol, error) {
+	if options.CopyChunkerParameters {
+		otherGopts, _, err := options.SecondaryRepoOptions.FillGlobalOpts(ctx, globalOptions, "secondary")
 		if err != nil {
 			return nil, err
 		}
@@ -268,7 +276,7 @@ func maybeReadChunkerPolynomial(ctx context.Context, opts InitOptions, gopts glo
 		return &pol, nil
 	}
 
-	if opts.Repo != "" || opts.RepositoryFile != "" || opts.LegacyRepo != "" || opts.LegacyRepositoryFile != "" {
+	if options.Repo != "" || options.RepositoryFile != "" || options.LegacyRepo != "" || options.LegacyRepositoryFile != "" {
 		return nil, errors.Fatal("Secondary repository must only be specified when copying the chunker parameters")
 	}
 	return nil, nil

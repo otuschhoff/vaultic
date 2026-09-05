@@ -9,9 +9,9 @@ import (
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
-func testRunCheck(t testing.TB, gopts global.Options) {
+func testRunCheck(t testing.TB, globalOptions global.Options) {
 	t.Helper()
-	stdout, stderr, err := testRunCheckOutput(t, gopts, true)
+	stdout, stderr, err := testRunCheckOutput(t, globalOptions, true)
 	if err != nil {
 		t.Error(stdout)
 		t.Error(stderr)
@@ -19,28 +19,28 @@ func testRunCheck(t testing.TB, gopts global.Options) {
 	}
 }
 
-func testRunCheckMustFail(t testing.TB, gopts global.Options) {
+func testRunCheckMustFail(t testing.TB, globalOptions global.Options) {
 	t.Helper()
-	_, _, err := testRunCheckOutput(t, gopts, false)
+	_, _, err := testRunCheckOutput(t, globalOptions, false)
 	rtest.Assert(t, err != nil, "expected non nil error after check of damaged repository")
 }
 
-func testRunCheckOutput(t testing.TB, gopts global.Options, checkUnused bool) (string, string, error) {
-	stdout, stderr, err := withCaptureStdoutStderr(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		opts := CheckOptions{
+func testRunCheckOutput(t testing.TB, globalOptions global.Options, checkUnused bool) (string, string, error) {
+	stdout, stderr, err := withCaptureStdoutStderr(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		options := checkOptions{
 			ReadData:    true,
 			CheckUnused: checkUnused,
 		}
-		_, err := runCheck(ctx, opts, gopts, nil, gopts.Term)
+		_, err := runCheck(ctx, options, globalOptions, nil, globalOptions.Term)
 		return err
 	})
 	return stdout.String(), stderr.String(), err
 }
 
-func testRunCheckOutputWithOpts(t testing.TB, gopts global.Options, opts CheckOptions, args []string) (string, error) {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		gopts.Verbosity = 2
-		_, err := runCheck(ctx, opts, gopts, args, gopts.Term)
+func testRunCheckOutputWithOpts(t testing.TB, globalOptions global.Options, options checkOptions, args []string) (string, error) {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		globalOptions.Verbosity = 2
+		_, err := runCheck(ctx, options, globalOptions, args, globalOptions.Term)
 		return err
 	})
 	return buf.String(), err
@@ -48,37 +48,37 @@ func testRunCheckOutputWithOpts(t testing.TB, gopts global.Options, opts CheckOp
 
 func TestCheckWithSnaphotFilter(t *testing.T) {
 	testCases := []struct {
-		opts           CheckOptions
+		options        checkOptions
 		args           []string
 		expectedOutput string
 	}{
 		{ // full --read-data, all snapshots
-			CheckOptions{ReadData: true},
+			checkOptions{ReadData: true},
 			nil,
 			"4 / 4 packs",
 		},
 		{ // full --read-data, all snapshots
-			CheckOptions{ReadData: true},
+			checkOptions{ReadData: true},
 			nil,
 			"2 / 2 snapshots",
 		},
 		{ // full --read-data, latest snapshot
-			CheckOptions{ReadData: true},
+			checkOptions{ReadData: true},
 			[]string{"latest"},
 			"2 / 2 packs",
 		},
 		{ // full --read-data, latest snapshot
-			CheckOptions{ReadData: true},
+			checkOptions{ReadData: true},
 			[]string{"latest"},
 			"1 / 1 snapshots",
 		},
 		{ // --read-data-subset, latest snapshot
-			CheckOptions{ReadDataSubset: "1%"},
+			checkOptions{ReadDataSubset: "1%"},
 			[]string{"latest"},
 			"1 / 1 packs",
 		},
 		{ // --read-data-subset, latest snapshot
-			CheckOptions{ReadDataSubset: "1%"},
+			checkOptions{ReadDataSubset: "1%"},
 			[]string{"latest"},
 			"filtered",
 		},
@@ -88,12 +88,12 @@ func TestCheckWithSnaphotFilter(t *testing.T) {
 	defer cleanup()
 
 	testSetupBackupData(t, env)
-	opts := BackupOptions{}
-	testRunBackup(t, env.testdata+"/0", []string{"for_cmd_ls"}, opts, env.gopts)
-	testRunBackup(t, env.testdata+"/0", []string{"0/9"}, opts, env.gopts)
+	options := backupOptions{}
+	testRunBackup(t, env.testdata+"/0", []string{"for_cmd_ls"}, options, env.globalOptions)
+	testRunBackup(t, env.testdata+"/0", []string{"0/9"}, options, env.globalOptions)
 
 	for _, testCase := range testCases {
-		output, err := testRunCheckOutputWithOpts(t, env.gopts, testCase.opts, testCase.args)
+		output, err := testRunCheckOutputWithOpts(t, env.globalOptions, testCase.options, testCase.args)
 		rtest.OK(t, err)
 
 		hasOutput := strings.Contains(output, testCase.expectedOutput)

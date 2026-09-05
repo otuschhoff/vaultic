@@ -129,8 +129,7 @@ func (b *Backend) List(ctx context.Context, t backend.FileType, fn func(backend.
 		// we list both and let the caller deduplicate; to avoid reporting data
 		// packs twice we list packs from cold and additionally tree packs from
 		// hot.
-		var err error
-		err = b.cold.List(ctx, t, fn)
+		err := b.cold.List(ctx, t, fn)
 		if err != nil {
 			return err
 		}

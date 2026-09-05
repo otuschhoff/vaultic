@@ -47,14 +47,14 @@ Exit status is 12 if the password is incorrect.
 	return cmd
 }
 
-func runList(ctx context.Context, gopts global.Options, args []string, term ui.Terminal, listAllowedArgsUseString string) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+func runList(ctx context.Context, globalOptions global.Options, args []string, term ui.Terminal, listAllowedArgsUseString string) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
 	if len(args) == 0 || (args[0] == "packs" && len(args) > 2) || (args[0] != "packs" && len(args) != 1) {
 		return errors.Fatal(fmt.Sprintf("too many parameters or type not specified. Must be one of [%s] or 'packs snapshotID'", listAllowedArgsUseString))
 	}
 
-	ctx, repo, unlock, err := openWithReadLock(ctx, gopts, gopts.NoLock || args[0] == "locks", printer)
+	ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, globalOptions.NoLock || args[0] == "locks", printer)
 	if err != nil {
 		return err
 	}

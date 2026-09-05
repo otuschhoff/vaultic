@@ -28,6 +28,7 @@ func (h *Writer) Write(p []byte) (int, error) {
 	// returns an error.
 	_, hashErr := h.h.Write(p[:n])
 	if hashErr != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(hashErr)
 	}
 

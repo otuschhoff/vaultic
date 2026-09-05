@@ -20,6 +20,7 @@ func NewRegistry() *Registry {
 
 func (r *Registry) Register(factory Factory) {
 	if r.factories[factory.Scheme()] != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("duplicate backend")
 	}
 	r.factories[factory.Scheme()] = factory

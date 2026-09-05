@@ -6,6 +6,9 @@ import (
 	"github.com/pkg/errors"
 )
 
+// ErrStopIteration signals that an iteration ended successfully before exhaustion.
+var ErrStopIteration = stderrors.New("stop iteration")
+
 // New creates a new error based on message. Wrapped so that this package does
 // not appear in the stack trace.
 var New = errors.New

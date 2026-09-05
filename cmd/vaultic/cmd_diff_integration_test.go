@@ -15,12 +15,12 @@ import (
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
-func testRunDiffOutput(t testing.TB, gopts global.Options, firstSnapshotID string, secondSnapshotID string) (string, error) {
-	buf, err := withCaptureStdout(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		opts := DiffOptions{
+func testRunDiffOutput(t testing.TB, globalOptions global.Options, firstSnapshotID string, secondSnapshotID string) (string, error) {
+	buf, err := withCaptureStdout(t, globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		options := diffOptions{
 			ShowMetadata: false,
 		}
-		return runDiff(ctx, opts, gopts, []string{firstSnapshotID, secondSnapshotID}, gopts.Term)
+		return runDiff(ctx, options, globalOptions, []string{firstSnapshotID, secondSnapshotID}, globalOptions.Term)
 	})
 	return buf.String(), err
 }
@@ -80,7 +80,7 @@ var diffOutputRegexPatterns = []string{
 
 func setupDiffRepo(t *testing.T) (*testEnvironment, func(), string, string) {
 	env, cleanup := withTestEnvironment(t)
-	testRunInit(t, env.gopts)
+	testRunInit(t, env.globalOptions)
 
 	datadir := filepath.Join(env.base, "testdata")
 	testdir := filepath.Join(datadir, "testdir")
@@ -102,9 +102,9 @@ func setupDiffRepo(t *testing.T) (*testEnvironment, func(), string, string) {
 	rtest.OK(t, appendRandomData(modfile+"1", 256*1024))
 
 	snapshots := make(map[string]struct{})
-	opts := BackupOptions{}
-	testRunBackup(t, "", []string{datadir}, opts, env.gopts)
-	snapshots, firstSnapshotID := lastSnapshot(snapshots, loadSnapshotMap(t, env.gopts))
+	options := backupOptions{}
+	testRunBackup(t, "", []string{datadir}, options, env.globalOptions)
+	snapshots, firstSnapshotID := lastSnapshot(snapshots, loadSnapshotMap(t, env.globalOptions))
 
 	rtest.OK(t, os.Rename(modfile, modfile+"3"))
 	rtest.OK(t, os.Rename(submoddir, submoddir+"2"))
@@ -112,8 +112,8 @@ func setupDiffRepo(t *testing.T) (*testEnvironment, func(), string, string) {
 	rtest.OK(t, appendRandomData(modfile+"2", 256*1024))
 	rtest.OK(t, os.Mkdir(modfile+"4", 0755))
 
-	testRunBackup(t, "", []string{datadir}, opts, env.gopts)
-	_, secondSnapshotID := lastSnapshot(snapshots, loadSnapshotMap(t, env.gopts))
+	testRunBackup(t, "", []string{datadir}, options, env.globalOptions)
+	_, secondSnapshotID := lastSnapshot(snapshots, loadSnapshotMap(t, env.globalOptions))
 
 	return env, cleanup, firstSnapshotID, secondSnapshotID
 }
@@ -123,11 +123,11 @@ func TestDiff(t *testing.T) {
 	defer cleanup()
 
 	// quiet suppresses the diff output except for the summary
-	env.gopts.Quiet = false
-	_, err := testRunDiffOutput(t, env.gopts, "", secondSnapshotID)
+	env.globalOptions.Quiet = false
+	_, err := testRunDiffOutput(t, env.globalOptions, "", secondSnapshotID)
 	rtest.Assert(t, err != nil, "expected error on invalid snapshot id")
 
-	out, err := testRunDiffOutput(t, env.gopts, firstSnapshotID, secondSnapshotID)
+	out, err := testRunDiffOutput(t, env.globalOptions, firstSnapshotID, secondSnapshotID)
 	rtest.OK(t, err)
 
 	for _, pattern := range diffOutputRegexPatterns {
@@ -137,8 +137,8 @@ func TestDiff(t *testing.T) {
 	}
 
 	// check quiet output
-	env.gopts.Quiet = true
-	outQuiet, err := testRunDiffOutput(t, env.gopts, firstSnapshotID, secondSnapshotID)
+	env.globalOptions.Quiet = true
+	outQuiet, err := testRunDiffOutput(t, env.globalOptions, firstSnapshotID, secondSnapshotID)
 	rtest.OK(t, err)
 
 	rtest.Assert(t, len(outQuiet) < len(out), "expected shorter output on quiet mode %v vs. %v", len(outQuiet), len(out))
@@ -153,9 +153,9 @@ func TestDiffJSON(t *testing.T) {
 	defer cleanup()
 
 	// quiet suppresses the diff output except for the summary
-	env.gopts.Quiet = false
-	env.gopts.JSON = true
-	out, err := testRunDiffOutput(t, env.gopts, firstSnapshotID, secondSnapshotID)
+	env.globalOptions.Quiet = false
+	env.globalOptions.JSON = true
+	out, err := testRunDiffOutput(t, env.globalOptions, firstSnapshotID, secondSnapshotID)
 	rtest.OK(t, err)
 
 	var stat DiffStatsContainer
@@ -181,8 +181,8 @@ func TestDiffJSON(t *testing.T) {
 		stat.ChangedFiles == 1, "unexpected statistics")
 
 	// check quiet output
-	env.gopts.Quiet = true
-	outQuiet, err := testRunDiffOutput(t, env.gopts, firstSnapshotID, secondSnapshotID)
+	env.globalOptions.Quiet = true
+	outQuiet, err := testRunDiffOutput(t, env.globalOptions, firstSnapshotID, secondSnapshotID)
 	rtest.OK(t, err)
 
 	stat = DiffStatsContainer{}

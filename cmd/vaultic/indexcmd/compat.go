@@ -1,20 +1,20 @@
 package indexcmd
 
-type BackendsOptions = indexBackendsOptions
-type CheckOptions = indexCheckOptions
-type DaemonOptions = indexDaemonOptions
-type ExportOptions = indexExportOptions
-type FileHistoryOptions = indexFileHistoryOptions
-type GCOptions = indexGCOptions
-type HistoryOptions = indexHistoryOptions
-type HistoryPruneOptions = indexHistoryPruneOptions
-type ImportOptions = indexImportOptions
-type KeysOptions = indexKeysOptions
-type PacksOptions = indexPacksOptions
-type PathAtOptions = indexPathAtOptions
-type PathIndexOptions = indexPathIndexOptions
-type RebuildPackStatsOptions = indexRebuildPackStatsOptions
-type StatsOptions = indexStatsOptions
+type BackendsConfig = indexBackendsOptions
+type CheckConfig = indexCheckOptions
+type DaemonConfig = indexDaemonOptions
+type ExportConfig = indexExportOptions
+type FileHistoryConfig = indexFileHistoryOptions
+type GCConfig = indexGCOptions
+type HistoryConfig = indexHistoryOptions
+type HistoryPruneConfig = indexHistoryPruneOptions
+type ImportConfig = indexImportOptions
+type KeysConfig = indexKeysOptions
+type PacksConfig = indexPacksOptions
+type PathAtConfig = indexPathAtOptions
+type PathIndexConfig = indexPathIndexOptions
+type RebuildPackStatsConfig = indexRebuildPackStatsOptions
+type StatsConfig = indexStatsOptions
 type BackendComparisonResult = BackendsResult
 
 var RetireLegacyQuorumBypasses = retireLegacyQuorumBypasses

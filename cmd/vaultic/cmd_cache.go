@@ -19,7 +19,7 @@ import (
 )
 
 func newCacheCommand(globalOptions *global.Options) *cobra.Command {
-	var opts CacheOptions
+	var options cacheOptions
 
 	cmd := &cobra.Command{
 		Use:   "cache",
@@ -36,40 +36,40 @@ Exit status is 1 if there was any error.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runCache(opts, *globalOptions, args, globalOptions.Term)
+			return runCache(options, *globalOptions, args, globalOptions.Term)
 		},
 	}
 
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// CacheOptions bundles all options for the snapshots command.
-type CacheOptions struct {
+// cacheOptions bundles all options for the snapshots command.
+type cacheOptions struct {
 	Cleanup bool
 	MaxAge  uint
 	NoSize  bool
 }
 
-func (opts *CacheOptions) AddFlags(f *pflag.FlagSet) {
-	f.BoolVar(&opts.Cleanup, "cleanup", false, "remove old cache directories")
-	f.UintVar(&opts.MaxAge, "max-age", 30, "max age in `days` for cache directories to be considered old")
-	f.BoolVar(&opts.NoSize, "no-size", false, "do not output the size of the cache directories")
+func (options *cacheOptions) AddFlags(f *pflag.FlagSet) {
+	f.BoolVar(&options.Cleanup, "cleanup", false, "remove old cache directories")
+	f.UintVar(&options.MaxAge, "max-age", 30, "max age in `days` for cache directories to be considered old")
+	f.BoolVar(&options.NoSize, "no-size", false, "do not output the size of the cache directories")
 }
 
-func runCache(opts CacheOptions, gopts global.Options, args []string, term ui.Terminal) error {
-	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+func runCache(options cacheOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
 	if len(args) > 0 {
 		return errors.Fatal("the cache command expects no arguments, only options - please see `vaultic help cache` for usage and flags")
 	}
 
-	if gopts.NoCache {
+	if globalOptions.NoCache {
 		return errors.Fatal("Refusing to do anything, the cache is disabled")
 	}
 
 	var (
-		cachedir = gopts.CacheDir
+		cachedir = globalOptions.CacheDir
 		err      error
 	)
 
@@ -80,8 +80,8 @@ func runCache(opts CacheOptions, gopts global.Options, args []string, term ui.Te
 		}
 	}
 
-	if opts.Cleanup || gopts.CleanupCache {
-		oldDirs, err := cache.OlderThan(cachedir, time.Duration(opts.MaxAge)*24*time.Hour)
+	if options.Cleanup || globalOptions.CleanupCache {
+		oldDirs, err := cache.OlderThan(cachedir, time.Duration(options.MaxAge)*24*time.Hour)
 		if err != nil {
 			return err
 		}
@@ -117,7 +117,7 @@ func runCache(opts CacheOptions, gopts global.Options, args []string, term ui.Te
 	tab.AddColumn("Last Used", "{{ .Last }}")
 	tab.AddColumn("Old", "{{ .Old }}")
 
-	if !opts.NoSize {
+	if !options.NoSize {
 		tab.AddColumn("Size", "{{ .Size }}")
 	}
 
@@ -137,12 +137,12 @@ func runCache(opts CacheOptions, gopts global.Options, args []string, term ui.Te
 
 	for _, entry := range dirs {
 		var old string
-		if cache.IsOld(entry.ModTime(), time.Duration(opts.MaxAge)*24*time.Hour) {
+		if cache.IsOld(entry.ModTime(), time.Duration(options.MaxAge)*24*time.Hour) {
 			old = "yes"
 		}
 
 		var size string
-		if !opts.NoSize {
+		if !options.NoSize {
 			bytes, err := dirSize(filepath.Join(cachedir, entry.Name()))
 			if err != nil {
 				return err
@@ -163,7 +163,9 @@ func runCache(opts CacheOptions, gopts global.Options, args []string, term ui.Te
 		})
 	}
 
-	_ = tab.Write(gopts.Term.OutputWriter())
+	if err := tab.Write(globalOptions.Term.OutputWriter()); err != nil {
+		return fmt.Errorf("write cache table: %w", err)
+	}
 	printer.S("%d cache dirs in %s", len(dirs), cachedir)
 
 	return nil

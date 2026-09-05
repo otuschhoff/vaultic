@@ -99,6 +99,7 @@ func rootDirectory(fs fs.FS, target string) string {
 // named as a backup target (see BackupTarget.Explicit).
 func (t *tree) Add(fs fs.FS, path string, explicit bool) error {
 	if path == "" {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic("invalid path (empty string)")
 	}
 
@@ -235,6 +236,7 @@ func formatTree(t tree, indent string) (s string) {
 func unrollTree(f fs.FS, t *tree) error {
 	// if the current tree is a leaf node (Path is set) and has additional
 	// nodes, add the contents of Path to the nodes.
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if t.Path != "" && len(t.Nodes) > 0 {
 		debug.Log("resolve path %v", t.Path)
 		entries, err := fs.Readdirnames(f, t.Path, 0)

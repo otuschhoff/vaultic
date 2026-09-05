@@ -24,8 +24,8 @@ import (
 type Snapshot = querycmd.Snapshot
 
 func newForgetCommand(globalOptions *global.Options) *cobra.Command {
-	var opts ForgetOptions
-	var pruneOpts PruneOptions
+	var options forgetOptions
+	var pruneOpts pruneOptions
 	cmd := &cobra.Command{
 		Use:   "forget [flags] [snapshot ID] [...]",
 		Short: "Remove snapshots from the repository",
@@ -53,14 +53,14 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			finalizeSnapshotFilter(&opts.SnapshotFilter)
+			finalizeSnapshotFilter(&options.SnapshotFilter)
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runForget(cmd.Context(), opts, pruneOpts, *globalOptions, globalOptions.Term, args)
+			return runForget(cmd.Context(), options, pruneOpts, *globalOptions, globalOptions.Term, args)
 		},
 	}
-	opts.AddFlags(cmd.Flags())
+	options.AddFlags(cmd.Flags())
 	pruneOpts.AddLimitedFlags(cmd.Flags())
 	return cmd
 }
@@ -69,10 +69,6 @@ type ForgetPolicyCount int
 
 var ErrNegativePolicyCount = errors.New("negative values not allowed, use 'unlimited' instead")
 var ErrFailedToRemoveOneOrMoreSnapshots = errors.New("failed to remove one or more snapshots")
-
-// forgetPhaseATestHook pauses tests after shared policy evaluation and before
-// exclusive revalidation. Production code leaves it nil.
-var forgetPhaseATestHook func()
 
 func (c *ForgetPolicyCount) Set(s string) error {
 	switch s {
@@ -104,8 +100,8 @@ func (c *ForgetPolicyCount) Type() string {
 	return "n"
 }
 
-// ForgetOptions collects all options for the forget command.
-type ForgetOptions struct {
+// forgetOptions collects all options for the forget command.
+type forgetOptions struct {
 	Last                ForgetPolicyCount
 	Minutely            ForgetPolicyCount
 	Hourly              ForgetPolicyCount
@@ -147,62 +143,75 @@ type forgetPlan struct {
 	horizons  map[vaultic.ID]repository.SnapshotRetentionHorizon
 }
 
-func (opts *ForgetOptions) AddFlags(f *pflag.FlagSet) {
-	f.VarP(&opts.Last, "keep-last", "l", "keep the last `n` snapshots (use 'unlimited' to keep all snapshots)")
-	f.Var(&opts.Minutely, "keep-minutely", "keep the last `n` minutely snapshots")
-	f.VarP(&opts.Hourly, "keep-hourly", "H", "keep the last `n` hourly snapshots (use 'unlimited' to keep all hourly snapshots)")
-	f.VarP(&opts.Daily, "keep-daily", "d", "keep the last `n` daily snapshots (use 'unlimited' to keep all daily snapshots)")
-	f.VarP(&opts.Weekly, "keep-weekly", "w", "keep the last `n` weekly snapshots (use 'unlimited' to keep all weekly snapshots)")
-	f.VarP(&opts.Monthly, "keep-monthly", "m", "keep the last `n` monthly snapshots (use 'unlimited' to keep all monthly snapshots)")
-	f.Var(&opts.QuarterYearly, "keep-quarter-yearly", "keep the last `n` quarterly snapshots")
-	f.Var(&opts.HalfYearly, "keep-half-yearly", "keep the last `n` half-yearly snapshots")
-	f.VarP(&opts.Yearly, "keep-yearly", "y", "keep the last `n` yearly snapshots (use 'unlimited' to keep all yearly snapshots)")
-	f.VarP(&opts.Within, "keep-within", "", "keep snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
-	f.Var(&opts.WithinMinutely, "keep-within-minutely", "keep minutely snapshots newer than `duration`")
-	f.VarP(&opts.WithinHourly, "keep-within-hourly", "", "keep hourly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
-	f.VarP(&opts.WithinDaily, "keep-within-daily", "", "keep daily snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
-	f.VarP(&opts.WithinWeekly, "keep-within-weekly", "", "keep weekly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
+func (options *forgetOptions) AddFlags(f *pflag.FlagSet) {
+	f.VarP(&options.Last, "keep-last", "l", "keep the last `n` snapshots (use 'unlimited' to keep all snapshots)")
+	f.Var(&options.Minutely, "keep-minutely", "keep the last `n` minutely snapshots")
+	f.VarP(&options.Hourly, "keep-hourly", "H", "keep the last `n` hourly snapshots (use 'unlimited' to keep all hourly snapshots)")
+	f.VarP(&options.Daily, "keep-daily", "d", "keep the last `n` daily snapshots (use 'unlimited' to keep all daily snapshots)")
+	f.VarP(&options.Weekly, "keep-weekly", "w", "keep the last `n` weekly snapshots (use 'unlimited' to keep all weekly snapshots)")
+	f.VarP(&options.Monthly, "keep-monthly", "m", "keep the last `n` monthly snapshots (use 'unlimited' to keep all monthly snapshots)")
+	f.Var(&options.QuarterYearly, "keep-quarter-yearly", "keep the last `n` quarterly snapshots")
+	f.Var(&options.HalfYearly, "keep-half-yearly", "keep the last `n` half-yearly snapshots")
+	f.VarP(&options.Yearly, "keep-yearly", "y", "keep the last `n` yearly snapshots (use 'unlimited' to keep all yearly snapshots)")
+	f.VarP(&options.Within, "keep-within", "", "keep snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
+	f.Var(&options.WithinMinutely, "keep-within-minutely", "keep minutely snapshots newer than `duration`")
 	f.VarP(
-		&opts.WithinMonthly,
+		&options.WithinHourly, "keep-within-hourly", "",
+		"keep hourly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot",
+	)
+	f.VarP(
+		&options.WithinDaily, "keep-within-daily", "",
+		"keep daily snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot",
+	)
+	f.VarP(
+		&options.WithinWeekly, "keep-within-weekly", "",
+		"keep weekly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot",
+	)
+	f.VarP(
+		&options.WithinMonthly,
 		"keep-within-monthly",
 		"",
 		"keep monthly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot",
 	)
-	f.Var(&opts.WithinQuarterYearly, "keep-within-quarter-yearly", "keep quarterly snapshots newer than `duration`")
-	f.Var(&opts.WithinHalfYearly, "keep-within-half-yearly", "keep half-yearly snapshots newer than `duration`")
-	f.VarP(&opts.WithinYearly, "keep-within-yearly", "", "keep yearly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot")
-	f.Var(&opts.KeepTags, "keep-tag", "keep snapshots with this `taglist` (can be specified multiple times)")
-	f.BoolVar(&opts.UnsafeAllowRemoveAll, "unsafe-allow-remove-all", false, "allow deleting all snapshots of a snapshot group")
-	f.BoolVar(&opts.UnsafeAllowRemoveAll, "keep-none", false, "allow deleting all snapshots of a snapshot group")
+	f.Var(&options.WithinQuarterYearly, "keep-within-quarter-yearly", "keep quarterly snapshots newer than `duration`")
+	f.Var(&options.WithinHalfYearly, "keep-within-half-yearly", "keep half-yearly snapshots newer than `duration`")
+	f.VarP(
+		&options.WithinYearly, "keep-within-yearly", "",
+		"keep yearly snapshots that are newer than `duration` (eg. 1y5m7d2h) relative to the latest snapshot",
+	)
+	f.Var(&options.KeepTags, "keep-tag", "keep snapshots with this `taglist` (can be specified multiple times)")
+	f.BoolVar(&options.UnsafeAllowRemoveAll, "unsafe-allow-remove-all", false, "allow deleting all snapshots of a snapshot group")
+	f.BoolVar(&options.UnsafeAllowRemoveAll, "keep-none", false, "allow deleting all snapshots of a snapshot group")
 	f.BoolVar(
-		&opts.OverrideDeleteProtection,
+		&options.OverrideDeleteProtection,
 		"override-delete-protection",
 		false,
 		"remove snapshots even if they are marked delete-protected (delete_never/delete_after)",
 	)
-	f.StringArrayVar(&opts.Hosts, "hostname", nil, "only consider snapshots with the given `hostname` (can be specified multiple times)")
+	f.StringArrayVar(&options.Hosts, "hostname", nil, "only consider snapshots with the given `hostname` (can be specified multiple times)")
 	err := f.MarkDeprecated("hostname", "use --host")
 	if err != nil {
 		// MarkDeprecated only returns an error when the flag is not found
-		panic(err) //nolint:forbidigo // flag registration is a construction-time invariant
+		// Flag registration is a construction-time invariant.
+		panic(err) //nolint:forbidigo // A missing flag here is a command-construction defect.
 	}
 	// must be defined after `--hostname` to not override the default value from the environment
-	initMultiSnapshotFilter(f, &opts.SnapshotFilter, false)
-	f.BoolVarP(&opts.Compact, "compact", "c", false, "use compact output format")
-	opts.GroupBy = data.SnapshotGroupByOptions{Host: true, Path: true}
-	f.VarP(&opts.GroupBy, "group-by", "g", "`group` snapshots by host, paths and/or tags, separated by comma (disable grouping with '')")
-	f.BoolVarP(&opts.DryRun, "dry-run", "n", false, "do not delete anything, just print what would be done")
-	f.BoolVar(&opts.Prune, "prune", false, "automatically run the 'prune' command if snapshots have been removed")
+	initMultiSnapshotFilter(f, &options.SnapshotFilter, false)
+	f.BoolVarP(&options.Compact, "compact", "c", false, "use compact output format")
+	options.GroupBy = data.SnapshotGroupByOptions{Host: true, Path: true}
+	f.VarP(&options.GroupBy, "group-by", "g", "`group` snapshots by host, paths and/or tags, separated by comma (disable grouping with '')")
+	f.BoolVarP(&options.DryRun, "dry-run", "n", false, "do not delete anything, just print what would be done")
+	f.BoolVar(&options.Prune, "prune", false, "automatically run the 'prune' command if snapshots have been removed")
 	f.SortFlags = false
 }
 
-func verifyForgetOptions(opts *ForgetOptions) error {
-	if opts.Last < -1 || opts.Minutely < -1 || opts.Hourly < -1 || opts.Daily < -1 || opts.Weekly < -1 ||
-		opts.Monthly < -1 || opts.QuarterYearly < -1 || opts.HalfYearly < -1 || opts.Yearly < -1 {
+func verifyForgetOptions(options *forgetOptions) error {
+	if options.Last < -1 || options.Minutely < -1 || options.Hourly < -1 || options.Daily < -1 || options.Weekly < -1 ||
+		options.Monthly < -1 || options.QuarterYearly < -1 || options.HalfYearly < -1 || options.Yearly < -1 {
 		return errors.Fatal("negative values other than -1 are not allowed for --keep-*")
 	}
-	for _, d := range []data.Duration{opts.Within, opts.WithinMinutely, opts.WithinHourly, opts.WithinDaily,
-		opts.WithinMonthly, opts.WithinQuarterYearly, opts.WithinHalfYearly, opts.WithinWeekly, opts.WithinYearly} {
+	for _, d := range []data.Duration{options.Within, options.WithinMinutely, options.WithinHourly, options.WithinDaily,
+		options.WithinMonthly, options.WithinQuarterYearly, options.WithinHalfYearly, options.WithinWeekly, options.WithinYearly} {
 		if d.Hours < 0 || d.Days < 0 || d.Months < 0 || d.Years < 0 {
 			return errors.Fatal("durations containing negative values are not allowed for --keep-within*")
 		}
@@ -213,14 +222,14 @@ func verifyForgetOptions(opts *ForgetOptions) error {
 // buildForgetPlan evaluates the current snapshot set without modifying the
 // repository. Phase A and the exclusive phase-B revalidation both use this
 // same helper, so phase B can delete only IDs selected by both observations.
-func buildForgetPlan(ctx context.Context, opts ForgetOptions, repo vaultic.Repository, args []string) (forgetPlan, error) {
+func buildForgetPlan(ctx context.Context, options forgetOptions, repo vaultic.Repository, args []string) (forgetPlan, error) {
 	plan := forgetPlan{remove: vaultic.NewIDSet(), horizons: make(map[vaultic.ID]repository.SnapshotRetentionHorizon)}
 	var snapshots data.Snapshots
 	now := time.Now()
 	isProtected := func(sn *data.Snapshot) bool {
-		return !opts.OverrideDeleteProtection && sn.Delete != nil && sn.Delete.MustKeep(now)
+		return !options.OverrideDeleteProtection && sn.Delete != nil && sn.Delete.MustKeep(now)
 	}
-	if err := opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
+	if err := options.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
@@ -240,12 +249,12 @@ func buildForgetPlan(ctx context.Context, opts ForgetOptions, repo vaultic.Repos
 		return plan, nil
 	}
 
-	snapshotGroups, _, err := data.GroupSnapshots(snapshots, opts.GroupBy)
+	snapshotGroups, _, err := data.GroupSnapshots(snapshots, options.GroupBy)
 	if err != nil {
 		return forgetPlan{}, err
 	}
-	policy := forgetPolicy(opts)
-	if err := validateForgetPolicy(opts, policy); err != nil {
+	policy := forgetPolicy(options)
+	if err := validateForgetPolicy(options, policy); err != nil {
 		return forgetPlan{}, err
 	}
 	for keyJSON, snapshotGroup := range snapshotGroups {
@@ -285,38 +294,38 @@ func buildForgetPlan(ctx context.Context, opts ForgetOptions, repo vaultic.Repos
 	return plan, nil
 }
 
-func forgetPolicy(opts ForgetOptions) data.ExpirePolicy {
+func forgetPolicy(options forgetOptions) data.ExpirePolicy {
 	return data.ExpirePolicy{
-		Last:                int(opts.Last),
-		Minutely:            int(opts.Minutely),
-		Hourly:              int(opts.Hourly),
-		Daily:               int(opts.Daily),
-		Weekly:              int(opts.Weekly),
-		Monthly:             int(opts.Monthly),
-		QuarterYearly:       int(opts.QuarterYearly),
-		HalfYearly:          int(opts.HalfYearly),
-		Yearly:              int(opts.Yearly),
-		Within:              opts.Within,
-		WithinMinutely:      opts.WithinMinutely,
-		WithinHourly:        opts.WithinHourly,
-		WithinDaily:         opts.WithinDaily,
-		WithinWeekly:        opts.WithinWeekly,
-		WithinMonthly:       opts.WithinMonthly,
-		WithinQuarterYearly: opts.WithinQuarterYearly,
-		WithinHalfYearly:    opts.WithinHalfYearly,
-		WithinYearly:        opts.WithinYearly,
-		Tags:                opts.KeepTags,
+		Last:                int(options.Last),
+		Minutely:            int(options.Minutely),
+		Hourly:              int(options.Hourly),
+		Daily:               int(options.Daily),
+		Weekly:              int(options.Weekly),
+		Monthly:             int(options.Monthly),
+		QuarterYearly:       int(options.QuarterYearly),
+		HalfYearly:          int(options.HalfYearly),
+		Yearly:              int(options.Yearly),
+		Within:              options.Within,
+		WithinMinutely:      options.WithinMinutely,
+		WithinHourly:        options.WithinHourly,
+		WithinDaily:         options.WithinDaily,
+		WithinWeekly:        options.WithinWeekly,
+		WithinMonthly:       options.WithinMonthly,
+		WithinQuarterYearly: options.WithinQuarterYearly,
+		WithinHalfYearly:    options.WithinHalfYearly,
+		WithinYearly:        options.WithinYearly,
+		Tags:                options.KeepTags,
 	}
 }
 
-func validateForgetPolicy(opts ForgetOptions, policy data.ExpirePolicy) error {
+func validateForgetPolicy(options forgetOptions, policy data.ExpirePolicy) error {
 	if !policy.Empty() {
 		return nil
 	}
-	if !opts.UnsafeAllowRemoveAll {
+	if !options.UnsafeAllowRemoveAll {
 		return errors.Fatal("no policy was specified, no snapshots will be removed")
 	}
-	if opts.SnapshotFilter.Empty() {
+	if options.SnapshotFilter.Empty() {
 		return errors.Fatal("--unsafe-allow-remove-all is not allowed unless a snapshot filter option is specified")
 	}
 	return nil
@@ -340,59 +349,67 @@ func (plan forgetPlan) revalidatedAgainst(initial vaultic.IDSet) forgetPlan {
 // exclusive lock only to re-list, revalidate, and delete snapshots that remain
 // selected by both views. A snapshot created, protected, or retained after
 // phase A is never deleted by phase B.
-func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOptions, gopts global.Options, term ui.Terminal, args []string) error {
-	if err := verifyForgetOptions(&opts); err != nil {
+func runForget(ctx context.Context, options forgetOptions, pruneOptions pruneOptions, globalOptions global.Options, term ui.Terminal, args []string) error {
+	return runForgetWithPhaseACallback(ctx, options, pruneOptions, globalOptions, term, args, nil)
+}
+
+func runForgetWithPhaseACallback(
+	ctx context.Context, options forgetOptions, pruneOptions pruneOptions,
+	globalOptions global.Options, term ui.Terminal, args []string, afterPhaseA func(),
+) error {
+	if err := verifyForgetOptions(&options); err != nil {
 		return err
 	}
 	if err := verifyPruneOptions(&pruneOptions); err != nil {
 		return err
 	}
-	if gopts.NoLock && !opts.DryRun {
+	if globalOptions.NoLock && !options.DryRun {
 		return errors.Fatal("--no-lock is only applicable in combination with --dry-run for forget command")
 	}
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
+	printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, term)
 	baseCtx := ctx
 	// Dry runs are read-only and use a single shared/read observation.
-	if opts.DryRun {
-		ctx, repo, unlock, err := openWithReadLock(baseCtx, gopts, gopts.NoLock, printer)
+	if options.DryRun {
+		ctx, repo, unlock, err := openWithReadLock(baseCtx, globalOptions, globalOptions.NoLock, printer)
 		if err != nil {
 			return err
 		}
 		defer unlock()
-		plan, err := buildForgetPlan(ctx, opts, repo, args)
+		plan, err := buildForgetPlan(ctx, options, repo, args)
 		if err != nil {
 			return err
 		}
-		printForgetPlan(printer, gopts, opts, args, plan)
-		return nil
+		return printForgetPlan(printer, globalOptions, options, args, plan)
 	}
 	// Phase A: policy evaluation while append writers may proceed.
-	ctx, repo, unlock, err := openWithReadLock(baseCtx, gopts, false, printer)
+	ctx, repo, unlock, err := openWithReadLock(baseCtx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
-	initial, err := buildForgetPlan(ctx, opts, repo, args)
+	initial, err := buildForgetPlan(ctx, options, repo, args)
 	unlock()
 	if err != nil {
 		return err
 	}
-	if forgetPhaseATestHook != nil {
-		forgetPhaseATestHook()
+	if afterPhaseA != nil {
+		afterPhaseA()
 	}
 	// Phase B: a short exclusive window recomputes the policy and intersects
 	// candidates with phase A before deleting. Existing snapshots that are now
 	// protected or no longer selected are retained.
-	ctx, repo, unlock, err = openWithExclusiveLock(baseCtx, gopts, false, printer)
+	ctx, repo, unlock, err = openWithExclusiveLock(baseCtx, globalOptions, false, printer)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	current, err := buildForgetPlan(ctx, opts, repo, args)
+	current, err := buildForgetPlan(ctx, options, repo, args)
 	if err != nil {
 		return err
 	}
 	plan := current.revalidatedAgainst(initial.remove)
-	printForgetPlan(printer, gopts, opts, args, plan)
+	if err := printForgetPlan(printer, globalOptions, options, args, plan); err != nil {
+		return err
+	}
 	failed, err := deleteForgetSnapshots(ctx, repo, plan.remove, printer)
 	if err != nil {
 		return err
@@ -405,43 +422,48 @@ func runForget(ctx context.Context, opts ForgetOptions, pruneOptions PruneOption
 			return fmt.Errorf("record placement promotion eligibility: %w", err)
 		}
 	}
-	if len(plan.remove) != 0 && opts.Prune {
+	if len(plan.remove) != 0 && options.Prune {
 		printer.P("%d snapshots have been removed, running prune\n", len(plan.remove))
-		return runPruneWithRepo(ctx, pruneOptions, gopts, repo, plan.remove, printer)
+		return runPruneWithRepo(ctx, pruneOptions, globalOptions, repo, plan.remove, printer)
 	}
 	return nil
 }
 
-func printForgetPlan(printer vaultic.Printer, gopts global.Options, opts ForgetOptions, args []string, plan forgetPlan) {
-	if plan.protected > 0 && !gopts.JSON {
+func printForgetPlan(printer vaultic.Printer, globalOptions global.Options, options forgetOptions, args []string, plan forgetPlan) error {
+	if plan.protected > 0 && !globalOptions.JSON {
 		printer.P("kept %d delete-protected snapshots\n", plan.protected)
 	}
 	if len(args) == 0 {
-		printer.P("Applying Policy: %v\n", forgetPolicy(opts))
+		printer.P("Applying Policy: %v\n", forgetPolicy(options))
 	}
-	if gopts.JSON {
+	if globalOptions.JSON {
 		if len(plan.groups) != 0 {
-			if err := printJSONForget(gopts.Term.OutputWriter(), plan.groups); err != nil {
+			if err := printJSONForget(globalOptions.Term.OutputWriter(), plan.groups); err != nil {
 				printer.E("error printing forget result: %v\n", err)
 			}
 		}
-		return
+		return nil
 	}
-	if gopts.Quiet {
-		return
+	if globalOptions.Quiet {
+		return nil
 	}
 	for _, group := range plan.groups {
 		if len(group.Keep) != 0 {
 			printer.P("keep %d snapshots:\n", len(group.Keep))
-			_ = querycmd.PrintSnapshots(gopts.Term.OutputWriter(), snapshotsFromJSON(group.Keep), nil, opts.Compact)
+			if err := querycmd.PrintSnapshots(globalOptions.Term.OutputWriter(), snapshotsFromJSON(group.Keep), nil, options.Compact); err != nil {
+				return fmt.Errorf("print retained snapshots: %w", err)
+			}
 			printer.P("\n")
 		}
 		if len(group.Remove) != 0 {
 			printer.P("remove %d snapshots:\n", len(group.Remove))
-			_ = querycmd.PrintSnapshots(gopts.Term.OutputWriter(), snapshotsFromJSON(group.Remove), nil, opts.Compact)
+			if err := querycmd.PrintSnapshots(globalOptions.Term.OutputWriter(), snapshotsFromJSON(group.Remove), nil, options.Compact); err != nil {
+				return fmt.Errorf("print removed snapshots: %w", err)
+			}
 			printer.P("\n")
 		}
 	}
+	return nil
 }
 
 func snapshotsFromJSON(items []Snapshot) data.Snapshots {
@@ -469,159 +491,6 @@ func deleteForgetSnapshots(ctx context.Context, repo vaultic.Repository, ids vau
 	}, bar)
 	bar.Done()
 	return failed, err
-}
-
-func runForgetLegacy(ctx context.Context, opts ForgetOptions, pruneOptions PruneOptions, gopts global.Options, term ui.Terminal, args []string) error {
-	if err := verifyForgetOptions(&opts); err != nil {
-		return err
-	}
-	if err := verifyPruneOptions(&pruneOptions); err != nil {
-		return err
-	}
-	if gopts.NoLock && !opts.DryRun {
-		return errors.Fatal("--no-lock is only applicable in combination with --dry-run for forget command")
-	}
-	printer := progress.NewTerminalPrinter(gopts.JSON, gopts.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun && gopts.NoLock, printer)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	snapshots, protected, err := findLegacyForgetSnapshots(ctx, opts, repo, args, time.Now())
-	if err != nil {
-		return err
-	}
-	if protected > 0 && !gopts.JSON {
-		printer.P("kept %d delete-protected snapshots\n", protected)
-	}
-	removeSnIDs, jsonGroups, err := selectLegacyForgetSnapshots(ctx, opts, gopts, printer, snapshots, args)
-	if err != nil {
-		return err
-	}
-	failedSnIDs := vaultic.NewIDSet()
-	if len(removeSnIDs) != 0 && !opts.DryRun {
-		failedSnIDs, err = deleteForgetSnapshots(ctx, repo, removeSnIDs, printer)
-		if err != nil {
-			return err
-		}
-	} else if len(removeSnIDs) != 0 {
-		printer.P("Would have removed the following snapshots:\n%v\n\n", removeSnIDs)
-	}
-	if gopts.JSON && len(jsonGroups) > 0 {
-		err = printJSONForget(gopts.Term.OutputWriter(), jsonGroups)
-		if err != nil {
-			return err
-		}
-	}
-	if len(failedSnIDs) > 0 {
-		return ErrFailedToRemoveOneOrMoreSnapshots
-	}
-	if len(removeSnIDs) > 0 && opts.Prune {
-		if opts.DryRun {
-			printer.P("%d snapshots would be removed, running prune dry run\n", len(removeSnIDs))
-		} else {
-			printer.P("%d snapshots have been removed, running prune\n", len(removeSnIDs))
-		}
-		pruneOptions.DryRun = opts.DryRun
-		return runPruneWithRepo(ctx, pruneOptions, gopts, repo, removeSnIDs, printer)
-	}
-
-	return nil
-}
-
-//nolint:unused // retained as part of the dormant legacy forget implementation
-func findLegacyForgetSnapshots(ctx context.Context, opts ForgetOptions, repo vaultic.Repository, args []string, now time.Time) (data.Snapshots, int, error) {
-	var snapshots data.Snapshots
-	protected := 0
-	err := opts.SnapshotFilter.FindAll(ctx, repo, repo, args, func(_ string, sn *data.Snapshot, err error) error {
-		if err != nil {
-			return err
-		}
-		if !opts.OverrideDeleteProtection && sn.Delete != nil && sn.Delete.MustKeep(now) {
-			protected++
-			return nil
-		}
-		snapshots = append(snapshots, sn)
-		return nil
-	})
-	return snapshots, protected, err
-}
-
-//nolint:unused // retained as part of the dormant legacy forget implementation
-func selectLegacyForgetSnapshots(
-	ctx context.Context, opts ForgetOptions, gopts global.Options, printer vaultic.Printer,
-	snapshots data.Snapshots, args []string,
-) (vaultic.IDSet, []*ForgetGroup, error) {
-	removeIDs := vaultic.NewIDSet()
-	if len(args) != 0 {
-		for _, sn := range snapshots {
-			removeIDs.Insert(*sn.ID())
-		}
-		return removeIDs, nil, nil
-	}
-	snapshotGroups, _, err := data.GroupSnapshots(snapshots, opts.GroupBy)
-	if err != nil {
-		return nil, nil, err
-	}
-	policy := forgetPolicy(opts)
-	if err := validateForgetPolicy(opts, policy); err != nil {
-		return nil, nil, err
-	}
-	printer.P("Applying Policy: %v\n", policy)
-	jsonGroups := make([]*ForgetGroup, 0, len(snapshotGroups))
-	for keyJSON, snapshotGroup := range snapshotGroups {
-		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
-		}
-		if gopts.Verbose >= 1 && !gopts.JSON {
-			if err := querycmd.PrintSnapshotGroupHeader(gopts.Term.OutputWriter(), keyJSON); err != nil {
-				return nil, nil, err
-			}
-		}
-		group, remove, err := evaluateLegacyForgetGroup(opts, gopts, printer, keyJSON, snapshotGroup, policy)
-		if err != nil {
-			return nil, nil, err
-		}
-		jsonGroups = append(jsonGroups, group)
-		for _, sn := range remove {
-			removeIDs.Insert(*sn.ID())
-		}
-	}
-	return removeIDs, jsonGroups, nil
-}
-
-//nolint:unused // retained as part of the dormant legacy forget implementation
-func evaluateLegacyForgetGroup(
-	opts ForgetOptions, gopts global.Options, printer vaultic.Printer,
-	keyJSON string, snapshots data.Snapshots, policy data.ExpirePolicy,
-) (*ForgetGroup, data.Snapshots, error) {
-	var key data.SnapshotGroupKey
-	if err := json.Unmarshal([]byte(keyJSON), &key); err != nil {
-		return nil, nil, err
-	}
-	keep, remove, reasons := data.ApplyPolicy(snapshots, policy)
-	if !policy.Empty() && len(keep) == 0 {
-		return nil, nil, fmt.Errorf("refusing to delete last snapshot of snapshot group \"%v\"", key.String())
-	}
-	if len(keep) != 0 && !gopts.Quiet && !gopts.JSON {
-		printer.P("keep %d snapshots:\n", len(keep))
-		if err := querycmd.PrintSnapshots(gopts.Term.OutputWriter(), keep, reasons, opts.Compact); err != nil {
-			return nil, nil, err
-		}
-		printer.P("\n")
-	}
-	if len(remove) != 0 && !gopts.Quiet && !gopts.JSON {
-		printer.P("remove %d snapshots:\n", len(remove))
-		if err := querycmd.PrintSnapshots(gopts.Term.OutputWriter(), remove, nil, opts.Compact); err != nil {
-			return nil, nil, err
-		}
-		printer.P("\n")
-	}
-	group := &ForgetGroup{
-		Tags: key.Tags, Host: key.Hostname, Paths: key.Paths,
-		Keep: asJSONSnapshots(keep), Remove: asJSONSnapshots(remove), Reasons: asJSONKeeps(reasons),
-	}
-	return group, remove, nil
 }
 
 // ForgetGroup helps to print what is forgotten in JSON.

@@ -28,7 +28,7 @@ type PlacementModel struct {
 
 func PlacementBackendHash(id string) uint64 {
 	hash := fnv.New64a()
-	_, _ = hash.Write([]byte(id))
+	_, _ = hash.Write([]byte(id)) // hash.Hash writes are specified to return a nil error.
 	value := hash.Sum64()
 	if value == 0 {
 		return 1

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	vaulticerrors "github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/observability"
@@ -114,7 +115,7 @@ func newIndexUnlockStatusCommand(globalOptions *global.Options, options *indexUn
 			if err != nil {
 				return err
 			}
-			defer func() { _ = client.Close() }()
+			defer vaulticerrors.CloseQuietly(client)
 			status, err := client.Status(command.Context())
 			if err != nil {
 				return err
@@ -177,7 +178,7 @@ func prepareUnlockSession(
 ) error {
 	session, err := client.CreateSession(ctx, sessionTTL)
 	if err != nil {
-		_ = emitUnlockEvent(ctx, observability.Warning, "unlock session creation rejected",
+		emitUnlockEventBestEffort(ctx, observability.Warning, "unlock session creation rejected",
 			map[string]any{"capsule_generation": capsuleGeneration})
 		return err
 	}
@@ -187,7 +188,7 @@ func prepareUnlockSession(
 	if err := writeNewProtectedJSON(sessionFile, session); err != nil {
 		return err
 	}
-	_ = emitUnlockEvent(ctx, observability.Notice, "unlock session created", map[string]any{
+	emitUnlockEventBestEffort(ctx, observability.Notice, "unlock session created", map[string]any{
 		"session_id": session.Transcript.SessionID, "capsule_generation": capsuleGeneration, "expires_unix_ms": session.Transcript.ExpiresUnixMS,
 	})
 	result := map[string]any{"session_file": sessionFile, "fingerprint": session.Fingerprint,
@@ -381,7 +382,7 @@ func readValidatedUnlockSession(
 		)
 	}
 	if unverifiedSession {
-		_ = emitUnlockEvent(
+		emitUnlockEventBestEffort(
 			ctx,
 			observability.Critical,
 			"unverified broker identity recovery session acknowledged",
@@ -404,7 +405,7 @@ func submitUnlockContribution(ctx context.Context, globalOptions *global.Options
 	}
 	unlocked, err := client.SubmitContribution(ctx, contribution)
 	if err != nil {
-		_ = emitUnlockEvent(
+		emitUnlockEventBestEffort(
 			ctx,
 			observability.Warning,
 			"custodian contribution rejected",
@@ -416,7 +417,7 @@ func submitUnlockContribution(ctx context.Context, globalOptions *global.Options
 		)
 		return err
 	}
-	_ = emitUnlockEvent(ctx, observability.Notice, "custodian contribution accepted",
+	emitUnlockEventBestEffort(ctx, observability.Notice, "custodian contribution accepted",
 		map[string]any{"member_id": memberID, "capsule_generation": capsuleGeneration, "quorum_complete": unlocked})
 	if globalOptions.JSON {
 		globalOptions.Term.Print(
@@ -453,7 +454,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			if err != nil {
 				return err
 			}
-			defer func() { _ = client.Close() }()
+			defer vaulticerrors.CloseQuietly(client)
 			if commandOptions.prepare {
 				return prepareUnlockSession(
 					command.Context(),
@@ -478,7 +479,7 @@ func newIndexUnlockContributeCommand(globalOptions *global.Options, options *ind
 			}
 			lastSeen, err := readGenerationAnchor(generationAnchor, capsule.Generation())
 			if err != nil {
-				_ = emitUnlockEvent(
+				emitUnlockEventBestEffort(
 					command.Context(),
 					observability.Warning,
 					"custodian contribution rejected",
@@ -562,11 +563,11 @@ func newIndexUnlockLockCommand(globalOptions *global.Options, options *indexUnlo
 			if err != nil {
 				return err
 			}
-			defer func() { _ = client.Close() }()
+			defer vaulticerrors.CloseQuietly(client)
 			if err := client.Lock(command.Context()); err != nil {
 				return err
 			}
-			_ = emitUnlockEvent(command.Context(), observability.Notice, "key broker explicitly locked", nil)
+			emitUnlockEventBestEffort(command.Context(), observability.Notice, "key broker explicitly locked", nil)
 			if globalOptions.JSON {
 				globalOptions.Term.Print("{\"locked\":true}")
 			} else {
@@ -640,7 +641,7 @@ func writeNewProtectedJSON(path string, value any) error {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) // The protected file write failed, and a stale partial file is never loaded.
 	}
 	return err
 }
@@ -678,9 +679,9 @@ func writeGenerationAnchor(path string, generation uint64) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer func() { _ = os.Remove(temporaryName) }()
+	defer func() { _ = os.Remove(temporaryName) }() // Rename removes the temp path on success; failure leaves an unusable staging file.
 	if err = temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
+		_ = temporary.Close() // Preserve the permission failure; no data has been written.
 		return err
 	}
 	_, err = fmt.Fprintf(temporary, "%d\n", generation)
@@ -696,13 +697,13 @@ func writeGenerationAnchor(path string, generation uint64) error {
 	return err
 }
 
-func emitUnlockEvent(
+func emitUnlockEventBestEffort(
 	ctx context.Context,
 	severity observability.Severity,
 	message string,
 	fields map[string]any,
-) error {
-	return observability.Emit(
+) {
+	observability.EmitBestEffort(
 		ctx,
 		observability.Event{
 			Severity:  severity,

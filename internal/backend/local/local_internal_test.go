@@ -34,7 +34,8 @@ func TestNoSpacePermanent(t *testing.T) {
 
 	h := backend.Handle{Type: backend.ConfigFile}
 	err = be.Save(context.Background(), h, nil)
-	_, ok := err.(*backoff.PermanentError)
+	permanentError := &backoff.PermanentError{}
+	ok := errors.As(err, &permanentError)
 	rtest.Assert(t, ok,
 		"error type should be backoff.PermanentError, got %T", err)
 	rtest.Assert(t, errors.Is(err, syscall.ENOSPC),

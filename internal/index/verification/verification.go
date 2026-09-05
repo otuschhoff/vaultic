@@ -53,13 +53,10 @@ type Options struct {
 	Seed             uint64
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]Candidate, error) {
-	if options.Level < schema.VerificationHeader || options.Level > schema.VerificationFull ||
-		options.SampleCount < 0 ||
-		options.SamplePercent < 0 ||
-		options.SamplePercent > 100 ||
-		(options.SampleCount > 0 && options.SamplePercent > 0) {
-		return nil, fmt.Errorf("invalid verification selection options")
+	if err := validateOptions(options); err != nil {
+		return nil, err
 	}
 	var candidates []Candidate
 	err := scan(ctx, store, []byte("p:"), func(kv daemon.KeyValue) error {
@@ -138,6 +135,15 @@ func Plan(ctx context.Context, store Store, options Options, now time.Time) ([]C
 		return candidates[i].Backend < candidates[j].Backend
 	})
 	return candidates, nil
+}
+
+func validateOptions(options Options) error {
+	if options.Level < schema.VerificationHeader || options.Level > schema.VerificationFull ||
+		options.SampleCount < 0 || options.SamplePercent < 0 || options.SamplePercent > 100 ||
+		(options.SampleCount > 0 && options.SamplePercent > 0) {
+		return fmt.Errorf("invalid verification selection options")
+	}
+	return nil
 }
 
 func matchPack(pack schema.PackRecord, options Options, now int64) bool {

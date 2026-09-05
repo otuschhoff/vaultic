@@ -3,6 +3,7 @@ package crawl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ func BuildDirectoryManifest(
 	}
 	database, err := pebble.Open(directory, &pebble.Options{})
 	if err != nil {
-		_ = os.RemoveAll(directory)
+		_ = os.RemoveAll(directory) // The database never opened, so this empty temporary directory is unreachable.
 		return nil, fmt.Errorf("open cwalk manifest: %w", err)
 	}
 	manifest := &DirectoryManifest{database: database, path: directory}
@@ -70,7 +71,7 @@ func BuildDirectoryManifest(
 	close(records)
 	writeErr := <-writeDone
 	if walkErr != nil || writeErr != nil || ctx.Err() != nil {
-		_ = manifest.Close()
+		_ = manifest.Close() // Preserve the walk/write failure; manifest cleanup cannot make it usable.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -84,7 +85,7 @@ func BuildDirectoryManifest(
 
 func writeDirectoryRecords(database *pebble.DB, records <-chan directoryRecord, done chan<- error, cancel context.CancelFunc) {
 	batch := database.NewBatch()
-	defer func() { _ = batch.Close() }()
+	defer func() { _ = batch.Close() }() // Commit errors are returned explicitly; batch close only releases memory.
 	pending := 0
 	for record := range records {
 		encoded, err := json.Marshal(record.names)
@@ -193,7 +194,7 @@ func (manifest *DirectoryManifest) Names(directory string) ([]string, bool, erro
 	}
 	value, closer, err := manifest.database.Get(manifestKey(absolute))
 	if err != nil {
-		if err == pebble.ErrNotFound {
+		if errors.Is(err, pebble.ErrNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err

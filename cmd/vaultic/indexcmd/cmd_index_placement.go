@@ -90,8 +90,8 @@ func newIndexPlacementMigratePoolCommand(globalOptions *global.Options) *cobra.C
 	command.Flags().BoolVar(&options.Execute, "execute", false, "process queued migration work after planning")
 	command.Flags().Uint64Var(&options.MaxRequests, "max-requests", 0, "process at most this many placement requests (0 is unlimited)")
 	command.Flags().Uint64Var(&options.MaxBytes, "max-bytes", 0, "move at most this many pack bytes (0 is unlimited)")
-	_ = command.MarkFlagRequired("from")
-	_ = command.MarkFlagRequired("to")
+	mustMarkFlagRequired(command, "from")
+	mustMarkFlagRequired(command, "to")
 	return command
 }
 

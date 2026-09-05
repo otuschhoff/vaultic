@@ -20,7 +20,7 @@ func removeResticBinary(dir, target string) error {
 
 	backup := filepath.Join(dir, filepath.Base(target)+".bak")
 	if _, err := os.Stat(backup); err == nil {
-		_ = os.Remove(backup)
+		_ = os.Remove(backup) // A stale backup is harmless after the replacement executable is installed.
 	}
 	if err := os.Rename(target, backup); err != nil {
 		return fmt.Errorf("unable to rename target file: %w", err)

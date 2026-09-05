@@ -406,7 +406,7 @@ func (r *Repository) SearchKey(ctx context.Context, password string, maxKeys int
 		r.key = oldKey
 		r.keyID = oldKeyID
 
-		if err == crypto.ErrUnauthenticated {
+		if errors.Is(err, crypto.ErrUnauthenticated) {
 			return fmt.Errorf("config or key %v is damaged: %w", key.ID(), err)
 		}
 		return fmt.Errorf("config cannot be loaded: %w", err)

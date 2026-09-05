@@ -109,12 +109,11 @@ func (p *Packer) Finalize() error {
 	encryptedHeader = binary.LittleEndian.AppendUint32(encryptedHeader, uint32(len(encryptedHeader)))
 
 	if err := verifyHeader(p.k, encryptedHeader, p.blobs); err != nil {
-		//nolint:revive,staticcheck // ignore linter warnings about error message spelling
 		return fmt.Errorf(
-			("Detected data corruption while writing pack-file header: %w\nCorrupted data " +
+			("detected data corruption while writing pack-file header: %w\nCorrupted data " +
 				"is either caused by hardware issues or software bugs. Please open an issue " +
 				"at https://github.com/otuschhoff/vaultic/issues/new/choose for further " +
-				"troubleshooting."),
+				"troubleshooting"),
 			err,
 		)
 	}

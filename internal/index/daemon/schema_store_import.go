@@ -410,6 +410,7 @@ func (store *SchemaStore) MarkIndexPublished(
 	return 0, fmt.Errorf("mark index published: transaction conflict retry limit exceeded")
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (store *SchemaStore) markIndexPublishedOnce(
 	ctx context.Context,
 	indexID schema.ID,
@@ -435,6 +436,7 @@ func (store *SchemaStore) markIndexPublishedOnce(
 	}
 	var checkpoint schema.ExportIndexCheckpointRecord
 	puts := make([]Mutation, 0, len(packIDs)+2)
+	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if found {
 		checkpoint, err = schema.UnmarshalExportIndexCheckpointRecord(checkpointValue)
 		if err != nil || !slices.Equal(checkpoint.PackIDs, packIDs) {
@@ -622,6 +624,7 @@ func (store *SchemaStore) MarkPackDeletePending(ctx context.Context, packID sche
 	return fmt.Errorf("mark pack delete-pending: transaction conflict retry limit exceeded")
 }
 
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (store *SchemaStore) markPackDeletePendingOnce(ctx context.Context, packID schema.ID) error {
 	key := schema.PackKey(packID)
 	placementKeys, err := store.packPlacementKeys(ctx, packID)
@@ -754,6 +757,7 @@ func (store *SchemaStore) MarkPackDeleted(ctx context.Context, packID schema.ID,
 	return fmt.Errorf("mark pack deleted: transaction conflict retry limit exceeded")
 }
 
+//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func (store *SchemaStore) markPackDeletedOnce(ctx context.Context, packID schema.ID, memberBlobIDs []schema.ID) error {
 	packKey := schema.PackKey(packID)
 	placementKeys, err := store.packPlacementKeys(ctx, packID)

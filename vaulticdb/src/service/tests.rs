@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Daemon service integration tests.
+
     use super::*;
     use std::io::Write;
     use std::os::fd::IntoRawFd;

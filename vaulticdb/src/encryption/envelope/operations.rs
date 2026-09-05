@@ -19,7 +19,7 @@ pub async fn create_escrow_record(
     let wrapped = provider.wrap(&context, &payload).await?;
     Ok(EscrowRecord {
         format: 1,
-        repository_id: repository_id.to_owned(),
+        repository_id: repository_id.into(),
         escrow_id: escrow_id.to_owned(),
         provider: provider.name().to_owned(),
         key_reference: key_reference.to_owned(),

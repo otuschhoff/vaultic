@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -244,5 +245,5 @@ func TestLockRefreshStaleMissing(t *testing.T) {
 	rtest.OK(t, be.Remove(context.TODO(), backend.Handle{Type: backend.LockFile, Name: lockID.String()}))
 	time.Sleep(time.Millisecond)
 	err = lock.refreshStaleLock(context.TODO())
-	rtest.Assert(t, err == errRemovedLock, "unexpected error, expected %v, got %v", errRemovedLock, err)
+	rtest.Assert(t, errors.Is(err, errRemovedLock), "unexpected error, expected %v, got %v", errRemovedLock, err)
 }

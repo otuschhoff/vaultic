@@ -1,3 +1,5 @@
+//! Structured security audit event construction and emission.
+
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Result};

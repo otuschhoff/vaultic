@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    //! Broker binary integration tests.
+
     use super::*;
 
     #[test]
@@ -391,10 +393,10 @@ mod tests {
                 policy: UnlockPolicy::Threshold {
                     group_id: "operators".to_owned(),
                     required: 1,
-                    members: vec!["bob".to_owned()],
+                    members: vec!["bob".into()],
                 },
                 members: vec![OfflinePolicyMember {
-                    member_id: "bob".to_owned(),
+                    member_id: "bob".into(),
                     provider: MemberProvider::OfflineArgon2id,
                     credential: BASE64.encode(b"bob passphrase"),
                 }],

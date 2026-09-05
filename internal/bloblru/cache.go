@@ -37,6 +37,7 @@ func New(size int) *Cache {
 	maxEntries := size / overhead
 	lru, err := simplelru.NewLRU[vaultic.ID, []byte](maxEntries, c.evict)
 	if err != nil {
+		//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 		panic(err) // Can only be maxEntries <= 0.
 	}
 	c.c = lru

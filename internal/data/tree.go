@@ -48,6 +48,7 @@ func NewTreeNodeIterator(rd io.Reader) (TreeNodeIterator, error) {
 
 	return func(yield func(NodeOrError) bool) {
 		if t.started {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("tree iterator is single use only")
 		}
 		t.started = true
@@ -251,7 +252,7 @@ type TreeJSONBuilder struct {
 
 func NewTreeJSONBuilder() *TreeJSONBuilder {
 	tb := &TreeJSONBuilder{}
-	_, _ = tb.buf.WriteString(`{"nodes":[`)
+	_, _ = tb.buf.WriteString(`{"nodes":[`) // bytes.Buffer writes always return a nil error.
 	return tb
 }
 
@@ -260,7 +261,7 @@ func (builder *TreeJSONBuilder) AddNode(node *Node) error {
 		return fmt.Errorf("node %q, last %q: %w", node.Name, builder.lastName, ErrTreeNotOrdered)
 	}
 	if builder.lastName != "" {
-		_ = builder.buf.WriteByte(',')
+		_ = builder.buf.WriteByte(',') // bytes.Buffer writes always return a nil error.
 	}
 	builder.lastName = node.Name
 
@@ -268,7 +269,7 @@ func (builder *TreeJSONBuilder) AddNode(node *Node) error {
 	if err != nil {
 		return err
 	}
-	_, _ = builder.buf.Write(val)
+	_, _ = builder.buf.Write(val) // bytes.Buffer writes always return a nil error.
 	builder.countNodes++
 	return nil
 }
@@ -372,10 +373,13 @@ type DualTree struct {
 // DualTreeIterator iterates over two trees in parallel. It returns a sequence of DualTree structs.
 // The sequence is terminated when both trees are exhausted. The error field must be checked before
 // accessing any of the nodes.
+//
+//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func DualTreeIterator(tree1, tree2 TreeNodeIterator) iter.Seq[DualTree] {
 	started := false
 	return func(yield func(DualTree) bool) {
 		if started {
+			//nolint:forbidigo // This existing panic enforces an internal invariant; new panic paths remain forbidden.
 			panic("tree iterator is single use only")
 		}
 		started = true
