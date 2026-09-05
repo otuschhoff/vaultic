@@ -600,11 +600,15 @@ impl RecoveryCapsule {
                 | MemberProvider::Fido2HmacSecret
                 | MemberProvider::MacosSecureEnclave => {
                     hardware_verified = true;
-                    let credential = &member.hardware.as_ref().unwrap().credential_id;
+                    let hardware = member
+                        .hardware
+                        .as_ref()
+                        .context("hardware member is missing hardware identity")?;
+                    let credential = &hardware.credential_id;
                     if !hardware_credentials.insert(credential.clone()) {
                         findings.push(format!("duplicate hardware credential {credential}"));
                     }
-                    let public_key = &member.hardware.as_ref().unwrap().public_key;
+                    let public_key = &hardware.public_key;
                     if !hardware_public_keys.insert(public_key.clone()) {
                         findings.push("duplicate hardware public key".to_owned());
                     }
@@ -617,7 +621,10 @@ impl RecoveryCapsule {
                             member.key_reference
                         ));
                     }
-                    let principal = member.principal.as_ref().unwrap();
+                    let principal = member
+                        .principal
+                        .as_ref()
+                        .context("cloud member is missing principal identity")?;
                     let identity = (
                         principal.authority.clone(),
                         principal.tenant_account_or_project.clone(),

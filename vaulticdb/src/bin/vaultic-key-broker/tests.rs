@@ -317,7 +317,14 @@ mod tests {
         drop(client_a);
         task_a.await.unwrap().unwrap();
         task_b.await.unwrap().unwrap();
-        assert!(broker.lock().await.status(unix_time_ms().unwrap()).locked);
+        assert!(
+            broker
+                .lock()
+                .await
+                .status(unix_time_ms().unwrap())
+                .unwrap()
+                .locked
+        );
     }
 
     #[tokio::test]
@@ -458,7 +465,14 @@ mod tests {
         )
         .await
         .is_err());
-        assert!(broker.lock().await.status(1_003).policy_mutation_pending);
+        assert!(
+            broker
+                .lock()
+                .await
+                .status(1_003)
+                .unwrap()
+                .policy_mutation_pending
+        );
         protocol.lease_challenge = Some("activate-challenge".to_owned());
         handle_request(
             BrokerRequest::ActivatePolicyMutation {
@@ -473,7 +487,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let status = broker.lock().await.status(1_004);
+        let status = broker.lock().await.status(1_004).unwrap();
         assert!(status.locked);
         assert_eq!(status.capsule_generation, 2);
         assert!(!status.policy_mutation_pending);

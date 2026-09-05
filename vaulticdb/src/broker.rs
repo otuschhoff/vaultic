@@ -310,13 +310,10 @@ impl KeyBroker {
         })
     }
 
-    pub fn status(&mut self, now_unix_ms: u64) -> UnlockStatus {
+    pub fn status(&mut self, now_unix_ms: u64) -> Result<UnlockStatus> {
         self.expire(now_unix_ms);
-        let policy = self
-            .capsule
-            .effective_policy_status()
-            .expect("validated capsule policy");
-        UnlockStatus {
+        let policy = self.capsule.effective_policy_status()?;
+        Ok(UnlockStatus {
             locked: self.epoch.is_none(),
             repository_id: self.capsule.header.repository_id.clone(),
             capsule_generation: self.capsule.header.generation,
@@ -341,7 +338,7 @@ impl KeyBroker {
                 .as_ref()
                 .map(|pending| pending.digest.clone()),
             identity_recovery: self.identity_recovery,
-        }
+        })
     }
 
     pub fn create_session(
@@ -658,7 +655,10 @@ impl KeyBroker {
         if pending.digest != digest {
             bail!("published capsule digest does not match pending policy mutation");
         }
-        let pending = self.pending_policy_mutation.take().expect("checked above");
+        let pending = self
+            .pending_policy_mutation
+            .take()
+            .context("no policy mutation is pending publication")?;
         self.capsule = pending.capsule;
         self.identity_recovery = false;
         self.lock();

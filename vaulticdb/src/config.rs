@@ -70,7 +70,7 @@ impl Config {
                 Duration::from_secs(30),
                 false,
             )?
-            .expect("minimum writer tenure has a default"),
+            .context("minimum writer tenure must be enabled")?,
             writer_idle_grace: configured_duration(
                 "VAULTICDB_WRITER_IDLE_GRACE",
                 Duration::ZERO,
@@ -81,7 +81,7 @@ impl Config {
                 Duration::from_secs(30),
                 false,
             )?
-            .expect("writer transition timeout has a default"),
+            .context("writer transition timeout must be enabled")?,
             storage,
         })
     }

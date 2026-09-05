@@ -13,7 +13,7 @@ pub fn macos_secure_enclave_reference_parts(reference: &str) -> Result<(Vec<u8>,
     Ok((
         URL_SAFE_NO_PAD
             .decode(reference.application_tag)
-            .expect("validated application tag"),
+            .context("decode validated macOS Secure Enclave application tag")?,
         reference.public_key,
     ))
 }
@@ -43,7 +43,8 @@ pub fn macos_secure_enclave_unwrap_with_shared_secret(
     let nonce_offset = 1 + MACOS_SECURE_ENCLAVE_PUBLIC_KEY_BYTES;
     let payload_offset = nonce_offset + MACOS_SECURE_ENCLAVE_NONCE_BYTES;
     let key = macos_secure_enclave_key(shared_secret, context)?;
-    let cipher = Aes256Gcm::new_from_slice(key.as_slice()).expect("32-byte AES key");
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+        .map_err(|_| anyhow::anyhow!("initialize macOS Secure Enclave cipher"))?;
     cipher
         .decrypt(
             Nonce::from_slice(&ciphertext[nonce_offset..payload_offset]),
@@ -179,7 +180,7 @@ fn parse_yubikey_piv_reference(reference: &str) -> Result<YubikeyPivReference> {
         .as_bytes()
         .chunks_exact(2)
         .map(|pair| {
-            let text = std::str::from_utf8(pair).expect("hexadecimal key id is ASCII");
+            let text = std::str::from_utf8(pair).context("YubiKey PIV key id is not ASCII")?;
             u8::from_str_radix(text, 16).context("YubiKey PIV key id is not hexadecimal")
         })
         .collect::<Result<Vec<_>>>()?;

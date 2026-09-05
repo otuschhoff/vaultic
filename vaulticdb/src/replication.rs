@@ -128,16 +128,17 @@ impl ReplicatedObjectStore {
             }
         }
         if missing.is_empty() {
-            return Ok(existing_result.expect("replicated object store has at least two replicas"));
+            return existing_result
+                .ok_or_else(|| generic_error("replicated object store has no replicas"));
         }
         let writes = missing
             .into_iter()
             .map(|replica| async { Self::put_replica(replica, location, &bytes, &options).await });
         let mut results = try_join_all(writes).await?;
-        Ok(results
+        results
             .pop()
             .or(existing_result)
-            .expect("replicated object store has at least two replicas"))
+            .ok_or_else(|| generic_error("replicated object store produced no write result"))
     }
 
     async fn list_from_any(

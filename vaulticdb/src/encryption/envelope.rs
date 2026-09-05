@@ -277,7 +277,8 @@ impl KeyManager {
         rand::rng().fill_bytes(&mut key);
         let mut nonce = [0u8; NONCE_BYTES];
         rand::rng().fill_bytes(&mut nonce);
-        let cipher = Aes256Gcm::new_from_slice(previous.key.as_ref()).expect("fixed-size DEK");
+        let cipher = Aes256Gcm::new_from_slice(previous.key.as_ref())
+            .map_err(|_| anyhow::anyhow!("initialize metadata DEK rotation cipher"))?;
         let wrapped = cipher
             .encrypt(
                 Nonce::from_slice(&nonce),
@@ -862,7 +863,8 @@ fn expand_deks(envelope: &KeyEnvelope, root: &[u8]) -> Result<Vec<EncryptionKey>
         if nonce.len() != NONCE_BYTES {
             bail!("invalid DEK rotation nonce");
         }
-        let cipher = Aes256Gcm::new_from_slice(previous.key.as_ref()).expect("fixed-size DEK");
+        let cipher = Aes256Gcm::new_from_slice(previous.key.as_ref())
+            .map_err(|_| anyhow::anyhow!("initialize metadata DEK rotation cipher"))?;
         let plaintext = cipher
             .decrypt(
                 Nonce::from_slice(&nonce),
@@ -919,11 +921,9 @@ fn decode_cloud_payload(context: &KeyContext<'_>, payload: &[u8]) -> Result<Zero
     {
         bail!("cloud-wrapped metadata key binding mismatch");
     }
-    let length = u32::from_be_bytes(
-        payload[prefix + 32..prefix + 36]
-            .try_into()
-            .expect("fixed-size length"),
-    ) as usize;
+    let mut length_bytes = [0u8; 4];
+    length_bytes.copy_from_slice(&payload[prefix + 32..prefix + 36]);
+    let length = u32::from_be_bytes(length_bytes) as usize;
     if payload.len() != prefix + 36 + length {
         bail!("cloud-wrapped secret length mismatch");
     }

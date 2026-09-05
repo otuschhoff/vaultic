@@ -177,7 +177,8 @@ fn wrap_local(
     dek: &[u8],
 ) -> Result<Vec<u8>> {
     let mut kek = derive_kek(passphrase, config)?;
-    let cipher = Aes256Gcm::new_from_slice(&kek).expect("fixed-size KEK");
+    let cipher = Aes256Gcm::new_from_slice(&kek)
+        .map_err(|_| anyhow::anyhow!("initialize metadata key wrapping cipher"))?;
     let result = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -208,7 +209,8 @@ fn unwrap_local(
         bail!("invalid metadata key slot nonce");
     }
     let mut kek = derive_kek(passphrase, config)?;
-    let cipher = Aes256Gcm::new_from_slice(&kek).expect("fixed-size KEK");
+    let cipher = Aes256Gcm::new_from_slice(&kek)
+        .map_err(|_| anyhow::anyhow!("initialize metadata key unwrapping cipher"))?;
     let result = cipher
         .decrypt(
             Nonce::from_slice(&nonce),

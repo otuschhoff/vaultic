@@ -541,10 +541,17 @@ fn decode_header(data: &[u8]) -> Result<Header> {
     {
         return Err(encryption_error(EncryptionError::Header));
     }
-    let key_version = u32::from_be_bytes(data[10..14].try_into().unwrap());
-    let chunk_size = u32::from_be_bytes(data[14..18].try_into().unwrap()) as usize;
-    let plaintext_len = u64::from_be_bytes(data[18..26].try_into().unwrap()) as usize;
-    let nonce = data[26..38].try_into().unwrap();
+    let mut key_version_bytes = [0u8; 4];
+    key_version_bytes.copy_from_slice(&data[10..14]);
+    let key_version = u32::from_be_bytes(key_version_bytes);
+    let mut chunk_size_bytes = [0u8; 4];
+    chunk_size_bytes.copy_from_slice(&data[14..18]);
+    let chunk_size = u32::from_be_bytes(chunk_size_bytes) as usize;
+    let mut plaintext_len_bytes = [0u8; 8];
+    plaintext_len_bytes.copy_from_slice(&data[18..26]);
+    let plaintext_len = u64::from_be_bytes(plaintext_len_bytes) as usize;
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce.copy_from_slice(&data[26..38]);
     if key_version == 0 || chunk_size == 0 {
         return Err(encryption_error(EncryptionError::Header));
     }
@@ -589,7 +596,9 @@ fn encrypted_chunk_offset(header: Header, index: usize) -> Result<usize> {
 fn chunk_nonce(base: [u8; NONCE_SIZE], index: usize) -> Result<[u8; NONCE_SIZE]> {
     let index = u32::try_from(index).map_err(|_| encryption_error(EncryptionError::Length))?;
     let mut nonce = base;
-    let counter = u32::from_be_bytes(nonce[8..12].try_into().unwrap()) ^ index;
+    let mut counter_bytes = [0u8; 4];
+    counter_bytes.copy_from_slice(&nonce[8..12]);
+    let counter = u32::from_be_bytes(counter_bytes) ^ index;
     nonce[8..12].copy_from_slice(&counter.to_be_bytes());
     Ok(nonce)
 }

@@ -155,7 +155,7 @@ pub async fn handle_request(
     match request {
         BrokerRequest::Negotiate { .. } => unreachable!(),
         BrokerRequest::Status => {
-            let status = broker.status(now);
+            let status = broker.status(now)?;
             Ok(BrokerResponse::Status {
                 protocol: PROTOCOL_VERSION,
                 locked: status.locked,
@@ -439,7 +439,7 @@ pub async fn handle_request(
             Ok(BrokerResponse::Ok)
         }
         BrokerRequest::Lock => {
-            let status = broker.status(now);
+            let status = broker.status(now)?;
             broker.lock();
             emit_security_event(
                 "notice",

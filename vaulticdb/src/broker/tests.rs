@@ -163,7 +163,7 @@ mod tests {
         let restart_identity = identity.clone();
         let restart_authorizations = authorizations.clone();
         let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
-        assert!(broker.status(1_000).locked);
+        assert!(broker.status(1_000).unwrap().locked);
         let session = broker
             .create_session(
                 "unix:/run/vaultic/broker.sock",
@@ -195,7 +195,7 @@ mod tests {
                 unlocked
             );
         }
-        assert!(!broker.status(1_003).locked);
+        assert!(!broker.status(1_003).unwrap().locked);
         let lease = broker
             .acquire_lease(
                 &client(),
@@ -224,7 +224,7 @@ mod tests {
             )
             .is_err());
         broker.disconnect("connection-a");
-        assert_eq!(broker.status(1_005).active_leases, 0);
+        assert_eq!(broker.status(1_005).unwrap().active_leases, 0);
         let mut reconnected = client();
         reconnected.connection_id = "connection-b".to_owned();
         let reacquired = broker
@@ -239,7 +239,7 @@ mod tests {
 
         let mut restarted =
             KeyBroker::new(capsule, restart_identity, restart_authorizations, None).unwrap();
-        assert!(restarted.status(1_006).locked);
+        assert!(restarted.status(1_006).unwrap().locked);
         assert!(restarted
             .release_lease(&reacquired.lease_id, "connection-b")
             .is_err());
@@ -252,7 +252,7 @@ mod tests {
             )
             .is_err());
         broker.lock();
-        assert!(broker.status(1_006).locked);
+        assert!(broker.status(1_006).unwrap().locked);
     }
 
     #[test]
@@ -408,11 +408,18 @@ mod tests {
             recovered.repository_master_key.as_slice(),
             b"repository-master-key"
         );
-        assert_eq!(broker.status(1_005).capsule_generation, 4);
-        assert_eq!(broker.status(1_005).active_leases, 0);
-        assert_eq!(broker.status(1_005).pending_capsule_generation, Some(5));
+        assert_eq!(broker.status(1_005).unwrap().capsule_generation, 4);
+        assert_eq!(broker.status(1_005).unwrap().active_leases, 0);
         assert_eq!(
-            broker.status(1_005).pending_capsule_sha256.as_deref(),
+            broker.status(1_005).unwrap().pending_capsule_generation,
+            Some(5)
+        );
+        assert_eq!(
+            broker
+                .status(1_005)
+                .unwrap()
+                .pending_capsule_sha256
+                .as_deref(),
             Some(digest.as_str())
         );
         assert!(broker
@@ -427,7 +434,7 @@ mod tests {
             .activate_policy_mutation(&client(), "wrong-digest")
             .is_err());
         broker.activate_policy_mutation(&client(), &digest).unwrap();
-        let status = broker.status(1_006);
+        let status = broker.status(1_006).unwrap();
         assert!(status.locked);
         assert_eq!(status.capsule_generation, 5);
         assert_eq!(status.active_leases, 0);
@@ -478,7 +485,7 @@ mod tests {
             .unwrap();
             broker.submit_contribution(contribution, 1_002).unwrap();
         }
-        assert!(broker.status(1_003).identity_recovery);
+        assert!(broker.status(1_003).unwrap().identity_recovery);
         assert!(broker
             .acquire_lease(
                 &client(),
@@ -507,7 +514,7 @@ mod tests {
             replacement_public_key
         );
         broker.activate_policy_mutation(&client(), &digest).unwrap();
-        let status = broker.status(1_005);
+        let status = broker.status(1_005).unwrap();
         assert!(status.locked);
         assert!(!status.identity_recovery);
         assert_eq!(status.capsule_generation, 5);
@@ -762,7 +769,7 @@ mod tests {
                 10_003,
             )
             .unwrap();
-        let status = broker.status(20_003);
+        let status = broker.status(20_003).unwrap();
         assert!(status.locked);
         assert_eq!(status.active_leases, 0);
     }

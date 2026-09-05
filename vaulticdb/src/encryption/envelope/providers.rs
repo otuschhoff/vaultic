@@ -814,7 +814,8 @@ impl Fido2HmacSecretProvider {
     }
 
     fn crypt(&self, context: &KeyContext<'_>, input: &[u8], encrypt: bool) -> Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(self.secret.as_slice()).expect("32-byte AES key");
+        let cipher = Aes256Gcm::new_from_slice(self.secret.as_slice())
+            .map_err(|_| anyhow::anyhow!("initialize FIDO2 hmac-secret cipher"))?;
         let aad = context.binding();
         if encrypt {
             let mut nonce = [0u8; 12];
@@ -901,7 +902,8 @@ impl KeyProvider for MacosSecureEnclaveProvider {
         let ephemeral_public = PublicKey::from(&ephemeral_secret);
         let shared_secret = ephemeral_secret.diffie_hellman(&self.public_key);
         let key = macos_secure_enclave_key(shared_secret.raw_secret_bytes().as_slice(), context)?;
-        let cipher = Aes256Gcm::new_from_slice(key.as_slice()).expect("32-byte AES key");
+        let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+            .map_err(|_| anyhow::anyhow!("initialize macOS Secure Enclave cipher"))?;
         let mut nonce = [0u8; MACOS_SECURE_ENCLAVE_NONCE_BYTES];
         rand::rng().fill_bytes(&mut nonce);
         let ciphertext = cipher
