@@ -219,7 +219,7 @@ jobs:
           export VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb"
           cargo test --manifest-path vaulticdb/Cargo.toml storage::tests::s3_metadata_rebuild_destroys_rebuilds_and_reopens_encrypted_candidate -- --exact
           go test ./internal/index/daemon -run TestS3CompatibleStorageRoundTrip -v
-          go test ./cmd/vaultic -run TestIndexWorkflowsS3CompatibleMetadata -v
+          go test ./cmd/vaultic -run TestIndexWorkflowsS3CompatibleMetadata
 
       - name: Dump MinIO log on failure
         if: failure()
