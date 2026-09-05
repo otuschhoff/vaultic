@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -40,6 +40,8 @@ fn peer_pid(_stream: &UnixStream, credentials: &tokio::net::unix::UCred) -> Resu
 
 #[cfg(target_os = "macos")]
 fn peer_pid(stream: &UnixStream, _credentials: &tokio::net::unix::UCred) -> Result<u32> {
+    use std::os::fd::AsRawFd;
+
     let mut pid: libc::pid_t = 0;
     let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
     let result = unsafe {
