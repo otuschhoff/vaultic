@@ -707,7 +707,7 @@ For debugging rclone, you can set the environment variable ``RCLONE_VERBOSE=2``.
 The rclone backend has three additional options:
 
 * ``-o rclone.program`` specifies the path to rclone, the default value is just ``rclone``
-* ``-o rclone.args`` allows setting the arguments passed to rclone, by default this is ``serve vaultic --stdio --b2-hard-delete``
+* ``-o rclone.args`` allows setting the arguments passed to rclone, by default this is ``serve restic --stdio --b2-hard-delete``
 * ``-o rclone.timeout`` specifies timeout for waiting on repository opening, the default value is ``1m``
 
 The reason for the ``--b2-hard-delete`` parameters can be found in the corresponding GitHub `issue #1657`_.
@@ -722,14 +722,14 @@ So, calling vaultic like this
 .. code-block:: console
 
     $ vaultic -o rclone.program="/path/to/rclone" \
-      -o rclone.args="serve vaultic --stdio --bwlimit 1M --b2-hard-delete --verbose" \
+    -o rclone.args="serve restic --stdio --bwlimit 1M --b2-hard-delete --verbose" \
       -r rclone:b2:foo/bar
 
 runs rclone as follows:
 
 .. code-block:: console
 
-    $ /path/to/rclone serve vaultic --stdio --bwlimit 1M --b2-hard-delete --verbose b2:foo/bar
+    $ /path/to/rclone serve restic --stdio --bwlimit 1M --b2-hard-delete --verbose b2:foo/bar
 
 Manually setting ``rclone.program`` also allows running a remote instance of
 rclone e.g. via SSH on a server, for example:

@@ -155,24 +155,62 @@ jobs:
           VAULTIC_TEST_OS_PASSWORD: ${{ secrets.RESTIC_TEST_OS_PASSWORD }}
           VAULTIC_TEST_OS_REGION_NAME: ${{ secrets.RESTIC_TEST_OS_REGION_NAME }}
           VAULTIC_TEST_SWIFT: ${{ secrets.RESTIC_TEST_SWIFT }}
-          # fail if any of the following tests cannot be run
-          VAULTIC_TEST_DISALLOW_SKIP: "vaultic/backend/rest.TestBackendREST,\
-            vaultic/backend/sftp.TestBackendSFTP,\
-            vaultic/backend/s3.TestBackendMinio,\
-            vaultic/backend/rclone.TestBackendRclone,\
-            vaultic/backend/s3.TestBackendS3,\
-            vaultic/backend/swift.TestBackendSwift,\
-            vaultic/backend/b2.TestBackendB2,\
-            vaultic/backend/gs.TestBackendGS,\
-            vaultic/backend/azure.TestBackendAzure"
         run: |
-          # prepare credentials for Google Cloud Storage tests in a temp file
-          export GOOGLE_APPLICATION_CREDENTIALS=$(mktemp --tmpdir vaultic-gcs-auth-XXXXXXX)
-          echo $VAULTIC_TEST_GS_APPLICATION_CREDENTIALS_B64 | base64 -d > $GOOGLE_APPLICATION_CREDENTIALS
+          required_tests=(
+            vaultic/backend/rest.TestBackendREST
+            vaultic/backend/sftp.TestBackendSFTP
+            vaultic/backend/s3.TestBackendMinio
+            vaultic/backend/rclone.TestBackendRclone
+          )
+
+          require_if_configured() {
+            local test_name=$1
+            shift
+            local configured=0
+            local variable
+
+            for variable in "$@"; do
+              if [[ -n "${!variable:-}" ]]; then
+                configured=$((configured + 1))
+              fi
+            done
+
+            if ((configured == 0)); then
+              return
+            fi
+            if ((configured != $#)); then
+              echo "incomplete credentials for ${test_name}" >&2
+              return 1
+            fi
+            required_tests+=("$test_name")
+          }
+
+          require_if_configured vaultic/backend/s3.TestBackendS3 \
+            VAULTIC_TEST_S3_KEY VAULTIC_TEST_S3_SECRET VAULTIC_TEST_S3_REPOSITORY
+          require_if_configured vaultic/backend/azure.TestBackendAzure \
+            VAULTIC_TEST_AZURE_ACCOUNT_NAME VAULTIC_TEST_AZURE_ACCOUNT_KEY VAULTIC_TEST_AZURE_REPOSITORY
+          require_if_configured vaultic/backend/b2.TestBackendB2 \
+            VAULTIC_TEST_B2_ACCOUNT_ID VAULTIC_TEST_B2_ACCOUNT_KEY VAULTIC_TEST_B2_REPOSITORY
+          require_if_configured vaultic/backend/gs.TestBackendGS \
+            VAULTIC_TEST_GS_PROJECT_ID VAULTIC_TEST_GS_REPOSITORY VAULTIC_TEST_GS_APPLICATION_CREDENTIALS_B64
+          require_if_configured vaultic/backend/swift.TestBackendSwift \
+            VAULTIC_TEST_SWIFT VAULTIC_TEST_OS_AUTH_URL VAULTIC_TEST_OS_TENANT_NAME \
+            VAULTIC_TEST_OS_USERNAME VAULTIC_TEST_OS_PASSWORD VAULTIC_TEST_OS_REGION_NAME
+
+          VAULTIC_TEST_DISALLOW_SKIP=$(IFS=,; echo "${required_tests[*]}")
+          export VAULTIC_TEST_DISALLOW_SKIP
+
+          if [[ -n "$VAULTIC_TEST_GS_APPLICATION_CREDENTIALS_B64" ]]; then
+            GOOGLE_APPLICATION_CREDENTIALS=$(mktemp --tmpdir vaultic-gcs-auth-XXXXXXX)
+            export GOOGLE_APPLICATION_CREDENTIALS
+            trap 'rm -f "$GOOGLE_APPLICATION_CREDENTIALS"' EXIT
+            printf '%s' "$VAULTIC_TEST_GS_APPLICATION_CREDENTIALS_B64" | base64 -d > "$GOOGLE_APPLICATION_CREDENTIALS"
+          fi
+
           go test -cover -parallel 5 -timeout 15m ./internal/backend/...
 
-        # only run cloud backend tests for pull requests from and pushes to our
-        # own repo, otherwise the secrets are not available
+        # Run backend integrations for pull requests from and pushes to our own
+        # repo. Cloud tests are enforced only for configured credential groups.
         # Skip for Dependabot pull requests as these are run without secrets
         # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/automating-dependabot-with-github-actions#responding-to-events
         if: ((github.repository == 'otuschhoff/vaultic' && github.event_name == 'push') || github.event.pull_request.head.repo.full_name == github.repository) && (github.actor != 'dependabot[bot]') && matrix.test_cloud_backends

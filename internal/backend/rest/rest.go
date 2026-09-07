@@ -50,8 +50,8 @@ func NewFactory() location.Factory {
 
 // the REST API protocol version is decided by HTTP request headers, these are the constants.
 const (
-	ContentTypeV1 = "application/vnd.x.vaultic.rest.v1"
-	ContentTypeV2 = "application/vnd.x.vaultic.rest.v2"
+	ContentTypeV1 = "application/vnd.x.restic.rest.v1"
+	ContentTypeV2 = "application/vnd.x.restic.rest.v2"
 )
 
 // Open opens the REST backend with the given config.

@@ -31,10 +31,10 @@ func findRclone(t testing.TB) {
 	if err != nil {
 		t.Skip(err)
 	}
-	command := exec.Command(path, "serve", "vaultic", "--help")
+	command := exec.Command(path, "serve", "restic", "--help")
 	output, err := command.CombinedOutput()
 	if err != nil || !bytes.Contains(output, []byte("--stdio")) {
-		t.Skip("rclone does not support serve vaultic --stdio")
+		t.Skip("rclone does not support serve restic --stdio")
 	}
 }
 

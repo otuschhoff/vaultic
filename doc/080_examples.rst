@@ -483,4 +483,4 @@ instead of using REST-server.
 
 .. code-block:: console
 
-   rclone serve vaultic --addr localhost:8000 /path/to/repo
+   rclone serve restic --addr localhost:8000 /path/to/repo
