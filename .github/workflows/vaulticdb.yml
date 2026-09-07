@@ -192,7 +192,12 @@ jobs:
         run: go build ./cmd/vaultic
 
       - name: Test vaultic daemon client
-        run: VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb" go test ./internal/index/daemon -race
+        run: |
+          export VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb"
+          go test ./internal/index/daemon -race
+          go test ./cmd/vaultic \
+            -run 'TestRepositoryOpensWithEncryptedMasterKeyInDB|TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses' \
+            -count=1
 
       - name: Start MinIO for S3-compatible metadata storage
         run: |

@@ -31,6 +31,7 @@ import (
 )
 
 func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
+	daemonBinary := testVaulticDBBinary(t)
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
@@ -66,7 +67,7 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 	}
 	daemonOptions := daemon.Options{
 		Socket: testMetadataSocket(t), RepositoryID: repositoryID,
-		DaemonPath: testVaulticDBBinary(t), DataDir: t.TempDir(),
+		DaemonPath: daemonBinary, DataDir: t.TempDir(),
 		EncryptionMode: "initialize", PassphraseFile: passphraseFile,
 	}
 	client, err := daemon.Ensure(ctx, daemonOptions)
@@ -157,6 +158,7 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 }
 
 func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
+	daemonBinary := testVaulticDBBinary(t)
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
@@ -194,7 +196,7 @@ func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
 	}
 	daemonOptions := daemon.Options{
 		Socket: testMetadataSocket(t), RepositoryID: repositoryID,
-		DaemonPath: testVaulticDBBinary(t), DataDir: t.TempDir(),
+		DaemonPath: daemonBinary, DataDir: t.TempDir(),
 		EncryptionMode: "initialize", PassphraseFile: passphraseFile,
 	}
 	client, err := daemon.Ensure(ctx, daemonOptions)
@@ -518,13 +520,20 @@ func metadataRepositoryContext(
 func testVaulticDBBinary(t *testing.T) string {
 	t.Helper()
 	if binary := os.Getenv("VAULTICDB_TEST_BINARY"); binary != "" {
+		if _, err := os.Stat(binary); err != nil {
+			t.Fatalf("VAULTICDB_TEST_BINARY is unavailable: %v", err)
+		}
 		return binary
 	}
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate integration test")
 	}
-	return filepath.Join(filepath.Dir(source), "..", "..", "vaulticdb", "target", "debug", "vaulticdb")
+	binary := filepath.Join(filepath.Dir(source), "..", "..", "vaulticdb", "target", "debug", "vaulticdb")
+	if _, err := os.Stat(binary); err != nil {
+		t.Skipf("compiled vaulticdb unavailable: %v", err)
+	}
+	return binary
 }
 
 func testMetadataSocket(t *testing.T) string {
