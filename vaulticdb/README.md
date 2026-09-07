@@ -170,6 +170,9 @@ go test ./internal/index/daemon -run TestS3CompatibleStorageRoundTrip
 ./vaulticdb/build-musl.sh
 ```
 
-The script requires `x86_64-unknown-linux-musl` and writes the binary under
-`dist/vaulticdb/linux-amd64/`. It records the Rust, SlateDB, and target metadata
-beside the binary.
+The script requires `x86_64-unknown-linux-musl` and writes `vaulticdb`,
+`vaultic-key-broker`, and `vaultic-key-custodian` under
+`dist/vaulticdb/linux-amd64/`. All three executables are statically linked. The
+custodian uses HIDAPI's pure-Rust `basic-udev` backend, so it does not load
+`libudev`. The script rejects an artifact with any ELF dynamic dependency and
+records the Rust, SlateDB, and target metadata beside the binaries.

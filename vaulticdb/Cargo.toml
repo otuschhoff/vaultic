@@ -42,8 +42,9 @@ tokio-stream = { version = "0.1", features = ["net"] }
 thiserror = "2.0"
 zeroize = { version = "1.8", features = ["derive"] }
 
-[target.'cfg(not(target_env = "musl"))'.dependencies]
-ctap-hid-fido2 = "3.5.13"
+[dependencies.ctap-hid-fido2]
+path = "vendor/ctap-hid-fido2"
+features = ["linux-native-basic-udev"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

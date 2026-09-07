@@ -97,7 +97,7 @@ jobs:
         run: cargo install cargo-zigbuild --version 0.23.2 --locked
 
       - name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install --yes libudev-dev musl-tools
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
 
       - name: Install protobuf compiler
         env:
@@ -157,13 +157,14 @@ jobs:
       - name: Run native SlateDB smoke test
         run: VAULTICDB_NATIVE_SMOKE=1 cargo run --manifest-path vaulticdb/Cargo.toml --quiet
 
-      - name: Build static musl vaulticdb
+      - name: Build static musl binaries
         run: ./vaulticdb/build-musl.sh
 
-      - name: Verify static daemon artifact
+      - name: Verify static artifacts
         run: |
-          file dist/vaulticdb/linux-amd64/vaulticdb
-          test "$(file dist/vaulticdb/linux-amd64/vaulticdb | grep -c 'statically linked')" -eq 1
+          ./vaulticdb/verify-static-linux.sh dist/vaulticdb/linux-amd64/vaulticdb \
+            dist/vaulticdb/linux-amd64/vaultic-key-broker \
+            dist/vaulticdb/linux-amd64/vaultic-key-custodian
 
       - name: Run musl daemon native smoke test
         run: VAULTICDB_NATIVE_SMOKE=1 dist/vaulticdb/linux-amd64/vaulticdb

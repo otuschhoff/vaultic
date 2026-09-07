@@ -35,6 +35,12 @@ CARGO_NET_OFFLINE=${CARGO_NET_OFFLINE:-false} \
     --target "$target" --release
 
 cp "$repo_root/vaulticdb/target/$target/release/vaulticdb" "$out_dir/vaulticdb"
+cp "$repo_root/vaulticdb/target/$target/release/vaultic-key-broker" "$out_dir/vaultic-key-broker"
+cp "$repo_root/vaulticdb/target/$target/release/vaultic-key-custodian" "$out_dir/vaultic-key-custodian"
+"$repo_root/vaulticdb/verify-static-linux.sh" \
+    "$out_dir/vaulticdb" \
+    "$out_dir/vaultic-key-broker" \
+    "$out_dir/vaultic-key-custodian"
 {
     printf 'target=%s\n' "$target"
     printf 'slatedb_revision=%s\n' 'ae07acd4498068d1b9ba799cc9f6c9824e6f6251'

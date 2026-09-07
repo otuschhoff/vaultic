@@ -4,12 +4,9 @@
 use std::{env, fs, io::Read, os::unix::fs::PermissionsExt};
 
 use anyhow::{bail, Context, Result};
-#[cfg(not(target_env = "musl"))]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-#[cfg(not(target_env = "musl"))]
 use serde_json::json;
-#[cfg(not(target_env = "musl"))]
 use sha2::{Digest, Sha256};
 use vaulticdb::encryption::envelope::providers::{
     Fido2HmacSecretProvider, KeyContext, KeyProvider, YubikeyPivProvider,
@@ -22,7 +19,6 @@ use vaulticdb::encryption::envelope::providers::{
     macos_secure_enclave_unwrap_with_shared_secret,
 };
 
-#[cfg(not(target_env = "musl"))]
 use ctap_hid_fido2::{
     fidokey::{
         get_assertion::{Extension as GetExtension, GetAssertionArgsBuilder},
@@ -32,7 +28,6 @@ use ctap_hid_fido2::{
     verifier, Cfg, FidoKeyHidFactory,
 };
 
-#[cfg(not(target_env = "musl"))]
 fn fido2_enroll(arguments: &[String]) -> Result<()> {
     let pin = read_pin(&arguments[1])?;
     validate_rp_id(&arguments[2])?;
@@ -85,11 +80,6 @@ fn fido2_enroll(arguments: &[String]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_env = "musl")]
-fn fido2_enroll(_: &[String]) -> Result<()> {
-    bail!("FIDO2 operations require the dynamically linked vaultic-key-custodian build")
-}
-
 async fn fido2_unwrap(arguments: &[String]) -> Result<()> {
     let mut secret = fido2_secret(&arguments[1], &arguments[2], &arguments[3], &arguments[4])?;
     let provider = Fido2HmacSecretProvider::from_base64(BASE64.encode(secret))?;
@@ -111,7 +101,6 @@ async fn fido2_unwrap(arguments: &[String]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_env = "musl"))]
 fn fido2_secret(
     pin_file: &str,
     repository_id: &str,
@@ -157,11 +146,6 @@ fn fido2_secret(
             _ => None,
         })
         .context("authenticator returned no hmac-secret output")
-}
-
-#[cfg(target_env = "musl")]
-fn fido2_secret(_: &str, _: &str, _: &str, _: &str) -> Result<[u8; 32]> {
-    bail!("FIDO2 operations require the dynamically linked vaultic-key-custodian build")
 }
 
 #[cfg(target_os = "macos")]
@@ -400,7 +384,6 @@ fn decode_wrapped_share(encoded: &[u8], provider: &str) -> Result<Zeroizing<Vec<
     )?))
 }
 
-#[cfg(not(target_env = "musl"))]
 fn parse_fido2_reference(reference: &str) -> Result<(String, Vec<u8>, Vec<u8>)> {
     let fields = reference
         .strip_prefix("fido2:")
@@ -432,7 +415,6 @@ fn parse_fido2_reference(reference: &str) -> Result<(String, Vec<u8>, Vec<u8>)> 
     ))
 }
 
-#[cfg(not(target_env = "musl"))]
 fn validate_rp_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 253

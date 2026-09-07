@@ -1,4 +1,5 @@
-#[cfg(all(test, not(target_env = "musl")))]
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     //! Custodian binary integration tests.
 
