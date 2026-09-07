@@ -185,3 +185,12 @@ locally with:
 ```sh
 ./vaulticdb/smoke-static-linux.sh dist/vaulticdb/linux-amd64
 ```
+
+Tagged GitHub releases provide downloadable bundles for Linux amd64 and arm64
+and macOS arm64, plus a best-effort Windows amd64 CLI bundle. Linux bundles
+contain the `vaultic` CLI and all three statically linked `vaulticdb`
+executables. The macOS bundle contains the CLI and native service executables;
+macOS requires dynamic linkage to Apple system libraries. The Windows bundle
+contains the self-contained `vaultic.exe` CLI. The `vaulticdb` service suite is
+not built for Windows because its local transport and broker security model
+currently require Unix sockets and Unix peer credentials.

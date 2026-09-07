@@ -91,6 +91,22 @@ reproduce a byte identical version from the source code for that
 release. Instructions on how to do that are contained in the
 [builder repository](https://github.com/vaultic/builder).
 
+## Release downloads
+
+Tagged releases publish archives on the GitHub Releases page:
+
+| Archive | Contents |
+| --- | --- |
+| `linux-amd64` | Statically linked `vaultic`, `vaulticdb`, key broker, and key custodian |
+| `linux-arm64` | Statically linked `vaultic`, `vaulticdb`, key broker, and key custodian |
+| `macos-arm64` | `vaultic` and the native, signed `vaulticdb` service suite |
+| `windows-amd64` | Best-effort, self-contained `vaultic.exe` CLI |
+
+Linux artifacts are fully static and do not require distribution libraries.
+macOS requires linkage to Apple system libraries. The `vaulticdb` service suite
+is not available on Windows because it currently requires Unix sockets and Unix
+peer credentials. Every release also includes `SHA256SUMS` for the archives.
+
 ## News
 
 You can follow the vaultic project on Mastodon [@vaultic](https://fosstodon.org/@vaultic) or subscribe to

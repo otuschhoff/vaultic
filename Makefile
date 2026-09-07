@@ -86,10 +86,10 @@ vaulticdb-%:
 	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker; \
 	cp vaulticdb/target/$$target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian; \
 	case "$$target" in *-musl) ./vaulticdb/verify-static-linux.sh $(BIN_DIR)/$*/vaulticdb $(BIN_DIR)/$*/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-custodian ;; esac; \
-	if [ "$*" = macos-arm64 ]; then \
+	case "$*" in macos-*) \
 		codesign --force --sign "$(MACOS_CODESIGN_IDENTITY)" --identifier com.vaultic.key-custodian --entitlements "$(MACOS_CUSTODIAN_ENTITLEMENTS)" $(BIN_DIR)/$*/vaultic-key-custodian; \
-		codesign --verify --strict $(BIN_DIR)/$*/vaultic-key-custodian; \
-	fi
+		codesign --verify --strict $(BIN_DIR)/$*/vaultic-key-custodian ;; \
+	esac
 
 vaulticdb-proto:
 	./vaulticdb/generate-proto.sh

@@ -1,4 +1,4 @@
-name: Build and Release Generic Linux Binaries
+name: Build and Release Binaries
 
 on:
   push:
@@ -6,17 +6,32 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-linux-amd64:
+  build-linux:
+    name: Build Linux ${{ matrix.architecture }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            platform: linux-amd64
+            rust-target: x86_64-unknown-linux-musl
+          - architecture: arm64
+            platform: linux-arm64
+            rust-target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.rust-target }}
 
       - name: Install Zig
         env:
@@ -50,29 +65,153 @@ jobs:
           unzip -q "$archive" -d "$install_dir"
           echo "$install_dir/bin" >> "$GITHUB_PATH"
 
-      - name: Build release binaries
-        run: make vaulticdb-linux-amd64
+      - name: Build static Linux binaries
+        run: make vaultic-${{ matrix.platform }} vaulticdb-${{ matrix.platform }}
 
-      - name: Package generic Linux binaries
+      - name: Verify static Linux binaries
         run: |
-          tar -C bin -czf vaulticdb-linux-amd64.tar.gz linux-amd64
+          ./vaulticdb/verify-static-linux.sh \
+            bin/${{ matrix.platform }}/vaultic \
+            bin/${{ matrix.platform }}/vaulticdb \
+            bin/${{ matrix.platform }}/vaultic-key-broker \
+            bin/${{ matrix.platform }}/vaultic-key-custodian
 
-      - name: Test generic Linux binaries across distributions
+      - name: Run Linux amd64 binaries
+        if: matrix.architecture == 'amd64'
         run: |
-          mkdir -p "$RUNNER_TEMP/vaulticdb-release"
-          tar -C "$RUNNER_TEMP/vaulticdb-release" -xzf vaulticdb-linux-amd64.tar.gz
+          bin/${{ matrix.platform }}/vaultic version
+          ./vaulticdb/smoke-static-linux.sh bin/${{ matrix.platform }}
+
+      - name: Test generic Linux amd64 binaries across distributions
+        if: matrix.architecture == 'amd64'
+        run: |
           for image in almalinux:8 debian:stable-slim ubuntu:latest; do
             docker run --rm \
               --platform linux/amd64 \
-              --volume "$RUNNER_TEMP/vaulticdb-release/linux-amd64:/opt/vaulticdb:ro" \
+              --volume "$PWD/bin/${{ matrix.platform }}:/opt/vaultic:ro" \
               --volume "$PWD/vaulticdb/smoke-static-linux.sh:/opt/smoke-static-linux.sh:ro" \
               "$image" \
-              /bin/sh /opt/smoke-static-linux.sh /opt/vaulticdb
+              /bin/sh -c '/opt/vaultic/vaultic version && /bin/sh /opt/smoke-static-linux.sh /opt/vaultic'
           done
 
-      - name: Create Release & Upload Artifacts
+      - name: Package Linux binaries
+        run: |
+          cp LICENSE bin/${{ matrix.platform }}/LICENSE
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz" "${{ matrix.platform }}"
+
+      - name: Upload Linux release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Build native macOS binaries
+        run: make vaultic-macos-arm64 vaulticdb-macos-arm64
+
+      - name: Verify and run macOS binaries
+        run: |
+          codesign --verify --strict bin/macos-arm64/vaultic-key-custodian
+          if otool -L bin/macos-arm64/* | grep -E '/(opt/homebrew|usr/local)/'; then
+            echo "macOS release binaries link to non-system libraries" >&2
+            exit 1
+          fi
+          bin/macos-arm64/vaultic version
+          VAULTICDB_NATIVE_SMOKE=1 bin/macos-arm64/vaulticdb
+          if bin/macos-arm64/vaultic-key-broker >broker.log 2>&1; then
+            echo "vaultic-key-broker unexpectedly accepted an empty command line" >&2
+            exit 1
+          fi
+          grep -q 'usage: vaultic-key-broker' broker.log
+
+      - name: Package macOS binaries
+        run: |
+          cp LICENSE bin/macos-arm64/LICENSE
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-macos-arm64.tar.gz" macos-arm64
+
+      - name: Upload macOS release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-arm64
+          path: vaultic-${{ github.ref_name }}-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows amd64 CLI (optional)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build Windows CLI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin/windows-amd64 | Out-Null
+          go run build.go --goos windows --goarch amd64 -o bin/windows-amd64/vaultic.exe
+
+      - name: Run Windows CLI
+        shell: pwsh
+        run: bin/windows-amd64/vaultic.exe version
+
+      - name: Package Windows CLI
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE bin/windows-amd64/LICENSE
+          Compress-Archive -Path bin/windows-amd64 -DestinationPath "vaultic-${{ github.ref_name }}-windows-amd64.zip"
+
+      - name: Upload Windows release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-amd64
+          path: vaultic-${{ github.ref_name }}-windows-amd64.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-macos, build-windows]
+    if: ${{ !cancelled() && needs.build-linux.result == 'success' && needs.build-macos.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Require Linux and macOS archives
+        run: |
+          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64.tar.gz"
+          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-arm64.tar.gz"
+          test -f "release-assets/vaultic-${{ github.ref_name }}-macos-arm64.tar.gz"
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS
+
+      - name: Publish release archives
         uses: softprops/action-gh-release@v2
         with:
-          files: vaulticdb-linux-amd64.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
