@@ -403,7 +403,7 @@ fn default_runtime_directory() -> String {
                 .into_owned();
         }
     }
-    env::temp_dir()
+    PathBuf::from("/tmp")
         .join(format!("vaulticdb-{}", unsafe { libc::geteuid() }))
         .to_string_lossy()
         .into_owned()

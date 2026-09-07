@@ -69,17 +69,18 @@ data. Transferred volume might be lower (due to deduplication) or higher.
 Parallel and selective crawling
 *******************************
 
-For large local filesystem trees, ``--use-cwalk`` runs the initial traversal with
-the upstream parallel cwalk engine. ``--cwalk-concurrency N`` controls its worker
-count and defaults to the Go process CPU count. A bounded internal queue applies
-backpressure to concurrent callbacks. Non-local filesystem implementations use the
-standard scanner automatically.
+For local filesystem trees, the initial traversal uses the upstream parallel
+cwalk engine by default. ``--cwalk-concurrency N`` controls its worker count and
+defaults to 32. Use ``--no-cwalk`` to restore the legacy traversal. A bounded
+internal queue applies backpressure to concurrent callbacks. Non-local filesystem
+implementations use the standard scanner automatically.
 
-``--use-pathdiff`` enables selective parent-subtree reuse and requires all of
-``--use-cwalk``, ``--pathdiff-endpoint PATH``, and ``--pathdiff-svm-map FILE``.
-The endpoint is the Unix control socket of a running upstream pathdiff service. The
-map is strict version-1 JSON containing only source-to-LIF/SVM/volume topology.
-See the crawl architecture document for the complete schema and state machine.
+``--use-pathdiff`` enables selective parent-subtree reuse and requires cwalk
+(the default), ``--pathdiff-endpoint PATH``, and ``--pathdiff-svm-map FILE``.
+It cannot be combined with ``--no-cwalk``. The endpoint is the Unix control
+socket of a running upstream pathdiff service. The map is strict version-1 JSON
+containing only source-to-LIF/SVM/volume topology. See the crawl architecture
+document for the complete schema and state machine.
 
 Every field in a source entry is required, and every backup target must have
 exactly one entry. ``remote_path`` must be absolute::

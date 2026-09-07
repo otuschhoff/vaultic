@@ -106,6 +106,7 @@ type backupOptions struct {
 	ReadConcurrency           uint
 	NoScan                    bool
 	UseCWalk                  bool
+	NoCWalk                   bool
 	CWalkConcurrency          int
 	UsePathdiff               bool
 	PathdiffEndpoint          string
@@ -238,8 +239,9 @@ func (options *backupOptions) addTraversalFlags(f *pflag.FlagSet) {
 	f.BoolVar(&options.IgnoreCtime, "ignore-ctime", false, "ignore ctime changes when checking for modified files (default: $VAULTIC_IGNORE_CTIME or false)")
 	f.BoolVarP(&options.DryRun, "dry-run", "n", false, "do not upload or write any data, just show what would be done")
 	f.BoolVar(&options.NoScan, "no-scan", false, "do not run scanner to estimate size of backup")
-	f.BoolVar(&options.UseCWalk, "use-cwalk", false, "use parallel cwalk traversal for the backup scanner")
-	f.IntVar(&options.CWalkConcurrency, "cwalk-concurrency", runtime.GOMAXPROCS(0), "run `n` concurrent cwalk workers")
+	f.BoolVar(&options.UseCWalk, "use-cwalk", true, "use parallel cwalk traversal for the backup scanner")
+	f.BoolVar(&options.NoCWalk, "no-cwalk", false, "use the legacy traversal instead of cwalk")
+	f.IntVar(&options.CWalkConcurrency, "cwalk-concurrency", 32, "run `n` concurrent cwalk workers")
 	f.BoolVar(&options.UsePathdiff, "use-pathdiff", false, "use verified pathdiff events to skip unchanged subtrees")
 	f.StringVar(&options.PathdiffEndpoint, "pathdiff-endpoint", "", "pathdiff control socket `path`")
 	f.BoolVar(
@@ -348,6 +350,9 @@ func parseOptionalBool(value string) bool {
 }
 
 func (options *backupOptions) Finalize() error {
+	if options.NoCWalk {
+		options.UseCWalk = false
+	}
 	if envVal := env.Get("READ_CONCURRENCY"); envVal != "" && !options.readConcurrencyFlag.Changed {
 		n, err := strconv.ParseUint(envVal, 10, 32)
 		if err != nil {

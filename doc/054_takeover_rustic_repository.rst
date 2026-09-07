@@ -426,8 +426,6 @@ Run the first authoritative backup without ``--use-pathdiff``:
 
    $ vaultic backup \
          --host original-rustic-hostname \
-         --use-cwalk \
-         --cwalk-concurrency 32 \
          /exact/original/source/path
 
 ``--host`` preserves parent-snapshot selection when the current machine name
@@ -435,10 +433,11 @@ differs from the hostname stored by Rustic. Use the actual old hostname; omit
 the flag when it is unchanged. The source path must match the original backup
 path exactly.
 
-``--use-cwalk`` enables the parallel filesystem walker. It accelerates metadata
-enumeration but does not weaken correctness. ``--cwalk-concurrency 32`` sets
-the traversal worker count; benchmark values such as 16, 32, and 64 against the
-source filesystem instead of assuming that more workers are faster.
+The parallel filesystem walker is enabled by default with 32 workers. It
+accelerates metadata enumeration but does not weaken correctness. Use
+``--cwalk-concurrency N`` to tune the worker count; benchmark values such as 16,
+32, and 64 against the source filesystem instead of assuming that more workers
+are faster. Do not use ``--no-cwalk`` for this baseline.
 
 This first authoritative run is more than a directory listing. Imported or
 missing inode records are not ``verified``, so Vaultic deliberately rejects the
@@ -613,19 +612,18 @@ snapshot through backup start:
 
    $ vaultic backup \
          --host original-rustic-hostname \
-         --use-cwalk \
-         --cwalk-concurrency 32 \
          --use-pathdiff \
          --pathdiff-endpoint /run/pathdiff/control.sock \
          --pathdiff-svm-map /etc/vaultic/archive-svm-map.json \
          --pathdiff-require-coverage \
          /exact/original/source/path
 
-``--use-pathdiff`` requests selective parent-subtree reuse. It requires
-``--use-cwalk``. ``--pathdiff-endpoint`` identifies the running pathdiff Unix
-socket, and ``--pathdiff-svm-map`` supplies the exact source-to-LIF, SVM, and
-volume mapping described in :doc:`040_backup`. The map identifies topology; it
-does not prove event coverage.
+``--use-pathdiff`` requests selective parent-subtree reuse and uses the default
+cwalk traversal; it cannot be combined with ``--no-cwalk``.
+``--pathdiff-endpoint`` identifies the running pathdiff Unix socket, and
+``--pathdiff-svm-map`` supplies the exact source-to-LIF, SVM, and volume mapping
+described in :doc:`040_backup`. The map identifies topology; it does not prove
+event coverage.
 
 ``--pathdiff-require-coverage`` makes the command fail if the service cannot
 prove uninterrupted coverage. Without it, Vaultic safely falls back to a full

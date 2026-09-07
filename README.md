@@ -133,13 +133,15 @@ safely.
 
 ## Accelerate a CDOT source
 
-For a large NetApp ONTAP (CDOT) tree mounted at `/mnt/finance`, enable the
-parallel cwalk scanner:
+For a large NetApp ONTAP (CDOT) tree mounted at `/mnt/finance`, the parallel
+cwalk scanner is enabled by default with 32 workers:
 
 ```console
-$ vaultic -r /mnt/vaultic/finance backup --use-cwalk \
-      --cwalk-concurrency 32 /mnt/finance
+$ vaultic -r /mnt/vaultic/finance backup /mnt/finance
 ```
+
+Use `--cwalk-concurrency N` to tune the worker count, or `--no-cwalk` to use
+the legacy traversal.
 
 Selective reuse additionally requires an upstream pathdiff service and an
 exact source-to-LIF/SVM/volume map. For example, save this as
@@ -163,8 +165,7 @@ exact source-to-LIF/SVM/volume map. For example, save this as
 ```
 
 ```console
-$ vaultic -r /mnt/vaultic/finance backup --use-cwalk \
-      --cwalk-concurrency 32 --use-pathdiff \
+$ vaultic -r /mnt/vaultic/finance backup --use-pathdiff \
       --pathdiff-endpoint /run/pathdiff/control.sock \
       --pathdiff-svm-map /etc/vaultic/finance-svm-map.json \
       /mnt/finance

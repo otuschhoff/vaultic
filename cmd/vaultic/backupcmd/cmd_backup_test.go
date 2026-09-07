@@ -40,15 +40,37 @@ func TestAutomaticDeferredFallbackDistinguishesUnavailableFromCorrupt(t *testing
 func TestBackupCrawlFlags(t *testing.T) {
 	command := NewCommand(&global.Options{})
 	for _, name := range []string{
-		"use-cwalk", "cwalk-concurrency", "use-pathdiff", "pathdiff-endpoint",
+		"use-cwalk", "no-cwalk", "cwalk-concurrency", "use-pathdiff", "pathdiff-endpoint",
 		"pathdiff-require-coverage", "pathdiff-svm-map",
 	} {
 		if command.Flags().Lookup(name) == nil {
 			t.Errorf("backup flag --%s is not registered", name)
 		}
 	}
-	if value, err := command.Flags().GetInt("cwalk-concurrency"); err != nil || value != runtime.GOMAXPROCS(0) {
-		t.Errorf("cwalk concurrency = %d, %v; want GOMAXPROCS %d", value, err, runtime.GOMAXPROCS(0))
+	if value, err := command.Flags().GetBool("use-cwalk"); err != nil || !value {
+		t.Errorf("use-cwalk = %t, %v; want true", value, err)
+	}
+	if value, err := command.Flags().GetInt("cwalk-concurrency"); err != nil || value != 32 {
+		t.Errorf("cwalk concurrency = %d, %v; want 32", value, err)
+	}
+	if err := command.Flags().Set("cwalk-concurrency", "7"); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := command.Flags().GetInt("cwalk-concurrency"); err != nil || value != 7 {
+		t.Errorf("configured cwalk concurrency = %d, %v; want 7", value, err)
+	}
+}
+
+func TestNoCWalkRestoresLegacyTraversal(t *testing.T) {
+	command := NewCommand(&global.Options{})
+	if err := command.Flags().Set("no-cwalk", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.PreRunE(command, nil); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := command.Flags().GetBool("use-cwalk"); err != nil || value {
+		t.Errorf("use-cwalk = %t, %v; want false after --no-cwalk", value, err)
 	}
 }
 

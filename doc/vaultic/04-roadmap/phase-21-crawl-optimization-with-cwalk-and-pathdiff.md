@@ -12,7 +12,7 @@
 2. Import `pathdiff` (`github.com/otuschhoff/pathdiff`) into `vaultic` (e.g. `internal/pathdiff`), making in-scope enhancements to support volume ID-to-name resolution, target host LIF (Logical Interface) $\rightarrow$ SVM (Storage Virtual Machine) $\rightarrow$ volume mapping, and service-owned observation continuity.
 3. Implement 100% event-coverage verification: query the running `pathdiff` service for changes in the source path and parent-snapshot-to-backup-start window, together with the time from which that resolved path's LIF/SVM observation has been continuous. Reject late observation, reconnects, retention gaps, or unmonitored windows.
 4. Implement selective change-path crawl execution: if 100% event coverage is verified, crawl only the modified subtrees identified by `pathdiff`; if event coverage is incomplete or unverified, fall back automatically to a full `cwalk` traversal.
-5. Expose CLI crawl options: `--use-cwalk`, `--cwalk-concurrency N`, `--use-pathdiff`, `--pathdiff-endpoint`, `--pathdiff-require-coverage`, and `--pathdiff-svm-map`.
+5. Expose CLI crawl options: default cwalk with `--no-cwalk` as a legacy fallback, `--cwalk-concurrency N`, `--use-pathdiff`, `--pathdiff-endpoint`, `--pathdiff-require-coverage`, and `--pathdiff-svm-map`.
 
 **Tests:** `cwalk` high-concurrency directory traversal correctness test comparing results against standard traversal; `pathdiff` volume ID resolution and target host LIF $\rightarrow$ SVM $\rightarrow$ volume topology matching test; event coverage gap detection test verifying automatic fallback to full `cwalk` scan when event logs are truncated; selective change-path crawl integration benchmark demonstrating subtree skipping when changes are sparse; imported `pathdiff` module unit tests.
 
@@ -22,7 +22,7 @@
 
 Implemented in the Go backup pipeline:
 
-- Full archiver discovery uses upstream `github.com/otuschhoff/cwalk` for plain local filesystems when `--use-cwalk` is set. Directory results flow through a bounded 4096-entry queue into fixed-size Pebble batches and are consumed during deterministic tree construction. Selective runs cwalk only below collapsed changed roots; unsupported filesystem implementations retain direct sequential directory reads.
+- Full archiver discovery uses upstream `github.com/otuschhoff/cwalk` by default for plain local filesystems, with 32 workers unless `--cwalk-concurrency` overrides it. `--no-cwalk` restores legacy traversal. Directory results flow through a bounded 4096-entry queue into fixed-size Pebble batches and are consumed during deterministic tree construction. Selective runs cwalk only below collapsed changed roots; unsupported filesystem implementations retain direct sequential directory reads.
 - Upstream `github.com/otuschhoff/pathdiff` supplies the localhost control-socket client and event, engine, status, retention, volume, SVM, and LIF models. `internal/crawl` exposes a transport-neutral change-service query and derives a continuous observation window by checking the same matching engine session before and after each path-window query.
 - A verified selective plan reuses unchanged directory nodes and subtree IDs directly from the parent snapshot. Changed-path ancestors are still listed, so file creation, deletion, and rename events rebuild the containing directory deterministically.
 - A cwalk or selective run does not launch a redundant full progress scanner, and a selective run does not produce an authoritative metadata-crawl claim. Reused descendants were not independently observed.

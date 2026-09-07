@@ -463,7 +463,7 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 }
 
 func configureBackupScanner(ctx context.Context, run *backupRun, byName archiver.SelectByNameFunc, selectItem archiver.SelectFunc) {
-	if run.options.NoScan || run.pathdiffPlan.Selective || run.options.UseCWalk {
+	if run.options.NoScan || run.pathdiffPlan.Selective || run.options.UseCWalk && fs.IsLocal(run.targetFS) {
 		return
 	}
 	scanner := archiver.NewScanner(run.targetFS)

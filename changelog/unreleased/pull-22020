@@ -1,0 +1,7 @@
+Enhancement: Enable cwalk traversal by default for backups
+
+Backups now use the parallel cwalk filesystem traversal by default with 32
+workers. The worker count remains configurable with `--cwalk-concurrency`, and
+`--no-cwalk` restores the legacy traversal for compatibility or troubleshooting.
+
+https://github.com/vaultic/vaultic/pull/22020

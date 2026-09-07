@@ -477,7 +477,11 @@ func TestDefaultSocketUsesXDGRuntimeDirectory(t *testing.T) {
 func TestDefaultSocketUsesPerUserTemporaryDirectory(t *testing.T) {
 	t.Setenv("VAULTICDB_RUNTIME_DIR", "")
 	t.Setenv("XDG_RUNTIME_DIR", "")
-	want := filepath.Join(os.TempDir(), "vaulticdb-"+runtimeUserID())
+	temporaryDirectory := os.TempDir()
+	if runtime.GOOS != "windows" {
+		temporaryDirectory = "/tmp"
+	}
+	want := filepath.Join(temporaryDirectory, "vaulticdb-"+runtimeUserID())
 	if socket := DefaultSocket("repository"); filepath.Dir(socket) != want {
 		t.Fatalf("default socket directory = %q, want %q", filepath.Dir(socket), want)
 	}

@@ -94,7 +94,7 @@ func defaultRuntimeDir() string {
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
 		return filepath.Join(xdg, "vaulticdb")
 	}
-	return filepath.Join(os.TempDir(), "vaulticdb-"+runtimeUserID())
+	return filepath.Join(runtimeTempDir(), "vaulticdb-"+runtimeUserID())
 }
 
 // Client is a validated connection to one vaulticdb endpoint.

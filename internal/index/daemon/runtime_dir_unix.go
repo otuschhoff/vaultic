@@ -10,3 +10,7 @@ import (
 func runtimeUserID() string {
 	return strconv.Itoa(os.Geteuid())
 }
+
+func runtimeTempDir() string {
+	return "/tmp"
+}
