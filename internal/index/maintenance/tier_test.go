@@ -151,9 +151,9 @@ func TestTierAggregateDriftIsDetectedAndRepaired(t *testing.T) {
 // aggregate in exactly one batch.
 func TestTierAggregateRebuildIsAtomicAndDryRunnable(t *testing.T) {
 	fixture := newTierFixture(t, schema.TierCold, schema.TierMirrored)
-	mirroredKey := string(schema.TierAggregateKey(schema.TierMirrored))
+	mirroredKey := schema.TierAggregateKey(schema.TierMirrored)
 	fixture.store.set(t, schema.TierAggregateKey(schema.TierMirrored), schema.PackAggregate{PackCount: 99, UpdateSequence: 1})
-	before := append([]byte(nil), fixture.store.values[mirroredKey]...)
+	before := append([]byte(nil), fixture.store.values[string(mirroredKey)]...)
 
 	writes := fixture.store.batchWrites
 	dry, err := RebuildPackAggregates(context.Background(), fixture.store, true)
@@ -163,7 +163,7 @@ func TestTierAggregateRebuildIsAtomicAndDryRunnable(t *testing.T) {
 	if fixture.store.batchWrites != writes {
 		t.Fatal("dry run wrote to the store")
 	}
-	if string(fixture.store.values[mirroredKey]) != string(before) {
+	if string(fixture.store.values[string(mirroredKey)]) != string(before) {
 		t.Fatal("dry run mutated the aggregate")
 	}
 

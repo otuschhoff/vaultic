@@ -308,7 +308,7 @@ From source
 ***********
 
 vaultic is written in the Go programming language and you need at least
-Go version 1.25. Building vaultic may also work with older versions of Go,
+Go version 1.26. Building vaultic may also work with older versions of Go,
 but that's not supported. See the `Getting
 started <https://go.dev/doc/install>`__ guide of the Go project for
 instructions how to install Go.

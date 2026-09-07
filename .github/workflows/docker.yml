@@ -6,7 +6,7 @@ on:
     tags:
       - 'v*'
     branches:
-      - 'master'
+      - 'main'
 
 env:
   REGISTRY: ghcr.io
@@ -56,8 +56,8 @@ jobs:
         run: |
           echo "removing git directory for consistency with release binaries"
           rm -rf .git
-        # remove VCS information from release builds, keep VCS for nightly builds on master
-        if: github.ref != 'refs/heads/master'
+        # remove VCS information from release builds, keep VCS for nightly builds on main
+        if: github.ref != 'refs/heads/main'
 
       - name: Build and push Docker image
         id: build-and-push

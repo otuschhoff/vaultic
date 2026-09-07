@@ -47,6 +47,7 @@ func parseIDsFromReader(t testing.TB, reader io.Reader) vaultic.IDs {
 			IDs = append(IDs, id)
 		}
 	}
+	rtest.OK(t, scanner.Err())
 
 	return IDs
 }

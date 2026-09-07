@@ -1,9 +1,9 @@
 name: test
 on:
-  # run tests on push to master, but not when other branches are pushed to
+  # run tests on push to main, but not when other branches are pushed to
   push:
     branches:
-      - master
+      - main
 
   # run tests for all pull requests
   pull_request:
@@ -43,11 +43,6 @@ jobs:
             os: ubuntu-latest
             test_fuse: true
             test_opts: "-race"
-
-          - job_name: Linux
-            go: 1.25.x
-            os: ubuntu-latest
-            test_fuse: true
 
     name: ${{ matrix.job_name }} Go ${{ matrix.go }}
     runs-on: ${{ matrix.os }}
@@ -257,7 +252,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           # Required: the version of golangci-lint is required and must be specified without patch version: we always use the latest patch version.
-          version: v2.12
+          version: v2.13
           args: --verbose --timeout 5m --max-issues-per-linter=0 --max-same-issues=0
 
       - name: Check go.mod/go.sum

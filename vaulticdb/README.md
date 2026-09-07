@@ -13,15 +13,15 @@ Prerequisites:
 
 - Rust toolchain compatible with the pinned SlateDB revision
 - `protoc` 36.0
-- `protoc-gen-go` v1.36.10
-- `protoc-gen-go-grpc` 1.5.1
+- `protoc-gen-go` v1.36.12
+- `protoc-gen-go-grpc` 1.6.2
 - C toolchain for any generated binding checks
 
 Install the pinned Go generators before regenerating bindings:
 
 ```sh
-go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
 export PATH="$(go env GOPATH)/bin:$PATH"
 ```
 

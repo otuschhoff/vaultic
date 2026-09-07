@@ -150,13 +150,13 @@ linters:
       # OpenPGP repository compatibility and the legacy Poly1305 construction
       # depend on deprecated x/crypto APIs without drop-in replacements.
       - path: (.+)\.go$
-        text: 'SA1019: "golang.org/x/crypto/poly1305" is deprecated'
+        text: 'SA1019: "?golang.org/x/crypto/poly1305"? is deprecated'
       - path: (.+)\.go$
-        text: 'SA1019: "golang.org/x/crypto/openpgp" is deprecated'
+        text: 'SA1019: "?golang.org/x/crypto/openpgp"? is deprecated'
       # DialContext and WithBlock preserve the daemon startup timeout contract;
       # grpc.NewClient connects lazily and is not a behavior-preserving replacement.
       - path: (.+)\.go$
-        text: "SA1019: grpc.(DialContext|WithBlock) is deprecated"
+        text: "SA1019: (google.golang.org/)?grpc.(DialContext|WithBlock) is deprecated"
       # Multiline corruption diagnostics end with operator guidance and are
       # intentionally presented as complete prose.
       - linters: [staticcheck]

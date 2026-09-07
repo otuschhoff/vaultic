@@ -26,10 +26,10 @@ require_version() {
 
 require_version protoc "libprotoc 36.0" \
     "install protoc 36.0 from https://github.com/protocolbuffers/protobuf/releases/tag/v36.0"
-require_version protoc-gen-go "protoc-gen-go v1.36.10" \
-    "install with: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10"
-require_version protoc-gen-go-grpc "protoc-gen-go-grpc 1.5.1" \
-    "install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1"
+require_version protoc-gen-go "protoc-gen-go v1.36.12" \
+    "install with: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12"
+require_version protoc-gen-go-grpc "protoc-gen-go-grpc 1.6.2" \
+    "install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2"
 
 mkdir -p "$go_out"
 protoc \
