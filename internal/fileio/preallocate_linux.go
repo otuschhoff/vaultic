@@ -1,6 +1,7 @@
 package fileio
 
 import (
+	"errors"
 	"os"
 	"syscall"
 
@@ -22,7 +23,7 @@ func PreallocateFile(wr *os.File, size int64) error {
 func ignoringEINTR(fn func() error) error {
 	for {
 		err := fn()
-		if err != syscall.EINTR {
+		if !errors.Is(err, syscall.EINTR) {
 			return err
 		}
 	}

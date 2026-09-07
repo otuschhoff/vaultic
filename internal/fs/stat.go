@@ -25,7 +25,7 @@ type ExtendedFileInfo struct {
 	ModTime    time.Time // last (content) modification time stamp
 	ChangeTime time.Time // last status change time stamp
 
-	sys any // Value returned by os.FileInfo.Sys()
+	sys any //nolint:unused,nolintlint // Used by the Darwin and Windows implementations.
 }
 
 // ExtendedStat returns an ExtendedFileInfo constructed from the os.FileInfo.
