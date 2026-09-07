@@ -47,7 +47,7 @@ jobs:
 
       - name: Upload interop logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: interop-logs
           path: /tmp/vaultic-interop/logs
