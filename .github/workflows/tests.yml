@@ -109,22 +109,9 @@ jobs:
           # add $USERPROFILE/bin to path ($GOBIN was already added to the path by setup-go@v3)
           echo $Env:USERPROFILE\bin >> $Env:GITHUB_PATH
 
-          echo "install tar"
-          cd $env:USERPROFILE
-          mkdir tar
-          cd tar
-
-          # install exactly these versions of tar and the libraries, other combinations might not work!
-
-          Invoke-WebRequest https://github.com/vaultic/test-assets/raw/master/tar-1.13-1-bin.zip -OutFile tar.zip
-          unzip tar.zip
-          Invoke-WebRequest https://github.com/vaultic/test-assets/raw/master/libintl-0.11.5-2-bin.zip -OutFile libintl.zip
-          unzip libintl.zip
-          Invoke-WebRequest https://github.com/vaultic/test-assets/raw/master/libiconv-1.8-1-bin.zip -OutFile libiconv.zip
-          unzip libiconv.zip
-
-          # add $USERPROFILE/tar/bin to path
-          echo $Env:USERPROFILE\tar\bin >> $Env:GITHUB_PATH
+          echo "verify tar"
+          Get-Command tar.exe -ErrorAction Stop
+          tar.exe --version
         if: matrix.os == 'windows-latest'
 
       - name: Build with build.go
