@@ -126,6 +126,10 @@ The destination uses its own encryption keys, so copying reads and rewrites the
 snapshot data. Interrupted copies are resumable. See
 [copying snapshots between repositories](doc/045_working_with_repos.rst) and
 the [interop design](doc/vaultic/02-architecture/03-legacy-interop-and-crawl.md).
+For repositories with tens or hundreds of terabytes of packs, follow the
+[large Rustic repository takeover guide](doc/054_takeover_rustic_repository.rst)
+to adopt the repository without copying packs and stage VaulticDB authority
+safely.
 
 ## Accelerate a CDOT source
 

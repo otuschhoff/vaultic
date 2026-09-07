@@ -16,6 +16,7 @@ Vaultic Documentation
    051_cold_storage
    052_profiles_automation
    053_command_parity
+   054_takeover_rustic_repository
    060_forget
    070_encryption
    075_scripting
