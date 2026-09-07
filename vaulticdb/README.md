@@ -176,3 +176,12 @@ The script requires `x86_64-unknown-linux-musl` and writes `vaulticdb`,
 custodian uses HIDAPI's pure-Rust `basic-udev` backend, so it does not load
 `libudev`. The script rejects an artifact with any ELF dynamic dependency and
 records the Rust, SlateDB, and target metadata beside the binaries.
+
+CI packages these files once as the generic `vaulticdb-linux-amd64` artifact.
+The exact same artifact is run without rebuilding in AlmaLinux 8, Debian stable,
+and Ubuntu latest containers. Run the distribution-independent smoke test
+locally with:
+
+```sh
+./vaulticdb/smoke-static-linux.sh dist/vaulticdb/linux-amd64
+```

@@ -1,4 +1,4 @@
-name: Build and Release Linux Binary
+name: Build and Release Generic Linux Binaries
 
 on:
   push:
@@ -53,16 +53,26 @@ jobs:
       - name: Build release binaries
         run: make vaulticdb-linux-amd64
 
-      - name: Package binaries
+      - name: Package generic Linux binaries
         run: |
-          mv bin/linux-amd64/vaulticdb bin/vaulticdb-linux-amd64
-          mv bin/linux-amd64/vaultic-key-custodian bin/vaultic-key-custodian-linux-amd64
-          mv bin/linux-amd64/vaultic-key-broker bin/vaultic-key-broker-linux-amd64
-          rmdir bin/linux-amd64
+          tar -C bin -czf vaulticdb-linux-amd64.tar.gz linux-amd64
+
+      - name: Test generic Linux binaries across distributions
+        run: |
+          mkdir -p "$RUNNER_TEMP/vaulticdb-release"
+          tar -C "$RUNNER_TEMP/vaulticdb-release" -xzf vaulticdb-linux-amd64.tar.gz
+          for image in almalinux:8 debian:stable-slim ubuntu:latest; do
+            docker run --rm \
+              --platform linux/amd64 \
+              --volume "$RUNNER_TEMP/vaulticdb-release/linux-amd64:/opt/vaulticdb:ro" \
+              --volume "$PWD/vaulticdb/smoke-static-linux.sh:/opt/smoke-static-linux.sh:ro" \
+              "$image" \
+              /bin/sh /opt/smoke-static-linux.sh /opt/vaulticdb
+          done
 
       - name: Create Release & Upload Artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: bin/*
+          files: vaulticdb-linux-amd64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -166,8 +166,19 @@ jobs:
             dist/vaulticdb/linux-amd64/vaultic-key-broker \
             dist/vaulticdb/linux-amd64/vaultic-key-custodian
 
-      - name: Run musl daemon native smoke test
-        run: VAULTICDB_NATIVE_SMOKE=1 dist/vaulticdb/linux-amd64/vaulticdb
+      - name: Run static binaries on build host
+        run: ./vaulticdb/smoke-static-linux.sh dist/vaulticdb/linux-amd64
+
+      - name: Package generic Linux binaries
+        run: tar -C dist/vaulticdb -czf vaulticdb-linux-amd64.tar.gz linux-amd64
+
+      - name: Upload generic Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaulticdb-linux-amd64
+          path: vaulticdb-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Verify Unix RPC smoke test
         run: |
@@ -225,3 +236,38 @@ jobs:
       - name: Dump MinIO log on failure
         if: failure()
         run: cat "$RUNNER_TEMP/minio.log" || true
+
+  static-linux-compatibility:
+    name: Static Linux compatibility (${{ matrix.distribution }})
+    needs: vaulticdb
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: AlmaLinux 8
+            image: almalinux:8
+          - distribution: Debian stable
+            image: debian:stable-slim
+          - distribution: Ubuntu latest
+            image: ubuntu:latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download generic Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: vaulticdb-linux-amd64
+          path: artifacts
+
+      - name: Extract generic Linux binaries
+        run: tar -C artifacts -xzf artifacts/vaulticdb-linux-amd64.tar.gz
+
+      - name: Run unchanged binaries on ${{ matrix.distribution }}
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume "$PWD/artifacts/linux-amd64:/opt/vaulticdb:ro" \
+            --volume "$PWD/vaulticdb/smoke-static-linux.sh:/opt/smoke-static-linux.sh:ro" \
+            "${{ matrix.image }}" \
+            /bin/sh /opt/smoke-static-linux.sh /opt/vaulticdb
