@@ -1,0 +1,44 @@
+name: Build and Release Linux Binary
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-almalinux8:
+    runs-on: ubuntu-latest
+    container:
+      image: almalinux:8
+    steps:
+      - name: Install C dependencies and build tools
+        run: |
+          dnf install -y gcc gcc-c++ make pkgconfig systemd-devel git
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --workspace
+
+      - name: Package binaries
+        run: |
+          mkdir -p bin
+          cp target/release/vaulticdb bin/vaulticdb-linux-amd64
+          cp target/release/vaultic-key-custodian bin/vaultic-key-custodian-linux-amd64
+          cp target/release/vaultic-key-broker bin/vaultic-key-broker-linux-amd64
+
+      - name: Create Release & Upload Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
