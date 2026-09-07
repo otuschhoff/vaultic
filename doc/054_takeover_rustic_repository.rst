@@ -352,25 +352,28 @@ socket that ordinary Vaultic commands use. A system unit can be:
    Group=vaultic
    UMask=0077
    EnvironmentFile=/etc/vaultic/vaulticdb-archive.env
-   ExecStartPre=+/usr/bin/install -d -m 0700 -o vaultic -g vaultic /tmp/vaulticdb
+   Environment=VAULTICDB_RUNTIME_DIR=/run/vaulticdb
+   RuntimeDirectory=vaulticdb
+   RuntimeDirectoryMode=0700
    ExecStart=/usr/local/bin/vaulticdb
    Restart=on-failure
    RestartSec=5s
    LimitCORE=0
    NoNewPrivileges=yes
-   PrivateTmp=no
    ProtectSystem=strict
-   ReadWritePaths=/tmp/vaulticdb /srv/vaulticdb
+   ReadWritePaths=/run/vaulticdb /srv/vaulticdb
 
    [Install]
    WantedBy=multi-user.target
 
-``PrivateTmp=no`` is intentional: ordinary Vaultic commands use the shared
-repository-hashed socket below ``/tmp/vaulticdb``. ``UMask=0077`` and the
-mode-0700 parent satisfy the client ownership checks. Adjust the account,
-binary path, and data path to the installation. These settings use the initial
-recovery-passphrase slot; Stage 8 replaces that operational route with broker
-settings after the takeover is validated.
+``RuntimeDirectory=`` makes systemd create ``/run/vaulticdb`` as the service
+account with mode ``0700`` and remove it when the unit stops. Set
+``VAULTICDB_RUNTIME_DIR=/run/vaulticdb`` for ordinary Vaultic commands that
+connect to this service as well. VaulticDB refuses to adopt an existing runtime
+path that is a symlink, has another owner, or is not mode ``0700``. Adjust the
+account, binary path, and data path to the installation. These settings use the
+initial recovery-passphrase slot; Stage 8 replaces that operational route with
+broker settings after the takeover is validated.
 
 After installing the unit, stop any persistent on-demand daemon so it releases
 the repository endpoint, then start and enable the service. The singleton lock

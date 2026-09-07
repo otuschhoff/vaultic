@@ -54,8 +54,10 @@ impl Config {
         let auth_token = read_auth_token()?;
         let repository_id =
             RepositoryId::new(env::var("VAULTICDB_REPOSITORY_ID").unwrap_or_default());
-        let runtime_dir =
-            env::var("VAULTICDB_RUNTIME_DIR").unwrap_or_else(|_| "/tmp/vaulticdb".to_owned());
+        let runtime_dir = env::var("VAULTICDB_RUNTIME_DIR")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(default_runtime_directory);
         let transport =
             transport_from_env(repository_id.as_str(), &runtime_dir, auth_token.is_some())?;
         let storage = storage_from_env()?;
@@ -390,4 +392,19 @@ pub(crate) fn default_socket_path(runtime_dir: &str, repository_id: &str) -> Str
         repository_id.as_bytes()
     });
     format!("{runtime_dir}/{digest:x}.sock")
+}
+
+fn default_runtime_directory() -> String {
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir)
+                .join("vaulticdb")
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    env::temp_dir()
+        .join(format!("vaulticdb-{}", unsafe { libc::geteuid() }))
+        .to_string_lossy()
+        .into_owned()
 }

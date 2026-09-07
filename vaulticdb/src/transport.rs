@@ -57,8 +57,7 @@ async fn main() -> Result<()> {
     match transport {
         TransportConfig::Unix(path) => {
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-                set_private_directory_permissions(parent)?;
+                prepare_private_runtime_directory(parent)?;
             }
             let lock_path = path.with_extension("lock");
             let _lock = acquire_singleton_lock(&lock_path)?;
@@ -104,8 +103,7 @@ async fn main() -> Result<()> {
         TransportConfig::Tcp { address, allowlist, metadata_path } => {
             let listener = TcpListener::bind(address).await.context("bind TCP listener")?;
             if let Some(parent) = metadata_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-                set_private_directory_permissions(parent)?;
+                prepare_private_runtime_directory(parent)?;
             }
             let lock_path = metadata_path.with_extension("lock");
             let _lock = acquire_singleton_lock(&lock_path)?;
@@ -323,18 +321,34 @@ fn acquire_singleton_lock(path: &Path) -> Result<File> {
 }
 
 #[cfg(unix)]
-fn set_private_directory_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn prepare_private_runtime_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    let mut permissions = std::fs::metadata(path)?.permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(path, permissions)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700).create(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        bail!("vaulticdb runtime path {} is not a directory", path.display());
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        bail!("vaulticdb runtime directory {} has an unsafe owner", path.display());
+    }
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        bail!("vaulticdb runtime directory {} must have mode 0700", path.display());
+    }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_private_directory_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+fn prepare_private_runtime_directory(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(Into::into)
 }
 
 #[cfg(unix)]
@@ -350,4 +364,37 @@ fn set_private_socket_permissions(path: &std::path::Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_private_socket_permissions(_path: &std::path::Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod runtime_directory_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn creates_private_directory_and_rejects_unsafe_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "vaulticdb-runtime-test-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let runtime = root.join("runtime");
+        prepare_private_runtime_directory(&runtime).unwrap();
+        assert_eq!(
+            std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(prepare_private_runtime_directory(&runtime).is_err());
+        std::fs::remove_dir(&runtime).unwrap();
+
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        symlink(&target, &runtime).unwrap();
+        assert!(prepare_private_runtime_directory(&runtime).is_err());
+
+        std::fs::remove_file(&runtime).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

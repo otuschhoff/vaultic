@@ -84,7 +84,17 @@ func DefaultSocket(repositoryID string) string {
 		repositoryID = "default"
 	}
 	digest := sha256.Sum256([]byte(repositoryID))
-	return filepath.Join("/tmp/vaulticdb", hex.EncodeToString(digest[:])+".sock")
+	return filepath.Join(defaultRuntimeDir(), hex.EncodeToString(digest[:])+".sock")
+}
+
+func defaultRuntimeDir() string {
+	if configured := os.Getenv("VAULTICDB_RUNTIME_DIR"); configured != "" {
+		return configured
+	}
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+		return filepath.Join(xdg, "vaulticdb")
+	}
+	return filepath.Join(os.TempDir(), "vaulticdb-"+runtimeUserID())
 }
 
 // Client is a validated connection to one vaulticdb endpoint.
@@ -486,7 +496,7 @@ func validateProtectedFile(path, description string) error {
 
 func tcpMetadataPath(address string) string {
 	digest := sha256.Sum256([]byte(address))
-	return filepath.Join("/tmp/vaulticdb", "tcp-"+hex.EncodeToString(digest[:]))
+	return filepath.Join(defaultRuntimeDir(), "tcp-"+hex.EncodeToString(digest[:]))
 }
 
 func daemonOwnsProcess(socket string, processID int) bool {
@@ -579,7 +589,7 @@ func validateUnixEndpoint(socket string) error {
 	if vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid()) {
 		return fmt.Errorf("unsafe vaulticdb socket owner at %s", socket)
 	}
-	directory, err := os.Stat(filepath.Dir(socket))
+	directory, err := os.Lstat(filepath.Dir(socket))
 	if err != nil {
 		return err
 	}

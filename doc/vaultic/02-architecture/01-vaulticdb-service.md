@@ -139,10 +139,18 @@ the Go client and Rust server from the same source. RPC groups should include:
 - bounded/pageable `ExportScan`
 
 Unix sockets are the default transport and must use a private runtime directory
-with mode `0700` and a socket with mode `0600`. TCP is disabled by default. An
-opt-in TCP listener must bind only to a configured address, require a non-empty
-IP allowlist, and use mutual authentication or an equivalent authenticated
-channel. Missing authentication or an allowlist is a startup error.
+with mode `0700` and a socket with mode `0600`. `VAULTICDB_RUNTIME_DIR` selects
+the directory explicitly. Otherwise, Vaultic and VaulticDB use
+`$XDG_RUNTIME_DIR/vaulticdb`, falling back to a per-UID directory under the
+system temporary directory. Existing symlinks, non-directories, paths owned by
+another user, and paths with a mode other than `0700` are startup errors. A
+managed system service should explicitly use a service-owned directory under
+`/run`, such as `/run/vaulticdb` created by systemd's `RuntimeDirectory=`.
+
+TCP is disabled by default. An opt-in TCP listener must bind only to a
+configured address, require a non-empty IP allowlist, and use mutual
+authentication or an equivalent authenticated channel. Missing authentication
+or an allowlist is a startup error.
 
 Every RPC needs request IDs, deadlines, cancellation, bounded message sizes,
 and backpressure. Large scans and batches must stream or page rather than use

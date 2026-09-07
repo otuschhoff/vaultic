@@ -453,6 +453,36 @@ func TestDefaultSocketIsRepositoryScoped(t *testing.T) {
 	}
 }
 
+func TestDefaultSocketUsesConfiguredRuntimeDirectory(t *testing.T) {
+	runtimeDirectory := t.TempDir()
+	t.Setenv("VAULTICDB_RUNTIME_DIR", runtimeDirectory)
+	if socket := DefaultSocket("repository"); filepath.Dir(socket) != runtimeDirectory {
+		t.Fatalf("default socket directory = %q, want %q", filepath.Dir(socket), runtimeDirectory)
+	}
+	if metadata := tcpMetadataPath("127.0.0.1:50051"); filepath.Dir(metadata) != runtimeDirectory {
+		t.Fatalf("TCP metadata directory = %q, want %q", filepath.Dir(metadata), runtimeDirectory)
+	}
+}
+
+func TestDefaultSocketUsesXDGRuntimeDirectory(t *testing.T) {
+	xdgRuntimeDirectory := t.TempDir()
+	t.Setenv("VAULTICDB_RUNTIME_DIR", "")
+	t.Setenv("XDG_RUNTIME_DIR", xdgRuntimeDirectory)
+	want := filepath.Join(xdgRuntimeDirectory, "vaulticdb")
+	if socket := DefaultSocket("repository"); filepath.Dir(socket) != want {
+		t.Fatalf("default socket directory = %q, want %q", filepath.Dir(socket), want)
+	}
+}
+
+func TestDefaultSocketUsesPerUserTemporaryDirectory(t *testing.T) {
+	t.Setenv("VAULTICDB_RUNTIME_DIR", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	want := filepath.Join(os.TempDir(), "vaulticdb-"+runtimeUserID())
+	if socket := DefaultSocket("repository"); filepath.Dir(socket) != want {
+		t.Fatalf("default socket directory = %q, want %q", filepath.Dir(socket), want)
+	}
+}
+
 func TestConnectValidatesDaemon(t *testing.T) {
 	socket := testSocket(t)
 	listener, err := net.Listen("unix", socket)

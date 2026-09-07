@@ -110,7 +110,7 @@ All daemon-specific environment variables are parsed once by `Config::from_env`.
 |---|---|---|
 | `VAULTICDB_REPOSITORY_ID` | empty | Required by `publish-capsule`; scopes storage and daemon identity checks. |
 | `VAULTICDB_DAEMON_ID` | `vaulticdb-dev` | Instance ID reported by health and writer-role RPCs. |
-| `VAULTICDB_RUNTIME_DIR` | `/tmp/vaulticdb` | Parent for default Unix and TCP metadata paths. |
+| `VAULTICDB_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/vaulticdb`, otherwise `<temp>/vaulticdb-<uid>` | Parent for default Unix and TCP metadata paths. Existing directories must be owned by the daemon user with mode `0700`. Managed services should set this to a service-owned directory under `/run`. |
 | `VAULTICDB_TRANSPORT` | `unix` | `unix` or `tcp`. |
 | `VAULTICDB_SOCKET` | `<runtime>/<repository-hash>.sock` | Unix socket path. |
 | `VAULTICDB_TCP_ADDR` | `127.0.0.1:50051` | TCP listen address. |

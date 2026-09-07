@@ -6,6 +6,8 @@ Cold storage
 Cold storage is a storage tier that trades lower storage cost for slower and
 more expensive retrieval: data must be "restored" (warmed up) before it can be
 read. Examples are Amazon S3 Glacier storage classes and OVH Cold Archive.
+For S3 credentials, permissions, storage classes, VaulticDB configuration, and
+hardening, see :ref:`cloud_object_storage`.
 
 vaultic supports cold storage in two complementary ways, mirroring rustic.
 

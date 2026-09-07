@@ -13,6 +13,7 @@ Vaultic Documentation
    048_in_repo_config
    049_snapshot_metadata
    050_restore
+   051_cloud_object_storage
    051_cold_storage
    052_profiles_automation
    053_command_parity
