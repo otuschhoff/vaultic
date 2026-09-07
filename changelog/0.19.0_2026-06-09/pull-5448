@@ -14,6 +14,6 @@ container.
 `4` (neutral priority).
 
 For further details, please see:
-https://restic.readthedocs.io/en/stable/020_installation.html#docker-container
+../../doc/020_installation.rst
 
 https://github.com/restic/restic/pull/5448

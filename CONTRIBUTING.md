@@ -203,7 +203,7 @@ to be ashamed of. In contrast, that happens regularly for all of us. That's
 what the tests are there for.
 
 More details of how to structure tests can be found here at
-[writing tests](https://vaultic.readthedocs.io/en/stable/090_participating.html#writing-tests).
+[writing tests](doc/090_participating.rst).
 
 Code Conventions
 ----------------

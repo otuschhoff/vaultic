@@ -15,7 +15,7 @@ FROM alpine:latest
 LABEL org.opencontainers.image.title="vaultic"
 LABEL org.opencontainers.image.description="Fast, secure, efficient backup program"
 LABEL org.opencontainers.image.url="https://vaultic.net"
-LABEL org.opencontainers.image.documentation="https://vaultic.readthedocs.io"
+LABEL org.opencontainers.image.documentation="https://github.com/otuschhoff/vaultic/tree/main/doc"
 LABEL org.opencontainers.image.source="https://github.com/otuschhoff/vaultic"
 LABEL org.opencontainers.image.licenses="BSD-2-Clause"
 

@@ -571,7 +571,7 @@ restic users. The changes are ordered by importance.
    `4` (neutral priority).
 
    For further details, please see:
-   https://restic.readthedocs.io/en/stable/020_installation.html#docker-container
+  doc/020_installation.rst
 
    https://github.com/restic/restic/pull/5448
 
@@ -1840,7 +1840,7 @@ restic users. The changes are ordered by importance.
    The `repair packs` command has been improved to also be able to process
    truncated pack files. The `check` and `check --read-data` command will provide
    instructions on using the command if necessary to repair a repository. See the
-   guide at https://restic.readthedocs.io/en/stable/077_troubleshooting.html for
+  guide at doc/077_troubleshooting.rst for
    further instructions.
 
    https://github.com/restic/restic/issues/828
@@ -2389,7 +2389,7 @@ restic users. The changes are ordered by importance.
 ## Summary
 
  * Fix #4540: Restore ARMv5 support for ARM binaries
- * Fix #4545: Repair documentation build on Read the Docs
+ * Fix #4545: Repair hosted documentation build
 
 ## Details
 
@@ -2403,10 +2403,9 @@ restic users. The changes are ordered by importance.
 
    https://github.com/restic/restic/issues/4540
 
- * Bugfix #4545: Repair documentation build on Read the Docs
+ * Bugfix #4545: Repair hosted documentation build
 
-   For restic 0.16.1, no documentation was available at
-   https://restic.readthedocs.io/ .
+   For restic 0.16.1, no hosted documentation was available.
 
    The documentation build process is now updated to work again.
 
@@ -5041,7 +5040,7 @@ restic users. The changes are ordered by importance.
    By default, the `prune` command no longer removes all unused data. This behavior
    can be fine-tuned by new options, like the acceptable amount of unused space or
    the maximum size of data to reorganize. For more details, please see
-   https://restic.readthedocs.io/en/stable/060_forget.html .
+  doc/060_forget.rst.
 
    Moreover, `prune` now accepts the `--dry-run` option and also running `forget
    --dry-run --prune` will show what `prune` would do.

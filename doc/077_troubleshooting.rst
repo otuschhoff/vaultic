@@ -175,7 +175,7 @@ In case of damage to a snapshot file, ``check`` will show an error message like 
   error: failed to load snapshot 1d204771: LoadRaw(<snapshot/1d20477115>): invalid data returned
   [0:00] 100.00%  1 / 1 snapshots
 
-  The repository contains damaged snapshot files. These damaged files must be removed to repair the repository. This can be done using the following commands. Please read the troubleshooting guide at https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.
+  The repository contains damaged snapshot files. These damaged files must be removed to repair the repository. Read this troubleshooting section carefully before running the following commands.
 
   vaultic repair snapshots --forget 1d2047711588c657efea246369c499bb2133240b1e03477d503386ceaa92fa2f
 

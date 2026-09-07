@@ -1,7 +1,6 @@
-Bugfix: Repair documentation build on Read the Docs
+Bugfix: Repair hosted documentation build
 
-For restic 0.16.1, no documentation was available at
-https://restic.readthedocs.io/ .
+For restic 0.16.1, no hosted documentation was available.
 
 The documentation build process is now updated to work again.
 

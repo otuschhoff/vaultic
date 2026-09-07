@@ -1,6 +1,6 @@
 [Unit]
 Description=Vaultic quorum key broker
-Documentation=https://vaultic.readthedocs.io/en/latest/070_encryption.html
+Documentation=https://github.com/otuschhoff/vaultic/blob/main/doc/070_encryption.rst
 After=local-fs.target
 
 [Service]

@@ -12,7 +12,7 @@ uses the information already known by `prune`.
 By default, the `prune` command no longer removes all unused data. This
 behavior can be fine-tuned by new options, like the acceptable amount of
 unused space or the maximum size of data to reorganize. For more details,
-please see https://restic.readthedocs.io/en/stable/060_forget.html .
+please see ../../doc/060_forget.rst.
 
 Moreover, `prune` now accepts the `--dry-run` option and also running
 `forget --dry-run --prune` will show what `prune` would do.

@@ -13,7 +13,7 @@ Usage help is available:
     vaultic is a backup program which allows saving multiple revisions of files and
     directories in an encrypted repository stored on different backends.
 
-    The full documentation can be found at https://vaultic.readthedocs.io/ .
+    The documentation can be found at https://github.com/otuschhoff/vaultic/tree/main/doc .
 
     Usage:
       vaultic [command]

@@ -313,7 +313,7 @@ func runCheck(
 	if errorsFound {
 		if len(salvagePacks) == 0 && len(brokenSnapshots) == 0 {
 			printer.E("\nThe repository is damaged and must be repaired. Please follow the troubleshooting guide at " +
-				"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html .\n\n")
+				"https://github.com/otuschhoff/vaultic/blob/main/doc/077_troubleshooting.rst .\n\n")
 		}
 		return summary, errors.Fatal("repository contains errors")
 	}
@@ -339,7 +339,7 @@ func reportDamagedFiles(printer vaultic.Printer, summary *checkSummary, salvageP
 	if len(salvagePacks) > 0 {
 		printer.E("\nThe repository contains damaged pack files. These damaged files must be removed to repair the repository. " +
 			"This can be done using the following commands. Please read the troubleshooting guide at " +
-			"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
+			"https://github.com/otuschhoff/vaultic/blob/main/doc/077_troubleshooting.rst first.\n\n")
 		for id := range salvagePacks {
 			summary.BrokenPacks = append(summary.BrokenPacks, id.String())
 		}
@@ -352,7 +352,7 @@ func reportDamagedFiles(printer vaultic.Printer, summary *checkSummary, salvageP
 	}
 	printer.E("\nThe repository contains damaged snapshot files. These damaged files must be removed to repair the repository. " +
 		"This can be done using the following commands. Please read the troubleshooting guide at " +
-		"https://vaultic.readthedocs.io/en/stable/077_troubleshooting.html first.\n\n")
+		"https://github.com/otuschhoff/vaultic/blob/main/doc/077_troubleshooting.rst first.\n\n")
 	printer.E("vaultic repair snapshots --forget %s\n\n", strings.Join(brokenSnapshots, " "))
 	printer.E("Damaged snapshot files can be caused by backend problems, hardware problems or bugs in vaultic. " +
 		"Please open an issue at https://github.com/otuschhoff/vaultic/issues/new/choose for further troubleshooting!\n")
