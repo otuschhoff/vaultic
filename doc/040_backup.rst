@@ -113,6 +113,36 @@ Changed subtree roots still use cwalk; only their ancestor frontier uses direct
 directory reads. Parent-time boundaries are inclusive because snapshot time marks
 backup start, so an equal-time event must be treated conservatively as a change.
 
+On macOS, ``--use-fsevents`` uses the source volume's persistent FSEvents
+journal instead of an external pathdiff service. The selected parent must
+contain a matching volume and journal anchor. Journal resets, backwards event
+IDs, dropped or wrapped events, root or mount changes, replay timeout, and a
+missing ``HistoryDone`` marker all fall back to a full crawl of the affected
+source root. ``--fsevents-require-coverage`` makes those conditions fatal.
+``--fsevents-replay-timeout`` defaults to 60 seconds. FSEvents and pathdiff are
+mutually exclusive and both require cwalk. FSEvents subtree reuse is enabled
+only for roots read from a successfully mounted APFS snapshot. If snapshot
+creation falls back to the live filesystem, that root is fully crawled so
+changes cannot slip between the replay boundary and the read source.
+
+The independent ``--fsevents-full-crawl-every`` guard defaults to 168 hours.
+It follows the parent chain to the last snapshot not marked selective and
+forces a full crawl when that snapshot is too old. Setting the duration to zero
+disables the guard and emits an integrity warning. Snapshot JSON records
+``fsevents_anchors`` and ``crawl_plan``. ``backup --json`` also emits a
+``crawl_plan`` message, including per-root decisions and the number of reused
+subtrees.
+
+On macOS, ``--apfs-snapshot`` defaults to true. For sources on the system Data
+volume, Vaultic captures the FSEvents position, creates a Time Machine local
+snapshot, mounts it read-only with ``nobrowse`` in a mode-0700 directory, and
+redirects only filesystem reads to that mount. Stored snapshot paths remain the
+original live paths. The macOS ``tmutil localsnapshot`` interface cannot target
+arbitrary external APFS volumes; those and authorization failures fall back to
+live reads. Use ``--apfs-snapshot-require`` to reject fallback, or
+``--apfs-snapshot-keep`` to retain a successfully created snapshot for
+debugging. The latter emits a warning.
+
 On Windows, the ``--use-fs-snapshot`` option will use Windows' Volume Shadow Copy
 Service (VSS) when creating backups. Vaultic will transparently create a VSS
 snapshot for each volume that contains files to backup. Files are read from the

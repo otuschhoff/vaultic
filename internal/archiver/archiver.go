@@ -911,9 +911,12 @@ type SnapshotOptions struct {
 	ProgramVersion string
 	// Label, Description and Delete are vaultic/rustic snapshot metadata
 	// extensions (see internal/data).
-	Label       string
-	Description string
-	Delete      *data.DeleteOption
+	Label            string
+	Description      string
+	Delete           *data.DeleteOption
+	FSEventsAnchors  []data.FSEventsAnchor
+	CrawlPlan        *data.CrawlPlan
+	FinalizeSnapshot func(*data.Snapshot)
 	// SkipIfUnchanged omits the snapshot creation if it is identical to the parent snapshot.
 	SkipIfUnchanged bool
 	// DeferredUploader creates durable packs without publishing normal metadata.
@@ -1004,6 +1007,8 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOp
 	sn.Excludes = snapshotOptions.Excludes
 	sn.Label = snapshotOptions.Label
 	sn.Description = snapshotOptions.Description
+	sn.FSEventsAnchors = snapshotOptions.FSEventsAnchors
+	sn.CrawlPlan = snapshotOptions.CrawlPlan
 	if snapshotOptions.Delete != nil && snapshotOptions.Delete.IsSet() {
 		sn.Delete = snapshotOptions.Delete
 	}
@@ -1027,6 +1032,9 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOp
 		DataAddedPacked:     arch.summary.ItemStats.DataSizeInRepo + arch.summary.ItemStats.TreeSizeInRepo,
 		TotalFilesProcessed: arch.summary.Files.New + arch.summary.Files.Changed + arch.summary.Files.Unchanged,
 		TotalBytesProcessed: arch.summary.ProcessedBytes,
+	}
+	if snapshotOptions.FinalizeSnapshot != nil {
+		snapshotOptions.FinalizeSnapshot(sn)
 	}
 
 	if snapshotOptions.DeferredUploader != nil {

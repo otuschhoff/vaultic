@@ -32,6 +32,8 @@ func IsLocal(filesystem FS) bool {
 		return IsLocal(filesystem.FS)
 	case *Track:
 		return IsLocal(filesystem.FS)
+	case *PrefixMap:
+		return IsLocal(filesystem.FS)
 	default:
 		return false
 	}

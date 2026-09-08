@@ -65,6 +65,32 @@ func (c *Checker) IsFiltered() bool {
 	return len(c.args) != 0 || !c.snapshotFilter.Empty()
 }
 
+type SnapshotCrawlPlan struct {
+	ID   string
+	Plan data.CrawlPlan
+}
+
+func (c *Checker) SelectiveCrawlPlans(ctx context.Context) ([]SnapshotCrawlPlan, error) {
+	result := make([]SnapshotCrawlPlan, 0)
+	collect := func(id string, snapshot *data.Snapshot, err error) error {
+		if err != nil {
+			return err
+		}
+		if snapshot != nil && snapshot.CrawlPlan != nil && snapshot.CrawlPlan.Mode == "selective" {
+			result = append(result, SnapshotCrawlPlan{ID: id, Plan: *snapshot.CrawlPlan})
+		}
+		return nil
+	}
+	if c.IsFiltered() {
+		err := c.snapshotFilter.FindAll(ctx, c.snapshots, c.repo, c.args, collect)
+		return result, err
+	}
+	err := data.ForAllSnapshots(ctx, c.snapshots, c.repo, nil, func(id vaultic.ID, snapshot *data.Snapshot, err error) error {
+		return collect(id.String(), snapshot, err)
+	})
+	return result, err
+}
+
 // Error is an error that occurred while checking a repository.
 type Error struct {
 	TreeID vaultic.ID

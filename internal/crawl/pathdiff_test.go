@@ -161,6 +161,24 @@ func TestBuildPathdiffPlanResolvesTopology(t *testing.T) {
 	}
 }
 
+func TestNewSelectivePlanNormalizesChangedDirectories(t *testing.T) {
+	root := t.TempDir()
+	plan := NewSelectivePlan([]string{
+		filepath.Join(root, "child", "nested"),
+		filepath.Join(root, "child"),
+		filepath.Join(root, "sibling", "..", "sibling"),
+	})
+	want := []string{filepath.Join(root, "child"), filepath.Join(root, "sibling")}
+	if len(plan.ChangedDirs) != len(want) {
+		t.Fatalf("changed directories = %q, want %q", plan.ChangedDirs, want)
+	}
+	for index := range want {
+		if plan.ChangedDirs[index] != want[index] {
+			t.Fatalf("changed directories = %q, want %q", plan.ChangedDirs, want)
+		}
+	}
+}
+
 func TestBuildPathdiffPlanHandlesRootAndZeroEventIntervals(t *testing.T) {
 	target := t.TempDir()
 	since := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)

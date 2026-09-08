@@ -140,6 +140,10 @@ func LoadTopology(filename string) (Topology, error) {
 }
 
 func BuildPathdiffPlan(ctx context.Context, service ChangeService, topology Topology, targets []string, since, until time.Time) (Plan, error) {
+	return BuildSelectivePlan(ctx, service, topology, targets, since, until)
+}
+
+func BuildSelectivePlan(ctx context.Context, service ChangeService, topology Topology, targets []string, since, until time.Time) (Plan, error) {
 	full := func(format string, args ...any) (Plan, error) {
 		return Plan{Reason: fmt.Sprintf(format, args...)}, nil
 	}
@@ -191,13 +195,23 @@ func BuildPathdiffPlan(ctx context.Context, service ChangeService, topology Topo
 	for dir := range changed {
 		dirs = append(dirs, dir)
 	}
+	return NewSelectivePlan(dirs), nil
+}
+
+func NewSelectivePlan(changedDirs []string) Plan {
+	dirs := make([]string, 0, len(changedDirs))
+	for _, directory := range changedDirs {
+		if directory != "" {
+			dirs = append(dirs, filepath.Clean(directory))
+		}
+	}
 	sort.Strings(dirs)
 	dirs = collapsePaths(dirs)
 	changedSet := make(map[string]struct{}, len(dirs))
 	for _, directory := range dirs {
 		changedSet[directory] = struct{}{}
 	}
-	return Plan{Selective: true, ChangedDirs: dirs, changedSet: changedSet}, nil
+	return Plan{Selective: true, ChangedDirs: dirs, changedSet: changedSet}
 }
 
 func (plan Plan) ReuseSubtree(sourcePath string) bool {

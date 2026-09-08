@@ -41,7 +41,8 @@ func TestBackupCrawlFlags(t *testing.T) {
 	command := NewCommand(&global.Options{})
 	for _, name := range []string{
 		"use-cwalk", "no-cwalk", "cwalk-concurrency", "use-pathdiff", "pathdiff-endpoint",
-		"pathdiff-require-coverage", "pathdiff-svm-map",
+		"pathdiff-require-coverage", "pathdiff-svm-map", "use-fsevents", "fsevents-require-coverage",
+		"fsevents-replay-timeout", "fsevents-full-crawl-every", "apfs-snapshot", "apfs-snapshot-require", "apfs-snapshot-keep",
 	} {
 		if command.Flags().Lookup(name) == nil {
 			t.Errorf("backup flag --%s is not registered", name)
@@ -90,6 +91,17 @@ func TestBackupCrawlOptionValidation(t *testing.T) {
 			"--use-pathdiff requires --pathdiff-svm-map",
 		},
 		{"coverage-needs-pathdiff", backupOptions{PathdiffRequireCoverage: true}, "--pathdiff-require-coverage requires --use-pathdiff"},
+		{
+			"change-sources-exclusive",
+			backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket", PathdiffSVMMap: "map", UseFSEvents: true, FSEventsReplayTimeout: time.Minute},
+			"mutually exclusive",
+		},
+		{"fsevents-needs-cwalk", backupOptions{UseFSEvents: true, FSEventsReplayTimeout: time.Minute}, "--use-fsevents requires --use-cwalk"},
+		{"fsevents-coverage-needs-source", backupOptions{FSEventsRequireCoverage: true}, "--fsevents-require-coverage requires --use-fsevents"},
+		{"fsevents-timeout-positive", backupOptions{UseCWalk: true, CWalkConcurrency: 1, UseFSEvents: true}, "--fsevents-replay-timeout must be positive"},
+		{"full-crawl-duration-nonnegative", backupOptions{FSEventsFullCrawlEvery: -time.Second}, "--fsevents-full-crawl-every cannot be negative"},
+		{"snapshot-require-needs-snapshot", backupOptions{APFSSnapshotRequire: true}, "--apfs-snapshot-require requires --apfs-snapshot"},
+		{"snapshot-keep-needs-snapshot", backupOptions{APFSSnapshotKeep: true}, "--apfs-snapshot-keep requires --apfs-snapshot"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	uppathdiff "github.com/otuschhoff/pathdiff"
@@ -16,11 +19,13 @@ import (
 
 	"github.com/otuschhoff/vaultic/cmd/vaultic/indexcmd"
 	"github.com/otuschhoff/vaultic/cmd/vaultic/querycmd"
+	"github.com/otuschhoff/vaultic/internal/apfs"
 	"github.com/otuschhoff/vaultic/internal/archiver"
 	"github.com/otuschhoff/vaultic/internal/crawl"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/fsevents"
 	"github.com/otuschhoff/vaultic/internal/global"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/analytics"
@@ -56,6 +61,10 @@ type backupRun struct {
 	parent              *data.Snapshot
 	targetFS            fs.FS
 	pathdiffPlan        crawl.Plan
+	fseventsRoots       []crawl.FSEventsRootPlan
+	fseventsAnchors     []data.FSEventsAnchor
+	apfsMounts          []*apfs.Mount
+	reusedSubtrees      atomic.Uint64
 	authoritativeEngine *enginepkg.DaemonEngine
 	reconciler          *reconcile.Reconciler
 
@@ -342,8 +351,260 @@ func openBackupFilesystem(run *backupRun) error {
 	}
 	if run.options.FSTestHook != nil {
 		run.targetFS = run.options.FSTestHook(run.targetFS)
+		return nil
+	}
+	return configureMacOSSource(run)
+}
+
+type cachedVolumeResolver struct {
+	volumes map[string]apfs.Volume
+}
+
+func (resolver cachedVolumeResolver) ResolveVolume(target string) (crawl.FSEventsVolume, error) {
+	volume, ok := resolver.volumes[filepath.Clean(target)]
+	if !ok {
+		return crawl.FSEventsVolume{}, fmt.Errorf("source volume was not resolved")
+	}
+	relative, err := apfs.VolumeRelativePath(volume, volume.Root)
+	if err != nil {
+		return crawl.FSEventsVolume{}, err
+	}
+	return crawl.FSEventsVolume{
+		Root: volume.Root, JournalRoot: relative, Device: volume.Device, VolumeUUID: volume.UUID,
+	}, nil
+}
+
+func configureMacOSSource(run *backupRun) error {
+	if !run.options.UseFSEvents && !run.options.APFSSnapshot {
+		return nil
+	}
+	if runtime.GOOS != "darwin" {
+		if run.options.FSEventsRequireCoverage || run.options.APFSSnapshotRequire {
+			return errors.Fatal("the requested FSEvents or APFS snapshot guarantee requires macOS")
+		}
+		return nil
+	}
+	manager := apfs.NewManager()
+	if err := manager.SweepStale(run.ctx); err != nil {
+		run.printer.E("cleanup stale APFS backup sources: %v\n", err)
+	} else {
+		emitMacOSBackupEvent(run, observability.Info, observability.CategoryLifecycle, "stale APFS snapshot sweep completed", nil)
+	}
+	volumes := make(map[string]apfs.Volume, len(run.targets))
+	for _, target := range run.targets {
+		resolved, err := manager.ResolveVolumes(run.ctx, target, run.options.ExcludeOtherFS)
+		if err != nil {
+			if run.options.FSEventsRequireCoverage || run.options.APFSSnapshotRequire {
+				return fmt.Errorf("resolve macOS source volume for %q: %w", target, err)
+			}
+			run.printer.E("macOS source optimization unavailable for %q: %v\n", target, err)
+			continue
+		}
+		for _, volume := range resolved {
+			volumes[filepath.Clean(volume.Root)] = volume
+		}
+	}
+	frozenVolumes, err := configureAPFSSource(run, manager, volumes)
+	if err != nil {
+		return err
+	}
+	if run.options.UseFSEvents {
+		fseventsTargets := make([]string, 0, len(volumes))
+		for root := range volumes {
+			fseventsTargets = append(fseventsTargets, root)
+		}
+		sort.Strings(fseventsTargets)
+		configureFSEventsPlan(run, cachedVolumeResolver{volumes: frozenVolumes}, fseventsTargets)
+		if run.options.FSEventsRequireCoverage {
+			if reason := crawl.FSEventsFallbackReason(run.fseventsRoots); reason != "" {
+				return errors.Fatalf("FSEvents coverage is required: %s", reason)
+			}
+		}
 	}
 	return nil
+}
+
+func configureFSEventsPlan(run *backupRun, resolver cachedVolumeResolver, targets []string) {
+	run.pathdiffPlan = crawl.Plan{Reason: "FSEvents selectivity is unavailable"}
+	if run.parent == nil {
+		run.fseventsRoots = []crawl.FSEventsRootPlan{{Reason: "no parent snapshot is available"}}
+		return
+	}
+	if reason := periodicFullCrawlReason(run); reason != "" {
+		run.fseventsRoots = []crawl.FSEventsRootPlan{{Reason: reason}}
+		run.pathdiffPlan.Reason = reason
+		emitMacOSBackupEvent(run, observability.Notice, observability.CategoryIntegrity, "FSEvents forced a full crawl", map[string]any{"reason": reason})
+		return
+	}
+	planned := crawl.BuildFSEventsPlan(
+		run.ctx, fsevents.NativeSource{}, resolver, run.parent.FSEventsAnchors,
+		targets, run.options.FSEventsReplayTimeout,
+	)
+	run.fseventsRoots = planned.Roots
+	selectiveRoots := 0
+	for _, root := range planned.Roots {
+		if root.Selective {
+			selectiveRoots++
+		}
+	}
+	if selectiveRoots > 0 {
+		run.pathdiffPlan = planned.Plan
+	} else {
+		run.pathdiffPlan = crawl.Plan{Reason: crawl.FSEventsFallbackReason(planned.Roots)}
+	}
+	for _, root := range planned.Roots {
+		fields := map[string]any{"volume_uuid": root.VolumeUUID, "event_count": root.EventCount}
+		if root.Selective {
+			emitMacOSBackupEvent(run, observability.Info, observability.CategoryIntegrity, "FSEvents replay completed", fields)
+		} else {
+			fields["reason"] = root.Reason
+			emitMacOSBackupEvent(run, observability.Warning, observability.CategoryIntegrity, "FSEvents coverage fallback", fields)
+		}
+	}
+}
+
+func periodicFullCrawlReason(run *backupRun) string {
+	interval := run.options.FSEventsFullCrawlEvery
+	if interval == 0 {
+		emitMacOSBackupEvent(run, observability.Warning, observability.CategoryIntegrity, "FSEvents periodic full-crawl guard is disabled", nil)
+		return ""
+	}
+	snapshot := run.parent
+	for snapshot != nil && snapshot.CrawlPlan != nil && snapshot.CrawlPlan.Mode == "selective" {
+		if snapshot.Parent == nil {
+			snapshot = nil
+			break
+		}
+		parent, err := data.LoadSnapshot(run.ctx, run.repo, *snapshot.Parent)
+		if err != nil {
+			return fmt.Sprintf("cannot verify last full crawl: %v", err)
+		}
+		snapshot = parent
+	}
+	if snapshot == nil || run.start.Sub(snapshot.Time) >= interval {
+		return fmt.Sprintf("periodic full crawl is due after %s", interval)
+	}
+	return ""
+}
+
+func configureAPFSSource(run *backupRun, manager apfs.Manager, volumes map[string]apfs.Volume) (frozenVolumes map[string]apfs.Volume, err error) {
+	source := fsevents.NativeSource{}
+	capturedAt := time.Now()
+	mounts := make(map[string]*apfs.Mount)
+	frozenVolumes = make(map[string]apfs.Volume, len(volumes))
+	configured := false
+	defer func() {
+		if configured {
+			return
+		}
+		for _, mount := range mounts {
+			err = errors.Join(err, mount.Cleanup(context.Background()))
+		}
+	}()
+	mappings := make([]fs.PathMapping, 0, len(volumes))
+	anchors := make(map[string]*data.FSEventsAnchor)
+	keys := make([]string, 0, len(volumes))
+	for target := range volumes {
+		keys = append(keys, target)
+	}
+	sort.Strings(keys)
+	for _, target := range keys {
+		volume := volumes[target]
+		anchor := anchors[volume.UUID]
+		if anchor == nil {
+			journalUUID, journalErr := source.JournalUUID(volume.Device)
+			eventID, eventErr := source.CurrentEventID(volume.Device)
+			if journalErr != nil || eventErr != nil {
+				if run.options.FSEventsRequireCoverage {
+					return nil, fmt.Errorf("capture FSEvents anchor for volume %q: %w", volume.UUID, errors.Join(journalErr, eventErr))
+				}
+				run.printer.E("FSEvents anchor unavailable for %q: %v\n", target, errors.Join(journalErr, eventErr))
+			} else {
+				anchor = &data.FSEventsAnchor{
+					Device: volume.Device, VolumeUUID: volume.UUID, JournalUUID: journalUUID,
+					EventID: eventID, CapturedAt: capturedAt.UTC(),
+				}
+				anchors[volume.UUID] = anchor
+				emitMacOSBackupEvent(run, observability.Info, observability.CategoryIntegrity, "FSEvents anchor captured", map[string]any{
+					"volume_uuid": volume.UUID, "event_id": eventID,
+				})
+			}
+		}
+		if anchor != nil {
+			anchor.SourceRoots = append(anchor.SourceRoots, volume.Root)
+		}
+		if !run.options.APFSSnapshot {
+			continue
+		}
+		mount := mounts[volume.UUID]
+		if mount == nil {
+			var err error
+			mount, err = manager.CreateAndMount(run.ctx, volume, capturedAt, run.options.APFSSnapshotKeep)
+			if err != nil {
+				if run.options.APFSSnapshotRequire {
+					return nil, fmt.Errorf("create APFS backup source for %q: %w", target, err)
+				}
+				run.printer.E("APFS snapshot unavailable for %q; reading live source: %v\n", target, err)
+				emitMacOSBackupEvent(run, observability.Warning, observability.CategoryLifecycle, "APFS snapshot fallback to live source", map[string]any{
+					"volume_uuid": volume.UUID, "reason": err.Error(),
+				})
+				continue
+			}
+			mounts[volume.UUID] = mount
+			run.apfsMounts = append(run.apfsMounts, mount)
+			if anchor != nil {
+				anchor.APFSSnapshot = mount.Name
+			}
+			emitMacOSBackupEvent(run, observability.Info, observability.CategoryLifecycle, "APFS snapshot mounted", map[string]any{
+				"volume_uuid": volume.UUID, "snapshot": mount.Name,
+			})
+			if run.options.APFSSnapshotKeep {
+				emitMacOSBackupEvent(run, observability.Warning, observability.CategoryLifecycle, "APFS snapshot retention requested", map[string]any{"snapshot": mount.Name})
+			}
+		}
+		snapshotRoot, err := apfs.SnapshotSourcePath(volume, volume.Root, mount.MountPoint)
+		if err != nil {
+			return nil, err
+		}
+		mappings = append(mappings, fs.PathMapping{Source: volume.Root, Target: snapshotRoot})
+		frozenVolumes[target] = volume
+	}
+	for _, anchor := range anchors {
+		sort.Strings(anchor.SourceRoots)
+		run.fseventsAnchors = append(run.fseventsAnchors, *anchor)
+	}
+	sort.Slice(run.fseventsAnchors, func(left, right int) bool {
+		return run.fseventsAnchors[left].VolumeUUID < run.fseventsAnchors[right].VolumeUUID
+	})
+	if len(mappings) > 0 {
+		mapped, err := fs.NewPrefixMap(run.targetFS, mappings)
+		if err != nil {
+			return nil, err
+		}
+		run.targetFS = mapped
+	}
+	previousClose := run.closeSource
+	run.closeSource = func() {
+		if previousClose != nil {
+			previousClose()
+		}
+		for _, mount := range run.apfsMounts {
+			if err := mount.Cleanup(context.Background()); err != nil {
+				run.printer.E("cleanup APFS snapshot %q: %v\n", mount.Name, err)
+				emitMacOSBackupEvent(run, observability.Error, observability.CategoryLifecycle, "APFS snapshot cleanup failed", map[string]any{"snapshot": mount.Name, "reason": err.Error()})
+			} else {
+				emitMacOSBackupEvent(run, observability.Info, observability.CategoryLifecycle, "APFS snapshot cleanup completed", map[string]any{"snapshot": mount.Name})
+			}
+		}
+	}
+	configured = true
+	return frozenVolumes, nil
+}
+
+func emitMacOSBackupEvent(run *backupRun, severity observability.Severity, category observability.Category, message string, fields map[string]any) {
+	observability.EmitBestEffort(run.ctx, observability.Event{
+		Severity: severity, Category: category, Component: "backup", Message: message, Fields: fields,
+	})
 }
 
 func openBackupStdin(run *backupRun) error {
@@ -405,6 +666,9 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 }
 
 func configurePathdiff(run *backupRun) error {
+	if run.options.UseFSEvents {
+		return nil
+	}
 	run.pathdiffPlan = crawl.Plan{Reason: "pathdiff is disabled"}
 	if !run.options.UsePathdiff {
 		return nil
@@ -491,7 +755,13 @@ func configureBackupHooks(ctx context.Context, run *backupRun) error {
 		excludedItem: run.progress.ExcludedItem,
 	}
 	if run.pathdiffPlan.Selective {
-		run.hooks.reuseSubtree = func(_ string, sourcePath string, _ *data.Node) bool { return run.pathdiffPlan.ReuseSubtree(sourcePath) }
+		run.hooks.reuseSubtree = func(_ string, sourcePath string, _ *data.Node) bool {
+			reuse := run.pathdiffPlan.ReuseSubtree(sourcePath)
+			if reuse {
+				run.reusedSubtrees.Add(1)
+			}
+			return reuse
+		}
 	}
 	run.hooks.wireReuseSubtree(run.archiver)
 	run.hooks.wireError(run.archiver)
@@ -536,11 +806,41 @@ func configureBackupChangeFlags(run *backupRun) {
 }
 
 func configureSnapshotOptions(run *backupRun) error {
+	crawlSource := ""
+	if run.options.UsePathdiff {
+		crawlSource = "pathdiff"
+	} else if run.options.UseFSEvents {
+		crawlSource = "fsevents"
+	}
+	mode := "full"
+	if run.pathdiffPlan.Selective {
+		mode = "selective"
+	}
+	rootPlans := make([]data.CrawlRootPlan, 0, len(run.fseventsRoots))
+	for _, root := range run.fseventsRoots {
+		rootMode := "full"
+		if root.Selective {
+			rootMode = "selective"
+		}
+		rootPlans = append(rootPlans, data.CrawlRootPlan{
+			Root: root.Root, Mode: rootMode, Reason: root.Reason, EventCount: root.EventCount,
+		})
+	}
 	run.snapshotOpts = archiver.SnapshotOptions{
 		Excludes: run.options.Excludes, Tags: run.options.Tags.Flatten(),
 		BackupStart: run.start, Time: run.timeStamp, Hostname: run.options.Host,
 		Label: run.options.Label, ParentSnapshot: run.parent,
 		ProgramVersion: "vaultic " + global.Version, SkipIfUnchanged: run.options.SkipIfUnchanged,
+		FSEventsAnchors: run.fseventsAnchors,
+		CrawlPlan: &data.CrawlPlan{
+			Mode: mode, Source: crawlSource, Reason: run.pathdiffPlan.Reason,
+			ChangedPaths: run.pathdiffPlan.ChangedDirs, Roots: rootPlans,
+		},
+		FinalizeSnapshot: func(snapshot *data.Snapshot) {
+			if snapshot.CrawlPlan != nil {
+				snapshot.CrawlPlan.ReusedSubtrees = run.reusedSubtrees.Load()
+			}
+		},
 	}
 	if run.deferredActive {
 		if err := configureDeferredUploader(run); err != nil {
@@ -701,6 +1001,16 @@ func publishReconciledBackup(run *backupRun, snapshotErr error) error {
 func reportBackup(run *backupRun) error {
 	if run.deferredActive {
 		return reportDeferredBackup(run)
+	}
+	if run.globalOptions.JSON && run.snapshot != nil && run.snapshot.CrawlPlan != nil {
+		payload, err := json.Marshal(map[string]any{
+			"message_type": "crawl_plan",
+			"crawl_plan":   run.snapshot.CrawlPlan,
+		})
+		if err != nil {
+			return fmt.Errorf("encode crawl plan: %w", err)
+		}
+		run.term.Print(string(payload))
 	}
 	run.progress.Finish(run.snapshotID, run.summary, run.options.DryRun)
 	if !run.success {

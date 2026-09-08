@@ -868,7 +868,11 @@ Authorize the exact ``/usr/local/bin/vaultic`` digest and the
 ``repository-master-key`` capability in the broker release manifest. Grant that
 installed Vaultic executable Full Disk Access in macOS Privacy & Security, then
 test access from the LaunchAgent context; a Terminal test does not prove that a
-background process has the same TCC authorization.
+background process has the same TCC authorization. The recurring backup also
+uses ``tmutil`` and ``mount_apfs`` for its temporary read-only source. A missing
+authorization falls back to a live read by default; set
+``apfs-snapshot-require = true`` only after proving snapshot creation and mount
+from the LaunchAgent itself.
 
 An unattended ``rclone:`` transport necessarily needs a noninteractive Google
 Drive credential. Keep the OAuth refresh token in a mode-``0600`` rclone config
@@ -958,6 +962,10 @@ contains repository topology and backup choices, but no unlock credential:
 
     [backup]
     one-file-system = true
+   use-fsevents = true
+   fsevents-replay-timeout = "60s"
+   fsevents-full-crawl-every = "168h"
+   apfs-snapshot = true
     exclude-file = ["/Users/oli/Library/Application Support/vaultic/excludes.txt"]
 
     [[backup.snapshots]]

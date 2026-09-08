@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -268,6 +269,23 @@ func runCheck(
 	err = chkr.LoadSnapshots(ctx, &options.SnapshotFilter, args)
 	if err != nil {
 		return summary, err
+	}
+	if options.ReadData {
+		plans, err := chkr.SelectiveCrawlPlans(ctx)
+		if err != nil {
+			return summary, fmt.Errorf("load selective crawl provenance: %w", err)
+		}
+		for _, plan := range plans {
+			if globalOptions.JSON {
+				payload, _ := json.Marshal(map[string]any{
+					"message_type": "crawl_provenance", "snapshot_id": plan.ID,
+					"authoritative": false, "crawl_plan": plan.Plan,
+				})
+				term.Print(string(payload))
+			} else {
+				printer.P("snapshot %s used a selective, non-authoritative crawl (%d reused subtrees)\n", plan.ID, plan.Plan.ReusedSubtrees)
+			}
+		}
 	}
 	printer.P("load indexes\n")
 	hints, errs := chkr.LoadIndex(ctx, printer)

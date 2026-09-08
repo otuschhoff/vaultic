@@ -94,6 +94,29 @@ alternatively naming snapshot ID(s) explicitly. The selected subset of packfiles
 will then be checked for consistency and read when either ``--read-data`` or
 ``--read-data-subset`` is given.
 
+On macOS, ``vaultic check --read-data`` reports snapshots whose
+``crawl_plan.mode`` is ``selective`` as non-authoritative and includes their
+reused-subtree count. This is provenance, not repository damage: FSEvents was
+used to infer unchanged subtrees from the parent while pack contents are still
+verified normally. Inspect the same fields with ``vaultic snapshots --json``.
+
+An FSEvents backup fallback names the reason. A missing parent anchor is normal
+for the first run. A journal UUID change, dropped or wrapped event flag, root or
+mount change, backwards event ID, timeout, or missing historical-completion
+marker deliberately causes a full cwalk. Repeated authorization failures for
+APFS snapshots mean the installed Vaultic executable or its LaunchAgent context
+lacks Full Disk Access; granting Terminal access alone is not sufficient. A
+snapshot fallback also disables FSEvents subtree reuse for that source root and
+performs a full live crawl; with ``--fsevents-require-coverage`` it is fatal.
+
+Vaultic records temporary local snapshots in
+``$TMPDIR/vaultic-apfs-leases`` and sweeps dead-process leases at the next
+backup. It ignores malformed names, active PIDs, and mount points outside its
+own ``vaultic-apfs-*`` directories. If manual cleanup is required, first stop
+the backup LaunchAgent, inspect ``mount`` and ``tmutil listlocalsnapshots /``,
+unmount only the path named by a valid lease, and pass only that lease's
+``YYYY-MM-DD-HHMMSS`` value to ``tmutil deletelocalsnapshots``.
+
 
 2. Backing up the repository
 ****************************

@@ -112,6 +112,13 @@ type backupOptions struct {
 	PathdiffEndpoint          string
 	PathdiffRequireCoverage   bool
 	PathdiffSVMMap            string
+	UseFSEvents               bool
+	FSEventsRequireCoverage   bool
+	FSEventsReplayTimeout     time.Duration
+	FSEventsFullCrawlEvery    time.Duration
+	APFSSnapshot              bool
+	APFSSnapshotRequire       bool
+	APFSSnapshotKeep          bool
 	SkipIfUnchanged           bool
 	ProfileNames              []string
 	Init                      bool
@@ -251,6 +258,18 @@ func (options *backupOptions) addTraversalFlags(f *pflag.FlagSet) {
 		"fail instead of performing a full crawl when pathdiff coverage is unverified",
 	)
 	f.StringVar(&options.PathdiffSVMMap, "pathdiff-svm-map", "", "pathdiff source-to-LIF/SVM/volume topology JSON `file`")
+	f.BoolVar(&options.UseFSEvents, "use-fsevents", false, "use verified macOS FSEvents to skip unchanged subtrees")
+	f.BoolVar(
+		&options.FSEventsRequireCoverage,
+		"fsevents-require-coverage",
+		false,
+		"fail instead of crawling a source volume when FSEvents coverage is unverified",
+	)
+	f.DurationVar(&options.FSEventsReplayTimeout, "fsevents-replay-timeout", time.Minute, "historical FSEvents replay `timeout` per volume")
+	f.DurationVar(&options.FSEventsFullCrawlEvery, "fsevents-full-crawl-every", 168*time.Hour, "maximum `duration` between full crawls (0 disables)")
+	f.BoolVar(&options.APFSSnapshot, "apfs-snapshot", runtime.GOOS == "darwin", "read macOS sources from temporary APFS snapshots when available")
+	f.BoolVar(&options.APFSSnapshotRequire, "apfs-snapshot-require", false, "fail when a temporary APFS snapshot cannot be used")
+	f.BoolVar(&options.APFSSnapshotKeep, "apfs-snapshot-keep", false, "keep temporary APFS snapshots after backup for debugging")
 	if runtime.GOOS == "windows" {
 		f.BoolVar(&options.UseFsSnapshot, "use-fs-snapshot", false, "use filesystem snapshot where possible (currently only Windows VSS)")
 	}
@@ -540,6 +559,27 @@ func (options backupOptions) validateParent() error {
 	}
 	if options.PathdiffRequireCoverage && !options.UsePathdiff {
 		return errors.Fatal("--pathdiff-require-coverage requires --use-pathdiff")
+	}
+	if options.UseFSEvents && options.UsePathdiff {
+		return errors.Fatal("--use-fsevents and --use-pathdiff are mutually exclusive")
+	}
+	if options.UseFSEvents && !options.UseCWalk {
+		return errors.Fatal("--use-fsevents requires --use-cwalk")
+	}
+	if options.FSEventsRequireCoverage && !options.UseFSEvents {
+		return errors.Fatal("--fsevents-require-coverage requires --use-fsevents")
+	}
+	if options.UseFSEvents && options.FSEventsReplayTimeout <= 0 {
+		return errors.Fatal("--fsevents-replay-timeout must be positive")
+	}
+	if options.FSEventsFullCrawlEvery < 0 {
+		return errors.Fatal("--fsevents-full-crawl-every cannot be negative")
+	}
+	if options.APFSSnapshotRequire && !options.APFSSnapshot {
+		return errors.Fatal("--apfs-snapshot-require requires --apfs-snapshot")
+	}
+	if options.APFSSnapshotKeep && !options.APFSSnapshot {
+		return errors.Fatal("--apfs-snapshot-keep requires --apfs-snapshot")
 	}
 	return nil
 }

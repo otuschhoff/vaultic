@@ -43,7 +43,37 @@ type Snapshot struct {
 	// `vaultic merge`. It is additive metadata and ignored by older clients.
 	MergedSnapshots []vaultic.ID `json:"merged_snapshots,omitempty"`
 
+	FSEventsAnchors []FSEventsAnchor `json:"fsevents_anchors,omitempty"`
+	CrawlPlan       *CrawlPlan       `json:"crawl_plan,omitempty"`
+
 	id *vaultic.ID // plaintext ID, used during restore
+}
+
+type FSEventsAnchor struct {
+	Device       uint64    `json:"device"`
+	VolumeUUID   string    `json:"volume_uuid"`
+	JournalUUID  string    `json:"journal_uuid"`
+	EventID      uint64    `json:"event_id"`
+	CapturedAt   time.Time `json:"captured_at"`
+	SourceRoots  []string  `json:"source_roots"`
+	APFSSnapshot string    `json:"apfs_snapshot,omitempty"`
+}
+
+type CrawlPlan struct {
+	Mode           string          `json:"mode"`
+	Source         string          `json:"source,omitempty"`
+	Reason         string          `json:"reason,omitempty"`
+	ChangedPaths   []string        `json:"changed_paths,omitempty"`
+	ReusedSubtrees uint64          `json:"reused_subtrees,omitempty"`
+	APFSSnapshot   string          `json:"apfs_snapshot,omitempty"`
+	Roots          []CrawlRootPlan `json:"roots,omitempty"`
+}
+
+type CrawlRootPlan struct {
+	Root       string `json:"root"`
+	Mode       string `json:"mode"`
+	Reason     string `json:"reason,omitempty"`
+	EventCount int    `json:"event_count,omitempty"`
 }
 
 type SnapshotSummary struct {

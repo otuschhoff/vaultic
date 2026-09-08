@@ -67,8 +67,8 @@ func TestCrossProcessAppendBackups(t *testing.T) {
 		"VAULTIC_PASSWORD=" + test.TestPassword,
 		"VAULTIC_CACHE_DIR=" + env.cache,
 	}
-	first := runLockingCLI(t, commonEnv, "backup", "--host", "subprocess-a", pathA)
-	second := runLockingCLI(t, commonEnv, "backup", "--host", "subprocess-b", pathB)
+	first := runLockingCLI(t, commonEnv, "backup", "--apfs-snapshot=false", "--host", "subprocess-a", pathA)
+	second := runLockingCLI(t, commonEnv, "backup", "--apfs-snapshot=false", "--host", "subprocess-b", pathB)
 	var firstOutput, secondOutput bytes.Buffer
 	first.Stdout, first.Stderr = &firstOutput, &firstOutput
 	second.Stdout, second.Stderr = &secondOutput, &secondOutput
@@ -101,7 +101,7 @@ func TestCrossProcessBackupAndPrune(t *testing.T) {
 		"VAULTIC_CACHE_DIR=" + env.cache,
 	}
 	prune := runLockingCLI(t, commonEnv, "prune", "--retry-lock", "10s", "--max-unused", "0%")
-	backup := runLockingCLI(t, commonEnv, "backup", "--host", "subprocess-prune-backup", path)
+	backup := runLockingCLI(t, commonEnv, "backup", "--apfs-snapshot=false", "--host", "subprocess-prune-backup", path)
 	var pruneOutput, backupOutput bytes.Buffer
 	prune.Stdout, prune.Stderr = &pruneOutput, &pruneOutput
 	backup.Stdout, backup.Stderr = &backupOutput, &backupOutput
