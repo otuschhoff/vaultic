@@ -118,7 +118,10 @@ func oauthClient(ctx context.Context, transport http.RoundTripper, credentials C
 		if tokenURI == "" {
 			tokenURI = google.Endpoint.TokenURL
 		}
-		config := oauth2.Config{ClientID: credentials.ClientID, ClientSecret: credentials.ClientSecret, Endpoint: oauth2.Endpoint{TokenURL: tokenURI}, Scopes: scopes}
+		config := oauth2.Config{
+			ClientID: credentials.ClientID, ClientSecret: credentials.ClientSecret,
+			Endpoint: oauth2.Endpoint{TokenURL: tokenURI}, Scopes: scopes,
+		}
 		source = config.TokenSource(ctx, &oauth2.Token{RefreshToken: credentials.RefreshToken})
 	}
 	return oauth2.NewClient(ctx, source), nil

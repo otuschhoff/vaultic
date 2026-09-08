@@ -76,31 +76,9 @@ func getStorageClient(ctx context.Context, rt http.RoundTripper) (*storage.Clien
 	// create a new context with the HTTP client stored at the oauth2.HTTPClient key
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
-	var ts oauth2.TokenSource
-	if credential, ok := ctx.Value(serviceAccountContextKey{}).(ServiceAccountCredential); ok {
-		config, err := google.JWTConfigFromJSON(credential.JSON, storage.ScopeReadWrite)
-		if err != nil {
-			return nil, err
-		}
-		config.Subject = credential.Subject
-		ts = config.TokenSource(ctx)
-	} else if ctx.Value(workloadIdentityContextKey{}) == true {
-		var err error
-		ts, err = google.DefaultTokenSource(ctx, storage.ScopeReadWrite)
-		if err != nil {
-			return nil, err
-		}
-	} else if token := os.Getenv("GOOGLE_ACCESS_TOKEN"); token != "" {
-		ts = oauth2.StaticTokenSource(&oauth2.Token{
-			AccessToken: token,
-			TokenType:   "Bearer",
-		})
-	} else {
-		var err error
-		ts, err = google.DefaultTokenSource(ctx, storage.ScopeReadWrite)
-		if err != nil {
-			return nil, err
-		}
+	ts, err := storageTokenSource(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	oauthClient := oauth2.NewClient(ctx, ts)
@@ -111,6 +89,24 @@ func getStorageClient(ctx context.Context, rt http.RoundTripper) (*storage.Clien
 	}
 
 	return gcsClient, nil
+}
+
+func storageTokenSource(ctx context.Context) (oauth2.TokenSource, error) {
+	if credential, ok := ctx.Value(serviceAccountContextKey{}).(ServiceAccountCredential); ok {
+		config, err := google.JWTConfigFromJSON(credential.JSON, storage.ScopeReadWrite)
+		if err != nil {
+			return nil, err
+		}
+		config.Subject = credential.Subject
+		return config.TokenSource(ctx), nil
+	}
+	if ctx.Value(workloadIdentityContextKey{}) == true {
+		return google.DefaultTokenSource(ctx, storage.ScopeReadWrite)
+	}
+	if token := os.Getenv("GOOGLE_ACCESS_TOKEN"); token != "" {
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token, TokenType: "Bearer"}), nil
+	}
+	return google.DefaultTokenSource(ctx, storage.ScopeReadWrite)
 }
 
 func (be *gs) bucketExists(ctx context.Context, bucket *storage.BucketHandle) (bool, error) {

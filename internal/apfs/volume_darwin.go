@@ -1,10 +1,12 @@
 //go:build darwin
 
+// Package apfs provides consistent macOS backup sources using APFS snapshots.
 package apfs
 
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -130,7 +132,7 @@ func parseStringPlist(payload []byte) (map[string]string, error) {
 	var key string
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

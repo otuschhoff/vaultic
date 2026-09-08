@@ -1,3 +1,4 @@
+// Package fsevents exposes macOS filesystem event journals for incremental backup planning.
 package fsevents
 
 import (

@@ -432,7 +432,7 @@ func (s testService) MultiGet(_ context.Context, request *vaulticdbv1.MultiGetRe
 
 func TestOptionsDefaults(t *testing.T) {
 	options := (Options{}).withDefaults()
-	if options.Socket != DefaultSocket("") || options.StartTimeout != 10*time.Second || options.RetryInterval != 25*time.Millisecond {
+	if options.Socket != DefaultSocket("") || options.StartTimeout != 30*time.Second || options.RetryInterval != 25*time.Millisecond {
 		t.Fatalf("unexpected defaults: %#v", options)
 	}
 }

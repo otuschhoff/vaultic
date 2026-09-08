@@ -183,7 +183,9 @@ jobs:
       - name: Verify Unix RPC smoke test
         run: |
           cargo build --manifest-path vaulticdb/Cargo.toml --quiet
-          VAULTICDB_SOCKET=/tmp/vaulticdb/ci.sock vaulticdb/target/debug/vaulticdb &
+          VAULTICDB_TOPOLOGY_SOURCE=external \
+            VAULTICDB_SOCKET=/tmp/vaulticdb/ci.sock \
+            vaulticdb/target/debug/vaulticdb &
           daemon_pid=$!
           trap 'kill "$daemon_pid" 2>/dev/null || true' EXIT
           VAULTICDB_SOCKET=/tmp/vaulticdb/ci.sock go run ./cmd/vaulticdb-smoke

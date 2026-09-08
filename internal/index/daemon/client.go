@@ -48,6 +48,7 @@ type Options struct {
 	StartTimeout      time.Duration
 	RetryInterval     time.Duration
 	PersistentDaemon  bool
+	TopologySource    string
 	ObjectStore       string
 	DataDir           string
 	S3Bucket          string
@@ -70,10 +71,13 @@ func (o Options) withDefaults() Options {
 		o.Socket = DefaultSocket(o.RepositoryID)
 	}
 	if o.StartTimeout == 0 {
-		o.StartTimeout = 10 * time.Second
+		o.StartTimeout = 30 * time.Second
 	}
 	if o.RetryInterval == 0 {
 		o.RetryInterval = 25 * time.Millisecond
+	}
+	if o.TopologySource == "" {
+		o.TopologySource = "external"
 	}
 	return o
 }
@@ -346,6 +350,7 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 	cmd.Env = append(daemonEnvironment(options),
 		"VAULTICDB_SOCKET="+options.Socket,
 		"VAULTICDB_REPOSITORY_ID="+options.RepositoryID,
+		"VAULTICDB_TOPOLOGY_SOURCE="+options.TopologySource,
 	)
 	for name, value := range map[string]string{
 		"VAULTICDB_OBJECT_STORE":               options.ObjectStore,

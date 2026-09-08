@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"sort"
@@ -88,8 +89,19 @@ func newBackendEnrollGDriveCommand(globalOptions *global.Options) *cobra.Command
 				_ = client.Close() // Preserve the capsule mismatch; connection cleanup is best effort.
 				return err
 			}
-			backend := topology.PackBackend{ID: backendID, Provider: topology.ProviderGoogleDrive, Endpoint: map[string]any{"drive_id": driveID, "root_folder_id": rootFolderID, "path": drivePath}, Role: topology.BackendRole(role), Offsite: offsite, FailureDomain: failureDomain, CredentialRef: credentialRef}
-			prepared, err := client.PrepareTopologyMutation(command.Context(), globalOptions.KeyBrokerReleaseManifest, topology.Mutation{Operation: "set-backend-credential", Backend: &backend, Reference: credentialRef, Credential: &credential}, members, externalMembers)
+			backend := topology.PackBackend{
+				ID: backendID, Provider: topology.ProviderGoogleDrive,
+				Endpoint: map[string]any{"drive_id": driveID, "root_folder_id": rootFolderID, "path": drivePath},
+				Role:     topology.BackendRole(role), Offsite: offsite,
+				FailureDomain: failureDomain, CredentialRef: credentialRef,
+			}
+			mutation := topology.Mutation{
+				Operation: "set-backend-credential", Backend: &backend,
+				Reference: credentialRef, Credential: &credential,
+			}
+			prepared, err := client.PrepareTopologyMutation(
+				command.Context(), globalOptions.KeyBrokerReleaseManifest, mutation, members, externalMembers,
+			)
 			vaulticerrors.LogClose(client, "close key broker after Google Drive enrollment", func(string, ...any) {})
 			if err != nil {
 				return err
@@ -125,7 +137,10 @@ func enrollGDrive(ctx context.Context, globalOptions *global.Options, clientID, 
 	}
 	defer listener.Close()
 	redirect := "http://" + listener.Addr().String() + "/oauth2/callback"
-	config := oauth2.Config{ClientID: clientID, ClientSecret: clientSecret, Endpoint: google.Endpoint, RedirectURL: redirect, Scopes: []string{drive.DriveScope}}
+	config := oauth2.Config{
+		ClientID: clientID, ClientSecret: clientSecret, Endpoint: google.Endpoint,
+		RedirectURL: redirect, Scopes: []string{drive.DriveScope},
+	}
 	stateBytes := make([]byte, 24)
 	if _, err := rand.Read(stateBytes); err != nil {
 		return topology.Credential{}, err
@@ -145,14 +160,15 @@ func enrollGDrive(ctx context.Context, globalOptions *global.Options, clientID, 
 		}
 		code := request.URL.Query().Get("code")
 		if code == "" {
-			result <- callbackResult{err: fmt.Errorf("Google OAuth did not return an authorization code")}
+			result <- callbackResult{err: fmt.Errorf("google OAuth did not return an authorization code")}
 			return
 		}
-		_, _ = writer.Write([]byte("Google Drive enrollment received. Return to Vaultic.")) // The OAuth result is already delivered independently of this courtesy response.
+		// The OAuth result is delivered independently of this courtesy response.
+		_, _ = writer.Write([]byte("Google Drive enrollment received. Return to Vaultic."))
 		result <- callbackResult{code: code}
 	})
 	go func() { _ = server.Serve(listener) }() // Shutdown and listener closure are the expected server termination paths.
-	defer server.Shutdown(context.Background())
+	defer shutdownOAuthServer(ctx, server)
 	globalOptions.Term.Print("Open this URL to authorize Google Drive:\n" + config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce) + "\n")
 	var callback callbackResult
 	select {
@@ -168,9 +184,23 @@ func enrollGDrive(ctx context.Context, globalOptions *global.Options, clientID, 
 		return topology.Credential{}, fmt.Errorf("exchange Google OAuth code: %w", err)
 	}
 	if token.RefreshToken == "" {
-		return topology.Credential{}, fmt.Errorf("Google OAuth response did not include a refresh token")
+		return topology.Credential{}, fmt.Errorf("google OAuth response did not include a refresh token")
 	}
-	return topology.Credential{Kind: topology.CredentialOAuth2RefreshToken, ClientID: clientID, ClientSecret: clientSecret, RefreshToken: token.RefreshToken, Scopes: []string{drive.DriveScope}, TokenURI: google.Endpoint.TokenURL, IssuedAt: time.Now().UTC().Format(time.RFC3339)}, nil
+	return topology.Credential{
+		Kind: topology.CredentialOAuth2RefreshToken, ClientID: clientID, ClientSecret: clientSecret,
+		RefreshToken: token.RefreshToken, Scopes: []string{drive.DriveScope},
+		TokenURI: google.Endpoint.TokenURL, IssuedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func shutdownOAuthServer(ctx context.Context, server *http.Server) {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	vaulticerrors.LogCleanup(
+		"shut down Google OAuth callback server",
+		func() error { return server.Shutdown(shutdownCtx) },
+		log.Printf,
+	)
 }
 
 func newBackendVerifyCommand(globalOptions *global.Options) *cobra.Command {
@@ -182,35 +212,13 @@ func newBackendVerifyCommand(globalOptions *global.Options) *cobra.Command {
 			if len(compare) != 2 {
 				return fmt.Errorf("--compare requires exactly two repository locations")
 			}
-			ctx := command.Context()
-			if credentialFile != "" && credentialRef != "" {
-				return fmt.Errorf("--credential-ref and --gdrive-credential-file are mutually exclusive")
+			ctx, cleanup, err := comparisonCredentialContext(
+				command.Context(), globalOptions, credentialFile, credentialRef,
+			)
+			if err != nil {
+				return err
 			}
-			if credentialRef != "" {
-				client, err := indexbroker.Dial(ctx, globalOptions.KeyBrokerSocket)
-				if err != nil {
-					return err
-				}
-				defer vaulticerrors.CloseQuietly(client)
-				lease, err := client.AcquireCredentialLease(ctx, globalOptions.KeyBrokerReleaseManifest, credentialRef, globalOptions.KeyBrokerLeaseDuration)
-				if err != nil {
-					return err
-				}
-				defer clear(lease.Key)
-				var credential topology.Credential
-				if err := json.Unmarshal(lease.Key, &credential); err != nil {
-					return fmt.Errorf("decode leased comparison credential: %w", err)
-				}
-				defer func() { credential = topology.Credential{} }()
-				ctx = gdrive.WithCredentials(ctx, gdrive.Credentials{ClientID: credential.ClientID, ClientSecret: credential.ClientSecret, RefreshToken: credential.RefreshToken, TokenURI: credential.TokenURI, Scopes: credential.Scopes, ServiceAccountJSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject})
-			} else if credentialFile != "" {
-				var credential topology.Credential
-				if err := readProtectedJSON(credentialFile, "Google Drive credential", &credential); err != nil {
-					return err
-				}
-				defer func() { credential = topology.Credential{} }()
-				ctx = gdrive.WithCredentials(ctx, gdrive.Credentials{ClientID: credential.ClientID, ClientSecret: credential.ClientSecret, RefreshToken: credential.RefreshToken, TokenURI: credential.TokenURI, Scopes: credential.Scopes, ServiceAccountJSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject})
-			}
+			defer cleanup()
 			printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
 			left, err := global.OpenBackend(ctx, compare[0], *globalOptions, printer)
 			if err != nil {
@@ -246,6 +254,56 @@ func newBackendVerifyCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().StringVar(&credentialRef, "credential-ref", "", "broker-leased credential reference for a native gdrive comparison")
 	command.Flags().StringVar(&credentialFile, "gdrive-credential-file", "", "mode-0600 credential for a native gdrive comparison")
 	return command
+}
+
+func comparisonCredentialContext(
+	ctx context.Context,
+	globalOptions *global.Options,
+	credentialFile, credentialRef string,
+) (context.Context, func(), error) {
+	if credentialFile != "" && credentialRef != "" {
+		return ctx, func() {}, fmt.Errorf("--credential-ref and --gdrive-credential-file are mutually exclusive")
+	}
+	if credentialRef != "" {
+		client, err := indexbroker.Dial(ctx, globalOptions.KeyBrokerSocket)
+		if err != nil {
+			return ctx, func() {}, err
+		}
+		lease, err := client.AcquireCredentialLease(
+			ctx, globalOptions.KeyBrokerReleaseManifest, credentialRef, globalOptions.KeyBrokerLeaseDuration,
+		)
+		if err != nil {
+			vaulticerrors.CloseQuietly(client)
+			return ctx, func() {}, err
+		}
+		var credential topology.Credential
+		if err := json.Unmarshal(lease.Key, &credential); err != nil {
+			clear(lease.Key)
+			vaulticerrors.CloseQuietly(client)
+			return ctx, func() {}, fmt.Errorf("decode leased comparison credential: %w", err)
+		}
+		configured := gdrive.WithCredentials(ctx, topologyGDriveCredentials(credential))
+		return configured, func() {
+			clear(lease.Key)
+			vaulticerrors.CloseQuietly(client)
+		}, nil
+	}
+	if credentialFile != "" {
+		var credential topology.Credential
+		if err := readProtectedJSON(credentialFile, "Google Drive credential", &credential); err != nil {
+			return ctx, func() {}, err
+		}
+		return gdrive.WithCredentials(ctx, topologyGDriveCredentials(credential)), func() {}, nil
+	}
+	return ctx, func() {}, nil
+}
+
+func topologyGDriveCredentials(credential topology.Credential) gdrive.Credentials {
+	return gdrive.Credentials{
+		ClientID: credential.ClientID, ClientSecret: credential.ClientSecret,
+		RefreshToken: credential.RefreshToken, TokenURI: credential.TokenURI,
+		Scopes: credential.Scopes, ServiceAccountJSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject,
+	}
 }
 
 func backendInventory(ctx context.Context, store backend.Backend) ([]string, error) {

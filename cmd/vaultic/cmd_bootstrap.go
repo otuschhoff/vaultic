@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/otuschhoff/vaultic/internal/global"
-	"github.com/otuschhoff/vaultic/internal/repository/bootstrap"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/spf13/cobra"
 )
@@ -40,13 +39,12 @@ func newBootstrapCommand(globalOptions *global.Options) *cobra.Command {
 				return err
 			}
 			defer repository.Close()
-			profile := bootstrap.Profile{
-				Format:           2,
-				RepositoryID:     repository.Config().ID,
-				CapsuleDirectory: capsuleDirectory,
-				BrokerSocket:     globalOptions.KeyBrokerSocket,
-			}
-			if err := bootstrap.StoreProfile(output, profile); err != nil {
+			if err := global.StoreCapsuleBootstrapProfile(
+				output,
+				repository.Config().ID,
+				capsuleDirectory,
+				globalOptions.KeyBrokerSocket,
+			); err != nil {
 				return err
 			}
 			globalOptions.Term.Print(fmt.Sprintf("credential-free capsule profile written to %s\n", output))

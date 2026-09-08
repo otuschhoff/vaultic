@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -136,11 +137,11 @@ func TestValidateDaemonStartOptions(t *testing.T) {
 }
 
 func TestPrepareDaemonCommand(t *testing.T) {
-	options := Options{
+	options := (Options{
 		Socket: "/tmp/vaulticdb/test.sock", TCPAddress: "127.0.0.1:1234", TCPAllowlist: []string{"127.0.0.1/32"},
 		AuthToken: "secret", RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "memory",
 		RecoveryUnlock: true, BrokerLease: 3 * time.Second, RebuildInitialize: true,
-	}
+	}).withDefaults()
 	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
 	if err != nil {
 		t.Fatal(err)
@@ -151,6 +152,9 @@ func TestPrepareDaemonCommand(t *testing.T) {
 	})
 	if cmd.Path != options.DaemonPath || len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0] != authRead {
 		t.Fatalf("unexpected daemon command: path=%q extra-files=%v", cmd.Path, cmd.ExtraFiles)
+	}
+	if !slices.Contains(cmd.Env, "VAULTICDB_TOPOLOGY_SOURCE=external") {
+		t.Fatalf("daemon environment does not declare external topology: %q", cmd.Env)
 	}
 	environment := strings.Join(cmd.Env, "\n")
 	for _, entry := range []string{

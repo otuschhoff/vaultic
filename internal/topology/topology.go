@@ -1,3 +1,4 @@
+// Package topology defines sealed repository storage topology documents.
 package topology
 
 import (
@@ -233,16 +234,38 @@ func (document Document) validate(redacted bool) error {
 	if document.Format != Format || document.RepositoryID == "" || document.TopologyGeneration == 0 || len(document.PackBackends) == 0 {
 		return fmt.Errorf("invalid sealed topology identity or version")
 	}
-	backendIDs := make(map[string]struct{}, len(document.PackBackends))
+	backendIDs, domains, offsite, references, err := validatePackBackends(document.PackBackends)
+	if err != nil {
+		return err
+	}
+	policy := document.PlacementPolicy
+	if policy.MinCopies == 0 || policy.MinDomains == 0 ||
+		uint(len(document.PackBackends)) < policy.MinCopies ||
+		uint(len(domains)) < policy.MinDomains || offsite < policy.MinOffsite {
+		return fmt.Errorf("pack backends cannot satisfy placement policy")
+	}
+	if err := validateStagingBackends(document.StagingBackends, backendIDs); err != nil {
+		return err
+	}
+	if err := document.MetadataReplicas.validate(references); err != nil {
+		return err
+	}
+	return document.validateCredentials(references, redacted)
+}
+
+func validatePackBackends(
+	backends []PackBackend,
+) (map[string]struct{}, map[string]struct{}, uint, map[string]struct{}, error) {
+	backendIDs := make(map[string]struct{}, len(backends))
 	domains := make(map[string]struct{})
 	offsite := uint(0)
 	references := make(map[string]struct{})
-	for index, item := range document.PackBackends {
+	for index, item := range backends {
 		if item.ID == "" || item.FailureDomain == "" {
-			return fmt.Errorf("pack backend identity is incomplete")
+			return nil, nil, 0, nil, fmt.Errorf("pack backend identity is incomplete")
 		}
-		if _, duplicate := backendIDs[item.ID]; duplicate || index > 0 && document.PackBackends[index-1].ID >= item.ID {
-			return fmt.Errorf("pack backends require unique IDs in canonical order")
+		if _, duplicate := backendIDs[item.ID]; duplicate || index > 0 && backends[index-1].ID >= item.ID {
+			return nil, nil, 0, nil, fmt.Errorf("pack backends require unique IDs in canonical order")
 		}
 		backendIDs[item.ID] = struct{}{}
 		domains[item.FailureDomain] = struct{}{}
@@ -250,28 +273,29 @@ func (document Document) validate(redacted bool) error {
 			offsite++
 		}
 		if err := validateEndpoint(item.Provider, item.Endpoint); err != nil {
-			return err
+			return nil, nil, 0, nil, err
 		}
 		if err := validateReference(item.Provider, item.CredentialRef, references); err != nil {
-			return err
+			return nil, nil, 0, nil, err
 		}
 	}
-	policy := document.PlacementPolicy
-	if policy.MinCopies == 0 || policy.MinDomains == 0 || uint(len(document.PackBackends)) < policy.MinCopies || uint(len(domains)) < policy.MinDomains || offsite < policy.MinOffsite {
-		return fmt.Errorf("pack backends cannot satisfy placement policy")
-	}
-	seenStaging := make(map[string]struct{}, len(document.StagingBackends))
-	for index, id := range document.StagingBackends {
+	return backendIDs, domains, offsite, references, nil
+}
+
+func validateStagingBackends(staging []string, backendIDs map[string]struct{}) error {
+	seenStaging := make(map[string]struct{}, len(staging))
+	for index, id := range staging {
 		_, exists := backendIDs[id]
 		_, duplicate := seenStaging[id]
-		if !exists || duplicate || index > 0 && document.StagingBackends[index-1] >= id {
+		if !exists || duplicate || index > 0 && staging[index-1] >= id {
 			return fmt.Errorf("staging backends must be known, unique, and canonically ordered")
 		}
 		seenStaging[id] = struct{}{}
 	}
-	if err := document.MetadataReplicas.validate(references); err != nil {
-		return err
-	}
+	return nil
+}
+
+func (document Document) validateCredentials(references map[string]struct{}, redacted bool) error {
 	for reference, credential := range document.Credentials {
 		if !validReference(reference) {
 			return fmt.Errorf("invalid credential reference %q", reference)
@@ -289,20 +313,33 @@ func (document Document) validate(redacted bool) error {
 			return fmt.Errorf("dangling credential reference %q", reference)
 		}
 		if exists {
-			for _, item := range document.PackBackends {
-				if item.CredentialRef == reference && !credentialSupportsProvider(credential.Kind, item.Provider) {
-					return fmt.Errorf("credential %q kind %q cannot authenticate provider %q", reference, credential.Kind, item.Provider)
-				}
-			}
-			for _, replica := range document.MetadataReplicas.Replicas {
-				if replica.CredentialRef == reference && !credentialSupportsProvider(credential.Kind, replica.Provider) {
-					return fmt.Errorf("credential %q kind %q cannot authenticate provider %q", reference, credential.Kind, replica.Provider)
-				}
+			if err := document.validateCredentialProviders(reference, credential); err != nil {
+				return err
 			}
 		}
 	}
 	if redacted && len(document.Credentials) != 0 {
 		return fmt.Errorf("redacted topology contains credentials")
+	}
+	return nil
+}
+
+func (document Document) validateCredentialProviders(reference string, credential Credential) error {
+	for _, item := range document.PackBackends {
+		if item.CredentialRef == reference && !credentialSupportsProvider(credential.Kind, item.Provider) {
+			return fmt.Errorf(
+				"credential %q kind %q cannot authenticate provider %q",
+				reference, credential.Kind, item.Provider,
+			)
+		}
+	}
+	for _, replica := range document.MetadataReplicas.Replicas {
+		if replica.CredentialRef == reference && !credentialSupportsProvider(credential.Kind, replica.Provider) {
+			return fmt.Errorf(
+				"credential %q kind %q cannot authenticate provider %q",
+				reference, credential.Kind, replica.Provider,
+			)
+		}
 	}
 	return nil
 }
@@ -353,7 +390,9 @@ func (credential Credential) Validate() error {
 	case CredentialGCPServiceAccountJSON:
 		valid = credential.ServiceAccountJSON != "" && json.Valid([]byte(credential.ServiceAccountJSON))
 	case CredentialOAuth2RefreshToken:
-		valid = credential.ClientID != "" && credential.ClientSecret != "" && credential.RefreshToken != "" && credential.TokenURI != "" && len(credential.Scopes) > 0 && !slices.Contains(credential.Scopes, "")
+		valid = credential.ClientID != "" && credential.ClientSecret != "" &&
+			credential.RefreshToken != "" && credential.TokenURI != "" &&
+			len(credential.Scopes) > 0 && !slices.Contains(credential.Scopes, "")
 	case CredentialNone:
 		valid = !credential.HasSecret()
 	}
@@ -364,7 +403,8 @@ func (credential Credential) Validate() error {
 }
 
 func (credential Credential) HasSecret() bool {
-	return credential.SecretAccessKey != "" || credential.AccountKey != "" || credential.SASToken != "" || credential.ServiceAccountJSON != "" || credential.ClientSecret != "" || credential.RefreshToken != ""
+	return credential.SecretAccessKey != "" || credential.AccountKey != "" || credential.SASToken != "" ||
+		credential.ServiceAccountJSON != "" || credential.ClientSecret != "" || credential.RefreshToken != ""
 }
 
 func credentialSupportsProvider(kind CredentialKind, provider Provider) bool {
@@ -402,11 +442,16 @@ func validReference(reference string) bool {
 		return false
 	}
 	for _, character := range name {
-		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("-_.", character)) {
+		if !validReferenceCharacter(character) {
 			return false
 		}
 	}
 	return true
+}
+
+func validReferenceCharacter(character rune) bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' || strings.ContainsRune("-_.", character)
 }
 
 func validateEndpoint(provider Provider, endpoint map[string]any) error {

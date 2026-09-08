@@ -63,21 +63,19 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 		}
 	}()
 	var primary backend.Backend
-	var primaryURL string
 	for _, declared := range document.PackBackends {
 		credential, credentialErr := leaseTopologyCredential(ctx, client, globalOptions, declared.CredentialRef)
 		if credentialErr != nil {
 			return capsuleTopologyBackends{}, credentialErr
 		}
-		openedBackend, description, openErr := openStructuredBackend(ctx, globalOptions, printer, declared, credential)
-		credential = topology.Credential{}
+		openedBackend, _, openErr := openStructuredBackend(ctx, globalOptions, printer, declared, credential)
 		if openErr != nil {
 			return capsuleTopologyBackends{}, fmt.Errorf("open capsule backend %q: %w", declared.ID, openErr)
 		}
 		opened = append(opened, openedBackend)
 		placements[repository.PlacementBackendHash(declared.ID)] = openedBackend
 		if primary == nil && declared.Role == topology.RolePrimary {
-			primary, primaryURL = openedBackend, description
+			primary = openedBackend
 		}
 	}
 	if primary == nil {
@@ -95,8 +93,7 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	if err != nil {
 		return capsuleTopologyBackends{}, err
 	}
-	primary, primaryURL, err = openStructuredBackend(ctx, globalOptions, printer, primaryDeclaration, credential)
-	credential = topology.Credential{}
+	primary, primaryURL, err := openStructuredBackend(ctx, globalOptions, printer, primaryDeclaration, credential)
 	if err != nil {
 		return capsuleTopologyBackends{}, err
 	}
@@ -126,102 +123,24 @@ func leaseTopologyCredential(ctx context.Context, client *indexbroker.Client, gl
 	return credential, nil
 }
 
-func openStructuredBackend(ctx context.Context, globalOptions Options, printer vaultic.Printer, declared topology.PackBackend, credential topology.Credential) (backend.Backend, string, error) {
-	endpoint := func(name string) (string, error) {
-		value, ok := declared.Endpoint[name].(string)
-		if !ok || value == "" {
-			return "", fmt.Errorf("backend %q endpoint %q is missing", declared.ID, name)
-		}
-		return value, nil
-	}
-	var scheme, description string
-	var config any
-	switch declared.Provider {
-	case topology.ProviderLocal:
-		location, err := endpoint("data_dir")
+func openStructuredBackend(
+	ctx context.Context,
+	globalOptions Options,
+	printer vaultic.Printer,
+	declared topology.PackBackend,
+	credential topology.Credential,
+) (backend.Backend, string, error) {
+	if declared.Provider == topology.ProviderLocal {
+		location, err := requiredEndpointString(declared, "data_dir")
 		if err != nil {
 			return nil, "", err
 		}
 		opened, err := innerOpenBackend(ctx, location, globalOptions, globalOptions.Extended, false, printer)
 		return opened, location, err
-	case topology.ProviderS3:
-		rawEndpoint, err := endpoint("url")
-		if err != nil {
-			return nil, "", err
-		}
-		parsed, err := url.Parse(rawEndpoint)
-		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" && parsed.Path != "/" || parsed.Scheme != "https" && parsed.Scheme != "http" {
-			return nil, "", fmt.Errorf("backend %q has invalid S3 endpoint", declared.ID)
-		}
-		bucket, err := endpoint("bucket")
-		if err != nil {
-			return nil, "", err
-		}
-		cfg := s3.NewConfig()
-		cfg.Endpoint, cfg.UseHTTP, cfg.Bucket = parsed.Host, parsed.Scheme == "http", bucket
-		cfg.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
-		cfg.Region = optionalEndpointString(declared.Endpoint, "region")
-		cfg.StorageClass = optionalEndpointString(declared.Endpoint, "storage_class")
-		if credential.Kind != topology.CredentialNone {
-			cfg.KeyID = credential.AccessKeyID
-			cfg.Secret = options.NewSecretString(credential.SecretAccessKey)
-		}
-		scheme, config, description = "s3", &cfg, fmt.Sprintf("s3:%s/%s/%s", cfg.Endpoint, cfg.Bucket, cfg.Prefix)
-	case topology.ProviderAzure:
-		rawEndpoint, err := endpoint("url")
-		if err != nil {
-			return nil, "", err
-		}
-		parsed, err := url.Parse(rawEndpoint)
-		if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" && parsed.Path != "/" {
-			return nil, "", fmt.Errorf("backend %q has invalid Azure endpoint", declared.ID)
-		}
-		hostParts := strings.SplitN(parsed.Hostname(), ".blob.", 2)
-		if len(hostParts) != 2 || hostParts[0] == "" || hostParts[1] == "" {
-			return nil, "", fmt.Errorf("backend %q Azure endpoint must be account.blob.SUFFIX", declared.ID)
-		}
-		container, err := endpoint("container")
-		if err != nil {
-			return nil, "", err
-		}
-		cfg := azure.NewConfig()
-		cfg.Container = container
-		cfg.EndpointSuffix = hostParts[1]
-		cfg.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
-		cfg.AccountName = hostParts[0]
-		if credential.AccountName != "" && credential.AccountName != cfg.AccountName {
-			return nil, "", fmt.Errorf("backend %q Azure account does not match its endpoint", declared.ID)
-		}
-		cfg.AccountKey = options.NewSecretString(credential.AccountKey)
-		cfg.AccountSAS = options.NewSecretString(credential.SASToken)
-		scheme, config, description = "azure", &cfg, "azure:"+container+":"+cfg.Prefix
-	case topology.ProviderGCS:
-		bucket, err := endpoint("bucket")
-		if err != nil {
-			return nil, "", err
-		}
-		cfg := gs.NewConfig()
-		cfg.Bucket = bucket
-		cfg.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
-		if credential.Kind == topology.CredentialNone {
-			ctx = gs.WithWorkloadIdentity(ctx)
-		} else {
-			ctx = gs.WithServiceAccountCredential(ctx, gs.ServiceAccountCredential{JSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject})
-		}
-		scheme, config, description = "gs", &cfg, "gs:"+bucket+":"+cfg.Prefix
-	case topology.ProviderGoogleDrive:
-		driveID, err := endpoint("drive_id")
-		if err != nil {
-			return nil, "", err
-		}
-		cfg := gdrive.NewConfig()
-		cfg.DriveID = driveID
-		cfg.RootFolderID = optionalEndpointString(declared.Endpoint, "root_folder_id")
-		cfg.Prefix = optionalEndpointString(declared.Endpoint, "path")
-		ctx = gdrive.WithCredentials(ctx, gdrive.Credentials{ClientID: credential.ClientID, ClientSecret: credential.ClientSecret, RefreshToken: credential.RefreshToken, TokenURI: credential.TokenURI, Scopes: credential.Scopes, ServiceAccountJSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject})
-		scheme, config, description = "gdrive", &cfg, "gdrive:"+driveID+"/"+cfg.Prefix
-	default:
-		return nil, "", fmt.Errorf("unsupported capsule backend provider %q", declared.Provider)
+	}
+	ctx, scheme, config, description, err := structuredBackendConfig(ctx, declared, credential)
+	if err != nil {
+		return nil, "", err
 	}
 	roundTripper, limiter, err := setupTransport(globalOptions)
 	if err != nil {
@@ -234,12 +153,147 @@ func openStructuredBackend(ctx context.Context, globalOptions Options, printer v
 		}
 		roundTripper = pinnedRoundTripper{base: roundTripper, expected: expected}
 	}
-	opened, err := createOrOpenBackend(ctx, backendOpenRequest{scheme: scheme, config: config, transport: roundTripper, limiter: limiter, globalOptions: globalOptions, repository: description, create: false, printer: printer})
+	opened, err := createOrOpenBackend(ctx, backendOpenRequest{
+		scheme: scheme, config: config, transport: roundTripper, limiter: limiter,
+		globalOptions: globalOptions, repository: description, create: false, printer: printer,
+	})
 	if err != nil {
 		return nil, "", err
 	}
 	opened, err = wrapBackend(opened, globalOptions, printer)
 	return opened, description, err
+}
+
+func requiredEndpointString(declared topology.PackBackend, name string) (string, error) {
+	value, ok := declared.Endpoint[name].(string)
+	if !ok || value == "" {
+		return "", fmt.Errorf("backend %q endpoint %q is missing", declared.ID, name)
+	}
+	return value, nil
+}
+
+func structuredBackendConfig(
+	ctx context.Context,
+	declared topology.PackBackend,
+	credential topology.Credential,
+) (context.Context, string, any, string, error) {
+	switch declared.Provider {
+	case topology.ProviderS3:
+		config, description, err := s3BackendConfig(declared, credential)
+		return ctx, "s3", config, description, err
+	case topology.ProviderAzure:
+		config, description, err := azureBackendConfig(declared, credential)
+		return ctx, "azure", config, description, err
+	case topology.ProviderGCS:
+		config, description, configuredCtx, err := gcsBackendConfig(ctx, declared, credential)
+		return configuredCtx, "gs", config, description, err
+	case topology.ProviderGoogleDrive:
+		config, description, configuredCtx, err := gdriveBackendConfig(ctx, declared, credential)
+		return configuredCtx, "gdrive", config, description, err
+	default:
+		return ctx, "", nil, "", fmt.Errorf("unsupported capsule backend provider %q", declared.Provider)
+	}
+}
+
+func s3BackendConfig(declared topology.PackBackend, credential topology.Credential) (*s3.Config, string, error) {
+	rawEndpoint, err := requiredEndpointString(declared, "url")
+	if err != nil {
+		return nil, "", err
+	}
+	parsed, err := url.Parse(rawEndpoint)
+	validPath := parsed != nil && (parsed.Path == "" || parsed.Path == "/")
+	validScheme := parsed != nil && (parsed.Scheme == "https" || parsed.Scheme == "http")
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !validPath || !validScheme {
+		return nil, "", fmt.Errorf("backend %q has invalid S3 endpoint", declared.ID)
+	}
+	bucket, err := requiredEndpointString(declared, "bucket")
+	if err != nil {
+		return nil, "", err
+	}
+	config := s3.NewConfig()
+	config.Endpoint, config.UseHTTP, config.Bucket = parsed.Host, parsed.Scheme == "http", bucket
+	config.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
+	config.Region = optionalEndpointString(declared.Endpoint, "region")
+	config.StorageClass = optionalEndpointString(declared.Endpoint, "storage_class")
+	if credential.Kind != topology.CredentialNone {
+		config.KeyID = credential.AccessKeyID
+		config.Secret = options.NewSecretString(credential.SecretAccessKey)
+	}
+	return &config, fmt.Sprintf("s3:%s/%s/%s", config.Endpoint, config.Bucket, config.Prefix), nil
+}
+
+func azureBackendConfig(declared topology.PackBackend, credential topology.Credential) (*azure.Config, string, error) {
+	rawEndpoint, err := requiredEndpointString(declared, "url")
+	if err != nil {
+		return nil, "", err
+	}
+	parsed, err := url.Parse(rawEndpoint)
+	validPath := parsed != nil && (parsed.Path == "" || parsed.Path == "/")
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !validPath {
+		return nil, "", fmt.Errorf("backend %q has invalid Azure endpoint", declared.ID)
+	}
+	hostParts := strings.SplitN(parsed.Hostname(), ".blob.", 2)
+	if len(hostParts) != 2 || hostParts[0] == "" || hostParts[1] == "" {
+		return nil, "", fmt.Errorf("backend %q Azure endpoint must be account.blob.SUFFIX", declared.ID)
+	}
+	container, err := requiredEndpointString(declared, "container")
+	if err != nil {
+		return nil, "", err
+	}
+	config := azure.NewConfig()
+	config.Container = container
+	config.EndpointSuffix = hostParts[1]
+	config.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
+	config.AccountName = hostParts[0]
+	if credential.AccountName != "" && credential.AccountName != config.AccountName {
+		return nil, "", fmt.Errorf("backend %q Azure account does not match its endpoint", declared.ID)
+	}
+	config.AccountKey = options.NewSecretString(credential.AccountKey)
+	config.AccountSAS = options.NewSecretString(credential.SASToken)
+	return &config, "azure:" + container + ":" + config.Prefix, nil
+}
+
+func gcsBackendConfig(
+	ctx context.Context,
+	declared topology.PackBackend,
+	credential topology.Credential,
+) (*gs.Config, string, context.Context, error) {
+	bucket, err := requiredEndpointString(declared, "bucket")
+	if err != nil {
+		return nil, "", ctx, err
+	}
+	config := gs.NewConfig()
+	config.Bucket = bucket
+	config.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
+	if credential.Kind == topology.CredentialNone {
+		ctx = gs.WithWorkloadIdentity(ctx)
+	} else {
+		ctx = gs.WithServiceAccountCredential(ctx, gs.ServiceAccountCredential{
+			JSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject,
+		})
+	}
+	return &config, "gs:" + bucket + ":" + config.Prefix, ctx, nil
+}
+
+func gdriveBackendConfig(
+	ctx context.Context,
+	declared topology.PackBackend,
+	credential topology.Credential,
+) (*gdrive.Config, string, context.Context, error) {
+	driveID, err := requiredEndpointString(declared, "drive_id")
+	if err != nil {
+		return nil, "", ctx, err
+	}
+	config := gdrive.NewConfig()
+	config.DriveID = driveID
+	config.RootFolderID = optionalEndpointString(declared.Endpoint, "root_folder_id")
+	config.Prefix = optionalEndpointString(declared.Endpoint, "path")
+	ctx = gdrive.WithCredentials(ctx, gdrive.Credentials{
+		ClientID: credential.ClientID, ClientSecret: credential.ClientSecret,
+		RefreshToken: credential.RefreshToken, TokenURI: credential.TokenURI,
+		Scopes: credential.Scopes, ServiceAccountJSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject,
+	})
+	return &config, "gdrive:" + driveID + "/" + config.Prefix, ctx, nil
 }
 
 type pinnedRoundTripper struct {

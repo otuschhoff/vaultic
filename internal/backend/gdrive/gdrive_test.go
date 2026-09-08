@@ -38,7 +38,8 @@ func TestRecordedResponsesCoverPaginationRangeAndTokenRefresh(t *testing.T) {
 			_, _ = io.WriteString(writer, `{"files":[{"id":"folder-snapshots","name":"snapshots","mimeType":"application/vnd.google-apps.folder"}]}`)
 		case request.URL.Path == "/files" && request.URL.Query().Get("pageToken") == "":
 			listPages++
-			_, _ = io.WriteString(writer, `{"nextPageToken":"next","files":[{"id":"file-a","name":"a","size":"6","md5Checksum":"e80b5017098950fc58aad83c8c14978e"}]}`)
+			_, _ = io.WriteString(writer, `{"nextPageToken":"next","files":[`+
+				`{"id":"file-a","name":"a","size":"6","md5Checksum":"e80b5017098950fc58aad83c8c14978e"}]}`)
 		case request.URL.Path == "/files":
 			listPages++
 			_, _ = io.WriteString(writer, `{"files":[{"id":"file-b","name":"b","size":"3"}]}`)
@@ -154,11 +155,13 @@ func TestSaveStatAndRemove(t *testing.T) {
 func TestDuplicateFoldersFailClosed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		switch {
-		case request.URL.Path == "/token":
+		switch request.URL.Path {
+		case "/token":
 			_, _ = io.WriteString(writer, `{"access_token":"access-token","token_type":"Bearer","expires_in":3600}`)
-		case request.URL.Path == "/files":
-			_, _ = io.WriteString(writer, `{"files":[{"id":"one","name":"snapshots","mimeType":"application/vnd.google-apps.folder"},{"id":"two","name":"snapshots","mimeType":"application/vnd.google-apps.folder"}]}`)
+		case "/files":
+			_, _ = io.WriteString(writer, `{"files":[`+
+				`{"id":"one","name":"snapshots","mimeType":"application/vnd.google-apps.folder"},`+
+				`{"id":"two","name":"snapshots","mimeType":"application/vnd.google-apps.folder"}]}`)
 		default:
 			http.NotFound(writer, request)
 		}
@@ -166,7 +169,11 @@ func TestDuplicateFoldersFailClosed(t *testing.T) {
 	defer server.Close()
 
 	opened := openTestBackend(t, server.URL)
-	err := opened.Save(context.Background(), backend.Handle{Type: backend.SnapshotFile, Name: "snapshot-id"}, backend.NewByteReader([]byte("payload"), opened.Hasher()))
+	err := opened.Save(
+		context.Background(),
+		backend.Handle{Type: backend.SnapshotFile, Name: "snapshot-id"},
+		backend.NewByteReader([]byte("payload"), opened.Hasher()),
+	)
 	if err == nil || !strings.Contains(err.Error(), "duplicate entries") {
 		t.Fatalf("duplicate folder error = %v", err)
 	}

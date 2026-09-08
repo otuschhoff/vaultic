@@ -1,5 +1,6 @@
 //go:build darwin
 
+// Package apfs provides consistent macOS backup sources using APFS snapshots.
 package apfs
 
 import "golang.org/x/sys/unix"

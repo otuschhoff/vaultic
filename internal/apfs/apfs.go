@@ -1,3 +1,4 @@
+// Package apfs provides consistent macOS backup sources using APFS snapshots.
 package apfs
 
 import (
@@ -89,42 +90,53 @@ func (manager Manager) SweepStale(ctx context.Context) error {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		leasePath := filepath.Join(directory, entry.Name())
-		payload, readErr := os.ReadFile(leasePath)
-		if readErr != nil {
-			result = errors.Join(result, readErr)
-			continue
-		}
-		var record lease
-		if json.Unmarshal(payload, &record) != nil || processAlive(record.PID) {
-			continue
-		}
-		if _, ok := snapshotTimestamp(record.Name); !ok || !manager.ownsMountPoint(record.MountPoint) {
-			continue
-		}
-		if record.MountPoint != "" {
-			output, unmountErr := manager.Runner.Output(ctx, "umount", record.MountPoint)
-			if unmountErr != nil {
-				forced, forceErr := manager.Runner.Output(ctx, "diskutil", "unmount", "force", record.MountPoint)
-				if forceErr != nil {
-					result = errors.Join(result, classifyCommandError("unmount stale APFS snapshot", output, unmountErr), classifyCommandError("force-unmount stale APFS snapshot", forced, forceErr))
-					continue
-				}
-			}
-			if removeErr := os.Remove(record.MountPoint); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				result = errors.Join(result, removeErr)
-				continue
-			}
-		}
-		if deleteErr := manager.delete(ctx, record.Name); deleteErr != nil {
-			result = errors.Join(result, deleteErr)
-			continue
-		}
-		if removeErr := os.Remove(leasePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			result = errors.Join(result, removeErr)
-		}
+		result = errors.Join(result, manager.sweepLease(ctx, filepath.Join(directory, entry.Name())))
 	}
 	return result
+}
+
+func (manager Manager) sweepLease(ctx context.Context, leasePath string) error {
+	payload, err := os.ReadFile(leasePath)
+	if err != nil {
+		return err
+	}
+	var record lease
+	if json.Unmarshal(payload, &record) != nil || processAlive(record.PID) {
+		return nil
+	}
+	if _, ok := snapshotTimestamp(record.Name); !ok || !manager.ownsMountPoint(record.MountPoint) {
+		return nil
+	}
+	if err := manager.removeStaleMount(ctx, record.MountPoint); err != nil {
+		return err
+	}
+	if err := manager.delete(ctx, record.Name); err != nil {
+		return err
+	}
+	if err := os.Remove(leasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (manager Manager) removeStaleMount(ctx context.Context, mountPoint string) error {
+	if mountPoint == "" {
+		return nil
+	}
+	output, err := manager.Runner.Output(ctx, "umount", mountPoint)
+	if err != nil {
+		forced, forceErr := manager.Runner.Output(ctx, "diskutil", "unmount", "force", mountPoint)
+		if forceErr != nil {
+			return errors.Join(
+				classifyCommandError("unmount stale APFS snapshot", output, err),
+				classifyCommandError("force-unmount stale APFS snapshot", forced, forceErr),
+			)
+		}
+	}
+	if err := os.Remove(mountPoint); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (manager Manager) ResolveVolume(ctx context.Context, sourceRoot string) (Volume, error) {
@@ -146,7 +158,10 @@ func (manager Manager) CreateAndMount(ctx context.Context, volume Volume, captur
 		return nil, &Error{Kind: ErrorNotAPFS, Op: "create APFS snapshot", Err: fmt.Errorf("filesystem is %q", volume.Filesystem)}
 	}
 	if volume.MountPoint != "/" && volume.MountPoint != "/System/Volumes/Data" {
-		return nil, &Error{Kind: ErrorNotAvailable, Op: "create APFS snapshot", Err: fmt.Errorf("tmutil cannot create snapshots for volume mounted at %q", volume.MountPoint)}
+		return nil, &Error{
+			Kind: ErrorNotAvailable, Op: "create APFS snapshot",
+			Err: fmt.Errorf("tmutil cannot create snapshots for volume mounted at %q", volume.MountPoint),
+		}
 	}
 	if manager.Runner == nil {
 		manager.Runner = execRunner{}
@@ -168,18 +183,30 @@ func (manager Manager) CreateAndMount(ctx context.Context, volume Volume, captur
 		return nil, errors.Join(classifyCommandError("list APFS snapshots", listed, listErr), manager.rollbackCreate(ctx, name, leasePath, ""))
 	}
 	if !snapshotListed(string(listed), name) {
-		return nil, &Error{Kind: ErrorNameNotFound, Op: "verify APFS snapshot", Err: errors.Join(fmt.Errorf("snapshot %q was not listed", name), manager.rollbackCreate(ctx, name, leasePath, ""))}
+		return nil, &Error{
+			Kind: ErrorNameNotFound, Op: "verify APFS snapshot",
+			Err: errors.Join(fmt.Errorf("snapshot %q was not listed", name), manager.rollbackCreate(ctx, name, leasePath, "")),
+		}
 	}
 	createdAt, err := snapshotTime(name, capturedAt.Location())
 	if err != nil || createdAt.Before(capturedAt.Truncate(time.Second)) {
-		return nil, &Error{Kind: ErrorNameNotFound, Op: "verify APFS snapshot time", Err: errors.Join(fmt.Errorf("snapshot %q predates anchor capture", name), manager.rollbackCreate(ctx, name, leasePath, ""))}
+		return nil, &Error{
+			Kind: ErrorNameNotFound, Op: "verify APFS snapshot time",
+			Err: errors.Join(
+				fmt.Errorf("snapshot %q predates anchor capture", name),
+				manager.rollbackCreate(ctx, name, leasePath, ""),
+			),
+		}
 	}
 	mountPoint, err := os.MkdirTemp(manager.TempDir, "vaultic-apfs-")
 	if err != nil {
 		return nil, &Error{Kind: ErrorMount, Op: "create APFS mount directory", Err: errors.Join(err, manager.rollbackCreate(ctx, name, leasePath, ""))}
 	}
 	if err := os.Chmod(mountPoint, 0o700); err != nil {
-		return nil, &Error{Kind: ErrorMount, Op: "protect APFS mount directory", Err: errors.Join(err, manager.rollbackCreate(ctx, name, leasePath, mountPoint))}
+		return nil, &Error{
+			Kind: ErrorMount, Op: "protect APFS mount directory",
+			Err: errors.Join(err, manager.rollbackCreate(ctx, name, leasePath, mountPoint)),
+		}
 	}
 	if err := manager.updateLease(leasePath, lease{PID: os.Getpid(), Name: name, MountPoint: mountPoint, CreatedAt: time.Now().UTC()}); err != nil {
 		return nil, &Error{Kind: ErrorMount, Op: "update APFS snapshot lease", Err: errors.Join(err, manager.rollbackCreate(ctx, name, leasePath, mountPoint))}
@@ -213,7 +240,10 @@ func (mount *Mount) Cleanup(ctx context.Context) error {
 	var result error
 	if output, err := mount.manager.Runner.Output(ctx, "umount", mount.MountPoint); err != nil {
 		if forced, forceErr := mount.manager.Runner.Output(ctx, "diskutil", "unmount", "force", mount.MountPoint); forceErr != nil {
-			result = errors.Join(classifyCommandError("unmount APFS snapshot", output, err), classifyCommandError("force-unmount APFS snapshot", forced, forceErr))
+			result = errors.Join(
+				classifyCommandError("unmount APFS snapshot", output, err),
+				classifyCommandError("force-unmount APFS snapshot", forced, forceErr),
+			)
 		}
 	}
 	if err := os.Remove(mount.MountPoint); err != nil && !errors.Is(err, os.ErrNotExist) {

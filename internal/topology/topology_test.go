@@ -46,7 +46,8 @@ func TestReferencesAndPolicyFailClosed(t *testing.T) {
 	}
 	delete(document.Credentials, "cred:unused")
 	document.PackBackends[0].CredentialRef = "cred:missing"
-	if err := document.Validate(); err == nil || !(strings.Contains(err.Error(), "dangling") || strings.Contains(err.Error(), "unused")) {
+	if err := document.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "dangling") && !strings.Contains(err.Error(), "unused") {
 		t.Fatalf("dangling credential error = %v", err)
 	}
 	document.PackBackends[0].CredentialRef = "cred:archive"

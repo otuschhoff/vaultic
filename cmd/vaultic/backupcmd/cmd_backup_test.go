@@ -93,7 +93,11 @@ func TestBackupCrawlOptionValidation(t *testing.T) {
 		{"coverage-needs-pathdiff", backupOptions{PathdiffRequireCoverage: true}, "--pathdiff-require-coverage requires --use-pathdiff"},
 		{
 			"change-sources-exclusive",
-			backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true, PathdiffEndpoint: "socket", PathdiffSVMMap: "map", UseFSEvents: true, FSEventsReplayTimeout: time.Minute},
+			backupOptions{
+				UseCWalk: true, CWalkConcurrency: 1,
+				UsePathdiff: true, PathdiffEndpoint: "socket", PathdiffSVMMap: "map",
+				UseFSEvents: true, FSEventsReplayTimeout: time.Minute,
+			},
 			"mutually exclusive",
 		},
 		{"fsevents-needs-cwalk", backupOptions{UseFSEvents: true, FSEventsReplayTimeout: time.Minute}, "--use-fsevents requires --use-cwalk"},

@@ -53,7 +53,11 @@ func TestCreateMountAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(runner.calls, "\n")
-	for _, fragment := range []string{"tmutil localsnapshot", "mount_apfs -o rdonly,nobrowse -s " + name, "umount ", "tmutil deletelocalsnapshots 2026-09-08-094012"} {
+	fragments := []string{
+		"tmutil localsnapshot", "mount_apfs -o rdonly,nobrowse -s " + name,
+		"umount ", "tmutil deletelocalsnapshots 2026-09-08-094012",
+	}
+	for _, fragment := range fragments {
 		if !strings.Contains(joined, fragment) {
 			t.Fatalf("calls missing %q:\n%s", fragment, joined)
 		}
@@ -69,7 +73,11 @@ func TestCreateAndMountClassifiesFailures(t *testing.T) {
 	}{
 		{name: "filesystem", volume: Volume{Filesystem: "hfs"}, kind: ErrorNotAPFS},
 		{name: "volume", volume: Volume{Filesystem: "apfs", MountPoint: "/Volumes/external"}, kind: ErrorNotAvailable},
-		{name: "authorization", volume: Volume{Filesystem: "apfs", MountPoint: "/"}, result: commandResult{output: "Operation not permitted", err: errors.New("exit 1")}, kind: ErrorNotAuthorized},
+		{
+			name: "authorization", volume: Volume{Filesystem: "apfs", MountPoint: "/"},
+			result: commandResult{output: "Operation not permitted", err: errors.New("exit 1")},
+			kind:   ErrorNotAuthorized,
+		},
 		{name: "unavailable", volume: Volume{Filesystem: "apfs", MountPoint: "/"}, result: commandResult{err: execNotFoundError{}}, kind: ErrorNotAvailable},
 	}
 	for _, test := range tests {

@@ -16,6 +16,15 @@ import (
 	"github.com/otuschhoff/vaultic/internal/errors"
 )
 
+func StoreCapsuleBootstrapProfile(path, repositoryID, capsuleDirectory, brokerSocket string) error {
+	return bootstrap.StoreProfile(path, bootstrap.Profile{
+		Format:           2,
+		RepositoryID:     repositoryID,
+		CapsuleDirectory: capsuleDirectory,
+		BrokerSocket:     brokerSocket,
+	})
+}
+
 func resolveBootstrapRepository(
 	ctx context.Context,
 	gopts Options,

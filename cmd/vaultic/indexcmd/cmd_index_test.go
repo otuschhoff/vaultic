@@ -38,7 +38,10 @@ func TestMain(m *testing.M) {
 		case "fido2-hmac-secret-derive":
 			fmt.Println(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 		case "fido2-enroll":
-			fmt.Println(`{"credential_id":"AQID","public_key":"sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472","public_key_der":"BAUG","relying_party_id":"vaultic.example","attestation_fingerprint":null,"user_presence_required":true}`)
+			fmt.Println(`{"credential_id":"AQID",` +
+				`"public_key":"sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472",` +
+				`"public_key_der":"BAUG","relying_party_id":"vaultic.example",` +
+				`"attestation_fingerprint":null,"user_presence_required":true}`)
 		default:
 			os.Exit(1)
 		}

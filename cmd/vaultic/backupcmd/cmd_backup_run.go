@@ -510,25 +510,9 @@ func configureAPFSSource(run *backupRun, manager apfs.Manager, volumes map[strin
 	sort.Strings(keys)
 	for _, target := range keys {
 		volume := volumes[target]
-		anchor := anchors[volume.UUID]
-		if anchor == nil {
-			journalUUID, journalErr := source.JournalUUID(volume.Device)
-			eventID, eventErr := source.CurrentEventID(volume.Device)
-			if journalErr != nil || eventErr != nil {
-				if run.options.FSEventsRequireCoverage {
-					return nil, fmt.Errorf("capture FSEvents anchor for volume %q: %w", volume.UUID, errors.Join(journalErr, eventErr))
-				}
-				run.printer.E("FSEvents anchor unavailable for %q: %v\n", target, errors.Join(journalErr, eventErr))
-			} else {
-				anchor = &data.FSEventsAnchor{
-					Device: volume.Device, VolumeUUID: volume.UUID, JournalUUID: journalUUID,
-					EventID: eventID, CapturedAt: capturedAt.UTC(),
-				}
-				anchors[volume.UUID] = anchor
-				emitMacOSBackupEvent(run, observability.Info, observability.CategoryIntegrity, "FSEvents anchor captured", map[string]any{
-					"volume_uuid": volume.UUID, "event_id": eventID,
-				})
-			}
+		anchor, anchorErr := captureFSEventsAnchor(run, source, volume, target, capturedAt, anchors)
+		if anchorErr != nil {
+			return nil, anchorErr
 		}
 		if anchor != nil {
 			anchor.SourceRoots = append(anchor.SourceRoots, volume.Root)
@@ -536,31 +520,12 @@ func configureAPFSSource(run *backupRun, manager apfs.Manager, volumes map[strin
 		if !run.options.APFSSnapshot {
 			continue
 		}
-		mount := mounts[volume.UUID]
+		mount, mountErr := ensureAPFSMount(run, manager, volume, target, capturedAt, mounts, anchor)
+		if mountErr != nil {
+			return nil, mountErr
+		}
 		if mount == nil {
-			var err error
-			mount, err = manager.CreateAndMount(run.ctx, volume, capturedAt, run.options.APFSSnapshotKeep)
-			if err != nil {
-				if run.options.APFSSnapshotRequire {
-					return nil, fmt.Errorf("create APFS backup source for %q: %w", target, err)
-				}
-				run.printer.E("APFS snapshot unavailable for %q; reading live source: %v\n", target, err)
-				emitMacOSBackupEvent(run, observability.Warning, observability.CategoryLifecycle, "APFS snapshot fallback to live source", map[string]any{
-					"volume_uuid": volume.UUID, "reason": err.Error(),
-				})
-				continue
-			}
-			mounts[volume.UUID] = mount
-			run.apfsMounts = append(run.apfsMounts, mount)
-			if anchor != nil {
-				anchor.APFSSnapshot = mount.Name
-			}
-			emitMacOSBackupEvent(run, observability.Info, observability.CategoryLifecycle, "APFS snapshot mounted", map[string]any{
-				"volume_uuid": volume.UUID, "snapshot": mount.Name,
-			})
-			if run.options.APFSSnapshotKeep {
-				emitMacOSBackupEvent(run, observability.Warning, observability.CategoryLifecycle, "APFS snapshot retention requested", map[string]any{"snapshot": mount.Name})
-			}
+			continue
 		}
 		snapshotRoot, err := apfs.SnapshotSourcePath(volume, volume.Root, mount.MountPoint)
 		if err != nil {
@@ -583,6 +548,87 @@ func configureAPFSSource(run *backupRun, manager apfs.Manager, volumes map[strin
 		}
 		run.targetFS = mapped
 	}
+	installAPFSCleanup(run)
+	configured = true
+	return frozenVolumes, nil
+}
+
+func captureFSEventsAnchor(
+	run *backupRun,
+	source fsevents.NativeSource,
+	volume apfs.Volume,
+	target string,
+	capturedAt time.Time,
+	anchors map[string]*data.FSEventsAnchor,
+) (*data.FSEventsAnchor, error) {
+	if anchor := anchors[volume.UUID]; anchor != nil {
+		return anchor, nil
+	}
+	journalUUID, journalErr := source.JournalUUID(volume.Device)
+	eventID, eventErr := source.CurrentEventID(volume.Device)
+	if journalErr != nil || eventErr != nil {
+		err := errors.Join(journalErr, eventErr)
+		if run.options.FSEventsRequireCoverage {
+			return nil, fmt.Errorf("capture FSEvents anchor for volume %q: %w", volume.UUID, err)
+		}
+		run.printer.E("FSEvents anchor unavailable for %q: %v\n", target, err)
+		return nil, nil
+	}
+	anchor := &data.FSEventsAnchor{
+		Device: volume.Device, VolumeUUID: volume.UUID, JournalUUID: journalUUID,
+		EventID: eventID, CapturedAt: capturedAt.UTC(),
+	}
+	anchors[volume.UUID] = anchor
+	emitMacOSBackupEvent(
+		run, observability.Info, observability.CategoryIntegrity, "FSEvents anchor captured",
+		map[string]any{"volume_uuid": volume.UUID, "event_id": eventID},
+	)
+	return anchor, nil
+}
+
+func ensureAPFSMount(
+	run *backupRun,
+	manager apfs.Manager,
+	volume apfs.Volume,
+	target string,
+	capturedAt time.Time,
+	mounts map[string]*apfs.Mount,
+	anchor *data.FSEventsAnchor,
+) (*apfs.Mount, error) {
+	if mount := mounts[volume.UUID]; mount != nil {
+		return mount, nil
+	}
+	mount, err := manager.CreateAndMount(run.ctx, volume, capturedAt, run.options.APFSSnapshotKeep)
+	if err != nil {
+		if run.options.APFSSnapshotRequire {
+			return nil, fmt.Errorf("create APFS backup source for %q: %w", target, err)
+		}
+		run.printer.E("APFS snapshot unavailable for %q; reading live source: %v\n", target, err)
+		emitMacOSBackupEvent(
+			run, observability.Warning, observability.CategoryLifecycle, "APFS snapshot fallback to live source",
+			map[string]any{"volume_uuid": volume.UUID, "reason": err.Error()},
+		)
+		return nil, nil
+	}
+	mounts[volume.UUID] = mount
+	run.apfsMounts = append(run.apfsMounts, mount)
+	if anchor != nil {
+		anchor.APFSSnapshot = mount.Name
+	}
+	emitMacOSBackupEvent(
+		run, observability.Info, observability.CategoryLifecycle, "APFS snapshot mounted",
+		map[string]any{"volume_uuid": volume.UUID, "snapshot": mount.Name},
+	)
+	if run.options.APFSSnapshotKeep {
+		emitMacOSBackupEvent(
+			run, observability.Warning, observability.CategoryLifecycle, "APFS snapshot retention requested",
+			map[string]any{"snapshot": mount.Name},
+		)
+	}
+	return mount, nil
+}
+
+func installAPFSCleanup(run *backupRun) {
 	previousClose := run.closeSource
 	run.closeSource = func() {
 		if previousClose != nil {
@@ -591,14 +637,18 @@ func configureAPFSSource(run *backupRun, manager apfs.Manager, volumes map[strin
 		for _, mount := range run.apfsMounts {
 			if err := mount.Cleanup(context.Background()); err != nil {
 				run.printer.E("cleanup APFS snapshot %q: %v\n", mount.Name, err)
-				emitMacOSBackupEvent(run, observability.Error, observability.CategoryLifecycle, "APFS snapshot cleanup failed", map[string]any{"snapshot": mount.Name, "reason": err.Error()})
-			} else {
-				emitMacOSBackupEvent(run, observability.Info, observability.CategoryLifecycle, "APFS snapshot cleanup completed", map[string]any{"snapshot": mount.Name})
+				emitMacOSBackupEvent(
+					run, observability.Error, observability.CategoryLifecycle, "APFS snapshot cleanup failed",
+					map[string]any{"snapshot": mount.Name, "reason": err.Error()},
+				)
+				continue
 			}
+			emitMacOSBackupEvent(
+				run, observability.Info, observability.CategoryLifecycle, "APFS snapshot cleanup completed",
+				map[string]any{"snapshot": mount.Name},
+			)
 		}
 	}
-	configured = true
-	return frozenVolumes, nil
 }
 
 func emitMacOSBackupEvent(run *backupRun, severity observability.Severity, category observability.Category, message string, fields map[string]any) {
