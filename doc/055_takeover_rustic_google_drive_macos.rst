@@ -68,7 +68,7 @@ guide and does not require rewriting any packs.
 
 The ``rclone`` configuration is a temporary migration input. It is not the
 intended steady state because its refresh token remains outside quorum custody.
-After the format-3 capsule and broker are active, enroll the same Drive through
+After the format-1 capsule and broker are active, enroll the same Drive through
 Vaultic's native backend. Put only the installed-application OAuth client secret
 in an owner-only file; the refresh token returned by the loopback flow is sent
 straight to the broker and is neither printed nor written:
@@ -252,6 +252,7 @@ route still works:
              --group bootstrap \
              --threshold 1 \
              --broker-public-key "$HOME/.config/vaultic/quorum/broker-identity.pub" \
+             --topology-file "$HOME/.config/vaultic/quorum/topology.json" \
              --member recovery-password=offline-argon2id:"$HOME/.config/vaultic/quorum/recovery.passphrase" \
              --state-file "$HOME/.config/vaultic/quorum/capsule-migration.json"
 

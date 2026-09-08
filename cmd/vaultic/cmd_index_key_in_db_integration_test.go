@@ -26,6 +26,7 @@ import (
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/topology"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/ui/termstatus"
 )
@@ -223,6 +224,7 @@ func TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses(t *testing.T) {
 			{ID: "bob", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{2}, 32)},
 			{ID: "carol", Provider: "offline-keyfile", Credential: bytes.Repeat([]byte{3}, 32)},
 		},
+		testSealedTopology(t, repositoryID, 1),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -343,6 +345,7 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 			{ID: "alice", Provider: "offline-keyfile", Credential: credentials[0]},
 			{ID: "bob", Provider: "offline-argon2id", Credential: credentials[1]},
 		},
+		testSealedTopology(t, repositoryID, 1),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -515,6 +518,25 @@ func metadataRepositoryContext(
 		t.Fatal(err)
 	}
 	return ctx
+}
+
+func testSealedTopology(t *testing.T, repositoryID string, generation uint64) []byte {
+	t.Helper()
+	encoded, err := os.ReadFile(filepath.Join("..", "..", "testdata", "topology-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := topology.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.RepositoryID = repositoryID
+	document.TopologyGeneration = generation
+	encoded, err = document.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func testVaulticDBBinary(t *testing.T) string {

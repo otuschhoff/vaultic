@@ -319,14 +319,8 @@ impl KeyBroker {
         self.expire(now_unix_ms);
         let policy = self.capsule.effective_policy_status()?;
         let mut findings = policy.findings;
-        if self.capsule.sealed_topology.is_none() {
-            findings.push("topology: external".to_owned());
-        }
-        if let Some(encoded) = self
-            .epoch
-            .as_ref()
-            .and_then(|epoch| epoch.keys.sealed_topology.as_ref())
-        {
+        if let Some(epoch) = self.epoch.as_ref() {
+            let encoded = &epoch.keys.sealed_topology;
             let topology = TopologyDocument::decode(encoded.as_slice())?;
             let now = time::OffsetDateTime::from_unix_timestamp_nanos(
                 i128::from(now_unix_ms) * 1_000_000,
@@ -354,7 +348,6 @@ impl KeyBroker {
             hardware_verified: policy.hardware_verified,
             custody_assumed: policy.custody_assumed,
             compliant: policy.compliant
-                && self.capsule.sealed_topology.is_some()
                 && !findings
                     .iter()
                     .any(|finding| finding.starts_with("credential-rotation-overdue:")),
@@ -554,11 +547,7 @@ impl KeyBroker {
                 key
             }
             Capability::TopologyRead => {
-                let encoded = epoch
-                    .keys
-                    .sealed_topology
-                    .as_ref()
-                    .context("capsule topology is external")?;
+                let encoded = &epoch.keys.sealed_topology;
                 Zeroizing::new(TopologyDocument::decode(encoded.as_slice())?.redacted_json()?)
             }
             Capability::CredentialLease | Capability::PolicyMutation => {
@@ -617,11 +606,7 @@ impl KeyBroker {
             bail!("credential reference is not authorized for this client");
         }
         let epoch = self.epoch.as_ref().context("broker is locked")?;
-        let encoded = epoch
-            .keys
-            .sealed_topology
-            .as_ref()
-            .context("capsule topology is external")?;
+        let encoded = &epoch.keys.sealed_topology;
         let topology = TopologyDocument::decode(encoded.as_slice())?;
         let credential = topology
             .credentials
@@ -674,16 +659,17 @@ impl KeyBroker {
             .generation
             .checked_add(1)
             .context("capsule generation overflow")?;
-        let mut builder = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
-            .broker_identity_public_key(self.identity.verifying_key().as_bytes())
-            .key_versions(
-                self.capsule.header.root_key_version,
-                self.capsule.header.metadata_dek_version,
-                self.capsule.header.repository_key_version,
-            );
-        if let Some(topology) = epoch.keys.sealed_topology.as_ref() {
-            builder = builder.sealed_topology(topology.as_slice());
-        }
+        let builder = CapsuleBuilder::new(
+            &self.capsule.header.repository_id,
+            generation,
+            epoch.keys.sealed_topology.as_slice(),
+        )
+        .broker_identity_public_key(self.identity.verifying_key().as_bytes())
+        .key_versions(
+            self.capsule.header.root_key_version,
+            self.capsule.header.metadata_dek_version,
+            self.capsule.header.repository_key_version,
+        );
         let candidate = builder.create_offline_policy(
             policy,
             credentials,
@@ -713,16 +699,17 @@ impl KeyBroker {
             .generation
             .checked_add(1)
             .context("capsule generation overflow")?;
-        let mut builder = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
-            .broker_identity_public_key(self.identity.verifying_key().as_bytes())
-            .key_versions(
-                self.capsule.header.root_key_version,
-                self.capsule.header.metadata_dek_version,
-                self.capsule.header.repository_key_version,
-            );
-        if let Some(topology) = epoch.keys.sealed_topology.as_ref() {
-            builder = builder.sealed_topology(topology.as_slice());
-        }
+        let builder = CapsuleBuilder::new(
+            &self.capsule.header.repository_id,
+            generation,
+            epoch.keys.sealed_topology.as_slice(),
+        )
+        .broker_identity_public_key(self.identity.verifying_key().as_bytes())
+        .key_versions(
+            self.capsule.header.root_key_version,
+            self.capsule.header.metadata_dek_version,
+            self.capsule.header.repository_key_version,
+        );
         let candidate = builder
             .create_policy(
                 policy,
@@ -753,29 +740,28 @@ impl KeyBroker {
             .checked_add(1)
             .context("capsule generation overflow")?;
         let epoch = self.epoch.as_ref().context("broker is locked")?;
-        let current = epoch
-            .keys
-            .sealed_topology
-            .as_ref()
-            .context("capsule topology is external")?;
+        let current = &epoch.keys.sealed_topology;
         let mut document = TopologyDocument::decode(current.as_slice())?;
         document.apply_mutation(mutation, generation)?;
         let topology = Zeroizing::new(document.canonical_json()?);
-        let candidate = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
-            .broker_identity_public_key(self.identity.verifying_key().as_bytes())
-            .key_versions(
-                self.capsule.header.root_key_version,
-                self.capsule.header.metadata_dek_version,
-                self.capsule.header.repository_key_version,
-            )
-            .sealed_topology(topology.as_slice())
-            .create_policy(
-                self.capsule.policy.clone(),
-                protections,
-                epoch.keys.metadata_dek.as_slice(),
-                epoch.keys.repository_master_key.as_slice(),
-            )
-            .await?;
+        let candidate = CapsuleBuilder::new(
+            &self.capsule.header.repository_id,
+            generation,
+            topology.as_slice(),
+        )
+        .broker_identity_public_key(self.identity.verifying_key().as_bytes())
+        .key_versions(
+            self.capsule.header.root_key_version,
+            self.capsule.header.metadata_dek_version,
+            self.capsule.header.repository_key_version,
+        )
+        .create_policy(
+            self.capsule.policy.clone(),
+            protections,
+            epoch.keys.metadata_dek.as_slice(),
+            epoch.keys.repository_master_key.as_slice(),
+        )
+        .await?;
         self.accept_policy_mutation(candidate, false)
     }
 
@@ -863,9 +849,7 @@ impl KeyBroker {
         if let Some(epoch) = self.epoch.take() {
             unlock_memory(epoch.keys.metadata_dek.as_slice());
             unlock_memory(epoch.keys.repository_master_key.as_slice());
-            if let Some(topology) = epoch.keys.sealed_topology.as_ref() {
-                unlock_memory(topology.as_slice());
-            }
+            unlock_memory(epoch.keys.sealed_topology.as_slice());
         }
     }
 

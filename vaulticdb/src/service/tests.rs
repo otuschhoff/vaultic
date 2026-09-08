@@ -98,12 +98,16 @@ mod tests {
             ("alice", MemberCredential::Passphrase(b"alice passphrase")),
             ("bob", MemberCredential::Passphrase(b"bob passphrase")),
         ];
-        let current = CapsuleBuilder::new("repo-a", 1)
+        let topology = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/topology-v1.json"
+        ));
+        let current = CapsuleBuilder::new("repo-a", 1, topology)
             .broker_identity_public_key(&[1; 32])
             .create_offline_threshold("operators", 2, &credentials, &[7; 32], b"master-key")
             .unwrap();
         publish_local(&capsule_directory, &current).unwrap();
-        let candidate = CapsuleBuilder::new("repo-a", 2)
+        let candidate = CapsuleBuilder::new("repo-a", 2, topology)
             .broker_identity_public_key(&[2; 32])
             .create_offline_threshold("operators", 2, &credentials, &[7; 32], b"master-key")
             .unwrap();

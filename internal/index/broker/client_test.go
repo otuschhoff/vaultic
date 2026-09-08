@@ -16,6 +16,57 @@ import (
 	"time"
 )
 
+func TestLoadCapsuleAcceptsOnlyFormatOneWithTopology(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   uint32
+		topology json.RawMessage
+		trailing string
+		wantErr  bool
+	}{
+		{name: "format one", format: 1, topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"nonce","ciphertext":"ciphertext"}`)},
+		{name: "former format two", format: 2,
+			topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"nonce","ciphertext":"ciphertext"}`), wantErr: true},
+		{name: "former format three", format: 3,
+			topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"nonce","ciphertext":"ciphertext"}`), wantErr: true},
+		{name: "missing topology", format: 1, wantErr: true},
+		{name: "malformed topology", format: 1, topology: json.RawMessage(`[]`), wantErr: true},
+		{name: "wrong topology purpose", format: 1, topology: json.RawMessage(`{"purpose":"other","nonce":"nonce","ciphertext":"ciphertext"}`), wantErr: true},
+		{name: "empty topology nonce", format: 1,
+			topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"","ciphertext":"ciphertext"}`), wantErr: true},
+		{name: "empty topology ciphertext", format: 1,
+			topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"nonce","ciphertext":""}`), wantErr: true},
+		{name: "unknown topology field", format: 1,
+			topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"nonce","ciphertext":"ciphertext","extra":true}`), wantErr: true},
+		{name: "trailing capsule data", format: 1,
+			topology: json.RawMessage(`{"purpose":"sealed-topology-v1","nonce":"nonce","ciphertext":"ciphertext"}`), trailing: `{}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := capsule{
+				Header:              capsuleHeader{Format: test.format, RepositoryID: "repo-a", Generation: 1},
+				Policy:              json.RawMessage(`{}`),
+				MetadataDEK:         json.RawMessage(`{}`),
+				RepositoryMasterKey: json.RawMessage(`{}`),
+				SealedTopology:      test.topology,
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded = append(encoded, test.trailing...)
+			path := filepath.Join(t.TempDir(), "capsule.json")
+			if err := os.WriteFile(path, encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = LoadCapsule(path)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("LoadCapsule() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestExternalShareBindingCrossLanguageFixture(t *testing.T) {
 	value := capsule{
 		Header: capsuleHeader{RepositoryID: "repo-a", Generation: 8, RootKeyVersion: 1, PolicyHash: "policy-hash"},
@@ -98,7 +149,7 @@ func TestPreparePolicyMutationUsesSignedChallengeAndBase64Credential(t *testing.
 		requestResult <- request
 		_, _ = serverConnection.Write(
 			[]byte(
-				(`{"result":"policy_mutation_prepared","capsule":{"format":2},` +
+				(`{"result":"policy_mutation_prepared","capsule":{"format":1},` +
 					`"capsule_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"),
 			),
 		)
@@ -178,7 +229,7 @@ func TestPendingPolicyMutationUsesSignedChallenge(t *testing.T) {
 		requestResult <- request
 		_, _ = serverConnection.Write(
 			[]byte(
-				(`{"result":"policy_mutation_prepared","capsule":{"format":2},` +
+				(`{"result":"policy_mutation_prepared","capsule":{"format":1},` +
 					`"capsule_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` + "\n"),
 			),
 		)
@@ -210,7 +261,7 @@ func TestIdentityRecoverySessionBypassesOnlyLostIdentitySignature(t *testing.T) 
 	}
 	value := capsule{
 		Header: capsuleHeader{
-			Format:                  2,
+			Format:                  1,
 			RepositoryID:            "repo-a",
 			Generation:              4,
 			BrokerIdentityPublicKey: base64.StdEncoding.EncodeToString(oldPublic),

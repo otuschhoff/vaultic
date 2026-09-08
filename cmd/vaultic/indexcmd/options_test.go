@@ -110,7 +110,7 @@ func TestQuorumBypassOptionsFinalize(t *testing.T) {
 func TestKeyOptionsFinalize(t *testing.T) {
 	prepare := quorumPrepareOptions{
 		CapsuleDirectory: "capsules", GroupID: "operators", BrokerPublicKeyFile: "broker.pub",
-		StateFile: "state.json", Generation: 1, Threshold: 2,
+		StateFile: "state.json", TopologyFile: "topology.json", Generation: 1, Threshold: 2,
 	}
 	if err := prepare.finalize(1); err == nil {
 		t.Fatal("quorum preparation accepted an unsatisfiable threshold")

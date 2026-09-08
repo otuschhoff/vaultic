@@ -216,7 +216,7 @@ set of member credentials, but loss of every capsule copy is unrecoverable.
 
 Each capsule generation has a new random root wrapping secret. HKDF derives
 independent wrapping keys for ``metadata-dek`` and
-``repository-master-key``; format 3 also derives ``sealed-topology-v1`` for a
+``repository-master-key``; capsule format 1 also derives ``sealed-topology-v1`` for a
 canonical topology document containing endpoints, placement policy, metadata
 replicas, and provider credentials. AES-256-GCM authenticates each payload and the
 complete logical header. Repository identity, generation, key versions,
@@ -228,7 +228,7 @@ repositories, policies, or generations fails closed.
 Sealed topology and credential leases
 =====================================
 
-Format-3 capsules are the authority for repository reachability. The broker's
+Format-1 capsules are the authority for repository reachability. The broker's
 ``topology-read`` lease returns endpoints and credential references with the
 credential map removed. A separate ``credential-lease`` returns exactly one
 authorized reference. It never returns the complete secret-bearing topology.
@@ -239,8 +239,8 @@ connection closes or the earliest lease expires.
 Use ``--topology-source capsule`` (the default when a broker is configured) for
 normal operation. ``--topology-source external`` and
 ``VAULTICDB_TOPOLOGY_SOURCE=external`` retain the legacy environment-backed
-path and are reported as non-compliant. A format-2 capsule remains readable but
-reports ``topology: external`` because it has no sealed topology payload.
+path and are reported as non-compliant. Recovery capsules always contain sealed
+topology; capsule formats without it are not accepted.
 
 Inspect topology without releasing credentials:
 
@@ -777,6 +777,7 @@ old key:
       --repository-id REPOSITORY-UUID --capsule-directory /secure/capsules \
       --generation 1 --group operators --threshold 2 \
       --broker-public-key broker-identity.pub \
+      --topology-file /secure/topology.json \
       --member alice=offline-argon2id:/secure/alice.passphrase \
       --member bob=offline-keyfile:/media/bob/member.key \
       --member carol=offline-keyfile:/media/carol/member.key \

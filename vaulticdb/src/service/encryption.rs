@@ -16,7 +16,7 @@ use crate::{
         RotateLocalKeySlotRequest, StoreMasterKeyRequest,
     },
 };
-use vaulticdb::encryption;
+use vaulticdb::{encryption, topology::TopologyDocument};
 
 use super::{
     check_context, check_request, validate_capsule_mutation, verify_capsule_migration_proof,
@@ -81,6 +81,17 @@ impl Service {
         if request.threshold == 0 || request.threshold > u32::from(u8::MAX) {
             return Err(Status::invalid_argument("invalid capsule threshold"));
         }
+        let sealed_topology = Zeroizing::new(std::mem::take(&mut request.sealed_topology));
+        let topology = TopologyDocument::decode(sealed_topology.as_slice()).map_err(|error| {
+            Status::invalid_argument(format!("invalid sealed topology: {error}"))
+        })?;
+        if topology.repository_id != request.repository_id
+            || topology.topology_generation != request.generation
+        {
+            return Err(Status::invalid_argument(
+                "sealed topology identity must match the capsule migration",
+            ));
+        }
         let manager = self.storage.key_manager()?;
         let audit = manager
             .audit_objects()
@@ -135,6 +146,7 @@ impl Service {
         let capsule = encryption::recovery_capsule::CapsuleBuilder::new(
             request.repository_id.clone(),
             request.generation,
+            sealed_topology.as_slice(),
         )
         .broker_identity_public_key(&request.broker_identity_public_key)
         .create_offline_threshold(

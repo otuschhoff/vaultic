@@ -3547,6 +3547,7 @@ type PrepareCapsuleMigrationRequest struct {
 	Threshold               uint32                  `protobuf:"varint,6,opt,name=threshold,proto3" json:"threshold,omitempty"`
 	BrokerIdentityPublicKey []byte                  `protobuf:"bytes,7,opt,name=broker_identity_public_key,json=brokerIdentityPublicKey,proto3" json:"broker_identity_public_key,omitempty"`
 	Members                 []*OfflineCapsuleMember `protobuf:"bytes,8,rep,name=members,proto3" json:"members,omitempty"`
+	SealedTopology          []byte                  `protobuf:"bytes,9,opt,name=sealed_topology,json=sealedTopology,proto3" json:"sealed_topology,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -3633,6 +3634,13 @@ func (x *PrepareCapsuleMigrationRequest) GetBrokerIdentityPublicKey() []byte {
 func (x *PrepareCapsuleMigrationRequest) GetMembers() []*OfflineCapsuleMember {
 	if x != nil {
 		return x.Members
+	}
+	return nil
+}
+
+func (x *PrepareCapsuleMigrationRequest) GetSealedTopology() []byte {
+	if x != nil {
+		return x.SealedTopology
 	}
 	return nil
 }
@@ -4220,7 +4228,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1e\n" +
 	"\n" +
 	"credential\x18\x03 \x01(\fR\n" +
-	"credential\"\xfe\x02\n" +
+	"credential\"\xa7\x03\n" +
 	"\x1ePrepareCapsuleMigrationRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12+\n" +
@@ -4231,7 +4239,8 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\bgroup_id\x18\x05 \x01(\tR\agroupId\x12\x1c\n" +
 	"\tthreshold\x18\x06 \x01(\rR\tthreshold\x12;\n" +
 	"\x1abroker_identity_public_key\x18\a \x01(\fR\x17brokerIdentityPublicKey\x12<\n" +
-	"\amembers\x18\b \x03(\v2\".vaulticdb.v1.OfflineCapsuleMemberR\amembers\"\xc2\x01\n" +
+	"\amembers\x18\b \x03(\v2\".vaulticdb.v1.OfflineCapsuleMemberR\amembers\x12'\n" +
+	"\x0fsealed_topology\x18\t \x01(\fR\x0esealedTopology\"\xc2\x01\n" +
 	"\x1fPrepareCapsuleMigrationResponse\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x01 \x01(\x04R\n" +

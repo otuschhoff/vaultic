@@ -182,6 +182,7 @@ func (c *Client) PrepareCapsuleMigration(
 	threshold uint32,
 	brokerIdentityPublicKey []byte,
 	members []OfflineCapsuleMember,
+	sealedTopology []byte,
 ) (CapsuleMigration, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
@@ -209,6 +210,7 @@ func (c *Client) PrepareCapsuleMigration(
 			Threshold:               threshold,
 			BrokerIdentityPublicKey: brokerIdentityPublicKey,
 			Members:                 requestMembers,
+			SealedTopology:          sealedTopology,
 		},
 	)
 	if err != nil {

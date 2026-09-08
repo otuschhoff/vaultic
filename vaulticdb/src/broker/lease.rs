@@ -176,12 +176,10 @@ fn protect_recovered_keys(keys: &RecoveredKeys) -> Result<()> {
         unlock_memory(keys.metadata_dek.as_slice());
         return Err(error);
     }
-    if let Some(topology) = keys.sealed_topology.as_ref() {
-        if let Err(error) = lock_memory(topology.as_slice()) {
-            unlock_memory(keys.metadata_dek.as_slice());
-            unlock_memory(keys.repository_master_key.as_slice());
-            return Err(error);
-        }
+    if let Err(error) = lock_memory(keys.sealed_topology.as_slice()) {
+        unlock_memory(keys.metadata_dek.as_slice());
+        unlock_memory(keys.repository_master_key.as_slice());
+        return Err(error);
     }
     #[cfg(target_os = "linux")]
     unsafe {
@@ -190,13 +188,11 @@ fn protect_recovered_keys(keys: &RecoveredKeys) -> Result<()> {
             keys.metadata_dek.len(),
             libc::MADV_DONTDUMP,
         );
-        if let Some(topology) = keys.sealed_topology.as_ref() {
-            libc::madvise(
-                topology.as_ptr().cast_mut().cast(),
-                topology.len(),
-                libc::MADV_DONTDUMP,
-            );
-        }
+        libc::madvise(
+            keys.sealed_topology.as_ptr().cast_mut().cast(),
+            keys.sealed_topology.len(),
+            libc::MADV_DONTDUMP,
+        );
         libc::madvise(
             keys.repository_master_key.as_ptr().cast_mut().cast(),
             keys.repository_master_key.len(),

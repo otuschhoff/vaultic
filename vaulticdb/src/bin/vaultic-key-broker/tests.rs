@@ -257,7 +257,11 @@ mod tests {
     #[tokio::test]
     async fn unix_service_negotiates_connections_independently_and_broadcasts_lock() {
         let identity = SigningKey::generate(&mut LegacyOsRng);
-        let capsule = CapsuleBuilder::new("repo-a", 1)
+        let capsule = CapsuleBuilder::new(
+            "repo-a",
+            1,
+            include_bytes!("../../../../testdata/topology-v1.json"),
+        )
             .broker_identity_public_key(identity.verifying_key().as_bytes())
             .create_offline_threshold(
                 "operators",
@@ -331,7 +335,11 @@ mod tests {
     async fn protocol_policy_mutation_retains_candidate_until_exact_activation() {
         let identity = SigningKey::generate(&mut LegacyOsRng);
         let release_key = SigningKey::from_bytes(&[6; 32]);
-        let capsule = CapsuleBuilder::new("repo-a", 1)
+        let capsule = CapsuleBuilder::new(
+            "repo-a",
+            1,
+            include_bytes!("../../../../testdata/topology-v1.json"),
+        )
             .broker_identity_public_key(identity.verifying_key().as_bytes())
             .create_offline_threshold(
                 "operators",

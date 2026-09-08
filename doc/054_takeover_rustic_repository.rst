@@ -518,15 +518,17 @@ still available:
       --group operators \
       --threshold 2 \
       --broker-public-key /etc/vaultic/broker-identity.pub \
+      --topology-file /secure/topology.json \
       --member alice=offline-argon2id:/secure/alice.passphrase \
       --member bob=offline-keyfile:/media/bob/member.key \
       --member carol=offline-keyfile:/media/carol/member.key \
       --state-file /secure/capsule-migration.json
 
-``migrate-prepare`` reads the metadata DEK and database copy of the repository
-master key, wraps both in a new recovery capsule, publishes immutable local and
-repository copies, verifies reconstruction, and records the exact capsule
-digest in the mode-0600 ``--state-file``. ``--threshold 2`` requires any two of
+``migrate-prepare`` validates the canonical ``--topology-file``, reads the
+metadata DEK and database copy of the repository master key, wraps all three in
+a new recovery capsule, publishes immutable local and repository copies,
+verifies reconstruction, and records the exact capsule digest in the mode-0600
+``--state-file``. ``--threshold 2`` requires any two of
 the three listed members. ``--generation 1`` is the first immutable capsule
 generation. Preparation is intentionally non-destructive: all old access routes
 remain available if broker setup or quorum testing fails.

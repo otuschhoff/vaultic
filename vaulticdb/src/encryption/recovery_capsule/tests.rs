@@ -5,6 +5,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
 
+    const TEST_TOPOLOGY: &[u8] = br#"{"format":1,"repository_id":"repo-a","topology_generation":7}"#;
+
     struct ContextProvider {
         name: &'static str,
     }
@@ -49,7 +51,7 @@ mod tests {
     }
 
     fn capsule(required: u8) -> RecoveryCapsule {
-        CapsuleBuilder::new("repo-a", 7)
+        CapsuleBuilder::new("repo-a", 7, TEST_TOPOLOGY)
             .broker_identity_public_key(&[9; 32])
             .create_offline_threshold(
                 "operators",
@@ -110,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn format_three_round_trips_sealed_topology_and_format_two_remains_external() {
+    fn format_one_round_trips_sealed_topology() {
         let credentials = BTreeMap::from([
             (
                 "alice".to_owned(),
@@ -121,10 +123,9 @@ mod tests {
                 MemberCredential::Passphrase(b"bob passphrase"),
             ),
         ]);
-        let topology = br#"{"format":1,"repository_id":"repo-a","topology_generation":7}"#;
-        let sealed = CapsuleBuilder::new("repo-a", 8)
+        let topology = br#"{"format":1,"repository_id":"repo-a","topology_generation":8}"#;
+        let sealed = CapsuleBuilder::new("repo-a", 8, topology)
             .broker_identity_public_key(&[9; 32])
-            .sealed_topology(topology)
             .create_offline_threshold(
                 "operators",
                 2,
@@ -136,26 +137,33 @@ mod tests {
                 b"repository-master-key",
             )
             .unwrap();
-        assert_eq!(sealed.header.format, 3);
-        assert!(sealed.sealed_topology.is_some());
+        assert_eq!(sealed.header.format, 1);
         let recovered = sealed.recover_offline(&credentials).unwrap();
-        assert_eq!(recovered.sealed_topology.unwrap().as_slice(), topology);
+        assert_eq!(recovered.sealed_topology.as_slice(), topology);
 
-        let legacy = capsule(2);
-        assert_eq!(legacy.header.format, 2);
-        assert!(legacy.sealed_topology.is_none());
-        assert!(!serde_json::to_vec(&legacy)
+        for format in [2, 3] {
+            let mut unsupported = sealed.clone();
+            unsupported.header.format = format;
+            unsupported.header.logical_id = logical_id(&unsupported.header);
+            assert!(unsupported.validate().is_err());
+        }
+        let mut missing_topology = serde_json::to_value(&sealed).unwrap();
+        missing_topology
+            .as_object_mut()
             .unwrap()
-            .windows(b"sealed_topology".len())
-            .any(|window| window == b"sealed_topology"));
+            .remove("sealed_topology");
+        assert!(serde_json::from_value::<RecoveryCapsule>(missing_topology).is_err());
     }
 
     #[test]
     fn sealed_topology_cannot_be_transplanted_between_generations() {
         let create = |generation| {
-            CapsuleBuilder::new("repo-a", generation)
+            CapsuleBuilder::new(
+                "repo-a",
+                generation,
+                br#"{"format":1,"repository_id":"repo-a"}"#,
+            )
                 .broker_identity_public_key(&[9; 32])
-                .sealed_topology(br#"{"format":1,"repository_id":"repo-a"}"#)
                 .create_offline_threshold(
                     "operators",
                     1,
@@ -190,7 +198,7 @@ mod tests {
             required: 2,
             members: vec!["alice".into(), "bob".into()],
         };
-        let capsule = CapsuleBuilder::new("repo-a", 8)
+        let capsule = CapsuleBuilder::new("repo-a", 8, TEST_TOPOLOGY)
             .broker_identity_public_key(&[9; 32])
             .create_policy(
                 policy,
@@ -276,7 +284,7 @@ mod tests {
         let enclave_fingerprint =
             format!("sha256:{:x}", Sha256::digest(enclave_public_key.as_bytes()));
         let yubikey_reference = "pkcs11:module-path=/usr/lib/libykcs11.so;slot-id=1;id=9a;public-key-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;type=rsa-key-pair";
-        let capsule = CapsuleBuilder::new("repo-a", 9)
+        let capsule = CapsuleBuilder::new("repo-a", 9, TEST_TOPOLOGY)
             .broker_identity_public_key(&[9; 32])
             .create_policy(
                 UnlockPolicy::Threshold {
@@ -411,7 +419,7 @@ mod tests {
     #[test]
     fn external_share_binding_has_stable_cross_language_fixture() {
         let header = CapsuleHeader {
-            format: 2,
+            format: 1,
             logical_id: "unused".to_owned(),
             repository_id: "repo-a".into(),
             generation: 8,
@@ -499,7 +507,7 @@ mod tests {
                 },
             ],
         };
-        let capsule = CapsuleBuilder::new("repo-a", 8)
+        let capsule = CapsuleBuilder::new("repo-a", 8, TEST_TOPOLOGY)
             .broker_identity_public_key(&[9; 32])
             .create_offline_policy(
                 policy,

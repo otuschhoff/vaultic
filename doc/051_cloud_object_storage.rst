@@ -41,7 +41,7 @@ access for a backup repository.
 Credential sources
 ------------------
 
-For a format-3 quorum repository, the preferred source is sealed topology.
+For a format-1 quorum repository, the preferred source is sealed topology.
 Vaultic obtains the structured S3 endpoint and one authorized credential lease
 from the unlocked broker; VaulticDB does the same for each metadata replica.
 Static keys are therefore absent from shell variables, launchd property lists,
@@ -51,8 +51,8 @@ repository configuration, and the credential-free bootstrap profile. Optional
 The environment-based procedures below are the legacy external-topology mode.
 Select that mode explicitly with ``--topology-source external`` or
 ``VAULTICDB_TOPOLOGY_SOURCE=external``. Broker status reports
-``topology: external`` as non-compliant. Retain this path for format-2 capsules
-and migration only.
+``topology: external`` as non-compliant. Retain this path for standalone and
+migration tooling only; recovery capsules always use sealed topology.
 
 Vaultic's repository S3 backend supports the AWS credential chain, including:
 
@@ -220,7 +220,7 @@ writers at the same final database path. Preserve the previous metadata prefix
 during migration or rebuild until the replacement has been independently
 verified.
 
-With a format-3 capsule, do not set ``VAULTICDB_REPLICATED_*``, ``AWS_*``, or
+With a format-1 capsule, do not set ``VAULTICDB_REPLICATED_*``, ``AWS_*``, or
 Azure credential variables. Configure only the broker socket, signed release
 manifest, repository identity, and ``VAULTICDB_TOPOLOGY_SOURCE=capsule``.
 VaulticDB acquires redacted topology plus the exact replica credential leases,

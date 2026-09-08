@@ -28,8 +28,8 @@ use zeroize::Zeroizing;
 use super::envelope::providers::{KeyContext, KeyProvider};
 use crate::ids::{MemberId, RepositoryId};
 
-pub const CAPSULE_FORMAT: u32 = 3;
-const LEGACY_CAPSULE_FORMAT: u32 = 2;
+/// The only supported recovery capsule schema.
+pub const CAPSULE_FORMAT: u32 = 1;
 pub const ROOT_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const SALT_BYTES: usize = 16;
@@ -47,8 +47,7 @@ pub struct RecoveryCapsule {
     pub members: Vec<MemberShare>,
     pub metadata_dek: WrappedPayload,
     pub repository_master_key: WrappedPayload,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sealed_topology: Option<WrappedPayload>,
+    pub sealed_topology: WrappedPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,7 +174,7 @@ pub struct WrappedPayload {
 pub struct RecoveredKeys {
     pub metadata_dek: Zeroizing<Vec<u8>>,
     pub repository_master_key: Zeroizing<Vec<u8>>,
-    pub sealed_topology: Option<Zeroizing<Vec<u8>>>,
+    pub sealed_topology: Zeroizing<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,11 +210,15 @@ pub struct CapsuleBuilder {
     metadata_dek_version: u32,
     repository_key_version: u32,
     broker_identity_public_key: Vec<u8>,
-    sealed_topology: Option<Vec<u8>>,
+    sealed_topology: Zeroizing<Vec<u8>>,
 }
 
 impl CapsuleBuilder {
-    pub fn new(repository_id: impl Into<RepositoryId>, generation: u64) -> Self {
+    pub fn new(
+        repository_id: impl Into<RepositoryId>,
+        generation: u64,
+        sealed_topology: &[u8],
+    ) -> Self {
         Self {
             repository_id: repository_id.into(),
             generation,
@@ -223,7 +226,7 @@ impl CapsuleBuilder {
             metadata_dek_version: 1,
             repository_key_version: 1,
             broker_identity_public_key: Vec::new(),
-            sealed_topology: None,
+            sealed_topology: Zeroizing::new(sealed_topology.to_vec()),
         }
     }
 
@@ -241,11 +244,6 @@ impl CapsuleBuilder {
         self.root_key_version = root_key_version;
         self.metadata_dek_version = metadata_dek_version;
         self.repository_key_version = repository_key_version;
-        self
-    }
-
-    pub fn sealed_topology(mut self, topology: &[u8]) -> Self {
-        self.sealed_topology = Some(topology.to_vec());
         self
     }
 
@@ -299,11 +297,7 @@ impl CapsuleBuilder {
         }
         let policy_hash = policy_hash(&policy)?;
         let mut header = CapsuleHeader {
-            format: if self.sealed_topology.is_some() {
-                CAPSULE_FORMAT
-            } else {
-                LEGACY_CAPSULE_FORMAT
-            },
+            format: CAPSULE_FORMAT,
             logical_id: String::new(),
             repository_id: self.repository_id,
             generation: self.generation,
@@ -350,18 +344,12 @@ impl CapsuleBuilder {
             "repository-master-key",
             root_secret.as_ref(),
         )?;
-        let sealed_topology = self
-            .sealed_topology
-            .as_deref()
-            .map(|topology| {
-                wrap_payload(
-                    &header,
-                    topology,
-                    "sealed-topology-v1",
-                    root_secret.as_ref(),
-                )
-            })
-            .transpose()?;
+        let sealed_topology = wrap_payload(
+            &header,
+            &self.sealed_topology,
+            "sealed-topology-v1",
+            root_secret.as_ref(),
+        )?;
         let capsule = RecoveryCapsule {
             header,
             policy,
@@ -397,11 +385,7 @@ impl CapsuleBuilder {
         }
         let policy_hash = policy_hash(&policy)?;
         let mut header = CapsuleHeader {
-            format: if self.sealed_topology.is_some() {
-                CAPSULE_FORMAT
-            } else {
-                LEGACY_CAPSULE_FORMAT
-            },
+            format: CAPSULE_FORMAT,
             logical_id: String::new(),
             repository_id: self.repository_id,
             generation: self.generation,
@@ -457,18 +441,12 @@ impl CapsuleBuilder {
             "repository-master-key",
             root_secret.as_ref(),
         )?;
-        let sealed_topology = self
-            .sealed_topology
-            .as_deref()
-            .map(|topology| {
-                wrap_payload(
-                    &header,
-                    topology,
-                    "sealed-topology-v1",
-                    root_secret.as_ref(),
-                )
-            })
-            .transpose()?;
+        let sealed_topology = wrap_payload(
+            &header,
+            &self.sealed_topology,
+            "sealed-topology-v1",
+            root_secret.as_ref(),
+        )?;
         let capsule = RecoveryCapsule {
             header,
             policy,
@@ -490,7 +468,7 @@ pub enum MemberCredential<'a> {
 
 impl RecoveryCapsule {
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.header.format, LEGACY_CAPSULE_FORMAT | CAPSULE_FORMAT)
+        if self.header.format != CAPSULE_FORMAT
             || self.header.generation == 0
             || self.header.repository_id.is_empty()
             || self.header.logical_id != logical_id(&self.header)
@@ -512,10 +490,8 @@ impl RecoveryCapsule {
         {
             bail!("recovery capsule payload purpose mismatch");
         }
-        match (self.header.format, &self.sealed_topology) {
-            (LEGACY_CAPSULE_FORMAT, None) => {}
-            (CAPSULE_FORMAT, Some(payload)) if payload.purpose == "sealed-topology-v1" => {}
-            _ => bail!("recovery capsule topology payload does not match its format"),
+        if self.sealed_topology.purpose != "sealed-topology-v1" {
+            bail!("recovery capsule topology payload purpose mismatch");
         }
         let referenced = self.policy.member_ids()?;
         let mut seen_members = BTreeSet::new();
@@ -816,18 +792,12 @@ impl RecoveryCapsule {
             "repository-master-key",
             root_secret.as_slice(),
         )?;
-        let sealed_topology = self
-            .sealed_topology
-            .as_ref()
-            .map(|payload| {
-                unwrap_payload(
-                    &self.header,
-                    payload,
-                    "sealed-topology-v1",
-                    root_secret.as_slice(),
-                )
-            })
-            .transpose()?;
+        let sealed_topology = unwrap_payload(
+            &self.header,
+            &self.sealed_topology,
+            "sealed-topology-v1",
+            root_secret.as_slice(),
+        )?;
         Ok(RecoveredKeys {
             metadata_dek,
             repository_master_key,

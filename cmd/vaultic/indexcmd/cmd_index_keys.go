@@ -25,6 +25,7 @@ import (
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/observability"
+	"github.com/otuschhoff/vaultic/internal/topology"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/spf13/cobra"
@@ -71,15 +72,15 @@ func (options hardwareEnrollmentOptions) finalizeFIDO2() error {
 }
 
 type quorumPrepareOptions struct {
-	CapsuleDirectory, GroupID, BrokerPublicKeyFile, StateFile string
-	Generation                                                uint64
-	Threshold                                                 uint32
+	CapsuleDirectory, GroupID, BrokerPublicKeyFile, StateFile, TopologyFile string
+	Generation                                                              uint64
+	Threshold                                                               uint32
 }
 
 func (options quorumPrepareOptions) finalize(memberCount int) error {
 	if options.Generation == 0 || options.Threshold == 0 || options.GroupID == "" || options.CapsuleDirectory == "" ||
-		options.BrokerPublicKeyFile == "" || options.StateFile == "" {
-		return fmt.Errorf("capsule directory, generation, group, threshold, broker public key, and state file are required")
+		options.BrokerPublicKeyFile == "" || options.StateFile == "" || options.TopologyFile == "" {
+		return fmt.Errorf("capsule directory, generation, group, threshold, broker public key, topology, and state file are required")
 	}
 	if memberCount == 0 || options.Threshold > uint32(memberCount) {
 		return fmt.Errorf("threshold must be satisfiable by at least one --member")
@@ -1101,11 +1102,23 @@ func newIndexKeysQuorumPrepareCommand(globalOptions *global.Options, options *in
 				return err
 			}
 			defer cleanup()
+			sealedTopology, err := os.ReadFile(commandOptions.TopologyFile)
+			if err != nil {
+				return fmt.Errorf("read sealed topology: %w", err)
+			}
+			defer clear(sealedTopology)
+			document, err := topology.Decode(sealedTopology)
+			if err != nil {
+				return err
+			}
+			if document.RepositoryID != options.RepositoryID || document.TopologyGeneration != commandOptions.Generation {
+				return fmt.Errorf("sealed topology identity must match repository and capsule generation")
+			}
 			migration, err := withDaemonSession(command.Context(), options.Daemon, options.RepositoryID,
 				func(client *daemon.Client) (daemon.CapsuleMigration, error) {
 					return client.PrepareCapsuleMigration(
 						command.Context(), commandOptions.CapsuleDirectory, commandOptions.Generation,
-						commandOptions.GroupID, commandOptions.Threshold, publicKey, members,
+						commandOptions.GroupID, commandOptions.Threshold, publicKey, members, sealedTopology,
 					)
 				})
 			if err != nil {
@@ -1142,6 +1155,7 @@ func newIndexKeysQuorumPrepareCommand(globalOptions *global.Options, options *in
 	command.Flags().StringVar(&commandOptions.GroupID, "group", "operators", "threshold group ID")
 	command.Flags().Uint32Var(&commandOptions.Threshold, "threshold", 0, "required member contributions")
 	command.Flags().StringVar(&commandOptions.BrokerPublicKeyFile, "broker-public-key", "", "broker Ed25519 public-key file")
+	command.Flags().StringVar(&commandOptions.TopologyFile, "topology-file", "", "canonical sealed topology JSON file")
 	command.Flags().StringArrayVar(&memberSpecs, "member", nil, "offline member ID=PROVIDER:FILE (repeatable)")
 	command.Flags().StringVar(&commandOptions.StateFile, "state-file", "", "new mode-0600 migration state file")
 	return command

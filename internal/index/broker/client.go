@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -153,7 +154,13 @@ type capsule struct {
 	Members             []memberShare   `json:"members"`
 	MetadataDEK         json.RawMessage `json:"metadata_dek"`
 	RepositoryMasterKey json.RawMessage `json:"repository_master_key"`
-	SealedTopology      json.RawMessage `json:"sealed_topology,omitempty"`
+	SealedTopology      json.RawMessage `json:"sealed_topology"`
+}
+
+type wrappedPayload struct {
+	Purpose    string `json:"purpose"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
 }
 
 type capsuleHeader struct {
@@ -651,13 +658,35 @@ func LoadCapsule(path string) (*capsule, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, fmt.Errorf("decode recovery capsule: %w", err)
 	}
-	if value.Header.Format != 2 || value.Header.RepositoryID == "" || value.Header.Generation == 0 ||
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("decode recovery capsule: trailing data")
+	}
+	sealedTopology, err := decodeWrappedPayload(value.SealedTopology)
+	if err != nil {
+		return nil, errors.New("invalid recovery capsule topology payload")
+	}
+	if value.Header.Format != 1 || value.Header.RepositoryID == "" || value.Header.Generation == 0 ||
 		len(value.Policy) == 0 ||
 		len(value.MetadataDEK) == 0 ||
-		len(value.RepositoryMasterKey) == 0 {
+		len(value.RepositoryMasterKey) == 0 ||
+		sealedTopology.Purpose != "sealed-topology-v1" ||
+		sealedTopology.Nonce == "" || sealedTopology.Ciphertext == "" {
 		return nil, errors.New("invalid recovery capsule header")
 	}
 	return &value, nil
+}
+
+func decodeWrappedPayload(data []byte) (wrappedPayload, error) {
+	var value wrappedPayload
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return wrappedPayload{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return wrappedPayload{}, errors.New("trailing wrapped payload data")
+	}
+	return value, nil
 }
 
 func (value *capsule) RepositoryID() string { return value.Header.RepositoryID }

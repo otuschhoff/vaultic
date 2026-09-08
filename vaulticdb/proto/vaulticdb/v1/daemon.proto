@@ -381,6 +381,7 @@ message PrepareCapsuleMigrationRequest {
   uint32 threshold = 6;
   bytes broker_identity_public_key = 7;
   repeated OfflineCapsuleMember members = 8;
+  bytes sealed_topology = 9;
 }
 
 message PrepareCapsuleMigrationResponse {

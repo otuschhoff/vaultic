@@ -54,12 +54,15 @@ mod tests {
 
     fn setup() -> (RecoveryCapsule, SigningKey, Vec<ClientAuthorization>) {
         let identity = SigningKey::generate(&mut LegacyOsRng);
-        let capsule = CapsuleBuilder::new("repo-a", 4)
-            .broker_identity_public_key(identity.verifying_key().as_bytes())
-            .sealed_topology(include_bytes!(concat!(
+        let capsule = CapsuleBuilder::new(
+            "repo-a",
+            4,
+            include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../testdata/topology-v1.json"
-            )))
+            )),
+        )
+            .broker_identity_public_key(identity.verifying_key().as_bytes())
             .create_offline_threshold(
                 "operators",
                 2,
@@ -166,25 +169,6 @@ mod tests {
                 2_000
             )
             .is_ok());
-    }
-
-    #[test]
-    fn format_two_status_reports_external_topology() {
-        let identity = SigningKey::generate(&mut LegacyOsRng);
-        let capsule = CapsuleBuilder::new("repo-a", 1)
-            .broker_identity_public_key(identity.verifying_key().as_bytes())
-            .create_offline_threshold(
-                "operators",
-                1,
-                &[("alice", MemberCredential::Passphrase(b"alice passphrase"))],
-                &[7; 32],
-                b"repository-master-key",
-            )
-            .unwrap();
-        let mut broker = KeyBroker::new(capsule, identity, setup().2, None).unwrap();
-        let status = broker.status(1_000).unwrap();
-        assert!(!status.compliant);
-        assert!(status.findings.iter().any(|item| item == "topology: external"));
     }
 
     #[test]
@@ -513,17 +497,12 @@ mod tests {
             b"repository-master-key"
         );
         assert_eq!(
-            recovered
-                .sealed_topology
-                .as_ref()
-                .map(|topology| topology.as_slice()),
-            Some(
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../testdata/topology-v1.json"
-                ))
-                .as_slice()
-            )
+            recovered.sealed_topology.as_slice(),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../testdata/topology-v1.json"
+            ))
+            .as_slice()
         );
         assert_eq!(broker.status(1_005).unwrap().capsule_generation, 4);
         assert_eq!(broker.status(1_005).unwrap().active_leases, 0);
@@ -616,7 +595,7 @@ mod tests {
             ]))
             .unwrap();
         let topology = crate::topology::TopologyDocument::decode(
-            recovered.sealed_topology.as_ref().unwrap().as_slice(),
+            recovered.sealed_topology.as_slice(),
         )
         .unwrap();
         assert_eq!(candidate.header.generation, 5);
