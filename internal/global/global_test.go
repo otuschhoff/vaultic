@@ -182,10 +182,11 @@ func TestResolveBootstrapRepositorySurvivesSeedLoss(t *testing.T) {
 	}
 	anchorPath := filepath.Join(tempDir, "anchor.json")
 	profilePath := filepath.Join(tempDir, "bootstrap.toml")
-	profile := "format = 1\nrepository_id = \"repo-a\"\nanchor_file = \"" + anchorPath + "\"\n" +
-		"[[seed]]\nid = \"missing\"\nlocation = \"" + filepath.Join(tempDir, "missing") + "\"\n" +
-		"[[seed]]\nid = \"surviving\"\nlocation = \"" + survivingLocation + "\"\n"
-	if err := os.WriteFile(profilePath, []byte(profile), 0o600); err != nil {
+	profile := bootstrap.Profile{
+		Format: 1, RepositoryID: "repo-a", AnchorFile: anchorPath,
+		Seeds: []bootstrap.Seed{{ID: "missing", Location: filepath.Join(tempDir, "missing")}, {ID: "surviving", Location: survivingLocation}},
+	}
+	if err := bootstrap.StoreProfile(profilePath, profile); err != nil {
 		t.Fatal(err)
 	}
 	gopts.BootstrapProfile = profilePath

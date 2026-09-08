@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -63,7 +64,7 @@ func TestAnchorAndOfflineExportRejectRollbackAndOverwrite(t *testing.T) {
 		t.Fatal("offline manifest was overwritten")
 	}
 	info, err := os.Stat(filepath.Join(export, "topology-00000000000000000002.enc"))
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("offline manifest mode = %v, %v", info.Mode(), err)
 	}
 }
@@ -86,7 +87,7 @@ func TestCapsuleProfileRoundTripIsCredentialFree(t *testing.T) {
 		t.Fatalf("runtime profile contains secret-bearing fields: %s", encoded)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("profile mode = %v, %v", info.Mode(), err)
 	}
 }

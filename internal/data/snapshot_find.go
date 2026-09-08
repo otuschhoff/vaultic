@@ -287,6 +287,19 @@ func (f *SnapshotFilter) findSorted(
 		absTargets = append(absTargets, filepath.Clean(target))
 	}
 	f.Paths = absTargets
+	for _, filters := range [][][]string{f.FilterPaths, f.PathsExact} {
+		for _, paths := range filters {
+			for index, target := range paths {
+				if !filepath.IsAbs(target) {
+					target, err = filepath.Abs(target)
+					if err != nil {
+						return nil, errors.Wrap(err, "Abs")
+					}
+				}
+				paths[index] = filepath.Clean(target)
+			}
+		}
+	}
 
 	var matches Snapshots
 	err = ForAllSnapshots(ctx, be, loader, nil, func(id vaultic.ID, snapshot *Snapshot, err error) error {

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -29,6 +30,48 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/ui"
 )
+
+func TestMain(m *testing.M) {
+	base := filepath.Base(os.Args[0])
+	if base == "custodian" || base == "custodian.exe" {
+		switch os.Args[1] {
+		case "fido2-hmac-secret-derive":
+			fmt.Println(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+		case "fido2-enroll":
+			fmt.Println(`{"credential_id":"AQID","public_key":"sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472","public_key_der":"BAUG","relying_party_id":"vaultic.example","attestation_fingerprint":null,"user_presence_required":true}`)
+		default:
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func testCustodianPath(t *testing.T, root string) string {
+	t.Helper()
+	extension := ""
+	if runtime.GOOS == "windows" {
+		extension = ".exe"
+	}
+	helperPath := filepath.Join(root, "custodian"+extension)
+	executable, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer executable.Close()
+	helper, err := os.OpenFile(helperPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(helper, executable); err != nil {
+		_ = helper.Close()
+		t.Fatal(err)
+	}
+	if err := helper.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return helperPath
+}
 
 func testP256PublicKey(t *testing.T) []byte {
 	t.Helper()
@@ -173,11 +216,7 @@ func TestParseExternalPolicyMembers(t *testing.T) {
 		t.Fatalf("PIV members = %#v", pivMembers)
 	}
 
-	helperPath := filepath.Join(root, "custodian")
-	helper := "#!/bin/sh\nprintf '" + base64.StdEncoding.EncodeToString(make([]byte, 32)) + "\\n'\n"
-	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	helperPath := testCustodianPath(t, root)
 	fidoPath := filepath.Join(root, "fido.json")
 	fido := fmt.Sprintf(
 		`{"member_id":"fido-a","provider":"fido2-hmac-secret",`+
@@ -240,14 +279,7 @@ func testSecureEnclaveExternalPolicyMember(t *testing.T, root, tokenPath string)
 
 func TestEnrollFIDO2WritesProtectedExternalMember(t *testing.T) {
 	root := t.TempDir()
-	helperPath := filepath.Join(root, "custodian")
-	helperOutput := `{"credential_id":"AQID",` +
-		`"public_key":"sha256:787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472",` +
-		`"public_key_der":"BAUG","relying_party_id":"vaultic.example",` +
-		`"attestation_fingerprint":null,"user_presence_required":true}`
-	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nprintf '%s\\n' '"+helperOutput+"'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	helperPath := testCustodianPath(t, root)
 	pinPath := filepath.Join(root, "pin")
 	if err := os.WriteFile(pinPath, []byte("123456"), 0o600); err != nil {
 		t.Fatal(err)
@@ -272,7 +304,7 @@ func TestEnrollFIDO2WritesProtectedExternalMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && metadata.Mode().Perm() != 0o600 {
 		t.Fatalf("FIDO2 definition mode = %o", metadata.Mode().Perm())
 	}
 }

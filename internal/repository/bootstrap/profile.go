@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 
 	"github.com/BurntSushi/toml"
@@ -101,7 +102,7 @@ func LoadAnchor(path string) (Anchor, error) {
 	if err != nil {
 		return Anchor{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return Anchor{}, fmt.Errorf("bootstrap anchor must be a private regular file")
 	}
 	encoded, err := os.ReadFile(path)

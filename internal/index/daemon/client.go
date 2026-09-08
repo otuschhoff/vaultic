@@ -583,20 +583,20 @@ func validateUnixEndpoint(socket string) error {
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
+	if info.Mode()&os.ModeSocket == 0 || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		return fmt.Errorf("unsafe vaulticdb socket permissions at %s", socket)
 	}
-	if vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid()) {
+	if runtime.GOOS != "windows" && vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid()) {
 		return fmt.Errorf("unsafe vaulticdb socket owner at %s", socket)
 	}
 	directory, err := os.Lstat(filepath.Dir(socket))
 	if err != nil {
 		return err
 	}
-	if !directory.IsDir() || directory.Mode().Perm() != 0o700 {
+	if !directory.IsDir() || runtime.GOOS != "windows" && directory.Mode().Perm() != 0o700 {
 		return fmt.Errorf("unsafe vaulticdb runtime directory permissions at %s", filepath.Dir(socket))
 	}
-	if vaulticfs.ExtendedStat(directory).UID != uint32(os.Geteuid()) {
+	if runtime.GOOS != "windows" && vaulticfs.ExtendedStat(directory).UID != uint32(os.Geteuid()) {
 		return fmt.Errorf("unsafe vaulticdb runtime directory owner at %s", filepath.Dir(socket))
 	}
 	return nil

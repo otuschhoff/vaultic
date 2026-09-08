@@ -36,6 +36,7 @@ func goldenJSON(t *testing.T, name string, value any) {
 	if err != nil {
 		t.Fatalf("read golden %s (set UPDATE_GOLDEN=1 to create it): %v", path, err)
 	}
+	expected = bytes.ReplaceAll(expected, []byte("\r\n"), []byte("\n"))
 	if string(expected) != string(encoded) {
 		t.Fatalf("golden %s mismatch:\nwant:\n%s\ngot:\n%s", path, expected, encoded)
 	}

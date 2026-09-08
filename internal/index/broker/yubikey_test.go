@@ -2,23 +2,74 @@ package broker
 
 import (
 	"encoding/base64"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) == "helper" || filepath.Base(os.Args[0]) == "helper.exe" {
+		root := filepath.Dir(os.Args[0])
+		input, err := io.ReadAll(os.Stdin)
+		if err == nil {
+			err = os.WriteFile(filepath.Join(root, "arguments"), []byte(strings.Join(os.Args[1:], " ")+"\n"), 0o600)
+		}
+		if err == nil {
+			err = os.WriteFile(filepath.Join(root, "stdin"), input, 0o600)
+		}
+		if err == nil && len(os.Args) > 1 && os.Args[1] == "macos-secure-enclave-unwrap" {
+			err = os.WriteFile(filepath.Join(root, "environment"), []byte(strings.Join(os.Environ(), "\n")), 0o600)
+		}
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		outputs := map[string]string{
+			"yubikey-piv-unwrap":          base64.StdEncoding.EncodeToString([]byte("wrapped-share")),
+			"fido2-hmac-secret-unwrap":    base64.StdEncoding.EncodeToString([]byte("fido-share")),
+			"macos-secure-enclave-unwrap": base64.StdEncoding.EncodeToString([]byte("enclave-share")),
+		}
+		fmt.Println(outputs[os.Args[1]])
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func testCustodianHelper(t *testing.T, root string) string {
+	t.Helper()
+	extension := ""
+	if runtime.GOOS == "windows" {
+		extension = ".exe"
+	}
+	helperPath := filepath.Join(root, "helper"+extension)
+	executable, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer executable.Close()
+	helper, err := os.OpenFile(helperPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(helper, executable); err != nil {
+		_ = helper.Close()
+		t.Fatal(err)
+	}
+	if err := helper.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return helperPath
+}
 
 func TestYubiKeyPIVUnwrapperUsesBoundContext(t *testing.T) {
 	root := t.TempDir()
 	argumentsPath := filepath.Join(root, "arguments")
 	stdinPath := filepath.Join(root, "stdin")
-	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString(
-		[]byte("wrapped-share"),
-	) + "\\n'\n"
-	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	helperPath := testCustodianHelper(t, root)
 	unwrapper := YubiKeyPIVUnwrapper{HelperPath: helperPath, PINFile: "/protected/pin"}
 	plaintext, identity, err := unwrapper.UnwrapMember(
 		t.Context(),
@@ -69,13 +120,7 @@ func TestFIDO2HMACSecretUnwrapperUsesBoundContext(t *testing.T) {
 	root := t.TempDir()
 	argumentsPath := filepath.Join(root, "arguments")
 	stdinPath := filepath.Join(root, "stdin")
-	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath + "\ncat > " + stdinPath + "\nprintf '" + base64.StdEncoding.EncodeToString(
-		[]byte("fido-share"),
-	) + "\\n'\n"
-	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	helperPath := testCustodianHelper(t, root)
 	unwrapper := FIDO2HMACSecretUnwrapper{HelperPath: helperPath, PINFile: "/protected/pin"}
 	plaintext, identity, err := unwrapper.UnwrapMember(
 		t.Context(),
@@ -116,14 +161,7 @@ func TestMacosSecureEnclaveUnwrapperUsesBoundContextAndEmptyEnvironment(t *testi
 	argumentsPath := filepath.Join(root, "arguments")
 	stdinPath := filepath.Join(root, "stdin")
 	environmentPath := filepath.Join(root, "environment")
-	helperPath := filepath.Join(root, "helper")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argumentsPath
-	script += "\nenv > " + environmentPath
-	script += "\ncat > " + stdinPath
-	script += "\nprintf '" + base64.StdEncoding.EncodeToString([]byte("enclave-share")) + "\\n'\n"
-	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	helperPath := testCustodianHelper(t, root)
 	unwrapper := MacosSecureEnclaveUnwrapper{HelperPath: helperPath}
 	plaintext, identity, err := unwrapper.UnwrapMember(
 		t.Context(),

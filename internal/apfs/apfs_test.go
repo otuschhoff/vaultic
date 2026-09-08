@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestCreateMountAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(mount.MountPoint)
-	if err != nil || info.Mode().Perm() != 0o700 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("mount directory mode = %v, %v", info.Mode(), err)
 	}
 	if err := mount.Cleanup(t.Context()); err != nil {
@@ -88,6 +89,9 @@ type execNotFoundError struct{}
 func (execNotFoundError) Error() string { return "executable file not found" }
 
 func TestRemapRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("APFS paths use Darwin filesystem semantics")
+	}
 	got, err := RemapRoot("/Users/oli", "/private/tmp/snapshot", "/Users/oli/docs/report")
 	if err != nil || got != filepath.Join("/private/tmp/snapshot", "docs/report") {
 		t.Fatalf("remapped path = %q, %v", got, err)
@@ -98,6 +102,9 @@ func TestRemapRoot(t *testing.T) {
 }
 
 func TestSnapshotSourcePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("APFS paths use Darwin filesystem semantics")
+	}
 	tests := []struct {
 		name   string
 		volume Volume

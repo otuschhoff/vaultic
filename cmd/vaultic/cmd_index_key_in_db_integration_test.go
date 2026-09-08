@@ -361,7 +361,7 @@ func TestGoContributionsUnlockRustBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	socketDirectory, err := os.MkdirTemp("/tmp", "vkb-")
+	socketDirectory, err := os.MkdirTemp("", "vkb-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func testVaulticDBBinary(t *testing.T) string {
 
 func testMetadataSocket(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp", "vdb-")
+	directory, err := os.MkdirTemp("", "vdb-")
 	if err != nil {
 		t.Fatal(err)
 	}

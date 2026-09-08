@@ -378,7 +378,7 @@ func testGCDaemonPath(t *testing.T) string {
 // which manifests as an opaque daemon-readiness timeout.
 func gcTestSocket(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "vd-gc-")
+	dir, err := os.MkdirTemp("", "vd-gc-")
 	if err != nil {
 		t.Fatal(err)
 	}

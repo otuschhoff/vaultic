@@ -3,6 +3,8 @@ package warmup
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -26,8 +28,8 @@ func TestWarmupDisabled(t *testing.T) {
 
 func TestWarmupBatchIDs(t *testing.T) {
 	// use a command that appends the substituted %ids to a file we control
-	out := t.TempDir() + "/calls.txt"
-	opts := Options{Command: "echo '%ids' >> " + out, Batch: 2}
+	out := filepath.Join(t.TempDir(), "calls.txt")
+	opts := Options{Command: "echo %ids >> \"" + out + "\"", Batch: 2}
 
 	r := New(opts, nil, nil)
 	handles := []backend.Handle{handle("aaaa"), handle("bbbb"), handle("cccc"), handle("dddd"), handle("eeee")}
@@ -42,9 +44,9 @@ func TestWarmupBatchIDs(t *testing.T) {
 }
 
 func TestWarmupParallelPerID(t *testing.T) {
-	out := t.TempDir() + "/calls.txt"
+	out := filepath.Join(t.TempDir(), "calls.txt")
 	// %id (singular) -> one invocation per handle, up to Batch in parallel
-	opts := Options{Command: "echo '%id' >> " + out, Batch: 2}
+	opts := Options{Command: "echo %id >> \"" + out + "\"", Batch: 2}
 	r := New(opts, nil, nil)
 	handles := []backend.Handle{handle("aa"), handle("bb"), handle("cc")}
 	rtest.OK(t, r.Warmup(context.TODO(), handles, pathOf))
@@ -59,6 +61,9 @@ func TestWarmupParallelPerID(t *testing.T) {
 }
 
 func TestWarmupProgressProtocol(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("progress fixture uses POSIX shell quoting and command separators")
+	}
 	// use %ids so both packs are in ONE invocation; the command reports
 	// pack-progress within that invocation, interleaved with plain text
 	cmd := `echo 'starting'; echo '{"type":"pack-progress","warm":1}'; echo '{"type":"pack-progress","warm":2}'`
@@ -84,7 +89,11 @@ func TestWarmupFailurePropagates(t *testing.T) {
 
 func TestWarmupWait(t *testing.T) {
 	start := time.Now()
-	r := New(Options{Command: "true", Wait: 50 * time.Millisecond}, nil, nil)
+	command := "true"
+	if runtime.GOOS == "windows" {
+		command = "ver > nul"
+	}
+	r := New(Options{Command: command, Wait: 50 * time.Millisecond}, nil, nil)
 	rtest.OK(t, r.Warmup(context.TODO(), []backend.Handle{handle("aa")}, pathOf))
 	rtest.Assert(t, time.Since(start) >= 50*time.Millisecond, "warm-up wait was not honored")
 }

@@ -362,7 +362,7 @@ func reconciliationDaemonClient(t *testing.T, repositoryID string) *daemon.Clien
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("compiled vaulticdb unavailable: %v", err)
 	}
-	socketDir, err := os.MkdirTemp("/tmp", "vd-feasibility-")
+	socketDir, err := os.MkdirTemp("", "vd-feasibility-")
 	if err != nil {
 		t.Fatal(err)
 	}

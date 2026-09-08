@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -167,7 +168,7 @@ func (r *Runner) invoke(ctx context.Context, ids, paths []string) error {
 		cmdline = strings.ReplaceAll(cmdline, k, repl[k])
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
+	cmd := shellCommand(ctx, cmdline)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -217,7 +218,7 @@ func (r *Runner) wait(ctx context.Context, handles []backend.Handle, pathFor fun
 			paths = append(paths, pathFor(h))
 		}
 		cmdline := substitute(r.opts.WaitCommand, ids, paths)
-		cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
+		cmd := shellCommand(ctx, cmdline)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return errors.Wrapf(err, "warm-up wait command failed: %s", strings.TrimSpace(string(out)))
 		}
@@ -235,6 +236,13 @@ func (r *Runner) wait(ctx context.Context, handles []backend.Handle, pathFor fun
 		}
 	}
 	return nil
+}
+
+func shellCommand(ctx context.Context, command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd.exe", "/C", command)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", command)
 }
 
 func first(s []string) string {

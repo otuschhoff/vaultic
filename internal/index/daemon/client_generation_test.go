@@ -354,7 +354,7 @@ type testService struct {
 
 func testSocket(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "vd-")
+	dir, err := os.MkdirTemp("", "vd-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,11 +591,11 @@ func TestEnsureStartsDaemonRecoversStaleSocketAndCleansUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(socket)
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("socket permissions: %v, %v", info.Mode(), err)
 	}
 	dir, err := os.Stat(filepath.Dir(socket))
-	if err != nil || dir.Mode().Perm() != 0o700 {
+	if err != nil || runtime.GOOS != "windows" && dir.Mode().Perm() != 0o700 {
 		t.Fatalf("directory permissions: %v, %v", dir.Mode(), err)
 	}
 	capabilities, err := client.RPC().

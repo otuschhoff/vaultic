@@ -61,7 +61,7 @@ func (filesystem *fakeFS) Lstat(path string) (*fs.ExtendedFileInfo, error) {
 	}
 	filesystem.mu.Lock()
 	defer filesystem.mu.Unlock()
-	info, found := filesystem.entries[path]
+	info, found := filesystem.entries[filepath.ToSlash(path)]
 	if !found {
 		return nil, os.ErrNotExist
 	}
@@ -69,7 +69,7 @@ func (filesystem *fakeFS) Lstat(path string) (*fs.ExtendedFileInfo, error) {
 }
 
 func (filesystem *fakeFS) Dir(path string) string {
-	if parent, found := filesystem.parents[path]; found {
+	if parent, found := filesystem.parents[filepath.ToSlash(path)]; found {
 		return parent
 	}
 	return filepath.Dir(path)
@@ -786,7 +786,7 @@ func TestDefaultWorkerCountAppliesBackpressure(t *testing.T) {
 
 func TestDaemonBackedPostImportReconciliation(t *testing.T) {
 	binary := reconciliationDaemonBinary(t)
-	socketDirectory, err := os.MkdirTemp("/tmp", "vaultic-reconcile-")
+	socketDirectory, err := os.MkdirTemp("", "vaultic-reconcile-")
 	if err != nil {
 		t.Fatal(err)
 	}

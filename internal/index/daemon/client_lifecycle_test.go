@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +22,41 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestMain(m *testing.M) {
+	base := filepath.Base(os.Args[0])
+	if base == "unready-daemon" || base == "unready-daemon.exe" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func unreadyDaemonPath(t *testing.T, directory string) string {
+	t.Helper()
+	extension := ""
+	if runtime.GOOS == "windows" {
+		extension = ".exe"
+	}
+	path := filepath.Join(directory, "unready-daemon"+extension)
+	source, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	destination, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(destination, source); err != nil {
+		_ = destination.Close()
+		t.Fatal(err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestEnsureRejectsInsecureTCPConfiguration(t *testing.T) {
 	address := freeTCPAddress(t)
@@ -562,10 +599,7 @@ func TestEnsureTCPRaceHasOneOwner(t *testing.T) {
 
 func TestEnsureCancellationKillsUnreadyChild(t *testing.T) {
 	directory := t.TempDir()
-	script := filepath.Join(directory, "unready-daemon")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := unreadyDaemonPath(t, directory)
 	socket := filepath.Join(directory, "daemon.sock")
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
