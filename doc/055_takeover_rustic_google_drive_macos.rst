@@ -829,13 +829,309 @@ This preserves the warm 5 TiB Google Drive tier, keeps one metadata replica
 local and another on GCP S3, and makes the deep archive tier cheap while still
 maintaining a replayable, restoreable backup history.
 
+Run recurring backups after a 2-of-3 unlock
+============================================
+
+The recommended macOS arrangement separates scheduling from authorization:
+
+* ``launchd`` probes every 15 minutes but never holds a repository password,
+   master key, metadata DEK, YubiKey PIN, recovery password, or member share;
+* a fresh 2-of-3 ceremony opens a bounded broker epoch;
+* the next probe sees the unlocked broker and runs one backup in the background;
+* a success stamp suppresses another backup for 23 hours; and
+* the broker locks automatically when the configured epoch expires.
+
+This makes unlocking the only recurring interactive step. If the broker stays
+locked, the probe exits successfully without opening the repository. Unlocking
+does not itself start a backup, but the next probe starts one within 15 minutes.
+
+Choose one coherent macOS account model
+---------------------------------------
+
+The broker socket is mode ``0600``. For a personal Mac backup of
+``/Users/oli``, run the broker and backup LaunchAgent as the ``oli`` login user
+and authorize that numeric UID in the broker's signed client policy. Do not
+install the system ``_vaultic`` LaunchDaemon template unchanged and then expect
+a user LaunchAgent to reach its owner-only socket. A separate service account
+also lacks ordinary access and macOS privacy consent for the login user's home
+directory.
+
+Run the supervised ``vaulticdb`` process under the same account and authorize
+its separately signed release manifest only for ``metadata-dek``. If VaulticDB
+or the broker restarts while locked, VaulticDB cannot reacquire its metadata
+lease; let launchd retry it and complete the next 2-of-3 ceremony. Do not restore
+the retired key-in-database route merely to make unattended restart succeed.
+
+Keep ``vaultic``, ``vaulticdb``, and the wrapper below in root-owned,
+non-writable installation paths even though their processes run as ``oli``.
+Authorize the exact ``/usr/local/bin/vaultic`` digest and the
+``repository-master-key`` capability in the broker release manifest. Grant that
+installed Vaultic executable Full Disk Access in macOS Privacy & Security, then
+test access from the LaunchAgent context; a Terminal test does not prove that a
+background process has the same TCC authorization.
+
+An unattended ``rclone:`` transport necessarily needs a noninteractive Google
+Drive credential. Keep the OAuth refresh token in a mode-``0600`` rclone config
+owned by ``oli``, restrict the Google account and remote to this backup, and do
+not put the token or an rclone config password in the plist. The quorum protects
+the repository keys, not the cloud account; revoking the rclone token must be a
+separate incident-response action.
+
+Bound the manual unlock window
+------------------------------
+
+Set a finite epoch lifetime in the broker config. Two hours gives the
+15-minute probe enough time to observe an unlock without leaving the broker
+open for the rest of the day:
+
+.. code-block:: json
+
+    {
+       "maximum_unlocked_seconds": 7200
+    }
+
+Add this field to the existing broker JSON rather than replacing the complete
+configuration. Restarting the broker applies the setting and starts it locked,
+so perform another 2-of-3 ceremony afterward. Epoch expiry prevents new leases
+and revokes broker-side lease state. It cannot retract key bytes already issued
+to a running, authorized process, so host and authorized-client integrity still
+matter during a backup.
+
+Variant: keep the broker epoch open for one week
+------------------------------------------------
+
+If a daily 2-of-3 ceremony is too disruptive, configure a seven-day epoch:
+
+.. code-block:: json
+
+   {
+     "maximum_unlocked_seconds": 604800
+   }
+
+One ceremony can then authorize up to seven recurring daily backups. The
+LaunchAgent and wrapper do not change: each backup still requests only a
+one-hour, connection-bound ``repository-master-key`` lease, and the 23-hour
+success stamp still permits at most one successful backup per day. A job that
+starts near the end of the week may continue with key bytes already delivered
+to its process, but no new lease can be issued after epoch expiry.
+
+This variant reduces ceremony frequency but materially enlarges the compromise
+window. For the whole week, any correctly signed and broker-authorized client
+running under the configured peer UID can request its allowed key capability
+without another Touch ID, YubiKey, or password contribution. Screen lock,
+logout, sleep, and closing Terminal do not lock a launchd-supervised broker.
+Broker restart, host restart, explicit lock, or the seven-day expiry does.
+
+Use the weekly variant only on a FileVault-protected, physically controlled Mac
+with automatic screen lock, current endpoint security, tightly bounded release
+authorizations, and no unnecessary local administrators. Prefer the two-hour
+window on a shared, mobile, or higher-risk machine. Lock immediately before
+travel, repair, account changes, suspected compromise, or handing the Mac to
+another person:
+
+.. code-block:: console
+
+   $ vaultic index unlock lock \
+         --broker-socket "$HOME/.config/vaultic/quorum/key-broker.sock" \
+         --confirm
+
+After a broker or Mac restart, or after seven days, perform a fresh 2-of-3
+ceremony. Changing ``maximum_unlocked_seconds`` also requires a broker restart
+and therefore another ceremony. Do not increase ``--key-broker-lease`` beyond
+``1h``: the broker rejects longer leases, and a week-long lease would defeat the
+separation between the unlock epoch and individual jobs even if it were
+accepted.
+
+Create a dedicated recurring profile
+------------------------------------
+
+Save this as ``$HOME/.config/vaultic/recurring.toml`` with mode ``0600``. It
+contains repository topology and backup choices, but no unlock credential:
+
+.. code-block:: toml
+
+    [global]
+    no-progress = true
+
+    [repository]
+    repository = "rclone:biz-drive:Backup/Hosts/mbp"
+
+    [backup]
+    one-file-system = true
+    exclude-file = ["/Users/oli/Library/Application Support/vaultic/excludes.txt"]
+
+    [[backup.snapshots]]
+    name = "mbp-disk"
+    sources = ["/Users/oli"]
+    host = "mbp-disk"
+    tag = ["automatic", "daily"]
+
+Do not copy the old Rustic ``password-file`` into this production profile. The
+finalized capsule migration deliberately makes password, direct-key,
+Azure-secret, and key-in-database routes mutually exclusive with brokered
+unlock.
+
+Install the probe wrapper
+-------------------------
+
+Install the following as ``/usr/local/libexec/vaultic-backup-mbp``. Keep it
+root-owned and mode ``0755``. The status query is local and does not acquire a
+key lease. The backup requests a one-hour job lease, below the broker's maximum
+allowed lease lifetime, and waits up to 30 minutes for an existing repository
+operation to release its lock:
+
+.. code-block:: zsh
+
+    #!/bin/zsh
+    set -u
+    set -o pipefail
+    umask 077
+
+    readonly VAULTIC=/usr/local/bin/vaultic
+    readonly PROFILE="$HOME/.config/vaultic/recurring.toml"
+    readonly BROKER_SOCKET="$HOME/.config/vaultic/quorum/key-broker.sock"
+    readonly RELEASE_MANIFEST=/usr/local/etc/vaultic/vaultic.release.json
+    readonly RCLONE_CONFIG_FILE="$HOME/.config/rclone/rclone.conf"
+    readonly STATE_DIR="$HOME/Library/Application Support/vaultic/automation"
+    readonly SUCCESS_STAMP="$STATE_DIR/last-backup-success"
+    readonly MINIMUM_INTERVAL=82800
+
+    /bin/mkdir -p "$STATE_DIR"
+
+    unset VAULTIC_PASSWORD VAULTIC_PASSWORD_FILE VAULTIC_PASSWORD_COMMAND
+    unset VAULTIC_KEY VAULTIC_KEY_FILE VAULTIC_KEY_COMMAND
+    unset VAULTIC_METADATA_KEY_IN_DB
+    unset RESTIC_PASSWORD RESTIC_PASSWORD_FILE RESTIC_PASSWORD_COMMAND
+
+    status_json=$(
+       "$VAULTIC" -P "$PROFILE" --json index unlock \
+          --broker-socket "$BROKER_SOCKET" status 2>/dev/null
+    ) || exit 0
+    locked=$(
+       /usr/bin/printf '%s' "$status_json" |
+          /usr/bin/plutil -extract locked raw -o - - 2>/dev/null
+    ) || exit 0
+    [[ "$locked" == "false" ]] || exit 0
+
+    now=$(/bin/date +%s)
+    if [[ -f "$SUCCESS_STAMP" ]]; then
+       last_success=$(/usr/bin/stat -f %m "$SUCCESS_STAMP") || exit 1
+       (( now - last_success < MINIMUM_INTERVAL )) && exit 0
+    fi
+
+    export RCLONE_CONFIG="$RCLONE_CONFIG_FILE"
+
+    "$VAULTIC" \
+       --key-broker-socket "$BROKER_SOCKET" \
+       --key-broker-release-manifest "$RELEASE_MANIFEST" \
+       --key-broker-lease 1h \
+       --retry-lock 30m \
+       -P "$PROFILE" \
+       backup --name mbp-disk || exit $?
+
+    /usr/bin/touch "$SUCCESS_STAMP"
+
+``launchd`` never starts a second instance of the same job while one is still
+running. The repository lock and ``--retry-lock`` additionally coordinate this
+job with manually invoked Vaultic maintenance. The success stamp is updated
+only after exit status 0; an incomplete snapshot with exit status 3 or any
+fatal failure remains eligible for retry during the current unlock epoch.
+
+Install the user LaunchAgent
+----------------------------
+
+Create ``$HOME/Library/LaunchAgents/com.vaultic.backup.mbp.plist`` with mode
+``0644``. Use absolute executable paths because a LaunchAgent does not inherit
+the interactive shell's ``PATH``:
+
+.. code-block:: xml
+
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+       "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+       <key>Label</key>
+       <string>com.vaultic.backup.mbp</string>
+       <key>ProgramArguments</key>
+       <array>
+          <string>/usr/local/libexec/vaultic-backup-mbp</string>
+       </array>
+       <key>RunAtLoad</key>
+       <true/>
+       <key>StartInterval</key>
+       <integer>900</integer>
+       <key>ProcessType</key>
+       <string>Background</string>
+       <key>LowPriorityIO</key>
+       <true/>
+       <key>StandardOutPath</key>
+       <string>/Users/oli/Library/Logs/vaultic-backup.log</string>
+       <key>StandardErrorPath</key>
+       <string>/Users/oli/Library/Logs/vaultic-backup.log</string>
+    </dict>
+    </plist>
+
+Validate and load it in the GUI domain of the logged-in user:
+
+.. code-block:: console
+
+    $ install -d -m 0700 "$HOME/Library/Logs" \
+             "$HOME/Library/Application Support/vaultic/automation"
+    $ chmod 0600 "$HOME/.config/vaultic/recurring.toml"
+    $ chmod 0600 "$HOME/.config/rclone/rclone.conf"
+    $ plutil -lint "$HOME/Library/LaunchAgents/com.vaultic.backup.mbp.plist"
+    $ launchctl bootstrap "gui/$(id -u)" \
+             "$HOME/Library/LaunchAgents/com.vaultic.backup.mbp.plist"
+
+After changing the plist, use ``launchctl bootout`` with the same GUI domain
+and path before bootstrapping it again. ``launchctl print
+gui/$(id -u)/com.vaultic.backup.mbp`` shows its state and last exit status.
+
+Daily operation
+---------------
+
+When a backup is due, perform one of the three fresh ceremonies from Step 1a:
+Touch ID plus YubiKey, Touch ID plus recovery password, or YubiKey plus recovery
+password. Use a new signed session, compare its fingerprint independently, and
+submit both contributions. Nothing from the ceremony belongs in the profile,
+wrapper, plist, environment, logs, or success stamp.
+
+Within 15 minutes the LaunchAgent acquires a repository-key lease and starts the
+named backup. Check ``$HOME/Library/Logs/vaultic-backup.log``. While the broker
+is still unlocked, confirm the new snapshot through the same brokered route:
+
+.. code-block:: console
+
+   $ vaultic \
+      --key-broker-socket "$HOME/.config/vaultic/quorum/key-broker.sock" \
+      --key-broker-release-manifest /usr/local/etc/vaultic/vaultic.release.json \
+      -P "$HOME/.config/vaultic/recurring.toml" \
+      snapshots --latest 1
+
+The 23-hour success interval prevents repeat snapshots during the same unlock
+window. Broker expiry closes the window automatically. To end it immediately:
+
+.. code-block:: console
+
+   $ vaultic index unlock lock \
+      --broker-socket "$HOME/.config/vaultic/quorum/key-broker.sock" \
+      --confirm
+
+If the Mac is asleep or offline, no backup is recorded and the stamp is not
+advanced. The probes continue after wake or network recovery, but a new
+2-of-3 ceremony is required if the broker epoch has already expired. Schedule
+``forget --prune`` and archive promotion as separate, less frequent LaunchAgent
+jobs; they also require an unlocked broker and must use distinct success stamps
+so a successful backup cannot suppress maintenance.
+
 Operational notes
 =================
 
 If you adopt this model, keep the following practices in place:
 
-* Use Touch ID or a hardware-backed passkey to unlock the local Mac and the
-  repository password store.
+* Use the 2-of-3 broker ceremony to release repository and metadata keys; do not
+   recreate a repository password file for scheduled jobs.
 * Keep cloud access keys out of shell history and make sure they are rotated on a
   schedule.
 * Prefer short-lived credentials from a workload identity or IAM role over long-
