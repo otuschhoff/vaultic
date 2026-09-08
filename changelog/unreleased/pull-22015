@@ -1,4 +1,4 @@
-Enhancement: Add `index stats`, `index packs`, `index history`, and `index backends`
+Enhancement: Add SlateDB index introspection commands
 
 Answering questions about a repository's composition and growth previously
 required either listing the backend or loading a full index, which is slow on a
