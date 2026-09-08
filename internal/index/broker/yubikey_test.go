@@ -205,7 +205,8 @@ func TestMacosSecureEnclaveUnwrapperUsesBoundContextAndEmptyEnvironment(t *testi
 	}
 	for _, entry := range strings.Fields(string(environment)) {
 		name, _, _ := strings.Cut(entry, "=")
-		if name != "PWD" && name != "SHLVL" && name != "_" {
+		windowsSystemRoot := runtime.GOOS == "windows" && strings.EqualFold(name, "SYSTEMROOT")
+		if name != "PWD" && name != "SHLVL" && name != "_" && !windowsSystemRoot {
 			t.Fatalf("helper inherited unexpected environment entry %q", entry)
 		}
 	}

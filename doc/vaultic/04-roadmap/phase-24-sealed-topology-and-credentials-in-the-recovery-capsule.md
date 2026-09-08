@@ -2,7 +2,7 @@
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 23](phase-23-macos-fsevents-change-detection-and-apfs-snapshot-backup-source.md) · [Phase 25 →](phase-25-ephemeral-cloud-storage-credentials-remote-principals-and-vaulticdb-access-tickets.md)
+[← Phase 23](phase-23-macos-fsevents-change-detection-and-apfs-snapshot-backup-source.md) · [Phase 25 →](phase-25-backblaze-and-wasabi-s3-compatible-backends.md)
 
 [Phase 20 quorum unlock](phase-20-quorum-based-encryption-unlock.md) · [Phase 22 bootstrap topology](phase-22-operational-resilience-with-relinquishable-metadata-writers-and-deferred-crawl-commit.md) · [Broker implementation](../02-architecture/08-quorum-key-broker.md) · [macOS takeover runbook](../../055_takeover_rustic_google_drive_macos.rst)
 
@@ -17,7 +17,7 @@ The Phase 22 design deliberately kept credentials out of the bootstrap-topology 
 1. **Recovery is not self-contained.** The takeover runbook shows the consequence: after finalizing quorum custody, an operator still needs the `VAULTICDB_REPLICATED_*` bucket names, endpoints, and `AWS_*` keys, plus an `rclone.conf` with a Google refresh token, to bring the repository back on a new Mac. Those are the pieces most likely to be lost with the old host and least likely to be in the custodians' possession.
 2. **Credentials are the weakest link.** The master key is behind a 2-of-3 ceremony; the S3 secret that lets anyone *delete* every pack is in a launchd environment file, a shell profile, or `~/.config/rclone/rclone.conf` with mode 0600. An attacker who cannot open the capsule can still destroy the repository.
 
-Phase 25 addresses the second gap for cloud providers that can mint short-lived scoped credentials from an issuer credential. This phase is the prerequisite it needs: the issuer credential itself, and every endpoint the issuer is for, must live inside the capsule rather than beside it. It also covers what Phase 25 cannot: providers with no delegation mechanism (S3-compatible stores without STS, Google Drive) whose only credential is long-lived.
+Phase 26 addresses the second gap for cloud providers that can mint short-lived scoped credentials from an issuer credential. This phase is the prerequisite it needs: the issuer credential itself, and every endpoint the issuer is for, must live inside the capsule rather than beside it. It also covers what Phase 26 cannot: providers with no delegation mechanism (S3-compatible stores without STS, Google Drive) whose only credential is long-lived. Phase 27 then extends those scoped credentials and the existing key leases to enrolled remote principals.
 
 ## Design
 
@@ -106,7 +106,7 @@ The broker never hands the whole topology document to a client. Two capabilities
 - `topology-read` — returns the document with the `credentials` map removed. Replaces the Phase 22 `topology-discovery` HKDF key for recovery capsules. Granted to `vaultic` and `vaulticdb` alongside their existing leases.
 - `credential-lease` — returns one credential by `credential_ref`, only if the requesting client's authorization lists that reference (or `*`), as a lease with the same TTL, connection binding, epoch binding, and revocation semantics as key leases. `vaulticdb` is authorized only for the references its `metadata_replicas` use; `vaultic` only for `pack_backends` references. A read-only `vaulticdb` never receives a credential whose kind can delete.
 
-Consumers hold credentials in zeroizing memory for the lease duration and re-lease at the renewal margin. For static kinds the "renewal" returns the same secret; the value of the lease is epoch binding — when the broker locks, a consumer that has to re-lease fails closed. Phase 25 layers short-lived provider tokens on top of this: its issuer credential is simply a `credential_ref` of kind `aws-static` / `gcp-service-account-json` / `azure-shared-key` with `may_issue` set, read by the broker itself and never leased to consumers.
+Consumers hold credentials in zeroizing memory for the lease duration and re-lease at the renewal margin. For static kinds the "renewal" returns the same secret; the value of the lease is epoch binding — when the broker locks, a consumer that has to re-lease fails closed. Phase 26 layers short-lived provider tokens on top of this: its issuer credential is simply a `credential_ref` of kind `aws-static` / `gcp-service-account-json` / `azure-shared-key` with `may_issue` set, read by the broker itself and never leased to consumers.
 
 `vaulticdb` startup changes from "read `VAULTICDB_*` and connect" to "acquire `metadata-dek` lease, acquire `topology-read`, acquire `credential-lease` for each replica reference, build the object-store stack." The `VAULTICDB_*` variables remain accepted only when `VAULTICDB_TOPOLOGY_SOURCE=external`, which status reports as a finding. The same applies to `vaultic`: `--topology-source capsule|external`, default `capsule` when the broker is configured.
 
@@ -145,7 +145,7 @@ The only artifacts that must survive the old host are the capsule generation (al
 
 - Custodian material (Secure Enclave key, YubiKey PIV key, recovery passphrase) — it unlocks the capsule and cannot be inside it.
 - The broker identity key and release-signing keys — they authenticate the capsule and the clients; sealing them would be circular.
-- Ephemeral tokens minted by Phase 25 — they are leases, not custody.
+- Ephemeral tokens minted by Phase 26 — they are leases, not custody.
 - Local paths that are host-specific (`data_dir`, socket paths) *are* sealed, because they are topology, but a `--topology-override local.data_dir=…` is allowed at bootstrap and is recorded as a deviation in status.
 
 ### Threat model delta
@@ -156,7 +156,7 @@ The only artifacts that must survive the old host are the capsule generation (al
 | Google refresh token in `~/.config/rclone/rclone.conf`; readable by any process running as the user. | Token is inside the capsule; the native backend refreshes in memory; nothing on disk. |
 | VaulticDB replica endpoints and HMAC keys in environment variables visible in `ps`, crash logs, and launchd plists. | Endpoints and keys are leased from the broker per epoch. |
 | Recovering on a new host needs the capsule + custodians + a separately kept list of buckets, endpoints, and keys. | Capsule + custodians. |
-| Unchanged: compromise of the host *during* an unlock epoch exposes leased credentials for the lease duration. | Unchanged; Phase 25 narrows it with short-lived scoped tokens. |
+| Unchanged: compromise of the host *during* an unlock epoch exposes leased credentials for the lease duration. | Unchanged; Phase 26 narrows it with short-lived scoped tokens. |
 
 ## Implementation steps
 

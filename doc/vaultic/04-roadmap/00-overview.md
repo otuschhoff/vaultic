@@ -43,7 +43,10 @@ commit series so it can be reviewed or reverted independently.
 | 22 | [Operational resilience and deferred crawl commit](phase-22-operational-resilience-with-relinquishable-metadata-writers-and-deferred-crawl-commit.md) | see phase detail |
 | 23 | [macOS FSEvents change detection and APFS snapshot backup source](phase-23-macos-fsevents-change-detection-and-apfs-snapshot-backup-source.md) | design |
 | 24 | [Sealed topology and credentials in the recovery capsule](phase-24-sealed-topology-and-credentials-in-the-recovery-capsule.md) | design |
-| 25 | [Ephemeral cloud storage credentials, remote principals, and VaulticDB access tickets](phase-25-ephemeral-cloud-storage-credentials-remote-principals-and-vaulticdb-access-tickets.md) | design |
+| 25 | [Backblaze and Wasabi S3-compatible backends](phase-25-backblaze-and-wasabi-s3-compatible-backends.md) | design |
+| 26 | [Ephemeral cloud storage credentials](phase-26-ephemeral-cloud-storage-credentials.md) | design |
+| 27 | [Remote principals and brokered VaulticDB access tickets](phase-27-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 28 | [Read-only NFSv3 snapshot server](phase-28-read-only-nfsv3-snapshot-server.md) | design |
 
 ## Supporting plans
 

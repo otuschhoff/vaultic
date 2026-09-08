@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -72,7 +73,7 @@ func (filesystem *fakeFS) Dir(path string) string {
 	if parent, found := filesystem.parents[filepath.ToSlash(path)]; found {
 		return parent
 	}
-	return filepath.Dir(path)
+	return pathpkg.Dir(filepath.ToSlash(path))
 }
 
 func TestAuthoritativeCrawlClaimIsExplicitAndFailsClosed(t *testing.T) {
