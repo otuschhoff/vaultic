@@ -18,6 +18,7 @@ Vaultic Documentation
    052_profiles_automation
    053_command_parity
    054_takeover_rustic_repository
+   055_takeover_rustic_google_drive_macos
    060_forget
    070_encryption
    075_scripting
