@@ -11,7 +11,8 @@ recovery. The operator-facing commands and custody procedures remain in
 
 | Component | Implementation | Responsibility |
 |---|---|---|
-| Recovery capsule | `vaulticdb/src/encryption/recovery_capsule.rs` | Validate immutable capsule generations, evaluate policies, wrap member shares, reconstruct the root secret, and authenticate both recovered payloads. |
+| Recovery capsule | `vaulticdb/src/encryption/recovery_capsule.rs` | Validate immutable capsule generations, evaluate policies, wrap member shares, reconstruct the root secret, and authenticate metadata, repository-key, and optional sealed-topology payloads. |
+| Topology schema | `vaulticdb/src/topology.rs`, `internal/topology/` | Canonicalize and validate closed endpoint and credential schemas, references, provider compatibility, placement policy, and redacted projections. |
 | Provider codecs | `vaulticdb/src/encryption/envelope/providers.rs` | Bind provider operations to repository, slot, key version, key reference, and purpose. |
 | Broker core | `vaulticdb/src/broker.rs` | Own unlock sessions, recovered keys, epochs, leases, policy candidates, and authorization decisions. |
 | Broker service | `vaulticdb/src/bin/vaultic-key-broker.rs` | Load the pre-database capsule, inspect peers, negotiate the protocol, dispatch bounded requests, and emit allowlisted security events. |
@@ -125,17 +126,21 @@ stateDiagram-v2
 ```
 
 A lease is bound to capability, epoch, connection, expiry, key version, and
-capsule generation. `metadata-dek`, `repository-master-key`, and
-`metadata-loss-recovery` are separate capabilities. Policy mutation is an
-authorized operation, not a key-returning lease. A broker restart creates no
-replacement epoch; clients must complete a new quorum ceremony.
+capsule generation. `metadata-dek`, `repository-master-key`,
+`metadata-loss-recovery`, `topology-read`, and `credential-lease` are separate
+capabilities. Topology reads contain references but no credential values;
+credential release requires an exact per-client reference authorization, and a
+read-only client cannot receive a delete-capable credential. Policy and
+topology mutation are authorized operations, not key-returning leases. A broker
+restart creates no replacement epoch; clients must complete a new quorum
+ceremony.
 
 ## Policy mutation and publication
 
 ```mermaid
 stateDiagram-v2
     [*] --> CurrentUnlocked
-    CurrentUnlocked --> CandidateRetained: prepare exact candidate and digest
+    CurrentUnlocked --> CandidateRetained: prepare exact policy or topology candidate and digest
     CandidateRetained --> MirrorPublished: create-only repository mirror
     MirrorPublished --> BothPublished: create-only local generation
     BothPublished --> CurrentLocked: activate exact retained digest
@@ -148,7 +153,9 @@ stateDiagram-v2
 The ordering is deliberate:
 
 1. The unlocked broker creates a fresh root secret and complete candidate while
-   preserving both underlying keys.
+  preserving both underlying keys and, for policy mutations, sealed topology.
+  A topology mutation is applied to the secret-bearing document only inside
+  the broker, validated, and rewrapped without exposing unrelated credentials.
 2. It retains the candidate and SHA-256 digest in memory, closes sessions and
    leases, and blocks new leases.
 3. VaulticDB writes the repository mirror with create-only semantics.

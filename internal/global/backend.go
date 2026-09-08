@@ -6,13 +6,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/repository/bootstrap"
 	"github.com/otuschhoff/vaultic/internal/repository/staging"
 	"github.com/otuschhoff/vaultic/internal/textfile"
+	"github.com/otuschhoff/vaultic/internal/topology"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
@@ -73,6 +76,9 @@ type repositoryLocation struct {
 	repository         string
 	bootstrapMasterKey string
 	bootstrapBroker    *indexbroker.Client
+	capsuleTopology    *topology.Document
+	capsuleBackend     backend.Backend
+	capsulePlacements  map[uint64]backend.Backend
 }
 
 // OpenRepository reads the password and opens the repository.
@@ -82,6 +88,9 @@ func OpenRepository(ctx context.Context, globalOptions Options, printer vaultic.
 		return nil, err
 	}
 	defer func() {
+		if location.capsulePlacements != nil {
+			closeTopologyBackends(location.capsulePlacements)
+		}
 		if location.bootstrapBroker != nil {
 			errors.LogClose(location.bootstrapBroker, "close bootstrap broker", debug.Log)
 		}
@@ -99,7 +108,47 @@ func OpenRepository(ctx context.Context, globalOptions Options, printer vaultic.
 }
 
 func resolveRepositoryLocation(ctx context.Context, globalOptions Options, printer vaultic.Printer) (repositoryLocation, error) {
+	expectedRepositoryID := ""
+	if globalOptions.BootstrapProfile != "" {
+		if globalOptions.Repo != "" || globalOptions.RepositoryFile != "" {
+			return repositoryLocation{}, errors.Fatal("--bootstrap-profile is mutually exclusive with --repo and --repository-file")
+		}
+		profile, err := bootstrap.LoadProfile(globalOptions.BootstrapProfile)
+		if err != nil {
+			return repositoryLocation{}, err
+		}
+		if profile.Format == 2 {
+			expectedRepositoryID = profile.RepositoryID
+			globalOptions.KeyBrokerSocket = profile.BrokerSocket
+			globalOptions.TopologySource = "capsule"
+			globalOptions.BootstrapProfile = ""
+		}
+	}
 	location := repositoryLocation{globalOptions: globalOptions}
+	topologySource, err := validateTopologySource(globalOptions.TopologySource, globalOptions.KeyBrokerSocket != "")
+	if err != nil {
+		return repositoryLocation{}, err
+	}
+	if topologySource == "capsule" {
+		resolved, err := openCapsuleTopology(ctx, globalOptions, printer)
+		if err == nil {
+			if expectedRepositoryID != "" && resolved.document.RepositoryID != expectedRepositoryID {
+				closeTopologyBackends(resolved.placements)
+				_ = resolved.primary.Close() // Preserve the repository identity error; backend cleanup is best effort.
+				_ = resolved.client.Close()  // Preserve the repository identity error; broker cleanup is best effort.
+				return repositoryLocation{}, errors.Fatal("capsule bootstrap profile repository identity mismatch")
+			}
+			location.repository = resolved.primaryURL
+			location.capsuleBackend = resolved.primary
+			location.capsulePlacements = resolved.placements
+			location.capsuleTopology = &resolved.document
+			location.bootstrapBroker = resolved.client
+			return location, nil
+		}
+		if globalOptions.TopologySource == "capsule" || !strings.Contains(err.Error(), "topology is external") {
+			return repositoryLocation{}, err
+		}
+	}
 	if globalOptions.BootstrapProfile != "" {
 		if globalOptions.Repo != "" || globalOptions.RepositoryFile != "" {
 			return repositoryLocation{}, errors.Fatal("--bootstrap-profile is mutually exclusive with --repo and --repository-file")
@@ -125,7 +174,11 @@ func resolveRepositoryLocation(ctx context.Context, globalOptions Options, print
 
 func openAndAuthenticate(ctx context.Context, location *repositoryLocation, printer vaultic.Printer) (*repository.Repository, context.Context, error) {
 	globalOptions := location.globalOptions
-	be, err := innerOpenBackend(ctx, location.repository, globalOptions, globalOptions.Extended, false, printer)
+	be := location.capsuleBackend
+	var err error
+	if be == nil {
+		be, err = innerOpenBackend(ctx, location.repository, globalOptions, globalOptions.Extended, false, printer)
+	}
 	if err != nil {
 		return nil, ctx, err
 	}
@@ -140,6 +193,19 @@ func openAndAuthenticate(ctx context.Context, location *repositoryLocation, prin
 	}
 	if err := authenticateRepository(ctx, s, location); err != nil {
 		return nil, ctx, err
+	}
+	if location.capsuleTopology != nil {
+		if err := location.capsuleTopology.ValidateConfig(s.Config()); err != nil {
+			return nil, ctx, err
+		}
+		for id, placement := range location.capsulePlacements {
+			s.AttachPlacementBackend(id, placement)
+		}
+		location.capsulePlacements = nil
+		if location.bootstrapBroker != nil {
+			s.AddOwnedCloser(location.bootstrapBroker)
+			location.bootstrapBroker = nil
+		}
 	}
 
 	if globalOptions.MetadataLossRecovery {

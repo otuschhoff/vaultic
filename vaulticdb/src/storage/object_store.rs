@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ObjectStoreConfig {
     Local { root: PathBuf },
     Memory,
@@ -6,23 +6,30 @@ pub(crate) enum ObjectStoreConfig {
     Replicated { replicas: Vec<ReplicaConfig> },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ReplicaConfig {
     pub(crate) id: String,
     pub(crate) store: ReplicaStoreConfig,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ReplicaStoreConfig {
     Local { root: PathBuf },
     Memory,
-    S3 { bucket: String, prefix: Option<String> },
+    S3 {
+        bucket: String,
+        prefix: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        access_key_id: Option<Zeroizing<String>>,
+        secret_access_key: Option<Zeroizing<String>>,
+    },
     Azure {
         account: String,
         container: String,
         prefix: Option<String>,
-        access_key: Option<String>,
-        bearer_token: Option<String>,
+        access_key: Option<Zeroizing<String>>,
+        bearer_token: Option<Zeroizing<String>>,
     },
 }
 
@@ -113,9 +120,28 @@ fn replica_store(
             ))
         }
         ReplicaStoreConfig::Memory => Ok(Arc::new(InMemory::new())),
-        ReplicaStoreConfig::S3 { bucket, prefix } => {
-            let store = AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
+        ReplicaStoreConfig::S3 {
+            bucket,
+            prefix,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+        } => {
+            let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+            if let Some(endpoint) = endpoint {
+                builder = builder.with_endpoint(endpoint);
+            }
+            if let Some(region) = region {
+                builder = builder.with_region(region);
+            }
+            if let Some(access_key_id) = access_key_id {
+                builder = builder.with_access_key_id(access_key_id.as_str());
+            }
+            if let Some(secret_access_key) = secret_access_key {
+                builder = builder.with_secret_access_key(secret_access_key.as_str());
+            }
+            let store = builder
                 .build()
                 .with_context(|| format!("configure S3-compatible object store replica {id}"))?;
             let path = match prefix {
@@ -137,10 +163,10 @@ fn replica_store(
                 .with_account(account)
                 .with_container_name(container);
             if let Some(access_key) = access_key {
-                builder = builder.with_access_key(access_key);
+                builder = builder.with_access_key(access_key.as_str());
             }
             if let Some(token) = bearer_token {
-                builder = builder.with_bearer_token_authorization(token);
+                builder = builder.with_bearer_token_authorization(token.as_str());
             }
             let store = builder
                 .build()

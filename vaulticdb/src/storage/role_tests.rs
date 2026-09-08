@@ -11,6 +11,7 @@ mod role_tests {
         let suffix = rand::random::<u64>();
         unsafe {
             env::set_var("VAULTICDB_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_TOPOLOGY_SOURCE", "external");
             env::set_var("VAULTICDB_DATABASE_PATH", format!("role-test-{suffix}"));
         }
         let config = crate::Config::from_env().unwrap();
@@ -44,6 +45,7 @@ mod role_tests {
         storage.close().await.unwrap();
         unsafe {
             env::remove_var("VAULTICDB_DATABASE_PATH");
+            env::remove_var("VAULTICDB_TOPOLOGY_SOURCE");
         }
     }
 
@@ -52,6 +54,7 @@ mod role_tests {
         let suffix = rand::random::<u64>();
         unsafe {
             env::set_var("VAULTICDB_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_TOPOLOGY_SOURCE", "external");
             env::set_var(
                 "VAULTICDB_DATABASE_PATH",
                 format!("idempotency-test-{suffix}"),
@@ -99,6 +102,7 @@ mod role_tests {
         storage.close().await.unwrap();
         unsafe {
             env::remove_var("VAULTICDB_DATABASE_PATH");
+            env::remove_var("VAULTICDB_TOPOLOGY_SOURCE");
         }
     }
 }

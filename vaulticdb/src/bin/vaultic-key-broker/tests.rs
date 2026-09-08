@@ -349,6 +349,8 @@ mod tests {
             release_public_key: release_key.verifying_key().to_bytes(),
             peer_uid: 42,
             capabilities: BTreeSet::from([Capability::PolicyMutation]),
+            credential_refs: BTreeSet::new(),
+            read_only: false,
         }];
         let mut state = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
         let session = state

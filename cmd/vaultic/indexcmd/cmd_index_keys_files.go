@@ -632,6 +632,15 @@ func newIndexKeysStatusCommand(globalOptions *global.Options, options *indexKeys
 
 func quorumAccessRouteFindings(options global.Options, metadata daemon.KeyStatus) []string {
 	var findings []string
+	if options.TopologySource == "external" {
+		findings = append(findings, "topology: external")
+	}
+	if len(options.TopologyOverrides) != 0 {
+		findings = append(findings, "capsule topology has host-local overrides")
+	}
+	if strings.HasPrefix(options.Repo, "rclone:") {
+		findings = append(findings, "rclone backend credential remains outside capsule")
+	}
 	configured := []struct {
 		active bool
 		name   string

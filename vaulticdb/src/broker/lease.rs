@@ -3,6 +3,20 @@ pub async fn acquire_metadata_lease(
     manifest_path: &std::path::Path,
     ttl: Duration,
 ) -> Result<(BrokerLeaseConnection, Zeroizing<Vec<u8>>)> {
+    let (connection, key) = acquire_payload_lease(socket, manifest_path, "metadata-dek", None, ttl).await?;
+    if key.len() != 32 {
+        bail!("broker metadata DEK has an invalid length");
+    }
+    Ok((connection, key))
+}
+
+pub async fn acquire_payload_lease(
+    socket: &str,
+    manifest_path: &std::path::Path,
+    capability: &str,
+    credential_ref: Option<&str>,
+    ttl: Duration,
+) -> Result<(BrokerLeaseConnection, Zeroizing<Vec<u8>>)> {
     if socket.is_empty() || ttl.is_zero() || ttl > MAX_LEASE_TTL {
         bail!("invalid broker metadata lease configuration");
     }
@@ -60,16 +74,19 @@ pub async fn acquire_metadata_lease(
             negotiation.challenge, actual_digest
         ))
     );
-    let request = serde_json::json!({
+    let mut request = serde_json::json!({
         "operation": "acquire_lease",
         "component": manifest.component,
         "version": manifest.version,
         "release_identity": manifest.release_identity,
         "release_signature": manifest.signature,
-        "capability": "metadata-dek",
+        "capability": capability,
         "ttl_seconds": ttl.as_secs(),
         "challenge_response": challenge_response,
     });
+    if let Some(credential_ref) = credential_ref {
+        request["credential_ref"] = serde_json::Value::String(credential_ref.to_owned());
+    }
     let mut request = serde_json::to_vec(&request)?;
     request.push(b'\n');
     writer.write_all(&request).await?;
@@ -102,7 +119,7 @@ pub async fn acquire_metadata_lease(
     let response: LeaseResponse = serde_json::from_slice(&response)?;
     if response.result == "error" {
         bail!(
-            "key broker rejected metadata lease ({}): {}",
+            "key broker rejected {capability} lease ({}): {}",
             response.code,
             response.message
         );
@@ -113,15 +130,15 @@ pub async fn acquire_metadata_lease(
         || response.key_version == 0
         || response.capsule_generation == 0
     {
-        bail!("invalid key broker metadata lease response");
+        bail!("invalid key broker {capability} lease response");
     }
     let key = Zeroizing::new(
         BASE64
             .decode(&response.key)
-            .context("decode leased metadata DEK")?,
+            .with_context(|| format!("decode leased {capability} payload"))?,
     );
-    if key.len() != 32 {
-        bail!("broker metadata DEK has an invalid length");
+    if key.is_empty() {
+        bail!("broker {capability} lease payload is empty");
     }
     let (disconnected_sender, disconnected) = watch::channel(false);
     tokio::spawn(async move {
@@ -159,6 +176,13 @@ fn protect_recovered_keys(keys: &RecoveredKeys) -> Result<()> {
         unlock_memory(keys.metadata_dek.as_slice());
         return Err(error);
     }
+    if let Some(topology) = keys.sealed_topology.as_ref() {
+        if let Err(error) = lock_memory(topology.as_slice()) {
+            unlock_memory(keys.metadata_dek.as_slice());
+            unlock_memory(keys.repository_master_key.as_slice());
+            return Err(error);
+        }
+    }
     #[cfg(target_os = "linux")]
     unsafe {
         libc::madvise(
@@ -166,6 +190,13 @@ fn protect_recovered_keys(keys: &RecoveredKeys) -> Result<()> {
             keys.metadata_dek.len(),
             libc::MADV_DONTDUMP,
         );
+        if let Some(topology) = keys.sealed_topology.as_ref() {
+            libc::madvise(
+                topology.as_ptr().cast_mut().cast(),
+                topology.len(),
+                libc::MADV_DONTDUMP,
+            );
+        }
         libc::madvise(
             keys.repository_master_key.as_ptr().cast_mut().cast(),
             keys.repository_master_key.len(),

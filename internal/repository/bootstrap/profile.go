@@ -11,10 +11,12 @@ import (
 )
 
 type Profile struct {
-	Format       uint   `toml:"format"        json:"format"`
-	RepositoryID string `toml:"repository_id" json:"repository_id"`
-	AnchorFile   string `toml:"anchor_file"   json:"anchor_file"`
-	Seeds        []Seed `toml:"seed"          json:"seeds"`
+	Format           uint   `toml:"format"            json:"format"`
+	RepositoryID     string `toml:"repository_id"     json:"repository_id"`
+	AnchorFile       string `toml:"anchor_file"       json:"anchor_file"`
+	CapsuleDirectory string `toml:"capsule_directory" json:"capsule_directory"`
+	BrokerSocket     string `toml:"broker_socket"     json:"broker_socket"`
+	Seeds            []Seed `toml:"seed"              json:"seeds"`
 }
 
 type Seed struct {
@@ -38,7 +40,13 @@ func LoadProfile(path string) (Profile, error) {
 }
 
 func (profile Profile) Validate() error {
-	if profile.Format != Format || profile.RepositoryID == "" || len(profile.Seeds) == 0 {
+	if profile.Format == 2 {
+		if profile.RepositoryID == "" || profile.CapsuleDirectory == "" || profile.BrokerSocket == "" || len(profile.Seeds) != 0 {
+			return fmt.Errorf("capsule bootstrap profile requires repository identity, capsule directory, and broker socket only")
+		}
+		return nil
+	}
+	if profile.Format != Format || profile.RepositoryID == "" || len(profile.Seeds) == 0 || profile.CapsuleDirectory != "" || profile.BrokerSocket != "" {
 		return fmt.Errorf("bootstrap profile requires format, repository identity, and seeds")
 	}
 	seen := make(map[string]struct{}, len(profile.Seeds))
@@ -55,6 +63,37 @@ func (profile Profile) Validate() error {
 		seen[seed.ID] = struct{}{}
 	}
 	return nil
+}
+
+func StoreProfile(path string, profile Profile) error {
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".profile-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := toml.NewEncoder(temporary).Encode(profile); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 func LoadAnchor(path string) (Anchor, error) {

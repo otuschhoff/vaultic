@@ -3,6 +3,7 @@ package all
 import (
 	"github.com/otuschhoff/vaultic/internal/backend/azure"
 	"github.com/otuschhoff/vaultic/internal/backend/b2"
+	"github.com/otuschhoff/vaultic/internal/backend/gdrive"
 	"github.com/otuschhoff/vaultic/internal/backend/gs"
 	"github.com/otuschhoff/vaultic/internal/backend/local"
 	"github.com/otuschhoff/vaultic/internal/backend/location"
@@ -18,6 +19,7 @@ func Backends() *location.Registry {
 	backends.Register(azure.NewFactory())
 	backends.Register(b2.NewFactory())
 	backends.Register(gs.NewFactory())
+	backends.Register(gdrive.NewFactory())
 	backends.Register(local.NewFactory())
 	backends.Register(rclone.NewFactory())
 	backends.Register(rest.NewFactory())

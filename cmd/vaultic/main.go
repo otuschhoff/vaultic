@@ -95,6 +95,8 @@ The documentation can be found at https://github.com/otuschhoff/vaultic/tree/mai
 	// globalOptions is passed to commands by reference to allow PersistentPreRunE to modify it
 	cmd.AddCommand(
 		backupcmd.NewCommand(globalOptions),
+		indexcmd.NewBackendCommand(globalOptions),
+		newBootstrapCommand(globalOptions),
 		newCacheCommand(globalOptions),
 		newCatCommand(globalOptions),
 		newCheckCommand(globalOptions),

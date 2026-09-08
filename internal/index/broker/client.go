@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cloudflare/circl/hpke"
+	"github.com/otuschhoff/vaultic/internal/topology"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 )
@@ -152,6 +153,7 @@ type capsule struct {
 	Members             []memberShare   `json:"members"`
 	MetadataDEK         json.RawMessage `json:"metadata_dek"`
 	RepositoryMasterKey json.RawMessage `json:"repository_master_key"`
+	SealedTopology      json.RawMessage `json:"sealed_topology,omitempty"`
 }
 
 type capsuleHeader struct {
@@ -353,15 +355,66 @@ func (client *Client) Lock(ctx context.Context) error {
 	return nil
 }
 
+func (client *Client) ReleaseLease(ctx context.Context, leaseID string) error {
+	if leaseID == "" {
+		return errors.New("lease ID is required")
+	}
+	var response responseEnvelope
+	if err := client.call(ctx, map[string]any{"operation": "release_lease", "lease_id": leaseID}, &response); err != nil {
+		return err
+	}
+	if response.Result != "ok" {
+		return errors.New("unexpected broker release response")
+	}
+	return nil
+}
+
 func (client *Client) AcquireLease(
 	ctx context.Context,
 	manifestPath, capability string,
 	ttl time.Duration,
 ) (Lease, error) {
 	if capability != "repository-master-key" && capability != "topology-discovery" &&
-		capability != "metadata-loss-recovery" {
+		capability != "metadata-loss-recovery" && capability != "topology-read" {
 		return Lease{}, fmt.Errorf("unsupported Vaultic broker capability %q", capability)
 	}
+	return client.acquireLease(ctx, manifestPath, capability, "", ttl)
+}
+
+func (client *Client) AcquireCredentialLease(
+	ctx context.Context,
+	manifestPath, credentialRef string,
+	ttl time.Duration,
+) (Lease, error) {
+	if credentialRef == "" {
+		return Lease{}, errors.New("credential reference is required")
+	}
+	return client.acquireLease(ctx, manifestPath, "credential-lease", credentialRef, ttl)
+}
+
+func (client *Client) ReadTopology(
+	ctx context.Context,
+	manifestPath string,
+	ttl time.Duration,
+) (topology.Document, Lease, error) {
+	lease, err := client.AcquireLease(ctx, manifestPath, "topology-read", ttl)
+	if err != nil {
+		return topology.Document{}, Lease{}, err
+	}
+	document, err := topology.DecodeRedacted(lease.Key)
+	if err != nil {
+		_ = client.ReleaseLease(ctx, lease.LeaseID) // Preserve the topology decoding error; lease cleanup is best effort.
+		clear(lease.Key)
+		return topology.Document{}, Lease{}, fmt.Errorf("decode broker topology: %w", err)
+	}
+	return document, lease, nil
+}
+
+func (client *Client) acquireLease(
+	ctx context.Context,
+	manifestPath, capability, credentialRef string,
+	ttl time.Duration,
+) (Lease, error) {
 	if ttl <= 0 || ttl > time.Hour || ttl%time.Second != 0 {
 		return Lease{}, errors.New("broker lease lifetime must be positive whole seconds and at most one hour")
 	}
@@ -379,17 +432,21 @@ func (client *Client) AcquireLease(
 		"ttl_seconds":        uint64(ttl / time.Second),
 		"challenge_response": authorization["challenge_response"],
 	}
+	if credentialRef != "" {
+		request["credential_ref"] = credentialRef
+	}
 	var response responseEnvelope
 	if err := client.call(ctx, request, &response); err != nil {
 		return Lease{}, err
 	}
 	if response.Result != "lease" || response.LeaseID == "" || response.EpochID == nil || *response.EpochID == "" ||
-		response.KeyVersion == 0 {
+		response.KeyVersion == 0 || response.Challenge == "" {
 		return Lease{}, errors.New("invalid broker lease response")
 	}
+	client.challenge = response.Challenge
 	key, err := base64.StdEncoding.DecodeString(response.Key)
 	if err != nil || len(key) == 0 {
-		return Lease{}, errors.New("invalid broker repository key")
+		return Lease{}, errors.New("invalid broker lease payload")
 	}
 	return Lease{
 		LeaseID:           response.LeaseID,
@@ -429,6 +486,34 @@ func (client *Client) PreparePolicyMutation(
 	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 ||
 		len(response.CapsuleSHA256) != 64 {
 		return PreparedPolicyMutation{}, errors.New("invalid prepared policy mutation response")
+	}
+	return PreparedPolicyMutation{Capsule: response.Capsule, CapsuleSHA256: response.CapsuleSHA256}, nil
+}
+
+func (client *Client) PrepareTopologyMutation(
+	ctx context.Context,
+	manifestPath string,
+	mutation topology.Mutation,
+	members []OfflinePolicyMember,
+	externalMembers []ExternalPolicyMember,
+) (PreparedPolicyMutation, error) {
+	authorization, err := client.authorizedOperation(manifestPath)
+	if err != nil {
+		return PreparedPolicyMutation{}, err
+	}
+	var response responseEnvelope
+	request := map[string]any{
+		"operation":        "prepare_topology_mutation",
+		"authorization":    authorization,
+		"mutation":         mutation,
+		"members":          members,
+		"external_members": externalMembers,
+	}
+	if err := client.call(ctx, request, &response); err != nil {
+		return PreparedPolicyMutation{}, err
+	}
+	if response.Result != "policy_mutation_prepared" || len(response.Capsule) == 0 || len(response.CapsuleSHA256) != 64 {
+		return PreparedPolicyMutation{}, errors.New("invalid prepared topology mutation response")
 	}
 	return PreparedPolicyMutation{Capsule: response.Capsule, CapsuleSHA256: response.CapsuleSHA256}, nil
 }

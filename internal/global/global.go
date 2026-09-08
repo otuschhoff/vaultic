@@ -107,6 +107,10 @@ func innerOpenBackend(ctx context.Context, s string, gopts Options, opts options
 	return be, nil
 }
 
+func OpenBackend(ctx context.Context, location string, globalOptions Options, printer vaultic.Printer) (backend.Backend, error) {
+	return innerOpenBackend(ctx, location, globalOptions, globalOptions.Extended, false, printer)
+}
+
 // parseConfig parses the repository location and extended options and returns the scheme and configuration.
 func parseConfig(backends *location.Registry, s string, opts options.Options) (string, any, error) {
 	loc, err := location.Parse(backends, s)

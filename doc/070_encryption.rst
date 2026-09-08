@@ -216,12 +216,67 @@ set of member credentials, but loss of every capsule copy is unrecoverable.
 
 Each capsule generation has a new random root wrapping secret. HKDF derives
 independent wrapping keys for ``metadata-dek`` and
-``repository-master-key``; AES-256-GCM authenticates each payload and the
+``repository-master-key``; format 3 also derives ``sealed-topology-v1`` for a
+canonical topology document containing endpoints, placement policy, metadata
+replicas, and provider credentials. AES-256-GCM authenticates each payload and the
 complete logical header. Repository identity, generation, key versions,
 policy hash, algorithm, and broker identity are bound independently of the
 file location. Moving an unchanged capsule between its local, mirror, and
 offline locations does not change authentication. Swapping payloads, members,
 repositories, policies, or generations fails closed.
+
+Sealed topology and credential leases
+=====================================
+
+Format-3 capsules are the authority for repository reachability. The broker's
+``topology-read`` lease returns endpoints and credential references with the
+credential map removed. A separate ``credential-lease`` returns exactly one
+authorized reference. It never returns the complete secret-bearing topology.
+Both leases are bound to the broker epoch, connection, executable release, and
+expiry. VaulticDB monitors every metadata and topology lease and exits when any
+connection closes or the earliest lease expires.
+
+Use ``--topology-source capsule`` (the default when a broker is configured) for
+normal operation. ``--topology-source external`` and
+``VAULTICDB_TOPOLOGY_SOURCE=external`` retain the legacy environment-backed
+path and are reported as non-compliant. A format-2 capsule remains readable but
+reports ``topology: external`` because it has no sealed topology payload.
+
+Inspect topology without releasing credentials:
+
+.. code-block:: console
+
+  $ vaultic index keys --repository-id REPOSITORY-UUID quorum topology show
+
+Every endpoint or credential change is prepared inside the unlocked broker and
+published as a new capsule generation, repository mirror first. Use the
+``topology set-backend-credential`` operation when introducing a backend and
+its credential together; separate intermediate generations would necessarily
+contain either a dangling reference or an unused secret. Credential input files
+must be owner-only and are never copied into the runtime profile.
+
+Fresh-host bootstrap writes only repository identity, capsule directory, and
+broker socket information:
+
+.. code-block:: console
+
+  $ vaultic bootstrap --from-capsule \
+      --capsule-directory "$HOME/.config/vaultic/quorum/capsules" \
+      --output "$HOME/.config/vaultic/profile.json" \
+      --key-broker-socket "$HOME/.config/vaultic/quorum/key-broker.sock" \
+      --key-broker-release-manifest /usr/local/etc/vaultic/vaultic.release.json
+
+The broker must already be unlocked by a satisfying custody ceremony. The
+command opens the capsule-declared pack backends, authenticates repository
+configuration, and refuses a repository ID, placement, role, domain, or policy
+mismatch.
+
+When a sealed local path is not valid on the recovery host, Vaultic accepts
+``--topology-override ID.data_dir=PATH`` for a local pack backend and VaulticDB
+accepts ``VAULTICDB_TOPOLOGY_OVERRIDE=ID.data_dir=PATH`` for a local metadata
+replica. Remote endpoints and every credential remain non-overridable. Status
+reports host-local overrides as a compliance deviation; record and review them
+as part of the recovery ceremony.
 
 Unlock policies
 ===============

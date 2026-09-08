@@ -50,6 +50,10 @@ struct FileAuthorization {
     release_public_key: String,
     peer_uid: u32,
     capabilities: BTreeSet<Capability>,
+    #[serde(default)]
+    credential_refs: BTreeSet<String>,
+    #[serde(default)]
+    read_only: bool,
 }
 
 pub struct BrokerStartup {
@@ -103,6 +107,8 @@ pub fn load(config_path: &Path) -> Result<BrokerStartup> {
                     .map_err(|_| anyhow::anyhow!("release public key must be 32 bytes"))?,
                 peer_uid: authorization.peer_uid,
                 capabilities: authorization.capabilities,
+                credential_refs: authorization.credential_refs,
+                read_only: authorization.read_only,
             })
         })
         .collect::<Result<Vec<_>>>()?;

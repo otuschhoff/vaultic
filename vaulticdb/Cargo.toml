@@ -42,6 +42,7 @@ tonic-prost = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 thiserror = "2.0"
 zeroize = { version = "1.8", features = ["derive"] }
+time = { version = "0.3", features = ["parsing"] }
 
 [dependencies.ctap-hid-fido2]
 path = "vendor/ctap-hid-fido2"

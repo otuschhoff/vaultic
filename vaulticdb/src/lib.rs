@@ -4,4 +4,5 @@
 pub mod broker;
 pub mod encryption;
 pub mod ids;
+pub mod topology;
 pub mod writer_role;

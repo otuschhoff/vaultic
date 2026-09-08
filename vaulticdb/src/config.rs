@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::storage::{
     BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, StorageConfig,
+    TopologySource,
 };
 use vaulticdb::encryption::envelope::{EncryptionConfig, EncryptionMode, ProviderCredentials};
 use vaulticdb::ids::RepositoryId;
@@ -90,14 +91,6 @@ impl Config {
 }
 
 fn storage_from_env() -> Result<StorageConfig> {
-    let object_store = object_store_from_env()?;
-    let fencing_replica = match &object_store {
-        ObjectStoreConfig::Replicated { .. } => Some(
-            env::var("VAULTICDB_FENCING_REPLICA")
-                .context("replicated metadata requires VAULTICDB_FENCING_REPLICA")?,
-        ),
-        _ => None,
-    };
     let metadata_rebuild_initialize = env_bool("VAULTICDB_METADATA_REBUILD_INITIALIZE")?;
     let broker = match env::var_os("VAULTICDB_BROKER_SOCKET") {
         Some(socket) => Some(BrokerLeaseConfig {
@@ -110,6 +103,51 @@ fn storage_from_env() -> Result<StorageConfig> {
             lease_duration: Duration::from_secs(parse_u64("VAULTICDB_BROKER_LEASE_SECONDS", 3600)?),
         }),
         None => None,
+    };
+    let topology_source = match env::var("VAULTICDB_TOPOLOGY_SOURCE").ok().as_deref() {
+        Some("capsule") => TopologySource::Capsule,
+        Some("external") => TopologySource::External,
+        Some(value) => {
+            bail!("unsupported VAULTICDB_TOPOLOGY_SOURCE {value:?}; expected capsule or external")
+        }
+        None if broker.is_some() => TopologySource::Capsule,
+        None => {
+            bail!("VAULTICDB_TOPOLOGY_SOURCE=external is required for environment-backed topology")
+        }
+    };
+    if topology_source == TopologySource::Capsule && broker.is_none() {
+        bail!("capsule topology requires VAULTICDB_BROKER_SOCKET");
+    }
+    let topology_override_local = match env::var("VAULTICDB_TOPOLOGY_OVERRIDE").ok() {
+        Some(value) => {
+            let (selector, path) = value
+                .split_once('=')
+                .context("VAULTICDB_TOPOLOGY_OVERRIDE must be ID.data_dir=PATH")?;
+            let id = selector
+                .strip_suffix(".data_dir")
+                .filter(|id| !id.is_empty())
+                .context("only ID.data_dir topology overrides are supported")?;
+            if path.is_empty() {
+                bail!("topology override data directory must not be empty");
+            }
+            Some((id.to_owned(), PathBuf::from(path)))
+        }
+        None => None,
+    };
+    if topology_override_local.is_some() && topology_source != TopologySource::Capsule {
+        bail!("topology overrides require capsule topology");
+    }
+    let object_store = if topology_source == TopologySource::Capsule {
+        ObjectStoreConfig::Memory
+    } else {
+        object_store_from_env()?
+    };
+    let fencing_replica = match &object_store {
+        ObjectStoreConfig::Replicated { .. } => Some(
+            env::var("VAULTICDB_FENCING_REPLICA")
+                .context("replicated metadata requires VAULTICDB_FENCING_REPLICA")?,
+        ),
+        _ => None,
     };
     if metadata_rebuild_initialize && broker.is_none() {
         bail!("metadata rebuild initialization requires a broker metadata-DEK lease");
@@ -131,6 +169,8 @@ fn storage_from_env() -> Result<StorageConfig> {
         broker,
         encryption: encryption_from_env()?,
         transaction_idle_timeout_ms,
+        topology_source,
+        topology_override_local,
     })
 }
 
@@ -187,6 +227,10 @@ fn replica_from_env(id: &str) -> Result<ReplicaConfig> {
             bucket: env::var(format!("{prefix}_S3_BUCKET"))
                 .with_context(|| format!("{prefix}_S3_BUCKET is required for S3 replica {id}"))?,
             prefix: optional_nonempty_dynamic(&format!("{prefix}_S3_PREFIX"))?,
+            endpoint: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
         },
         "azure" => ReplicaStoreConfig::Azure {
             account: env::var(format!("{prefix}_AZURE_ACCOUNT")).with_context(|| {
@@ -196,8 +240,12 @@ fn replica_from_env(id: &str) -> Result<ReplicaConfig> {
                 format!("{prefix}_AZURE_CONTAINER is required for Azure replica {id}")
             })?,
             prefix: optional_nonempty_dynamic(&format!("{prefix}_AZURE_PREFIX"))?,
-            access_key: env::var(format!("{prefix}_AZURE_ACCESS_KEY")).ok(),
-            bearer_token: env::var(format!("{prefix}_AZURE_BEARER_TOKEN")).ok(),
+            access_key: env::var(format!("{prefix}_AZURE_ACCESS_KEY"))
+                .ok()
+                .map(Zeroizing::new),
+            bearer_token: env::var(format!("{prefix}_AZURE_BEARER_TOKEN"))
+                .ok()
+                .map(Zeroizing::new),
         },
         value => bail!(
             "unsupported {prefix}_OBJECT_STORE {value:?}; expected local, memory, s3, or azure"

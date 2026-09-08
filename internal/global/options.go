@@ -47,6 +47,8 @@ type Options struct {
 	Repo                       string
 	RepositoryFile             string
 	BootstrapProfile           string
+	TopologySource             string
+	TopologyOverrides          []string
 	PasswordFile               string
 	PasswordCommand            string
 	AzureKeyVaultURL           string
@@ -225,6 +227,8 @@ func (globalOptions *Options) addRepositoryAccessFlags(f *pflag.FlagSet) {
 	f.StringVarP(&globalOptions.Repo, "repo", "r", "", "`repository` to backup to or restore from (default: $VAULTIC_REPOSITORY)")
 	f.StringVarP(&globalOptions.RepositoryFile, "repository-file", "", "", "`file` to read the repository location from (default: $VAULTIC_REPOSITORY_FILE)")
 	f.StringVar(&globalOptions.BootstrapProfile, "bootstrap-profile", "", "credential-free bootstrap topology profile (default: $VAULTIC_BOOTSTRAP_PROFILE)")
+	f.StringVar(&globalOptions.TopologySource, "topology-source", "", "repository topology source: capsule or external (default: capsule with broker)")
+	f.StringSliceVar(&globalOptions.TopologyOverrides, "topology-override", nil, "recorded host-local topology override ID.data_dir=PATH (repeatable)")
 	f.StringVarP(&globalOptions.PasswordFile, "password-file", "p", "", "`file` to read the repository password from (default: $VAULTIC_PASSWORD_FILE)")
 	f.StringVarP(&globalOptions.KeyHint, "key-hint", "", "", "`key` ID of key to try decrypting first (default: $VAULTIC_KEY_HINT)")
 	f.StringVarP(
@@ -320,6 +324,7 @@ func (globalOptions *Options) applyEnvironment(f *pflag.FlagSet, packSizeFlag, c
 	globalOptions.Repo = env.Get("REPOSITORY")
 	globalOptions.RepositoryFile = env.Get("REPOSITORY_FILE")
 	globalOptions.BootstrapProfile = env.Get("BOOTSTRAP_PROFILE")
+	globalOptions.TopologySource = env.Get("TOPOLOGY_SOURCE")
 	globalOptions.PasswordFile = env.Get("PASSWORD_FILE")
 	globalOptions.KeyHint = env.Get("KEY_HINT")
 	globalOptions.PasswordCommand = env.Get("PASSWORD_COMMAND")

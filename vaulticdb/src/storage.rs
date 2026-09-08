@@ -27,18 +27,20 @@ use slatedb::{
 };
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
+use zeroize::Zeroizing;
 
 use crate::{
     error::VaulticDbError,
     proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest},
     replication::ReplicatedObjectStore,
 };
-use vaulticdb::broker::{acquire_metadata_lease, BrokerLeaseConnection};
+use vaulticdb::broker::{acquire_metadata_lease, acquire_payload_lease, BrokerLeaseConnection};
 use vaulticdb::encryption::{
     self,
     envelope::{self, EncryptionStatus, KeyManager},
 };
 use vaulticdb::ids::{Namespace, RepositoryId};
+use vaulticdb::topology::{Credential, CredentialKind, Provider, ReplicaMode, TopologyDocument};
 
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
@@ -108,6 +110,7 @@ pub(crate) struct Storage {
     last_durable_sequence: AtomicU64,
     transaction_idle_timeout_ms: u64,
     broker_lease: Option<BrokerLeaseConnection>,
+    _topology_leases: Vec<BrokerLeaseConnection>,
     writer_epoch: AtomicU64,
 }
 
@@ -126,6 +129,170 @@ pub(crate) struct StorageConfig {
     pub(crate) broker: Option<BrokerLeaseConfig>,
     pub(crate) encryption: envelope::EncryptionConfig,
     pub(crate) transaction_idle_timeout_ms: u64,
+    pub(crate) topology_source: TopologySource,
+    pub(crate) topology_override_local: Option<(String, PathBuf)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TopologySource {
+    Capsule,
+    External,
+}
+
+async fn storage_from_capsule(
+    repository_id: &str,
+    broker: &BrokerLeaseConfig,
+    local_override: Option<&(String, PathBuf)>,
+) -> Result<(
+    ObjectStoreConfig,
+    Option<String>,
+    Vec<BrokerLeaseConnection>,
+)> {
+    let socket = broker.socket.to_string_lossy();
+    let (topology_lease, encoded) = acquire_payload_lease(
+        &socket,
+        &broker.release_manifest,
+        "topology-read",
+        None,
+        broker.lease_duration,
+    )
+    .await?;
+    let topology = TopologyDocument::decode_redacted(encoded.as_slice())?;
+    if topology.repository_id != repository_id {
+        bail!("capsule topology repository identity does not match VaulticDB configuration");
+    }
+    let mut leases = vec![topology_lease];
+    let mut replicas = Vec::with_capacity(topology.metadata_replicas.order.len());
+    let mut override_applied = false;
+    for id in &topology.metadata_replicas.order {
+        let replica = topology
+            .metadata_replicas
+            .replicas
+            .get(id)
+            .with_context(|| format!("capsule topology is missing metadata replica {id:?}"))?;
+        let mut credential = match replica.credential_ref.as_deref() {
+            Some(reference) => {
+                let (lease, encoded) = acquire_payload_lease(
+                    &socket,
+                    &broker.release_manifest,
+                    "credential-lease",
+                    Some(reference),
+                    broker.lease_duration,
+                )
+                .await?;
+                let credential: Credential = serde_json::from_slice(encoded.as_slice())
+                    .with_context(|| format!("decode credential lease for {reference:?}"))?;
+                credential.validate()?;
+                leases.push(lease);
+                Some(credential)
+            }
+            None => None,
+        };
+        let endpoint = |name: &str| -> Result<String> {
+            replica
+                .endpoint
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .with_context(|| format!("metadata replica {id:?} is missing endpoint {name:?}"))
+        };
+        let optional_endpoint = |name: &str| {
+            replica
+                .endpoint
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        let store = match replica.provider {
+            Provider::Local => {
+                let root = match local_override {
+                    Some((override_id, root)) if override_id == id => {
+                        override_applied = true;
+                        root.clone()
+                    }
+                    _ => PathBuf::from(endpoint("data_dir")?),
+                };
+                ReplicaStoreConfig::Local { root }
+            }
+            Provider::S3 => {
+                let (access_key_id, secret_access_key) = match credential.as_mut() {
+                    Some(value)
+                        if matches!(
+                            value.kind,
+                            CredentialKind::AwsStatic | CredentialKind::S3Static
+                        ) =>
+                    {
+                        (
+                            value.access_key_id.take().map(Zeroizing::new),
+                            value.secret_access_key.take().map(Zeroizing::new),
+                        )
+                    }
+                    Some(_) => bail!("metadata replica {id:?} requires an S3 credential"),
+                    None => (None, None),
+                };
+                ReplicaStoreConfig::S3 {
+                    bucket: endpoint("bucket")?,
+                    prefix: optional_endpoint("prefix"),
+                    endpoint: optional_endpoint("url"),
+                    region: optional_endpoint("region"),
+                    access_key_id,
+                    secret_access_key,
+                }
+            }
+            Provider::Azure => {
+                let (account, access_key) = match credential.as_mut() {
+                    Some(value) if value.kind == CredentialKind::AzureSharedKey => (
+                        value
+                            .account_name
+                            .take()
+                            .context("Azure account name is missing")?,
+                        value.account_key.take().map(Zeroizing::new),
+                    ),
+                    Some(_) => bail!("metadata replica {id:?} requires an Azure shared key"),
+                    None => (endpoint("account")?, None),
+                };
+                ReplicaStoreConfig::Azure {
+                    account,
+                    container: endpoint("container")?,
+                    prefix: optional_endpoint("prefix"),
+                    access_key,
+                    bearer_token: None,
+                }
+            }
+            Provider::Gcs | Provider::GoogleDrive => {
+                bail!("unsupported VaulticDB metadata replica provider")
+            }
+        };
+        replicas.push(ReplicaConfig {
+            id: id.clone(),
+            store,
+        });
+    }
+    if local_override.is_some() && !override_applied {
+        bail!("topology override does not select a local metadata replica");
+    }
+    let fencing = match topology.metadata_replicas.mode {
+        ReplicaMode::Local => None,
+        ReplicaMode::Replicated => Some(topology.metadata_replicas.fencing.clone()),
+    };
+    let store = match topology.metadata_replicas.mode {
+        ReplicaMode::Local => replicas
+            .into_iter()
+            .next()
+            .map(|replica| match replica.store {
+                ReplicaStoreConfig::Local { root } => ObjectStoreConfig::Local { root },
+                store => ObjectStoreConfig::Replicated {
+                    replicas: vec![ReplicaConfig {
+                        id: replica.id,
+                        store,
+                    }],
+                },
+            })
+            .context("capsule topology has no local metadata replica")?,
+        ReplicaMode::Replicated => ObjectStoreConfig::Replicated { replicas },
+    };
+    Ok((store, fencing, leases))
 }
 
 enum Database {
@@ -145,10 +312,29 @@ impl Database {
 
 impl Storage {
     pub(crate) async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
-        let (path, object_store) = object_store(repository_id, &config.object_store)?;
-        let coordination_store = match &config.fencing_replica {
+        let (effective_store, effective_fencing, topology_leases) =
+            if config.topology_source == TopologySource::Capsule {
+                let broker = config
+                    .broker
+                    .as_ref()
+                    .context("capsule topology requires a broker")?;
+                storage_from_capsule(
+                    repository_id,
+                    broker,
+                    config.topology_override_local.as_ref(),
+                )
+                .await?
+            } else {
+                (
+                    config.object_store.clone(),
+                    config.fencing_replica.clone(),
+                    Vec::new(),
+                )
+            };
+        let (path, object_store) = object_store(repository_id, &effective_store)?;
+        let coordination_store = match &effective_fencing {
             Some(replica) => replicated_replica_store(
-                &config.object_store,
+                &effective_store,
                 replica,
                 &crate::repository_key(repository_id),
             )?,
@@ -223,6 +409,7 @@ impl Storage {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
             broker_lease,
+            _topology_leases: topology_leases,
             writer_epoch: AtomicU64::new(writer_epoch),
         };
         let initialize = async {
@@ -246,9 +433,30 @@ impl Storage {
     }
 
     pub(crate) fn broker_lease_monitor(&self) -> Option<(tokio::sync::watch::Receiver<bool>, u64)> {
-        self.broker_lease
-            .as_ref()
-            .map(|lease| (lease.disconnected(), lease.expires_unix_ms))
+        let leases = self
+            .broker_lease
+            .iter()
+            .chain(self._topology_leases.iter())
+            .collect::<Vec<_>>();
+        if leases.is_empty() {
+            return None;
+        }
+        let expires_unix_ms = leases
+            .iter()
+            .map(|lease| lease.expires_unix_ms)
+            .min()
+            .unwrap_or_default();
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        for lease in leases {
+            let mut disconnected = lease.disconnected();
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                if disconnected.wait_for(|value| *value).await.is_ok() {
+                    let _ = sender.send(true);
+                }
+            });
+        }
+        Some((receiver, expires_unix_ms))
     }
 
     pub(crate) fn encryption_status(&self) -> &EncryptionStatus {

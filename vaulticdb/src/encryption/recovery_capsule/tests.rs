@@ -109,6 +109,76 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn format_three_round_trips_sealed_topology_and_format_two_remains_external() {
+        let credentials = BTreeMap::from([
+            (
+                "alice".to_owned(),
+                MemberCredential::Passphrase(b"alice passphrase"),
+            ),
+            (
+                "bob".to_owned(),
+                MemberCredential::Passphrase(b"bob passphrase"),
+            ),
+        ]);
+        let topology = br#"{"format":1,"repository_id":"repo-a","topology_generation":7}"#;
+        let sealed = CapsuleBuilder::new("repo-a", 8)
+            .broker_identity_public_key(&[9; 32])
+            .sealed_topology(topology)
+            .create_offline_threshold(
+                "operators",
+                2,
+                &[
+                    ("alice", MemberCredential::Passphrase(b"alice passphrase")),
+                    ("bob", MemberCredential::Passphrase(b"bob passphrase")),
+                ],
+                &[7; 32],
+                b"repository-master-key",
+            )
+            .unwrap();
+        assert_eq!(sealed.header.format, 3);
+        assert!(sealed.sealed_topology.is_some());
+        let recovered = sealed.recover_offline(&credentials).unwrap();
+        assert_eq!(recovered.sealed_topology.unwrap().as_slice(), topology);
+
+        let legacy = capsule(2);
+        assert_eq!(legacy.header.format, 2);
+        assert!(legacy.sealed_topology.is_none());
+        assert!(!serde_json::to_vec(&legacy)
+            .unwrap()
+            .windows(b"sealed_topology".len())
+            .any(|window| window == b"sealed_topology"));
+    }
+
+    #[test]
+    fn sealed_topology_cannot_be_transplanted_between_generations() {
+        let create = |generation| {
+            CapsuleBuilder::new("repo-a", generation)
+                .broker_identity_public_key(&[9; 32])
+                .sealed_topology(br#"{"format":1,"repository_id":"repo-a"}"#)
+                .create_offline_threshold(
+                    "operators",
+                    1,
+                    &[(
+                        "alice",
+                        MemberCredential::Passphrase(b"alice passphrase"),
+                    )],
+                    &[7; 32],
+                    b"repository-master-key",
+                )
+                .unwrap()
+        };
+        let mut first = create(8);
+        let second = create(9);
+        first.sealed_topology = second.sealed_topology;
+        assert!(first
+            .recover_offline(&BTreeMap::from([(
+                "alice".to_owned(),
+                MemberCredential::Passphrase(b"alice passphrase"),
+            )]))
+            .is_err());
+    }
+
     #[tokio::test]
     async fn external_member_wrap_is_context_bound_and_recovers_with_offline_member() {
         let azure = ContextProvider {

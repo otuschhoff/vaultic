@@ -66,6 +66,52 @@ If those commands succeed, the repository is compatible with Vaultic in place.
 This is the zero-copy takeover path described in the larger Rustic takeover
 guide and does not require rewriting any packs.
 
+The ``rclone`` configuration is a temporary migration input. It is not the
+intended steady state because its refresh token remains outside quorum custody.
+After the format-3 capsule and broker are active, enroll the same Drive through
+Vaultic's native backend. Put only the installed-application OAuth client secret
+in an owner-only file; the refresh token returned by the loopback flow is sent
+straight to the broker and is neither printed nor written:
+
+.. code-block:: console
+
+   $ chmod 600 "$HOME/.config/vaultic/google-client-secret"
+   $ vaultic --key-broker-socket "$VAULTIC_BROKER_SOCKET" \
+      --key-broker-release-manifest /usr/local/etc/vaultic/vaultic.release.json \
+      backend enroll gdrive \
+      --client-id CLIENT.apps.googleusercontent.com \
+      --client-secret-file "$HOME/.config/vaultic/google-client-secret" \
+      --backend-id drive --credential-ref cred:drive-oauth \
+      --drive-id SHARED-DRIVE-ID --root-folder-id ROOT-FOLDER-ID \
+      --path Backup/Hosts/mbp --role primary --offsite \
+      --failure-domain google-drive \
+      --capsule "$VAULTIC_CAPSULE_DIR/ACTIVE-GENERATION.json" \
+      --capsule-directory "$VAULTIC_CAPSULE_DIR" \
+      --member recovery-password=offline-argon2id:"$HOME/.config/vaultic/quorum/recovery.passphrase" \
+      --external-member-file "$HOME/.config/vaultic/quorum/mac-touchid.json" \
+      --external-member-file "$HOME/.config/vaultic/quorum/yubikey-piv.json"
+
+Enrollment requests full Google Drive scope because a ``drive.file`` token from
+Vaultic's OAuth client cannot inspect files created by rclone's different OAuth
+client. Restrict the OAuth identity and shared drive operationally, and use a
+dedicated Drive for this repository.
+
+Before switching topology, compare the rclone and native inventories. The
+native side obtains the newly sealed credential by broker lease:
+
+.. code-block:: console
+
+   $ vaultic --key-broker-socket "$VAULTIC_BROKER_SOCKET" \
+      --key-broker-release-manifest /usr/local/etc/vaultic/vaultic.release.json \
+      backend verify \
+      --credential-ref cred:drive-oauth \
+      --compare 'rclone:biz-drive:Backup/Hosts/mbp,gdrive:SHARED-DRIVE-ID/Backup/Hosts/mbp'
+
+The command compares every repository file type by object name and size. After
+it reports a match and normal ``snapshots``, ``check``, and restore tests pass
+through capsule topology, remove the Google remote from ``rclone.conf``. Keep
+rclone only when another non-Drive backend still requires it.
+
 Step 1: index locally on the Mac with VaulticDB
 ===============================================
 
@@ -646,39 +692,25 @@ local-plus-GCP replicated deployment is a separate metadata migration: populate
 and verify the remote candidate before enabling synchronous replication. See
 :doc:`070_encryption` for the guarded remote-candidate rebuild procedure.
 
-The following is the eventual VaulticDB service configuration. Replica order is
-significant: ``local`` is the primary read/list target and reads fail over to
-``gcp``. Mutating operations must succeed on both replicas before VaulticDB
-acknowledges them. GCP is the single fencing replica used to coordinate writer
-authority.
+The sealed topology's ``metadata_replicas`` object is the eventual VaulticDB
+service configuration. Replica order is significant: ``local`` is the primary
+read/list target and reads fail over to ``gcp``. Mutating operations must
+succeed on both replicas before VaulticDB acknowledges them. GCP is the single
+fencing replica used to coordinate writer authority.
 
 .. code-block:: console
 
-   $ export VAULTICDB_OBJECT_STORE=replicated
-   $ export VAULTICDB_REPLICATED_REPLICAS=local,gcp
-   $ export VAULTICDB_FENCING_REPLICA=gcp
+   $ export VAULTICDB_TOPOLOGY_SOURCE=capsule
+   $ export VAULTICDB_BROKER_SOCKET="$VAULTIC_BROKER_SOCKET"
+   $ export VAULTICDB_RELEASE_MANIFEST=/usr/local/etc/vaultic/vaulticdb.release.json
+   $ export VAULTICDB_REPOSITORY_ID="$VAULTICDB_REPOSITORY_ID"
 
-   $ export VAULTICDB_REPLICATED_LOCAL_OBJECT_STORE=local
-   $ export VAULTICDB_REPLICATED_LOCAL_DATA_DIR="$HOME/Library/Application Support/vaulticdb"
-
-   $ export VAULTICDB_REPLICATED_GCP_OBJECT_STORE=s3
-   $ export VAULTICDB_REPLICATED_GCP_S3_BUCKET=alice-vaulticdb
-   $ export VAULTICDB_REPLICATED_GCP_S3_PREFIX=vaulticdb/production
-
-Configure the GCP S3-compatible endpoint and credentials separately:
-
-.. code-block:: console
-
-   $ export AWS_ACCESS_KEY_ID=...   # GCP HMAC key or workload identity credential
-   $ export AWS_SECRET_ACCESS_KEY=...
-   $ export AWS_DEFAULT_REGION=us-east1
-   $ export AWS_ENDPOINT_URL_S3=https://storage.googleapis.com
-
-These settings belong to the persistent VaulticDB service deployment. The
-current Vaultic-managed daemon flags cover single local or S3 stores; start a
-replicated deployment with this environment. VaulticDB appends a
-repository-identity hash beneath each configured prefix, allowing the namespace
-root to serve multiple repositories without mixing their SlateDB objects.
+Do not set ``VAULTICDB_REPLICATED_*`` or ``AWS_*`` in this deployment. The
+local path, GCP endpoint, bucket, prefix, order, and fencing replica come from
+``topology-read``; the GCP HMAC or service-account credential comes from its
+exact ``credential-lease``. VaulticDB appends a repository-identity hash beneath
+each configured prefix, allowing the namespace root to serve multiple
+repositories without mixing their SlateDB objects.
 
 Do not point the existing local database at an empty GCP replica and assume it
 will backfill automatically. Populate and validate the GCP candidate first,
@@ -857,7 +889,8 @@ also lacks ordinary access and macOS privacy consent for the login user's home
 directory.
 
 Run the supervised ``vaulticdb`` process under the same account and authorize
-its separately signed release manifest only for ``metadata-dek``. If VaulticDB
+its separately signed release manifest for ``metadata-dek``, ``topology-read``,
+and only the credential references used by its metadata replicas. If VaulticDB
 or the broker restarts while locked, VaulticDB cannot reacquire its metadata
 lease; let launchd retry it and complete the next 2-of-3 ceremony. Do not restore
 the retired key-in-database route merely to make unattended restart succeed.
@@ -874,12 +907,12 @@ authorization falls back to a live read by default; set
 ``apfs-snapshot-require = true`` only after proving snapshot creation and mount
 from the LaunchAgent itself.
 
-An unattended ``rclone:`` transport necessarily needs a noninteractive Google
-Drive credential. Keep the OAuth refresh token in a mode-``0600`` rclone config
-owned by ``oli``, restrict the Google account and remote to this backup, and do
-not put the token or an rclone config password in the plist. The quorum protects
-the repository keys, not the cloud account; revoking the rclone token must be a
-separate incident-response action.
+The native ``gdrive:`` transport receives its refresh token through an exact
+``credential-lease`` authorization on the signed Vaultic release. Do not put a
+Google token, ``rclone`` configuration path, or cloud credential in the plist,
+wrapper, or recurring profile. Broker lock or connection loss revokes the
+broker-side lease; host integrity still matters while the authorized Vaultic
+process holds the token in memory.
 
 Bound the manual unlock window
 ------------------------------
@@ -949,16 +982,17 @@ accepted.
 Create a dedicated recurring profile
 ------------------------------------
 
-Save this as ``$HOME/.config/vaultic/recurring.toml`` with mode ``0600``. It
-contains repository topology and backup choices, but no unlock credential:
+First run ``vaultic bootstrap --from-capsule`` as described in
+:doc:`070_encryption` to create
+``$HOME/.config/vaultic/capsule-bootstrap.toml``. That profile contains only
+repository identity, capsule directory, and broker socket. Save the backup
+choices below as ``$HOME/.config/vaultic/recurring.toml`` with mode ``0600``;
+it contains no repository location or unlock credential:
 
 .. code-block:: toml
 
     [global]
     no-progress = true
-
-    [repository]
-    repository = "rclone:biz-drive:Backup/Hosts/mbp"
 
     [backup]
     one-file-system = true
@@ -997,9 +1031,9 @@ operation to release its lock:
 
     readonly VAULTIC=/usr/local/bin/vaultic
     readonly PROFILE="$HOME/.config/vaultic/recurring.toml"
+   readonly BOOTSTRAP_PROFILE="$HOME/.config/vaultic/capsule-bootstrap.toml"
     readonly BROKER_SOCKET="$HOME/.config/vaultic/quorum/key-broker.sock"
     readonly RELEASE_MANIFEST=/usr/local/etc/vaultic/vaultic.release.json
-    readonly RCLONE_CONFIG_FILE="$HOME/.config/rclone/rclone.conf"
     readonly STATE_DIR="$HOME/Library/Application Support/vaultic/automation"
     readonly SUCCESS_STAMP="$STATE_DIR/last-backup-success"
     readonly MINIMUM_INTERVAL=82800
@@ -1027,13 +1061,12 @@ operation to release its lock:
        (( now - last_success < MINIMUM_INTERVAL )) && exit 0
     fi
 
-    export RCLONE_CONFIG="$RCLONE_CONFIG_FILE"
-
     "$VAULTIC" \
        --key-broker-socket "$BROKER_SOCKET" \
        --key-broker-release-manifest "$RELEASE_MANIFEST" \
        --key-broker-lease 1h \
        --retry-lock 30m \
+      --bootstrap-profile "$BOOTSTRAP_PROFILE" \
        -P "$PROFILE" \
        backup --name mbp-disk || exit $?
 
@@ -1087,7 +1120,7 @@ Validate and load it in the GUI domain of the logged-in user:
     $ install -d -m 0700 "$HOME/Library/Logs" \
              "$HOME/Library/Application Support/vaultic/automation"
     $ chmod 0600 "$HOME/.config/vaultic/recurring.toml"
-    $ chmod 0600 "$HOME/.config/rclone/rclone.conf"
+   $ chmod 0600 "$HOME/.config/vaultic/capsule-bootstrap.toml"
     $ plutil -lint "$HOME/Library/LaunchAgents/com.vaultic.backup.mbp.plist"
     $ launchctl bootstrap "gui/$(id -u)" \
              "$HOME/Library/LaunchAgents/com.vaultic.backup.mbp.plist"
@@ -1114,6 +1147,7 @@ is still unlocked, confirm the new snapshot through the same brokered route:
    $ vaultic \
       --key-broker-socket "$HOME/.config/vaultic/quorum/key-broker.sock" \
       --key-broker-release-manifest /usr/local/etc/vaultic/vaultic.release.json \
+      --bootstrap-profile "$HOME/.config/vaultic/capsule-bootstrap.toml" \
       -P "$HOME/.config/vaultic/recurring.toml" \
       snapshots --latest 1
 

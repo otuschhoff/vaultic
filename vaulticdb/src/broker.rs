@@ -32,6 +32,7 @@ use crate::encryption::recovery_capsule::{
     RecoveryCapsule, UnlockPolicy, UnwrappedMemberShare,
 };
 use crate::ids::{MemberId, RepositoryId, SessionId};
+use crate::topology::{TopologyDocument, TopologyMutation};
 
 pub mod audit;
 pub mod peer;
@@ -66,6 +67,8 @@ pub enum Capability {
     MetadataDek,
     RepositoryMasterKey,
     TopologyDiscovery,
+    TopologyRead,
+    CredentialLease,
     MetadataLossRecovery,
     PolicyMutation,
 }
@@ -165,6 +168,8 @@ pub struct ClientAuthorization {
     pub release_public_key: [u8; 32],
     pub peer_uid: u32,
     pub capabilities: BTreeSet<Capability>,
+    pub credential_refs: BTreeSet<String>,
+    pub read_only: bool,
 }
 
 #[derive(Debug)]
@@ -313,6 +318,28 @@ impl KeyBroker {
     pub fn status(&mut self, now_unix_ms: u64) -> Result<UnlockStatus> {
         self.expire(now_unix_ms);
         let policy = self.capsule.effective_policy_status()?;
+        let mut findings = policy.findings;
+        if self.capsule.sealed_topology.is_none() {
+            findings.push("topology: external".to_owned());
+        }
+        if let Some(encoded) = self
+            .epoch
+            .as_ref()
+            .and_then(|epoch| epoch.keys.sealed_topology.as_ref())
+        {
+            let topology = TopologyDocument::decode(encoded.as_slice())?;
+            let now = time::OffsetDateTime::from_unix_timestamp_nanos(
+                i128::from(now_unix_ms) * 1_000_000,
+            )?;
+            for reference in topology
+                .credentials
+                .iter()
+                .filter(|(_, credential)| credential.rotation_overdue(now))
+                .map(|(reference, _)| reference)
+            {
+                findings.push(format!("credential-rotation-overdue: {reference}"));
+            }
+        }
         Ok(UnlockStatus {
             locked: self.epoch.is_none(),
             repository_id: self.capsule.header.repository_id.clone(),
@@ -326,8 +353,12 @@ impl KeyBroker {
             principal_verified: policy.principal_verified,
             hardware_verified: policy.hardware_verified,
             custody_assumed: policy.custody_assumed,
-            compliant: policy.compliant,
-            findings: policy.findings,
+            compliant: policy.compliant
+                && self.capsule.sealed_topology.is_some()
+                && !findings
+                    .iter()
+                    .any(|finding| finding.starts_with("credential-rotation-overdue:")),
+            findings,
             policy_mutation_pending: self.pending_policy_mutation.is_some(),
             pending_capsule_generation: self
                 .pending_policy_mutation
@@ -496,6 +527,9 @@ impl KeyBroker {
         if capability == Capability::PolicyMutation {
             bail!("policy mutation capability cannot issue a key lease");
         }
+        if capability == Capability::CredentialLease {
+            bail!("credential leases require an exact credential reference");
+        }
         if ttl.is_zero() || ttl > MAX_LEASE_TTL || client.connection_id.is_empty() {
             bail!("invalid lease request");
         }
@@ -519,7 +553,17 @@ impl KeyBroker {
                 .map_err(|_| anyhow::anyhow!("derive topology discovery key"))?;
                 key
             }
-            Capability::PolicyMutation => unreachable!("rejected above"),
+            Capability::TopologyRead => {
+                let encoded = epoch
+                    .keys
+                    .sealed_topology
+                    .as_ref()
+                    .context("capsule topology is external")?;
+                Zeroizing::new(TopologyDocument::decode(encoded.as_slice())?.redacted_json()?)
+            }
+            Capability::CredentialLease | Capability::PolicyMutation => {
+                unreachable!("rejected above")
+            }
         };
         let lease_id = random_id(&mut rand::rng());
         self.leases.insert(
@@ -539,9 +583,72 @@ impl KeyBroker {
                 Capability::MetadataDek => self.capsule.header.metadata_dek_version,
                 Capability::RepositoryMasterKey
                 | Capability::TopologyDiscovery
-                | Capability::MetadataLossRecovery => self.capsule.header.repository_key_version,
+                | Capability::MetadataLossRecovery
+                | Capability::TopologyRead
+                | Capability::CredentialLease => self.capsule.header.repository_key_version,
                 Capability::PolicyMutation => unreachable!("rejected above"),
             },
+            capsule_generation: self.capsule.header.generation,
+            key,
+        })
+    }
+
+    pub fn acquire_credential_lease(
+        &mut self,
+        client: &ClientIdentity,
+        credential_ref: &str,
+        ttl: Duration,
+        now_unix_ms: u64,
+    ) -> Result<KeyLease> {
+        self.expire(now_unix_ms);
+        if self.pending_policy_mutation.is_some() || self.identity_recovery {
+            bail!("credential leases are unavailable in the current broker state");
+        }
+        if ttl.is_zero() || ttl > MAX_LEASE_TTL || client.connection_id.is_empty() {
+            bail!("invalid lease request");
+        }
+        self.authorize(client, Capability::CredentialLease)?;
+        let authorization = self
+            .authorization(client, Capability::CredentialLease)
+            .context("credential lease is not authorized")?;
+        if !authorization.credential_refs.contains("*")
+            && !authorization.credential_refs.contains(credential_ref)
+        {
+            bail!("credential reference is not authorized for this client");
+        }
+        let epoch = self.epoch.as_ref().context("broker is locked")?;
+        let encoded = epoch
+            .keys
+            .sealed_topology
+            .as_ref()
+            .context("capsule topology is external")?;
+        let topology = TopologyDocument::decode(encoded.as_slice())?;
+        let credential = topology
+            .credentials
+            .get(credential_ref)
+            .context("topology has no such credential")?;
+        if authorization.read_only && credential.has_secret() {
+            bail!("read-only client cannot lease a delete-capable credential");
+        }
+        let key = Zeroizing::new(topology.credential_json(credential_ref)?);
+        let expires_unix_ms = now_unix_ms
+            .checked_add(u64::try_from(ttl.as_millis())?)
+            .context("lease expiry overflow")?;
+        let lease_id = random_id(&mut rand::rng());
+        self.leases.insert(
+            lease_id.clone(),
+            LeaseState {
+                epoch_id: epoch.id.clone(),
+                connection_id: client.connection_id.clone(),
+                expires_unix_ms,
+            },
+        );
+        Ok(KeyLease {
+            lease_id,
+            epoch_id: epoch.id.clone(),
+            capability: Capability::CredentialLease,
+            expires_unix_ms,
+            key_version: self.capsule.header.repository_key_version,
             capsule_generation: self.capsule.header.generation,
             key,
         })
@@ -567,19 +674,22 @@ impl KeyBroker {
             .generation
             .checked_add(1)
             .context("capsule generation overflow")?;
-        let candidate = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
+        let mut builder = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
             .broker_identity_public_key(self.identity.verifying_key().as_bytes())
             .key_versions(
                 self.capsule.header.root_key_version,
                 self.capsule.header.metadata_dek_version,
                 self.capsule.header.repository_key_version,
-            )
-            .create_offline_policy(
-                policy,
-                credentials,
-                epoch.keys.metadata_dek.as_slice(),
-                epoch.keys.repository_master_key.as_slice(),
-            )?;
+            );
+        if let Some(topology) = epoch.keys.sealed_topology.as_ref() {
+            builder = builder.sealed_topology(topology.as_slice());
+        }
+        let candidate = builder.create_offline_policy(
+            policy,
+            credentials,
+            epoch.keys.metadata_dek.as_slice(),
+            epoch.keys.repository_master_key.as_slice(),
+        )?;
         self.accept_policy_mutation(candidate, acknowledge_downgrade)
     }
 
@@ -603,13 +713,17 @@ impl KeyBroker {
             .generation
             .checked_add(1)
             .context("capsule generation overflow")?;
-        let candidate = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
+        let mut builder = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
             .broker_identity_public_key(self.identity.verifying_key().as_bytes())
             .key_versions(
                 self.capsule.header.root_key_version,
                 self.capsule.header.metadata_dek_version,
                 self.capsule.header.repository_key_version,
-            )
+            );
+        if let Some(topology) = epoch.keys.sealed_topology.as_ref() {
+            builder = builder.sealed_topology(topology.as_slice());
+        }
+        let candidate = builder
             .create_policy(
                 policy,
                 protections,
@@ -618,6 +732,51 @@ impl KeyBroker {
             )
             .await?;
         self.accept_policy_mutation(candidate, acknowledge_downgrade)
+    }
+
+    pub async fn prepare_topology_mutation(
+        &mut self,
+        client: &ClientIdentity,
+        mutation: TopologyMutation,
+        protections: &[(&str, MemberProtection<'_>)],
+        now_unix_ms: u64,
+    ) -> Result<(RecoveryCapsule, String)> {
+        self.expire(now_unix_ms);
+        self.authorize(client, Capability::PolicyMutation)?;
+        if self.pending_policy_mutation.is_some() {
+            bail!("a policy mutation is already pending publication");
+        }
+        let generation = self
+            .capsule
+            .header
+            .generation
+            .checked_add(1)
+            .context("capsule generation overflow")?;
+        let epoch = self.epoch.as_ref().context("broker is locked")?;
+        let current = epoch
+            .keys
+            .sealed_topology
+            .as_ref()
+            .context("capsule topology is external")?;
+        let mut document = TopologyDocument::decode(current.as_slice())?;
+        document.apply_mutation(mutation, generation)?;
+        let topology = Zeroizing::new(document.canonical_json()?);
+        let candidate = CapsuleBuilder::new(&self.capsule.header.repository_id, generation)
+            .broker_identity_public_key(self.identity.verifying_key().as_bytes())
+            .key_versions(
+                self.capsule.header.root_key_version,
+                self.capsule.header.metadata_dek_version,
+                self.capsule.header.repository_key_version,
+            )
+            .sealed_topology(topology.as_slice())
+            .create_policy(
+                self.capsule.policy.clone(),
+                protections,
+                epoch.keys.metadata_dek.as_slice(),
+                epoch.keys.repository_master_key.as_slice(),
+            )
+            .await?;
+        self.accept_policy_mutation(candidate, false)
     }
 
     fn accept_policy_mutation(
@@ -704,21 +863,32 @@ impl KeyBroker {
         if let Some(epoch) = self.epoch.take() {
             unlock_memory(epoch.keys.metadata_dek.as_slice());
             unlock_memory(epoch.keys.repository_master_key.as_slice());
+            if let Some(topology) = epoch.keys.sealed_topology.as_ref() {
+                unlock_memory(topology.as_slice());
+            }
         }
     }
 
-    fn authorize(&self, client: &ClientIdentity, capability: Capability) -> Result<()> {
-        if !client.executable_owned_by_root || !client.installation_path_read_only {
-            bail!("client executable ownership or installation path is not trusted");
-        }
-        let authorization = self.authorizations.iter().find(|authorization| {
+    fn authorization(
+        &self,
+        client: &ClientIdentity,
+        capability: Capability,
+    ) -> Option<&ClientAuthorization> {
+        self.authorizations.iter().find(|authorization| {
             authorization.component == client.component
                 && authorization.release_identity == client.release_identity
                 && authorization.peer_uid == client.peer_uid
                 && client.version >= authorization.minimum_version
                 && client.version <= authorization.maximum_version
                 && authorization.capabilities.contains(&capability)
-        });
+        })
+    }
+
+    fn authorize(&self, client: &ClientIdentity, capability: Capability) -> Result<()> {
+        if !client.executable_owned_by_root || !client.installation_path_read_only {
+            bail!("client executable ownership or installation path is not trusted");
+        }
+        let authorization = self.authorization(client, capability);
         let Some(authorization) = authorization else {
             bail!("client identity, version, or capability is not authorized");
         };

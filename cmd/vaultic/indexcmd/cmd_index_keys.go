@@ -186,6 +186,7 @@ func newIndexKeysQuorumCommand(globalOptions *global.Options, options *indexKeys
 		newIndexKeysQuorumMutationCommand(globalOptions, options, "replace-member"),
 		newIndexKeysQuorumResumeMutationCommand(globalOptions, options),
 		newIndexKeysQuorumCancelMutationCommand(globalOptions),
+		newIndexKeysQuorumTopologyCommand(globalOptions, options),
 	)
 	return command
 }

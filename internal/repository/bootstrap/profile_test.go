@@ -67,3 +67,26 @@ func TestAnchorAndOfflineExportRejectRollbackAndOverwrite(t *testing.T) {
 		t.Fatalf("offline manifest mode = %v, %v", info.Mode(), err)
 	}
 }
+
+func TestCapsuleProfileRoundTripIsCredentialFree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime", "bootstrap.toml")
+	expected := Profile{Format: 2, RepositoryID: "repo-a", CapsuleDirectory: "/capsules", BrokerSocket: "/run/vaultic/broker.sock"}
+	if err := StoreProfile(path, expected); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := LoadProfile(path)
+	if err != nil || actual.RepositoryID != expected.RepositoryID || actual.BrokerSocket != expected.BrokerSocket {
+		t.Fatalf("profile = %#v, %v", actual, err)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "credential") || strings.Contains(string(encoded), "secret") {
+		t.Fatalf("runtime profile contains secret-bearing fields: %s", encoded)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("profile mode = %v, %v", info.Mode(), err)
+	}
+}

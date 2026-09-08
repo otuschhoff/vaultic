@@ -56,6 +56,10 @@ mod tests {
         let identity = SigningKey::generate(&mut LegacyOsRng);
         let capsule = CapsuleBuilder::new("repo-a", 4)
             .broker_identity_public_key(identity.verifying_key().as_bytes())
+            .sealed_topology(include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../testdata/topology-v1.json"
+            )))
             .create_offline_threshold(
                 "operators",
                 2,
@@ -75,7 +79,14 @@ mod tests {
             release_identity: "release-key-a".to_owned(),
             release_public_key: release_signing_key().verifying_key().to_bytes(),
             peer_uid: 42,
-            capabilities: BTreeSet::from([Capability::MetadataDek, Capability::PolicyMutation]),
+            capabilities: BTreeSet::from([
+                Capability::MetadataDek,
+                Capability::TopologyRead,
+                Capability::CredentialLease,
+                Capability::PolicyMutation,
+            ]),
+            credential_refs: BTreeSet::from(["cred:drive".to_owned()]),
+            read_only: false,
         }];
         (capsule, identity, authorizations)
     }
@@ -155,6 +166,25 @@ mod tests {
                 2_000
             )
             .is_ok());
+    }
+
+    #[test]
+    fn format_two_status_reports_external_topology() {
+        let identity = SigningKey::generate(&mut LegacyOsRng);
+        let capsule = CapsuleBuilder::new("repo-a", 1)
+            .broker_identity_public_key(identity.verifying_key().as_bytes())
+            .create_offline_threshold(
+                "operators",
+                1,
+                &[("alice", MemberCredential::Passphrase(b"alice passphrase"))],
+                &[7; 32],
+                b"repository-master-key",
+            )
+            .unwrap();
+        let mut broker = KeyBroker::new(capsule, identity, setup().2, None).unwrap();
+        let status = broker.status(1_000).unwrap();
+        assert!(!status.compliant);
+        assert!(status.findings.iter().any(|item| item == "topology: external"));
     }
 
     #[test]
@@ -256,6 +286,76 @@ mod tests {
     }
 
     #[test]
+    fn topology_and_credentials_are_released_without_broad_secret_disclosure() {
+        let (capsule, identity, authorizations) = setup();
+        let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        for (member, passphrase) in [
+            ("alice", b"alice passphrase".as_slice()),
+            ("bob", b"bob passphrase".as_slice()),
+        ] {
+            let contribution = encrypt_offline_contribution(
+                &capsule,
+                &session,
+                "unix:/broker.sock",
+                member,
+                &MemberCredential::Passphrase(passphrase),
+                4,
+                None,
+                1_001,
+            )
+            .unwrap();
+            broker.submit_contribution(contribution, 1_002).unwrap();
+        }
+
+        let topology = broker
+            .acquire_lease(
+                &client(),
+                Capability::TopologyRead,
+                Duration::from_secs(30),
+                1_003,
+            )
+            .unwrap();
+        let topology = String::from_utf8(topology.key.to_vec()).unwrap();
+        assert!(topology.contains("cred:drive"));
+        assert!(!topology.contains("refresh-secret"));
+
+        let credential = broker
+            .acquire_credential_lease(
+                &client(),
+                "cred:drive",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .unwrap();
+        assert!(String::from_utf8(credential.key.to_vec())
+            .unwrap()
+            .contains("refresh-secret"));
+        assert!(broker
+            .acquire_credential_lease(
+                &client(),
+                "cred:archive",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .is_err());
+
+        broker.authorizations[0].read_only = true;
+        assert!(broker
+            .acquire_credential_lease(
+                &client(),
+                "cred:drive",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .is_err());
+        broker.lock();
+        assert_eq!(broker.status(1_004).unwrap().active_leases, 0);
+    }
+
+    #[test]
     fn release_key_rotation_preserves_strict_client_authorization() {
         let (capsule, identity, _) = setup();
         let old_key = SigningKey::from_bytes(&[6; 32]);
@@ -269,6 +369,8 @@ mod tests {
                 release_public_key: old_key.verifying_key().to_bytes(),
                 peer_uid: 42,
                 capabilities: BTreeSet::from([Capability::MetadataDek]),
+                credential_refs: BTreeSet::new(),
+                read_only: false,
             },
             ClientAuthorization {
                 component: "vaulticdb".to_owned(),
@@ -278,6 +380,8 @@ mod tests {
                 release_public_key: new_key.verifying_key().to_bytes(),
                 peer_uid: 42,
                 capabilities: BTreeSet::from([Capability::MetadataDek]),
+                credential_refs: BTreeSet::new(),
+                read_only: false,
             },
         ];
         let broker = KeyBroker::new(capsule, identity, authorizations, None).unwrap();
@@ -408,6 +512,19 @@ mod tests {
             recovered.repository_master_key.as_slice(),
             b"repository-master-key"
         );
+        assert_eq!(
+            recovered
+                .sealed_topology
+                .as_ref()
+                .map(|topology| topology.as_slice()),
+            Some(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../testdata/topology-v1.json"
+                ))
+                .as_slice()
+            )
+        );
         assert_eq!(broker.status(1_005).unwrap().capsule_generation, 4);
         assert_eq!(broker.status(1_005).unwrap().active_leases, 0);
         assert_eq!(
@@ -439,6 +556,75 @@ mod tests {
         assert_eq!(status.capsule_generation, 5);
         assert_eq!(status.active_leases, 0);
         assert!(!status.policy_mutation_pending);
+    }
+
+    #[tokio::test]
+    async fn topology_mutation_rewraps_validated_secret_as_next_generation() {
+        let (capsule, identity, authorizations) = setup();
+        let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        for (member, passphrase) in [
+            ("alice", b"alice passphrase".as_slice()),
+            ("bob", b"bob passphrase".as_slice()),
+        ] {
+            let contribution = encrypt_offline_contribution(
+                &capsule,
+                &session,
+                "unix:/broker.sock",
+                member,
+                &MemberCredential::Passphrase(passphrase),
+                4,
+                None,
+                1_001,
+            )
+            .unwrap();
+            broker.submit_contribution(contribution, 1_002).unwrap();
+        }
+        let mut credential: crate::topology::Credential = serde_json::from_value(serde_json::json!({
+            "kind": "oauth2-refresh-token",
+            "client_id": "client-id",
+            "client_secret": "rotated-client-secret",
+            "refresh_token": "rotated-refresh-secret",
+            "scopes": ["https://www.googleapis.com/auth/drive.file"],
+            "token_uri": "https://oauth2.googleapis.com/token"
+        }))
+        .unwrap();
+        let protections = [
+            ("alice", MemberProtection::Offline(MemberCredential::Passphrase(b"alice passphrase"))),
+            ("bob", MemberProtection::Offline(MemberCredential::Passphrase(b"bob passphrase"))),
+            ("carol", MemberProtection::Offline(MemberCredential::Keyfile(&[3; 32]))),
+        ];
+        let (candidate, _) = broker
+            .prepare_topology_mutation(
+                &client(),
+                crate::topology::TopologyMutation::RotateCredential {
+                    reference: "cred:drive".to_owned(),
+                    credential: credential.clone(),
+                },
+                &protections,
+                1_003,
+            )
+            .await
+            .unwrap();
+        credential.refresh_token.take();
+        let recovered = candidate
+            .recover_offline(&BTreeMap::from([
+                ("alice".to_owned(), MemberCredential::Passphrase(b"alice passphrase")),
+                ("bob".to_owned(), MemberCredential::Passphrase(b"bob passphrase")),
+            ]))
+            .unwrap();
+        let topology = crate::topology::TopologyDocument::decode(
+            recovered.sealed_topology.as_ref().unwrap().as_slice(),
+        )
+        .unwrap();
+        assert_eq!(candidate.header.generation, 5);
+        assert_eq!(topology.topology_generation, 5);
+        assert_eq!(
+            topology.credentials["cred:drive"].refresh_token.as_deref(),
+            Some("rotated-refresh-secret")
+        );
     }
 
     #[test]

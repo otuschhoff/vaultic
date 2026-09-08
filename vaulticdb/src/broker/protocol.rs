@@ -19,6 +19,7 @@ use crate::{
         MemberProvider, PrincipalBinding, RecoveryCapsule, UnlockPolicy,
     },
     ids::MemberId,
+    topology::TopologyMutation,
 };
 
 pub const PROTOCOL_VERSION: &str = "vaultic-key-broker.v1";
@@ -71,6 +72,8 @@ pub enum BrokerRequest {
         release_identity: String,
         release_signature: String,
         capability: Capability,
+        #[serde(default)]
+        credential_ref: Option<String>,
         ttl_seconds: u64,
         challenge_response: String,
     },
@@ -84,6 +87,13 @@ pub enum BrokerRequest {
         #[serde(default)]
         external_members: Vec<ExternalPolicyMember>,
         acknowledge_downgrade: bool,
+    },
+    PrepareTopologyMutation {
+        authorization: AuthorizedOperation,
+        mutation: TopologyMutation,
+        members: Vec<OfflinePolicyMember>,
+        #[serde(default)]
+        external_members: Vec<ExternalPolicyMember>,
     },
     ActivatePolicyMutation {
         authorization: AuthorizedOperation,
@@ -231,6 +241,7 @@ pub async fn handle_request(
             release_identity,
             release_signature,
             capability,
+            credential_ref,
             ttl_seconds,
             challenge_response,
         } => {
@@ -253,8 +264,21 @@ pub async fn handle_request(
                 executable_owned_by_root: peer.owned_by_root,
                 installation_path_read_only: peer.installation_path_read_only,
             };
-            let lease =
-                broker.acquire_lease(&client, capability, Duration::from_secs(ttl_seconds), now)?;
+            let lease = if capability == Capability::CredentialLease {
+                broker.acquire_credential_lease(
+                    &client,
+                    credential_ref
+                        .as_deref()
+                        .context("credential lease requires credential_ref")?,
+                    Duration::from_secs(ttl_seconds),
+                    now,
+                )?
+            } else {
+                if credential_ref.is_some() {
+                    bail!("credential_ref is valid only for credential leases");
+                }
+                broker.acquire_lease(&client, capability, Duration::from_secs(ttl_seconds), now)?
+            };
             emit_security_event(
                 "notice",
                 "auth",
@@ -269,6 +293,8 @@ pub async fn handle_request(
                     ("expires_unix_ms", lease.expires_unix_ms.to_string()),
                 ],
             );
+            let next_challenge = random_id();
+            protocol.lease_challenge = Some(next_challenge.clone());
             Ok(BrokerResponse::Lease {
                 lease_id: lease.lease_id,
                 epoch_id: lease.epoch_id,
@@ -277,6 +303,7 @@ pub async fn handle_request(
                 key_version: lease.key_version,
                 capsule_generation: lease.capsule_generation,
                 key: BASE64.encode(lease.key.as_slice()),
+                challenge: next_challenge,
             })
         }
         BrokerRequest::ReleaseLease { lease_id } => {
@@ -390,6 +417,107 @@ pub async fn handle_request(
                 },
                 "lifecycle",
                 "policy_mutation_prepared",
+                &[
+                    ("repository_id", capsule.header.repository_id.to_string()),
+                    ("capsule_generation", capsule.header.generation.to_string()),
+                    ("capsule_sha256", capsule_sha256.clone()),
+                ],
+            );
+            Ok(BrokerResponse::PolicyMutationPrepared {
+                capsule,
+                capsule_sha256,
+            })
+        }
+        BrokerRequest::PrepareTopologyMutation {
+            authorization,
+            mutation,
+            members,
+            external_members,
+        } => {
+            let client = authorized_client(protocol, peer, connection_id, authorization)?;
+            let credentials = members
+                .into_iter()
+                .map(|member| {
+                    if member.member_id.is_empty() || member.credential.is_empty() {
+                        bail!("policy member ID and credential must not be empty");
+                    }
+                    let credential = BASE64
+                        .decode(member.credential)
+                        .context("decode policy member credential")?;
+                    match member.provider {
+                        MemberProvider::OfflineArgon2id | MemberProvider::OfflineKeyfile => Ok((
+                            member.member_id,
+                            member.provider,
+                            Zeroizing::new(credential),
+                        )),
+                        _ => bail!("offline policy member has an external provider"),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut external_providers = Vec::with_capacity(external_members.len());
+            for member in external_members {
+                if member.member_id.is_empty() || member.key_reference.is_empty() {
+                    bail!("external policy member ID and key reference must not be empty");
+                }
+                let provider_name = match member.provider {
+                    MemberProvider::AzureKeyVault => "azure-key-vault",
+                    MemberProvider::AwsKms | MemberProvider::AwsCloudhsm => "aws-kms",
+                    MemberProvider::GcpKms | MemberProvider::GcpCloudHsm => "gcp-kms",
+                    MemberProvider::YubikeyPiv => "yubikey-piv",
+                    MemberProvider::Fido2HmacSecret => "fido2-hmac-secret",
+                    MemberProvider::MacosSecureEnclave => "macos-secure-enclave",
+                    _ => bail!("unsupported external policy member provider"),
+                };
+                let provider: Box<dyn crate::encryption::envelope::providers::KeyProvider> =
+                    if member.provider == MemberProvider::MacosSecureEnclave {
+                        Box::new(
+                            crate::encryption::envelope::providers::MacosSecureEnclaveProvider::from_key_reference(
+                                &member.key_reference,
+                            )?,
+                        )
+                    } else {
+                        crate::encryption::envelope::providers::for_management(
+                            provider_name,
+                            member.bearer_token.clone(),
+                        )
+                        .await?
+                    };
+                external_providers.push((member, provider));
+            }
+            let mut protections = credentials
+                .iter()
+                .map(|(member_id, provider, credential)| {
+                    let credential = match provider {
+                        MemberProvider::OfflineArgon2id => {
+                            MemberCredential::Passphrase(credential.as_slice())
+                        }
+                        MemberProvider::OfflineKeyfile => {
+                            MemberCredential::Keyfile(credential.as_slice())
+                        }
+                        _ => unreachable!("validated above"),
+                    };
+                    (member_id.as_str(), MemberProtection::Offline(credential))
+                })
+                .collect::<Vec<_>>();
+            protections.extend(external_providers.iter().map(|(member, provider)| {
+                (
+                    member.member_id.as_str(),
+                    MemberProtection::External(ExternalMemberProtection {
+                        provider: member.provider.clone(),
+                        key_reference: &member.key_reference,
+                        principal: member.principal.clone(),
+                        hardware: member.hardware.clone(),
+                        key_provider: provider.as_ref(),
+                    }),
+                )
+            }));
+            let (capsule, capsule_sha256) = broker
+                .prepare_topology_mutation(&client, mutation, &protections, now)
+                .await?;
+            emit_security_event(
+                "critical",
+                "lifecycle",
+                "topology_mutation_prepared",
                 &[
                     ("repository_id", capsule.header.repository_id.to_string()),
                     ("capsule_generation", capsule.header.generation.to_string()),
@@ -541,6 +669,7 @@ pub enum BrokerResponse {
         key_version: u32,
         capsule_generation: u64,
         key: String,
+        challenge: String,
     },
     PolicyMutationPrepared {
         capsule: RecoveryCapsule,

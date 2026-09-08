@@ -114,6 +114,7 @@ mod tests {
         unsafe {
             env::set_var("VAULTICDB_REPOSITORY_ID", "repo-a");
             env::set_var("VAULTICDB_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_TOPOLOGY_SOURCE", "external");
         }
         let arguments = vec![
             "publish-capsule".to_owned(),
@@ -132,6 +133,7 @@ mod tests {
         unsafe {
             env::remove_var("VAULTICDB_REPOSITORY_ID");
             env::remove_var("VAULTICDB_OBJECT_STORE");
+            env::remove_var("VAULTICDB_TOPOLOGY_SOURCE");
         }
         std::fs::remove_dir_all(root).unwrap();
     }

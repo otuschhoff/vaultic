@@ -4614,6 +4614,7 @@ dependencies = [
  "sharks",
  "slatedb",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tonic",

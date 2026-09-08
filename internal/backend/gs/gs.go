@@ -44,6 +44,22 @@ type gs struct {
 	layout.Layout
 }
 
+type serviceAccountContextKey struct{}
+type workloadIdentityContextKey struct{}
+
+type ServiceAccountCredential struct {
+	JSON    []byte
+	Subject string
+}
+
+func WithServiceAccountCredential(ctx context.Context, credential ServiceAccountCredential) context.Context {
+	return context.WithValue(ctx, serviceAccountContextKey{}, credential)
+}
+
+func WithWorkloadIdentity(ctx context.Context) context.Context {
+	return context.WithValue(ctx, workloadIdentityContextKey{}, true)
+}
+
 // Ensure that *Backend implements backend.Backend.
 var _ backend.Backend = &gs{}
 
@@ -61,7 +77,20 @@ func getStorageClient(ctx context.Context, rt http.RoundTripper) (*storage.Clien
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
 	var ts oauth2.TokenSource
-	if token := os.Getenv("GOOGLE_ACCESS_TOKEN"); token != "" {
+	if credential, ok := ctx.Value(serviceAccountContextKey{}).(ServiceAccountCredential); ok {
+		config, err := google.JWTConfigFromJSON(credential.JSON, storage.ScopeReadWrite)
+		if err != nil {
+			return nil, err
+		}
+		config.Subject = credential.Subject
+		ts = config.TokenSource(ctx)
+	} else if ctx.Value(workloadIdentityContextKey{}) == true {
+		var err error
+		ts, err = google.DefaultTokenSource(ctx, storage.ScopeReadWrite)
+		if err != nil {
+			return nil, err
+		}
+	} else if token := os.Getenv("GOOGLE_ACCESS_TOKEN"); token != "" {
 		ts = oauth2.StaticTokenSource(&oauth2.Token{
 			AccessToken: token,
 			TokenType:   "Bearer",
