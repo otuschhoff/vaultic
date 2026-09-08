@@ -41,6 +41,7 @@ commit series so it can be reviewed or reverted independently.
 | 20 | [Quorum-based encryption unlock](phase-20-quorum-based-encryption-unlock.md) | in progress |
 | 21 | [Crawl optimization with cwalk and pathdiff](phase-21-crawl-optimization-with-cwalk-and-pathdiff.md) | see phase detail |
 | 22 | [Operational resilience and deferred crawl commit](phase-22-operational-resilience-with-relinquishable-metadata-writers-and-deferred-crawl-commit.md) | see phase detail |
+| 23 | [Ephemeral cloud storage credentials, remote principals, and VaulticDB access tickets](phase-23-ephemeral-cloud-storage-credentials-remote-principals-and-vaulticdb-access-tickets.md) | design |
 
 ## Supporting plans
 

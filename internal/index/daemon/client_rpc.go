@@ -778,8 +778,11 @@ func (c *Client) Close(ctx context.Context) error {
 		_, err := c.rpc.Shutdown(shutdownCtx, &vaulticdbv1.Empty{Context: requestContext(shutdownCtx)})
 		if err != nil {
 			result = err
+			// gRPC may surface the deadline as a status before shutdownCtx.Err() is visible.
 			if shutdownCtx.Err() != nil {
 				result = shutdownCtx.Err()
+			} else if status.Code(err) == codes.DeadlineExceeded {
+				result = context.DeadlineExceeded
 			}
 			_ = c.process.Process.Kill() // Shutdown RPC already failed; process termination is fallback cleanup.
 		}
