@@ -1,8 +1,8 @@
-# Phase 23: Ephemeral cloud storage credentials, remote principals, and brokered VaulticDB access tickets
+# Phase 25: Ephemeral cloud storage credentials, remote principals, and brokered VaulticDB access tickets
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 22](phase-22-operational-resilience-with-relinquishable-metadata-writers-and-deferred-crawl-commit.md)
+[← Phase 24](phase-24-sealed-topology-and-credentials-in-the-recovery-capsule.md)
 
 [Broker implementation and state machines](../02-architecture/08-quorum-key-broker.md) · [Cloud object storage operator guide](../../051_cloud_object_storage.rst)
 

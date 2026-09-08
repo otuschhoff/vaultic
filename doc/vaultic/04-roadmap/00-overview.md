@@ -41,7 +41,9 @@ commit series so it can be reviewed or reverted independently.
 | 20 | [Quorum-based encryption unlock](phase-20-quorum-based-encryption-unlock.md) | in progress |
 | 21 | [Crawl optimization with cwalk and pathdiff](phase-21-crawl-optimization-with-cwalk-and-pathdiff.md) | see phase detail |
 | 22 | [Operational resilience and deferred crawl commit](phase-22-operational-resilience-with-relinquishable-metadata-writers-and-deferred-crawl-commit.md) | see phase detail |
-| 23 | [Ephemeral cloud storage credentials, remote principals, and VaulticDB access tickets](phase-23-ephemeral-cloud-storage-credentials-remote-principals-and-vaulticdb-access-tickets.md) | design |
+| 23 | [macOS FSEvents change detection and APFS snapshot backup source](phase-23-macos-fsevents-change-detection-and-apfs-snapshot-backup-source.md) | design |
+| 24 | [Sealed topology and credentials in the recovery capsule](phase-24-sealed-topology-and-credentials-in-the-recovery-capsule.md) | design |
+| 25 | [Ephemeral cloud storage credentials, remote principals, and VaulticDB access tickets](phase-25-ephemeral-cloud-storage-credentials-remote-principals-and-vaulticdb-access-tickets.md) | design |
 
 ## Supporting plans
 

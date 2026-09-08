@@ -2,7 +2,7 @@
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 21](phase-21-crawl-optimization-with-cwalk-and-pathdiff.md) · [Phase 23 →](phase-23-ephemeral-cloud-storage-credentials-remote-principals-and-vaulticdb-access-tickets.md)
+[← Phase 21](phase-21-crawl-optimization-with-cwalk-and-pathdiff.md) · [Phase 23 →](phase-23-macos-fsevents-change-detection-and-apfs-snapshot-backup-source.md)
 
 **Goal:** keep backup data moving through transient metadata-writer contention, VaulticDB maintenance, and complete VaulticDB unavailability. Allow an idle or operator-directed `vaulticdb` instance to relinquish SlateDB writer ownership and remain available as a non-fencing reader, then reacquire writer ownership when required. Allow `vaultic` to discover and connect to multiple data-pack backends before contacting VaulticDB, then crawl, encrypt, upload, and verify data packs when VaulticDB is read-only, unavailable, or corrupt by publishing a self-contained authenticated staging journal to those backends and committing its metadata later. Clearly distinguish durable staged data from a completed, normally restorable backup; never weaken single-writer fencing, snapshot publication ordering, quorum placement, or deletion safety to improve availability.
 
