@@ -51,6 +51,143 @@ pub(crate) enum ReplicaStoreConfig {
     },
 }
 
+#[derive(Debug)]
+struct RenewableObjectStore {
+    current: std::sync::RwLock<Arc<dyn ObjectStore>>,
+    valid_until_ms: AtomicU64,
+    write_until_ms: AtomicU64,
+}
+
+impl std::fmt::Display for RenewableObjectStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("brokered renewable object store")
+    }
+}
+
+impl RenewableObjectStore {
+    fn new(current: Arc<dyn ObjectStore>, valid_until_ms: u64, ttl: std::time::Duration) -> Self {
+        Self {
+            current: std::sync::RwLock::new(current),
+            valid_until_ms: AtomicU64::new(valid_until_ms),
+            write_until_ms: AtomicU64::new(
+                valid_until_ms.saturating_sub(storage_write_safety_margin(ttl).as_millis() as u64),
+            ),
+        }
+    }
+
+    fn current(&self, write: bool) -> slatedb::object_store::Result<Arc<dyn ObjectStore>> {
+        let deadline = if write {
+            self.write_until_ms.load(Ordering::Acquire)
+        } else {
+            self.valid_until_ms.load(Ordering::Acquire)
+        };
+        if unix_time_ms().unwrap_or(deadline) >= deadline {
+            return Err(slatedb::object_store::Error::Generic {
+                store: "brokered",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "storage credential expired",
+                )),
+            });
+        }
+        self.current
+            .read()
+            .map(|current| Arc::clone(&current))
+            .map_err(|_| slatedb::object_store::Error::Generic {
+                store: "brokered",
+                source: Box::new(std::io::Error::other("storage credential lock poisoned")),
+            })
+    }
+
+    fn replace(
+        &self,
+        next: Arc<dyn ObjectStore>,
+        valid_until_ms: u64,
+        ttl: std::time::Duration,
+    ) -> Result<()> {
+        *self
+            .current
+            .write()
+            .map_err(|_| anyhow::anyhow!("storage credential lock poisoned"))? = next;
+        self.valid_until_ms.store(valid_until_ms, Ordering::Release);
+        self.write_until_ms.store(
+            valid_until_ms.saturating_sub(storage_write_safety_margin(ttl).as_millis() as u64),
+            Ordering::Release,
+        );
+        Ok(())
+    }
+}
+
+fn storage_write_safety_margin(ttl: std::time::Duration) -> std::time::Duration {
+    std::cmp::min(std::time::Duration::from_secs(300), ttl / 10)
+}
+
+#[async_trait]
+impl ObjectStore for RenewableObjectStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> slatedb::object_store::Result<PutResult> {
+        self.current(true)?.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+        self.current(true)?
+            .put_multipart_opts(location, options)
+            .await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> slatedb::object_store::Result<GetResult> {
+        self.current(false)?.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, slatedb::object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectPath>> {
+        match self.current(true) {
+            Ok(current) => current.delete_stream(locations),
+            Err(error) => stream::once(async move { Err(error) }).boxed(),
+        }
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        match self.current(false) {
+            Ok(current) => current.list(prefix),
+            Err(error) => stream::once(async move { Err(error) }).boxed(),
+        }
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> slatedb::object_store::Result<ListResult> {
+        self.current(false)?.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> slatedb::object_store::Result<()> {
+        self.current(true)?.copy_opts(from, to, options).await
+    }
+}
+
 pub(crate) fn object_store(
     repository_id: &str,
     config: &ObjectStoreConfig,
@@ -316,5 +453,48 @@ mod object_store_tests {
         assert!(error
             .to_string()
             .contains("provider profile requires an explicit endpoint"));
+    }
+
+    #[tokio::test]
+    async fn renewable_store_stops_writes_before_reads_and_recovers_after_swap() {
+        let initial: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let existing = ObjectPath::from("existing");
+        initial.put(&existing, "old".into()).await.unwrap();
+        let store = RenewableObjectStore::new(
+            initial,
+            current_unix_ms() + 1_000,
+            std::time::Duration::from_secs(100),
+        );
+
+        assert!(store.get(&existing).await.is_ok());
+        let error = store
+            .put(&ObjectPath::from("blocked"), "data".into())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("storage credential expired"));
+
+        let replacement: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        store
+            .replace(
+                replacement,
+                current_unix_ms() + 60_000,
+                std::time::Duration::from_secs(100),
+            )
+            .unwrap();
+        store
+            .put(&ObjectPath::from("renewed"), "data".into())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn renewable_store_fails_reads_after_hard_expiry() {
+        let store = RenewableObjectStore::new(
+            Arc::new(InMemory::new()),
+            current_unix_ms().saturating_sub(1),
+            std::time::Duration::from_secs(100),
+        );
+        let error = store.get(&ObjectPath::from("expired")).await.unwrap_err();
+        assert!(error.to_string().contains("storage credential expired"));
     }
 }

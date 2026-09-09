@@ -79,6 +79,7 @@ type repositoryLocation struct {
 	capsuleTopology    *topology.Document
 	capsuleBackend     backend.Backend
 	capsulePlacements  map[uint64]backend.Backend
+	capsuleManager     *storageCredentialManager
 }
 
 // OpenRepository reads the password and opens the repository.
@@ -90,6 +91,9 @@ func OpenRepository(ctx context.Context, globalOptions Options, printer vaultic.
 	defer func() {
 		if location.capsulePlacements != nil {
 			closeTopologyBackends(location.capsulePlacements)
+		}
+		if location.capsuleManager != nil {
+			errors.LogClose(location.capsuleManager, "close storage credential manager", debug.Log)
 		}
 		if location.bootstrapBroker != nil {
 			errors.LogClose(location.bootstrapBroker, "close bootstrap broker", debug.Log)
@@ -135,6 +139,7 @@ func resolveRepositoryLocation(ctx context.Context, globalOptions Options, print
 			if expectedRepositoryID != "" && resolved.document.RepositoryID != expectedRepositoryID {
 				closeTopologyBackends(resolved.placements)
 				_ = resolved.primary.Close() // Preserve the repository identity error; backend cleanup is best effort.
+				_ = resolved.manager.Close() // Stop renewal before closing its broker connection.
 				_ = resolved.client.Close()  // Preserve the repository identity error; broker cleanup is best effort.
 				return repositoryLocation{}, errors.Fatal("capsule bootstrap profile repository identity mismatch")
 			}
@@ -142,7 +147,7 @@ func resolveRepositoryLocation(ctx context.Context, globalOptions Options, print
 			location.capsuleBackend = resolved.primary
 			location.capsulePlacements = resolved.placements
 			location.capsuleTopology = &resolved.document
-			location.bootstrapBroker = resolved.client
+			location.capsuleManager = resolved.manager
 			return location, nil
 		}
 		if globalOptions.TopologySource == "capsule" || !strings.Contains(err.Error(), "topology is external") {
@@ -202,6 +207,7 @@ func openAndAuthenticate(ctx context.Context, location *repositoryLocation, prin
 			s.AttachPlacementBackend(id, placement)
 		}
 		location.capsulePlacements = nil
+		location.capsuleManager = nil // The managed primary stops renewal before backend shutdown.
 		if location.bootstrapBroker != nil {
 			s.AddOwnedCloser(location.bootstrapBroker)
 			location.bootstrapBroker = nil

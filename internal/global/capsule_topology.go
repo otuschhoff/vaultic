@@ -21,6 +21,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/gs"
 	"github.com/otuschhoff/vaultic/internal/backend/s3"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
+	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/options"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/topology"
@@ -33,12 +34,43 @@ type capsuleTopologyBackends struct {
 	primaryURL string
 	placements map[uint64]backend.Backend
 	client     *indexbroker.Client
+	manager    *storageCredentialManager
+}
+
+func storageCredentialLifetime(globalOptions Options) (time.Duration, time.Duration, time.Duration, error) {
+	ttl := globalOptions.StorageTokenTTL
+	if ttl == 0 {
+		ttl = time.Hour
+	}
+	margin := globalOptions.StorageTokenRenewMargin
+	if margin == 0 {
+		margin = max(20*time.Minute, ttl/3)
+	}
+	grace := globalOptions.BrokerOutageGrace
+	if grace == 0 {
+		grace = ttl
+	}
+	if ttl <= 0 || ttl > time.Hour || ttl%time.Second != 0 {
+		return 0, 0, 0, fmt.Errorf("storage token TTL must be positive whole seconds and at most one hour")
+	}
+	if margin <= 0 || margin >= ttl {
+		return 0, 0, 0, fmt.Errorf("storage token renewal margin must be positive and less than the token TTL")
+	}
+	if grace <= 0 {
+		return 0, 0, 0, fmt.Errorf("broker outage grace must be positive")
+	}
+	return ttl, margin, grace, nil
 }
 
 func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vaultic.Printer) (_ capsuleTopologyBackends, err error) {
 	if globalOptions.KeyBrokerSocket == "" || globalOptions.KeyBrokerReleaseManifest == "" {
 		return capsuleTopologyBackends{}, fmt.Errorf("capsule topology requires key broker socket and release manifest")
 	}
+	storageTTL, _, _, err := storageCredentialLifetime(globalOptions)
+	if err != nil {
+		return capsuleTopologyBackends{}, err
+	}
+	globalOptions.StorageTokenTTL = storageTTL
 	client, err := indexbroker.Dial(ctx, globalOptions.KeyBrokerSocket)
 	if err != nil {
 		return capsuleTopologyBackends{}, err
@@ -46,6 +78,15 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	defer func() {
 		if err != nil {
 			_ = client.Close() // Preserve the topology-open error; connection cleanup is best effort.
+		}
+	}()
+	manager, err := newStorageCredentialManager(client, globalOptions, printer)
+	if err != nil {
+		return capsuleTopologyBackends{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = manager.Close() // Preserve the topology-open error; manager cleanup is best effort.
 		}
 	}()
 	document, topologyLease, err := client.ReadTopology(ctx, globalOptions.KeyBrokerReleaseManifest, globalOptions.KeyBrokerLeaseDuration)
@@ -72,7 +113,7 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	var primary backend.Backend
 	for _, declared := range document.PackBackends {
 		openedBackend, _, openErr := openCapsulePackBackend(
-			ctx, client, globalOptions, printer, declared, storageTier,
+			ctx, manager, globalOptions, printer, declared, storageTier,
 		)
 		if openErr != nil {
 			return capsuleTopologyBackends{}, fmt.Errorf("open capsule backend %q: %w", declared.ID, openErr)
@@ -95,18 +136,31 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 		}
 	}
 	primary, primaryURL, err := openCapsulePrimaryBackend(
-		ctx, client, globalOptions, printer, primaryDeclaration, storageTier,
+		ctx, manager, globalOptions, printer, primaryDeclaration, storageTier,
 	)
 	if err != nil {
 		return capsuleTopologyBackends{}, err
 	}
 	opened = append(opened, primary)
-	return capsuleTopologyBackends{document: document, primary: primary, primaryURL: primaryURL, placements: placements, client: client}, nil
+	manager.start()
+	managedPrimary := &credentialManagedBackend{Backend: primary, manager: manager}
+	return capsuleTopologyBackends{document: document, primary: managedPrimary, primaryURL: primaryURL, placements: placements, client: client, manager: manager}, nil
 }
+
+type credentialManagedBackend struct {
+	backend.Backend
+	manager *storageCredentialManager
+}
+
+func (b *credentialManagedBackend) Close() error {
+	return errors.Join(b.manager.Close(), b.Backend.Close())
+}
+
+func (b *credentialManagedBackend) Unwrap() backend.Backend { return b.Backend }
 
 func openCapsulePackBackend(
 	ctx context.Context,
-	client *indexbroker.Client,
+	manager *storageCredentialManager,
 	globalOptions Options,
 	printer vaultic.Printer,
 	declared topology.PackBackend,
@@ -116,30 +170,44 @@ func openCapsulePackBackend(
 		return openStructuredBackend(ctx, globalOptions, printer, declared, topology.Credential{Kind: topology.CredentialNone})
 	}
 	credential, err := leaseTopologyStorageCredential(
-		ctx, client, globalOptions, "pack:"+declared.ID, storageTier,
+		ctx, manager.client, globalOptions, "pack:"+declared.ID, storageTier,
 	)
 	if err != nil {
 		return nil, "", err
 	}
-	return openStructuredBackend(ctx, globalOptions, printer, declared, credential)
+	opened, description, err := openStructuredBackend(ctx, globalOptions, printer, declared, credential.credential)
+	if err != nil {
+		_ = manager.client.ReleaseLease(ctx, credential.leaseID) // Preserve the backend-open error; lease cleanup is best effort.
+		return nil, "", err
+	}
+	validUntil := credential.expiresAt
+	if graceUntil := time.Now().Add(manager.outageGrace); graceUntil.Before(validUntil) {
+		validUntil = graceUntil
+	}
+	renewable := newRenewableBackend(opened, validUntil, manager.options.StorageTokenTTL)
+	manager.add(&storageCredentialSlot{
+		backend: renewable, declared: declared, target: "pack:" + declared.ID,
+		tier: storageTier, leaseID: credential.leaseID, expiresAt: credential.expiresAt,
+	})
+	return renewable, description, nil
 }
 
 func openCapsulePrimaryBackend(
 	ctx context.Context,
-	client *indexbroker.Client,
+	manager *storageCredentialManager,
 	globalOptions Options,
 	printer vaultic.Printer,
 	declared topology.PackBackend,
 	storageTier string,
 ) (backend.Backend, string, error) {
 	dataBackend, description, err := openCapsulePackBackend(
-		ctx, client, globalOptions, printer, declared, storageTier,
+		ctx, manager, globalOptions, printer, declared, storageTier,
 	)
 	if err != nil || !globalOptions.StorageLockCredential || declared.Provider == topology.ProviderLocal {
 		return dataBackend, description, err
 	}
 	lockBackend, _, err := openCapsulePackBackend(
-		ctx, client, globalOptions, printer, declared, string(topology.StorageLock),
+		ctx, manager, globalOptions, printer, declared, string(topology.StorageLock),
 	)
 	if err != nil {
 		_ = dataBackend.Close() // Preserve the lock-backend error; data backend cleanup is best effort.
@@ -199,45 +267,76 @@ func (r *credentialRoutingBackend) WarmupWait(ctx context.Context, handles []bac
 	return r.data.WarmupWait(ctx, handles)
 }
 
+type leasedStorageCredential struct {
+	credential topology.Credential
+	leaseID    string
+	expiresAt  time.Time
+	source     string
+}
+
 func leaseTopologyStorageCredential(
 	ctx context.Context,
 	client *indexbroker.Client,
 	globalOptions Options,
 	storageTarget, storageTier string,
-) (topology.Credential, error) {
+) (_ leasedStorageCredential, err error) {
 	lease, err := client.AcquireStorageCredentialLease(
 		ctx,
 		globalOptions.KeyBrokerReleaseManifest,
 		storageTarget,
 		storageTier,
-		globalOptions.KeyBrokerLeaseDuration,
+		globalOptions.StorageTokenTTL,
 	)
 	if err != nil {
-		return topology.Credential{}, err
+		return leasedStorageCredential{}, err
 	}
 	defer clear(lease.Key)
+	defer func() {
+		if err != nil {
+			_ = client.ReleaseLease(context.Background(), lease.LeaseID) // Preserve validation errors; lease cleanup is best effort.
+		}
+	}()
 	if lease.ExpiresUnixMS <= uint64(time.Now().UnixMilli()) {
-		return topology.Credential{}, fmt.Errorf("key broker returned an expired storage credential lease")
+		return leasedStorageCredential{}, fmt.Errorf("key broker returned an expired storage credential lease")
 	}
 	if lease.StorageTarget != storageTarget || lease.StorageTier != storageTier ||
 		lease.CredentialSource != "sts" && lease.CredentialSource != "azure-user-delegation" && lease.CredentialSource != "gcp-downscope" && lease.CredentialSource != "static" &&
 			lease.CredentialSource != "static-fallback" {
-		return topology.Credential{}, fmt.Errorf("key broker returned mismatched storage credential metadata")
+		return leasedStorageCredential{}, fmt.Errorf("key broker returned mismatched storage credential metadata")
 	}
 	if (lease.CredentialSource == "static" || lease.CredentialSource == "static-fallback") && lease.StaticGeneration == 0 {
-		return topology.Credential{}, fmt.Errorf("key broker returned static credentials without a generation")
+		return leasedStorageCredential{}, fmt.Errorf("key broker returned static credentials without a generation")
 	}
 	if (lease.CredentialSource == "sts" || lease.CredentialSource == "azure-user-delegation" || lease.CredentialSource == "gcp-downscope") && lease.ProviderExpiresAt == "" {
-		return topology.Credential{}, fmt.Errorf("key broker returned dynamic credentials without a provider expiry")
+		return leasedStorageCredential{}, fmt.Errorf("key broker returned dynamic credentials without a provider expiry")
 	}
 	var credential topology.Credential
 	if err := json.Unmarshal(lease.Key, &credential); err != nil {
-		return topology.Credential{}, fmt.Errorf("decode storage credential lease: %w", err)
+		return leasedStorageCredential{}, fmt.Errorf("decode storage credential lease: %w", err)
 	}
 	if err := credential.Validate(); err != nil {
-		return topology.Credential{}, fmt.Errorf("validate storage credential lease: %w", err)
+		return leasedStorageCredential{}, fmt.Errorf("validate storage credential lease: %w", err)
 	}
-	return credential, nil
+	expiresAt := time.UnixMilli(int64(lease.ExpiresUnixMS))
+	if lease.ProviderExpiresAt != "" {
+		providerExpiry, parseErr := time.Parse(time.RFC3339, lease.ProviderExpiresAt)
+		if parseErr != nil {
+			return leasedStorageCredential{}, fmt.Errorf("parse provider storage credential expiry: %w", parseErr)
+		}
+		if providerExpiry.Before(expiresAt) {
+			expiresAt = providerExpiry
+		}
+	}
+	leased := leasedStorageCredential{credential: credential, leaseID: lease.LeaseID, expiresAt: expiresAt, source: lease.CredentialSource}
+	observability.EmitBestEffort(ctx, observability.Event{
+		Severity: observability.Notice, Category: observability.CategoryAuth, Component: "storage-credential-manager",
+		Message: "storage credential granted", Fields: map[string]any{
+			"storage_target": storageTarget, "storage_tier": storageTier,
+			"ttl_seconds": int64(time.Until(expiresAt).Seconds()), "lease_id": lease.LeaseID,
+			"credential_source": lease.CredentialSource,
+		},
+	})
+	return leased, nil
 }
 
 func openStructuredBackend(

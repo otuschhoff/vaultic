@@ -303,20 +303,32 @@ pub async fn handle_request(
                 }
                 broker.acquire_lease(&client, capability, Duration::from_secs(ttl_seconds), now)?
             };
-            emit_security_event(
-                "notice",
-                "auth",
-                "lease_granted",
-                &[
-                    ("connection_id", connection_id.to_owned()),
-                    ("component", client.component.clone()),
-                    ("version", client.version.to_string()),
-                    ("release_identity", client.release_identity.clone()),
-                    ("capability", format!("{:?}", lease.capability)),
-                    ("lease_id", lease.lease_id.clone()),
-                    ("expires_unix_ms", lease.expires_unix_ms.to_string()),
-                ],
-            );
+            let mut grant_fields = vec![
+                ("connection_id", connection_id.to_owned()),
+                ("component", client.component.clone()),
+                ("version", client.version.to_string()),
+                ("release_identity", client.release_identity.clone()),
+                ("capability", format!("{:?}", lease.capability)),
+                ("lease_id", lease.lease_id.clone()),
+                ("expires_unix_ms", lease.expires_unix_ms.to_string()),
+                ("ttl_seconds", ttl_seconds.to_string()),
+            ];
+            if let Some(value) = &lease.storage_target {
+                grant_fields.push(("storage_target", value.clone()));
+            }
+            if let Some(value) = &lease.storage_tier {
+                grant_fields.push(("storage_tier", value.clone()));
+            }
+            if let Some(value) = &lease.credential_source {
+                grant_fields.push(("credential_source", value.to_string()));
+            }
+            if let Some(value) = &lease.provider_expires_at {
+                grant_fields.push(("provider_expires_at", value.clone()));
+            }
+            if let Some(value) = lease.static_generation {
+                grant_fields.push(("static_generation", value.to_string()));
+            }
+            emit_security_event("notice", "auth", "lease_granted", &grant_fields);
             let next_challenge = random_id();
             protocol.lease_challenge = Some(next_challenge.clone());
             Ok(BrokerResponse::Lease {

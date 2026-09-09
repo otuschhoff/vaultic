@@ -199,7 +199,12 @@ mod tests {
             "lease_granted",
             &[
                 ("component", "vaultic".to_owned()),
-                ("release_identity", "release-a".to_owned())
+                ("release_identity", "release-a".to_owned()),
+                ("storage_target", "pack:primary".to_owned()),
+                ("storage_tier", "storage-read".to_owned()),
+                ("credential_source", "sts".to_owned()),
+                ("ttl_seconds", "3600".to_owned()),
+                ("provider_expires_at", "2030-01-01T00:00:00Z".to_owned()),
             ],
         )
         .unwrap()

@@ -93,15 +93,45 @@ impl Config {
 fn storage_from_env() -> Result<StorageConfig> {
     let metadata_rebuild_initialize = env_bool("VAULTICDB_METADATA_REBUILD_INITIALIZE")?;
     let broker = match env::var_os("VAULTICDB_BROKER_SOCKET") {
-        Some(socket) => Some(BrokerLeaseConfig {
-            socket: PathBuf::from(socket),
-            release_manifest: PathBuf::from(
-                env::var_os("VAULTICDB_RELEASE_MANIFEST").context(
-                    "VAULTICDB_RELEASE_MANIFEST is required with VAULTICDB_BROKER_SOCKET",
-                )?,
-            ),
-            lease_duration: Duration::from_secs(parse_u64("VAULTICDB_BROKER_LEASE_SECONDS", 3600)?),
-        }),
+        Some(socket) => {
+            let storage_token_ttl = configured_duration(
+                "VAULTICDB_STORAGE_TOKEN_TTL",
+                Duration::from_secs(3600),
+                false,
+            )?
+            .context("storage token TTL must be enabled")?;
+            if storage_token_ttl > Duration::from_secs(3600) {
+                bail!("VAULTICDB_STORAGE_TOKEN_TTL must not exceed 1h");
+            }
+            let default_margin = std::cmp::max(Duration::from_secs(1200), storage_token_ttl / 3);
+            let storage_token_renew_margin = configured_duration(
+                "VAULTICDB_STORAGE_TOKEN_RENEW_MARGIN",
+                default_margin,
+                false,
+            )?
+            .context("storage token renewal margin must be enabled")?;
+            if storage_token_renew_margin >= storage_token_ttl {
+                bail!("VAULTICDB_STORAGE_TOKEN_RENEW_MARGIN must be less than the token TTL");
+            }
+            let broker_outage_grace =
+                configured_duration("VAULTICDB_BROKER_OUTAGE_GRACE", storage_token_ttl, false)?
+                    .context("broker outage grace must be enabled")?;
+            Some(BrokerLeaseConfig {
+                socket: PathBuf::from(socket),
+                release_manifest: PathBuf::from(
+                    env::var_os("VAULTICDB_RELEASE_MANIFEST").context(
+                        "VAULTICDB_RELEASE_MANIFEST is required with VAULTICDB_BROKER_SOCKET",
+                    )?,
+                ),
+                lease_duration: Duration::from_secs(parse_u64(
+                    "VAULTICDB_BROKER_LEASE_SECONDS",
+                    3600,
+                )?),
+                storage_token_ttl,
+                storage_token_renew_margin,
+                broker_outage_grace,
+            })
+        }
         None => None,
     };
     let topology_source = match env::var("VAULTICDB_TOPOLOGY_SOURCE").ok().as_deref() {

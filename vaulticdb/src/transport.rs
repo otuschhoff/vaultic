@@ -139,20 +139,32 @@ async fn main() -> Result<()> {
 }
 
 fn monitor_broker_lease(storage: &Storage, shutdown: watch::Sender<bool>) {
-    let Some((mut disconnected, expires_unix_ms)) = storage.broker_lease_monitor() else {
+    let Some(mut valid_until) = storage.broker_lease_monitor() else {
         return;
     };
     tokio::spawn(async move {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or(expires_unix_ms);
-        let until_expiry = std::time::Duration::from_millis(expires_unix_ms.saturating_sub(now));
-        tokio::select! {
-            _ = disconnected.changed() => {}
-            _ = tokio::time::sleep(until_expiry) => {}
+        loop {
+            let expires_unix_ms = *valid_until.borrow();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(expires_unix_ms);
+            let until_expiry =
+                std::time::Duration::from_millis(expires_unix_ms.saturating_sub(now));
+            tokio::select! {
+                changed = valid_until.changed() => {
+                    if changed.is_ok() {
+                        continue;
+                    }
+                }
+                _ = tokio::time::sleep(until_expiry) => {}
+            }
+            eprintln!(
+                "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"credential_expired\"}}"
+            );
+            let _ = shutdown.send(true);
+            return;
         }
-        let _ = shutdown.send(true);
     });
 }
 

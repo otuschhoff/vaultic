@@ -2,14 +2,115 @@ package global
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
 	"github.com/otuschhoff/vaultic/internal/topology"
 )
+
+func TestStorageCredentialLifetime(t *testing.T) {
+	tests := []struct {
+		name       string
+		options    Options
+		wantTTL    time.Duration
+		wantMargin time.Duration
+		wantGrace  time.Duration
+		wantError  bool
+	}{
+		{name: "defaults", wantTTL: time.Hour, wantMargin: 20 * time.Minute, wantGrace: time.Hour},
+		{name: "computed margin", options: Options{StorageTokenTTL: 45 * time.Minute}, wantTTL: 45 * time.Minute, wantMargin: 20 * time.Minute, wantGrace: 45 * time.Minute},
+		{name: "explicit", options: Options{StorageTokenTTL: 30 * time.Minute, StorageTokenRenewMargin: 10 * time.Minute, BrokerOutageGrace: 25 * time.Minute}, wantTTL: 30 * time.Minute, wantMargin: 10 * time.Minute, wantGrace: 25 * time.Minute},
+		{name: "margin exceeds ttl", options: Options{StorageTokenTTL: 15 * time.Minute}, wantError: true},
+		{name: "ttl exceeds broker maximum", options: Options{StorageTokenTTL: 2 * time.Hour}, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ttl, margin, grace, err := storageCredentialLifetime(test.options)
+			if (err != nil) != test.wantError {
+				t.Fatalf("storageCredentialLifetime() error = %v, want error %v", err, test.wantError)
+			}
+			if err == nil && (ttl != test.wantTTL || margin != test.wantMargin || grace != test.wantGrace) {
+				t.Fatalf("storageCredentialLifetime() = (%v, %v, %v), want (%v, %v, %v)", ttl, margin, grace, test.wantTTL, test.wantMargin, test.wantGrace)
+			}
+		})
+	}
+}
+
+func TestRenewableBackendFailsClosedAtExpiry(t *testing.T) {
+	ctx := context.Background()
+	storage := mem.New()
+	renewable := newRenewableBackend(storage, time.Now().Add(-time.Second), time.Hour)
+	handle := backend.Handle{Type: backend.PackFile, Name: "expired"}
+	if err := renewable.Save(ctx, handle, backend.NewByteReader([]byte("data"), renewable.Hasher())); !errors.Is(err, errStorageCredentialExpired) {
+		t.Fatalf("Save() error = %v, want credential expiry", err)
+	}
+	if _, err := renewable.Stat(ctx, handle); !errors.Is(err, errStorageCredentialExpired) {
+		t.Fatalf("Stat() error = %v, want credential expiry", err)
+	}
+}
+
+func TestRenewableBackendStopsWritesBeforeReads(t *testing.T) {
+	ctx := context.Background()
+	storage := mem.New()
+	handle := backend.Handle{Type: backend.PackFile, Name: "existing"}
+	if err := storage.Save(ctx, handle, backend.NewByteReader([]byte("data"), storage.Hasher())); err != nil {
+		t.Fatal(err)
+	}
+	renewable := newRenewableBackend(storage, time.Now().Add(4*time.Minute), time.Hour)
+	if err := renewable.Save(ctx, backend.Handle{Type: backend.PackFile, Name: "new"}, backend.NewByteReader([]byte("data"), renewable.Hasher())); !errors.Is(err, errStorageCredentialExpired) {
+		t.Fatalf("Save() error = %v, want credential safety-margin expiry", err)
+	}
+	if _, err := renewable.Stat(ctx, handle); err != nil {
+		t.Fatalf("Stat() error = %v, want read to remain admitted", err)
+	}
+}
+
+func TestRenewableBackendSwapDrainsInflightOperation(t *testing.T) {
+	ctx := context.Background()
+	oldStorage := mem.New()
+	newStorage := mem.New()
+	handle := backend.Handle{Type: backend.PackFile, Name: "pack"}
+	if err := oldStorage.Save(ctx, handle, backend.NewByteReader([]byte("old"), oldStorage.Hasher())); err != nil {
+		t.Fatal(err)
+	}
+	renewable := newRenewableBackend(oldStorage, time.Now().Add(time.Hour), time.Hour)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	loadDone := make(chan error, 1)
+	go func() {
+		loadDone <- renewable.Load(ctx, handle, 0, 0, func(io.Reader) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	var swapped atomic.Bool
+	swapDone := make(chan error, 1)
+	go func() {
+		_, err := renewable.swap(newStorage, time.Now().Add(time.Hour), time.Hour)
+		swapped.Store(true)
+		swapDone <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	if swapped.Load() {
+		t.Fatal("credential swap completed before the in-flight operation drained")
+	}
+	close(release)
+	if err := <-loadDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-swapDone; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCredentialRoutingBackendIsolatesLocks(t *testing.T) {
 	ctx := context.Background()

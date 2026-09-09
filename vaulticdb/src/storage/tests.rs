@@ -187,8 +187,8 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
-            broker_lease: None,
-            _topology_leases: Vec::new(),
+            credential_manager: None,
+            broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
         };
         storage.store_master_key(b"repository-key").await.unwrap();
@@ -270,8 +270,8 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
-            broker_lease: None,
-            _topology_leases: Vec::new(),
+            credential_manager: None,
+            broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
         };
         let error = storage.assert_current_writer_epoch().await.unwrap_err();
@@ -342,8 +342,8 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
-            broker_lease: None,
-            _topology_leases: Vec::new(),
+            credential_manager: None,
+            broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(0),
         };
         let diagnostic = "aa".repeat(32);

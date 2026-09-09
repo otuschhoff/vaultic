@@ -82,6 +82,9 @@ type Options struct {
 	KeyBrokerSocket              string
 	KeyBrokerReleaseManifest     string
 	KeyBrokerLeaseDuration       time.Duration
+	StorageTokenTTL              time.Duration
+	StorageTokenRenewMargin      time.Duration
+	BrokerOutageGrace            time.Duration
 	StorageCredentialTier        string
 	StorageLockCredential        bool
 	Quiet                        bool
@@ -308,6 +311,24 @@ func (globalOptions *Options) addRepositoryAccessFlags(f *pflag.FlagSet) {
 	f.StringVar(&globalOptions.KeyBrokerSocket, "key-broker-socket", "", "local vaultic-key-broker Unix socket")
 	f.StringVar(&globalOptions.KeyBrokerReleaseManifest, "key-broker-release-manifest", "", "signed release manifest authorizing this Vaultic executable")
 	f.DurationVar(&globalOptions.KeyBrokerLeaseDuration, "key-broker-lease", 15*time.Minute, "job-scoped repository-key lease lifetime")
+	f.DurationVar(&globalOptions.StorageTokenTTL, "storage-token-ttl", time.Hour, "brokered cloud storage credential lifetime")
+	f.DurationVar(&globalOptions.StorageTokenRenewMargin, "storage-token-renew-margin", 0, "proactive storage credential renewal margin (default: max(20m, TTL/3))")
+	f.DurationVar(&globalOptions.BrokerOutageGrace, "broker-outage-grace", 0, "maximum storage access after last successful broker contact (default: storage token TTL)")
+	if value := env.Get("STORAGE_TOKEN_TTL"); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			globalOptions.StorageTokenTTL = duration
+		}
+	}
+	if value := env.Get("STORAGE_TOKEN_RENEW_MARGIN"); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			globalOptions.StorageTokenRenewMargin = duration
+		}
+	}
+	if value := env.Get("BROKER_OUTAGE_GRACE"); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			globalOptions.BrokerOutageGrace = duration
+		}
+	}
 }
 
 func (globalOptions *Options) addTelemetryFlags(f *pflag.FlagSet) {

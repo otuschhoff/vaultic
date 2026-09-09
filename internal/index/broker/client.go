@@ -40,6 +40,15 @@ type Client struct {
 	challenge  string
 }
 
+type RequestError struct {
+	Code    string
+	Message string
+}
+
+func (err *RequestError) Error() string {
+	return fmt.Sprintf("key broker rejected request (%s): %s", err.Code, err.Message)
+}
+
 type Status struct {
 	Protocol                 string   `json:"protocol"`
 	Locked                   bool     `json:"locked"`
@@ -649,8 +658,18 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 		if err := client.connection.SetDeadline(deadline); err != nil {
 			return err
 		}
-		defer client.connection.SetDeadline(time.Time{})
 	}
+	cancellationDone := make(chan struct{})
+	stopCancellation := context.AfterFunc(ctx, func() {
+		_ = client.connection.SetDeadline(time.Now()) // Interrupt blocked broker I/O; the call returns the primary transport error.
+		close(cancellationDone)
+	})
+	defer func() {
+		if !stopCancellation() {
+			<-cancellationDone
+		}
+		_ = client.connection.SetDeadline(time.Time{}) // The next serialized broker request gets an independent deadline.
+	}()
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -672,7 +691,7 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 		return fmt.Errorf("decode broker response: %w", err)
 	}
 	if response.Result == "error" {
-		return fmt.Errorf("key broker rejected request (%s): %s", response.Code, response.Message)
+		return &RequestError{Code: response.Code, Message: response.Message}
 	}
 	return nil
 }

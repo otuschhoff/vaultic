@@ -12,7 +12,8 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
+use async_trait::async_trait;
+use futures_util::{stream, stream::BoxStream, StreamExt};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,7 +27,9 @@ use slatedb::{
         memory::InMemory,
         path::Path as ObjectPath,
         prefix::PrefixStore,
-        ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion,
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        UpdateVersion,
     },
     Db, DbIterator, DbReader, DbReaderMode, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
 };
@@ -114,16 +117,41 @@ pub(crate) struct Storage {
     next_transaction: AtomicU64,
     last_durable_sequence: AtomicU64,
     transaction_idle_timeout_ms: u64,
-    broker_lease: Option<BrokerLeaseConnection>,
-    _topology_leases: Vec<BrokerLeaseConnection>,
+    credential_manager: Option<StorageCredentialManager>,
+    broker_lease_metadata: Option<BrokerLeaseMetadata>,
     writer_epoch: AtomicU64,
 }
 
-#[derive(Debug)]
+struct BrokerLeaseMetadata {
+    epoch_id: String,
+    key_version: u32,
+    capsule_generation: u64,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct BrokerLeaseConfig {
     pub(crate) socket: PathBuf,
     pub(crate) release_manifest: PathBuf,
     pub(crate) lease_duration: std::time::Duration,
+    pub(crate) storage_token_ttl: std::time::Duration,
+    pub(crate) storage_token_renew_margin: std::time::Duration,
+    pub(crate) broker_outage_grace: std::time::Duration,
+}
+
+struct StorageCredentialManager {
+    cancel: tokio::sync::watch::Sender<bool>,
+    valid_until: tokio::sync::watch::Receiver<u64>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl StorageCredentialManager {
+    async fn close(&self) {
+        let _ = self.cancel.send(true);
+        if let Some(task) = self.task.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -160,7 +188,7 @@ async fn storage_from_capsule(
         "topology-read",
         None,
         None,
-        broker.lease_duration,
+        broker.storage_token_ttl,
     )
     .await?;
     let topology = TopologyDocument::decode_redacted(encoded.as_slice())?;
@@ -189,7 +217,7 @@ async fn storage_from_capsule(
                 "credential-lease",
                 None,
                 Some((&target, tier)),
-                broker.lease_duration,
+                broker.storage_token_ttl,
             )
             .await?;
             let credential: Credential = serde_json::from_slice(encoded.as_slice())
@@ -359,6 +387,186 @@ async fn storage_from_capsule(
     Ok((store, fencing, leases))
 }
 
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn start_storage_credential_manager(
+    repository_id: String,
+    database_path: String,
+    capsule_topology: bool,
+    broker: BrokerLeaseConfig,
+    local_override: Option<(String, PathBuf)>,
+    dek_sha256: Vec<u8>,
+    initial_metadata_lease: BrokerLeaseConnection,
+    initial_topology_leases: Vec<BrokerLeaseConnection>,
+    renewable_object_store: Arc<RenewableObjectStore>,
+    coordination_store: Arc<RenewableObjectStore>,
+    initial_valid_until: u64,
+) -> StorageCredentialManager {
+    let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+    let (valid_until, valid_until_receiver) = tokio::sync::watch::channel(initial_valid_until);
+    let task = tokio::spawn(async move {
+        let mut metadata_lease = initial_metadata_lease;
+        let mut topology_leases = initial_topology_leases;
+        let mut failures = 0_u32;
+        loop {
+            let credential_expiry = topology_leases
+                .iter()
+                .map(|lease| lease.expires_unix_ms)
+                .chain(std::iter::once(metadata_lease.expires_unix_ms))
+                .min()
+                .unwrap_or_default();
+            let now = current_unix_ms();
+            let margin_ms = broker.storage_token_renew_margin.as_millis() as u64;
+            let grace_probe_ms = (broker.broker_outage_grace / 2).as_millis() as u64;
+            let renewal_at = std::cmp::min(
+                credential_expiry.saturating_sub(margin_ms),
+                now.saturating_add(grace_probe_ms),
+            );
+            let delay = std::time::Duration::from_millis(renewal_at.saturating_sub(now));
+            tokio::select! {
+                changed = cancelled.changed() => {
+                    if changed.is_err() || *cancelled.borrow() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(delay) => {}
+            }
+
+            eprintln!(
+                "{{\"category\":\"auth\",\"component\":\"vaulticdb\",\"event\":\"storage_credential_renewal_attempted\"}}"
+            );
+            let renewed = async {
+                let (next_path, next_object_store, next_coordination_store, next_topology_leases) =
+                    if capsule_topology {
+                        let (next_config, next_fencing, next_topology_leases) =
+                            storage_from_capsule(&repository_id, &broker, local_override.as_ref())
+                                .await?;
+                        let (next_path, next_object_store) =
+                            object_store(&repository_id, &next_config)?;
+                        let next_coordination_store = match &next_fencing {
+                            Some(replica) => replicated_replica_store(
+                                &next_config,
+                                replica,
+                                &crate::repository_key(&repository_id),
+                            )?,
+                            None => next_object_store.clone(),
+                        };
+                        (
+                            next_path,
+                            next_object_store,
+                            next_coordination_store,
+                            next_topology_leases,
+                        )
+                    } else {
+                        (
+                            database_path.clone(),
+                            renewable_object_store.current(false)?,
+                            coordination_store.current(false)?,
+                            Vec::new(),
+                        )
+                    };
+                let (next_metadata_lease, next_dek) = acquire_metadata_lease(
+                    broker.socket.to_string_lossy().as_ref(),
+                    &broker.release_manifest,
+                    broker.lease_duration,
+                )
+                .await?;
+                if Sha256::digest(next_dek.as_slice()).as_slice() != dek_sha256.as_slice() {
+                    bail!("renewed metadata DEK does not match the active database key");
+                }
+                if next_path != database_path {
+                    bail!("renewed metadata topology changed the database path");
+                }
+                let credential_expiry = next_topology_leases
+                    .iter()
+                    .map(|lease| lease.expires_unix_ms)
+                    .chain(std::iter::once(next_metadata_lease.expires_unix_ms))
+                    .min()
+                    .unwrap_or_default();
+                let grace_expiry =
+                    current_unix_ms().saturating_add(broker.broker_outage_grace.as_millis() as u64);
+                let next_valid_until = std::cmp::min(credential_expiry, grace_expiry);
+                Ok::<_, anyhow::Error>((
+                    next_object_store,
+                    next_coordination_store,
+                    next_metadata_lease,
+                    next_topology_leases,
+                    next_valid_until,
+                ))
+            }
+            .await;
+
+            match renewed {
+                Ok((
+                    next_object_store,
+                    next_coordination_store,
+                    next_metadata_lease,
+                    next_topology_leases,
+                    next_valid_until,
+                )) => {
+                    if renewable_object_store
+                        .replace(
+                            next_object_store,
+                            next_valid_until,
+                            broker.storage_token_ttl,
+                        )
+                        .and_then(|()| {
+                            coordination_store.replace(
+                                next_coordination_store,
+                                next_valid_until,
+                                broker.storage_token_ttl,
+                            )
+                        })
+                        .is_err()
+                    {
+                        let _ = valid_until.send(current_unix_ms());
+                        return;
+                    }
+                    metadata_lease = next_metadata_lease;
+                    topology_leases = next_topology_leases;
+                    failures = 0;
+                    let _ = valid_until.send(next_valid_until);
+                    eprintln!(
+                        "{{\"category\":\"auth\",\"component\":\"vaulticdb\",\"event\":\"storage_credential_renewed\",\"fields\":{{\"valid_until_unix_ms\":{next_valid_until}}}}}"
+                    );
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    let backoff_seconds = std::cmp::min(1_u64 << failures.min(6), 60);
+                    let backoff_ms = backoff_seconds * 1_000;
+                    let jitter_ms = current_unix_ms() % std::cmp::max(backoff_ms / 5, 1);
+                    let retry_delay = std::time::Duration::from_millis(
+                        backoff_ms.saturating_sub(backoff_ms / 10) + jitter_ms,
+                    );
+                    let event = if error.to_string().contains("(locked)") {
+                        "storage_credential_renewal_locked"
+                    } else {
+                        "storage_credential_renewal_failed"
+                    };
+                    eprintln!(
+                        "{{\"category\":\"auth\",\"component\":\"vaulticdb\",\"event\":\"{event}\",\"fields\":{{\"valid_until_unix_ms\":{}}}}}",
+                        *valid_until.borrow()
+                    );
+                    tokio::select! {
+                        _ = cancelled.changed() => return,
+                        () = tokio::time::sleep(retry_delay) => {}
+                    }
+                }
+            }
+        }
+    });
+    StorageCredentialManager {
+        cancel,
+        valid_until: valid_until_receiver,
+        task: Mutex::new(Some(task)),
+    }
+}
+
 enum Database {
     Writer(Db),
     Reader(DbReader),
@@ -395,40 +603,92 @@ impl Storage {
                     Vec::new(),
                 )
             };
-        let (path, object_store) = object_store(repository_id, &effective_store)?;
-        let coordination_store = match &effective_fencing {
+        let (path, raw_object_store) = object_store(repository_id, &effective_store)?;
+        let raw_coordination_store = match &effective_fencing {
             Some(replica) => replicated_replica_store(
                 &effective_store,
                 replica,
                 &crate::repository_key(repository_id),
             )?,
-            None => object_store.clone(),
+            None => raw_object_store.clone(),
         };
         let recovery_initialize = config.metadata_rebuild_initialize;
-        if recovery_initialize && metadata_store_has_database_objects(object_store.as_ref()).await?
+        if recovery_initialize
+            && metadata_store_has_database_objects(raw_object_store.as_ref()).await?
         {
             bail!("metadata rebuild initialization requires an empty candidate metadata store");
         }
-        let mut broker_lease = None;
-        let (object_store, encryption, key_manager) = if let Some(broker) = &config.broker {
+        let mut credential_manager = None;
+        let mut broker_lease_metadata = None;
+        let (object_store, coordination_store, encryption, key_manager) = if let Some(broker) =
+            &config.broker
+        {
             let (lease, dek) = acquire_metadata_lease(
                 broker.socket.to_string_lossy().as_ref(),
                 &broker.release_manifest,
                 broker.lease_duration,
             )
             .await?;
+            let dek_sha256 = Sha256::digest(dek.as_slice()).to_vec();
+            broker_lease_metadata = Some(BrokerLeaseMetadata {
+                epoch_id: lease.epoch_id.clone(),
+                key_version: lease.key_version,
+                capsule_generation: lease.capsule_generation,
+            });
+            let all_expiries = topology_leases
+                .iter()
+                .map(|item| item.expires_unix_ms)
+                .chain(std::iter::once(lease.expires_unix_ms));
+            let credential_expiry = all_expiries.min().unwrap_or(lease.expires_unix_ms);
+            let grace_expiry =
+                current_unix_ms().saturating_add(broker.broker_outage_grace.as_millis() as u64);
+            let valid_until = std::cmp::min(credential_expiry, grace_expiry);
+            let renewable_object_store = Arc::new(RenewableObjectStore::new(
+                raw_object_store,
+                valid_until,
+                broker.storage_token_ttl,
+            ));
+            let renewable_coordination_store = Arc::new(RenewableObjectStore::new(
+                raw_coordination_store,
+                valid_until,
+                broker.storage_token_ttl,
+            ));
             let configured = envelope::configure_brokered(
                 repository_id,
-                object_store,
+                renewable_object_store.clone(),
                 &dek,
                 lease.key_version,
                 lease.capsule_generation,
                 recovery_initialize,
             )?;
-            broker_lease = Some(lease);
-            configured
+            credential_manager = Some(start_storage_credential_manager(
+                repository_id.to_owned(),
+                path.clone(),
+                config.topology_source == TopologySource::Capsule,
+                broker.clone(),
+                config.topology_override_local.clone(),
+                dek_sha256,
+                lease,
+                topology_leases,
+                renewable_object_store,
+                renewable_coordination_store.clone(),
+                valid_until,
+            ));
+            (
+                configured.0,
+                renewable_coordination_store as Arc<dyn ObjectStore>,
+                configured.1,
+                configured.2,
+            )
         } else {
-            envelope::configure(repository_id, object_store, &config.encryption).await?
+            let configured =
+                envelope::configure(repository_id, raw_object_store, &config.encryption).await?;
+            (
+                configured.0,
+                raw_coordination_store,
+                configured.1,
+                configured.2,
+            )
         };
         let (database, writer_epoch) =
             match claim_writer_epoch(coordination_store.as_ref(), None).await? {
@@ -472,8 +732,8 @@ impl Storage {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
-            broker_lease,
-            _topology_leases: topology_leases,
+            credential_manager,
+            broker_lease_metadata,
             writer_epoch: AtomicU64::new(writer_epoch),
         };
         let initialize = async {
@@ -496,31 +756,10 @@ impl Storage {
         Ok(storage)
     }
 
-    pub(crate) fn broker_lease_monitor(&self) -> Option<(tokio::sync::watch::Receiver<bool>, u64)> {
-        let leases = self
-            .broker_lease
-            .iter()
-            .chain(self._topology_leases.iter())
-            .collect::<Vec<_>>();
-        if leases.is_empty() {
-            return None;
-        }
-        let expires_unix_ms = leases
-            .iter()
-            .map(|lease| lease.expires_unix_ms)
-            .min()
-            .unwrap_or_default();
-        let (sender, receiver) = tokio::sync::watch::channel(false);
-        for lease in leases {
-            let mut disconnected = lease.disconnected();
-            let sender = sender.clone();
-            tokio::spawn(async move {
-                if disconnected.wait_for(|value| *value).await.is_ok() {
-                    let _ = sender.send(true);
-                }
-            });
-        }
-        Some((receiver, expires_unix_ms))
+    pub(crate) fn broker_lease_monitor(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.credential_manager
+            .as_ref()
+            .map(|manager| manager.valid_until.clone())
     }
 
     pub(crate) fn encryption_status(&self) -> &EncryptionStatus {
@@ -592,7 +831,7 @@ impl Storage {
 
     async fn record_metadata_rebuild_handoff(&self, repository_id: &str) -> Result<()> {
         let lease = self
-            .broker_lease
+            .broker_lease_metadata
             .as_ref()
             .context("metadata rebuild handoff requires a broker lease")?;
         let value = serde_json::to_vec(&serde_json::json!({
@@ -614,7 +853,7 @@ impl Storage {
     }
 
     pub(crate) async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
-        if self.broker_lease.is_some() {
+        if self.credential_manager.is_some() {
             return Err(Status::failed_precondition(
                 "repository master key is authoritative only in the recovery capsule",
             ));
@@ -630,7 +869,7 @@ impl Storage {
     }
 
     pub(crate) async fn store_master_key(&self, master_key: &[u8]) -> Result<(), Status> {
-        if self.broker_lease.is_some() {
+        if self.credential_manager.is_some() {
             return Err(Status::failed_precondition(
                 "master-key-in-DB is prohibited in brokered mode",
             ));
@@ -753,21 +992,28 @@ impl Storage {
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
+        if let Some(manager) = &self.credential_manager {
+            manager.close().await;
+        }
         self.transactions.write().await.clear();
         let database = self.database.write().await;
         let was_writer = matches!(&*database, Database::Writer(_));
-        match &*database {
+        let database_close = match &*database {
             Database::Writer(db) => db.close().await.context("close SlateDB writer"),
             Database::Reader(reader) => reader.close().await.context("close SlateDB reader"),
             Database::Unavailable => Ok(()),
-        }?;
-        if was_writer {
+        };
+        let writer_release = if database_close.is_ok() && was_writer {
             release_writer_claim(
                 self.coordination_store.as_ref(),
                 self.writer_epoch.load(Ordering::Acquire),
             )
-            .await?;
-        }
+            .await
+        } else {
+            Ok(())
+        };
+        database_close?;
+        writer_release?;
         Ok(())
     }
 

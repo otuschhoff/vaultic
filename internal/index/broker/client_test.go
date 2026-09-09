@@ -67,6 +67,16 @@ func TestLoadCapsuleAcceptsOnlyFormatOneWithTopology(t *testing.T) {
 	}
 }
 
+func TestRequestErrorPreservesBrokerCode(t *testing.T) {
+	err := &RequestError{Code: "locked", Message: "broker is locked"}
+	if err.Code != "locked" {
+		t.Fatalf("request error code = %q, want locked", err.Code)
+	}
+	if got := err.Error(); got != "key broker rejected request (locked): broker is locked" {
+		t.Fatalf("request error = %q", got)
+	}
+}
+
 func TestExternalShareBindingCrossLanguageFixture(t *testing.T) {
 	value := capsule{
 		Header: capsuleHeader{RepositoryID: "repo-a", Generation: 8, RootKeyVersion: 1, PolicyHash: "policy-hash"},
@@ -154,7 +164,6 @@ func TestPreparePolicyMutationUsesSignedChallengeAndBase64Credential(t *testing.
 			),
 		)
 	}()
-
 	prepared, err := client.PreparePolicyMutation(
 		t.Context(),
 		manifestPath,

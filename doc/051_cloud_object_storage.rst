@@ -92,6 +92,40 @@ Static keys are therefore absent from shell variables, launchd property lists,
 repository configuration, and the credential-free bootstrap profile. Optional
 ``tls_sha256`` endpoint pins are checked against the peer leaf certificate.
 
+Credential lifetime and renewal
+-------------------------------
+
+Vaultic and VaulticDB request storage credentials for one hour by default and
+renew them before expiry. Configure Vaultic with ``--storage-token-ttl``,
+``--storage-token-renew-margin``, and ``--broker-outage-grace``; the equivalent
+VaulticDB settings are ``VAULTICDB_STORAGE_TOKEN_TTL``,
+``VAULTICDB_STORAGE_TOKEN_RENEW_MARGIN``, and
+``VAULTICDB_BROKER_OUTAGE_GRACE``. Vaultic environment equivalents use the
+``VAULTIC_`` prefix. Durations use ``ms``, ``s``, ``m``, or ``h`` suffixes.
+
+The renewal margin defaults to the larger of 20 minutes and one third of the
+TTL. Outage grace defaults to the TTL. Size them so that
+``renew_margin >= expected_ceremony_time + retry_backoff`` and
+``ttl >= renew_margin + minimum_useful_work_window``. The broker rejects a
+storage TTL above one hour rather than silently clamping it.
+
+Renewal opens a replacement cloud client and atomically routes new operations
+to it. An operation already using the old client may finish before that client
+is closed. VaulticDB keeps its SlateDB state open while swapping the underlying
+replica clients, and reacquires its metadata-DEK authorization without replacing
+the active DEK. A changed DEK or topology path fails renewal closed.
+
+When the broker is locked, unavailable, or restarting, consumers keep using the
+current credential only until the earlier of its broker/provider expiry and the
+outage-grace deadline. Renewal retries use bounded jitter. New writes stop five
+minutes or one tenth of the TTL before that deadline, whichever is smaller, so
+backup uploads and maintenance mutations are not admitted without a useful
+validity window. Reads continue until the hard deadline. At hard expiry Vaultic
+returns ``storage credential expired`` and VaulticDB stops admitting object
+operations, drains the server, and emits ``credential_expired``. Renewal and
+issuance events contain target, tier, source, TTL, issue/lease ID, and expiry,
+but never credential values.
+
 Every S3 profile can instead use exact-tier static bindings, either before STS
 is configured or as an explicit STS outage fallback. Backblaze has no IAM roles
 or STS and therefore always uses this static-only form. Create separate bucket-
