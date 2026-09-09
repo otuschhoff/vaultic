@@ -6,8 +6,12 @@
 !/go.*
 !/cmd/*
 !/docker/entrypoint.sh
+!/docker/entrypoint-rados.sh
 !/internal/*
 !/helpers/*
+!/vaulticdb/
+!/vaulticdb/**
+/vaulticdb/target/
 !/VERSION
 !/LICENSE
 !/.git/

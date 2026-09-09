@@ -1,0 +1,103 @@
+ARG CEPH_VERSION=20.2.4
+
+FROM golang:1.26-bookworm AS go-toolchain
+
+FROM rust:1-bookworm AS rust-toolchain
+
+FROM quay.io/ceph/ceph:v${CEPH_VERSION} AS rados-go-toolchain
+
+WORKDIR /src
+ARG CEPH_VERSION
+COPY --from=go-toolchain /usr/local/go/ /usr/local/go/
+ENV PATH="/usr/local/go/bin:${PATH}"
+RUN dnf install --assumeyes --setopt=install_weak_deps=False \
+        gcc \
+        git \
+        make \
+        https://download.ceph.com/rpm-${CEPH_VERSION}/el9/x86_64/librados-devel-${CEPH_VERSION}-0.el9.x86_64.rpm \
+    && test "$(rpm -q --queryformat '%{VERSION}' librados-devel | cut -d. -f1)" -ge 20 \
+    && dnf clean all
+
+FROM rados-go-toolchain AS vaultic-builder
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go run build.go --enable-cgo --tags rados --goos linux --goarch amd64 \
+    --output /out/vaultic
+
+FROM quay.io/ceph/ceph:v${CEPH_VERSION} AS rados-rust-toolchain
+
+WORKDIR /src
+ARG CEPH_VERSION
+COPY --from=rust-toolchain /usr/local/cargo/ /usr/local/cargo/
+COPY --from=rust-toolchain /usr/local/rustup/ /usr/local/rustup/
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN dnf install --assumeyes --setopt=install_weak_deps=False \
+        cmake \
+        gcc \
+        gcc-c++ \
+        git \
+        libudev-devel \
+        make \
+        pkgconf-pkg-config \
+        protobuf-compiler \
+        https://download.ceph.com/rpm-${CEPH_VERSION}/el9/x86_64/librados-devel-${CEPH_VERSION}-0.el9.x86_64.rpm \
+    && test "$(rpm -q --queryformat '%{VERSION}' librados-devel | cut -d. -f1)" -ge 20 \
+    && dnf clean all
+
+FROM rados-rust-toolchain AS vaulticdb-builder
+
+COPY vaulticdb ./vaulticdb
+RUN cargo build --manifest-path vaulticdb/Cargo.toml --release --features rados --bins \
+    && mkdir -p /out \
+    && cp vaulticdb/target/release/vaulticdb \
+        vaulticdb/target/release/vaultic-key-broker \
+        vaulticdb/target/release/vaultic-key-custodian \
+        /out/
+
+FROM scratch AS binaries
+
+COPY --from=vaultic-builder /out/vaultic /linux-amd64-rados/vaultic
+COPY --from=vaulticdb-builder /out/ /linux-amd64-rados/
+COPY LICENSE /linux-amd64-rados/LICENSE
+
+FROM quay.io/ceph/ceph:v${CEPH_VERSION}
+
+ARG CEPH_VERSION
+
+LABEL org.opencontainers.image.title="Vaultic with native RADOS"
+LABEL org.opencontainers.image.description="Vaultic CLI and services with a matching librados runtime"
+LABEL org.opencontainers.image.url="https://vaultic.net"
+LABEL org.opencontainers.image.documentation="https://github.com/otuschhoff/vaultic/tree/main/doc"
+LABEL org.opencontainers.image.source="https://github.com/otuschhoff/vaultic"
+LABEL org.opencontainers.image.licenses="BSD-2-Clause"
+
+RUN dnf install --assumeyes --setopt=install_weak_deps=False \
+        fuse3 \
+        jq \
+        openssh-clients \
+        tzdata \
+    && dnf clean all
+COPY --from=vaultic-builder /out/vaultic /usr/bin/vaultic
+COPY --from=vaulticdb-builder /out/ /usr/bin/
+COPY LICENSE /usr/share/licenses/vaultic/LICENSE
+COPY --chmod=0755 docker/entrypoint-rados.sh /entrypoint.sh
+
+RUN test "$(rpm -q --queryformat '%{VERSION}' librados2)" = "${CEPH_VERSION}" \
+    && test "$(rpm -q --queryformat '%{VERSION}' librados2 | cut -d. -f1)" -ge 20 \
+    && ldd /usr/bin/vaultic | grep -q 'librados.so' \
+    && ldd /usr/bin/vaulticdb | grep -q 'librados.so' \
+    && /usr/bin/vaultic version \
+    && VAULTICDB_NATIVE_SMOKE=1 /usr/bin/vaulticdb \
+    && /usr/bin/vaultic-key-broker 2>&1 | grep -q 'usage: vaultic-key-broker' \
+    && /usr/bin/vaultic-key-custodian 2>&1 | grep -q 'invalid vaultic-key-custodian operation or argument count'
+
+ENV IONICE_CLASS=
+ENV IONICE_PRIORITY=4
+ENV NICE=0
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD []
