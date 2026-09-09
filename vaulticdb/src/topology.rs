@@ -187,6 +187,7 @@ pub fn select_static_credential_reference(
 pub enum Provider {
     Local,
     S3,
+    Rados,
     Azure,
     Gcs,
     GoogleDrive,
@@ -427,6 +428,7 @@ pub enum CredentialKind {
     AwsStatic,
     S3Static,
     S3Session,
+    CephxStatic,
     AzureSharedKey,
     AzureSas,
     AzureEntraClientSecret,
@@ -885,6 +887,11 @@ impl Credential {
                     && present(&self.session_token)
                     && present(&self.expires_at)
             }
+            CredentialKind::CephxStatic => {
+                self.client_id.as_deref().is_some_and(|client| {
+                    client.starts_with("client.") && client.len() > "client.".len()
+                }) && present(&self.client_secret)
+            }
             CredentialKind::AzureSharedKey => {
                 present(&self.account_name) && present(&self.account_key)
             }
@@ -1322,6 +1329,7 @@ fn validate_credential_provider(
                 | CredentialKind::S3Session
                 | CredentialKind::None
         ),
+        Provider::Rados => matches!(kind, CredentialKind::CephxStatic),
         Provider::Azure => matches!(
             kind,
             CredentialKind::AzureSharedKey | CredentialKind::AzureSas | CredentialKind::None
@@ -1382,6 +1390,7 @@ fn validate_endpoint(provider: &Provider, endpoint: &BTreeMap<String, Value>) ->
     let required: &[&str] = match provider {
         Provider::Local => &["data_dir"],
         Provider::S3 => &["url", "bucket", "region"],
+        Provider::Rados => &["monitors", "cluster_fsid", "pool", "namespace", "prefix"],
         Provider::Azure => &["url", "account", "container"],
         Provider::Gcs => &["bucket"],
         Provider::GoogleDrive => &["drive_id", "root_folder_id", "path"],
@@ -1407,6 +1416,7 @@ fn validate_endpoint(provider: &Provider, endpoint: &BTreeMap<String, Value>) ->
             "storage_class",
             "tls_sha256",
         ],
+        Provider::Rados => &["monitors", "cluster_fsid", "pool", "namespace", "prefix"],
         Provider::Azure => &["url", "account", "container", "prefix", "tls_sha256"],
         Provider::Gcs => &["bucket", "prefix"],
         Provider::GoogleDrive => &["drive_id", "root_folder_id", "path"],
@@ -1421,6 +1431,9 @@ fn validate_endpoint(provider: &Provider, endpoint: &BTreeMap<String, Value>) ->
     }
     if provider == &Provider::S3 {
         normalize_s3_endpoint(endpoint)?;
+    }
+    if provider == &Provider::Rados {
+        validate_rados_endpoint(endpoint)?;
     }
     if provider == &Provider::Azure {
         let raw_url = endpoint["url"].as_str().unwrap_or_default();
@@ -1450,6 +1463,52 @@ fn validate_endpoint(provider: &Provider, endpoint: &BTreeMap<String, Value>) ->
         }
     }
     Ok(())
+}
+
+fn validate_rados_endpoint(endpoint: &BTreeMap<String, Value>) -> Result<()> {
+    let value = |field: &str| endpoint[field].as_str().unwrap_or_default();
+    let fsid = value("cluster_fsid");
+    let valid_fsid = fsid.len() == 36
+        && fsid.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !valid_fsid {
+        bail!("RADOS endpoint cluster_fsid must be a UUID");
+    }
+    for monitor in value("monitors").split(',').map(str::trim) {
+        let valid = if monitor.starts_with('[') {
+            monitor
+                .split_once("]:")
+                .is_some_and(|(host, port)| host.len() > 1 && valid_port(port))
+        } else {
+            monitor.rsplit_once(':').is_some_and(|(host, port)| {
+                !host.is_empty() && !host.contains(':') && valid_port(port)
+            })
+        };
+        if !valid {
+            bail!("RADOS endpoint monitors must be comma-separated host:port addresses");
+        }
+    }
+    for field in ["pool", "namespace"] {
+        let configured = value(field);
+        if configured.contains(['/', '\0', '\r', '\n']) || matches!(configured, "." | "..") {
+            bail!("RADOS endpoint {field} is invalid");
+        }
+    }
+    let prefix = value("prefix");
+    if prefix.starts_with('/')
+        || !prefix.ends_with('/')
+        || prefix.contains("..")
+        || prefix.contains(['\0', '\r', '\n'])
+    {
+        bail!("RADOS endpoint prefix must be a relative directory prefix ending in slash");
+    }
+    Ok(())
+}
+
+fn valid_port(port: &str) -> bool {
+    port.parse::<u16>().is_ok_and(|port| port != 0)
 }
 
 #[cfg(test)]
@@ -2171,6 +2230,39 @@ mod tests {
         topology.pack_backends[0].endpoint.insert(
             "refresh_token".to_owned(),
             Value::String("must-not-appear-here".to_owned()),
+        );
+        assert!(topology.validate().is_err());
+    }
+
+    #[test]
+    fn rados_endpoint_and_credential_validate() {
+        let mut topology = topology();
+        let backend = &mut topology.pack_backends[0];
+        backend.provider = Provider::Rados;
+        backend.endpoint = BTreeMap::from([
+            (
+                "monitors".to_owned(),
+                Value::String("ceph-mon-a.example:3300,[2001:db8::1]:3300".to_owned()),
+            ),
+            (
+                "cluster_fsid".to_owned(),
+                Value::String("2f525d6a-8f31-4f79-b731-82a6acb235f5".to_owned()),
+            ),
+            ("pool".to_owned(), Value::String("vaultic-data".to_owned())),
+            ("namespace".to_owned(), Value::String("repo-2".to_owned())),
+            ("prefix".to_owned(), Value::String("packs/".to_owned())),
+        ]);
+        let credential = topology.credentials.get_mut("cred:archive").unwrap();
+        credential.kind = CredentialKind::CephxStatic;
+        credential.access_key_id = None;
+        credential.secret_access_key = None;
+        credential.client_id = Some("client.vaultic-repo-2".to_owned());
+        credential.client_secret = Some("AQB-secret".to_owned());
+        assert!(topology.validate().is_ok());
+
+        topology.pack_backends[0].endpoint.insert(
+            "monitors".to_owned(),
+            Value::String("https://ceph-mon-a.example:3300".to_owned()),
         );
         assert!(topology.validate().is_err());
     }

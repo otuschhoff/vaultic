@@ -19,6 +19,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/azure"
 	"github.com/otuschhoff/vaultic/internal/backend/gdrive"
 	"github.com/otuschhoff/vaultic/internal/backend/gs"
+	backendrados "github.com/otuschhoff/vaultic/internal/backend/rados"
 	"github.com/otuschhoff/vaultic/internal/backend/s3"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/observability"
@@ -354,6 +355,18 @@ func openStructuredBackend(
 		opened, err := innerOpenBackend(ctx, location, globalOptions, globalOptions.Extended, false, printer)
 		return opened, location, err
 	}
+	if declared.Provider == topology.ProviderRADOS {
+		config, description, err := radosBackendConfig(declared, credential)
+		if err != nil {
+			return nil, "", err
+		}
+		opened, err := backendrados.Open(ctx, config)
+		if err != nil {
+			return nil, "", err
+		}
+		wrapped, err := wrapBackend(opened, globalOptions, printer)
+		return wrapped, description, err
+	}
 	ctx, scheme, config, description, err := structuredBackendConfig(ctx, declared, credential)
 	if err != nil {
 		return nil, "", err
@@ -378,6 +391,42 @@ func openStructuredBackend(
 	}
 	opened, err = wrapBackend(opened, globalOptions, printer)
 	return opened, description, err
+}
+
+func radosBackendConfig(declared topology.PackBackend, credential topology.Credential) (backendrados.Config, string, error) {
+	required := func(name string) (string, error) { return requiredEndpointString(declared, name) }
+	monitors, err := required("monitors")
+	if err != nil {
+		return backendrados.Config{}, "", err
+	}
+	clusterFSID, err := required("cluster_fsid")
+	if err != nil {
+		return backendrados.Config{}, "", err
+	}
+	pool, err := required("pool")
+	if err != nil {
+		return backendrados.Config{}, "", err
+	}
+	namespace, err := required("namespace")
+	if err != nil {
+		return backendrados.Config{}, "", err
+	}
+	prefix, err := required("prefix")
+	if err != nil {
+		return backendrados.Config{}, "", err
+	}
+	if credential.Kind != topology.CredentialCephXStatic {
+		return backendrados.Config{}, "", fmt.Errorf("backend %q requires a CephX credential", declared.ID)
+	}
+	config := backendrados.Config{
+		Monitors: monitors, ClusterFSID: clusterFSID, Pool: pool, Namespace: namespace, Prefix: prefix,
+		Client: credential.ClientID, Key: options.NewSecretString(credential.ClientSecret), Connections: 1,
+		OperationTTL: 30 * time.Second,
+	}
+	monitorDigest := sha256.Sum256([]byte(monitors))
+	prefixDigest := sha256.Sum256([]byte(prefix))
+	description := fmt.Sprintf("rados:<monitors-sha256:%x>/%s/%s/<prefix-sha256:%x>", monitorDigest, pool, namespace, prefixDigest)
+	return config, description, nil
 }
 
 func requiredEndpointString(declared topology.PackBackend, name string) (string, error) {

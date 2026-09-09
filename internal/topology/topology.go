@@ -113,6 +113,7 @@ type Provider string
 const (
 	ProviderLocal       Provider = "local"
 	ProviderS3          Provider = "s3"
+	ProviderRADOS       Provider = "rados"
 	ProviderAzure       Provider = "azure"
 	ProviderGCS         Provider = "gcs"
 	ProviderGoogleDrive Provider = "google-drive"
@@ -184,6 +185,7 @@ const (
 	CredentialAWSStatic              CredentialKind = "aws-static"
 	CredentialS3Static               CredentialKind = "s3-static"
 	CredentialS3Session              CredentialKind = "s3-session"
+	CredentialCephXStatic            CredentialKind = "cephx-static"
 	CredentialAzureSharedKey         CredentialKind = "azure-shared-key"
 	CredentialAzureSAS               CredentialKind = "azure-sas"
 	CredentialAzureEntraClientSecret CredentialKind = "azure-entra-client-secret"
@@ -483,6 +485,9 @@ func (credential Credential) Validate() error {
 	case CredentialS3Session:
 		valid = credential.AccessKeyID != "" && credential.SecretAccessKey != "" &&
 			credential.SessionToken != "" && credential.ExpiresAt != ""
+	case CredentialCephXStatic:
+		valid = strings.HasPrefix(credential.ClientID, "client.") && len(credential.ClientID) > len("client.") &&
+			credential.ClientSecret != ""
 	case CredentialAzureSharedKey:
 		valid = credential.AccountName != "" && credential.AccountKey != ""
 	case CredentialAzureSAS:
@@ -518,6 +523,8 @@ func credentialSupportsProvider(kind CredentialKind, provider Provider) bool {
 	switch provider {
 	case ProviderS3:
 		return kind == CredentialAWSStatic || kind == CredentialS3Static || kind == CredentialS3Session || kind == CredentialNone
+	case ProviderRADOS:
+		return kind == CredentialCephXStatic
 	case ProviderAzure:
 		return kind == CredentialAzureSharedKey || kind == CredentialAzureSAS || kind == CredentialNone
 	case ProviderGCS:
@@ -874,6 +881,7 @@ func validateEndpoint(provider Provider, endpoint map[string]any) error {
 	requiredByProvider := map[Provider][]string{
 		ProviderLocal:       {"data_dir"},
 		ProviderS3:          {"url", "bucket", "region"},
+		ProviderRADOS:       {"monitors", "cluster_fsid", "pool", "namespace", "prefix"},
 		ProviderAzure:       {"url", "account", "container"},
 		ProviderGCS:         {"bucket"},
 		ProviderGoogleDrive: {"drive_id", "root_folder_id", "path"},
@@ -881,6 +889,7 @@ func validateEndpoint(provider Provider, endpoint map[string]any) error {
 	allowedByProvider := map[Provider]map[string]struct{}{
 		ProviderLocal:       {"data_dir": {}},
 		ProviderS3:          {"url": {}, "bucket": {}, "prefix": {}, "region": {}, "provider": {}, "bucket_lookup": {}, "storage_class": {}, "tls_sha256": {}},
+		ProviderRADOS:       {"monitors": {}, "cluster_fsid": {}, "pool": {}, "namespace": {}, "prefix": {}},
 		ProviderAzure:       {"url": {}, "account": {}, "container": {}, "prefix": {}, "tls_sha256": {}},
 		ProviderGCS:         {"bucket": {}, "prefix": {}},
 		ProviderGoogleDrive: {"drive_id": {}, "root_folder_id": {}, "path": {}},
@@ -914,10 +923,47 @@ func validateEndpoint(provider Provider, endpoint map[string]any) error {
 			return err
 		}
 	}
+	if provider == ProviderRADOS {
+		if err := validateRADOSEndpoint(endpoint); err != nil {
+			return err
+		}
+	}
 	if provider == ProviderAzure {
 		if err := validateAzureEndpoint(endpoint); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateRADOSEndpoint(endpoint map[string]any) error {
+	fsid := endpoint["cluster_fsid"].(string)
+	if len(fsid) != 36 || fsid[8] != '-' || fsid[13] != '-' || fsid[18] != '-' || fsid[23] != '-' {
+		return fmt.Errorf("rados endpoint cluster_fsid must be a UUID")
+	}
+	for index, character := range fsid {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdefABCDEF", character) {
+			return fmt.Errorf("rados endpoint cluster_fsid must be a UUID")
+		}
+	}
+	for _, monitor := range strings.Split(endpoint["monitors"].(string), ",") {
+		host, port, err := net.SplitHostPort(strings.TrimSpace(monitor))
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("rados endpoint monitors must be comma-separated host:port addresses")
+		}
+	}
+	for _, field := range []string{"pool", "namespace"} {
+		value := endpoint[field].(string)
+		if strings.ContainsAny(value, "/\x00\r\n") || value == "." || value == ".." {
+			return fmt.Errorf("rados endpoint %s is invalid", field)
+		}
+	}
+	prefix := endpoint["prefix"].(string)
+	if strings.HasPrefix(prefix, "/") || !strings.HasSuffix(prefix, "/") || strings.Contains(prefix, "..") || strings.ContainsAny(prefix, "\x00\r\n") {
+		return fmt.Errorf("rados endpoint prefix must be a relative directory prefix ending in slash")
 	}
 	return nil
 }

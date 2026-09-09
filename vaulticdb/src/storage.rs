@@ -286,6 +286,33 @@ async fn storage_from_capsule(
                     bucket_lookup: optional_endpoint("bucket_lookup"),
                 }
             }
+            Provider::Rados => {
+                let (client, key) = match credential.as_mut() {
+                    Some(value) if value.kind == CredentialKind::CephxStatic => (
+                        value
+                            .client_id
+                            .take()
+                            .context("CephX credential is missing its client identity")?,
+                        Zeroizing::new(
+                            value
+                                .client_secret
+                                .take()
+                                .context("CephX credential is missing its key")?,
+                        ),
+                    ),
+                    Some(_) => bail!("metadata replica {id:?} requires a CephX credential"),
+                    None => bail!("metadata replica {id:?} requires a CephX credential"),
+                };
+                ReplicaStoreConfig::Rados {
+                    monitors: endpoint("monitors")?,
+                    cluster_fsid: endpoint("cluster_fsid")?,
+                    pool: endpoint("pool")?,
+                    namespace: endpoint("namespace")?,
+                    prefix: endpoint("prefix")?,
+                    client,
+                    key,
+                }
+            }
             Provider::Azure => {
                 let raw_endpoint = endpoint("url")?;
                 let account = endpoint("account")?;
@@ -1607,6 +1634,10 @@ impl Storage {
             })
             .transpose()
     }
+}
+
+mod rados {
+    include!("storage/rados.rs");
 }
 
 include!("storage/operations.rs");

@@ -34,6 +34,15 @@ pub(crate) enum ReplicaStoreConfig {
         provider: Option<String>,
         bucket_lookup: Option<String>,
     },
+    Rados {
+        monitors: String,
+        cluster_fsid: String,
+        pool: String,
+        namespace: String,
+        prefix: String,
+        client: String,
+        key: Zeroizing<String>,
+    },
     Azure {
         account: String,
         container: String,
@@ -329,6 +338,24 @@ fn replica_store(
             };
             Ok(Arc::new(PrefixStore::new(store, path)))
         }
+        ReplicaStoreConfig::Rados {
+            monitors,
+            cluster_fsid,
+            pool,
+            namespace,
+            prefix,
+            client,
+            key,
+        } => rados::open(rados::Config {
+            monitors,
+            cluster_fsid,
+            pool,
+            namespace,
+            prefix: &format!("{}/{repository_key}", prefix.trim_matches('/')),
+            client,
+            key,
+        })
+        .with_context(|| format!("configure native RADOS object store replica {id}")),
         ReplicaStoreConfig::Azure {
             account,
             container,

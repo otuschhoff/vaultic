@@ -1,8 +1,8 @@
-# Phase 27: Remote principals and brokered VaulticDB access tickets
+# Phase 32: Remote principals and brokered VaulticDB access tickets
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 26](phase-26-ephemeral-cloud-storage-credentials.md) · [Phase 28 →](phase-28-read-only-nfsv3-snapshot-server.md)
+[← Phase 31](phase-31-read-only-nfsv3-snapshot-server.md)
 
 [Broker implementation and state machines](../02-architecture/08-quorum-key-broker.md) · [Cloud object storage operator guide](../../051_cloud_object_storage.rst)
 

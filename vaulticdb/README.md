@@ -76,7 +76,10 @@ export VAULTICDB_REPLICATED_LOCAL2_OBJECT_STORE=local
 export VAULTICDB_REPLICATED_LOCAL2_DATA_DIR=/srv/vaulticdb-secondary
 ```
 
-Replica object stores may be `local`, `s3`, or `azure`. Azure replicas use
+Replica object stores may be `local`, `s3`, `azure`, or native `rados`. RADOS
+replicas are configured by sealed topology capsules and require a build with
+the `rados` feature; see `../doc/046_native_rados.rst` for the platform,
+credential, and operational requirements. Azure replicas use
 `VAULTICDB_REPLICATED_<ID>_AZURE_ACCOUNT`,
 `VAULTICDB_REPLICATED_<ID>_AZURE_CONTAINER`, optional
 `VAULTICDB_REPLICATED_<ID>_AZURE_PREFIX`, and either

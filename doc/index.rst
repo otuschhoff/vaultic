@@ -9,6 +9,7 @@ Vaultic Documentation
    030_preparing_a_new_repo
    040_backup
    045_working_with_repos
+   046_native_rados
    047_tuning_parameters
    048_in_repo_config
    049_snapshot_metadata

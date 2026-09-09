@@ -1,8 +1,8 @@
-# Phase 28: Read-only NFSv3 snapshot server
+# Phase 31: Read-only NFSv3 snapshot server
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 27](phase-27-remote-principals-and-brokered-vaulticdb-access-tickets.md)
+[← Phase 30](phase-30-vaultic-best-effort-read-cache-tier.md) · [Phase 32 →](phase-32-remote-principals-and-brokered-vaulticdb-access-tickets.md)
 
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) · [Restore documentation](../../050_restore.rst)
 
@@ -20,7 +20,7 @@ This phase implements:
 - read-only metadata, directory, symlink, and regular-file operations;
 - stable opaque file handles for the lifetime of the export;
 - loopback-only service by default, with explicit controls for network exposure;
-- repository-backed random reads with bounded tree and blob caches;
+- repository-backed random reads through the same Phase 30 read-cache manager as the FUSE read-only mount, with bounded tree/blob RAM caches;
 - client mount instructions printed from the effective configuration.
 
 It does not implement NFSv2, NFSv4, UDP transport, NLM locking, writable exports, snapshot mutation, server-side restore, Kerberos, NFS-over-TLS, or a general replacement for a production NAS. NFSv3 has no secure native identity or transport layer. Remote use therefore requires a trusted private network, VPN, or tunnel and remains opt-in.
@@ -42,7 +42,7 @@ repository + selected snapshot
       kernel FUSE           NFSv3 RPC/TCP
 ```
 
-The extraction must preserve existing FUSE behavior and tests before the NFS server is added.
+The extraction must preserve existing FUSE behavior and tests before the NFS server is added. Phase 30 is a prerequisite: retain its shared repository and file-read cache interfaces inside `snapshotfs`, not a second NFS-specific cache implementation. Both adapters use identical content identities, trust policies, representations, and budget coordination.
 
 ## Design
 
@@ -67,12 +67,14 @@ Core flags:
 | `--allow-cidr CIDR` | client source range; repeatable; loopback ranges are implicit for loopback binds |
 | `--owner preserved|server|root` | report stored UID/GID, server UID/GID, or root; default `preserved` |
 | `--permissions preserved|readable` | preserve stored mode bits or expose every node as owner-readable; default `preserved` |
-| `--tree-cache-size SIZE` | bounded decoded-tree cache |
-| `--blob-cache-size SIZE` | bounded plaintext data-blob cache, default aligned with FUSE |
+| `--tree-cache-size SIZE` | bounded process-local decoded-tree RAM cache |
+| `--blob-cache-size SIZE` | bounded process-local plaintext data-blob RAM cache, using the same implementation/default as FUSE |
 | `--max-read-size SIZE` | advertised and enforced NFS read maximum |
 | `--idle-timeout DURATION` | optional shutdown after no mounted clients or RPC activity |
 
 The server prints exact macOS, Linux, and BSD mount commands using the effective address, ports, and export name. It never invokes `mount`, edits `/etc/exports`, registers a system daemon, or requires root merely to bind the default ports.
+
+Reuse Phase 30's cache-target/profile selection and authenticated online control surface for persistent local-disk, S3, and librados caches. Do not give NFS separate persistent size/trust defaults or a second quota. Report effective shared cache profile and separate process-local RAM limits; selecting an export must not implicitly enable plaintext caching. Online resize, priority, representation, and trust changes affect active exports just as they affect FUSE mounts.
 
 ### Protocol implementation
 
@@ -109,7 +111,7 @@ The mount service implements `MNT`, `UMNT`, `UMNTALL`, `DUMP`, and `EXPORT` for 
 - regular-file cumulative blob offsets and random range reads;
 - symlink target retrieval;
 - stable node identity derived from repository ID, snapshot ID, canonical path, and node type;
-- bounded concurrent tree and plaintext blob caches;
+- bounded concurrent tree/blob RAM caches and the shared Phase 30 persistent representation/cache-manager interfaces;
 - context cancellation and repository error classification.
 
 FUSE becomes a thin adapter over this API. Existing xattr behavior remains in the FUSE adapter because NFSv3 has no standard extended-attribute RPC. Device nodes, sockets, and unsupported special nodes are reported as metadata only and cannot trigger host device access. Repository symlinks are returned verbatim; path traversal is always performed by the client and never causes the server to read outside the selected snapshot.
@@ -124,9 +126,13 @@ The server maintains a bounded node table from compact IDs to immutable snapshot
 
 ### Read semantics and caching
 
-Reads use the same cumulative content-blob offset mapping as FUSE. The server validates signed RPC offsets and counts before conversion, caps each response at the advertised maximum, handles empty and sparse files, and never allocates directly from an untrusted client count. Concurrent reads share the repository pack cache and a bounded plaintext blob LRU.
+Reads use the same cumulative content-blob offset mapping and Phase 30 cache manager as FUSE. The server validates signed RPC offsets and counts before conversion, caps each response at the advertised maximum, handles empty and sparse files, and never allocates directly from an untrusted client count. Concurrent reads coalesce fills and use the same encrypted packs/ranges, compressed derived containers, decoded blobs/extents, and whole-file cache representations supported by FUSE.
 
-Cache keys include blob or tree IDs, never client-controlled paths. Cache size limits are hard limits with measurable eviction. Plaintext cache buffers are cleared on eviction where practical and always on shutdown. A slow backend produces NFS I/O delay or a bounded protocol error; it must not deadlock all RPC workers. Per-client and global in-flight request limits provide backpressure.
+An NFS export can reuse entries warmed by a FUSE mount and vice versa when repository, content identity, format, and trust policy match, including across process restarts. Shared persistent targets use one coordinated budget and eviction policy, not one full allowance per mount/export. Process-local tree/blob caches remain independently RAM-bounded. Whole-file keys use authenticated content layout rather than client-controlled paths, NFS handles, or process-specific export IDs.
+
+NFS inherits Phase 30's value-based eviction, LRU/ageing, online resize, promotion/demotion, and Ceph free-space controller without protocol overrides. Admission respects reservations including staging; a smaller requested limit reports pinned/deletion-pending bytes until reclamation completes. Reads cannot indefinitely pin retiring entries; eviction falls back to another representation or authoritative data without changing the file bytes. Cache corruption or unavailability is a miss when a valid origin read succeeds, not an automatic export shutdown.
+
+Plaintext persistence is allowed only on a target explicitly configured `plaintext-allowed`; compressed plaintext is subject to the same rule. Integrity verification and active repository/key authorization remain mandatory for every read. Clear process-owned plaintext RAM buffers on eviction/shutdown where practical. Persistent entries follow the shared retention/trust policy, not per-export shutdown; stopping one server must not erase another authorized consumer's shared cache. Direct storage access to plaintext and NFS client/kernel caches cannot be revoked by broker lock or guaranteed securely erased. A slow backend produces NFS I/O delay or a bounded protocol error; it must not deadlock all RPC workers. Per-client and global in-flight request limits provide backpressure.
 
 Read errors map consistently: missing or invalid snapshot nodes to `STALE` or `NOENT`, permission denial to `ACCES`, malformed names to `INVAL` or `NAMETOOLONG`, canceled and unavailable repository reads to `IO` or `JUKEBOX` where retry is appropriate, and integrity/authentication failures to `IO` plus a high-severity secret-free event.
 
@@ -140,11 +146,11 @@ NFSv3 clients may cache attributes and directory entries. Since an export is imm
 
 ### Security boundary
 
-Default binding is loopback. Binding a non-loopback address requires at least one `--allow-cidr` and an explicit `--acknowledge-insecure-nfsv3` flag. Startup explains that AUTH_SYS UID/GID claims are client-controlled, traffic and file contents are unencrypted, source addresses can be spoofed on hostile networks, and NFSv3 provides no equivalent to Phase 27 principal authentication.
+Default binding is loopback. Binding a non-loopback address requires at least one `--allow-cidr` and an explicit `--acknowledge-insecure-nfsv3` flag. Startup explains that AUTH_SYS UID/GID claims are client-controlled, traffic and file contents are unencrypted, source addresses can be spoofed on hostile networks, and NFSv3 provides no equivalent to Phase 32 principal authentication.
 
 Source CIDR filtering is defense in depth, not authentication. Remote deployments should use WireGuard, another authenticated VPN, an SSH TCP tunnel, or host firewall rules. The server does not accept wildcard exports, hostname-based allowlists, privileged-client assumptions, or `no_root_squash`-style authority. Reported UID/GID affects client presentation only; all server operations remain read-only regardless of AUTH_SYS identity.
 
-The command keeps the repository read lock and required broker leases for its lifetime. Broker lock, key-lease expiry, repository integrity failure, or context cancellation stops admission, drains bounded in-flight reads, closes listeners, clears caches and handle keys, and exits without leaving a background service.
+The command keeps the repository read lock and required broker leases for its lifetime. Broker lock, key-lease expiry, unrecoverable repository integrity failure, or context cancellation stops admission, drains bounded in-flight reads, closes listeners, releases cache references, clears process-owned plaintext buffers and handle keys where practical, and exits without leaving an NFS background service. The independent shared cache coordinator retains its own lifecycle and limited cleanup authority; persistent plaintext retention/purge follows Phase 30's explicit policy and cannot promise cryptographic revocation.
 
 ### Networking and lifecycle
 
@@ -156,8 +162,8 @@ Metrics and events cover active mounts, RPCs by procedure and status, bytes read
 
 ## Implementation steps
 
-1. Extract `internal/snapshotfs` from the FUSE implementation with protocol-neutral nodes, lookup, directory iteration, attributes, symlinks, range reads, stable identities, and bounded caches.
-2. Refactor `internal/fuse` into an adapter over `snapshotfs` and prove existing mount behavior and tests remain unchanged.
+1. Extract `internal/snapshotfs` from the FUSE implementation with protocol-neutral nodes, lookup, directory iteration, attributes, symlinks, range reads, stable identities, bounded RAM caches, and the Phase 30 shared cache interfaces.
+2. Refactor `internal/fuse` into an adapter over `snapshotfs`; preserve Phase 30 cache configuration, representation/trust handling, shared quotas, and online controls, and prove existing mount behavior and tests remain unchanged.
 3. Select and pin a maintained Go NFSv3 ONC RPC/XDR library after malformed-input, concurrency, cancellation, and license review; isolate it behind `internal/nfs`.
 4. Implement the read-only NFSv3 and mount-protocol procedure sets, explicit `ROFS` mutation responses, fixed-port TCP service, source filtering, request limits, and error mapping.
 5. Implement authenticated opaque file handles, bounded node reconstruction, deterministic directory cookies, and restart-stale semantics.
@@ -171,12 +177,14 @@ Protocol unit tests cover every implemented NFSv3 and mount procedure, every mut
 
 `internal/snapshotfs` contract tests run the same fixtures through FUSE and NFS adapters and compare lookup results, attributes, directory ordering, symlink targets, and file bytes. Existing FUSE integration tests remain passing after extraction.
 
+Shared-cache integration tests warm each representation through FUSE and read it through NFS, then reverse the direction, on local disk, S3, and librados. Verify cross-process/restart reuse, a single aggregate budget including conversion scratch, coalesced fills, authenticated content identities, encrypted-only defaults, explicit plaintext opt-in, and identical corruption/origin fallback. Exercise online grow/shrink, trust tightening, priority changes, hot-file cooling to retained compressed entries, and Ceph capacity pressure while both adapters read. Stopping one consumer must not purge shared entries needed by the other; broker expiry must stop that consumer even on a plaintext cache hit.
+
 Platform integration tests start the server on loopback with isolated ports and mount it using the native client on supported macOS, Linux, and BSD CI workers. They read whole and ranged files, traverse nested trees, copy a snapshot tree, verify hashes and metadata, exercise concurrent readers and cache eviction, unmount cleanly, and prove writes, deletes, renames, chmod, and timestamp changes fail read-only. Tests skip with an explicit reason when the host cannot perform NFS mounts; protocol-level tests remain mandatory everywhere.
 
-Security tests verify loopback defaults, non-loopback acknowledgement and CIDR requirements, source denial, no UDP listener, no RPCBind dependency, no credential or path leakage in events, file-handle tamper rejection, bounded mount and node tables, malformed-request resilience, rate limiting, graceful shutdown on broker lock and lease expiry, and cache clearing. Fuzz tests target XDR decoding boundaries, file-handle parsing, directory cookies, and component normalization.
+Security tests verify loopback defaults, non-loopback acknowledgement and CIDR requirements, source denial, no UDP listener, no RPCBind dependency, no credential or path leakage in events, file-handle tamper rejection, bounded mount and node tables, malformed-request resilience, rate limiting, graceful shutdown on broker lock and lease expiry, process-owned buffer cleanup, and shared persistent-cache retention/purge policy. Fuzz tests target XDR decoding boundaries, file-handle parsing, directory cookies, and component normalization.
 
-Performance tests compare sequential and random reads with FUSE over the same local repository, verify bounded memory under a working set larger than both caches, and ensure one slow client cannot starve unrelated reads. The phase sets regression thresholds from measured baselines rather than requiring NFS to outperform FUSE.
+Performance tests compare sequential and random reads with FUSE over the same repository, Phase 30 cache profile, trust setting, and byte budget across local and remote cache backends. Measure cold/warm representation effects separately from kernel/NFS client cache hits, verify bounded memory under a working set larger than the configured RAM and persistent caches, and ensure one slow client cannot starve unrelated reads. The phase sets regression thresholds from measured baselines rather than requiring NFS to outperform FUSE.
 
 ## Exit criterion
 
-`vaultic serve nfs SNAPSHOT` exposes exactly the selected immutable snapshot, or selected subfolder, through a standards-compliant read-only NFSv3 TCP export without requiring FUSE or root privileges on the Vaultic host. Native macOS, Linux, and BSD clients can mount, browse, and copy the export with byte-for-byte correct contents and stable metadata; every mutation fails with `NFS3ERR_ROFS`. FUSE and NFS share one tested snapshot filesystem implementation, memory and request concurrency remain bounded, forged or stale handles cannot escape the export, shutdown follows repository and broker lease lifetime, and any non-loopback deployment requires explicit acknowledgement plus network restrictions with the protocol's lack of encryption and strong authentication clearly documented.
+`vaultic serve nfs SNAPSHOT` exposes exactly the selected immutable snapshot, or selected subfolder, through a standards-compliant read-only NFSv3 TCP export without requiring FUSE or root privileges on the Vaultic host. Native macOS, Linux, and BSD clients can mount, browse, and copy the export with byte-for-byte correct contents and stable metadata; every mutation fails with `NFS3ERR_ROFS`. FUSE and NFS share one tested snapshot filesystem implementation and the same Phase 30 read-cache manager, with cross-protocol entry reuse, trust enforcement, coordinated budgets, and online resizing demonstrated. Memory and request concurrency remain bounded, forged or stale handles cannot escape the export, shutdown follows repository and broker lease lifetime without falsely promising revocation of persisted plaintext, and any non-loopback deployment requires explicit acknowledgement plus network restrictions with the protocol's lack of encryption and strong authentication clearly documented.
