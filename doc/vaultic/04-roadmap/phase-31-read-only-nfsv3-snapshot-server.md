@@ -2,7 +2,7 @@
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 30](phase-30-vaultic-best-effort-read-cache-tier.md) · [Phase 32 →](phase-32-remote-principals-and-brokered-vaulticdb-access-tickets.md)
+[← Phase 30](phase-30-vaultic-best-effort-read-cache-tier.md) · [Phase 32 →](phase-32-operational-monitoring-and-metrics-export.md)
 
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) · [Restore documentation](../../050_restore.rst)
 
@@ -146,7 +146,7 @@ NFSv3 clients may cache attributes and directory entries. Since an export is imm
 
 ### Security boundary
 
-Default binding is loopback. Binding a non-loopback address requires at least one `--allow-cidr` and an explicit `--acknowledge-insecure-nfsv3` flag. Startup explains that AUTH_SYS UID/GID claims are client-controlled, traffic and file contents are unencrypted, source addresses can be spoofed on hostile networks, and NFSv3 provides no equivalent to Phase 32 principal authentication.
+Default binding is loopback. Binding a non-loopback address requires at least one `--allow-cidr` and an explicit `--acknowledge-insecure-nfsv3` flag. Startup explains that AUTH_SYS UID/GID claims are client-controlled, traffic and file contents are unencrypted, source addresses can be spoofed on hostile networks, and NFSv3 provides no equivalent to Phase 33 principal authentication.
 
 Source CIDR filtering is defense in depth, not authentication. Remote deployments should use WireGuard, another authenticated VPN, an SSH TCP tunnel, or host firewall rules. The server does not accept wildcard exports, hostname-based allowlists, privileged-client assumptions, or `no_root_squash`-style authority. Reported UID/GID affects client presentation only; all server operations remain read-only regardless of AUTH_SYS identity.
 

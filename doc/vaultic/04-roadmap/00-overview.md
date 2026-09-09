@@ -50,7 +50,8 @@ commit series so it can be reviewed or reverted independently.
 | 29 | [VaulticDB/SlateDB read-cache tiers](phase-29-slatedb-read-cache-tiers.md) | design |
 | 30 | [Vaultic best-effort read-cache tier](phase-30-vaultic-best-effort-read-cache-tier.md) | design |
 | 31 | [Read-only NFSv3 snapshot server](phase-31-read-only-nfsv3-snapshot-server.md) | design |
-| 32 | [Remote principals and brokered VaulticDB access tickets](phase-32-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 32 | [Operational monitoring and bounded metrics export](phase-32-operational-monitoring-and-metrics-export.md) | design |
+| 33 | [Remote principals and brokered VaulticDB access tickets](phase-33-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
 
 ## Supporting plans
 

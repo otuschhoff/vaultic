@@ -8,7 +8,7 @@
 
 **Status: Complete. S3 (including Wasabi and Ceph), Azure, and GCS issuance, exact-tier static fallback, proactive consumer renewal, outage grace, fail-closed expiry, and lifecycle observability are implemented.**
 
-**Goal:** remove long-lived cloud object-storage credentials from every local `vaultic` and `vaulticdb` process. The Phase 20 `vaultic-key-broker` becomes the sole holder of the *issuer credential* for each S3-compatible, Azure Blob, or Google Cloud Storage location and hands out short-lived, least-privilege *storage credentials* scoped to what a specific job needs: read only, read plus create, or read plus delete for maintenance. Credential lifetime and proactive renewal margin are configurable so operators can decide how long consumers keep working when the broker is down, locked, or waiting for a custodian ceremony. This phase establishes the provider-enforced issuance and consumer-lifecycle foundation that Phase 32 extends to remote principals.
+**Goal:** remove long-lived cloud object-storage credentials from every local `vaultic` and `vaulticdb` process. The Phase 20 `vaultic-key-broker` becomes the sole holder of the *issuer credential* for each S3-compatible, Azure Blob, or Google Cloud Storage location and hands out short-lived, least-privilege *storage credentials* scoped to what a specific job needs: read only, read plus create, or read plus delete for maintenance. Credential lifetime and proactive renewal margin are configurable so operators can decide how long consumers keep working when the broker is down, locked, or waiting for a custodian ceremony. This phase establishes the provider-enforced issuance and consumer-lifecycle foundation that Phase 33 extends to remote principals.
 
 ## Threat model and trust boundaries
 
@@ -19,7 +19,7 @@ This phase has two trust zones:
 
 A compromised local consumer can use its current credential only until the shortest of credential expiry, broker outage grace, and provider revocation. Read consumers cannot modify repository data. Append consumers cannot delete data and cannot overwrite it where the provider can enforce create-only writes. Long-lived issuer credentials never enter consumer memory, environment variables, command lines, logs, or runtime profiles. A provider without delegation, such as Backblaze B2, is an explicit degraded case: the broker may lease a pre-provisioned, least-privilege application key, but lease expiry only makes a conforming client discard that key and does not revoke an exfiltrated copy.
 
-Remote authentication, cross-host credential delivery, repository-key leases, and VaulticDB access tickets are deliberately deferred to Phase 32.
+Remote authentication, cross-host credential delivery, repository-key leases, and VaulticDB access tickets are deliberately deferred to Phase 33.
 
 ## Design
 
