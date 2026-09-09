@@ -19,6 +19,7 @@ type Config struct {
 	UseHTTP      bool
 	Bucket       string
 	Prefix       string
+	Provider     string `option:"provider"      help:"S3 provider profile: generic, backblaze, or wasabi"`
 	Layout       string `option:"layout"        help:"use this backend layout (default: auto-detect) (deprecated)"`
 	StorageClass string `option:"storage-class" help:"set S3 storage class (STANDARD, STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING or REDUCED_REDUNDANCY)"`
 
@@ -35,8 +36,10 @@ type Config struct {
 	UnsafeAnonymousAuth bool   `option:"unsafe-anonymous-auth" help:"use anonymous authentication"`
 
 	// For testing only
-	KeyID  string
-	Secret options.SecretString
+	KeyID            string
+	Secret           options.SecretString
+	SessionToken     string
+	BrokerCredential bool
 }
 
 // NewConfig returns a new Config with the default values filled in.
@@ -72,6 +75,9 @@ func ParseConfig(s string) (*Config, error) {
 
 		if url.Path == "" {
 			return nil, errors.New("s3: bucket name not found")
+		}
+		if url.User != nil || url.RawQuery != "" || url.Fragment != "" {
+			return nil, errors.New("s3: endpoint URL must not contain credentials, query parameters, or a fragment")
 		}
 
 		bucket, path, _ := strings.Cut(url.Path[1:], "/")

@@ -44,6 +44,10 @@ type indexDaemonOptions struct {
 	ObjectStore       string
 	S3Bucket          string
 	S3Prefix          string
+	S3Endpoint        string
+	S3Region          string
+	S3Provider        string
+	S3BucketLookup    string
 	EncryptionMode    string
 	PassphraseFile    string
 	AzureTokenFile    string
@@ -90,6 +94,10 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.ObjectStore, "daemon-object-store", "", "vaulticdb object store: local, memory, or s3")
 	flags.StringVar(&options.S3Bucket, "daemon-s3-bucket", "", "vaulticdb S3 bucket")
 	flags.StringVar(&options.S3Prefix, "daemon-s3-prefix", "", "vaulticdb S3 key prefix")
+	flags.StringVar(&options.S3Endpoint, "daemon-s3-endpoint", "", "vaulticdb S3 endpoint URL")
+	flags.StringVar(&options.S3Region, "daemon-s3-region", "", "vaulticdb S3 signing region")
+	flags.StringVar(&options.S3Provider, "daemon-s3-provider", "", "vaulticdb S3 provider: generic, backblaze, or wasabi")
+	flags.StringVar(&options.S3BucketLookup, "daemon-s3-bucket-lookup", "", "vaulticdb S3 bucket lookup: auto, dns, or path")
 	flags.StringVar(&options.EncryptionMode, "metadata-encryption", "", "metadata encryption mode: off, required, or initialize")
 	flags.StringVar(&options.PassphraseFile, "metadata-recovery-passphrase-file", "", "file containing the metadata recovery passphrase")
 	flags.StringVar(&options.AzureTokenFile, "metadata-azure-token-file", "", "protected Azure Key Vault bearer-token file")
@@ -147,6 +155,8 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		AuthToken: authToken, RepositoryID: repositoryID, DataDir: options.DataDir,
 		DaemonPath:  options.DaemonPath,
 		ObjectStore: options.ObjectStore, S3Bucket: options.S3Bucket, S3Prefix: options.S3Prefix,
+		S3Endpoint: options.S3Endpoint, S3Region: options.S3Region,
+		S3Provider: options.S3Provider, S3BucketLookup: options.S3BucketLookup,
 		EncryptionMode: options.EncryptionMode, PassphraseFile: options.PassphraseFile,
 		AzureTokenFile: options.AzureTokenFile,
 		GCPTokenFile:   options.GCPTokenFile,

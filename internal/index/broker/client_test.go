@@ -186,6 +186,72 @@ func TestPreparePolicyMutationUsesSignedChallengeAndBase64Credential(t *testing.
 	}
 }
 
+func TestAcquireStorageCredentialLeaseCarriesSTSSession(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executableData, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(executableData)
+	manifestPath := filepath.Join(t.TempDir(), "release.json")
+	manifest, err := json.Marshal(ReleaseManifest{
+		Component: "vaultic", Version: 20, ReleaseIdentity: "release-a",
+		ExecutableSHA256: hex.EncodeToString(digest[:]), Signature: "signature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	clientConnection, serverConnection := net.Pipe()
+	defer clientConnection.Close()
+	defer serverConnection.Close()
+	client := &Client{
+		connection: clientConnection,
+		reader:     bufio.NewReader(clientConnection),
+		protocol:   protocolVersion,
+		challenge:  "challenge-a",
+	}
+	requestResult := make(chan map[string]any, 1)
+	go func() {
+		line, _ := bufio.NewReader(serverConnection).ReadBytes('\n')
+		var request map[string]any
+		_ = json.Unmarshal(line, &request)
+		requestResult <- request
+		payload := base64.StdEncoding.EncodeToString([]byte(
+			`{"kind":"s3-session","access_key_id":"temporary-access",` +
+				`"secret_access_key":"temporary-secret","session_token":"temporary-token",` +
+				`"expires_at":"2030-01-01T00:00:00Z"}`,
+		))
+		response := `{"result":"lease","lease_id":"lease-a","epoch_id":"epoch-a",` +
+			`"capability":"credential-lease","expires_unix_ms":30000,"key_version":1,` +
+			`"capsule_generation":4,"key":"` + payload + `","challenge":"challenge-b",` +
+			`"credential_source":"sts","storage_target":"pack:archive",` +
+			`"storage_tier":"storage-read","provider_expires_at":"2030-01-01T00:00:00Z"}` + "\n"
+		_, _ = serverConnection.Write([]byte(response))
+	}()
+
+	lease, err := client.AcquireStorageCredentialLease(
+		t.Context(), manifestPath, "pack:archive", "storage-read", 30*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := <-requestResult
+	if request["storage_target"] != "pack:archive" || request["storage_tier"] != "storage-read" {
+		t.Fatalf("storage lease request = %#v", request)
+	}
+	if lease.CredentialSource != "sts" || lease.ProviderExpiresAt == "" ||
+		!strings.Contains(string(lease.Key), `"session_token":"temporary-token"`) {
+		t.Fatalf("STS storage lease = %+v, key = %s", lease, lease.Key)
+	}
+}
+
 func TestPendingPolicyMutationUsesSignedChallenge(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

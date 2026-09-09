@@ -260,7 +260,7 @@ func runCheck(
 	}
 	// Check needs a coherent repository view across indexes, packs, and
 	// snapshots. Keep its exclusive lock even though its cache writes are local.
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, globalOptions.NoLock, printer)
+	ctx, repo, unlock, err := openWithReadDataExclusiveLock(ctx, globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return summary, err
 	}

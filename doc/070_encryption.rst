@@ -255,6 +255,13 @@ its credential together; separate intermediate generations would necessarily
 contain either a dangling reference or an unused secret. Credential input files
 must be owner-only and are never copied into the runtime profile.
 
+Structured S3 endpoints may include ``provider`` with the closed values
+``generic``, ``backblaze``, or ``wasabi`` and ``bucket_lookup`` with ``auto``,
+``dns``, or ``path``. Backblaze and Wasabi profiles validate endpoint ownership,
+region, HTTPS, addressing, and unsupported storage features before the broker
+releases a credential. Adding or changing either field is a topology mutation
+and therefore publishes a new capsule generation.
+
 Fresh-host bootstrap writes only repository identity, capsule directory, and
 broker socket information:
 

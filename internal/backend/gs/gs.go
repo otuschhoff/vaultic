@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 
@@ -45,6 +46,7 @@ type gs struct {
 }
 
 type serviceAccountContextKey struct{}
+type accessTokenContextKey struct{}
 type workloadIdentityContextKey struct{}
 
 type ServiceAccountCredential struct {
@@ -52,8 +54,17 @@ type ServiceAccountCredential struct {
 	Subject string
 }
 
+type AccessTokenCredential struct {
+	Token  string
+	Expiry time.Time
+}
+
 func WithServiceAccountCredential(ctx context.Context, credential ServiceAccountCredential) context.Context {
 	return context.WithValue(ctx, serviceAccountContextKey{}, credential)
+}
+
+func WithAccessTokenCredential(ctx context.Context, credential AccessTokenCredential) context.Context {
+	return context.WithValue(ctx, accessTokenContextKey{}, credential)
 }
 
 func WithWorkloadIdentity(ctx context.Context) context.Context {
@@ -92,6 +103,13 @@ func getStorageClient(ctx context.Context, rt http.RoundTripper) (*storage.Clien
 }
 
 func storageTokenSource(ctx context.Context) (oauth2.TokenSource, error) {
+	if credential, ok := ctx.Value(accessTokenContextKey{}).(AccessTokenCredential); ok {
+		return oauth2.StaticTokenSource(&oauth2.Token{
+			AccessToken: credential.Token,
+			TokenType:   "Bearer",
+			Expiry:      credential.Expiry,
+		}), nil
+	}
 	if credential, ok := ctx.Value(serviceAccountContextKey{}).(ServiceAccountCredential); ok {
 		config, err := google.JWTConfigFromJSON(credential.JSON, storage.ScopeReadWrite)
 		if err != nil {

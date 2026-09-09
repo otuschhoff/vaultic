@@ -189,6 +189,10 @@ fn object_store_from_env() -> Result<ObjectStoreConfig> {
             bucket: env::var("VAULTICDB_S3_BUCKET")
                 .context("VAULTICDB_S3_BUCKET is required for S3 storage")?,
             prefix: optional_nonempty("VAULTICDB_S3_PREFIX")?,
+            endpoint: optional_nonempty("VAULTICDB_S3_ENDPOINT")?,
+            region: optional_nonempty("VAULTICDB_S3_REGION")?,
+            provider: optional_nonempty("VAULTICDB_S3_PROVIDER")?,
+            bucket_lookup: optional_nonempty("VAULTICDB_S3_BUCKET_LOOKUP")?,
         }),
         "replicated" => {
             let replicas = env::var("VAULTICDB_REPLICATED_REPLICAS")
@@ -227,26 +231,37 @@ fn replica_from_env(id: &str) -> Result<ReplicaConfig> {
             bucket: env::var(format!("{prefix}_S3_BUCKET"))
                 .with_context(|| format!("{prefix}_S3_BUCKET is required for S3 replica {id}"))?,
             prefix: optional_nonempty_dynamic(&format!("{prefix}_S3_PREFIX"))?,
-            endpoint: None,
-            region: None,
+            endpoint: optional_nonempty_dynamic(&format!("{prefix}_S3_ENDPOINT"))?,
+            region: optional_nonempty_dynamic(&format!("{prefix}_S3_REGION"))?,
             access_key_id: None,
             secret_access_key: None,
+            session_token: None,
+            provider: optional_nonempty_dynamic(&format!("{prefix}_S3_PROVIDER"))?,
+            bucket_lookup: optional_nonempty_dynamic(&format!("{prefix}_S3_BUCKET_LOOKUP"))?,
         },
-        "azure" => ReplicaStoreConfig::Azure {
-            account: env::var(format!("{prefix}_AZURE_ACCOUNT")).with_context(|| {
+        "azure" => {
+            let account = env::var(format!("{prefix}_AZURE_ACCOUNT")).with_context(|| {
                 format!("{prefix}_AZURE_ACCOUNT is required for Azure replica {id}")
-            })?,
-            container: env::var(format!("{prefix}_AZURE_CONTAINER")).with_context(|| {
-                format!("{prefix}_AZURE_CONTAINER is required for Azure replica {id}")
-            })?,
-            prefix: optional_nonempty_dynamic(&format!("{prefix}_AZURE_PREFIX"))?,
-            access_key: env::var(format!("{prefix}_AZURE_ACCESS_KEY"))
-                .ok()
-                .map(Zeroizing::new),
-            bearer_token: env::var(format!("{prefix}_AZURE_BEARER_TOKEN"))
-                .ok()
-                .map(Zeroizing::new),
-        },
+            })?;
+            ReplicaStoreConfig::Azure {
+                endpoint: optional_nonempty_dynamic(&format!("{prefix}_AZURE_ENDPOINT"))?
+                    .unwrap_or_else(|| format!("https://{account}.blob.core.windows.net")),
+                account,
+                container: env::var(format!("{prefix}_AZURE_CONTAINER")).with_context(|| {
+                    format!("{prefix}_AZURE_CONTAINER is required for Azure replica {id}")
+                })?,
+                prefix: optional_nonempty_dynamic(&format!("{prefix}_AZURE_PREFIX"))?,
+                access_key: env::var(format!("{prefix}_AZURE_ACCESS_KEY"))
+                    .ok()
+                    .map(Zeroizing::new),
+                bearer_token: env::var(format!("{prefix}_AZURE_BEARER_TOKEN"))
+                    .ok()
+                    .map(Zeroizing::new),
+                sas_token: env::var(format!("{prefix}_AZURE_SAS_TOKEN"))
+                    .ok()
+                    .map(Zeroizing::new),
+            }
+        }
         value => bail!(
             "unsupported {prefix}_OBJECT_STORE {value:?}; expected local, memory, s3, or azure"
         ),

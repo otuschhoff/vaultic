@@ -55,13 +55,21 @@ The below table shows which vaultic version is required to use a certain
 repository version, as well as notable features introduced in the various
 versions.
 
-+--------------------+-------------------------+---------------------+------------------+
-| Repository version | Required vaultic version | Major new features  | Comment          |
-+====================+=========================+=====================+==================+
-| ``1``              | Any                     |                     |                  |
-+--------------------+-------------------------+---------------------+------------------+
-| ``2``              | 0.14.0 or newer         | Compression support | Current default  |
-+--------------------+-------------------------+---------------------+------------------+
+.. list-table::
+     :header-rows: 1
+
+     * - Repository version
+         - Required vaultic version
+         - Major new features
+         - Comment
+     * - ``1``
+         - Any
+         -
+         -
+     * - ``2``
+         - 0.14.0 or newer
+         - Compression support
+         - Current default
 
 
 Local
@@ -356,7 +364,20 @@ S3 storage from `Wasabi <https://wasabi.com>`__ can be used as follows.
 
     $ export AWS_ACCESS_KEY_ID=<YOUR-WASABI-ACCESS-KEY-ID>
     $ export AWS_SECRET_ACCESS_KEY=<YOUR-WASABI-SECRET-ACCESS-KEY>
-    $ vaultic -r s3:https://<WASABI-SERVICE-URL>/<WASABI-BUCKET-NAME> init
+    $ vaultic -r s3:https://s3.eu-central-2.wasabisys.com/<WASABI-BUCKET-NAME>/vaultic \
+        -o s3.provider=wasabi init
+
+The provider profile requires HTTPS, derives and validates the signing region
+from a regional endpoint, and defaults to DNS bucket lookup. The non-regional
+``s3.wasabisys.com`` endpoint requires an explicit ``s3.region=REGION``. If a
+Wasabi CNAME or private endpoint is used, set both ``s3.provider=wasabi`` and
+``s3.region=REGION`` explicitly. Wasabi Object Lock, versioning, minimum storage
+duration, and deletion charges remain bucket-side policy; Vaultic reports the
+provider but does not administer those settings. Glacier restore and nonstandard
+AWS storage classes are rejected for this profile. Temporary credential role
+assumption uses Wasabi's AWS-compatible ``https://sts.wasabisys.com`` service.
+Set ``VAULTIC_AWS_ASSUME_ROLE_ARN`` and authenticate with Wasabi sub-user
+credentials; root credentials cannot call ``AssumeRole``.
 
 Alibaba Cloud (Aliyun) Object Storage System (OSS)
 **************************************************
@@ -469,6 +490,33 @@ Backblaze B2
    The previous version of the file is "hidden" for one day and then deleted automatically
    by B2. More details at the `Backblaze documentation <https://www.backblaze.com/docs/cloud-storage-lifecycle-rules>`__.
 
+For new repositories, create an S3-compatible application key restricted to the
+target bucket and use its key ID and application key as the standard AWS access
+key and secret. The endpoint region appears in the Backblaze endpoint hostname:
+
+.. code-block:: console
+
+    $ export AWS_ACCESS_KEY_ID=<B2-S3-APPLICATION-KEY-ID>
+    $ export AWS_SECRET_ACCESS_KEY=<B2-S3-APPLICATION-KEY>
+    $ vaultic -r s3:https://s3.us-west-004.backblazeb2.com/<BUCKET>/vaultic \
+        -o s3.provider=backblaze init
+
+The Backblaze profile validates HTTPS, the ``backblazeb2.com`` hostname, signing
+region, DNS-compatible bucket name, and DNS lookup before resolving credentials.
+Backblaze does not support AWS IAM roles, STS role assumption, Glacier restore,
+or AWS archive storage classes. B2 Object Lock and lifecycle/version retention
+must be configured and audited in Backblaze.
+
+For broker-managed sealed topology, use multiple application keys rather than
+an account master key: list/read for ``storage-read``, list/read/write for
+``storage-append``, and list/read/write/delete for ``storage-maintain``. A
+separate list/read/write/delete key restricted to the repository lock prefix is
+used as ``storage-lock``. Prune needs write as well as delete because it repacks
+live data before removing obsolete objects. Backblaze's ``writeFiles``
+capability is not provider-enforced append-only, and a broker lease cannot make
+a static key ephemeral; provider expiry or deletion is required to revoke a
+copied key.
+
 Vaultic can backup data to any Backblaze B2 bucket. You need to first setup the
 following environment variables with the credentials you can find in the
 dashboard on the "Buckets" page when signed into your B2 account:
@@ -506,6 +554,15 @@ Note that the bucket name must be unique across all of B2.
 The number of concurrent connections to the B2 service can be set with the ``-o
 b2.connections=10`` switch. By default, at most five parallel connections are
 established.
+
+The native ``b2:`` backend remains supported and continues to use
+``B2_ACCOUNT_ID`` and ``B2_ACCOUNT_KEY``. Those are distinct configuration names
+from the ``AWS_*`` variables used by the S3-compatible API. Changing a repository
+URL from ``b2:`` to ``s3:`` is not a migration. Copy the backend first, then run
+``vaultic backend verify --compare
+b2:BUCKET:PREFIX,s3:https://s3.REGION.backblazeb2.com/BUCKET/PREFIX``. The command
+streams both inventories and compares every object name, length, and SHA-256 hash
+before topology is switched.
 
 .. _generate S3-compatible access keys: https://www.backblaze.com/docs/cloud-storage-s3-compatible-app-keys
 

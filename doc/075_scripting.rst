@@ -60,12 +60,12 @@ environment variables, which are listed below.
     AWS_DEFAULT_REGION                  Amazon S3 default region
     AWS_PROFILE                         Amazon credentials profile (alternative to specifying key and region)
     AWS_SHARED_CREDENTIALS_FILE         Location of the AWS CLI shared credentials file (default: ~/.aws/credentials)
-    VAULTIC_AWS_ASSUME_ROLE_ARN          Amazon IAM Role ARN to assume using discovered credentials
+    VAULTIC_AWS_ASSUME_ROLE_ARN          AWS or Wasabi IAM Role ARN to assume using discovered credentials
     VAULTIC_AWS_ASSUME_ROLE_SESSION_NAME Session Name to use with the role assumption
     VAULTIC_AWS_ASSUME_ROLE_EXTERNAL_ID  External ID to use with the role assumption
     VAULTIC_AWS_ASSUME_ROLE_POLICY       Inline Amazon IAM session policy
     VAULTIC_AWS_ASSUME_ROLE_REGION       Region to use for IAM calls for the role assumption (default: us-east-1)
-    VAULTIC_AWS_ASSUME_ROLE_STS_ENDPOINT URL to the STS endpoint (default is determined based on VAULTIC_AWS_ASSUME_ROLE_REGION). You generally do not need to set this, advanced use only.
+    VAULTIC_AWS_ASSUME_ROLE_STS_ENDPOINT URL to the STS endpoint (defaults from the provider and region; Wasabi uses https://sts.wasabisys.com). You generally do not need to set this, advanced use only.
 
     AZURE_ACCOUNT_NAME                  Account name for Azure
     AZURE_ACCOUNT_KEY                   Account key for Azure

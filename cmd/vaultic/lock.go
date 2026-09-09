@@ -107,3 +107,14 @@ func openWithExclusiveLock(
 		DryRun: dryRun,
 	}, printer)
 }
+
+func openWithReadDataExclusiveLock(
+	ctx context.Context,
+	globalOptions global.Options,
+	noLock bool,
+	printer vaultic.Printer,
+) (context.Context, *repository.Repository, func(), error) {
+	return internalcli.OpenRepository(ctx, globalOptions, internalcli.LockExclusive, internalcli.OpenOptions{
+		DryRun: noLock, ReadOnlyData: true,
+	}, printer)
+}

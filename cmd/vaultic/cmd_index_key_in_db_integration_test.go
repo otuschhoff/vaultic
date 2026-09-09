@@ -522,7 +522,7 @@ func metadataRepositoryContext(
 
 func testSealedTopology(t *testing.T, repositoryID string, generation uint64) []byte {
 	t.Helper()
-	encoded, err := os.ReadFile(filepath.Join("..", "..", "testdata", "topology-v1.json"))
+	encoded, err := os.ReadFile(filepath.Join("..", "..", "testdata", "topology-v2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

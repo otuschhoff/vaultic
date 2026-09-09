@@ -130,10 +130,14 @@ func PublishCapsuleWithoutDatabase(
 	command := exec.CommandContext(ctx, options.DaemonPath, "publish-capsule", capsuleDirectory, temporaryPath, capsuleSHA256, "true")
 	command.Env = append(daemonEnvironment(options), "VAULTICDB_REPOSITORY_ID="+options.RepositoryID)
 	for name, value := range map[string]string{
-		"VAULTICDB_OBJECT_STORE": options.ObjectStore,
-		"VAULTICDB_DATA_DIR":     options.DataDir,
-		"VAULTICDB_S3_BUCKET":    options.S3Bucket,
-		"VAULTICDB_S3_PREFIX":    options.S3Prefix,
+		"VAULTICDB_OBJECT_STORE":     options.ObjectStore,
+		"VAULTICDB_DATA_DIR":         options.DataDir,
+		"VAULTICDB_S3_BUCKET":        options.S3Bucket,
+		"VAULTICDB_S3_PREFIX":        options.S3Prefix,
+		"VAULTICDB_S3_ENDPOINT":      options.S3Endpoint,
+		"VAULTICDB_S3_REGION":        options.S3Region,
+		"VAULTICDB_S3_PROVIDER":      options.S3Provider,
+		"VAULTICDB_S3_BUCKET_LOOKUP": options.S3BucketLookup,
 	} {
 		if value != "" {
 			command.Env = append(command.Env, name+"="+value)

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
@@ -432,6 +433,9 @@ func runPruneWithRepo(
 	if popts.DryRun {
 		printer.P("\nWould have made the following changes:")
 	}
+	if plan.Stats().Blobs.RemoveTotal > 0 {
+		printProviderDeletionWarning(printer, repo.Backend())
+	}
 	if !globalOptions.JSON {
 		err = printPruneStats(printer, plan.Stats())
 		if err != nil {
@@ -496,6 +500,9 @@ func runPrunePhaseAWithRepo(
 	}
 	plan.BindPrunePlan(markerID)
 	if !globalOptions.JSON {
+		if plan.Stats().Blobs.RemoveTotal > 0 {
+			printProviderDeletionWarning(printer, repo.Backend())
+		}
 		if err := printPruneStats(printer, plan.Stats()); err != nil {
 			return err
 		}
@@ -512,6 +519,14 @@ func runPrunePhaseAWithRepo(
 		return repo.FinalizePrunePlan(ctx, printer)
 	}
 	return nil
+}
+
+func printProviderDeletionWarning(printer vaultic.Printer, repositoryBackend backend.Backend) {
+	profile := repositoryBackend.Properties().StorageProfile
+	if profile == nil || (profile.Provider != "backblaze" && profile.Provider != "wasabi") {
+		return
+	}
+	printer.S("warning: deleting objects from %s may incur minimum-storage-duration, retention, API, or egress charges\n", profile.Provider)
 }
 
 // printPruneStats prints out the statistics

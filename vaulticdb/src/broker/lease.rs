@@ -3,7 +3,8 @@ pub async fn acquire_metadata_lease(
     manifest_path: &std::path::Path,
     ttl: Duration,
 ) -> Result<(BrokerLeaseConnection, Zeroizing<Vec<u8>>)> {
-    let (connection, key) = acquire_payload_lease(socket, manifest_path, "metadata-dek", None, ttl).await?;
+    let (connection, key) =
+        acquire_payload_lease(socket, manifest_path, "metadata-dek", None, None, ttl).await?;
     if key.len() != 32 {
         bail!("broker metadata DEK has an invalid length");
     }
@@ -15,6 +16,7 @@ pub async fn acquire_payload_lease(
     manifest_path: &std::path::Path,
     capability: &str,
     credential_ref: Option<&str>,
+    storage_selection: Option<(&str, &str)>,
     ttl: Duration,
 ) -> Result<(BrokerLeaseConnection, Zeroizing<Vec<u8>>)> {
     if socket.is_empty() || ttl.is_zero() || ttl > MAX_LEASE_TTL {
@@ -87,6 +89,10 @@ pub async fn acquire_payload_lease(
     if let Some(credential_ref) = credential_ref {
         request["credential_ref"] = serde_json::Value::String(credential_ref.to_owned());
     }
+    if let Some((storage_target, storage_tier)) = storage_selection {
+        request["storage_target"] = serde_json::Value::String(storage_target.to_owned());
+        request["storage_tier"] = serde_json::Value::String(storage_tier.to_owned());
+    }
     let mut request = serde_json::to_vec(&request)?;
     request.push(b'\n');
     writer.write_all(&request).await?;
@@ -115,6 +121,16 @@ pub async fn acquire_payload_lease(
         capsule_generation: u64,
         #[serde(default)]
         key: String,
+        #[serde(default)]
+        credential_source: Option<String>,
+        #[serde(default)]
+        storage_target: Option<String>,
+        #[serde(default)]
+        storage_tier: Option<String>,
+        #[serde(default)]
+        provider_expires_at: Option<String>,
+        #[serde(default)]
+        static_generation: Option<u64>,
     }
     let response: LeaseResponse = serde_json::from_slice(&response)?;
     if response.result == "error" {
@@ -131,6 +147,35 @@ pub async fn acquire_payload_lease(
         || response.capsule_generation == 0
     {
         bail!("invalid key broker {capability} lease response");
+    }
+    if let Some((expected_target, expected_tier)) = storage_selection {
+        let source_valid = matches!(
+            response.credential_source.as_deref(),
+            Some(
+                "sts"
+                    | "azure-user-delegation"
+                    | "gcp-downscope"
+                    | "static"
+                    | "static-fallback"
+            )
+        );
+        let generation_valid = !matches!(
+            response.credential_source.as_deref(),
+            Some("static" | "static-fallback")
+        )
+            || response.static_generation.is_some_and(|generation| generation > 0);
+        let expiry_valid = !matches!(
+            response.credential_source.as_deref(),
+            Some("sts" | "azure-user-delegation" | "gcp-downscope")
+        ) || response.provider_expires_at.is_some();
+        if response.storage_target.as_deref() != Some(expected_target)
+            || response.storage_tier.as_deref() != Some(expected_tier)
+            || !source_valid
+            || !generation_valid
+            || !expiry_valid
+        {
+            bail!("key broker returned mismatched storage credential metadata");
+        }
     }
     let key = Zeroizing::new(
         BASE64
@@ -155,6 +200,11 @@ pub async fn acquire_payload_lease(
             expires_unix_ms: response.expires_unix_ms,
             key_version: response.key_version,
             capsule_generation: response.capsule_generation,
+            credential_source: response.credential_source,
+            storage_target: response.storage_target,
+            storage_tier: response.storage_tier,
+            provider_expires_at: response.provider_expires_at,
+            static_generation: response.static_generation,
         },
         key,
     ))

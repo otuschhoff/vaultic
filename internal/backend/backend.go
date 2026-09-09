@@ -99,6 +99,30 @@ type Properties struct {
 	// HasFlakyErrors states whether the backend may temporarily return errors
 	// that are considered as permanent for existing files.
 	HasFlakyErrors bool
+
+	StorageProfile *StorageProfile
+}
+
+type StorageProfile struct {
+	Provider           string
+	EndpointHost       string
+	Region             string
+	Bucket             string
+	PrefixSHA256       string
+	BucketLookup       string
+	SignatureV4        bool
+	MultipartUpload    bool
+	RangeReads         bool
+	ListObjectsV2      bool
+	ConditionalCreate  string
+	VersionRetention   string
+	ObjectImmutability string
+	STSRoleAssumption  string
+	GlacierRestore     bool
+}
+
+type StorageCapabilityProber interface {
+	ProbeStorageCapabilities(ctx context.Context) (*StorageProfile, error)
 }
 
 type Unwrapper interface {

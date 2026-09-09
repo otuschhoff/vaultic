@@ -3,9 +3,11 @@ package indexcmd
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -93,11 +95,15 @@ func newBackendEnrollGDriveCommand(globalOptions *global.Options) *cobra.Command
 				ID: backendID, Provider: topology.ProviderGoogleDrive,
 				Endpoint: map[string]any{"drive_id": driveID, "root_folder_id": rootFolderID, "path": drivePath},
 				Role:     topology.BackendRole(role), Offsite: offsite,
-				FailureDomain: failureDomain, CredentialRef: credentialRef,
+				FailureDomain: failureDomain,
+				CredentialPolicy: &topology.CredentialPolicy{Static: &topology.StaticCredentialPolicy{
+					Generation: 1,
+					Bindings:   topology.CredentialBindings{StorageMaintain: credentialRef},
+				}},
 			}
 			mutation := topology.Mutation{
-				Operation: "set-backend-credential", Backend: &backend,
-				Reference: credentialRef, Credential: &credential,
+				Operation: "set-backend-policy", Backend: &backend,
+				Credentials: map[string]topology.Credential{credentialRef: credential},
 			}
 			prepared, err := client.PrepareTopologyMutation(
 				command.Context(), globalOptions.KeyBrokerReleaseManifest, mutation, members, externalMembers,
@@ -310,7 +316,20 @@ func backendInventory(ctx context.Context, store backend.Backend) ([]string, err
 	var inventory []string
 	for fileType := backend.PackFile; fileType <= backend.StagingFile; fileType++ {
 		err := store.List(ctx, fileType, func(info backend.FileInfo) error {
-			inventory = append(inventory, fmt.Sprintf("%d/%s/%d", fileType, info.Name, info.Size))
+			handle := backend.Handle{Type: fileType, Name: info.Name}
+			digest := sha256.New()
+			var loaded int64
+			if err := store.Load(ctx, handle, 0, 0, func(reader io.Reader) error {
+				written, err := io.Copy(digest, reader)
+				loaded += written
+				return err
+			}); err != nil {
+				return fmt.Errorf("hash %v %q: %w", fileType, info.Name, err)
+			}
+			if loaded != info.Size {
+				return fmt.Errorf("hash %v %q: listed size %d, loaded %d", fileType, info.Name, info.Size, loaded)
+			}
+			inventory = append(inventory, fmt.Sprintf("%d/%s/%d/%x", fileType, info.Name, info.Size, digest.Sum(nil)))
 			return nil
 		})
 		if err != nil {

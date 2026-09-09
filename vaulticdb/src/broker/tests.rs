@@ -9,7 +9,15 @@ mod tests {
             CapsuleBuilder, ExternalMemberProtection, MemberProvider, PrincipalBinding,
         },
     };
+    use crate::topology::{
+        AzureUserDelegationPolicy, Credential, CredentialKind, Provider, S3StsPolicy,
+        StaticCredentialPolicy,
+    };
     use async_trait::async_trait;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     struct ContextProvider;
 
@@ -53,14 +61,20 @@ mod tests {
     }
 
     fn setup() -> (RecoveryCapsule, SigningKey, Vec<ClientAuthorization>) {
+        setup_with_topology(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/topology-v2.json"
+        )))
+    }
+
+    fn setup_with_topology(
+        topology: &[u8],
+    ) -> (RecoveryCapsule, SigningKey, Vec<ClientAuthorization>) {
         let identity = SigningKey::generate(&mut LegacyOsRng);
         let capsule = CapsuleBuilder::new(
             "repo-a",
             4,
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../testdata/topology-v1.json"
-            )),
+            topology,
         )
             .broker_identity_public_key(identity.verifying_key().as_bytes())
             .create_offline_threshold(
@@ -92,6 +106,30 @@ mod tests {
             read_only: false,
         }];
         (capsule, identity, authorizations)
+    }
+
+    fn unlock_broker(mut broker: KeyBroker, capsule: &RecoveryCapsule) -> KeyBroker {
+        let session = broker
+            .create_session("unix:/broker.sock", Duration::from_secs(60), 1_000)
+            .unwrap();
+        for (member, passphrase) in [
+            ("alice", b"alice passphrase".as_slice()),
+            ("bob", b"bob passphrase".as_slice()),
+        ] {
+            let contribution = encrypt_offline_contribution(
+                capsule,
+                &session,
+                "unix:/broker.sock",
+                member,
+                &MemberCredential::Passphrase(passphrase),
+                4,
+                None,
+                1_001,
+            )
+            .unwrap();
+            broker.submit_contribution(contribution, 1_002).unwrap();
+        }
+        broker
     }
 
     fn client() -> ClientIdentity {
@@ -269,8 +307,8 @@ mod tests {
         assert!(broker.status(1_006).unwrap().locked);
     }
 
-    #[test]
-    fn topology_and_credentials_are_released_without_broad_secret_disclosure() {
+    #[tokio::test]
+    async fn topology_and_credentials_are_released_without_broad_secret_disclosure() {
         let (capsule, identity, authorizations) = setup();
         let mut broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
         let session = broker
@@ -335,8 +373,505 @@ mod tests {
                 1_003,
             )
             .is_err());
+        let read_credential = broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:drive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .await
+            .unwrap();
+        assert!(String::from_utf8(read_credential.key.to_vec())
+            .unwrap()
+            .contains("refresh-secret"));
+        assert!(broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:drive",
+                "storage-append",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .await
+            .is_err());
+        for tier in ["storage-maintain", "storage-lock"] {
+            assert!(broker
+                .acquire_storage_credential_lease(
+                    &client(),
+                    "pack:drive",
+                    tier,
+                    Duration::from_secs(30),
+                    1_003,
+                )
+                .await
+                .is_err());
+        }
         broker.lock();
         assert_eq!(broker.status(1_004).unwrap().active_leases, 0);
+    }
+
+    #[tokio::test]
+    async fn sts_recovery_retires_checked_out_static_fallback_generation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for status in [503, 200, 503] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 16 * 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let (reason, body) = if status == 200 {
+                    (
+                        "OK",
+                        r#"<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>temporary-access</AccessKeyId><SecretAccessKey>temporary-secret</SecretAccessKey><SessionToken>temporary-token</SessionToken><Expiration>2030-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult><ResponseMetadata><RequestId>request-a</RequestId></ResponseMetadata></AssumeRoleResponse>"#,
+                    )
+                } else {
+                    (
+                        "Service Unavailable",
+                        r#"<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Receiver</Type><Code>ServiceUnavailable</Code><Message>unavailable</Message></Error><RequestId>request-a</RequestId></ErrorResponse>"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut topology = TopologyDocument::decode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/topology-v2.json"
+        )))
+        .unwrap();
+        topology.credentials.insert(
+            "cred:issuer".to_owned(),
+            topology.credentials["cred:archive"].clone(),
+        );
+        let backend = &mut topology.pack_backends[0];
+        backend.endpoint.insert(
+            "url".to_owned(),
+            serde_json::Value::String(format!("http://{address}")),
+        );
+        backend.credential_policy = Some(CredentialPolicy {
+            sts: Some(S3StsPolicy {
+                issuer_ref: "cred:issuer".to_owned(),
+                endpoint: format!("http://{address}"),
+                region: "us-east-1".to_owned(),
+                session_name: "vaultic-test".to_owned(),
+                external_id: None,
+                roles: crate::topology::CredentialBindings {
+                    storage_read: Some("arn:aws:iam::123456789012:role/read".to_owned()),
+                    storage_append: None,
+                    storage_maintain: None,
+                    storage_lock: None,
+                },
+                fallback: StsFallback::StaticOnUnavailable,
+            }),
+            azure_user_delegation: None,
+            gcp_downscope: None,
+            r#static: Some(StaticCredentialPolicy {
+                generation: 1,
+                revoked_generations: Vec::new(),
+                bindings: crate::topology::CredentialBindings {
+                    storage_read: Some("cred:archive".to_owned()),
+                    storage_append: None,
+                    storage_maintain: None,
+                    storage_lock: None,
+                },
+            }),
+        });
+        let encoded = topology.canonical_json().unwrap();
+        let (capsule, identity, mut authorizations) = setup_with_topology(&encoded);
+        authorizations[0]
+            .credential_refs
+            .insert("cred:issuer".to_owned());
+        let broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let mut broker = unlock_broker(broker, &capsule);
+
+        assert!(broker
+            .acquire_credential_lease(
+                &client(),
+                "cred:issuer",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("broker-only"));
+
+        let fallback = broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fallback.credential_source, Some("static-fallback"));
+        assert_eq!(fallback.static_generation, Some(1));
+        let fallback_status = broker.status(1_003).unwrap();
+        assert!(!fallback_status.compliant);
+        assert!(fallback_status.findings.iter().any(|finding| {
+            finding.contains("static-fallback-active-provider-authority")
+        }));
+
+        let issued = broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_004,
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.credential_source, Some("sts"));
+        assert!(String::from_utf8(issued.key.to_vec())
+            .unwrap()
+            .contains("temporary-token"));
+
+        assert!(broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_005,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+        let status = broker.status(1_006).unwrap();
+        assert!(!status.compliant);
+        assert!(status.findings.iter().any(|finding| {
+            finding.contains("static-fallback-provider-revocation-required")
+        }));
+    }
+
+    #[tokio::test]
+    async fn azure_recovery_retires_fallback_without_releasing_entra_issuer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for (index, status) in [200, 503, 200, 200, 200, 503].into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 16 * 1024];
+                let read = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let token_request = index % 2 == 0;
+                let (reason, content_type, body) = if token_request {
+                    assert!(request.contains("/tenant-a/oauth2/v2.0/token"));
+                    ("OK", "application/json", r#"{"access_token":"entra-token"}"#.to_owned())
+                } else if status == 200 {
+                    assert!(request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer entra-token"));
+                    (
+                        "OK",
+                        "application/xml",
+                        format!(
+                            "<UserDelegationKey><SignedOid>issuer-oid</SignedOid><SignedTid>tenant-a</SignedTid><SignedStart>2020-01-01T00:00:00Z</SignedStart><SignedExpiry>2099-01-01T00:00:00Z</SignedExpiry><SignedService>b</SignedService><SignedVersion>2026-04-06</SignedVersion><Value>{}</Value></UserDelegationKey>",
+                            BASE64.encode(b"delegation-key")
+                        ),
+                    )
+                } else {
+                    ("Service Unavailable", "application/xml", "<Error/>".to_owned())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut topology = TopologyDocument::decode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/topology-v2.json"
+        )))
+        .unwrap();
+        topology.credentials.insert(
+            "cred:archive".to_owned(),
+            Credential {
+                kind: CredentialKind::AzureSas,
+                access_key_id: None,
+                secret_access_key: None,
+                session_token: None,
+                expires_at: None,
+                account_name: Some("account-a".to_owned()),
+                account_key: None,
+                sas_token: Some("sp=rl&sig=static".to_owned()),
+                service_account_json: None,
+                access_token: None,
+                subject: None,
+                tenant_id: None,
+                client_id: None,
+                client_secret: None,
+                refresh_token: None,
+                scopes: Vec::new(),
+                token_uri: None,
+                issued_at: None,
+                rotation_due: None,
+            },
+        );
+        topology.credentials.insert(
+            "cred:azure-issuer".to_owned(),
+            Credential {
+                kind: CredentialKind::AzureEntraClientSecret,
+                access_key_id: None,
+                secret_access_key: None,
+                session_token: None,
+                expires_at: None,
+                account_name: None,
+                account_key: None,
+                sas_token: None,
+                service_account_json: None,
+                access_token: None,
+                subject: None,
+                tenant_id: Some("tenant-a".to_owned()),
+                client_id: Some("client-a".to_owned()),
+                client_secret: Some("issuer-secret".to_owned()),
+                refresh_token: None,
+                scopes: vec!["https://storage.azure.com/.default".to_owned()],
+                token_uri: Some(format!(
+                    "http://{address}/tenant-a/oauth2/v2.0/token"
+                )),
+                issued_at: None,
+                rotation_due: None,
+            },
+        );
+        let backend = &mut topology.pack_backends[0];
+        backend.provider = Provider::Azure;
+        backend.endpoint = BTreeMap::from([
+            ("url".to_owned(), serde_json::Value::String(format!("http://{address}"))),
+            ("account".to_owned(), serde_json::Value::String("account-a".to_owned())),
+            ("container".to_owned(), serde_json::Value::String("repo-a".to_owned())),
+            ("prefix".to_owned(), serde_json::Value::String(String::new())),
+        ]);
+        backend.credential_policy = Some(CredentialPolicy {
+            sts: None,
+            azure_user_delegation: Some(AzureUserDelegationPolicy {
+                issuer_ref: "cred:azure-issuer".to_owned(),
+                service_version: "2026-04-06".to_owned(),
+                signed_ip: None,
+                hierarchical_namespace: false,
+                tiers: vec![StorageCredentialTier::Read],
+                fallback: StsFallback::StaticOnUnavailable,
+            }),
+            gcp_downscope: None,
+            r#static: Some(StaticCredentialPolicy {
+                generation: 1,
+                revoked_generations: Vec::new(),
+                bindings: crate::topology::CredentialBindings {
+                    storage_read: Some("cred:archive".to_owned()),
+                    storage_append: None,
+                    storage_maintain: None,
+                    storage_lock: None,
+                },
+            }),
+        });
+        let encoded = topology.canonical_json().unwrap();
+        let (capsule, identity, mut authorizations) = setup_with_topology(&encoded);
+        authorizations[0]
+            .credential_refs
+            .insert("cred:azure-issuer".to_owned());
+        let broker = KeyBroker::new(capsule.clone(), identity, authorizations, None).unwrap();
+        let mut broker = unlock_broker(broker, &capsule);
+
+        assert!(broker
+            .acquire_credential_lease(
+                &client(),
+                "cred:azure-issuer",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("broker-only"));
+        let fallback = broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_003,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fallback.credential_source, Some("static-fallback"));
+        assert_eq!(fallback.static_generation, Some(1));
+
+        let issued = broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_004,
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.credential_source, Some("azure-user-delegation"));
+        assert!(issued.provider_expires_at.is_some());
+        let credential: Credential = serde_json::from_slice(issued.key.as_slice()).unwrap();
+        assert_eq!(credential.kind, CredentialKind::AzureSas);
+        assert!(credential.sas_token.is_some());
+        assert!(credential.client_secret.is_none());
+
+        assert!(broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_005,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+    }
+
+    #[tokio::test]
+    async fn static_fallback_retirement_survives_broker_restarts() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for status in [503, 200, 503] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 16 * 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let (reason, body) = if status == 200 {
+                    (
+                        "OK",
+                        r#"<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>temporary-access</AccessKeyId><SecretAccessKey>temporary-secret</SecretAccessKey><SessionToken>temporary-token</SessionToken><Expiration>2030-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult><ResponseMetadata><RequestId>request-a</RequestId></ResponseMetadata></AssumeRoleResponse>"#,
+                    )
+                } else {
+                    (
+                        "Service Unavailable",
+                        r#"<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Receiver</Type><Code>ServiceUnavailable</Code><Message>unavailable</Message></Error><RequestId>request-a</RequestId></ErrorResponse>"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut topology = TopologyDocument::decode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/topology-v2.json"
+        )))
+        .unwrap();
+        topology.credentials.insert(
+            "cred:issuer".to_owned(),
+            topology.credentials["cred:archive"].clone(),
+        );
+        let backend = &mut topology.pack_backends[0];
+        backend.endpoint.insert(
+            "url".to_owned(),
+            serde_json::Value::String(format!("http://{address}")),
+        );
+        backend.credential_policy = Some(CredentialPolicy {
+            sts: Some(S3StsPolicy {
+                issuer_ref: "cred:issuer".to_owned(),
+                endpoint: format!("http://{address}"),
+                region: "us-east-1".to_owned(),
+                session_name: "vaultic-test".to_owned(),
+                external_id: None,
+                roles: crate::topology::CredentialBindings {
+                    storage_read: Some("arn:aws:iam::123456789012:role/read".to_owned()),
+                    storage_append: None,
+                    storage_maintain: None,
+                    storage_lock: None,
+                },
+                fallback: StsFallback::StaticOnUnavailable,
+            }),
+            azure_user_delegation: None,
+            gcp_downscope: None,
+            r#static: Some(StaticCredentialPolicy {
+                generation: 1,
+                revoked_generations: Vec::new(),
+                bindings: crate::topology::CredentialBindings {
+                    storage_read: Some("cred:archive".to_owned()),
+                    storage_append: None,
+                    storage_maintain: None,
+                    storage_lock: None,
+                },
+            }),
+        });
+        let encoded = topology.canonical_json().unwrap();
+        let (capsule, identity, authorizations) = setup_with_topology(&encoded);
+        let state_path = std::env::temp_dir().join(format!(
+            "vaultic-fallback-state-{}-{}.json",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+
+        let new_broker = || {
+            KeyBroker::new_with_fallback_state(
+                capsule.clone(),
+                identity.clone(),
+                authorizations.clone(),
+                None,
+                state_path.clone(),
+                false,
+            )
+            .unwrap()
+        };
+        let mut broker = unlock_broker(new_broker(), &capsule);
+        assert_eq!(
+            broker
+                .acquire_storage_credential_lease(
+                    &client(),
+                    "pack:archive",
+                    "storage-read",
+                    Duration::from_secs(30),
+                    1_003,
+                )
+                .await
+                .unwrap()
+                .credential_source,
+            Some("static-fallback")
+        );
+
+        let mut broker = unlock_broker(new_broker(), &capsule);
+        assert_eq!(
+            broker
+                .acquire_storage_credential_lease(
+                    &client(),
+                    "pack:archive",
+                    "storage-read",
+                    Duration::from_secs(30),
+                    1_004,
+                )
+                .await
+                .unwrap()
+                .credential_source,
+            Some("sts")
+        );
+
+        let mut broker = unlock_broker(new_broker(), &capsule);
+        assert!(broker
+            .acquire_storage_credential_lease(
+                &client(),
+                "pack:archive",
+                "storage-read",
+                Duration::from_secs(30),
+                1_005,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+        let _ = std::fs::remove_file(state_path);
     }
 
     #[test]
@@ -500,7 +1035,7 @@ mod tests {
             recovered.sealed_topology.as_slice(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../testdata/topology-v1.json"
+                "/../testdata/topology-v2.json"
             ))
             .as_slice()
         );

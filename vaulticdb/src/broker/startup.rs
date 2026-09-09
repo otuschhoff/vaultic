@@ -34,6 +34,8 @@ struct BrokerConfig {
     identity_key_path: PathBuf,
     socket_path: PathBuf,
     #[serde(default)]
+    fallback_state_path: Option<PathBuf>,
+    #[serde(default)]
     maximum_unlocked_seconds: Option<u64>,
     #[serde(default)]
     identity_recovery: bool,
@@ -113,11 +115,27 @@ pub fn load(config_path: &Path) -> Result<BrokerStartup> {
         })
         .collect::<Result<Vec<_>>>()?;
     let maximum_lifetime = config.maximum_unlocked_seconds.map(Duration::from_secs);
-    let broker = if config.identity_recovery {
-        KeyBroker::new_identity_recovery(capsule, identity, authorizations, maximum_lifetime)?
-    } else {
-        KeyBroker::new(capsule, identity, authorizations, maximum_lifetime)?
-    };
+    let fallback_state_path = config.fallback_state_path.unwrap_or_else(|| {
+        let repository_hash = format!("{:x}", Sha256::digest(config.repository_id.as_str()));
+        config
+            .capsule_directory
+            .join(format!(".fallback-lifecycle-{repository_hash}.state"))
+    });
+    if fallback_state_path.parent() == Some(config.capsule_directory.as_path())
+        && fallback_state_path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+    {
+        bail!("fallback lifecycle state in the capsule directory must not use a .json extension");
+    }
+    let broker = KeyBroker::new_with_fallback_state(
+        capsule,
+        identity,
+        authorizations,
+        maximum_lifetime,
+        fallback_state_path,
+        config.identity_recovery,
+    )?;
     if config.identity_recovery {
         emit_security_event(
             "critical",

@@ -6,7 +6,7 @@
 
 [Cloud object storage operator guide](../../051_cloud_object_storage.rst) · [Storage placement architecture](../02-architecture/05-storage-placement.md)
 
-**Status: design specification, not yet implemented.**
+**Status: implemented.**
 
 **Goal:** make Backblaze B2 Cloud Storage and Wasabi dependable, explicitly supported S3-compatible targets for repository data, Phase 12 placement backends, and Phase 19 VaulticDB metadata replicas. Both providers use the existing `s3:` backend and AWS Signature Version 4 rather than new storage implementations. Add provider-aware endpoint and region handling, capability validation, safe defaults, diagnostics, documentation, and conformance coverage so operators do not have to infer provider-specific behavior from generic S3 options. Preserve the native `b2:` backend for compatibility, but recommend B2's S3-compatible API for new deployments.
 
@@ -20,7 +20,7 @@ This phase supports:
 - static credentials from Phase 24 sealed topology as well as explicit external mode;
 - provider-native versioning, immutability, and lifecycle settings without attempting to administer bucket policy from Vaultic.
 
-This phase does not add provider-specific REST clients, create cloud accounts or buckets, manage billing controls, or emulate unsupported AWS services. Backblaze documents IAM roles as unsupported, so Phase 26 must report it as static-only unless the provider adds a delegation mechanism. Wasabi's temporary-credential capabilities and account-level availability must be probed against its current API before Phase 26 enables ephemeral issuance; absence of a verified mechanism is reported honestly rather than treated as AWS STS compatibility.
+This phase does not add provider-specific REST clients, create cloud accounts or buckets, manage billing controls, or emulate unsupported AWS services. Backblaze documents IAM roles as unsupported, so Phase 26 must report it as static-only unless the provider adds a delegation mechanism. Wasabi documents native AWS-compatible STS at `https://sts.wasabisys.com`, including `GetSessionToken`, `AssumeRole`, and `GetCallerIdentity`. `AssumeRole` requires sub-user credentials; root credentials are unsupported. Phase 26 may use this verified mechanism but must still test account policy, scope enforcement, and TTL behavior before issuing brokered credentials.
 
 ## Design
 
@@ -83,7 +83,7 @@ At open, the backend records a provider capability set used by validation and st
 | Conditional create | probe and report exact behavior | probe and report exact behavior |
 | Version retention | provider bucket lifecycle/version rules | bucket versioning and retention rules |
 | Object immutability | B2 Object Lock when enabled | Wasabi Object Lock when enabled |
-| AWS STS role assumption | unsupported; IAM roles are not available | capability-probed and disabled unless the account and endpoint prove support |
+| AWS STS role assumption | unsupported; IAM roles are not available | supported through `https://sts.wasabisys.com`; caller must be a sub-user |
 | Glacier restore API | unsupported | unsupported |
 
 Selecting `s3.enable-restore=true` or AWS Glacier storage classes for either profile fails during configuration. Unknown storage classes produce a typed provider-compatibility error. Vaultic does not infer durability from a successful write: storage verification still performs independent read and hash checks.

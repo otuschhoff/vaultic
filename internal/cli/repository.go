@@ -8,6 +8,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/topology"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -27,6 +28,7 @@ type OpenOptions struct {
 	DryRun       bool
 	AllowNoLock  bool
 	LockFreeRead bool
+	ReadOnlyData bool
 }
 
 func OpenRepository(
@@ -36,6 +38,16 @@ func OpenRepository(
 	openOptions OpenOptions,
 	printer vaultic.Printer,
 ) (context.Context, *repository.Repository, func(), error) {
+	if openOptions.DryRun {
+		policy = LockNone
+	}
+	if policy != LockExclusive && openOptions.AllowNoLock {
+		policy = LockNone
+	}
+	if policy == LockShared && openOptions.LockFreeRead && feature.Flag.Enabled(feature.LockFree) {
+		policy = LockNone
+	}
+	options.StorageCredentialTier, options.StorageLockCredential = storageCredentialAccess(policy, openOptions)
 	repo, err := global.OpenRepository(ctx, options, printer)
 	if err != nil {
 		return nil, nil, nil, err
@@ -44,12 +56,6 @@ func OpenRepository(
 	if openOptions.DryRun {
 		repo.SetDryRun()
 		return ctx, repo, func() {}, nil
-	}
-	if policy != LockExclusive && openOptions.AllowNoLock {
-		policy = LockNone
-	}
-	if policy == LockShared && openOptions.LockFreeRead && feature.Flag.Enabled(feature.LockFree) {
-		policy = LockNone
 	}
 	if policy == LockNone {
 		return ctx, repo, func() {}, nil
@@ -84,4 +90,19 @@ func OpenRepository(
 		remoteUnlock()
 		localUnlock()
 	}, nil
+}
+
+func storageCredentialAccess(policy LockPolicy, openOptions OpenOptions) (string, bool) {
+	switch {
+	case openOptions.ReadOnlyData:
+		return string(topology.StorageRead), policy != LockNone
+	case policy == LockExclusive:
+		return string(topology.StorageMaintain), true
+	case policy == LockShared && !openOptions.LockFreeRead:
+		return string(topology.StorageAppend), true
+	case policy == LockShared:
+		return string(topology.StorageRead), true
+	default:
+		return string(topology.StorageRead), false
+	}
 }

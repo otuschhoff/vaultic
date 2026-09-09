@@ -100,7 +100,7 @@ mod tests {
         ];
         let topology = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../testdata/topology-v1.json"
+            "/../testdata/topology-v2.json"
         ));
         let current = CapsuleBuilder::new("repo-a", 1, topology)
             .broker_identity_public_key(&[1; 32])

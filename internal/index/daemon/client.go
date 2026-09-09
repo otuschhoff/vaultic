@@ -53,6 +53,10 @@ type Options struct {
 	DataDir           string
 	S3Bucket          string
 	S3Prefix          string
+	S3Endpoint        string
+	S3Region          string
+	S3Provider        string
+	S3BucketLookup    string
 	EncryptionMode    string
 	PassphraseFile    string
 	AzureTokenFile    string
@@ -357,6 +361,10 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		"VAULTICDB_DATA_DIR":                   options.DataDir,
 		"VAULTICDB_S3_BUCKET":                  options.S3Bucket,
 		"VAULTICDB_S3_PREFIX":                  options.S3Prefix,
+		"VAULTICDB_S3_ENDPOINT":                options.S3Endpoint,
+		"VAULTICDB_S3_REGION":                  options.S3Region,
+		"VAULTICDB_S3_PROVIDER":                options.S3Provider,
+		"VAULTICDB_S3_BUCKET_LOOKUP":           options.S3BucketLookup,
 		"VAULTICDB_ENCRYPTION":                 options.EncryptionMode,
 		"VAULTICDB_ENCRYPTION_PASSPHRASE_FILE": options.PassphraseFile,
 		"VAULTICDB_AZURE_TOKEN_FILE":           options.AzureTokenFile,

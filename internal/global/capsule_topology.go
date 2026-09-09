@@ -6,7 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,6 +56,10 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	if err := applyTopologyOverrides(&document, globalOptions.TopologyOverrides); err != nil {
 		return capsuleTopologyBackends{}, err
 	}
+	storageTier := globalOptions.StorageCredentialTier
+	if storageTier == "" {
+		storageTier = string(topology.StorageMaintain)
+	}
 	placements := make(map[uint64]backend.Backend, len(document.PackBackends))
 	opened := make([]backend.Backend, 0, len(document.PackBackends)+1)
 	defer func() {
@@ -64,11 +71,9 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	}()
 	var primary backend.Backend
 	for _, declared := range document.PackBackends {
-		credential, credentialErr := leaseTopologyCredential(ctx, client, globalOptions, declared.CredentialRef)
-		if credentialErr != nil {
-			return capsuleTopologyBackends{}, credentialErr
-		}
-		openedBackend, _, openErr := openStructuredBackend(ctx, globalOptions, printer, declared, credential)
+		openedBackend, _, openErr := openCapsulePackBackend(
+			ctx, client, globalOptions, printer, declared, storageTier,
+		)
 		if openErr != nil {
 			return capsuleTopologyBackends{}, fmt.Errorf("open capsule backend %q: %w", declared.ID, openErr)
 		}
@@ -89,11 +94,9 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 			break
 		}
 	}
-	credential, err := leaseTopologyCredential(ctx, client, globalOptions, primaryDeclaration.CredentialRef)
-	if err != nil {
-		return capsuleTopologyBackends{}, err
-	}
-	primary, primaryURL, err := openStructuredBackend(ctx, globalOptions, printer, primaryDeclaration, credential)
+	primary, primaryURL, err := openCapsulePrimaryBackend(
+		ctx, client, globalOptions, printer, primaryDeclaration, storageTier,
+	)
 	if err != nil {
 		return capsuleTopologyBackends{}, err
 	}
@@ -101,24 +104,138 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	return capsuleTopologyBackends{document: document, primary: primary, primaryURL: primaryURL, placements: placements, client: client}, nil
 }
 
-func leaseTopologyCredential(ctx context.Context, client *indexbroker.Client, globalOptions Options, reference string) (topology.Credential, error) {
-	if reference == "" {
-		return topology.Credential{Kind: topology.CredentialNone}, nil
+func openCapsulePackBackend(
+	ctx context.Context,
+	client *indexbroker.Client,
+	globalOptions Options,
+	printer vaultic.Printer,
+	declared topology.PackBackend,
+	storageTier string,
+) (backend.Backend, string, error) {
+	if declared.Provider == topology.ProviderLocal {
+		return openStructuredBackend(ctx, globalOptions, printer, declared, topology.Credential{Kind: topology.CredentialNone})
 	}
-	lease, err := client.AcquireCredentialLease(ctx, globalOptions.KeyBrokerReleaseManifest, reference, globalOptions.KeyBrokerLeaseDuration)
+	credential, err := leaseTopologyStorageCredential(
+		ctx, client, globalOptions, "pack:"+declared.ID, storageTier,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	return openStructuredBackend(ctx, globalOptions, printer, declared, credential)
+}
+
+func openCapsulePrimaryBackend(
+	ctx context.Context,
+	client *indexbroker.Client,
+	globalOptions Options,
+	printer vaultic.Printer,
+	declared topology.PackBackend,
+	storageTier string,
+) (backend.Backend, string, error) {
+	dataBackend, description, err := openCapsulePackBackend(
+		ctx, client, globalOptions, printer, declared, storageTier,
+	)
+	if err != nil || !globalOptions.StorageLockCredential || declared.Provider == topology.ProviderLocal {
+		return dataBackend, description, err
+	}
+	lockBackend, _, err := openCapsulePackBackend(
+		ctx, client, globalOptions, printer, declared, string(topology.StorageLock),
+	)
+	if err != nil {
+		_ = dataBackend.Close() // Preserve the lock-backend error; data backend cleanup is best effort.
+		return nil, "", fmt.Errorf("open lock backend %q: %w", declared.ID, err)
+	}
+	return &credentialRoutingBackend{data: dataBackend, lock: lockBackend}, description, nil
+}
+
+type credentialRoutingBackend struct {
+	data backend.Backend
+	lock backend.Backend
+}
+
+func (r *credentialRoutingBackend) route(fileType backend.FileType) backend.Backend {
+	if fileType == backend.LockFile {
+		return r.lock
+	}
+	return r.data
+}
+
+func (r *credentialRoutingBackend) Properties() backend.Properties { return r.data.Properties() }
+func (r *credentialRoutingBackend) Hasher() hash.Hash              { return r.data.Hasher() }
+func (r *credentialRoutingBackend) Unwrap() backend.Backend        { return r.data }
+func (r *credentialRoutingBackend) Remove(ctx context.Context, handle backend.Handle) error {
+	return r.route(handle.Type).Remove(ctx, handle)
+}
+func (r *credentialRoutingBackend) Close() error {
+	return errors.Join(r.data.Close(), r.lock.Close())
+}
+func (r *credentialRoutingBackend) Save(ctx context.Context, handle backend.Handle, reader backend.RewindReader) error {
+	return r.route(handle.Type).Save(ctx, handle, reader)
+}
+func (r *credentialRoutingBackend) Load(
+	ctx context.Context,
+	handle backend.Handle,
+	length int,
+	offset int64,
+	fn func(io.Reader) error,
+) error {
+	return r.route(handle.Type).Load(ctx, handle, length, offset, fn)
+}
+func (r *credentialRoutingBackend) Stat(ctx context.Context, handle backend.Handle) (backend.FileInfo, error) {
+	return r.route(handle.Type).Stat(ctx, handle)
+}
+func (r *credentialRoutingBackend) List(ctx context.Context, fileType backend.FileType, fn func(backend.FileInfo) error) error {
+	return r.route(fileType).List(ctx, fileType, fn)
+}
+func (r *credentialRoutingBackend) IsNotExist(err error) bool { return r.data.IsNotExist(err) }
+func (r *credentialRoutingBackend) IsPermanentError(err error) bool {
+	return r.data.IsPermanentError(err)
+}
+func (r *credentialRoutingBackend) Delete(ctx context.Context) error { return r.data.Delete(ctx) }
+func (r *credentialRoutingBackend) Warmup(ctx context.Context, handles []backend.Handle) ([]backend.Handle, error) {
+	return r.data.Warmup(ctx, handles)
+}
+func (r *credentialRoutingBackend) WarmupWait(ctx context.Context, handles []backend.Handle) error {
+	return r.data.WarmupWait(ctx, handles)
+}
+
+func leaseTopologyStorageCredential(
+	ctx context.Context,
+	client *indexbroker.Client,
+	globalOptions Options,
+	storageTarget, storageTier string,
+) (topology.Credential, error) {
+	lease, err := client.AcquireStorageCredentialLease(
+		ctx,
+		globalOptions.KeyBrokerReleaseManifest,
+		storageTarget,
+		storageTier,
+		globalOptions.KeyBrokerLeaseDuration,
+	)
 	if err != nil {
 		return topology.Credential{}, err
 	}
 	defer clear(lease.Key)
 	if lease.ExpiresUnixMS <= uint64(time.Now().UnixMilli()) {
-		return topology.Credential{}, fmt.Errorf("key broker returned an expired credential lease")
+		return topology.Credential{}, fmt.Errorf("key broker returned an expired storage credential lease")
+	}
+	if lease.StorageTarget != storageTarget || lease.StorageTier != storageTier ||
+		lease.CredentialSource != "sts" && lease.CredentialSource != "azure-user-delegation" && lease.CredentialSource != "gcp-downscope" && lease.CredentialSource != "static" &&
+			lease.CredentialSource != "static-fallback" {
+		return topology.Credential{}, fmt.Errorf("key broker returned mismatched storage credential metadata")
+	}
+	if (lease.CredentialSource == "static" || lease.CredentialSource == "static-fallback") && lease.StaticGeneration == 0 {
+		return topology.Credential{}, fmt.Errorf("key broker returned static credentials without a generation")
+	}
+	if (lease.CredentialSource == "sts" || lease.CredentialSource == "azure-user-delegation" || lease.CredentialSource == "gcp-downscope") && lease.ProviderExpiresAt == "" {
+		return topology.Credential{}, fmt.Errorf("key broker returned dynamic credentials without a provider expiry")
 	}
 	var credential topology.Credential
 	if err := json.Unmarshal(lease.Key, &credential); err != nil {
-		return topology.Credential{}, fmt.Errorf("decode credential lease %q: %w", reference, err)
+		return topology.Credential{}, fmt.Errorf("decode storage credential lease: %w", err)
 	}
 	if err := credential.Validate(); err != nil {
-		return topology.Credential{}, fmt.Errorf("validate credential lease %q: %w", reference, err)
+		return topology.Credential{}, fmt.Errorf("validate storage credential lease: %w", err)
 	}
 	return credential, nil
 }
@@ -214,12 +331,22 @@ func s3BackendConfig(declared topology.PackBackend, credential topology.Credenti
 	config.Endpoint, config.UseHTTP, config.Bucket = parsed.Host, parsed.Scheme == "http", bucket
 	config.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
 	config.Region = optionalEndpointString(declared.Endpoint, "region")
+	config.Provider = optionalEndpointString(declared.Endpoint, "provider")
+	config.BucketLookup = optionalEndpointString(declared.Endpoint, "bucket_lookup")
 	config.StorageClass = optionalEndpointString(declared.Endpoint, "storage_class")
+	normalized, _, err := s3.NormalizeConfig(config)
+	if err != nil {
+		return nil, "", fmt.Errorf("backend %q: %w", declared.ID, err)
+	}
+	config = normalized
 	if credential.Kind != topology.CredentialNone {
 		config.KeyID = credential.AccessKeyID
 		config.Secret = options.NewSecretString(credential.SecretAccessKey)
+		config.SessionToken = credential.SessionToken
+		config.BrokerCredential = true
 	}
-	return &config, fmt.Sprintf("s3:%s/%s/%s", config.Endpoint, config.Bucket, config.Prefix), nil
+	prefixDigest := sha256.Sum256([]byte(config.Prefix))
+	return &config, fmt.Sprintf("s3:%s/%s/<prefix-sha256:%x>", config.Endpoint, config.Bucket, prefixDigest), nil
 }
 
 func azureBackendConfig(declared topology.PackBackend, credential topology.Credential) (*azure.Config, string, error) {
@@ -236,6 +363,13 @@ func azureBackendConfig(declared topology.PackBackend, credential topology.Crede
 	if len(hostParts) != 2 || hostParts[0] == "" || hostParts[1] == "" {
 		return nil, "", fmt.Errorf("backend %q Azure endpoint must be account.blob.SUFFIX", declared.ID)
 	}
+	account, err := requiredEndpointString(declared, "account")
+	if err != nil {
+		return nil, "", err
+	}
+	if account != hostParts[0] {
+		return nil, "", fmt.Errorf("backend %q Azure account does not match its endpoint", declared.ID)
+	}
 	container, err := requiredEndpointString(declared, "container")
 	if err != nil {
 		return nil, "", err
@@ -244,7 +378,7 @@ func azureBackendConfig(declared topology.PackBackend, credential topology.Crede
 	config.Container = container
 	config.EndpointSuffix = hostParts[1]
 	config.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
-	config.AccountName = hostParts[0]
+	config.AccountName = account
 	if credential.AccountName != "" && credential.AccountName != config.AccountName {
 		return nil, "", fmt.Errorf("backend %q Azure account does not match its endpoint", declared.ID)
 	}
@@ -265,12 +399,23 @@ func gcsBackendConfig(
 	config := gs.NewConfig()
 	config.Bucket = bucket
 	config.Prefix = optionalEndpointString(declared.Endpoint, "prefix")
-	if credential.Kind == topology.CredentialNone {
+	switch credential.Kind {
+	case topology.CredentialNone:
 		ctx = gs.WithWorkloadIdentity(ctx)
-	} else {
+	case topology.CredentialGCPServiceAccountJSON:
 		ctx = gs.WithServiceAccountCredential(ctx, gs.ServiceAccountCredential{
 			JSON: []byte(credential.ServiceAccountJSON), Subject: credential.Subject,
 		})
+	case topology.CredentialGCPAccessToken:
+		expiresAt, parseErr := time.Parse(time.RFC3339, credential.ExpiresAt)
+		if parseErr != nil {
+			return nil, "", ctx, fmt.Errorf("backend %q GCP access token has invalid expiry: %w", declared.ID, parseErr)
+		}
+		ctx = gs.WithAccessTokenCredential(ctx, gs.AccessTokenCredential{
+			Token: credential.AccessToken, Expiry: expiresAt,
+		})
+	default:
+		return nil, "", ctx, fmt.Errorf("backend %q requires a GCS credential", declared.ID)
 	}
 	return &config, "gs:" + bucket + ":" + config.Prefix, ctx, nil
 }

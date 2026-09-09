@@ -17,7 +17,11 @@ import (
 func newIndexKeysQuorumTopologyCommand(globalOptions *global.Options, options *indexKeysOptions) *cobra.Command {
 	command := &cobra.Command{Use: "topology", Short: "Inspect and mutate capsule-sealed topology", Args: cobra.NoArgs, DisableAutoGenTag: true}
 	command.AddCommand(newTopologyShowCommand(globalOptions))
-	for _, operation := range []string{"set-backend", "set-backend-credential", "set-replica", "set-credential", "rotate-credential", "remove-credential"} {
+	operations := []string{
+		"set-backend", "set-backend-policy", "set-replica", "set-replica-policy",
+		"set-credential", "rotate-credential", "remove-credential",
+	}
+	for _, operation := range operations {
 		command.AddCommand(newTopologyMutationCommand(globalOptions, options, operation))
 	}
 	return command
@@ -55,8 +59,11 @@ func newTopologyMutationCommand(globalOptions *global.Options, options *indexKey
 	if operation == "set-backend" {
 		argumentCount, usage = 1, operation+" FILE"
 	}
-	if operation == "set-backend-credential" {
-		argumentCount, usage = 3, operation+" BACKEND_FILE REFERENCE CREDENTIAL_FILE"
+	if operation == "set-backend-policy" {
+		argumentCount, usage = 2, operation+" BACKEND_FILE CREDENTIALS_FILE"
+	}
+	if operation == "set-replica-policy" {
+		argumentCount, usage = 3, operation+" ID REPLICA_FILE CREDENTIALS_FILE"
 	}
 	if operation == "remove-credential" {
 		argumentCount, usage = 1, operation+" REFERENCE"
@@ -131,25 +138,32 @@ func readTopologyMutation(operation string, args []string) (topology.Mutation, e
 			return topology.Mutation{}, err
 		}
 		mutation.Backend = &backend
-	case "set-backend-credential":
+	case "set-backend-policy":
 		var backend topology.PackBackend
 		if err := readStrictJSON(args[0], &backend); err != nil {
 			return topology.Mutation{}, err
 		}
-		var credential topology.Credential
-		if err := readProtectedJSON(args[2], "topology credential", &credential); err != nil {
+		credentials, err := readCredentialBundle(args[1])
+		if err != nil {
 			return topology.Mutation{}, err
 		}
-		if err := credential.Validate(); err != nil {
-			return topology.Mutation{}, err
-		}
-		mutation.Backend, mutation.Reference, mutation.Credential = &backend, args[1], &credential
+		mutation.Backend, mutation.Credentials = &backend, credentials
 	case "set-replica":
 		var replica topology.MetadataReplica
 		if err := readStrictJSON(args[1], &replica); err != nil {
 			return topology.Mutation{}, err
 		}
 		mutation.ID, mutation.Replica = args[0], &replica
+	case "set-replica-policy":
+		var replica topology.MetadataReplica
+		if err := readStrictJSON(args[1], &replica); err != nil {
+			return topology.Mutation{}, err
+		}
+		credentials, err := readCredentialBundle(args[2])
+		if err != nil {
+			return topology.Mutation{}, err
+		}
+		mutation.ID, mutation.Replica, mutation.Credentials = args[0], &replica, credentials
 	case "set-credential", "rotate-credential":
 		var credential topology.Credential
 		if err := readProtectedJSON(args[1], "topology credential", &credential); err != nil {
@@ -165,6 +179,19 @@ func readTopologyMutation(operation string, args []string) (topology.Mutation, e
 		return topology.Mutation{}, fmt.Errorf("unsupported topology mutation %q", operation)
 	}
 	return mutation, nil
+}
+
+func readCredentialBundle(path string) (map[string]topology.Credential, error) {
+	var credentials map[string]topology.Credential
+	if err := readProtectedJSON(path, "topology credential bundle", &credentials); err != nil {
+		return nil, err
+	}
+	for reference, credential := range credentials {
+		if err := credential.Validate(); err != nil {
+			return nil, fmt.Errorf("credential %q: %w", reference, err)
+		}
+	}
+	return credentials, nil
 }
 
 func readStrictJSON(path string, destination any) error {

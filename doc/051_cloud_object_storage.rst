@@ -1,7 +1,7 @@
 .. _cloud_object_storage:
 
-Cloud object storage (S3)
-#########################
+Cloud object storage (S3 and GCS)
+#################################
 
 Vaultic can use Amazon S3 or an S3-compatible service for three independent
 purposes:
@@ -34,6 +34,40 @@ require a particular addressing style::
     $ vaultic -r s3:https://objects.example.net/example/repository \
         -o s3.bucket-lookup=path snapshots
 
+Backblaze and Wasabi profiles
+-----------------------------
+
+Select an explicit profile with ``-o s3.provider=backblaze`` or
+``-o s3.provider=wasabi``. A recognized production hostname also enables the
+profile for diagnostics and safe defaults, unless ``s3.provider=generic`` was
+selected explicitly::
+
+    $ vaultic -r s3:https://s3.us-west-004.backblazeb2.com/example/repository \
+        -o s3.provider=backblaze snapshots
+
+    $ vaultic -r s3:https://s3.eu-central-2.wasabisys.com/example/repository \
+        -o s3.provider=wasabi snapshots
+
+Named profiles validate the provider hostname and signing region before
+credentials are resolved, require HTTPS for recognized production endpoints,
+and default to DNS bucket lookup. A custom CNAME requires an explicit provider
+and region; set ``s3.bucket-lookup=path`` only when the provider or network
+requires it. Explicit options always win, including ``s3.provider=generic``.
+Redirects to a different hostname or port are rejected before authorization can
+be forwarded.
+
+Both profiles support Signature V4, multipart uploads, range reads, and
+ListObjectsV2. Conditional-create behavior is reported as unverified until a
+live endpoint proves it. Backblaze IAM roles are unsupported. Wasabi supports
+native `AWS-compatible STS <https://docs.wasabi.com/docs/aws-sts-with-wasabi>`_
+``AssumeRole`` at ``https://sts.wasabisys.com``;
+Vaultic selects that endpoint automatically for the Wasabi profile. The caller
+must use Wasabi sub-user credentials because root credentials cannot assume a
+role. Both profiles reject Glacier restore and storage classes other than
+``STANDARD``. Inspect the normalized provider, endpoint host, region,
+addressing mode, and capability results with ``vaultic index backends --no-list
+--json``.
+
 Vaultic refuses anonymous S3 access unless
 ``-o s3.unsafe-anonymous-auth=true`` is explicitly set. Do not enable anonymous
 access for a backup repository.
@@ -41,12 +75,66 @@ access for a backup repository.
 Credential sources
 ------------------
 
-For a format-1 quorum repository, the preferred source is sealed topology.
-Vaultic obtains the structured S3 endpoint and one authorized credential lease
-from the unlocked broker; VaulticDB does the same for each metadata replica.
+For a quorum repository, the preferred source is format-2 sealed topology.
+Vaultic asks the unlocked broker for a backend ID and operation tier; the broker
+prefers that tier's STS role and returns a temporary session. If the policy
+explicitly permits ``static-on-unavailable``, a transport timeout, connection
+failure, or STS 5xx response selects only that tier's static binding. Access
+denial, invalid roles or policies, malformed responses, and other configuration
+errors fail closed and never activate fallback. VaulticDB does
+the same for each metadata replica, requesting ``storage-read`` for a read-only
+replica and ``storage-maintain`` for a writable replica. Repository lock objects
+use an independent ``storage-lock`` binding restricted to the lock prefix.
+The broker lease payload carries the temporary access key, secret key, session
+token, and provider expiry together; both Vaultic and VaulticDB pass all four
+fields directly to their S3 client and do not export them to the environment.
 Static keys are therefore absent from shell variables, launchd property lists,
 repository configuration, and the credential-free bootstrap profile. Optional
 ``tls_sha256`` endpoint pins are checked against the peer leaf certificate.
+
+Every S3 profile can instead use exact-tier static bindings, either before STS
+is configured or as an explicit STS outage fallback. Backblaze has no IAM roles
+or STS and therefore always uses this static-only form. Create separate bucket-
+and repository-prefix-restricted application keys and register these bindings:
+
+* ``storage-read``: ``listFiles`` and ``readFiles``;
+* ``storage-append``: the read capabilities plus ``writeFiles``;
+* ``storage-maintain``: the append capabilities plus ``deleteFiles``; and
+* ``storage-lock``: list, read, write, and delete restricted to the repository
+  lock prefix.
+
+Prune and garbage collection need ``storage-maintain``, not a read-and-delete
+key, because they write replacement packs before deleting obsolete objects.
+Backblaze ``writeFiles`` is not create-only and can create a newer version of an
+existing name. Vaultic still sends conditional-create requests, but operators
+must treat append overwrite prevention as client-only. Broker lease expiry also
+does not revoke a copied Backblaze key; only provider expiry or deletion does.
+The same limitation applies to static AWS, Wasabi, MinIO, Ceph, and other
+S3-compatible keys.
+
+Each static policy has a monotonically increasing ``generation``. If the broker
+has released a static fallback, status reports
+``static-fallback-active-provider-authority``. When STS later succeeds, the
+broker retires every outstanding fallback generation for that target from
+further checkout and reports
+``static-fallback-provider-revocation-required``. Delete or disable the old keys
+at the provider, install fresh exact-tier keys under a higher generation, and
+list the old generation in ``revoked_generations``. This acknowledgement clears
+the finding; it does not itself revoke provider credentials.
+
+Fallback checkout and retirement are written synchronously to an atomically
+replaced, broker-identity-signed lifecycle journal before the corresponding
+credential lease is returned. By default the journal is stored beside local
+capsule generations with a ``.state`` extension so capsule discovery cannot
+mistake it for a generation. Set ``fallback_state_path`` in broker configuration
+to move it. A missing write or invalid signature fails credential issuance
+closed; the journal contains target IDs and generation numbers, never keys.
+
+Operators who prefer one data key may bind the same bucket- and prefix-restricted
+read/write/delete credential to all three data tiers. Do not use an account
+master key or grant key-management and bucket-administration capabilities. The
+broker never silently substitutes a stronger binding when an exact tier is
+missing.
 
 The environment-based procedures below are the legacy external-topology mode.
 Select that mode explicitly with ``--topology-source external`` or
@@ -63,10 +151,78 @@ Vaultic's repository S3 backend supports the AWS credential chain, including:
 * STS role assumption through ``VAULTIC_AWS_ASSUME_ROLE_ARN`` and the related
   ``VAULTIC_AWS_ASSUME_ROLE_*`` variables listed in :doc:`075_scripting`.
 
+For Wasabi, set ``VAULTIC_AWS_ASSUME_ROLE_ARN`` to a Wasabi IAM role ARN and
+provide the sub-user access key through the normal AWS credential chain. The
+Wasabi profile defaults ``VAULTIC_AWS_ASSUME_ROLE_STS_ENDPOINT`` to
+``https://sts.wasabisys.com`` and the session name to ``vaultic``. An explicit
+session name remains supported, and Wasabi documents a maximum role session of
+12 hours. For credential safety, a Wasabi profile rejects an STS endpoint
+override that is not that exact HTTPS service endpoint.
+
 Long-lived access keys are simple but carry permanent value if copied. If they
 must be used, create a dedicated identity for each repository role, restrict it
 to one bucket prefix, keep it out of command lines and repository configuration,
 and rotate it regularly.
+
+Ceph RGW STS
+------------
+
+Select ``-o s3.provider=ceph`` for Ceph Object Gateway and provide the RGW
+endpoint, region, and addressing mode explicitly::
+
+    $ vaultic -r s3:https://rgw.example.net/example/repository \
+        -o s3.provider=ceph -o s3.region=us-east-1 snapshots
+
+Ceph uses Vaultic's AWS-compatible Signature V4 and ``AssumeRole`` paths. In
+sealed topology, set ``credential_policy.sts.endpoint`` to the deployment's RGW
+STS endpoint and bind a distinct role ARN to each enabled tier. The broker
+derives the inline policy from the sealed bucket, repository prefix, and tier;
+callers cannot provide a policy. HTTP is accepted only when the storage endpoint
+itself explicitly uses HTTP for a local test cluster. Ceph releases vary in STS
+and session-policy support, so verify prefix conditions and multipart operations
+against the deployed RGW version before enabling dynamic credentials.
+
+Google Cloud Valet Key credentials
+----------------------------------
+
+Google Cloud Storage does not issue temporary S3 interoperability HMAC keys.
+Its XML and JSON APIs accept OAuth bearer tokens, so Vaultic implements the
+Valet Key pattern with Google's native Credential Access Boundary flow. The
+broker signs a service-account OAuth assertion from a capsule-sealed issuer,
+uses IAM Credentials to impersonate the configured runtime service account,
+then exchanges that source token at Google Security Token Service. Consumers
+receive only a ``gcp-access-token`` and its provider expiry. The private key,
+bootstrap token, and impersonated source token remain broker-only.
+
+Configure ``credential_policy.gcp_downscope`` only on a ``gcs`` endpoint:
+
+* ``issuer_ref`` names a ``gcp-service-account-json`` broker credential;
+* ``service_account`` names the runtime service account to impersonate;
+* ``iam_credentials_endpoint`` is normally
+  ``https://iamcredentials.googleapis.com``;
+* ``token_exchange_endpoint`` is normally
+  ``https://sts.googleapis.com/v1/token``;
+* ``tiers`` lists unique enabled tiers in canonical order; and
+* ``fallback`` is ``disabled`` or ``static-on-unavailable``.
+
+Grant the issuer only ``iam.serviceAccounts.getAccessToken`` on the runtime
+service account. Grant that runtime account the underlying bucket permissions;
+a Credential Access Boundary subtracts permissions but cannot add them. The
+broker generates the boundary from the sealed bucket and prefix. Read uses
+``roles/storage.objectViewer``; append intersects object viewer and object
+creator; maintain uses ``roles/storage.objectAdmin``. Lock leases use object
+admin only under ``locks/``. The CEL condition restricts both object names and
+Google's ``storage.googleapis.com/objectListPrefix`` attribute so list requests
+cannot escape the repository prefix.
+
+Only connection failures, timeouts, HTTP 408/429, and provider 5xx responses can
+activate ``static-on-unavailable``. The fallback must be a separate, narrowly
+scoped service-account key bound to every enabled exact tier; the dynamic issuer
+cannot be a consumer binding. Authentication denial, redirects, malformed or
+oversized responses, and invalid configuration fail closed. Dynamic recovery
+retires checked-out fallback generations through the durable lifecycle journal.
+Vaultic and VaulticDB pass downscoped tokens directly to their native GCS
+clients in memory, without environment variables or credential files.
 
 Prefer short-lived credentials from an instance profile, workload identity, or
 STS role. Export all three values when supplying a fixed temporary credential::
@@ -86,6 +242,24 @@ When Vaultic starts the daemon, it forwards ``AWS_*`` variables for an S3
 object store. The repository-only ``VAULTIC_AWS_ASSUME_ROLE_*`` variables are
 not VaulticDB configuration; provide the resulting temporary ``AWS_*``
 credentials or use a workload identity for the daemon.
+
+For external-mode Backblaze or Wasabi metadata, pass the same normalized profile
+through the daemon CLI::
+
+    $ vaultic index status --start-daemon --persistent-daemon \
+        --daemon-object-store s3 --daemon-s3-bucket example-metadata \
+        --daemon-s3-prefix vaulticdb/production \
+        --daemon-s3-endpoint https://s3.eu-central-2.wasabisys.com \
+        --daemon-s3-region eu-central-2 --daemon-s3-provider wasabi \
+        --daemon-s3-bucket-lookup dns
+
+Direct daemon launches use ``VAULTICDB_S3_ENDPOINT``,
+``VAULTICDB_S3_REGION``, ``VAULTICDB_S3_PROVIDER``, and
+``VAULTICDB_S3_BUCKET_LOOKUP`` with the existing bucket and prefix variables.
+Replicated external stores use the corresponding
+``VAULTICDB_REPLICATED_ID_S3_*`` names. Capsule topology carries ``provider``
+and ``bucket_lookup`` in the structured S3 endpoint, so capsule mode needs none
+of these endpoint or credential variables.
 
 Permissions
 -----------
@@ -133,6 +307,11 @@ placement, and VaulticDB operation require them. Bucket versioning or Object
 Lock may preserve deleted versions, but retention rules can also make
 ``prune``, placement eviction, and metadata compaction fail; test the complete
 lifecycle before enforcing retention.
+
+Backblaze and Wasabi may charge for minimum storage duration, retained versions,
+API operations, or egress. A provider warning is informational only: Vaultic
+still performs requested retention and deletion work and reports retention or
+quota denial distinctly.
 
 Storage tiers
 =============
@@ -220,6 +399,12 @@ writers at the same final database path. Preserve the previous metadata prefix
 during migration or rebuild until the replacement has been independently
 verified.
 
+For Backblaze migration from the native API, copy objects with the existing
+backend migration workflow and run ``vaultic backend verify --compare`` against
+the native ``b2:`` and S3-compatible locations. Verification reads and compares
+every object name, length, and SHA-256 hash; do not activate the new topology
+merely because both URLs refer to the same Backblaze bucket.
+
 With a format-1 capsule, do not set ``VAULTICDB_REPLICATED_*``, ``AWS_*``, or
 Azure credential variables. Configure only the broker socket, signed release
 manifest, repository identity, and ``VAULTICDB_TOPOLOGY_SOURCE=capsule``.
@@ -283,6 +468,218 @@ config`` setters do not edit placement arrays. Do not download and hand-edit an
 encrypted repository config object: an interrupted or malformed replacement
 can make the repository unavailable.
 
+In sealed topology, different providers retain the same structured S3 shape.
+The ``credential_policy`` below makes Wasabi STS preferred while retaining
+generation 3 static fallback keys. The Backblaze location is static-only and
+maps each operation tier to a pre-provisioned application key:
+
+.. code-block:: json
+
+    {
+      "pack_backends": [
+        {
+          "id": "wasabi-primary",
+          "provider": "s3",
+          "endpoint": {
+            "url": "https://s3.eu-central-2.wasabisys.com",
+            "bucket": "example-primary",
+            "prefix": "repository",
+            "region": "eu-central-2",
+            "provider": "wasabi",
+            "bucket_lookup": "dns"
+          },
+          "credential_policy": {
+            "sts": {
+              "issuer_ref": "cred:wasabi-issuer",
+              "endpoint": "https://sts.wasabisys.com",
+              "region": "eu-central-2",
+              "session_name": "vaultic",
+              "roles": {
+                "storage-read": "arn:aws:iam::123456789012:role/vaultic-read",
+                "storage-append": "arn:aws:iam::123456789012:role/vaultic-append",
+                "storage-maintain": "arn:aws:iam::123456789012:role/vaultic-maintain",
+                "storage-lock": "arn:aws:iam::123456789012:role/vaultic-lock"
+              },
+              "fallback": "static-on-unavailable"
+            },
+            "static": {
+              "generation": 3,
+              "revoked_generations": [1, 2],
+              "bindings": {
+                "storage-read": "cred:wasabi-read-g3",
+                "storage-append": "cred:wasabi-append-g3",
+                "storage-maintain": "cred:wasabi-maintain-g3",
+                "storage-lock": "cred:wasabi-lock-g3"
+              }
+            }
+          },
+          "role": "primary",
+          "offsite": false,
+          "failure_domain": "wasabi-eu-central-2"
+        },
+        {
+          "id": "backblaze-offsite",
+          "provider": "s3",
+          "endpoint": {
+            "url": "https://s3.us-west-004.backblazeb2.com",
+            "bucket": "example-offsite",
+            "prefix": "repository",
+            "region": "us-west-004",
+            "provider": "backblaze",
+            "bucket_lookup": "dns"
+          },
+          "credential_policy": {
+            "static": {
+              "generation": 1,
+              "bindings": {
+                "storage-read": "cred:backblaze-offsite-read",
+                "storage-append": "cred:backblaze-offsite-append",
+                "storage-maintain": "cred:backblaze-offsite-maintain",
+                "storage-lock": "cred:backblaze-offsite-lock"
+              }
+            }
+          },
+          "role": "replica",
+          "offsite": true,
+          "failure_domain": "backblaze-us-west-004"
+        }
+      ]
+    }
+
+Credential objects remain in the encrypted capsule and are omitted here. Enroll
+the backend JSON and a protected JSON object mapping each new ``cred:`` reference
+to its credential atomically:
+
+.. code-block:: console
+
+  $ vaultic index keys --repository-id REPOSITORY-UUID quorum topology \
+    set-backend-policy backblaze-backend.json backblaze-credentials.json \
+    --capsule current.vrc --capsule-directory capsules \
+    --member 'MEMBER=PROVIDER:MEMBER-CREDENTIAL-FILE'
+
+The credentials file must be owner-only. The mutation rejects invalid or unused
+references, provider mismatches, duplicate credential enrollment, zero or
+reused generations, Backblaze STS policies, and non-standard Wasabi STS
+endpoints. A
+successful write is not treated as a durability proof: placement verification
+and ``vaultic backend verify`` perform independent reads and hashes.
+
+Azure Blob Valet Key with Entra
+-------------------------------
+
+Azure Blob uses Microsoft Entra and user delegation SAS rather than STS. The
+broker is the only process that receives the capsule-sealed
+``azure-entra-client-secret`` issuer credential. For each authorized request it
+uses the OAuth client-credentials flow, obtains a user delegation key from Blob
+Storage, signs a short-lived SAS locally, and leases only that SAS to
+``vaultic`` or ``vaulticdb``. The client secret, OAuth bearer token, and user
+delegation key never leave the broker.
+
+Grant the issuer service principal both:
+
+* ``Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action``
+  at storage-account, resource-group, or subscription scope. The built-in
+  Storage Blob Delegator role is the narrow key-generation role.
+* The required Blob data actions on the dedicated repository container. Azure
+  authorizes a user delegation SAS by intersecting these RBAC or ACL rights
+  with the permissions in the SAS, so the issuer role must not be broader than
+  the intended repository authority.
+
+Use the OAuth scope ``https://storage.azure.com/.default`` for public Azure, or
+the corresponding Storage resource scope for the configured sovereign cloud.
+The token URI must be HTTPS, must contain the credential's exact tenant ID as
+``/{tenant_id}/oauth2/v2.0/token``, and cannot contain user information, a query,
+or a fragment.
+
+Dynamic Azure topology requires a dedicated container and an empty ``prefix``.
+Ordinary data leases are container-scoped. A ``storage-lock`` lease is narrower:
+it is a directory SAS for ``locks/`` with ``sr=d`` and ``sdd=1``. Consequently,
+enabling ``storage-lock`` requires an Azure storage account with hierarchical
+namespace enabled and ``hierarchical_namespace: true`` in policy. Without HNS,
+omit that tier; the broker rejects a policy that would claim lock isolation it
+cannot enforce.
+
+.. code-block:: json
+
+    {
+      "id": "azure-primary",
+      "provider": "azure",
+      "endpoint": {
+        "url": "https://ACCOUNT.blob.core.windows.net",
+        "account": "ACCOUNT",
+        "container": "DEDICATED_REPOSITORY_CONTAINER",
+        "prefix": ""
+      },
+      "credential_policy": {
+        "azure_user_delegation": {
+          "issuer_ref": "cred:azure-issuer",
+          "service_version": "2026-04-06",
+          "signed_ip": "198.51.100.10-198.51.100.20",
+          "hierarchical_namespace": true,
+          "tiers": [
+            "storage-read",
+            "storage-append",
+            "storage-maintain",
+            "storage-lock"
+          ],
+          "fallback": "static-on-unavailable"
+        },
+        "static": {
+          "generation": 2,
+          "revoked_generations": [1],
+          "bindings": {
+            "storage-read": "cred:azure-read-g2",
+            "storage-append": "cred:azure-append-g2",
+            "storage-maintain": "cred:azure-maintain-g2",
+            "storage-lock": "cred:azure-lock-g2"
+          }
+        }
+      },
+      "role": "primary",
+      "offsite": false,
+      "failure_domain": "azure-account-region"
+    }
+
+The protected credential bundle supplied to ``set-backend-policy`` contains the
+issuer and every referenced fallback credential. The issuer has this shape:
+
+.. code-block:: json
+
+    {
+      "cred:azure-issuer": {
+        "kind": "azure-entra-client-secret",
+        "tenant_id": "TENANT_ID",
+        "client_id": "APPLICATION_CLIENT_ID",
+        "client_secret": "CLIENT_SECRET",
+        "token_uri": "https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/token",
+        "scopes": ["https://storage.azure.com/.default"]
+      }
+    }
+
+The broker refuses to lease an Entra issuer directly or accept one in a static
+consumer binding. Dynamically issued permissions are exactly ``rl`` for
+``storage-read``, ``rcwl`` for ``storage-append``, and ``rcwdl`` for
+``storage-maintain`` and ``storage-lock``. All SAS tokens require HTTPS;
+``signed_ip`` optionally restricts use to one IPv4 address or an inclusive IPv4
+range. Azure's ``w`` permission can overwrite, so append safety also depends on
+Vaultic's create-only request precondition and must not be represented as
+provider-enforced append-only authority.
+
+The SAS expiry is bounded by both the broker lease and the user delegation key;
+Azure limits delegation keys to seven days. Network failures, timeouts, HTTP
+408/429, and provider 5xx responses are availability failures eligible for an
+exact-tier ``static-on-unavailable`` fallback. Authentication and authorization
+4xx responses, invalid policy, and malformed or oversized provider responses
+fail closed. A successful dynamic issuance permanently retires every checked-out
+fallback generation for that target. Revoke those static SAS tokens or shared
+keys at Azure, enroll a fresh generation, and list the old generation in
+``revoked_generations`` before fallback can be compliant again.
+
+To revoke dynamic access, revoke the storage account's user delegation keys
+and/or remove the issuer's RBAC or ACL assignments. Azure caches delegation keys
+and role assignments, so allow for propagation delay and keep lease lifetimes
+short. Treat every SAS as a bearer secret until expiry or confirmed revocation.
+
 Recent packs are copied to warm offsite storage first. Promotion to an archival
 backend is delayed until the pack survives the configured crossover, avoiding
 minimum-retention charges for short-lived data. The configured durability
@@ -328,7 +725,9 @@ Hardening checklist
 
 * Block public access and require TLS. Use a private endpoint where practical.
 * Use separate identities and prefixes for repository packs, placement
-  backends, and VaulticDB metadata. Deny access outside each prefix.
+  backends, and VaulticDB metadata. For dynamic Azure credentials, use dedicated
+  containers and HNS directory scope for ``locks/``. Deny access outside each
+  provider-enforced boundary.
 * Prefer workload identity or short-lived STS credentials over permanent keys.
   Never place secrets in repository URLs, repository config, shell history, or
   service arguments.

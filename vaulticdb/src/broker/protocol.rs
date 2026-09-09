@@ -74,6 +74,10 @@ pub enum BrokerRequest {
         capability: Capability,
         #[serde(default)]
         credential_ref: Option<String>,
+        #[serde(default)]
+        storage_target: Option<String>,
+        #[serde(default)]
+        storage_tier: Option<String>,
         ttl_seconds: u64,
         challenge_response: String,
     },
@@ -242,6 +246,8 @@ pub async fn handle_request(
             release_signature,
             capability,
             credential_ref,
+            storage_target,
+            storage_tier,
             ttl_seconds,
             challenge_response,
         } => {
@@ -265,17 +271,35 @@ pub async fn handle_request(
                 installation_path_read_only: peer.installation_path_read_only,
             };
             let lease = if capability == Capability::CredentialLease {
-                broker.acquire_credential_lease(
-                    &client,
-                    credential_ref
-                        .as_deref()
-                        .context("credential lease requires credential_ref")?,
-                    Duration::from_secs(ttl_seconds),
-                    now,
-                )?
+                match (
+                    credential_ref.as_deref(),
+                    storage_target.as_deref(),
+                    storage_tier.as_deref(),
+                ) {
+                    (Some(reference), None, None) => broker.acquire_credential_lease(
+                        &client,
+                        reference,
+                        Duration::from_secs(ttl_seconds),
+                        now,
+                    )?,
+                    (None, Some(target), Some(tier)) => {
+                        broker
+                            .acquire_storage_credential_lease(
+                                &client,
+                                target,
+                                tier,
+                                Duration::from_secs(ttl_seconds),
+                                now,
+                            )
+                            .await?
+                    }
+                    _ => bail!(
+                        "credential lease requires either credential_ref or storage_target with storage_tier"
+                    ),
+                }
             } else {
-                if credential_ref.is_some() {
-                    bail!("credential_ref is valid only for credential leases");
+                if credential_ref.is_some() || storage_target.is_some() || storage_tier.is_some() {
+                    bail!("credential selection is valid only for credential leases");
                 }
                 broker.acquire_lease(&client, capability, Duration::from_secs(ttl_seconds), now)?
             };
@@ -304,6 +328,11 @@ pub async fn handle_request(
                 capsule_generation: lease.capsule_generation,
                 key: BASE64.encode(lease.key.as_slice()),
                 challenge: next_challenge,
+                credential_source: lease.credential_source,
+                storage_target: lease.storage_target,
+                storage_tier: lease.storage_tier,
+                provider_expires_at: lease.provider_expires_at,
+                static_generation: lease.static_generation,
             })
         }
         BrokerRequest::ReleaseLease { lease_id } => {
@@ -670,6 +699,16 @@ pub enum BrokerResponse {
         capsule_generation: u64,
         key: String,
         challenge: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        credential_source: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage_target: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage_tier: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_expires_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        static_generation: Option<u64>,
     },
     PolicyMutationPrepared {
         capsule: RecoveryCapsule,

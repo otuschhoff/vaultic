@@ -57,45 +57,51 @@ type Options struct {
 	AzureKeyVaultTimeout       time.Duration
 	KeyHint                    string
 	// MasterKey* open the repository directly with a master key (no password).
-	MasterKey                 string
-	MasterKeyFile             string
-	MasterKeyCommand          string
-	MetadataKeyInDB           bool
-	MetadataDaemonSocket      string
-	MetadataDaemonPath        string
-	MetadataDaemonDataDir     string
-	MetadataDaemonObjectStore string
-	MetadataDaemonS3Bucket    string
-	MetadataDaemonS3Prefix    string
-	MetadataEncryptionMode    string
-	MetadataPassphraseFile    string
-	MetadataAzureTokenFile    string
-	MetadataGCPTokenFile      string
-	MetadataVaultTokenFile    string
-	MetadataPKCS11PINFile     string
-	MetadataRecoveryUnlock    bool
-	MetadataLossRecovery      bool
-	KeyBrokerSocket           string
-	KeyBrokerReleaseManifest  string
-	KeyBrokerLeaseDuration    time.Duration
-	Quiet                     bool
-	Verbose                   int
-	LogFile                   string
-	LogLevel                  string
-	NoProgress                bool
-	ProgressInterval          time.Duration
-	NoLock                    bool
-	RetryLock                 time.Duration
-	JSON                      bool
-	CacheDir                  string
-	NoCache                   bool
-	CleanupCache              bool
-	Compression               repository.CompressionMode
-	PackSize                  uint
-	TreePackSize              uint
-	DataPackSize              uint
-	NoExtraVerify             bool
-	InsecureNoPassword        bool
+	MasterKey                    string
+	MasterKeyFile                string
+	MasterKeyCommand             string
+	MetadataKeyInDB              bool
+	MetadataDaemonSocket         string
+	MetadataDaemonPath           string
+	MetadataDaemonDataDir        string
+	MetadataDaemonObjectStore    string
+	MetadataDaemonS3Bucket       string
+	MetadataDaemonS3Prefix       string
+	MetadataDaemonS3Endpoint     string
+	MetadataDaemonS3Region       string
+	MetadataDaemonS3Provider     string
+	MetadataDaemonS3BucketLookup string
+	MetadataEncryptionMode       string
+	MetadataPassphraseFile       string
+	MetadataAzureTokenFile       string
+	MetadataGCPTokenFile         string
+	MetadataVaultTokenFile       string
+	MetadataPKCS11PINFile        string
+	MetadataRecoveryUnlock       bool
+	MetadataLossRecovery         bool
+	KeyBrokerSocket              string
+	KeyBrokerReleaseManifest     string
+	KeyBrokerLeaseDuration       time.Duration
+	StorageCredentialTier        string
+	StorageLockCredential        bool
+	Quiet                        bool
+	Verbose                      int
+	LogFile                      string
+	LogLevel                     string
+	NoProgress                   bool
+	ProgressInterval             time.Duration
+	NoLock                       bool
+	RetryLock                    time.Duration
+	JSON                         bool
+	CacheDir                     string
+	NoCache                      bool
+	CleanupCache                 bool
+	Compression                  repository.CompressionMode
+	PackSize                     uint
+	TreePackSize                 uint
+	DataPackSize                 uint
+	NoExtraVerify                bool
+	InsecureNoPassword           bool
 
 	// RepoHot is the location of the hot part of a hot/cold repository
 	// (empty for a normal repository).
@@ -282,6 +288,10 @@ func (globalOptions *Options) addRepositoryAccessFlags(f *pflag.FlagSet) {
 	f.StringVar(&globalOptions.MetadataDaemonObjectStore, "metadata-daemon-object-store", "", "vaulticdb object store for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonS3Bucket, "metadata-daemon-s3-bucket", "", "vaulticdb S3 bucket for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonS3Prefix, "metadata-daemon-s3-prefix", "", "vaulticdb S3 prefix for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonS3Endpoint, "metadata-daemon-s3-endpoint", "", "vaulticdb S3 endpoint for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonS3Region, "metadata-daemon-s3-region", "", "vaulticdb S3 region for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonS3Provider, "metadata-daemon-s3-provider", "", "vaulticdb S3 provider for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonS3BucketLookup, "metadata-daemon-s3-bucket-lookup", "", "vaulticdb S3 bucket lookup for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataEncryptionMode, "metadata-encryption-mode", "", "metadata encryption mode for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataPassphraseFile, "metadata-passphrase-file", "", "protected metadata recovery passphrase file")
 	f.StringVar(&globalOptions.MetadataAzureTokenFile, "metadata-key-db-azure-token-file", "", "protected Azure KMS token file for key-in-DB unlock")
@@ -346,6 +356,10 @@ func (globalOptions *Options) applyEnvironment(f *pflag.FlagSet, packSizeFlag, c
 	globalOptions.MetadataDaemonObjectStore = env.Get("METADATA_DAEMON_OBJECT_STORE")
 	globalOptions.MetadataDaemonS3Bucket = env.Get("METADATA_DAEMON_S3_BUCKET")
 	globalOptions.MetadataDaemonS3Prefix = env.Get("METADATA_DAEMON_S3_PREFIX")
+	globalOptions.MetadataDaemonS3Endpoint = env.Get("METADATA_DAEMON_S3_ENDPOINT")
+	globalOptions.MetadataDaemonS3Region = env.Get("METADATA_DAEMON_S3_REGION")
+	globalOptions.MetadataDaemonS3Provider = env.Get("METADATA_DAEMON_S3_PROVIDER")
+	globalOptions.MetadataDaemonS3BucketLookup = env.Get("METADATA_DAEMON_S3_BUCKET_LOOKUP")
 	globalOptions.MetadataEncryptionMode = env.Get("METADATA_ENCRYPTION_MODE")
 	globalOptions.MetadataPassphraseFile = env.Get("METADATA_PASSPHRASE_FILE")
 	globalOptions.MetadataAzureTokenFile = env.Get("METADATA_AZURE_TOKEN_FILE")

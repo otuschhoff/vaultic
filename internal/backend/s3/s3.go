@@ -1,7 +1,11 @@
 package s3
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash"
 	"io"
@@ -28,8 +32,9 @@ import (
 
 // s3 stores data on an S3 endpoint.
 type s3 struct {
-	client *minio.Client
-	cfg    Config
+	client            *minio.Client
+	cfg               Config
+	conditionalCreate string
 	layout.Layout
 }
 
@@ -52,7 +57,24 @@ func NewFactory() location.Factory {
 }
 
 func open(cfg Config, rt http.RoundTripper) (*s3, error) {
-	debug.Log("open, config %#v", cfg)
+	var err error
+	cfg, _, err = NormalizeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	roleArn := env.Get("AWS_ASSUME_ROLE_ARN")
+	if cfg.BrokerCredential {
+		roleArn = ""
+	}
+	stsEndpoint, err := roleAssumptionEndpoint(cfg, roleArn, env.Get("AWS_ASSUME_ROLE_STS_ENDPOINT"))
+	if err != nil {
+		return nil, err
+	}
+	prefixDigest := sha256.Sum256([]byte(cfg.Prefix))
+	debug.Log(
+		"open S3 provider=%q endpoint=%q region=%q bucket=%q prefix_sha256=%x bucket_lookup=%q",
+		cfg.Provider, endpointHostname(cfg.Endpoint), cfg.Region, cfg.Bucket, prefixDigest, cfg.BucketLookup,
+	)
 
 	if cfg.EnableRestore && !feature.Flag.Enabled(feature.S3Restore) {
 		return nil, fmt.Errorf("feature flag `s3-restore` is required to use `-o s3.enable-restore=true`")
@@ -62,7 +84,7 @@ func open(cfg Config, rt http.RoundTripper) (*s3, error) {
 		minio.MaxRetry = int(cfg.MaxRetries)
 	}
 
-	creds, err := getCredentials(cfg, rt)
+	creds, err := getCredentials(cfg, rt, roleArn, stsEndpoint)
 	if err != nil {
 		return nil, errors.Wrap(err, "s3.getCredentials")
 	}
@@ -71,7 +93,7 @@ func open(cfg Config, rt http.RoundTripper) (*s3, error) {
 		Creds:     creds,
 		Secure:    !cfg.UseHTTP,
 		Region:    cfg.Region,
-		Transport: rt,
+		Transport: guardEndpointRedirects(rt, cfg.Endpoint),
 	}
 
 	switch strings.ToLower(cfg.BucketLookup) {
@@ -91,8 +113,7 @@ func open(cfg Config, rt http.RoundTripper) (*s3, error) {
 	}
 
 	be := &s3{
-		client: client,
-		cfg:    cfg,
+		client: client, cfg: cfg, conditionalCreate: "unverified",
 		Layout: layout.NewDefaultLayout(cfg.Prefix, path.Join),
 	}
 
@@ -101,7 +122,7 @@ func open(cfg Config, rt http.RoundTripper) (*s3, error) {
 
 // getCredentials -- runs through the various credential types and returns the first one that works.
 // additionally if the user has specified a role to assume, it will do that as well.
-func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials, error) {
+func getCredentials(cfg Config, tr http.RoundTripper, roleArn, stsEndpoint string) (*credentials.Credentials, error) {
 	if cfg.UnsafeAnonymousAuth {
 		return credentials.New(&credentials.Static{}), nil
 	}
@@ -120,6 +141,7 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 			Value: credentials.Value{
 				AccessKeyID:     cfg.KeyID,
 				SecretAccessKey: cfg.Secret.Unwrap(),
+				SessionToken:    cfg.SessionToken,
 			},
 		},
 		&credentials.EnvAWS{},
@@ -150,8 +172,6 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 		return nil, fmt.Errorf("no credentials found. Use `-o s3.unsafe-anonymous-auth=true` for anonymous authentication")
 	}
 
-	roleArn := env.Get("AWS_ASSUME_ROLE_ARN")
-	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if roleArn != "" {
 		// use the region provided by the configuration by default
 		awsRegion := cfg.Region
@@ -161,22 +181,11 @@ func getCredentials(cfg Config, tr http.RoundTripper) (*credentials.Credentials,
 		}
 
 		sessionName := env.Get("AWS_ASSUME_ROLE_SESSION_NAME")
+		if sessionName == "" && cfg.Provider == string(ProviderWasabi) {
+			sessionName = "vaultic"
+		}
 		externalID := env.Get("AWS_ASSUME_ROLE_EXTERNAL_ID")
 		policy := env.Get("AWS_ASSUME_ROLE_POLICY")
-		stsEndpoint := env.Get("AWS_ASSUME_ROLE_STS_ENDPOINT")
-
-		if stsEndpoint == "" {
-			if awsRegion != "" {
-				if strings.HasPrefix(awsRegion, "cn-") {
-					stsEndpoint = "https://sts." + awsRegion + ".amazonaws.com.cn"
-				} else {
-					stsEndpoint = "https://sts." + awsRegion + ".amazonaws.com"
-				}
-			} else {
-				stsEndpoint = "https://sts.amazonaws.com"
-			}
-		}
-
 		assumeRoleOptions := credentials.STSAssumeRoleOptions{
 			RoleARN:         roleArn,
 			AccessKey:       c.AccessKeyID,
@@ -219,14 +228,14 @@ func Create(ctx context.Context, cfg Config, rt http.RoundTripper, _ func(string
 
 	if err != nil {
 		debug.Log("BucketExists(%v) returned err %v", cfg.Bucket, err)
-		return nil, errors.Wrap(err, "client.BucketExists")
+		return nil, errors.Wrap(be.providerError(err), "client.BucketExists")
 	}
 
 	if !found {
 		// create new bucket with default ACL in default region
 		err = be.client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{})
 		if err != nil {
-			return nil, errors.Wrap(err, "client.MakeBucket")
+			return nil, errors.Wrap(be.providerError(err), "client.MakeBucket")
 		}
 	}
 
@@ -254,7 +263,7 @@ func (be *s3) IsPermanentError(err error) bool {
 
 	var merr minio.ErrorResponse
 	if errors.As(err, &merr) {
-		if merr.Code == "InvalidRange" || merr.Code == "AccessDenied" {
+		if merr.Code == "InvalidRange" || classifyProviderError(be.cfg.Provider, merr) != nil && !isRetryableProviderCode(merr.Code) {
 			return true
 		}
 	}
@@ -263,9 +272,104 @@ func (be *s3) IsPermanentError(err error) bool {
 }
 
 func (be *s3) Properties() backend.Properties {
+	capabilities := providerCapabilities(Provider(be.cfg.Provider))
 	return backend.Properties{
 		Connections:      be.cfg.Connections,
 		HasAtomicReplace: true,
+		StorageProfile: &backend.StorageProfile{
+			Provider: be.cfg.Provider, EndpointHost: endpointHostname(be.cfg.Endpoint), Region: be.cfg.Region,
+			Bucket: be.cfg.Bucket, PrefixSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(be.cfg.Prefix))),
+			BucketLookup: be.cfg.BucketLookup, SignatureV4: capabilities.SignatureV4,
+			MultipartUpload: capabilities.MultipartUpload, RangeReads: capabilities.RangeReads,
+			ListObjectsV2: capabilities.ListObjectsV2, ConditionalCreate: be.conditionalCreate,
+			VersionRetention: capabilities.VersionRetention, ObjectImmutability: capabilities.ObjectImmutability,
+			STSRoleAssumption: capabilities.STSRoleAssumption, GlacierRestore: capabilities.GlacierRestore,
+		},
+	}
+}
+
+func (be *s3) providerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var response minio.ErrorResponse
+	if errors.As(err, &response) {
+		if classified := classifyProviderError(be.cfg.Provider, response); classified != nil {
+			return classified
+		}
+	}
+	return err
+}
+
+func (be *s3) ProbeStorageCapabilities(ctx context.Context) (*backend.StorageProfile, error) {
+	if be.cfg.Provider == string(ProviderGeneric) {
+		profile := be.Properties().StorageProfile
+		return profile, nil
+	}
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return nil, err
+	}
+	object := path.Join(be.cfg.Prefix, ".vaultic-capability-probe-"+hex.EncodeToString(random))
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := be.client.RemoveObject(cleanupCtx, be.cfg.Bucket, object, minio.RemoveObjectOptions{}); err != nil {
+			debug.Log("remove S3 capability probe object: %v", err)
+		}
+	}()
+	put := func(value string) error {
+		options := minio.PutObjectOptions{ContentType: "application/octet-stream", SendContentMd5: true}
+		options.SetMatchETagExcept("*")
+		_, err := be.client.PutObject(ctx, be.cfg.Bucket, object, bytes.NewReader([]byte(value)), int64(len(value)), options)
+		return err
+	}
+	if err := put("first"); err != nil {
+		response := minio.ToErrorResponse(err)
+		if response.Code == "NotImplemented" || response.Code == "UnsupportedOperation" || response.Code == "InvalidRequest" {
+			be.conditionalCreate = "unsupported"
+			return be.Properties().StorageProfile, nil
+		}
+		return nil, fmt.Errorf("probe conditional create: %w", be.providerError(err))
+	}
+	err := put("second")
+	if err == nil {
+		be.conditionalCreate = "weaker-overwrite-allowed"
+	} else {
+		response := minio.ToErrorResponse(err)
+		if response.Code != "PreconditionFailed" && response.Code != "ConditionalRequestConflict" {
+			return nil, fmt.Errorf("probe conditional create conflict: %w", be.providerError(err))
+		}
+		be.conditionalCreate = "strict"
+	}
+	return be.Properties().StorageProfile, nil
+}
+
+func classifyProviderError(provider string, response minio.ErrorResponse) error {
+	kind := ErrorKind("")
+	switch response.Code {
+	case "AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch", "InvalidToken", "ExpiredToken":
+		kind = ErrorAuthentication
+	case "SlowDown", "Throttling", "ThrottlingException", "RequestLimitExceeded", "TooManyRequests":
+		kind = ErrorThrottling
+	case "QuotaExceeded", "AccountProblem", "InsufficientStorage":
+		kind = ErrorQuota
+	case "AccessDeniedByObjectLock", "InvalidRetentionPeriod", "ObjectLockConfigurationNotFoundError":
+		kind = ErrorRetention
+	case "NotImplemented", "UnsupportedOperation", "InvalidRequest":
+		kind = ErrorUnsupportedAPI
+	default:
+		return nil
+	}
+	return &ProviderError{Provider: Provider(provider), Kind: kind, Code: response.Code}
+}
+
+func isRetryableProviderCode(code string) bool {
+	switch code {
+	case "SlowDown", "Throttling", "ThrottlingException", "RequestLimitExceeded", "TooManyRequests":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -305,7 +409,7 @@ func (be *s3) Save(ctx context.Context, h backend.Handle, reader backend.RewindR
 		return errors.Errorf("wrote %d bytes instead of the expected %d bytes", info.Size, reader.Length())
 	}
 
-	return errors.Wrap(err, "client.PutObject")
+	return errors.Wrap(be.providerError(err), "client.PutObject")
 }
 
 // Load runs fn with a reader that yields the contents of the file at h at the
@@ -335,7 +439,7 @@ func (be *s3) openReader(ctx context.Context, h backend.Handle, length int, offs
 	coreClient := minio.Core{Client: be.client}
 	reader, info, _, err := coreClient.GetObject(ctx, be.cfg.Bucket, objName, rangeOptions)
 	if err != nil {
-		return nil, err
+		return nil, be.providerError(err)
 	}
 
 	if feature.Flag.Enabled(feature.BackendErrorRedesign) && length > 0 {
@@ -370,7 +474,7 @@ func (be *s3) Stat(ctx context.Context, h backend.Handle) (bi backend.FileInfo, 
 
 	fi, err := obj.Stat()
 	if err != nil {
-		return backend.FileInfo{}, errors.Wrap(err, "Stat")
+		return backend.FileInfo{}, errors.Wrap(be.providerError(err), "Stat")
 	}
 
 	return backend.FileInfo{Size: fi.Size, Name: h.Name}, nil
@@ -386,7 +490,7 @@ func (be *s3) Remove(ctx context.Context, h backend.Handle) error {
 		err = nil
 	}
 
-	return errors.Wrap(err, "client.RemoveObject")
+	return errors.Wrap(be.providerError(err), "client.RemoveObject")
 }
 
 // List runs fn for each file in the backend which has the type t. When an
@@ -415,7 +519,7 @@ func (be *s3) List(ctx context.Context, t backend.FileType, fn func(backend.File
 
 	for obj := range listresp {
 		if obj.Err != nil {
-			return obj.Err
+			return be.providerError(obj.Err)
 		}
 
 		m := strings.TrimPrefix(obj.Key, prefix)

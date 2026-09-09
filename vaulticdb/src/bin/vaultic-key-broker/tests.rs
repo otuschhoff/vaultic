@@ -260,7 +260,7 @@ mod tests {
         let capsule = CapsuleBuilder::new(
             "repo-a",
             1,
-            include_bytes!("../../../../testdata/topology-v1.json"),
+            include_bytes!("../../../../testdata/topology-v2.json"),
         )
             .broker_identity_public_key(identity.verifying_key().as_bytes())
             .create_offline_threshold(
@@ -338,7 +338,7 @@ mod tests {
         let capsule = CapsuleBuilder::new(
             "repo-a",
             1,
-            include_bytes!("../../../../testdata/topology-v1.json"),
+            include_bytes!("../../../../testdata/topology-v2.json"),
         )
             .broker_identity_public_key(identity.verifying_key().as_bytes())
             .create_offline_threshold(

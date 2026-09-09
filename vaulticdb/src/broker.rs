@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -32,12 +33,19 @@ use crate::encryption::recovery_capsule::{
     RecoveryCapsule, UnlockPolicy, UnwrappedMemberShare,
 };
 use crate::ids::{MemberId, RepositoryId, SessionId};
-use crate::topology::{TopologyDocument, TopologyMutation};
+use crate::topology::{
+    select_static_credential_reference, CredentialPolicy, StorageCredentialTier, StsFallback,
+    TopologyDocument, TopologyMutation,
+};
 
 pub mod audit;
+mod azure_sas;
+mod fallback_state;
+mod gcp_downscope;
 pub mod peer;
 pub mod protocol;
 pub mod startup;
+mod sts;
 
 type SessionKem = X25519HkdfSha256;
 type SessionKdf = HkdfSha256;
@@ -47,6 +55,7 @@ const SESSION_INFO: &[u8] = b"vaultic-key-broker-contribution-v1";
 const MAX_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_ACTIVE_SESSIONS: usize = 64;
 const MAX_LEASE_TTL: Duration = Duration::from_secs(60 * 60);
+const STS_ISSUE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContributionRejection {
@@ -181,6 +190,11 @@ pub struct KeyLease {
     pub key_version: u32,
     pub capsule_generation: u64,
     pub key: Zeroizing<Vec<u8>>,
+    pub credential_source: Option<&'static str>,
+    pub storage_target: Option<String>,
+    pub storage_tier: Option<String>,
+    pub provider_expires_at: Option<String>,
+    pub static_generation: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +215,11 @@ pub struct BrokerLeaseConnection {
     pub expires_unix_ms: u64,
     pub key_version: u32,
     pub capsule_generation: u64,
+    pub credential_source: Option<String>,
+    pub storage_target: Option<String>,
+    pub storage_tier: Option<String>,
+    pub provider_expires_at: Option<String>,
+    pub static_generation: Option<u64>,
 }
 
 impl BrokerLeaseConnection {
@@ -246,6 +265,9 @@ pub struct KeyBroker {
     identity_locked: bool,
     pending_policy_mutation: Option<PendingPolicyMutation>,
     identity_recovery: bool,
+    issued_static_fallbacks: BTreeSet<(String, u64)>,
+    retired_static_fallbacks: BTreeSet<(String, u64)>,
+    fallback_state_store: Option<fallback_state::FallbackStateStore>,
 }
 
 impl KeyBroker {
@@ -261,6 +283,7 @@ impl KeyBroker {
             authorizations,
             maximum_unlocked_lifetime,
             false,
+            None,
         )
     }
 
@@ -276,6 +299,25 @@ impl KeyBroker {
             authorizations,
             maximum_unlocked_lifetime,
             true,
+            None,
+        )
+    }
+
+    pub fn new_with_fallback_state(
+        capsule: RecoveryCapsule,
+        identity: SigningKey,
+        authorizations: Vec<ClientAuthorization>,
+        maximum_unlocked_lifetime: Option<Duration>,
+        fallback_state_path: PathBuf,
+        identity_recovery: bool,
+    ) -> Result<Self> {
+        Self::new_with_identity_mode(
+            capsule,
+            identity,
+            authorizations,
+            maximum_unlocked_lifetime,
+            identity_recovery,
+            Some(fallback_state_path),
         )
     }
 
@@ -285,6 +327,7 @@ impl KeyBroker {
         authorizations: Vec<ClientAuthorization>,
         maximum_unlocked_lifetime: Option<Duration>,
         identity_recovery: bool,
+        fallback_state_path: Option<PathBuf>,
     ) -> Result<Self> {
         capsule.validate()?;
         let pinned = BASE64
@@ -300,6 +343,23 @@ impl KeyBroker {
         if maximum_unlocked_lifetime == Some(Duration::ZERO) {
             bail!("maximum unlocked lifetime must not be zero");
         }
+        let pinned_key: [u8; 32] = pinned
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("pinned broker identity must be 32 bytes"))?;
+        let pinned_key = VerifyingKey::from_bytes(&pinned_key)?;
+        let (fallback_state_store, issued_static_fallbacks, retired_static_fallbacks) =
+            if let Some(path) = fallback_state_path {
+                let (store, issued, retired) = fallback_state::FallbackStateStore::load(
+                    path,
+                    capsule.header.repository_id.as_str(),
+                    &capsule.header.logical_id,
+                    &pinned_key,
+                )?;
+                (Some(store), issued, retired)
+            } else {
+                (None, BTreeSet::new(), BTreeSet::new())
+            };
         lock_memory(identity.as_bytes())?;
         Ok(Self {
             capsule,
@@ -312,6 +372,9 @@ impl KeyBroker {
             identity_locked: true,
             pending_policy_mutation: None,
             identity_recovery,
+            issued_static_fallbacks,
+            retired_static_fallbacks,
+            fallback_state_store,
         })
     }
 
@@ -333,6 +396,28 @@ impl KeyBroker {
             {
                 findings.push(format!("credential-rotation-overdue: {reference}"));
             }
+            for (target, generation) in &self.issued_static_fallbacks {
+                let acknowledged = storage_credential_policy(&topology, target)
+                    .ok()
+                    .and_then(|(configured, _)| configured.r#static.as_ref())
+                    .is_some_and(|configured| configured.revoked_generations.contains(generation));
+                if !acknowledged {
+                    findings.push(format!(
+                        "static-fallback-active-provider-authority: {target} generation {generation}"
+                    ));
+                }
+            }
+            for (target, generation) in &self.retired_static_fallbacks {
+                let acknowledged = storage_credential_policy(&topology, target)
+                    .ok()
+                    .and_then(|(configured, _)| configured.r#static.as_ref())
+                    .is_some_and(|configured| configured.revoked_generations.contains(generation));
+                if !acknowledged {
+                    findings.push(format!(
+                        "static-fallback-provider-revocation-required: {target} generation {generation}"
+                    ));
+                }
+            }
         }
         Ok(UnlockStatus {
             locked: self.epoch.is_none(),
@@ -348,9 +433,11 @@ impl KeyBroker {
             hardware_verified: policy.hardware_verified,
             custody_assumed: policy.custody_assumed,
             compliant: policy.compliant
-                && !findings
-                    .iter()
-                    .any(|finding| finding.starts_with("credential-rotation-overdue:")),
+                && !findings.iter().any(|finding| {
+                    finding.starts_with("credential-rotation-overdue:")
+                        || finding.starts_with("static-fallback-active-provider-authority:")
+                        || finding.starts_with("static-fallback-provider-revocation-required:")
+                }),
             findings,
             policy_mutation_pending: self.pending_policy_mutation.is_some(),
             pending_capsule_generation: self
@@ -579,6 +666,11 @@ impl KeyBroker {
             },
             capsule_generation: self.capsule.header.generation,
             key,
+            credential_source: None,
+            storage_target: None,
+            storage_tier: None,
+            provider_expires_at: None,
+            static_generation: None,
         })
     }
 
@@ -586,6 +678,17 @@ impl KeyBroker {
         &mut self,
         client: &ClientIdentity,
         credential_ref: &str,
+        ttl: Duration,
+        now_unix_ms: u64,
+    ) -> Result<KeyLease> {
+        self.issue_credential_lease(client, credential_ref, ttl, now_unix_ms, false)
+    }
+
+    pub async fn acquire_storage_credential_lease(
+        &mut self,
+        client: &ClientIdentity,
+        storage_target: &str,
+        storage_tier: &str,
         ttl: Duration,
         now_unix_ms: u64,
     ) -> Result<KeyLease> {
@@ -600,7 +703,305 @@ impl KeyBroker {
         let authorization = self
             .authorization(client, Capability::CredentialLease)
             .context("credential lease is not authorized")?;
-        if !authorization.credential_refs.contains("*")
+        let tier = match storage_tier {
+            "storage-read" => StorageCredentialTier::Read,
+            "storage-append" => StorageCredentialTier::Append,
+            "storage-maintain" => StorageCredentialTier::Maintain,
+            "storage-lock" => StorageCredentialTier::Lock,
+            _ => bail!("invalid storage credential tier"),
+        };
+        if authorization.read_only && tier != StorageCredentialTier::Read {
+            bail!("read-only client cannot lease a write-capable storage credential");
+        }
+        let epoch = self.epoch.as_ref().context("broker is locked")?;
+        let topology = TopologyDocument::decode(epoch.keys.sealed_topology.as_slice())?;
+        let (policy, endpoint) = storage_credential_policy(&topology, storage_target)?;
+        let policy = policy.clone();
+        let endpoint = endpoint.clone();
+        let mut fell_back = false;
+        if let Some(sts_policy) = policy
+            .sts
+            .as_ref()
+            .filter(|configured| configured.roles.reference(tier).is_some())
+        {
+            let issuer = topology
+                .credentials
+                .get(&sts_policy.issuer_ref)
+                .context("topology has no STS issuer credential")?
+                .clone();
+            let issued = tokio::time::timeout(
+                STS_ISSUE_TIMEOUT,
+                sts::issue(&issuer, sts_policy, &endpoint, tier, ttl),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(sts::StsIssueError::Unavailable(anyhow::anyhow!(
+                    "STS request exceeded {} seconds",
+                    STS_ISSUE_TIMEOUT.as_secs()
+                )))
+            });
+            match issued {
+                Ok(credential) => {
+                    let recovered = self
+                        .issued_static_fallbacks
+                        .iter()
+                        .filter(|(target, _)| target == storage_target)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for fallback in &recovered {
+                        self.issued_static_fallbacks.remove(fallback);
+                        self.retired_static_fallbacks.insert(fallback.clone());
+                    }
+                    if !recovered.is_empty() {
+                        if let Err(error) = self.persist_fallback_state() {
+                            for fallback in recovered {
+                                self.retired_static_fallbacks.remove(&fallback);
+                                self.issued_static_fallbacks.insert(fallback);
+                            }
+                            return Err(error.context(
+                                "record static fallback retirement before issuing STS credential",
+                            ));
+                        }
+                    }
+                    let provider_expires_at = credential.expires_at.clone();
+                    let key = Zeroizing::new(
+                        serde_json::to_vec(&credential).context("encode issued STS credential")?,
+                    );
+                    return self.issue_credential_payload(
+                        client,
+                        key,
+                        ttl,
+                        now_unix_ms,
+                        Some("sts"),
+                        Some(storage_target.to_owned()),
+                        Some(storage_tier.to_owned()),
+                        provider_expires_at,
+                        None,
+                    );
+                }
+                Err(sts::StsIssueError::Terminal(error)) => return Err(error),
+                Err(sts::StsIssueError::Unavailable(error)) => {
+                    if sts_policy.fallback != StsFallback::StaticOnUnavailable {
+                        return Err(
+                            error.context("STS unavailable and static fallback is disabled")
+                        );
+                    }
+                    fell_back = true;
+                }
+            }
+        }
+        if let Some(azure_policy) = policy
+            .azure_user_delegation
+            .as_ref()
+            .filter(|configured| configured.tiers.contains(&tier))
+        {
+            let issuer = topology
+                .credentials
+                .get(&azure_policy.issuer_ref)
+                .context("topology has no Azure user delegation issuer credential")?
+                .clone();
+            let issued = tokio::time::timeout(
+                STS_ISSUE_TIMEOUT,
+                azure_sas::issue(&issuer, azure_policy, &endpoint, tier, ttl),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(azure_sas::AzureSasIssueError::Unavailable(anyhow::anyhow!(
+                    "Azure user delegation request exceeded {} seconds",
+                    STS_ISSUE_TIMEOUT.as_secs()
+                )))
+            });
+            match issued {
+                Ok(credential) => {
+                    let recovered = self
+                        .issued_static_fallbacks
+                        .iter()
+                        .filter(|(target, _)| target == storage_target)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for fallback in &recovered {
+                        self.issued_static_fallbacks.remove(fallback);
+                        self.retired_static_fallbacks.insert(fallback.clone());
+                    }
+                    if !recovered.is_empty() {
+                        if let Err(error) = self.persist_fallback_state() {
+                            for fallback in recovered {
+                                self.retired_static_fallbacks.remove(&fallback);
+                                self.issued_static_fallbacks.insert(fallback);
+                            }
+                            return Err(error.context(
+                                "record static fallback retirement before issuing Azure SAS",
+                            ));
+                        }
+                    }
+                    let provider_expires_at = credential.expires_at.clone();
+                    let key = Zeroizing::new(
+                        serde_json::to_vec(&credential)
+                            .context("encode issued Azure SAS credential")?,
+                    );
+                    return self.issue_credential_payload(
+                        client,
+                        key,
+                        ttl,
+                        now_unix_ms,
+                        Some("azure-user-delegation"),
+                        Some(storage_target.to_owned()),
+                        Some(storage_tier.to_owned()),
+                        provider_expires_at,
+                        None,
+                    );
+                }
+                Err(azure_sas::AzureSasIssueError::Terminal(error)) => return Err(error),
+                Err(azure_sas::AzureSasIssueError::Unavailable(error)) => {
+                    if azure_policy.fallback != StsFallback::StaticOnUnavailable {
+                        return Err(error.context(
+                            "Azure user delegation unavailable and static fallback is disabled",
+                        ));
+                    }
+                    fell_back = true;
+                }
+            }
+        }
+        if let Some(gcp_policy) = policy
+            .gcp_downscope
+            .as_ref()
+            .filter(|configured| configured.tiers.contains(&tier))
+        {
+            let issuer = topology
+                .credentials
+                .get(&gcp_policy.issuer_ref)
+                .context("topology has no GCP downscope issuer credential")?
+                .clone();
+            let issued = tokio::time::timeout(
+                STS_ISSUE_TIMEOUT,
+                gcp_downscope::issue(&issuer, gcp_policy, &endpoint, tier, ttl),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(gcp_downscope::GcpDownscopeIssueError::Unavailable(
+                    anyhow::anyhow!(
+                        "GCP downscope request exceeded {} seconds",
+                        STS_ISSUE_TIMEOUT.as_secs()
+                    ),
+                ))
+            });
+            match issued {
+                Ok(credential) => {
+                    let recovered = self
+                        .issued_static_fallbacks
+                        .iter()
+                        .filter(|(target, _)| target == storage_target)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for fallback in &recovered {
+                        self.issued_static_fallbacks.remove(fallback);
+                        self.retired_static_fallbacks.insert(fallback.clone());
+                    }
+                    if !recovered.is_empty() {
+                        if let Err(error) = self.persist_fallback_state() {
+                            for fallback in recovered {
+                                self.retired_static_fallbacks.remove(&fallback);
+                                self.issued_static_fallbacks.insert(fallback);
+                            }
+                            return Err(error.context(
+                                "record static fallback retirement before issuing GCP access token",
+                            ));
+                        }
+                    }
+                    let provider_expires_at = credential.expires_at.clone();
+                    let key = Zeroizing::new(
+                        serde_json::to_vec(&credential)
+                            .context("encode issued GCP access token credential")?,
+                    );
+                    return self.issue_credential_payload(
+                        client,
+                        key,
+                        ttl,
+                        now_unix_ms,
+                        Some("gcp-downscope"),
+                        Some(storage_target.to_owned()),
+                        Some(storage_tier.to_owned()),
+                        provider_expires_at,
+                        None,
+                    );
+                }
+                Err(gcp_downscope::GcpDownscopeIssueError::Terminal(error)) => return Err(error),
+                Err(gcp_downscope::GcpDownscopeIssueError::Unavailable(error)) => {
+                    if gcp_policy.fallback != StsFallback::StaticOnUnavailable {
+                        return Err(error.context(
+                            "GCP downscoping unavailable and static fallback is disabled",
+                        ));
+                    }
+                    fell_back = true;
+                }
+            }
+        }
+        let credential_ref = select_static_credential_reference(Some(&policy), tier)?.to_owned();
+        let static_generation = policy
+            .r#static
+            .as_ref()
+            .map(|configured| configured.generation);
+        if fell_back {
+            let fallback = (
+                storage_target.to_owned(),
+                static_generation.unwrap_or_default(),
+            );
+            if self.retired_static_fallbacks.contains(&fallback) {
+                bail!("static fallback generation is retired and must be rotated after provider revocation");
+            }
+            if self.issued_static_fallbacks.insert(fallback.clone()) {
+                if let Err(error) = self.persist_fallback_state() {
+                    self.issued_static_fallbacks.remove(&fallback);
+                    return Err(error
+                        .context("record static fallback checkout before releasing credential"));
+                }
+            }
+        }
+        let mut lease =
+            self.issue_credential_lease(client, &credential_ref, ttl, now_unix_ms, true)?;
+        lease.credential_source = Some(if fell_back {
+            "static-fallback"
+        } else {
+            "static"
+        });
+        lease.storage_target = Some(storage_target.to_owned());
+        lease.storage_tier = Some(storage_tier.to_owned());
+        lease.static_generation = static_generation;
+        Ok(lease)
+    }
+
+    fn persist_fallback_state(&self) -> Result<()> {
+        if let Some(store) = &self.fallback_state_store {
+            store.persist(
+                &self.issued_static_fallbacks,
+                &self.retired_static_fallbacks,
+                &self.identity,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn issue_credential_lease(
+        &mut self,
+        client: &ClientIdentity,
+        credential_ref: &str,
+        ttl: Duration,
+        now_unix_ms: u64,
+        tier_authorized: bool,
+    ) -> Result<KeyLease> {
+        self.expire(now_unix_ms);
+        if self.pending_policy_mutation.is_some() || self.identity_recovery {
+            bail!("credential leases are unavailable in the current broker state");
+        }
+        if ttl.is_zero() || ttl > MAX_LEASE_TTL || client.connection_id.is_empty() {
+            bail!("invalid lease request");
+        }
+        self.authorize(client, Capability::CredentialLease)?;
+        let authorization = self
+            .authorization(client, Capability::CredentialLease)
+            .context("credential lease is not authorized")?;
+        if !tier_authorized
+            && !authorization.credential_refs.contains("*")
             && !authorization.credential_refs.contains(credential_ref)
         {
             bail!("credential reference is not authorized for this client");
@@ -608,14 +1009,40 @@ impl KeyBroker {
         let epoch = self.epoch.as_ref().context("broker is locked")?;
         let encoded = &epoch.keys.sealed_topology;
         let topology = TopologyDocument::decode(encoded.as_slice())?;
+        if topology
+            .pack_backends
+            .iter()
+            .any(|backend| policy_uses_issuer(backend.credential_policy.as_ref(), credential_ref))
+            || topology.metadata_replicas.replicas.values().any(|replica| {
+                policy_uses_issuer(replica.credential_policy.as_ref(), credential_ref)
+            })
+        {
+            bail!("dynamic issuer credentials are broker-only");
+        }
         let credential = topology
             .credentials
             .get(credential_ref)
             .context("topology has no such credential")?;
-        if authorization.read_only && credential.has_secret() {
+        if authorization.read_only && credential.has_secret() && !tier_authorized {
             bail!("read-only client cannot lease a delete-capable credential");
         }
         let key = Zeroizing::new(topology.credential_json(credential_ref)?);
+        self.issue_credential_payload(client, key, ttl, now_unix_ms, None, None, None, None, None)
+    }
+
+    fn issue_credential_payload(
+        &mut self,
+        client: &ClientIdentity,
+        key: Zeroizing<Vec<u8>>,
+        ttl: Duration,
+        now_unix_ms: u64,
+        credential_source: Option<&'static str>,
+        storage_target: Option<String>,
+        storage_tier: Option<String>,
+        provider_expires_at: Option<String>,
+        static_generation: Option<u64>,
+    ) -> Result<KeyLease> {
+        let epoch = self.epoch.as_ref().context("broker is locked")?;
         let expires_unix_ms = now_unix_ms
             .checked_add(u64::try_from(ttl.as_millis())?)
             .context("lease expiry overflow")?;
@@ -636,6 +1063,11 @@ impl KeyBroker {
             key_version: self.capsule.header.repository_key_version,
             capsule_generation: self.capsule.header.generation,
             key,
+            credential_source,
+            storage_target,
+            storage_tier,
+            provider_expires_at,
+            static_generation,
         })
     }
 
@@ -800,6 +1232,8 @@ impl KeyBroker {
         if pending.digest != digest {
             bail!("published capsule digest does not match pending policy mutation");
         }
+        self.persist_fallback_state()
+            .context("re-sign static fallback lifecycle state before policy activation")?;
         let pending = self
             .pending_policy_mutation
             .take()
@@ -938,6 +1372,61 @@ impl KeyBroker {
     fn close_all_sessions(&mut self) {
         self.sessions.clear();
     }
+}
+
+fn storage_credential_policy<'a>(
+    topology: &'a TopologyDocument,
+    storage_target: &str,
+) -> Result<(
+    &'a CredentialPolicy,
+    &'a BTreeMap<String, serde_json::Value>,
+)> {
+    if let Some(id) = storage_target.strip_prefix("pack:") {
+        let backend = topology
+            .pack_backends
+            .iter()
+            .find(|backend| backend.id == id)
+            .context("topology has no such pack backend")?;
+        return Ok((
+            backend
+                .credential_policy
+                .as_ref()
+                .context("pack backend has no credential policy")?,
+            &backend.endpoint,
+        ));
+    }
+    if let Some(id) = storage_target.strip_prefix("metadata:") {
+        let replica = topology
+            .metadata_replicas
+            .replicas
+            .get(id)
+            .context("topology has no such metadata replica")?;
+        return Ok((
+            replica
+                .credential_policy
+                .as_ref()
+                .context("metadata replica has no credential policy")?,
+            &replica.endpoint,
+        ));
+    }
+    bail!("invalid storage credential target")
+}
+
+fn policy_uses_issuer(policy: Option<&CredentialPolicy>, credential_ref: &str) -> bool {
+    policy.is_some_and(|policy| {
+        policy
+            .sts
+            .as_ref()
+            .is_some_and(|issuer| issuer.issuer_ref == credential_ref)
+            || policy
+                .azure_user_delegation
+                .as_ref()
+                .is_some_and(|issuer| issuer.issuer_ref == credential_ref)
+            || policy
+                .gcp_downscope
+                .as_ref()
+                .is_some_and(|issuer| issuer.issuer_ref == credential_ref)
+    })
 }
 
 include!("broker/lease.rs");

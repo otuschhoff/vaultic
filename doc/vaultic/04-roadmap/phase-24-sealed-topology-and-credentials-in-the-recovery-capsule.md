@@ -40,7 +40,7 @@ The topology document:
 
 ```json
 {
-  "format": 1,
+  "format": 2,
   "repository_id": "…",
   "topology_generation": 7,
   "pack_backends": [
@@ -49,14 +49,14 @@ The topology document:
       "provider": "google-drive",
       "endpoint": { "drive_id": "0AL…", "root_folder_id": "1xY…", "path": "Backup/Hosts/mbp" },
       "role": "primary", "offsite": true, "failure_domain": "google-drive",
-      "credential_ref": "cred:drive-oauth"
+      "credential_policy": { "static": { "generation": 1, "bindings": { "storage-read": "cred:drive-oauth", "storage-append": "cred:drive-oauth", "storage-maintain": "cred:drive-oauth", "storage-lock": "cred:drive-oauth" } } }
     },
     {
       "id": "archive",
       "provider": "s3",
       "endpoint": { "url": "https://s3.us-east-1.amazonaws.com", "bucket": "alice-deep-archive", "prefix": "", "region": "us-east-1", "storage_class": "DEEP_ARCHIVE", "tls_sha256": null },
       "role": "archival", "offsite": true, "failure_domain": "aws-archive",
-      "credential_ref": "cred:aws-archive-issuer"
+      "credential_policy": { "static": { "generation": 1, "bindings": { "storage-maintain": "cred:aws-archive" } } }
     }
   ],
   "placement_policy": { "min_copies": 2, "min_domains": 2, "min_offsite": 1, "offsite_deadline_seconds": 14400, "promotion_crossover_seconds": 2592000 },
@@ -67,12 +67,12 @@ The topology document:
     "fencing": "gcp",
     "replicas": {
       "local": { "provider": "local", "endpoint": { "data_dir": "/Users/oli/Library/Application Support/vaultic/vaulticdb" } },
-      "gcp":   { "provider": "s3", "endpoint": { "url": "https://storage.googleapis.com", "bucket": "alice-vaulticdb", "prefix": "mbp", "region": "auto" }, "credential_ref": "cred:gcp-hmac" }
+      "gcp":   { "provider": "s3", "endpoint": { "url": "https://storage.googleapis.com", "bucket": "alice-vaulticdb", "prefix": "mbp", "region": "auto" }, "credential_policy": { "static": { "generation": 1, "bindings": { "storage-maintain": "cred:gcp-hmac" } } } }
     }
   },
   "credentials": {
     "cred:drive-oauth":        { "kind": "oauth2-refresh-token", "client_id": "…apps.googleusercontent.com", "client_secret": "…", "refresh_token": "1//0g…", "scopes": ["https://www.googleapis.com/auth/drive.file"], "token_uri": "https://oauth2.googleapis.com/token", "issued_at": "…", "rotation_due": "…" },
-    "cred:aws-archive-issuer": { "kind": "aws-static", "access_key_id": "AKIA…", "secret_access_key": "…", "may_issue": { "role_arn": "arn:aws:iam::…:role/vaultic-archive-issuer" } },
+    "cred:aws-archive":        { "kind": "aws-static", "access_key_id": "AKIA…", "secret_access_key": "…" },
     "cred:gcp-hmac":           { "kind": "s3-static", "access_key_id": "GOOG1E…", "secret_access_key": "…" }
   }
 }
@@ -82,7 +82,7 @@ Rules:
 
 - `pack_backends`, `placement_policy`, and `staging_backends` are the same shapes the encrypted repository `config` and the Phase 22 bootstrap manifest already carry. The document adds a structured `endpoint` object per backend that replaces free-form locator strings, so there is nothing to parse a secret out of and `containsCredential` becomes unnecessary for capsule-sourced topology.
 - `metadata_replicas` carries what `VAULTICDB_OBJECT_STORE`, `VAULTICDB_REPLICATED_REPLICAS`, `VAULTICDB_FENCING_REPLICA`, and the per-replica `VAULTICDB_REPLICATED_<ID>_*` variables carry today, with credentials factored out by reference.
-- Every `credential_ref` points into `credentials`; dangling or unused references fail validation. Credential kinds are a closed enum with per-kind validation (`aws-static`, `s3-static`, `azure-shared-key`, `azure-sas`, `gcp-service-account-json`, `oauth2-refresh-token`, `none` for workload identity).
+- Every issuer and static binding in `credential_policy` points into `credentials`; dangling or unused references fail validation. The closed bindings are `storage-read`, `storage-append`, `storage-maintain`, and `storage-lock`. Static policies carry a rotation generation and acknowledged provider-revoked generations. Credential kinds are a closed enum with per-kind validation (`aws-static`, `s3-static`, `azure-shared-key`, `azure-sas`, `gcp-service-account-json`, `oauth2-refresh-token`, `none` for workload identity); generated `s3-session` values are lease-only and cannot be sealed into topology.
 - The document is canonical JSON (sorted keys, no insignificant whitespace) so its SHA-256 is a stable `topology_sha256` for anchoring and status.
 - Size is bounded (1 MiB, same as `MaxManifestBytes`); the capsule stays a single small object.
 
@@ -104,9 +104,9 @@ Placement mutations (`vaultic config --set-placement-*`, `index placement`, Phas
 The broker never hands the whole topology document to a client. Two capabilities are added to the `Capability` enum:
 
 - `topology-read` — returns the document with the `credentials` map removed. Replaces the Phase 22 `topology-discovery` HKDF key for recovery capsules. Granted to `vaultic` and `vaulticdb` alongside their existing leases.
-- `credential-lease` — returns one credential by `credential_ref`, only if the requesting client's authorization lists that reference (or `*`), as a lease with the same TTL, connection binding, epoch binding, and revocation semantics as key leases. `vaulticdb` is authorized only for the references its `metadata_replicas` use; `vaultic` only for `pack_backends` references. A read-only `vaulticdb` never receives a credential whose kind can delete.
+- `credential-lease` — returns one credential by broker-side `(storage_target, storage_tier)` selection. Storage consumers never select sealed references directly. The lease uses the same TTL, connection binding, epoch binding, and revocation semantics as key leases and includes source, target, tier, provider expiry, and static generation metadata. A read-only client may request only `storage-read`.
 
-Consumers hold credentials in zeroizing memory for the lease duration and re-lease at the renewal margin. For static kinds the "renewal" returns the same secret; the value of the lease is epoch binding — when the broker locks, a consumer that has to re-lease fails closed. Phase 26 layers short-lived provider tokens on top of this: its issuer credential is simply a `credential_ref` of kind `aws-static` / `gcp-service-account-json` / `azure-shared-key` with `may_issue` set, read by the broker itself and never leased to consumers.
+Consumers hold credentials in zeroizing memory for the lease duration. For static kinds a repeated lease returns the exact configured tier key; broker expiry does not revoke a copied provider key. Phase 26 adds broker-owned STS issuance and generation-tagged static fallback through `credential_policy`; issuer credentials remain sealed and are never leased to consumers.
 
 `vaulticdb` startup changes from "read `VAULTICDB_*` and connect" to "acquire `metadata-dek` lease, acquire `topology-read`, acquire `credential-lease` for each replica reference, build the object-store stack." The `VAULTICDB_*` variables remain accepted only when `VAULTICDB_TOPOLOGY_SOURCE=external`, which status reports as a finding. The same applies to `vaultic`: `--topology-source capsule|external`, default `capsule` when the broker is configured.
 
@@ -162,7 +162,7 @@ The only artifacts that must survive the old host are the capsule generation (al
 
 1. Define capsule format 1 with a mandatory `sealed_topology: WrappedPayload`; `recover_from_shares` and `RecoveredKeys` always unwrap it under `sealed-topology-v1`, and all other capsule formats are rejected.
 2. Define the topology document schema in `internal/topology` (Go) and `vaulticdb/src/topology.rs` (Rust) with canonical JSON encoding, the credential-kind enum, reference validation, and size bounds; share fixtures across both languages (the same pattern as the existing cross-language capsule fixture test).
-3. Add `Capability::TopologyRead` and `Capability::CredentialLease` to the broker with per-client `credential_refs` authorization; implement redaction for `topology-read` and single-reference release for `credential-lease` with existing lease semantics.
+3. Add `Capability::TopologyRead` and `Capability::CredentialLease` to the broker; implement redaction for `topology-read` and target/tier selection for storage credential leases with existing lease semantics.
 4. Route all topology and placement mutations through a broker `topology-mutate` operation that validates, seals, and publishes a new capsule generation before updating the repository config projection; add `vaultic index keys quorum topology show|set-backend|set-replica|set-credential|rotate-credential|remove-credential` with `--acknowledge-policy-downgrade`-style confirmation when a change reduces `min_copies`, `min_domains`, or `min_offsite`.
 5. Teach `vaultic` repository opening to prefer capsule topology (`--topology-source capsule`), build backends from structured endpoints plus leased credentials, and verify agreement with the encrypted `config`.
 6. Teach `vaulticdb` to build its object-store stack from `topology-read` plus `credential-lease` (`VAULTICDB_TOPOLOGY_SOURCE=capsule`), keeping the environment path behind `external` with a compliance finding.
@@ -173,8 +173,8 @@ The only artifacts that must survive the old host are the capsule generation (al
 
 ## Tests
 
-Capsule: format-1 round trip with all three mandatory payloads; every other capsule format and every missing topology payload is rejected; a `sealed_topology` payload transplanted to another capsule or generation fails authentication; cross-language fixture proves Go and Rust produce identical canonical JSON and digests. Topology schema: every credential kind's validation; dangling and unused `credential_ref`; duplicate backend IDs; policy evaluation identical to `bootstrap.EvaluatePolicy`; size bound. Broker: `topology-read` never contains a credential value (byte-scan assertion); `credential-lease` denies references outside the client's authorization and any delete-capable kind to a read-only `vaulticdb`; leases end at lock, epoch expiry, and connection close; a topology mutation publishes a new generation in the required order and refuses to activate on mirror-publication failure; policy-downgrade acknowledgement required. Consumers: `vaultic` opens all backends from capsule topology with no `AWS_*`, `RCLONE_*`, or `VAULTICDB_*` in the environment (asserted by a clean-environment integration harness); config/capsule disagreement fails with a typed conflict; `vaulticdb` builds local+S3 replicated storage from leases and refuses to start on `external` without the explicit flag. Google Drive: recorded-response fake covering upload, ranged download, stat, list pagination, delete, duplicate-folder races, `rateLimitExceeded` retry, and token refresh; live test behind `VAULTIC_TEST_GDRIVE_*`; `backend verify --compare` against a tree written by `rclone serve restic`; `orderedListOnceBackend` conformance. Bootstrap: fresh-host recovery with only the capsule and two custodian credentials reaches a readable repository and a running replicated `vaulticdb`; `--topology-override` recorded as a deviation. Secret hygiene: no credential value in events, status output, errors, `ps` environment, core dumps, or the runtime profile.
+Capsule: format-1 round trip with all three mandatory payloads; every other capsule format and every missing topology payload is rejected; a `sealed_topology` payload transplanted to another capsule or generation fails authentication; the format-2 topology cross-language fixture proves Go and Rust produce identical canonical JSON and digests. Topology schema: every credential kind's validation; dangling and unused policy references; duplicate backend IDs; policy evaluation identical to `bootstrap.EvaluatePolicy`; size bound. Broker: `topology-read` never contains a credential value (byte-scan assertion); target/tier credential leases fail closed and read-only clients cannot request write-capable tiers; leases end at lock, epoch expiry, and connection close; a topology mutation publishes a new generation in the required order and refuses to activate on mirror-publication failure; policy-downgrade acknowledgement required. Consumers: `vaultic` opens all backends from capsule topology with no `AWS_*`, `RCLONE_*`, or `VAULTICDB_*` in the environment (asserted by a clean-environment integration harness); config/capsule disagreement fails with a typed conflict; `vaulticdb` builds local+S3 replicated storage from leases and refuses to start on `external` without the explicit flag. Google Drive: recorded-response fake covering upload, ranged download, stat, list pagination, delete, duplicate-folder races, `rateLimitExceeded` retry, and token refresh; live test behind `VAULTIC_TEST_GDRIVE_*`; `backend verify --compare` against a tree written by `rclone serve restic`; `orderedListOnceBackend` conformance. Bootstrap: fresh-host recovery with only the capsule and two custodian credentials reaches a readable repository and a running replicated `vaulticdb`; `--topology-override` recorded as a deviation. Secret hygiene: no credential value in events, status output, errors, `ps` environment, core dumps, or the runtime profile.
 
 ## Exit criterion
 
-A format-1 recovery capsule plus any two of three custodian credentials is sufficient, with no other file or environment variable, to bring a fresh host to a fully opened repository: all pack backends (including Google Drive natively), the replicated VaulticDB metadata store, placement policy, and every long-lived credential are recovered from the capsule and released to signed `vaultic` and `vaulticdb` binaries only as epoch-bound leases. Every change to endpoints, policy, or credentials is a custodian-visible capsule generation with mirror-first publication and rollback protection. Google Drive credentials are held only in memory by a native backend; `rclone.conf`, `VAULTICDB_REPLICATED_*`, and `AWS_*` are no longer required and their use is reported as non-compliant. Earlier capsule formats are deliberately unsupported because none were initialized.
+A format-1 recovery capsule containing format-2 topology plus any two of three custodian credentials is sufficient, with no other file or environment variable, to bring a fresh host to a fully opened repository: all pack backends (including Google Drive natively), the replicated VaulticDB metadata store, placement policy, and every long-lived credential are recovered from the capsule and released to signed `vaultic` and `vaulticdb` binaries only as epoch-bound leases. Every change to endpoints, policy, or credentials is a custodian-visible capsule generation with mirror-first publication and rollback protection. Google Drive credentials are held only in memory by a native backend; `rclone.conf`, `VAULTICDB_REPLICATED_*`, and `AWS_*` are no longer required and their use is reported as non-compliant. Earlier topology formats are deliberately unsupported because none were initialized.

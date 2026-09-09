@@ -523,14 +523,15 @@ type BackendFileTypeCount struct {
 
 // BackendReport describes one configured backend.
 type BackendReport struct {
-	ID          string                 `json:"id"`
-	Role        string                 `json:"role"`
-	Location    string                 `json:"location"`
-	Ingest      bool                   `json:"ingest"`
-	ReadEnabled bool                   `json:"read_enabled"`
-	Connections uint                   `json:"connections"`
-	Listed      bool                   `json:"listed"`
-	FileTypes   []BackendFileTypeCount `json:"file_types,omitempty"`
+	ID             string                  `json:"id"`
+	Role           string                  `json:"role"`
+	Location       string                  `json:"location"`
+	Ingest         bool                    `json:"ingest"`
+	ReadEnabled    bool                    `json:"read_enabled"`
+	Connections    uint                    `json:"connections"`
+	Listed         bool                    `json:"listed"`
+	FileTypes      []BackendFileTypeCount  `json:"file_types,omitempty"`
+	StorageProfile *backend.StorageProfile `json:"storage_profile,omitempty"`
 	// MinRetention is unknown until the backend registry of Phase 12 declares
 	// it, and is reported as unknown rather than as zero.
 	MinRetentionKnown bool `json:"min_retention_known"`
@@ -682,8 +683,24 @@ func collectBackendReports(ctx context.Context, targets []backendTarget, noList 
 			ReadEnabled: target.readEnabled,
 			Connections: target.lister.Properties().Connections,
 		}
+		report.StorageProfile = target.lister.Properties().StorageProfile
 		if locator, ok := target.lister.(interface{ Location() string }); ok {
 			report.Location = locator.Location()
+		}
+		if !noList {
+			if prober, ok := target.lister.(backend.StorageCapabilityProber); ok {
+				profile, err := prober.ProbeStorageCapabilities(ctx)
+				if err != nil {
+					return nil, err
+				}
+				report.StorageProfile = profile
+			}
+		}
+		if report.StorageProfile != nil {
+			report.Location = fmt.Sprintf(
+				"s3://%s/%s/<prefix-sha256:%s>", report.StorageProfile.EndpointHost,
+				report.StorageProfile.Bucket, report.StorageProfile.PrefixSHA256,
+			)
 		}
 		if !noList {
 			counts, err := countBackendObjects(ctx, target.lister)

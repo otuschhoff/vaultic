@@ -176,6 +176,7 @@ func runIndexPlacement(
 	}
 	result.Statuses = filterPlacementStatuses(result.Statuses, options)
 	if !globalOptions.JSON {
+		printPlacementProviderWarnings(printer, repo, model)
 		printer.P(
 			"packs %d; unsatisfied %d; overdue %d; pending promotion %d; scheduler requests %d\n",
 			result.PacksScanned,
@@ -211,6 +212,23 @@ func runIndexPlacement(
 		return result, errIndexDifferences
 	}
 	return result, nil
+}
+
+func printPlacementProviderWarnings(printer vaultic.Printer, repo *repository.Repository, model maintenance.PlacementModel) {
+	for _, placement := range model.Backends {
+		target, found := repo.PlacementBackend(placement.Hash)
+		if !found {
+			continue
+		}
+		profile := target.Properties().StorageProfile
+		if profile == nil || (profile.Provider != "backblaze" && profile.Provider != "wasabi") {
+			continue
+		}
+		printer.S(
+			"provider %s backend %q: placement deletion or promotion may incur retention, API, or egress charges\n",
+			profile.Provider, placement.ID,
+		)
+	}
 }
 
 func runIndexPlacementMigratePool(

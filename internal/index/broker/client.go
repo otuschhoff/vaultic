@@ -77,6 +77,11 @@ type Lease struct {
 	ExpiresUnixMS     uint64 `json:"expires_unix_ms"`
 	KeyVersion        uint32 `json:"key_version"`
 	CapsuleGeneration uint64 `json:"capsule_generation"`
+	CredentialSource  string `json:"credential_source,omitempty"`
+	StorageTarget     string `json:"storage_target,omitempty"`
+	StorageTier       string `json:"storage_tier,omitempty"`
+	ProviderExpiresAt string `json:"provider_expires_at,omitempty"`
+	StaticGeneration  uint64 `json:"static_generation,omitempty"`
 	Key               []byte `json:"-"`
 }
 
@@ -266,6 +271,11 @@ type responseEnvelope struct {
 	ExpiresUnixMS            uint64          `json:"expires_unix_ms"`
 	KeyVersion               uint32          `json:"key_version"`
 	Key                      string          `json:"key"`
+	CredentialSource         string          `json:"credential_source"`
+	StorageTarget            string          `json:"storage_target"`
+	StorageTier              string          `json:"storage_tier"`
+	ProviderExpiresAt        string          `json:"provider_expires_at"`
+	StaticGeneration         uint64          `json:"static_generation"`
 	Capsule                  json.RawMessage `json:"capsule"`
 	CapsuleSHA256            string          `json:"capsule_sha256"`
 }
@@ -385,7 +395,7 @@ func (client *Client) AcquireLease(
 		capability != "metadata-loss-recovery" && capability != "topology-read" {
 		return Lease{}, fmt.Errorf("unsupported Vaultic broker capability %q", capability)
 	}
-	return client.acquireLease(ctx, manifestPath, capability, "", ttl)
+	return client.acquireLease(ctx, manifestPath, capability, "", "", "", ttl)
 }
 
 func (client *Client) AcquireCredentialLease(
@@ -396,7 +406,18 @@ func (client *Client) AcquireCredentialLease(
 	if credentialRef == "" {
 		return Lease{}, errors.New("credential reference is required")
 	}
-	return client.acquireLease(ctx, manifestPath, "credential-lease", credentialRef, ttl)
+	return client.acquireLease(ctx, manifestPath, "credential-lease", credentialRef, "", "", ttl)
+}
+
+func (client *Client) AcquireStorageCredentialLease(
+	ctx context.Context,
+	manifestPath, storageTarget, storageTier string,
+	ttl time.Duration,
+) (Lease, error) {
+	if storageTarget == "" || storageTier == "" {
+		return Lease{}, errors.New("storage target and credential tier are required")
+	}
+	return client.acquireLease(ctx, manifestPath, "credential-lease", "", storageTarget, storageTier, ttl)
 }
 
 func (client *Client) ReadTopology(
@@ -419,7 +440,7 @@ func (client *Client) ReadTopology(
 
 func (client *Client) acquireLease(
 	ctx context.Context,
-	manifestPath, capability, credentialRef string,
+	manifestPath, capability, credentialRef, storageTarget, storageTier string,
 	ttl time.Duration,
 ) (Lease, error) {
 	if ttl <= 0 || ttl > time.Hour || ttl%time.Second != 0 {
@@ -442,6 +463,10 @@ func (client *Client) acquireLease(
 	if credentialRef != "" {
 		request["credential_ref"] = credentialRef
 	}
+	if storageTarget != "" {
+		request["storage_target"] = storageTarget
+		request["storage_tier"] = storageTier
+	}
 	var response responseEnvelope
 	if err := client.call(ctx, request, &response); err != nil {
 		return Lease{}, err
@@ -462,6 +487,11 @@ func (client *Client) acquireLease(
 		ExpiresUnixMS:     response.ExpiresUnixMS,
 		KeyVersion:        response.KeyVersion,
 		CapsuleGeneration: response.CapsuleGeneration,
+		CredentialSource:  response.CredentialSource,
+		StorageTarget:     response.StorageTarget,
+		StorageTier:       response.StorageTier,
+		ProviderExpiresAt: response.ProviderExpiresAt,
+		StaticGeneration:  response.StaticGeneration,
 		Key:               key,
 	}, nil
 }

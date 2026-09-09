@@ -19,9 +19,14 @@ use sha2::{Digest, Sha256};
 use slatedb::{
     config::DbReaderOptions,
     object_store::{
-        aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, local::LocalFileSystem,
-        memory::InMemory, path::Path as ObjectPath, prefix::PrefixStore, ObjectStore,
-        ObjectStoreExt, PutMode, PutOptions, UpdateVersion,
+        aws::AmazonS3Builder,
+        azure::{split_sas, MicrosoftAzureBuilder},
+        gcp::GoogleCloudStorageBuilder,
+        local::LocalFileSystem,
+        memory::InMemory,
+        path::Path as ObjectPath,
+        prefix::PrefixStore,
+        ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion,
     },
     Db, DbIterator, DbReader, DbReaderMode, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
 };
@@ -154,6 +159,7 @@ async fn storage_from_capsule(
         &broker.release_manifest,
         "topology-read",
         None,
+        None,
         broker.lease_duration,
     )
     .await?;
@@ -170,23 +176,29 @@ async fn storage_from_capsule(
             .replicas
             .get(id)
             .with_context(|| format!("capsule topology is missing metadata replica {id:?}"))?;
-        let mut credential = match replica.credential_ref.as_deref() {
-            Some(reference) => {
-                let (lease, encoded) = acquire_payload_lease(
-                    &socket,
-                    &broker.release_manifest,
-                    "credential-lease",
-                    Some(reference),
-                    broker.lease_duration,
-                )
-                .await?;
-                let credential: Credential = serde_json::from_slice(encoded.as_slice())
-                    .with_context(|| format!("decode credential lease for {reference:?}"))?;
-                credential.validate()?;
-                leases.push(lease);
-                Some(credential)
-            }
-            None => None,
+        let mut credential = if replica.credential_policy.is_some() {
+            let target = format!("metadata:{id}");
+            let tier = if replica.read_only {
+                "storage-read"
+            } else {
+                "storage-maintain"
+            };
+            let (lease, encoded) = acquire_payload_lease(
+                &socket,
+                &broker.release_manifest,
+                "credential-lease",
+                None,
+                Some((&target, tier)),
+                broker.lease_duration,
+            )
+            .await?;
+            let credential: Credential = serde_json::from_slice(encoded.as_slice())
+                .with_context(|| format!("decode credential lease for metadata replica {id:?}"))?;
+            credential.validate()?;
+            leases.push(lease);
+            Some(credential)
+        } else {
+            None
         };
         let endpoint = |name: &str| -> Result<String> {
             replica
@@ -216,20 +228,23 @@ async fn storage_from_capsule(
                 ReplicaStoreConfig::Local { root }
             }
             Provider::S3 => {
-                let (access_key_id, secret_access_key) = match credential.as_mut() {
+                let (access_key_id, secret_access_key, session_token) = match credential.as_mut() {
                     Some(value)
                         if matches!(
                             value.kind,
-                            CredentialKind::AwsStatic | CredentialKind::S3Static
+                            CredentialKind::AwsStatic
+                                | CredentialKind::S3Static
+                                | CredentialKind::S3Session
                         ) =>
                     {
                         (
                             value.access_key_id.take().map(Zeroizing::new),
                             value.secret_access_key.take().map(Zeroizing::new),
+                            value.session_token.take().map(Zeroizing::new),
                         )
                     }
                     Some(_) => bail!("metadata replica {id:?} requires an S3 credential"),
-                    None => (None, None),
+                    None => (None, None, None),
                 };
                 ReplicaStoreConfig::S3 {
                     bucket: endpoint("bucket")?,
@@ -238,29 +253,78 @@ async fn storage_from_capsule(
                     region: optional_endpoint("region"),
                     access_key_id,
                     secret_access_key,
+                    session_token,
+                    provider: optional_endpoint("provider"),
+                    bucket_lookup: optional_endpoint("bucket_lookup"),
                 }
             }
             Provider::Azure => {
-                let (account, access_key) = match credential.as_mut() {
-                    Some(value) if value.kind == CredentialKind::AzureSharedKey => (
-                        value
+                let raw_endpoint = endpoint("url")?;
+                let account = endpoint("account")?;
+                let (access_key, sas_token) = match credential.as_mut() {
+                    Some(value) if value.kind == CredentialKind::AzureSharedKey => {
+                        if value.account_name.as_deref() != Some(account.as_str()) {
+                            bail!(
+                                "metadata replica {id:?} Azure account does not match its endpoint"
+                            );
+                        }
+                        (value.account_key.take().map(Zeroizing::new), None)
+                    }
+                    Some(value) if value.kind == CredentialKind::AzureSas => {
+                        if value
                             .account_name
-                            .take()
-                            .context("Azure account name is missing")?,
-                        value.account_key.take().map(Zeroizing::new),
-                    ),
-                    Some(_) => bail!("metadata replica {id:?} requires an Azure shared key"),
-                    None => (endpoint("account")?, None),
+                            .as_deref()
+                            .is_some_and(|declared| declared != account)
+                        {
+                            bail!(
+                                "metadata replica {id:?} Azure account does not match its endpoint"
+                            );
+                        }
+                        (None, value.sas_token.take().map(Zeroizing::new))
+                    }
+                    Some(_) => {
+                        bail!("metadata replica {id:?} requires an Azure storage credential")
+                    }
+                    None => (None, None),
                 };
                 ReplicaStoreConfig::Azure {
                     account,
                     container: endpoint("container")?,
                     prefix: optional_endpoint("prefix"),
+                    endpoint: raw_endpoint,
                     access_key,
                     bearer_token: None,
+                    sas_token,
                 }
             }
-            Provider::Gcs | Provider::GoogleDrive => {
+            Provider::Gcs => {
+                let (bearer_token, service_account_key) = match credential.as_mut() {
+                    Some(value) if value.kind == CredentialKind::GcpAccessToken => (
+                        Some(Zeroizing::new(value.access_token.take().context(
+                            "GCP access token credential is missing its token",
+                        )?)),
+                        None,
+                    ),
+                    Some(value) if value.kind == CredentialKind::GcpServiceAccountJson => (
+                        None,
+                        Some(Zeroizing::new(value.service_account_json.take().context(
+                            "GCP service account credential is missing its JSON key",
+                        )?)),
+                    ),
+                    Some(value) if value.kind == CredentialKind::None => (None, None),
+                    Some(_) => {
+                        bail!("metadata replica {id:?} requires a GCP storage credential")
+                    }
+                    None => (None, None),
+                };
+                ReplicaStoreConfig::Gcs {
+                    bucket: endpoint("bucket")?,
+                    prefix: optional_endpoint("prefix"),
+                    bearer_token,
+                    service_account_key,
+                }
+            }
+            Provider::GoogleDrive => {
                 bail!("unsupported VaulticDB metadata replica provider")
             }
         };

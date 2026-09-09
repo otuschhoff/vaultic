@@ -139,7 +139,9 @@ func TestValidateDaemonStartOptions(t *testing.T) {
 func TestPrepareDaemonCommand(t *testing.T) {
 	options := (Options{
 		Socket: "/tmp/vaulticdb/test.sock", TCPAddress: "127.0.0.1:1234", TCPAllowlist: []string{"127.0.0.1/32"},
-		AuthToken: "secret", RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "memory",
+		AuthToken: "secret", RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "s3",
+		S3Bucket: "metadata", S3Prefix: "repo", S3Endpoint: "https://s3.eu-central-2.wasabisys.com",
+		S3Region: "eu-central-2", S3Provider: "wasabi", S3BucketLookup: "dns",
 		RecoveryUnlock: true, BrokerLease: 3 * time.Second, RebuildInitialize: true,
 	}).withDefaults()
 	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
@@ -160,7 +162,13 @@ func TestPrepareDaemonCommand(t *testing.T) {
 	for _, entry := range []string{
 		"VAULTICDB_SOCKET=" + options.Socket,
 		"VAULTICDB_REPOSITORY_ID=" + options.RepositoryID,
-		"VAULTICDB_OBJECT_STORE=memory",
+		"VAULTICDB_OBJECT_STORE=s3",
+		"VAULTICDB_S3_BUCKET=metadata",
+		"VAULTICDB_S3_PREFIX=repo",
+		"VAULTICDB_S3_ENDPOINT=https://s3.eu-central-2.wasabisys.com",
+		"VAULTICDB_S3_REGION=eu-central-2",
+		"VAULTICDB_S3_PROVIDER=wasabi",
+		"VAULTICDB_S3_BUCKET_LOOKUP=dns",
 		"VAULTICDB_TCP_AUTH_TOKEN_FD=3",
 		"VAULTICDB_TRANSPORT=tcp",
 		"VAULTICDB_ENCRYPTION_RECOVERY_ACK=true",

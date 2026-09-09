@@ -14,6 +14,7 @@ argon2 = "0.5"
 async-trait = "0.1"
 aws-config = { version = "1.11", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-kms = "1.117"
+aws-sdk-sts = "1.114"
 base64 = "0.23"
 bytes = "1.10"
 cryptoki = "0.10"
@@ -25,9 +26,10 @@ hmac = "0.12"
 hpke = "0.13"
 ipnet = "2.11"
 libc = "0.2"
-object_store = { version = "0.14", default-features = false, features = ["azure"] }
+object_store = { version = "0.14", default-features = false, features = ["azure", "gcp"] }
 p256 = { version = "0.13", features = ["ecdh"] }
 prost = "0.14"
+quick-xml = { version = "0.41", features = ["serialize"] }
 rand = "0.9"
 rand08 = { package = "rand", version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -42,7 +44,9 @@ tonic-prost = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 thiserror = "2.0"
 zeroize = { version = "1.8", features = ["derive"] }
-time = { version = "0.3", features = ["parsing"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+url = "2.5"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 
 [dependencies.ctap-hid-fido2]
 path = "vendor/ctap-hid-fido2"
@@ -60,3 +64,6 @@ too_many_lines = "warn"
 cognitive_complexity = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
+
+[dev-dependencies]
+rsa = { version = "0.9", features = ["pem"] }

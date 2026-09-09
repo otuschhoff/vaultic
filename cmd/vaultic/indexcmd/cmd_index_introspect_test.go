@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
@@ -22,10 +23,36 @@ type countingBackend struct {
 	location string
 	files    map[backend.FileType][]backend.FileInfo
 	listCall int
+	profile  *backend.StorageProfile
 }
 
 func (target *countingBackend) Properties() backend.Properties {
-	return backend.Properties{Connections: 2}
+	return backend.Properties{Connections: 2, StorageProfile: target.profile}
+}
+
+func TestBackendReportRedactsS3Location(t *testing.T) {
+	target := &countingBackend{
+		location: "s3:s3.us-west-004.backblazeb2.com/bucket/private/repository",
+		profile: &backend.StorageProfile{
+			Provider: "backblaze", EndpointHost: "s3.us-west-004.backblazeb2.com",
+			Bucket: "bucket", PrefixSHA256: "0123456789abcdef",
+		},
+	}
+	reports, err := collectBackendReports(context.Background(), []backendTarget{{id: "offsite", lister: target}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].Location != "s3://s3.us-west-004.backblazeb2.com/bucket/<prefix-sha256:0123456789abcdef>" {
+		t.Fatalf("S3 backend location was not redacted: %s", reports[0].Location)
+	}
+	encoded, err := json.Marshal(reports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(encoded)
+	if strings.Contains(output, "private/repository") {
+		t.Fatalf("S3 backend report was not redacted: %s", output)
+	}
 }
 
 func (target *countingBackend) Location() string { return target.location }
@@ -38,6 +65,38 @@ func (target *countingBackend) List(_ context.Context, fileType backend.FileType
 		}
 	}
 	return nil
+}
+
+type probingBackend struct {
+	countingBackend
+	probeCalls int
+}
+
+func (target *probingBackend) ProbeStorageCapabilities(context.Context) (*backend.StorageProfile, error) {
+	target.probeCalls++
+	return &backend.StorageProfile{
+		Provider: "wasabi", EndpointHost: "s3.eu-central-2.wasabisys.com", Bucket: "bucket",
+		PrefixSHA256: "digest", ConditionalCreate: "strict",
+	}, nil
+}
+
+func TestBackendReportsProbeCapabilitiesUnlessNoList(t *testing.T) {
+	target := &probingBackend{}
+	target.location = "s3:raw-prefix"
+	backendTargets := []backendTarget{{id: "metadata", lister: target}}
+	reports, err := collectBackendReports(context.Background(), backendTargets, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.probeCalls != 1 || reports[0].StorageProfile.ConditionalCreate != "strict" {
+		t.Fatalf("capability probe result = %#v, calls = %d", reports[0].StorageProfile, target.probeCalls)
+	}
+	if _, err := collectBackendReports(context.Background(), backendTargets, true); err != nil {
+		t.Fatal(err)
+	}
+	if target.probeCalls != 1 {
+		t.Fatalf("--no-list invoked capability probe; calls = %d", target.probeCalls)
+	}
 }
 
 // TestBackendsNoListPerformsZeroBackendRequests is the archival guarantee: on a
