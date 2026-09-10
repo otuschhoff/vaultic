@@ -22,6 +22,8 @@ pub struct TopologyDocument {
     pub placement_policy: PlacementPolicy,
     pub staging_backends: Vec<String>,
     pub metadata_replicas: MetadataReplicas,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_target: Option<WalTarget>,
     pub credentials: BTreeMap<String, Credential>,
 }
 
@@ -380,6 +382,23 @@ pub struct MetadataReplica {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WalTarget {
+    pub provider: Provider,
+    pub endpoint: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_policy: Option<CredentialPolicy>,
+    pub durability: WalDurability,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WalDurability {
+    LocalProcess,
+    SharedRemote,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub struct Credential {
@@ -455,6 +474,10 @@ pub enum TopologyMutation {
     SetReplicaPolicy {
         id: String,
         replica: MetadataReplica,
+        credentials: BTreeMap<String, Credential>,
+    },
+    SetWalTarget {
+        target: Option<WalTarget>,
         credentials: BTreeMap<String, Credential>,
     },
     SetCredential {
@@ -586,6 +609,26 @@ impl TopologyDocument {
             }
         }
         self.metadata_replicas.validate(&mut references)?;
+        if let Some(target) = &self.wal_target {
+            if !matches!(
+                target.provider,
+                Provider::Local | Provider::S3 | Provider::Rados
+            ) {
+                bail!("WAL target provider must be local, s3, or rados");
+            }
+            if (target.provider == Provider::Local)
+                != (target.durability == WalDurability::LocalProcess)
+            {
+                bail!("local WAL requires local-process durability and remote WAL requires shared-remote durability");
+            }
+            validate_endpoint(&target.provider, &target.endpoint)?;
+            validate_credential_policy(
+                &target.provider,
+                &target.endpoint,
+                target.credential_policy.as_ref(),
+                &mut references,
+            )?;
+        }
         for (reference, credential) in &self.credentials {
             if !valid_reference(reference) || !references.contains(reference) {
                 bail!("credential {reference:?} is invalid or unused");
@@ -686,6 +729,19 @@ impl TopologyDocument {
                 }
             }
         }
+        if let Some(target) = &self.wal_target {
+            for reference in credential_references(target.credential_policy.as_ref()) {
+                if let Some(credential) = self.credentials.get(reference) {
+                    if !is_dynamic_issuer(target.credential_policy.as_ref(), reference) {
+                        validate_credential_provider(
+                            &credential.kind,
+                            &target.provider,
+                            reference,
+                        )?;
+                    }
+                }
+            }
+        }
         if redacted && !self.credentials.is_empty() {
             bail!("redacted topology contains credentials");
         }
@@ -751,6 +807,9 @@ impl TopologyDocument {
                         }) || self.metadata_replicas.replicas.values().any(|configured| {
                             credential_references(configured.credential_policy.as_ref())
                                 .contains(&reference.as_str())
+                        }) || self.wal_target.as_ref().is_some_and(|configured| {
+                            credential_references(configured.credential_policy.as_ref())
+                                .contains(&reference.as_str())
                         });
                     if !still_used {
                         self.credentials.remove(&reference);
@@ -807,6 +866,57 @@ impl TopologyDocument {
                             credential_references(configured.credential_policy.as_ref())
                                 .contains(&reference.as_str())
                         }) || self.metadata_replicas.replicas.values().any(|configured| {
+                            credential_references(configured.credential_policy.as_ref())
+                                .contains(&reference.as_str())
+                        }) || self.wal_target.as_ref().is_some_and(|configured| {
+                            credential_references(configured.credential_policy.as_ref())
+                                .contains(&reference.as_str())
+                        });
+                    if !still_used {
+                        self.credentials.remove(&reference);
+                    }
+                }
+            }
+            TopologyMutation::SetWalTarget {
+                target,
+                credentials,
+            } => {
+                if target
+                    .as_ref()
+                    .is_some_and(|configured| configured.provider != Provider::Local)
+                    && target
+                        .as_ref()
+                        .is_some_and(|configured| configured.credential_policy.is_none())
+                {
+                    bail!("remote WAL target requires credential_policy");
+                }
+                if credentials
+                    .keys()
+                    .any(|reference| self.credentials.contains_key(reference))
+                {
+                    bail!("credential already exists; use rotate-credential");
+                }
+                let old_references = self
+                    .wal_target
+                    .as_ref()
+                    .map(|configured| {
+                        credential_references(configured.credential_policy.as_ref())
+                            .into_iter()
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                self.wal_target = target;
+                self.credentials.extend(credentials);
+                for reference in old_references {
+                    let still_used =
+                        self.pack_backends.iter().any(|configured| {
+                            credential_references(configured.credential_policy.as_ref())
+                                .contains(&reference.as_str())
+                        }) || self.metadata_replicas.replicas.values().any(|configured| {
+                            credential_references(configured.credential_policy.as_ref())
+                                .contains(&reference.as_str())
+                        }) || self.wal_target.as_ref().is_some_and(|configured| {
                             credential_references(configured.credential_policy.as_ref())
                                 .contains(&reference.as_str())
                         });
@@ -2118,8 +2228,15 @@ mod tests {
     }
 
     #[test]
-    fn replica_policy_mutation_is_atomic() {
+    fn replica_policy_mutation_preserves_wal_credential() {
         let mut topology = topology();
+        let existing_replica = topology.metadata_replicas.replicas["remote"].clone();
+        topology.wal_target = Some(WalTarget {
+            provider: existing_replica.provider.clone(),
+            endpoint: existing_replica.endpoint.clone(),
+            credential_policy: existing_replica.credential_policy.clone(),
+            durability: WalDurability::SharedRemote,
+        });
         let mut replica = topology.metadata_replicas.replicas["remote"].clone();
         replica.credential_policy = Some(CredentialPolicy {
             sts: None,
@@ -2151,7 +2268,7 @@ mod tests {
                 8,
             )
             .unwrap();
-        assert!(!topology.credentials.contains_key("cred:metadata"));
+        assert!(topology.credentials.contains_key("cred:metadata"));
         assert_eq!(
             topology.metadata_replicas.replicas["remote"]
                 .credential_policy
@@ -2165,6 +2282,60 @@ mod tests {
                 .as_deref(),
             Some("cred:metadata-maintain")
         );
+    }
+
+    #[test]
+    fn wal_target_policy_is_bounded_redacted_and_atomic() {
+        let mut topology = topology();
+        let credential = topology.credentials["cred:metadata"].clone();
+        let target = WalTarget {
+            provider: Provider::S3,
+            endpoint: BTreeMap::from([
+                (
+                    "url".to_owned(),
+                    Value::String("https://storage.example.com".to_owned()),
+                ),
+                ("bucket".to_owned(), Value::String("wal-bucket".to_owned())),
+                ("prefix".to_owned(), Value::String("wal".to_owned())),
+                ("region".to_owned(), Value::String("auto".to_owned())),
+            ]),
+            credential_policy: Some(CredentialPolicy {
+                sts: None,
+                azure_user_delegation: None,
+                gcp_downscope: None,
+                r#static: Some(StaticCredentialPolicy {
+                    generation: 1,
+                    revoked_generations: Vec::new(),
+                    bindings: CredentialBindings {
+                        storage_read: None,
+                        storage_append: None,
+                        storage_maintain: Some("cred:wal".to_owned()),
+                        storage_lock: None,
+                    },
+                }),
+            }),
+            durability: WalDurability::SharedRemote,
+        };
+        topology
+            .apply_mutation(
+                TopologyMutation::SetWalTarget {
+                    target: Some(target),
+                    credentials: BTreeMap::from([("cred:wal".to_owned(), credential)]),
+                },
+                8,
+            )
+            .unwrap();
+        assert_eq!(topology.topology_generation, 8);
+        let redacted = String::from_utf8(topology.redacted_json().unwrap()).unwrap();
+        assert!(redacted.contains("cred:wal"));
+        assert!(!redacted.contains("METADATA-ID"));
+
+        topology.wal_target.as_mut().unwrap().durability = WalDurability::LocalProcess;
+        assert!(topology
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("remote WAL requires shared-remote"));
     }
 
     #[test]

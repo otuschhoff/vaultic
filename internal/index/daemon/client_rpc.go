@@ -168,10 +168,17 @@ func daemonEnvironment(options Options) []string {
 		"http_proxy": true, "https_proxy": true, "no_proxy": true,
 		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 	}
+	walS3Credentials := map[string]bool{
+		"VAULTICDB_WAL_S3_ACCESS_KEY_ID":     true,
+		"VAULTICDB_WAL_S3_SECRET_ACCESS_KEY": true,
+		"VAULTICDB_WAL_S3_SESSION_TOKEN":     true,
+	}
 	result := make([]string, 0, len(allowed))
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")
-		if found && (allowed[name] || (options.ObjectStore == "s3" && strings.HasPrefix(name, "AWS_"))) {
+		if found && (allowed[name] ||
+			(options.ObjectStore == "s3" && strings.HasPrefix(name, "AWS_")) ||
+			(options.WALStore == "s3" && walS3Credentials[name])) {
 			result = append(result, entry)
 		}
 	}

@@ -2,7 +2,7 @@
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 31](phase-31-read-only-nfsv3-snapshot-server.md) · [Phase 33 →](phase-33-remote-principals-and-brokered-vaulticdb-access-tickets.md)
+[← Phase 31](phase-31-read-only-nfsv3-snapshot-server.md) · [Phase 33 →](phase-33-writable-fuse-and-durable-writeback.md)
 
 [Operational observability](02-observability.md) · [CLI and operations architecture](../02-architecture/04-cli-and-operations.md)
 
@@ -91,7 +91,7 @@ The default overview emphasizes actionable saturation: slowest backend, writebac
 
 ## Collection and transport
 
-Define one shared telemetry schema and small instrumentation library per implementation language, not a second metrics vocabulary in each command. Each long-running component exposes an authenticated local status API over its existing protected control channel. Short-lived `vaultic` commands can expose an ephemeral in-process collector to the aggregate monitor or emit a final snapshot. Remote status follows the component's existing authentication and least-privilege rules; Phase 33 later extends this access to enrolled remote principals.
+Define one shared telemetry schema and small instrumentation library per implementation language, not a second metrics vocabulary in each command. Each long-running component exposes an authenticated local status API over its existing protected control channel. Short-lived `vaultic` commands can expose an ephemeral in-process collector to the aggregate monitor or emit a final snapshot. Remote status follows the component's existing authentication and least-privilege rules; Phase 38 later extends this access to enrolled remote principals.
 
 Collection has configurable timeouts, maximum response size, maximum active-operation records, histogram count, and refresh frequency. Metrics collection and export have separate bounded queues. On overflow, coalesce gauges, preserve counters through the next successful snapshot where possible, drop distribution intervals or events according to documented policy, and expose dropped-export counters. Telemetry failure never blocks backup, restore, database durability, cache reads, or broker lease handling.
 

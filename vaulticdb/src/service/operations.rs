@@ -133,6 +133,8 @@ impl Service {
         )?;
         check_context(request.get_ref().context.as_ref())?;
         let encryption = self.storage.encryption_status();
+        let (wal_target, wal_durability, wal_separate, wal_encrypted, wal_status) =
+            self.storage.wal_status();
         Ok(Response::new(CapabilitiesResponse {
             daemon_id: self.state.daemon_id.to_string(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -152,6 +154,19 @@ impl Service {
             recovery_unlock: encryption.recovery_unlock,
             writer_roles: true,
             durable_idempotency: true,
+            wal_target: wal_target.to_owned(),
+            wal_durability: wal_durability.to_owned(),
+            wal_separate,
+            wal_encrypted,
+            wal_replay_ready: true,
+            wal_uploaded_bytes: wal_status.uploaded_bytes,
+            wal_outstanding_flushes: wal_status.outstanding_flushes,
+            wal_durability_failures: wal_status.durability_failures,
+            wal_last_flush_latency_ms: wal_status.last_flush_latency_ms,
+            wal_retained_bytes: wal_status.retained_bytes,
+            wal_retained_segments: wal_status.retained_segments,
+            wal_oldest_segment_unix_ms: wal_status.oldest_segment_unix_ms,
+            wal_cleanup_failures: wal_status.cleanup_failures,
         }))
     }
 

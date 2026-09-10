@@ -159,9 +159,19 @@ func TestS3CompatibleStorageRoundTrip(t *testing.T) {
 	if os.Getenv("VAULTICDB_TEST_S3_ENDPOINT") == "" {
 		t.Skip("VAULTICDB_TEST_S3_ENDPOINT is not configured")
 	}
+	t.Setenv("VAULTICDB_WAL_S3_ACCESS_KEY_ID", os.Getenv("AWS_ACCESS_KEY_ID"))
+	t.Setenv("VAULTICDB_WAL_S3_SECRET_ACCESS_KEY", os.Getenv("AWS_SECRET_ACCESS_KEY"))
+	t.Setenv("VAULTICDB_WAL_S3_SESSION_TOKEN", os.Getenv("AWS_SESSION_TOKEN"))
+	socket := testSocket(t)
+	runPrefix := "phase28/" + filepath.Base(filepath.Dir(socket))
 	options := Options{
-		Socket: testSocket(t), RepositoryID: "phase3-s3", DaemonPath: daemonBinary(t),
-		ObjectStore: "s3", S3Bucket: os.Getenv("VAULTICDB_TEST_S3_BUCKET"), S3Prefix: "phase3/roundtrip",
+		Socket: socket, RepositoryID: "phase3-s3", DaemonPath: daemonBinary(t),
+		TopologySource: "external",
+		ObjectStore:    "s3", S3Bucket: os.Getenv("VAULTICDB_TEST_S3_BUCKET"), S3Prefix: runPrefix + "/metadata",
+		S3Endpoint: os.Getenv("VAULTICDB_TEST_S3_ENDPOINT"), S3Region: "us-east-1", S3BucketLookup: "path",
+		WALStore: "s3", WALS3Bucket: os.Getenv("VAULTICDB_TEST_S3_BUCKET"),
+		WALS3Prefix: runPrefix + "/wal", WALS3Endpoint: os.Getenv("VAULTICDB_TEST_S3_ENDPOINT"),
+		WALS3Region: "us-east-1", WALS3BucketLookup: "path",
 	}
 	if options.S3Bucket == "" {
 		options.S3Bucket = "vaulticdb-phase3"
@@ -175,9 +185,28 @@ func TestS3CompatibleStorageRoundTrip(t *testing.T) {
 	if err != nil || !durable {
 		t.Fatalf("S3 write = %t, %v", durable, err)
 	}
+	if wal := client.WALInfo(); wal.Target != "s3" || !wal.Separate || !wal.ReplayReady ||
+		wal.RetainedSegments == 0 || wal.OutstandingFlushes != 0 || wal.DurabilityFailures != 0 {
+		t.Fatalf("active S3 WAL status = %+v", wal)
+	}
 	value, found, err := client.Get(ctx, []byte("s3:key"), "")
 	if err != nil || !found || string(value) != "s3-value" {
 		t.Fatalf("S3 read = %q, %t, %v", value, found, err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	options.Socket = testSocket(t)
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wal := client.WALInfo(); wal.RetainedBytes == 0 || wal.RetainedSegments == 0 ||
+		wal.OutstandingFlushes != 0 || wal.DurabilityFailures != 0 {
+		t.Fatalf("reopened S3 WAL status = %+v", wal)
+	}
+	if value, found, err := client.Get(ctx, []byte("s3:key"), ""); err != nil || !found || string(value) != "s3-value" {
+		t.Fatalf("replayed S3 value = %q, %t, %v", value, found, err)
 	}
 	if err := client.Close(ctx); err != nil {
 		t.Fatal(err)
@@ -399,6 +428,11 @@ func (s testService) Capabilities(_ context.Context, request *vaulticdbv1.Capabi
 	return &vaulticdbv1.CapabilitiesResponse{
 		ProtocolVersion: s.protocol, SchemaVersion: s.schema, RepositoryId: request.GetRepositoryId(),
 		MaxBatchItems: 10_000, MaxMessageBytes: 16 * 1024 * 1024, MaxPageItems: 1_000,
+		WalTarget: "s3", WalDurability: "durable-object-store", WalSeparate: true,
+		WalEncrypted: true, WalReplayReady: true, WalUploadedBytes: 101,
+		WalOutstandingFlushes: 2, WalDurabilityFailures: 3, WalLastFlushLatencyMs: 4,
+		WalRetainedBytes: 105, WalRetainedSegments: 6, WalOldestSegmentUnixMs: 7,
+		WalCleanupFailures: 8,
 	}, nil
 }
 
@@ -508,6 +542,13 @@ func TestConnectValidatesDaemon(t *testing.T) {
 	client, err := Connect(context.Background(), Options{Socket: socket, RepositoryID: "test-repo"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := client.WALInfo(); got.Target != "s3" || got.Durability != "durable-object-store" ||
+		!got.Separate || !got.Encrypted || !got.ReplayReady || got.UploadedBytes != 101 ||
+		got.OutstandingFlushes != 2 || got.DurabilityFailures != 3 || got.LastFlushLatencyMS != 4 ||
+		got.RetainedBytes != 105 || got.RetainedSegments != 6 || got.OldestSegmentUnixMS != 7 ||
+		got.CleanupFailures != 8 {
+		t.Fatalf("WALInfo() = %+v", got)
 	}
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatal(err)

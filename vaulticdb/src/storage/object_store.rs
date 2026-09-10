@@ -60,6 +60,278 @@ pub(crate) enum ReplicaStoreConfig {
     },
 }
 
+#[derive(Debug, Default)]
+struct WalMetrics {
+    uploaded_bytes: AtomicU64,
+    outstanding_flushes: AtomicU64,
+    durability_failures: AtomicU64,
+    last_flush_latency_ms: AtomicU64,
+    cleanup_failures: AtomicU64,
+    retained: std::sync::Mutex<HashMap<String, (u64, u64)>>,
+}
+
+impl WalMetrics {
+    fn snapshot(&self) -> WalStatus {
+        let retained = self.retained.lock().ok();
+        let retained_bytes = retained
+            .as_ref()
+            .map(|objects| objects.values().map(|(size, _)| size).sum())
+            .unwrap_or(0);
+        let retained_segments = retained
+            .as_ref()
+            .map_or(0, |objects| objects.len() as u64);
+        let oldest_segment_unix_ms = retained
+            .as_ref()
+            .and_then(|objects| objects.values().map(|(_, timestamp)| *timestamp).min())
+            .unwrap_or(0);
+        WalStatus {
+            uploaded_bytes: self.uploaded_bytes.load(Ordering::Acquire),
+            outstanding_flushes: self.outstanding_flushes.load(Ordering::Acquire),
+            durability_failures: self.durability_failures.load(Ordering::Acquire),
+            last_flush_latency_ms: self.last_flush_latency_ms.load(Ordering::Acquire),
+            retained_bytes,
+            retained_segments,
+            oldest_segment_unix_ms,
+            cleanup_failures: self.cleanup_failures.load(Ordering::Acquire),
+        }
+    }
+
+    fn retain(&self, location: &ObjectPath, size: u64, timestamp_ms: u64) {
+        if let Ok(mut retained) = self.retained.lock() {
+            retained.insert(location.to_string(), (size, timestamp_ms));
+        }
+    }
+
+    fn remove(&self, location: &ObjectPath) {
+        if let Ok(mut retained) = self.retained.lock() {
+            retained.remove(location.as_ref());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MonitoredWalStore {
+    inner: Arc<dyn ObjectStore>,
+    metrics: Arc<WalMetrics>,
+}
+
+#[derive(Debug)]
+struct MonitoredWalUpload {
+    inner: Box<dyn MultipartUpload>,
+    location: ObjectPath,
+    metrics: Arc<WalMetrics>,
+    uploaded_bytes: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl MultipartUpload for MonitoredWalUpload {
+    fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+        let size = payload.content_length() as u64;
+        let upload = self.inner.put_part(payload);
+        let metrics = Arc::clone(&self.metrics);
+        let uploaded_bytes = Arc::clone(&self.uploaded_bytes);
+        metrics.outstanding_flushes.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async move {
+            let started = Instant::now();
+            let result = upload.await;
+            metrics
+                .outstanding_flushes
+                .fetch_sub(1, Ordering::AcqRel);
+            metrics.last_flush_latency_ms.store(
+                started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                Ordering::Release,
+            );
+            if result.is_ok() {
+                metrics.uploaded_bytes.fetch_add(size, Ordering::AcqRel);
+                uploaded_bytes.fetch_add(size, Ordering::AcqRel);
+            } else {
+                metrics
+                    .durability_failures
+                    .fetch_add(1, Ordering::AcqRel);
+            }
+            result
+        })
+    }
+
+    async fn complete(&mut self) -> slatedb::object_store::Result<PutResult> {
+        let started = Instant::now();
+        self.metrics
+            .outstanding_flushes
+            .fetch_add(1, Ordering::AcqRel);
+        let result = self.inner.complete().await;
+        self.metrics
+            .outstanding_flushes
+            .fetch_sub(1, Ordering::AcqRel);
+        self.metrics.last_flush_latency_ms.store(
+            started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+        if result.is_ok() {
+            self.metrics.retain(
+                &self.location,
+                self.uploaded_bytes.load(Ordering::Acquire),
+                current_unix_ms(),
+            );
+        } else {
+            self.metrics
+                .durability_failures
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        result
+    }
+
+    async fn abort(&mut self) -> slatedb::object_store::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+impl std::fmt::Display for MonitoredWalStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "monitored WAL ({})", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for MonitoredWalStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> slatedb::object_store::Result<PutResult> {
+        let size = payload.content_length() as u64;
+        let started = Instant::now();
+        self.metrics
+            .outstanding_flushes
+            .fetch_add(1, Ordering::AcqRel);
+        let result = self.inner.put_opts(location, payload, options).await;
+        self.metrics
+            .outstanding_flushes
+            .fetch_sub(1, Ordering::AcqRel);
+        self.metrics.last_flush_latency_ms.store(
+            started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+        if result.is_ok() {
+            self.metrics.uploaded_bytes.fetch_add(size, Ordering::AcqRel);
+            self.metrics
+                .retain(location, size, current_unix_ms());
+        } else {
+            self.metrics
+                .durability_failures
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        result
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+        let inner = self.inner.put_multipart_opts(location, options).await?;
+        Ok(Box::new(MonitoredWalUpload {
+            inner,
+            location: location.clone(),
+            metrics: Arc::clone(&self.metrics),
+            uploaded_bytes: Arc::new(AtomicU64::new(0)),
+        }))
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> slatedb::object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, slatedb::object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectPath>> {
+        let metrics = Arc::clone(&self.metrics);
+        self.inner
+            .delete_stream(locations)
+            .map(move |result| {
+                match &result {
+                    Ok(location) => metrics.remove(location),
+                    Err(_) => {
+                        metrics.cleanup_failures.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
+                result
+            })
+            .boxed()
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> slatedb::object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> slatedb::object_store::Result<()> {
+        let size = self.inner.head(from).await.map_or(0, |metadata| metadata.size);
+        let started = Instant::now();
+        self.metrics
+            .outstanding_flushes
+            .fetch_add(1, Ordering::AcqRel);
+        let result = self.inner.copy_opts(from, to, options).await;
+        self.metrics
+            .outstanding_flushes
+            .fetch_sub(1, Ordering::AcqRel);
+        self.metrics.last_flush_latency_ms.store(
+            started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+        if result.is_ok() {
+            self.metrics.uploaded_bytes.fetch_add(size, Ordering::AcqRel);
+            self.metrics.retain(to, size, current_unix_ms());
+        } else {
+            self.metrics
+                .durability_failures
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        result
+    }
+}
+
+async fn monitored_wal_store(
+    store: Arc<dyn ObjectStore>,
+) -> Result<(Arc<dyn ObjectStore>, Arc<WalMetrics>)> {
+    let metrics = Arc::new(WalMetrics::default());
+    let mut objects = store.list(None);
+    while let Some(object) = objects.next().await {
+        let object = object.context("inventory WAL object store")?;
+        metrics.retain(
+            &object.location,
+            object.size,
+            object.last_modified.timestamp_millis().try_into().unwrap_or(0),
+        );
+    }
+    Ok((
+        Arc::new(MonitoredWalStore {
+            inner: store,
+            metrics: Arc::clone(&metrics),
+        }),
+        metrics,
+    ))
+}
+
 #[derive(Debug)]
 struct RenewableObjectStore {
     current: std::sync::RwLock<Arc<dyn ObjectStore>>,
@@ -275,6 +547,90 @@ fn replicated_replica_store(
         .find(|replica| replica.id == id)
         .with_context(|| format!("fencing replica {id:?} is not configured"))?;
     replica_store(&replica.store, repository_key, id)
+}
+
+fn wal_object_store(
+    repository_id: &str,
+    config: &ReplicaStoreConfig,
+) -> Result<Arc<dyn ObjectStore>> {
+    replica_store(config, &crate::repository_key(repository_id), "wal")
+}
+
+fn repository_control_store(
+    config: &ObjectStoreConfig,
+    path: &str,
+    store: Arc<dyn ObjectStore>,
+) -> Arc<dyn ObjectStore> {
+    match config {
+        ObjectStoreConfig::S3 { .. } => Arc::new(PrefixStore::new(store, ObjectPath::from(path))),
+        _ => store,
+    }
+}
+
+fn wal_store_identity(config: &WalStoreConfig) -> String {
+    match config {
+        WalStoreConfig::Inherit => "inherit".to_owned(),
+        WalStoreConfig::Store(ReplicaStoreConfig::Local { root }) => {
+            format!("local:{}", root.display())
+        }
+        WalStoreConfig::Store(ReplicaStoreConfig::Memory) => "memory".to_owned(),
+        WalStoreConfig::Store(ReplicaStoreConfig::S3 {
+            bucket,
+            prefix,
+            endpoint,
+            region,
+            provider,
+            bucket_lookup,
+            ..
+        }) => format!(
+            "s3:{bucket}:{}:{}:{}:{}:{}",
+            prefix.as_deref().unwrap_or_default(),
+            endpoint.as_deref().unwrap_or_default(),
+            region.as_deref().unwrap_or_default(),
+            provider.as_deref().unwrap_or_default(),
+            bucket_lookup.as_deref().unwrap_or_default()
+        ),
+        WalStoreConfig::Store(ReplicaStoreConfig::Rados {
+            monitors,
+            cluster_fsid,
+            pool,
+            namespace,
+            prefix,
+            client,
+            ..
+        }) => format!(
+            "rados:{cluster_fsid}:{monitors}:{pool}:{namespace}:{prefix}:{client}"
+        ),
+        WalStoreConfig::Store(ReplicaStoreConfig::Azure { .. }) => "unsupported:azure".to_owned(),
+        WalStoreConfig::Store(ReplicaStoreConfig::Gcs { .. }) => "unsupported:gcs".to_owned(),
+    }
+}
+
+fn wal_store_kind(config: &WalStoreConfig) -> &'static str {
+    match config {
+        WalStoreConfig::Inherit => "inherited",
+        WalStoreConfig::Store(ReplicaStoreConfig::Local { .. }) => "local",
+        WalStoreConfig::Store(ReplicaStoreConfig::Memory) => "memory",
+        WalStoreConfig::Store(ReplicaStoreConfig::S3 { .. }) => "s3",
+        WalStoreConfig::Store(ReplicaStoreConfig::Rados { .. }) => "rados",
+        WalStoreConfig::Store(ReplicaStoreConfig::Azure { .. }) => "unsupported-azure",
+        WalStoreConfig::Store(ReplicaStoreConfig::Gcs { .. }) => "unsupported-gcs",
+    }
+}
+
+fn wal_store_durability(config: &WalStoreConfig) -> &'static str {
+    match config {
+        WalStoreConfig::Inherit => "inherited",
+        WalStoreConfig::Store(ReplicaStoreConfig::Local { .. } | ReplicaStoreConfig::Memory) => {
+            "local-process"
+        }
+        WalStoreConfig::Store(
+            ReplicaStoreConfig::S3 { .. } | ReplicaStoreConfig::Rados { .. },
+        ) => "shared-remote",
+        WalStoreConfig::Store(ReplicaStoreConfig::Azure { .. } | ReplicaStoreConfig::Gcs { .. }) => {
+            "unsupported"
+        }
+    }
 }
 
 fn replica_store(

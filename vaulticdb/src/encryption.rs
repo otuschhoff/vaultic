@@ -156,6 +156,15 @@ impl EncryptedObjectStore {
         })
     }
 
+    pub(crate) fn with_inner(&self, inner: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            inner,
+            repository_id: self.repository_id.clone(),
+            keyring: self.keyring.clone(),
+            chunk_size: self.chunk_size,
+        }
+    }
+
     #[cfg(test)]
     fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;

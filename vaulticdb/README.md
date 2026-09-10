@@ -127,6 +127,18 @@ All daemon-specific environment variables are parsed once by `Config::from_env`.
 | `VAULTICDB_DATA_DIR` | system temp `vaulticdb/data` | Root for local storage; repository hash is appended. |
 | `VAULTICDB_S3_BUCKET` | none | Required for S3 storage. |
 | `VAULTICDB_S3_PREFIX` | none | Optional non-empty shared S3 prefix. |
+| `VAULTICDB_WAL_STORE` | `inherit` | `inherit`, `local`, `memory` (tests only), `s3`, or `rados`; a separate target never falls back to metadata storage. |
+| `VAULTICDB_WAL_DATA_DIR` | system temp `vaulticdb/wal` | Root for local WAL; repository hash is appended. |
+| `VAULTICDB_WAL_S3_BUCKET` | none | Required for S3 WAL storage. |
+| `VAULTICDB_WAL_S3_PREFIX` | none | Optional dedicated WAL namespace root. |
+| `VAULTICDB_WAL_S3_ENDPOINT` | provider default | Optional S3-compatible endpoint. |
+| `VAULTICDB_WAL_S3_REGION` | provider default | Optional signing region. |
+| `VAULTICDB_WAL_S3_PROVIDER` | `generic` | Optional S3 provider profile. |
+| `VAULTICDB_WAL_S3_BUCKET_LOOKUP` | provider default | `auto`, `dns`, or `path`. |
+| `VAULTICDB_WAL_S3_ACCESS_KEY_ID` | none | Dedicated external-topology WAL access key; prefer broker leases in production. |
+| `VAULTICDB_WAL_S3_SECRET_ACCESS_KEY` | none | Secret half of the dedicated WAL credential. |
+| `VAULTICDB_WAL_S3_SESSION_TOKEN` | none | Optional temporary WAL credential token. |
+| `VAULTICDB_WAL_RADOS_*` | none | Monitor, FSID, pool, namespace, prefix, client, and key for external-topology native RADOS WAL. |
 | `VAULTICDB_REPLICATED_REPLICAS` | none | Required comma-separated IDs for replicated storage. |
 | `VAULTICDB_FENCING_REPLICA` | none | Required configured replica ID for replicated writer fencing. |
 | `VAULTICDB_REPLICATED_<ID>_OBJECT_STORE` | none | Required per replica; `local`, `memory`, `s3`, or `azure`. |
@@ -158,6 +170,16 @@ Abandoned transactions are reclaimed after five minutes of inactivity before
 the active-transaction limit is enforced. Set
 `VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS` to an integer of at least 10 seconds
 to override that interval. In-flight transaction operations are never pruned.
+
+Separate WAL targets use SlateDB's native WAL-store protocol. Durable calls
+return only after an immutable WAL object is published. WAL objects use the
+same metadata encryption keyring and are never placed in a cache tier. Local
+WAL cannot survive host loss unless its directory is durable shared storage.
+To change targets, drain and stop the writer, retain the old WAL, and create
+and verify a new metadata generation with the new target before activation.
+VaulticDB atomically binds the target identity to the metadata generation, so a
+direct reopen with a mismatched WAL identity fails closed. Capabilities include
+live flush latency, byte, backlog, failure, and retained-segment counters.
 
 Run the Phase 3 integration tests against a pre-created S3-compatible bucket:
 

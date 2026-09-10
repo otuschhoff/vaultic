@@ -433,6 +433,29 @@ writers at the same final database path. Preserve the previous metadata prefix
 during migration or rebuild until the replacement has been independently
 verified.
 
+SlateDB WAL on S3
+-----------------
+
+VaulticDB can place SlateDB's WAL in a separate S3 bucket or prefix with
+``--daemon-wal-store s3`` and the ``--daemon-wal-s3-*`` options. The daemon
+appends the repository identity hash and keeps WAL objects separate from SSTs,
+manifests, repository packs, and caches. A durable acknowledgement waits for
+the immutable S3 WAL upload to complete; there is no local upload queue and no
+fallback after an S3 error.
+
+Use a dedicated credential with read, create, overwrite, list, and delete
+authority limited to the WAL namespace. In capsule mode, configure
+``wal_target`` with ``durability: shared-remote``; the broker issues its
+credential as target ``wal`` at ``storage-maintain`` independently of metadata
+replica credentials. WAL objects use the metadata DEK outside process memory.
+
+Changing WAL placement is restart-required. Drain and stop the writer, preserve
+the old WAL, create and verify a new metadata generation under the new target,
+then activate that generation through the guarded workflow. VaulticDB rejects a
+direct reopen when its metadata-generation WAL binding differs. Never delete
+WAL by age; SlateDB cleanup follows manifest checkpoint and reader recovery
+state.
+
 For Backblaze migration from the native API, copy objects with the existing
 backend migration workflow and run ``vaultic backend verify --compare`` against
 the native ``b2:`` and S3-compatible locations. Verification reads and compares

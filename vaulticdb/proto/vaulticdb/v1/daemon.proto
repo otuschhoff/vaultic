@@ -133,6 +133,19 @@ message CapabilitiesResponse {
   bool recovery_unlock = 16;
   bool writer_roles = 17;
   bool durable_idempotency = 18;
+  string wal_target = 19;
+  string wal_durability = 20;
+  bool wal_separate = 21;
+  bool wal_encrypted = 22;
+  bool wal_replay_ready = 23;
+  uint64 wal_uploaded_bytes = 24;
+  uint64 wal_outstanding_flushes = 25;
+  uint64 wal_durability_failures = 26;
+  uint64 wal_last_flush_latency_ms = 27;
+  uint64 wal_retained_bytes = 28;
+  uint64 wal_retained_segments = 29;
+  uint64 wal_oldest_segment_unix_ms = 30;
+  uint64 wal_cleanup_failures = 31;
 }
 
 enum WriterRole {

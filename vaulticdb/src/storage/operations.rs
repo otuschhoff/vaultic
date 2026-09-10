@@ -46,6 +46,54 @@ async fn metadata_store_has_database_objects(store: &dyn ObjectStore) -> Result<
     Ok(false)
 }
 
+async fn ensure_wal_target_identity(
+    store: &dyn ObjectStore,
+    identity: &str,
+    metadata_exists: bool,
+) -> Result<()> {
+    let path = ObjectPath::from(WAL_TARGET_PATH);
+    let expected = format!("sha256:{:x}\n", Sha256::digest(identity.as_bytes()));
+    match store.get(&path).await {
+        Ok(result) => {
+            let actual = result.bytes().await.context("read WAL target identity")?;
+            if actual.as_ref() != expected.as_bytes() {
+                bail!("configured WAL target does not match the metadata generation");
+            }
+            return Ok(());
+        }
+        Err(slatedb::object_store::Error::NotFound { .. }) => {}
+        Err(error) => return Err(error).context("read WAL target identity"),
+    }
+    if metadata_exists && identity != "inherit" {
+        bail!("existing metadata without a WAL target binding must first open with inherited WAL");
+    }
+    match store
+        .put_opts(
+            &path,
+            expected.clone().into_bytes().into(),
+            PutOptions::from(PutMode::Create),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(slatedb::object_store::Error::AlreadyExists { .. }) => {
+            let actual = store
+                .get(&path)
+                .await
+                .context("read concurrently created WAL target identity")?
+                .bytes()
+                .await
+                .context("decode concurrently created WAL target identity")?;
+            if actual.as_ref() == expected.as_bytes() {
+                Ok(())
+            } else {
+                bail!("configured WAL target does not match the metadata generation")
+            }
+        }
+        Err(error) => Err(error).context("publish WAL target identity"),
+    }
+}
+
 async fn latest_writer_epoch(store: &dyn ObjectStore) -> Result<u64> {
     let prefix = ObjectPath::from(WRITER_EPOCH_PREFIX);
     let mut objects = store.list(Some(&prefix));

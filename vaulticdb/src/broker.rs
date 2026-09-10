@@ -1409,6 +1409,19 @@ fn storage_credential_policy<'a>(
             &replica.endpoint,
         ));
     }
+    if storage_target == "wal" {
+        let target = topology
+            .wal_target
+            .as_ref()
+            .context("topology has no separate WAL target")?;
+        return Ok((
+            target
+                .credential_policy
+                .as_ref()
+                .context("WAL target has no credential policy")?,
+            &target.endpoint,
+        ));
+    }
     bail!("invalid storage credential target")
 }
 

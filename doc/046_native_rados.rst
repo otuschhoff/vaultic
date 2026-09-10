@@ -125,6 +125,27 @@ The current credential is static. Native RADOS does not claim STS-like expiry,
 provider-enforced create-only access, or automatic CephX rotation. Rotate a
 client key in broker custody according to the cluster's operational procedure.
 
+SlateDB WAL on RADOS
+====================
+
+An RADOS-enabled VaulticDB can select a separate native WAL target with sealed
+``wal_target`` topology. Use ``provider: rados``, the standard monitor, FSID,
+pool, namespace, and prefix fields, ``durability: shared-remote``, and a
+dedicated CephX ``storage-maintain`` binding. VaulticDB leases this credential
+under target ``wal`` rather than reusing metadata or repository credentials.
+
+SlateDB publishes immutable WAL objects through librados before a durable write
+handle resolves. The RADOS adapter's completed atomic write is the durability
+boundary; errors and credential expiry fail the write and never select local
+storage. WAL objects pass through metadata encryption before librados and stay
+outside every cache-eviction namespace.
+
+Changing the target is restart-required. Drain and stop the writer, retain the
+old pool and namespace, create and verify a new metadata generation configured
+with the new WAL, then activate it. VaulticDB's metadata-generation binding
+makes a direct reopen with a different WAL-store identity fail closed. Keep the
+old generation and WAL until observation and retirement checks finish.
+
 Operations
 ==========
 

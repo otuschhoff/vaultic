@@ -6,6 +6,153 @@ mod tests {
     use std::env;
     use slatedb::object_store::{path::Path, ObjectStoreExt};
 
+    async fn listed_paths(store: &dyn ObjectStore) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut objects = store.list(None);
+        while let Some(object) = objects.next().await {
+            paths.push(object.unwrap().location.to_string());
+        }
+        paths
+    }
+
+    #[tokio::test]
+    async fn direct_s3_control_objects_are_repository_scoped() {
+        let bucket: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        bucket
+            .put(
+                &Path::from("other-repository/_vaultic/wal-target-v1"),
+                "other".into(),
+            )
+            .await
+            .unwrap();
+        let config = ObjectStoreConfig::S3 {
+            bucket: "bucket".to_owned(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            provider: None,
+            bucket_lookup: None,
+        };
+        let scoped = repository_control_store(&config, "repository", bucket.clone());
+
+        ensure_wal_target_identity(scoped.as_ref(), "s3:bucket:wal", false)
+            .await
+            .unwrap();
+
+        assert_eq!(listed_paths(scoped.as_ref()).await, vec![WAL_TARGET_PATH]);
+        assert!(listed_paths(bucket.as_ref())
+            .await
+            .contains(&"repository/_vaultic/wal-target-v1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn wal_metrics_track_multipart_uploads() {
+        let raw: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (wal, metrics) = monitored_wal_store(raw).await.unwrap();
+        let location = Path::from("wal/0001.sst");
+        let mut upload = wal
+            .put_multipart_opts(&location, PutMultipartOptions::default())
+            .await
+            .unwrap();
+        upload.put_part("part-a".into()).await.unwrap();
+        upload.put_part("part-b".into()).await.unwrap();
+        upload.complete().await.unwrap();
+
+        let status = metrics.snapshot();
+        assert_eq!(status.uploaded_bytes, 12);
+        assert_eq!(status.retained_bytes, 12);
+        assert_eq!(status.retained_segments, 1);
+        assert_eq!(status.outstanding_flushes, 0);
+        assert_eq!(status.durability_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn wal_metrics_track_finalizing_copies() {
+        let raw: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        raw.put(&Path::from("staging/0001"), "wal-data".into())
+            .await
+            .unwrap();
+        let (wal, metrics) = monitored_wal_store(raw).await.unwrap();
+
+        wal.copy(
+            &Path::from("staging/0001"),
+            &Path::from("wal/0001.sst"),
+        )
+        .await
+        .unwrap();
+
+        let status = metrics.snapshot();
+        assert_eq!(status.uploaded_bytes, 8);
+        assert_eq!(status.retained_bytes, 16);
+        assert_eq!(status.retained_segments, 2);
+        assert_eq!(status.outstanding_flushes, 0);
+        assert_eq!(status.durability_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn separate_wal_store_routes_durable_writes_and_reader_replay() {
+        let main: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let raw_wal: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (wal, wal_metrics) = monitored_wal_store(raw_wal).await.unwrap();
+        let path = format!("separate-wal-{}", rand::random::<u64>());
+        let db = open_writer(&path, main.clone(), Some(wal.clone()))
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(b"wal-key", b"wal-value");
+        db.write(batch).await.unwrap().await_durable().await.unwrap();
+
+        let status = wal_metrics.snapshot();
+        assert!(status.uploaded_bytes > 0);
+        assert!(status.retained_bytes > 0);
+        assert!(status.retained_segments > 0);
+        assert_eq!(status.outstanding_flushes, 0);
+        assert_eq!(status.durability_failures, 0);
+
+        let wal_paths = listed_paths(wal.as_ref()).await;
+        assert!(!wal_paths.is_empty());
+        assert!(wal_paths.iter().all(|item| item.contains("wal")));
+        assert!(listed_paths(main.as_ref())
+            .await
+            .iter()
+            .all(|item| !item.contains("/wal/")));
+
+        let reader = open_reader(&path, main.clone(), Some(wal.clone()))
+            .await
+            .unwrap();
+        assert_eq!(reader.get(b"wal-key").await.unwrap().as_deref(), Some(&b"wal-value"[..]));
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+
+        ensure_wal_target_identity(main.as_ref(), "s3:bucket-a:wal", false)
+            .await
+            .unwrap();
+        assert!(ensure_wal_target_identity(main.as_ref(), "s3:bucket-b:wal", true)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn wal_metrics_report_expired_credential_failures() {
+        let renewable = Arc::new(RenewableObjectStore::new(
+            Arc::new(InMemory::new()),
+            current_unix_ms() + 60_000,
+            std::time::Duration::from_secs(60),
+        ));
+        let (wal, metrics) = monitored_wal_store(renewable.clone()).await.unwrap();
+        renewable.write_until_ms.store(0, Ordering::Release);
+
+        assert!(wal
+            .put(&Path::from("wal/expired.sst"), b"payload".to_vec().into())
+            .await
+            .is_err());
+        let status = metrics.snapshot();
+        assert_eq!(status.outstanding_flushes, 0);
+        assert_eq!(status.durability_failures, 1);
+        assert_eq!(status.uploaded_bytes, 0);
+        assert_eq!(status.retained_segments, 0);
+    }
+
     #[tokio::test]
     async fn s3_metadata_rebuild_destroys_rebuilds_and_reopens_encrypted_candidate() {
         if env::var_os("VAULTICDB_TEST_S3_ENDPOINT").is_none() {
@@ -173,6 +320,8 @@ mod tests {
             database_path: "migration-test".to_owned(),
             coordination_store: object_store.clone(),
             object_store,
+            wal_object_store: None,
+            wal_metrics: None,
             encryption: EncryptionStatus {
                 enabled: true,
                 algorithm: "AES-256-GCM",
@@ -190,6 +339,8 @@ mod tests {
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
+            wal_target: "inherited",
+            wal_durability: "inherited",
         };
         storage.store_master_key(b"repository-key").await.unwrap();
         let digest = "ab".repeat(32);
@@ -250,12 +401,19 @@ mod tests {
             .await
             .is_err());
 
-        let db = Db::open("epoch-test", object_store.clone()).await.unwrap();
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("epoch-test", object_store.clone())
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
         let storage = Storage {
             database: RwLock::new(Database::Writer(db)),
             database_path: "epoch-test".to_owned(),
             coordination_store: object_store.clone(),
             object_store,
+            wal_object_store: Some(wal_object_store),
+            wal_metrics: None,
             encryption: EncryptionStatus {
                 enabled: false,
                 algorithm: "none",
@@ -273,6 +431,8 @@ mod tests {
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
+            wal_target: "memory",
+            wal_durability: "local-process",
         };
         let error = storage.assert_current_writer_epoch().await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
@@ -328,6 +488,8 @@ mod tests {
             database_path: "generation-lifecycle".to_owned(),
             coordination_store: object_store.clone(),
             object_store,
+            wal_object_store: None,
+            wal_metrics: None,
             encryption: EncryptionStatus {
                 enabled: false,
                 algorithm: "none",
@@ -345,6 +507,8 @@ mod tests {
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(0),
+            wal_target: "inherited",
+            wal_durability: "inherited",
         };
         let diagnostic = "aa".repeat(32);
         let quarantined = storage

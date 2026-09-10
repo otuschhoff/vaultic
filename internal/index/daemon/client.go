@@ -57,6 +57,21 @@ type Options struct {
 	S3Region          string
 	S3Provider        string
 	S3BucketLookup    string
+	WALStore          string
+	WALDataDir        string
+	WALS3Bucket       string
+	WALS3Prefix       string
+	WALS3Endpoint     string
+	WALS3Region       string
+	WALS3Provider     string
+	WALS3BucketLookup string
+	WALRadosMonitors  string
+	WALRadosFSID      string
+	WALRadosPool      string
+	WALRadosNamespace string
+	WALRadosPrefix    string
+	WALRadosClient    string
+	WALRadosKey       string
 	EncryptionMode    string
 	PassphraseFile    string
 	AzureTokenFile    string
@@ -118,6 +133,7 @@ type Client struct {
 	options    Options
 	limits     Limits
 	encryption EncryptionInfo
+	wal        WALInfo
 }
 
 // EncryptionInfo describes the validated daemon metadata-encryption state.
@@ -128,6 +144,28 @@ type EncryptionInfo struct {
 	EnvelopeGeneration uint64
 	UnlockSlot         string
 	RecoveryUnlock     bool
+}
+
+// WALInfo describes the daemon's effective write-ahead-log placement.
+type WALInfo struct {
+	Target              string `json:"target"`
+	Durability          string `json:"durability"`
+	Separate            bool   `json:"separate"`
+	Encrypted           bool   `json:"encrypted"`
+	ReplayReady         bool   `json:"replay_ready"`
+	UploadedBytes       uint64 `json:"uploaded_bytes"`
+	OutstandingFlushes  uint64 `json:"outstanding_flushes"`
+	DurabilityFailures  uint64 `json:"durability_failures"`
+	LastFlushLatencyMS  uint64 `json:"last_flush_latency_ms"`
+	RetainedBytes       uint64 `json:"retained_bytes"`
+	RetainedSegments    uint64 `json:"retained_segments"`
+	OldestSegmentUnixMS uint64 `json:"oldest_segment_unix_ms"`
+	CleanupFailures     uint64 `json:"cleanup_failures"`
+}
+
+// WALInfo returns the validated, secret-free WAL capabilities.
+func (c *Client) WALInfo() WALInfo {
+	return c.wal
 }
 
 // KeySlotInfo is non-secret metadata describing one independent DEK wrapping.
@@ -291,6 +329,18 @@ func validateEnsureOptions(options Options) error {
 		options.ObjectStore != "s3" {
 		return fmt.Errorf("%w: unsupported object store %q", ErrUnavailable, options.ObjectStore)
 	}
+	if options.WALStore != "" && options.WALStore != "inherit" && options.WALStore != "local" &&
+		options.WALStore != "memory" && options.WALStore != "s3" && options.WALStore != "rados" {
+		return fmt.Errorf("%w: unsupported WAL store %q", ErrUnavailable, options.WALStore)
+	}
+	if options.WALStore == "s3" && options.WALS3Bucket == "" {
+		return fmt.Errorf("%w: WAL S3 bucket is not configured", ErrUnavailable)
+	}
+	if options.WALStore == "rados" && (options.WALRadosMonitors == "" || options.WALRadosFSID == "" ||
+		options.WALRadosPool == "" || options.WALRadosNamespace == "" || options.WALRadosPrefix == "" ||
+		options.WALRadosClient == "" || options.WALRadosKey == "") {
+		return fmt.Errorf("%w: WAL RADOS endpoint and CephX credentials are incomplete", ErrUnavailable)
+	}
 	for _, network := range options.TCPAllowlist {
 		if _, _, err := net.ParseCIDR(network); err != nil {
 			return fmt.Errorf("%w: invalid TCP allowlist entry %q: %w", ErrUnavailable, network, err)
@@ -365,6 +415,21 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		"VAULTICDB_S3_REGION":                  options.S3Region,
 		"VAULTICDB_S3_PROVIDER":                options.S3Provider,
 		"VAULTICDB_S3_BUCKET_LOOKUP":           options.S3BucketLookup,
+		"VAULTICDB_WAL_STORE":                  options.WALStore,
+		"VAULTICDB_WAL_DATA_DIR":               options.WALDataDir,
+		"VAULTICDB_WAL_S3_BUCKET":              options.WALS3Bucket,
+		"VAULTICDB_WAL_S3_PREFIX":              options.WALS3Prefix,
+		"VAULTICDB_WAL_S3_ENDPOINT":            options.WALS3Endpoint,
+		"VAULTICDB_WAL_S3_REGION":              options.WALS3Region,
+		"VAULTICDB_WAL_S3_PROVIDER":            options.WALS3Provider,
+		"VAULTICDB_WAL_S3_BUCKET_LOOKUP":       options.WALS3BucketLookup,
+		"VAULTICDB_WAL_RADOS_MONITORS":         options.WALRadosMonitors,
+		"VAULTICDB_WAL_RADOS_CLUSTER_FSID":     options.WALRadosFSID,
+		"VAULTICDB_WAL_RADOS_POOL":             options.WALRadosPool,
+		"VAULTICDB_WAL_RADOS_NAMESPACE":        options.WALRadosNamespace,
+		"VAULTICDB_WAL_RADOS_PREFIX":           options.WALRadosPrefix,
+		"VAULTICDB_WAL_RADOS_CLIENT":           options.WALRadosClient,
+		"VAULTICDB_WAL_RADOS_KEY":              options.WALRadosKey,
 		"VAULTICDB_ENCRYPTION":                 options.EncryptionMode,
 		"VAULTICDB_ENCRYPTION_PASSPHRASE_FILE": options.PassphraseFile,
 		"VAULTICDB_AZURE_TOKEN_FILE":           options.AzureTokenFile,
@@ -810,6 +875,15 @@ func (c *Client) validate(ctx context.Context) error {
 		Enabled: capabilities.GetEncryptionEnabled(), Algorithm: capabilities.GetEncryptionAlgorithm(),
 		ActiveDEKVersion: capabilities.GetActiveDekVersion(), EnvelopeGeneration: capabilities.GetEnvelopeGeneration(),
 		UnlockSlot: capabilities.GetUnlockSlot(), RecoveryUnlock: capabilities.GetRecoveryUnlock(),
+	}
+	c.wal = WALInfo{
+		Target: capabilities.GetWalTarget(), Durability: capabilities.GetWalDurability(),
+		Separate: capabilities.GetWalSeparate(), Encrypted: capabilities.GetWalEncrypted(),
+		ReplayReady:   capabilities.GetWalReplayReady(),
+		UploadedBytes: capabilities.GetWalUploadedBytes(), OutstandingFlushes: capabilities.GetWalOutstandingFlushes(),
+		DurabilityFailures: capabilities.GetWalDurabilityFailures(), LastFlushLatencyMS: capabilities.GetWalLastFlushLatencyMs(),
+		RetainedBytes: capabilities.GetWalRetainedBytes(), RetainedSegments: capabilities.GetWalRetainedSegments(),
+		OldestSegmentUnixMS: capabilities.GetWalOldestSegmentUnixMs(), CleanupFailures: capabilities.GetWalCleanupFailures(),
 	}
 	if (c.options.EncryptionMode == "required" || c.options.EncryptionMode == "initialize") && !c.encryption.Enabled {
 		return fmt.Errorf("daemon did not enable required metadata encryption")

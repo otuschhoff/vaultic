@@ -200,6 +200,10 @@ impl KeyManager {
         Ok(Zeroizing::new(active.secret().to_vec()))
     }
 
+    pub fn wrap_object_store(&self, inner: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
+        Arc::new(self.encrypted.with_inner(inner))
+    }
+
     pub async fn publish_capsule_mirror(
         &self,
         capsule: &super::recovery_capsule::RecoveryCapsule,
@@ -512,6 +516,23 @@ pub fn configure_brokered(
         },
         None,
     ))
+}
+
+pub fn wrap_brokered_object_store(
+    repository_id: &str,
+    inner: Arc<dyn ObjectStore>,
+    dek: &[u8],
+    dek_version: u32,
+) -> Result<Arc<dyn ObjectStore>> {
+    let key: [u8; DEK_BYTES] = dek
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("brokered metadata DEK has an invalid length"))?;
+    Ok(Arc::new(EncryptedObjectStore::new(
+        inner,
+        repository_id,
+        vec![EncryptionKey::new(dek_version, key)],
+        dek_version,
+    )?))
 }
 
 fn enforce_recovery_acknowledgement(

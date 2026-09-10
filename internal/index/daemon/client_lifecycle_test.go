@@ -184,10 +184,15 @@ func TestPrepareDaemonCommand(t *testing.T) {
 func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTIC_UNRELATED_SECRET", "must-not-be-inherited")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3-credential")
+	t.Setenv("VAULTICDB_WAL_S3_ACCESS_KEY_ID", "wal-access-key")
+	t.Setenv("VAULTICDB_WAL_S3_SECRET_ACCESS_KEY", "wal-s3-credential")
+	t.Setenv("VAULTICDB_WAL_S3_SESSION_TOKEN", "wal-session-token")
+	t.Setenv("VAULTICDB_WAL_S3_ENDPOINT", "must-come-from-options")
 	t.Setenv("PATH", "/test/bin")
 
 	local := strings.Join(daemonEnvironment(Options{ObjectStore: "local"}), "\n")
-	if strings.Contains(local, "VAULTIC_UNRELATED_SECRET") || strings.Contains(local, "AWS_SECRET_ACCESS_KEY") {
+	if strings.Contains(local, "VAULTIC_UNRELATED_SECRET") || strings.Contains(local, "AWS_SECRET_ACCESS_KEY") ||
+		strings.Contains(local, "VAULTICDB_WAL_S3_SECRET_ACCESS_KEY") {
 		t.Fatalf("local daemon inherited a secret-bearing environment: %s", local)
 	}
 	if !strings.Contains(local, "PATH=/test/bin") {
@@ -197,6 +202,15 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	s3 := strings.Join(daemonEnvironment(Options{ObjectStore: "s3"}), "\n")
 	if strings.Contains(s3, "VAULTIC_UNRELATED_SECRET") || !strings.Contains(s3, "AWS_SECRET_ACCESS_KEY=s3-credential") {
 		t.Fatalf("S3 daemon environment is not credential-chain scoped: %s", s3)
+	}
+
+	walS3 := strings.Join(daemonEnvironment(Options{ObjectStore: "local", WALStore: "s3"}), "\n")
+	if strings.Contains(walS3, "VAULTIC_UNRELATED_SECRET") || strings.Contains(walS3, "AWS_SECRET_ACCESS_KEY") ||
+		strings.Contains(walS3, "VAULTICDB_WAL_S3_ENDPOINT") ||
+		!strings.Contains(walS3, "VAULTICDB_WAL_S3_ACCESS_KEY_ID=wal-access-key") ||
+		!strings.Contains(walS3, "VAULTICDB_WAL_S3_SECRET_ACCESS_KEY=wal-s3-credential") ||
+		!strings.Contains(walS3, "VAULTICDB_WAL_S3_SESSION_TOKEN=wal-session-token") {
+		t.Fatalf("WAL S3 daemon environment is not credential-chain scoped: %s", walS3)
 	}
 }
 

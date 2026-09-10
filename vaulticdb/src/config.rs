@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::storage::{
     BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, StorageConfig,
-    TopologySource,
+    TopologySource, WalStoreConfig,
 };
 use vaulticdb::encryption::envelope::{EncryptionConfig, EncryptionMode, ProviderCredentials};
 use vaulticdb::ids::RepositoryId;
@@ -194,6 +194,7 @@ fn storage_from_env() -> Result<StorageConfig> {
         .context("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS is too large")?;
     Ok(StorageConfig {
         object_store,
+        wal_store: wal_store_from_env()?,
         fencing_replica,
         metadata_rebuild_initialize,
         broker,
@@ -202,6 +203,59 @@ fn storage_from_env() -> Result<StorageConfig> {
         topology_source,
         topology_override_local,
     })
+}
+
+fn wal_store_from_env() -> Result<WalStoreConfig> {
+    let kind = env::var("VAULTICDB_WAL_STORE").unwrap_or_else(|_| "inherit".to_owned());
+    let store = match kind.as_str() {
+        "inherit" => return Ok(WalStoreConfig::Inherit),
+        "local" => ReplicaStoreConfig::Local {
+            root: env::var_os("VAULTICDB_WAL_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| env::temp_dir().join("vaulticdb").join("wal")),
+        },
+        "memory" => ReplicaStoreConfig::Memory,
+        "s3" => ReplicaStoreConfig::S3 {
+            bucket: env::var("VAULTICDB_WAL_S3_BUCKET")
+                .context("VAULTICDB_WAL_S3_BUCKET is required for S3 WAL storage")?,
+            prefix: optional_nonempty("VAULTICDB_WAL_S3_PREFIX")?,
+            endpoint: optional_nonempty("VAULTICDB_WAL_S3_ENDPOINT")?,
+            region: optional_nonempty("VAULTICDB_WAL_S3_REGION")?,
+            provider: optional_nonempty("VAULTICDB_WAL_S3_PROVIDER")?,
+            bucket_lookup: optional_nonempty("VAULTICDB_WAL_S3_BUCKET_LOOKUP")?,
+            access_key_id: env::var("VAULTICDB_WAL_S3_ACCESS_KEY_ID")
+                .ok()
+                .map(Zeroizing::new),
+            secret_access_key: env::var("VAULTICDB_WAL_S3_SECRET_ACCESS_KEY")
+                .ok()
+                .map(Zeroizing::new),
+            session_token: env::var("VAULTICDB_WAL_S3_SESSION_TOKEN")
+                .ok()
+                .map(Zeroizing::new),
+        },
+        "rados" => ReplicaStoreConfig::Rados {
+            monitors: env::var("VAULTICDB_WAL_RADOS_MONITORS")
+                .context("VAULTICDB_WAL_RADOS_MONITORS is required for RADOS WAL storage")?,
+            cluster_fsid: env::var("VAULTICDB_WAL_RADOS_CLUSTER_FSID")
+                .context("VAULTICDB_WAL_RADOS_CLUSTER_FSID is required for RADOS WAL storage")?,
+            pool: env::var("VAULTICDB_WAL_RADOS_POOL")
+                .context("VAULTICDB_WAL_RADOS_POOL is required for RADOS WAL storage")?,
+            namespace: env::var("VAULTICDB_WAL_RADOS_NAMESPACE")
+                .context("VAULTICDB_WAL_RADOS_NAMESPACE is required for RADOS WAL storage")?,
+            prefix: env::var("VAULTICDB_WAL_RADOS_PREFIX")
+                .context("VAULTICDB_WAL_RADOS_PREFIX is required for RADOS WAL storage")?,
+            client: env::var("VAULTICDB_WAL_RADOS_CLIENT")
+                .context("VAULTICDB_WAL_RADOS_CLIENT is required for RADOS WAL storage")?,
+            key: Zeroizing::new(
+                env::var("VAULTICDB_WAL_RADOS_KEY")
+                    .context("VAULTICDB_WAL_RADOS_KEY is required for RADOS WAL storage")?,
+            ),
+        },
+        value => bail!(
+            "unsupported VAULTICDB_WAL_STORE {value:?}; expected inherit, local, memory, s3, or rados"
+        ),
+    };
+    Ok(WalStoreConfig::Store(store))
 }
 
 fn object_store_from_env() -> Result<ObjectStoreConfig> {

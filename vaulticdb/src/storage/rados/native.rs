@@ -170,13 +170,24 @@ mod tests {
         assert!(matches!(denied.put("live-rust/denied", Bytes::from_static(b"denied"), WriteMode::Create), Err(DriverError::Other(_))));
 
         let store = std::sync::Arc::new(RadosStore::new(open(config()).expect("open SlateDB RADOS store"), "live-rust-db"));
+        let wal_store = std::sync::Arc::new(RadosStore::new(open(config()).expect("open SlateDB RADOS WAL store"), "live-rust-wal"));
         let database_path = format!("db-{}", rand::random::<u64>());
-        let database = Db::open(database_path.as_str(), store.clone()).await.expect("open SlateDB on RADOS");
+        let database = Db::builder(database_path.as_str(), store.clone())
+            .with_wal_object_store(wal_store.clone())
+            .build()
+            .await
+            .expect("open SlateDB on RADOS with separate WAL");
         let mut batch = WriteBatch::new();
         batch.put(b"phase27/key", b"phase27/value");
         database.write(batch).await.expect("write SlateDB value").await_durable().await.expect("durable SlateDB write");
         database.close().await.expect("close SlateDB writer");
-        let reader = DbReader::open(database_path.as_str(), store, DbReaderMode::FollowLatest, DbReaderOptions::default()).await.expect("reopen SlateDB reader");
+        let reader = DbReader::builder(database_path.as_str(), store)
+            .with_wal_object_store(wal_store)
+            .with_reader_mode(DbReaderMode::FollowLatest)
+            .with_options(DbReaderOptions::default())
+            .build()
+            .await
+            .expect("reopen SlateDB reader with separate RADOS WAL");
         assert_eq!(reader.get(b"phase27/key").await.expect("read reopened SlateDB value").as_deref(), Some(b"phase27/value".as_slice()));
         reader.close().await.expect("close SlateDB reader");
     }

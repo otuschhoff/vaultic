@@ -48,6 +48,21 @@ type indexDaemonOptions struct {
 	S3Region          string
 	S3Provider        string
 	S3BucketLookup    string
+	WALStore          string
+	WALDataDir        string
+	WALS3Bucket       string
+	WALS3Prefix       string
+	WALS3Endpoint     string
+	WALS3Region       string
+	WALS3Provider     string
+	WALS3BucketLookup string
+	WALRadosMonitors  string
+	WALRadosFSID      string
+	WALRadosPool      string
+	WALRadosNamespace string
+	WALRadosPrefix    string
+	WALRadosClient    string
+	WALRadosKeyFile   string
 	EncryptionMode    string
 	PassphraseFile    string
 	AzureTokenFile    string
@@ -98,6 +113,21 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.S3Region, "daemon-s3-region", "", "vaulticdb S3 signing region")
 	flags.StringVar(&options.S3Provider, "daemon-s3-provider", "", "vaulticdb S3 provider: generic, backblaze, or wasabi")
 	flags.StringVar(&options.S3BucketLookup, "daemon-s3-bucket-lookup", "", "vaulticdb S3 bucket lookup: auto, dns, or path")
+	flags.StringVar(&options.WALStore, "daemon-wal-store", "", "vaulticdb WAL store: inherit, local, s3, or rados")
+	flags.StringVar(&options.WALDataDir, "daemon-wal-data-dir", "", "local vaulticdb WAL directory")
+	flags.StringVar(&options.WALS3Bucket, "daemon-wal-s3-bucket", "", "vaulticdb WAL S3 bucket")
+	flags.StringVar(&options.WALS3Prefix, "daemon-wal-s3-prefix", "", "vaulticdb WAL S3 key prefix")
+	flags.StringVar(&options.WALS3Endpoint, "daemon-wal-s3-endpoint", "", "vaulticdb WAL S3 endpoint URL")
+	flags.StringVar(&options.WALS3Region, "daemon-wal-s3-region", "", "vaulticdb WAL S3 signing region")
+	flags.StringVar(&options.WALS3Provider, "daemon-wal-s3-provider", "", "vaulticdb WAL S3 provider profile")
+	flags.StringVar(&options.WALS3BucketLookup, "daemon-wal-s3-bucket-lookup", "", "vaulticdb WAL S3 bucket lookup")
+	flags.StringVar(&options.WALRadosMonitors, "daemon-wal-rados-monitors", "", "vaulticdb WAL Ceph monitor endpoints")
+	flags.StringVar(&options.WALRadosFSID, "daemon-wal-rados-fsid", "", "vaulticdb WAL Ceph cluster FSID")
+	flags.StringVar(&options.WALRadosPool, "daemon-wal-rados-pool", "", "vaulticdb WAL Ceph pool")
+	flags.StringVar(&options.WALRadosNamespace, "daemon-wal-rados-namespace", "", "vaulticdb WAL Ceph namespace")
+	flags.StringVar(&options.WALRadosPrefix, "daemon-wal-rados-prefix", "", "vaulticdb WAL RADOS object prefix")
+	flags.StringVar(&options.WALRadosClient, "daemon-wal-rados-client", "", "vaulticdb WAL CephX client identity")
+	flags.StringVar(&options.WALRadosKeyFile, "daemon-wal-rados-key-file", "", "protected file containing the vaulticdb WAL CephX key")
 	flags.StringVar(&options.EncryptionMode, "metadata-encryption", "", "metadata encryption mode: off, required, or initialize")
 	flags.StringVar(&options.PassphraseFile, "metadata-recovery-passphrase-file", "", "file containing the metadata recovery passphrase")
 	flags.StringVar(&options.AzureTokenFile, "metadata-azure-token-file", "", "protected Azure Key Vault bearer-token file")
@@ -150,6 +180,18 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		}
 		authToken = string(value)
 	}
+	var walRadosKey string
+	if options.WALRadosKeyFile != "" {
+		value, err := readProtectedBinary(options.WALRadosKeyFile, "vaulticdb WAL CephX key", true)
+		if err != nil {
+			return daemon.Options{}, err
+		}
+		defer clear(value)
+		walRadosKey = strings.TrimSpace(string(value))
+		if walRadosKey == "" {
+			return daemon.Options{}, errors.New("vaulticdb WAL CephX key is empty")
+		}
+	}
 	config := daemon.Options{
 		Socket: options.Socket, TCPAddress: options.TCPAddress, TCPAllowlist: options.TCPAllowlist,
 		AuthToken: authToken, RepositoryID: repositoryID, DataDir: options.DataDir,
@@ -157,6 +199,14 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		ObjectStore: options.ObjectStore, S3Bucket: options.S3Bucket, S3Prefix: options.S3Prefix,
 		S3Endpoint: options.S3Endpoint, S3Region: options.S3Region,
 		S3Provider: options.S3Provider, S3BucketLookup: options.S3BucketLookup,
+		WALStore: options.WALStore, WALDataDir: options.WALDataDir,
+		WALS3Bucket: options.WALS3Bucket, WALS3Prefix: options.WALS3Prefix,
+		WALS3Endpoint: options.WALS3Endpoint, WALS3Region: options.WALS3Region,
+		WALS3Provider: options.WALS3Provider, WALS3BucketLookup: options.WALS3BucketLookup,
+		WALRadosMonitors: options.WALRadosMonitors, WALRadosFSID: options.WALRadosFSID,
+		WALRadosPool: options.WALRadosPool, WALRadosNamespace: options.WALRadosNamespace,
+		WALRadosPrefix: options.WALRadosPrefix, WALRadosClient: options.WALRadosClient,
+		WALRadosKey:    walRadosKey,
 		EncryptionMode: options.EncryptionMode, PassphraseFile: options.PassphraseFile,
 		AzureTokenFile: options.AzureTokenFile,
 		GCPTokenFile:   options.GCPTokenFile,

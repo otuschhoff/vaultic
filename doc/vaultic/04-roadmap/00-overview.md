@@ -51,7 +51,12 @@ commit series so it can be reviewed or reverted independently.
 | 30 | [Vaultic best-effort read-cache tier](phase-30-vaultic-best-effort-read-cache-tier.md) | design |
 | 31 | [Read-only NFSv3 snapshot server](phase-31-read-only-nfsv3-snapshot-server.md) | design |
 | 32 | [Operational monitoring and bounded metrics export](phase-32-operational-monitoring-and-metrics-export.md) | design |
-| 33 | [Remote principals and brokered VaulticDB access tickets](phase-33-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 33 | [Writable FUSE and durable writeback](phase-33-writable-fuse-and-durable-writeback.md) | design |
+| 34 | [Writable NFSv3 workspace exports](phase-34-writable-nfsv3-exports.md) | design |
+| 35 | [NFSv3 locking and recovery](phase-35-nfsv3-locking-and-recovery.md) | design |
+| 36 | [NFS server-side group authorization](phase-36-nfs-server-side-group-authorization.md) | design |
+| 37 | [Multi-server writable NFS availability research](phase-37-multi-server-nfs-ha-research.md) | research planned |
+| 38 | [Remote principals and brokered VaulticDB access tickets](phase-38-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
 
 ## Supporting plans
 

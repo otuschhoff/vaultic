@@ -5,11 +5,44 @@ mod tests {
     use super::*;
     use futures_util::TryStreamExt;
     use slatedb::object_store::{memory::InMemory, ObjectStoreExt};
+    use slatedb::{Db, WriteBatch};
 
     fn store(inner: Arc<dyn ObjectStore>, repository: &str) -> EncryptedObjectStore {
         EncryptedObjectStore::new(inner, repository, vec![EncryptionKey::new(1, [7; 32])], 1)
             .unwrap()
             .with_chunk_size(16)
+    }
+
+    #[tokio::test]
+    async fn separate_slatedb_wal_is_encrypted_at_rest() {
+        let main: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let raw_wal: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let template = store(main.clone(), "repo-a");
+        let encrypted_main: Arc<dyn ObjectStore> = Arc::new(template.clone());
+        let encrypted_wal: Arc<dyn ObjectStore> = Arc::new(template.with_inner(raw_wal.clone()));
+        let db = Db::builder("encrypted-wal", encrypted_main)
+            .with_wal_object_store(encrypted_wal)
+            .build()
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(b"plaintext-key", b"plaintext-value");
+        db.write(batch).await.unwrap().await_durable().await.unwrap();
+
+        let objects = raw_wal.list(None).try_collect::<Vec<_>>().await.unwrap();
+        assert!(!objects.is_empty());
+        for object in objects {
+            let raw = raw_wal
+                .get(&object.location)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            assert!(!raw.windows(b"plaintext-key".len()).any(|window| window == b"plaintext-key"));
+            assert!(!raw.windows(b"plaintext-value".len()).any(|window| window == b"plaintext-value"));
+        }
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

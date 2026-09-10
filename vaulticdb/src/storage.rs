@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -29,7 +29,7 @@ use slatedb::{
         prefix::PrefixStore,
         CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
         ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-        UpdateVersion,
+        UpdateVersion, UploadPart,
     },
     Db, DbIterator, DbReader, DbReaderMode, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
 };
@@ -62,6 +62,7 @@ const IDEMPOTENCY_PREFIX: &[u8] = b"meta:idempotency:";
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const WRITER_EPOCH_PREFIX: &str = "_vaultic/writer-epochs";
 const ACTIVE_WRITER_PATH: &str = "_vaultic/active-writer";
+const WAL_TARGET_PATH: &str = "_vaultic/wal-target-v1";
 const ACTIVE_GENERATION_PATH: &str = "_vaultic/metadata-authority";
 const GENERATION_DECISION_PREFIX: &str = "_vaultic/metadata-authority-decisions";
 
@@ -110,6 +111,8 @@ pub(crate) struct Storage {
     database: RwLock<Database>,
     database_path: String,
     object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    wal_metrics: Option<Arc<WalMetrics>>,
     coordination_store: Arc<dyn ObjectStore>,
     encryption: EncryptionStatus,
     key_manager: Option<Arc<KeyManager>>,
@@ -120,6 +123,8 @@ pub(crate) struct Storage {
     credential_manager: Option<StorageCredentialManager>,
     broker_lease_metadata: Option<BrokerLeaseMetadata>,
     writer_epoch: AtomicU64,
+    wal_target: &'static str,
+    wal_durability: &'static str,
 }
 
 struct BrokerLeaseMetadata {
@@ -157,6 +162,7 @@ impl StorageCredentialManager {
 #[derive(Debug)]
 pub(crate) struct StorageConfig {
     pub(crate) object_store: ObjectStoreConfig,
+    pub(crate) wal_store: WalStoreConfig,
     pub(crate) fencing_replica: Option<String>,
     pub(crate) metadata_rebuild_initialize: bool,
     pub(crate) broker: Option<BrokerLeaseConfig>,
@@ -164,6 +170,53 @@ pub(crate) struct StorageConfig {
     pub(crate) transaction_idle_timeout_ms: u64,
     pub(crate) topology_source: TopologySource,
     pub(crate) topology_override_local: Option<(String, PathBuf)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum WalStoreConfig {
+    Inherit,
+    Store(ReplicaStoreConfig),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WalStatus {
+    pub(crate) uploaded_bytes: u64,
+    pub(crate) outstanding_flushes: u64,
+    pub(crate) durability_failures: u64,
+    pub(crate) last_flush_latency_ms: u64,
+    pub(crate) retained_bytes: u64,
+    pub(crate) retained_segments: u64,
+    pub(crate) oldest_segment_unix_ms: u64,
+    pub(crate) cleanup_failures: u64,
+}
+
+async fn open_writer(
+    path: &str,
+    object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+) -> Result<Db> {
+    let mut builder = Db::builder(path, object_store);
+    if let Some(wal_store) = wal_object_store {
+        builder = builder.with_wal_object_store(wal_store);
+    }
+    builder.build().await.map_err(Into::into)
+}
+
+async fn open_reader(
+    path: &str,
+    object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+) -> Result<DbReader> {
+    let mut builder = DbReader::builder(path, object_store)
+        .with_reader_mode(DbReaderMode::FollowLatest)
+        .with_options(DbReaderOptions {
+            skip_wal_replay: false,
+            ..Default::default()
+        });
+    if let Some(wal_store) = wal_object_store {
+        builder = builder.with_wal_object_store(wal_store);
+    }
+    builder.build().await.map_err(Into::into)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +231,7 @@ async fn storage_from_capsule(
     local_override: Option<&(String, PathBuf)>,
 ) -> Result<(
     ObjectStoreConfig,
+    WalStoreConfig,
     Option<String>,
     Vec<BrokerLeaseConnection>,
 )> {
@@ -391,6 +445,111 @@ async fn storage_from_capsule(
     if local_override.is_some() && !override_applied {
         bail!("topology override does not select a local metadata replica");
     }
+    let wal_store = match &topology.wal_target {
+        None => WalStoreConfig::Inherit,
+        Some(target) => {
+            let mut credential = if target.credential_policy.is_some() {
+                let (lease, encoded) = acquire_payload_lease(
+                    &socket,
+                    &broker.release_manifest,
+                    "credential-lease",
+                    None,
+                    Some(("wal", "storage-maintain")),
+                    broker.storage_token_ttl,
+                )
+                .await?;
+                let credential: Credential = serde_json::from_slice(encoded.as_slice())
+                    .context("decode credential lease for WAL target")?;
+                credential.validate()?;
+                leases.push(lease);
+                Some(credential)
+            } else {
+                None
+            };
+            let endpoint = |name: &str| -> Result<String> {
+                target
+                    .endpoint
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .with_context(|| format!("WAL target is missing endpoint {name:?}"))
+            };
+            let optional_endpoint = |name: &str| {
+                target
+                    .endpoint
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            };
+            let store = match target.provider {
+                Provider::Local => ReplicaStoreConfig::Local {
+                    root: PathBuf::from(endpoint("data_dir")?),
+                },
+                Provider::S3 => {
+                    let (access_key_id, secret_access_key, session_token) =
+                        match credential.as_mut() {
+                            Some(value)
+                                if matches!(
+                                    value.kind,
+                                    CredentialKind::AwsStatic
+                                        | CredentialKind::S3Static
+                                        | CredentialKind::S3Session
+                                ) =>
+                            {
+                                (
+                                    value.access_key_id.take().map(Zeroizing::new),
+                                    value.secret_access_key.take().map(Zeroizing::new),
+                                    value.session_token.take().map(Zeroizing::new),
+                                )
+                            }
+                            Some(_) => bail!("WAL target requires an S3 credential"),
+                            None => (None, None, None),
+                        };
+                    ReplicaStoreConfig::S3 {
+                        bucket: endpoint("bucket")?,
+                        prefix: optional_endpoint("prefix"),
+                        endpoint: optional_endpoint("url"),
+                        region: optional_endpoint("region"),
+                        access_key_id,
+                        secret_access_key,
+                        session_token,
+                        provider: optional_endpoint("provider"),
+                        bucket_lookup: optional_endpoint("bucket_lookup"),
+                    }
+                }
+                Provider::Rados => {
+                    let (client, key) = match credential.as_mut() {
+                        Some(value) if value.kind == CredentialKind::CephxStatic => (
+                            value
+                                .client_id
+                                .take()
+                                .context("WAL CephX credential is missing its client identity")?,
+                            Zeroizing::new(
+                                value
+                                    .client_secret
+                                    .take()
+                                    .context("WAL CephX credential is missing its key")?,
+                            ),
+                        ),
+                        Some(_) => bail!("WAL target requires a CephX credential"),
+                        None => bail!("WAL target requires a CephX credential"),
+                    };
+                    ReplicaStoreConfig::Rados {
+                        monitors: endpoint("monitors")?,
+                        cluster_fsid: endpoint("cluster_fsid")?,
+                        pool: endpoint("pool")?,
+                        namespace: endpoint("namespace")?,
+                        prefix: endpoint("prefix")?,
+                        client,
+                        key,
+                    }
+                }
+                _ => bail!("unsupported WAL target provider"),
+            };
+            WalStoreConfig::Store(store)
+        }
+    };
     let fencing = match topology.metadata_replicas.mode {
         ReplicaMode::Local => None,
         ReplicaMode::Replicated => Some(topology.metadata_replicas.fencing.clone()),
@@ -411,7 +570,7 @@ async fn storage_from_capsule(
             .context("capsule topology has no local metadata replica")?,
         ReplicaMode::Replicated => ObjectStoreConfig::Replicated { replicas },
     };
-    Ok((store, fencing, leases))
+    Ok((store, wal_store, fencing, leases))
 }
 
 fn current_unix_ms() -> u64 {
@@ -431,7 +590,9 @@ fn start_storage_credential_manager(
     initial_metadata_lease: BrokerLeaseConnection,
     initial_topology_leases: Vec<BrokerLeaseConnection>,
     renewable_object_store: Arc<RenewableObjectStore>,
+    renewable_wal_store: Option<Arc<RenewableObjectStore>>,
     coordination_store: Arc<RenewableObjectStore>,
+    wal_identity: String,
     initial_valid_until: u64,
 ) -> StorageCredentialManager {
     let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
@@ -468,9 +629,14 @@ fn start_storage_credential_manager(
                 "{{\"category\":\"auth\",\"component\":\"vaulticdb\",\"event\":\"storage_credential_renewal_attempted\"}}"
             );
             let renewed = async {
-                let (next_path, next_object_store, next_coordination_store, next_topology_leases) =
-                    if capsule_topology {
-                        let (next_config, next_fencing, next_topology_leases) =
+                let (
+                    next_path,
+                    next_object_store,
+                    next_wal_store,
+                    next_coordination_store,
+                    next_topology_leases,
+                ) = if capsule_topology {
+                        let (next_config, next_wal_config, next_fencing, next_topology_leases) =
                             storage_from_capsule(&repository_id, &broker, local_override.as_ref())
                                 .await?;
                         let (next_path, next_object_store) =
@@ -483,9 +649,19 @@ fn start_storage_credential_manager(
                             )?,
                             None => next_object_store.clone(),
                         };
+                        if wal_store_identity(&next_wal_config) != wal_identity {
+                            bail!("renewed topology changed the WAL target; drain and restart are required");
+                        }
+                        let next_wal_store = match &next_wal_config {
+                            WalStoreConfig::Inherit => None,
+                            WalStoreConfig::Store(config) => {
+                                Some(wal_object_store(&repository_id, config)?)
+                            }
+                        };
                         (
                             next_path,
                             next_object_store,
+                            next_wal_store,
                             next_coordination_store,
                             next_topology_leases,
                         )
@@ -493,6 +669,10 @@ fn start_storage_credential_manager(
                         (
                             database_path.clone(),
                             renewable_object_store.current(false)?,
+                            renewable_wal_store
+                                .as_ref()
+                                .map(|store| store.current(false))
+                                .transpose()?,
                             coordination_store.current(false)?,
                             Vec::new(),
                         )
@@ -520,6 +700,7 @@ fn start_storage_credential_manager(
                 let next_valid_until = std::cmp::min(credential_expiry, grace_expiry);
                 Ok::<_, anyhow::Error>((
                     next_object_store,
+                    next_wal_store,
                     next_coordination_store,
                     next_metadata_lease,
                     next_topology_leases,
@@ -531,6 +712,7 @@ fn start_storage_credential_manager(
             match renewed {
                 Ok((
                     next_object_store,
+                    next_wal_store,
                     next_coordination_store,
                     next_metadata_lease,
                     next_topology_leases,
@@ -542,6 +724,13 @@ fn start_storage_credential_manager(
                             next_valid_until,
                             broker.storage_token_ttl,
                         )
+                        .and_then(|()| match (&renewable_wal_store, next_wal_store) {
+                            (Some(current), Some(next)) => {
+                                current.replace(next, next_valid_until, broker.storage_token_ttl)
+                            }
+                            (None, None) => Ok(()),
+                            _ => bail!("renewed topology changed separate WAL configuration"),
+                        })
                         .and_then(|()| {
                             coordination_store.replace(
                                 next_coordination_store,
@@ -611,7 +800,7 @@ impl Database {
 
 impl Storage {
     pub(crate) async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
-        let (effective_store, effective_fencing, topology_leases) =
+        let (effective_store, effective_wal_store, effective_fencing, topology_leases) =
             if config.topology_source == TopologySource::Capsule {
                 let broker = config
                     .broker
@@ -626,30 +815,48 @@ impl Storage {
             } else {
                 (
                     config.object_store.clone(),
+                    config.wal_store.clone(),
                     config.fencing_replica.clone(),
                     Vec::new(),
                 )
             };
         let (path, raw_object_store) = object_store(repository_id, &effective_store)?;
+        let raw_control_store =
+            repository_control_store(&effective_store, &path, raw_object_store.clone());
+        let raw_wal_object_store = match &effective_wal_store {
+            WalStoreConfig::Inherit => None,
+            WalStoreConfig::Store(config) => Some(wal_object_store(repository_id, config)?),
+        };
         let raw_coordination_store = match &effective_fencing {
             Some(replica) => replicated_replica_store(
                 &effective_store,
                 replica,
                 &crate::repository_key(repository_id),
             )?,
-            None => raw_object_store.clone(),
+            None => raw_control_store.clone(),
         };
+        let metadata_exists =
+            metadata_store_has_database_objects(raw_control_store.as_ref()).await?;
         let recovery_initialize = config.metadata_rebuild_initialize;
-        if recovery_initialize
-            && metadata_store_has_database_objects(raw_object_store.as_ref()).await?
-        {
+        if recovery_initialize && metadata_exists {
             bail!("metadata rebuild initialization requires an empty candidate metadata store");
         }
+        ensure_wal_target_identity(
+            raw_control_store.as_ref(),
+            &wal_store_identity(&effective_wal_store),
+            metadata_exists,
+        )
+        .await?;
         let mut credential_manager = None;
         let mut broker_lease_metadata = None;
-        let (object_store, coordination_store, encryption, key_manager) = if let Some(broker) =
-            &config.broker
-        {
+        let (
+            object_store,
+            wal_object_store,
+            coordination_store,
+            encryption,
+            key_manager,
+            wal_metrics,
+        ) = if let Some(broker) = &config.broker {
             let (lease, dek) = acquire_metadata_lease(
                 broker.socket.to_string_lossy().as_ref(),
                 &broker.release_manifest,
@@ -680,6 +887,20 @@ impl Storage {
                 valid_until,
                 broker.storage_token_ttl,
             ));
+            let renewable_wal_store = raw_wal_object_store.map(|store| {
+                Arc::new(RenewableObjectStore::new(
+                    store,
+                    valid_until,
+                    broker.storage_token_ttl,
+                ))
+            });
+            let (monitored_wal_store, wal_metrics) = match &renewable_wal_store {
+                Some(store) => {
+                    let (store, metrics) = monitored_wal_store(store.clone()).await?;
+                    (Some(store), Some(metrics))
+                }
+                None => (None, None),
+            };
             let configured = envelope::configure_brokered(
                 repository_id,
                 renewable_object_store.clone(),
@@ -688,6 +909,15 @@ impl Storage {
                 lease.capsule_generation,
                 recovery_initialize,
             )?;
+            let encrypted_wal_store = match monitored_wal_store {
+                Some(store) => Some(envelope::wrap_brokered_object_store(
+                    repository_id,
+                    store,
+                    &dek,
+                    lease.key_version,
+                )?),
+                None => None,
+            };
             credential_manager = Some(start_storage_credential_manager(
                 repository_id.to_owned(),
                 path.clone(),
@@ -698,60 +928,80 @@ impl Storage {
                 lease,
                 topology_leases,
                 renewable_object_store,
+                renewable_wal_store,
                 renewable_coordination_store.clone(),
+                wal_store_identity(&effective_wal_store),
                 valid_until,
             ));
             (
                 configured.0,
+                encrypted_wal_store,
                 renewable_coordination_store as Arc<dyn ObjectStore>,
                 configured.1,
                 configured.2,
+                wal_metrics,
             )
         } else {
             let configured =
                 envelope::configure(repository_id, raw_object_store, &config.encryption).await?;
+            let (monitored_wal_store, wal_metrics) = match raw_wal_object_store {
+                Some(store) => {
+                    let (store, metrics) = monitored_wal_store(store).await?;
+                    (Some(store), Some(metrics))
+                }
+                None => (None, None),
+            };
+            let wal_object_store = match monitored_wal_store {
+                Some(store) if configured.1.enabled => Some(
+                    configured
+                        .2
+                        .as_ref()
+                        .context("metadata encryption key manager is unavailable")?
+                        .wrap_object_store(store),
+                ),
+                store => store,
+            };
             (
                 configured.0,
+                wal_object_store,
                 raw_coordination_store,
                 configured.1,
                 configured.2,
+                wal_metrics,
             )
         };
-        let (database, writer_epoch) =
-            match claim_writer_epoch(coordination_store.as_ref(), None).await? {
-                Some(epoch) => {
-                    let db = match Db::open(path.clone(), object_store.clone()).await {
-                        Ok(db) => db,
-                        Err(error) => {
-                            release_writer_claim(coordination_store.as_ref(), epoch)
-                                .await
-                                .context("release writer claim after database open failure")?;
-                            return Err(error).context("open SlateDB database");
-                        }
-                    };
-                    (Database::Writer(db), epoch)
-                }
-                None => (
-                    Database::Reader(
-                        DbReader::open(
-                            path.as_str(),
-                            object_store.clone(),
-                            DbReaderMode::FollowLatest,
-                            DbReaderOptions {
-                                skip_wal_replay: false,
-                                ..Default::default()
-                            },
-                        )
+        let (database, writer_epoch) = match claim_writer_epoch(coordination_store.as_ref(), None)
+            .await?
+        {
+            Some(epoch) => {
+                let db = match open_writer(&path, object_store.clone(), wal_object_store.clone())
+                    .await
+                {
+                    Ok(db) => db,
+                    Err(error) => {
+                        release_writer_claim(coordination_store.as_ref(), epoch)
+                            .await
+                            .context("release writer claim after database open failure")?;
+                        return Err(error).context("open SlateDB database");
+                    }
+                };
+                (Database::Writer(db), epoch)
+            }
+            None => (
+                Database::Reader(
+                    open_reader(&path, object_store.clone(), wal_object_store.clone())
                         .await
                         .context("open SlateDB database as non-fencing reader")?,
-                    ),
-                    latest_writer_epoch(coordination_store.as_ref()).await?,
                 ),
-            };
+                latest_writer_epoch(coordination_store.as_ref()).await?,
+            ),
+        };
         let storage = Self {
             database: RwLock::new(database),
             database_path: path,
             object_store,
+            wal_object_store,
+            wal_metrics,
             coordination_store,
             encryption,
             key_manager,
@@ -762,6 +1012,8 @@ impl Storage {
             credential_manager,
             broker_lease_metadata,
             writer_epoch: AtomicU64::new(writer_epoch),
+            wal_target: wal_store_kind(&effective_wal_store),
+            wal_durability: wal_store_durability(&effective_wal_store),
         };
         let initialize = async {
             storage.ensure_encryption_policy(repository_id).await?;
@@ -791,6 +1043,18 @@ impl Storage {
 
     pub(crate) fn encryption_status(&self) -> &EncryptionStatus {
         &self.encryption
+    }
+
+    pub(crate) fn wal_status(&self) -> (&str, &str, bool, bool, WalStatus) {
+        (
+            self.wal_target,
+            self.wal_durability,
+            self.wal_object_store.is_some(),
+            self.encryption.enabled,
+            self.wal_metrics
+                .as_ref()
+                .map_or_else(WalStatus::default, |metrics| metrics.snapshot()),
+        )
     }
 
     pub(crate) async fn writer_status_epoch(&self) -> (bool, u64) {
@@ -1064,14 +1328,10 @@ impl Storage {
         db.close()
             .await
             .context("close SlateDB writer before demotion")?;
-        let reader = DbReader::open(
+        let reader = open_reader(
             self.database_path.as_str(),
             self.object_store.clone(),
-            DbReaderMode::FollowLatest,
-            DbReaderOptions {
-                skip_wal_replay: false,
-                ..Default::default()
-            },
+            self.wal_object_store.clone(),
         )
         .await
         .context("open non-fencing SlateDB reader")?;
@@ -1101,9 +1361,13 @@ impl Storage {
             .close()
             .await
             .context("close SlateDB reader before promotion")?;
-        let db = Db::open(self.database_path.as_str(), self.object_store.clone())
-            .await
-            .context("open freshly fenced SlateDB writer")?;
+        let db = open_writer(
+            self.database_path.as_str(),
+            self.object_store.clone(),
+            self.wal_object_store.clone(),
+        )
+        .await
+        .context("open freshly fenced SlateDB writer")?;
         *database = Database::Writer(db);
         self.writer_epoch.store(epoch, Ordering::Release);
         Ok(epoch)
