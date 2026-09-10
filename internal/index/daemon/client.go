@@ -301,6 +301,21 @@ func Ensure(ctx context.Context, options Options) (*Client, error) {
 }
 
 func validateEnsureOptions(options Options) error {
+	if err := validateEncryptionOptions(options); err != nil {
+		return err
+	}
+	if err := validateStorageOptions(options); err != nil {
+		return err
+	}
+	for _, network := range options.TCPAllowlist {
+		if _, _, err := net.ParseCIDR(network); err != nil {
+			return fmt.Errorf("%w: invalid TCP allowlist entry %q: %w", ErrUnavailable, network, err)
+		}
+	}
+	return nil
+}
+
+func validateEncryptionOptions(options Options) error {
 	if options.EncryptionMode != "" && options.EncryptionMode != "off" && options.EncryptionMode != "required" &&
 		options.EncryptionMode != "initialize" {
 		return fmt.Errorf("%w: unsupported metadata encryption mode %q", ErrUnavailable, options.EncryptionMode)
@@ -322,6 +337,10 @@ func validateEnsureOptions(options Options) error {
 	if err := validateProtectedFiles(options); err != nil {
 		return err
 	}
+	return nil
+}
+
+func validateStorageOptions(options Options) error {
 	if options.ObjectStore == "s3" && options.S3Bucket == "" {
 		return fmt.Errorf("%w: S3 bucket is not configured", ErrUnavailable)
 	}
@@ -340,11 +359,6 @@ func validateEnsureOptions(options Options) error {
 		options.WALRadosPool == "" || options.WALRadosNamespace == "" || options.WALRadosPrefix == "" ||
 		options.WALRadosClient == "" || options.WALRadosKey == "") {
 		return fmt.Errorf("%w: WAL RADOS endpoint and CephX credentials are incomplete", ErrUnavailable)
-	}
-	for _, network := range options.TCPAllowlist {
-		if _, _, err := net.ParseCIDR(network); err != nil {
-			return fmt.Errorf("%w: invalid TCP allowlist entry %q: %w", ErrUnavailable, network, err)
-		}
 	}
 	return nil
 }

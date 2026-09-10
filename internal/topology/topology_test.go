@@ -360,9 +360,11 @@ func TestRADOSEndpointAndCredentialValidation(t *testing.T) {
 	backend := &document.PackBackends[0]
 	backend.Provider = ProviderRADOS
 	backend.Endpoint = map[string]any{
-		"monitors": "ceph-mon-a.example:3300,[2001:db8::1]:3300",
+		"monitors":     "ceph-mon-a.example:3300,[2001:db8::1]:3300",
 		"cluster_fsid": "2f525d6a-8f31-4f79-b731-82a6acb235f5",
-		"pool": "vaultic-data", "namespace": "repo-2", "prefix": "packs/",
+		"pool":         "vaultic-data",
+		"namespace":    "repo-2",
+		"prefix":       "packs/",
 	}
 	document.Credentials["cred:archive"] = Credential{
 		Kind: CredentialCephXStatic, ClientID: "client.vaultic-repo-2", ClientSecret: "AQB-secret",
@@ -371,9 +373,9 @@ func TestRADOSEndpointAndCredentialValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for field, value := range map[string]string{
-		"monitors": "https://ceph-mon-a.example:3300",
+		"monitors":     "https://ceph-mon-a.example:3300",
 		"cluster_fsid": "ceph",
-		"pool": "../other", "namespace": "other/repo", "prefix": "/packs",
+		"pool":         "../other", "namespace": "other/repo", "prefix": "/packs",
 	} {
 		original := backend.Endpoint[field]
 		backend.Endpoint[field] = value

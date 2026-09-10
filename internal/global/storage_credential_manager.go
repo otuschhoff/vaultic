@@ -196,9 +196,15 @@ type storageCredentialManager struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	closeOnce   sync.Once
+	closeCtx    context.Context
 }
 
-func newStorageCredentialManager(client *indexbroker.Client, options Options, printer vaultic.Printer) (*storageCredentialManager, error) {
+func newStorageCredentialManager(
+	ctx context.Context,
+	client *indexbroker.Client,
+	options Options,
+	printer vaultic.Printer,
+) (*storageCredentialManager, error) {
 	ttl, margin, grace, err := storageCredentialLifetime(options)
 	if err != nil {
 		return nil, err
@@ -206,7 +212,7 @@ func newStorageCredentialManager(client *indexbroker.Client, options Options, pr
 	options.StorageTokenTTL = ttl
 	return &storageCredentialManager{
 		client: client, options: options, printer: printer, renewMargin: margin,
-		outageGrace: grace, done: make(chan struct{}),
+		outageGrace: grace, done: make(chan struct{}), closeCtx: context.WithoutCancel(ctx),
 	}, nil
 }
 
@@ -224,8 +230,8 @@ func (m *storageCredentialManager) nextRenewal(expiresAt, contactedAt time.Time)
 	return graceRenewal
 }
 
-func (m *storageCredentialManager) start() {
-	ctx, cancel := context.WithCancel(context.Background())
+func (m *storageCredentialManager) start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	go m.run(ctx)
 }
@@ -262,27 +268,9 @@ func (m *storageCredentialManager) renew(ctx context.Context, slot *storageCrede
 		m.reconnect(ctx)
 	}
 	if err == nil {
-		var next backend.Backend
-		next, _, err = openStructuredBackend(ctx, m.options, m.printer, slot.declared, leased.credential)
+		err = m.activateRenewedCredential(ctx, slot, leased)
 		if err == nil {
-			validUntil := leased.expiresAt
-			if graceUntil := time.Now().Add(m.outageGrace); graceUntil.Before(validUntil) {
-				validUntil = graceUntil
-			}
-			var previous backend.Backend
-			previous, err = slot.backend.swap(next, validUntil, m.options.StorageTokenTTL)
-			if err == nil {
-				oldLeaseID := slot.leaseID
-				slot.leaseID = leased.leaseID
-				slot.expiresAt = leased.expiresAt
-				slot.nextAttempt = m.nextRenewal(leased.expiresAt, time.Now())
-				slot.failures = 0
-				_ = previous.Close()                       // The replacement is active; stale client cleanup is best effort.
-				_ = m.client.ReleaseLease(ctx, oldLeaseID) // The replacement lease is active; old lease cleanup is best effort.
-				observability.EmitBestEffort(ctx, storageCredentialEvent(observability.Notice, "storage credential renewed", slot, &leased))
-				return
-			}
-			_ = next.Close() // Preserve the swap error; unused replacement cleanup is best effort.
+			return
 		}
 		_ = m.client.ReleaseLease(ctx, leased.leaseID) // Preserve the renewal error; rejected lease cleanup is best effort.
 	}
@@ -303,6 +291,38 @@ func (m *storageCredentialManager) renew(ctx context.Context, slot *storageCrede
 	})
 }
 
+func (m *storageCredentialManager) activateRenewedCredential(
+	ctx context.Context,
+	slot *storageCredentialSlot,
+	leased leasedStorageCredential,
+) error {
+	next, _, err := openStructuredBackend(ctx, m.options, m.printer, slot.declared, leased.credential)
+	if err != nil {
+		return err
+	}
+	validUntil := leased.expiresAt
+	if graceUntil := time.Now().Add(m.outageGrace); graceUntil.Before(validUntil) {
+		validUntil = graceUntil
+	}
+	previous, err := slot.backend.swap(next, validUntil, m.options.StorageTokenTTL)
+	if err != nil {
+		_ = next.Close() // Preserve the swap error; unused replacement cleanup is best effort.
+		return err
+	}
+	oldLeaseID := slot.leaseID
+	slot.leaseID = leased.leaseID
+	slot.expiresAt = leased.expiresAt
+	slot.nextAttempt = m.nextRenewal(leased.expiresAt, time.Now())
+	slot.failures = 0
+	_ = previous.Close()                       // The replacement is active; stale client cleanup is best effort.
+	_ = m.client.ReleaseLease(ctx, oldLeaseID) // The replacement lease is active; old lease cleanup is best effort.
+	observability.EmitBestEffort(
+		ctx,
+		storageCredentialEvent(observability.Notice, "storage credential renewed", slot, &leased),
+	)
+	return nil
+}
+
 func (m *storageCredentialManager) reconnect(ctx context.Context) {
 	replacement, err := indexbroker.Dial(ctx, m.options.KeyBrokerSocket)
 	if err != nil {
@@ -313,14 +333,22 @@ func (m *storageCredentialManager) reconnect(ctx context.Context) {
 	_ = previous.Close() // The replacement connection is active; stale transport cleanup is best effort.
 }
 
-func storageCredentialEvent(severity observability.Severity, message string, slot *storageCredentialSlot, leased *leasedStorageCredential) observability.Event {
+func storageCredentialEvent(
+	severity observability.Severity,
+	message string,
+	slot *storageCredentialSlot,
+	leased *leasedStorageCredential,
+) observability.Event {
 	fields := map[string]any{"storage_target": slot.target, "storage_tier": slot.tier}
 	if leased != nil {
 		fields["lease_id"] = leased.leaseID
 		fields["expires_at"] = leased.expiresAt.UTC().Format(time.RFC3339)
 		fields["credential_source"] = leased.source
 	}
-	return observability.Event{Severity: severity, Category: observability.CategoryAuth, Component: "storage-credential-manager", Message: message, Fields: fields}
+	return observability.Event{
+		Severity: severity, Category: observability.CategoryAuth,
+		Component: "storage-credential-manager", Message: message, Fields: fields,
+	}
 }
 
 func (m *storageCredentialManager) Close() error {
@@ -331,7 +359,7 @@ func (m *storageCredentialManager) Close() error {
 			<-m.done
 		}
 		for _, slot := range m.slots {
-			if err := m.client.ReleaseLease(context.Background(), slot.leaseID); err != nil {
+			if err := m.client.ReleaseLease(m.closeCtx, slot.leaseID); err != nil {
 				result = errors.Join(result, fmt.Errorf("release storage credential lease: %w", err))
 			}
 		}

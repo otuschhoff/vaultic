@@ -478,39 +478,43 @@ func (replicas MetadataReplicas) validate(references map[string]struct{}) error 
 }
 
 func (credential Credential) Validate() error {
-	valid := false
-	switch credential.Kind {
-	case CredentialAWSStatic, CredentialS3Static:
-		valid = credential.AccessKeyID != "" && credential.SecretAccessKey != ""
-	case CredentialS3Session:
-		valid = credential.AccessKeyID != "" && credential.SecretAccessKey != "" &&
-			credential.SessionToken != "" && credential.ExpiresAt != ""
-	case CredentialCephXStatic:
-		valid = strings.HasPrefix(credential.ClientID, "client.") && len(credential.ClientID) > len("client.") &&
-			credential.ClientSecret != ""
-	case CredentialAzureSharedKey:
-		valid = credential.AccountName != "" && credential.AccountKey != ""
-	case CredentialAzureSAS:
-		valid = credential.SASToken != ""
-	case CredentialAzureEntraClientSecret:
-		valid = credential.TenantID != "" && credential.ClientID != "" &&
-			credential.ClientSecret != "" && credential.TokenURI != "" &&
-			len(credential.Scopes) == 1 && credential.Scopes[0] != ""
-	case CredentialGCPServiceAccountJSON:
-		valid = credential.ServiceAccountJSON != "" && json.Valid([]byte(credential.ServiceAccountJSON))
-	case CredentialGCPAccessToken:
-		valid = credential.AccessToken != "" && credential.ExpiresAt != ""
-	case CredentialOAuth2RefreshToken:
-		valid = credential.ClientID != "" && credential.ClientSecret != "" &&
-			credential.RefreshToken != "" && credential.TokenURI != "" &&
-			len(credential.Scopes) > 0 && !slices.Contains(credential.Scopes, "")
-	case CredentialNone:
-		valid = !credential.HasSecret()
-	}
-	if !valid {
+	if !credential.fieldsMatchKind() {
 		return fmt.Errorf("fields do not match credential kind")
 	}
 	return nil
+}
+
+func (credential Credential) fieldsMatchKind() bool {
+	switch credential.Kind {
+	case CredentialAWSStatic, CredentialS3Static:
+		return credential.AccessKeyID != "" && credential.SecretAccessKey != ""
+	case CredentialS3Session:
+		return credential.AccessKeyID != "" && credential.SecretAccessKey != "" &&
+			credential.SessionToken != "" && credential.ExpiresAt != ""
+	case CredentialCephXStatic:
+		return strings.HasPrefix(credential.ClientID, "client.") && len(credential.ClientID) > len("client.") &&
+			credential.ClientSecret != ""
+	case CredentialAzureSharedKey:
+		return credential.AccountName != "" && credential.AccountKey != ""
+	case CredentialAzureSAS:
+		return credential.SASToken != ""
+	case CredentialAzureEntraClientSecret:
+		return credential.TenantID != "" && credential.ClientID != "" &&
+			credential.ClientSecret != "" && credential.TokenURI != "" &&
+			len(credential.Scopes) == 1 && credential.Scopes[0] != ""
+	case CredentialGCPServiceAccountJSON:
+		return credential.ServiceAccountJSON != "" && json.Valid([]byte(credential.ServiceAccountJSON))
+	case CredentialGCPAccessToken:
+		return credential.AccessToken != "" && credential.ExpiresAt != ""
+	case CredentialOAuth2RefreshToken:
+		return credential.ClientID != "" && credential.ClientSecret != "" &&
+			credential.RefreshToken != "" && credential.TokenURI != "" &&
+			len(credential.Scopes) > 0 && !slices.Contains(credential.Scopes, "")
+	case CredentialNone:
+		return !credential.HasSecret()
+	default:
+		return false
+	}
 }
 
 func (credential Credential) HasSecret() bool {

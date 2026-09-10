@@ -81,7 +81,7 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 			_ = client.Close() // Preserve the topology-open error; connection cleanup is best effort.
 		}
 	}()
-	manager, err := newStorageCredentialManager(client, globalOptions, printer)
+	manager, err := newStorageCredentialManager(ctx, client, globalOptions, printer)
 	if err != nil {
 		return capsuleTopologyBackends{}, err
 	}
@@ -143,9 +143,12 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 		return capsuleTopologyBackends{}, err
 	}
 	opened = append(opened, primary)
-	manager.start()
+	manager.start(ctx)
 	managedPrimary := &credentialManagedBackend{Backend: primary, manager: manager}
-	return capsuleTopologyBackends{document: document, primary: managedPrimary, primaryURL: primaryURL, placements: placements, client: client, manager: manager}, nil
+	return capsuleTopologyBackends{
+		document: document, primary: managedPrimary, primaryURL: primaryURL,
+		placements: placements, client: client, manager: manager,
+	}, nil
 }
 
 type credentialManagedBackend struct {
@@ -294,21 +297,27 @@ func leaseTopologyStorageCredential(
 	defer clear(lease.Key)
 	defer func() {
 		if err != nil {
-			_ = client.ReleaseLease(context.Background(), lease.LeaseID) // Preserve validation errors; lease cleanup is best effort.
+			_ = client.ReleaseLease(context.WithoutCancel(ctx), lease.LeaseID) // Preserve validation errors; cleanup is best effort.
 		}
 	}()
 	if lease.ExpiresUnixMS <= uint64(time.Now().UnixMilli()) {
 		return leasedStorageCredential{}, fmt.Errorf("key broker returned an expired storage credential lease")
 	}
-	if lease.StorageTarget != storageTarget || lease.StorageTier != storageTier ||
-		lease.CredentialSource != "sts" && lease.CredentialSource != "azure-user-delegation" && lease.CredentialSource != "gcp-downscope" && lease.CredentialSource != "static" &&
-			lease.CredentialSource != "static-fallback" {
+	validSource := lease.CredentialSource == "sts" ||
+		lease.CredentialSource == "azure-user-delegation" ||
+		lease.CredentialSource == "gcp-downscope" ||
+		lease.CredentialSource == "static" ||
+		lease.CredentialSource == "static-fallback"
+	if lease.StorageTarget != storageTarget || lease.StorageTier != storageTier || !validSource {
 		return leasedStorageCredential{}, fmt.Errorf("key broker returned mismatched storage credential metadata")
 	}
 	if (lease.CredentialSource == "static" || lease.CredentialSource == "static-fallback") && lease.StaticGeneration == 0 {
 		return leasedStorageCredential{}, fmt.Errorf("key broker returned static credentials without a generation")
 	}
-	if (lease.CredentialSource == "sts" || lease.CredentialSource == "azure-user-delegation" || lease.CredentialSource == "gcp-downscope") && lease.ProviderExpiresAt == "" {
+	dynamicSource := lease.CredentialSource == "sts" ||
+		lease.CredentialSource == "azure-user-delegation" ||
+		lease.CredentialSource == "gcp-downscope"
+	if dynamicSource && lease.ProviderExpiresAt == "" {
 		return leasedStorageCredential{}, fmt.Errorf("key broker returned dynamic credentials without a provider expiry")
 	}
 	var credential topology.Credential

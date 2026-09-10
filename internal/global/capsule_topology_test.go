@@ -25,8 +25,18 @@ func TestStorageCredentialLifetime(t *testing.T) {
 		wantError  bool
 	}{
 		{name: "defaults", wantTTL: time.Hour, wantMargin: 20 * time.Minute, wantGrace: time.Hour},
-		{name: "computed margin", options: Options{StorageTokenTTL: 45 * time.Minute}, wantTTL: 45 * time.Minute, wantMargin: 20 * time.Minute, wantGrace: 45 * time.Minute},
-		{name: "explicit", options: Options{StorageTokenTTL: 30 * time.Minute, StorageTokenRenewMargin: 10 * time.Minute, BrokerOutageGrace: 25 * time.Minute}, wantTTL: 30 * time.Minute, wantMargin: 10 * time.Minute, wantGrace: 25 * time.Minute},
+		{
+			name: "computed margin", options: Options{StorageTokenTTL: 45 * time.Minute},
+			wantTTL: 45 * time.Minute, wantMargin: 20 * time.Minute, wantGrace: 45 * time.Minute,
+		},
+		{
+			name: "explicit",
+			options: Options{
+				StorageTokenTTL: 30 * time.Minute, StorageTokenRenewMargin: 10 * time.Minute,
+				BrokerOutageGrace: 25 * time.Minute,
+			},
+			wantTTL: 30 * time.Minute, wantMargin: 10 * time.Minute, wantGrace: 25 * time.Minute,
+		},
 		{name: "margin exceeds ttl", options: Options{StorageTokenTTL: 15 * time.Minute}, wantError: true},
 		{name: "ttl exceeds broker maximum", options: Options{StorageTokenTTL: 2 * time.Hour}, wantError: true},
 	}
@@ -64,7 +74,12 @@ func TestRenewableBackendStopsWritesBeforeReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	renewable := newRenewableBackend(storage, time.Now().Add(4*time.Minute), time.Hour)
-	if err := renewable.Save(ctx, backend.Handle{Type: backend.PackFile, Name: "new"}, backend.NewByteReader([]byte("data"), renewable.Hasher())); !errors.Is(err, errStorageCredentialExpired) {
+	err := renewable.Save(
+		ctx,
+		backend.Handle{Type: backend.PackFile, Name: "new"},
+		backend.NewByteReader([]byte("data"), renewable.Hasher()),
+	)
+	if !errors.Is(err, errStorageCredentialExpired) {
 		t.Fatalf("Save() error = %v, want credential safety-margin expiry", err)
 	}
 	if _, err := renewable.Stat(ctx, handle); err != nil {

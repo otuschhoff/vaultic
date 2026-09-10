@@ -2,6 +2,7 @@ package warmup
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,9 +28,8 @@ func TestWarmupDisabled(t *testing.T) {
 }
 
 func TestWarmupBatchIDs(t *testing.T) {
-	// use a command that appends the substituted %ids to a file we control
 	out := filepath.Join(t.TempDir(), "calls.txt")
-	opts := Options{Command: "echo %ids >> \"" + out + "\"", Batch: 2}
+	opts := Options{Command: warmupHelperCommand(t, out, "%ids"), Batch: 2}
 
 	r := New(opts, nil, nil)
 	handles := []backend.Handle{handle("aaaa"), handle("bbbb"), handle("cccc"), handle("dddd"), handle("eeee")}
@@ -45,8 +45,7 @@ func TestWarmupBatchIDs(t *testing.T) {
 
 func TestWarmupParallelPerID(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "calls.txt")
-	// %id (singular) -> one invocation per handle, up to Batch in parallel
-	opts := Options{Command: "echo %id >> \"" + out + "\"", Batch: 2}
+	opts := Options{Command: warmupHelperCommand(t, out, "%id"), Batch: 2}
 	r := New(opts, nil, nil)
 	handles := []backend.Handle{handle("aa"), handle("bb"), handle("cc")}
 	rtest.OK(t, r.Warmup(context.TODO(), handles, pathOf))
@@ -58,6 +57,47 @@ func TestWarmupParallelPerID(t *testing.T) {
 	for _, id := range []string{"aa", "bb", "cc"} {
 		rtest.Assert(t, strings.Contains(joined, id), "missing id %q in %v", id, lines)
 	}
+}
+
+func TestWarmupCommandHelper(t *testing.T) {
+	if os.Getenv("VAULTIC_WARMUP_HELPER") != "1" {
+		return
+	}
+	separator := -1
+	for index, argument := range os.Args {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 > len(os.Args) {
+		t.Fatal("warmup helper arguments are incomplete")
+	}
+	file, err := os.OpenFile(os.Args[separator+1], os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := fmt.Fprintln(file, strings.Join(os.Args[separator+2:], " ")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func warmupHelperCommand(t *testing.T, output, placeholder string) string {
+	t.Helper()
+	t.Setenv("VAULTIC_WARMUP_HELPER", "1")
+	command := shellQuote(os.Args[0]) + " -test.run=TestWarmupCommandHelper -- " + shellQuote(output) + " " + placeholder
+	if runtime.GOOS == "windows" {
+		return "call " + command
+	}
+	return command
+}
+
+func shellQuote(value string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func TestWarmupProgressProtocol(t *testing.T) {
