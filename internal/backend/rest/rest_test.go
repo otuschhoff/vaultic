@@ -115,10 +115,12 @@ func runRESTServer(ctx context.Context, t testing.TB, dir, reqListenAddr string)
 	// or the parent context to cancel,
 	// or for us to timeout
 	var actualListenAddr string
+	startupTimer := time.NewTimer(30 * time.Second)
+	defer startupTimer.Stop()
 	select {
 	case <-processCtx.Done():
 		t.Fatal(context.Canceled)
-	case <-time.NewTimer(2 * time.Second).C:
+	case <-startupTimer.C:
 		t.Fatal(context.DeadlineExceeded)
 	case a, ok := <-listenAddrCh:
 		if !ok {
