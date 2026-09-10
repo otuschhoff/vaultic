@@ -50,7 +50,8 @@ type progressMessage struct {
 
 // Runner runs a warm-up command for batches of pack handles.
 type Runner struct {
-	opts Options
+	opts    Options
+	command func(context.Context, string) *exec.Cmd
 	// progressFn is called with the cumulative number of warm packs per batch.
 	progressFn func(warm, total int)
 	// logFn receives non-JSON output lines of the warm-up program.
@@ -65,7 +66,7 @@ func New(opts Options, progressFn func(warm, total int), logFn func(msg string))
 	if logFn == nil {
 		logFn = func(string) {}
 	}
-	return &Runner{opts: opts, progressFn: progressFn, logFn: logFn}
+	return &Runner{opts: opts, command: shellCommand, progressFn: progressFn, logFn: logFn}
 }
 
 // Enabled reports whether a warm-up command is configured.
@@ -168,7 +169,7 @@ func (r *Runner) invoke(ctx context.Context, ids, paths []string) error {
 		cmdline = strings.ReplaceAll(cmdline, k, repl[k])
 	}
 
-	cmd := shellCommand(ctx, cmdline)
+	cmd := r.command(ctx, cmdline)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -218,7 +219,7 @@ func (r *Runner) wait(ctx context.Context, handles []backend.Handle, pathFor fun
 			paths = append(paths, pathFor(h))
 		}
 		cmdline := substitute(r.opts.WaitCommand, ids, paths)
-		cmd := shellCommand(ctx, cmdline)
+		cmd := r.command(ctx, cmdline)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return errors.Wrapf(err, "warm-up wait command failed: %s", strings.TrimSpace(string(out)))
 		}
