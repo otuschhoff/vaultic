@@ -38,8 +38,8 @@ impl Service {
     ) -> Result<Response<GenerationStatusResponse>, Status> {
         check_request(&self.state, &request, &request.get_ref().repository_id)?;
         check_context(request.get_ref().context.as_ref())?;
-        let authority = self
-            .storage
+        let storage = self.storage().await?;
+        let authority = storage
             .generation_authority(&request.get_ref().repository_id)
             .await
             .map_err(VaulticDbError::generation)
@@ -60,8 +60,8 @@ impl Service {
                 "metadata generation activation requires explicit approval",
             ));
         }
-        let authority = self
-            .storage
+        let storage = self.storage().await?;
+        let authority = storage
             .activate_generation(
                 &request.repository_id,
                 request.expected_active_generation,
@@ -89,8 +89,8 @@ impl Service {
                 "quarantine requires a proven healing-required classification",
             ));
         }
-        let authority = self
-            .storage
+        let storage = self.storage().await?;
+        let authority = storage
             .quarantine_generation(
                 &request.repository_id,
                 request.expected_active_generation,
@@ -115,8 +115,8 @@ impl Service {
                 "post-activation index check did not pass",
             ));
         }
-        let authority = self
-            .storage
+        let storage = self.storage().await?;
+        let authority = storage
             .verify_generation(
                 &request.repository_id,
                 request.expected_decision,
@@ -141,8 +141,8 @@ impl Service {
                 "metadata generation rollback requires separate acknowledgement",
             ));
         }
-        let authority = self
-            .storage
+        let storage = self.storage().await?;
+        let authority = storage
             .rollback_generation(
                 &request.repository_id,
                 request.expected_decision,
@@ -152,7 +152,7 @@ impl Service {
             .await
             .map_err(VaulticDbError::generation)
             .map_err(Status::from)?;
-        self.storage
+        storage
             .refresh_writer_fence()
             .await
             .map_err(VaulticDbError::generation)
@@ -173,8 +173,8 @@ impl Service {
                 "metadata generation retirement requires separate acknowledgement",
             ));
         }
-        let authority = self
-            .storage
+        let storage = self.storage().await?;
+        let authority = storage
             .retire_generation(
                 &request.repository_id,
                 request.expected_decision,

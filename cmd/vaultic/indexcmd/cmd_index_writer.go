@@ -1,7 +1,9 @@
 package indexcmd
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/global"
@@ -18,14 +20,54 @@ type indexWriterOptions struct {
 type writerPromoteOptions struct {
 	Reason              string
 	ForceTakeover       bool
-	ExpectedActiveEpoch uint64
+	ExpectedActiveEpoch string
+	Timeout             time.Duration
+}
+
+type writerStatusProvider interface {
+	WriterStatus(context.Context) (daemon.WriterStatus, error)
 }
 
 func (options writerPromoteOptions) Finalize() error {
-	if options.ForceTakeover && options.ExpectedActiveEpoch == 0 {
+	if options.ForceTakeover && options.ExpectedActiveEpoch == "" {
 		return fmt.Errorf("--force-takeover requires --expected-active-epoch")
 	}
+	if _, _, err := parseExpectedActiveEpoch(options.ExpectedActiveEpoch); err != nil {
+		return err
+	}
+	if options.Timeout <= 0 {
+		return fmt.Errorf("--timeout must be positive")
+	}
 	return nil
+}
+
+func parseExpectedActiveEpoch(value string) (uint64, bool, error) {
+	if value == "" {
+		return 0, false, nil
+	}
+	if value == "auto" {
+		return 0, true, nil
+	}
+	epoch, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || epoch == 0 {
+		return 0, false, fmt.Errorf("invalid --expected-active-epoch %q: use a positive integer or auto", value)
+	}
+	return epoch, false, nil
+}
+
+func (options writerPromoteOptions) resolveExpectedActiveEpoch(ctx context.Context, client writerStatusProvider) (uint64, error) {
+	epoch, automatic, err := parseExpectedActiveEpoch(options.ExpectedActiveEpoch)
+	if err != nil || !options.ForceTakeover || !automatic {
+		return epoch, err
+	}
+	status, err := client.WriterStatus(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("retrieve active writer epoch: %w", err)
+	}
+	if status.ObservedEpoch == 0 {
+		return 0, fmt.Errorf("cannot automatically select an expected active epoch: no active writer claim was observed")
+	}
+	return status.ObservedEpoch, nil
 }
 
 func newIndexWriterCommand(globalOptions *global.Options) *cobra.Command {
@@ -95,7 +137,11 @@ func newIndexWriterDemoteCommand(globalOptions *global.Options, options *indexWr
 }
 
 func newIndexWriterPromoteCommand(globalOptions *global.Options, options *indexWriterOptions) *cobra.Command {
-	promoteOptions := writerPromoteOptions{Reason: "operator request"}
+	promoteOptions := writerPromoteOptions{
+		Reason:              "operator request",
+		ExpectedActiveEpoch: "auto",
+		Timeout:             time.Hour,
+	}
 	command := &cobra.Command{
 		Use:               "promote",
 		Short:             "Acquire a freshly fenced writer epoch",
@@ -105,10 +151,16 @@ func newIndexWriterPromoteCommand(globalOptions *global.Options, options *indexW
 			return promoteOptions.Finalize()
 		},
 		RunE: func(command *cobra.Command, _ []string) error {
-			status, err := withDaemonSession(command.Context(), options.Daemon, options.RepositoryID,
+			ctx, cancel := context.WithTimeout(command.Context(), promoteOptions.Timeout)
+			defer cancel()
+			status, err := withDaemonSession(ctx, options.Daemon, options.RepositoryID,
 				func(client *daemon.Client) (daemon.WriterStatus, error) {
+					expectedActiveEpoch, err := promoteOptions.resolveExpectedActiveEpoch(ctx, client)
+					if err != nil {
+						return daemon.WriterStatus{}, err
+					}
 					return client.PromoteWriterWithTakeover(
-						command.Context(), promoteOptions.Reason, promoteOptions.ForceTakeover, promoteOptions.ExpectedActiveEpoch,
+						ctx, promoteOptions.Reason, promoteOptions.ForceTakeover, expectedActiveEpoch,
 					)
 				})
 			if err != nil {
@@ -120,11 +172,12 @@ func newIndexWriterPromoteCommand(globalOptions *global.Options, options *indexW
 	}
 	command.Flags().StringVar(&promoteOptions.Reason, "reason", "operator request", "auditable writer transition reason")
 	command.Flags().BoolVar(&promoteOptions.ForceTakeover, "force-takeover", false, "replace a crashed writer claim using an exact conditional update")
-	command.Flags().Uint64Var(
+	command.Flags().DurationVar(&promoteOptions.Timeout, "timeout", time.Hour, "maximum time to acquire the writer epoch and open SlateDB")
+	command.Flags().StringVar(
 		&promoteOptions.ExpectedActiveEpoch,
 		"expected-active-epoch",
-		0,
-		"active writer epoch observed before authorizing takeover",
+		"auto",
+		"active writer epoch observed before authorizing takeover, or auto to retrieve it",
 	)
 	return command
 }

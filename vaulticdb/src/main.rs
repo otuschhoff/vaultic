@@ -22,7 +22,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbReader, DbReaderMode, WriteBatch};
 use tokio::{
     net::{TcpListener, UnixListener},
-    sync::{mpsc, watch, Mutex},
+    sync::{mpsc, watch, Mutex, RwLock},
 };
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;
@@ -30,6 +30,7 @@ use vaulticdb::writer_role::{WriterRole as CoreWriterRole, WriterRoleState};
 
 mod config;
 mod error;
+mod lifecycle;
 mod replication;
 mod service;
 mod storage;
@@ -42,6 +43,7 @@ mod proto {
 }
 
 use config::{Config, TransportConfig};
+use lifecycle::{DaemonLifecycle, DaemonPhase};
 use proto::vaultic_db_server::VaulticDbServer;
 use service::{publish_capsule_without_database, unix_time_ms_i64, DaemonState, Service};
 use storage::Storage;

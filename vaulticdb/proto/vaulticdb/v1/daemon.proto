@@ -107,6 +107,9 @@ message HealthResponse {
   string repository_id = 4;
   string slate_db_revision = 5;
   bool ready = 6;
+  string state = 7;
+  string state_detail = 8;
+  int64 state_since_unix_ms = 9;
 }
 
 message CapabilitiesRequest {

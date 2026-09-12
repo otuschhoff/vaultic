@@ -20,7 +20,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slatedb::{
-    config::DbReaderOptions,
+    config::{DbReaderOptions, FlushOptions, FlushType},
     object_store::{
         aws::AmazonS3Builder,
         azure::{split_sas, MicrosoftAzureBuilder},
@@ -201,7 +201,13 @@ async fn open_writer(
     if let Some(wal_store) = wal_object_store {
         builder = builder.with_wal_object_store(wal_store);
     }
-    builder.build().await.map_err(Into::into)
+    let db = builder.build().await?;
+    db.flush_with_options(FlushOptions {
+        flush_type: FlushType::MemTable,
+    })
+    .await
+    .context("publish replayed SlateDB WAL")?;
+    Ok(db)
 }
 
 async fn open_reader(

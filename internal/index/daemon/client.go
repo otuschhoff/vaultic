@@ -37,6 +37,15 @@ const (
 
 var requestSequence atomic.Uint64
 
+type daemonNotReadyError struct {
+	state  string
+	detail string
+}
+
+func (err *daemonNotReadyError) Error() string {
+	return fmt.Sprintf("daemon is not ready: state=%q detail=%q", err.state, err.detail)
+}
+
 // Options controls how a vaultic process connects to or starts vaulticdb.
 type Options struct {
 	Socket            string
@@ -824,6 +833,10 @@ func retryDial(ctx context.Context, options Options) (*Client, error) {
 		if err == nil {
 			return client, nil
 		}
+		var lifecycleError *daemonNotReadyError
+		if errors.As(err, &lifecycleError) && lifecycleError.state == "failed" {
+			return nil, err
+		}
 		if time.Now().After(deadline) {
 			return nil, err
 		}
@@ -859,11 +872,15 @@ func (c *Client) validate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !health.GetReady() || health.GetProtocolVersion() != ProtocolVersion ||
-		health.GetSchemaVersion() != SchemaVersion {
+	if !health.GetReady() {
+		return &daemonNotReadyError{
+			state:  health.GetState(),
+			detail: health.GetStateDetail(),
+		}
+	}
+	if health.GetProtocolVersion() != ProtocolVersion || health.GetSchemaVersion() != SchemaVersion {
 		return fmt.Errorf(
-			"incompatible daemon: ready=%t protocol=%q schema=%q",
-			health.GetReady(),
+			"incompatible daemon: protocol=%q schema=%q",
 			health.GetProtocolVersion(),
 			health.GetSchemaVersion(),
 		)

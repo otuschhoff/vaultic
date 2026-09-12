@@ -1,10 +1,24 @@
 package indexcmd
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 )
+
+type stubWriterStatusProvider struct {
+	status daemon.WriterStatus
+	calls  int
+}
+
+func (provider *stubWriterStatusProvider) WriterStatus(context.Context) (daemon.WriterStatus, error) {
+	provider.calls++
+	return provider.status, nil
+}
 
 func TestStagingOptionsFinalize(t *testing.T) {
 	tests := []struct {
@@ -45,11 +59,85 @@ func TestStagingOptionsFinalize(t *testing.T) {
 }
 
 func TestWriterPromoteOptionsFinalize(t *testing.T) {
-	if err := (writerPromoteOptions{ForceTakeover: true}).Finalize(); err == nil {
+	if err := (writerPromoteOptions{ForceTakeover: true, Timeout: time.Minute}).Finalize(); err == nil {
 		t.Fatal("Finalize() accepted force takeover without an expected epoch")
 	}
-	if err := (writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: 1}).Finalize(); err != nil {
+	if err := (writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: "1"}).Finalize(); err == nil {
+		t.Fatal("Finalize() accepted a non-positive timeout")
+	}
+	if err := (writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: "invalid", Timeout: time.Minute}).Finalize(); err == nil {
+		t.Fatal("Finalize() accepted an invalid expected epoch")
+	}
+	if err := (writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: "1", Timeout: time.Minute}).Finalize(); err != nil {
 		t.Fatalf("Finalize() error = %v", err)
+	}
+	if err := (writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: "auto", Timeout: time.Minute}).Finalize(); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+}
+
+func TestParseExpectedActiveEpoch(t *testing.T) {
+	tests := []struct {
+		value     string
+		wantEpoch uint64
+		wantAuto  bool
+		wantErr   bool
+	}{
+		{value: ""},
+		{value: "42", wantEpoch: 42},
+		{value: "auto", wantAuto: true},
+		{value: "0", wantErr: true},
+		{value: "latest", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			epoch, automatic, err := parseExpectedActiveEpoch(test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("parseExpectedActiveEpoch(%q) error = %v, wantErr %t", test.value, err, test.wantErr)
+			}
+			if epoch != test.wantEpoch || automatic != test.wantAuto {
+				t.Fatalf("parseExpectedActiveEpoch(%q) = (%d, %t), want (%d, %t)", test.value, epoch, automatic, test.wantEpoch, test.wantAuto)
+			}
+		})
+	}
+}
+
+func TestResolveExpectedActiveEpoch(t *testing.T) {
+	provider := &stubWriterStatusProvider{status: daemon.WriterStatus{ObservedEpoch: 42}}
+	automatic := writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: "auto"}
+	epoch, err := automatic.resolveExpectedActiveEpoch(context.Background(), provider)
+	if err != nil {
+		t.Fatalf("resolveExpectedActiveEpoch() error = %v", err)
+	}
+	if epoch != 42 || provider.calls != 1 {
+		t.Fatalf("resolveExpectedActiveEpoch() = %d with %d status calls, want 42 with 1", epoch, provider.calls)
+	}
+
+	explicit := writerPromoteOptions{ForceTakeover: true, ExpectedActiveEpoch: "7"}
+	epoch, err = explicit.resolveExpectedActiveEpoch(context.Background(), provider)
+	if err != nil {
+		t.Fatalf("resolveExpectedActiveEpoch() error = %v", err)
+	}
+	if epoch != 7 || provider.calls != 1 {
+		t.Fatalf("resolveExpectedActiveEpoch() = %d with %d status calls, want 7 with 1", epoch, provider.calls)
+	}
+}
+
+func TestWriterPromoteCommandDefaults(t *testing.T) {
+	command := newIndexWriterPromoteCommand(&global.Options{}, &indexWriterOptions{})
+	expectedEpoch, err := command.Flags().GetString("expected-active-epoch")
+	if err != nil {
+		t.Fatalf("GetString(expected-active-epoch) error = %v", err)
+	}
+	if expectedEpoch != "auto" {
+		t.Fatalf("expected-active-epoch default = %q, want auto", expectedEpoch)
+	}
+	timeout, err := command.Flags().GetDuration("timeout")
+	if err != nil {
+		t.Fatalf("GetDuration(timeout) error = %v", err)
+	}
+	if timeout != time.Hour {
+		t.Fatalf("timeout default = %s, want 1h", timeout)
 	}
 }
 

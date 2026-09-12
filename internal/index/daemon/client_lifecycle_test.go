@@ -578,6 +578,9 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 	if health.GetReady() {
 		t.Fatal("daemon remained ready after drain")
 	}
+	if health.GetState() != "draining" {
+		t.Fatalf("daemon state after drain = %q, want draining", health.GetState())
+	}
 	if _, _, err := client.Get(context.Background(), []byte("after-drain"), ""); status.Code(err) != codes.Unavailable {
 		t.Fatalf("storage request after drain returned %v", err)
 	}

@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     error::VaulticDbError,
+    lifecycle::DaemonPhase,
     proto::{DemoteWriterRequest, PromoteWriterRequest, WriterStatusRequest, WriterStatusResponse},
 };
 use vaulticdb::writer_role::RoleError;
@@ -32,6 +33,7 @@ impl Service {
     ) -> Result<Response<WriterStatusResponse>, Status> {
         check_request(&self.state, &request, &request.get_ref().repository_id)?;
         check_context(request.get_ref().context.as_ref())?;
+        self.storage().await?;
         Ok(Response::new(self.writer_status_response().await))
     }
 
@@ -60,15 +62,17 @@ impl Service {
         check_request(&self.state, &request, &request.get_ref().repository_id)?;
         check_context(request.get_ref().context.as_ref())?;
         let _transition = self.state.writer_transition.lock().await;
+        let storage = self.storage().await?;
         let request = request.into_inner();
         let reason = request.reason;
         {
             let mut role = self.state.writer_role.lock().await;
-            role.begin_promotion(Instant::now(), reason)
+            role.begin_promotion(Instant::now(), reason.clone())
                 .map_err(role_error)?;
         }
-        let next_epoch = match self
-            .storage
+        self.transition_lifecycle(DaemonPhase::Promoting, reason)
+            .await?;
+        let next_epoch = match storage
             .promote(if request.force_takeover {
                 Some(request.expected_active_epoch)
             } else {
@@ -78,12 +82,14 @@ impl Service {
         {
             Ok(epoch) => epoch,
             Err(error) => {
-                let observed_epoch = self.storage.writer_status_epoch().await.1;
+                let observed_epoch = storage.writer_status_epoch().await.1;
                 self.state.writer_role.lock().await.fence(
                     observed_epoch,
                     Instant::now(),
                     "writer promotion failed",
                 );
+                self.transition_lifecycle(DaemonPhase::Fenced, "writer promotion failed")
+                    .await?;
                 return Err(Status::failed_precondition(format!(
                     "writer promotion failed: {error:#}"
                 )));
@@ -95,6 +101,8 @@ impl Service {
             .await
             .complete_promotion(next_epoch, Instant::now())
             .map_err(role_error)?;
+        self.transition_lifecycle(DaemonPhase::ReadWrite, "promotion complete")
+            .await?;
         *self.state.last_writer_activity.lock().await = Instant::now();
         Ok(Response::new(self.writer_status_response().await))
     }

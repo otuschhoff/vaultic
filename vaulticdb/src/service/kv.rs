@@ -86,10 +86,9 @@ impl Service {
     ) -> Result<Response<GetResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
         let request = request.into_inner();
+        let storage = self.storage().await?;
         Ok(Response::new(
-            self.storage
-                .get(&request.key, &request.transaction_id)
-                .await?,
+            storage.get(&request.key, &request.transaction_id).await?,
         ))
     }
 
@@ -102,10 +101,11 @@ impl Service {
             return Err(Status::resource_exhausted("multi-get item limit exceeded"));
         }
         let request = request.into_inner();
+        let storage = self.storage().await?;
         let mut results = Vec::with_capacity(request.keys.len());
         let mut response_bytes = 0usize;
         for key in request.keys {
-            let result = self.storage.get(&key, &request.transaction_id).await?;
+            let result = storage.get(&key, &request.transaction_id).await?;
             response_bytes = response_bytes
                 .checked_add(repeated_message_encoded_len(result.encoded_len()))
                 .ok_or_else(|| Status::resource_exhausted("multi-get response size overflow"))?;
@@ -126,8 +126,9 @@ impl Service {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
         validate_scan(request.get_ref())?;
         let request = request.into_inner();
+        let storage = self.storage().await?;
         Ok(Response::new(
-            self.storage
+            storage
                 .scan(
                     &request.prefix,
                     &request.after_key,

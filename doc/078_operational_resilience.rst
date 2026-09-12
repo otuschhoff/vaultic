@@ -1,6 +1,24 @@
 Operational resilience
 ======================
 
+Daemon lifecycle status
+-----------------------
+
+VaulticDB starts serving its gRPC endpoint immediately after the transport is
+bound, before SlateDB has necessarily finished opening. The ``Health`` response
+reports ``ready``, ``state``, ``state_detail``, and ``state_since_unix_ms`` so a
+supervisor can distinguish a live daemon that is loading storage from an
+unreachable daemon. Storage-dependent RPCs return ``Unavailable`` with the
+current lifecycle state until storage is ready.
+
+The complete state vocabulary is ``loading_storage``, ``read_only``,
+``read_write``, ``promoting``, ``demoting``, ``fenced``, ``draining``,
+``failed``, and ``stopping``. ``read_only``, ``read_write``, and ``fenced``
+report ``ready=true``; fenced instances remain reachable for inspection and
+controlled recovery while rejecting writes. A storage-open failure leaves the
+gRPC status endpoint available in ``failed`` state until the daemon is shut
+down, preserving the diagnostic in ``state_detail``.
+
 Writer ownership
 ----------------
 
@@ -23,8 +41,20 @@ writer cannot return, record the epoch shown by ``writer status``, and use the
 explicit conditional takeover::
 
     vaultic index writer promote --repository-id REPOSITORY_ID \
-      --force-takeover --expected-active-epoch EPOCH \
+        --force-takeover \
       --reason "confirmed failed host"
+
+    ``--expected-active-epoch`` defaults to ``auto``, which retrieves the observed
+    active epoch from the daemon immediately before requesting takeover. Promotion
+    still uses an exact conditional update and fails if the active object or epoch
+    changes between those operations. A positive integer can be supplied instead
+    when an operator must authorize a previously recorded epoch explicitly.
+
+Promotion opens SlateDB as the newly fenced writer before it returns. Large WAL
+    replays on remote filesystems can take significant time, so promotion defaults
+    to a one-hour timeout. A timeout after the active epoch advances is an uncertain
+    outcome: inspect the claim and daemon state instead of immediately issuing
+    another takeover.
 
 The takeover fails if the active object or epoch changed after inspection. It
 must not be used merely to resolve ordinary contention.
@@ -77,15 +107,13 @@ the recovery socket::
       status
 
 A stale claim reports a read-only role, current epoch zero, and a non-zero
-observed epoch. Use that exact observed value for the conditional takeover::
+observed epoch. Retrieve that value and use it for the conditional takeover::
 
-    export EPOCH=OBSERVED_EPOCH
     vaultic index writer \
       --repository-id "$REPOSITORY_ID" \
       --daemon-socket "$VAULTICDB_SOCKET" \
       promote \
       --force-takeover \
-      --expected-active-epoch "$EPOCH" \
       --reason "confirmed previous vaulticdb process terminated"
 
 Run ``writer status`` again and require a read-write role with matching current

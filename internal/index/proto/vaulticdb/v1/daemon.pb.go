@@ -1038,15 +1038,18 @@ func (x *HealthRequest) GetContext() *RequestContext {
 }
 
 type HealthResponse struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	DaemonId        string                 `protobuf:"bytes,1,opt,name=daemon_id,json=daemonId,proto3" json:"daemon_id,omitempty"`
-	ProtocolVersion string                 `protobuf:"bytes,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
-	SchemaVersion   string                 `protobuf:"bytes,3,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
-	RepositoryId    string                 `protobuf:"bytes,4,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
-	SlateDbRevision string                 `protobuf:"bytes,5,opt,name=slate_db_revision,json=slateDbRevision,proto3" json:"slate_db_revision,omitempty"`
-	Ready           bool                   `protobuf:"varint,6,opt,name=ready,proto3" json:"ready,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	DaemonId         string                 `protobuf:"bytes,1,opt,name=daemon_id,json=daemonId,proto3" json:"daemon_id,omitempty"`
+	ProtocolVersion  string                 `protobuf:"bytes,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	SchemaVersion    string                 `protobuf:"bytes,3,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	RepositoryId     string                 `protobuf:"bytes,4,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	SlateDbRevision  string                 `protobuf:"bytes,5,opt,name=slate_db_revision,json=slateDbRevision,proto3" json:"slate_db_revision,omitempty"`
+	Ready            bool                   `protobuf:"varint,6,opt,name=ready,proto3" json:"ready,omitempty"`
+	State            string                 `protobuf:"bytes,7,opt,name=state,proto3" json:"state,omitempty"`
+	StateDetail      string                 `protobuf:"bytes,8,opt,name=state_detail,json=stateDetail,proto3" json:"state_detail,omitempty"`
+	StateSinceUnixMs int64                  `protobuf:"varint,9,opt,name=state_since_unix_ms,json=stateSinceUnixMs,proto3" json:"state_since_unix_ms,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -1119,6 +1122,27 @@ func (x *HealthResponse) GetReady() bool {
 		return x.Ready
 	}
 	return false
+}
+
+func (x *HealthResponse) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetStateDetail() string {
+	if x != nil {
+		return x.StateDetail
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetStateSinceUnixMs() int64 {
+	if x != nil {
+		return x.StateSinceUnixMs
+	}
+	return 0
 }
 
 type CapabilitiesRequest struct {
@@ -4113,14 +4137,17 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\adurable\x18\x01 \x01(\bR\adurable\"l\n" +
 	"\rHealthRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
-	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xe6\x01\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xce\x02\n" +
 	"\x0eHealthResponse\x12\x1b\n" +
 	"\tdaemon_id\x18\x01 \x01(\tR\bdaemonId\x12)\n" +
 	"\x10protocol_version\x18\x02 \x01(\tR\x0fprotocolVersion\x12%\n" +
 	"\x0eschema_version\x18\x03 \x01(\tR\rschemaVersion\x12#\n" +
 	"\rrepository_id\x18\x04 \x01(\tR\frepositoryId\x12*\n" +
 	"\x11slate_db_revision\x18\x05 \x01(\tR\x0fslateDbRevision\x12\x14\n" +
-	"\x05ready\x18\x06 \x01(\bR\x05ready\"r\n" +
+	"\x05ready\x18\x06 \x01(\bR\x05ready\x12\x14\n" +
+	"\x05state\x18\a \x01(\tR\x05state\x12!\n" +
+	"\fstate_detail\x18\b \x01(\tR\vstateDetail\x12-\n" +
+	"\x13state_since_unix_ms\x18\t \x01(\x03R\x10stateSinceUnixMs\"r\n" +
 	"\x13CapabilitiesRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xdd\n" +

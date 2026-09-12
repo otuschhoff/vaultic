@@ -133,6 +133,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_writer_publishes_replayed_wal_for_readers() {
+        let main: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = format!("publish-replayed-wal-{}", rand::random::<u64>());
+        let db = Db::builder(path.as_str(), main.clone())
+            .with_wal_object_store(wal.clone())
+            .build()
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(b"replayed-key", b"replayed-value");
+        db.write(batch).await.unwrap().await_durable().await.unwrap();
+        db.close_with_options(slatedb::config::CloseOptions { flush_type: None })
+            .await
+            .unwrap();
+
+        let writer = open_writer(path.as_str(), main.clone(), Some(wal.clone()))
+            .await
+            .unwrap();
+        let reader = DbReader::builder(path.as_str(), main)
+            .with_wal_object_store(wal)
+            .with_reader_mode(DbReaderMode::FollowLatest)
+            .with_options(DbReaderOptions {
+                skip_wal_replay: true,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.get(b"replayed-key").await.unwrap().as_deref(),
+            Some(&b"replayed-value"[..])
+        );
+        reader.close().await.unwrap();
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn wal_metrics_report_expired_credential_failures() {
         let renewable = Arc::new(RenewableObjectStore::new(
             Arc::new(InMemory::new()),

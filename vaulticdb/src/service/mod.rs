@@ -13,7 +13,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use tokio::{sync::watch, sync::Mutex};
+use tokio::{sync::watch, sync::Mutex, sync::RwLock};
 use tonic::{Request, Response, Status};
 use vaulticdb::encryption;
 use vaulticdb::ids::RepositoryId;
@@ -21,6 +21,7 @@ use vaulticdb::ids::RepositoryId;
 use crate::{
     config::Config,
     error::VaulticDbError,
+    lifecycle::{DaemonLifecycle, DaemonPhase},
     proto::{
         self, vaultic_db_server::VaulticDb, ActivateGenerationRequest, AddCloudKeySlotRequest,
         AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest, CapabilitiesResponse,
@@ -64,9 +65,11 @@ pub(crate) struct DaemonState {
     pub(crate) unix_socket: bool,
     pub(crate) tcp_enabled: bool,
     pub(crate) draining: Arc<AtomicBool>,
+    pub(crate) lifecycle: Arc<Mutex<DaemonLifecycle>>,
     pub(crate) writer_role: Arc<Mutex<WriterRoleState>>,
     pub(crate) writer_transition: Arc<Mutex<()>>,
     pub(crate) last_writer_activity: Arc<Mutex<Instant>>,
+    pub(crate) minimum_writer_tenure: Duration,
     pub(crate) writer_idle_grace: Option<Duration>,
     pub(crate) writer_transition_timeout: Duration,
     pub(crate) clock_started: Instant,
@@ -77,7 +80,34 @@ pub(crate) struct DaemonState {
 pub(crate) struct Service {
     pub(crate) state: DaemonState,
     pub(crate) shutdown: watch::Sender<bool>,
-    pub(crate) storage: Arc<Storage>,
+    pub(crate) storage: Arc<RwLock<Option<Arc<Storage>>>>,
+}
+
+impl Service {
+    pub(crate) async fn storage(&self) -> Result<Arc<Storage>, Status> {
+        if let Some(storage) = self.storage.read().await.clone() {
+            return Ok(storage);
+        }
+        let lifecycle = self.state.lifecycle.lock().await.status();
+        Err(Status::unavailable(format!(
+            "vaulticdb is {}: {}",
+            lifecycle.phase.as_str(),
+            lifecycle.detail
+        )))
+    }
+
+    pub(crate) async fn transition_lifecycle(
+        &self,
+        phase: DaemonPhase,
+        detail: impl Into<String>,
+    ) -> Result<(), Status> {
+        self.state
+            .lifecycle
+            .lock()
+            .await
+            .transition(phase, detail, unix_time_ms_i64()?)
+            .map_err(Status::internal)
+    }
 }
 
 struct WriteIntentGuard {
@@ -336,3 +366,81 @@ impl VaulticDb for Service {
 }
 
 include!("operations.rs");
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::{
+        lifecycle::DaemonPhase,
+        proto::{GetRequest, HealthRequest, RequestContext},
+    };
+
+    fn loading_service() -> Service {
+        let now = Instant::now();
+        let (shutdown, _) = watch::channel(false);
+        Service {
+            state: DaemonState {
+                daemon_id: Arc::from("test-daemon"),
+                repository_id: "test-repository".into(),
+                auth_token: None,
+                unix_socket: true,
+                tcp_enabled: false,
+                draining: Arc::new(AtomicBool::new(false)),
+                lifecycle: Arc::new(Mutex::new(DaemonLifecycle::loading(123))),
+                writer_role: Arc::new(Mutex::new(WriterRoleState::read_only(
+                    0,
+                    now,
+                    Duration::ZERO,
+                ))),
+                writer_transition: Arc::new(Mutex::new(())),
+                last_writer_activity: Arc::new(Mutex::new(now)),
+                minimum_writer_tenure: Duration::ZERO,
+                writer_idle_grace: None,
+                writer_transition_timeout: Duration::from_secs(30),
+                clock_started: now,
+                clock_started_unix_ms: 123,
+            },
+            shutdown,
+            storage: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    fn request_context() -> Option<RequestContext> {
+        Some(RequestContext {
+            request_id: "test-request".to_owned(),
+            deadline_unix_ms: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn health_reports_loading_before_storage_is_ready() {
+        let service = loading_service();
+        let response = service
+            .handle_health(Request::new(HealthRequest {
+                repository_id: "test-repository".to_owned(),
+                context: request_context(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.ready);
+        assert_eq!(response.state, DaemonPhase::LoadingStorage.as_str());
+        assert_eq!(response.state_detail, "opening SlateDB");
+        assert_eq!(response.state_since_unix_ms, 123);
+    }
+
+    #[tokio::test]
+    async fn storage_rpc_reports_loading_state() {
+        let service = loading_service();
+        let error = service
+            .handle_get(Request::new(GetRequest {
+                context: request_context(),
+                key: b"key".to_vec(),
+                transaction_id: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(error.message().contains("loading_storage"));
+    }
+}

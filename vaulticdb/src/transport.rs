@@ -36,13 +36,16 @@ async fn main() -> Result<()> {
         storage: storage_config,
     } = Config::from_env()?;
     let clock_started = Instant::now();
-    let mut state = DaemonState {
+    let state = DaemonState {
         daemon_id: Arc::from(daemon_id),
         repository_id: repository_id.clone(),
         auth_token: auth_token.map(Arc::new),
         unix_socket: matches!(&transport, TransportConfig::Unix(_)),
         tcp_enabled: matches!(&transport, TransportConfig::Tcp { .. }),
         draining: Arc::new(AtomicBool::new(false)),
+        lifecycle: Arc::new(Mutex::new(DaemonLifecycle::loading(
+            unix_time_ms_i64()?,
+        ))),
         writer_role: Arc::new(Mutex::new(WriterRoleState::read_write(
             1,
             clock_started,
@@ -50,6 +53,7 @@ async fn main() -> Result<()> {
         ))),
         writer_transition: Arc::new(Mutex::new(())),
         last_writer_activity: Arc::new(Mutex::new(clock_started)),
+        minimum_writer_tenure,
         writer_idle_grace,
         writer_transition_timeout,
         clock_started,
@@ -80,24 +84,23 @@ async fn main() -> Result<()> {
                 remove_runtime_metadata(&path);
                 return Err(error);
             }
-            let storage = Arc::new(
-                Storage::open(state.repository_id.as_ref(), &storage_config).await?,
-            );
-            let (is_writer, epoch) = storage.writer_status_epoch().await;
-            state.writer_role = Arc::new(Mutex::new(if is_writer {
-                WriterRoleState::read_write(epoch, clock_started, minimum_writer_tenure)
-            } else {
-                WriterRoleState::read_only(epoch, clock_started, minimum_writer_tenure)
-            }));
-            monitor_broker_lease(storage.as_ref(), shutdown.clone());
-            let service = storage_service(state.clone(), shutdown.clone(), storage.clone());
+            let (service, runtime) = storage_service(state.clone(), shutdown.clone());
+            let loader = tokio::spawn(load_storage(runtime.clone(), storage_config));
             let stream = UnixListenerStream::new(listener);
             let result = Server::builder()
                 .concurrency_limit_per_connection(MAX_CONCURRENT_REQUESTS)
                 .add_service(service)
                 .serve_with_incoming_shutdown(stream, shutdown_signal(shutdown_rx))
                 .await;
-            let close_result = storage.close().await;
+            let loaded = loader.await.context("join SlateDB loading task")?;
+            runtime
+                .transition_lifecycle(DaemonPhase::Stopping, "gRPC server stopped")
+                .await
+                .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+            let close_result = match loaded {
+                Ok(storage) => storage.close().await,
+                Err(error) => Err(error),
+            };
             drop(_lock);
             let _ = tokio::fs::remove_file(&path).await;
             remove_runtime_metadata(&path);
@@ -112,17 +115,8 @@ async fn main() -> Result<()> {
             let lock_path = metadata_path.with_extension("lock");
             let _lock = acquire_singleton_lock(&lock_path)?;
             write_runtime_metadata(&metadata_path, tcp_enabled)?;
-            let storage = Arc::new(
-                Storage::open(state.repository_id.as_ref(), &storage_config).await?,
-            );
-            let (is_writer, epoch) = storage.writer_status_epoch().await;
-            state.writer_role = Arc::new(Mutex::new(if is_writer {
-                WriterRoleState::read_write(epoch, clock_started, minimum_writer_tenure)
-            } else {
-                WriterRoleState::read_only(epoch, clock_started, minimum_writer_tenure)
-            }));
-            monitor_broker_lease(storage.as_ref(), shutdown.clone());
-            let service = storage_service(state, shutdown, storage.clone());
+            let (service, runtime) = storage_service(state, shutdown.clone());
+            let loader = tokio::spawn(load_storage(runtime.clone(), storage_config));
             let (sender, receiver) = mpsc::channel(64);
             tokio::spawn(accept_allowed_tcp(listener, allowlist, sender));
             let result = Server::builder()
@@ -133,13 +127,84 @@ async fn main() -> Result<()> {
                     shutdown_signal(shutdown_rx),
                 )
                 .await;
-            let close_result = storage.close().await;
+            let loaded = loader.await.context("join SlateDB loading task")?;
+            runtime
+                .transition_lifecycle(DaemonPhase::Stopping, "gRPC server stopped")
+                .await
+                .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+            let close_result = match loaded {
+                Ok(storage) => storage.close().await,
+                Err(error) => Err(error),
+            };
             remove_runtime_metadata(&metadata_path);
             result?;
             close_result?;
         }
     }
     Ok(())
+}
+
+async fn load_storage(service: Service, storage_config: crate::storage::StorageConfig) -> Result<Arc<Storage>> {
+    let storage = match Storage::open(service.state.repository_id.as_ref(), &storage_config).await {
+        Ok(storage) => Arc::new(storage),
+        Err(error) => {
+            service
+                .transition_lifecycle(DaemonPhase::Failed, format!("open SlateDB: {error:#}"))
+                .await
+                .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+            return Err(error).context("open SlateDB database");
+        }
+    };
+    let (is_writer, epoch) = storage.writer_status_epoch().await;
+    *service.state.writer_role.lock().await = if is_writer {
+        WriterRoleState::read_write(
+            epoch,
+            service.state.clock_started,
+            service.state.minimum_writer_tenure,
+        )
+    } else {
+        WriterRoleState::read_only(
+            epoch,
+            service.state.clock_started,
+            service.state.minimum_writer_tenure,
+        )
+    };
+    *service.storage.write().await = Some(storage.clone());
+    let became_ready = service
+        .state
+        .lifecycle
+        .lock()
+        .await
+        .finish_loading(
+                if is_writer {
+                    DaemonPhase::ReadWrite
+                } else {
+                    DaemonPhase::ReadOnly
+                },
+                if is_writer {
+                    "SlateDB writer ready"
+                } else {
+                    "SlateDB reader ready"
+                },
+                unix_time_ms_i64().map_err(|status| anyhow::anyhow!(status.message().to_owned()))?,
+            );
+    let became_ready = match became_ready {
+        Ok(became_ready) => became_ready,
+        Err(error) => {
+            *service.storage.write().await = None;
+            return match storage.close().await {
+                Ok(()) => Err(anyhow::anyhow!(error)).context("finish loading lifecycle"),
+                Err(close_error) => Err(anyhow::anyhow!(
+                    "{error}; additionally failed to close SlateDB: {close_error:#}"
+                )),
+            };
+        }
+    };
+    monitor_broker_lease(storage.as_ref(), service.shutdown.clone());
+    if became_ready {
+        monitor_writer_idle(service.clone());
+    }
+    Ok(storage)
 }
 
 fn monitor_broker_lease(storage: &Storage, shutdown: watch::Sender<bool>) {
@@ -186,13 +251,19 @@ fn disable_core_dumps() {
 fn storage_service(
     state: DaemonState,
     shutdown: watch::Sender<bool>,
-    storage: Arc<Storage>,
-) -> VaulticDbServer<Service> {
+) -> (VaulticDbServer<Service>, Service) {
     let service = Service {
         state,
         shutdown,
-        storage,
+        storage: Arc::new(RwLock::new(None)),
     };
+    let server = VaulticDbServer::new(service.clone())
+        .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES as usize);
+    (server, service)
+}
+
+fn monitor_writer_idle(service: Service) {
     if let Some(grace) = service.state.writer_idle_grace {
         let idle_service = service.clone();
         tokio::spawn(async move {
@@ -220,9 +291,6 @@ fn storage_service(
             }
         });
     }
-    VaulticDbServer::new(service)
-        .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
-        .max_encoding_message_size(MAX_MESSAGE_BYTES as usize)
 }
 
 fn write_runtime_metadata(socket: &Path, tcp_enabled: bool) -> Result<()> {

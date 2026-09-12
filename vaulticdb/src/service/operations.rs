@@ -112,13 +112,17 @@ impl Service {
             request.get_ref().repository_id.as_str(),
         )?;
         check_context(request.get_ref().context.as_ref())?;
+        let lifecycle = self.state.lifecycle.lock().await.status();
         Ok(Response::new(HealthResponse {
             daemon_id: self.state.daemon_id.to_string(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             schema_version: SCHEMA_VERSION.to_owned(),
             repository_id: self.state.repository_id.to_string(),
             slate_db_revision: String::new(),
-            ready: !self.state.draining.load(Ordering::Acquire),
+            ready: lifecycle.phase.ready(),
+            state: lifecycle.phase.as_str().to_owned(),
+            state_detail: lifecycle.detail,
+            state_since_unix_ms: lifecycle.changed_at_unix_ms,
         }))
     }
 
@@ -132,9 +136,10 @@ impl Service {
             request.get_ref().repository_id.as_str(),
         )?;
         check_context(request.get_ref().context.as_ref())?;
-        let encryption = self.storage.encryption_status();
+        let storage = self.storage().await?;
+        let encryption = storage.encryption_status();
         let (wal_target, wal_durability, wal_separate, wal_encrypted, wal_status) =
-            self.storage.wal_status();
+            storage.wal_status();
         Ok(Response::new(CapabilitiesResponse {
             daemon_id: self.state.daemon_id.to_string(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -173,14 +178,26 @@ impl Service {
     async fn handle_drain(&self, request: Request<Empty>) -> Result<Response<Empty>, Status> {
         check_request(&self.state, &request, "")?;
         check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
         self.state.draining.store(true, Ordering::Release);
+        self.transition_lifecycle(DaemonPhase::Draining, "drain requested")
+            .await?;
         Ok(Response::new(Empty { context: None }))
     }
 
     async fn handle_shutdown(&self, request: Request<Empty>) -> Result<Response<Empty>, Status> {
         check_request(&self.state, &request, "")?;
         check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
         self.state.draining.store(true, Ordering::Release);
+        let phase = self.state.lifecycle.lock().await.status().phase;
+        if phase == DaemonPhase::Failed {
+            self.transition_lifecycle(DaemonPhase::Stopping, "shutdown requested")
+                .await?;
+        } else {
+            self.transition_lifecycle(DaemonPhase::Draining, "shutdown requested")
+                .await?;
+        }
         let _ = self.shutdown.send(true);
         Ok(Response::new(Empty { context: None }))
     }
@@ -192,13 +209,16 @@ impl Service {
         force: bool,
     ) -> Result<WriterStatusResponse, Status> {
         let _transition = self.state.writer_transition.lock().await;
+        let storage = self.storage().await?;
         {
             let mut role = self.state.writer_role.lock().await;
-            role.begin_demotion(Instant::now(), reason, force)
+            role.begin_demotion(Instant::now(), reason.clone(), force)
                 .map_err(role_error)?;
         }
+        self.transition_lifecycle(DaemonPhase::Demoting, reason)
+            .await?;
         let drain = async {
-            while self.storage.active_transactions().await != 0 {
+            while storage.active_transactions().await != 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
@@ -208,24 +228,31 @@ impl Service {
                 .lock()
                 .await
                 .fail_demotion(Instant::now());
+            self.transition_lifecycle(DaemonPhase::ReadWrite, "demotion timed out")
+                .await?;
             return Err(Status::deadline_exceeded(
                 "writer demotion quiescence timed out",
             ));
         }
-        match self.storage.demote().await {
-            Ok(()) => self
-                .state
-                .writer_role
-                .lock()
-                .await
-                .complete_demotion(Instant::now())
-                .map_err(role_error)?,
+        match storage.demote().await {
+            Ok(()) => {
+                self.state
+                    .writer_role
+                    .lock()
+                    .await
+                    .complete_demotion(Instant::now())
+                    .map_err(role_error)?;
+                self.transition_lifecycle(DaemonPhase::ReadOnly, "demotion complete")
+                    .await?;
+            }
             Err(error) => {
                 self.state
                     .writer_role
                     .lock()
                     .await
                     .fail_demotion(Instant::now());
+                self.transition_lifecycle(DaemonPhase::ReadWrite, "demotion failed")
+                    .await?;
                 return Err(Status::failed_precondition(format!(
                     "writer demotion failed: {error:#}"
                 )));
@@ -235,8 +262,8 @@ impl Service {
     }
 
     async fn write_intent(&self) -> Result<WriteIntentGuard, Status> {
-        if !self
-            .storage
+        let storage = self.storage().await?;
+        if !storage
             .mutations_allowed(&self.state.repository_id)
             .await
             .map_err(VaulticDbError::generation)
@@ -250,11 +277,18 @@ impl Service {
     }
 
     async fn authority_intent(&self) -> Result<WriteIntentGuard, Status> {
-        self.storage
-            .ensure_writer_fence()
-            .await
-            .map_err(VaulticDbError::generation)
-            .map_err(Status::from)?;
+        let storage = self.storage().await?;
+        if let Err(error) = storage.ensure_writer_fence().await {
+            let observed_epoch = storage.writer_status_epoch().await.1;
+            let mut role = self.state.writer_role.lock().await;
+            if role.status().role == CoreWriterRole::ReadWrite {
+                role.fence(observed_epoch, Instant::now(), "writer epoch changed");
+                drop(role);
+                self.transition_lifecycle(DaemonPhase::Fenced, "writer epoch changed")
+                    .await?;
+            }
+            return Err(Status::from(VaulticDbError::generation(error)));
+        }
         self.state
             .writer_role
             .lock()
@@ -284,6 +318,7 @@ impl Service {
     }
 
     async fn writer_status_response(&self) -> WriterStatusResponse {
+        let storage = self.storage().await.ok();
         let status = self.state.writer_role.lock().await.status();
         let transition_unix_ms = self.state.clock_started_unix_ms.saturating_add(
             status
@@ -319,8 +354,13 @@ impl Service {
             transition_reason: status.transition_reason,
             transition_unix_ms,
             active_write_intents: status.active_write_intents,
-            active_transactions: self.storage.active_transactions().await as u64,
-            last_durable_sequence: self.storage.last_durable_sequence(),
+            active_transactions: match &storage {
+                Some(storage) => storage.active_transactions().await as u64,
+                None => 0,
+            },
+            last_durable_sequence: storage
+                .as_ref()
+                .map_or(0, |storage| storage.last_durable_sequence()),
             idle_deadline_unix_ms,
             promotion_safe: status.promotion_safe,
         }
@@ -341,10 +381,11 @@ impl Service {
     }
 
     async fn key_status_response(&self) -> Result<KeyStatusResponse, Status> {
+        let storage = self.storage().await?;
         let (envelope_generation, active_dek_version, slots) =
-            self.storage.key_manager()?.status().await;
+            storage.key_manager()?.status().await;
         let (pending_capsule_migration_sha256, finalized_capsule_migration_sha256) =
-            self.storage.capsule_migration_status().await?;
+            storage.capsule_migration_status().await?;
         Ok(KeyStatusResponse {
             envelope_generation,
             active_dek_version,

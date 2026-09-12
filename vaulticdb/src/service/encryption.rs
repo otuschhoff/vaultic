@@ -53,7 +53,8 @@ impl Service {
             request.identity_recovery,
         )
         .map_err(key_management_error)?;
-        let manager = self.storage.key_manager()?;
+        let storage = self.storage().await?;
+        let manager = storage.key_manager()?;
         let mirror_path = manager
             .publish_capsule_mirror(&capsule)
             .await
@@ -92,7 +93,8 @@ impl Service {
                 "sealed topology identity must match the capsule migration",
             ));
         }
-        let manager = self.storage.key_manager()?;
+        let storage = self.storage().await?;
+        let manager = storage.key_manager()?;
         let audit = manager
             .audit_objects()
             .await
@@ -110,7 +112,7 @@ impl Service {
             .await
             .map_err(key_management_error)?;
         let repository_master_key =
-            Zeroizing::new(self.storage.get_master_key().await?.ok_or_else(|| {
+            Zeroizing::new(storage.get_master_key().await?.ok_or_else(|| {
                 Status::failed_precondition("repository master key is not stored")
             })?);
         let protected_credentials = request
@@ -177,9 +179,7 @@ impl Service {
             .map_err(|error| key_management_error(error.into()))?;
         encoded.push(b'\n');
         let capsule_sha256 = format!("{:x}", Sha256::digest(&encoded));
-        self.storage
-            .record_capsule_migration(&capsule_sha256)
-            .await?;
+        storage.record_capsule_migration(&capsule_sha256).await?;
         Ok(Response::new(PrepareCapsuleMigrationResponse {
             generation: capsule.header.generation,
             local_path: local_path.display().to_string(),
@@ -195,9 +195,10 @@ impl Service {
     ) -> Result<Response<Empty>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
         let _intent = self.write_intent().await?;
+        let storage = self.storage().await?;
         let repository_id = request.get_ref().repository_id.as_str();
         let capsule_sha256 = request.get_ref().capsule_sha256.as_str();
-        match self.storage.get_master_key().await? {
+        match storage.get_master_key().await? {
             Some(master_key) => {
                 let master_key = Zeroizing::new(master_key);
                 verify_capsule_migration_proof(
@@ -206,14 +207,10 @@ impl Service {
                     capsule_sha256,
                     &request.get_ref().broker_key_proof,
                 )?;
-                self.storage
-                    .finalize_capsule_migration(capsule_sha256)
-                    .await?;
+                storage.finalize_capsule_migration(capsule_sha256).await?;
             }
             None => {
-                self.storage
-                    .finalize_capsule_migration(capsule_sha256)
-                    .await?;
+                storage.finalize_capsule_migration(capsule_sha256).await?;
             }
         }
         Ok(Response::new(Empty::default()))
@@ -224,13 +221,14 @@ impl Service {
         request: Request<KeyStatusRequest>,
     ) -> Result<Response<EncryptionAuditResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
-        if !self.storage.encryption_status().enabled {
+        let storage = self.storage().await?;
+        if !storage.encryption_status().enabled {
             return Ok(Response::new(EncryptionAuditResponse {
                 enabled: false,
                 ..Default::default()
             }));
         }
-        let manager = self.storage.key_manager()?;
+        let manager = storage.key_manager()?;
         let (envelope_generation, active_dek_version, _) = manager.status().await;
         let audit = manager
             .audit_objects()
@@ -253,7 +251,8 @@ impl Service {
         request: Request<KeyStatusRequest>,
     ) -> Result<Response<ExportKeyEnvelopeResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
-        let manager = self.storage.key_manager()?;
+        let storage = self.storage().await?;
+        let manager = storage.key_manager()?;
         let (generation, _, _) = manager.status().await;
         Ok(Response::new(ExportKeyEnvelopeResponse {
             envelope: manager
@@ -274,8 +273,9 @@ impl Service {
         let provider = encryption::envelope::providers::for_management(&request.provider, token)
             .await
             .map_err(key_management_error)?;
+        let storage = self.storage().await?;
         let master_key =
-            Zeroizing::new(self.storage.get_master_key().await?.ok_or_else(|| {
+            Zeroizing::new(storage.get_master_key().await?.ok_or_else(|| {
                 Status::failed_precondition("repository master key is not stored")
             })?);
         let record = encryption::envelope::create_escrow_record(
@@ -324,8 +324,8 @@ impl Service {
     ) -> Result<Response<RewriteDekResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
         let _intent = self.write_intent().await?;
-        let (rewritten, remaining) = self
-            .storage
+        let storage = self.storage().await?;
+        let (rewritten, remaining) = storage
             .key_manager()?
             .rewrite_old_deks(request.get_ref().max_objects as usize)
             .await
@@ -342,7 +342,8 @@ impl Service {
     ) -> Result<Response<KeyStatusResponse>, Status> {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
         let _intent = self.write_intent().await?;
-        self.storage
+        let storage = self.storage().await?;
+        storage
             .key_manager()?
             .rotate_dek()
             .await
@@ -369,7 +370,8 @@ impl Service {
         let provider = encryption::envelope::providers::for_management(&request.provider, token)
             .await
             .map_err(key_management_error)?;
-        self.storage
+        let storage = self.storage().await?;
+        storage
             .key_manager()?
             .add_cloud_slot(
                 &request.slot_id,
@@ -398,7 +400,8 @@ impl Service {
         let _intent = self.write_intent().await?;
         let request = request.into_inner();
         let passphrase = Zeroizing::new(request.passphrase);
-        self.storage
+        let storage = self.storage().await?;
+        storage
             .key_manager()?
             .add_local_slot(
                 &request.slot_id,
@@ -418,7 +421,8 @@ impl Service {
         self.check_key_request(&request, request.get_ref().repository_id.as_str())?;
         let _intent = self.write_intent().await?;
         let slot_id = request.into_inner().slot_id;
-        self.storage
+        let storage = self.storage().await?;
+        storage
             .key_manager()?
             .remove_slot(&slot_id)
             .await
@@ -434,7 +438,8 @@ impl Service {
         let _intent = self.write_intent().await?;
         let request = request.into_inner();
         let passphrase = Zeroizing::new(request.passphrase);
-        self.storage
+        let storage = self.storage().await?;
+        storage
             .key_manager()?
             .rotate_local_slot(&request.slot_id, &passphrase)
             .await
@@ -457,7 +462,8 @@ impl Service {
                 "master-key-in-DB is available only over a private Unix socket",
             ));
         }
-        let value = self.storage.get_master_key().await?;
+        let storage = self.storage().await?;
+        let value = storage.get_master_key().await?;
         Ok(Response::new(MasterKeyResponse {
             found: value.is_some(),
             master_key: value.unwrap_or_default(),
@@ -481,7 +487,8 @@ impl Service {
         }
         let _intent = self.write_intent().await?;
         let master_key = Zeroizing::new(request.get_ref().master_key.clone());
-        self.storage.store_master_key(&master_key).await?;
+        let storage = self.storage().await?;
+        storage.store_master_key(&master_key).await?;
         Ok(Response::new(Empty { context: None }))
     }
 }

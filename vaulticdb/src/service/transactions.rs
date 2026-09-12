@@ -36,8 +36,9 @@ impl Service {
     ) -> Result<Response<WriteBatchResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
         validate_write_batch(request.get_ref())?;
+        let storage = self.storage().await?;
         let durable = self
-            .with_write_intent(self.storage.write_batch(request.get_ref()))
+            .with_write_intent(storage.write_batch(request.get_ref()))
             .await?;
         Ok(Response::new(WriteBatchResponse { durable }))
     }
@@ -47,13 +48,14 @@ impl Service {
         request: Request<Empty>,
     ) -> Result<Response<BeginResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        let storage = self.storage().await?;
         self.state
             .writer_role
             .lock()
             .await
             .transaction_opened()
             .map_err(role_error)?;
-        let transaction_id = match self.storage.begin().await {
+        let transaction_id = match storage.begin().await {
             Ok(transaction_id) => transaction_id,
             Err(error) => {
                 self.state.writer_role.lock().await.transaction_closed();
@@ -69,8 +71,8 @@ impl Service {
         request: Request<TransactionRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        let result = self
-            .storage
+        let storage = self.storage().await?;
+        let result = storage
             .commit(
                 &request.get_ref().transaction_id,
                 &request.get_ref().idempotency_key,
@@ -89,10 +91,8 @@ impl Service {
         request: Request<TransactionRequest>,
     ) -> Result<Response<Empty>, Status> {
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        let result = self
-            .storage
-            .rollback(&request.get_ref().transaction_id)
-            .await;
+        let storage = self.storage().await?;
+        let result = storage.rollback(&request.get_ref().transaction_id).await;
         if result.is_ok() {
             self.state.writer_role.lock().await.transaction_closed();
             *self.state.last_writer_activity.lock().await = Instant::now();
