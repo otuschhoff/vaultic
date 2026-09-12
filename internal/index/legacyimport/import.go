@@ -224,39 +224,15 @@ func importPacks(
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			for {
-				var packIndex int
-				var ok bool
-				select {
-				case <-workerCtx.Done():
-					return
-				case packIndex, ok = <-jobs:
-					if !ok {
-						return
-					}
-				}
-				packCtx, cancelPack := context.WithTimeoutCause(workerCtx, packTimeout, errPackTimeout)
-				indexedPack := packs[packIndex]
-				imported, debt, err := buildPackImport(packCtx, statter, sourceIndex, indexedPack)
-				if err == nil {
-					imported.BatchSize = options.BatchSize
-					if !options.DryRun {
-						err = store.ImportLegacyPack(packCtx, imported)
-					}
-				}
-				if err != nil && errors.Is(context.Cause(packCtx), errPackTimeout) {
-					err = fmt.Errorf("pack import exceeded %s; increase --pack-timeout if the storage backend is healthy: %w", packTimeout, err)
-				}
-				cancelPack()
-				outcomes[packIndex] = packImportResult{imported: imported, debt: debt, err: err, complete: true}
-				if err != nil {
+			importPackJobs(
+				workerCtx, jobs, statter, store, sourceIndex, packs, options, packTimeout, outcomes,
+				func(packIndex int) {
 					failOnce.Do(func() {
 						failedPack = packIndex
 						cancel()
 					})
-					return
-				}
-			}
+				},
+			)
 		}()
 	}
 dispatch:
@@ -270,6 +246,59 @@ dispatch:
 	close(jobs)
 	group.Wait()
 	return outcomes, failedPack
+}
+
+func importPackJobs(
+	ctx context.Context,
+	jobs <-chan int,
+	statter PackStatter,
+	store Store,
+	sourceIndex schema.ID,
+	packs []legacyindex.PackBlobs,
+	options Options,
+	packTimeout time.Duration,
+	outcomes []packImportResult,
+	fail func(int),
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case packIndex, ok := <-jobs:
+			if !ok {
+				return
+			}
+			outcomes[packIndex] = importPack(ctx, statter, store, sourceIndex, packs[packIndex], options, packTimeout)
+			if outcomes[packIndex].err != nil {
+				fail(packIndex)
+				return
+			}
+		}
+	}
+}
+
+func importPack(
+	ctx context.Context,
+	statter PackStatter,
+	store Store,
+	sourceIndex schema.ID,
+	indexedPack legacyindex.PackBlobs,
+	options Options,
+	packTimeout time.Duration,
+) packImportResult {
+	packCtx, cancel := context.WithTimeoutCause(ctx, packTimeout, errPackTimeout)
+	defer cancel()
+	imported, debt, err := buildPackImport(packCtx, statter, sourceIndex, indexedPack)
+	if err == nil {
+		imported.BatchSize = options.BatchSize
+		if !options.DryRun {
+			err = store.ImportLegacyPack(packCtx, imported)
+		}
+	}
+	if err != nil && errors.Is(context.Cause(packCtx), errPackTimeout) {
+		err = fmt.Errorf("pack import exceeded %s; increase --pack-timeout if the storage backend is healthy: %w", packTimeout, err)
+	}
+	return packImportResult{imported: imported, debt: debt, err: err, complete: true}
 }
 
 func recordFinding(result *Result, options Options, sourceID vaultic.ID, stage string, err error) error {
