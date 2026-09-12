@@ -80,7 +80,8 @@ vaulticdb-%:
 	case "$$target" in \
 		*-musl) \
 			command -v cargo-zigbuild >/dev/null 2>&1 || { echo "vaulticdb: cargo-zigbuild is required for $$target (install with: cargo install cargo-zigbuild)" >&2; exit 1; }; \
-			RUSTUP_TOOLCHAIN=$(VAULTICDB_RUST_TOOLCHAIN) cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --target "$$target" --release ;; \
+			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-D warnings -A linker_messages" RUSTUP_TOOLCHAIN=$(VAULTICDB_RUST_TOOLCHAIN) \
+				cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --target "$$target" --release ;; \
 		*) \
 			rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo build --manifest-path vaulticdb/Cargo.toml --release --target "$$target" ;; \
 	esac; \
