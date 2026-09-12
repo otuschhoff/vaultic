@@ -289,6 +289,12 @@ func mirrorCurrentEnvelope(ctx context.Context, destination backend.Backend, cli
 
 func saveImmutableBackendRecord(ctx context.Context, destination backend.Backend, handle backend.Handle, payload []byte) error {
 	compareExisting := func() (bool, error) {
+		if _, err := destination.Stat(ctx, handle); err != nil {
+			if destination.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
 		var existing []byte
 		err := destination.Load(ctx, handle, 0, 0, func(reader io.Reader) error {
 			var readErr error

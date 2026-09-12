@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/backend/mock"
 	"github.com/otuschhoff/vaultic/internal/global"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -48,6 +50,42 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestSaveImmutableBackendRecordDoesNotLoadMissingRecord(t *testing.T) {
+	payload := []byte("envelope")
+	handle := backend.Handle{Type: backend.SlateDBFile, Name: "key-envelope.json", IsMetadata: true}
+	loadCalled := false
+	saveCalls := 0
+	destination := mock.NewBackend()
+	destination.StatFn = func(context.Context, backend.Handle) (backend.FileInfo, error) {
+		return backend.FileInfo{}, fs.ErrNotExist
+	}
+	destination.IsNotExistFn = func(err error) bool {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	destination.OpenReaderFn = func(context.Context, backend.Handle, int, int64) (io.ReadCloser, error) {
+		loadCalled = true
+		return nil, errors.New("unexpected load")
+	}
+	destination.SaveFn = func(_ context.Context, gotHandle backend.Handle, reader backend.RewindReader) error {
+		saveCalls++
+		gotPayload, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		if gotHandle != handle || !bytes.Equal(gotPayload, payload) {
+			t.Fatalf("saved (%v, %q), want (%v, %q)", gotHandle, gotPayload, handle, payload)
+		}
+		return nil
+	}
+
+	if err := saveImmutableBackendRecord(context.Background(), destination, handle, payload); err != nil {
+		t.Fatal(err)
+	}
+	if loadCalled || saveCalls != 1 {
+		t.Fatalf("load called %v, save calls %d; want false, 1", loadCalled, saveCalls)
+	}
 }
 
 func testCustodianPath(t *testing.T, root string) string {
