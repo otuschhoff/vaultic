@@ -75,8 +75,18 @@ func TestResolveBackendManifestStates(t *testing.T) {
 		}
 	})
 
+	t.Run("envelope mirror only", func(t *testing.T) {
+		be := mem.New()
+		saveSlateDBFile(ctx, t, be, "key-envelope-00000000000000000001.json", []byte("envelope"))
+		resolution, err := Resolve(ctx, be, "repo")
+		if err != nil || resolution.Mode != ModeLegacy || resolution.State != ManifestAbsent {
+			t.Fatalf("Resolve = %#v, %v", resolution, err)
+		}
+	})
+
 	t.Run("partial namespace", func(t *testing.T) {
 		be := mem.New()
+		saveSlateDBFile(ctx, t, be, "key-envelope-00000000000000000001.json", []byte("envelope"))
 		saveSlateDBFile(ctx, t, be, "lock", []byte("partial"))
 		resolution, err := Resolve(ctx, be, "repo")
 		if err == nil || resolution.State != ManifestCorrupt {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"strings"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
@@ -18,6 +19,9 @@ const (
 	ManifestName          = "manifest"
 	ManifestFormatVersion = 1
 	ManifestSchemaVersion = "0"
+	envelopeMirrorPrefix  = "key-envelope-"
+	envelopeMirrorSuffix  = ".json"
+	envelopeGenerationLen = 20
 )
 
 // Mode describes which metadata engine is configured for a repository.
@@ -225,14 +229,15 @@ func Resolve(ctx context.Context, be backend.Backend, repositoryID string) (Reso
 			return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt}, fmt.Errorf("stat slatedb manifest: %w", err)
 		}
 
-		hasNamespace := false
-		if listErr := be.List(ctx, backend.SlateDBFile, func(backend.FileInfo) error {
-			hasNamespace = true
+		hasDatabaseState := false
+		if listErr := be.List(ctx, backend.SlateDBFile, func(info backend.FileInfo) error {
+			// Envelopes are mirrored before activation and do not make SlateDB authoritative.
+			hasDatabaseState = hasDatabaseState || !isEnvelopeMirror(info.Name)
 			return nil
 		}); listErr != nil && !be.IsNotExist(listErr) {
 			return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt}, fmt.Errorf("list slatedb namespace: %w", listErr)
 		}
-		if hasNamespace {
+		if hasDatabaseState {
 			return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt}, fmt.Errorf("partial slatedb namespace without manifest")
 		}
 		return Resolution{Mode: ModeLegacy, State: ManifestAbsent}, nil
@@ -275,6 +280,20 @@ func Resolve(ctx context.Context, be backend.Backend, repositoryID string) (Reso
 		return Resolution{Mode: ModeSlateDB, State: ManifestCorrupt, Manifest: &manifest}, fmt.Errorf("invalid slatedb manifest repository or authority")
 	}
 	return Resolution{Mode: ModeSlateDB, State: ManifestValid, Manifest: &manifest}, nil
+}
+
+func isEnvelopeMirror(name string) bool {
+	generation, found := strings.CutPrefix(name, envelopeMirrorPrefix)
+	if !found || len(generation) != envelopeGenerationLen+len(envelopeMirrorSuffix) ||
+		!strings.HasSuffix(generation, envelopeMirrorSuffix) {
+		return false
+	}
+	for _, digit := range generation[:envelopeGenerationLen] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Activate writes the authoritative marker last. It is idempotent for an
