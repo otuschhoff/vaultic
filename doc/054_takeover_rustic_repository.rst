@@ -332,6 +332,7 @@ Create a mode-0600 environment file such as
 .. code-block:: text
 
    VAULTICDB_REPOSITORY_ID=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+   VAULTICDB_TOPOLOGY_SOURCE=external
    VAULTICDB_OBJECT_STORE=local
    VAULTICDB_DATA_DIR=/srv/vaulticdb
    VAULTICDB_ENCRYPTION=required

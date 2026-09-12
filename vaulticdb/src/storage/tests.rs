@@ -439,6 +439,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reader_validates_existing_encryption_policy_for_writer_takeover() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = format!("encrypted-reader-{}", rand::random::<u64>());
+        let db = Db::open(path.as_str(), object_store.clone())
+            .await
+            .unwrap();
+        let policy = EncryptionPolicy {
+            format: 1,
+            required: true,
+            algorithm: "AES-256-GCM".to_owned(),
+            object_format: 1,
+            repository_id: "repo".into(),
+        };
+        db.put(
+            ENCRYPTION_POLICY_RECORD,
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .await
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+        let reader = open_reader(&path, object_store.clone(), None)
+            .await
+            .unwrap();
+        let storage = Storage {
+            database: RwLock::new(Database::Reader(reader)),
+            database_path: path,
+            coordination_store: object_store.clone(),
+            object_store,
+            wal_object_store: None,
+            wal_metrics: None,
+            encryption: EncryptionStatus {
+                enabled: true,
+                algorithm: "AES-256-GCM",
+                active_dek_version: 1,
+                envelope_generation: 1,
+                unlock_slot: Some("test".to_owned()),
+                recovery_unlock: false,
+                initializing: false,
+            },
+            key_manager: None,
+            transactions: RwLock::new(HashMap::new()),
+            next_transaction: AtomicU64::new(1),
+            last_durable_sequence: AtomicU64::new(0),
+            transaction_idle_timeout_ms: 1_000,
+            credential_manager: None,
+            broker_lease_metadata: None,
+            writer_epoch: AtomicU64::new(1),
+            wal_target: "inherited",
+            wal_durability: "inherited",
+        };
+
+        storage.ensure_encryption_policy("repo").await.unwrap();
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn metadata_generation_activation_rejects_stale_compare_and_swap() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (current, version) = read_generation_authority(object_store.as_ref(), "repo")

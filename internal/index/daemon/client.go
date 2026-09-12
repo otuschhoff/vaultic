@@ -526,6 +526,7 @@ func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Cli
 	if err != nil {
 		_ = cmd.Process.Kill() // Preserve the readiness failure while terminating the unusable daemon.
 		_ = cmd.Wait()         // Reap the terminated daemon; its exit status cannot replace the readiness failure.
+		startupError := daemonStartupError(cmd)
 		cleanupOwnedArtifacts(options, cmd.Process.Pid)
 		if options.EncryptionMode == "required" || options.EncryptionMode == "initialize" {
 			observability.EmitBestEffort(ctx, observability.Event{
@@ -533,6 +534,9 @@ func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Cli
 				Component: "vaulticdb", Message: "encrypted metadata daemon failed during startup",
 				Fields: map[string]any{"repository_id": options.RepositoryID},
 			})
+		}
+		if startupError != "" {
+			return nil, fmt.Errorf("%w: wait for daemon readiness: %w; vaulticdb stderr: %s", ErrUnavailable, err, startupError)
 		}
 		return nil, fmt.Errorf("%w: wait for daemon readiness: %w", ErrUnavailable, err)
 	}
@@ -549,6 +553,18 @@ func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Cli
 	}
 	client.process = cmd
 	return client, nil
+}
+
+func daemonStartupError(cmd *exec.Cmd) string {
+	limited, ok := cmd.Stderr.(*limitedWriter)
+	if !ok {
+		return ""
+	}
+	buffer, ok := limited.writer.(*bytes.Buffer)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(buffer.String())
 }
 
 type limitedWriter struct {

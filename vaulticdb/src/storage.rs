@@ -1076,13 +1076,12 @@ impl Storage {
 
     async fn ensure_encryption_policy(&self, repository_id: &str) -> Result<()> {
         let database = self.database.read().await;
-        let Database::Writer(db) = &*database else {
-            bail!("metadata encryption policy requires a writer")
+        let existing = match &*database {
+            Database::Writer(db) => db.get(ENCRYPTION_POLICY_RECORD).await,
+            Database::Reader(reader) => reader.get(ENCRYPTION_POLICY_RECORD).await,
+            Database::Unavailable => bail!("metadata encryption policy storage is unavailable"),
         };
-        let existing = db
-            .get(ENCRYPTION_POLICY_RECORD)
-            .await
-            .context("read metadata encryption policy")?;
+        let existing = existing.context("read metadata encryption policy")?;
         if !self.encryption.enabled {
             if existing.is_some() {
                 bail!("metadata encryption policy exists but encryption is disabled");
@@ -1109,6 +1108,9 @@ impl Storage {
         if !self.encryption.initializing {
             bail!("metadata encryption policy is missing while encryption is required");
         }
+        let Database::Writer(db) = &*database else {
+            bail!("initializing metadata encryption policy requires a writer")
+        };
         db.put(
             ENCRYPTION_POLICY_RECORD,
             serde_json::to_vec(&expected).context("encode metadata encryption policy")?,

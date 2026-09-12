@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -157,6 +158,17 @@ func TestMetadataRebuildInitializationRequiresBrokeredRequiredEncryption(t *test
 	)
 	if err == nil || !strings.Contains(err.Error(), "requires brokered required encryption") {
 		t.Fatalf("wrong encryption mode accepted for metadata rebuild: %v", err)
+	}
+}
+
+func TestDaemonStartupErrorReturnsCapturedStderr(t *testing.T) {
+	cmd := &exec.Cmd{}
+	var stderr bytes.Buffer
+	cmd.Stderr = &limitedWriter{writer: &stderr, remaining: 64 * 1024}
+	_, _ = cmd.Stderr.Write([]byte("startup failed\n"))
+
+	if got := daemonStartupError(cmd); got != "startup failed" {
+		t.Fatalf("daemonStartupError() = %q, want captured stderr", got)
 	}
 }
 
