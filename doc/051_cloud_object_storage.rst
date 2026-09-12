@@ -456,6 +456,25 @@ direct reopen when its metadata-generation WAL binding differs. Never delete
 WAL by age; SlateDB cleanup follows manifest checkpoint and reader recovery
 state.
 
+Volatile in-memory WAL for bulk import
+--------------------------------------
+
+On a high-memory host, a rebuild from legacy indexes can avoid durable WAL I/O
+by starting its temporary VaulticDB process with an in-memory WAL::
+
+  $ vaultic -r /srv/repository index import --from-legacy \
+    --start-daemon --daemon-object-store local \
+    --daemon-data-dir /shared/vaulticdb \
+    --daemon-wal-store memory --pack-workers 16
+
+Use this only while the legacy indexes remain available as the recovery source.
+The daemon reports this WAL durability as ``local-process``: a crash, kill, or
+host restart can lose transactions that were acknowledged but not yet flushed
+to the durable metadata store. Restart the import with ``--resume`` (the
+default) after such an interruption. Do not combine this mode with
+``--persistent-daemon`` or use the resulting daemon for normal authoritative
+metadata writes. Complete and validate the import before ``--activate``.
+
 For Backblaze migration from the native API, copy objects with the existing
 backend migration workflow and run ``vaultic backend verify --compare`` against
 the native ``b2:`` and S3-compatible locations. Verification reads and compares

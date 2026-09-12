@@ -17,6 +17,8 @@ Options should include:
 - repository and backend options shared with existing commands
 - `--from-legacy` or equivalent explicit source selection
 - `--batch-size`
+- `--pack-workers` for bounded concurrent pack imports
+- `--pack-timeout` for a storage-appropriate per-pack transaction deadline
 - `--max-errors`
 - `--resume`
 - `--snapshot-depth` for bounded optional tree traversal

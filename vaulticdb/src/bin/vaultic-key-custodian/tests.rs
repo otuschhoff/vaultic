@@ -40,6 +40,10 @@ mod tests {
 #[tokio::main]
 async fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == ["--version"] {
+        vaulticdb::build_info::print_version("vaultic-key-custodian");
+        return Ok(());
+    }
     match arguments.first().map(String::as_str) {
         Some("yubikey-piv-unwrap") if arguments.len() == 7 => yubikey_piv_unwrap(&arguments).await,
         Some("fido2-enroll") if arguments.len() == 3 => fido2_enroll(&arguments),

@@ -30,7 +30,7 @@ import (
 // to a missing backend storage location or config file
 var ErrNoRepository = errors.New("repository does not exist")
 
-const Version = "0.1.5"
+const Version = "0.1.6"
 
 // TimeFormat is the format used for all timestamps printed by vaultic.
 const TimeFormat = "2006-01-02 15:04:05"

@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/data"
@@ -69,6 +72,7 @@ func (statter fixedStatter) Stat(context.Context, backend.Handle) (backend.FileI
 }
 
 type memoryStore struct {
+	mu               sync.Mutex
 	values           map[string][]byte
 	imports          []daemon.LegacyPackImport
 	revisions        uint64
@@ -77,18 +81,26 @@ type memoryStore struct {
 
 func newMemoryStore() *memoryStore { return &memoryStore{values: make(map[string][]byte)} }
 func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	value, found := store.values[string(key)]
 	return append([]byte(nil), value...), found, nil
 }
 func (store *memoryStore) ImportLegacyPack(_ context.Context, imported daemon.LegacyPackImport) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	store.imports = append(store.imports, imported)
 	return nil
 }
 func (store *memoryStore) Put(_ context.Context, key, value []byte, _ bool) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	store.values[string(key)] = append([]byte(nil), value...)
 	return nil
 }
 func (store *memoryStore) AllocateRevision(context.Context) (uint64, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	store.revisions++
 	return store.revisions, nil
 }
@@ -100,6 +112,8 @@ func (store *memoryStore) PublishRevisionBatch(
 	related []daemon.Mutation,
 	_ [][]byte,
 ) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	pointer, err := (schema.CurrentPointer{Revision: revision, RecordKey: revisionKey}).MarshalBinary()
 	if err != nil {
 		return err
@@ -119,10 +133,56 @@ func (store *memoryStore) PublishContentManifest(
 	related []daemon.Mutation,
 	_ [][]byte,
 ) (schema.ID, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	for _, mutation := range related {
 		store.values[string(mutation.Key)] = append([]byte(nil), mutation.Value...)
 	}
 	return schema.ContentManifestID(ids), nil
+}
+
+type blockingImportStore struct {
+	*memoryStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (store *blockingImportStore) ImportLegacyPack(ctx context.Context, imported daemon.LegacyPackImport) error {
+	select {
+	case store.entered <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-store.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return store.memoryStore.ImportLegacyPack(ctx, imported)
+}
+
+type failingImportStore struct {
+	*memoryStore
+	calls int
+}
+
+func (store *failingImportStore) ImportLegacyPack(_ context.Context, _ daemon.LegacyPackImport) error {
+	store.calls++
+	return errors.New("injected pack import failure")
+}
+
+type deadlineImportStore struct {
+	*memoryStore
+	remaining chan time.Duration
+}
+
+func (store *deadlineImportStore) ImportLegacyPack(ctx context.Context, imported daemon.LegacyPackImport) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return errors.New("pack import context has no deadline")
+	}
+	store.remaining <- time.Until(deadline)
+	return store.memoryStore.ImportLegacyPack(ctx, imported)
 }
 
 func encodedIndex(t *testing.T, packID, blobID vaultic.ID) []byte {
@@ -186,6 +246,178 @@ func TestImportDryRunAndWorkBudget(t *testing.T) {
 	_, err = Import(context.Background(), source, fixedStatter{size: 16}, store, Options{WorkBudget: 1})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestImportRunsPackWorkersConcurrentlyBeforeCheckpoint(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	for range 3 {
+		idx.StorePack(
+			vaultic.NewRandomID(),
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}},
+		)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := &blockingImportStore{
+		memoryStore: newMemoryStore(),
+		entered:     make(chan struct{}, 3),
+		release:     make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+			fixedStatter{size: 2},
+			store,
+			Options{Resume: true, PackWorkers: 2},
+		)
+		done <- err
+	}()
+	for range 2 {
+		select {
+		case <-store.entered:
+		case <-time.After(time.Second):
+			t.Fatal("pack imports did not overlap")
+		}
+	}
+	select {
+	case <-store.entered:
+		t.Fatal("pack imports exceeded the configured worker limit")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, found := store.values[string(schema.ImportCheckpointKey(schema.ID(indexID)))]; found {
+		t.Fatal("checkpoint published before pack workers completed")
+	}
+	close(store.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, found := store.values[string(schema.ImportCheckpointKey(schema.ID(indexID)))]; !found {
+		t.Fatal("checkpoint missing after pack workers completed")
+	}
+}
+
+func TestImportAppliesConfiguredPackTimeout(t *testing.T) {
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	store := &deadlineImportStore{memoryStore: newMemoryStore(), remaining: make(chan time.Duration, 1)}
+	_, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}},
+		fixedStatter{size: 16},
+		store,
+		Options{PackTimeout: 2 * time.Minute},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := <-store.remaining
+	if remaining <= time.Minute || remaining > 2*time.Minute {
+		t.Fatalf("pack import deadline remaining = %v, want within (1m, 2m]", remaining)
+	}
+}
+
+func TestImportPreservesShorterCallerDeadline(t *testing.T) {
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	store := &deadlineImportStore{memoryStore: newMemoryStore(), remaining: make(chan time.Duration, 1)}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := Import(
+		ctx,
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}},
+		fixedStatter{size: 16},
+		store,
+		Options{PackTimeout: 2 * time.Minute},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := <-store.remaining
+	if remaining <= 20*time.Second || remaining > 30*time.Second {
+		t.Fatalf("pack import deadline remaining = %v, want within (20s, 30s]", remaining)
+	}
+}
+
+func TestImportRejectsNegativePackTimeout(t *testing.T) {
+	_, err := Import(context.Background(), &memorySource{}, fixedStatter{}, newMemoryStore(), Options{PackTimeout: -time.Second})
+	if err == nil || !strings.Contains(err.Error(), "pack timeout must not be negative") {
+		t.Fatalf("negative pack timeout error = %v", err)
+	}
+}
+
+func TestImportExplainsPackTimeout(t *testing.T) {
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	store := &blockingImportStore{
+		memoryStore: newMemoryStore(),
+		entered:     make(chan struct{}, 1),
+		release:     make(chan struct{}),
+	}
+	_, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}},
+		fixedStatter{size: 16},
+		store,
+		Options{PackTimeout: 10 * time.Millisecond},
+	)
+	if err == nil || !strings.Contains(err.Error(), "pack import exceeded 10ms; increase --pack-timeout") {
+		t.Fatalf("pack timeout error = %v", err)
+	}
+}
+
+func TestImportDoesNotMislabelCallerDeadlineAsPackTimeout(t *testing.T) {
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	store := &blockingImportStore{
+		memoryStore: newMemoryStore(),
+		entered:     make(chan struct{}, 1),
+		release:     make(chan struct{}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := Import(
+		ctx,
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}},
+		fixedStatter{size: 16},
+		store,
+		Options{PackTimeout: time.Minute},
+	)
+	if err == nil || strings.Contains(err.Error(), "increase --pack-timeout") {
+		t.Fatalf("caller deadline error = %v", err)
+	}
+}
+
+func TestImportStopsDispatchAfterPackFailure(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	for range 3 {
+		idx.StorePack(
+			vaultic.NewRandomID(),
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}},
+		)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := &failingImportStore{memoryStore: newMemoryStore()}
+	_, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+		fixedStatter{size: 2},
+		store,
+		Options{Resume: true, PackWorkers: 1},
+	)
+	if err == nil || !strings.Contains(err.Error(), "injected pack import failure") {
+		t.Fatalf("pack failure = %v", err)
+	}
+	if store.calls != 1 {
+		t.Fatalf("pack imports after failure = %d, want 1", store.calls)
+	}
+	if _, found := store.values[string(schema.ImportCheckpointKey(schema.ID(indexID)))]; found {
+		t.Fatal("failed index published a checkpoint")
 	}
 }
 

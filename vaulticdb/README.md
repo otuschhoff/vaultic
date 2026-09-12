@@ -189,6 +189,16 @@ VAULTICDB_TEST_S3_BUCKET=metadata \
 go test ./internal/index/daemon -run TestS3CompatibleStorageRoundTrip
 ```
 
+## Build identity
+
+Run `vaultic --version`, `vaulticdb --version`, `vaultic-key-broker --version`,
+or `vaultic-key-custodian --version` to inspect an executable without loading
+repository, topology, broker, or hardware configuration. The report includes
+the application and toolchain versions plus selected storage, transport, TLS,
+and cryptographic dependency versions. Rust dependency data is generated from
+`Cargo.lock`; multiple versions are shown when the resolved graph contains
+more than one version of a security-relevant crate.
+
 ## Static Linux build
 
 ```sh

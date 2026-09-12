@@ -11,6 +11,10 @@ fn repository_key(repository_id: &str) -> String {
 async fn main() -> Result<()> {
     disable_core_dumps();
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == ["--version"] {
+        vaulticdb::build_info::print_version("vaulticdb");
+        return Ok(());
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "publish-capsule")

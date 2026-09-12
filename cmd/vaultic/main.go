@@ -45,9 +45,11 @@ var cmdGroupDefault = "default"
 var cmdGroupAdvanced = "advanced"
 
 func newRootCommand(globalOptions *global.Options) *cobra.Command {
+	versionReport := textVersionReport(collectVersionInfo())
 	cmd := &cobra.Command{
-		Use:   "vaultic",
-		Short: "Backup and restore files",
+		Use:     "vaultic",
+		Short:   "Backup and restore files",
+		Version: global.Version,
 		Long: `
 vaultic is a backup program which allows saving multiple revisions of files and
 directories in an encrypted repository stored on different backends.
@@ -75,6 +77,7 @@ The documentation can be found at https://github.com/otuschhoff/vaultic/tree/mai
 			return nil
 		},
 	}
+	cmd.SetVersionTemplate(versionReport)
 
 	cmd.AddGroup(
 		&cobra.Group{

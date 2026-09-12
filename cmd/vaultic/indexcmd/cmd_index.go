@@ -113,7 +113,7 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.S3Region, "daemon-s3-region", "", "vaulticdb S3 signing region")
 	flags.StringVar(&options.S3Provider, "daemon-s3-provider", "", "vaulticdb S3 provider: generic, backblaze, or wasabi")
 	flags.StringVar(&options.S3BucketLookup, "daemon-s3-bucket-lookup", "", "vaulticdb S3 bucket lookup: auto, dns, or path")
-	flags.StringVar(&options.WALStore, "daemon-wal-store", "", "vaulticdb WAL store: inherit, local, s3, or rados")
+	flags.StringVar(&options.WALStore, "daemon-wal-store", "", "vaulticdb WAL store: inherit, local, memory (volatile), s3, or rados")
 	flags.StringVar(&options.WALDataDir, "daemon-wal-data-dir", "", "local vaulticdb WAL directory")
 	flags.StringVar(&options.WALS3Bucket, "daemon-wal-s3-bucket", "", "vaulticdb WAL S3 bucket")
 	flags.StringVar(&options.WALS3Prefix, "daemon-wal-s3-prefix", "", "vaulticdb WAL S3 key prefix")
@@ -276,6 +276,8 @@ type indexImportOptions struct {
 	Activate                   bool
 	FromLegacy                 bool
 	BatchSize                  uint32
+	PackWorkers                uint
+	PackTimeout                time.Duration
 	MaxErrors                  uint64
 	WorkBudget                 uint64
 	SnapshotDepth              uint
@@ -307,6 +309,8 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.BoolVar(&options.Activate, "activate", false, "make SlateDB authoritative after a complete import")
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
 	flags.Uint32Var(&options.BatchSize, "batch-size", 0, "maximum mutations per daemon transaction batch (zero uses daemon limit)")
+	flags.UintVar(&options.PackWorkers, "pack-workers", 0, "concurrent legacy pack imports (zero uses up to eight available CPUs)")
+	flags.DurationVar(&options.PackTimeout, "pack-timeout", 5*time.Minute, "maximum time for one legacy pack import")
 	flags.Uint64Var(&options.MaxErrors, "max-errors", 0, "stop after this many source errors (zero is unlimited)")
 	flags.Uint64Var(&options.WorkBudget, "work-budget", 0, "maximum blob records to examine (zero is unlimited)")
 	flags.UintVar(&options.SnapshotDepth, "snapshot-depth", math.MaxUint, "maximum tree depth to import (zero disables snapshot import)")
@@ -361,7 +365,7 @@ func runIndexImport(
 	}
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
 		Resume: options.Resume, DryRun: options.DryRun, MaxErrors: options.MaxErrors,
-		BatchSize:  options.BatchSize,
+		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers, PackTimeout: options.PackTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget,
 	})

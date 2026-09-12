@@ -241,12 +241,18 @@ unknown facts in the report. Add ``--fail-on-warning`` in automation when
 expected incompleteness should produce exit status 2.
 
 For an unattended import, ``--batch-size N`` limits mutations per daemon
-transaction; zero uses the negotiated daemon limit. ``--work-budget N`` limits
-blob records examined, ``--snapshot-work-budget N`` limits snapshot nodes, and
-``--max-errors N`` stops after that many source findings. A reached budget exits
-as incomplete and is suitable for controlled windows, but a partially traversed
-snapshot is not checkpointed until that snapshot completes. Avoid a very small
-snapshot budget when one snapshot itself contains billions of nodes.
+transaction; zero uses the negotiated daemon limit. ``--pack-workers N`` bounds
+concurrent pack imports; zero uses up to eight available CPUs.
+``--pack-timeout DURATION`` limits each pack's complete storage transaction and
+defaults to five minutes, allowing durable object-store commits to exceed the
+short per-RPC safety deadline. An index checkpoint is published only after all
+of its selected pack workers complete.
+``--work-budget N`` limits blob records examined, ``--snapshot-work-budget N``
+limits snapshot nodes, and ``--max-errors N`` stops after that many source
+findings. A reached budget exits as incomplete and is suitable for controlled
+windows, but a partially traversed snapshot is not checkpointed until that
+snapshot completes. Avoid a very small snapshot budget when one snapshot itself
+contains billions of nodes.
 
 ``--dry-run`` validates without writing SlateDB. It adds another full metadata
 pass, so a storage snapshot plus a resumable real import is usually faster for a

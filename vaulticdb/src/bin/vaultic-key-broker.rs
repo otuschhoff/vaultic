@@ -41,6 +41,10 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 async fn main() -> Result<()> {
     disable_core_dumps();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.len() == 1 && arguments[0] == "--version" {
+        vaulticdb::build_info::print_version("vaultic-key-broker");
+        return Ok(());
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "identity-init")

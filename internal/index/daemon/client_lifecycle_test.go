@@ -181,6 +181,27 @@ func TestPrepareDaemonCommand(t *testing.T) {
 	}
 }
 
+func TestPrepareDaemonCommandWithMemoryWAL(t *testing.T) {
+	options := (Options{
+		Socket:       "/tmp/vaulticdb/test.sock",
+		RepositoryID: "repo",
+		DaemonPath:   "/path/to/vaulticdb",
+		ObjectStore:  "local",
+		WALStore:     "memory",
+	}).withDefaults()
+	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = authRead.Close()
+		_ = authWrite.Close()
+	})
+	if !slices.Contains(cmd.Env, "VAULTICDB_WAL_STORE=memory") {
+		t.Fatalf("daemon environment does not select the in-memory WAL: %q", cmd.Env)
+	}
+}
+
 func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTIC_UNRELATED_SECRET", "must-not-be-inherited")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3-credential")

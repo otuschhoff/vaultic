@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -14,12 +17,22 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
-var ErrLimitReached = errors.New("legacy import limit reached")
+var (
+	ErrLimitReached = errors.New("legacy import limit reached")
+	errPackTimeout  = errors.New("legacy pack import timeout")
+)
+
+const (
+	maxDefaultPackWorkers = 8
+	defaultPackTimeout    = 5 * time.Minute
+)
 
 type Options struct {
 	Resume             bool
 	DryRun             bool
 	BatchSize          uint32
+	PackWorkers        uint
+	PackTimeout        time.Duration
 	MaxErrors          uint64
 	WorkBudget         uint64
 	SnapshotDepth      uint
@@ -69,9 +82,19 @@ type Store interface {
 	Put(context.Context, []byte, []byte, bool) error
 }
 
+type packImportResult struct {
+	imported daemon.LegacyPackImport
+	debt     *schema.CrawlDebtRecord
+	err      error
+	complete bool
+}
+
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (Result, error) {
 	var result Result
+	if options.PackTimeout < 0 {
+		return result, fmt.Errorf("pack timeout must not be negative")
+	}
 	var workUsed uint64
 	err := legacyindex.ForAllIndexes(ctx, source, source, func(indexID vaultic.ID, index *legacyindex.Index, loadErr error) error {
 		result.IndexesSeen++
@@ -98,38 +121,48 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var checkpoint schema.ImportCheckpointRecord
-		for _, indexedPack := range packs {
+		selected := packs
+
+		limitReached := false
+		for packIndex, indexedPack := range packs {
 			work := uint64(len(indexedPack.Blobs))
 			if options.WorkBudget > 0 && workUsed+work > options.WorkBudget {
-				return ErrLimitReached
+				selected = packs[:packIndex]
+				limitReached = true
+				break
 			}
 			workUsed += work
 			result.RecordsSeen += work
-			imported, debt, err := buildPackImport(ctx, statter, schemaIndexID, indexedPack)
-			if err != nil {
-				return err
+		}
+		outcomes, failedPack := importPacks(ctx, statter, store, schemaIndexID, selected, options)
+		var checkpoint schema.ImportCheckpointRecord
+		for packIndex, outcome := range outcomes {
+			if !outcome.complete || outcome.err != nil {
+				continue
 			}
-			if debt != nil {
+			if outcome.debt != nil {
 				result.CrawlDebtCreated++
 			}
-			imported.BatchSize = options.BatchSize
-			if !options.DryRun {
-				if err := store.ImportLegacyPack(ctx, imported); err != nil {
-					return fmt.Errorf("import pack %s from index %s: %w", indexedPack.PackID.Str(), indexID.Str(), err)
-				}
-			}
 			result.PacksImported++
-			result.BlobsImported += imported.Record.BlobCount
-			result.RecordsImported += imported.Record.BlobCount
-			result.RecordsSkipped += work - imported.Record.BlobCount
+			result.BlobsImported += outcome.imported.Record.BlobCount
+			result.RecordsImported += outcome.imported.Record.BlobCount
+			result.RecordsSkipped += uint64(len(selected[packIndex].Blobs)) - outcome.imported.Record.BlobCount
 			checkpoint.PacksImported++
-			checkpoint.BlobsImported += imported.Record.BlobCount
-			if debt != nil {
+			checkpoint.BlobsImported += outcome.imported.Record.BlobCount
+			if outcome.debt != nil {
 				checkpoint.ErrorsSeen++
 				result.WarningsSeen++
-				result.Findings = append(result.Findings, Finding{SourceID: indexID, Stage: "stat-pack", Error: debt.ErrorClass})
+				result.Findings = append(result.Findings, Finding{SourceID: indexID, Stage: "stat-pack", Error: outcome.debt.ErrorClass})
 			}
+		}
+		if failedPack >= 0 {
+			return fmt.Errorf("import pack %s from index %s: %w", selected[failedPack].PackID.Str(), indexID.Str(), outcomes[failedPack].err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if limitReached {
+			return ErrLimitReached
 		}
 		if !options.DryRun {
 			encoded, err := checkpoint.MarshalBinary()
@@ -161,6 +194,82 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		}
 	}
 	return result, nil
+}
+
+func importPacks(
+	ctx context.Context,
+	statter PackStatter,
+	store Store,
+	sourceIndex schema.ID,
+	packs []legacyindex.PackBlobs,
+	options Options,
+) ([]packImportResult, int) {
+	outcomes := make([]packImportResult, len(packs))
+	workers := options.PackWorkers
+	if workers == 0 {
+		workers = min(uint(runtime.GOMAXPROCS(0)), maxDefaultPackWorkers)
+	}
+	workers = min(workers, uint(len(packs)))
+	packTimeout := options.PackTimeout
+	if packTimeout == 0 {
+		packTimeout = defaultPackTimeout
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	var group sync.WaitGroup
+	var failOnce sync.Once
+	failedPack := -1
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for {
+				var packIndex int
+				var ok bool
+				select {
+				case <-workerCtx.Done():
+					return
+				case packIndex, ok = <-jobs:
+					if !ok {
+						return
+					}
+				}
+				packCtx, cancelPack := context.WithTimeoutCause(workerCtx, packTimeout, errPackTimeout)
+				indexedPack := packs[packIndex]
+				imported, debt, err := buildPackImport(packCtx, statter, sourceIndex, indexedPack)
+				if err == nil {
+					imported.BatchSize = options.BatchSize
+					if !options.DryRun {
+						err = store.ImportLegacyPack(packCtx, imported)
+					}
+				}
+				if err != nil && errors.Is(context.Cause(packCtx), errPackTimeout) {
+					err = fmt.Errorf("pack import exceeded %s; increase --pack-timeout if the storage backend is healthy: %w", packTimeout, err)
+				}
+				cancelPack()
+				outcomes[packIndex] = packImportResult{imported: imported, debt: debt, err: err, complete: true}
+				if err != nil {
+					failOnce.Do(func() {
+						failedPack = packIndex
+						cancel()
+					})
+					return
+				}
+			}
+		}()
+	}
+dispatch:
+	for packIndex := range packs {
+		select {
+		case jobs <- packIndex:
+		case <-workerCtx.Done():
+			break dispatch
+		}
+	}
+	close(jobs)
+	group.Wait()
+	return outcomes, failedPack
 }
 
 func recordFinding(result *Result, options Options, sourceID vaultic.ID, stage string, err error) error {
