@@ -73,7 +73,7 @@ type feasibilityStore struct {
 	writes        map[string]uint64
 	facts         uint64
 	bitmaps       uint64
-	publicationMu sync.Mutex
+	publicationMu sync.RWMutex
 }
 
 func newFeasibilityStore(t *testing.T, facts uint64) *feasibilityStore {
@@ -95,6 +95,14 @@ func (store *feasibilityStore) LockAnalyticsPublication() {
 
 func (store *feasibilityStore) UnlockAnalyticsPublication() {
 	store.publicationMu.Unlock()
+}
+
+func (store *feasibilityStore) RLockAnalyticsPublication() {
+	store.publicationMu.RLock()
+}
+
+func (store *feasibilityStore) RUnlockAnalyticsPublication() {
+	store.publicationMu.RUnlock()
 }
 
 func (store *feasibilityStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {

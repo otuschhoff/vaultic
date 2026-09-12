@@ -19,7 +19,7 @@ const revisionAllocationAttempts = 128
 // the bounded daemon client.
 type SchemaStore struct {
 	client        *Client
-	publicationMu sync.Mutex
+	publicationMu sync.RWMutex
 }
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.
@@ -96,6 +96,14 @@ func (store *SchemaStore) LockAnalyticsPublication() {
 
 func (store *SchemaStore) UnlockAnalyticsPublication() {
 	store.publicationMu.Unlock()
+}
+
+func (store *SchemaStore) RLockAnalyticsPublication() {
+	store.publicationMu.RLock()
+}
+
+func (store *SchemaStore) RUnlockAnalyticsPublication() {
+	store.publicationMu.RUnlock()
 }
 
 func (store *SchemaStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {

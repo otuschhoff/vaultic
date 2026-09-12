@@ -30,6 +30,8 @@ type Store interface {
 type publicationLocker interface {
 	LockAnalyticsPublication()
 	UnlockAnalyticsPublication()
+	RLockAnalyticsPublication()
+	RUnlockAnalyticsPublication()
 }
 
 func lockAnalyticsPublication(store Store) (func(), error) {
@@ -39,6 +41,15 @@ func lockAnalyticsPublication(store Store) (func(), error) {
 	}
 	locker.LockAnalyticsPublication()
 	return locker.UnlockAnalyticsPublication, nil
+}
+
+func lockAnalyticsPublicationRead(store Store) (func(), error) {
+	locker, ok := store.(publicationLocker)
+	if !ok {
+		return nil, fmt.Errorf("analytics store does not support publication locking")
+	}
+	locker.RLockAnalyticsPublication()
+	return locker.RUnlockAnalyticsPublication, nil
 }
 
 type metadataHeadStore interface {

@@ -45,11 +45,12 @@ func runMinio(ctx context.Context, t testing.TB, dir, key, secret string) (strin
 
 	cmd := exec.CommandContext(ctx, "minio",
 		"server", "--address", address,
+		"--console-address", "127.0.0.1:0",
 		"--config-dir", filepath.Join(dir, "config"),
 		filepath.Join(dir, "root"))
 	cmd.Env = append(os.Environ(),
-		"MINIO_ACCESS_KEY="+key,
-		"MINIO_SECRET_KEY="+secret,
+		"MINIO_ROOT_USER="+key,
+		"MINIO_ROOT_PASSWORD="+secret,
 	)
 	cmd.Stderr = os.Stderr
 

@@ -219,34 +219,60 @@ func Execute(ctx context.Context, store Store, query Query) (Result, error) {
 	if err := query.Validate(); err != nil {
 		return Result{}, err
 	}
-	metadata, err := Status(ctx, store)
-	if err != nil {
-		return Result{}, err
-	}
-	if !metadata.Enabled {
-		return Result{}, fmt.Errorf("analytics is disabled; enable or rebuild it first")
-	}
-	pinned, found, err := pinLatest(ctx, store)
-	if err != nil {
-		return Result{}, err
-	}
-	if !found {
-		hasManifest := false
-		if err := scan(ctx, store, schema.AnalyticsManifestPrefix(), func(daemon.KeyValue) error { hasManifest = true; return nil }); err != nil {
+	var pending *queryCacheUpdate
+	result, err := func() (Result, error) {
+		unlock, err := lockAnalyticsPublicationRead(store)
+		if err != nil {
 			return Result{}, err
 		}
-		if hasManifest {
-			return Result{}, fmt.Errorf("analytics manifest exists without a published watermark")
+		defer unlock()
+		metadata, err := Status(ctx, store)
+		if err != nil {
+			return Result{}, err
 		}
-		result, err := executeLegacy(ctx, store, query)
-		result.Explain.LegacyFallback = err == nil
-		result.Explain.Source = "legacy-facts"
+		if !metadata.Enabled {
+			return Result{}, fmt.Errorf("analytics is disabled; enable or rebuild it first")
+		}
+		pinned, found, err := pinLatest(ctx, store)
+		if err != nil {
+			return Result{}, err
+		}
+		if !found {
+			hasManifest := false
+			if err := scan(ctx, store, schema.AnalyticsManifestPrefix(), func(daemon.KeyValue) error { hasManifest = true; return nil }); err != nil {
+				return Result{}, err
+			}
+			if hasManifest {
+				return Result{}, fmt.Errorf("analytics manifest exists without a published watermark")
+			}
+			result, err := executeLegacy(ctx, store, query)
+			result.Explain.LegacyFallback = err == nil
+			result.Explain.Source = "legacy-facts"
+			return result, err
+		}
+		return executePinned(ctx, store, query, pinned, &pending)
+	}()
+	if err != nil || pending == nil {
 		return result, err
 	}
-	return executePinned(ctx, store, query, pinned)
+	if err := updateCache(ctx, store, query, pending.hash, pending.resultKey, result); err != nil {
+		return Result{}, err
+	}
+	return result, nil
 }
 
-func executePinned(ctx context.Context, store Store, query Query, pinned pinnedGeneration) (Result, error) {
+type queryCacheUpdate struct {
+	hash      schema.ID
+	resultKey []byte
+}
+
+func executePinned(
+	ctx context.Context,
+	store Store,
+	query Query,
+	pinned pinnedGeneration,
+	pending **queryCacheUpdate,
+) (Result, error) {
 	head, headAvailable, err := authoritativeHead(ctx, store)
 	if err != nil {
 		return Result{}, err
@@ -318,9 +344,7 @@ func executePinned(ctx context.Context, store Store, query Query, pinned pinnedG
 	if err := executeRawSegments(ctx, store, query, pinned, &result); err != nil {
 		return Result{}, err
 	}
-	if err := updateCache(ctx, store, query, schema.ID(hash), cacheKey, result); err != nil {
-		return Result{}, err
-	}
+	*pending = &queryCacheUpdate{hash: schema.ID(hash), resultKey: cacheKey}
 	return result, nil
 }
 
