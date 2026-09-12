@@ -45,7 +45,10 @@ func failureDaemonBinary(t *testing.T) string {
 		}
 		root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", ".."))
 		target := filepath.Join(root, "vaulticdb", "target", "process-tests")
-		command := exec.Command("cargo", "build", "--manifest-path", filepath.Join(root, "vaulticdb", "Cargo.toml"), "--bin", "vaulticdb", "--features", "test-failpoints", "--target-dir", target)
+		command := exec.Command(
+			"cargo", "build", "--manifest-path", filepath.Join(root, "vaulticdb", "Cargo.toml"),
+			"--bin", "vaulticdb", "--features", "test-failpoints", "--target-dir", target,
+		)
 		if output, err := command.CombinedOutput(); err != nil {
 			failureDaemonBuildErr = errors.New(string(output))
 			return
@@ -347,7 +350,8 @@ func TestProcessPromotionOpenAndClaimReleaseFailureRequiresTakeover(t *testing.T
 	requireRPCDetail(t, err, codes.FailedPrecondition, "writer_role", false)
 	after, statusErr := reader.WriterStatus(ctx)
 	health := daemonHealth(t, reader)
-	if statusErr != nil || after.Role != "fenced" || after.CurrentEpoch != 0 || after.ObservedEpoch <= initial.ObservedEpoch || health.GetReady() || health.GetState() != "failed" {
+	if statusErr != nil || after.Role != "fenced" || after.CurrentEpoch != 0 ||
+		after.ObservedEpoch <= initial.ObservedEpoch || health.GetReady() || health.GetState() != "failed" {
 		t.Fatalf("retained promotion claim: writer=%+v health=%+v initial=%+v err=%v", after, health, initial, statusErr)
 	}
 	if err := reader.Close(ctx); err != nil {
@@ -430,11 +434,16 @@ func TestProcessDemotionReaderOpenFailureRecoversAfterRestart(t *testing.T) {
 	_, err = client.DemoteWriter(ctx, "process failure test", true, time.Second)
 	detail := requireRPCDetail(t, err, codes.FailedPrecondition, "writer_role", false)
 	after := daemonHealth(t, client)
-	if after.GetReady() || after.GetState() != "failed" || after.GetStateDetail() != "demotion failed" || after.GetStateSinceUnixMs() < before.GetStateSinceUnixMs() {
-		t.Fatalf("reader-open failure lifecycle: writer=%+v detail=%+v before=%+v after=%+v", beforeWriter, detail, before, after)
+	if after.GetReady() || after.GetState() != "failed" || after.GetStateDetail() != "demotion failed" ||
+		after.GetStateSinceUnixMs() < before.GetStateSinceUnixMs() {
+		t.Fatalf(
+			"reader-open failure lifecycle: writer=%+v detail=%+v before=%+v after=%+v",
+			beforeWriter, detail, before, after,
+		)
 	}
 	afterWriter, err := client.WriterStatus(ctx)
-	if err != nil || afterWriter.Role != "fenced" || afterWriter.CurrentEpoch != beforeWriter.CurrentEpoch || afterWriter.ObservedEpoch != beforeWriter.CurrentEpoch {
+	if err != nil || afterWriter.Role != "fenced" || afterWriter.CurrentEpoch != beforeWriter.CurrentEpoch ||
+		afterWriter.ObservedEpoch != beforeWriter.CurrentEpoch {
 		t.Fatalf("reader-open failure writer = %+v, before=%+v, err=%v", afterWriter, beforeWriter, err)
 	}
 	observerOptions := options
@@ -691,8 +700,12 @@ func TestProcessDemotionClaimReleaseFailureRecoversAfterRestart(t *testing.T) {
 	_, err = client.DemoteWriter(ctx, "process failure test", true, time.Second)
 	detail := requireRPCDetail(t, err, codes.FailedPrecondition, "writer_role", false)
 	after := daemonHealth(t, client)
-	if !after.GetReady() || after.GetState() != "fenced" || after.GetStateDetail() != "demotion failed" || after.GetStateSinceUnixMs() < before.GetStateSinceUnixMs() {
-		t.Fatalf("claim-release failure lifecycle: writer=%+v detail=%+v before=%+v after=%+v", beforeWriter, detail, before, after)
+	if !after.GetReady() || after.GetState() != "fenced" || after.GetStateDetail() != "demotion failed" ||
+		after.GetStateSinceUnixMs() < before.GetStateSinceUnixMs() {
+		t.Fatalf(
+			"claim-release failure lifecycle: writer=%+v detail=%+v before=%+v after=%+v",
+			beforeWriter, detail, before, after,
+		)
 	}
 	if err := client.Close(ctx); err != nil {
 		t.Fatal(err)
@@ -738,7 +751,10 @@ func TestProcessRollbackFenceRefreshFailureReconciles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activated, err := client.ActivateGeneration(ctx, quarantined.ActiveGeneration, quarantined.ActiveGeneration+1, "candidate", strings.Repeat("bb", 32), time.Minute)
+	activated, err := client.ActivateGeneration(
+		ctx, quarantined.ActiveGeneration, quarantined.ActiveGeneration+1,
+		"candidate", strings.Repeat("bb", 32), time.Minute,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -762,7 +778,8 @@ func TestProcessRollbackFenceRefreshFailureReconciles(t *testing.T) {
 		t.Fatalf("rollback reconciliation lifecycle = %+v", health)
 	}
 	committed, err := client.GenerationStatus(ctx)
-	if err != nil || committed.State != "rollback-observation" || committed.ActiveGeneration != initial.ActiveGeneration || committed.Decision <= activated.Decision {
+	if err != nil || committed.State != "rollback-observation" ||
+		committed.ActiveGeneration != initial.ActiveGeneration || committed.Decision <= activated.Decision {
 		t.Fatalf("committed rollback status = %+v, err=%v", committed, err)
 	}
 	writer, err := client.WriterStatus(ctx)
@@ -829,7 +846,8 @@ func TestProcessRollbackFenceRefreshFailureReconciles(t *testing.T) {
 		t.Fatalf("restarted rollback status = %+v, err=%v", afterRestart, err)
 	}
 	restartedWriter, err := restarted.WriterStatus(ctx)
-	if err != nil || restartedWriter.Role != "read-write" || restartedWriter.CurrentEpoch <= writer.CurrentEpoch || restartedWriter.CurrentEpoch != restartedWriter.ObservedEpoch {
+	if err != nil || restartedWriter.Role != "read-write" || restartedWriter.CurrentEpoch <= writer.CurrentEpoch ||
+		restartedWriter.CurrentEpoch != restartedWriter.ObservedEpoch {
 		t.Fatalf("restarted rollback writer = %+v, previous=%+v, err=%v", restartedWriter, writer, err)
 	}
 	reconciled, err = restarted.RollbackGeneration(ctx, activated.Decision, strings.Repeat("cc", 32), 0)
@@ -975,7 +993,8 @@ func TestProcessCapsuleMigrationResumesAfterPublicationCrashes(t *testing.T) {
 				t.Fatal(err)
 			}
 			replayed, err := resumed.PrepareCapsuleMigration(ctx, capsuleDir, 1, "operators", 1, publicKey, members, sealedTopology)
-			if err != nil || !bytes.Equal(replayed.Capsule, migration.Capsule) || replayed.LocalPath != migration.LocalPath || replayed.MirrorPath != migration.MirrorPath {
+			if err != nil || !bytes.Equal(replayed.Capsule, migration.Capsule) ||
+				replayed.LocalPath != migration.LocalPath || replayed.MirrorPath != migration.MirrorPath {
 				t.Fatalf("replayed migration = %+v, err=%v", replayed, err)
 			}
 			proofFor := func(digest string) []byte {
@@ -1033,7 +1052,8 @@ func TestProcessCapsuleMigrationResumesAfterPublicationCrashes(t *testing.T) {
 			if err := resumed.Close(ctx); err != nil {
 				t.Fatal(err)
 			}
-			for _, entry := range []string{options.Socket, strings.TrimSuffix(options.Socket, filepath.Ext(options.Socket)) + ".pid", strings.TrimSuffix(options.Socket, filepath.Ext(options.Socket)) + ".cap"} {
+			base := strings.TrimSuffix(options.Socket, filepath.Ext(options.Socket))
+			for _, entry := range []string{options.Socket, base + ".pid", base + ".cap"} {
 				if _, err := os.Lstat(entry); !os.IsNotExist(err) {
 					t.Fatalf("runtime artifact remained after recovery: %s (%v)", entry, err)
 				}
@@ -1273,7 +1293,8 @@ func TestProcessStorageProviderOutageRecoversAndPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := daemonHealth(t, client)
-	_, err = client.WriteBatchWithIdempotency(ctx, []Mutation{{Key: []byte("provider-key"), Value: []byte("provider-value")}}, nil, true, "", "provider-request")
+	mutations := []Mutation{{Key: []byte("provider-key"), Value: []byte("provider-value")}}
+	_, err = client.WriteBatchWithIdempotency(ctx, mutations, nil, true, "", "provider-request")
 	requireRPCDetail(t, err, codes.Unavailable, "storage_unavailable", true)
 	if !errors.Is(err, ErrStorageUnavailable) {
 		t.Fatalf("provider error = %v, want ErrStorageUnavailable", err)
@@ -1282,7 +1303,9 @@ func TestProcessStorageProviderOutageRecoversAndPersists(t *testing.T) {
 	if !after.GetReady() || after.GetState() != "read_write" || after.GetStateSinceUnixMs() != before.GetStateSinceUnixMs() {
 		t.Fatalf("provider outage changed lifecycle: before=%+v after=%+v", before, after)
 	}
-	if durable, err := client.WriteBatchWithIdempotency(ctx, []Mutation{{Key: []byte("provider-key"), Value: []byte("provider-value")}}, nil, true, "", "provider-request"); err != nil || !durable {
+	if durable, err := client.WriteBatchWithIdempotency(
+		ctx, mutations, nil, true, "", "provider-request",
+	); err != nil || !durable {
 		t.Fatalf("provider retry = durable %t, err=%v", durable, err)
 	}
 	if err := client.Close(ctx); err != nil {

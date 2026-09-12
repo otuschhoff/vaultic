@@ -440,13 +440,14 @@ func validateExistingRuntimeMetadata(options Options) error {
 		return fmt.Errorf("%w: %w", ErrUnsafeEndpoint, errIncompleteRuntimeMetadata)
 	}
 	for path, info := range map[string]os.FileInfo{pidPath: pidInfo, capabilityPath: capabilityInfo} {
-		if !info.Mode().IsRegular() || runtime.GOOS != "windows" && (info.Mode().Perm()&0o022 != 0 || vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid())) {
+		if !info.Mode().IsRegular() || runtime.GOOS != "windows" &&
+			(info.Mode().Perm()&0o022 != 0 || vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid())) {
 			return fmt.Errorf("%w: unsafe runtime metadata at %s", ErrUnsafeEndpoint, path)
 		}
 	}
 	pidBytes, err := os.ReadFile(pidPath)
 	if err != nil {
-		return fmt.Errorf("%w: read PID metadata: %v", ErrUnsafeEndpoint, err)
+		return fmt.Errorf("%w: read PID metadata: %w", ErrUnsafeEndpoint, err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil || pid <= 0 {
@@ -454,7 +455,7 @@ func validateExistingRuntimeMetadata(options Options) error {
 	}
 	capabilityBytes, err := os.ReadFile(capabilityPath)
 	if err != nil {
-		return fmt.Errorf("%w: read capability metadata: %v", ErrUnsafeEndpoint, err)
+		return fmt.Errorf("%w: read capability metadata: %w", ErrUnsafeEndpoint, err)
 	}
 	capabilities := make(map[string]string)
 	for line := range strings.SplitSeq(strings.TrimSpace(string(capabilityBytes)), "\n") {
@@ -466,7 +467,8 @@ func validateExistingRuntimeMetadata(options Options) error {
 		capabilities[name] = value
 	}
 	wantTCP := strconv.FormatBool(options.TCPAddress != "")
-	if len(capabilities) != 3 || capabilities["protocol"] != ProtocolVersion || capabilities["schema"] != SchemaVersion || capabilities["tcp_enabled"] != wantTCP {
+	if len(capabilities) != 3 || capabilities["protocol"] != ProtocolVersion ||
+		capabilities["schema"] != SchemaVersion || capabilities["tcp_enabled"] != wantTCP {
 		return fmt.Errorf("%w: incompatible capability metadata", ErrIncompatibleDaemon)
 	}
 	return nil
