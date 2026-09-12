@@ -190,14 +190,15 @@ impl KeyManager {
         serde_json::to_vec_pretty(&state.envelope).context("encode metadata key envelope")
     }
 
-    pub async fn active_dek_for_migration(&self) -> Result<Zeroizing<Vec<u8>>> {
+    pub async fn active_dek_for_migration(&self) -> Result<(u32, Zeroizing<Vec<u8>>)> {
         let state = self.state.lock().await;
         let keys = expand_deks(&state.envelope, &state.dek)?;
+        let active_version = state.envelope.active_dek_version;
         let active = keys
             .iter()
-            .find(|key| key.version == state.envelope.active_dek_version)
+            .find(|key| key.version == active_version)
             .context("active metadata DEK is unavailable")?;
-        Ok(Zeroizing::new(active.secret().to_vec()))
+        Ok((active_version, Zeroizing::new(active.secret().to_vec())))
     }
 
     pub fn wrap_object_store(&self, inner: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {

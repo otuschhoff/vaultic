@@ -5,7 +5,7 @@ use std::{
     env,
     fs::File,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
 };
@@ -22,7 +22,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbReader, DbReaderMode, WriteBatch};
 use tokio::{
     net::{TcpListener, UnixListener},
-    sync::{mpsc, watch, Mutex, RwLock},
+    sync::{mpsc, oneshot, watch, Mutex, RwLock},
 };
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;

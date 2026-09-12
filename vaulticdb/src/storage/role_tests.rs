@@ -78,10 +78,10 @@ mod role_tests {
         conflict.puts[0].value = b"two".to_vec();
         assert_eq!(
             storage.write_batch(&conflict).await.unwrap_err().code(),
-            tonic::Code::AlreadyExists
+            tonic::Code::Aborted
         );
 
-        let transaction_id = storage.begin().await.unwrap();
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
             .write_batch(&WriteBatchRequest {
                 puts: vec![KeyValue {
@@ -93,8 +93,16 @@ mod role_tests {
             })
             .await
             .unwrap();
-        storage.commit(&transaction_id, "commit-one").await.unwrap();
-        storage.commit(&transaction_id, "commit-one").await.unwrap();
+        assert!(storage
+            .commit(&transaction_id, "commit-one")
+            .await
+            .unwrap()
+            .consumed);
+        assert!(!storage
+            .commit(&transaction_id, "commit-one")
+            .await
+            .unwrap()
+            .consumed);
         assert_eq!(
             storage.get(b"transaction", "").await.unwrap().value,
             b"committed"

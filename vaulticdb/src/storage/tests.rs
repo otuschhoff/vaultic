@@ -15,6 +15,131 @@ mod tests {
         paths
     }
 
+    #[test]
+    fn storage_failpoints_fire_once() {
+        let failpoint = StorageFailpoint::OpenWriter("fail-once".to_owned());
+        arm_storage_failpoint(failpoint.clone());
+        assert!(check_storage_failpoint(failpoint.clone()).is_err());
+        assert!(check_storage_failpoint(failpoint).is_ok());
+    }
+
+    fn transition_storage(
+        database: Database,
+        path: String,
+        object_store: Arc<dyn ObjectStore>,
+        epoch: u64,
+    ) -> Storage {
+        Storage {
+            database: RwLock::new(database),
+            database_path: path,
+            coordination_store: object_store.clone(),
+            object_store,
+            wal_object_store: None,
+            wal_metrics: None,
+            encryption: EncryptionStatus {
+                enabled: false,
+                algorithm: "none",
+                active_dek_version: 0,
+                envelope_generation: 0,
+                unlock_slot: None,
+                recovery_unlock: false,
+                initializing: false,
+            },
+            key_manager: None,
+            capsule_migration: Mutex::new(()),
+            transactions: RwLock::new(HashMap::new()),
+            next_transaction: AtomicU64::new(1),
+            last_durable_sequence: AtomicU64::new(0),
+            transaction_idle_timeout_ms: 1_000,
+            credential_manager: None,
+            broker_lease_metadata: None,
+            writer_epoch: AtomicU64::new(epoch),
+            wal_target: "inherited",
+            wal_durability: "inherited",
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_promotion_open_releases_claim_and_recovers_reader() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("failed-promotion-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        writer.close().await.unwrap();
+        let reader = open_reader(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Reader(reader), path.clone(), object_store.clone(), 1);
+
+        arm_storage_failpoint(StorageFailpoint::OpenWriter(path.clone()));
+        let failure = storage.promote(Some(1)).await.unwrap_err();
+
+        assert_eq!(failure.database, DatabaseState::Reader);
+        assert!(!failure.claim_held);
+        assert_eq!(failure.epoch, 2);
+        assert_eq!(active_writer_epoch(object_store.as_ref()).await.unwrap(), None);
+        assert!(matches!(&*storage.database.read().await, Database::Reader(_)));
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_demotion_release_keeps_reader_and_reports_claim() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("failed-demotion-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
+
+        arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaim(
+            object_store.as_ref() as *const dyn ObjectStore as *const () as usize,
+        ));
+        let failure = storage.demote().await.unwrap_err();
+
+        assert_eq!(failure.database, DatabaseState::Reader);
+        assert!(failure.claim_held);
+        assert_eq!(failure.epoch, 1);
+        assert_eq!(active_writer_epoch(object_store.as_ref()).await.unwrap(), Some(1));
+        assert!(matches!(&*storage.database.read().await, Database::Reader(_)));
+        storage.close().await.unwrap();
+        release_writer_claim(object_store.as_ref(), 1).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_commit_reports_consumed_transaction() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("failed-commit-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        assert_eq!(storage.transactions.read().await.len(), 1);
+
+        arm_storage_failpoint(StorageFailpoint::BeforeTransactionCommit(path));
+        let failure = storage.commit(&transaction_id, "").await.unwrap_err();
+
+        assert!(failure.consumed);
+        assert_eq!(storage.transactions.read().await.len(), 0);
+        let missing = storage.commit("unknown", "").await.unwrap_err();
+        assert!(!missing.consumed);
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writer_fence_check_distinguishes_a_stale_claim() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("stale-fence-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
+        release_writer_claim(object_store.as_ref(), 1).await.unwrap();
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(2));
+
+        assert!(matches!(
+            storage.ensure_writer_fence().await,
+            Err(WriterFenceFailure::Stale { observed_epoch: 2 })
+        ));
+        assert!(storage.close().await.is_err());
+        release_writer_claim(object_store.as_ref(), 2).await.unwrap();
+    }
+
     #[tokio::test]
     async fn direct_s3_control_objects_are_repository_scoped() {
         let bucket: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -342,6 +467,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_transactions_report_counter_reconciliation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("expired-transaction-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage
+            .transactions
+            .read()
+            .await
+            .get(&transaction_id)
+            .unwrap()
+            .last_touched_ms
+            .store(0, Ordering::Relaxed);
+
+        assert_eq!(storage.prune_expired_transactions().await, (0, 1));
+        assert_eq!(storage.prune_expired_transactions().await, (0, 0));
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_begin_reports_transactions_pruned_before_failure() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("failed-begin-expiry-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage
+            .transactions
+            .read()
+            .await
+            .get(&transaction_id)
+            .unwrap()
+            .last_touched_ms
+            .store(0, Ordering::Relaxed);
+        let writer = {
+            let mut database = storage.database.write().await;
+            match std::mem::replace(&mut *database, Database::Unavailable) {
+                Database::Writer(writer) => writer,
+                _ => panic!("expected writer database"),
+            }
+        };
+        writer.close().await.unwrap();
+
+        let failure = storage.begin().await.unwrap_err();
+        assert_eq!(failure.expired, 1);
+        assert_eq!(storage.transactions.read().await.len(), 0);
+        release_writer_claim(object_store.as_ref(), 1).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn capsule_migration_keeps_master_key_until_matching_finalize() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(
@@ -370,6 +548,7 @@ mod tests {
                 initializing: false,
             },
             key_manager: None,
+            capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
@@ -415,6 +594,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capsule_migration_intention_preserves_bytes_and_progress() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("migration-intent-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+        storage.store_master_key(b"repository-key").await.unwrap_err();
+        let capsule = b"exact capsule bytes\n".to_vec();
+        let digest = format!("{:x}", Sha256::digest(&capsule));
+        let intent = CapsuleMigrationIntent {
+            format: 1,
+            repository_id: "repo".to_owned(),
+            generation: 3,
+            capsule_directory: "/capsules".to_owned(),
+            request_sha256: "request-digest".to_owned(),
+            capsule_sha256: digest.clone(),
+            capsule: capsule.clone(),
+            local_path: None,
+            mirror_path: None,
+        };
+        assert_eq!(
+            storage.store_capsule_migration_intent(&intent).await.unwrap(),
+            intent
+        );
+        let mut progressed = storage.capsule_migration_intent().await.unwrap().unwrap();
+        assert_eq!(progressed.capsule, capsule);
+        progressed.local_path = Some("/capsules/recovery.json".to_owned());
+        storage.write_capsule_migration_intent(&progressed).await.unwrap();
+        assert_eq!(
+            storage
+                .finalize_capsule_migration(&digest)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        progressed.mirror_path = Some("meta:capsule-mirror".to_owned());
+        storage.write_capsule_migration_intent(&progressed).await.unwrap();
+        assert_eq!(
+            storage.capsule_migration_status().await.unwrap(),
+            (Some(digest.clone()), None)
+        );
+        storage.finalize_capsule_migration(&digest).await.unwrap();
+        assert_eq!(
+            storage.capsule_migration_status().await.unwrap(),
+            (None, Some(digest))
+        );
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_capsule_migration_intentions_have_one_winner() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("migration-race-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
+        let intent = |suffix: u8| {
+            let capsule = vec![suffix; 32];
+            CapsuleMigrationIntent {
+                format: 1,
+                repository_id: "repo".to_owned(),
+                generation: u64::from(suffix),
+                capsule_directory: format!("/capsules/{suffix}"),
+                request_sha256: format!("request-{suffix}"),
+                capsule_sha256: format!("{:x}", Sha256::digest(&capsule)),
+                capsule,
+                local_path: None,
+                mirror_path: None,
+            }
+        };
+        let first = intent(1);
+        let second = intent(2);
+        let (first_result, second_result) = tokio::join!(
+            storage.store_capsule_migration_intent(&first),
+            storage.store_capsule_migration_intent(&second),
+        );
+        assert_ne!(first_result.is_ok(), second_result.is_ok());
+        let stored = storage.capsule_migration_intent().await.unwrap().unwrap();
+        assert!(stored == first || stored == second);
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn writer_epoch_claim_is_exclusive_and_fences_stale_claims() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(
@@ -435,6 +698,8 @@ mod tests {
                 .unwrap(),
             Some(2)
         );
+        assert!(release_writer_claim(object_store.as_ref(), 1).await.is_err());
+        assert_eq!(active_writer_epoch(object_store.as_ref()).await.unwrap(), Some(2));
         assert!(claim_writer_epoch(object_store.as_ref(), Some(1))
             .await
             .is_err());
@@ -462,6 +727,7 @@ mod tests {
                 initializing: false,
             },
             key_manager: None,
+            capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
@@ -473,7 +739,8 @@ mod tests {
             wal_durability: "local-process",
         };
         let error = storage.assert_current_writer_epoch().await.unwrap_err();
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.code(), tonic::Code::Aborted);
+        assert!(!error.details().is_empty());
     }
 
     #[tokio::test]
@@ -520,6 +787,7 @@ mod tests {
                 initializing: false,
             },
             key_manager: None,
+            capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
@@ -597,6 +865,7 @@ mod tests {
                 initializing: false,
             },
             key_manager: None,
+            capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
@@ -637,7 +906,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rolled_back.active_generation, 1);
+        assert_eq!(rolled_back.state, "rollback-observation");
         assert!(rolled_back.decision > activated.decision);
+        assert_eq!(
+            storage
+                .rollback_generation("repo", activated.decision, "dd".repeat(32), 0)
+                .await
+                .unwrap(),
+            rolled_back
+        );
         let verified = storage
             .verify_generation("repo", rolled_back.decision, "ee".repeat(32))
             .await

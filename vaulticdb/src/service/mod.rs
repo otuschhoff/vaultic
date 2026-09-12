@@ -13,7 +13,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use tokio::{sync::watch, sync::Mutex, sync::RwLock};
+use tokio::{sync::watch, sync::Mutex, sync::OwnedRwLockReadGuard, sync::RwLock};
 use tonic::{Request, Response, Status};
 use vaulticdb::encryption;
 use vaulticdb::ids::RepositoryId;
@@ -38,7 +38,7 @@ use crate::{
         VerifyGenerationRequest, WriteBatchRequest, WriteBatchResponse, WriterStatusRequest,
         WriterStatusResponse,
     },
-    storage::{self, Storage},
+    storage::{self, DatabaseState, Storage},
     MAX_BATCH_ITEMS, MAX_CONCURRENT_REQUESTS, MAX_MESSAGE_BYTES, MAX_PAGE_ITEMS, PROTOCOL_VERSION,
     SCHEMA_VERSION,
 };
@@ -68,6 +68,7 @@ pub(crate) struct DaemonState {
     pub(crate) lifecycle: Arc<Mutex<DaemonLifecycle>>,
     pub(crate) writer_role: Arc<Mutex<WriterRoleState>>,
     pub(crate) writer_transition: Arc<Mutex<()>>,
+    pub(crate) mutation_admission: Arc<RwLock<()>>,
     pub(crate) last_writer_activity: Arc<Mutex<Instant>>,
     pub(crate) minimum_writer_tenure: Duration,
     pub(crate) writer_idle_grace: Option<Duration>,
@@ -89,11 +90,14 @@ impl Service {
             return Ok(storage);
         }
         let lifecycle = self.state.lifecycle.lock().await.status();
-        Err(Status::unavailable(format!(
-            "vaulticdb is {}: {}",
-            lifecycle.phase.as_str(),
-            lifecycle.detail
-        )))
+        Err(VaulticDbError::StorageUnavailable {
+            message: format!(
+                "vaulticdb is {}: {}",
+                lifecycle.phase.as_str(),
+                lifecycle.detail
+            ),
+        }
+        .into())
     }
 
     pub(crate) async fn transition_lifecycle(
@@ -111,6 +115,7 @@ impl Service {
 }
 
 struct WriteIntentGuard {
+    _admission: OwnedRwLockReadGuard<()>,
     writer_role: Arc<Mutex<WriterRoleState>>,
     last_writer_activity: Arc<Mutex<Instant>>,
 }
@@ -372,7 +377,7 @@ mod lifecycle_tests {
     use super::*;
     use crate::{
         lifecycle::DaemonPhase,
-        proto::{GetRequest, HealthRequest, RequestContext},
+        proto::{Empty, GetRequest, HealthRequest, RequestContext},
     };
 
     fn loading_service() -> Service {
@@ -393,6 +398,7 @@ mod lifecycle_tests {
                     Duration::ZERO,
                 ))),
                 writer_transition: Arc::new(Mutex::new(())),
+                mutation_admission: Arc::new(RwLock::new(())),
                 last_writer_activity: Arc::new(Mutex::new(now)),
                 minimum_writer_tenure: Duration::ZERO,
                 writer_idle_grace: None,
@@ -403,6 +409,38 @@ mod lifecycle_tests {
             shutdown,
             storage: Arc::new(RwLock::new(None)),
         }
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_admitted_mutation_and_blocks_new_admission() {
+        let service = loading_service();
+        service
+            .state
+            .lifecycle
+            .lock()
+            .await
+            .transition(DaemonPhase::ReadWrite, "ready", 124)
+            .unwrap();
+        let admitted = service.mutation_admission().await.unwrap();
+        let draining = service.clone();
+        let drain = tokio::spawn(async move {
+            draining
+                .handle_drain(Request::new(Empty {
+                    context: Some(RequestContext {
+                        request_id: "drain-barrier".to_owned(),
+                        deadline_unix_ms: i64::MAX,
+                    }),
+                }))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+
+        drop(admitted);
+        drain.await.unwrap().unwrap();
+        let error = service.mutation_admission().await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(!error.details().is_empty());
     }
 
     fn request_context() -> Option<RequestContext> {
@@ -442,5 +480,62 @@ mod lifecycle_tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert!(error.message().contains("loading_storage"));
+    }
+
+    #[test]
+    fn key_mutation_admission_requires_context_and_rejects_drain() {
+        let service = loading_service();
+        let request = Request::new(Empty::default());
+        let missing = service
+            .check_key_request(&request, "test-repository", None)
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+
+        service.state.draining.store(true, Ordering::Release);
+        let drained = service
+            .check_key_request(&request, "test-repository", request_context().as_ref())
+            .unwrap_err();
+        assert_eq!(drained.code(), tonic::Code::Unavailable);
+        assert!(!drained.details().is_empty());
+    }
+
+    #[test]
+    fn generation_mutation_admission_rejects_drain_with_details() {
+        let service = loading_service();
+        service.state.draining.store(true, Ordering::Release);
+        let request = Request::new(Empty::default());
+        let error = service
+            .check_generation_mutation(&request, "test-repository", request_context().as_ref())
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(!error.details().is_empty());
+    }
+
+    #[test]
+    fn request_context_failures_have_structured_details() {
+        let missing = check_context(None).unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+        assert!(!missing.details().is_empty());
+
+        let expired = check_context(Some(&RequestContext {
+            request_id: "expired".to_owned(),
+            deadline_unix_ms: 1,
+        }))
+        .unwrap_err();
+        assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
+        assert!(!expired.details().is_empty());
+    }
+
+    #[test]
+    fn capsule_proof_failure_has_authorization_details() {
+        let error = verify_capsule_migration_proof(
+            b"repository master key",
+            "repository",
+            &"a".repeat(64),
+            b"invalid proof",
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(!error.details().is_empty());
     }
 }

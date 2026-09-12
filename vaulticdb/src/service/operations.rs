@@ -1,3 +1,32 @@
+#[cfg(all(feature = "test-failpoints", unix))]
+pub(crate) async fn process_test_barrier(variable: &'static str) -> Result<(), Status> {
+    use std::io::{Read, Write};
+
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
+        != Ok("vaulticdb-process-tests-v1")
+    {
+        return Ok(());
+    }
+    let Ok(path) = std::env::var(variable) else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || {
+        let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+        stream.write_all(variable.as_bytes())?;
+        stream.write_all(b"\n")?;
+        let mut release = [0_u8; 1];
+        stream.read_exact(&mut release)
+    })
+    .await
+    .map_err(|error| Status::internal(format!("join process test barrier: {error}")))?
+    .map_err(|error| Status::internal(format!("process test barrier: {error}")))
+}
+
+#[cfg(not(all(feature = "test-failpoints", unix)))]
+pub(crate) async fn process_test_barrier(_variable: &'static str) -> Result<(), Status> {
+    Ok(())
+}
+
 fn verify_capsule_migration_proof(
     master_key: &[u8],
     repository_id: &str,
@@ -12,7 +41,11 @@ fn verify_capsule_migration_proof(
     verifier.update(capsule_sha256.as_bytes());
     verifier
         .verify_slice(proof)
-        .map_err(|_| Status::permission_denied("capsule-recovered repository key proof failed"))
+        .map_err(|_| {
+            Status::from(VaulticDbError::Authorization {
+                message: "capsule-recovered repository key proof failed".to_owned(),
+            })
+        })
 }
 
 fn validate_capsule_mutation(
@@ -179,6 +212,9 @@ impl Service {
         check_request(&self.state, &request, "")?;
         check_context(request.get_ref().context.as_ref())?;
         let _transition = self.state.writer_transition.lock().await;
+        process_test_barrier("VAULTICDB_TEST_DRAIN_BARRIER").await?;
+        let _admission = self.state.mutation_admission.write().await;
+        process_test_barrier("VAULTICDB_TEST_DRAIN_ACQUIRED_BARRIER").await?;
         self.state.draining.store(true, Ordering::Release);
         self.transition_lifecycle(DaemonPhase::Draining, "drain requested")
             .await?;
@@ -189,6 +225,7 @@ impl Service {
         check_request(&self.state, &request, "")?;
         check_context(request.get_ref().context.as_ref())?;
         let _transition = self.state.writer_transition.lock().await;
+        let _admission = self.state.mutation_admission.write().await;
         self.state.draining.store(true, Ordering::Release);
         let phase = self.state.lifecycle.lock().await.status().phase;
         if phase == DaemonPhase::Failed {
@@ -209,6 +246,7 @@ impl Service {
         force: bool,
     ) -> Result<WriterStatusResponse, Status> {
         let _transition = self.state.writer_transition.lock().await;
+        let _admission = self.mutation_admission().await?;
         let storage = self.storage().await?;
         {
             let mut role = self.state.writer_role.lock().await;
@@ -218,22 +256,38 @@ impl Service {
         self.transition_lifecycle(DaemonPhase::Demoting, reason)
             .await?;
         let drain = async {
-            while storage.active_transactions().await != 0 {
+            loop {
+                let (active_transactions, expired) = storage.prune_expired_transactions().await;
+                let mut role = self.state.writer_role.lock().await;
+                for _ in 0..expired {
+                    role.transaction_closed();
+                }
+                let status = role.status();
+                if active_transactions == 0
+                    && status.active_write_intents == 0
+                    && status.active_transactions == 0
+                {
+                    break;
+                }
+                drop(role);
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
         if tokio::time::timeout(timeout, drain).await.is_err() {
+            self.ensure_aborted_demotion_authority().await?;
             self.state
                 .writer_role
                 .lock()
                 .await
-                .fail_demotion(Instant::now());
+                .cancel_demotion(Instant::now(), "demotion timed out");
             self.transition_lifecycle(DaemonPhase::ReadWrite, "demotion timed out")
                 .await?;
-            return Err(Status::deadline_exceeded(
-                "writer demotion quiescence timed out",
-            ));
+            return Err(VaulticDbError::DeadlineExceeded {
+                message: "writer demotion quiescence timed out".to_owned(),
+            }
+            .into());
         }
+        process_test_barrier("VAULTICDB_TEST_DEMOTION_BARRIER").await?;
         match storage.demote().await {
             Ok(()) => {
                 self.state
@@ -246,19 +300,70 @@ impl Service {
                     .await?;
             }
             Err(error) => {
-                self.state
-                    .writer_role
-                    .lock()
-                    .await
-                    .fail_demotion(Instant::now());
-                self.transition_lifecycle(DaemonPhase::ReadWrite, "demotion failed")
-                    .await?;
-                return Err(Status::failed_precondition(format!(
-                    "writer demotion failed: {error:#}"
-                )));
+                let phase = match (error.database, error.claim_held) {
+                    (DatabaseState::Writer, true) => {
+                        self.ensure_aborted_demotion_authority().await?;
+                        self.state.writer_role.lock().await.cancel_demotion(
+                            Instant::now(),
+                            "demotion failed before writer close",
+                        );
+                        DaemonPhase::ReadWrite
+                    }
+                    (DatabaseState::Reader, false) => {
+                        self.state
+                            .writer_role
+                            .lock()
+                            .await
+                            .complete_demotion(Instant::now())
+                            .map_err(role_error)?;
+                        DaemonPhase::ReadOnly
+                    }
+                    (DatabaseState::Reader | DatabaseState::Unavailable, _) => {
+                        self.state.writer_role.lock().await.fence(
+                            error.epoch,
+                            Instant::now(),
+                            "writer demotion outcome requires recovery",
+                        );
+                        if error.database == DatabaseState::Unavailable {
+                            DaemonPhase::Failed
+                        } else {
+                            DaemonPhase::Fenced
+                        }
+                    }
+                    (DatabaseState::Writer, false) => DaemonPhase::Failed,
+                };
+                self.transition_lifecycle(phase, "demotion failed").await?;
+                let message = format!("writer demotion failed: {:#}", error.error);
+                return Err(if error.retryable {
+                    VaulticDbError::StorageUnavailable { message }.into()
+                } else {
+                    VaulticDbError::WriterRole { message }.into()
+                });
             }
         }
         Ok(self.writer_status_response().await)
+    }
+
+    async fn ensure_aborted_demotion_authority(&self) -> Result<(), Status> {
+        if let Err(error) = self.ensure_writer_authority().await {
+            let mut role = self.state.writer_role.lock().await;
+            if role.status().role != CoreWriterRole::Fenced {
+                let status = role.status();
+                role.fence(
+                    status.current_epoch.max(status.observed_epoch),
+                    Instant::now(),
+                    "writer authority unavailable after aborted demotion",
+                );
+                drop(role);
+                self.transition_lifecycle(
+                    DaemonPhase::Failed,
+                    "writer authority unavailable after aborted demotion",
+                )
+                .await?;
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn write_intent(&self) -> Result<WriteIntentGuard, Status> {
@@ -269,26 +374,25 @@ impl Service {
             .map_err(VaulticDbError::generation)
             .map_err(Status::from)?
         {
-            return Err(Status::failed_precondition(
-                "metadata generation mutation interlock is active",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "generation".to_owned(),
+                message: "metadata generation mutation interlock is active".to_owned(),
+            }
+            .into());
         }
         self.authority_intent().await
     }
 
     async fn authority_intent(&self) -> Result<WriteIntentGuard, Status> {
-        let storage = self.storage().await?;
-        if let Err(error) = storage.ensure_writer_fence().await {
-            let observed_epoch = storage.writer_status_epoch().await.1;
-            let mut role = self.state.writer_role.lock().await;
-            if role.status().role == CoreWriterRole::ReadWrite {
-                role.fence(observed_epoch, Instant::now(), "writer epoch changed");
-                drop(role);
-                self.transition_lifecycle(DaemonPhase::Fenced, "writer epoch changed")
-                    .await?;
-            }
-            return Err(Status::from(VaulticDbError::generation(error)));
-        }
+        let admission = self.mutation_admission().await?;
+        self.authority_intent_with_admission(admission).await
+    }
+
+    async fn authority_intent_with_admission(
+        &self,
+        admission: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Result<WriteIntentGuard, Status> {
+        self.ensure_writer_authority().await?;
         self.state
             .writer_role
             .lock()
@@ -296,24 +400,62 @@ impl Service {
             .admit_write()
             .map_err(role_error)?;
         Ok(WriteIntentGuard {
+            _admission: admission,
             writer_role: self.state.writer_role.clone(),
             last_writer_activity: self.state.last_writer_activity.clone(),
         })
+    }
+
+    async fn mutation_admission(&self) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, Status> {
+        let admission = self.state.mutation_admission.clone().read_owned().await;
+        if self.state.draining.load(Ordering::Acquire) {
+            return Err(VaulticDbError::StorageUnavailable {
+                message: "vaulticdb is draining".to_owned(),
+            }
+            .into());
+        }
+        process_test_barrier("VAULTICDB_TEST_MUTATION_BARRIER").await?;
+        Ok(admission)
+    }
+
+    async fn ensure_writer_authority(&self) -> Result<(), Status> {
+        let storage = self.storage().await?;
+        if let Err(error) = storage.ensure_writer_fence().await {
+            match error {
+                crate::storage::WriterFenceFailure::Stale { observed_epoch } => {
+                    let mut role = self.state.writer_role.lock().await;
+                    if matches!(
+                        role.status().role,
+                        CoreWriterRole::ReadWrite | CoreWriterRole::Demoting
+                    ) {
+                        role.fence(observed_epoch, Instant::now(), "writer epoch changed");
+                        drop(role);
+                        self.transition_lifecycle(DaemonPhase::Fenced, "writer epoch changed")
+                            .await?;
+                    }
+                    return Err(VaulticDbError::WriterFenced {
+                        generation: observed_epoch,
+                    }
+                    .into());
+                }
+                crate::storage::WriterFenceFailure::Unavailable(error) => {
+                    return Err(Status::from(VaulticDbError::generation(error)));
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn with_write_intent<T, F>(&self, operation: F) -> Result<T, Status>
     where
         F: Future<Output = Result<T, Status>>,
     {
-        self.state
-            .writer_role
-            .lock()
-            .await
-            .admit_write()
-            .map_err(role_error)?;
+        let _intent = self.write_intent().await?;
         let result = operation.await;
-        self.state.writer_role.lock().await.finish_write();
-        *self.state.last_writer_activity.lock().await = Instant::now();
+        process_test_barrier("VAULTICDB_TEST_MUTATION_COMPLETE_BARRIER").await?;
+        if result.is_err() {
+            self.ensure_writer_authority().await?;
+        }
         result
     }
 
@@ -354,10 +496,7 @@ impl Service {
             transition_reason: status.transition_reason,
             transition_unix_ms,
             active_write_intents: status.active_write_intents,
-            active_transactions: match &storage {
-                Some(storage) => storage.active_transactions().await as u64,
-                None => 0,
-            },
+            active_transactions: status.active_transactions,
             last_durable_sequence: storage
                 .as_ref()
                 .map_or(0, |storage| storage.last_durable_sequence()),
@@ -370,12 +509,22 @@ impl Service {
         &self,
         request: &Request<T>,
         repository_id: &str,
+        context: Option<&proto::RequestContext>,
     ) -> Result<(), Status> {
         check_request(&self.state, request, repository_id)?;
+        check_context(context)?;
+        if self.state.draining.load(Ordering::Acquire) {
+            return Err(VaulticDbError::StorageUnavailable {
+                message: "vaulticdb is draining".to_owned(),
+            }
+            .into());
+        }
         if !self.state.unix_socket {
-            return Err(Status::failed_precondition(
-                "key management is available only over a private Unix socket",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "transport".to_owned(),
+                message: "key management is available only over a private Unix socket".to_owned(),
+            }
+            .into());
         }
         Ok(())
     }

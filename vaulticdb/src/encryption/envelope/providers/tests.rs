@@ -21,6 +21,36 @@ mod tests {
     }
 
     #[test]
+    fn aws_sdk_transport_errors_preserve_retryability() {
+        use aws_sdk_kms::operation::encrypt::EncryptError;
+
+        let timeout = aws_kms_error(
+            "AWS KMS Encrypt",
+            SdkError::<EncryptError>::timeout_error(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected timeout",
+            )),
+        );
+        assert!(timeout.chain().any(|cause| cause
+            .downcast_ref::<TransientProviderError>()
+            .is_some()));
+        assert!(timeout
+            .chain()
+            .any(|cause| cause.downcast_ref::<SdkError<EncryptError>>().is_some()));
+
+        let construction = aws_kms_error(
+            "AWS KMS Encrypt",
+            SdkError::<EncryptError>::construction_failure(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid client configuration",
+            )),
+        );
+        assert!(!construction.chain().any(|cause| cause
+            .downcast_ref::<TransientProviderError>()
+            .is_some()));
+    }
+
+    #[test]
     fn azure_references_require_an_explicit_key_version() {
         assert!(
             validate_azure_key_reference("https://example.vault.azure.net/keys/key/version")

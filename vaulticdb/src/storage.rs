@@ -52,6 +52,9 @@ use vaulticdb::encryption::{
 use vaulticdb::ids::{Namespace, RepositoryId};
 use vaulticdb::topology::{Credential, CredentialKind, Provider, ReplicaMode, TopologyDocument};
 
+#[cfg(any(test, feature = "test-failpoints"))]
+use std::sync::{LazyLock, Mutex as StdMutex};
+
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_024;
 const DONE_FIELD_ENCODED_LEN: usize = 2;
 const MASTER_KEY_RECORD: &[u8] = b"meta:master-key";
@@ -67,6 +70,90 @@ const ACTIVE_WRITER_PATH: &str = "_vaultic/active-writer";
 const WAL_TARGET_PATH: &str = "_vaultic/wal-target-v1";
 const ACTIVE_GENERATION_PATH: &str = "_vaultic/metadata-authority";
 const GENERATION_DECISION_PREFIX: &str = "_vaultic/metadata-authority-decisions";
+
+#[cfg(any(test, feature = "test-failpoints"))]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum StorageFailpoint {
+    BeforeWriteBatch(String),
+    BeforeTransactionCommit(String),
+    BeforeTransactionDurability(String),
+    CloseReader(String),
+    CloseWriter(String),
+    FinalizeCapsuleDurability(String),
+    OpenReader(String),
+    OpenWriter(String),
+    FlushWriter(String),
+    RefreshWriterFence(String),
+    ReleaseWriterClaim(usize),
+}
+
+#[cfg(test)]
+static STORAGE_FAILPOINTS: LazyLock<StdMutex<std::collections::HashSet<StorageFailpoint>>> =
+    LazyLock::new(|| StdMutex::new(std::collections::HashSet::new()));
+
+#[cfg(feature = "test-failpoints")]
+static PROCESS_STORAGE_FAILPOINTS: LazyLock<StdMutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| {
+        let configured = if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
+            == Ok("vaulticdb-process-tests-v1")
+        {
+            std::env::var("VAULTICDB_TEST_FAILPOINTS").unwrap_or_default()
+        } else {
+            String::new()
+        };
+        StdMutex::new(
+            configured
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        )
+    });
+
+#[cfg(test)]
+fn arm_storage_failpoint(failpoint: StorageFailpoint) {
+    STORAGE_FAILPOINTS
+        .lock()
+        .expect("storage failpoint lock")
+        .insert(failpoint);
+}
+
+#[cfg(any(test, feature = "test-failpoints"))]
+fn check_storage_failpoint(failpoint: StorageFailpoint) -> Result<()> {
+    #[cfg(test)]
+    if STORAGE_FAILPOINTS
+        .lock()
+        .expect("storage failpoint lock")
+        .remove(&failpoint)
+    {
+        bail!("injected storage failure at {failpoint:?}");
+    }
+    #[cfg(feature = "test-failpoints")]
+    {
+        let name = match failpoint {
+            StorageFailpoint::BeforeWriteBatch(_) => "provider-unavailable",
+            StorageFailpoint::BeforeTransactionCommit(_) => "before-transaction-commit",
+            StorageFailpoint::BeforeTransactionDurability(_) => "before-transaction-durability",
+            StorageFailpoint::CloseReader(_) => "close-reader",
+            StorageFailpoint::CloseWriter(_) => "close-writer",
+            StorageFailpoint::FinalizeCapsuleDurability(_) => "finalize-capsule-durability",
+            StorageFailpoint::OpenReader(_) => "open-reader",
+            StorageFailpoint::OpenWriter(_) => "open-writer",
+            StorageFailpoint::FlushWriter(_) => "flush-writer",
+            StorageFailpoint::RefreshWriterFence(_) => "refresh-writer-fence",
+            StorageFailpoint::ReleaseWriterClaim(_) => "release-writer-claim",
+        };
+        if PROCESS_STORAGE_FAILPOINTS
+            .lock()
+            .expect("process storage failpoint lock")
+            .remove(name)
+        {
+            bail!("injected storage failure at {name}");
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,6 +196,20 @@ struct IdempotencyRecord {
     durable: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CapsuleMigrationIntent {
+    pub(crate) format: u32,
+    pub(crate) repository_id: String,
+    pub(crate) generation: u64,
+    pub(crate) capsule_directory: String,
+    pub(crate) request_sha256: String,
+    pub(crate) capsule_sha256: String,
+    pub(crate) capsule: Vec<u8>,
+    pub(crate) local_path: Option<String>,
+    pub(crate) mirror_path: Option<String>,
+}
+
 pub(crate) struct Storage {
     database: RwLock<Database>,
     database_path: String,
@@ -118,6 +219,7 @@ pub(crate) struct Storage {
     coordination_store: Arc<dyn ObjectStore>,
     encryption: EncryptionStatus,
     key_manager: Option<Arc<KeyManager>>,
+    capsule_migration: Mutex<()>,
     transactions: RwLock<HashMap<String, Arc<TransactionSlot>>>,
     next_transaction: AtomicU64,
     last_durable_sequence: AtomicU64,
@@ -197,16 +299,34 @@ async fn open_writer(
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
 ) -> Result<Db> {
+    #[cfg(any(test, feature = "test-failpoints"))]
+    check_storage_failpoint(StorageFailpoint::OpenWriter(path.to_owned()))?;
+    let started = Instant::now();
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_writer_open_started\"}}"
+    );
     let mut builder = Db::builder(path, object_store);
     if let Some(wal_store) = wal_object_store {
         builder = builder.with_wal_object_store(wal_store);
     }
     let db = builder.build().await?;
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_wal_replay_completed\",\"fields\":{{\"elapsed_ms\":{}}}}}",
+        started.elapsed().as_millis()
+    );
+    let flush_started = Instant::now();
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_replayed_wal_flush_started\"}}"
+    );
     db.flush_with_options(FlushOptions {
         flush_type: FlushType::MemTable,
     })
     .await
     .context("publish replayed SlateDB WAL")?;
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_replayed_wal_flush_completed\",\"fields\":{{\"elapsed_ms\":{}}}}}",
+        flush_started.elapsed().as_millis()
+    );
     Ok(db)
 }
 
@@ -215,6 +335,12 @@ async fn open_reader(
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
 ) -> Result<DbReader> {
+    #[cfg(any(test, feature = "test-failpoints"))]
+    check_storage_failpoint(StorageFailpoint::OpenReader(path.to_owned()))?;
+    let started = Instant::now();
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_reader_open_started\",\"fields\":{{\"reason\":\"writer_claim_already_active\"}}}}"
+    );
     let mut builder = DbReader::builder(path, object_store)
         .with_reader_mode(DbReaderMode::FollowLatest)
         .with_options(DbReaderOptions {
@@ -224,7 +350,12 @@ async fn open_reader(
     if let Some(wal_store) = wal_object_store {
         builder = builder.with_wal_object_store(wal_store);
     }
-    builder.build().await.map_err(Into::into)
+    let reader = builder.build().await?;
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_reader_open_completed\",\"fields\":{{\"elapsed_ms\":{}}}}}",
+        started.elapsed().as_millis()
+    );
+    Ok(reader)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -797,6 +928,94 @@ enum Database {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DatabaseState {
+    Reader,
+    Writer,
+    Unavailable,
+}
+
+impl Storage {
+    pub(crate) async fn database_state(&self) -> DatabaseState {
+        match &*self.database.read().await {
+            Database::Reader(_) => DatabaseState::Reader,
+            Database::Writer(_) => DatabaseState::Writer,
+            Database::Unavailable => DatabaseState::Unavailable,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct StorageTransitionFailure {
+    pub(crate) database: DatabaseState,
+    pub(crate) claim_held: bool,
+    pub(crate) epoch: u64,
+    pub(crate) retryable: bool,
+    pub(crate) error: anyhow::Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TransactionOutcome {
+    pub(crate) consumed: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct BeginTransactionOutcome {
+    pub(crate) transaction_id: String,
+    pub(crate) expired: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct BeginTransactionFailure {
+    pub(crate) expired: usize,
+    pub(crate) status: Status,
+}
+
+#[derive(Debug)]
+pub(crate) enum WriterFenceFailure {
+    Stale { observed_epoch: u64 },
+    Unavailable(anyhow::Error),
+}
+
+#[derive(Debug)]
+pub(crate) struct TransactionFailure {
+    pub(crate) consumed: bool,
+    pub(crate) status: Status,
+}
+
+impl TransactionFailure {
+    fn before_consumption(status: Status) -> Self {
+        Self {
+            consumed: false,
+            status,
+        }
+    }
+
+    fn after_consumption(status: Status) -> Self {
+        Self {
+            consumed: true,
+            status,
+        }
+    }
+}
+
+impl StorageTransitionFailure {
+    fn new(database: DatabaseState, claim_held: bool, epoch: u64, error: anyhow::Error) -> Self {
+        Self {
+            database,
+            claim_held,
+            epoch,
+            retryable: false,
+            error,
+        }
+    }
+
+    fn retryable(mut self) -> Self {
+        self.retryable = true;
+        self
+    }
+}
+
 impl Database {
     fn as_writer(&self) -> Option<&Db> {
         match self {
@@ -1013,6 +1232,7 @@ impl Storage {
             coordination_store,
             encryption,
             key_manager,
+            capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
@@ -1078,7 +1298,10 @@ impl Storage {
 
     pub(crate) fn key_manager(&self) -> Result<&Arc<KeyManager>, Status> {
         self.key_manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("key management requires metadata encryption")
+            Status::from(VaulticDbError::Precondition {
+                field: "encryption".to_owned(),
+                message: "key management requires metadata encryption".to_owned(),
+            })
         })
     }
 
@@ -1155,14 +1378,19 @@ impl Storage {
 
     pub(crate) async fn get_master_key(&self) -> Result<Option<Vec<u8>>, Status> {
         if self.credential_manager.is_some() {
-            return Err(Status::failed_precondition(
-                "repository master key is authoritative only in the recovery capsule",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "master_key".to_owned(),
+                message: "repository master key is authoritative only in the recovery capsule"
+                    .to_owned(),
+            }
+            .into());
         }
         if !self.encryption.enabled {
-            return Err(Status::failed_precondition(
-                "master-key-in-DB requires metadata encryption",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "master_key".to_owned(),
+                message: "master-key-in-DB requires metadata encryption".to_owned(),
+            }
+            .into());
         }
         self.read_value(MASTER_KEY_RECORD)
             .await
@@ -1171,25 +1399,35 @@ impl Storage {
 
     pub(crate) async fn store_master_key(&self, master_key: &[u8]) -> Result<(), Status> {
         if self.credential_manager.is_some() {
-            return Err(Status::failed_precondition(
-                "master-key-in-DB is prohibited in brokered mode",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "master_key".to_owned(),
+                message: "master-key-in-DB is prohibited in brokered mode".to_owned(),
+            }
+            .into());
         }
         if !self.encryption.enabled {
-            return Err(Status::failed_precondition(
-                "master-key-in-DB requires metadata encryption",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "master_key".to_owned(),
+                message: "master-key-in-DB requires metadata encryption".to_owned(),
+            }
+            .into());
         }
         if master_key.is_empty() || master_key.len() > MAX_MASTER_KEY_BYTES {
-            return Err(Status::invalid_argument("invalid repository master key"));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "master_key".to_owned(),
+                message: "invalid repository master key".to_owned(),
+            }
+            .into());
         }
         if let Some(existing) = self.read_value(MASTER_KEY_RECORD).await? {
             if existing.as_ref() == master_key {
                 return Ok(());
             }
-            return Err(Status::already_exists(
-                "a different repository master key is already stored",
-            ));
+            return Err(VaulticDbError::StorageConflict {
+                message: "a different repository master key is already stored".to_owned(),
+                retryable: false,
+            }
+            .into());
         }
         let database = self.writer().await?;
         let db = database
@@ -1203,6 +1441,7 @@ impl Storage {
             .map_err(storage_error)
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_capsule_migration(
         &self,
         capsule_sha256: &str,
@@ -1212,21 +1451,29 @@ impl Storage {
                 .bytes()
                 .all(|value| value.is_ascii_hexdigit())
         {
-            return Err(Status::invalid_argument("invalid capsule digest"));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "capsule_sha256".to_owned(),
+                message: "invalid capsule digest".to_owned(),
+            }
+            .into());
         }
         let (pending, finalized) = self.capsule_migration_status().await?;
         if finalized.is_some() {
-            return Err(Status::failed_precondition(
-                "capsule migration is already finalized",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "capsule_migration".to_owned(),
+                message: "capsule migration is already finalized".to_owned(),
+            }
+            .into());
         }
         if let Some(pending) = pending {
             if pending == capsule_sha256 {
                 return Ok(());
             }
-            return Err(Status::already_exists(
-                "a different capsule migration is already pending",
-            ));
+            return Err(VaulticDbError::StorageConflict {
+                message: "a different capsule migration is already pending".to_owned(),
+                retryable: false,
+            }
+            .into());
         }
         let database = self.writer().await?;
         let db = database
@@ -1240,21 +1487,132 @@ impl Storage {
             .map_err(storage_error)
     }
 
+    pub(crate) async fn capsule_migration_intent(
+        &self,
+    ) -> Result<Option<CapsuleMigrationIntent>, Status> {
+        let Some(value) = self.read_value(CAPSULE_MIGRATION_RECORD).await? else {
+            return Ok(None);
+        };
+        if value.len() == 64 && value.iter().all(u8::is_ascii_hexdigit) {
+            return Ok(None);
+        }
+        let intent: CapsuleMigrationIntent = serde_json::from_slice(&value).map_err(|_| {
+            Status::from(VaulticDbError::StorageDataLoss {
+                message: "pending capsule migration intention is invalid".to_owned(),
+            })
+        })?;
+        if intent.format != 1
+            || intent.capsule_sha256.len() != 64
+            || !intent
+                .capsule_sha256
+                .bytes()
+                .all(|value| value.is_ascii_hexdigit())
+            || format!("{:x}", Sha256::digest(&intent.capsule)) != intent.capsule_sha256
+        {
+            return Err(VaulticDbError::StorageDataLoss {
+                message: "pending capsule migration intention failed validation".to_owned(),
+            }
+            .into());
+        }
+        Ok(Some(intent))
+    }
+
+    pub(crate) async fn store_capsule_migration_intent(
+        &self,
+        intent: &CapsuleMigrationIntent,
+    ) -> Result<CapsuleMigrationIntent, Status> {
+        let _migration = self.capsule_migration.lock().await;
+        if let Some(existing) = self.capsule_migration_intent().await? {
+            if existing.repository_id == intent.repository_id
+                && existing.generation == intent.generation
+                && existing.capsule_directory == intent.capsule_directory
+                && existing.request_sha256 == intent.request_sha256
+            {
+                return Ok(existing);
+            }
+            return Err(VaulticDbError::StorageConflict {
+                message: "a different capsule migration is already pending".to_owned(),
+                retryable: false,
+            }
+            .into());
+        }
+        if self.read_value(CAPSULE_MIGRATION_RECORD).await?.is_some() {
+            return Err(VaulticDbError::StorageConflict {
+                message: "a legacy capsule migration is already pending".to_owned(),
+                retryable: false,
+            }
+            .into());
+        }
+        self.write_capsule_migration_intent(intent).await?;
+        Ok(intent.clone())
+    }
+
+    pub(crate) async fn write_capsule_migration_intent(
+        &self,
+        intent: &CapsuleMigrationIntent,
+    ) -> Result<(), Status> {
+        if intent.format != 1
+            || intent.repository_id.is_empty()
+            || intent.capsule_directory.is_empty()
+            || intent.capsule_sha256.len() != 64
+            || !intent
+                .capsule_sha256
+                .bytes()
+                .all(|value| value.is_ascii_hexdigit())
+            || format!("{:x}", Sha256::digest(&intent.capsule)) != intent.capsule_sha256
+        {
+            return Err(VaulticDbError::InvalidRequest {
+                field: "capsule_migration".to_owned(),
+                message: "invalid capsule migration intention".to_owned(),
+            }
+            .into());
+        }
+        let encoded = serde_json::to_vec(intent)
+            .map_err(|error| Status::internal(format!("encode capsule migration: {error}")))?;
+        let database = self.writer().await?;
+        let db = database
+            .as_writer()
+            .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
+        db.put(CAPSULE_MIGRATION_RECORD, encoded)
+            .await
+            .map_err(storage_error)?
+            .await_durable()
+            .await
+            .map_err(storage_error)
+    }
+
     pub(crate) async fn capsule_migration_status(
         &self,
     ) -> Result<(Option<String>, Option<String>), Status> {
-        let pending = self
-            .read_value(CAPSULE_MIGRATION_RECORD)
-            .await?
-            .map(|value| String::from_utf8(value.to_vec()))
-            .transpose()
-            .map_err(|_| Status::data_loss("pending capsule migration digest is invalid"))?;
+        let pending = match self.read_value(CAPSULE_MIGRATION_RECORD).await? {
+            Some(value) if value.len() == 64 && value.iter().all(u8::is_ascii_hexdigit) => {
+                Some(String::from_utf8(value.to_vec()).map_err(|_| {
+                    Status::from(VaulticDbError::StorageDataLoss {
+                        message: "pending capsule migration digest is invalid".to_owned(),
+                    })
+                })?)
+            }
+            Some(value) => Some(
+                serde_json::from_slice::<CapsuleMigrationIntent>(&value)
+                    .map_err(|_| {
+                        Status::from(VaulticDbError::StorageDataLoss {
+                            message: "pending capsule migration intention is invalid".to_owned(),
+                        })
+                    })?
+                    .capsule_sha256,
+            ),
+            None => None,
+        };
         let finalized = self
             .read_value(CAPSULE_MIGRATION_FINALIZED_RECORD)
             .await?
             .map(|value| String::from_utf8(value.to_vec()))
             .transpose()
-            .map_err(|_| Status::data_loss("finalized capsule migration digest is invalid"))?;
+            .map_err(|_| {
+                Status::from(VaulticDbError::StorageDataLoss {
+                    message: "finalized capsule migration digest is invalid".to_owned(),
+                })
+            })?;
         Ok((pending, finalized))
     }
 
@@ -1266,16 +1624,43 @@ impl Storage {
         let Some(pending) = pending else {
             let finalized = self.read_value(CAPSULE_MIGRATION_FINALIZED_RECORD).await?;
             if finalized.as_deref() == Some(capsule_sha256.as_bytes()) {
+                let database = self.writer().await?;
+                let db = database
+                    .as_writer()
+                    .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
+                db.flush().await.map_err(storage_error)?;
                 return Ok(());
             }
-            return Err(Status::failed_precondition(
-                "no matching prepared or finalized capsule migration",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "capsule_sha256".to_owned(),
+                message: "no matching prepared or finalized capsule migration".to_owned(),
+            }
+            .into());
         };
-        if pending.as_ref() != capsule_sha256.as_bytes() {
-            return Err(Status::failed_precondition(
-                "prepared capsule digest mismatch",
-            ));
+        let pending_digest = if pending.len() == 64 && pending.iter().all(u8::is_ascii_hexdigit) {
+            pending.to_vec()
+        } else {
+            let intent =
+                serde_json::from_slice::<CapsuleMigrationIntent>(&pending).map_err(|_| {
+                    Status::from(VaulticDbError::StorageDataLoss {
+                        message: "pending capsule migration intention is invalid".to_owned(),
+                    })
+                })?;
+            if intent.local_path.is_none() || intent.mirror_path.is_none() {
+                return Err(VaulticDbError::Precondition {
+                    field: "capsule_migration".to_owned(),
+                    message: "capsule migration publication is incomplete".to_owned(),
+                }
+                .into());
+            }
+            intent.capsule_sha256.into_bytes()
+        };
+        if pending_digest.as_slice() != capsule_sha256.as_bytes() {
+            return Err(VaulticDbError::Precondition {
+                field: "capsule_sha256".to_owned(),
+                message: "prepared capsule digest mismatch".to_owned(),
+            }
+            .into());
         }
         let mut batch = slatedb::WriteBatch::new();
         batch.delete(MASTER_KEY_RECORD);
@@ -1288,8 +1673,13 @@ impl Storage {
         let db = database
             .as_writer()
             .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
-        db.write(batch).await.map_err(storage_error)?;
-        db.flush().await.map_err(storage_error)
+        let handle = db.write(batch).await.map_err(storage_error)?;
+        #[cfg(any(test, feature = "test-failpoints"))]
+        check_storage_failpoint(StorageFailpoint::FinalizeCapsuleDurability(
+            self.database_path.clone(),
+        ))
+        .map_err(storage_status)?;
+        handle.await_durable().await.map_err(storage_error)
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
@@ -1318,76 +1708,256 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) async fn demote(&self) -> Result<()> {
+    pub(crate) async fn demote(&self) -> Result<(), StorageTransitionFailure> {
+        let epoch = self.writer_epoch.load(Ordering::Acquire);
         if !self.transactions.read().await.is_empty() {
-            bail!("active transactions prevent writer demotion")
+            return Err(StorageTransitionFailure::new(
+                DatabaseState::Writer,
+                true,
+                epoch,
+                anyhow::anyhow!("active transactions prevent writer demotion"),
+            ));
         }
         let mut database = self.database.write().await;
         if !matches!(&*database, Database::Writer(_)) {
-            bail!("VaulticDB is not the metadata writer")
+            return Err(StorageTransitionFailure::new(
+                match &*database {
+                    Database::Reader(_) => DatabaseState::Reader,
+                    Database::Writer(_) => DatabaseState::Writer,
+                    Database::Unavailable => DatabaseState::Unavailable,
+                },
+                false,
+                epoch,
+                anyhow::anyhow!("VaulticDB is not the metadata writer"),
+            ));
         }
         let previous = std::mem::replace(&mut *database, Database::Unavailable);
         let Database::Writer(db) = previous else {
             *database = previous;
-            return Err(VaulticDbError::WriterDemoted.into());
+            return Err(StorageTransitionFailure::new(
+                DatabaseState::Unavailable,
+                false,
+                epoch,
+                VaulticDbError::WriterDemoted.into(),
+            ));
         };
-        db.flush()
-            .await
-            .context("flush SlateDB writer before demotion")?;
+        let flush_result = async {
+            #[cfg(any(test, feature = "test-failpoints"))]
+            check_storage_failpoint(StorageFailpoint::FlushWriter(self.database_path.clone()))?;
+            db.flush().await.map_err(anyhow::Error::from)
+        }
+        .await;
+        if let Err(error) = flush_result {
+            *database = Database::Writer(db);
+            return Err(StorageTransitionFailure::new(
+                DatabaseState::Writer,
+                true,
+                epoch,
+                error.context("flush SlateDB writer before demotion"),
+            )
+            .retryable());
+        }
         self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
-        db.close()
-            .await
-            .context("close SlateDB writer before demotion")?;
-        let reader = open_reader(
+        let close_result = async {
+            #[cfg(any(test, feature = "test-failpoints"))]
+            check_storage_failpoint(StorageFailpoint::CloseWriter(self.database_path.clone()))?;
+            db.close().await.map_err(anyhow::Error::from)
+        }
+        .await;
+        if let Err(error) = close_result {
+            return Err(StorageTransitionFailure::new(
+                DatabaseState::Unavailable,
+                true,
+                epoch,
+                error.context("close SlateDB writer before demotion"),
+            ));
+        }
+        let reader = match open_reader(
             self.database_path.as_str(),
             self.object_store.clone(),
             self.wal_object_store.clone(),
         )
         .await
-        .context("open non-fencing SlateDB reader")?;
+        {
+            Ok(reader) => reader,
+            Err(error) => {
+                return Err(StorageTransitionFailure::new(
+                    DatabaseState::Unavailable,
+                    true,
+                    epoch,
+                    error.context("open non-fencing SlateDB reader"),
+                ));
+            }
+        };
         *database = Database::Reader(reader);
-        release_writer_claim(
-            self.coordination_store.as_ref(),
-            self.writer_epoch.load(Ordering::Acquire),
-        )
-        .await?;
+        if let Err(error) = release_writer_claim(self.coordination_store.as_ref(), epoch).await {
+            return Err(StorageTransitionFailure::new(
+                DatabaseState::Reader,
+                true,
+                epoch,
+                error,
+            ));
+        }
         Ok(())
     }
 
-    pub(crate) async fn promote(&self, takeover_epoch: Option<u64>) -> Result<u64> {
+    pub(crate) async fn promote(
+        &self,
+        takeover_epoch: Option<u64>,
+    ) -> Result<u64, StorageTransitionFailure> {
         let epoch = claim_writer_epoch(self.coordination_store.as_ref(), takeover_epoch)
-            .await?
-            .context("another VaulticDB instance acquired the next writer epoch")?;
+            .await
+            .map_err(|error| {
+                StorageTransitionFailure::new(
+                    DatabaseState::Reader,
+                    false,
+                    self.writer_epoch.load(Ordering::Acquire),
+                    error,
+                )
+            })?
+            .ok_or_else(|| {
+                StorageTransitionFailure::new(
+                    DatabaseState::Reader,
+                    false,
+                    self.writer_epoch.load(Ordering::Acquire),
+                    anyhow::anyhow!("another VaulticDB instance acquired the next writer epoch"),
+                )
+            })?;
         let mut database = self.database.write().await;
         if !matches!(&*database, Database::Reader(_)) {
-            bail!("VaulticDB is not read-only")
+            let release = release_writer_claim(self.coordination_store.as_ref(), epoch).await;
+            return Err(StorageTransitionFailure::new(
+                match &*database {
+                    Database::Reader(_) => DatabaseState::Reader,
+                    Database::Writer(_) => DatabaseState::Writer,
+                    Database::Unavailable => DatabaseState::Unavailable,
+                },
+                release.is_err(),
+                epoch,
+                release
+                    .err()
+                    .unwrap_or_else(|| anyhow::anyhow!("VaulticDB is not read-only")),
+            ));
         }
         let previous = std::mem::replace(&mut *database, Database::Unavailable);
         let Database::Reader(reader) = previous else {
             *database = previous;
-            return Err(VaulticDbError::WriterTransitioning.into());
+            return Err(StorageTransitionFailure::new(
+                DatabaseState::Unavailable,
+                true,
+                epoch,
+                VaulticDbError::WriterTransitioning.into(),
+            ));
         };
-        reader
-            .close()
-            .await
-            .context("close SlateDB reader before promotion")?;
-        let db = open_writer(
+        let close_result = async {
+            #[cfg(any(test, feature = "test-failpoints"))]
+            check_storage_failpoint(StorageFailpoint::CloseReader(self.database_path.clone()))?;
+            reader.close().await.map_err(anyhow::Error::from)
+        }
+        .await;
+        if let Err(error) = close_result {
+            let released = release_writer_claim(self.coordination_store.as_ref(), epoch)
+                .await
+                .is_ok();
+            let recovered_reader = if released {
+                open_reader(
+                    self.database_path.as_str(),
+                    self.object_store.clone(),
+                    self.wal_object_store.clone(),
+                )
+                .await
+                .ok()
+            } else {
+                None
+            };
+            let state = if let Some(reader) = recovered_reader {
+                *database = Database::Reader(reader);
+                DatabaseState::Reader
+            } else {
+                DatabaseState::Unavailable
+            };
+            let failure = StorageTransitionFailure::new(
+                state,
+                !released,
+                epoch,
+                error.context("close SlateDB reader before promotion"),
+            );
+            return Err(if state == DatabaseState::Reader {
+                failure.retryable()
+            } else {
+                failure
+            });
+        }
+        let db = match open_writer(
             self.database_path.as_str(),
             self.object_store.clone(),
             self.wal_object_store.clone(),
         )
         .await
-        .context("open freshly fenced SlateDB writer")?;
+        {
+            Ok(db) => db,
+            Err(error) => {
+                let released = release_writer_claim(self.coordination_store.as_ref(), epoch)
+                    .await
+                    .is_ok();
+                let recovered_reader = if released {
+                    open_reader(
+                        self.database_path.as_str(),
+                        self.object_store.clone(),
+                        self.wal_object_store.clone(),
+                    )
+                    .await
+                    .ok()
+                } else {
+                    None
+                };
+                let state = if let Some(reader) = recovered_reader {
+                    *database = Database::Reader(reader);
+                    DatabaseState::Reader
+                } else {
+                    DatabaseState::Unavailable
+                };
+                let failure = StorageTransitionFailure::new(
+                    state,
+                    !released,
+                    epoch,
+                    error.context("open freshly fenced SlateDB writer"),
+                );
+                return Err(if state == DatabaseState::Reader && released {
+                    failure.retryable()
+                } else {
+                    failure
+                });
+            }
+        };
         *database = Database::Writer(db);
         self.writer_epoch.store(epoch, Ordering::Release);
         Ok(epoch)
     }
 
-    pub(crate) async fn active_transactions(&self) -> usize {
-        self.transactions.read().await.len()
+    pub(crate) async fn prune_expired_transactions(&self) -> (usize, usize) {
+        let mut transactions = self.transactions.write().await;
+        let before = transactions.len();
+        let now = unix_time_ms().unwrap_or(u64::MAX);
+        transactions.retain(|_, slot| {
+            Arc::strong_count(slot) > 1
+                || !transaction_expired(
+                    slot.last_touched_ms.load(Ordering::Relaxed),
+                    now,
+                    self.transaction_idle_timeout_ms,
+                )
+        });
+        (
+            transactions.len(),
+            before.saturating_sub(transactions.len()),
+        )
     }
 
     pub(crate) async fn refresh_writer_fence(&self) -> Result<u64> {
+        #[cfg(any(test, feature = "test-failpoints"))]
+        check_storage_failpoint(StorageFailpoint::RefreshWriterFence(
+            self.database_path.clone(),
+        ))?;
         let current = self.writer_epoch.load(Ordering::Acquire);
         let epoch = claim_writer_epoch(self.coordination_store.as_ref(), Some(current))
             .await?
@@ -1396,12 +1966,16 @@ impl Storage {
         Ok(epoch)
     }
 
-    pub(crate) async fn ensure_writer_fence(&self) -> Result<()> {
+    pub(crate) async fn ensure_writer_fence(&self) -> Result<(), WriterFenceFailure> {
         let current = self.writer_epoch.load(Ordering::Acquire);
-        if current == 0
-            || active_writer_epoch(self.coordination_store.as_ref()).await? != Some(current)
-        {
-            bail!("writer epoch is stale")
+        let active = active_writer_epoch(self.coordination_store.as_ref())
+            .await
+            .map_err(WriterFenceFailure::Unavailable)?;
+        if current == 0 || active != Some(current) {
+            let observed_epoch = latest_writer_epoch(self.coordination_store.as_ref())
+                .await
+                .map_err(WriterFenceFailure::Unavailable)?;
+            return Err(WriterFenceFailure::Stale { observed_epoch });
         }
         Ok(())
     }
@@ -1502,7 +2076,12 @@ impl Storage {
         validate_report_sha256(&report_sha256)?;
         let (current, version) =
             read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
-        if current.decision != expected_decision || current.state != "post-activation" {
+        if current.decision != expected_decision
+            || !matches!(
+                current.state.as_str(),
+                "post-activation" | "rollback-observation"
+            )
+        {
             bail!("metadata generation is not awaiting the authorized post-activation check")
         }
         if unix_time_ms()? < current.observation_until_ms {
@@ -1528,6 +2107,12 @@ impl Storage {
         observation_window_ms: u64,
     ) -> Result<GenerationAuthority> {
         validate_report_sha256(&report_sha256)?;
+        if let Some(authority) = self
+            .committed_generation_rollback(repository_id, expected_decision, &report_sha256)
+            .await?
+        {
+            return Ok(authority);
+        }
         let (current, version) =
             read_generation_authority(self.coordination_store.as_ref(), repository_id).await?;
         if current.decision != expected_decision
@@ -1549,7 +2134,7 @@ impl Storage {
             namespace: current.previous_namespace,
             previous_generation: current.active_generation,
             previous_namespace: current.namespace,
-            state: "post-activation".to_owned(),
+            state: "rollback-observation".to_owned(),
             report_sha256,
             decided_at_ms,
             observation_until_ms: decided_at_ms
@@ -1559,6 +2144,21 @@ impl Storage {
         };
         publish_generation_authority(self.coordination_store.as_ref(), &authority, version).await?;
         Ok(authority)
+    }
+
+    pub(crate) async fn committed_generation_rollback(
+        &self,
+        repository_id: &str,
+        expected_decision: u64,
+        report_sha256: &str,
+    ) -> Result<Option<GenerationAuthority>> {
+        validate_report_sha256(report_sha256)?;
+        let current = self.generation_authority(repository_id).await?;
+        let committed_decision = expected_decision.checked_add(1);
+        Ok((committed_decision == Some(current.decision)
+            && current.state == "rollback-observation"
+            && current.report_sha256 == report_sha256)
+            .then_some(current))
     }
 
     pub(crate) async fn retire_generation(
@@ -1605,7 +2205,10 @@ impl Storage {
         match &*database {
             Database::Writer(db) => db.get(key).await.map_err(storage_error),
             Database::Reader(reader) => reader.get(key).await.map_err(storage_error),
-            Database::Unavailable => Err(Status::unavailable("vaulticdb storage is transitioning")),
+            Database::Unavailable => Err(VaulticDbError::StorageUnavailable {
+                message: "vaulticdb storage is transitioning".to_owned(),
+            }
+            .into()),
         }
     }
 
@@ -1622,7 +2225,7 @@ impl Storage {
             let transaction = transaction.transaction.lock().await;
             transaction
                 .as_ref()
-                .ok_or_else(|| Status::not_found("transaction was closed"))?
+                .ok_or_else(|| transaction_not_found("transaction was closed"))?
                 .get(key)
                 .await
                 .map_err(storage_error)?
@@ -1649,9 +2252,11 @@ impl Storage {
         transaction_id: &str,
     ) -> Result<ScanResponse, Status> {
         if !after_key.is_empty() && !after_key.starts_with(prefix) {
-            return Err(Status::invalid_argument(
-                "scan cursor is outside the prefix",
-            ));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "after_key".to_owned(),
+                message: "scan cursor is outside the prefix".to_owned(),
+            }
+            .into());
         }
         let suffix = after_key.strip_prefix(prefix).unwrap_or_default();
         let database = self.database.read().await;
@@ -1660,7 +2265,10 @@ impl Storage {
                 Database::Writer(db) => scan_prefix_db(db, prefix, suffix).await?,
                 Database::Reader(reader) => scan_prefix_reader(reader, prefix, suffix).await?,
                 Database::Unavailable => {
-                    return Err(Status::unavailable("vaulticdb storage is transitioning"));
+                    return Err(VaulticDbError::StorageUnavailable {
+                        message: "vaulticdb storage is transitioning".to_owned(),
+                    }
+                    .into());
                 }
             }
         } else {
@@ -1669,7 +2277,7 @@ impl Storage {
             scan_prefix_transaction(
                 transaction
                     .as_ref()
-                    .ok_or_else(|| Status::not_found("transaction was closed"))?,
+                    .ok_or_else(|| transaction_not_found("transaction was closed"))?,
                 prefix,
                 suffix,
             )
@@ -1689,9 +2297,10 @@ impl Storage {
                     if existing.operation != "write-batch"
                         || existing.request_sha256 != request_digest
                     {
-                        return Err(Status::already_exists(
-                            "idempotency key is bound to a different operation",
-                        ));
+                        return Err(VaulticDbError::Idempotency {
+                            message: "idempotency key is bound to a different operation".to_owned(),
+                        }
+                        .into());
                     }
                     return Ok(existing.durable);
                 }
@@ -1721,6 +2330,11 @@ impl Storage {
             let db = database
                 .as_writer()
                 .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
+            #[cfg(any(test, feature = "test-failpoints"))]
+            check_storage_failpoint(StorageFailpoint::BeforeWriteBatch(
+                self.database_path.clone(),
+            ))
+            .map_err(storage_status)?;
             let handle = db.write(batch).await.map_err(storage_error)?;
             if request.await_durable || !request.idempotency_key.is_empty() {
                 handle.await_durable().await.map_err(storage_error)?;
@@ -1730,15 +2344,17 @@ impl Storage {
         }
 
         if request.await_durable {
-            return Err(Status::invalid_argument(
-                "transaction mutations become durable only at commit",
-            ));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "await_durable".to_owned(),
+                message: "transaction mutations become durable only at commit".to_owned(),
+            }
+            .into());
         }
         let transaction = self.transaction(&request.transaction_id).await?;
         let transaction = transaction.transaction.lock().await;
         let transaction = transaction
             .as_ref()
-            .ok_or_else(|| Status::not_found("transaction was closed"))?;
+            .ok_or_else(|| transaction_not_found("transaction was closed"))?;
         for put in &request.puts {
             transaction
                 .put(&put.key, &put.value)
@@ -1750,10 +2366,15 @@ impl Storage {
         Ok(false)
     }
 
-    pub(crate) async fn begin(&self) -> Result<String, Status> {
-        self.assert_current_writer_epoch().await?;
+    pub(crate) async fn begin(&self) -> Result<BeginTransactionOutcome, BeginTransactionFailure> {
+        self.assert_current_writer_epoch()
+            .await
+            .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
         let mut transactions = self.transactions.write().await;
-        let now = unix_time_ms().map_err(storage_status)?;
+        let now = unix_time_ms()
+            .map_err(storage_status)
+            .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
+        let count_before_expiry = transactions.len();
         transactions.retain(|_, slot| {
             Arc::strong_count(slot) > 1
                 || !transaction_expired(
@@ -1762,19 +2383,32 @@ impl Storage {
                     self.transaction_idle_timeout_ms,
                 )
         });
+        let expired = count_before_expiry.saturating_sub(transactions.len());
         if transactions.len() >= MAX_ACTIVE_TRANSACTIONS {
-            return Err(Status::resource_exhausted(
-                "active transaction limit exceeded",
-            ));
+            return Err(BeginTransactionFailure {
+                expired,
+                status: VaulticDbError::ResourceExhausted {
+                    message: "active transaction limit exceeded".to_owned(),
+                    retryable: true,
+                }
+                .into(),
+            });
         }
-        let database = self.writer().await?;
+        let database = self
+            .writer()
+            .await
+            .map_err(|status| BeginTransactionFailure { expired, status })?;
         let writer = database
             .as_writer()
-            .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
+            .ok_or_else(|| BeginTransactionFailure {
+                expired,
+                status: VaulticDbError::WriterDemoted.into(),
+            })?;
         let transaction = writer
             .begin(IsolationLevel::SerializableSnapshot)
             .await
-            .map_err(storage_error)?;
+            .map_err(storage_error)
+            .map_err(|status| BeginTransactionFailure { expired, status })?;
         let id = format!(
             "txn-{}-{}",
             std::process::id(),
@@ -1787,36 +2421,49 @@ impl Storage {
                 last_touched_ms: AtomicU64::new(now),
             }),
         );
-        Ok(id)
+        Ok(BeginTransactionOutcome {
+            transaction_id: id,
+            expired,
+        })
     }
 
     pub(crate) async fn commit(
         &self,
         transaction_id: &str,
         idempotency_key: &str,
-    ) -> Result<(), Status> {
-        self.assert_current_writer_epoch().await?;
+    ) -> Result<TransactionOutcome, TransactionFailure> {
+        self.assert_current_writer_epoch()
+            .await
+            .map_err(TransactionFailure::before_consumption)?;
         let request_digest = transaction_digest(transaction_id);
-        let record_key = idempotency_record_key(idempotency_key)?;
+        let record_key = idempotency_record_key(idempotency_key)
+            .map_err(TransactionFailure::before_consumption)?;
         if let Some(key) = record_key.as_ref() {
-            if let Some(existing) = self.read_idempotency(key).await? {
+            if let Some(existing) = self
+                .read_idempotency(key)
+                .await
+                .map_err(TransactionFailure::before_consumption)?
+            {
                 if existing.operation != "transaction-commit"
                     || existing.request_sha256 != request_digest
                 {
-                    return Err(Status::already_exists(
-                        "idempotency key is bound to a different operation",
+                    return Err(TransactionFailure::before_consumption(
+                        VaulticDbError::Idempotency {
+                            message: "idempotency key is bound to a different operation".to_owned(),
+                        }
+                        .into(),
                     ));
                 }
-                return Ok(());
+                return Ok(TransactionOutcome { consumed: false });
             }
         }
-        let transaction = self.remove_transaction(transaction_id).await?;
-        let transaction = transaction
-            .transaction
-            .lock()
+        let transaction = self
+            .remove_transaction(transaction_id)
             .await
-            .take()
-            .ok_or_else(|| Status::not_found("transaction was closed"))?;
+            .map_err(TransactionFailure::before_consumption)?;
+        let transaction = transaction.transaction.lock().await.take().ok_or_else(|| {
+            TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
+        })?;
         if let Some(key) = record_key {
             let record = IdempotencyRecord {
                 format: 1,
@@ -1828,33 +2475,64 @@ impl Storage {
                 .put(
                     key,
                     serde_json::to_vec(&record).map_err(|error| {
-                        Status::internal(format!("encode idempotency record: {error}"))
+                        TransactionFailure::after_consumption(Status::internal(format!(
+                            "encode idempotency record: {error}"
+                        )))
                     })?,
                 )
-                .map_err(storage_error)?;
+                .map_err(storage_error)
+                .map_err(TransactionFailure::after_consumption)?;
         }
-        if let Some(handle) = transaction.commit().await.map_err(storage_error)? {
-            handle.await_durable().await.map_err(storage_error)?;
+        #[cfg(any(test, feature = "test-failpoints"))]
+        check_storage_failpoint(StorageFailpoint::BeforeTransactionCommit(
+            self.database_path.clone(),
+        ))
+        .map_err(storage_status)
+        .map_err(TransactionFailure::after_consumption)?;
+        if let Some(handle) = transaction
+            .commit()
+            .await
+            .map_err(storage_error)
+            .map_err(TransactionFailure::after_consumption)?
+        {
+            #[cfg(any(test, feature = "test-failpoints"))]
+            check_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(
+                self.database_path.clone(),
+            ))
+            .map_err(storage_status)
+            .map_err(TransactionFailure::after_consumption)?;
+            handle
+                .await_durable()
+                .await
+                .map_err(storage_error)
+                .map_err(TransactionFailure::after_consumption)?;
         }
         self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
-        Ok(())
+        Ok(TransactionOutcome { consumed: true })
     }
 
-    pub(crate) async fn rollback(&self, transaction_id: &str) -> Result<(), Status> {
-        let transaction = self.remove_transaction(transaction_id).await?;
-        let transaction = transaction
-            .transaction
-            .lock()
+    pub(crate) async fn rollback(
+        &self,
+        transaction_id: &str,
+    ) -> Result<TransactionOutcome, TransactionFailure> {
+        let transaction = self
+            .remove_transaction(transaction_id)
             .await
-            .take()
-            .ok_or_else(|| Status::not_found("transaction was closed"))?;
+            .map_err(TransactionFailure::before_consumption)?;
+        let transaction = transaction.transaction.lock().await.take().ok_or_else(|| {
+            TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
+        })?;
         transaction.rollback();
-        Ok(())
+        Ok(TransactionOutcome { consumed: true })
     }
 
     async fn transaction(&self, transaction_id: &str) -> Result<Arc<TransactionSlot>, Status> {
         if transaction_id.is_empty() {
-            return Err(Status::invalid_argument("transaction ID is required"));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "transaction_id".to_owned(),
+                message: "transaction ID is required".to_owned(),
+            }
+            .into());
         }
         let transaction = self
             .transactions
@@ -1862,7 +2540,7 @@ impl Storage {
             .await
             .get(transaction_id)
             .cloned()
-            .ok_or_else(|| Status::not_found("transaction was not found"))?;
+            .ok_or_else(|| transaction_not_found("transaction was not found"))?;
         transaction
             .last_touched_ms
             .store(unix_time_ms().map_err(storage_status)?, Ordering::Relaxed);
@@ -1878,9 +2556,10 @@ impl Storage {
             .await
             .map_err(storage_status)?;
         if claimed == 0 || observed != claimed || active != Some(claimed) {
-            return Err(Status::failed_precondition(format!(
-                "writer epoch is stale: claimed {claimed}, authoritative {observed}, active {active:?}"
-            )));
+            return Err(VaulticDbError::WriterFenced {
+                generation: observed,
+            }
+            .into());
         }
         Ok(())
     }
@@ -1890,21 +2569,28 @@ impl Storage {
         transaction_id: &str,
     ) -> Result<Arc<TransactionSlot>, Status> {
         if transaction_id.is_empty() {
-            return Err(Status::invalid_argument("transaction ID is required"));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "transaction_id".to_owned(),
+                message: "transaction ID is required".to_owned(),
+            }
+            .into());
         }
         self.transactions
             .write()
             .await
             .remove(transaction_id)
-            .ok_or_else(|| Status::not_found("transaction was not found"))
+            .ok_or_else(|| transaction_not_found("transaction was not found"))
     }
 
     async fn read_idempotency(&self, key: &[u8]) -> Result<Option<IdempotencyRecord>, Status> {
         self.read_value(key)
             .await?
             .map(|value| {
-                serde_json::from_slice(&value)
-                    .map_err(|_| Status::data_loss("invalid durable idempotency record"))
+                serde_json::from_slice(&value).map_err(|_| {
+                    Status::from(VaulticDbError::StorageDataLoss {
+                        message: "invalid durable idempotency record".to_owned(),
+                    })
+                })
             })
             .transpose()
     }

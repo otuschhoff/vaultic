@@ -7,6 +7,18 @@ fn repository_key(repository_id: &str) -> String {
     format!("{digest:x}")
 }
 
+fn injected_transport_failure(name: &str) -> Option<anyhow::Error> {
+    #[cfg(feature = "test-failpoints")]
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
+        == Ok("vaulticdb-process-tests-v1")
+        && std::env::var("VAULTICDB_TEST_TRANSPORT_FAILURE").as_deref() == Ok(name)
+    {
+        return Some(anyhow::anyhow!("injected transport {name} failure"));
+    }
+    let _ = name;
+    None
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     disable_core_dumps();
@@ -52,6 +64,7 @@ async fn main() -> Result<()> {
             minimum_writer_tenure,
         ))),
         writer_transition: Arc::new(Mutex::new(())),
+        mutation_admission: Arc::new(RwLock::new(())),
         last_writer_activity: Arc::new(Mutex::new(clock_started)),
         minimum_writer_tenure,
         writer_idle_grace,
@@ -70,42 +83,65 @@ async fn main() -> Result<()> {
             let lock_path = path.with_extension("lock");
             let _lock = acquire_singleton_lock(&lock_path)?;
             remove_stale_socket(&path).await?;
-            write_runtime_metadata(&path, false)?;
+            write_runtime_metadata(&path, false).await?;
             let listener = match UnixListener::bind(&path) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    remove_runtime_metadata(&path);
-                    return Err(error)
-                        .with_context(|| format!("bind Unix socket {}", path.display()));
+                    return combine_results(vec![
+                        (
+                            "bind Unix socket",
+                            Err(error)
+                                .with_context(|| format!("bind Unix socket {}", path.display())),
+                        ),
+                        ("cleanup runtime metadata", remove_runtime_metadata(&path)),
+                    ]);
                 }
             };
             if let Err(error) = set_private_socket_permissions(&path) {
-                let _ = tokio::fs::remove_file(&path).await;
-                remove_runtime_metadata(&path);
-                return Err(error);
+                let socket_cleanup = remove_file_if_exists(&path).await;
+                let metadata_cleanup = remove_runtime_metadata(&path);
+                return combine_results(vec![
+                    ("set private socket permissions", Err(error)),
+                    ("cleanup Unix socket", socket_cleanup),
+                    ("cleanup runtime metadata", metadata_cleanup),
+                ]);
             }
+            let mut artifacts = RuntimeArtifacts::unix(path.clone());
             let (service, runtime) = storage_service(state.clone(), shutdown.clone());
-            let loader = tokio::spawn(load_storage(runtime.clone(), storage_config));
+            let loader = spawn_storage_loader(runtime.clone(), storage_config, shutdown.clone());
             let stream = UnixListenerStream::new(listener);
             let result = Server::builder()
                 .concurrency_limit_per_connection(MAX_CONCURRENT_REQUESTS)
                 .add_service(service)
                 .serve_with_incoming_shutdown(stream, shutdown_signal(shutdown_rx))
                 .await;
-            let loaded = loader.await.context("join SlateDB loading task")?;
-            runtime
-                .transition_lifecycle(DaemonPhase::Stopping, "gRPC server stopped")
+            let result = injected_transport_failure("server")
+                .map_or_else(|| result.map_err(Into::into), Err);
+            let loaded = loader
                 .await
-                .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+                .context("receive SlateDB loading result")
+                .and_then(|result| result);
+            let transition_result = match injected_transport_failure("stopping-transition") {
+                Some(error) => Err(error),
+                None => runtime
+                    .transition_lifecycle(DaemonPhase::Stopping, "gRPC server stopped")
+                    .await
+                    .map_err(|status| anyhow::anyhow!(status.message().to_owned())),
+            };
             let close_result = match loaded {
                 Ok(storage) => storage.close().await,
                 Err(error) => Err(error),
             };
+            let close_result = injected_transport_failure("storage-close")
+                .map_or(close_result, Err);
+            let artifact_cleanup = artifacts.cleanup();
             drop(_lock);
-            let _ = tokio::fs::remove_file(&path).await;
-            remove_runtime_metadata(&path);
-            result?;
-            close_result?;
+            combine_results(vec![
+                ("serve gRPC", result),
+                ("transition lifecycle", transition_result),
+                ("close storage", close_result),
+                ("cleanup runtime artifacts", artifact_cleanup),
+            ])?;
         }
         TransportConfig::Tcp { address, allowlist, metadata_path } => {
             let listener = TcpListener::bind(address).await.context("bind TCP listener")?;
@@ -114,9 +150,10 @@ async fn main() -> Result<()> {
             }
             let lock_path = metadata_path.with_extension("lock");
             let _lock = acquire_singleton_lock(&lock_path)?;
-            write_runtime_metadata(&metadata_path, tcp_enabled)?;
+            write_runtime_metadata(&metadata_path, tcp_enabled).await?;
+            let mut artifacts = RuntimeArtifacts::tcp(metadata_path.clone());
             let (service, runtime) = storage_service(state, shutdown.clone());
-            let loader = tokio::spawn(load_storage(runtime.clone(), storage_config));
+            let loader = spawn_storage_loader(runtime.clone(), storage_config, shutdown.clone());
             let (sender, receiver) = mpsc::channel(64);
             tokio::spawn(accept_allowed_tcp(listener, allowlist, sender));
             let result = Server::builder()
@@ -127,27 +164,170 @@ async fn main() -> Result<()> {
                     shutdown_signal(shutdown_rx),
                 )
                 .await;
-            let loaded = loader.await.context("join SlateDB loading task")?;
-            runtime
-                .transition_lifecycle(DaemonPhase::Stopping, "gRPC server stopped")
+            let result = injected_transport_failure("server")
+                .map_or_else(|| result.map_err(Into::into), Err);
+            let loaded = loader
                 .await
-                .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+                .context("receive SlateDB loading result")
+                .and_then(|result| result);
+            let transition_result = match injected_transport_failure("stopping-transition") {
+                Some(error) => Err(error),
+                None => runtime
+                    .transition_lifecycle(DaemonPhase::Stopping, "gRPC server stopped")
+                    .await
+                    .map_err(|status| anyhow::anyhow!(status.message().to_owned())),
+            };
             let close_result = match loaded {
                 Ok(storage) => storage.close().await,
                 Err(error) => Err(error),
             };
-            remove_runtime_metadata(&metadata_path);
-            result?;
-            close_result?;
+            let close_result = injected_transport_failure("storage-close")
+                .map_or(close_result, Err);
+            let artifact_cleanup = artifacts.cleanup();
+            combine_results(vec![
+                ("serve gRPC", result),
+                ("transition lifecycle", transition_result),
+                ("close storage", close_result),
+                ("cleanup runtime artifacts", artifact_cleanup),
+            ])?;
         }
     }
     Ok(())
 }
 
+struct RuntimeArtifacts {
+    socket_path: Option<PathBuf>,
+    metadata_path: PathBuf,
+    armed: bool,
+}
+
+impl RuntimeArtifacts {
+    fn unix(path: PathBuf) -> Self {
+        Self {
+            socket_path: Some(path.clone()),
+            metadata_path: path,
+            armed: true,
+        }
+    }
+
+    fn tcp(metadata_path: PathBuf) -> Self {
+        Self {
+            socket_path: None,
+            metadata_path,
+            armed: true,
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        self.armed = false;
+        let mut results = Vec::new();
+        if let Some(path) = &self.socket_path {
+            results.push(("remove Unix socket", remove_file_if_exists_sync(path)));
+        }
+        results.push((
+            "remove runtime metadata",
+            remove_runtime_metadata(&self.metadata_path),
+        ));
+        combine_results(results)
+    }
+}
+
+impl Drop for RuntimeArtifacts {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+fn combine_results(results: Vec<(&str, Result<()>)>) -> Result<()> {
+    let errors = results
+        .into_iter()
+        .filter_map(|(operation, result)| {
+            result.err().map(|error| OperationFailure {
+                operation: operation.to_owned(),
+                error,
+            })
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(CombinedOperationErrors(errors)))
+    }
+}
+
+#[derive(Debug)]
+struct OperationFailure {
+    operation: String,
+    error: anyhow::Error,
+}
+
+struct CombinedOperationErrors(Vec<OperationFailure>);
+
+impl std::fmt::Debug for CombinedOperationErrors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::fmt::Display for CombinedOperationErrors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            &self
+                .0
+                .iter()
+                .map(|failure| format!("{}: {:#}", failure.operation, failure.error))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+}
+
+impl std::error::Error for CombinedOperationErrors {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.first().map(|failure| failure.error.as_ref())
+    }
+}
+
+fn spawn_storage_loader(
+    service: Service,
+    storage_config: crate::storage::StorageConfig,
+    shutdown: watch::Sender<bool>,
+) -> oneshot::Receiver<Result<Arc<Storage>>> {
+    let (result_sender, result_receiver) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = tokio::spawn(load_storage(service, storage_config))
+            .await
+            .context("join SlateDB loading task")
+            .and_then(|result| result);
+        if result.is_err() {
+            let _ = shutdown.send(true);
+        }
+        let _ = result_sender.send(result);
+    });
+    result_receiver
+}
+
 async fn load_storage(service: Service, storage_config: crate::storage::StorageConfig) -> Result<Arc<Storage>> {
+    #[cfg(feature = "test-failpoints")]
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
+        == Ok("vaulticdb-process-tests-v1")
+        && std::env::var_os("VAULTICDB_TEST_PANIC_LOADER").is_some()
+    {
+        panic!("injected storage loader panic");
+    }
+    let started = Instant::now();
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"storage_load_started\"}}"
+    );
     let storage = match Storage::open(service.state.repository_id.as_ref(), &storage_config).await {
         Ok(storage) => Arc::new(storage),
         Err(error) => {
+            eprintln!(
+                "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"storage_load_failed\",\"fields\":{{\"elapsed_ms\":{}}}}}",
+                started.elapsed().as_millis()
+            );
             service
                 .transition_lifecycle(DaemonPhase::Failed, format!("open SlateDB: {error:#}"))
                 .await
@@ -155,7 +335,41 @@ async fn load_storage(service: Service, storage_config: crate::storage::StorageC
             return Err(error).context("open SlateDB database");
         }
     };
-    let (is_writer, epoch) = storage.writer_status_epoch().await;
+    let (is_writer, mut epoch) = storage.writer_status_epoch().await;
+    let reconciliation = async {
+        if is_writer
+            && storage
+                .generation_authority(service.state.repository_id.as_ref())
+                .await?
+                .state
+                == "rollback-observation"
+        {
+            epoch = storage
+                .refresh_writer_fence()
+                .await
+                .context("reconcile writer fence after committed generation rollback")?;
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(error) = reconciliation {
+        let transition_result = service
+            .transition_lifecycle(
+                DaemonPhase::Failed,
+                format!("reconcile generation writer fence: {error:#}"),
+            )
+            .await
+            .map_err(|status| anyhow::anyhow!(status.message().to_owned()));
+        let close_result = storage.close().await;
+        return match combine_results(vec![
+            ("reconcile generation writer fence", Err(error)),
+            ("transition lifecycle", transition_result),
+            ("close storage", close_result),
+        ]) {
+            Err(error) => Err(error),
+            Ok(()) => unreachable!("reconciliation failure must be preserved"),
+        };
+    }
     *service.state.writer_role.lock().await = if is_writer {
         WriterRoleState::read_write(
             epoch,
@@ -204,6 +418,12 @@ async fn load_storage(service: Service, storage_config: crate::storage::StorageC
     if became_ready {
         monitor_writer_idle(service.clone());
     }
+    eprintln!(
+        "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"storage_ready\",\"fields\":{{\"role\":\"{}\",\"epoch\":{},\"elapsed_ms\":{}}}}}",
+        if is_writer { "writer" } else { "reader" },
+        epoch,
+        started.elapsed().as_millis()
+    );
     Ok(storage)
 }
 
@@ -293,22 +513,51 @@ fn monitor_writer_idle(service: Service) {
     }
 }
 
-fn write_runtime_metadata(socket: &Path, tcp_enabled: bool) -> Result<()> {
+async fn write_runtime_metadata(socket: &Path, tcp_enabled: bool) -> Result<()> {
     let pid_path = socket.with_extension("pid");
     let cap_path = socket.with_extension("cap");
-    std::fs::write(pid_path, format!("{}\n", std::process::id()))?;
-    std::fs::write(
-        cap_path,
+    std::fs::write(&pid_path, format!("{}\n", std::process::id()))?;
+    crate::service::process_test_barrier("VAULTICDB_TEST_RUNTIME_METADATA_BARRIER")
+        .await
+        .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+    if let Err(error) = std::fs::write(
+        &cap_path,
         format!(
             "protocol={PROTOCOL_VERSION}\nschema={SCHEMA_VERSION}\ntcp_enabled={tcp_enabled}\n"
         ),
-    )?;
+    ) {
+        remove_file_if_exists_sync(&pid_path)
+            .with_context(|| format!("rollback PID metadata after capability write failed: {error}"))?;
+        return Err(error).with_context(|| format!("write {}", cap_path.display()));
+    }
     Ok(())
 }
 
-fn remove_runtime_metadata(socket: &Path) {
-    let _ = std::fs::remove_file(socket.with_extension("pid"));
-    let _ = std::fs::remove_file(socket.with_extension("cap"));
+fn remove_runtime_metadata(socket: &Path) -> Result<()> {
+    let pid_result = remove_file_if_exists_sync(&socket.with_extension("pid"));
+    let cap_result = remove_file_if_exists_sync(&socket.with_extension("cap"));
+    match (pid_result, cap_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(pid), Ok(())) => Err(pid),
+        (Ok(()), Err(cap)) => Err(cap),
+        (Err(pid), Err(cap)) => Err(anyhow::anyhow!("{pid:#}; {cap:#}")),
+    }
+}
+
+fn remove_file_if_exists_sync(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+async fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 async fn remove_stale_socket(path: &Path) -> Result<()> {
@@ -480,5 +729,66 @@ mod runtime_directory_tests {
 
         std::fs::remove_file(&runtime).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_artifact_cleanup_removes_files_and_reports_wrong_types() {
+        let root = std::env::temp_dir().join(format!(
+            "vaulticdb-cleanup-test-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let endpoint = root.join("vaulticdb.sock");
+        std::fs::write(endpoint.with_extension("pid"), b"pid").unwrap();
+        std::fs::write(endpoint.with_extension("cap"), b"cap").unwrap();
+        remove_runtime_metadata(&endpoint).unwrap();
+        assert!(!endpoint.with_extension("pid").exists());
+        assert!(!endpoint.with_extension("cap").exists());
+
+        std::fs::create_dir(&endpoint).unwrap();
+        assert!(remove_file_if_exists(&endpoint).await.is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn runtime_artifact_guards_cleanup_unix_and_tcp_metadata() {
+        for unix in [true, false] {
+            let root = std::path::PathBuf::from("/tmp").join(format!(
+                "vaulticdb-artifact-guard-test-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let endpoint = root.join("vaulticdb.sock");
+            std::fs::write(endpoint.with_extension("pid"), b"pid").unwrap();
+            std::fs::write(endpoint.with_extension("cap"), b"cap").unwrap();
+            if unix {
+                let listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+                drop(listener);
+                drop(RuntimeArtifacts::unix(endpoint.clone()));
+                assert!(!endpoint.exists());
+            } else {
+                drop(RuntimeArtifacts::tcp(endpoint.clone()));
+            }
+            assert!(!endpoint.with_extension("pid").exists());
+            assert!(!endpoint.with_extension("cap").exists());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn result_aggregation_preserves_primary_and_cleanup_failures() {
+        let error = combine_results(vec![
+            ("serve gRPC", Err(anyhow::anyhow!("primary failure"))),
+            ("cleanup runtime artifacts", Err(anyhow::anyhow!("cleanup failure"))),
+        ])
+        .unwrap_err();
+        let combined = error.downcast_ref::<CombinedOperationErrors>().unwrap();
+        assert_eq!(combined.0.len(), 2);
+        assert_eq!(combined.0[0].operation, "serve gRPC");
+        assert_eq!(combined.0[0].error.to_string(), "primary failure");
+        assert_eq!(combined.0[1].operation, "cleanup runtime artifacts");
+        assert_eq!(combined.0[1].error.to_string(), "cleanup failure");
     }
 }

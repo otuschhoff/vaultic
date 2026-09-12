@@ -133,7 +133,7 @@ fn cstring(value: &str) -> Result<CString> { CString::new(value).context("RADOS 
 fn cstring_driver(value: &str) -> std::result::Result<CString, DriverError> { CString::new(value).map_err(|_| other("RADOS object name contains NUL")) }
 fn check(status: c_int) -> Result<()> { if status < 0 { Err(std::io::Error::from_raw_os_error(-status).into()) } else { Ok(()) } }
 fn other(message: impl Into<String>) -> DriverError { DriverError::Other(message.into()) }
-fn map_status(status: c_int, mode: WriteMode) -> std::result::Result<(), DriverError> { if status >= 0 { return Ok(()); } match -status { 2 => Err(DriverError::NotFound), 17 if matches!(mode, WriteMode::Create) => Err(DriverError::Exists), 34 | 75 if matches!(mode, WriteMode::Update(_)) => Err(DriverError::Precondition), 34 => Err(DriverError::Range), errno => Err(other(std::io::Error::from_raw_os_error(errno).to_string())) } }
+fn map_status(status: c_int, mode: WriteMode) -> std::result::Result<(), DriverError> { if status >= 0 { return Ok(()); } match -status { 2 => Err(DriverError::NotFound), 17 if matches!(mode, WriteMode::Create) => Err(DriverError::Exists), 34 | 75 if matches!(mode, WriteMode::Update(_)) => Err(DriverError::Precondition), 34 => Err(DriverError::Range), errno => Err(DriverError::Io(std::io::Error::from_raw_os_error(errno))) } }
 
 #[cfg(test)]
 mod tests {

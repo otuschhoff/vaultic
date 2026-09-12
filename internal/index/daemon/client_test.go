@@ -96,7 +96,12 @@ func TestEveryDaemonDetailCodeHasSentinel(t *testing.T) {
 		"writer_transitioning": ErrWriterTransitioning, "generation_changed": ErrGenerationChanged,
 		"namespace_mismatch": ErrNamespaceMismatch, "encryption_integrity": ErrEncryptionIntegrity,
 		"idempotency_conflict": ErrIdempotencyConflict, "storage_unavailable": ErrStorageUnavailable,
+		"generation_reconciliation_pending": ErrGenerationPending,
+		"storage_conflict":                  ErrStorageConflict, "storage_data_loss": ErrStorageDataLoss,
+		"authentication_failed": ErrAuthentication, "authorization_failed": ErrAuthorization,
 		"invalid_request": ErrInvalidRequest, "key_management": ErrKeyManagement,
+		"precondition_failed": ErrPrecondition, "deadline_exceeded": ErrDeadlineExceeded,
+		"resource_exhausted": ErrResourceExhausted, "not_found": ErrNotFound,
 		"writer_role": ErrWriterRole,
 	}
 	for code, want := range tests {
@@ -139,6 +144,53 @@ func TestGenerationConflictReturnsTypedDaemonError(t *testing.T) {
 	var daemonError *RPCError
 	if !errors.As(err, &daemonError) || daemonError.Detail().GetField() != "generation" {
 		t.Fatalf("generation detail not preserved: %#v", daemonError)
+	}
+}
+
+func TestRealDaemonAdmissionErrorsAreTyped(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "typed-admission-errors",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(ctx) })
+
+	_, err = client.RPC().Get(ctx, &vaulticdbv1.GetRequest{Key: []byte("key")})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("missing context error = %v, want ErrInvalidRequest", err)
+	}
+
+	_, err = client.RPC().Get(ctx, &vaulticdbv1.GetRequest{
+		Context: &vaulticdbv1.RequestContext{RequestId: "expired", DeadlineUnixMs: 1},
+		Key:     []byte("key"),
+	})
+	if !errors.Is(err, ErrDeadlineExceeded) {
+		t.Fatalf("expired context error = %v, want ErrDeadlineExceeded", err)
+	}
+
+	deletes := make([][]byte, 10001)
+	for index := range deletes {
+		deletes[index] = []byte("key")
+	}
+	_, err = client.RPC().WriteBatch(ctx, &vaulticdbv1.WriteBatchRequest{
+		Context: requestContext(ctx), Deletes: deletes,
+	})
+	if !errors.Is(err, ErrResourceExhausted) {
+		t.Fatalf("batch limit error = %v, want ErrResourceExhausted", err)
+	}
+
+	_, err = client.RPC().Drain(ctx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.RPC().Get(ctx, &vaulticdbv1.GetRequest{
+		Context: requestContext(ctx), Key: []byte("key"),
+	})
+	if !errors.Is(err, ErrStorageUnavailable) {
+		t.Fatalf("draining error = %v, want ErrStorageUnavailable", err)
 	}
 }
 

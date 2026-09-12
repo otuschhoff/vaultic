@@ -37,6 +37,8 @@ pub enum VaulticDbError {
     WriterTransitioning,
     #[error("metadata generation authority: {message}")]
     Generation { message: String },
+    #[error("metadata generation committed but writer reconciliation is pending: {message}")]
+    GenerationReconciliationPending { message: String, generation: u64 },
     #[error("metadata namespace: {message}")]
     Namespace { message: String },
     #[error("metadata encryption: {message}")]
@@ -45,16 +47,37 @@ pub enum VaulticDbError {
     Idempotency { message: String },
     #[error("storage unavailable: {message}")]
     StorageUnavailable { message: String },
+    #[error("storage conflict: {message}")]
+    StorageConflict { message: String, retryable: bool },
+    #[error("storage data loss: {message}")]
+    StorageDataLoss { message: String },
     #[error("invalid {field}: {message}")]
     InvalidRequest { field: String, message: String },
+    #[error("precondition failed: {message}")]
+    Precondition { field: String, message: String },
+    #[error("request deadline exceeded: {message}")]
+    DeadlineExceeded { message: String },
+    #[error("resource limit exceeded: {message}")]
+    ResourceExhausted { message: String, retryable: bool },
+    #[error("{field} not found: {message}")]
+    NotFound { field: String, message: String },
     #[error("key management: {message}")]
     KeyManagement { message: String },
     #[error("writer role: {message}")]
     WriterRole { message: String },
+    #[error("authentication: {message}")]
+    Authentication { message: String },
+    #[error("authorization: {message}")]
+    Authorization { message: String },
 }
 
 impl VaulticDbError {
     pub fn generation(error: AnyError) -> Self {
+        if provider_unavailable(&error) {
+            return Self::StorageUnavailable {
+                message: format!("generation provider: {error:#}"),
+            };
+        }
         Self::Generation {
             message: format!("{error:#}"),
         }
@@ -62,6 +85,11 @@ impl VaulticDbError {
 
     pub fn key_management(error: impl Into<AnyError>) -> Self {
         let error = error.into();
+        if provider_unavailable(&error) {
+            return Self::StorageUnavailable {
+                message: format!("key provider: {error:#}"),
+            };
+        }
         Self::KeyManagement {
             message: format!("{error:#}"),
         }
@@ -80,6 +108,13 @@ impl VaulticDbError {
                 false,
                 "generation",
                 0,
+            ),
+            Self::GenerationReconciliationPending { generation, .. } => (
+                Code::Unavailable,
+                "generation_reconciliation_pending",
+                true,
+                "generation",
+                *generation,
             ),
             Self::Namespace { .. } => (
                 Code::FailedPrecondition,
@@ -105,15 +140,88 @@ impl VaulticDbError {
             Self::StorageUnavailable { .. } => {
                 (Code::Unavailable, "storage_unavailable", true, "", 0)
             }
+            Self::StorageConflict { retryable, .. } => {
+                (Code::Aborted, "storage_conflict", *retryable, "", 0)
+            }
+            Self::StorageDataLoss { .. } => {
+                (Code::DataLoss, "storage_data_loss", false, "storage", 0)
+            }
             Self::InvalidRequest { field, .. } => {
                 (Code::InvalidArgument, "invalid_request", false, field, 0)
             }
+            Self::Precondition { field, .. } => (
+                Code::FailedPrecondition,
+                "precondition_failed",
+                false,
+                field,
+                0,
+            ),
+            Self::DeadlineExceeded { .. } => {
+                (Code::DeadlineExceeded, "deadline_exceeded", true, "", 0)
+            }
+            Self::ResourceExhausted { retryable, .. } => (
+                Code::ResourceExhausted,
+                "resource_exhausted",
+                *retryable,
+                "",
+                0,
+            ),
+            Self::NotFound { field, .. } => (Code::NotFound, "not_found", false, field, 0),
             Self::KeyManagement { .. } => {
                 (Code::FailedPrecondition, "key_management", false, "", 0)
             }
             Self::WriterRole { .. } => (Code::FailedPrecondition, "writer_role", false, "", 0),
+            Self::Authentication { .. } => {
+                (Code::Unauthenticated, "authentication_failed", false, "", 0)
+            }
+            Self::Authorization { .. } => {
+                (Code::PermissionDenied, "authorization_failed", false, "", 0)
+            }
         }
     }
+}
+
+fn provider_unavailable(error: &AnyError) -> bool {
+    error.chain().any(|cause| {
+        let explicitly_transient = cause
+            .downcast_ref::<vaulticdb::encryption::envelope::providers::TransientProviderError>()
+            .is_some();
+        let transient_io = cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::WouldBlock
+            )
+        });
+        let transient_http = cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_connect()
+                || error.is_timeout()
+                || error.status().is_some_and(|status| {
+                    status == reqwest::StatusCode::REQUEST_TIMEOUT
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error()
+                })
+        });
+        let transient_object_store = cause
+            .downcast_ref::<slatedb::object_store::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    slatedb::object_store::Error::Generic {
+                        store: "S3" | "GCS" | "MicrosoftAzure",
+                        ..
+                    } | slatedb::object_store::Error::JoinError { .. }
+                )
+            });
+        explicitly_transient || transient_io || transient_http || transient_object_store
+    })
 }
 
 impl From<RoleError> for VaulticDbError {

@@ -19,6 +19,13 @@ controlled recovery while rejecting writes. A storage-open failure leaves the
 gRPC status endpoint available in ``failed`` state until the daemon is shut
 down, preserving the diagnostic in ``state_detail``.
 
+Client startup distinguishes endpoint absence from an existing daemon that
+rejects the connection. Missing or refused endpoints may start a configured
+daemon. Authentication failure, repository mismatch, incompatible protocol or
+schema, unsafe socket ownership or permissions, and a terminal ``failed``
+lifecycle are returned immediately; ``vaultic`` does not launch a replacement
+process over those errors.
+
 Writer ownership
 ----------------
 
@@ -56,8 +63,70 @@ Promotion opens SlateDB as the newly fenced writer before it returns. Large WAL
     outcome: inspect the claim and daemon state instead of immediately issuing
     another takeover.
 
+    Writer transition failures report the state that remains, not the role that was
+    requested. A failure before writer close can leave the daemon ``read_write``.
+    A failure after writer close leaves it ``fenced`` when a reader remains usable,
+    or ``failed`` when storage is unavailable. A failed promotion releases only the
+    epoch it acquired and returns to ``read_only`` when it can reopen a reader;
+    otherwise it becomes ``fenced`` or ``failed``. Never infer ownership from the
+    failed command alone: inspect both lifecycle and writer status before retrying.
+
+    Client cancellation does not cancel an admitted promotion, demotion,
+    transaction finalization, or generation rollback. The daemon completes the
+    state transition and its accounting in the background. After a deadline or
+    disconnect, query status before deciding whether to retry. Writer claim release
+    uses a version-conditional released marker rather than an unconditional delete,
+    so a stale daemon cannot remove a successor's claim.
+
 The takeover fails if the active object or epoch changed after inspection. It
 must not be used merely to resolve ordinary contention.
+
+Generation rollback reconciliation
+----------------------------------
+
+A generation rollback first commits generation authority and then advances the
+writer epoch. If authority commits but epoch refresh fails, VaulticDB fences the
+writer and returns the structured, retryable
+``generation_reconciliation_pending`` error. Retrying the same acknowledged
+rollback with the same expected decision and report digest resumes fence
+refresh; it does not create another generation decision. Startup also advances
+the fence before reporting ``read_write`` when durable authority remains in
+``rollback-observation`` state.
+
+Do not submit a different rollback while reconciliation is pending. Retry the
+same request or restart the daemon with the same repository configuration, then
+require matching current and observed writer epochs before resuming mutations.
+
+Recovery capsule migration
+--------------------------
+
+Capsule migration persists the exact serialized capsule and its digest before
+publishing either the local or mirrored artifact. Completion of each
+destination is recorded durably. A retry with the same repository, generation,
+and capsule directory resumes the first incomplete publication using the exact
+stored bytes; it does not generate a new capsule. A different migration is
+rejected while an intention is pending.
+
+Finalization is rejected until both local and mirror publication markers are
+present. Only then may VaulticDB remove the stored repository master key and
+mark the migration digest finalized.
+
+Structured failures and cleanup
+-------------------------------
+
+Expected daemon failures include a machine-readable ``ErrorDetail``. Its
+``retryable`` field indicates whether the same request can reasonably succeed
+without operator correction. Availability and transition failures are normally
+retryable; authentication, authorization, identity, integrity, and validation
+failures are not.
+
+Native RADOS multipart completion can publish the final object and then fail to
+delete staging objects. That condition is returned explicitly with text stating
+that the final object was published. Do not blindly repeat a non-idempotent
+publication; inspect the final object and clean the named staging objects.
+Explicit multipart abort also reports staged-object deletion failures. Startup
+stale-staging cleanup and destructor cleanup remain best-effort so cleanup does
+not prevent repository availability.
 
 Recover a crashed encrypted writer on Linux
 -------------------------------------------

@@ -147,6 +147,7 @@ impl WriterRoleState {
             return Err(RoleError::Transitioning);
         }
         self.status.role = WriterRole::ReadOnly;
+        self.status.current_epoch = 0;
         self.status.transition_started = now;
         self.status.writer_since = None;
         self.status.promotion_safe = true;
@@ -156,6 +157,13 @@ impl WriterRoleState {
     pub fn fail_demotion(&mut self, now: Instant) {
         self.status.role = WriterRole::Fenced;
         self.status.transition_reason = "writer close or quiescence failed".to_owned();
+        self.status.transition_started = now;
+        self.status.promotion_safe = false;
+    }
+
+    pub fn cancel_demotion(&mut self, now: Instant, reason: impl Into<String>) {
+        self.status.role = WriterRole::ReadWrite;
+        self.status.transition_reason = reason.into();
         self.status.transition_started = now;
         self.status.promotion_safe = false;
     }
@@ -179,7 +187,7 @@ impl WriterRoleState {
         if self.status.role != WriterRole::Promoting {
             return Err(RoleError::Transitioning);
         }
-        if epoch <= self.status.current_epoch || epoch < self.status.observed_epoch {
+        if epoch <= self.status.current_epoch.max(self.status.observed_epoch) {
             self.fence(
                 self.status.observed_epoch.max(epoch),
                 now,
@@ -192,6 +200,41 @@ impl WriterRoleState {
         self.status.observed_epoch = epoch;
         self.status.transition_started = now;
         self.status.writer_since = Some(now);
+        Ok(())
+    }
+
+    pub fn fail_promotion_to_reader(&mut self, observed_epoch: u64, now: Instant) {
+        self.status.role = WriterRole::ReadOnly;
+        self.status.current_epoch = 0;
+        self.status.observed_epoch = self.status.observed_epoch.max(observed_epoch);
+        self.status.transition_reason = "writer promotion rolled back".to_owned();
+        self.status.transition_started = now;
+        self.status.writer_since = None;
+        self.status.promotion_safe = true;
+    }
+
+    pub fn recover_fenced_writer(&mut self, epoch: u64, now: Instant) -> Result<(), RoleError> {
+        if self.status.role != WriterRole::Fenced || epoch <= self.status.current_epoch {
+            return Err(RoleError::StaleEpoch);
+        }
+        self.status.role = WriterRole::ReadWrite;
+        self.status.current_epoch = epoch;
+        self.status.observed_epoch = epoch;
+        self.status.transition_reason = "writer fence reconciled".to_owned();
+        self.status.transition_started = now;
+        self.status.writer_since = Some(now);
+        self.status.promotion_safe = false;
+        Ok(())
+    }
+
+    pub fn refresh_writer_epoch(&mut self, epoch: u64, now: Instant) -> Result<(), RoleError> {
+        if self.status.role != WriterRole::ReadWrite || epoch <= self.status.current_epoch {
+            return Err(RoleError::StaleEpoch);
+        }
+        self.status.current_epoch = epoch;
+        self.status.observed_epoch = epoch;
+        self.status.transition_reason = "writer fence refreshed".to_owned();
+        self.status.transition_started = now;
         Ok(())
     }
 

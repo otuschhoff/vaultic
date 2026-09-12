@@ -4,7 +4,11 @@ fn idempotency_record_key(value: &str) -> Result<Option<Vec<u8>>, Status> {
     }
     if value.len() > MAX_IDEMPOTENCY_KEY_BYTES || value.bytes().any(|byte| byte.is_ascii_control())
     {
-        return Err(Status::invalid_argument("invalid idempotency key"));
+        return Err(VaulticDbError::InvalidRequest {
+            field: "idempotency_key".to_owned(),
+            message: "invalid idempotency key".to_owned(),
+        }
+        .into());
     }
     let mut key = IDEMPOTENCY_PREFIX.to_vec();
     key.extend_from_slice(value.as_bytes());
@@ -114,7 +118,7 @@ async fn claim_writer_epoch(
     store: &dyn ObjectStore,
     takeover_epoch: Option<u64>,
 ) -> Result<Option<u64>> {
-    let epoch = latest_writer_epoch(store)
+    let mut epoch = latest_writer_epoch(store)
         .await?
         .checked_add(1)
         .context("writer epoch overflow")?;
@@ -141,7 +145,30 @@ async fn claim_writer_epoch(
         }
         PutMode::Update(version)
     } else {
-        PutMode::Create
+        match store.get(&active_path).await {
+            Ok(current) => {
+                let version = UpdateVersion {
+                    e_tag: current.meta.e_tag.clone(),
+                    version: current.meta.version.clone(),
+                };
+                let bytes = current.bytes().await.context("read active writer claim")?;
+                let released_epoch = std::str::from_utf8(&bytes)
+                    .context("decode active writer claim")?
+                    .strip_prefix("released:")
+                    .and_then(|value| value.parse::<u64>().ok());
+                let Some(released_epoch) = released_epoch else {
+                    return Ok(None);
+                };
+                epoch = epoch.max(
+                    released_epoch
+                        .checked_add(1)
+                        .context("writer epoch overflow")?,
+                );
+                PutMode::Update(version)
+            }
+            Err(slatedb::object_store::Error::NotFound { .. }) => PutMode::Create,
+            Err(error) => return Err(error).context("read active writer claim"),
+        }
     };
     match store
         .put_opts(
@@ -164,7 +191,7 @@ async fn claim_writer_epoch(
         .put_opts(&path, value.into(), PutOptions::from(PutMode::Create))
         .await
     {
-        let _ = store.delete(&active_path).await;
+        let _ = release_writer_claim(store, epoch).await;
         return Err(error).context("publish writer epoch history");
     }
     Ok(Some(epoch))
@@ -175,6 +202,9 @@ async fn active_writer_epoch(store: &dyn ObjectStore) -> Result<Option<u64>> {
         Ok(result) => {
             let bytes = result.bytes().await.context("read active writer claim")?;
             let value = std::str::from_utf8(&bytes).context("decode active writer claim")?;
+            if value.starts_with("released:") {
+                return Ok(None);
+            }
             Ok(Some(value.parse().context("parse active writer epoch")?))
         }
         Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
@@ -270,13 +300,40 @@ async fn publish_generation_authority(
 }
 
 async fn release_writer_claim(store: &dyn ObjectStore, epoch: u64) -> Result<()> {
-    if active_writer_epoch(store).await? != Some(epoch) {
+    #[cfg(any(test, feature = "test-failpoints"))]
+    check_storage_failpoint(StorageFailpoint::ReleaseWriterClaim(
+        store as *const dyn ObjectStore as *const () as usize,
+    ))?;
+    let active_path = ObjectPath::from(ACTIVE_WRITER_PATH);
+    let current = store
+        .get(&active_path)
+        .await
+        .context("read active writer claim for release")?;
+    let version = UpdateVersion {
+        e_tag: current.meta.e_tag.clone(),
+        version: current.meta.version.clone(),
+    };
+    let bytes = current
+        .bytes()
+        .await
+        .context("read active writer release claim")?;
+    if std::str::from_utf8(&bytes)
+        .context("decode active writer release claim")?
+        .parse::<u64>()
+        .context("parse active writer release epoch")?
+        != epoch
+    {
         bail!("refusing to release a writer claim owned by another epoch")
     }
     store
-        .delete(&ObjectPath::from(ACTIVE_WRITER_PATH))
+        .put_opts(
+            &active_path,
+            format!("released:{epoch}").into_bytes().into(),
+            PutOptions::from(PutMode::Update(version)),
+        )
         .await
         .context("release active writer claim")
+        .map(|_| ())
 }
 
 fn unix_time_ms() -> Result<u64> {
@@ -289,7 +346,10 @@ fn unix_time_ms() -> Result<u64> {
 }
 
 fn storage_status(error: anyhow::Error) -> Status {
-    Status::internal(error.to_string())
+    VaulticDbError::StorageUnavailable {
+        message: error.to_string(),
+    }
+    .into()
 }
 
 fn transaction_expired(last_touched_ms: u64, now_ms: u64, timeout_ms: u64) -> bool {
@@ -355,12 +415,19 @@ async fn collect_page(iterator: &mut DbIterator, page_size: usize) -> Result<Sca
         };
         let next_size = response_bytes
             .checked_add(repeated_message_encoded_len(entry.encoded_len()))
-            .ok_or_else(|| Status::resource_exhausted("scan response size overflow"))?;
+            .ok_or_else(|| {
+                Status::from(VaulticDbError::ResourceExhausted {
+                    message: "scan response size overflow".to_owned(),
+                    retryable: false,
+                })
+            })?;
         if next_size > crate::MAX_MESSAGE_BYTES as usize - DONE_FIELD_ENCODED_LEN {
             if entries.is_empty() {
-                return Err(Status::resource_exhausted(
-                    "scan entry exceeds response byte limit",
-                ));
+                return Err(VaulticDbError::ResourceExhausted {
+                    message: "scan entry exceeds response byte limit".to_owned(),
+                    retryable: false,
+                }
+                .into());
             }
             return Ok(ScanResponse {
                 entries,
@@ -389,7 +456,11 @@ fn encoded_varint_len(mut value: u64) -> usize {
 
 fn validate_key(key: &[u8]) -> Result<(), Status> {
     if key.is_empty() {
-        return Err(Status::invalid_argument("key must not be empty"));
+        return Err(VaulticDbError::InvalidRequest {
+            field: "key".to_owned(),
+            message: "key must not be empty".to_owned(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -421,13 +492,30 @@ fn validate_mutations(request: &WriteBatchRequest) -> Result<(), Status> {
 fn storage_error(error: slatedb::Error) -> Status {
     let message = format!("SlateDB operation failed: {error}");
     if encryption::is_integrity_error(&error) {
-        return Status::data_loss(message);
+        return VaulticDbError::Encryption { message }.into();
     }
-    match error.kind() {
-        ErrorKind::Transaction => Status::aborted(message),
-        ErrorKind::Unavailable | ErrorKind::Closed(_) => Status::unavailable(message),
-        ErrorKind::Invalid => Status::invalid_argument(message),
-        ErrorKind::Data => Status::data_loss(message),
-        _ => Status::internal(message),
+    let error = match error.kind() {
+        ErrorKind::Transaction => VaulticDbError::StorageConflict {
+            message,
+            retryable: true,
+        },
+        ErrorKind::Unavailable | ErrorKind::Closed(_) => {
+            VaulticDbError::StorageUnavailable { message }
+        }
+        ErrorKind::Invalid => VaulticDbError::InvalidRequest {
+            field: "storage".to_owned(),
+            message,
+        },
+        ErrorKind::Data => VaulticDbError::StorageDataLoss { message },
+        _ => return Status::internal(message),
+    };
+    error.into()
+}
+
+fn transaction_not_found(message: &str) -> Status {
+    VaulticDbError::NotFound {
+        field: "transaction_id".to_owned(),
+        message: message.to_owned(),
     }
+    .into()
 }

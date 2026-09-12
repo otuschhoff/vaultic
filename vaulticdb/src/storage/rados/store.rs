@@ -1,4 +1,4 @@
-use std::{fmt, ops::Range, sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex}, time::SystemTime};
+use std::{fmt, ops::Range, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex}, time::SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -8,6 +8,7 @@ use slatedb::object_store::{
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions,
     PutPayload, PutResult, Result, UploadPart,
 };
+use tokio::sync::Notify;
 
 const STALE_MULTIPART_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
@@ -37,6 +38,8 @@ pub(super) enum DriverError {
     Precondition,
     #[error("invalid object range")]
     Range,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
 }
@@ -74,7 +77,7 @@ impl RadosStore {
         let stale = objects.into_iter().filter(|value| {
             SystemTime::now().duration_since(value.modified).is_ok_and(|age| age >= STALE_MULTIPART_AGE)
         }).map(|value| StagedPart { ordinal: 0, name: value.name }).collect::<Vec<_>>();
-        cleanup_staged(&self.driver, &stale).await;
+        let _ = cleanup_staged(&self.driver, &stale).await;
         Ok(())
     }
     fn relative(&self, name: &str) -> Result<Path> {
@@ -118,7 +121,9 @@ impl ObjectStore for RadosStore {
         Ok(Box::new(Multipart {
             store: self.clone(), location: location.clone(), options,
             upload: rand::random(), next_part: Arc::new(AtomicUsize::new(0)),
-            parts: Arc::new(Mutex::new(Vec::new())), finished: false,
+            parts: Arc::new(Mutex::new(Vec::new())), cancelled: Arc::new(AtomicBool::new(false)),
+            in_flight: Arc::new(AtomicUsize::new(0)), settled: Arc::new(Notify::new()),
+            cleanup_errors: Arc::new(Mutex::new(Vec::new())), accepting_parts: true, finished: false,
         }))
     }
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
@@ -162,32 +167,106 @@ struct Multipart {
     upload: u128,
     next_part: Arc<AtomicUsize>,
     parts: Arc<Mutex<Vec<StagedPart>>>,
+    cancelled: Arc<AtomicBool>,
+    in_flight: Arc<AtomicUsize>,
+    settled: Arc<Notify>,
+    cleanup_errors: Arc<Mutex<Vec<String>>>,
+    accepting_parts: bool,
     finished: bool,
 }
 
 #[derive(Clone, Debug)]
 struct StagedPart { ordinal: usize, name: String }
 
+struct InFlightPart {
+    count: Arc<AtomicUsize>,
+    settled: Arc<Notify>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MultipartCleanupError {
+    #[error("failed to delete staged multipart objects: {failures:?}")]
+    Deletions { failures: Vec<String> },
+    #[error("RADOS cleanup worker failed: {message}")]
+    Worker { message: String },
+    #[error("multipart final object was published but staging cleanup failed")]
+    Published {
+        #[source]
+        source: Box<slatedb::object_store::Error>,
+    },
+}
+
+fn multipart_cleanup_error(error: MultipartCleanupError) -> slatedb::object_store::Error {
+    slatedb::object_store::Error::Generic {
+        store: "native RADOS",
+        source: Box::new(error),
+    }
+}
+
+impl Drop for InFlightPart {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.settled.notify_waiters();
+    }
+}
+
 #[async_trait]
 impl MultipartUpload for Multipart {
     fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+        if !self.accepting_parts {
+            return Box::pin(async { Err(generic("multipart already finished")) });
+        }
         let ordinal = self.next_part.fetch_add(1, Ordering::SeqCst);
         let name = self.store.staging_name(self.upload, ordinal);
         let driver = Arc::clone(&self.store.driver);
         let parts = Arc::clone(&self.parts);
+        let cancelled = Arc::clone(&self.cancelled);
+        let in_flight = Arc::clone(&self.in_flight);
+        let settled = Arc::clone(&self.settled);
+        let cleanup_errors = Arc::clone(&self.cleanup_errors);
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        let guard = InFlightPart { count: in_flight, settled };
         Box::pin(async move {
             let staged_name = name.clone();
-            blocking(move || driver.put(&staged_name, Bytes::from(payload), WriteMode::Create))
+            let cleanup_name = staged_name.clone();
+            blocking(move || {
+            let _guard = guard;
+                let result = match driver.put(&staged_name, Bytes::from(payload), WriteMode::Create) {
+                    Ok(version) => match parts.lock() {
+                        Ok(mut registered) => {
+                            if cancelled.load(Ordering::Acquire) {
+                                if let Err(error) = driver.delete(&cleanup_name) {
+                                    if let Ok(mut errors) = cleanup_errors.lock() {
+                                        errors.push(error.to_string());
+                                    }
+                                }
+                            } else {
+                                registered.push(StagedPart { ordinal, name: cleanup_name });
+                            }
+                            Ok(version)
+                        }
+                        Err(_) => Err(DriverError::Other("multipart staging lock poisoned".to_owned())),
+                    },
+                    Err(error) => Err(error),
+                };
+                result
+            })
                 .await
                 .map_err(|error| map_error(Path::from(name.clone()), error))?;
-            parts.lock().map_err(|_| generic("multipart staging lock poisoned"))?
-                .push(StagedPart { ordinal, name });
             Ok(())
         })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
         if self.finished { return Err(generic("multipart already completed")); }
+        self.accepting_parts = false;
+        loop {
+            let settled = self.settled.notified();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            settled.await;
+        }
         let mut parts = self.parts.lock().map_err(|_| generic("multipart staging lock poisoned"))?.clone();
         parts.sort_by_key(|part| part.ordinal);
         let mut bytes = Vec::new();
@@ -203,23 +282,49 @@ impl MultipartUpload for Multipart {
             extensions: self.options.extensions.clone(), ..Default::default()
         }).await?;
         self.finished = true;
-        cleanup_staged(&self.store.driver, &parts).await;
+        cleanup_staged(&self.store.driver, &parts).await.map_err(|error| {
+            multipart_cleanup_error(MultipartCleanupError::Published {
+                source: Box::new(error),
+            })
+        })?;
         Ok(result)
     }
 
     async fn abort(&mut self) -> Result<()> {
         if self.finished { return Ok(()); }
-        let parts = self.parts.lock().map_err(|_| generic("multipart staging lock poisoned"))?.clone();
-        cleanup_staged(&self.store.driver, &parts).await;
+        self.accepting_parts = false;
+        let parts = {
+            let parts = self.parts.lock().map_err(|_| generic("multipart staging lock poisoned"))?;
+            self.cancelled.store(true, Ordering::Release);
+            parts.clone()
+        };
+        loop {
+            let settled = self.settled.notified();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            settled.await;
+        }
         self.finished = true;
-        Ok(())
+        cleanup_staged(&self.store.driver, &parts).await?;
+        let errors = self.cleanup_errors.lock().map_err(|_| generic("multipart cleanup error lock poisoned"))?;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(multipart_cleanup_error(MultipartCleanupError::Deletions {
+                failures: errors.clone(),
+            }))
+        }
     }
 }
 
 impl Drop for Multipart {
     fn drop(&mut self) {
         if self.finished { return; }
-        let Ok(parts) = self.parts.lock().map(|parts| parts.clone()) else { return; };
+        let Ok(parts) = self.parts.lock().map(|parts| {
+            self.cancelled.store(true, Ordering::Release);
+            parts.clone()
+        }) else { return; };
         let driver = Arc::clone(&self.store.driver);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else { return; };
         std::mem::drop(runtime.spawn_blocking(move || {
@@ -228,15 +333,36 @@ impl Drop for Multipart {
     }
 }
 
-async fn cleanup_staged(driver: &Arc<dyn Driver>, parts: &[StagedPart]) {
+async fn cleanup_staged(driver: &Arc<dyn Driver>, parts: &[StagedPart]) -> Result<()> {
     let driver = Arc::clone(driver); let parts = parts.to_vec();
-    let _ = tokio::task::spawn_blocking(move || {
-        for part in parts { let _ = driver.delete(&part.name); }
-    }).await;
+    let failures = tokio::task::spawn_blocking(move || {
+        parts
+            .into_iter()
+            .filter_map(|part| {
+                driver
+                    .delete(&part.name)
+                    .err()
+                    .map(|error| format!("{}: {error}", part.name))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| {
+        multipart_cleanup_error(MultipartCleanupError::Worker {
+            message: error.to_string(),
+        })
+    })?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(multipart_cleanup_error(MultipartCleanupError::Deletions {
+            failures,
+        }))
+    }
 }
 
 async fn blocking<T: Send + 'static>(operation: impl FnOnce() -> std::result::Result<T, DriverError> + Send + 'static) -> std::result::Result<T, DriverError> { tokio::task::spawn_blocking(operation).await.map_err(|error| DriverError::Other(format!("RADOS worker failed: {error}")))? }
-fn map_error(path: Path, error: DriverError) -> slatedb::object_store::Error { match error { DriverError::NotFound => slatedb::object_store::Error::NotFound { path: path.to_string(), source: Box::new(error) }, DriverError::Exists => slatedb::object_store::Error::AlreadyExists { path: path.to_string(), source: Box::new(error) }, DriverError::Precondition => precondition(&path, error.to_string()), DriverError::Range | DriverError::Other(_) => generic(error.to_string()) } }
+fn map_error(path: Path, error: DriverError) -> slatedb::object_store::Error { match error { DriverError::NotFound => slatedb::object_store::Error::NotFound { path: path.to_string(), source: Box::new(error) }, DriverError::Exists => slatedb::object_store::Error::AlreadyExists { path: path.to_string(), source: Box::new(error) }, DriverError::Precondition => precondition(&path, error.to_string()), DriverError::Range | DriverError::Other(_) => generic(error.to_string()), DriverError::Io(_) => slatedb::object_store::Error::Generic { store: "native RADOS", source: Box::new(error) } } }
 fn precondition(path: &Path, source: impl Into<String>) -> slatedb::object_store::Error { slatedb::object_store::Error::Precondition { path: path.to_string(), source: source.into().into() } }
 fn generic(source: impl Into<String>) -> slatedb::object_store::Error { slatedb::object_store::Error::Generic { store: "native RADOS", source: source.into().into() } }
 
@@ -247,7 +373,12 @@ mod tests {
     use std::{collections::BTreeMap, sync::RwLock};
 
     #[derive(Debug, Default)]
-    struct MemoryDriver { objects: RwLock<BTreeMap<String, StoredObject>>, next: std::sync::atomic::AtomicU64 }
+    struct MemoryDriver {
+        objects: RwLock<BTreeMap<String, StoredObject>>,
+        next: std::sync::atomic::AtomicU64,
+        fail_deletes: std::sync::atomic::AtomicBool,
+        panic_deletes: std::sync::atomic::AtomicBool,
+    }
 
     impl Driver for MemoryDriver {
         fn put(&self, name: &str, bytes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError> {
@@ -268,7 +399,16 @@ mod tests {
             if range.start > range.end || range.end > object.size { return Err(DriverError::Range); }
             Ok(StoredObject { bytes: object.bytes.slice(range.start as usize..range.end as usize), ..object })
         }
-        fn delete(&self, name: &str) -> std::result::Result<(), DriverError> { self.objects.write().map_err(|_| DriverError::Other("lock poisoned".to_owned()))?.remove(name).map(|_| ()).ok_or(DriverError::NotFound) }
+        fn delete(&self, name: &str) -> std::result::Result<(), DriverError> {
+            assert!(
+                !self.panic_deletes.load(std::sync::atomic::Ordering::SeqCst),
+                "injected delete panic"
+            );
+            if self.fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(DriverError::Other("injected delete failure".to_owned()));
+            }
+            self.objects.write().map_err(|_| DriverError::Other("lock poisoned".to_owned()))?.remove(name).map(|_| ()).ok_or(DriverError::NotFound)
+        }
         fn list(&self, prefix: &str) -> std::result::Result<Vec<StoredMeta>, DriverError> { Ok(self.objects.read().map_err(|_| DriverError::Other("lock poisoned".to_owned()))?.iter().filter(|(name, _)| name.starts_with(prefix)).map(|(name, value)| StoredMeta { name: name.clone(), size: value.size, version: value.version, modified: value.modified }).collect()) }
     }
 
@@ -298,12 +438,24 @@ mod tests {
         assert_eq!(driver.objects.read().unwrap().keys().filter(|name| name.starts_with(".vaultic-rados/multipart/")).count(), 2);
         upload.complete().await.unwrap();
         assert!(!driver.objects.read().unwrap().keys().any(|name| name.starts_with(".vaultic-rados/multipart/")));
+        assert!(upload.put_part(Bytes::from_static(b"late").into()).await.is_err());
+        assert!(!driver.objects.read().unwrap().keys().any(|name| name.starts_with(".vaultic-rados/multipart/")));
         assert_eq!(&store.get(&Path::from("sst/one")).await.unwrap().bytes().await.unwrap()[..], b"part-apart-b");
-        assert_eq!(store.list(None).collect::<Vec<_>>().await.len(), 2);
+
+        let mut raced = store.put_multipart(&Path::from("sst/raced")).await.unwrap();
+        let issued = raced.put_part(Bytes::from_static(b"issued-before-complete").into());
+        let writer = tokio::spawn(issued);
+        raced.complete().await.unwrap();
+        writer.await.unwrap().unwrap();
+        assert_eq!(&store.get(&Path::from("sst/raced")).await.unwrap().bytes().await.unwrap()[..], b"issued-before-complete");
+        assert!(!driver.objects.read().unwrap().keys().any(|name| name.starts_with(".vaultic-rados/multipart/")));
+        assert_eq!(store.list(None).collect::<Vec<_>>().await.len(), 3);
 
         let mut abandoned = store.put_multipart(&Path::from("sst/aborted")).await.unwrap();
         abandoned.put_part(Bytes::from_static(b"temporary").into()).await.unwrap();
         abandoned.abort().await.unwrap();
+        assert!(!driver.objects.read().unwrap().keys().any(|name| name.starts_with(".vaultic-rados/multipart/")));
+        assert!(abandoned.put_part(Bytes::from_static(b"late").into()).await.is_err());
         assert!(!driver.objects.read().unwrap().keys().any(|name| name.starts_with(".vaultic-rados/multipart/")));
         assert!(matches!(store.get(&Path::from("sst/aborted")).await, Err(slatedb::object_store::Error::NotFound { .. })));
 
@@ -320,5 +472,75 @@ mod tests {
         assert!(!driver.objects.read().unwrap().contains_key(&stale_name));
         assert!(driver.objects.read().unwrap().contains_key(&fresh_name));
         upload.abort().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_reports_cleanup_failure_for_in_flight_part() {
+        let driver = Arc::new(MemoryDriver::default());
+        let store = RadosStore::new(driver.clone(), "repo/db");
+        let mut upload = store
+            .put_multipart(&Path::from("sst/cancelled"))
+            .await
+            .unwrap();
+        let part = upload.put_part(Bytes::from_static(b"in-flight").into());
+        driver.fail_deletes.store(true, Ordering::Release);
+        let writer = tokio::spawn(part);
+
+        let error = upload.abort().await.unwrap_err();
+        let slatedb::object_store::Error::Generic { source, .. } = &error else {
+            panic!("unexpected in-flight cleanup error: {error}");
+        };
+        assert!(matches!(source.downcast_ref(), Some(MultipartCleanupError::Deletions { failures }) if failures.len() == 1));
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_multipart_cleanup_failures_are_reported() {
+        let driver = Arc::new(MemoryDriver::default());
+        let store = RadosStore::new(driver.clone(), "repo/db");
+        let mut aborted = store.put_multipart(&Path::from("sst/aborted-failure")).await.unwrap();
+        aborted.put_part(Bytes::from_static(b"temporary").into()).await.unwrap();
+        aborted.put_part(Bytes::from_static(b"second").into()).await.unwrap();
+        let staged = driver.objects.read().unwrap().keys().filter(|name| name.starts_with(".vaultic-rados/multipart/")).cloned().collect::<Vec<_>>();
+        driver.fail_deletes.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = aborted.abort().await.unwrap_err();
+        let slatedb::object_store::Error::Generic { source, .. } = &error else {
+            panic!("unexpected cleanup error: {error}");
+        };
+        let Some(MultipartCleanupError::Deletions { failures }) = source.downcast_ref() else {
+            panic!("unexpected cleanup source: {source}");
+        };
+        assert_eq!(failures.len(), 2);
+        assert!(staged.iter().all(|name| failures.iter().any(|failure| failure.starts_with(name))));
+        assert!(aborted.abort().await.is_ok());
+
+        driver.fail_deletes.store(false, std::sync::atomic::Ordering::SeqCst);
+        let location = Path::from("sst/completed-cleanup-failure");
+        let mut completed = store.put_multipart(&location).await.unwrap();
+        completed.put_part(Bytes::from_static(b"published").into()).await.unwrap();
+        driver.fail_deletes.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = completed.complete().await.unwrap_err();
+        let slatedb::object_store::Error::Generic { source, .. } = &error else {
+            panic!("unexpected completion error: {error}");
+        };
+        assert!(matches!(source.downcast_ref(), Some(MultipartCleanupError::Published { .. })));
+        driver.fail_deletes.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(&store.get(&location).await.unwrap().bytes().await.unwrap()[..], b"published");
+    }
+
+    #[tokio::test]
+    async fn abort_reports_cleanup_worker_panic() {
+        let driver = Arc::new(MemoryDriver::default());
+        let store = RadosStore::new(driver.clone(), "repo/db");
+        let mut upload = store.put_multipart(&Path::from("sst/worker-panic")).await.unwrap();
+        upload.put_part(Bytes::from_static(b"temporary").into()).await.unwrap();
+        driver.panic_deletes.store(true, Ordering::Release);
+
+        let error = upload.abort().await.unwrap_err();
+        let slatedb::object_store::Error::Generic { source, .. } = &error else {
+            panic!("unexpected worker error: {error}");
+        };
+        assert!(matches!(source.downcast_ref(), Some(MultipartCleanupError::Worker { .. })));
+        assert!(upload.put_part(Bytes::from_static(b"late").into()).await.is_err());
     }
 }

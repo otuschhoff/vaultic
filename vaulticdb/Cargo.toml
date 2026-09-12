@@ -1,6 +1,6 @@
 [package]
 name = "vaulticdb"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 default-run = "vaulticdb"
 publish = false
@@ -10,6 +10,7 @@ description = "Vaultic SlateDB metadata service"
 [features]
 default = []
 rados = []
+test-failpoints = []
 
 [dependencies]
 aes-gcm = "0.10"

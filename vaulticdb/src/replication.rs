@@ -345,6 +345,15 @@ impl MultipartUpload for ReplicatedMultipartUpload {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{operation} failed on replica {replica}: {source}")]
+struct ReplicaOperationError {
+    operation: &'static str,
+    replica: String,
+    #[source]
+    source: slatedb::object_store::Error,
+}
+
 fn replica_error(
     operation: &'static str,
     replica: &str,
@@ -352,7 +361,11 @@ fn replica_error(
 ) -> slatedb::object_store::Error {
     slatedb::object_store::Error::Generic {
         store: "vaulticdb replicated object store",
-        source: format!("{operation} failed on replica {replica}: {source}").into(),
+        source: Box::new(ReplicaOperationError {
+            operation,
+            replica: replica.to_owned(),
+            source,
+        }),
     }
 }
 

@@ -1,5 +1,7 @@
 //! gRPC handlers for metadata generation authority transitions.
 
+use std::sync::atomic::Ordering;
+
 use tonic::{Request, Response, Status};
 
 use crate::{
@@ -32,6 +34,23 @@ pub(super) fn status_response(authority: GenerationAuthority) -> GenerationStatu
 }
 
 impl Service {
+    pub(super) fn check_generation_mutation<T>(
+        &self,
+        request: &Request<T>,
+        repository_id: &str,
+        context: Option<&crate::proto::RequestContext>,
+    ) -> Result<(), Status> {
+        check_request(&self.state, request, repository_id)?;
+        check_context(context)?;
+        if self.state.draining.load(Ordering::Acquire) {
+            return Err(VaulticDbError::StorageUnavailable {
+                message: "vaulticdb is draining".to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     pub(super) async fn handle_generation_status(
         &self,
         request: Request<GenerationStatusRequest>,
@@ -51,14 +70,20 @@ impl Service {
         &self,
         request: Request<ActivateGenerationRequest>,
     ) -> Result<Response<GenerationStatusResponse>, Status> {
-        check_request(&self.state, &request, &request.get_ref().repository_id)?;
-        check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
+        self.check_generation_mutation(
+            &request,
+            &request.get_ref().repository_id,
+            request.get_ref().context.as_ref(),
+        )?;
         let _intent = self.authority_intent().await?;
         let request = request.into_inner();
         if !request.approve {
-            return Err(Status::failed_precondition(
-                "metadata generation activation requires explicit approval",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "approve".to_owned(),
+                message: "metadata generation activation requires explicit approval".to_owned(),
+            }
+            .into());
         }
         let storage = self.storage().await?;
         let authority = storage
@@ -80,14 +105,20 @@ impl Service {
         &self,
         request: Request<QuarantineGenerationRequest>,
     ) -> Result<Response<GenerationStatusResponse>, Status> {
-        check_request(&self.state, &request, &request.get_ref().repository_id)?;
-        check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
+        self.check_generation_mutation(
+            &request,
+            &request.get_ref().repository_id,
+            request.get_ref().context.as_ref(),
+        )?;
         let _intent = self.authority_intent().await?;
         let request = request.into_inner();
         if !request.healing_required {
-            return Err(Status::invalid_argument(
-                "quarantine requires a proven healing-required classification",
-            ));
+            return Err(VaulticDbError::InvalidRequest {
+                field: "healing_required".to_owned(),
+                message: "quarantine requires a proven healing-required classification".to_owned(),
+            }
+            .into());
         }
         let storage = self.storage().await?;
         let authority = storage
@@ -106,14 +137,20 @@ impl Service {
         &self,
         request: Request<VerifyGenerationRequest>,
     ) -> Result<Response<GenerationStatusResponse>, Status> {
-        check_request(&self.state, &request, &request.get_ref().repository_id)?;
-        check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
+        self.check_generation_mutation(
+            &request,
+            &request.get_ref().repository_id,
+            request.get_ref().context.as_ref(),
+        )?;
         let _intent = self.authority_intent().await?;
         let request = request.into_inner();
         if !request.post_activation_check_clean {
-            return Err(Status::failed_precondition(
-                "post-activation index check did not pass",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "post_activation_check_clean".to_owned(),
+                message: "post-activation index check did not pass".to_owned(),
+            }
+            .into());
         }
         let storage = self.storage().await?;
         let authority = storage
@@ -132,16 +169,86 @@ impl Service {
         &self,
         request: Request<RollbackGenerationRequest>,
     ) -> Result<Response<GenerationStatusResponse>, Status> {
-        check_request(&self.state, &request, &request.get_ref().repository_id)?;
-        check_context(request.get_ref().context.as_ref())?;
-        let _intent = self.authority_intent().await?;
+        let service = self.clone();
+        tokio::spawn(async move { service.rollback_generation_inner(request).await })
+            .await
+            .map_err(|error| Status::internal(format!("join generation rollback: {error}")))?
+    }
+
+    async fn rollback_generation_inner(
+        &self,
+        request: Request<RollbackGenerationRequest>,
+    ) -> Result<Response<GenerationStatusResponse>, Status> {
+        let _transition = self.state.writer_transition.lock().await;
+        self.check_generation_mutation(
+            &request,
+            &request.get_ref().repository_id,
+            request.get_ref().context.as_ref(),
+        )?;
         let request = request.into_inner();
         if !request.acknowledge {
-            return Err(Status::failed_precondition(
-                "metadata generation rollback requires separate acknowledgement",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "acknowledge".to_owned(),
+                message: "metadata generation rollback requires separate acknowledgement"
+                    .to_owned(),
+            }
+            .into());
         }
+        let admission = self.mutation_admission().await?;
         let storage = self.storage().await?;
+        if let Some(authority) = storage
+            .committed_generation_rollback(
+                &request.repository_id,
+                request.expected_decision,
+                &request.report_sha256,
+            )
+            .await
+            .map_err(VaulticDbError::generation)
+            .map_err(Status::from)?
+        {
+            match storage.database_state().await {
+                crate::storage::DatabaseState::Reader => {
+                    return Ok(Response::new(status_response(authority)));
+                }
+                crate::storage::DatabaseState::Unavailable => {
+                    return Err(VaulticDbError::StorageUnavailable {
+                        message: "generation rollback is committed but storage is unavailable"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+                crate::storage::DatabaseState::Writer => {}
+            }
+            self.state.writer_role.lock().await.fence(
+                storage.writer_status_epoch().await.1,
+                std::time::Instant::now(),
+                "generation rollback fence reconciliation",
+            );
+            self.transition_lifecycle(
+                crate::lifecycle::DaemonPhase::Fenced,
+                "generation rollback fence reconciliation",
+            )
+            .await?;
+            let epoch = storage.refresh_writer_fence().await.map_err(|error| {
+                Status::from(VaulticDbError::GenerationReconciliationPending {
+                    message: format!("{error:#}"),
+                    generation: authority.active_generation,
+                })
+            })?;
+            self.state
+                .writer_role
+                .lock()
+                .await
+                .recover_fenced_writer(epoch, std::time::Instant::now())
+                .map_err(super::role_error)?;
+            self.transition_lifecycle(
+                crate::lifecycle::DaemonPhase::ReadWrite,
+                "generation rollback fence reconciled",
+            )
+            .await?;
+            return Ok(Response::new(status_response(authority)));
+        }
+        let _intent = self.authority_intent_with_admission(admission).await?;
         let authority = storage
             .rollback_generation(
                 &request.repository_id,
@@ -152,11 +259,33 @@ impl Service {
             .await
             .map_err(VaulticDbError::generation)
             .map_err(Status::from)?;
-        storage
-            .refresh_writer_fence()
+        let epoch = match storage.refresh_writer_fence().await {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                self.state.writer_role.lock().await.fence(
+                    storage.writer_status_epoch().await.1,
+                    std::time::Instant::now(),
+                    "generation rollback committed; writer fence refresh failed",
+                );
+                self.transition_lifecycle(
+                    crate::lifecycle::DaemonPhase::Fenced,
+                    "generation rollback committed; writer fence refresh failed",
+                )
+                .await?;
+                return Err(Status::from(
+                    VaulticDbError::GenerationReconciliationPending {
+                        message: format!("{error:#}"),
+                        generation: authority.active_generation,
+                    },
+                ));
+            }
+        };
+        self.state
+            .writer_role
+            .lock()
             .await
-            .map_err(VaulticDbError::generation)
-            .map_err(Status::from)?;
+            .refresh_writer_epoch(epoch, std::time::Instant::now())
+            .map_err(super::role_error)?;
         Ok(Response::new(status_response(authority)))
     }
 
@@ -164,14 +293,21 @@ impl Service {
         &self,
         request: Request<RetireGenerationRequest>,
     ) -> Result<Response<GenerationStatusResponse>, Status> {
-        check_request(&self.state, &request, &request.get_ref().repository_id)?;
-        check_context(request.get_ref().context.as_ref())?;
+        let _transition = self.state.writer_transition.lock().await;
+        self.check_generation_mutation(
+            &request,
+            &request.get_ref().repository_id,
+            request.get_ref().context.as_ref(),
+        )?;
         let _intent = self.authority_intent().await?;
         let request = request.into_inner();
         if !request.acknowledge {
-            return Err(Status::failed_precondition(
-                "metadata generation retirement requires separate acknowledgement",
-            ));
+            return Err(VaulticDbError::Precondition {
+                field: "acknowledge".to_owned(),
+                message: "metadata generation retirement requires separate acknowledgement"
+                    .to_owned(),
+            }
+            .into());
         }
         let storage = self.storage().await?;
         let authority = storage

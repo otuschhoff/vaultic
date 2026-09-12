@@ -18,13 +18,25 @@ var (
 	ErrWriterDemoted       = errors.New("vaulticdb writer demoted")
 	ErrWriterTransitioning = errors.New("vaulticdb writer transitioning")
 	ErrGenerationChanged   = errors.New("vaulticdb generation changed")
+	ErrGenerationPending   = errors.New("vaulticdb generation reconciliation pending")
 	ErrNamespaceMismatch   = errors.New("vaulticdb namespace mismatch")
 	ErrEncryptionIntegrity = errors.New("vaulticdb encryption integrity failure")
 	ErrIdempotencyConflict = errors.New("vaulticdb idempotency conflict")
 	ErrStorageUnavailable  = errors.New("vaulticdb storage unavailable")
+	ErrStorageConflict     = errors.New("vaulticdb storage conflict")
+	ErrStorageDataLoss     = errors.New("vaulticdb storage data loss")
 	ErrInvalidRequest      = errors.New("vaulticdb invalid request")
+	ErrPrecondition        = errors.New("vaulticdb precondition failed")
+	ErrDeadlineExceeded    = errors.New("vaulticdb request deadline exceeded")
+	ErrResourceExhausted   = errors.New("vaulticdb resource exhausted")
+	ErrNotFound            = errors.New("vaulticdb object not found")
 	ErrKeyManagement       = errors.New("vaulticdb key management failure")
 	ErrWriterRole          = errors.New("vaulticdb writer role failure")
+	ErrAuthentication      = errors.New("vaulticdb authentication failed")
+	ErrAuthorization       = errors.New("vaulticdb authorization failed")
+	ErrIncompatibleDaemon  = errors.New("incompatible vaulticdb daemon")
+	ErrRepositoryMismatch  = errors.New("vaulticdb repository mismatch")
+	ErrUnsafeEndpoint      = errors.New("unsafe vaulticdb endpoint")
 )
 
 // RPCError preserves the transport status while exposing a stable daemon error.
@@ -49,6 +61,8 @@ func daemonErrorKind(code string) error {
 		return ErrWriterTransitioning
 	case "generation_changed":
 		return ErrGenerationChanged
+	case "generation_reconciliation_pending":
+		return ErrGenerationPending
 	case "namespace_mismatch":
 		return ErrNamespaceMismatch
 	case "encryption_integrity":
@@ -57,12 +71,28 @@ func daemonErrorKind(code string) error {
 		return ErrIdempotencyConflict
 	case "storage_unavailable":
 		return ErrStorageUnavailable
+	case "storage_conflict":
+		return ErrStorageConflict
+	case "storage_data_loss":
+		return ErrStorageDataLoss
 	case "invalid_request":
 		return ErrInvalidRequest
+	case "precondition_failed":
+		return ErrPrecondition
+	case "deadline_exceeded":
+		return ErrDeadlineExceeded
+	case "resource_exhausted":
+		return ErrResourceExhausted
+	case "not_found":
+		return ErrNotFound
 	case "key_management":
 		return ErrKeyManagement
 	case "writer_role":
 		return ErrWriterRole
+	case "authentication_failed":
+		return ErrAuthentication
+	case "authorization_failed":
+		return ErrAuthorization
 	default:
 		return nil
 	}

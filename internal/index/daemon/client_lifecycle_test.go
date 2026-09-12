@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -105,6 +106,30 @@ func TestValidateEnsureOptions(t *testing.T) {
 	}
 	if err := validateEnsureOptions(Options{ObjectStore: "memory", TCPAllowlist: []string{"127.0.0.1/32"}}); err != nil {
 		t.Fatalf("validateEnsureOptions(valid) = %v", err)
+	}
+}
+
+func TestPermanentExistingDaemonError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "authentication sentinel", err: ErrAuthentication, want: true},
+		{name: "authorization status", err: status.Error(codes.PermissionDenied, "denied"), want: true},
+		{name: "incompatible", err: fmt.Errorf("probe: %w", ErrIncompatibleDaemon), want: true},
+		{name: "repository", err: ErrRepositoryMismatch, want: true},
+		{name: "unsafe endpoint", err: ErrUnsafeEndpoint, want: true},
+		{name: "missing socket", err: os.ErrNotExist, want: false},
+		{name: "connection refused", err: syscall.ECONNREFUSED, want: false},
+		{name: "deadline", err: context.DeadlineExceeded, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := permanentExistingDaemonError(test.err); got != test.want {
+				t.Fatalf("permanentExistingDaemonError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
 	}
 }
 
@@ -261,8 +286,10 @@ func TestEncryptedDaemonPersistsOnlyCiphertextAndReopens(t *testing.T) {
 	if err := client.StoreMasterKey(ctx, masterKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.StoreMasterKey(ctx, []byte("different-key")); status.Code(err) != codes.AlreadyExists {
+	if err := client.StoreMasterKey(ctx, []byte("different-key")); !errors.Is(err, ErrStorageConflict) || status.Code(err) != codes.Aborted {
 		t.Fatalf("master key replacement was not rejected: %v", err)
+	} else {
+		requireRPCDetail(t, err, codes.Aborted, "storage_conflict", false)
 	}
 	keyStatus, err := client.AddLocalKeySlot(ctx, "replacement-recovery", []byte("temporary passphrase"), 10, true)
 	if err != nil || keyStatus.EnvelopeGeneration != 2 || len(keyStatus.Slots) != 2 {
@@ -586,6 +613,235 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 	}
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnsureDoesNotReplaceExistingDaemonAfterAuthenticationRejection(t *testing.T) {
+	ctx := context.Background()
+	socket := testSocket(t)
+	owner, err := Ensure(ctx, Options{
+		Socket: socket, RepositoryID: "auth-rejection", AuthToken: "correct-token",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(ctx) })
+	before := daemonHealth(t, owner)
+
+	_, err = Ensure(ctx, Options{
+		Socket: socket, RepositoryID: "auth-rejection", AuthToken: "wrong-token",
+		DaemonPath: filepath.Join(t.TempDir(), "must-not-launch"),
+		DataDir:    t.TempDir(), ObjectStore: "memory",
+	})
+	if !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("Ensure authentication rejection = %v, want ErrAuthentication", err)
+	}
+	requireRPCDetail(t, err, codes.Unauthenticated, "authentication_failed", false)
+	after := daemonHealth(t, owner)
+	if after.GetDaemonId() != before.GetDaemonId() || after.GetStateSinceUnixMs() != before.GetStateSinceUnixMs() || after.GetState() != before.GetState() {
+		t.Fatalf("existing daemon changed after rejected Ensure: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestRetryDialReturnsPermanentAuthenticationRejection(t *testing.T) {
+	ctx := context.Background()
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "retry-auth-rejection", AuthToken: "correct-token",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+	}
+	owner, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(ctx)
+
+	options.AuthToken = "wrong-token"
+	options.StartTimeout = time.Minute
+	_, err = retryDial(ctx, options)
+	if !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("retryDial authentication rejection = %v, want ErrAuthentication", err)
+	}
+	requireRPCDetail(t, err, codes.Unauthenticated, "authentication_failed", false)
+}
+
+func TestEnsureDoesNotReplaceExistingDaemonAfterRepositoryRejection(t *testing.T) {
+	ctx := context.Background()
+	socket := testSocket(t)
+	owner, err := Ensure(ctx, Options{
+		Socket: socket, RepositoryID: "owned-repository", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(ctx)
+
+	_, err = Ensure(ctx, Options{
+		Socket: socket, RepositoryID: "different-repository",
+		DaemonPath: filepath.Join(t.TempDir(), "must-not-launch"), ObjectStore: "memory",
+	})
+	if !errors.Is(err, ErrNamespaceMismatch) {
+		t.Fatalf("repository rejection = %v, want ErrNamespaceMismatch", err)
+	}
+	requireRPCDetail(t, err, codes.FailedPrecondition, "namespace_mismatch", false)
+}
+
+func TestEnsureDoesNotReplaceExistingDaemonAfterEncryptionRejection(t *testing.T) {
+	ctx := context.Background()
+	socket := testSocket(t)
+	owner, err := Ensure(ctx, Options{
+		Socket: socket, RepositoryID: "encryption-rejection", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(ctx)
+	passphrase := filepath.Join(t.TempDir(), "passphrase")
+	if err := os.WriteFile(passphrase, []byte("test passphrase\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Ensure(ctx, Options{
+		Socket: socket, RepositoryID: "encryption-rejection", EncryptionMode: "required", PassphraseFile: passphrase,
+		DaemonPath: filepath.Join(t.TempDir(), "must-not-launch"), ObjectStore: "memory",
+	})
+	if !errors.Is(err, ErrIncompatibleDaemon) {
+		t.Fatalf("encryption rejection = %v, want ErrIncompatibleDaemon", err)
+	}
+}
+
+func TestEnsureDoesNotLaunchWithMalformedRuntimeMetadata(t *testing.T) {
+	socket := testSocket(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimSuffix(socket, filepath.Ext(socket))
+	if err := os.WriteFile(base+".pid", []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base+".cap", []byte("protocol=broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Ensure(context.Background(), Options{
+		Socket: socket, RepositoryID: "malformed-runtime",
+		DaemonPath: filepath.Join(t.TempDir(), "must-not-launch"), ObjectStore: "memory",
+	})
+	if !errors.Is(err, ErrUnsafeEndpoint) {
+		t.Fatalf("malformed runtime metadata = %v, want ErrUnsafeEndpoint", err)
+	}
+}
+
+func TestEnsureRejectsMalformedMetadataForLiveDaemon(t *testing.T) {
+	ctx := context.Background()
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "live-malformed-runtime",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+	}
+	owner, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(ctx)
+	base := strings.TrimSuffix(options.Socket, filepath.Ext(options.Socket))
+	if err := os.WriteFile(base+".cap", []byte("protocol=\nprotocol="+ProtocolVersion+"\nschema="+SchemaVersion+"\ntcp_enabled=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options.DaemonPath = filepath.Join(t.TempDir(), "must-not-launch")
+	_, err = Ensure(ctx, options)
+	if !errors.Is(err, ErrUnsafeEndpoint) {
+		t.Fatalf("live malformed metadata = %v, want ErrUnsafeEndpoint", err)
+	}
+}
+
+func TestLoaderPanicAfterBindCleansRuntimeArtifacts(t *testing.T) {
+	socket := testSocket(t)
+	_, err := Ensure(context.Background(), Options{
+		Socket: socket, RepositoryID: "loader-panic", DaemonPath: failureDaemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+		testEnvironment: []string{"VAULTICDB_TEST_PANIC_LOADER=1"},
+	})
+	if err == nil {
+		t.Fatal("Ensure unexpectedly succeeded after loader panic")
+	}
+	base := strings.TrimSuffix(socket, filepath.Ext(socket))
+	for _, artifact := range []string{socket, base + ".pid", base + ".cap"} {
+		if _, statErr := os.Lstat(artifact); !os.IsNotExist(statErr) {
+			t.Fatalf("runtime artifact remained after loader panic: %s (%v)", artifact, statErr)
+		}
+	}
+	recovered, err := Ensure(context.Background(), Options{
+		Socket: socket, RepositoryID: "loader-panic", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatalf("retry after loader panic: %v", err)
+	}
+	if health := daemonHealth(t, recovered); !health.GetReady() || health.GetState() != "read_write" {
+		t.Fatalf("recovered loader lifecycle = %+v", health)
+	}
+	if err := recovered.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransportTeardownFailuresCleanRuntimeArtifacts(t *testing.T) {
+	for _, failure := range []string{"server", "stopping-transition", "storage-close"} {
+		t.Run(failure, func(t *testing.T) {
+			socket := testSocket(t)
+			options := Options{
+				Socket: socket, RepositoryID: "transport-" + failure, DaemonPath: failureDaemonBinary(t),
+				DataDir: t.TempDir(), ObjectStore: "memory",
+				testEnvironment: []string{"VAULTICDB_TEST_TRANSPORT_FAILURE=" + failure},
+			}
+			client, err := Ensure(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.Close(context.Background()); err == nil {
+				t.Fatalf("%s teardown unexpectedly succeeded", failure)
+			}
+			base := strings.TrimSuffix(socket, filepath.Ext(socket))
+			for _, artifact := range []string{socket, base + ".pid", base + ".cap"} {
+				if _, statErr := os.Lstat(artifact); !os.IsNotExist(statErr) {
+					t.Fatalf("runtime artifact remained after %s failure: %s (%v)", failure, artifact, statErr)
+				}
+			}
+			options.testEnvironment = nil
+			recovered, err := Ensure(context.Background(), options)
+			if err != nil {
+				t.Fatalf("lock reacquisition after %s failure: %v", failure, err)
+			}
+			if err := recovered.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNormalTCPShutdownCleansRuntimeMetadata(t *testing.T) {
+	options := Options{
+		TCPAddress: freeTCPAddress(t), TCPAllowlist: []string{"127.0.0.1/32"},
+		AuthToken: "tcp-cleanup-secret", RepositoryID: "tcp-cleanup", DaemonPath: daemonBinary(t),
+	}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimSuffix(tcpMetadataPath(options.TCPAddress), filepath.Ext(tcpMetadataPath(options.TCPAddress)))
+	for _, artifact := range []string{base + ".pid", base + ".cap"} {
+		if _, statErr := os.Lstat(artifact); !os.IsNotExist(statErr) {
+			t.Fatalf("TCP runtime metadata remained after shutdown: %s (%v)", artifact, statErr)
+		}
 	}
 }
 

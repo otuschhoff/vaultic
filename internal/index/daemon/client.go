@@ -25,8 +25,10 @@ import (
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/observability"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -92,6 +94,7 @@ type Options struct {
 	BrokerManifest    string
 	BrokerLease       time.Duration
 	RebuildInitialize bool
+	testEnvironment   []string
 }
 
 func (o Options) withDefaults() Options {
@@ -390,6 +393,9 @@ func validateProtectedFiles(options Options) error {
 }
 
 func connectExistingDaemon(ctx context.Context, options Options) (*Client, error) {
+	if err := validateExistingRuntimeMetadata(options); err != nil {
+		return nil, err
+	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, dialAttemptTimeout(options))
 	client, connectErr := Connect(probeCtx, options)
 	cancelProbe()
@@ -404,7 +410,80 @@ func connectExistingDaemon(ctx context.Context, options Options) (*Client, error
 		}
 		return client, nil
 	}
+	var lifecycleError *daemonNotReadyError
+	if errors.As(connectErr, &lifecycleError) {
+		if lifecycleError.state == "failed" {
+			return nil, connectErr
+		}
+		return retryDial(ctx, options)
+	}
+	if permanentExistingDaemonError(connectErr) {
+		return nil, connectErr
+	}
 	return nil, nil
+}
+
+var errIncompleteRuntimeMetadata = errors.New("incomplete vaulticdb runtime metadata")
+
+func validateExistingRuntimeMetadata(options Options) error {
+	base := options.Socket
+	if options.TCPAddress != "" {
+		base = tcpMetadataPath(options.TCPAddress)
+	}
+	pidPath, capabilityPath := metadataPath(base, ".pid"), metadataPath(base, ".cap")
+	pidInfo, pidErr := os.Lstat(pidPath)
+	capabilityInfo, capabilityErr := os.Lstat(capabilityPath)
+	if errors.Is(pidErr, os.ErrNotExist) && errors.Is(capabilityErr, os.ErrNotExist) {
+		return nil
+	}
+	if pidErr != nil || capabilityErr != nil {
+		return fmt.Errorf("%w: %w", ErrUnsafeEndpoint, errIncompleteRuntimeMetadata)
+	}
+	for path, info := range map[string]os.FileInfo{pidPath: pidInfo, capabilityPath: capabilityInfo} {
+		if !info.Mode().IsRegular() || runtime.GOOS != "windows" && (info.Mode().Perm()&0o022 != 0 || vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid())) {
+			return fmt.Errorf("%w: unsafe runtime metadata at %s", ErrUnsafeEndpoint, path)
+		}
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		return fmt.Errorf("%w: read PID metadata: %v", ErrUnsafeEndpoint, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || pid <= 0 {
+		return fmt.Errorf("%w: invalid PID metadata", ErrUnsafeEndpoint)
+	}
+	capabilityBytes, err := os.ReadFile(capabilityPath)
+	if err != nil {
+		return fmt.Errorf("%w: read capability metadata: %v", ErrUnsafeEndpoint, err)
+	}
+	capabilities := make(map[string]string)
+	for line := range strings.SplitSeq(strings.TrimSpace(string(capabilityBytes)), "\n") {
+		name, value, found := strings.Cut(line, "=")
+		_, duplicate := capabilities[name]
+		if !found || name == "" || duplicate {
+			return fmt.Errorf("%w: invalid capability metadata", ErrUnsafeEndpoint)
+		}
+		capabilities[name] = value
+	}
+	wantTCP := strconv.FormatBool(options.TCPAddress != "")
+	if len(capabilities) != 3 || capabilities["protocol"] != ProtocolVersion || capabilities["schema"] != SchemaVersion || capabilities["tcp_enabled"] != wantTCP {
+		return fmt.Errorf("%w: incompatible capability metadata", ErrIncompatibleDaemon)
+	}
+	return nil
+}
+
+func permanentExistingDaemonError(err error) bool {
+	if errors.Is(err, ErrAuthentication) || errors.Is(err, ErrAuthorization) ||
+		errors.Is(err, ErrIncompatibleDaemon) || errors.Is(err, ErrRepositoryMismatch) || errors.Is(err, ErrNamespaceMismatch) ||
+		errors.Is(err, ErrUnsafeEndpoint) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateDaemonStartOptions(options Options) error {
@@ -429,6 +508,10 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		"VAULTICDB_REPOSITORY_ID="+options.RepositoryID,
 		"VAULTICDB_TOPOLOGY_SOURCE="+options.TopologySource,
 	)
+	cmd.Env = append(cmd.Env, options.testEnvironment...)
+	if len(options.testEnvironment) != 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_TEST_CAPABILITY=vaulticdb-process-tests-v1")
+	}
 	for name, value := range map[string]string{
 		"VAULTICDB_OBJECT_STORE":               options.ObjectStore,
 		"VAULTICDB_DATA_DIR":                   options.DataDir,
@@ -701,20 +784,20 @@ func validateUnixEndpoint(socket string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSocket == 0 || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		return fmt.Errorf("unsafe vaulticdb socket permissions at %s", socket)
+		return fmt.Errorf("%w: socket permissions at %s", ErrUnsafeEndpoint, socket)
 	}
 	if runtime.GOOS != "windows" && vaulticfs.ExtendedStat(info).UID != uint32(os.Geteuid()) {
-		return fmt.Errorf("unsafe vaulticdb socket owner at %s", socket)
+		return fmt.Errorf("%w: socket owner at %s", ErrUnsafeEndpoint, socket)
 	}
 	directory, err := os.Lstat(filepath.Dir(socket))
 	if err != nil {
 		return err
 	}
 	if !directory.IsDir() || runtime.GOOS != "windows" && directory.Mode().Perm() != 0o700 {
-		return fmt.Errorf("unsafe vaulticdb runtime directory permissions at %s", filepath.Dir(socket))
+		return fmt.Errorf("%w: runtime directory permissions at %s", ErrUnsafeEndpoint, filepath.Dir(socket))
 	}
 	if runtime.GOOS != "windows" && vaulticfs.ExtendedStat(directory).UID != uint32(os.Geteuid()) {
-		return fmt.Errorf("unsafe vaulticdb runtime directory owner at %s", filepath.Dir(socket))
+		return fmt.Errorf("%w: runtime directory owner at %s", ErrUnsafeEndpoint, filepath.Dir(socket))
 	}
 	return nil
 }
@@ -819,6 +902,22 @@ func withAuth(ctx context.Context, token string) context.Context {
 func retryDial(ctx context.Context, options Options) (*Client, error) {
 	deadline := time.Now().Add(options.StartTimeout)
 	for {
+		if err := validateExistingRuntimeMetadata(options); err != nil {
+			if !errors.Is(err, errIncompleteRuntimeMetadata) {
+				return nil, err
+			}
+			if time.Now().After(deadline) {
+				return nil, context.DeadlineExceeded
+			}
+			timer := time.NewTimer(options.RetryInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return nil, context.DeadlineExceeded
@@ -835,6 +934,9 @@ func retryDial(ctx context.Context, options Options) (*Client, error) {
 		}
 		var lifecycleError *daemonNotReadyError
 		if errors.As(err, &lifecycleError) && lifecycleError.state == "failed" {
+			return nil, err
+		}
+		if permanentExistingDaemonError(err) {
 			return nil, err
 		}
 		if time.Now().After(deadline) {
@@ -880,14 +982,14 @@ func (c *Client) validate(ctx context.Context) error {
 	}
 	if health.GetProtocolVersion() != ProtocolVersion || health.GetSchemaVersion() != SchemaVersion {
 		return fmt.Errorf(
-			"incompatible daemon: protocol=%q schema=%q",
+			"%w: protocol=%q schema=%q", ErrIncompatibleDaemon,
 			health.GetProtocolVersion(),
 			health.GetSchemaVersion(),
 		)
 	}
 	if health.GetRepositoryId() != "" && health.GetRepositoryId() != c.options.RepositoryID {
 		return fmt.Errorf(
-			"daemon repository identity %q does not match %q",
+			"%w: daemon repository identity %q does not match %q", ErrRepositoryMismatch,
 			health.GetRepositoryId(),
 			c.options.RepositoryID,
 		)
@@ -901,17 +1003,17 @@ func (c *Client) validate(ctx context.Context) error {
 	}
 	if capabilities.GetProtocolVersion() != ProtocolVersion || capabilities.GetSchemaVersion() != SchemaVersion {
 		return fmt.Errorf(
-			"incompatible daemon capabilities: protocol=%q schema=%q",
+			"%w: capabilities protocol=%q schema=%q", ErrIncompatibleDaemon,
 			capabilities.GetProtocolVersion(),
 			capabilities.GetSchemaVersion(),
 		)
 	}
 	if capabilities.GetTcpEnabled() != (c.options.TCPAddress != "") {
-		return fmt.Errorf("daemon transport does not match the requested endpoint")
+		return fmt.Errorf("%w: daemon transport does not match the requested endpoint", ErrIncompatibleDaemon)
 	}
 	if capabilities.GetMaxBatchItems() == 0 || capabilities.GetMaxMessageBytes() == 0 ||
 		capabilities.GetMaxPageItems() == 0 {
-		return fmt.Errorf("daemon advertised invalid storage limits")
+		return fmt.Errorf("%w: daemon advertised invalid storage limits", ErrIncompatibleDaemon)
 	}
 	c.limits = Limits{
 		MaxBatchItems:   capabilities.GetMaxBatchItems(),
@@ -933,7 +1035,7 @@ func (c *Client) validate(ctx context.Context) error {
 		OldestSegmentUnixMS: capabilities.GetWalOldestSegmentUnixMs(), CleanupFailures: capabilities.GetWalCleanupFailures(),
 	}
 	if (c.options.EncryptionMode == "required" || c.options.EncryptionMode == "initialize") && !c.encryption.Enabled {
-		return fmt.Errorf("daemon did not enable required metadata encryption")
+		return fmt.Errorf("%w: daemon did not enable required metadata encryption", ErrIncompatibleDaemon)
 	}
 	if c.encryption.Enabled {
 		c.auditEncryptionUnlock(ctx)

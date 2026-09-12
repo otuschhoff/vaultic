@@ -51,7 +51,12 @@ impl DaemonPhase {
             ),
             Self::Promoting => matches!(
                 next,
-                Self::ReadWrite | Self::Fenced | Self::Draining | Self::Failed | Self::Stopping
+                Self::ReadOnly
+                    | Self::ReadWrite
+                    | Self::Fenced
+                    | Self::Draining
+                    | Self::Failed
+                    | Self::Stopping
             ),
             Self::Demoting => matches!(
                 next,
@@ -64,7 +69,7 @@ impl DaemonPhase {
             ),
             Self::Fenced => matches!(
                 next,
-                Self::Promoting | Self::Draining | Self::Failed | Self::Stopping
+                Self::ReadWrite | Self::Promoting | Self::Draining | Self::Failed | Self::Stopping
             ),
             Self::Draining => matches!(next, Self::Failed | Self::Stopping),
             Self::Failed => matches!(next, Self::Stopping),

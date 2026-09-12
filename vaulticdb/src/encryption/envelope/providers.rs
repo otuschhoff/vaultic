@@ -1,6 +1,6 @@
 //! Local, cloud, PKCS#11, and hardware key wrapping providers.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, error::Error as StdError, path::PathBuf};
 
 use aes_gcm::{
     aead::{Aead, Payload},
@@ -9,7 +9,11 @@ use aes_gcm::{
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
-use aws_sdk_kms::{primitives::Blob, Client as AwsKmsClient};
+use aws_sdk_kms::{
+    error::{ProvideErrorMetadata, SdkError},
+    primitives::Blob,
+    Client as AwsKmsClient,
+};
 use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
     Engine,
@@ -34,6 +38,50 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
+
+#[derive(Debug, thiserror::Error)]
+#[error("transient provider failure: {source}")]
+pub struct TransientProviderError {
+    #[source]
+    source: Box<dyn StdError + Send + Sync>,
+}
+
+fn aws_kms_error<E>(operation: &'static str, error: SdkError<E>) -> anyhow::Error
+where
+    E: StdError + ProvideErrorMetadata + Send + Sync + 'static,
+{
+    let retryable = match &error {
+        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) | SdkError::ResponseError(_) => {
+            true
+        }
+        SdkError::ServiceError(service) => {
+            let status = service.raw().status().as_u16();
+            status == 408
+                || status == 429
+                || status >= 500
+                || matches!(
+                    service.err().code(),
+                    Some(
+                        "DependencyTimeoutException"
+                            | "KMSInternalException"
+                            | "KeyUnavailableException"
+                            | "LimitExceededException"
+                            | "ThrottlingException"
+                    )
+                )
+        }
+        SdkError::ConstructionFailure(_) => false,
+        _ => false,
+    };
+    if retryable {
+        anyhow::Error::new(TransientProviderError {
+            source: Box::new(error),
+        })
+        .context(operation)
+    } else {
+        anyhow::Error::new(error).context(operation)
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ProviderCredentials {
@@ -205,7 +253,7 @@ impl KeyProvider for AwsKmsProvider {
             .set_encryption_context(Some(context.aws_context()))
             .send()
             .await
-            .context("AWS KMS Encrypt")?;
+            .map_err(|error| aws_kms_error("AWS KMS Encrypt", error))?;
         Ok(output
             .ciphertext_blob()
             .context("AWS KMS returned no ciphertext")?
@@ -226,7 +274,7 @@ impl KeyProvider for AwsKmsProvider {
             .set_encryption_context(Some(context.aws_context()))
             .send()
             .await
-            .context("AWS KMS Decrypt")?;
+            .map_err(|error| aws_kms_error("AWS KMS Decrypt", error))?;
         Ok(Zeroizing::new(
             output
                 .plaintext()

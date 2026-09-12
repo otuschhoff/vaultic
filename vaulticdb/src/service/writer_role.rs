@@ -8,6 +8,7 @@ use crate::{
     error::VaulticDbError,
     lifecycle::DaemonPhase,
     proto::{DemoteWriterRequest, PromoteWriterRequest, WriterStatusRequest, WriterStatusResponse},
+    storage::DatabaseState,
 };
 use vaulticdb::writer_role::RoleError;
 
@@ -41,6 +42,16 @@ impl Service {
         &self,
         request: Request<DemoteWriterRequest>,
     ) -> Result<Response<WriterStatusResponse>, Status> {
+        let service = self.clone();
+        tokio::spawn(async move { service.demote_writer_inner(request).await })
+            .await
+            .map_err(|error| Status::internal(format!("join writer demotion: {error}")))?
+    }
+
+    async fn demote_writer_inner(
+        &self,
+        request: Request<DemoteWriterRequest>,
+    ) -> Result<Response<WriterStatusResponse>, Status> {
         check_request(&self.state, &request, &request.get_ref().repository_id)?;
         check_context(request.get_ref().context.as_ref())?;
         let request = request.into_inner();
@@ -59,9 +70,20 @@ impl Service {
         &self,
         request: Request<PromoteWriterRequest>,
     ) -> Result<Response<WriterStatusResponse>, Status> {
+        let service = self.clone();
+        tokio::spawn(async move { service.promote_writer_inner(request).await })
+            .await
+            .map_err(|error| Status::internal(format!("join writer promotion: {error}")))?
+    }
+
+    async fn promote_writer_inner(
+        &self,
+        request: Request<PromoteWriterRequest>,
+    ) -> Result<Response<WriterStatusResponse>, Status> {
         check_request(&self.state, &request, &request.get_ref().repository_id)?;
         check_context(request.get_ref().context.as_ref())?;
         let _transition = self.state.writer_transition.lock().await;
+        let _admission = self.mutation_admission().await?;
         let storage = self.storage().await?;
         let request = request.into_inner();
         let reason = request.reason;
@@ -82,17 +104,40 @@ impl Service {
         {
             Ok(epoch) => epoch,
             Err(error) => {
-                let observed_epoch = storage.writer_status_epoch().await.1;
-                self.state.writer_role.lock().await.fence(
-                    observed_epoch,
-                    Instant::now(),
-                    "writer promotion failed",
-                );
-                self.transition_lifecycle(DaemonPhase::Fenced, "writer promotion failed")
+                let phase = match (error.database, error.claim_held) {
+                    (DatabaseState::Reader, false) => {
+                        self.state
+                            .writer_role
+                            .lock()
+                            .await
+                            .fail_promotion_to_reader(error.epoch, Instant::now());
+                        DaemonPhase::ReadOnly
+                    }
+                    (DatabaseState::Unavailable, _) => {
+                        self.state.writer_role.lock().await.fence(
+                            error.epoch,
+                            Instant::now(),
+                            "writer promotion failed",
+                        );
+                        DaemonPhase::Failed
+                    }
+                    _ => {
+                        self.state.writer_role.lock().await.fence(
+                            error.epoch,
+                            Instant::now(),
+                            "writer promotion failed",
+                        );
+                        DaemonPhase::Fenced
+                    }
+                };
+                self.transition_lifecycle(phase, "writer promotion failed")
                     .await?;
-                return Err(Status::failed_precondition(format!(
-                    "writer promotion failed: {error:#}"
-                )));
+                let message = format!("writer promotion failed: {:#}", error.error);
+                return Err(if error.retryable {
+                    VaulticDbError::StorageUnavailable { message }.into()
+                } else {
+                    VaulticDbError::WriterRole { message }.into()
+                });
             }
         };
         self.state
