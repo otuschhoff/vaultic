@@ -345,6 +345,126 @@ impl std::fmt::Display for RenewableObjectStore {
     }
 }
 
+#[derive(Debug)]
+struct ConditionalLocalFileSystem {
+    inner: LocalFileSystem,
+    lock_path: PathBuf,
+}
+
+impl ConditionalLocalFileSystem {
+    fn new(root: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            inner: LocalFileSystem::new_with_prefix(root)
+                .with_context(|| format!("open SlateDB data directory {}", root.display()))?,
+            lock_path: root.with_extension("coordination.lock"),
+        })
+    }
+
+    async fn lock(&self) -> slatedb::object_store::Result<File> {
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            file.lock_exclusive()?;
+            Ok::<_, std::io::Error>(file)
+        })
+        .await
+        .map_err(|source| slatedb::object_store::Error::Generic {
+            store: "ConditionalLocalFileSystem",
+            source: Box::new(source),
+        })?
+        .map_err(|source| slatedb::object_store::Error::Generic {
+            store: "ConditionalLocalFileSystem",
+            source: Box::new(source),
+        })
+    }
+}
+
+impl std::fmt::Display for ConditionalLocalFileSystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "conditional {}", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ConditionalLocalFileSystem {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        mut options: PutOptions,
+    ) -> slatedb::object_store::Result<PutResult> {
+        let PutMode::Update(version) = &options.mode else {
+            return self.inner.put_opts(location, payload, options).await;
+        };
+        let expected = version.e_tag.clone().ok_or_else(|| {
+            slatedb::object_store::Error::Precondition {
+                path: location.to_string(),
+                source: "local conditional update requires an ETag".into(),
+            }
+        })?;
+        let _lock = self.lock().await?;
+        self.inner
+            .get_opts(
+                location,
+                GetOptions::new().with_if_match(Some(expected)),
+            )
+            .await?;
+        options.mode = PutMode::Overwrite;
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> slatedb::object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, slatedb::object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> slatedb::object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> slatedb::object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
 impl RenewableObjectStore {
     fn new(current: Arc<dyn ObjectStore>, valid_until_ms: u64, ttl: std::time::Duration) -> Self {
         Self {
@@ -479,8 +599,7 @@ pub(crate) fn object_store(
             let root = root.join(&repository_key);
             std::fs::create_dir_all(&root)
                 .with_context(|| format!("create SlateDB data directory {}", root.display()))?;
-            let store = LocalFileSystem::new_with_prefix(&root)
-                .with_context(|| format!("open SlateDB data directory {}", root.display()))?;
+            let store = ConditionalLocalFileSystem::new(&root)?;
             Ok(("db".to_owned(), Arc::new(store)))
         }
         ObjectStoreConfig::Memory => Ok((repository_key, Arc::new(InMemory::new()))),
@@ -647,11 +766,7 @@ fn replica_store(
                     root.display()
                 )
             })?;
-            Ok(Arc::new(
-                LocalFileSystem::new_with_prefix(&root).with_context(|| {
-                    format!("open replicated SlateDB data directory {}", root.display())
-                })?,
-            ))
+            Ok(Arc::new(ConditionalLocalFileSystem::new(&root)?))
         }
         ReplicaStoreConfig::Memory => Ok(Arc::new(InMemory::new())),
         ReplicaStoreConfig::S3 {
@@ -821,6 +936,31 @@ fn configure_s3_builder(
 #[cfg(test)]
 mod object_store_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_store_conditionally_replaces_stale_writer_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "vaulticdb-local-takeover-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let (_, store) = object_store(
+            "repository",
+            &ObjectStoreConfig::Local { root: root.clone() },
+        )
+        .unwrap();
+
+        assert_eq!(claim_writer_epoch(store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(store.as_ref(), Some(1)).await.unwrap(),
+            Some(2)
+        );
+        assert!(claim_writer_epoch(store.as_ref(), Some(1)).await.is_err());
+        assert_eq!(active_writer_epoch(store.as_ref()).await.unwrap(), Some(2));
+
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn named_s3_provider_requires_an_explicit_endpoint() {

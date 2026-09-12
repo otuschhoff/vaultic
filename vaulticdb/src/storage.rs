@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    fs::{File, OpenOptions},
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
     sync::{
@@ -13,6 +14,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use fs2::FileExt;
 use futures_util::{stream, stream::BoxStream, StreamExt};
 use prost::Message;
 use serde::{Deserialize, Serialize};
