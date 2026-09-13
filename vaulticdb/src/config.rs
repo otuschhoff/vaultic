@@ -16,6 +16,9 @@ use ipnet::IpNet;
 use zeroize::Zeroizing;
 
 use crate::storage::{
+    cache::{
+        CacheConfidentiality, CacheConfig, CacheTierConfig, CacheTierPolicy, DEFAULT_CACHE_TIMEOUT,
+    },
     BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, StorageConfig,
     TopologySource, WalStoreConfig,
 };
@@ -195,6 +198,7 @@ fn storage_from_env() -> Result<StorageConfig> {
     Ok(StorageConfig {
         object_store,
         wal_store: wal_store_from_env()?,
+        cache: cache_from_env()?,
         fencing_replica,
         metadata_rebuild_initialize,
         broker,
@@ -203,6 +207,147 @@ fn storage_from_env() -> Result<StorageConfig> {
         topology_source,
         topology_override_local,
     })
+}
+
+fn cache_from_env() -> Result<CacheConfig> {
+    let raw_tiers = env::var("VAULTICDB_READ_CACHE_TIERS").unwrap_or_default();
+    if raw_tiers.trim().is_empty() {
+        return Ok(CacheConfig::default());
+    }
+    let part_size_bytes = parse_u64(
+        "VAULTICDB_READ_CACHE_PART_SIZE_BYTES",
+        crate::storage::cache::DEFAULT_PART_SIZE_BYTES,
+    )?;
+    let max_inflight_bytes = parse_u64(
+        "VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES",
+        part_size_bytes.saturating_mul(8),
+    )?;
+    let aggregate_max_bytes = optional_u64("VAULTICDB_READ_CACHE_AGGREGATE_MAX_BYTES")?;
+    let mut ids = std::collections::HashSet::new();
+    let mut environment_ids = std::collections::HashSet::new();
+    let tiers = raw_tiers
+        .split(',')
+        .map(str::trim)
+        .map(|id| {
+            if id.is_empty() {
+                bail!("VAULTICDB_READ_CACHE_TIERS contains an empty tier ID");
+            }
+            if !ids.insert(id.to_owned()) {
+                bail!("VAULTICDB_READ_CACHE_TIERS contains duplicate tier ID {id:?}");
+            }
+            let environment_id = env_id(id);
+            if !environment_ids.insert(environment_id.clone()) {
+                bail!("read-cache tier IDs must have distinct environment IDs");
+            }
+            cache_tier_from_env(id, &environment_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let config = CacheConfig {
+        tiers,
+        aggregate_max_bytes,
+        part_size_bytes,
+        max_inflight_bytes,
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+fn cache_tier_from_env(id: &str, environment_id: &str) -> Result<CacheTierConfig> {
+    let prefix = format!("VAULTICDB_READ_CACHE_{environment_id}");
+    let confidentiality_name = format!("{prefix}_CONFIDENTIALITY");
+    let confidentiality = match env::var(&confidentiality_name) {
+        Ok(value) if value == "encrypted" => CacheConfidentiality::Encrypted,
+        Err(env::VarError::NotPresent) => CacheConfidentiality::Encrypted,
+        Ok(value) if value == "decrypted" => {
+            let acknowledgement_name = format!("{prefix}_ACKNOWLEDGE_PLAINTEXT");
+            if !optional_bool(&acknowledgement_name, false)? {
+                bail!(
+                    "{acknowledgement_name}=true is required for decrypted read-cache tier {id:?}"
+                );
+            }
+            CacheConfidentiality::DecryptedHighlyTrusted
+        }
+        Ok(value) => {
+            bail!("unsupported {confidentiality_name} {value:?}; expected encrypted or decrypted")
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let store = match env::var(format!("{prefix}_OBJECT_STORE"))
+        .with_context(|| format!("{prefix}_OBJECT_STORE is required"))?
+        .as_str()
+    {
+        "local" => ReplicaStoreConfig::Local {
+            root: PathBuf::from(env::var_os(format!("{prefix}_DATA_DIR")).with_context(|| {
+                format!("{prefix}_DATA_DIR is required for local cache tier {id}")
+            })?),
+        },
+        "memory" => ReplicaStoreConfig::Memory,
+        "s3" => ReplicaStoreConfig::S3 {
+            bucket: env::var(format!("{prefix}_S3_BUCKET"))
+                .with_context(|| format!("{prefix}_S3_BUCKET is required for S3 cache tier {id}"))?,
+            prefix: optional_nonempty_dynamic(&format!("{prefix}_S3_PREFIX"))?,
+            endpoint: optional_nonempty_dynamic(&format!("{prefix}_S3_ENDPOINT"))?,
+            region: optional_nonempty_dynamic(&format!("{prefix}_S3_REGION"))?,
+            access_key_id: env::var(format!("{prefix}_S3_ACCESS_KEY_ID"))
+                .ok()
+                .map(Zeroizing::new),
+            secret_access_key: env::var(format!("{prefix}_S3_SECRET_ACCESS_KEY"))
+                .ok()
+                .map(Zeroizing::new),
+            session_token: match env::var(format!("{prefix}_S3_SESSION_TOKEN")) {
+                Ok(_) => bail!(
+                    "{prefix}_S3_SESSION_TOKEN is not supported for read-cache tiers: cache credentials are static and expiring session credentials cannot be renewed"
+                ),
+                Err(env::VarError::NotPresent) => None,
+                Err(error) => return Err(error.into()),
+            },
+            provider: optional_nonempty_dynamic(&format!("{prefix}_S3_PROVIDER"))?,
+            bucket_lookup: optional_nonempty_dynamic(&format!("{prefix}_S3_BUCKET_LOOKUP"))?,
+        },
+        "rados" => ReplicaStoreConfig::Rados {
+            monitors: required_cache_value(&prefix, "RADOS_MONITORS", id)?,
+            cluster_fsid: required_cache_value(&prefix, "RADOS_CLUSTER_FSID", id)?,
+            pool: required_cache_value(&prefix, "RADOS_POOL", id)?,
+            namespace: required_cache_value(&prefix, "RADOS_NAMESPACE", id)?,
+            prefix: required_cache_value(&prefix, "RADOS_PREFIX", id)?,
+            client: required_cache_value(&prefix, "RADOS_CLIENT", id)?,
+            key: Zeroizing::new(required_cache_value(&prefix, "RADOS_KEY", id)?),
+        },
+        "azure" | "gcs" => bail!(
+            "unsupported {prefix}_OBJECT_STORE for Phase 29 read cache; expected local, memory, s3, or rados"
+        ),
+        value => bail!(
+            "unsupported {prefix}_OBJECT_STORE {value:?}; expected local, memory, s3, or rados"
+        ),
+    };
+    Ok(CacheTierConfig {
+        id: id.to_owned(),
+        store,
+        confidentiality,
+        policy: CacheTierPolicy {
+            enabled: optional_bool(&format!("{prefix}_ENABLED"), true)?,
+            max_bytes: required_u64(&format!("{prefix}_MAX_BYTES"))?,
+            idle_age_ms: configured_duration(&format!("{prefix}_IDLE_AGE"), Duration::ZERO, true)?
+                .map_or(0, duration_ms),
+            absolute_age_ms: configured_duration(
+                &format!("{prefix}_ABSOLUTE_AGE"),
+                Duration::ZERO,
+                true,
+            )?
+            .map(duration_ms),
+            read_priority: parse_u32(&format!("{prefix}_READ_PRIORITY"), 100)?,
+            admission_priority: parse_u32(&format!("{prefix}_ADMISSION_PRIORITY"), 100)?,
+            timeout_ms: duration_ms(
+                configured_duration(&format!("{prefix}_TIMEOUT"), DEFAULT_CACHE_TIMEOUT, false)?
+                    .context("read-cache timeout must be enabled")?,
+            ),
+        },
+    })
+}
+
+fn required_cache_value(prefix: &str, suffix: &str, id: &str) -> Result<String> {
+    let name = format!("{prefix}_{suffix}");
+    env::var(&name).with_context(|| format!("{name} is required for RADOS cache tier {id}"))
 }
 
 fn wal_store_from_env() -> Result<WalStoreConfig> {
@@ -411,6 +556,45 @@ fn parse_u64(name: &str, default: u64) -> Result<u64> {
     }
 }
 
+fn required_u64(name: &str) -> Result<u64> {
+    env::var(name)
+        .with_context(|| format!("{name} is required"))?
+        .parse()
+        .with_context(|| format!("invalid {name}"))
+}
+
+fn optional_u64(name: &str) -> Result<Option<u64>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(
+            value.parse().with_context(|| format!("invalid {name}"))?,
+        )),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn parse_u32(name: &str, default: u32) -> Result<u32> {
+    match env::var(name) {
+        Ok(value) => value.parse().with_context(|| format!("invalid {name}")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn optional_bool(name: &str, default: bool) -> Result<bool> {
+    match env::var(name) {
+        Ok(value) if value == "true" => Ok(true),
+        Ok(value) if value == "false" => Ok(false),
+        Ok(_) => bail!("{name} must be true or false"),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
 fn env_bool(name: &str) -> Result<bool> {
     match env::var(name) {
         Ok(value) => Ok(value == "true"),
@@ -554,4 +738,146 @@ fn default_runtime_directory() -> String {
         .join(format!("vaulticdb-{}", unsafe { libc::geteuid() }))
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn environment_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn clear_cache_environment() {
+        let names = env::vars()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("VAULTICDB_READ_CACHE_"))
+            .collect::<Vec<_>>();
+        for name in names {
+            unsafe { env::remove_var(name) };
+        }
+    }
+
+    #[test]
+    fn empty_cache_tier_list_disables_cache() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_cache_environment();
+        unsafe { env::set_var("VAULTICDB_READ_CACHE_TIERS", "  ") };
+        assert!(cache_from_env().unwrap().tiers.is_empty());
+        clear_cache_environment();
+    }
+
+    #[test]
+    fn parses_memory_and_s3_cache_tiers() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_cache_environment();
+        unsafe {
+            env::set_var("VAULTICDB_READ_CACHE_TIERS", "ram,remote-east");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_MAX_BYTES", "1048576");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_IDLE_AGE", "5m");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_READ_PRIORITY", "2");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_OBJECT_STORE", "s3");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_S3_BUCKET", "cache");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_MAX_BYTES", "2097152");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_ABSOLUTE_AGE", "2h");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_TIMEOUT", "750ms");
+            env::set_var("VAULTICDB_READ_CACHE_AGGREGATE_MAX_BYTES", "2500000");
+        }
+        let cache = cache_from_env().unwrap();
+        assert_eq!(cache.tiers.len(), 2);
+        assert_eq!(cache.aggregate_max_bytes, Some(2_500_000));
+        assert_eq!(
+            cache.tiers[0].confidentiality,
+            CacheConfidentiality::Encrypted
+        );
+        assert_eq!(cache.tiers[0].policy.idle_age_ms, 300_000);
+        assert_eq!(cache.tiers[0].policy.read_priority, 2);
+        assert_eq!(cache.tiers[1].policy.absolute_age_ms, Some(7_200_000));
+        assert_eq!(cache.tiers[1].policy.timeout_ms, 750);
+        clear_cache_environment();
+    }
+
+    #[test]
+    fn decrypted_cache_tier_requires_explicit_plaintext_acknowledgement() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_cache_environment();
+        unsafe {
+            env::set_var("VAULTICDB_READ_CACHE_TIERS", "trusted");
+            env::set_var("VAULTICDB_READ_CACHE_TRUSTED_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_READ_CACHE_TRUSTED_MAX_BYTES", "1048576");
+            env::set_var("VAULTICDB_READ_CACHE_TRUSTED_CONFIDENTIALITY", "decrypted");
+        }
+        let error = cache_from_env().unwrap_err().to_string();
+        assert!(error.contains("ACKNOWLEDGE_PLAINTEXT=true"));
+
+        unsafe {
+            env::set_var("VAULTICDB_READ_CACHE_TRUSTED_ACKNOWLEDGE_PLAINTEXT", "true");
+        }
+        let cache = cache_from_env().unwrap();
+        assert_eq!(
+            cache.tiers[0].confidentiality,
+            CacheConfidentiality::DecryptedHighlyTrusted
+        );
+        clear_cache_environment();
+    }
+
+    #[test]
+    fn rejects_invalid_cache_confidentiality() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_cache_environment();
+        unsafe {
+            env::set_var("VAULTICDB_READ_CACHE_TIERS", "ram");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_MAX_BYTES", "1048576");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_CONFIDENTIALITY", "plaintext");
+        }
+        let error = cache_from_env().unwrap_err().to_string();
+        assert!(error.contains("expected encrypted or decrypted"));
+        clear_cache_environment();
+    }
+
+    #[test]
+    fn rejects_duplicate_malformed_and_unsupported_cache_tiers() {
+        let _guard = environment_lock().lock().unwrap();
+        for (tiers, backend) in [
+            ("same,same", "memory"),
+            ("bad.id", "memory"),
+            ("archive", "azure"),
+        ] {
+            clear_cache_environment();
+            unsafe {
+                env::set_var("VAULTICDB_READ_CACHE_TIERS", tiers);
+                env::set_var("VAULTICDB_READ_CACHE_SAME_OBJECT_STORE", backend);
+                env::set_var("VAULTICDB_READ_CACHE_SAME_MAX_BYTES", "1");
+                env::set_var("VAULTICDB_READ_CACHE_BAD_ID_OBJECT_STORE", backend);
+                env::set_var("VAULTICDB_READ_CACHE_BAD_ID_MAX_BYTES", "1");
+                env::set_var("VAULTICDB_READ_CACHE_ARCHIVE_OBJECT_STORE", backend);
+                env::set_var("VAULTICDB_READ_CACHE_ARCHIVE_MAX_BYTES", "1");
+            }
+            assert!(
+                cache_from_env().is_err(),
+                "accepted invalid tiers {tiers:?}"
+            );
+        }
+        clear_cache_environment();
+    }
+
+    #[test]
+    fn rejects_expiring_cache_session_credentials() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_cache_environment();
+        unsafe {
+            env::set_var("VAULTICDB_READ_CACHE_TIERS", "remote");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_OBJECT_STORE", "s3");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_S3_BUCKET", "cache");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_S3_SESSION_TOKEN", "temporary");
+            env::set_var("VAULTICDB_READ_CACHE_REMOTE_MAX_BYTES", "1048576");
+        }
+        let error = cache_from_env().unwrap_err().to_string();
+        assert!(error.contains("cannot be renewed"));
+        clear_cache_environment();
+    }
 }

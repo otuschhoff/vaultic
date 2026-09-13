@@ -80,11 +80,16 @@ enum StorageFailpoint {
     CloseReader(String),
     CloseWriter(String),
     FinalizeCapsuleDurability(String),
+    ObserveLatestWriterEpoch(String),
     OpenReader(String),
     OpenWriter(String),
     FlushWriter(String),
+    InventoryWal,
+    CloseCache,
     RefreshWriterFence(String),
     ReleaseWriterClaim(usize),
+    ReleaseWriterClaimAny,
+    WriterClaimUnavailable(String),
 }
 
 #[cfg(test)]
@@ -138,11 +143,16 @@ fn check_storage_failpoint(failpoint: StorageFailpoint) -> Result<()> {
             StorageFailpoint::CloseReader(_) => "close-reader",
             StorageFailpoint::CloseWriter(_) => "close-writer",
             StorageFailpoint::FinalizeCapsuleDurability(_) => "finalize-capsule-durability",
+            StorageFailpoint::ObserveLatestWriterEpoch(_) => "observe-latest-writer-epoch",
             StorageFailpoint::OpenReader(_) => "open-reader",
             StorageFailpoint::OpenWriter(_) => "open-writer",
             StorageFailpoint::FlushWriter(_) => "flush-writer",
+            StorageFailpoint::InventoryWal => "inventory-wal",
+            StorageFailpoint::CloseCache => "close-cache",
             StorageFailpoint::RefreshWriterFence(_) => "refresh-writer-fence",
             StorageFailpoint::ReleaseWriterClaim(_) => "release-writer-claim",
+            StorageFailpoint::ReleaseWriterClaimAny => "release-writer-claim-any",
+            StorageFailpoint::WriterClaimUnavailable(_) => "writer-claim-unavailable",
         };
         if PROCESS_STORAGE_FAILPOINTS
             .lock()
@@ -214,6 +224,7 @@ pub(crate) struct Storage {
     database: RwLock<Database>,
     database_path: String,
     object_store: Arc<dyn ObjectStore>,
+    cache_manager: Option<Arc<cache::CacheManager>>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     wal_metrics: Option<Arc<WalMetrics>>,
     coordination_store: Arc<dyn ObjectStore>,
@@ -267,6 +278,7 @@ impl StorageCredentialManager {
 pub(crate) struct StorageConfig {
     pub(crate) object_store: ObjectStoreConfig,
     pub(crate) wal_store: WalStoreConfig,
+    pub(crate) cache: cache::CacheConfig,
     pub(crate) fencing_replica: Option<String>,
     pub(crate) metadata_rebuild_initialize: bool,
     pub(crate) broker: Option<BrokerLeaseConfig>,
@@ -936,6 +948,22 @@ pub(crate) enum DatabaseState {
 }
 
 impl Storage {
+    pub(crate) fn cache_status(&self) -> Option<cache::CacheStatus> {
+        self.cache_manager.as_ref().map(|cache| cache.status())
+    }
+
+    pub(crate) async fn update_cache_policy(
+        &self,
+        expected_revision: u64,
+        updates: Vec<cache::CacheTierPolicyUpdate>,
+    ) -> Result<cache::CacheStatus> {
+        self.cache_manager
+            .as_ref()
+            .context("read cache is not configured")?
+            .update_policy(expected_revision, updates)
+            .await
+    }
+
     pub(crate) async fn database_state(&self) -> DatabaseState {
         match &*self.database.read().await {
             Database::Reader(_) => DatabaseState::Reader,
@@ -1025,6 +1053,109 @@ impl Database {
     }
 }
 
+#[derive(Debug)]
+struct FailedOpenError {
+    primary: anyhow::Error,
+    cleanup_failures: Vec<FailedOpenCleanup>,
+}
+
+#[derive(Debug)]
+struct FailedOpenCleanup {
+    operation: &'static str,
+    error: anyhow::Error,
+}
+
+impl std::fmt::Display for FailedOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.primary)?;
+        formatter.write_str("; cleanup failures: ")?;
+        for (index, failure) in self.cleanup_failures.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{}: {:#}", failure.operation, failure.error)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for FailedOpenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.primary.as_ref())
+    }
+}
+
+fn preserve_primary_error(
+    primary: anyhow::Error,
+    cleanup_failures: Vec<FailedOpenCleanup>,
+) -> anyhow::Error {
+    if cleanup_failures.is_empty() {
+        primary
+    } else {
+        anyhow::Error::new(FailedOpenError {
+            primary,
+            cleanup_failures,
+        })
+    }
+}
+
+async fn close_cache_manager(manager: &cache::CacheManager) -> Result<()> {
+    let result = manager
+        .close()
+        .await
+        .context("close read-cache quota coordinator");
+    #[cfg(any(test, feature = "test-failpoints"))]
+    check_storage_failpoint(StorageFailpoint::CloseCache)?;
+    result
+}
+
+async fn failed_open_cleanup(
+    primary: anyhow::Error,
+    _database_path: &str,
+    cache_manager: Option<&Arc<cache::CacheManager>>,
+    reader: Option<DbReader>,
+    writer_claim: Option<(&dyn ObjectStore, u64)>,
+) -> anyhow::Error {
+    if let Some(manager) = cache_manager {
+        manager.begin_close();
+    }
+    let mut cleanup_failures = Vec::new();
+    if let Some(reader) = reader {
+        #[cfg(any(test, feature = "test-failpoints"))]
+        let close_result =
+            match check_storage_failpoint(StorageFailpoint::CloseReader(_database_path.to_owned()))
+            {
+                Ok(()) => reader.close().await.map_err(anyhow::Error::from),
+                Err(error) => Err(error),
+            };
+        #[cfg(not(any(test, feature = "test-failpoints")))]
+        let close_result = reader.close().await.map_err(anyhow::Error::from);
+        if let Err(error) = close_result {
+            cleanup_failures.push(FailedOpenCleanup {
+                operation: "close SlateDB reader",
+                error,
+            });
+        }
+    }
+    if let Some((coordination_store, epoch)) = writer_claim {
+        if let Err(error) = release_writer_claim(coordination_store, epoch).await {
+            cleanup_failures.push(FailedOpenCleanup {
+                operation: "release writer claim",
+                error,
+            });
+        }
+    }
+    if let Some(manager) = cache_manager {
+        if let Err(error) = close_cache_manager(manager).await {
+            cleanup_failures.push(FailedOpenCleanup {
+                operation: "close read-cache quota coordinator",
+                error,
+            });
+        }
+    }
+    preserve_primary_error(primary, cleanup_failures)
+}
+
 impl Storage {
     pub(crate) async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
         let (effective_store, effective_wal_store, effective_fencing, topology_leases) =
@@ -1078,6 +1209,7 @@ impl Storage {
         let mut broker_lease_metadata = None;
         let (
             object_store,
+            cache_manager,
             wal_object_store,
             coordination_store,
             encryption,
@@ -1128,21 +1260,84 @@ impl Storage {
                 }
                 None => (None, None),
             };
-            let configured = envelope::configure_brokered(
+            let cache_manager = if config.cache.tiers.is_empty() {
+                None
+            } else {
+                Some(Arc::new(
+                    cache::CacheManager::new(
+                        renewable_object_store.clone(),
+                        renewable_coordination_store.clone(),
+                        config.cache.clone(),
+                        repository_id,
+                        &path,
+                    )
+                    .await
+                    .context("open SlateDB read cache")?,
+                ))
+            };
+            let encrypted_origin: Arc<dyn ObjectStore> = match &cache_manager {
+                Some(cache)
+                    if cache.has_confidentiality(cache::CacheConfidentiality::Encrypted) =>
+                {
+                    cache.clone()
+                }
+                None => renewable_object_store.clone(),
+                Some(_) => renewable_object_store.clone(),
+            };
+            let configured = match envelope::configure_brokered(
                 repository_id,
-                renewable_object_store.clone(),
+                encrypted_origin,
                 &dek,
                 lease.key_version,
                 lease.capsule_generation,
                 recovery_initialize,
-            )?;
+            ) {
+                Ok(configured) => configured,
+                Err(error) => {
+                    let primary = error.context("configure brokered metadata encryption");
+                    return Err(failed_open_cleanup(
+                        primary,
+                        &path,
+                        cache_manager.as_ref(),
+                        None,
+                        None,
+                    )
+                    .await);
+                }
+            };
+            let object_store = match &cache_manager {
+                Some(cache)
+                    if cache.has_confidentiality(
+                        cache::CacheConfidentiality::DecryptedHighlyTrusted,
+                    ) =>
+                {
+                    cache.store(
+                        configured.0.clone(),
+                        cache::CacheConfidentiality::DecryptedHighlyTrusted,
+                    )
+                }
+                _ => configured.0.clone(),
+            };
             let encrypted_wal_store = match monitored_wal_store {
-                Some(store) => Some(envelope::wrap_brokered_object_store(
+                Some(store) => match envelope::wrap_brokered_object_store(
                     repository_id,
                     store,
                     &dek,
                     lease.key_version,
-                )?),
+                ) {
+                    Ok(store) => Some(store),
+                    Err(error) => {
+                        let primary = error.context("wrap brokered WAL encryption");
+                        return Err(failed_open_cleanup(
+                            primary,
+                            &path,
+                            cache_manager.as_ref(),
+                            None,
+                            None,
+                        )
+                        .await);
+                    }
+                },
                 None => None,
             };
             credential_manager = Some(start_storage_credential_manager(
@@ -1161,7 +1356,8 @@ impl Storage {
                 valid_until,
             ));
             (
-                configured.0,
+                object_store,
+                cache_manager,
                 encrypted_wal_store,
                 renewable_coordination_store as Arc<dyn ObjectStore>,
                 configured.1,
@@ -1169,8 +1365,6 @@ impl Storage {
                 wal_metrics,
             )
         } else {
-            let configured =
-                envelope::configure(repository_id, raw_object_store, &config.encryption).await?;
             let (monitored_wal_store, wal_metrics) = match raw_wal_object_store {
                 Some(store) => {
                     let (store, metrics) = monitored_wal_store(store).await?;
@@ -1178,18 +1372,101 @@ impl Storage {
                 }
                 None => (None, None),
             };
+            let cache_manager = if config.cache.tiers.is_empty() {
+                None
+            } else {
+                Some(Arc::new(
+                    cache::CacheManager::new(
+                        raw_object_store.clone(),
+                        raw_coordination_store.clone(),
+                        config.cache.clone(),
+                        repository_id,
+                        &path,
+                    )
+                    .await
+                    .context("open SlateDB read cache")?,
+                ))
+            };
+            let encrypted_origin: Arc<dyn ObjectStore> = match &cache_manager {
+                Some(cache)
+                    if cache.has_confidentiality(cache::CacheConfidentiality::Encrypted) =>
+                {
+                    cache.clone()
+                }
+                _ => raw_object_store.clone(),
+            };
+            let configured = match envelope::configure(
+                repository_id,
+                encrypted_origin,
+                &config.encryption,
+            )
+            .await
+            {
+                Ok(configured) => configured,
+                Err(error) => {
+                    let primary = error.context("configure metadata encryption");
+                    return Err(failed_open_cleanup(
+                        primary,
+                        &path,
+                        cache_manager.as_ref(),
+                        None,
+                        None,
+                    )
+                    .await);
+                }
+            };
+            if !configured.1.enabled
+                && cache_manager.as_ref().is_some_and(|cache| {
+                    cache.has_confidentiality(cache::CacheConfidentiality::Encrypted)
+                })
+            {
+                let primary = anyhow::anyhow!(
+                    "encrypted read-cache tiers require metadata encryption; use decrypted confidentiality with explicit plaintext acknowledgement when metadata encryption is off"
+                );
+                return Err(failed_open_cleanup(
+                    primary,
+                    &path,
+                    cache_manager.as_ref(),
+                    None,
+                    None,
+                )
+                .await);
+            }
             let wal_object_store = match monitored_wal_store {
-                Some(store) if configured.1.enabled => Some(
-                    configured
-                        .2
-                        .as_ref()
-                        .context("metadata encryption key manager is unavailable")?
-                        .wrap_object_store(store),
-                ),
+                Some(store) if configured.1.enabled => {
+                    let Some(key_manager) = configured.2.as_ref() else {
+                        let primary =
+                            anyhow::anyhow!("metadata encryption key manager is unavailable");
+                        return Err(failed_open_cleanup(
+                            primary,
+                            &path,
+                            cache_manager.as_ref(),
+                            None,
+                            None,
+                        )
+                        .await);
+                    };
+                    Some(key_manager.wrap_object_store(store))
+                }
                 store => store,
             };
+            let object_store: Arc<dyn ObjectStore> = match &cache_manager {
+                Some(cache)
+                    if cache.has_confidentiality(
+                        cache::CacheConfidentiality::DecryptedHighlyTrusted,
+                    ) =>
+                {
+                    cache.store(
+                        configured.0.clone(),
+                        cache::CacheConfidentiality::DecryptedHighlyTrusted,
+                    )
+                }
+                None => configured.0.clone(),
+                Some(_) => configured.0.clone(),
+            };
             (
-                configured.0,
+                object_store,
+                cache_manager,
                 wal_object_store,
                 raw_coordination_store,
                 configured.1,
@@ -1197,36 +1474,100 @@ impl Storage {
                 wal_metrics,
             )
         };
-        let (database, writer_epoch) = match claim_writer_epoch(coordination_store.as_ref(), None)
-            .await?
-        {
+        #[cfg(any(test, feature = "test-failpoints"))]
+        let writer_claim_result =
+            match check_storage_failpoint(StorageFailpoint::WriterClaimUnavailable(path.clone())) {
+                Ok(()) => claim_writer_epoch(coordination_store.as_ref(), None).await,
+                Err(_) => Ok(None),
+            };
+        #[cfg(not(any(test, feature = "test-failpoints")))]
+        let writer_claim_result = claim_writer_epoch(coordination_store.as_ref(), None).await;
+        let writer_claim = match writer_claim_result {
+            Ok(claim) => claim,
+            Err(error) => {
+                let primary = error.context("claim SlateDB writer epoch");
+                return Err(failed_open_cleanup(
+                    primary,
+                    &path,
+                    cache_manager.as_ref(),
+                    None,
+                    None,
+                )
+                .await);
+            }
+        };
+        let (database, writer_epoch) = match writer_claim {
             Some(epoch) => {
                 let db = match open_writer(&path, object_store.clone(), wal_object_store.clone())
                     .await
                 {
                     Ok(db) => db,
                     Err(error) => {
-                        release_writer_claim(coordination_store.as_ref(), epoch)
-                            .await
-                            .context("release writer claim after database open failure")?;
-                        return Err(error).context("open SlateDB database");
+                        let primary = error.context("open SlateDB database");
+                        return Err(failed_open_cleanup(
+                            primary,
+                            &path,
+                            cache_manager.as_ref(),
+                            None,
+                            Some((coordination_store.as_ref(), epoch)),
+                        )
+                        .await);
                     }
                 };
                 (Database::Writer(db), epoch)
             }
-            None => (
-                Database::Reader(
-                    open_reader(&path, object_store.clone(), wal_object_store.clone())
-                        .await
-                        .context("open SlateDB database as non-fencing reader")?,
-                ),
-                latest_writer_epoch(coordination_store.as_ref()).await?,
-            ),
+            None => {
+                let reader = match open_reader(
+                    &path,
+                    object_store.clone(),
+                    wal_object_store.clone(),
+                )
+                .await
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        let primary = error.context("open SlateDB database as non-fencing reader");
+                        return Err(failed_open_cleanup(
+                            primary,
+                            &path,
+                            cache_manager.as_ref(),
+                            None,
+                            None,
+                        )
+                        .await);
+                    }
+                };
+                #[cfg(any(test, feature = "test-failpoints"))]
+                let observed_epoch = match check_storage_failpoint(
+                    StorageFailpoint::ObserveLatestWriterEpoch(path.clone()),
+                ) {
+                    Ok(()) => latest_writer_epoch(coordination_store.as_ref()).await,
+                    Err(error) => Err(error),
+                };
+                #[cfg(not(any(test, feature = "test-failpoints")))]
+                let observed_epoch = latest_writer_epoch(coordination_store.as_ref()).await;
+                let epoch = match observed_epoch {
+                    Ok(epoch) => epoch,
+                    Err(error) => {
+                        let primary = error.context("observe latest SlateDB writer epoch");
+                        return Err(failed_open_cleanup(
+                            primary,
+                            &path,
+                            cache_manager.as_ref(),
+                            Some(reader),
+                            None,
+                        )
+                        .await);
+                    }
+                };
+                (Database::Reader(reader), epoch)
+            }
         };
         let storage = Self {
             database: RwLock::new(database),
             database_path: path,
             object_store,
+            cache_manager,
             wal_object_store,
             wal_metrics,
             coordination_store,
@@ -1254,11 +1595,14 @@ impl Storage {
         }
         .await;
         if let Err(error) = initialize {
-            storage
-                .close()
-                .await
-                .context("close storage after initialization failure")?;
-            return Err(error).context("initialize VaulticDB storage");
+            let primary = error.context("initialize VaulticDB storage");
+            let cleanup_failures = storage.close().await.err().map_or_else(Vec::new, |error| {
+                vec![FailedOpenCleanup {
+                    operation: "close storage after initialization failure",
+                    error,
+                }]
+            });
+            return Err(preserve_primary_error(primary, cleanup_failures));
         }
         Ok(storage)
     }
@@ -1683,6 +2027,9 @@ impl Storage {
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
+        if let Some(manager) = &self.cache_manager {
+            manager.begin_close();
+        }
         if let Some(manager) = &self.credential_manager {
             manager.close().await;
         }
@@ -1703,8 +2050,13 @@ impl Storage {
         } else {
             Ok(())
         };
+        let cache_close = match &self.cache_manager {
+            Some(manager) => close_cache_manager(manager).await,
+            None => Ok(()),
+        };
         database_close?;
         writer_release?;
+        cache_close?;
         Ok(())
     }
 
@@ -2599,6 +2951,9 @@ impl Storage {
 mod rados {
     include!("storage/rados.rs");
 }
+
+#[path = "storage/cache.rs"]
+pub(crate) mod cache;
 
 include!("storage/operations.rs");
 

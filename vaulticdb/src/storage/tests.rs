@@ -3,8 +3,13 @@ mod tests {
     //! Storage persistence and generation authority tests.
 
     use super::*;
-    use std::env;
+    use std::{collections::HashMap, env};
     use slatedb::object_store::{path::Path, ObjectStoreExt};
+    use vaulticdb::encryption::envelope::{
+        EncryptionConfig, EncryptionMode, ProviderCredentials,
+    };
+
+    static STORAGE_FAILPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn listed_paths(store: &dyn ObjectStore) -> Vec<String> {
         let mut paths = Vec::new();
@@ -15,12 +20,237 @@ mod tests {
         paths
     }
 
+    fn compacted_ulid(path: &str) -> Option<&str> {
+        let name = path.split_once("compacted/")?.1.strip_suffix(".sst")?;
+        (name.len() == 26
+            && name.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(byte, b'A'..=b'H' | b'J'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+            }))
+        .then_some(name)
+    }
+
+    fn cache_storage_config(confidentiality: cache::CacheConfidentiality) -> StorageConfig {
+        StorageConfig {
+            object_store: ObjectStoreConfig::Memory,
+            wal_store: WalStoreConfig::Inherit,
+            cache: cache::CacheConfig {
+                tiers: vec![cache::CacheTierConfig {
+                    id: "memory".to_owned(),
+                    store: ReplicaStoreConfig::Memory,
+                    confidentiality,
+                    policy: cache::CacheTierPolicy {
+                        enabled: true,
+                        max_bytes: 64 * 1024,
+                        idle_age_ms: 0,
+                        absolute_age_ms: None,
+                        read_priority: 1,
+                        admission_priority: 1,
+                        timeout_ms: 250,
+                    },
+                }],
+                aggregate_max_bytes: Some(64 * 1024),
+                part_size_bytes: 4096,
+                max_inflight_bytes: 8192,
+            },
+            fencing_replica: None,
+            metadata_rebuild_initialize: false,
+            broker: None,
+            encryption: EncryptionConfig {
+                mode: EncryptionMode::Off,
+                passphrase_file: None,
+                recovery_acknowledged: false,
+                provider_credentials: ProviderCredentials::new(HashMap::new()),
+            },
+            transaction_idle_timeout_ms: 1_000,
+            topology_source: TopologySource::External,
+            topology_override_local: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn encryption_off_rejects_encrypted_cache_tiers() {
+        let repository_id = format!("cache-encryption-off-{}", rand::random::<u64>());
+        let error = match Storage::open(
+            &repository_id,
+            &cache_storage_config(cache::CacheConfidentiality::Encrypted),
+        )
+        .await
+        {
+            Ok(storage) => {
+                storage.close().await.unwrap();
+                panic!("encrypted cache tier unexpectedly opened without metadata encryption")
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("encrypted read-cache tiers require metadata encryption"));
+    }
+
+    #[tokio::test]
+    async fn encryption_off_allows_decrypted_highly_trusted_cache_tiers() {
+        let repository_id = format!("cache-decrypted-off-{}", rand::random::<u64>());
+        let storage = Storage::open(
+            &repository_id,
+            &cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage.cache_status().unwrap().tiers[0].confidentiality,
+            cache::CacheConfidentiality::DecryptedHighlyTrusted
+        );
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dedicated_wal_inventory_failure_precedes_cache_startup() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
+        let repository_id = format!("failed-wal-inventory-cache-{}", rand::random::<u64>());
+        let mut config =
+            cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
+        arm_storage_failpoint(StorageFailpoint::InventoryWal);
+
+        let error = match Storage::open(&repository_id, &config).await {
+            Ok(storage) => {
+                storage.close().await.unwrap();
+                panic!("WAL inventory unexpectedly succeeded")
+            }
+            Err(error) => format!("{error:#}"),
+        };
+
+        assert!(error.contains("InventoryWal"));
+        assert!(!cache::has_test_inspection(&repository_id));
+    }
+
+    #[tokio::test]
+    async fn encryption_failure_preserves_primary_when_cache_close_fails() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
+        let repository_id = format!("failed-encryption-cache-close-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::Encrypted);
+        config.encryption.mode = EncryptionMode::Required;
+        arm_storage_failpoint(StorageFailpoint::CloseCache);
+
+        let error = match Storage::open(&repository_id, &config).await {
+            Ok(storage) => {
+                storage.close().await.unwrap();
+                panic!("metadata encryption unexpectedly configured")
+            }
+            Err(error) => format!("{error:#}"),
+        };
+
+        assert!(error.starts_with("configure metadata encryption"));
+        assert!(error.contains("key envelope is missing"));
+        assert!(error.contains("cleanup failures: close read-cache quota coordinator"));
+        assert!(error.contains("CloseCache"));
+        assert_failed_open_cache_is_fenced(&repository_id).await;
+    }
+
     #[test]
     fn storage_failpoints_fire_once() {
         let failpoint = StorageFailpoint::OpenWriter("fail-once".to_owned());
         arm_storage_failpoint(failpoint.clone());
         assert!(check_storage_failpoint(failpoint.clone()).is_err());
         assert!(check_storage_failpoint(failpoint).is_ok());
+    }
+
+    async fn assert_failed_open_cache_is_fenced(repository_id: &str) {
+        let inspection = cache::test_inspection(repository_id);
+        let returned = inspection.state().await;
+        assert!(returned.closing);
+        assert_eq!(returned.background_task_count, 0);
+        assert!(returned.ledger_lease_expired || returned.conservatively_fenced);
+        tokio::task::yield_now().await;
+        let settled = inspection.state().await;
+        assert_eq!(settled.background_task_count, 0);
+        assert_eq!(settled.cache_write_count, returned.cache_write_count);
+    }
+
+    #[tokio::test]
+    async fn failed_writer_open_preserves_release_failure_and_closes_cache() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
+        let repository_id = format!("failed-writer-open-cache-{}", rand::random::<u64>());
+        let config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        let (path, _) = object_store(&repository_id, &config.object_store).unwrap();
+        arm_storage_failpoint(StorageFailpoint::OpenWriter(path));
+        arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaimAny);
+
+        let error = match Storage::open(&repository_id, &config).await {
+            Ok(storage) => {
+                storage.close().await.unwrap();
+                panic!("writer open unexpectedly succeeded")
+            }
+            Err(error) => format!("{error:#}"),
+        };
+
+        assert!(error.starts_with("open SlateDB database: injected storage failure"));
+        assert!(error.contains("cleanup failures: release writer claim"));
+        assert!(error.contains("ReleaseWriterClaimAny"));
+        assert_failed_open_cache_is_fenced(&repository_id).await;
+    }
+
+    #[tokio::test]
+    async fn failed_latest_epoch_preserves_reader_close_failure_and_closes_cache() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
+        let repository_id = format!("failed-reader-epoch-cache-{}", rand::random::<u64>());
+        let root = std::env::temp_dir().join(&repository_id);
+        let mut config =
+            cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+        Storage::open(&repository_id, &config)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let (path, _) = object_store(&repository_id, &config.object_store).unwrap();
+        arm_storage_failpoint(StorageFailpoint::WriterClaimUnavailable(path.clone()));
+        arm_storage_failpoint(StorageFailpoint::ObserveLatestWriterEpoch(path.clone()));
+        arm_storage_failpoint(StorageFailpoint::CloseReader(path));
+
+        let error = match Storage::open(&repository_id, &config).await {
+            Ok(storage) => {
+                storage.close().await.unwrap();
+                panic!("reader epoch observation unexpectedly succeeded")
+            }
+            Err(error) => format!("{error:#}"),
+        };
+
+        assert!(error.starts_with("observe latest SlateDB writer epoch: injected storage failure"));
+        assert!(error.contains("cleanup failures: close SlateDB reader"));
+        assert!(error.contains("CloseReader"));
+        assert_failed_open_cache_is_fenced(&repository_id).await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn slatedb_compacted_sst_paths_are_unique_ulid_generations() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let database = format!("sst-path-contract-{}", rand::random::<u64>());
+        let db = open_writer(&database, object_store.clone(), None).await.unwrap();
+        let mut compacted = std::collections::HashSet::new();
+        for (key, value) in [(b"first".as_slice(), b"one".as_slice()), (b"second", b"two")] {
+            let mut batch = WriteBatch::new();
+            batch.put(key, value);
+            db.write(batch).await.unwrap().await_durable().await.unwrap();
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+            let paths = listed_paths(object_store.as_ref()).await;
+            let observed = paths
+                .iter()
+                .filter_map(|path| compacted_ulid(path).map(str::to_owned))
+                .collect::<Vec<_>>();
+            assert!(
+                !observed.is_empty(),
+                "flush did not publish a compacted ULID SST: {paths:?}"
+            );
+            compacted.extend(observed);
+        }
+        db.close().await.unwrap();
+        assert!(compacted.len() >= 2, "each flush must publish a fresh compacted SST identity");
     }
 
     fn transition_storage(
@@ -34,6 +264,7 @@ mod tests {
             database_path: path,
             coordination_store: object_store.clone(),
             object_store,
+            cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
             encryption: EncryptionStatus {
@@ -61,6 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_promotion_open_releases_claim_and_recovers_reader() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-promotion-{}", rand::random::<u64>());
@@ -82,6 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_demotion_release_keeps_reader_and_reports_claim() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-demotion-{}", rand::random::<u64>());
@@ -104,6 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_commit_reports_consumed_transaction() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-commit-{}", rand::random::<u64>());
@@ -536,6 +770,7 @@ mod tests {
             database_path: "migration-test".to_owned(),
             coordination_store: object_store.clone(),
             object_store,
+            cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
             encryption: EncryptionStatus {
@@ -715,6 +950,7 @@ mod tests {
             database_path: "epoch-test".to_owned(),
             coordination_store: object_store.clone(),
             object_store,
+            cache_manager: None,
             wal_object_store: Some(wal_object_store),
             wal_metrics: None,
             encryption: EncryptionStatus {
@@ -775,6 +1011,7 @@ mod tests {
             database_path: path,
             coordination_store: object_store.clone(),
             object_store,
+            cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
             encryption: EncryptionStatus {
@@ -853,6 +1090,7 @@ mod tests {
             database_path: "generation-lifecycle".to_owned(),
             coordination_store: object_store.clone(),
             object_store,
+            cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
             encryption: EncryptionStatus {

@@ -21,6 +21,8 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	VaulticDB_Health_FullMethodName                   = "/vaulticdb.v1.VaulticDB/Health"
 	VaulticDB_Capabilities_FullMethodName             = "/vaulticdb.v1.VaulticDB/Capabilities"
+	VaulticDB_CacheStatus_FullMethodName              = "/vaulticdb.v1.VaulticDB/CacheStatus"
+	VaulticDB_UpdateCachePolicy_FullMethodName        = "/vaulticdb.v1.VaulticDB/UpdateCachePolicy"
 	VaulticDB_WriterStatus_FullMethodName             = "/vaulticdb.v1.VaulticDB/WriterStatus"
 	VaulticDB_DemoteWriter_FullMethodName             = "/vaulticdb.v1.VaulticDB/DemoteWriter"
 	VaulticDB_PromoteWriter_FullMethodName            = "/vaulticdb.v1.VaulticDB/PromoteWriter"
@@ -63,6 +65,8 @@ const (
 type VaulticDBClient interface {
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*CapabilitiesResponse, error)
+	CacheStatus(ctx context.Context, in *ReadCacheStatusRequest, opts ...grpc.CallOption) (*ReadCacheStatusResponse, error)
+	UpdateCachePolicy(ctx context.Context, in *UpdateReadCachePolicyRequest, opts ...grpc.CallOption) (*ReadCacheStatusResponse, error)
 	WriterStatus(ctx context.Context, in *WriterStatusRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
 	DemoteWriter(ctx context.Context, in *DemoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
 	PromoteWriter(ctx context.Context, in *PromoteWriterRequest, opts ...grpc.CallOption) (*WriterStatusResponse, error)
@@ -121,6 +125,26 @@ func (c *vaulticDBClient) Capabilities(ctx context.Context, in *CapabilitiesRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CapabilitiesResponse)
 	err := c.cc.Invoke(ctx, VaulticDB_Capabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) CacheStatus(ctx context.Context, in *ReadCacheStatusRequest, opts ...grpc.CallOption) (*ReadCacheStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadCacheStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_CacheStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) UpdateCachePolicy(ctx context.Context, in *UpdateReadCachePolicyRequest, opts ...grpc.CallOption) (*ReadCacheStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadCacheStatusResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_UpdateCachePolicy_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -473,6 +497,8 @@ func (c *vaulticDBClient) PublishCapsuleMutation(ctx context.Context, in *Publis
 type VaulticDBServer interface {
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	Capabilities(context.Context, *CapabilitiesRequest) (*CapabilitiesResponse, error)
+	CacheStatus(context.Context, *ReadCacheStatusRequest) (*ReadCacheStatusResponse, error)
+	UpdateCachePolicy(context.Context, *UpdateReadCachePolicyRequest) (*ReadCacheStatusResponse, error)
 	WriterStatus(context.Context, *WriterStatusRequest) (*WriterStatusResponse, error)
 	DemoteWriter(context.Context, *DemoteWriterRequest) (*WriterStatusResponse, error)
 	PromoteWriter(context.Context, *PromoteWriterRequest) (*WriterStatusResponse, error)
@@ -522,6 +548,12 @@ func (UnimplementedVaulticDBServer) Health(context.Context, *HealthRequest) (*He
 }
 func (UnimplementedVaulticDBServer) Capabilities(context.Context, *CapabilitiesRequest) (*CapabilitiesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Capabilities not implemented")
+}
+func (UnimplementedVaulticDBServer) CacheStatus(context.Context, *ReadCacheStatusRequest) (*ReadCacheStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CacheStatus not implemented")
+}
+func (UnimplementedVaulticDBServer) UpdateCachePolicy(context.Context, *UpdateReadCachePolicyRequest) (*ReadCacheStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateCachePolicy not implemented")
 }
 func (UnimplementedVaulticDBServer) WriterStatus(context.Context, *WriterStatusRequest) (*WriterStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriterStatus not implemented")
@@ -678,6 +710,42 @@ func _VaulticDB_Capabilities_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VaulticDBServer).Capabilities(ctx, req.(*CapabilitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_CacheStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadCacheStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).CacheStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_CacheStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).CacheStatus(ctx, req.(*ReadCacheStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_UpdateCachePolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateReadCachePolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).UpdateCachePolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_UpdateCachePolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).UpdateCachePolicy(ctx, req.(*UpdateReadCachePolicyRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1308,6 +1376,14 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Capabilities",
 			Handler:    _VaulticDB_Capabilities_Handler,
+		},
+		{
+			MethodName: "CacheStatus",
+			Handler:    _VaulticDB_CacheStatus_Handler,
+		},
+		{
+			MethodName: "UpdateCachePolicy",
+			Handler:    _VaulticDB_UpdateCachePolicy_Handler,
 		},
 		{
 			MethodName: "WriterStatus",

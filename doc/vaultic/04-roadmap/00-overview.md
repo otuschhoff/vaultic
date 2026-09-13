@@ -47,7 +47,7 @@ commit series so it can be reviewed or reverted independently.
 | 26 | [Ephemeral cloud storage credentials](phase-26-ephemeral-cloud-storage-credentials.md) | design |
 | 27 | [Native Ceph librados object-store backend](phase-27-native-ceph-librados-object-store-backend.md) | design |
 | 28 | [VaulticDB/SlateDB WAL on S3 and librados](phase-28-slatedb-wal-on-s3-and-librados.md) | design |
-| 29 | [VaulticDB/SlateDB read-cache tiers](phase-29-slatedb-read-cache-tiers.md) | design |
+| 29 | [VaulticDB/SlateDB read-cache tiers](phase-29-slatedb-read-cache-tiers.md) | complete |
 | 30 | [Vaultic best-effort read-cache tier](phase-30-vaultic-best-effort-read-cache-tier.md) | design |
 | 31 | [Read-only NFSv3 snapshot server](phase-31-read-only-nfsv3-snapshot-server.md) | design |
 | 32 | [Operational monitoring and bounded metrics export](phase-32-operational-monitoring-and-metrics-export.md) | design |

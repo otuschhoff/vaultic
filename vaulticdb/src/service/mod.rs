@@ -32,9 +32,10 @@ use crate::{
         KeyStatusResponse, MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
         PrepareCapsuleMigrationRequest, PrepareCapsuleMigrationResponse, PromoteWriterRequest,
         PublishCapsuleMutationRequest, PublishCapsuleMutationResponse, QuarantineGenerationRequest,
-        RecoverEscrowRequest, RemoveKeySlotRequest, RetireGenerationRequest, RewriteDekRequest,
-        RewriteDekResponse, RollbackGenerationRequest, RotateDekRequest, RotateLocalKeySlotRequest,
-        ScanRequest, ScanResponse, StoreMasterKeyRequest, TransactionRequest,
+        ReadCacheStatusRequest, ReadCacheStatusResponse, RecoverEscrowRequest,
+        RemoveKeySlotRequest, RetireGenerationRequest, RewriteDekRequest, RewriteDekResponse,
+        RollbackGenerationRequest, RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest,
+        ScanResponse, StoreMasterKeyRequest, TransactionRequest, UpdateReadCachePolicyRequest,
         VerifyGenerationRequest, WriteBatchRequest, WriteBatchResponse, WriterStatusRequest,
         WriterStatusResponse,
     },
@@ -49,6 +50,7 @@ use zeroize::Zeroizing;
 mod encryption_helpers;
 mod generation;
 mod kv;
+mod read_cache;
 mod transactions;
 mod writer_role;
 
@@ -133,6 +135,20 @@ impl Drop for WriteIntentGuard {
 
 #[tonic::async_trait]
 impl VaulticDb for Service {
+    async fn cache_status(
+        &self,
+        request: Request<ReadCacheStatusRequest>,
+    ) -> Result<Response<ReadCacheStatusResponse>, Status> {
+        self.handle_cache_status(request).await
+    }
+
+    async fn update_cache_policy(
+        &self,
+        request: Request<UpdateReadCachePolicyRequest>,
+    ) -> Result<Response<ReadCacheStatusResponse>, Status> {
+        self.handle_update_cache_policy(request).await
+    }
+
     async fn generation_status(
         &self,
         request: Request<GenerationStatusRequest>,

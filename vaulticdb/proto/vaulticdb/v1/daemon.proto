@@ -151,6 +151,94 @@ message CapabilitiesResponse {
   uint64 wal_cleanup_failures = 31;
 }
 
+message ReadCacheStatusRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+}
+
+message ReadCacheMetrics {
+  uint64 hits = 1;
+  uint64 misses = 2;
+  uint64 origin_reads = 3;
+  uint64 origin_reads_avoided = 4;
+  uint64 corruptions = 5;
+  uint64 timeouts = 6;
+  uint64 failures = 7;
+  uint64 bypasses = 8;
+  uint64 admissions = 9;
+  uint64 admission_rejections = 10;
+  uint64 capacity_evictions = 11;
+  uint64 idle_evictions = 12;
+  uint64 absolute_evictions = 13;
+  uint64 corruption_evictions = 14;
+  uint64 read_latency_total_us = 15;
+  uint64 read_latency_count = 16;
+  uint64 write_latency_total_us = 17;
+  uint64 write_latency_count = 18;
+}
+
+message ReadCacheTierPolicy {
+  string tier_id = 1;
+  bool enabled = 2;
+  uint64 max_bytes = 3;
+  uint64 idle_age_ms = 4;
+  optional uint64 absolute_age_ms = 5;
+  uint32 read_priority = 6;
+  uint32 admission_priority = 7;
+  uint64 timeout_ms = 8;
+}
+
+enum ReadCacheConfidentiality {
+  READ_CACHE_CONFIDENTIALITY_UNSPECIFIED = 0;
+  READ_CACHE_CONFIDENTIALITY_ENCRYPTED = 1;
+  READ_CACHE_CONFIDENTIALITY_DECRYPTED_HIGHLY_TRUSTED = 2;
+}
+
+message ReadCacheTierStatus {
+  ReadCacheTierPolicy policy = 1;
+  uint64 used_bytes = 2;
+  uint64 reserved_bytes = 3;
+  uint64 pinned_bytes = 4;
+  uint64 requested_max_bytes = 5;
+  uint64 pending_reclaim_bytes = 6;
+  uint64 reconciliation_lag = 7;
+  bool circuit_open = 8;
+  ReadCacheMetrics metrics = 9;
+  ReadCacheConfidentiality confidentiality = 10;
+  uint64 local_used_bytes = 11;
+  uint64 local_reserved_bytes = 12;
+}
+
+message ReadCacheStatusResponse {
+  uint64 revision = 1;
+  string namespace = 2;
+  optional uint64 aggregate_max_bytes = 3;
+  uint64 used_bytes = 4;
+  uint64 reserved_bytes = 5;
+  uint64 pinned_bytes = 6;
+  uint64 max_inflight_bytes = 7;
+  uint64 pending_reclaim_bytes = 8;
+  ReadCacheMetrics metrics = 9;
+  repeated ReadCacheTierStatus tiers = 10;
+  uint64 inflight_bytes = 11;
+  bool quota_coordination_healthy = 12;
+  uint64 quota_ledger_revision = 13;
+  uint64 quota_lease_expiry_unix_ms = 14;
+  uint64 unverified_stale_bytes = 15;
+  uint64 quota_reconciliation_lag = 16;
+  uint64 local_used_bytes = 17;
+  uint64 local_reserved_bytes = 18;
+  uint64 policy_sync_lag = 19;
+  string policy_sync_error = 20;
+}
+
+message UpdateReadCachePolicyRequest {
+  string repository_id = 1;
+  RequestContext context = 2;
+  uint64 expected_revision = 3;
+  repeated ReadCacheTierPolicy tiers = 4;
+}
+
 enum WriterRole {
   WRITER_ROLE_UNSPECIFIED = 0;
   WRITER_ROLE_READ_ONLY = 1;
@@ -434,6 +522,8 @@ message PublishCapsuleMutationResponse {
 service VaulticDB {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc CacheStatus(ReadCacheStatusRequest) returns (ReadCacheStatusResponse);
+  rpc UpdateCachePolicy(UpdateReadCachePolicyRequest) returns (ReadCacheStatusResponse);
   rpc WriterStatus(WriterStatusRequest) returns (WriterStatusResponse);
   rpc DemoteWriter(DemoteWriterRequest) returns (WriterStatusResponse);
   rpc PromoteWriter(PromoteWriterRequest) returns (WriterStatusResponse);

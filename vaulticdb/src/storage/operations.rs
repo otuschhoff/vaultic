@@ -304,6 +304,8 @@ async fn release_writer_claim(store: &dyn ObjectStore, epoch: u64) -> Result<()>
     check_storage_failpoint(StorageFailpoint::ReleaseWriterClaim(
         store as *const dyn ObjectStore as *const () as usize,
     ))?;
+    #[cfg(any(test, feature = "test-failpoints"))]
+    check_storage_failpoint(StorageFailpoint::ReleaseWriterClaimAny)?;
     let active_path = ObjectPath::from(ACTIVE_WRITER_PATH);
     let current = store
         .get(&active_path)

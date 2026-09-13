@@ -406,7 +406,9 @@ impl Service {
         })
     }
 
-    async fn mutation_admission(&self) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, Status> {
+    pub(super) async fn mutation_admission(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, Status> {
         let admission = self.state.mutation_admission.clone().read_owned().await;
         if self.state.draining.load(Ordering::Acquire) {
             return Err(VaulticDbError::StorageUnavailable {

@@ -825,6 +825,22 @@ func (c *authenticatedClient) Capabilities(
 	return c.VaulticDBClient.Capabilities(withAuth(ctx, c.token), in, callOptions...)
 }
 
+func (c *authenticatedClient) CacheStatus(
+	ctx context.Context,
+	in *vaulticdbv1.ReadCacheStatusRequest,
+	callOptions ...grpc.CallOption,
+) (*vaulticdbv1.ReadCacheStatusResponse, error) {
+	return c.VaulticDBClient.CacheStatus(withAuth(ctx, c.token), in, callOptions...)
+}
+
+func (c *authenticatedClient) UpdateCachePolicy(
+	ctx context.Context,
+	in *vaulticdbv1.UpdateReadCachePolicyRequest,
+	callOptions ...grpc.CallOption,
+) (*vaulticdbv1.ReadCacheStatusResponse, error) {
+	return c.VaulticDBClient.UpdateCachePolicy(withAuth(ctx, c.token), in, callOptions...)
+}
+
 func (c *authenticatedClient) Drain(
 	ctx context.Context,
 	in *vaulticdbv1.Empty,

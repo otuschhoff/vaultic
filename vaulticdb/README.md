@@ -89,6 +89,78 @@ credential, and operational requirements. Azure replicas use
 `VAULTICDB_OBJECT_STORE=memory` is available only for isolated development and
 tests. It is never selected as a fallback for a failed local or S3 open.
 
+## SlateDB read-cache tiers
+
+Set `VAULTICDB_READ_CACHE_TIERS` to a comma-separated ordered list of tier IDs.
+An unset or empty list disables the cache. IDs may contain ASCII letters,
+digits, `-`, and `_`; configuration variable names uppercase IDs and replace
+`-` with `_`, so IDs must remain distinct after that conversion.
+
+Each tier requires `VAULTICDB_READ_CACHE_<ID>_OBJECT_STORE` (`local`, `memory`,
+`s3`, or `rados`) and `VAULTICDB_READ_CACHE_<ID>_MAX_BYTES`. `memory` is for
+tests. Local tiers require `_DATA_DIR`; S3 tiers require `_S3_BUCKET` and accept
+`_S3_PREFIX`, `_S3_ENDPOINT`, `_S3_REGION`, `_S3_PROVIDER`,
+`_S3_BUCKET_LOOKUP`, `_S3_ACCESS_KEY_ID`, and `_S3_SECRET_ACCESS_KEY`. Cache
+credentials are currently static. `_S3_SESSION_TOKEN` is rejected because this
+cache path has no renewal broker; credential denial opens the tier circuit and
+origin reads continue. RADOS tiers require `_RADOS_MONITORS`,
+`_RADOS_CLUSTER_FSID`, `_RADOS_POOL`, `_RADOS_NAMESPACE`, `_RADOS_PREFIX`,
+`_RADOS_CLIENT`, and `_RADOS_KEY`. Azure and GCS are not supported for Phase 29
+cache tiers.
+
+Each tier also accepts `_CONFIDENTIALITY=encrypted|decrypted`; the default is
+`encrypted`. An encrypted tier stores raw authoritative ciphertext below the
+metadata envelope-encryption layer. It is rejected when metadata encryption is
+off because the cache does not provide independent encryption and must not
+misrepresent plaintext as encrypted. A decrypted tier stores logical plaintext
+above envelope encryption and requires
+`VAULTICDB_READ_CACHE_<ID>_ACKNOWLEDGE_PLAINTEXT=true` at startup. This setting
+is per tier, so encrypted and decrypted tiers may be mixed in one configuration.
+
+**Decrypted cache tiers are only for highly trusted backends.** Cached bytes
+remain readable to anyone with backend access, including while the broker or
+repository is locked. Backups, snapshots, replication, or object versioning may
+retain plaintext after eviction; secure erase is not promised. Backend
+encryption at rest, TLS, and CephX protect different boundaries and do not
+substitute for trusting every principal and system with cache-backend access.
+
+Per-tier policy settings are `_ENABLED` (default `true`), `_IDLE_AGE` and
+`_ABSOLUTE_AGE` (duration with `ms`, `s`, `m`, or `h`; default disabled),
+`_READ_PRIORITY` and `_ADMISSION_PRIORITY` (default `100`, lower is preferred),
+and `_TIMEOUT` (default `250ms`). Global settings are
+`VAULTICDB_READ_CACHE_PART_SIZE_BYTES` (default 4 MiB),
+`VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES` (default eight parts), and optional
+`VAULTICDB_READ_CACHE_AGGREGATE_MAX_BYTES`.
+
+The configured part size is the largest admitted response in a tier's byte
+domain: ciphertext for encrypted tiers and plaintext for decrypted tiers.
+Larger responses still succeed from the authority but bypass caching. Fill and
+promotion writes are bounded best-effort background work; cache hits update only
+generation-aware in-memory recency and never persist access metadata. Cache
+timeouts and write failures do not turn an origin-successful read into a failure.
+
+`CacheStatus` reports policy revisions and synchronization errors, namespace,
+shared and process-local global/per-tier accounting, metrics, circuit state,
+and reconciliation lag. `UpdateCachePolicy` applies complete per-tier policies
+with `expected_revision` compare-and-swap. The policy-document CAS is the commit
+point; a lost response is resolved by reading back the exact document, and a
+rollback is another CAS revision. Quota-ledger synchronization after commit is
+asynchronous and observable. Heartbeats propagate changes to hit-only managers.
+An unavailable or malformed policy disables every cache tier while origin reads
+continue, and heartbeat recovery restores a complete validated snapshot.
+
+Policy updates are authenticated operational mutations, are rejected while
+draining, and do not require the writer role. Backend configuration and
+credentials are never returned or accepted by these RPCs. Status reports each
+tier's effective confidentiality, but the policy update message cannot change
+it; confidentiality is startup topology. Mode is included in cache namespaces
+and entry identities, so existing bytes are never reinterpreted after a mode
+change. One manager owns both byte-domain views, while a persisted fenced CAS
+ledger coordinates entry generations, deletion state, leases, reservations,
+and aggregate capacity across all managers sharing the namespace. WAL,
+manifests, fencing, coordination, policy, and untagged object-store operations
+remain outside both cache layers.
+
 Run the native SlateDB binding smoke test:
 
 ```sh

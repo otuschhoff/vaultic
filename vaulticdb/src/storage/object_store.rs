@@ -23,6 +23,8 @@ pub(crate) struct ReplicaConfig {
 pub(crate) enum ReplicaStoreConfig {
     Local { root: PathBuf },
     Memory,
+    #[cfg(test)]
+    Test(Arc<dyn ObjectStore>),
     S3 {
         bucket: String,
         prefix: Option<String>,
@@ -313,6 +315,8 @@ impl ObjectStore for MonitoredWalStore {
 async fn monitored_wal_store(
     store: Arc<dyn ObjectStore>,
 ) -> Result<(Arc<dyn ObjectStore>, Arc<WalMetrics>)> {
+    #[cfg(any(test, feature = "test-failpoints"))]
+    check_storage_failpoint(StorageFailpoint::InventoryWal)?;
     let metrics = Arc::new(WalMetrics::default());
     let mut objects = store.list(None);
     while let Some(object) = objects.next().await {
@@ -693,6 +697,8 @@ fn wal_store_identity(config: &WalStoreConfig) -> String {
             format!("local:{}", root.display())
         }
         WalStoreConfig::Store(ReplicaStoreConfig::Memory) => "memory".to_owned(),
+        #[cfg(test)]
+        WalStoreConfig::Store(ReplicaStoreConfig::Test(_)) => "test".to_owned(),
         WalStoreConfig::Store(ReplicaStoreConfig::S3 {
             bucket,
             prefix,
@@ -730,6 +736,8 @@ fn wal_store_kind(config: &WalStoreConfig) -> &'static str {
         WalStoreConfig::Inherit => "inherited",
         WalStoreConfig::Store(ReplicaStoreConfig::Local { .. }) => "local",
         WalStoreConfig::Store(ReplicaStoreConfig::Memory) => "memory",
+        #[cfg(test)]
+        WalStoreConfig::Store(ReplicaStoreConfig::Test(_)) => "test",
         WalStoreConfig::Store(ReplicaStoreConfig::S3 { .. }) => "s3",
         WalStoreConfig::Store(ReplicaStoreConfig::Rados { .. }) => "rados",
         WalStoreConfig::Store(ReplicaStoreConfig::Azure { .. }) => "unsupported-azure",
@@ -743,6 +751,8 @@ fn wal_store_durability(config: &WalStoreConfig) -> &'static str {
         WalStoreConfig::Store(ReplicaStoreConfig::Local { .. } | ReplicaStoreConfig::Memory) => {
             "local-process"
         }
+        #[cfg(test)]
+        WalStoreConfig::Store(ReplicaStoreConfig::Test(_)) => "test",
         WalStoreConfig::Store(
             ReplicaStoreConfig::S3 { .. } | ReplicaStoreConfig::Rados { .. },
         ) => "shared-remote",
@@ -752,7 +762,7 @@ fn wal_store_durability(config: &WalStoreConfig) -> &'static str {
     }
 }
 
-fn replica_store(
+pub(super) fn replica_store(
     config: &ReplicaStoreConfig,
     repository_key: &str,
     id: &str,
@@ -769,6 +779,8 @@ fn replica_store(
             Ok(Arc::new(ConditionalLocalFileSystem::new(&root)?))
         }
         ReplicaStoreConfig::Memory => Ok(Arc::new(InMemory::new())),
+        #[cfg(test)]
+        ReplicaStoreConfig::Test(store) => Ok(store.clone()),
         ReplicaStoreConfig::S3 {
             bucket,
             prefix,
