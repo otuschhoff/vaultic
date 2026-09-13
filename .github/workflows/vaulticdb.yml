@@ -198,7 +198,10 @@ jobs:
 
       - name: Test vaultic daemon client
         run: |
+          cargo build --manifest-path vaulticdb/Cargo.toml --bin vaulticdb \
+            --features test-failpoints --target-dir "$RUNNER_TEMP/vaulticdb-process-tests"
           export VAULTICDB_TEST_BINARY="$PWD/vaulticdb/target/debug/vaulticdb"
+          export VAULTICDB_FAILURE_TEST_BINARY="$RUNNER_TEMP/vaulticdb-process-tests/debug/vaulticdb"
           go test ./internal/index/daemon -race
           go test ./cmd/vaultic \
             -run 'TestRepositoryOpensWithEncryptedMasterKeyInDB|TestCapsuleMigrationRetiresDatabaseKeyAndManagedBypasses' \
