@@ -4,13 +4,77 @@ mod tests {
 
     use super::*;
     use futures_util::TryStreamExt;
-    use slatedb::object_store::{memory::InMemory, ObjectStoreExt};
+    use slatedb::object_store::{
+        local::LocalFileSystem, Attribute, AttributeValue, Attributes, ObjectStoreExt,
+    };
+    use slatedb::object_store::memory::InMemory;
     use slatedb::{Db, WriteBatch};
 
     fn store(inner: Arc<dyn ObjectStore>, repository: &str) -> EncryptedObjectStore {
         EncryptedObjectStore::new(inner, repository, vec![EncryptionKey::new(1, [7; 32])], 1)
             .unwrap()
             .with_chunk_size(16)
+    }
+
+    #[tokio::test]
+    async fn multipart_surfaces_unsupported_attributes_when_upload_starts() {
+        let root = std::env::temp_dir().join(format!(
+            "vaulticdb-encryption-multipart-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let inner: Arc<dyn ObjectStore> =
+            Arc::new(LocalFileSystem::new_with_prefix(&root).unwrap());
+        let encrypted = EncryptedObjectStore::new(
+            inner,
+            "repo-a",
+            vec![EncryptionKey::new(1, [7; 32])],
+            1,
+        )
+        .unwrap();
+        let mut attributes = Attributes::new();
+        attributes.insert(
+            Attribute::Metadata("slatedb-put-id".into()),
+            AttributeValue::from("test-put-id"),
+        );
+
+        let result = encrypted
+            .put_multipart_opts(
+                &Path::from("compacted/test.sst"),
+                PutMultipartOptions {
+                    attributes,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(slatedb::object_store::Error::NotSupported { .. }
+                | slatedb::object_store::Error::NotImplemented { .. })
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipart_preserves_submission_order_when_parts_complete_out_of_order() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let encrypted = store(inner, "repo-a");
+        let path = Path::from("compacted/ordered.sst");
+        let mut upload = encrypted.put_multipart(&path).await.unwrap();
+        let first = upload.put_part(Bytes::from_static(b"first-").into());
+        let second = upload.put_part(Bytes::from_static(b"second-").into());
+        let third = upload.put_part(Bytes::from_static(b"third").into());
+
+        third.await.unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        upload.complete().await.unwrap();
+
+        assert_eq!(
+            encrypted.get(&path).await.unwrap().bytes().await.unwrap(),
+            Bytes::from_static(b"first-second-third")
+        );
     }
 
     #[tokio::test]

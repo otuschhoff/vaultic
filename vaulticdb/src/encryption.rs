@@ -3,7 +3,7 @@
 use std::{
     fmt::{Debug, Display, Formatter},
     ops::Range,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use aes_gcm::{
@@ -363,11 +363,16 @@ impl ObjectStore for EncryptedObjectStore {
         location: &Path,
         options: PutMultipartOptions,
     ) -> Result<Box<dyn MultipartUpload>> {
+        let inner = self
+            .inner
+            .put_multipart_opts(location, options.clone())
+            .await?;
         Ok(Box::new(EncryptedMultipartUpload {
             store: self.clone(),
             location: location.clone(),
+            inner,
             options,
-            parts: Arc::new(Mutex::new(Vec::new())),
+            parts: Vec::new(),
             finished: false,
         }))
     }
@@ -469,36 +474,26 @@ impl ObjectStore for EncryptedObjectStore {
 struct EncryptedMultipartUpload {
     store: EncryptedObjectStore,
     location: Path,
+    inner: Box<dyn MultipartUpload>,
     options: PutMultipartOptions,
-    parts: Arc<Mutex<Vec<Bytes>>>,
+    parts: Vec<Bytes>,
     finished: bool,
 }
 
 #[async_trait]
 impl MultipartUpload for EncryptedMultipartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        let parts = Arc::clone(&self.parts);
-        Box::pin(async move {
-            let part = collect_payload(data);
-            parts
-                .lock()
-                .map_err(|_| encryption_error(EncryptionError::Authentication))?
-                .push(part);
-            Ok(())
-        })
+        self.parts.push(collect_payload(data));
+        Box::pin(async { Ok(()) })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
         if self.finished {
             return Err(encryption_error(EncryptionError::Length));
         }
-        let parts = self
-            .parts
-            .lock()
-            .map_err(|_| encryption_error(EncryptionError::Authentication))?
-            .clone();
         self.finished = true;
-        let plaintext = collect_parts(parts);
+        let plaintext = collect_parts(std::mem::take(&mut self.parts));
+        self.inner.abort().await?;
         let options = PutOptions {
             tags: self.options.tags.clone(),
             attributes: self.options.attributes.clone(),
@@ -512,11 +507,8 @@ impl MultipartUpload for EncryptedMultipartUpload {
 
     async fn abort(&mut self) -> Result<()> {
         self.finished = true;
-        self.parts
-            .lock()
-            .map_err(|_| encryption_error(EncryptionError::Authentication))?
-            .clear();
-        Ok(())
+        self.parts.clear();
+        self.inner.abort().await
     }
 }
 
