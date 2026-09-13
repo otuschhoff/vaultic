@@ -34,6 +34,9 @@ var (
 
 func failureDaemonBinary(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("VaulticDB service tests require Unix sockets")
+	}
 	if binary := os.Getenv("VAULTICDB_TEST_BINARY"); binary != "" {
 		return binary
 	}
