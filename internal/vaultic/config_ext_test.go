@@ -3,6 +3,7 @@ package vaultic_test
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
 
 	rtest "github.com/otuschhoff/vaultic/internal/test"
@@ -121,11 +122,46 @@ func TestConfigPlacementRegistryValidation(t *testing.T) {
 		"duplicate id":        {PlacementBackends: []vaultic.PlacementBackend{{ID: "a"}, {ID: "a"}}},
 		"bad offsite":         {PlacementPolicy: vaultic.PlacementPolicy{MinCopies: 1, MinOffsite: 2}},
 		"ingest without read": {PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadEnabled: boolPtr(false)}}},
+		"bad role":            {PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Role: "bogus"}}},
+		"bad trust":           {PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadCacheTrust: "bogus"}}},
+		"noncanonical role":   {PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Role: "READ-CACHE"}}},
+		"plaintext missing ack": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadCacheTrust: "plaintext-allowed", ReadCacheAck: false}},
+		},
+		"bad reserve fraction": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadCacheReserveFrac: 1.1}},
+		},
+		"bad raw amplification": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadCacheRawAmp: 0.5}},
+		},
+		"ceph mode wrong location": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", ReadCacheBudgetMode: "ceph-free-space", Location: "s3:https://example/bucket"}},
+		},
+		"ceph mode wrong role": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Role: "primary", ReadCacheBudgetMode: "ceph-free-space", Location: "rados://cluster/pool"}},
+		},
+		"multiple ceph managed read caches": {
+			PlacementBackends: []vaultic.PlacementBackend{
+				{ID: "a", Role: "read-cache", ReadCacheBudgetMode: "ceph-free-space", Location: "rados://cluster/pool-a"},
+				{ID: "b", Role: "read-cache", ReadCacheBudgetMode: "ceph-free-space", Location: "rados://cluster/pool-b"},
+			},
+		},
+		"read cache chunk above practical maximum": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Role: "read-cache", TargetPackSizeBytes: vaultic.MaxReadCacheChunkBytes + 1}},
+		},
+		"read cache chunk above integer maximum": {
+			PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Role: "read-cache", TargetPackSizeBytes: math.MaxUint64}},
+		},
 	} {
 		if err := cfg.ValidateExtensions(); err == nil {
 			t.Fatalf("%s placement config was accepted", name)
 		}
 	}
+	rtest.OK(t, vaultic.Config{PlacementBackends: []vaultic.PlacementBackend{{
+		ID: "a", Role: "read-cache", ReadCacheTrust: "plaintext-allowed", ReadCacheAck: true,
+		ReadCacheBudgetMode: "ceph-free-space", Location: "rados://cluster/pool", ReadCacheReserveFrac: 0.25, ReadCacheRawAmp: 1.2,
+		TargetPackSizeBytes: vaultic.MaxReadCacheChunkBytes,
+	}}}.ValidateExtensions())
 }
 
 func boolPtr(value bool) *bool { return &value }
@@ -172,6 +208,7 @@ func TestStagingBackendValidation(t *testing.T) {
 		{PlacementBackends: valid.PlacementBackends, StagingBackends: []string{"a", "a"}},
 		{PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Ingest: &disabled}}, StagingBackends: []string{"a"}},
 		{PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Ingest: &enabled, ReadEnabled: &disabled}}, StagingBackends: []string{"a"}},
+		{PlacementBackends: []vaultic.PlacementBackend{{ID: "a", Role: "read-cache"}}, StagingBackends: []string{"a"}},
 	} {
 		rtest.Assert(t, config.ValidateExtensions() != nil, "invalid staging backend configuration accepted")
 	}

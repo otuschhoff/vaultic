@@ -69,6 +69,9 @@ func placementDurable(placements map[uint64]schema.PlacementRecord, backends map
 		if !ok {
 			continue
 		}
+		if backend.Role == PlacementRoleReadCache {
+			continue
+		}
 		copies++
 		domains[backend.FailureDomain] = struct{}{}
 		if backend.Offsite {

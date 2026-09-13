@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/otuschhoff/vaultic/internal/backend"
@@ -15,8 +16,48 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+type decodedPackedBlob struct {
+	Plaintext        []byte
+	CompressedSource []byte
+}
+
+//nolint:gocognit,nestif // Authenticated cache fallbacks remain ordered with origin reads in this security-sensitive path.
 func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf []byte) ([]byte, error) {
 	var lastError error
+	//nolint:contextcheck // The shared cache worker is owned by Repository.Close, while ctx still bounds this blob read.
+	manager := r.readCacheManager()
+	if manager != nil && len(blobs) != 0 && r.readCacheAuthoritativeEligibleForBlob(ctx, blobs) && manager.refreshPolicyForAccess(ctx) {
+		length := int(blobs[0].Blob.DataLength())
+		if decoded, ok := manager.loadDecodedBlobRepresentation(ctx, blobs[0].Handle(), length); ok {
+			if !vaultic.Hash(decoded).Equal(blobs[0].Blob.ID) {
+				debug.Log("read-cache decoded blob hash mismatch for %v", blobs[0].Handle())
+			} else {
+				if len(decoded) > cap(buf) {
+					return decoded, nil
+				}
+				buf = buf[:len(decoded)]
+				copy(buf, decoded)
+				return buf, nil
+			}
+		}
+		compressedLength := crypto.PlaintextLength(int(blobs[0].Blob.Length))
+		if compressed, ok := manager.loadCompressedBlobRepresentation(ctx, blobs[0].Handle(), compressedLength); ok {
+			decoder, err := r.getZstdDecoder()
+			if err != nil {
+				return nil, err
+			}
+			decoded, err := decoder.DecodeAll(compressed, nil)
+			if err == nil && vaultic.Hash(decoded).Equal(blobs[0].Blob.ID) {
+				manager.admitBlobRepresentations(ctx, blobs[0].Handle(), decoded, compressed)
+				if len(decoded) > cap(buf) {
+					return decoded, nil
+				}
+				buf = buf[:len(decoded)]
+				copy(buf, decoded)
+				return buf, nil
+			}
+		}
+	}
 	for _, blob := range blobs {
 		debug.Log("blob %v found: %v", blob.Handle(), blob)
 		// load blob from pack
@@ -40,30 +81,16 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 			continue
 		}
 
-		decoder, err := r.getZstdDecoder()
-		if err != nil {
-			return nil, err
-		}
-		it := newPackBlobIterator(
-			blob.PackID(),
-			newByteReader(buf),
-			blob.Blob.Offset,
-			pack.Blobs{blob.Blob},
-			r.key,
-			decoder,
-		)
-		pbv, err := it.Next()
-
-		if err == nil {
-			err = pbv.Err
-		}
+		decoded, err := r.decodePackedBlob(blob, buf)
 		if err != nil {
 			debug.Log("error decoding blob %v: %v", blob, err)
 			lastError = err
 			continue
 		}
-
-		plaintext := pbv.Plaintext
+		if manager != nil {
+			manager.admitBlobRepresentations(ctx, blob.Handle(), decoded.Plaintext, decoded.CompressedSource)
+		}
+		plaintext := decoded.Plaintext
 		if len(plaintext) > cap(buf) {
 			return plaintext, nil
 		}
@@ -78,6 +105,184 @@ func (r *Repository) loadBlob(ctx context.Context, blobs []*pack.PackedBlob, buf
 	}
 
 	return nil, errors.Errorf("loading %v from %v packs failed", blobs[0].Handle(), len(blobs))
+}
+
+func (r *Repository) readCacheAuthoritativeEligibleForBlob(ctx context.Context, blobs []*pack.PackedBlob) bool {
+	if !r.readCachePrimaryEligible() {
+		return false
+	}
+	seenPacks := map[string]struct{}{}
+	for _, blob := range blobs {
+		packID := blob.PackID()
+		packKey := packID.String()
+		if _, exists := seenPacks[packKey]; exists {
+			continue
+		}
+		seenPacks[packKey] = struct{}{}
+		candidates, err := r.placementReadCandidates(ctx, packID)
+		if err != nil {
+			return false
+		}
+		if placementCandidatesAuthorizeCache(candidates) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Repository) readCacheAuthoritativeEligibleForLogicalRange(
+	ctx context.Context,
+	content []vaultic.ID,
+	cumSize []uint64,
+	offset uint64,
+	requestLen int,
+) bool {
+	if !r.readCachePrimaryEligible() {
+		return false
+	}
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return false
+	}
+	indices := referencedLogicalBlobIndices(content, cumSize, offset, requestLen)
+	if len(indices) == 0 {
+		return false
+	}
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(content) {
+			return false
+		}
+		blobID := content[idx]
+		blobs := engine.Lookup(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: blobID})
+		if len(blobs) == 0 {
+			return false
+		}
+		authorizedForBlob := false
+		seenPacks := map[string]struct{}{}
+		for _, blob := range blobs {
+			packID := blob.PackID()
+			packKey := packID.String()
+			if _, exists := seenPacks[packKey]; exists {
+				continue
+			}
+			seenPacks[packKey] = struct{}{}
+			candidates, err := r.placementReadCandidates(ctx, packID)
+			if err != nil {
+				return false
+			}
+			if placementCandidatesAuthorizeCache(candidates) {
+				authorizedForBlob = true
+				break
+			}
+		}
+		if !authorizedForBlob {
+			return false
+		}
+	}
+	return true
+}
+
+func placementCandidatesAuthorizeCache(candidates []placementReadCandidate) bool {
+	for _, candidate := range authorizedPlacementReadCandidates(candidates) {
+		if candidate.metadataConfirmed {
+			return true
+		}
+	}
+	return false
+}
+
+func referencedLogicalBlobIndices(content []vaultic.ID, cumSize []uint64, offset uint64, requestLen int) []int {
+	if len(content) == 0 || requestLen <= 0 {
+		return nil
+	}
+	if len(cumSize) != len(content)+1 {
+		all := make([]int, len(content))
+		for i := range content {
+			all[i] = i
+		}
+		return all
+	}
+	totalSize := cumSize[len(cumSize)-1]
+	if offset >= totalSize {
+		return nil
+	}
+	remaining := totalSize - offset
+	requestBytes := uint64(requestLen)
+	if requestBytes > remaining {
+		requestBytes = remaining
+	}
+	if requestBytes == 0 {
+		return nil
+	}
+	endExclusive := offset + requestBytes
+	start := sort.Search(len(cumSize), func(i int) bool { return cumSize[i] > offset }) - 1
+	if start < 0 || start >= len(content) {
+		return nil
+	}
+	indices := make([]int, 0, len(content)-start)
+	for i := start; i < len(content); i++ {
+		blobStart := cumSize[i]
+		if blobStart >= endExclusive {
+			break
+		}
+		indices = append(indices, i)
+	}
+	return indices
+}
+
+func (r *Repository) readCachePrimaryEligible() bool {
+	model, err := r.PlacementModel()
+	if err != nil {
+		return true
+	}
+	hasPrimary := false
+	primaryReadable := false
+	for _, placement := range model.Backends {
+		if placement.Role != PlacementRolePrimary {
+			continue
+		}
+		hasPrimary = true
+		if placement.ReadAllowed() {
+			primaryReadable = true
+			break
+		}
+	}
+	if hasPrimary && !primaryReadable {
+		return false
+	}
+	return true
+}
+
+func (r *Repository) decodePackedBlob(blob *pack.PackedBlob, packed []byte) (decodedPackedBlob, error) {
+	ciphertextLength := int(blob.Blob.Length)
+	if ciphertextLength > len(packed) {
+		return decodedPackedBlob{}, fmt.Errorf("readFull: short packed blob")
+	}
+	packed = packed[:ciphertextLength]
+	if int(blob.Blob.Length) <= r.key.NonceSize() {
+		return decodedPackedBlob{}, fmt.Errorf("invalid blob length %v", blob.Blob)
+	}
+	nonce, ciphertext := packed[:r.key.NonceSize()], packed[r.key.NonceSize():]
+	decrypted, err := r.key.Open(ciphertext[:0], nonce, ciphertext, nil)
+	if err != nil {
+		return decodedPackedBlob{}, fmt.Errorf("decrypting blob %v from pack %v failed: %w", blob.Handle(), blob.PackID(), err)
+	}
+	result := decodedPackedBlob{Plaintext: decrypted}
+	if blob.Blob.IsCompressed() {
+		result.CompressedSource = append([]byte(nil), decrypted...)
+		decoder, decErr := r.getZstdDecoder()
+		if decErr != nil {
+			return decodedPackedBlob{}, decErr
+		}
+		result.Plaintext, err = decoder.DecodeAll(decrypted, nil)
+		if err != nil {
+			return decodedPackedBlob{}, fmt.Errorf("decompressing blob %v from pack %v failed: %w", blob.Handle(), blob.PackID(), err)
+		}
+	}
+	if !vaultic.Hash(result.Plaintext).Equal(blob.Blob.ID) {
+		return decodedPackedBlob{}, fmt.Errorf("read blob %v from pack %v: wrong data returned", blob.Handle(), blob.PackID())
+	}
+	return result, nil
 }
 
 func (r *Repository) getZstdEncoder() (*zstd.Encoder, error) {

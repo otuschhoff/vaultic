@@ -8,6 +8,7 @@ import (
 )
 
 var ErrNoRepository = fmt.Errorf("repository does not exist")
+var ErrConditionalWriteUnsupported = fmt.Errorf("conditional write is not supported")
 
 // Backend is used to store and access data.
 //
@@ -125,6 +126,20 @@ type StorageCapabilityProber interface {
 	ProbeStorageCapabilities(ctx context.Context) (*StorageProfile, error)
 }
 
+// ReadAuthorization is an optional capability for backends whose read
+// authorization can change at runtime (for example, renewable credential
+// wrappers). Returning false must fail closed for read-cache hits that rely on
+// this backend as authoritative source eligibility.
+type ReadAuthorization interface {
+	ReadAuthorizedNow() bool
+}
+
+// ReclamationStatus reports whether physical storage associated with a
+// logically removed handle is still awaiting backend garbage collection.
+type ReclamationStatus interface {
+	ReclamationPending(ctx context.Context, handle Handle) (bool, error)
+}
+
 type Unwrapper interface {
 	// Unwrap returns the underlying backend or nil if there is none.
 	Unwrap() Backend
@@ -147,6 +162,22 @@ func AsBackend[B Backend](b Backend) B {
 	return be
 }
 
+// AsCapability unwraps nested backends to locate an optional capability interface.
+func AsCapability[C any](b Backend) C {
+	for b != nil {
+		if capability, ok := any(b).(C); ok {
+			return capability
+		}
+		if wrapped, ok := b.(Unwrapper); ok {
+			b = wrapped.Unwrap()
+			continue
+		}
+		break
+	}
+	var zero C
+	return zero
+}
+
 type FreezeBackend interface {
 	Backend
 	// Freeze blocks all backend operations except those on lock files
@@ -164,4 +195,46 @@ type FileInfo struct {
 // ApplyEnvironmenter fills in a backend configuration from the environment
 type ApplyEnvironmenter interface {
 	ApplyEnvironment(prefix string)
+}
+
+// ConditionalWriter exposes an optional, backend-native compare-and-swap primitive.
+//
+// expected:
+// - nil: update only when the target does not exist.
+// - non-nil: update only when the current bytes are identical to expected.
+//
+// Returns the currently stored bytes when swapped is false and the object exists.
+// For a create-if-missing miss, current is nil and swapped is false.
+type ConditionalWriter interface {
+	CompareAndSwap(ctx context.Context, h Handle, expected []byte, replacement []byte) (current []byte, swapped bool, err error)
+}
+
+// CapacityTelemetrySample describes optional backend-native capacity telemetry
+// for budget controllers.
+type CapacityTelemetrySample struct {
+	TotalRawBytes           uint64
+	FreeRawBytes            uint64
+	EligibleTotalRawBytes   uint64
+	EligibleFreeRawBytes    uint64
+	PoolMaxAvailRawBytes    uint64
+	PoolQuotaRawBytes       uint64
+	PoolMaxAvailBytes       uint64
+	PoolMaxAvailKnown       bool
+	PoolQuotaAvailableBytes uint64
+	PoolQuotaKnown          bool
+	ObjectHeadroomRawBytes  uint64
+	RawAmplification        float64
+	Health                  string
+	SourceGeneration        uint64
+	Denied                  bool
+	Inconsistent            bool
+	PoolReplicaSize         uint64
+	PoolReplicaSizeKnown    bool
+	PoolMinSize             uint64
+	PoolMinSizeKnown        bool
+}
+
+// CapacityTelemetry exposes optional backend-native storage capacity facts.
+type CapacityTelemetry interface {
+	SampleCapacity(ctx context.Context) (CapacityTelemetrySample, error)
 }

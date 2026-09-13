@@ -18,6 +18,7 @@ func TestStorageCredentialAccess(t *testing.T) {
 		{name: "locked read", policy: LockShared, options: OpenOptions{LockFreeRead: true}, tier: topology.StorageRead, usesLock: true},
 		{name: "backup", policy: LockShared, tier: topology.StorageAppend, usesLock: true},
 		{name: "maintenance", policy: LockExclusive, tier: topology.StorageMaintain, usesLock: true},
+		{name: "cache maintenance", policy: LockExclusive, options: OpenOptions{CacheMaintenance: true}, tier: topology.StorageRead, usesLock: true},
 		{
 			name: "coherent read", policy: LockExclusive, options: OpenOptions{ReadOnlyData: true},
 			tier: topology.StorageRead, usesLock: true,

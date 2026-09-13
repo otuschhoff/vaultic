@@ -56,6 +56,9 @@ func (r *Repository) DeferredUploadPlan() (DeferredUploadOptions, staging.Store,
 		if !ok {
 			return DeferredUploadOptions{}, staging.Store{}, fmt.Errorf("staging backend %q is not configured", id)
 		}
+		if placement.Role == PlacementRoleReadCache {
+			return DeferredUploadOptions{}, staging.Store{}, fmt.Errorf("staging backend %q uses the disposable read-cache role", id)
+		}
 		destination, ok := r.placementBackend(PlacementBackendHash(id))
 		if !ok {
 			continue

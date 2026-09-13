@@ -13,6 +13,7 @@ func TestPlacementEvictionRefusesToDropBelowDurability(t *testing.T) {
 		1: {PlacementBackend: vaultic.PlacementBackend{ID: "local", FailureDomain: "room", Role: PlacementRolePrimary}, Hash: 1},
 		2: {PlacementBackend: vaultic.PlacementBackend{ID: "archive", FailureDomain: "cloud", Role: PlacementRoleArchival, Offsite: true}, Hash: 2},
 		3: {PlacementBackend: vaultic.PlacementBackend{ID: "cache", FailureDomain: "room", Role: PlacementRoleCache}, Hash: 3},
+		4: {PlacementBackend: vaultic.PlacementBackend{ID: "read-cache", FailureDomain: "second-room", Role: PlacementRoleReadCache, Offsite: true}, Hash: 4},
 	}
 	live := func() schema.PlacementRecord {
 		return schema.PlacementRecord{State: schema.PlacementLive, Bytes: 1, RetentionSource: schema.RetentionUnknown}
@@ -39,6 +40,32 @@ func TestPlacementEvictionRefusesToDropBelowDurability(t *testing.T) {
 		2,
 	) {
 		t.Fatal("eviction that preserves the configured durability was refused")
+	}
+	if placementEvictionAllowed(
+		map[uint64]schema.PlacementRecord{1: live(), 2: live(), 4: live()},
+		backends,
+		policy,
+		2,
+	) {
+		t.Fatal("read-cache placement authorized evicting the only durable offsite copy")
+	}
+}
+
+func TestPlacementDurabilityExcludesReadCacheRole(t *testing.T) {
+	backends := map[uint64]PlacementBackend{
+		1: {PlacementBackend: vaultic.PlacementBackend{ID: "local", FailureDomain: "room-a", Role: PlacementRolePrimary}, Hash: 1},
+		2: {PlacementBackend: vaultic.PlacementBackend{ID: "archive", FailureDomain: "offsite", Role: PlacementRoleArchival, Offsite: true}, Hash: 2},
+		3: {PlacementBackend: vaultic.PlacementBackend{ID: "read-cache", FailureDomain: "room-b", Role: PlacementRoleReadCache, Offsite: true}, Hash: 3},
+	}
+	live := func() schema.PlacementRecord {
+		return schema.PlacementRecord{State: schema.PlacementLive, Bytes: 1, RetentionSource: schema.RetentionUnknown}
+	}
+	policy := vaultic.PlacementPolicy{MinCopies: 2, MinDomains: 2, MinOffsite: 1}
+	if placementDurable(map[uint64]schema.PlacementRecord{1: live(), 3: live()}, backends, policy) {
+		t.Fatal("read-cache placement counted toward durability copies/domains/offsite")
+	}
+	if !placementDurable(map[uint64]schema.PlacementRecord{1: live(), 2: live(), 3: live()}, backends, policy) {
+		t.Fatal("durable primary+archival pair became non-durable when read-cache existed")
 	}
 }
 

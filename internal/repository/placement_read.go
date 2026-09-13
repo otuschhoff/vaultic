@@ -14,24 +14,52 @@ import (
 )
 
 type placementReadCandidate struct {
-	backend backend.Backend
-	policy  PlacementBackend
+	backend           backend.Backend
+	policy            PlacementBackend
+	metadataConfirmed bool
 }
 
-func (r *Repository) placementReadCandidates(ctx context.Context, packID vaultic.ID) []placementReadCandidate {
+func placementReadAuthorized(candidate placementReadCandidate) bool {
+	authorization := backend.AsCapability[backend.ReadAuthorization](candidate.backend)
+	if authorization == nil {
+		return true
+	}
+	return authorization.ReadAuthorizedNow()
+}
+
+func authorizedPlacementReadCandidates(candidates []placementReadCandidate) []placementReadCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	authorized := make([]placementReadCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if placementReadAuthorized(candidate) {
+			authorized = append(authorized, candidate)
+		}
+	}
+	return authorized
+}
+
+func (r *Repository) placementReadCandidates(ctx context.Context, packID vaultic.ID) ([]placementReadCandidate, error) {
 	engine, ok := r.Engine().(*metadataindex.DaemonEngine)
 	if !ok {
-		return []placementReadCandidate{{backend: r.be}}
+		return []placementReadCandidate{{backend: r.be, metadataConfirmed: true}}, nil
 	}
 	model, err := r.PlacementModel()
 	if err != nil {
-		return []placementReadCandidate{{backend: r.be}}
+		return nil, err
 	}
 	candidates := make([]placementReadCandidate, 0, len(model.Backends))
 	observedPlacement := false
 	for _, policy := range model.Backends {
+		if policy.Role == PlacementRoleReadCache {
+			continue
+		}
 		value, found, err := engine.SchemaStore().Get(ctx, schema.PackPlacementKey(schema.ID(packID), policy.Hash))
-		if err != nil || !found {
+		if err != nil {
+			return nil, fmt.Errorf("read placement for pack %s backend %s: %w", packID, policy.ID, err)
+		}
+		if !found {
 			continue
 		}
 		observedPlacement = true
@@ -46,16 +74,16 @@ func (r *Repository) placementReadCandidates(ctx context.Context, packID vaultic
 		if !found {
 			continue
 		}
-		candidates = append(candidates, placementReadCandidate{backend: candidate, policy: policy})
+		candidates = append(candidates, placementReadCandidate{backend: candidate, policy: policy, metadataConfirmed: true})
 	}
 	sortPlacementReadCandidates(candidates)
 	if len(candidates) == 0 {
 		if observedPlacement {
-			return nil
+			return nil, nil
 		}
-		return []placementReadCandidate{{backend: r.be}}
+		return []placementReadCandidate{{backend: r.be}}, nil
 	}
-	return candidates
+	return candidates, nil
 }
 
 func sortPlacementReadCandidates(candidates []placementReadCandidate) {
@@ -91,7 +119,16 @@ func (r *Repository) loadPackFromPlacements(ctx context.Context, handle backend.
 	if err != nil {
 		return r.be.Load(ctx, handle, length, offset, fn)
 	}
-	return loadPackFromCandidates(ctx, r.placementReadCandidates(ctx, packID), handle, length, offset, fn)
+	candidates, err := r.placementReadCandidates(ctx, packID)
+	if err != nil {
+		return err
+	}
+	candidates = authorizedPlacementReadCandidates(candidates)
+	//nolint:contextcheck // The shared cache worker is owned by Repository.Close, not by this individual read.
+	if manager := r.readCacheManager(); manager != nil {
+		return manager.loadPack(ctx, packID, handle, length, offset, candidates, fn)
+	}
+	return loadPackFromCandidates(ctx, candidates, handle, length, offset, fn)
 }
 
 func loadPackFromCandidates(

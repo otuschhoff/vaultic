@@ -25,10 +25,11 @@ const (
 )
 
 type OpenOptions struct {
-	DryRun       bool
-	AllowNoLock  bool
-	LockFreeRead bool
-	ReadOnlyData bool
+	DryRun           bool
+	AllowNoLock      bool
+	LockFreeRead     bool
+	ReadOnlyData     bool
+	CacheMaintenance bool
 }
 
 func OpenRepository(
@@ -94,6 +95,8 @@ func OpenRepository(
 
 func storageCredentialAccess(policy LockPolicy, openOptions OpenOptions) (string, bool) {
 	switch {
+	case openOptions.CacheMaintenance:
+		return string(topology.StorageRead), policy != LockNone
 	case openOptions.ReadOnlyData:
 		return string(topology.StorageRead), policy != LockNone
 	case policy == LockExclusive:

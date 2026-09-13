@@ -228,6 +228,35 @@ func (be *MemoryBackend) Properties() backend.Properties {
 	}
 }
 
+// CompareAndSwap atomically replaces a handle when expected bytes match.
+func (be *MemoryBackend) CompareAndSwap(ctx context.Context, h backend.Handle, expected []byte, replacement []byte) ([]byte, bool, error) {
+	be.m.Lock()
+	defer be.m.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	h.IsMetadata = false
+	if h.Type == backend.ConfigFile {
+		h.Name = ""
+	}
+	current, exists := be.data[h]
+	if expected == nil {
+		if exists {
+			return append([]byte{}, current...), false, nil
+		}
+		be.data[h] = append([]byte{}, replacement...)
+		return nil, true, nil
+	}
+	if !exists {
+		return nil, false, nil
+	}
+	if !bytes.Equal(current, expected) {
+		return append([]byte{}, current...), false, nil
+	}
+	be.data[h] = append([]byte{}, replacement...)
+	return append([]byte{}, replacement...), true, nil
+}
+
 // Hasher may return a hash function for calculating a content hash for the backend
 func (be *MemoryBackend) Hasher() hash.Hash {
 	return xxhash.New()

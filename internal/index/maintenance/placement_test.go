@@ -220,6 +220,44 @@ func TestDurabilityCountsFailureDomainsNotBackends(t *testing.T) {
 	}
 }
 
+func TestDurabilityExcludesReadCacheRole(t *testing.T) {
+	model := PlacementModel{
+		Backends: []PlacementBackend{
+			{ID: "primary", Hash: 1, Role: "primary", FailureDomain: "rack-a"},
+			{ID: "archive", Hash: 2, Role: "archival", Offsite: true, FailureDomain: "provider-b"},
+			{ID: "rc", Hash: 3, Role: "read-cache", Offsite: true, FailureDomain: "rack-c"},
+		},
+		Policy: DurabilityPolicy{MinCopies: 2, MinDomains: 2, MinOffsite: 1},
+	}
+	backends := map[uint64]PlacementBackend{}
+	for _, backend := range model.Backends {
+		backends[backend.Hash] = backend
+	}
+	live := func() schema.PlacementRecord {
+		return schema.PlacementRecord{State: schema.PlacementLive, Bytes: 1, RetentionSource: schema.RetentionUnknown}
+	}
+	if durable(placementSet{1: live(), 3: live()}, backends, model.Policy) {
+		t.Fatal("read-cache placement counted toward durable copies/domains/offsite")
+	}
+	if !durable(placementSet{1: live(), 2: live(), 3: live()}, backends, model.Policy) {
+		t.Fatal("primary+archival durable pair became non-durable when read-cache existed")
+	}
+}
+
+func TestDerivedTierIgnoresReadCachePlacements(t *testing.T) {
+	backends := map[uint64]PlacementBackend{
+		1: {ID: "primary", Hash: 1, Role: "primary", FailureDomain: "rack-a"},
+		2: {ID: "read-cache", Hash: 2, Role: "read-cache", FailureDomain: "rack-b"},
+	}
+	placements := placementSet{
+		1: {State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown},
+		2: {State: schema.PlacementLive, Bytes: 100, RetentionSource: schema.RetentionUnknown},
+	}
+	if got := derivedTier(placements, backends, 2); got != schema.TierHot {
+		t.Fatalf("derived tier = %s, want hot", got)
+	}
+}
+
 func TestPlacementCheckReportsBPAndTierDrift(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}
 	packID := deterministicID(4)

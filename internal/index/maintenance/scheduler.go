@@ -821,6 +821,9 @@ func placementTargets(class string, model PlacementModel) []PlacementBackend {
 		if !backend.ingestEnabled() {
 			continue
 		}
+		if backend.Role == "read-cache" {
+			continue
+		}
 		switch class {
 		case "metadata":
 			if backend.Role != "archival" && backend.Role != "cache" {

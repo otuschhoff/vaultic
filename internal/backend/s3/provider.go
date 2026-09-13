@@ -12,6 +12,7 @@ type Provider string
 
 const (
 	ProviderGeneric   Provider = "generic"
+	ProviderAWS       Provider = "aws"
 	ProviderBackblaze Provider = "backblaze"
 	ProviderCeph      Provider = "ceph"
 	ProviderWasabi    Provider = "wasabi"
@@ -105,8 +106,8 @@ func selectProvider(raw string, inferred Provider, host string) (Provider, bool,
 	if !explicitSelection {
 		provider = inferred
 	}
-	if provider != ProviderGeneric && provider != ProviderBackblaze && provider != ProviderCeph && provider != ProviderWasabi {
-		return "", false, false, fmt.Errorf("bad S3 provider %q: must be generic, backblaze, ceph, or wasabi", raw)
+	if provider != ProviderGeneric && provider != ProviderAWS && provider != ProviderBackblaze && provider != ProviderCeph && provider != ProviderWasabi {
+		return "", false, false, fmt.Errorf("bad S3 provider %q: must be generic, aws, backblaze, ceph, or wasabi", raw)
 	}
 	if explicitProvider && inferred != ProviderGeneric && inferred != provider {
 		return "", false, false, fmt.Errorf("s3 provider %q does not match endpoint host %q", provider, host)
@@ -147,6 +148,9 @@ func validateNamedProvider(
 	}
 	if inferredProvider == ProviderGeneric && !explicitProvider {
 		return fmt.Errorf("s3 provider %q endpoint host %q is not recognized", provider, host)
+	}
+	if provider == ProviderAWS {
+		return nil
 	}
 	if cfg.EnableRestore {
 		return &ProviderCompatibilityError{
@@ -204,11 +208,23 @@ func inferProvider(host string) (Provider, string) {
 	if host == "s3.wasabisys.com" {
 		return ProviderWasabi, ""
 	}
+	if host == "s3.amazonaws.com" {
+		return ProviderAWS, ""
+	}
+	for _, suffix := range []string{".amazonaws.com", ".amazonaws.com.cn"} {
+		if strings.HasPrefix(host, "s3.") && strings.HasSuffix(host, suffix) {
+			region := strings.TrimSuffix(strings.TrimPrefix(host, "s3."), suffix)
+			if region != "" && !strings.Contains(region, ".") {
+				return ProviderAWS, region
+			}
+		}
+	}
 	return ProviderGeneric, ""
 }
 
 func providerDomainLookalike(host string) bool {
-	return strings.HasSuffix(host, ".backblazeb2.com") || strings.HasSuffix(host, ".wasabisys.com")
+	return strings.HasSuffix(host, ".backblazeb2.com") || strings.HasSuffix(host, ".wasabisys.com") ||
+		strings.HasSuffix(host, ".amazonaws.com") || strings.HasSuffix(host, ".amazonaws.com.cn")
 }
 
 func dnsCompatibleBucket(bucket string) bool {
@@ -237,6 +253,9 @@ func providerCapabilities(provider Provider) Capabilities {
 	}
 	switch provider {
 	case ProviderGeneric:
+	case ProviderAWS:
+		capabilities.ConditionalCreate = "supported"
+		capabilities.STSRoleAssumption = "supported"
 	case ProviderBackblaze:
 		capabilities.STSRoleAssumption = "unsupported"
 		capabilities.GlacierRestore = false

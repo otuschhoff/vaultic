@@ -63,6 +63,8 @@ type Config struct {
 	// from how it was opened. A single declared backend must resolve to the same
 	// behavior as an empty declaration in a non-hot/cold repository.
 	PlacementBackends []PlacementBackend `json:"placement_backends,omitempty"`
+	// ReadCacheAggregateCapacityBytes caps all read-cache tiers sharing this repository policy.
+	ReadCacheAggregateCapacityBytes uint64 `json:"read_cache_aggregate_capacity_bytes,omitempty"`
 	// StagingBackends names placement backends that mirror authenticated deferred-ingest journals.
 	StagingBackends []string `json:"staging_backends,omitempty"`
 	// StagingQuota bounds deferred jobs while authoritative metadata is unavailable.
@@ -94,6 +96,19 @@ type PlacementBackend struct {
 	ID                   string  `json:"id"`
 	Location             string  `json:"location,omitempty"`
 	Role                 string  `json:"role,omitempty"`
+	ReadCacheTrust       string  `json:"read_cache_trust,omitempty"`
+	ReadCacheAck         bool    `json:"read_cache_acknowledged,omitempty"`
+	ReadCacheBudgetMode  string  `json:"read_cache_budget_mode,omitempty"`
+	ReadCacheReserveFrac float64 `json:"read_cache_reserve_fraction,omitempty"`
+	ReadCacheMinFreeRaw  uint64  `json:"read_cache_min_free_raw_bytes,omitempty"`
+	ReadCacheSafetyRaw   uint64  `json:"read_cache_safety_margin_raw_bytes,omitempty"`
+	ReadCacheMaxRaw      uint64  `json:"read_cache_max_raw_bytes,omitempty"`
+	ReadCacheMaxAgeMS    uint64  `json:"read_cache_telemetry_max_age_ms,omitempty"`
+	ReadCacheGrowBytes   uint64  `json:"read_cache_growth_rate_bytes,omitempty"`
+	ReadCacheHysteresis  uint64  `json:"read_cache_growth_hysteresis_bytes,omitempty"`
+	ReadCacheStableCount uint32  `json:"read_cache_stable_samples_for_growth,omitempty"`
+	ReadCacheFallbackMax uint64  `json:"read_cache_fallback_bytes,omitempty"`
+	ReadCacheRawAmp      float64 `json:"read_cache_raw_amplification,omitempty"`
 	Ingest               *bool   `json:"ingest,omitempty"`
 	ReadEnabled          *bool   `json:"read_enabled,omitempty"`
 	Offsite              bool    `json:"offsite,omitempty"`

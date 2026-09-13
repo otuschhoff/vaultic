@@ -9,7 +9,10 @@ import (
 	"github.com/otuschhoff/vaultic/internal/options"
 )
 
-const defaultConnections = 1
+const (
+	defaultConnections  = 1
+	maximumOperationTTL = 5 * time.Minute
+)
 
 type Config struct {
 	Monitors     string
@@ -35,6 +38,9 @@ func (config Config) validate() error {
 	}
 	if config.OperationTTL <= 0 {
 		return fmt.Errorf("native RADOS operation timeout must be positive")
+	}
+	if config.OperationTTL > maximumOperationTTL {
+		return fmt.Errorf("native RADOS operation timeout must not exceed %s", maximumOperationTTL)
 	}
 	return nil
 }

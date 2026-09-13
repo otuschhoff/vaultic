@@ -47,7 +47,7 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	socket := filepath.Join(env.base, "vaulticdb.sock")
 	daemonConfig := daemon.Options{
 		Socket: socket, RepositoryID: repositoryID(t, env), DaemonPath: daemonPath,
-		DataDir: filepath.Join(env.base, "vaulticdb"), ObjectStore: "local", PersistentDaemon: true,
+		DataDir: filepath.Join(env.base, "vaulticdb"), ObjectStore: "local",
 	}
 	if s3Metadata {
 		daemonConfig.DataDir = ""

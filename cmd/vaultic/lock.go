@@ -32,7 +32,8 @@ type lockOpenOptions struct {
 	AllowNoLock bool
 	// LockFreeRead permits the Alpha lock-free feature to choose LockNone.
 	// It is deliberately false for append writers.
-	LockFreeRead bool
+	LockFreeRead     bool
+	CacheMaintenance bool
 }
 
 func (p LockPolicy) String() string {
@@ -70,7 +71,16 @@ func openWithLockPolicy(
 ) (context.Context, *repository.Repository, func(), error) {
 	return internalcli.OpenRepository(ctx, globalOptions, internalcli.LockPolicy(policy), internalcli.OpenOptions{
 		DryRun: options.DryRun, AllowNoLock: options.AllowNoLock, LockFreeRead: options.LockFreeRead,
+		CacheMaintenance: options.CacheMaintenance,
 	}, printer)
+}
+
+func openWithCacheExclusiveLock(
+	ctx context.Context,
+	globalOptions global.Options,
+	printer vaultic.Printer,
+) (context.Context, *repository.Repository, func(), error) {
+	return openWithLockPolicy(ctx, globalOptions, LockExclusive, lockOpenOptions{CacheMaintenance: true}, printer)
 }
 
 func openWithReadLock(

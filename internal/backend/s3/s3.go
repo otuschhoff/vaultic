@@ -14,6 +14,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -32,14 +33,21 @@ import (
 
 // s3 stores data on an S3 endpoint.
 type s3 struct {
-	client            *minio.Client
-	cfg               Config
-	conditionalCreate string
+	client               *minio.Client
+	cfg                  Config
+	conditionalCreate    string
+	conditionalOverwrite string
+	conditionalProbeMu   sync.Mutex
 	layout.Layout
+}
+
+type conditionalS3 struct {
+	*s3
 }
 
 // make sure that *Backend implements backend.Backend
 var _ backend.Backend = &s3{}
+var _ backend.ConditionalWriter = &conditionalS3{}
 
 var archiveClasses = []string{"GLACIER", "DEEP_ARCHIVE"}
 
@@ -113,7 +121,7 @@ func open(cfg Config, rt http.RoundTripper) (*s3, error) {
 	}
 
 	be := &s3{
-		client: client, cfg: cfg, conditionalCreate: "unverified",
+		client: client, cfg: cfg, conditionalCreate: "unverified", conditionalOverwrite: "unverified",
 		Layout: layout.NewDefaultLayout(cfg.Prefix, path.Join),
 	}
 
@@ -209,7 +217,11 @@ func getCredentials(cfg Config, tr http.RoundTripper, roleArn, stsEndpoint strin
 // Open opens the S3 backend at bucket and region. The bucket is created if it
 // does not exist yet.
 func Open(_ context.Context, cfg Config, rt http.RoundTripper, _ func(string, ...any)) (backend.Backend, error) {
-	return open(cfg, rt)
+	be, err := open(cfg, rt)
+	if err != nil {
+		return nil, err
+	}
+	return withConditionalWriter(be), nil
 }
 
 // Create opens the S3 backend at bucket and region and creates the bucket if
@@ -239,7 +251,18 @@ func Create(ctx context.Context, cfg Config, rt http.RoundTripper, _ func(string
 		}
 	}
 
-	return be, nil
+	return withConditionalWriter(be), nil
+}
+
+func withConditionalWriter(be *s3) backend.Backend {
+	if !supportsConditionalWriter(Provider(be.cfg.Provider)) {
+		return be
+	}
+	return &conditionalS3{s3: be}
+}
+
+func supportsConditionalWriter(provider Provider) bool {
+	return provider != ProviderGeneric
 }
 
 // isAccessDenied returns true if the error is caused by Access Denied.
@@ -273,6 +296,9 @@ func (be *s3) IsPermanentError(err error) bool {
 
 func (be *s3) Properties() backend.Properties {
 	capabilities := providerCapabilities(Provider(be.cfg.Provider))
+	be.conditionalProbeMu.Lock()
+	conditionalCreate := be.conditionalCreate
+	be.conditionalProbeMu.Unlock()
 	return backend.Properties{
 		Connections:      be.cfg.Connections,
 		HasAtomicReplace: true,
@@ -281,7 +307,7 @@ func (be *s3) Properties() backend.Properties {
 			Bucket: be.cfg.Bucket, PrefixSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(be.cfg.Prefix))),
 			BucketLookup: be.cfg.BucketLookup, SignatureV4: capabilities.SignatureV4,
 			MultipartUpload: capabilities.MultipartUpload, RangeReads: capabilities.RangeReads,
-			ListObjectsV2: capabilities.ListObjectsV2, ConditionalCreate: be.conditionalCreate,
+			ListObjectsV2: capabilities.ListObjectsV2, ConditionalCreate: conditionalCreate,
 			VersionRetention: capabilities.VersionRetention, ObjectImmutability: capabilities.ObjectImmutability,
 			STSRoleAssumption: capabilities.STSRoleAssumption, GlacierRestore: capabilities.GlacierRestore,
 		},
@@ -306,9 +332,21 @@ func (be *s3) ProbeStorageCapabilities(ctx context.Context) (*backend.StoragePro
 		profile := be.Properties().StorageProfile
 		return profile, nil
 	}
+	if err := be.probeConditionalWrites(ctx); err != nil {
+		return nil, err
+	}
+	return be.Properties().StorageProfile, nil
+}
+
+func (be *s3) probeConditionalWrites(ctx context.Context) error {
+	be.conditionalProbeMu.Lock()
+	defer be.conditionalProbeMu.Unlock()
+	if be.conditionalCreate != "unverified" && be.conditionalOverwrite != "unverified" {
+		return nil
+	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
-		return nil, err
+		return err
 	}
 	object := path.Join(be.cfg.Prefix, ".vaultic-capability-probe-"+hex.EncodeToString(random))
 	defer func() {
@@ -328,9 +366,10 @@ func (be *s3) ProbeStorageCapabilities(ctx context.Context) (*backend.StoragePro
 		response := minio.ToErrorResponse(err)
 		if response.Code == "NotImplemented" || response.Code == "UnsupportedOperation" || response.Code == "InvalidRequest" {
 			be.conditionalCreate = "unsupported"
-			return be.Properties().StorageProfile, nil
+			be.conditionalOverwrite = "unsupported"
+			return nil
 		}
-		return nil, fmt.Errorf("probe conditional create: %w", be.providerError(err))
+		return fmt.Errorf("probe conditional create: %w", be.providerError(err))
 	}
 	err := put("second")
 	if err == nil {
@@ -338,11 +377,48 @@ func (be *s3) ProbeStorageCapabilities(ctx context.Context) (*backend.StoragePro
 	} else {
 		response := minio.ToErrorResponse(err)
 		if response.Code != "PreconditionFailed" && response.Code != "ConditionalRequestConflict" {
-			return nil, fmt.Errorf("probe conditional create conflict: %w", be.providerError(err))
+			return fmt.Errorf("probe conditional create conflict: %w", be.providerError(err))
 		}
 		be.conditionalCreate = "strict"
 	}
-	return be.Properties().StorageProfile, nil
+	coreClient := minio.Core{Client: be.client}
+	reader, objectInfo, _, err := coreClient.GetObject(ctx, be.cfg.Bucket, object, minio.GetObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("probe conditional overwrite read: %w", be.providerError(err))
+	}
+	if closeErr := reader.Close(); closeErr != nil {
+		return fmt.Errorf("probe conditional overwrite close: %w", closeErr)
+	}
+	if objectInfo.ETag == "" {
+		be.conditionalOverwrite = "unsupported"
+		return nil
+	}
+	unconditional := minio.PutObjectOptions{ContentType: "application/octet-stream", SendContentMd5: true}
+	if _, err := be.client.PutObject(ctx, be.cfg.Bucket, object, bytes.NewReader([]byte("current")), int64(len("current")), unconditional); err != nil {
+		return fmt.Errorf("probe conditional overwrite mutation: %w", be.providerError(err))
+	}
+	stale := minio.PutObjectOptions{ContentType: "application/octet-stream", SendContentMd5: true}
+	stale.SetMatchETag(objectInfo.ETag)
+	_, err = be.client.PutObject(ctx, be.cfg.Bucket, object, bytes.NewReader([]byte("stale")), int64(len("stale")), stale)
+	if err == nil {
+		be.conditionalOverwrite = "unsupported"
+		return nil
+	}
+	if unsupportedConditionalWrite(err) {
+		be.conditionalOverwrite = "unsupported"
+		return nil
+	}
+	if !isConditionalWriteConflict(err) {
+		return fmt.Errorf("probe conditional overwrite conflict: %w", be.providerError(err))
+	}
+	be.conditionalOverwrite = "strict"
+	return nil
+}
+
+func (be *s3) strictConditionalOverwrite() bool {
+	be.conditionalProbeMu.Lock()
+	defer be.conditionalProbeMu.Unlock()
+	return be.conditionalOverwrite == "strict"
 }
 
 func classifyProviderError(provider string, response minio.ErrorResponse) error {
@@ -704,4 +780,122 @@ func (be *s3) waitForRestore(ctx context.Context, filename string) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func (be *conditionalS3) CompareAndSwap(ctx context.Context, h backend.Handle, expected []byte, replacement []byte) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
+	objName := be.Filename(h)
+	putOptions := minio.PutObjectOptions{ContentType: "application/octet-stream", SendContentMd5: true}
+	if be.useStorageClass(h) {
+		putOptions.StorageClass = be.cfg.StorageClass
+	}
+
+	//nolint:nestif // Create-only CAS must distinguish unsupported writes, conflicts, and readback failures.
+	if expected == nil {
+		putOptions.SetMatchETagExcept("*")
+		_, err := be.client.PutObject(ctx, be.cfg.Bucket, objName, bytes.NewReader(replacement), int64(len(replacement)), putOptions)
+		if err == nil {
+			return nil, true, nil
+		}
+		if unsupportedConditionalWrite(err) {
+			return nil, false, backend.ErrConditionalWriteUnsupported
+		}
+		if !isConditionalWriteConflict(err) {
+			return nil, false, errors.Wrap(be.providerError(err), "client.PutObject")
+		}
+		current, readErr := loadAll(ctx, be.s3, h)
+		if readErr != nil {
+			if be.IsNotExist(readErr) {
+				return nil, false, nil
+			}
+			return nil, false, readErr
+		}
+		return current, false, nil
+	}
+	if err := be.probeConditionalWrites(ctx); err != nil {
+		return nil, false, err
+	}
+	if !be.strictConditionalOverwrite() {
+		return nil, false, backend.ErrConditionalWriteUnsupported
+	}
+
+	current, token, found, err := be.loadCurrentWithToken(ctx, h)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	if !bytes.Equal(current, expected) {
+		return current, false, nil
+	}
+	if token == "" {
+		return nil, false, backend.ErrConditionalWriteUnsupported
+	}
+
+	putOptions.SetMatchETag(token)
+	_, err = be.client.PutObject(ctx, be.cfg.Bucket, objName, bytes.NewReader(replacement), int64(len(replacement)), putOptions)
+	if err == nil {
+		return append([]byte{}, replacement...), true, nil
+	}
+	if unsupportedConditionalWrite(err) {
+		return nil, false, backend.ErrConditionalWriteUnsupported
+	}
+	if !isConditionalWriteConflict(err) {
+		return nil, false, errors.Wrap(be.providerError(err), "client.PutObject")
+	}
+	conflictCurrent, readErr := loadAll(ctx, be.s3, h)
+	if readErr != nil {
+		if be.IsNotExist(readErr) {
+			return nil, false, nil
+		}
+		return nil, false, readErr
+	}
+	return conflictCurrent, false, nil
+}
+
+func (be *conditionalS3) loadCurrentWithToken(ctx context.Context, h backend.Handle) ([]byte, string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", false, err
+	}
+	coreClient := minio.Core{Client: be.client}
+	reader, object, _, err := coreClient.GetObject(ctx, be.cfg.Bucket, be.Filename(h), minio.GetObjectOptions{})
+	if err != nil {
+		if be.IsNotExist(err) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, errors.Wrap(be.providerError(err), "client.GetObject")
+	}
+	defer func() { _ = reader.Close() }() // The read result takes precedence over closing a response body.
+	current, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, "", false, errors.Wrap(be.providerError(err), "client.GetObject read")
+	}
+	return current, object.ETag, true, nil
+}
+
+func isConditionalWriteConflict(err error) bool {
+	response := minio.ToErrorResponse(err)
+	return response.Code == "PreconditionFailed" || response.Code == "ConditionalRequestConflict"
+}
+
+func unsupportedConditionalWrite(err error) bool {
+	response := minio.ToErrorResponse(err)
+	return response.Code == "NotImplemented" || response.Code == "UnsupportedOperation" || response.Code == "InvalidRequest"
+}
+
+func loadAll(ctx context.Context, be backend.Backend, h backend.Handle) ([]byte, error) {
+	var payload []byte
+	err := be.Load(ctx, h, 0, 0, func(reader io.Reader) error {
+		var readErr error
+		payload, readErr = io.ReadAll(reader)
+		return readErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
 }

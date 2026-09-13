@@ -1,6 +1,7 @@
 package vaultic
 
 import (
+	"math"
 	"path"
 	"strings"
 
@@ -54,6 +55,7 @@ const (
 	DefaultPackGrowFactor    = 32
 	DefaultMinPackToleratePC = 30
 	DefaultMaxPackToleratePC = 0 // 0 means larger packs are always tolerated
+	MaxReadCacheChunkBytes   = uint64(1 << 30)
 )
 
 // packSizer resolves a (size, growfactor, sizeLimit) triple with defaults.
@@ -198,6 +200,7 @@ func (c Config) ValidateExtensions() error {
 		}
 	}
 	seenBackends := map[string]struct{}{}
+	cephManagedReadCaches := 0
 	for _, backend := range c.PlacementBackends {
 		if backend.ID == "" {
 			return errors.New("placement backend id must not be empty")
@@ -208,6 +211,15 @@ func (c Config) ValidateExtensions() error {
 		seenBackends[backend.ID] = struct{}{}
 		if backend.Location != "" && strings.TrimSpace(backend.Location) == "" {
 			return errors.Errorf("placement backend %q has an empty location", backend.ID)
+		}
+		if err := validatePlacementBackendReadCache(backend); err != nil {
+			return errors.Errorf("placement backend %q: %w", backend.ID, err)
+		}
+		if backend.Role == "read-cache" && strings.EqualFold(strings.TrimSpace(backend.ReadCacheBudgetMode), "ceph-free-space") {
+			cephManagedReadCaches++
+			if cephManagedReadCaches > 1 {
+				return errors.New("multiple ceph-free-space read-cache backends require independent capacity controllers")
+			}
 		}
 		if (backend.Ingest == nil || *backend.Ingest) && backend.ReadEnabled != nil && !*backend.ReadEnabled {
 			return errors.Errorf("placement backend %q cannot enable ingest while read_enabled is false", backend.ID)
@@ -228,6 +240,9 @@ func (c Config) ValidateExtensions() error {
 		}
 		if placement == nil {
 			return errors.Errorf("staging backend %q is not a placement backend", id)
+		}
+		if placement.Role == "read-cache" {
+			return errors.Errorf("staging backend %q must not use the disposable read-cache role", id)
 		}
 		if placement.Ingest != nil && !*placement.Ingest || placement.ReadEnabled != nil && !*placement.ReadEnabled {
 			return errors.Errorf("staging backend %q must be ingest and read enabled", id)
@@ -255,5 +270,62 @@ func checkPack(name string, size, limit uint64) error {
 	if size != 0 && limit != 0 && size > limit {
 		return errors.Errorf("%s pack size (%d) exceeds %s pack size limit (%d)", name, size, name, limit)
 	}
+	return nil
+}
+
+func validatePlacementBackendReadCache(backend PlacementBackend) error {
+	role := strings.ToLower(strings.TrimSpace(backend.Role))
+	if backend.Role != role {
+		return errors.Errorf("placement role %q must use canonical lowercase spelling without surrounding whitespace", backend.Role)
+	}
+	switch role {
+	case "", "metadata", "primary", "archival", "cache", "read-cache":
+	default:
+		return errors.Errorf("unsupported role %q", backend.Role)
+	}
+	if role == "read-cache" && backend.TargetPackSizeBytes != 0 {
+		if backend.TargetPackSizeBytes > uint64(math.MaxInt) {
+			return errors.Errorf("target_pack_size_bytes %d exceeds this platform's integer limit", backend.TargetPackSizeBytes)
+		}
+		if backend.TargetPackSizeBytes > MaxReadCacheChunkBytes {
+			return errors.Errorf(
+				"target_pack_size_bytes %d exceeds the practical read-cache maximum of %d bytes (1 GiB)",
+				backend.TargetPackSizeBytes, MaxReadCacheChunkBytes,
+			)
+		}
+	}
+
+	trust := strings.ToLower(strings.TrimSpace(backend.ReadCacheTrust))
+	switch trust {
+	case "", "encrypted-only":
+	case "plaintext-allowed":
+		if !backend.ReadCacheAck {
+			return errors.New("plaintext-allowed trust requires read_cache_acknowledged=true")
+		}
+	default:
+		return errors.Errorf("unsupported read_cache_trust %q", backend.ReadCacheTrust)
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(backend.ReadCacheBudgetMode))
+	switch mode {
+	case "", "fixed":
+	case "ceph-free-space":
+		if role != "read-cache" {
+			return errors.New("read_cache_budget_mode ceph-free-space requires the read-cache role")
+		}
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(backend.Location)), "rados:") {
+			return errors.New("read_cache_budget_mode ceph-free-space requires a rados: location")
+		}
+	default:
+		return errors.Errorf("unsupported read_cache_budget_mode %q", backend.ReadCacheBudgetMode)
+	}
+
+	if backend.ReadCacheReserveFrac < 0 || backend.ReadCacheReserveFrac > 1 {
+		return errors.Errorf("read_cache_reserve_fraction must be in [0,1], got %v", backend.ReadCacheReserveFrac)
+	}
+	if backend.ReadCacheRawAmp != 0 && backend.ReadCacheRawAmp < 1 {
+		return errors.Errorf("read_cache_raw_amplification must be >= 1 when set, got %v", backend.ReadCacheRawAmp)
+	}
+
 	return nil
 }

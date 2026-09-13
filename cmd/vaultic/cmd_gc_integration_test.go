@@ -54,7 +54,7 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 	socket := daemon.DefaultSocket(repositoryID(t, env))
 	client, err := daemon.Ensure(context.Background(), daemon.Options{
 		Socket: socket, RepositoryID: repositoryID(t, env), DaemonPath: daemonPath,
-		DataDir: filepath.Join(env.base, "vaulticdb"), ObjectStore: "local", PersistentDaemon: true,
+		DataDir: filepath.Join(env.base, "vaulticdb"), ObjectStore: "local",
 	})
 	if err != nil {
 		t.Fatal(err)

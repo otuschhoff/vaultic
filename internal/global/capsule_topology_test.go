@@ -6,12 +6,14 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
+	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/topology"
 )
 
@@ -53,6 +55,19 @@ func TestStorageCredentialLifetime(t *testing.T) {
 	}
 }
 
+func TestCapsuleBackendStorageTierSeparatesReadOnlyOriginsFromWritableCache(t *testing.T) {
+	requested := string(topology.StorageRead)
+	origin := topology.PackBackend{Role: topology.RolePrimary}
+	cache := topology.PackBackend{Role: repository.PlacementRoleReadCache}
+
+	if got := capsuleBackendStorageTier(origin, requested); got != requested {
+		t.Fatalf("origin storage tier = %q, want %q", got, requested)
+	}
+	if got := capsuleBackendStorageTier(cache, requested); got != string(topology.StorageMaintain) {
+		t.Fatalf("cache storage tier = %q, want %q", got, topology.StorageMaintain)
+	}
+}
+
 func TestRenewableBackendFailsClosedAtExpiry(t *testing.T) {
 	ctx := context.Background()
 	storage := mem.New()
@@ -84,6 +99,65 @@ func TestRenewableBackendStopsWritesBeforeReads(t *testing.T) {
 	}
 	if _, err := renewable.Stat(ctx, handle); err != nil {
 		t.Fatalf("Stat() error = %v, want read to remain admitted", err)
+	}
+}
+
+func TestRenewableBackendForwardsConditionalWriter(t *testing.T) {
+	ctx := context.Background()
+	storage := mem.New()
+	renewable := newRenewableBackend(storage, time.Now().Add(time.Hour), time.Hour)
+	writer := backend.AsCapability[backend.ConditionalWriter](renewable)
+	if writer == nil {
+		t.Fatal("renewable backend did not expose conditional writer")
+	}
+	handle := backend.Handle{Type: backend.StagingFile, Name: "coord/control.json"}
+	current, swapped, err := writer.CompareAndSwap(ctx, handle, nil, []byte("first"))
+	if err != nil || !swapped || current != nil {
+		t.Fatalf("create-if-missing = (%q, %v, %v)", current, swapped, err)
+	}
+	current, swapped, err = writer.CompareAndSwap(ctx, handle, []byte("first"), []byte("second"))
+	if err != nil || !swapped || string(current) != "second" {
+		t.Fatalf("update = (%q, %v, %v)", current, swapped, err)
+	}
+}
+
+func TestRenewableBackendConditionalWriterFailClosed(t *testing.T) {
+	ctx := context.Background()
+	storage := &storageWithoutConditionalWriter{Backend: mem.New()}
+	renewable := newRenewableBackend(storage, time.Now().Add(time.Hour), time.Hour)
+	writer := backend.AsCapability[backend.ConditionalWriter](renewable)
+	if writer == nil {
+		t.Fatal("renewable backend did not expose conditional writer")
+	}
+	_, _, err := writer.CompareAndSwap(
+		ctx,
+		backend.Handle{Type: backend.StagingFile, Name: "coord/control.json"},
+		nil,
+		[]byte("first"),
+	)
+	if !errors.Is(err, backend.ErrConditionalWriteUnsupported) {
+		t.Fatalf("CompareAndSwap() error = %v, want ErrConditionalWriteUnsupported", err)
+	}
+}
+
+func TestRenewableBackendReadAuthorizationCapability(t *testing.T) {
+	storage := mem.New()
+	active := newRenewableBackend(storage, time.Now().Add(time.Minute), time.Hour)
+	auth := backend.AsCapability[backend.ReadAuthorization](active)
+	if auth == nil {
+		t.Fatal("renewable backend did not expose read authorization capability")
+	}
+	if !auth.ReadAuthorizedNow() {
+		t.Fatal("expected active renewable backend to be read-authorized")
+	}
+
+	expired := newRenewableBackend(storage, time.Now().Add(-time.Second), time.Hour)
+	expiredAuth := backend.AsCapability[backend.ReadAuthorization](expired)
+	if expiredAuth == nil {
+		t.Fatal("expired renewable backend did not expose read authorization capability")
+	}
+	if expiredAuth.ReadAuthorizedNow() {
+		t.Fatal("expired renewable backend should not be read-authorized")
 	}
 }
 
@@ -124,6 +198,67 @@ func TestRenewableBackendSwapDrainsInflightOperation(t *testing.T) {
 	}
 	if err := <-swapDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+type closeErrorBackend struct {
+	backend.Backend
+	closeErr   error
+	closeGate  chan struct{}
+	closeCalls atomic.Uint64
+}
+
+func (be *closeErrorBackend) Close() error {
+	be.closeCalls.Add(1)
+	if be.closeGate != nil {
+		<-be.closeGate
+	}
+	return be.closeErr
+}
+
+func TestRenewableBackendCloseReturnsFirstErrorOnRepeatedCalls(t *testing.T) {
+	closeErr := errors.New("close failed")
+	storage := &closeErrorBackend{Backend: mem.New(), closeErr: closeErr}
+	renewable := newRenewableBackend(storage, time.Now().Add(time.Hour), time.Hour)
+
+	if err := renewable.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("first Close() error = %v, want %v", err, closeErr)
+	}
+	if err := renewable.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("second Close() error = %v, want first close error %v", err, closeErr)
+	}
+	if calls := storage.closeCalls.Load(); calls != 1 {
+		t.Fatalf("backend Close() calls = %d, want 1", calls)
+	}
+}
+
+func TestRenewableBackendCloseConcurrentCallsReturnFirstError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	closeGate := make(chan struct{})
+	storage := &closeErrorBackend{Backend: mem.New(), closeErr: closeErr, closeGate: closeGate}
+	renewable := newRenewableBackend(storage, time.Now().Add(time.Hour), time.Hour)
+
+	const callers = 8
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- renewable.Close()
+		}()
+	}
+	close(closeGate)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("concurrent Close() error = %v, want first close error %v", err, closeErr)
+		}
+	}
+	if calls := storage.closeCalls.Load(); calls != 1 {
+		t.Fatalf("backend Close() calls = %d, want 1", calls)
 	}
 }
 
@@ -173,6 +308,10 @@ func assertBackendNames(
 			t.Fatalf("names for %v = %v, want %v", fileType, actual, expected)
 		}
 	}
+}
+
+type storageWithoutConditionalWriter struct {
+	backend.Backend
 }
 
 func TestApplyTopologyOverridesRestrictsChangesToLocalDataDir(t *testing.T) {

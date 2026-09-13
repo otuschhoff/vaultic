@@ -1,6 +1,7 @@
 package rados
 
 import (
+	"bytes"
 	"context"
 	stderrors "errors"
 	"io"
@@ -62,6 +63,30 @@ func (driver *memoryDriver) put(ctx context.Context, name string, data []byte, e
 	return nil
 }
 
+func (driver *memoryDriver) compareAndSwap(ctx context.Context, name string, expected []byte, replacement []byte) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	current, exists := driver.objects[name]
+	if expected == nil {
+		if exists {
+			return append([]byte(nil), current...), false, nil
+		}
+		driver.objects[name] = append([]byte(nil), replacement...)
+		return nil, true, nil
+	}
+	if !exists {
+		return nil, false, nil
+	}
+	if !bytes.Equal(current, expected) {
+		return append([]byte(nil), current...), false, nil
+	}
+	driver.objects[name] = append([]byte(nil), replacement...)
+	return append([]byte(nil), replacement...), true, nil
+}
+
 func (driver *memoryDriver) remove(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -74,6 +99,8 @@ func (driver *memoryDriver) remove(ctx context.Context, name string) error {
 	delete(driver.objects, name)
 	return nil
 }
+
+func (*memoryDriver) reclamationPending(context.Context, string) (bool, error) { return false, nil }
 
 func (driver *memoryDriver) list(ctx context.Context, prefix string) ([]objectInfo, error) {
 	driver.mu.Lock()
@@ -88,6 +115,10 @@ func (driver *memoryDriver) list(ctx context.Context, prefix string) ([]objectIn
 }
 
 func (*memoryDriver) close() error { return nil }
+
+func (*memoryDriver) capacity(context.Context) (backend.CapacityTelemetrySample, error) {
+	return backend.CapacityTelemetrySample{}, ErrUnsupported
+}
 
 func TestSaveRetriesAreIdempotentButConflictsFail(t *testing.T) {
 	store := newMemoryBackend()
@@ -152,5 +183,42 @@ func TestOpenWithoutNativeFeatureFailsClearly(t *testing.T) {
 	_, err := Open(t.Context(), config)
 	if !stderrors.Is(err, ErrUnsupported) {
 		t.Fatalf("Open error = %v, want ErrUnsupported", err)
+	}
+}
+
+func TestSampleCapacityUnsupportedForNonNativeDriver(t *testing.T) {
+	store := newMemoryBackend()
+	_, err := store.SampleCapacity(t.Context())
+	if !stderrors.Is(err, ErrUnsupported) {
+		t.Fatalf("SampleCapacity error = %v, want ErrUnsupported", err)
+	}
+}
+
+func TestCompareAndSwapConformance(t *testing.T) {
+	store := newMemoryBackend()
+	writer := backend.AsCapability[backend.ConditionalWriter](store)
+	if writer == nil {
+		t.Fatal("rados backend does not expose conditional writer")
+	}
+	handle := backend.Handle{Type: backend.StagingFile, Name: "control/policy.json"}
+
+	current, swapped, err := writer.CompareAndSwap(t.Context(), handle, nil, []byte("first"))
+	if err != nil || !swapped || current != nil {
+		t.Fatalf("create-if-missing = (%q, %v, %v)", current, swapped, err)
+	}
+
+	current, swapped, err = writer.CompareAndSwap(t.Context(), handle, nil, []byte("second"))
+	if err != nil || swapped || string(current) != "first" {
+		t.Fatalf("create conflict = (%q, %v, %v)", current, swapped, err)
+	}
+
+	current, swapped, err = writer.CompareAndSwap(t.Context(), handle, []byte("mismatch"), []byte("second"))
+	if err != nil || swapped || string(current) != "first" {
+		t.Fatalf("update mismatch = (%q, %v, %v)", current, swapped, err)
+	}
+
+	current, swapped, err = writer.CompareAndSwap(t.Context(), handle, []byte("first"), []byte("second"))
+	if err != nil || !swapped || string(current) != "second" {
+		t.Fatalf("update success = (%q, %v, %v)", current, swapped, err)
 	}
 }

@@ -25,6 +25,8 @@ type renewableBackend struct {
 	validUntil    time.Time
 	writeDeadline time.Time
 	closed        bool
+	closeDone     chan struct{}
+	closeErr      error
 }
 
 func newRenewableBackend(current backend.Backend, validUntil time.Time, ttl time.Duration) *renewableBackend {
@@ -49,6 +51,12 @@ func (r *renewableBackend) begin(write bool) (backend.Backend, error) {
 		return nil, errStorageCredentialExpired
 	}
 	return r.current, nil
+}
+
+func (r *renewableBackend) ReadAuthorizedNow() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.closed && time.Now().Before(r.validUntil)
 }
 
 func (r *renewableBackend) end() { r.mu.RUnlock() }
@@ -89,12 +97,27 @@ func (r *renewableBackend) Remove(ctx context.Context, handle backend.Handle) er
 
 func (r *renewableBackend) Close() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return nil
+	if done := r.closeDone; done != nil {
+		r.mu.Unlock()
+		<-done
+		r.mu.RLock()
+		err := r.closeErr
+		r.mu.RUnlock()
+		return err
 	}
 	r.closed = true
-	return r.current.Close()
+	r.closeDone = make(chan struct{})
+	done := r.closeDone
+	current := r.current
+	r.mu.Unlock()
+
+	err := current.Close()
+
+	r.mu.Lock()
+	r.closeErr = err
+	close(done)
+	r.mu.Unlock()
+	return err
 }
 
 func (r *renewableBackend) Save(ctx context.Context, handle backend.Handle, reader backend.RewindReader) error {
@@ -173,6 +196,19 @@ func (r *renewableBackend) WarmupWait(ctx context.Context, handles []backend.Han
 	}
 	defer r.end()
 	return current.WarmupWait(ctx, handles)
+}
+
+func (r *renewableBackend) CompareAndSwap(ctx context.Context, handle backend.Handle, expected []byte, replacement []byte) ([]byte, bool, error) {
+	current, err := r.begin(true)
+	if err != nil {
+		return nil, false, err
+	}
+	defer r.end()
+	writer := backend.AsCapability[backend.ConditionalWriter](current)
+	if writer == nil {
+		return nil, false, backend.ErrConditionalWriteUnsupported
+	}
+	return writer.CompareAndSwap(ctx, handle, expected, replacement)
 }
 
 type storageCredentialSlot struct {

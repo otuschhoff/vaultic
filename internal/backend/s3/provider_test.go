@@ -30,6 +30,21 @@ func TestNormalizeConfigProviderProfiles(t *testing.T) {
 			}, provider: ProviderGeneric, region: "region", lookup: "auto",
 		},
 		{
+			name: "infer AWS global", cfg: Config{
+				Endpoint: "s3.amazonaws.com", Bucket: "bucket",
+			}, provider: ProviderAWS, lookup: "dns",
+		},
+		{
+			name: "infer AWS regional", cfg: Config{
+				Endpoint: "s3.eu-west-2.amazonaws.com", Bucket: "bucket",
+			}, provider: ProviderAWS, region: "eu-west-2", lookup: "dns",
+		},
+		{
+			name: "infer AWS China regional", cfg: Config{
+				Endpoint: "s3.cn-north-1.amazonaws.com.cn", Bucket: "bucket",
+			}, provider: ProviderAWS, region: "cn-north-1", lookup: "dns",
+		},
+		{
 			name: "explicit generic suppresses inference", cfg: Config{
 				Provider: "generic", Endpoint: "s3.us-west-004.backblazeb2.com", Bucket: "bucket", Region: "custom",
 			}, provider: ProviderGeneric, region: "custom", lookup: "auto",
@@ -113,6 +128,25 @@ func TestNormalizeConfigProviderProfiles(t *testing.T) {
 				t.Fatal("NormalizeConfig() cleared explicit ListObjectsV1")
 			}
 		})
+	}
+}
+
+func TestAWSProviderConditionalWriterCapabilityIsLimitedToRecognizedHosts(t *testing.T) {
+	for _, endpoint := range []string{"s3.amazonaws.com", "s3.us-east-2.amazonaws.com"} {
+		cfg, profile, err := NormalizeConfig(Config{Endpoint: endpoint, Bucket: "bucket"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if profile.Provider != ProviderAWS || !supportsConditionalWriter(Provider(cfg.Provider)) {
+			t.Fatalf("endpoint %q did not retain AWS conditional writer capability: %#v", endpoint, profile)
+		}
+	}
+	cfg, profile, err := NormalizeConfig(Config{Endpoint: "objects.example", Bucket: "bucket"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != ProviderGeneric || supportsConditionalWriter(Provider(cfg.Provider)) {
+		t.Fatalf("unknown endpoint unexpectedly gained conditional writer capability: %#v", profile)
 	}
 }
 

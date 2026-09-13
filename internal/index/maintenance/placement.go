@@ -451,6 +451,9 @@ func derivedTier(placements placementSet, backends map[uint64]PlacementBackend, 
 			unknownLive++
 			continue
 		}
+		if resolved.Role == "read-cache" {
+			continue
+		}
 		live = append(live, resolved)
 	}
 	if len(live) == 0 && unknownLive == 0 {
@@ -495,6 +498,9 @@ func durable(placements placementSet, backends map[uint64]PlacementBackend, poli
 		}
 		backend, ok := backends[backendHash]
 		if !ok {
+			continue
+		}
+		if backend.Role == "read-cache" {
 			continue
 		}
 		copies++

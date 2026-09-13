@@ -113,8 +113,9 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 	}()
 	var primary backend.Backend
 	for _, declared := range document.PackBackends {
+		backendStorageTier := capsuleBackendStorageTier(declared, storageTier)
 		openedBackend, _, openErr := openCapsulePackBackend(
-			ctx, manager, globalOptions, printer, declared, storageTier,
+			ctx, manager, globalOptions, printer, declared, backendStorageTier,
 		)
 		if openErr != nil {
 			return capsuleTopologyBackends{}, fmt.Errorf("open capsule backend %q: %w", declared.ID, openErr)
@@ -149,6 +150,13 @@ func openCapsuleTopology(ctx context.Context, globalOptions Options, printer vau
 		document: document, primary: managedPrimary, primaryURL: primaryURL,
 		placements: placements, client: client, manager: manager,
 	}, nil
+}
+
+func capsuleBackendStorageTier(declared topology.PackBackend, requested string) string {
+	if declared.Role == repository.PlacementRoleReadCache {
+		return string(topology.StorageMaintain)
+	}
+	return requested
 }
 
 type credentialManagedBackend struct {

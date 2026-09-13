@@ -209,14 +209,24 @@ func (r *Repository) Delete(ctx context.Context) error {
 
 // Close closes the repository by closing the backend.
 func (r *Repository) Close() error {
-	errs := []error{r.Engine().Close(), r.be.Close()}
-	for _, closer := range r.ownedClosers {
-		errs = append(errs, closer.Close())
-	}
-	for _, placement := range r.ownedPlacementBackends {
-		errs = append(errs, placement.Close())
-	}
-	return errors.Join(errs...)
+	r.closeOnce.Do(func() {
+		r.readCacheMu.Lock()
+		manager := r.readCache
+		r.readCacheMu.Unlock()
+		if manager != nil {
+			manager.stopCapacityWorker()
+			manager.stopPolicyWorker()
+		}
+		errs := []error{r.Engine().Close(), r.be.Close()}
+		for _, closer := range r.ownedClosers {
+			errs = append(errs, closer.Close())
+		}
+		for _, placement := range r.ownedPlacementBackends {
+			errs = append(errs, placement.Close())
+		}
+		r.closeErr = errors.Join(errs...)
+	})
+	return r.closeErr
 }
 
 // saveBlob saves a blob of type t into the repository.

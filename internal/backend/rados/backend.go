@@ -34,8 +34,11 @@ type driver interface {
 	read(context.Context, string, int64, int) ([]byte, error)
 	stat(context.Context, string) (int64, error)
 	put(context.Context, string, []byte, bool) error
+	compareAndSwap(context.Context, string, []byte, []byte) ([]byte, bool, error)
 	remove(context.Context, string) error
+	reclamationPending(context.Context, string) (bool, error)
 	list(context.Context, string) ([]objectInfo, error)
+	capacity(context.Context) (backend.CapacityTelemetrySample, error)
 	close() error
 }
 
@@ -44,9 +47,13 @@ type Backend struct {
 	driver      driver
 	connections uint
 	prefix      string
+	opTTL       time.Duration
 }
 
 var _ backend.Backend = (*Backend)(nil)
+var _ backend.ConditionalWriter = (*Backend)(nil)
+var _ backend.CapacityTelemetry = (*Backend)(nil)
+var _ backend.ReclamationStatus = (*Backend)(nil)
 
 func Open(ctx context.Context, config Config) (*Backend, error) {
 	if config.Connections == 0 {
@@ -68,7 +75,7 @@ func Open(ctx context.Context, config Config) (*Backend, error) {
 func newBackend(config Config, native driver) *Backend {
 	return &Backend{
 		Layout: layout.NewDefaultLayout(strings.Trim(config.Prefix, "/"), path.Join),
-		driver: native, connections: config.Connections, prefix: strings.Trim(config.Prefix, "/") + "/",
+		driver: native, connections: config.Connections, prefix: strings.Trim(config.Prefix, "/") + "/", opTTL: config.OperationTTL,
 	}
 }
 
@@ -108,6 +115,13 @@ func (store *Backend) Save(ctx context.Context, handle backend.Handle, reader ba
 	return err
 }
 
+func (store *Backend) CompareAndSwap(ctx context.Context, handle backend.Handle, expected []byte, replacement []byte) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return store.driver.compareAndSwap(ctx, store.Filename(handle), expected, replacement)
+}
+
 func (store *Backend) Load(ctx context.Context, handle backend.Handle, length int, offset int64, consume func(io.Reader) error) error {
 	return util.DefaultLoad(ctx, handle, length, offset, store.openReader, consume)
 }
@@ -137,6 +151,10 @@ func (store *Backend) Remove(ctx context.Context, handle backend.Handle) error {
 		return nil
 	}
 	return err
+}
+
+func (store *Backend) ReclamationPending(ctx context.Context, handle backend.Handle) (bool, error) {
+	return store.driver.reclamationPending(ctx, store.Filename(handle))
 }
 
 func (store *Backend) List(ctx context.Context, fileType backend.FileType, consume func(backend.FileInfo) error) error {
@@ -188,3 +206,19 @@ func (store *Backend) Warmup(context.Context, []backend.Handle) ([]backend.Handl
 }
 
 func (store *Backend) WarmupWait(context.Context, []backend.Handle) error { return nil }
+
+func (store *Backend) SampleCapacity(ctx context.Context) (backend.CapacityTelemetrySample, error) {
+	if store.driver == nil {
+		return backend.CapacityTelemetrySample{}, ErrUnsupported
+	}
+	timeout := store.opTTL
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	if timeout > 15*time.Second {
+		timeout = 15 * time.Second
+	}
+	sampleCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return store.driver.capacity(sampleCtx)
+}

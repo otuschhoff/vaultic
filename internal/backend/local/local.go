@@ -112,9 +112,14 @@ func (b *Local) IsPermanentError(err error) bool {
 }
 
 // Save stores data in the backend at the handle.
-func (b *Local) Save(_ context.Context, h backend.Handle, reader backend.RewindReader) (err error) {
+func (b *Local) Save(ctx context.Context, h backend.Handle, reader backend.RewindReader) (err error) {
 	finalname := b.Filename(h)
 	dir := filepath.Dir(finalname)
+	release, err := b.lockMutation(ctx, finalname)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	defer func() {
 		// Mark non-retriable errors as such
@@ -258,8 +263,13 @@ func (b *Local) Stat(_ context.Context, h backend.Handle) (backend.FileInfo, err
 }
 
 // Remove removes the blob with the given name and type.
-func (b *Local) Remove(_ context.Context, h backend.Handle) error {
+func (b *Local) Remove(ctx context.Context, h backend.Handle) error {
 	fn := b.Filename(h)
+	release, err := b.lockMutation(ctx, fn)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	return removeFile(fn)
 }

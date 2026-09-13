@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	PlacementRoleMetadata = "metadata"
-	PlacementRolePrimary  = "primary"
-	PlacementRoleArchival = "archival"
-	PlacementRoleCache    = "cache"
+	PlacementRoleMetadata  = "metadata"
+	PlacementRolePrimary   = "primary"
+	PlacementRoleArchival  = "archival"
+	PlacementRoleCache     = "cache"
+	PlacementRoleReadCache = "read-cache"
 )
 
 type PlacementBackend struct {

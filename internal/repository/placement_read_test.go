@@ -10,6 +10,15 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+type fixedReadAuthorizationBackend struct {
+	backend.Backend
+	authorized bool
+}
+
+func (be fixedReadAuthorizationBackend) ReadAuthorizedNow() bool {
+	return be.authorized
+}
+
 func TestPlacementReadCandidatesPreferCheapestLivePlacement(t *testing.T) {
 	candidates := []placementReadCandidate{
 		{policy: PlacementBackend{vaulticPlacementBackend("archive", "hours", 0.01), 3}},
@@ -42,5 +51,52 @@ func TestPlacementReadFallsBackWhenPreferredBackendFails(t *testing.T) {
 	})
 	if err != nil || string(loaded) != "fallback" {
 		t.Fatalf("loaded = %q, err=%v", loaded, err)
+	}
+}
+
+func TestAuthorizedPlacementReadCandidatesFiltersUnauthorizedLeaseBackends(t *testing.T) {
+	candidates := []placementReadCandidate{
+		{
+			backend: fixedReadAuthorizationBackend{Backend: mem.New(), authorized: false},
+			policy:  PlacementBackend{PlacementBackend: vaultic.PlacementBackend{ID: "expired"}},
+		},
+		{
+			backend: fixedReadAuthorizationBackend{Backend: mem.New(), authorized: true},
+			policy:  PlacementBackend{PlacementBackend: vaultic.PlacementBackend{ID: "live"}},
+		},
+		{backend: mem.New(), policy: PlacementBackend{PlacementBackend: vaultic.PlacementBackend{ID: "static"}}},
+	}
+
+	filtered := authorizedPlacementReadCandidates(candidates)
+	if len(filtered) != 2 {
+		t.Fatalf("expected two authorized candidates, got %d", len(filtered))
+	}
+	if filtered[0].policy.ID == "expired" || filtered[1].policy.ID == "expired" {
+		t.Fatal("expired lease candidate should be filtered")
+	}
+}
+
+func TestPlacementReadCandidatesPropagatesMetadataReadFailure(t *testing.T) {
+	repo, _, _, packID, _ := promotionTestRepository(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	candidates, err := repo.placementReadCandidates(ctx, packID)
+	if err == nil {
+		t.Fatalf("placementReadCandidates() = %+v, nil; want metadata read error", candidates)
+	}
+	if candidates != nil {
+		t.Fatalf("placementReadCandidates() returned candidates on metadata error: %+v", candidates)
+	}
+}
+
+func TestPlacementFallbackWithoutMetadataDoesNotAuthorizeCache(t *testing.T) {
+	fallback := placementReadCandidate{backend: mem.New()}
+	if placementCandidatesAuthorizeCache([]placementReadCandidate{fallback}) {
+		t.Fatal("fallback without placement metadata authorized cache data")
+	}
+	fallback.metadataConfirmed = true
+	if !placementCandidatesAuthorizeCache([]placementReadCandidate{fallback}) {
+		t.Fatal("metadata-confirmed placement did not authorize cache data")
 	}
 }

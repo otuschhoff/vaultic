@@ -4,7 +4,6 @@ package fuse
 
 import (
 	"context"
-	"sort"
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
@@ -36,6 +35,10 @@ type openFile struct {
 	file
 	// cumsize[i] holds the cumulative size of blobs[:i].
 	cumsize []uint64
+}
+
+type logicalRangeReader interface {
+	ReadLogicalFileRange(ctx context.Context, content []vaultic.ID, cumSize []uint64, offset uint64, dst []byte) (int, error)
 }
 
 func newFile(root *Root, forget forgetFn, inode uint64, node *data.Node) (fusefile *file, err error) {
@@ -119,54 +122,35 @@ func (f *openFile) getBlobAt(ctx context.Context, i int) (blob []byte, err error
 
 func (f *openFile) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	debug.Log("Read(%v, %v, %v), file size %v", f.node.Name, req.Size, req.Offset, f.node.Size)
-	offset := uint64(req.Offset)
-
-	// as stated in https://godoc.org/bazil.org/fuse/fs#HandleReader there
-	// is no need to check if offset > size
-
-	// handle special case: file is empty
+	// As stated in https://godoc.org/bazil.org/fuse/fs#HandleReader there is no
+	// need to check whether offset exceeds size.
 	if f.node.Size == 0 {
 		resp.Data = resp.Data[:0]
 		return nil
 	}
-
-	// Skip blobs before the offset
-	startContent := -1 + sort.Search(len(f.cumsize), func(i int) bool {
-		return f.cumsize[i] > offset
-	})
-	offset -= f.cumsize[startContent]
-
-	dst := resp.Data[0:req.Size]
-	readBytes := 0
-	remainingBytes := req.Size
-
-	// The documentation of bazil/fuse actually says that synchronization is
-	// required (see https://godoc.org/bazil.org/fuse#hdr-Service_Methods):
-	//
-	// Multiple goroutines may call service methods simultaneously;
-	// the methods being called are responsible for appropriate synchronization.
-	//
-	// However, no lock needed here as getBlobAt can be called concurrently
-	// (blobCache has its own locking)
-	for i := startContent; remainingBytes > 0 && i < len(f.cumsize)-1; i++ {
-		blob, err := f.getBlobAt(ctx, i)
+	if reader, ok := f.root.repo.(logicalRangeReader); ok {
+		readBytes, err := reader.ReadLogicalFileRange(ctx, f.node.Content, f.cumsize, uint64(req.Offset), resp.Data[0:req.Size])
 		if err != nil {
 			return err
 		}
+		resp.Data = resp.Data[:readBytes]
+		return nil
+	}
 
-		if offset > 0 {
-			blob = blob[offset:]
-			offset = 0
-		}
-
-		copied := copy(dst, blob)
-		remainingBytes -= copied
-		readBytes += copied
-
-		dst = dst[copied:]
+	readBytes, err := vaultic.ReadLogicalFileRange(
+		ctx,
+		f.node.Content,
+		f.cumsize,
+		uint64(req.Offset),
+		resp.Data[0:req.Size],
+		func(ctx context.Context, index int, _ vaultic.ID) ([]byte, error) {
+			return f.getBlobAt(ctx, index)
+		},
+	)
+	if err != nil {
+		return err
 	}
 	resp.Data = resp.Data[:readBytes]
-
 	return nil
 }
 

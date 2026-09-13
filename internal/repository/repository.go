@@ -39,6 +39,8 @@ type Repository struct {
 	idx                    *index.MasterIndex
 	engine                 enginepkg.Engine
 	cache                  *cache.Cache
+	readCache              *readCacheManager
+	readCacheMu            sync.Mutex
 	placementBackends      map[uint64]backend.Backend
 	ownedPlacementBackends []backend.Backend
 	ownedClosers           []io.Closer
@@ -63,6 +65,9 @@ type Repository struct {
 
 	zeroChunkOnce sync.Once
 	zeroChunkID   vaultic.ID
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // AttachStagedPackRoots installs authenticated deferred-journal reachability
@@ -295,6 +300,15 @@ func New(be backend.Backend, opts Options) (*Repository, error) {
 // setConfig assigns the given config and updates the repository parameters accordingly
 func (r *Repository) setConfig(cfg vaultic.Config) {
 	r.cfg = cfg
+	var prior *readCacheManager
+	r.readCacheMu.Lock()
+	prior = r.readCache
+	r.readCache = nil
+	r.readCacheMu.Unlock()
+	if prior != nil {
+		prior.stopCapacityWorker()
+		prior.stopPolicyWorker()
+	}
 }
 
 // Config returns the repository configuration.
