@@ -4,6 +4,10 @@
 
 ## 16. Testing strategy
 
+The [VaulticDB reliability testing architecture](03-vaulticdb-reliability-testing.md)
+specifies the proposed model-based, deterministic simulation, crash, corruption,
+soak, telemetry, and CI gates for the SlateDB storage stack.
+
 ### Unit tests
 
 - Big-endian schema round trips and malformed input rejection
