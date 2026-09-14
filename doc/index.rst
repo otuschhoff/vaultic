@@ -20,6 +20,7 @@ Vaultic Documentation
    053_command_parity
    054_takeover_rustic_repository
    055_takeover_rustic_google_drive_macos
+   056_nfs_snapshot_server
    060_forget
    070_encryption
    075_scripting

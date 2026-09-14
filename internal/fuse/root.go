@@ -5,7 +5,6 @@ package fuse
 import (
 	"os"
 
-	"github.com/otuschhoff/vaultic/internal/bloblru"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -23,9 +22,8 @@ type Config struct {
 
 // Root is the root node of the fuse mount of a repository.
 type Root struct {
-	repo      vaultic.Repository
-	cfg       Config
-	blobCache *bloblru.Cache
+	repo vaultic.Repository
+	cfg  Config
 
 	*SnapshotsDir
 
@@ -38,17 +36,13 @@ var _ = fs.NodeStringLookuper(&Root{})
 
 const rootInode = 1
 
-// Size of the blob cache. TODO: make this configurable.
-const blobCacheSize = 64 << 20
-
 // NewRoot initializes a new root node from a repository.
 func NewRoot(repo vaultic.Repository, cfg Config) *Root {
 	debug.Log("NewRoot(), config %v", cfg)
 
 	root := &Root{
-		repo:      repo,
-		cfg:       cfg,
-		blobCache: bloblru.New(blobCacheSize),
+		repo: repo,
+		cfg:  cfg,
 	}
 
 	if !cfg.OwnerIsRoot {

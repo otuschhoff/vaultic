@@ -5,10 +5,6 @@ package fuse
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"slices"
-	"sync"
 	"syscall"
 
 	"github.com/anacrolix/fuse"
@@ -16,7 +12,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
-	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/snapshotfs"
 )
 
 // Statically ensure that *dir implement those interface
@@ -27,29 +23,23 @@ var _ = fs.NodeListxattrer(&dir{})
 var _ = fs.NodeStringLookuper(&dir{})
 
 type dir struct {
-	root        *Root
-	forget      forgetFn
-	items       map[string]*data.Node
-	inode       uint64
-	parentInode uint64
-	node        *data.Node
-	m           sync.Mutex
-	cache       treeCache
+	forget       forgetFn
+	parentInode  uint64
+	node         *snapshotfs.Node
+	holder       *snapshotFSHolder
+	reference    snapshotFSReference
+	snapshotRoot bool
+	cache        treeCache
 }
 
-func cleanupNodeName(name string) string {
-	return filepath.Base(name)
-}
-
-func newDir(root *Root, forget forgetFn, inode, parentInode uint64, node *data.Node) (*dir, error) {
-	debug.Log("new dir for %v (%v)", node.Name, node.Subtree)
-
+func newDir(forget forgetFn, parentInode uint64, node *snapshotfs.Node, holder *snapshotFSHolder) (*dir, error) {
+	debug.Log("new dir for %v", node.Path())
 	return &dir{
-		root:        root,
 		forget:      forget,
 		node:        node,
-		inode:       inode,
 		parentInode: parentInode,
+		holder:      holder,
+		reference:   retainSnapshotFS(holder),
 		cache:       *newTreeCache(),
 	}, nil
 }
@@ -64,123 +54,56 @@ func unwrapCtxCanceled(err error) error {
 	return err
 }
 
-// replaceSpecialNodes replaces nodes with name "." and "/" by their contents.
-// Otherwise, the node is returned.
-func replaceSpecialNodes(ctx context.Context, repo vaultic.BlobLoader, node *data.Node) (data.TreeNodeIterator, error) {
-	if node.Type != data.NodeTypeDir || node.Subtree == nil {
-		return slices.Values([]data.NodeOrError{{Node: node}}), nil
-	}
-
-	if node.Name != "." && node.Name != "/" {
-		return slices.Values([]data.NodeOrError{{Node: node}}), nil
-	}
-
-	tree, err := data.LoadTree(ctx, repo, *node.Subtree)
-	if err != nil {
-		return nil, unwrapCtxCanceled(err)
-	}
-
-	return tree, nil
-}
-
-func newDirFromSnapshot(root *Root, forget forgetFn, inode uint64, snapshot *data.Snapshot) (*dir, error) {
+func newDirFromSnapshot(ctx context.Context, root *Root, forget forgetFn, parentInode uint64, snapshot *data.Snapshot) (*dir, error) {
 	debug.Log("new dir for snapshot %v (%v)", snapshot.ID(), snapshot.Tree)
-	return &dir{
-		root:   root,
-		forget: forget,
-		node: &data.Node{
-			AccessTime: snapshot.Time,
-			ModTime:    snapshot.Time,
-			ChangeTime: snapshot.Time,
-			Mode:       os.ModeDir | 0555,
-			Subtree:    snapshot.Tree,
-		},
-		inode: inode,
-		cache: *newTreeCache(),
-	}, nil
-}
-
-func (d *dir) open(ctx context.Context) error {
-	d.m.Lock()
-	defer d.m.Unlock()
-
-	if d.items != nil {
-		return nil
+	owner := snapshotfs.OwnerPreserved
+	if root.cfg.OwnerIsRoot {
+		owner = snapshotfs.OwnerRoot
 	}
-
-	debug.Log("open dir %v (%v)", d.node.Name, d.node.Subtree)
-
-	tree, err := data.LoadTree(ctx, d.root.repo, *d.node.Subtree)
+	filesystem, err := snapshotfs.New(ctx, root.repo, snapshot, "", snapshotfs.Config{
+		Owner:       owner,
+		Permissions: snapshotfs.PermissionsPreserved,
+	})
 	if err != nil {
-		debug.Log("  error loading tree %v: %v", d.node.Subtree, err)
-		return unwrapCtxCanceled(err)
+		return nil, snapshotError(err)
 	}
-	items := make(map[string]*data.Node)
-	for item := range tree {
-		if item.Error != nil {
-			return unwrapCtxCanceled(item.Error)
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		n := item.Node
-
-		nodes, err := replaceSpecialNodes(ctx, d.root.repo, n)
-		if err != nil {
-			debug.Log("  replaceSpecialNodes(%v) failed: %v", n, err)
-			return err
-		}
-		for item := range nodes {
-			if item.Error != nil {
-				return unwrapCtxCanceled(item.Error)
-			}
-			items[cleanupNodeName(item.Node.Name)] = item.Node
-		}
+	node, err := filesystem.Root()
+	if err != nil {
+		_ = filesystem.Close() // Preserve the root error; cache cleanup is best effort.
+		return nil, snapshotError(err)
 	}
-	d.items = items
-	return nil
+	holder := &snapshotFSHolder{fs: filesystem}
+	directory, err := newDir(forget, parentInode, node, holder)
+	if err != nil {
+		_ = filesystem.Close() // Preserve the adapter error; cache cleanup is best effort.
+		return nil, err
+	}
+	directory.snapshotRoot = true
+	return directory, nil
 }
 
-func (d *dir) Attr(_ context.Context, a *fuse.Attr) error {
+func (d *dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	debug.Log("Attr()")
-	a.Inode = d.inode
-	a.Mode = os.ModeDir | d.node.Mode
-
-	if !d.root.cfg.OwnerIsRoot {
-		a.Uid = d.node.UID
-		a.Gid = d.node.GID
+	if err := snapshotAttr(ctx, d.node, a); err != nil {
+		return err
 	}
-	a.Atime = d.node.AccessTime
-	a.Ctime = d.node.ChangeTime
-	a.Mtime = d.node.ModTime
-
-	a.Nlink = d.calcNumberOfLinks()
-
+	if d.snapshotRoot {
+		a.Uid = 0
+		a.Gid = 0
+	}
 	return nil
-}
-
-func (d *dir) calcNumberOfLinks() uint32 {
-	// a directory d has 2 hardlinks + the number
-	// of directories contained by d
-	count := uint32(2)
-	for _, node := range d.items {
-		if node.Type == data.NodeTypeDir {
-			count++
-		}
-	}
-	return count
 }
 
 func (d *dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	debug.Log("ReadDirAll()")
-	err := d.open(ctx)
+	entries, err := d.node.ReadDir(ctx)
 	if err != nil {
-		return nil, err
+		return nil, snapshotError(err)
 	}
-	ret := make([]fuse.Dirent, 0, len(d.items)+2)
+	ret := make([]fuse.Dirent, 0, len(entries)+2)
 
 	ret = append(ret, fuse.Dirent{
-		Inode: d.inode,
+		Inode: d.node.Identity(),
 		Name:  ".",
 		Type:  fuse.DT_Dir,
 	})
@@ -191,14 +114,13 @@ func (d *dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		Type:  fuse.DT_Dir,
 	})
 
-	for _, node := range d.items {
+	for _, entry := range entries {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		name := cleanupNodeName(node.Name)
 		var typ fuse.DirentType
-		switch node.Type {
+		switch entry.Node.Type() {
 		case data.NodeTypeDir:
 			typ = fuse.DT_Dir
 		case data.NodeTypeFile:
@@ -208,9 +130,9 @@ func (d *dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		}
 
 		ret = append(ret, fuse.Dirent{
-			Inode: inodeFromNode(d.inode, node),
+			Inode: entry.Node.Identity(),
 			Type:  typ,
-			Name:  name,
+			Name:  entry.Name,
 		})
 	}
 
@@ -220,27 +142,21 @@ func (d *dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 func (d *dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	debug.Log("Lookup(%v)", name)
 
-	err := d.open(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	return d.cache.lookupOrCreate(name, -1, func(forget forgetFn) (fs.Node, error) {
-		node, ok := d.items[name]
-		if !ok {
+		node, err := d.node.Lookup(ctx, name)
+		if err != nil {
 			debug.Log("  Lookup(%v) -> not found", name)
-			return nil, syscall.ENOENT
+			return nil, snapshotError(err)
 		}
-		inode := inodeFromNode(d.inode, node)
-		switch node.Type {
+		switch node.Type() {
 		case data.NodeTypeDir:
-			return newDir(d.root, forget, inode, d.inode, node)
+			return newDir(forget, d.node.Identity(), node, d.holder)
 		case data.NodeTypeFile:
-			return newFile(d.root, forget, inode, node)
+			return newFile(forget, node, d.holder)
 		case data.NodeTypeSymlink:
-			return newLink(d.root, forget, inode, node)
+			return newLink(forget, node, d.holder)
 		case data.NodeTypeDev, data.NodeTypeCharDev, data.NodeTypeFifo, data.NodeTypeSocket:
-			return newOther(d.root, forget, inode, node)
+			return newOther(forget, node, d.holder)
 		default:
 			debug.Log("  node %v has unknown type %v", name, node.Type)
 			return nil, syscall.ENOENT
@@ -249,14 +165,17 @@ func (d *dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 }
 
 func (d *dir) Listxattr(_ context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
-	nodeToXattrList(d.node, req, resp)
+	raw := d.node.RawNode()
+	nodeToXattrList(&raw, req, resp)
 	return nil
 }
 
 func (d *dir) Getxattr(_ context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
-	return nodeGetXattr(d.node, req, resp)
+	raw := d.node.RawNode()
+	return nodeGetXattr(&raw, req, resp)
 }
 
 func (d *dir) Forget() {
 	d.forget()
+	d.reference.release()
 }

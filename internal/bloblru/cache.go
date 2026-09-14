@@ -139,6 +139,20 @@ func (c *Cache) GetOrCompute(id vaultic.ID, compute func() ([]byte, error)) ([]b
 	return blob, err
 }
 
+// Clear removes all cached blobs and clears their plaintext buffers.
+func (c *Cache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, id := range c.c.Keys() {
+		blob, ok := c.c.Peek(id)
+		if ok {
+			clear(blob[:cap(blob)])
+		}
+	}
+	c.c.Purge()
+}
+
 func (c *Cache) evict(key vaultic.ID, blob []byte) {
 	debug.Log("bloblru.Cache: evict %v, %d bytes", key, cap(blob))
 	c.free += cap(blob) + overhead

@@ -225,6 +225,15 @@ hard links. A program that does so is ``rsync``, used with the option
    To restore many files or a whole snapshot, ``vaultic restore`` is the best
    alternative, often it is *significantly* faster.
 
+Browsing one snapshot over NFS
+==============================
+
+``vaultic serve nfs`` exposes one selected snapshot or subfolder as a read-only
+NFSv3 export. It is useful for native NFS clients where FUSE is unavailable.
+Use restore instead when you need a durable writable copy, archived xattrs, or
+a large full-tree recovery. See :doc:`056_nfs_snapshot_server` for security,
+mount commands, resource controls, and lifecycle guidance.
+
 Printing files to stdout
 ========================
 

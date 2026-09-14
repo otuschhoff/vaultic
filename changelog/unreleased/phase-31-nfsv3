@@ -1,0 +1,14 @@
+Enhancement: add read-only NFSv3 snapshot server
+
+Vaultic can now expose one snapshot or subfolder with `vaultic serve nfs` for
+native NFS clients on macOS, Linux, and BSD. The server uses fixed NFS and mount
+protocol TCP ports, defaults to loopback, supports bounded caches and request
+limits, and rejects every mutation as read-only. FUSE and NFS share the same
+protocol-neutral snapshot filesystem and repository read-cache path.
+
+Remote exposure requires explicit CIDR restrictions and acknowledgement that
+NFSv3 AUTH_SYS identities are client-controlled and traffic is unencrypted.
+Operator documentation includes native mount commands, VPN and SSH tunnel
+guidance, readiness files, service lifecycle, and unsupported protocol features.
+
+https://github.com/otuschhoff/vaultic/pull/00000

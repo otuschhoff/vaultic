@@ -137,6 +137,7 @@ The documentation can be found at https://github.com/otuschhoff/vaultic/tree/mai
 
 	registerDebugCommand(cmd, globalOptions)
 	registerMountCommand(cmd, globalOptions)
+	registerServeCommand(cmd, globalOptions)
 	registerSelfUpdateCommand(cmd, globalOptions)
 	global.RegisterProfiling(cmd, os.Stderr)
 	wrapProfileHooks(cmd, globalOptions)

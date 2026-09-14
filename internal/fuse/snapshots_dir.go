@@ -121,7 +121,7 @@ func (d *SnapshotsDir) Lookup(ctx context.Context, name string) (fs.Node, error)
 		if entry.linkTarget != "" {
 			return newSnapshotLink(d.root, forget, inode, entry.linkTarget, entry.snapshot)
 		} else if entry.snapshot != nil {
-			return newDirFromSnapshot(d.root, forget, inode, entry.snapshot)
+			return newDirFromSnapshot(ctx, d.root, forget, d.inode, entry.snapshot)
 		}
 		return NewSnapshotsDir(d.root, forget, inode, d.inode, d.dirStruct, d.prefix+"/"+name), nil
 	})

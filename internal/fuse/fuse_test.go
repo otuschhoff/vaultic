@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/otuschhoff/vaultic/internal/bloblru"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/snapshotfs"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/anacrolix/fuse"
@@ -66,6 +66,35 @@ func loadTree(t testing.TB, repo vaultic.Loader, id vaultic.ID) data.TreeNodeIte
 	return tree
 }
 
+func snapshotNodeForTest(t *testing.T, repo vaultic.Repository, raw *data.Node) *snapshotfs.Node {
+	t.Helper()
+	ctx := t.Context()
+	node := *raw
+	var treeID vaultic.ID
+	if node.Name == "" {
+		node.Name = "node"
+	}
+	err := repo.WithBlobUploader(ctx, func(_ context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		if node.Type == data.NodeTypeDir && node.Subtree == nil {
+			treeID := data.TestSaveNodes(t, ctx, uploader, nil)
+			node.Subtree = &treeID
+		}
+		treeID = data.TestSaveNodes(t, ctx, uploader, []*data.Node{&node})
+		return nil
+	})
+	rtest.OK(t, err)
+	snapshot := &data.Snapshot{Tree: &treeID, Time: time.Unix(1700000000, 0)}
+	data.TestSetSnapshotID(t, snapshot, vaultic.Hash([]byte(t.Name()+node.Name)))
+	filesystem, err := snapshotfs.New(ctx, repo, snapshot, "", snapshotfs.Config{})
+	rtest.OK(t, err)
+	t.Cleanup(func() { _ = filesystem.Close() })
+	root, err := filesystem.Root()
+	rtest.OK(t, err)
+	result, err := root.Lookup(ctx, node.Name)
+	rtest.OK(t, err)
+	return result
+}
+
 func TestFuseFile(t *testing.T) {
 	repo := repository.TestRepository(t)
 
@@ -112,15 +141,14 @@ func TestFuseFile(t *testing.T) {
 
 	node := &data.Node{
 		Name:    "foo",
+		Type:    data.NodeTypeFile,
 		Inode:   23,
 		Mode:    0742,
 		Size:    filesize,
 		Content: content,
 	}
-	root := &Root{repo: repo, blobCache: bloblru.New(blobCacheSize)}
-
-	inode := inodeFromNode(1, node)
-	f, err := newFile(root, func() {}, inode, node)
+	snapshotNode := snapshotNodeForTest(t, repo, node)
+	f, err := newFile(func() {}, snapshotNode, nil)
 	rtest.OK(t, err)
 	of, err := f.Open(context.TODO(), nil, nil)
 	rtest.OK(t, err)
@@ -128,7 +156,7 @@ func TestFuseFile(t *testing.T) {
 	attr := fuse.Attr{}
 	rtest.OK(t, f.Attr(ctx, &attr))
 
-	rtest.Equals(t, inode, attr.Inode)
+	rtest.Equals(t, snapshotNode.Identity(), attr.Inode)
 	rtest.Equals(t, node.Mode, attr.Mode)
 	rtest.Equals(t, node.Size, attr.Size)
 	rtest.Equals(t, (node.Size/uint64(attr.BlockSize))+1, attr.Blocks)
@@ -151,9 +179,9 @@ func TestFuseFile(t *testing.T) {
 func TestFuseDir(t *testing.T) {
 	repo := repository.TestRepository(t)
 
-	root := &Root{repo: repo, blobCache: bloblru.New(blobCacheSize)}
-
 	node := &data.Node{
+		Name:       "foo",
+		Type:       data.NodeTypeDir,
 		Mode:       0755,
 		UID:        42,
 		GID:        43,
@@ -162,15 +190,15 @@ func TestFuseDir(t *testing.T) {
 		ModTime:    time.Unix(1606773733, 0),
 	}
 	parentInode := inodeFromName(0, "parent")
-	inode := inodeFromName(1, "foo")
-	d, err := newDir(root, func() {}, inode, parentInode, node)
+	snapshotNode := snapshotNodeForTest(t, repo, node)
+	d, err := newDir(func() {}, parentInode, snapshotNode, nil)
 	rtest.OK(t, err)
 
 	// don't open the directory as that would require setting up a proper tree blob
 	attr := fuse.Attr{}
 	rtest.OK(t, d.Attr(context.TODO(), &attr))
 
-	rtest.Equals(t, inode, attr.Inode)
+	rtest.Equals(t, snapshotNode.Identity(), attr.Inode)
 	rtest.Equals(t, node.UID, attr.Uid)
 	rtest.Equals(t, node.GID, attr.Gid)
 	rtest.Equals(t, node.AccessTime, attr.Atime)
@@ -241,7 +269,11 @@ func TestStableNodeObjects(t *testing.T) {
 
 	idsdir := testStableLookup(t, root, "ids")
 	snapID := loadFirstSnapshot(t, repo).ID().Str()
-	snapshotdir := testStableLookup(t, idsdir, snapID)
+	snapshotdir, err := idsdir.(fs.NodeStringLookuper).Lookup(context.TODO(), snapID)
+	rtest.OK(t, err)
+	snapshotdirAgain, err := idsdir.(fs.NodeStringLookuper).Lookup(context.TODO(), snapID)
+	rtest.OK(t, err)
+	rtest.Assert(t, snapshotdir == snapshotdirAgain, "snapshot object should be stable")
 	dir := testStableLookup(t, snapshotdir, "dir-0")
 	testStableLookup(t, dir, "file-2")
 }
@@ -281,6 +313,7 @@ func readLatestTarget(t testing.TB, node fs.Node) string {
 
 // Test reporting of fuse.Attr.Blocks in multiples of 512.
 func TestBlocks(t *testing.T) {
+	repo := repository.TestRepository(t)
 	root := &Root{}
 
 	for _, c := range []struct {
@@ -298,8 +331,8 @@ func TestBlocks(t *testing.T) {
 		target := strings.Repeat("x", int(c.size))
 
 		for _, n := range []fs.Node{
-			&file{root: root, node: &data.Node{Size: uint64(c.size)}},
-			&link{root: root, node: &data.Node{LinkTarget: target}},
+			&file{node: snapshotNodeForTest(t, repo, &data.Node{Name: fmt.Sprintf("file-%d", c.size), Type: data.NodeTypeFile, Size: uint64(c.size)})},
+			&link{node: snapshotNodeForTest(t, repo, &data.Node{Name: fmt.Sprintf("link-%d", c.size), Type: data.NodeTypeSymlink, LinkTarget: target})},
 			&snapshotLink{root: root, snapshot: &data.Snapshot{}, target: target},
 		} {
 			var a fuse.Attr
@@ -314,7 +347,7 @@ func TestBlocks(t *testing.T) {
 // must still report a positive nlink so tools that validate stat() (e.g.
 // Samba) accept the file.
 func TestFileAttrNlink(t *testing.T) {
-	root := &Root{}
+	repo := repository.TestRepository(t)
 	for _, tc := range []struct {
 		links uint64
 		want  uint32
@@ -324,7 +357,7 @@ func TestFileAttrNlink(t *testing.T) {
 		{42, 42},
 	} {
 		t.Run(fmt.Sprintf("links_%d", tc.links), func(t *testing.T) {
-			f := &file{root: root, node: &data.Node{Links: tc.links}}
+			f := &file{node: snapshotNodeForTest(t, repo, &data.Node{Name: "file", Type: data.NodeTypeFile, Links: tc.links})}
 			var a fuse.Attr
 			rtest.OK(t, f.Attr(context.TODO(), &a))
 			rtest.Equals(t, tc.want, a.Nlink)
@@ -332,35 +365,14 @@ func TestFileAttrNlink(t *testing.T) {
 	}
 }
 
-func TestInodeFromNode(t *testing.T) {
-	node := &data.Node{Name: "foo.txt", Type: data.NodeTypeCharDev, Links: 2}
-	ino1 := inodeFromNode(1, node)
-	ino2 := inodeFromNode(2, node)
-	rtest.Assert(t, ino1 == ino2, "inodes %d, %d of hard links differ", ino1, ino2)
-
-	node.Links = 1
-	ino1 = inodeFromNode(1, node)
-	ino2 = inodeFromNode(2, node)
-	rtest.Assert(t, ino1 != ino2, "same inode %d but different parent", ino1)
-
-	// Regression test: in a path a/b/b, the grandchild should not get the
-	// same inode as the grandparent.
-	a := &data.Node{Name: "a", Type: data.NodeTypeDir, Links: 2}
-	ab := &data.Node{Name: "b", Type: data.NodeTypeDir, Links: 2}
-	abb := &data.Node{Name: "b", Type: data.NodeTypeDir, Links: 2}
-	inoA := inodeFromNode(1, a)
-	inoAb := inodeFromNode(inoA, ab)
-	inoAbb := inodeFromNode(inoAb, abb)
-	rtest.Assert(t, inoA != inoAb, "inode(a/b) = inode(a)")
-	rtest.Assert(t, inoA != inoAbb, "inode(a/b/b) = inode(a)")
-}
-
 func TestLink(t *testing.T) {
 	node := &data.Node{Name: "foo.txt", Type: data.NodeTypeSymlink, Links: 1, LinkTarget: "dst", ExtendedAttributes: []data.ExtendedAttribute{
 		{Name: "foo", Value: []byte("bar")},
 	}}
 
-	lnk, err := newLink(&Root{}, func() {}, 42, node)
+	repo := repository.TestRepository(t)
+	snapshotNode := snapshotNodeForTest(t, repo, node)
+	lnk, err := newLink(func() {}, snapshotNode, nil)
 	rtest.OK(t, err)
 	target, err := lnk.Readlink(context.TODO(), nil)
 	rtest.OK(t, err)
@@ -378,29 +390,4 @@ func TestLink(t *testing.T) {
 
 	err = lnk.Getxattr(context.TODO(), &fuse.GetxattrRequest{Name: "invalid"}, nil)
 	rtest.Assert(t, err != nil, "missing error on reading invalid xattr")
-}
-
-var sink uint64
-
-func BenchmarkInode(b *testing.B) {
-	for _, sub := range []struct {
-		name string
-		node data.Node
-	}{
-		{
-			name: "no_hard_links",
-			node: data.Node{Name: "a somewhat long-ish filename.svg.bz2", Type: data.NodeTypeFifo},
-		},
-		{
-			name: "hard_link",
-			node: data.Node{Name: "some other filename", Type: data.NodeTypeFile, Links: 2},
-		},
-	} {
-		b.Run(sub.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				sink = inodeFromNode(1, &sub.node)
-			}
-		})
-	}
 }
