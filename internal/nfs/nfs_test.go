@@ -392,8 +392,30 @@ func TestServerTwoListenersAndProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) < 4 {
-		t.Fatalf("RPC readdir entries = %d", len(entries))
+	expectedEntries := map[string]bool{
+		"a-file": false, "directory": false, "large-file": false,
+		"pipe": false, "root-file": false, "z-link": false,
+	}
+	for _, entry := range entries {
+		if _, expected := expectedEntries[entry.FileName]; !expected {
+			t.Fatalf("RPC READDIRPLUS returned unexpected entry %q", entry.FileName)
+		}
+		if !entry.Attr.IsSet || entry.FileId == 0 || entry.Attr.Attr.Fileid != entry.FileId {
+			t.Fatalf("RPC READDIRPLUS attributes for %q = %+v", entry.FileName, entry)
+		}
+		if !entry.Handle.IsSet || len(entry.Handle.FH) == 0 {
+			t.Fatalf("RPC READDIRPLUS handle for %q = %+v", entry.FileName, entry.Handle)
+		}
+		attributes, err := target.GetAttr(entry.Handle.FH)
+		if err != nil || attributes.Fileid != entry.FileId {
+			t.Fatalf("RPC GETATTR for READDIRPLUS handle %q = %+v, %v", entry.FileName, attributes, err)
+		}
+		expectedEntries[entry.FileName] = true
+	}
+	for name, found := range expectedEntries {
+		if !found {
+			t.Errorf("RPC READDIRPLUS omitted %q", name)
+		}
 	}
 	if _, err := target.OpenFile("created", 0600); err == nil || !strings.Contains(err.Error(), "ROFS") {
 		t.Fatalf("RPC create error = %v", err)
@@ -403,7 +425,9 @@ func TestServerTwoListenersAndProtocol(t *testing.T) {
 	assertProgramUnavailable(t, mountClient, gonfs.NFSProgram)
 	assertProgramUnavailable(t, nfsClient, gonfs.MountProgram)
 	stats := server.Stats()
-	if stats.Procedures.NFS[gonfs.NFSProcedureCommit] == 0 || stats.Procedures.Mount[gonfs.MountProcMount] == 0 {
+	if stats.Procedures.NFS[gonfs.NFSProcedureReadDirPlus] == 0 ||
+		stats.Procedures.NFS[gonfs.NFSProcedureCommit] == 0 ||
+		stats.Procedures.Mount[gonfs.MountProcMount] == 0 {
 		t.Fatalf("procedure stats = %+v", stats.Procedures)
 	}
 
