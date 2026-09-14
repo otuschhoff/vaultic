@@ -1399,8 +1399,6 @@ func TestReadCacheCoordinatorPolicyDownsizeWorkerConvergesWithoutFurtherReads(t 
 	cache := mem.New()
 	manager := newTestReadCacheManager(t, shared, cache, "manager-policy-downsize-converge", 8192)
 	tier := manager.tiers[0]
-	manager.startPolicyWorker()
-	t.Cleanup(func() { manager.stopPolicyWorker() })
 
 	chunk := bytes.Repeat([]byte("z"), 192)
 	identity := manager.sourceRangeIdentity(tier, vaultic.ID{0x31}, 0, len(chunk))
@@ -1454,6 +1452,8 @@ func TestReadCacheCoordinatorPolicyDownsizeWorkerConvergesWithoutFurtherReads(t 
 		t.Fatal(err)
 	}
 	manager.reconcileAdmissionVisibility(context.Background())
+	manager.startPolicyWorker()
+	t.Cleanup(func() { manager.stopPolicyWorker() })
 
 	shrink := uint64(256)
 	if err := manager.updatePolicy(context.Background(), readCachePolicyUpdate{ID: tier.id, MaxBytes: &shrink}); err != nil {
