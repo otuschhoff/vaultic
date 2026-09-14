@@ -464,6 +464,7 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 		AuthToken:    "phase1-secret",
 		RepositoryID: "tcp-repo",
 		DaemonPath:   daemonBinary(t),
+		DataDir:      t.TempDir(),
 		StartTimeout: 5 * time.Second,
 	}
 	client, err := Ensure(context.Background(), options)

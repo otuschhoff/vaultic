@@ -630,7 +630,9 @@ func TestEnsureStartsDaemonRecoversStaleSocketAndCleansUp(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	client, err := Ensure(context.Background(), Options{Socket: socket, RepositoryID: "test-repo", DaemonPath: daemonBinary(t)})
+	client, err := Ensure(context.Background(), Options{
+		Socket: socket, RepositoryID: "test-repo", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +662,9 @@ func TestEnsureStartsDaemonRecoversStaleSocketAndCleansUp(t *testing.T) {
 
 func TestEnsureRacesToOneDaemon(t *testing.T) {
 	socket := testSocket(t)
-	options := Options{Socket: socket, RepositoryID: "race-repo", DaemonPath: daemonBinary(t)}
+	options := Options{
+		Socket: socket, RepositoryID: "race-repo", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+	}
 	clients := make([]*Client, 4)
 	errs := make([]error, len(clients))
 	var group sync.WaitGroup
