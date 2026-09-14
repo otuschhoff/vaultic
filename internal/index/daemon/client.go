@@ -651,7 +651,7 @@ func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Cli
 func reapFailedDaemon(ctx context.Context, cmd *exec.Cmd) {
 	wait := make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
+		_ = cmd.Wait() // Reap the failed daemon; its exit status cannot replace the startup error.
 		close(wait)
 	}()
 	timer := time.NewTimer(defaultRPCDeadline)
@@ -659,10 +659,10 @@ func reapFailedDaemon(ctx context.Context, cmd *exec.Cmd) {
 	select {
 	case <-wait:
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Kill() // Cancellation already determines the result; kill is fallback cleanup.
 		<-wait
 	case <-timer.C:
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Kill() // The grace period expired; kill is final fallback cleanup.
 		<-wait
 	}
 }
