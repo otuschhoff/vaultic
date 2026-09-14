@@ -155,7 +155,7 @@ func (node *Node) entries(ctx context.Context) ([]Entry, error) {
 	seen := make(map[string]struct{}, len(visible))
 	for _, child := range visible {
 		if err := validateComponent(child.Name); err != nil {
-			return nil, fmt.Errorf("%w: stored name: %v", ErrInvalidNode, err)
+			return nil, fmt.Errorf("%w: stored name: %w", ErrInvalidNode, err)
 		}
 		if _, exists := seen[child.Name]; exists {
 			return nil, fmt.Errorf("%w: %q", ErrCollision, child.Name)

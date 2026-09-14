@@ -158,12 +158,12 @@ func (fs *Filesystem) loadTree(ctx context.Context, id vaultic.ID) ([]*data.Node
 		}
 		iterator, err := data.NewTreeNodeIterator(bytes.NewReader(buf))
 		if err != nil {
-			return nil, 0, fmt.Errorf("%w: decode tree %s: %v", ErrInvalidNode, id.Str(), err)
+			return nil, 0, fmt.Errorf("%w: decode tree %s: %w", ErrInvalidNode, id.Str(), err)
 		}
 		nodes := make([]*data.Node, 0)
 		for item := range iterator {
 			if item.Error != nil {
-				return nil, 0, fmt.Errorf("%w: decode tree %s: %v", ErrInvalidNode, id.Str(), item.Error)
+				return nil, 0, fmt.Errorf("%w: decode tree %s: %w", ErrInvalidNode, id.Str(), item.Error)
 			}
 			if err := ctx.Err(); err != nil {
 				return nil, 0, canceledError(err)

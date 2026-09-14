@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestNFSReadinessFileOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("readiness mode = %o", info.Mode().Perm())
 	}
 	loaded, err := loadNFSReadinessFile(path)
