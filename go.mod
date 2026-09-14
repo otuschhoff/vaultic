@@ -153,6 +153,6 @@ require (
 	gopkg.in/ini.v1 v1.67.3 // indirect
 )
 
-replace github.com/willscott/go-nfs => ../go-nfs
+replace github.com/willscott/go-nfs => github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a
 
-replace github.com/willscott/go-nfs-client => ../go-nfs-client
+replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f
