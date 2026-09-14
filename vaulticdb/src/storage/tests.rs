@@ -172,8 +172,8 @@ mod tests {
         let repository_id = format!("failed-writer-open-cache-{}", rand::random::<u64>());
         let config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
         let (path, _) = object_store(&repository_id, &config.object_store).unwrap();
-        arm_storage_failpoint(StorageFailpoint::OpenWriter(path));
-        arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaimAny);
+        arm_storage_failpoint(StorageFailpoint::OpenWriter(path.clone()));
+        arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaimAfterFailedOpen(path));
 
         let error = match Storage::open(&repository_id, &config).await {
             Ok(storage) => {
@@ -185,7 +185,7 @@ mod tests {
 
         assert!(error.starts_with("open SlateDB database: injected storage failure"));
         assert!(error.contains("cleanup failures: release writer claim"));
-        assert!(error.contains("ReleaseWriterClaimAny"));
+        assert!(error.contains("ReleaseWriterClaimAfterFailedOpen"));
         assert_failed_open_cache_is_fenced(&repository_id).await;
     }
 

@@ -87,6 +87,7 @@ enum StorageFailpoint {
     InventoryWal,
     CloseCache,
     RefreshWriterFence(String),
+    ReleaseWriterClaimAfterFailedOpen(String),
     ReleaseWriterClaim(usize),
     ReleaseWriterClaimAny,
     WriterClaimUnavailable(String),
@@ -150,6 +151,7 @@ fn check_storage_failpoint(failpoint: StorageFailpoint) -> Result<()> {
             StorageFailpoint::InventoryWal => "inventory-wal",
             StorageFailpoint::CloseCache => "close-cache",
             StorageFailpoint::RefreshWriterFence(_) => "refresh-writer-fence",
+            StorageFailpoint::ReleaseWriterClaimAfterFailedOpen(_) => "release-writer-claim",
             StorageFailpoint::ReleaseWriterClaim(_) => "release-writer-claim",
             StorageFailpoint::ReleaseWriterClaimAny => "release-writer-claim-any",
             StorageFailpoint::WriterClaimUnavailable(_) => "writer-claim-unavailable",
@@ -1138,7 +1140,16 @@ async fn failed_open_cleanup(
         }
     }
     if let Some((coordination_store, epoch)) = writer_claim {
-        if let Err(error) = release_writer_claim(coordination_store, epoch).await {
+        #[cfg(test)]
+        let release_result = match check_storage_failpoint(
+            StorageFailpoint::ReleaseWriterClaimAfterFailedOpen(_database_path.to_owned()),
+        ) {
+            Ok(()) => release_writer_claim(coordination_store, epoch).await,
+            Err(error) => Err(error),
+        };
+        #[cfg(not(test))]
+        let release_result = release_writer_claim(coordination_store, epoch).await;
+        if let Err(error) = release_result {
             cleanup_failures.push(FailedOpenCleanup {
                 operation: "release writer claim",
                 error,
