@@ -1236,6 +1236,8 @@ func TestReadCacheCoordinatorConcurrentPolicyUpdatesAndFills(t *testing.T) {
 	cache := mem.New()
 	manager := newTestReadCacheManager(t, shared, cache, "manager-concurrent-policy-fills", 4096)
 	tier := manager.tiers[0]
+	manager.startPolicyWorker()
+	t.Cleanup(func() { manager.stopPolicyWorker() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -1268,14 +1270,20 @@ func TestReadCacheCoordinatorConcurrentPolicyUpdatesAndFills(t *testing.T) {
 	}()
 
 	wg.Wait()
+	manager.stopPolicyWorker()
+	manager.enforcePolicyRetirement(context.Background())
 
+	_, policy, err := manager.loadPolicy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, ledger, err := manager.loadQuota(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _, used, reserved := quotaUsage(ledger)
-	if used+reserved > manager.aggregateMax {
-		t.Fatalf("concurrent updates exceeded aggregate max: used=%d reserved=%d max=%d", used, reserved, manager.aggregateMax)
+	if used+reserved > policy.AggregateMaxBytes {
+		t.Fatalf("concurrent updates exceeded aggregate max: used=%d reserved=%d max=%d", used, reserved, policy.AggregateMaxBytes)
 	}
 }
 
