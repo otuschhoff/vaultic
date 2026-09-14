@@ -122,6 +122,12 @@ func TestReadCacheAggregateCapacityCapsMultipleTiers(t *testing.T) {
 	if status.AggregateMaxBytes != 6000 || status.RequestedMaxBytes != 6000 {
 		t.Fatalf("aggregate capacity = effective %d requested %d, want 6000", status.AggregateMaxBytes, status.RequestedMaxBytes)
 	}
+	repo.readCache.mu.Lock()
+	capacityWorkerRunning := repo.readCache.capacityStop != nil
+	repo.readCache.mu.Unlock()
+	if capacityWorkerRunning {
+		t.Fatal("fixed capacity manager started a dynamic capacity worker")
+	}
 	if len(status.Tiers) != 2 || status.Tiers[0].MaxBytes != 5000 || status.Tiers[1].MaxBytes != 5000 {
 		t.Fatalf("per-tier capacities changed by aggregate cap: %+v", status.Tiers)
 	}

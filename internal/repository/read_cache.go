@@ -1572,7 +1572,7 @@ func readCacheDescriptorMatchesIdentity(
 }
 
 func (manager *readCacheManager) startCapacityWorker() {
-	if manager == nil || manager.capacityController == nil {
+	if manager == nil || manager.capacityController == nil || manager.capacityController.opts.Mode == readCacheBudgetModeFixed {
 		return
 	}
 	manager.mu.Lock()
