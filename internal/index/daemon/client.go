@@ -618,8 +618,7 @@ func startDaemon(
 func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Client, error) {
 	client, err := retryDial(ctx, options)
 	if err != nil {
-		_ = cmd.Process.Kill() // Preserve the readiness failure while terminating the unusable daemon.
-		_ = cmd.Wait()         // Reap the terminated daemon; its exit status cannot replace the readiness failure.
+		reapFailedDaemon(ctx, cmd)
 		startupError := daemonStartupError(cmd)
 		cleanupOwnedArtifacts(options, cmd.Process.Pid)
 		if options.EncryptionMode == "required" || options.EncryptionMode == "initialize" {
@@ -647,6 +646,25 @@ func awaitDaemonReady(ctx context.Context, options Options, cmd *exec.Cmd) (*Cli
 	}
 	client.process = cmd
 	return client, nil
+}
+
+func reapFailedDaemon(ctx context.Context, cmd *exec.Cmd) {
+	wait := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(wait)
+	}()
+	timer := time.NewTimer(defaultRPCDeadline)
+	defer timer.Stop()
+	select {
+	case <-wait:
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		<-wait
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		<-wait
+	}
 }
 
 func daemonStartupError(cmd *exec.Cmd) string {
