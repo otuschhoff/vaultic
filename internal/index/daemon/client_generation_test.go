@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -89,6 +90,18 @@ func TestSchemaStoreImportsSameLegacyPackConcurrently(t *testing.T) {
 	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
 	if err != nil || aggregate.PackCount != 1 || aggregate.PayloadSize != 16 || aggregate.BlobCount != 2 || aggregate.PhysicalSize != 20 {
 		t.Fatalf("concurrent aggregate = %#v, err=%v", aggregate, err)
+	}
+}
+
+func TestSchemaStoreLegacyPackImportWaitHonorsCancellation(t *testing.T) {
+	store := NewSchemaStore(nil)
+	store.legacyImportGate <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := store.ImportLegacyPack(ctx, LegacyPackImport{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("import error = %v, want context cancellation", err)
 	}
 }
 

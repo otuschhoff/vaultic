@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"strings"
@@ -363,12 +364,30 @@ func runIndexImport(
 			return result, fmt.Errorf("load source indexes for snapshot import: %w", err)
 		}
 	}
+	started := time.Now()
+	log.Printf(
+		"legacy metadata import started: pack_workers=%d batch_size=%d snapshot_depth=%d resume=%t",
+		options.PackWorkers, options.BatchSize, options.SnapshotDepth, options.Resume,
+	)
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
 		Resume: options.Resume, DryRun: options.DryRun, MaxErrors: options.MaxErrors,
 		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers, PackTimeout: options.PackTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget,
 	})
+	if err != nil {
+		log.Printf(
+			"legacy metadata import failed after %s: indexes=%d packs=%d blobs=%d snapshots=%d: %v",
+			time.Since(started).Round(time.Millisecond), result.IndexesImported, result.PacksImported,
+			result.BlobsImported, result.SnapshotsImported, err,
+		)
+	} else {
+		log.Printf(
+			"legacy metadata import completed after %s: indexes=%d packs=%d blobs=%d snapshots=%d",
+			time.Since(started).Round(time.Millisecond), result.IndexesImported, result.PacksImported,
+			result.BlobsImported, result.SnapshotsImported,
+		)
+	}
 	if err != nil && !errors.Is(err, legacyimport.ErrLimitReached) {
 		return result, err
 	}

@@ -18,8 +18,9 @@ const revisionAllocationAttempts = 128
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
 type SchemaStore struct {
-	client        *Client
-	publicationMu sync.RWMutex
+	client           *Client
+	publicationMu    sync.RWMutex
+	legacyImportGate chan struct{}
 }
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.
@@ -88,7 +89,9 @@ type ReconciledRevision struct {
 	HardlinkParents    []schema.HardlinkParentRef
 }
 
-func NewSchemaStore(client *Client) *SchemaStore { return &SchemaStore{client: client} }
+func NewSchemaStore(client *Client) *SchemaStore {
+	return &SchemaStore{client: client, legacyImportGate: make(chan struct{}, 1)}
+}
 
 func (store *SchemaStore) LockAnalyticsPublication() {
 	store.publicationMu.Lock()
@@ -296,6 +299,13 @@ func (store *SchemaStore) recordCrawlDebtFailureOnce(ctx context.Context, keys [
 // ImportLegacyPack atomically merges one legacy pack's blob locations,
 // provenance, catalog record, aggregates, and optional pack-stat debt.
 func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyPackImport) error {
+	select {
+	case store.legacyImportGate <- struct{}{}:
+		defer func() { <-store.legacyImportGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
 		err := store.importPackOnce(ctx, imported, true)
