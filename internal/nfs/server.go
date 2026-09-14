@@ -156,7 +156,7 @@ func (server *Server) Serve(ctx context.Context) error {
 	server.rpcServers = rpcServers
 	server.mu.Unlock()
 	for index, listener := range listeners {
-		listener, rpcServer := listener, rpcServers[index]
+		rpcServer := rpcServers[index]
 		go func() {
 			defer server.serveWG.Done()
 			err := rpcServer.Serve(listener)

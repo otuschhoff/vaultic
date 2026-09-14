@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -515,7 +516,8 @@ func sendRejectedRecord(t *testing.T, address string, marker uint32, record []by
 	}
 	var one [1]byte
 	if _, err := connection.Read(one[:]); err != nil {
-		if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
 			t.Fatalf("malformed RPC connection was not rejected before deadline: %v", err)
 		}
 		return

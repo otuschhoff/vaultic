@@ -201,9 +201,19 @@ func TestFuseDir(t *testing.T) {
 	rtest.Equals(t, snapshotNode.Identity(), attr.Inode)
 	rtest.Equals(t, node.UID, attr.Uid)
 	rtest.Equals(t, node.GID, attr.Gid)
-	rtest.Equals(t, node.AccessTime, attr.Atime)
-	rtest.Equals(t, node.ChangeTime, attr.Ctime)
-	rtest.Equals(t, node.ModTime, attr.Mtime)
+	for _, times := range []struct {
+		name     string
+		expected time.Time
+		actual   time.Time
+	}{
+		{name: "access", expected: node.AccessTime, actual: attr.Atime},
+		{name: "change", expected: node.ChangeTime, actual: attr.Ctime},
+		{name: "modification", expected: node.ModTime, actual: attr.Mtime},
+	} {
+		if !times.expected.Equal(times.actual) {
+			t.Errorf("%s time: expected %v, got %v", times.name, times.expected, times.actual)
+		}
+	}
 }
 
 // Test top-level directories for their UID and GID.

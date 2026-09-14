@@ -256,7 +256,7 @@ func runServeNFS(ctx context.Context, options serveNFSOptions, globalOptions glo
 		defer removeNFSReadinessFile(options.ReadinessFile, record)
 	}
 
-	cacheStatus := repo.ReadCacheStatus()
+	cacheStatus := repo.ReadCacheStatus() //nolint:contextcheck // Lazy cache workers have repository lifetime, not request lifetime.
 	profiles := "none"
 	if len(globalOptions.UseProfiles) != 0 {
 		profiles = strings.Join(globalOptions.UseProfiles, ",")
