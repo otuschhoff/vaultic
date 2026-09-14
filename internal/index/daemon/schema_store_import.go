@@ -170,31 +170,71 @@ func planImportedBlobs(
 	imported LegacyPackImport,
 ) (packImportPlan, error) {
 	plan := packImportPlan{puts: make([]Mutation, 0, len(imported.Blobs)+7)}
+	blobIDs := make([]schema.ID, 0, len(imported.Blobs))
+	keys := make([][]byte, 0, len(imported.Blobs))
 	for blobID, incoming := range imported.Blobs {
-		key := schema.BlobKey(blobID)
-		value, found, err := transaction.Get(ctx, key)
+		imported.Blobs[blobID] = canonicalBlobRecord(incoming)
+		blobIDs = append(blobIDs, blobID)
+		keys = append(keys, schema.BlobKey(blobID))
+	}
+	for start := 0; start < len(keys); {
+		end, err := blobLookupBatchEnd(transaction.client.Limits(), keys, start)
 		if err != nil {
 			return packImportPlan{}, err
 		}
-		if found {
-			existing, err := schema.UnmarshalBlobRecord(value)
+		values, found, err := transaction.MultiGet(ctx, keys[start:end])
+		if err != nil {
+			return packImportPlan{}, err
+		}
+		for offset, blobID := range blobIDs[start:end] {
+			incoming := imported.Blobs[blobID]
+			if found[offset] {
+				existing, err := schema.UnmarshalBlobRecord(values[offset].Value)
+				if err != nil {
+					return packImportPlan{}, err
+				}
+				if err := accumulateNewLocations(&plan, existing, incoming); err != nil {
+					return packImportPlan{}, err
+				}
+				incoming = mergeBlobRecords(existing, incoming)
+			} else if err := accumulateAllLocations(&plan, incoming); err != nil {
+				return packImportPlan{}, err
+			}
+			encoded, err := incoming.MarshalBinary()
 			if err != nil {
 				return packImportPlan{}, err
 			}
-			if err := accumulateNewLocations(&plan, existing, incoming); err != nil {
-				return packImportPlan{}, err
-			}
-			incoming = mergeBlobRecords(existing, incoming)
-		} else if err := accumulateAllLocations(&plan, incoming); err != nil {
-			return packImportPlan{}, err
+			plan.puts = append(plan.puts, Mutation{Key: keys[start+offset], Value: encoded})
 		}
-		encoded, err := canonicalBlobRecord(incoming).MarshalBinary()
-		if err != nil {
-			return packImportPlan{}, err
-		}
-		plan.puts = append(plan.puts, Mutation{Key: key, Value: encoded})
+		start = end
 	}
 	return plan, nil
+}
+
+func blobLookupBatchEnd(limits Limits, keys [][]byte, start int) (int, error) {
+	if limits.MaxBatchItems == 0 || limits.MaxMessageBytes < 256 {
+		return 0, fmt.Errorf("vaulticdb advertised insufficient blob lookup limits")
+	}
+	const maxItems = 1_000
+	itemLimit := min(uint64(limits.MaxBatchItems), uint64(maxItems))
+	maxBytes := uint64(limits.MaxMessageBytes) / 2
+	used := uint64(128)
+	end := start
+	for end < len(keys) && uint64(end-start) < itemLimit {
+		size := uint64(len(keys[end])) + 16
+		if size > maxBytes {
+			return 0, fmt.Errorf("blob lookup key exceeds daemon message limit")
+		}
+		if used+size > maxBytes {
+			break
+		}
+		used += size
+		end++
+	}
+	if end == start {
+		return 0, fmt.Errorf("blob lookup batch made no progress")
+	}
+	return end, nil
 }
 
 func accumulateNewLocations(plan *packImportPlan, existing, incoming schema.BlobRecord) error {

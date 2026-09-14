@@ -168,6 +168,42 @@ func TestManifestBatchingRespectsNegotiatedLimits(t *testing.T) {
 	}
 }
 
+func TestBlobLookupBatchingRespectsNegotiatedLimits(t *testing.T) {
+	keys := make([][]byte, 2_500)
+	for index := range keys {
+		keys[index] = make([]byte, 34)
+	}
+	tests := []struct {
+		name    string
+		limits  Limits
+		batches int
+	}{
+		{name: "response headroom", limits: Limits{MaxBatchItems: 10_000, MaxMessageBytes: 16 * 1024 * 1024}, batches: 3},
+		{name: "item limit", limits: Limits{MaxBatchItems: 400, MaxMessageBytes: 16 * 1024 * 1024}, batches: 7},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batches := 0
+			for start := 0; start < len(keys); batches++ {
+				end, err := blobLookupBatchEnd(test.limits, keys, start)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if end <= start || end > len(keys) {
+					t.Fatalf("batch %d made invalid progress %d -> %d", batches, start, end)
+				}
+				start = end
+			}
+			if batches != test.batches {
+				t.Fatalf("batches = %d, want %d", batches, test.batches)
+			}
+		})
+	}
+	if _, err := blobLookupBatchEnd(Limits{}, keys, 0); err == nil {
+		t.Fatal("expected invalid limits to fail")
+	}
+}
+
 func TestS3CompatibleStorageRoundTrip(t *testing.T) {
 	if os.Getenv("VAULTICDB_TEST_S3_ENDPOINT") == "" {
 		t.Skip("VAULTICDB_TEST_S3_ENDPOINT is not configured")
