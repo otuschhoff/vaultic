@@ -309,7 +309,7 @@ func generateFiles() {
 
 var versionPattern = `const Version = ".*"`
 
-const versionCodeFile = "internal/global/global.go"
+const versionCodeFile = "internal/global/options.go"
 
 func updateVersion() {
 	err := os.WriteFile("VERSION", []byte(options.Version+"\n"), 0644)
