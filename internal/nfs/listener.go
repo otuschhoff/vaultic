@@ -73,31 +73,9 @@ func (conn *guardedConn) Read(dst []byte) (int, error) {
 	}
 	_ = conn.Conn.SetReadDeadline(time.Now().Add(conn.idleTimeout)) // The subsequent read reports transport failure.
 	if !conn.markerReady && conn.remaining == 0 {
-		if _, err := io.ReadFull(conn.Conn, conn.marker[:]); err != nil {
+		if err := conn.readRecordMarker(); err != nil {
 			return 0, err
 		}
-		fragment := binary.BigEndian.Uint32(conn.marker[:])
-		if !conn.inRecord {
-			conn.requests++
-			if conn.requests > conn.maxRequests {
-				return 0, io.ErrUnexpectedEOF
-			}
-			conn.inRecord = true
-			conn.recordSize = 0
-			conn.fragmentCount = 0
-		}
-		conn.fragmentCount++
-		if conn.fragmentCount > gonfs.MaxRecordFragments {
-			return 0, io.ErrUnexpectedEOF
-		}
-		conn.remaining = fragment &^ (1 << 31)
-		if conn.remaining > conn.maxFrame-conn.recordSize {
-			return 0, io.ErrUnexpectedEOF
-		}
-		conn.recordSize += conn.remaining
-		conn.lastFragment = fragment&(1<<31) != 0
-		conn.markerReady = true
-		conn.markerAt = 0
 	}
 	if conn.markerReady {
 		n := copy(dst, conn.marker[conn.markerAt:])
@@ -118,6 +96,35 @@ func (conn *guardedConn) Read(dst []byte) (int, error) {
 		conn.inRecord = false
 	}
 	return n, err
+}
+
+func (conn *guardedConn) readRecordMarker() error {
+	if _, err := io.ReadFull(conn.Conn, conn.marker[:]); err != nil {
+		return err
+	}
+	fragment := binary.BigEndian.Uint32(conn.marker[:])
+	if !conn.inRecord {
+		conn.requests++
+		if conn.requests > conn.maxRequests {
+			return io.ErrUnexpectedEOF
+		}
+		conn.inRecord = true
+		conn.recordSize = 0
+		conn.fragmentCount = 0
+	}
+	conn.fragmentCount++
+	if conn.fragmentCount > gonfs.MaxRecordFragments {
+		return io.ErrUnexpectedEOF
+	}
+	conn.remaining = fragment &^ (1 << 31)
+	if conn.remaining > conn.maxFrame-conn.recordSize {
+		return io.ErrUnexpectedEOF
+	}
+	conn.recordSize += conn.remaining
+	conn.lastFragment = fragment&(1<<31) != 0
+	conn.markerReady = true
+	conn.markerAt = 0
+	return nil
 }
 
 func (conn *guardedConn) Write(data []byte) (int, error) {

@@ -220,7 +220,8 @@ func TestRawRPCMalformedClientsReleaseConnectionSlot(t *testing.T) {
 	}
 	waitForActiveConnections(t, fixture.server, 0)
 	mountReply := rawRPCCall(t, fixture.addresses.Mount, rawRPCRequest(2, gonfs.MountProgram, 3, uint32(gonfs.MountProcMount), opaque([]byte("/snapshot"))))
-	if mountReply.replyStatus != rpcAccepted || mountReply.result != rpcSuccess || len(mountReply.body) < 8 || binary.BigEndian.Uint32(mountReply.body[:4]) != uint32(gonfs.MountStatusOk) {
+	if mountReply.replyStatus != rpcAccepted || mountReply.result != rpcSuccess ||
+		len(mountReply.body) < 8 || binary.BigEndian.Uint32(mountReply.body[:4]) != uint32(gonfs.MountStatusOk) {
 		t.Fatalf("valid MOUNT after malformed clients: %s", describeReply(mountReply))
 	}
 }
@@ -278,7 +279,8 @@ func startWireServer(t *testing.T, config Config) wireServer {
 	})
 
 	mountReply := rawRPCCall(t, addresses.Mount, rawRPCRequest(2, gonfs.MountProgram, 3, uint32(gonfs.MountProcMount), opaque([]byte("/snapshot"))))
-	if mountReply.replyStatus != rpcAccepted || mountReply.result != rpcSuccess || len(mountReply.body) < 8 || binary.BigEndian.Uint32(mountReply.body[:4]) != uint32(gonfs.MountStatusOk) {
+	if mountReply.replyStatus != rpcAccepted || mountReply.result != rpcSuccess ||
+		len(mountReply.body) < 8 || binary.BigEndian.Uint32(mountReply.body[:4]) != uint32(gonfs.MountStatusOk) {
 		t.Fatalf("mount fixture: %s", describeReply(mountReply))
 	}
 	rootHandle, rest := readOpaque(t, mountReply.body[4:])
@@ -299,7 +301,10 @@ func rawRPCRequest(rpcVersion, program, version, procedure uint32, body []byte) 
 	return append(request, body...)
 }
 
-func rawRPCRequestAuth(rpcVersion, program, version, procedure, credentialFlavor uint32, credentialBody []byte, verifierFlavor uint32, verifierBody, body []byte) []byte {
+func rawRPCRequestAuth(
+	rpcVersion, program, version, procedure, credentialFlavor uint32,
+	credentialBody []byte, verifierFlavor uint32, verifierBody, body []byte,
+) []byte {
 	request := words(0x7661756c, rpcCallMessage, rpcVersion, program, version, procedure, credentialFlavor, uint32(len(credentialBody)))
 	request = append(request, credentialBody...)
 	request = append(request, make([]byte, (4-len(credentialBody)%4)%4)...)
@@ -512,7 +517,8 @@ func sendRejectedRecord(t *testing.T, address string, marker uint32, record []by
 		t.Fatal(err)
 	}
 	if !idle {
-		_, _ = io.Copy(connection, io.MultiReader(bytes.NewReader(words(marker)), bytes.NewReader(record))) // Early server rejection may close during the intentional malformed write.
+		// Early server rejection may close during the intentional malformed write.
+		_, _ = io.Copy(connection, io.MultiReader(bytes.NewReader(words(marker)), bytes.NewReader(record)))
 	}
 	var one [1]byte
 	if _, err := connection.Read(one[:]); err != nil {

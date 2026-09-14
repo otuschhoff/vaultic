@@ -110,7 +110,8 @@ func (options *serveNFSOptions) addFlags(flags *pflag.FlagSet) {
 	flags.IntVar(&options.MountPort, "mount-port", nfs.DefaultMountListenPort, "listen on `port` for the mount protocol")
 	flags.StringVar(&options.ExportName, "export-name", "/snapshot", "publish the snapshot under `name`")
 	flags.StringArrayVar(&options.AllowCIDRs, "allow-cidr", nil, "allow clients from `CIDR` (can be specified multiple times)")
-	flags.BoolVar(&options.AcknowledgeInsecureNFSv3, "acknowledge-insecure-nfsv3", false, "acknowledge that remote NFSv3 has no encryption or strong authentication")
+	flags.BoolVar(&options.AcknowledgeInsecureNFSv3, "acknowledge-insecure-nfsv3", false,
+		"acknowledge that remote NFSv3 has no encryption or strong authentication")
 	flags.StringVar(&options.Owner, "owner", "preserved", "report ownership as preserved, server, or root")
 	flags.StringVar(&options.Permissions, "permissions", "preserved", "report permissions as preserved or readable")
 	flags.StringVar(&options.TreeCacheSize, "tree-cache-size", defaultNFSTreeCacheSize, "process-local decoded-tree cache `size`")
@@ -264,8 +265,10 @@ func runServeNFS(ctx context.Context, options serveNFSOptions, globalOptions glo
 	term.Print(fmt.Sprintf("Serving snapshot %s subfolder %q", snapshot.ID().String(), subfolder))
 	term.Print(fmt.Sprintf("NFS address: %s", addresses.NFS))
 	term.Print(fmt.Sprintf("Mount address: %s", addresses.Mount))
-	term.Print(fmt.Sprintf("Shared persistent read-cache: enabled=%v profile=%s revision=%d limit=%d", cacheStatus.Enabled, profiles, cacheStatus.PolicyRevision, cacheStatus.AggregateMaxBytes))
-	term.Print(fmt.Sprintf("Process-local caches: tree=%d blob=%d max-read=%d", filesystemConfig.TreeCacheBytes, filesystemConfig.BlobCacheBytes, serverConfig.MaxReadSize))
+	term.Print(fmt.Sprintf("Shared persistent read-cache: enabled=%v profile=%s revision=%d limit=%d",
+		cacheStatus.Enabled, profiles, cacheStatus.PolicyRevision, cacheStatus.AggregateMaxBytes))
+	term.Print(fmt.Sprintf("Process-local caches: tree=%d blob=%d max-read=%d",
+		filesystemConfig.TreeCacheBytes, filesystemConfig.BlobCacheBytes, serverConfig.MaxReadSize))
 	if !net.ParseIP(options.Listen).IsLoopback() {
 		term.Error("WARNING: NFSv3 traffic is unencrypted and AUTH_SYS identities are client-controlled; use only an authenticated private network.")
 	}

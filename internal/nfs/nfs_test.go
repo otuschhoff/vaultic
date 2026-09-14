@@ -295,7 +295,8 @@ func TestConfigValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaults.Listen != "127.0.0.1" || defaults.NFSPort != DefaultNFSListenPort || defaults.MountPort != DefaultMountListenPort || defaults.ExportName != "/snapshot" {
+	if defaults.Listen != "127.0.0.1" || defaults.NFSPort != DefaultNFSListenPort ||
+		defaults.MountPort != DefaultMountListenPort || defaults.ExportName != "/snapshot" {
 		t.Fatalf("defaults = %+v", defaults.Config)
 	}
 	for _, cfg := range []Config{
@@ -348,7 +349,7 @@ func TestServerTwoListenersAndProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootHandle := mountRoot(t, mountClient, "/snapshot")
+	_ = mountRoot(t, mountClient, "/snapshot")
 	assertMountDump(t, mountClient, []string{"/snapshot"})
 	assertMountExport(t, mountClient, "/snapshot")
 	callMount(t, mountClient, gonfs.MountProcUmnt, "/snapshot")
@@ -356,7 +357,7 @@ func TestServerTwoListenersAndProtocol(t *testing.T) {
 	_ = mountRoot(t, mountClient, "/snapshot")
 	callMount(t, mountClient, gonfs.MountProcUmntAll, "")
 	assertMountDump(t, mountClient, nil)
-	rootHandle = mountRoot(t, mountClient, "/snapshot")
+	rootHandle := mountRoot(t, mountClient, "/snapshot")
 	_, nfsPortText, _ := net.SplitHostPort(addresses.NFS)
 	nfsPort, _ := net.LookupPort("tcp", nfsPortText)
 	nfsClient, err := client.DialServiceAtPort(host, nfsPort)

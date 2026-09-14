@@ -31,7 +31,11 @@ func TestSnapshotFSContract(t *testing.T) {
 		}
 		treeID = data.TestSaveNodes(t, ctx, uploader, []*data.Node{
 			{Name: "z-link", Type: data.NodeTypeSymlink, Mode: 0777, LinkTarget: "a-file"},
-			{Name: "a-file", Type: data.NodeTypeFile, Mode: 0640, UID: 12, GID: 34, Size: uint64(len(payload)), Content: vaultic.IDs{contentID}, ModTime: stamp, AccessTime: stamp, ChangeTime: stamp},
+			{
+				Name: "a-file", Type: data.NodeTypeFile, Mode: 0640, UID: 12, GID: 34,
+				Size: uint64(len(payload)), Content: vaultic.IDs{contentID},
+				ModTime: stamp, AccessTime: stamp, ChangeTime: stamp,
+			},
 		})
 		return nil
 	})
@@ -83,7 +87,10 @@ func TestSnapshotFSContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fuseAttr.Inode != directFile.Identity() || fuseAttr.Mode != directAttr.Mode || fuseAttr.Uid != directAttr.UID || fuseAttr.Gid != directAttr.GID || fuseAttr.Size != directAttr.Size || uint64(fuseAttr.Nlink) != directAttr.Links || fuseAttr.Mtime != directAttr.ModTime {
+	if fuseAttr.Inode != directFile.Identity() || fuseAttr.Mode != directAttr.Mode ||
+		fuseAttr.Uid != directAttr.UID || fuseAttr.Gid != directAttr.GID ||
+		fuseAttr.Size != directAttr.Size || uint64(fuseAttr.Nlink) != directAttr.Links ||
+		fuseAttr.Mtime != directAttr.ModTime {
 		t.Fatalf("FUSE attrs do not match snapshotfs: FUSE=%+v snapshotfs=%+v identity=%d", fuseAttr, directAttr, directFile.Identity())
 	}
 
