@@ -2582,7 +2582,57 @@ impl Storage {
                 .await
                 .map_err(storage_error)?
         };
-        Ok(match value {
+        Ok(Self::get_response(key, value))
+    }
+
+    pub(crate) async fn multi_get(
+        &self,
+        keys: &[Vec<u8>],
+        transaction_id: &str,
+        max_response_bytes: usize,
+    ) -> Result<Vec<GetResponse>, Status> {
+        for key in keys {
+            validate_key(key)?;
+        }
+
+        let mut results = Vec::with_capacity(keys.len());
+        if keys.is_empty() {
+            return Ok(results);
+        }
+        let mut response_bytes = 0usize;
+        if transaction_id.is_empty() {
+            for key in keys {
+                let value = self.read_value(key).await?;
+                Self::push_multi_get_result(
+                    &mut results,
+                    &mut response_bytes,
+                    max_response_bytes,
+                    key,
+                    value,
+                )?;
+            }
+        } else {
+            let transaction = self.transaction(transaction_id).await?;
+            let transaction = transaction.transaction.lock().await;
+            let transaction = transaction
+                .as_ref()
+                .ok_or_else(|| transaction_not_found("transaction was closed"))?;
+            for key in keys {
+                let value = transaction.get(key).await.map_err(storage_error)?;
+                Self::push_multi_get_result(
+                    &mut results,
+                    &mut response_bytes,
+                    max_response_bytes,
+                    key,
+                    value,
+                )?;
+            }
+        }
+        Ok(results)
+    }
+
+    fn get_response(key: &[u8], value: Option<bytes::Bytes>) -> GetResponse {
+        match value {
             Some(value) => GetResponse {
                 found: true,
                 value: value.to_vec(),
@@ -2593,7 +2643,34 @@ impl Storage {
                 value: Vec::new(),
                 key: key.to_vec(),
             },
-        })
+        }
+    }
+
+    fn push_multi_get_result(
+        results: &mut Vec<GetResponse>,
+        response_bytes: &mut usize,
+        max_response_bytes: usize,
+        key: &[u8],
+        value: Option<bytes::Bytes>,
+    ) -> Result<(), Status> {
+        let result = Self::get_response(key, value);
+        *response_bytes = response_bytes
+            .checked_add(repeated_message_encoded_len(result.encoded_len()))
+            .ok_or_else(|| {
+                Status::from(VaulticDbError::ResourceExhausted {
+                    message: "multi-get response size overflow".to_owned(),
+                    retryable: false,
+                })
+            })?;
+        if *response_bytes > max_response_bytes {
+            return Err(VaulticDbError::ResourceExhausted {
+                message: "multi-get response byte limit exceeded".to_owned(),
+                retryable: false,
+            }
+            .into());
+        }
+        results.push(result);
+        Ok(())
     }
 
     pub(crate) async fn scan(

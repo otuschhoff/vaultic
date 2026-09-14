@@ -2,7 +2,6 @@
 
 use std::sync::atomic::Ordering;
 
-use prost::Message;
 use tonic::{Request, Response, Status};
 
 use crate::{
@@ -11,7 +10,6 @@ use crate::{
         GetRequest, GetResponse, MultiGetRequest, MultiGetResponse, RequestContext, ScanRequest,
         ScanResponse,
     },
-    storage::repeated_message_encoded_len,
     MAX_BATCH_ITEMS, MAX_MESSAGE_BYTES, MAX_PAGE_ITEMS,
 };
 
@@ -130,27 +128,13 @@ impl Service {
         }
         let request = request.into_inner();
         let storage = self.storage().await?;
-        let mut results = Vec::with_capacity(request.keys.len());
-        let mut response_bytes = 0usize;
-        for key in request.keys {
-            let result = storage.get(&key, &request.transaction_id).await?;
-            response_bytes = response_bytes
-                .checked_add(repeated_message_encoded_len(result.encoded_len()))
-                .ok_or_else(|| {
-                    Status::from(VaulticDbError::ResourceExhausted {
-                        message: "multi-get response size overflow".to_owned(),
-                        retryable: false,
-                    })
-                })?;
-            if response_bytes > MAX_MESSAGE_BYTES as usize {
-                return Err(VaulticDbError::ResourceExhausted {
-                    message: "multi-get response byte limit exceeded".to_owned(),
-                    retryable: false,
-                }
-                .into());
-            }
-            results.push(result);
-        }
+        let results = storage
+            .multi_get(
+                &request.keys,
+                &request.transaction_id,
+                MAX_MESSAGE_BYTES as usize,
+            )
+            .await?;
         Ok(Response::new(MultiGetResponse { results }))
     }
 

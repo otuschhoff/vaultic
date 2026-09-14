@@ -701,6 +701,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_get_preserves_transaction_order_and_response_limit() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("multi-get-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+        assert!(storage
+            .multi_get(&[], "unknown", usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage
+            .write_batch(&WriteBatchRequest {
+                puts: vec![KeyValue {
+                    key: b"present".to_vec(),
+                    value: b"value".to_vec(),
+                }],
+                transaction_id: transaction_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let keys = vec![
+            b"present".to_vec(),
+            b"missing".to_vec(),
+            b"present".to_vec(),
+        ];
+        let results = storage
+            .multi_get(&keys, &transaction_id, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(results.iter().map(|result| result.key.as_slice()).collect::<Vec<_>>(), keys);
+        assert_eq!(results[0].value, b"value");
+        assert!(!results[1].found);
+        assert_eq!(results[2].value, b"value");
+
+        let error = storage.multi_get(&keys, &transaction_id, 0).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        storage.rollback(&transaction_id).await.unwrap();
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn expired_transactions_report_counter_reconciliation() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
