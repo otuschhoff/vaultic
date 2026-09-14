@@ -62,11 +62,24 @@ jobs:
 
       - name: Get programs (Linux/macOS)
         run: |
+          retry_go_install() {
+            for attempt in 1 2 3; do
+              if go install "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              echo "go install failed on attempt $attempt; retrying in $((attempt * 10)) seconds" >&2
+              sleep $((attempt * 10))
+            done
+          }
+
           echo "build Go tools"
-          go install github.com/restic/rest-server/cmd/rest-server@master
+          retry_go_install github.com/restic/rest-server/cmd/rest-server@master
 
           echo "install minio server"
-          go install "github.com/minio/minio@$MINIO_VERSION"
+          retry_go_install "github.com/minio/minio@$MINIO_VERSION"
           mkdir $HOME/bin
 
           echo "install rclone"
