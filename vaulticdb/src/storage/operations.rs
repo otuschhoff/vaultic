@@ -81,6 +81,12 @@ async fn ensure_wal_target_identity(
     match store.get(&path).await {
         Ok(result) => {
             let actual = result.bytes().await.context("read WAL target identity")?;
+            if let Some(root) = decode_local_wal_handoff(&actual)? {
+                if identity == format!("local:{}", root.display()) {
+                    return Ok(());
+                }
+                bail!("configured WAL target does not match the post-import local WAL binding");
+            }
             if actual.as_ref() != expected.as_bytes() {
                 bail!("configured WAL target does not match the metadata generation");
             }
@@ -117,6 +123,56 @@ async fn ensure_wal_target_identity(
         }
         Err(error) => Err(error).context("publish WAL target identity"),
     }
+}
+
+async fn local_wal_handoff_target(store: &dyn ObjectStore) -> Result<Option<PathBuf>> {
+    let path = ObjectPath::from(WAL_TARGET_PATH);
+    match store.get(&path).await {
+        Ok(result) => decode_local_wal_handoff(
+            &result.bytes().await.context("read post-import local WAL binding")?,
+        ),
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error).context("read post-import local WAL binding"),
+    }
+}
+
+fn decode_local_wal_handoff(value: &[u8]) -> Result<Option<PathBuf>> {
+    let Some(path) = value.strip_prefix(WAL_TARGET_LOCAL_HANDOFF_PREFIX) else {
+        return Ok(None);
+    };
+    let path = std::str::from_utf8(path).context("post-import local WAL path is not UTF-8")?;
+    if path.is_empty() {
+        bail!("post-import local WAL path is empty");
+    }
+    Ok(Some(PathBuf::from(path)))
+}
+
+async fn mark_local_wal_handoff(store: &dyn ObjectStore, root: &std::path::Path) -> Result<()> {
+    let path = ObjectPath::from(WAL_TARGET_PATH);
+    let result = store
+        .get(&path)
+        .await
+        .context("read memory WAL target identity after clean bulk import")?;
+    let version = UpdateVersion {
+        e_tag: result.meta.e_tag.clone(),
+        version: result.meta.version.clone(),
+    };
+    let actual = result.bytes().await.context("decode memory WAL target identity")?;
+    let memory_identity = format!("sha256:{:x}\n", Sha256::digest(b"memory"));
+    if actual.as_ref() != memory_identity.as_bytes() {
+        bail!("clean bulk-import shutdown found an unexpected WAL target binding");
+    }
+    let mut handoff = WAL_TARGET_LOCAL_HANDOFF_PREFIX.to_vec();
+    handoff.extend_from_slice(root.to_string_lossy().as_bytes());
+    store
+        .put_opts(
+            &path,
+            handoff.into(),
+            PutOptions::from(PutMode::Update(version)),
+        )
+        .await
+        .context("publish post-import local WAL binding")?;
+    Ok(())
 }
 
 async fn latest_writer_epoch(store: &dyn ObjectStore) -> Result<u64> {

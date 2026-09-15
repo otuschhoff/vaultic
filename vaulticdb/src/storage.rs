@@ -20,7 +20,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slatedb::{
-    config::{DbReaderOptions, FlushOptions, FlushType},
+    config::{DbReaderOptions, FlushOptions, FlushType, Settings},
     object_store::{
         aws::AmazonS3Builder,
         azure::{split_sas, MicrosoftAzureBuilder},
@@ -68,6 +68,8 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const WRITER_EPOCH_PREFIX: &str = "_vaultic/writer-epochs";
 const ACTIVE_WRITER_PATH: &str = "_vaultic/active-writer";
 const WAL_TARGET_PATH: &str = "_vaultic/wal-target-v1";
+const WAL_TARGET_LOCAL_HANDOFF_PREFIX: &[u8] = b"vaulticdb-local-wal-after-bulk-import-v1:";
+const BULK_IMPORT_COMPLETE_RECORD: &[u8] = b"_vaultic/bulk-import-complete-v1";
 const ACTIVE_GENERATION_PATH: &str = "_vaultic/metadata-authority";
 const GENERATION_DECISION_PREFIX: &str = "_vaultic/metadata-authority-decisions";
 
@@ -238,7 +240,9 @@ pub(crate) struct Storage {
     last_durable_sequence: AtomicU64,
     transaction_idle_timeout_ms: u64,
     slatedb_multiget: bool,
+    slatedb_tuning: SlateDbTuning,
     metadata_rebuild_reset: bool,
+    bulk_import_local_wal_data_dir: Option<PathBuf>,
     credential_manager: Option<StorageCredentialManager>,
     broker_lease_metadata: Option<BrokerLeaseMetadata>,
     writer_epoch: AtomicU64,
@@ -282,16 +286,41 @@ impl StorageCredentialManager {
 pub(crate) struct StorageConfig {
     pub(crate) object_store: ObjectStoreConfig,
     pub(crate) wal_store: WalStoreConfig,
+    pub(crate) slatedb_tuning: SlateDbTuning,
     pub(crate) cache: cache::CacheConfig,
     pub(crate) fencing_replica: Option<String>,
     pub(crate) metadata_rebuild_initialize: bool,
     pub(crate) metadata_rebuild_reset: bool,
+    pub(crate) bulk_import_local_wal_data_dir: Option<PathBuf>,
     pub(crate) broker: Option<BrokerLeaseConfig>,
     pub(crate) encryption: envelope::EncryptionConfig,
     pub(crate) transaction_idle_timeout_ms: u64,
     pub(crate) slatedb_multiget: bool,
     pub(crate) topology_source: TopologySource,
     pub(crate) topology_override_local: Option<(String, PathBuf)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SlateDbTuning {
+    pub(crate) flush_interval: Option<std::time::Duration>,
+    pub(crate) max_unflushed_bytes: Option<usize>,
+    pub(crate) l0_sst_size_bytes: Option<usize>,
+}
+
+impl SlateDbTuning {
+    fn settings(&self) -> Settings {
+        let mut settings = Settings::default();
+        if let Some(flush_interval) = self.flush_interval {
+            settings.flush_interval = Some(flush_interval);
+        }
+        if let Some(max_unflushed_bytes) = self.max_unflushed_bytes {
+            settings.max_unflushed_bytes = max_unflushed_bytes;
+        }
+        if let Some(l0_sst_size_bytes) = self.l0_sst_size_bytes {
+            settings.l0_sst_size_bytes = l0_sst_size_bytes;
+        }
+        settings
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -316,6 +345,7 @@ async fn open_writer(
     path: &str,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    tuning: &SlateDbTuning,
 ) -> Result<Db> {
     #[cfg(any(test, feature = "test-failpoints"))]
     check_storage_failpoint(StorageFailpoint::OpenWriter(path.to_owned()))?;
@@ -323,7 +353,7 @@ async fn open_writer(
     eprintln!(
         "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_writer_open_started\"}}"
     );
-    let mut builder = Db::builder(path, object_store);
+    let mut builder = Db::builder(path, object_store).with_settings(tuning.settings());
     if let Some(wal_store) = wal_object_store {
         builder = builder.with_wal_object_store(wal_store);
     }
@@ -1173,10 +1203,10 @@ async fn failed_open_cleanup(
 
 impl Storage {
     pub(crate) async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
-        if config.metadata_rebuild_reset && !config.cache.tiers.is_empty() {
-            bail!("metadata rebuild reset requires read-cache tiers to be disabled");
+        if config.metadata_rebuild_reset && !config.cache.is_volatile() {
+            bail!("metadata rebuild reset permits only volatile memory read-cache tiers");
         }
-        let (effective_store, effective_wal_store, effective_fencing, topology_leases) =
+        let (effective_store, mut effective_wal_store, effective_fencing, topology_leases) =
             if config.topology_source == TopologySource::Capsule {
                 let broker = config
                     .broker
@@ -1199,6 +1229,11 @@ impl Storage {
         let (path, raw_object_store) = object_store(repository_id, &effective_store)?;
         let raw_control_store =
             repository_control_store(&effective_store, &path, raw_object_store.clone());
+        if matches!(effective_wal_store, WalStoreConfig::Inherit) {
+            if let Some(root) = local_wal_handoff_target(raw_control_store.as_ref()).await? {
+                effective_wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Local { root });
+            }
+        }
         let raw_wal_object_store = match &effective_wal_store {
             WalStoreConfig::Inherit => None,
             WalStoreConfig::Store(config) => Some(wal_object_store(repository_id, config)?),
@@ -1544,73 +1579,77 @@ impl Storage {
                 .await);
             }
         };
-        let (database, writer_epoch) = match writer_claim {
-            Some(epoch) => {
-                let db = match open_writer(&path, object_store.clone(), wal_object_store.clone())
+        let (database, writer_epoch) =
+            match writer_claim {
+                Some(epoch) => {
+                    let db = match open_writer(
+                        &path,
+                        object_store.clone(),
+                        wal_object_store.clone(),
+                        &config.slatedb_tuning,
+                    )
                     .await
-                {
-                    Ok(db) => db,
-                    Err(error) => {
-                        let primary = error.context("open SlateDB database");
-                        return Err(failed_open_cleanup(
-                            primary,
-                            &path,
-                            cache_manager.as_ref(),
-                            None,
-                            Some((coordination_store.as_ref(), epoch)),
-                        )
-                        .await);
-                    }
-                };
-                (Database::Writer(db), epoch)
-            }
-            None => {
-                let reader = match open_reader(
-                    &path,
-                    object_store.clone(),
-                    wal_object_store.clone(),
-                )
-                .await
-                {
-                    Ok(reader) => reader,
-                    Err(error) => {
-                        let primary = error.context("open SlateDB database as non-fencing reader");
-                        return Err(failed_open_cleanup(
-                            primary,
-                            &path,
-                            cache_manager.as_ref(),
-                            None,
-                            None,
-                        )
-                        .await);
-                    }
-                };
-                #[cfg(any(test, feature = "test-failpoints"))]
-                let observed_epoch = match check_storage_failpoint(
-                    StorageFailpoint::ObserveLatestWriterEpoch(path.clone()),
-                ) {
-                    Ok(()) => latest_writer_epoch(coordination_store.as_ref()).await,
-                    Err(error) => Err(error),
-                };
-                #[cfg(not(any(test, feature = "test-failpoints")))]
-                let observed_epoch = latest_writer_epoch(coordination_store.as_ref()).await;
-                let epoch = match observed_epoch {
-                    Ok(epoch) => epoch,
-                    Err(error) => {
-                        let primary = error.context("observe latest SlateDB writer epoch");
-                        return Err(failed_open_cleanup(
-                            primary,
-                            &path,
-                            cache_manager.as_ref(),
-                            Some(reader),
-                            None,
-                        )
-                        .await);
-                    }
-                };
-                (Database::Reader(reader), epoch)
-            }
-        };
+                    {
+                        Ok(db) => db,
+                        Err(error) => {
+                            let primary = error.context("open SlateDB database");
+                            return Err(failed_open_cleanup(
+                                primary,
+                                &path,
+                                cache_manager.as_ref(),
+                                None,
+                                Some((coordination_store.as_ref(), epoch)),
+                            )
+                            .await);
+                        }
+                    };
+                    (Database::Writer(db), epoch)
+                }
+                None => {
+                    let reader =
+                        match open_reader(&path, object_store.clone(), wal_object_store.clone())
+                            .await
+                        {
+                            Ok(reader) => reader,
+                            Err(error) => {
+                                let primary =
+                                    error.context("open SlateDB database as non-fencing reader");
+                                return Err(failed_open_cleanup(
+                                    primary,
+                                    &path,
+                                    cache_manager.as_ref(),
+                                    None,
+                                    None,
+                                )
+                                .await);
+                            }
+                        };
+                    #[cfg(any(test, feature = "test-failpoints"))]
+                    let observed_epoch = match check_storage_failpoint(
+                        StorageFailpoint::ObserveLatestWriterEpoch(path.clone()),
+                    ) {
+                        Ok(()) => latest_writer_epoch(coordination_store.as_ref()).await,
+                        Err(error) => Err(error),
+                    };
+                    #[cfg(not(any(test, feature = "test-failpoints")))]
+                    let observed_epoch = latest_writer_epoch(coordination_store.as_ref()).await;
+                    let epoch = match observed_epoch {
+                        Ok(epoch) => epoch,
+                        Err(error) => {
+                            let primary = error.context("observe latest SlateDB writer epoch");
+                            return Err(failed_open_cleanup(
+                                primary,
+                                &path,
+                                cache_manager.as_ref(),
+                                Some(reader),
+                                None,
+                            )
+                            .await);
+                        }
+                    };
+                    (Database::Reader(reader), epoch)
+                }
+            };
         let storage = Self {
             database: RwLock::new(database),
             database_path: path,
@@ -1627,7 +1666,9 @@ impl Storage {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
             slatedb_multiget: config.slatedb_multiget,
+            slatedb_tuning: config.slatedb_tuning.clone(),
             metadata_rebuild_reset: config.metadata_rebuild_reset,
+            bulk_import_local_wal_data_dir: config.bulk_import_local_wal_data_dir.clone(),
             credential_manager,
             broker_lease_metadata,
             writer_epoch: AtomicU64::new(writer_epoch),
@@ -2096,12 +2137,33 @@ impl Storage {
         self.transactions.write().await.clear();
         let database = self.database.write().await;
         let was_writer = matches!(&*database, Database::Writer(_));
+        let bulk_import_complete = match &*database {
+            Database::Writer(db) => db
+                .get(BULK_IMPORT_COMPLETE_RECORD)
+                .await
+                .context("read bulk-import completion marker before shutdown")?
+                .is_some(),
+            Database::Reader(_) | Database::Unavailable => false,
+        };
         let database_close = match &*database {
             Database::Writer(db) => db.close().await.context("close SlateDB writer"),
             Database::Reader(reader) => reader.close().await.context("close SlateDB reader"),
             Database::Unavailable => Ok(()),
         };
-        let writer_release = if database_close.is_ok() && was_writer {
+        let wal_rebind = if database_close.is_ok()
+            && was_writer
+            && self.metadata_rebuild_reset
+            && self.wal_target == "memory"
+            && bulk_import_complete
+        {
+            match &self.bulk_import_local_wal_data_dir {
+                Some(root) => mark_local_wal_handoff(self.coordination_store.as_ref(), root).await,
+                None => Ok(()),
+            }
+        } else {
+            Ok(())
+        };
+        let writer_release = if database_close.is_ok() && wal_rebind.is_ok() && was_writer {
             release_writer_claim(
                 self.coordination_store.as_ref(),
                 self.writer_epoch.load(Ordering::Acquire),
@@ -2115,6 +2177,7 @@ impl Storage {
             None => Ok(()),
         };
         database_close?;
+        wal_rebind?;
         writer_release?;
         cache_close?;
         Ok(())
@@ -2304,6 +2367,7 @@ impl Storage {
             self.database_path.as_str(),
             self.object_store.clone(),
             self.wal_object_store.clone(),
+            &self.slatedb_tuning,
         )
         .await
         {

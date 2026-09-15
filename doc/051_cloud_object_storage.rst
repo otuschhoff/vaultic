@@ -456,16 +456,50 @@ direct reopen when its metadata-generation WAL binding differs. Never delete
 WAL by age; SlateDB cleanup follows manifest checkpoint and reader recovery
 state.
 
+WAL latency tuning
+------------------
+
+VaulticDB exposes SlateDB's write-buffer controls as
+``--daemon-wal-flush-interval``, ``--daemon-max-unflushed-bytes``, and
+``--daemon-l0-sst-size-bytes``. Zero or omission keeps the SlateDB default:
+100 ms, 1 GiB, and 64 MiB respectively. For a high-memory bulk import whose
+durable WAL has noticeable operation latency, a starting point is::
+
+  $ vaultic index import --from-legacy --start-daemon \
+    --daemon-wal-flush-interval 500ms \
+    --daemon-max-unflushed-bytes 4294967296 \
+    --daemon-l0-sst-size-bytes 268435456
+
+The corresponding direct-daemon variables are
+``VAULTICDB_WAL_FLUSH_INTERVAL``, ``VAULTICDB_MAX_UNFLUSHED_BYTES``, and
+``VAULTICDB_L0_SST_SIZE_BYTES``. Environment values must be positive.
+
+A longer flush interval batches more writes per WAL object but adds that
+interval to durable acknowledgement and reader visibility latency. The maximum
+unflushed limit is not WAL-only: it bounds immutable WAL buffers and memtables
+together, then applies writer backpressure. A larger L0 threshold reduces L0
+object frequency while increasing memory use, WAL replay work, and the delay
+before secondary readers see L0 data. Buffering absorbs bursts; it cannot
+sustain ingestion above the backend's long-term write throughput.
+
 Volatile in-memory WAL for bulk import
 --------------------------------------
 
 On a high-memory host, a rebuild from legacy indexes can avoid durable WAL I/O
-by starting its temporary VaulticDB process with an in-memory WAL::
+by starting its temporary VaulticDB process with a forced fresh import::
 
   $ vaultic -r /srv/repository index import --from-legacy \
     --start-daemon --daemon-object-store local \
     --daemon-data-dir /shared/vaulticdb \
-    --daemon-wal-store memory --pack-workers 16
+    --force-reset-old-idx
+
+  This workflow automatically selects an in-memory WAL, enables SlateDB
+  MultiGet, scales a decrypted memory read cache and unflushed-data allowance to
+  physical RAM, uses a 256 MiB L0 threshold, and raises pack preparation
+  concurrency. Explicit operator cache and tuning settings take precedence.
+  After a fully successful import, clean shutdown persists a local-WAL binding
+  below the metadata data directory; the next default start uses that local WAL.
+  Failed or interrupted imports do not hand off and must be reset and retried.
 
 Use this only while the legacy indexes remain available as the recovery source.
 The daemon reports this WAL durability as ``local-process``: a crash, kill, or

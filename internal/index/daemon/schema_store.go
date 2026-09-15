@@ -17,6 +17,8 @@ const revisionAllocationAttempts = 128
 
 const freshImportSeenBytes = 64 << 20
 
+const bulkImportCompleteKey = "_vaultic/bulk-import-complete-v1"
+
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
 type SchemaStore struct {
@@ -24,6 +26,25 @@ type SchemaStore struct {
 	publicationMu    sync.RWMutex
 	legacyImportGate chan struct{}
 	freshImportSeen  *idSeenFilter
+}
+
+// MarkBulkImportComplete durably authorizes the temporary memory WAL to hand
+// the completed metadata generation to its configured local WAL on shutdown.
+func (store *SchemaStore) MarkBulkImportComplete(ctx context.Context) error {
+	acknowledged, err := store.client.WriteBatch(
+		ctx,
+		[]Mutation{{Key: []byte(bulkImportCompleteKey), Value: []byte("complete")}},
+		nil,
+		true,
+		"",
+	)
+	if err != nil {
+		return err
+	}
+	if !acknowledged {
+		return errors.New("vaulticdb did not durably acknowledge bulk-import completion")
+	}
+	return nil
 }
 
 type idSeenFilter struct {

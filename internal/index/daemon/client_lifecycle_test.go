@@ -209,11 +209,14 @@ func TestPrepareDaemonCommand(t *testing.T) {
 
 func TestPrepareDaemonCommandWithMemoryWAL(t *testing.T) {
 	options := (Options{
-		Socket:       "/tmp/vaulticdb/test.sock",
-		RepositoryID: "repo",
-		DaemonPath:   "/path/to/vaulticdb",
-		ObjectStore:  "local",
-		WALStore:     "memory",
+		Socket:            "/tmp/vaulticdb/test.sock",
+		RepositoryID:      "repo",
+		DaemonPath:        "/path/to/vaulticdb",
+		ObjectStore:       "local",
+		WALStore:          "memory",
+		WALFlushInterval:  500 * time.Millisecond,
+		MaxUnflushedBytes: 4 * 1024 * 1024 * 1024,
+		L0SSTSizeBytes:    256 * 1024 * 1024,
 	}).withDefaults()
 	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
 	if err != nil {
@@ -223,8 +226,66 @@ func TestPrepareDaemonCommandWithMemoryWAL(t *testing.T) {
 		_ = authRead.Close()
 		_ = authWrite.Close()
 	})
-	if !slices.Contains(cmd.Env, "VAULTICDB_WAL_STORE=memory") {
-		t.Fatalf("daemon environment does not select the in-memory WAL: %q", cmd.Env)
+	for _, entry := range []string{
+		"VAULTICDB_WAL_STORE=memory",
+		"VAULTICDB_WAL_FLUSH_INTERVAL=500ms",
+		"VAULTICDB_MAX_UNFLUSHED_BYTES=4294967296",
+		"VAULTICDB_L0_SST_SIZE_BYTES=268435456",
+	} {
+		if !slices.Contains(cmd.Env, entry) {
+			t.Errorf("daemon environment missing %q: %q", entry, cmd.Env)
+		}
+	}
+}
+
+func TestPrepareDaemonCommandWithFreshBulkImportCache(t *testing.T) {
+	t.Setenv("VAULTICDB_READ_CACHE_TIERS", "")
+	options := (Options{
+		RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "local",
+		FreshBulkImport: true, BulkImportReadCacheBytes: 64 * 1024 * 1024 * 1024,
+	}).withDefaults()
+	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = authRead.Close()
+		_ = authWrite.Close()
+	})
+	for _, entry := range []string{
+		"VAULTICDB_SLATEDB_MULTIGET=true",
+		"VAULTICDB_READ_CACHE_TIERS=bulk-memory",
+		"VAULTICDB_READ_CACHE_BULK_MEMORY_OBJECT_STORE=memory",
+		"VAULTICDB_READ_CACHE_BULK_MEMORY_CONFIDENTIALITY=decrypted",
+		"VAULTICDB_READ_CACHE_BULK_MEMORY_ACKNOWLEDGE_PLAINTEXT=true",
+		"VAULTICDB_READ_CACHE_BULK_MEMORY_MAX_BYTES=68719476736",
+		"VAULTICDB_READ_CACHE_PART_SIZE_BYTES=16777216",
+		"VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES=268435456",
+	} {
+		if !slices.Contains(cmd.Env, entry) {
+			t.Errorf("bulk-import environment missing %q: %q", entry, cmd.Env)
+		}
+	}
+}
+
+func TestFreshBulkImportPreservesAmbientReadCache(t *testing.T) {
+	t.Setenv("VAULTICDB_READ_CACHE_TIERS", "operator-cache")
+	t.Setenv("VAULTICDB_READ_CACHE_OPERATOR_CACHE_OBJECT_STORE", "memory")
+	options := (Options{
+		RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "local",
+		FreshBulkImport: true, BulkImportReadCacheBytes: 64 * 1024 * 1024 * 1024,
+	}).withDefaults()
+	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = authRead.Close()
+		_ = authWrite.Close()
+	})
+	if !slices.Contains(cmd.Env, "VAULTICDB_READ_CACHE_TIERS=operator-cache") ||
+		slices.Contains(cmd.Env, "VAULTICDB_READ_CACHE_TIERS=bulk-memory") {
+		t.Fatalf("operator read-cache configuration was replaced: %q", cmd.Env)
 	}
 }
 

@@ -11,6 +11,21 @@ mod tests {
 
     static STORAGE_FAILPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    #[test]
+    fn slatedb_tuning_preserves_unset_defaults() {
+        let defaults = Settings::default();
+        let settings = SlateDbTuning {
+            flush_interval: Some(std::time::Duration::from_millis(500)),
+            max_unflushed_bytes: Some(4 * 1024 * 1024 * 1024),
+            l0_sst_size_bytes: None,
+        }
+        .settings();
+
+        assert_eq!(settings.flush_interval, Some(std::time::Duration::from_millis(500)));
+        assert_eq!(settings.max_unflushed_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(settings.l0_sst_size_bytes, defaults.l0_sst_size_bytes);
+    }
+
     async fn listed_paths(store: &dyn ObjectStore) -> Vec<String> {
         let mut paths = Vec::new();
         let mut objects = store.list(None);
@@ -34,6 +49,7 @@ mod tests {
         StorageConfig {
             object_store: ObjectStoreConfig::Memory,
             wal_store: WalStoreConfig::Inherit,
+            slatedb_tuning: SlateDbTuning::default(),
             cache: cache::CacheConfig {
                 tiers: vec![cache::CacheTierConfig {
                     id: "memory".to_owned(),
@@ -56,6 +72,7 @@ mod tests {
             fencing_replica: None,
             metadata_rebuild_initialize: false,
             metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             broker: None,
             encryption: EncryptionConfig {
                 mode: EncryptionMode::Off,
@@ -89,18 +106,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_rebuild_reset_rejects_configured_read_cache() {
+    async fn metadata_rebuild_reset_allows_volatile_memory_read_cache() {
         let repository_id = format!("reset-cache-{}", rand::random::<u64>());
         let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        let root = env::temp_dir().join(format!(
+            "vaulticdb-reset-memory-cache-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+
+        let initial = Storage::open(&repository_id, &config).await.unwrap();
+        let database = initial.database.read().await;
+        let Database::Writer(db) = &*database else {
+            panic!("initial cache candidate did not open as writer")
+        };
+        db.put(b"p:stale", b"old".to_vec())
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        drop(database);
+        initial.close().await.unwrap();
+
         config.metadata_rebuild_reset = true;
+        let storage = Storage::open(&repository_id, &config).await.unwrap();
+        assert!(storage.read_value(b"p:stale").await.unwrap().is_none());
+        let status = storage.cache_status().unwrap();
+        assert_eq!(status.tiers.len(), 1);
+        assert_eq!(
+            status.tiers[0].confidentiality,
+            cache::CacheConfidentiality::DecryptedHighlyTrusted
+        );
+        storage.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_rebuild_reset_rejects_persistent_read_cache() {
+        let repository_id = format!("reset-persistent-cache-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.metadata_rebuild_reset = true;
+        config.cache.tiers[0].store = ReplicaStoreConfig::Local {
+            root: env::temp_dir().join(format!("vaulticdb-reset-cache-{}", rand::random::<u64>())),
+        };
         let error = match Storage::open(&repository_id, &config).await {
             Ok(storage) => {
                 storage.close().await.unwrap();
-                panic!("metadata reset unexpectedly accepted a read cache")
+                panic!("metadata reset unexpectedly accepted a persistent read cache")
             }
             Err(error) => error.to_string(),
         };
-        assert!(error.contains("requires read-cache tiers to be disabled"));
+        assert!(error.contains("permits only volatile memory read-cache tiers"));
     }
 
     #[tokio::test]
@@ -244,7 +302,14 @@ mod tests {
     async fn slatedb_compacted_sst_paths_are_unique_ulid_generations() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let database = format!("sst-path-contract-{}", rand::random::<u64>());
-        let db = open_writer(&database, object_store.clone(), None).await.unwrap();
+        let db = open_writer(
+            &database,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let mut compacted = std::collections::HashSet::new();
         for (key, value) in [(b"first".as_slice(), b"one".as_slice()), (b"second", b"two")] {
             let mut batch = WriteBatch::new();
@@ -300,7 +365,9 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
-			metadata_rebuild_reset: false,
+            slatedb_tuning: SlateDbTuning::default(),
+            metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(epoch),
@@ -315,7 +382,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-promotion-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         writer.close().await.unwrap();
         let reader = open_reader(&path, object_store.clone(), None).await.unwrap();
         let storage = transition_storage(Database::Reader(reader), path.clone(), object_store.clone(), 1);
@@ -337,7 +411,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-demotion-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
 
         arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaim(
@@ -360,7 +441,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-commit-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         assert_eq!(storage.transactions.read().await.len(), 1);
@@ -381,7 +469,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("deferred-commit-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let mut storage = transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
@@ -428,7 +523,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("stale-fence-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
         release_writer_claim(object_store.as_ref(), 1).await.unwrap();
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(2));
@@ -521,7 +623,12 @@ mod tests {
         let raw_wal: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (wal, wal_metrics) = monitored_wal_store(raw_wal).await.unwrap();
         let path = format!("separate-wal-{}", rand::random::<u64>());
-        let db = open_writer(&path, main.clone(), Some(wal.clone()))
+        let db = open_writer(
+            &path,
+            main.clone(),
+            Some(wal.clone()),
+            &SlateDbTuning::default(),
+        )
             .await
             .unwrap();
         let mut batch = WriteBatch::new();
@@ -575,7 +682,12 @@ mod tests {
             .await
             .unwrap();
 
-        let writer = open_writer(path.as_str(), main.clone(), Some(wal.clone()))
+        let writer = open_writer(
+            path.as_str(),
+            main.clone(),
+            Some(wal.clone()),
+            &SlateDbTuning::default(),
+        )
             .await
             .unwrap();
         let reader = DbReader::builder(path.as_str(), main)
@@ -773,6 +885,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clean_memory_wal_rebuild_reopens_with_persisted_local_wal() {
+        let root = env::temp_dir().join(format!(
+            "vaulticdb-memory-local-handoff-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let wal_root = root.join("wal");
+        let repository_id = format!("memory-local-handoff-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+        config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
+        config.metadata_rebuild_reset = true;
+        config.bulk_import_local_wal_data_dir = Some(wal_root.clone());
+
+        let memory = Storage::open(&repository_id, &config).await.unwrap();
+        let database = memory.database.read().await;
+        let Database::Writer(db) = &*database else {
+            panic!("bulk import did not open a writer")
+        };
+        db.put(b"p:imported", b"value".to_vec())
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        db.put(BULK_IMPORT_COMPLETE_RECORD, b"complete".to_vec())
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        drop(database);
+        memory.close().await.unwrap();
+
+        config.wal_store = WalStoreConfig::Inherit;
+        config.metadata_rebuild_reset = false;
+        config.bulk_import_local_wal_data_dir = None;
+        let local = Storage::open(&repository_id, &config).await.unwrap();
+        assert_eq!(local.wal_target, "local");
+        assert_eq!(
+            local.read_value(b"p:imported").await.unwrap(),
+            Some(bytes::Bytes::from_static(b"value"))
+        );
+        local.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_memory_wal_binding_rejects_local_target() {
+        let store = InMemory::new();
+        ensure_wal_target_identity(&store, "memory", false)
+            .await
+            .unwrap();
+        assert!(ensure_wal_target_identity(&store, "local:/tmp/wal", true)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn clean_incomplete_memory_wal_rebuild_does_not_handoff() {
+        let root = env::temp_dir().join(format!(
+            "vaulticdb-incomplete-memory-wal-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let repository_id = format!("incomplete-memory-wal-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+        config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
+        config.metadata_rebuild_reset = true;
+        config.bulk_import_local_wal_data_dir = Some(root.join("wal"));
+
+        Storage::open(&repository_id, &config)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+
+        config.wal_store = WalStoreConfig::Inherit;
+        config.metadata_rebuild_reset = false;
+        config.bulk_import_local_wal_data_dir = None;
+        assert!(Storage::open(&repository_id, &config).await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn metadata_rebuild_reset_reopens_empty_writable_local_candidate() {
         let root = env::temp_dir().join(format!(
             "vaulticdb-reset-{}-{}",
@@ -848,7 +1049,14 @@ mod tests {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
             let path = format!("multi-get-{}", rand::random::<u64>());
-            let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+            let writer = open_writer(
+                &path,
+                object_store.clone(),
+                None,
+                &SlateDbTuning::default(),
+            )
+            .await
+            .unwrap();
             let mut storage = transition_storage(Database::Writer(writer), path, object_store, 1);
             storage.slatedb_multiget = slatedb_multiget;
             assert!(storage
@@ -943,7 +1151,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("expired-transaction-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
@@ -965,7 +1180,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("failed-begin-expiry-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
@@ -1027,7 +1249,9 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
-			metadata_rebuild_reset: false,
+            slatedb_tuning: SlateDbTuning::default(),
+            metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1073,7 +1297,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("migration-intent-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
         storage.store_master_key(b"repository-key").await.unwrap_err();
         let capsule = b"exact capsule bytes\n".to_vec();
@@ -1124,7 +1355,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
         let path = format!("migration-race-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
         let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
         let intent = |suffix: u8| {
             let capsule = vec![suffix; 32];
@@ -1209,7 +1447,9 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
-			metadata_rebuild_reset: false,
+            slatedb_tuning: SlateDbTuning::default(),
+            metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1272,7 +1512,9 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
-			metadata_rebuild_reset: false,
+            slatedb_tuning: SlateDbTuning::default(),
+            metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1356,7 +1598,9 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
-			metadata_rebuild_reset: false,
+            slatedb_tuning: SlateDbTuning::default(),
+            metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(0),

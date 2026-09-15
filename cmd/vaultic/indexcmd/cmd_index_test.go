@@ -806,6 +806,10 @@ func TestForceResetOldIndexRequiresStartedPersistentTarget(t *testing.T) {
 			options.Daemon.Start = true
 			options.DryRun = true
 		}, want: "cannot be combined with --dry-run"},
+		{name: "temporary daemon", mutate: func(options *indexImportOptions) {
+			options.Daemon.Start = true
+			options.Daemon.Persistent = true
+		}, want: "cannot be combined with --persistent-daemon"},
 		{name: "persistent target", mutate: func(options *indexImportOptions) {
 			options.Daemon.Start = true
 		}, want: "local metadata rebuild candidate requires a new --daemon-data-dir"},
@@ -821,6 +825,61 @@ func TestForceResetOldIndexRequiresStartedPersistentTarget(t *testing.T) {
 				t.Fatalf("reset guard = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestBulkImportMemoryProfileScalesAndCaps(t *testing.T) {
+	const gib = uint64(1024 * 1024 * 1024)
+	for _, test := range []struct {
+		physical, cache, unflushed uint64
+	}{
+		{physical: 0, cache: 0, unflushed: 4 * gib},
+		{physical: 16 * gib, cache: 4 * gib, unflushed: gib},
+		{physical: 64 * gib, cache: 24 * gib, unflushed: 6 * gib},
+		{physical: 256 * gib, cache: 64 * gib, unflushed: 16 * gib},
+	} {
+		profile := newBulkImportMemoryProfile(test.physical)
+		if profile.readCacheBytes != test.cache || profile.maxUnflushedBytes != test.unflushed {
+			t.Errorf("profile(%d) = cache %d, unflushed %d; want %d, %d",
+				test.physical, profile.readCacheBytes, profile.maxUnflushedBytes, test.cache, test.unflushed)
+		}
+	}
+}
+
+func TestFreshBulkImportDefaultsPreserveExplicitTuning(t *testing.T) {
+	options := applyFreshBulkImportDefaults(indexImportOptions{
+		Daemon: indexDaemonOptions{
+			WALStore: "local", WALFlushInterval: time.Second,
+			MaxUnflushedBytes: 2, L0SSTSizeBytes: 3,
+		},
+		PackWorkers: 7,
+	})
+	if options.Daemon.WALStore != "local" || options.Daemon.WALFlushInterval != time.Second ||
+		options.Daemon.MaxUnflushedBytes != 2 || options.Daemon.L0SSTSizeBytes != 3 || options.PackWorkers != 7 {
+		t.Fatalf("explicit bulk-import tuning was replaced: %+v", options)
+	}
+	if !options.Daemon.FreshBulkImport {
+		t.Fatal("fresh bulk-import profile was not marked active")
+	}
+}
+
+func TestForceResetEnablesFreshBulkImportProfile(t *testing.T) {
+	options, err := validateIndexImportOptions(indexImportOptions{
+		ForceResetOldIndex: true,
+		FromLegacy:         true,
+		Daemon: indexDaemonOptions{
+			Start:   true,
+			DataDir: filepath.Join(t.TempDir(), "candidate"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.Daemon.FreshBulkImport || options.Daemon.WALStore != "memory" ||
+		options.Daemon.WALFlushInterval != 500*time.Millisecond ||
+		options.Daemon.L0SSTSizeBytes != bulkImportL0SSTSizeBytes ||
+		options.Daemon.MaxUnflushedBytes == 0 || options.PackWorkers == 0 {
+		t.Fatalf("fresh bulk-import profile is incomplete: %+v", options)
 	}
 }
 

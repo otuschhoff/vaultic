@@ -77,6 +77,12 @@ impl Default for CacheConfig {
 }
 
 impl CacheConfig {
+    pub(crate) fn is_volatile(&self) -> bool {
+        self.tiers
+            .iter()
+            .all(|tier| matches!(tier.store, ReplicaStoreConfig::Memory))
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.part_size_bytes < 4 * 1024 || !self.part_size_bytes.is_multiple_of(1024) {
             bail!("read-cache part size must be a multiple of 1 KiB and at least 4 KiB");

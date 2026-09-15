@@ -7,6 +7,8 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -37,48 +39,54 @@ func mustMarkPersistentFlagRequired(command *cobra.Command, name string) {
 }
 
 type indexDaemonOptions struct {
-	Socket            string
-	TCPAddress        string
-	TCPAllowlist      []string
-	AuthTokenFile     string
-	DaemonPath        string
-	DataDir           string
-	ObjectStore       string
-	S3Bucket          string
-	S3Prefix          string
-	S3Endpoint        string
-	S3Region          string
-	S3Provider        string
-	S3BucketLookup    string
-	WALStore          string
-	WALDataDir        string
-	WALS3Bucket       string
-	WALS3Prefix       string
-	WALS3Endpoint     string
-	WALS3Region       string
-	WALS3Provider     string
-	WALS3BucketLookup string
-	WALRadosMonitors  string
-	WALRadosFSID      string
-	WALRadosPool      string
-	WALRadosNamespace string
-	WALRadosPrefix    string
-	WALRadosClient    string
-	WALRadosKeyFile   string
-	EncryptionMode    string
-	PassphraseFile    string
-	AzureTokenFile    string
-	GCPTokenFile      string
-	VaultTokenFile    string
-	PKCS11PINFile     string
-	RecoveryUnlock    bool
-	BrokerSocket      string
-	BrokerManifest    string
-	BrokerLease       time.Duration
-	RebuildInitialize bool
-	RebuildReset      bool
-	Start             bool
-	Persistent        bool
+	Socket                        string
+	TCPAddress                    string
+	TCPAllowlist                  []string
+	AuthTokenFile                 string
+	DaemonPath                    string
+	DataDir                       string
+	ObjectStore                   string
+	S3Bucket                      string
+	S3Prefix                      string
+	S3Endpoint                    string
+	S3Region                      string
+	S3Provider                    string
+	S3BucketLookup                string
+	WALStore                      string
+	WALDataDir                    string
+	WALFlushInterval              time.Duration
+	MaxUnflushedBytes             uint64
+	L0SSTSizeBytes                uint64
+	WALS3Bucket                   string
+	WALS3Prefix                   string
+	WALS3Endpoint                 string
+	WALS3Region                   string
+	WALS3Provider                 string
+	WALS3BucketLookup             string
+	WALRadosMonitors              string
+	WALRadosFSID                  string
+	WALRadosPool                  string
+	WALRadosNamespace             string
+	WALRadosPrefix                string
+	WALRadosClient                string
+	WALRadosKeyFile               string
+	EncryptionMode                string
+	PassphraseFile                string
+	AzureTokenFile                string
+	GCPTokenFile                  string
+	VaultTokenFile                string
+	PKCS11PINFile                 string
+	RecoveryUnlock                bool
+	BrokerSocket                  string
+	BrokerManifest                string
+	BrokerLease                   time.Duration
+	RebuildInitialize             bool
+	RebuildReset                  bool
+	FreshBulkImport               bool
+	BulkImportPhysicalMemoryBytes uint64
+	BulkImportReadCacheBytes      uint64
+	Start                         bool
+	Persistent                    bool
 }
 
 var ErrDifferences = errors.New("metadata indexes differ")
@@ -118,6 +126,9 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.S3BucketLookup, "daemon-s3-bucket-lookup", "", "vaulticdb S3 bucket lookup: auto, dns, or path")
 	flags.StringVar(&options.WALStore, "daemon-wal-store", "", "vaulticdb WAL store: inherit, local, memory (volatile), s3, or rados")
 	flags.StringVar(&options.WALDataDir, "daemon-wal-data-dir", "", "local vaulticdb WAL directory")
+	flags.DurationVar(&options.WALFlushInterval, "daemon-wal-flush-interval", 0, "SlateDB WAL flush interval (zero uses the default)")
+	flags.Uint64Var(&options.MaxUnflushedBytes, "daemon-max-unflushed-bytes", 0, "SlateDB total unflushed byte limit (zero uses the default)")
+	flags.Uint64Var(&options.L0SSTSizeBytes, "daemon-l0-sst-size-bytes", 0, "SlateDB L0 SST size threshold (zero uses the default)")
 	flags.StringVar(&options.WALS3Bucket, "daemon-wal-s3-bucket", "", "vaulticdb WAL S3 bucket")
 	flags.StringVar(&options.WALS3Prefix, "daemon-wal-s3-prefix", "", "vaulticdb WAL S3 key prefix")
 	flags.StringVar(&options.WALS3Endpoint, "daemon-wal-s3-endpoint", "", "vaulticdb WAL S3 endpoint URL")
@@ -203,7 +214,9 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		S3Endpoint: options.S3Endpoint, S3Region: options.S3Region,
 		S3Provider: options.S3Provider, S3BucketLookup: options.S3BucketLookup,
 		WALStore: options.WALStore, WALDataDir: options.WALDataDir,
-		WALS3Bucket: options.WALS3Bucket, WALS3Prefix: options.WALS3Prefix,
+		WALFlushInterval: options.WALFlushInterval, MaxUnflushedBytes: options.MaxUnflushedBytes,
+		L0SSTSizeBytes: options.L0SSTSizeBytes,
+		WALS3Bucket:    options.WALS3Bucket, WALS3Prefix: options.WALS3Prefix,
 		WALS3Endpoint: options.WALS3Endpoint, WALS3Region: options.WALS3Region,
 		WALS3Provider: options.WALS3Provider, WALS3BucketLookup: options.WALS3BucketLookup,
 		WALRadosMonitors: options.WALRadosMonitors, WALRadosFSID: options.WALRadosFSID,
@@ -218,7 +231,9 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		RecoveryUnlock: options.RecoveryUnlock,
 		BrokerSocket:   options.BrokerSocket, BrokerManifest: options.BrokerManifest,
 		BrokerLease: options.BrokerLease, RebuildInitialize: options.RebuildInitialize,
-		RebuildReset: options.RebuildReset,
+		RebuildReset:             options.RebuildReset,
+		FreshBulkImport:          options.FreshBulkImport,
+		BulkImportReadCacheBytes: options.BulkImportReadCacheBytes,
 	}
 	if options.Start {
 		config.PersistentDaemon = options.Persistent
@@ -288,6 +303,65 @@ type indexImportOptions struct {
 	SnapshotDepth              uint
 	SnapshotWorkBudget         uint64
 	ConfirmMetadataLossRebuild bool
+}
+
+const (
+	bulkImportL0SSTSizeBytes = 256 * 1024 * 1024
+	bulkImportCacheMaxBytes  = 64 * 1024 * 1024 * 1024
+	bulkImportMaxUnflushed   = 16 * 1024 * 1024 * 1024
+)
+
+type bulkImportMemoryProfile struct {
+	physicalBytes     uint64
+	readCacheBytes    uint64
+	maxUnflushedBytes uint64
+}
+
+func newBulkImportMemoryProfile(physicalBytes uint64) bulkImportMemoryProfile {
+	const gib = uint64(1024 * 1024 * 1024)
+	profile := bulkImportMemoryProfile{physicalBytes: physicalBytes, maxUnflushedBytes: 4 * gib}
+	if physicalBytes == 0 {
+		return profile
+	}
+	reserved := max(8*gib, physicalBytes/4)
+	if reserved >= physicalBytes {
+		profile.maxUnflushedBytes = gib
+		return profile
+	}
+	usable := physicalBytes - reserved
+	profile.readCacheBytes = min(bulkImportCacheMaxBytes, usable/2)
+	profile.maxUnflushedBytes = min(bulkImportMaxUnflushed, max(gib, usable/8))
+	return profile
+}
+
+func applyFreshBulkImportDefaults(options indexImportOptions) indexImportOptions {
+	profile := newBulkImportMemoryProfile(physicalMemoryBytes())
+	if options.Daemon.WALStore == "" {
+		options.Daemon.WALStore = "memory"
+	}
+	if options.Daemon.WALDataDir == "" {
+		if options.Daemon.DataDir != "" {
+			options.Daemon.WALDataDir = filepath.Join(options.Daemon.DataDir, "wal")
+		} else {
+			options.Daemon.WALDataDir = filepath.Join(os.TempDir(), "vaulticdb", "wal")
+		}
+	}
+	if options.Daemon.WALFlushInterval == 0 {
+		options.Daemon.WALFlushInterval = 500 * time.Millisecond
+	}
+	if options.Daemon.MaxUnflushedBytes == 0 {
+		options.Daemon.MaxUnflushedBytes = profile.maxUnflushedBytes
+	}
+	if options.Daemon.L0SSTSizeBytes == 0 {
+		options.Daemon.L0SSTSizeBytes = bulkImportL0SSTSizeBytes
+	}
+	if options.PackWorkers == 0 {
+		options.PackWorkers = uint(min(32, runtime.GOMAXPROCS(0)))
+	}
+	options.Daemon.FreshBulkImport = true
+	options.Daemon.BulkImportPhysicalMemoryBytes = profile.physicalBytes
+	options.Daemon.BulkImportReadCacheBytes = profile.readCacheBytes
+	return options
 }
 
 type importProgressReporter struct {
@@ -446,6 +520,14 @@ func runIndexImport(
 	if err != nil {
 		return result, err
 	}
+	if options.Daemon.FreshBulkImport {
+		log.Printf(
+			"fresh legacy bulk-import profile: physical_memory=%d read_cache=%d max_unflushed=%d l0_sst=%d wal=%s flush_interval=%s",
+			options.Daemon.BulkImportPhysicalMemoryBytes, options.Daemon.BulkImportReadCacheBytes,
+			options.Daemon.MaxUnflushedBytes,
+			options.Daemon.L0SSTSizeBytes, options.Daemon.WALStore, options.Daemon.WALFlushInterval,
+		)
+	}
 	if err := prepareMetadataRebuild(ctx, options, globalOptions); err != nil {
 		return result, err
 	}
@@ -509,6 +591,11 @@ func runIndexImport(
 		Progress:           progressReporter.Update,
 	})
 	result.ResetElapsedMS = uint64(resetElapsed / time.Millisecond)
+	if err == nil && result.ErrorsSeen == 0 && options.Daemon.FreshBulkImport {
+		if markErr := store.MarkBulkImportComplete(ctx); markErr != nil {
+			return result, fmt.Errorf("mark successful bulk import complete: %w", markErr)
+		}
+	}
 	if err != nil {
 		log.Printf(
 			"legacy metadata import failed after %s: indexes=%d packs=%d blobs=%d snapshots=%d: %v",
@@ -553,11 +640,15 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 		if options.DryRun {
 			return options, fmt.Errorf("--force-reset-old-idx cannot be combined with --dry-run")
 		}
+		if options.Daemon.Persistent {
+			return options, fmt.Errorf("--force-reset-old-idx cannot be combined with --persistent-daemon because the successful import must hand off from memory WAL to local WAL")
+		}
 		if _, err := validateMetadataRebuildTarget(options.Daemon, true); err != nil {
 			return options, fmt.Errorf("validate reset target: %w", err)
 		}
 		options.Resume = false
 		options.Daemon.RebuildReset = true
+		options = applyFreshBulkImportDefaults(options)
 	}
 	if options.DryRun && options.Activate {
 		return options, fmt.Errorf("--activate cannot be combined with --dry-run")

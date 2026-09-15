@@ -19,8 +19,8 @@ use crate::storage::{
     cache::{
         CacheConfidentiality, CacheConfig, CacheTierConfig, CacheTierPolicy, DEFAULT_CACHE_TIMEOUT,
     },
-    BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, StorageConfig,
-    TopologySource, WalStoreConfig,
+    BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, SlateDbTuning,
+    StorageConfig, TopologySource, WalStoreConfig,
 };
 use vaulticdb::encryption::envelope::{EncryptionConfig, EncryptionMode, ProviderCredentials};
 use vaulticdb::ids::RepositoryId;
@@ -200,16 +200,30 @@ fn storage_from_env() -> Result<StorageConfig> {
     Ok(StorageConfig {
         object_store,
         wal_store: wal_store_from_env()?,
+        slatedb_tuning: slatedb_tuning_from_env()?,
         cache: cache_from_env()?,
         fencing_replica,
         metadata_rebuild_initialize,
         metadata_rebuild_reset,
+        bulk_import_local_wal_data_dir: env::var_os("VAULTICDB_BULK_IMPORT_LOCAL_WAL_DATA_DIR")
+            .map(PathBuf::from),
         broker,
         encryption: encryption_from_env()?,
         transaction_idle_timeout_ms,
         slatedb_multiget,
         topology_source,
         topology_override_local,
+    })
+}
+
+fn slatedb_tuning_from_env() -> Result<SlateDbTuning> {
+    Ok(SlateDbTuning {
+        flush_interval: match env::var_os("VAULTICDB_WAL_FLUSH_INTERVAL") {
+            Some(_) => configured_duration("VAULTICDB_WAL_FLUSH_INTERVAL", Duration::ZERO, false)?,
+            None => None,
+        },
+        max_unflushed_bytes: optional_positive_usize("VAULTICDB_MAX_UNFLUSHED_BYTES")?,
+        l0_sst_size_bytes: optional_positive_usize("VAULTICDB_L0_SST_SIZE_BYTES")?,
     })
 }
 
@@ -585,6 +599,17 @@ fn parse_u32(name: &str, default: u32) -> Result<u32> {
     }
 }
 
+fn optional_positive_usize(name: &str) -> Result<Option<usize>> {
+    optional_u64(name)?
+        .map(|value| {
+            if value == 0 {
+                bail!("{name} must be positive");
+            }
+            usize::try_from(value).with_context(|| format!("{name} exceeds platform limits"))
+        })
+        .transpose()
+}
+
 fn optional_bool(name: &str, default: bool) -> Result<bool> {
     match env::var(name) {
         Ok(value) if value == "true" => Ok(true),
@@ -764,6 +789,52 @@ mod tests {
         unsafe { env::set_var("VAULTICDB_SLATEDB_MULTIGET", "yes") };
         assert!(optional_bool("VAULTICDB_SLATEDB_MULTIGET", false).is_err());
         unsafe { env::remove_var("VAULTICDB_SLATEDB_MULTIGET") };
+    }
+
+    fn clear_slatedb_tuning_environment() {
+        for name in [
+            "VAULTICDB_WAL_FLUSH_INTERVAL",
+            "VAULTICDB_MAX_UNFLUSHED_BYTES",
+            "VAULTICDB_L0_SST_SIZE_BYTES",
+        ] {
+            unsafe { env::remove_var(name) };
+        }
+    }
+
+    #[test]
+    fn parses_optional_slatedb_tuning() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_slatedb_tuning_environment();
+        let defaults = slatedb_tuning_from_env().unwrap();
+        assert_eq!(defaults.flush_interval, None);
+        assert_eq!(defaults.max_unflushed_bytes, None);
+        assert_eq!(defaults.l0_sst_size_bytes, None);
+
+        unsafe {
+            env::set_var("VAULTICDB_WAL_FLUSH_INTERVAL", "500ms");
+            env::set_var("VAULTICDB_MAX_UNFLUSHED_BYTES", "4294967296");
+            env::set_var("VAULTICDB_L0_SST_SIZE_BYTES", "268435456");
+        }
+        let tuning = slatedb_tuning_from_env().unwrap();
+        assert_eq!(tuning.flush_interval, Some(Duration::from_millis(500)));
+        assert_eq!(tuning.max_unflushed_bytes, Some(4_294_967_296));
+        assert_eq!(tuning.l0_sst_size_bytes, Some(268_435_456));
+        clear_slatedb_tuning_environment();
+    }
+
+    #[test]
+    fn rejects_zero_slatedb_tuning_values() {
+        let _guard = environment_lock().lock().unwrap();
+        for name in [
+            "VAULTICDB_WAL_FLUSH_INTERVAL",
+            "VAULTICDB_MAX_UNFLUSHED_BYTES",
+            "VAULTICDB_L0_SST_SIZE_BYTES",
+        ] {
+            clear_slatedb_tuning_environment();
+            unsafe { env::set_var(name, "0") };
+            assert!(slatedb_tuning_from_env().is_err(), "accepted zero {name}");
+        }
+        clear_slatedb_tuning_environment();
     }
 
     fn clear_cache_environment() {

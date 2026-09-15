@@ -109,6 +109,10 @@ origin reads continue. RADOS tiers require `_RADOS_MONITORS`,
 `_RADOS_CLIENT`, and `_RADOS_KEY`. Azure and GCS are not supported for Phase 29
 cache tiers.
 
+Metadata rebuild reset permits `memory` tiers because a new process starts them
+empty. Persistent local, S3, and RADOS tiers must be disabled during reset so
+surviving entries cannot refer to metadata that the reset discarded.
+
 Each tier also accepts `_CONFIDENTIALITY=encrypted|decrypted`; the default is
 `encrypted`. An encrypted tier stores raw authoritative ciphertext below the
 metadata envelope-encryption layer. It is rejected when metadata encryption is
@@ -223,6 +227,9 @@ All daemon-specific environment variables are parsed once by `Config::from_env`.
 | `VAULTICDB_S3_PREFIX` | none | Optional non-empty shared S3 prefix. |
 | `VAULTICDB_WAL_STORE` | `inherit` | `inherit`, `local`, `memory` (tests only), `s3`, or `rados`; a separate target never falls back to metadata storage. |
 | `VAULTICDB_WAL_DATA_DIR` | system temp `vaulticdb/wal` | Root for local WAL; repository hash is appended. |
+| `VAULTICDB_WAL_FLUSH_INTERVAL` | SlateDB default (`100ms`) | Positive duration controlling WAL flush batching. Longer intervals reduce object-store PUT frequency but increase durable-write latency. |
+| `VAULTICDB_MAX_UNFLUSHED_BYTES` | SlateDB default (`1073741824`) | Positive byte limit across immutable WAL and memtable queues before writer backpressure. |
+| `VAULTICDB_L0_SST_SIZE_BYTES` | SlateDB default (`67108864`) | Positive active-memtable threshold for L0 publication; larger values reduce L0 writes but increase memory, recovery work, and secondary-reader delay. |
 | `VAULTICDB_WAL_S3_BUCKET` | none | Required for S3 WAL storage. |
 | `VAULTICDB_WAL_S3_PREFIX` | none | Optional dedicated WAL namespace root. |
 | `VAULTICDB_WAL_S3_ENDPOINT` | provider default | Optional S3-compatible endpoint. |

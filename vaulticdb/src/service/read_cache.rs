@@ -217,10 +217,12 @@ mod tests {
         StorageConfig {
             object_store: ObjectStoreConfig::Memory,
             wal_store: WalStoreConfig::Inherit,
+            slatedb_tuning: crate::storage::SlateDbTuning::default(),
             cache,
             fencing_replica: None,
             metadata_rebuild_initialize: false,
             metadata_rebuild_reset: false,
+            bulk_import_local_wal_data_dir: None,
             broker: None,
             encryption: EncryptionConfig {
                 mode: EncryptionMode::Off,

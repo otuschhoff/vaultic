@@ -50,52 +50,57 @@ func (err *daemonNotReadyError) Error() string {
 
 // Options controls how a vaultic process connects to or starts vaulticdb.
 type Options struct {
-	Socket            string
-	TCPAddress        string
-	TCPAllowlist      []string
-	AuthToken         string
-	RepositoryID      string
-	DaemonPath        string
-	StartTimeout      time.Duration
-	RetryInterval     time.Duration
-	PersistentDaemon  bool
-	TopologySource    string
-	ObjectStore       string
-	DataDir           string
-	S3Bucket          string
-	S3Prefix          string
-	S3Endpoint        string
-	S3Region          string
-	S3Provider        string
-	S3BucketLookup    string
-	WALStore          string
-	WALDataDir        string
-	WALS3Bucket       string
-	WALS3Prefix       string
-	WALS3Endpoint     string
-	WALS3Region       string
-	WALS3Provider     string
-	WALS3BucketLookup string
-	WALRadosMonitors  string
-	WALRadosFSID      string
-	WALRadosPool      string
-	WALRadosNamespace string
-	WALRadosPrefix    string
-	WALRadosClient    string
-	WALRadosKey       string
-	EncryptionMode    string
-	PassphraseFile    string
-	AzureTokenFile    string
-	GCPTokenFile      string
-	VaultTokenFile    string
-	PKCS11PINFile     string
-	RecoveryUnlock    bool
-	BrokerSocket      string
-	BrokerManifest    string
-	BrokerLease       time.Duration
-	RebuildInitialize bool
-	RebuildReset      bool
-	testEnvironment   []string
+	Socket                   string
+	TCPAddress               string
+	TCPAllowlist             []string
+	AuthToken                string
+	RepositoryID             string
+	DaemonPath               string
+	StartTimeout             time.Duration
+	RetryInterval            time.Duration
+	PersistentDaemon         bool
+	TopologySource           string
+	ObjectStore              string
+	DataDir                  string
+	S3Bucket                 string
+	S3Prefix                 string
+	S3Endpoint               string
+	S3Region                 string
+	S3Provider               string
+	S3BucketLookup           string
+	WALStore                 string
+	WALDataDir               string
+	WALFlushInterval         time.Duration
+	MaxUnflushedBytes        uint64
+	L0SSTSizeBytes           uint64
+	WALS3Bucket              string
+	WALS3Prefix              string
+	WALS3Endpoint            string
+	WALS3Region              string
+	WALS3Provider            string
+	WALS3BucketLookup        string
+	WALRadosMonitors         string
+	WALRadosFSID             string
+	WALRadosPool             string
+	WALRadosNamespace        string
+	WALRadosPrefix           string
+	WALRadosClient           string
+	WALRadosKey              string
+	EncryptionMode           string
+	PassphraseFile           string
+	AzureTokenFile           string
+	GCPTokenFile             string
+	VaultTokenFile           string
+	PKCS11PINFile            string
+	RecoveryUnlock           bool
+	BrokerSocket             string
+	BrokerManifest           string
+	BrokerLease              time.Duration
+	RebuildInitialize        bool
+	RebuildReset             bool
+	FreshBulkImport          bool
+	BulkImportReadCacheBytes uint64
+	testEnvironment          []string
 }
 
 func (o Options) withDefaults() Options {
@@ -373,6 +378,9 @@ func validateStorageOptions(options Options) error {
 		options.WALRadosClient == "" || options.WALRadosKey == "") {
 		return fmt.Errorf("%w: WAL RADOS endpoint and CephX credentials are incomplete", ErrUnavailable)
 	}
+	if options.WALFlushInterval < 0 {
+		return fmt.Errorf("%w: WAL flush interval must not be negative", ErrUnavailable)
+	}
 	return nil
 }
 
@@ -561,6 +569,32 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 			"VAULTICDB_BROKER_LEASE_SECONDS="+strconv.FormatUint(uint64(options.BrokerLease/time.Second), 10),
 		)
 	}
+	if options.WALFlushInterval > 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_WAL_FLUSH_INTERVAL="+options.WALFlushInterval.String())
+	}
+	if options.MaxUnflushedBytes > 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_MAX_UNFLUSHED_BYTES="+strconv.FormatUint(options.MaxUnflushedBytes, 10))
+	}
+	if options.L0SSTSizeBytes > 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_L0_SST_SIZE_BYTES="+strconv.FormatUint(options.L0SSTSizeBytes, 10))
+	}
+	if options.FreshBulkImport {
+		setEnvironment(&cmd.Env, "VAULTICDB_SLATEDB_MULTIGET", "true")
+		setEnvironment(&cmd.Env, "VAULTICDB_BULK_IMPORT_LOCAL_WAL_DATA_DIR", options.WALDataDir)
+		if options.BulkImportReadCacheBytes > 0 && os.Getenv("VAULTICDB_READ_CACHE_TIERS") == "" {
+			for name, value := range map[string]string{
+				"VAULTICDB_READ_CACHE_TIERS":                             "bulk-memory",
+				"VAULTICDB_READ_CACHE_BULK_MEMORY_OBJECT_STORE":          "memory",
+				"VAULTICDB_READ_CACHE_BULK_MEMORY_CONFIDENTIALITY":       "decrypted",
+				"VAULTICDB_READ_CACHE_BULK_MEMORY_ACKNOWLEDGE_PLAINTEXT": "true",
+				"VAULTICDB_READ_CACHE_BULK_MEMORY_MAX_BYTES":             strconv.FormatUint(options.BulkImportReadCacheBytes, 10),
+				"VAULTICDB_READ_CACHE_PART_SIZE_BYTES":                   "16777216",
+				"VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES":                "268435456",
+			} {
+				setEnvironment(&cmd.Env, name, value)
+			}
+		}
+	}
 	if options.RebuildInitialize {
 		cmd.Env = append(cmd.Env, "VAULTICDB_METADATA_REBUILD_INITIALIZE=true")
 	}
@@ -586,6 +620,17 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		)
 	}
 	return cmd, authRead, authWrite, nil
+}
+
+func setEnvironment(environment *[]string, name, value string) {
+	prefix := name + "="
+	for index, entry := range *environment {
+		if strings.HasPrefix(entry, prefix) {
+			(*environment)[index] = prefix + value
+			return
+		}
+	}
+	*environment = append(*environment, prefix+value)
 }
 
 func startDaemon(

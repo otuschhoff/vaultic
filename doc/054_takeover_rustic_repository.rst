@@ -242,9 +242,27 @@ This option is destructive. It refuses an already-running daemon and an
 authoritative SlateDB repository, then removes the selected repository's
 SlateDB objects and separate WAL objects before starting again. Encryption
 envelopes and repository control metadata are retained. Resume checkpoints are
-discarded with the database and ``--resume`` is forced off for this run. Disable
-all VaulticDB read-cache tiers for the reset and import; they can be enabled
-again after the fresh import finishes.
+discarded with the database and ``--resume`` is forced off for this run.
+Volatile ``memory`` read-cache tiers may remain enabled because they start empty
+with the new process. Persistent local, S3, and RADOS read-cache tiers must be
+disabled for the reset and can be enabled again after the fresh import finishes;
+their surviving entries could otherwise refer to discarded metadata.
+
+The in-memory WAL is appropriate only while the legacy indexes remain the
+recovery source. A forced fresh import automatically selects it, enables a
+host-memory-scaled decrypted RAM cache and generous SlateDB buffering, and
+raises pack preparation concurrency. Explicit cache and tuning options take
+precedence. A successful import writes a durable completion marker; clean
+daemon shutdown then binds the metadata generation to a local WAL below
+``--daemon-data-dir`` for subsequent starts. Failed, partial, or unclean imports
+retain the memory-WAL binding and must be reset and imported again.
+``--persistent-daemon`` is therefore rejected for this workflow.
+
+If the import requires a durable high-latency WAL, select it explicitly and start with
+``--daemon-wal-flush-interval 500ms``,
+``--daemon-max-unflushed-bytes 4294967296``, and
+``--daemon-l0-sst-size-bytes 268435456``. The 4 GiB limit includes immutable
+WAL and memtable queues rather than WAL alone.
 
 The fresh import avoids existing-value reads for blob and pack IDs not already
 committed during the new run. Possible duplicate IDs still use the normal merge
