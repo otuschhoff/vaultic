@@ -415,7 +415,7 @@ func main() {
 	version := getVersion()
 	constants := Constants{}
 	if version != "" {
-		constants["main.version"] = version
+		constants["github.com/otuschhoff/vaultic/internal/global.Version"] = version
 	}
 	ldflags := constants.LDFlags()
 	if !preserveSymbols {

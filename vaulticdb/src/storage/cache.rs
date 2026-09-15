@@ -4893,6 +4893,25 @@ mod tests {
         .expect("background cache admission");
     }
 
+    async fn wait_for_tier_admissions(cache: &CacheManager, tier_ids: &[&str]) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let status = cache.status();
+                if tier_ids.iter().all(|id| {
+                    status
+                        .tiers
+                        .iter()
+                        .any(|tier| tier.id == *id && tier.metrics.admissions > 0)
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background cache tier admissions");
+    }
+
     #[test]
     fn only_foreground_compacted_sst_reads_are_cacheable() {
         assert!(cacheable_read(&options(
@@ -5281,7 +5300,7 @@ mod tests {
             .await,
             b"mixed-plaintext"[..]
         );
-        wait_for_admissions(&cache, 2).await;
+        wait_for_tier_admissions(&cache, &["raw", "trusted"]).await;
 
         let mut cached_payloads = Vec::new();
         for tier in &cache.tiers {

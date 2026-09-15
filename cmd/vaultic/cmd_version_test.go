@@ -3,11 +3,22 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/global"
 )
+
+func TestVersionMatchesRepositoryVersion(t *testing.T) {
+	version, err := os.ReadFile("../../VERSION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := global.Version, strings.TrimSpace(string(version)); got != want {
+		t.Fatalf("global version %q does not match VERSION %q", got, want)
+	}
+}
 
 func TestRootVersionFlagDoesNotRunCommandSetup(t *testing.T) {
 	var output bytes.Buffer

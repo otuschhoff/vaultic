@@ -79,6 +79,16 @@ jobs:
             bin/${{ matrix.platform }}/vaultic-key-broker \
             bin/${{ matrix.platform }}/vaultic-key-custodian
 
+      - name: Verify Linux debug symbol identities
+        run: |
+          for binary in vaulticdb vaultic-key-broker vaultic-key-custodian; do
+            release_id=$(llvm-readelf --notes "bin/${{ matrix.platform }}/$binary" | awk '/Build ID:/ { print $3; exit }')
+            debug_id=$(llvm-readelf --notes "bin/${{ matrix.platform }}-debug/$binary.debug" | awk '/Build ID:/ { print $3; exit }')
+            test -n "$release_id"
+            test "$release_id" = "$debug_id"
+            llvm-readelf --string-dump=.gnu_debuglink "bin/${{ matrix.platform }}/$binary" | grep -Fq "$binary.debug"
+          done
+
       - name: Run Linux amd64 binaries
         if: matrix.architecture == 'amd64'
         run: |
@@ -132,6 +142,16 @@ jobs:
               /opt/vaultic/vaultic version &&
               VAULTICDB_NATIVE_SMOKE=1 /opt/vaultic/vaulticdb'
 
+      - name: Verify RADOS debug symbol identities
+        run: |
+          for binary in vaulticdb vaultic-key-broker vaultic-key-custodian; do
+            release_id=$(readelf --notes "bin/linux-amd64-rados/$binary" | awk '/Build ID:/ { print $3; exit }')
+            debug_id=$(readelf --notes "bin/linux-amd64-rados-debug/$binary.debug" | awk '/Build ID:/ { print $3; exit }')
+            test -n "$release_id"
+            test "$release_id" = "$debug_id"
+            readelf --string-dump=.gnu_debuglink "bin/linux-amd64-rados/$binary" | grep -Fq "$binary.debug"
+          done
+
       - name: Package RADOS-enabled Linux binaries
         run: |
           tar -C bin -czf "vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz" linux-amd64-rados
@@ -178,6 +198,15 @@ jobs:
             exit 1
           fi
           grep -q 'usage: vaultic-key-broker' broker.log
+
+      - name: Verify macOS debug symbol identities
+        run: |
+          for binary in vaulticdb vaultic-key-broker vaultic-key-custodian; do
+            release_uuid=$(dwarfdump --uuid "bin/macos-arm64/$binary" | awk 'NR == 1 { print $2 }')
+            debug_uuid=$(dwarfdump --uuid "bin/macos-arm64-debug/$binary.dSYM" | awk 'NR == 1 { print $2 }')
+            test -n "$release_uuid"
+            test "$release_uuid" = "$debug_uuid"
+          done
 
       - name: Package macOS binaries
         run: |

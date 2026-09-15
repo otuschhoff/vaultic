@@ -1,25 +1,25 @@
 //! Chunked authenticated encryption for metadata object stores.
 
 use std::{
+    collections::{HashMap, VecDeque},
+    env,
     fmt::{Debug, Display, Formatter},
     ops::Range,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
-use aes_gcm::{
-    aead::{Aead, Payload},
-    Aes256Gcm, KeyInit, Nonce,
-};
 use async_trait::async_trait;
+use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use bytes::{Bytes, BytesMut};
 use futures_util::{stream, stream::BoxStream, StreamExt};
 use rand::RngCore;
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use slatedb::object_store::{
     path::Path, CopyMode, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload,
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, UploadPart,
 };
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::ids::RepositoryId;
 
@@ -30,6 +30,10 @@ const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 const HEADER_SIZE: usize = 8 + 1 + 1 + 4 + 4 + 8 + NONCE_SIZE;
 const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
+const DEFAULT_MAX_CRYPTO_THREADS: usize = 8;
+const MAX_CRYPTO_THREADS: usize = 64;
+const PARALLEL_CRYPTO_CHUNKS: usize = 4;
+const HEADER_CACHE_ENTRIES: usize = 16 * 1024;
 
 pub mod envelope;
 pub mod recovery_capsule;
@@ -62,7 +66,109 @@ pub(crate) struct EncryptedObjectStore {
     inner: Arc<dyn ObjectStore>,
     repository_id: RepositoryId,
     keyring: Arc<RwLock<Keyring>>,
+    crypto: Arc<CryptoExecutor>,
+    headers: Arc<Mutex<HeaderCache>>,
     chunk_size: usize,
+}
+
+#[derive(Default)]
+struct HeaderCache {
+    entries: HashMap<Path, CachedHeader>,
+    order: VecDeque<Path>,
+}
+
+#[derive(Clone)]
+struct CachedHeader {
+    header: Header,
+    meta: ObjectMeta,
+}
+
+impl HeaderCache {
+    fn get(&self, location: &Path) -> Option<CachedHeader> {
+        self.entries.get(location).cloned()
+    }
+
+    fn insert(&mut self, location: Path, header: Header, meta: ObjectMeta) {
+        if self
+            .entries
+            .insert(location.clone(), CachedHeader { header, meta })
+            .is_some()
+        {
+            return;
+        }
+        self.order.push_back(location);
+        while self.entries.len() > HEADER_CACHE_ENTRIES {
+            if let Some(expired) = self.order.pop_front() {
+                self.entries.remove(&expired);
+            }
+        }
+    }
+
+    fn remove(&mut self, location: &Path) {
+        self.entries.remove(location);
+    }
+}
+
+struct CryptoExecutor {
+    pool: ThreadPool,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl CryptoExecutor {
+    fn new(threads: usize) -> anyhow::Result<Self> {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("vaulticdb-crypto-{index}"))
+            .build()
+            .map_err(|error| anyhow::anyhow!("initialize metadata crypto pool: {error}"))?;
+        Ok(Self {
+            pool,
+            permits: Arc::new(tokio::sync::Semaphore::new(threads)),
+        })
+    }
+
+    async fn run<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| encryption_error(EncryptionError::Authentication))?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.pool.spawn(move || {
+            let _permit = permit;
+            let _ = sender.send(operation());
+        });
+        receiver
+            .await
+            .map_err(|_| encryption_error(EncryptionError::Authentication))?
+    }
+}
+
+fn configured_crypto_threads() -> anyhow::Result<usize> {
+    let default = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(DEFAULT_MAX_CRYPTO_THREADS);
+    let Some(value) = env::var_os("VAULTICDB_CRYPTO_THREADS") else {
+        return Ok(default);
+    };
+    let value = value
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("VAULTICDB_CRYPTO_THREADS must be valid UTF-8"))?;
+    parse_crypto_threads(value)
+}
+
+fn parse_crypto_threads(value: &str) -> anyhow::Result<usize> {
+    let threads = value.parse::<usize>().map_err(|_| {
+        anyhow::anyhow!("VAULTICDB_CRYPTO_THREADS must be an integer between 1 and 64")
+    })?;
+    if !(1..=MAX_CRYPTO_THREADS).contains(&threads) {
+        anyhow::bail!("VAULTICDB_CRYPTO_THREADS must be between 1 and 64");
+    }
+    Ok(threads)
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -93,8 +199,23 @@ impl Clone for EncryptionKey {
 }
 
 struct Keyring {
-    keys: Vec<EncryptionKey>,
+    keys: Vec<CipherKey>,
     write_version: u32,
+}
+
+struct CipherKey {
+    key: EncryptionKey,
+    cipher: Arc<LessSafeKey>,
+}
+
+impl CipherKey {
+    fn new(key: EncryptionKey) -> anyhow::Result<Self> {
+        let cipher = UnboundKey::new(&AES_256_GCM, key.secret())
+            .map(LessSafeKey::new)
+            .map(Arc::new)
+            .map_err(|_| anyhow::anyhow!("initialize metadata AES-256-GCM key"))?;
+        Ok(Self { key, cipher })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +235,11 @@ impl Debug for EncryptedObjectStore {
             .field(
                 "write_version",
                 &self.keyring.read().map(|keyring| keyring.write_version),
+            )
+            .field("crypto_threads", &self.crypto.pool.current_num_threads())
+            .field(
+                "cached_headers",
+                &self.headers.lock().map(|headers| headers.entries.len()),
             )
             .field("chunk_size", &self.chunk_size)
             .finish_non_exhaustive()
@@ -145,6 +271,11 @@ impl EncryptedObjectStore {
         if versions.len() != keys.len() || versions.first() == Some(&0) {
             anyhow::bail!("metadata encryption key versions must be unique and non-zero");
         }
+        let keys = keys
+            .into_iter()
+            .map(CipherKey::new)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let crypto = Arc::new(CryptoExecutor::new(configured_crypto_threads()?)?);
         Ok(Self {
             inner,
             repository_id: repository_id.into(),
@@ -152,6 +283,8 @@ impl EncryptedObjectStore {
                 keys,
                 write_version,
             })),
+            crypto,
+            headers: Arc::new(Mutex::new(HeaderCache::default())),
             chunk_size: DEFAULT_CHUNK_SIZE,
         })
     }
@@ -161,6 +294,8 @@ impl EncryptedObjectStore {
             inner,
             repository_id: self.repository_id.clone(),
             keyring: self.keyring.clone(),
+            crypto: self.crypto.clone(),
+            headers: self.headers.clone(),
             chunk_size: self.chunk_size,
         }
     }
@@ -171,14 +306,14 @@ impl EncryptedObjectStore {
         self
     }
 
-    fn key(&self, version: u32) -> Result<Zeroizing<[u8; 32]>> {
+    fn cipher(&self, version: u32) -> Result<Arc<LessSafeKey>> {
         self.keyring
             .read()
             .map_err(|_| encryption_error(EncryptionError::Header))?
             .keys
             .iter()
-            .find(|key| key.version == version)
-            .map(|key| Zeroizing::new(*key.key))
+            .find(|key| key.key.version == version)
+            .map(|key| Arc::clone(&key.cipher))
             .ok_or_else(|| encryption_error(EncryptionError::Header))
     }
 
@@ -187,6 +322,25 @@ impl EncryptedObjectStore {
             .read()
             .map(|keyring| keyring.write_version)
             .map_err(|_| encryption_error(EncryptionError::Header))
+    }
+
+    fn cached_header(&self, location: &Path) -> Option<CachedHeader> {
+        self.headers
+            .lock()
+            .ok()
+            .and_then(|headers| headers.get(location))
+    }
+
+    fn cache_header(&self, location: &Path, header: Header, meta: &ObjectMeta) {
+        if let Ok(mut headers) = self.headers.lock() {
+            headers.insert(location.clone(), header, meta.clone());
+        }
+    }
+
+    fn invalidate_header(&self, location: &Path) {
+        if let Ok(mut headers) = self.headers.lock() {
+            headers.remove(location);
+        }
     }
 
     pub(crate) fn install_write_key(&self, key: EncryptionKey) -> anyhow::Result<()> {
@@ -200,12 +354,12 @@ impl EncryptedObjectStore {
         if keyring
             .keys
             .iter()
-            .any(|existing| existing.version == key.version)
+            .any(|existing| existing.key.version == key.version)
         {
             anyhow::bail!("metadata encryption key version already exists");
         }
         keyring.write_version = key.version;
-        keyring.keys.push(key);
+        keyring.keys.push(CipherKey::new(key)?);
         Ok(())
     }
 
@@ -217,11 +371,19 @@ impl EncryptedObjectStore {
         if version != keyring.write_version {
             anyhow::bail!("only metadata DEKs older than the active write key can be retired");
         }
-        keyring.keys.retain(|key| key.version >= version);
+        keyring.keys.retain(|key| key.key.version >= version);
         Ok(())
     }
 
-    fn encrypt(&self, location: &Path, plaintext: &[u8]) -> Result<Bytes> {
+    async fn encrypt(&self, location: &Path, plaintext: Bytes) -> Result<Bytes> {
+        let store = self.clone();
+        let location = location.clone();
+        self.crypto
+            .run(move || store.encrypt_sync(&location, &plaintext))
+            .await
+    }
+
+    fn encrypt_sync(&self, location: &Path, plaintext: &[u8]) -> Result<Bytes> {
         let mut nonce = [0u8; NONCE_SIZE];
         rand::rng().fill_bytes(&mut nonce);
         let header = Header {
@@ -232,25 +394,45 @@ impl EncryptedObjectStore {
         };
         let mut result = BytesMut::with_capacity(ciphertext_len(header)?);
         encode_header(header, &mut result);
-        let key = self.key(header.key_version)?;
-        let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-            .map_err(|_| encryption_error(EncryptionError::Header))?;
-        for index in 0..chunk_count(header.plaintext_len, header.chunk_size) {
+        let cipher = self.cipher(header.key_version)?;
+        let chunks = chunk_count(header.plaintext_len, header.chunk_size);
+        if chunks >= PARALLEL_CRYPTO_CHUNKS {
+            result.resize(ciphertext_len(header)?, 0);
+            result[HEADER_SIZE..]
+                .par_chunks_mut(header.chunk_size + TAG_SIZE)
+                .enumerate()
+                .try_for_each(|(index, output)| {
+                    let start = index * header.chunk_size;
+                    let end = (start + header.chunk_size).min(plaintext.len());
+                    let (ciphertext, tag) = output.split_at_mut(end - start);
+                    let nonce = Nonce::assume_unique_for_key(chunk_nonce(header.nonce, index)?);
+                    let aad =
+                        associated_data(&self.repository_id, location, header, index, end - start);
+                    cipher
+                        .seal_out_of_place_scatter(
+                            nonce,
+                            Aad::from(aad),
+                            &plaintext[start..end],
+                            ciphertext,
+                            &[],
+                            tag,
+                        )
+                        .map_err(|_| encryption_error(EncryptionError::Authentication))
+                })?;
+            return Ok(result.freeze());
+        }
+        for index in 0..chunks {
             let start = index * header.chunk_size;
             let end = (start + header.chunk_size).min(plaintext.len());
             let chunk = &plaintext[start..end];
-            let nonce = chunk_nonce(header.nonce, index)?;
+            let nonce = Nonce::assume_unique_for_key(chunk_nonce(header.nonce, index)?);
             let aad = associated_data(&self.repository_id, location, header, index, chunk.len());
-            let encrypted = cipher
-                .encrypt(
-                    Nonce::from_slice(&nonce),
-                    Payload {
-                        msg: chunk,
-                        aad: &aad,
-                    },
-                )
+            let encrypted_start = result.len();
+            result.extend_from_slice(chunk);
+            let tag = cipher
+                .seal_in_place_separate_tag(nonce, Aad::from(aad), &mut result[encrypted_start..])
                 .map_err(|_| encryption_error(EncryptionError::Authentication))?;
-            result.extend_from_slice(&encrypted);
+            result.extend_from_slice(tag.as_ref());
         }
         Ok(result.freeze())
     }
@@ -264,26 +446,78 @@ impl EncryptedObjectStore {
         plaintext_meta_from_header(meta, header)
     }
 
-    fn decrypt_chunks(
+    async fn decrypt_chunks(
+        &self,
+        location: &Path,
+        header: Header,
+        first_chunk: usize,
+        ciphertext: Bytes,
+    ) -> Result<Bytes> {
+        let store = self.clone();
+        let location = location.clone();
+        self.crypto
+            .run(move || store.decrypt_chunks_sync(&location, header, first_chunk, &ciphertext))
+            .await
+    }
+
+    fn decrypt_chunks_sync(
         &self,
         location: &Path,
         header: Header,
         first_chunk: usize,
         ciphertext: &[u8],
     ) -> Result<Bytes> {
-        let key = self.key(header.key_version)?;
-        let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-            .map_err(|_| encryption_error(EncryptionError::Header))?;
-        let mut result = BytesMut::new();
-        let mut offset = 0;
+        let cipher = self.cipher(header.key_version)?;
+        let chunk_stride = header.chunk_size + TAG_SIZE;
+        let selected_chunks = ciphertext.len().div_ceil(chunk_stride);
         let total_chunks = chunk_count(header.plaintext_len, header.chunk_size);
+        if selected_chunks == 0 || first_chunk + selected_chunks > total_chunks {
+            return Err(encryption_error(EncryptionError::Length));
+        }
+        let plaintext_len = (first_chunk..first_chunk + selected_chunks)
+            .map(|index| plaintext_chunk_len(header, index))
+            .sum::<usize>();
+        if plaintext_len + selected_chunks * TAG_SIZE != ciphertext.len() {
+            return Err(encryption_error(EncryptionError::Length));
+        }
+        if selected_chunks >= PARALLEL_CRYPTO_CHUNKS {
+            let mut result = BytesMut::zeroed(plaintext_len);
+            ciphertext
+                .par_chunks(chunk_stride)
+                .zip(result.par_chunks_mut(header.chunk_size))
+                .enumerate()
+                .try_for_each(|(offset, (encrypted, plaintext))| {
+                    let index = first_chunk + offset;
+                    let plaintext_chunk_len = plaintext_chunk_len(header, index);
+                    let nonce = Nonce::assume_unique_for_key(chunk_nonce(header.nonce, index)?);
+                    let aad = associated_data(
+                        &self.repository_id,
+                        location,
+                        header,
+                        index,
+                        plaintext_chunk_len,
+                    );
+                    cipher
+                        .open_separate_gather(
+                            nonce,
+                            Aad::from(aad),
+                            &encrypted[..plaintext_chunk_len],
+                            &encrypted[plaintext_chunk_len..],
+                            plaintext,
+                        )
+                        .map_err(|_| encryption_error(EncryptionError::Authentication))
+                })?;
+            return Ok(result.freeze());
+        }
+        let mut result = BytesMut::with_capacity(ciphertext.len());
+        let mut offset = 0;
         for index in first_chunk..total_chunks {
             let plaintext_chunk_len = plaintext_chunk_len(header, index);
             let encrypted_len = plaintext_chunk_len + TAG_SIZE;
             if offset + encrypted_len > ciphertext.len() {
                 break;
             }
-            let nonce = chunk_nonce(header.nonce, index)?;
+            let nonce = Nonce::assume_unique_for_key(chunk_nonce(header.nonce, index)?);
             let aad = associated_data(
                 &self.repository_id,
                 location,
@@ -291,16 +525,17 @@ impl EncryptedObjectStore {
                 index,
                 plaintext_chunk_len,
             );
-            let plaintext = cipher
-                .decrypt(
-                    Nonce::from_slice(&nonce),
-                    Payload {
-                        msg: &ciphertext[offset..offset + encrypted_len],
-                        aad: &aad,
-                    },
+            let plaintext_start = result.len();
+            let tag_start = offset + plaintext_chunk_len;
+            result.extend_from_slice(&ciphertext[offset..tag_start]);
+            cipher
+                .open_in_place_separate_tag(
+                    nonce,
+                    Aad::from(aad),
+                    &ciphertext[tag_start..offset + encrypted_len],
+                    &mut result[plaintext_start..],
                 )
                 .map_err(|_| encryption_error(EncryptionError::Authentication))?;
-            result.extend_from_slice(&plaintext);
             offset += encrypted_len;
             if offset == ciphertext.len() {
                 return Ok(result.freeze());
@@ -348,13 +583,11 @@ impl ObjectStore for EncryptedObjectStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> Result<PutResult> {
+        self.invalidate_header(location);
         let plaintext = collect_payload(payload);
+        let encrypted = self.encrypt(location, plaintext).await?;
         self.inner
-            .put_opts(
-                location,
-                self.encrypt(location, &plaintext)?.into(),
-                options,
-            )
+            .put_opts(location, encrypted.into(), options)
             .await
     }
 
@@ -380,12 +613,40 @@ impl ObjectStore for EncryptedObjectStore {
     async fn get_opts(&self, location: &Path, mut options: GetOptions) -> Result<GetResult> {
         let requested_range = options.range.take();
         let head = options.head;
-        let (header, encrypted_meta, attributes, extensions) =
-            self.header(location, options.clone()).await?;
-        let meta = plaintext_meta_from_header(encrypted_meta, header)?;
-        let range = resolve_range(requested_range, header.plaintext_len)?;
-        let payload = if head || range.is_empty() {
-            Bytes::new()
+        let mut header_response = None;
+        let mut cached_meta = None;
+        let mut header = if head {
+            let response = self.header(location, options.clone()).await?;
+            self.cache_header(location, response.0, &response.1);
+            header_response = Some((response.1, response.2, response.3));
+            response.0
+        } else if let Some(cached) = self.cached_header(location) {
+            cached_meta = Some(cached.meta);
+            cached.header
+        } else {
+            let response = self.header(location, options.clone()).await?;
+            self.cache_header(location, response.0, &response.1);
+            header_response = Some((response.1, response.2, response.3));
+            response.0
+        };
+        let mut range = resolve_range(requested_range.clone(), header.plaintext_len)?;
+        if !head && range.is_empty() && cached_meta.is_some() {
+            let response = self.header(location, options.clone()).await?;
+            header = response.0;
+            range = resolve_range(requested_range, header.plaintext_len)?;
+            self.cache_header(location, header, &response.1);
+            header_response = Some((response.1, response.2, response.3));
+            cached_meta = None;
+        }
+        let (payload, encrypted_meta, attributes, extensions) = if head || range.is_empty() {
+            let (meta, attributes, extensions) = match header_response {
+                Some(response) => response,
+                None => {
+                    let response = self.header(location, options.clone()).await?;
+                    (response.1, response.2, response.3)
+                }
+            };
+            (Bytes::new(), meta, attributes, extensions)
         } else {
             let first_chunk = range.start / header.chunk_size;
             let last_chunk = (range.end - 1) / header.chunk_size;
@@ -398,11 +659,28 @@ impl ObjectStore for EncryptedObjectStore {
             ));
             options.head = false;
             let encrypted = self.inner.get_opts(location, options).await?;
-            let chunks =
-                self.decrypt_chunks(location, header, first_chunk, &encrypted.bytes().await?)?;
+            if cached_meta
+                .as_ref()
+                .is_some_and(|cached| cached != &encrypted.meta)
+            {
+                self.invalidate_header(location);
+                return Err(encryption_error(EncryptionError::Authentication));
+            }
+            let encrypted_meta = encrypted.meta.clone();
+            let attributes = encrypted.attributes.clone();
+            let extensions = encrypted.extensions.clone();
+            let chunks = self
+                .decrypt_chunks(location, header, first_chunk, encrypted.bytes().await?)
+                .await?;
             let relative_start = range.start - first_chunk * header.chunk_size;
-            chunks.slice(relative_start..relative_start + range.len())
+            (
+                chunks.slice(relative_start..relative_start + range.len()),
+                encrypted_meta,
+                attributes,
+                extensions,
+            )
         };
+        let meta = plaintext_meta_from_header(encrypted_meta, header)?;
         Ok(GetResult {
             payload: GetResultPayload::Stream(stream::once(async { Ok(payload) }).boxed()),
             meta,
@@ -416,6 +694,15 @@ impl ObjectStore for EncryptedObjectStore {
         &self,
         locations: BoxStream<'static, Result<Path>>,
     ) -> BoxStream<'static, Result<Path>> {
+        let store = self.clone();
+        let locations = locations
+            .map(move |location| {
+                if let Ok(location) = &location {
+                    store.invalidate_header(location);
+                }
+                location
+            })
+            .boxed();
         self.inner.delete_stream(locations)
     }
 

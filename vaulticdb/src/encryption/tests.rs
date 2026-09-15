@@ -3,6 +3,10 @@ mod tests {
     //! Metadata object encryption tests.
 
     use super::*;
+    use aes_gcm::{
+        aead::{Aead, Payload},
+        Aes256Gcm, KeyInit,
+    };
     use futures_util::TryStreamExt;
     use slatedb::object_store::{
         local::LocalFileSystem, Attribute, AttributeValue, Attributes, ObjectStoreExt,
@@ -14,6 +18,73 @@ mod tests {
         EncryptedObjectStore::new(inner, repository, vec![EncryptionKey::new(1, [7; 32])], 1)
             .unwrap()
             .with_chunk_size(16)
+    }
+
+    #[test]
+    fn crypto_thread_count_accepts_only_configured_bounds() {
+        assert_eq!(parse_crypto_threads("1").unwrap(), 1);
+        assert_eq!(parse_crypto_threads("12").unwrap(), 12);
+        assert_eq!(parse_crypto_threads("64").unwrap(), 64);
+        for invalid in ["0", "65", "many", "", " 8"] {
+            assert!(
+                parse_crypto_threads(invalid).is_err(),
+                "accepted invalid crypto thread count {invalid:?}"
+            );
+        }
+    }
+
+    fn rustcrypto_encrypt(location: &Path, plaintext: &[u8]) -> Bytes {
+        let header = Header {
+            key_version: 1,
+            chunk_size: 16,
+            plaintext_len: plaintext.len(),
+            nonce: [11; NONCE_SIZE],
+        };
+        let cipher = Aes256Gcm::new_from_slice(&[7; 32]).unwrap();
+        let mut result = BytesMut::with_capacity(ciphertext_len(header).unwrap());
+        encode_header(header, &mut result);
+        for index in 0..chunk_count(header.plaintext_len, header.chunk_size) {
+            let start = index * header.chunk_size;
+            let end = (start + header.chunk_size).min(plaintext.len());
+            let nonce = chunk_nonce(header.nonce, index).unwrap();
+            let aad = associated_data("repo-a", location, header, index, end - start);
+            let encrypted = cipher
+                .encrypt(
+                    aes_gcm::Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &plaintext[start..end],
+                        aad: &aad,
+                    },
+                )
+                .unwrap();
+            result.extend_from_slice(&encrypted);
+        }
+        result.freeze()
+    }
+
+    fn rustcrypto_decrypt(location: &Path, ciphertext: &[u8]) -> Bytes {
+        let header = decode_header(ciphertext).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&[7; 32]).unwrap();
+        let mut result = BytesMut::with_capacity(header.plaintext_len);
+        let mut offset = HEADER_SIZE;
+        for index in 0..chunk_count(header.plaintext_len, header.chunk_size) {
+            let plaintext_len = plaintext_chunk_len(header, index);
+            let encrypted_len = plaintext_len + TAG_SIZE;
+            let nonce = chunk_nonce(header.nonce, index).unwrap();
+            let aad = associated_data("repo-a", location, header, index, plaintext_len);
+            let plaintext = cipher
+                .decrypt(
+                    aes_gcm::Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &ciphertext[offset..offset + encrypted_len],
+                        aad: &aad,
+                    },
+                )
+                .unwrap();
+            result.extend_from_slice(&plaintext);
+            offset += encrypted_len;
+        }
+        result.freeze()
     }
 
     #[tokio::test]
@@ -146,6 +217,56 @@ mod tests {
             Bytes::from_static(b"wxyz")
         );
         assert_eq!(encrypted.head(&path).await.unwrap().size, 36);
+    }
+
+    #[tokio::test]
+    async fn aws_lc_and_rustcrypto_ciphertexts_are_compatible() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let encrypted = store(inner.clone(), "repo-a");
+        let path = Path::from("sst/cross-backend");
+        let plaintext = Bytes::from_static(b"0123456789abcdefghijklmnopqrstuvwxyz");
+
+        inner
+            .put(&path, rustcrypto_encrypt(&path, &plaintext).into())
+            .await
+            .unwrap();
+        assert_eq!(
+            encrypted.get(&path).await.unwrap().bytes().await.unwrap(),
+            plaintext
+        );
+
+        encrypted
+            .put(&path, plaintext.clone().into())
+            .await
+            .unwrap();
+        let raw = inner.get(&path).await.unwrap().bytes().await.unwrap();
+        assert_eq!(rustcrypto_decrypt(&path, &raw), plaintext);
+    }
+
+    #[tokio::test]
+    async fn parallel_chunks_round_trip_and_reject_tampering() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let encrypted = store(inner.clone(), "repo-a");
+        let path = Path::from("compacted/parallel.sst");
+        let plaintext = Bytes::from((0..=255).cycle().take(16 * 9 + 3).collect::<Vec<_>>());
+
+        encrypted
+            .put(&path, plaintext.clone().into())
+            .await
+            .unwrap();
+        assert_eq!(
+            encrypted.get(&path).await.unwrap().bytes().await.unwrap(),
+            plaintext
+        );
+        assert_eq!(
+            encrypted.get_range(&path, 7..137).await.unwrap(),
+            plaintext.slice(7..137)
+        );
+
+        let mut raw = inner.get(&path).await.unwrap().bytes().await.unwrap().to_vec();
+        raw[HEADER_SIZE + 5 * (16 + TAG_SIZE)] ^= 1;
+        inner.put(&path, raw.into()).await.unwrap();
+        assert!(encrypted.get(&path).await.is_err());
     }
 
     #[tokio::test]

@@ -168,6 +168,7 @@ func daemonEnvironment(options Options) []string {
 		"http_proxy": true, "https_proxy": true, "no_proxy": true,
 		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 		"VAULTICDB_SLATEDB_MULTIGET": true,
+		"VAULTICDB_CRYPTO_THREADS":   true,
 	}
 	walS3Credentials := map[string]bool{
 		"VAULTICDB_WAL_S3_ACCESS_KEY_ID":     true,

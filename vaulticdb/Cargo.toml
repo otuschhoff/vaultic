@@ -1,6 +1,6 @@
 [package]
 name = "vaulticdb"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 default-run = "vaulticdb"
 publish = false
@@ -17,6 +17,7 @@ aes-gcm = "0.10"
 anyhow = "1.0"
 argon2 = "0.5"
 async-trait = "0.1"
+aws-lc-rs = "1.18"
 aws-config = { version = "1.11", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-kms = "1.117"
 aws-sdk-sts = "1.114"
@@ -37,6 +38,7 @@ prost = "0.14"
 quick-xml = { version = "0.41", features = ["serialize"] }
 rand = "0.9"
 rand08 = { package = "rand", version = "0.8" }
+rayon = "1.11"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

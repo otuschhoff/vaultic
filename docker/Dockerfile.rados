@@ -52,7 +52,8 @@ RUN dnf install --assumeyes --setopt=install_weak_deps=False \
 FROM rados-rust-toolchain AS vaulticdb-builder
 
 COPY vaulticdb ./vaulticdb
-RUN cargo build --manifest-path vaulticdb/Cargo.toml --release --features rados --bins \
+RUN RUSTFLAGS="-C link-arg=-Wl,--build-id=sha1" \
+    cargo build --manifest-path vaulticdb/Cargo.toml --release --features rados --bins \
     && mkdir -p /out \
     && cp vaulticdb/target/release/vaulticdb \
         vaulticdb/target/release/vaultic-key-broker \

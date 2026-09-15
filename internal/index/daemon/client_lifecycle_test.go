@@ -236,6 +236,7 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTICDB_WAL_S3_SESSION_TOKEN", "wal-session-token")
 	t.Setenv("VAULTICDB_WAL_S3_ENDPOINT", "must-come-from-options")
 	t.Setenv("VAULTICDB_SLATEDB_MULTIGET", "true")
+	t.Setenv("VAULTICDB_CRYPTO_THREADS", "12")
 	t.Setenv("PATH", "/test/bin")
 
 	local := strings.Join(daemonEnvironment(Options{ObjectStore: "local"}), "\n")
@@ -243,7 +244,8 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 		strings.Contains(local, "VAULTICDB_WAL_S3_SECRET_ACCESS_KEY") {
 		t.Fatalf("local daemon inherited a secret-bearing environment: %s", local)
 	}
-	if !strings.Contains(local, "PATH=/test/bin") || !strings.Contains(local, "VAULTICDB_SLATEDB_MULTIGET=true") {
+	if !strings.Contains(local, "PATH=/test/bin") || !strings.Contains(local, "VAULTICDB_SLATEDB_MULTIGET=true") ||
+		!strings.Contains(local, "VAULTICDB_CRYPTO_THREADS=12") {
 		t.Fatalf("local daemon lost required runtime environment: %s", local)
 	}
 
@@ -875,6 +877,7 @@ func TestEnsureTCPRaceHasOneOwner(t *testing.T) {
 		TCPAllowlist: []string{"127.0.0.1/32"},
 		AuthToken:    "race-secret",
 		RepositoryID: "tcp-race-repo",
+		DataDir:      t.TempDir(),
 		DaemonPath:   daemonBinary(t),
 		StartTimeout: 5 * time.Second,
 	}
@@ -889,6 +892,14 @@ func TestEnsureTCPRaceHasOneOwner(t *testing.T) {
 		}(index)
 	}
 	group.Wait()
+	for _, client := range clients {
+		if client != nil {
+			client := client
+			t.Cleanup(func() {
+				_ = client.Close(context.Background())
+			})
+		}
+	}
 	owners := 0
 	for index, client := range clients {
 		if errs[index] != nil {
@@ -896,9 +907,6 @@ func TestEnsureTCPRaceHasOneOwner(t *testing.T) {
 		}
 		if client.process != nil {
 			owners++
-			defer client.Close(context.Background())
-		} else if err := client.Close(context.Background()); err != nil {
-			t.Fatal(err)
 		}
 	}
 	if owners != 1 {
