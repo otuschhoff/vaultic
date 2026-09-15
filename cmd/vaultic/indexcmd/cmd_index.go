@@ -298,16 +298,11 @@ type importProgressReporter struct {
 	lastBlobs   uint64
 	lastNodes   uint64
 	printed     bool
-	stdout      func(string)
 	log         func(string)
 }
 
-func newImportProgressReporter(printer interface{ P(string, ...any) }, json bool, started time.Time) *importProgressReporter {
-	reporter := &importProgressReporter{started: started, log: func(message string) { log.Print(message) }}
-	if !json {
-		reporter.stdout = func(message string) { printer.P("%s\n", message) }
-	}
-	return reporter
+func newImportProgressReporter(started time.Time) *importProgressReporter {
+	return &importProgressReporter{started: started, log: func(message string) { log.Print(message) }}
 }
 
 func (reporter *importProgressReporter) Update(progress legacyimport.Progress) {
@@ -361,9 +356,6 @@ func (reporter *importProgressReporter) update(now time.Time, progress legacyimp
 		remaining,
 		eta,
 	)
-	if reporter.stdout != nil {
-		reporter.stdout(message)
-	}
 	reporter.log(message)
 	reporter.printed = true
 	reporter.lastPrinted = now
@@ -395,10 +387,7 @@ func importProgressEstimate(started, now time.Time, completed, total uint64) (st
 	return remaining.String(), now.Add(remaining).Format(time.RFC3339)
 }
 
-func emitImportStatus(printer interface{ P(string, ...any) }, json bool, message string) {
-	if !json {
-		printer.P("%s\n", message)
-	}
+func emitImportStatus(message string) {
 	log.Print(message)
 }
 
@@ -489,11 +478,10 @@ func runIndexImport(
 	var resetElapsed time.Duration
 	if options.ForceResetOldIndex {
 		resetElapsed = time.Since(resetStarted)
-		emitImportStatus(
-			printer,
-			globalOptions.JSON,
-			fmt.Sprintf("legacy import candidate reset and VaulticDB startup completed in %s", resetElapsed.Round(time.Millisecond)),
-		)
+		emitImportStatus(fmt.Sprintf(
+			"legacy import candidate reset and VaulticDB startup completed in %s",
+			resetElapsed.Round(time.Millisecond),
+		))
 	}
 	store, client := storeSession.Store, storeSession.Client
 	if options.ForceResetOldIndex {
@@ -508,7 +496,7 @@ func runIndexImport(
 		}
 	}
 	started := time.Now()
-	progressReporter := newImportProgressReporter(printer, globalOptions.JSON, started)
+	progressReporter := newImportProgressReporter(started)
 	log.Printf(
 		"legacy metadata import started: pack_workers=%d batch_size=%d snapshot_depth=%d resume=%t fresh=%t",
 		options.PackWorkers, options.BatchSize, options.SnapshotDepth, options.Resume, options.ForceResetOldIndex,

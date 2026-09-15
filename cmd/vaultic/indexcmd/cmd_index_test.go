@@ -826,10 +826,9 @@ func TestForceResetOldIndexRequiresStartedPersistentTarget(t *testing.T) {
 
 func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 	started := time.Date(2026, time.July, 7, 12, 0, 0, 0, time.UTC)
-	var stdout, logged []string
+	var logged []string
 	reporter := &importProgressReporter{
 		started: started,
-		stdout:  func(message string) { stdout = append(stdout, message) },
 		log:     func(message string) { logged = append(logged, message) },
 	}
 	reporter.update(started, legacyimport.Progress{IndexesTotal: 4, SnapshotsTotal: 2})
@@ -847,38 +846,38 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 		SnapshotsCompleted: 2, SnapshotsTotal: 2, SnapshotsImported: 2,
 		PacksImported: 12, BlobsImported: 34, NodesImported: 8,
 	})
-	if len(stdout) != 4 || len(logged) != 4 {
-		t.Fatalf("progress messages stdout=%q log=%q", stdout, logged)
+	if len(logged) != 4 {
+		t.Fatalf("progress messages = %q", logged)
 	}
 	wantInitial := "legacy import progress: 0.0%; indexes 0/4 (imported 0, resumed 0); " +
 		"snapshots 0/2 (imported 0, resumed 0); packs 0; blobs 0; speed last interval unknown; " +
 		"speed since start unknown; elapsed 0s; est. remaining unknown; ETA unknown"
-	if stdout[0] != wantInitial {
-		t.Fatalf("initial progress = %q", stdout[0])
+	if logged[0] != wantInitial {
+		t.Fatalf("initial progress = %q", logged[0])
 	}
 	wantPartial := "legacy import progress: 33.3%; indexes 2/4 (imported 1, resumed 1); " +
 		"snapshots 0/2 (imported 0, resumed 0); packs 6; blobs 17; " +
 		"speed last interval 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; " +
 		"speed since start 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; elapsed 4s; " +
 		"est. remaining 8s; ETA 2026-07-07T12:00:12Z"
-	if stdout[1] != wantPartial || logged[1] != wantPartial {
-		t.Fatalf("partial progress stdout=%q log=%q", stdout[1], logged[1])
+	if logged[1] != wantPartial {
+		t.Fatalf("partial progress = %q", logged[1])
 	}
 	wantIndexesComplete := "legacy import progress: 66.7%; indexes 4/4 (imported 3, resumed 1); " +
 		"snapshots 0/2 (imported 0, resumed 0); packs 12; blobs 34; " +
 		"speed last interval 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; " +
 		"speed since start 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; elapsed 8s; " +
 		"est. remaining 4s; ETA 2026-07-07T12:00:12Z"
-	if stdout[2] != wantIndexesComplete || logged[2] != wantIndexesComplete {
-		t.Fatalf("index completion progress stdout=%q log=%q", stdout[2], logged[2])
+	if logged[2] != wantIndexesComplete {
+		t.Fatalf("index completion progress = %q", logged[2])
 	}
 	wantFinal := "legacy import progress: 100.0%; indexes 4/4 (imported 3, resumed 1); " +
 		"snapshots 2/2 (imported 2, resumed 0); packs 12; blobs 34; " +
 		"speed last interval 0.0 packs/s, 0.0 blobs/s, 2.0 nodes/s; " +
 		"speed since start 1.0 packs/s, 2.8 blobs/s, 0.7 nodes/s; elapsed 12s; " +
 		"est. remaining 0s; ETA 2026-07-07T12:00:12Z"
-	if stdout[3] != wantFinal || logged[3] != wantFinal {
-		t.Fatalf("final progress stdout=%q log=%q", stdout[3], logged[3])
+	if logged[3] != wantFinal {
+		t.Fatalf("final progress = %q", logged[3])
 	}
 }
 
