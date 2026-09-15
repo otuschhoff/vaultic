@@ -798,9 +798,16 @@ mod tests {
         drop(database);
         storage.close().await.unwrap();
 
+        let (_, coordination_store) = object_store(&repository_id, &config.object_store).unwrap();
+        let stale_epoch = claim_writer_epoch(coordination_store.as_ref(), None)
+            .await
+            .unwrap()
+            .unwrap();
+
         config.metadata_rebuild_reset = true;
         let reset = Storage::open(&repository_id, &config).await.unwrap();
         assert!(reset.read_value(b"p:stale").await.unwrap().is_none());
+        assert!(reset.writer_epoch.load(Ordering::Acquire) > stale_epoch);
         let database = reset.database.read().await;
         let Database::Writer(db) = &*database else {
             panic!("reset candidate did not reopen as writer")

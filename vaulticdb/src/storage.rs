@@ -1501,14 +1501,35 @@ impl Storage {
                 wal_metrics,
             )
         };
+        let reset_takeover_epoch = if config.metadata_rebuild_reset {
+            match active_writer_epoch(coordination_store.as_ref()).await {
+                Ok(epoch) => epoch,
+                Err(error) => {
+                    let primary = error.context("read active writer claim for metadata reset");
+                    return Err(failed_open_cleanup(
+                        primary,
+                        &path,
+                        cache_manager.as_ref(),
+                        None,
+                        None,
+                    )
+                    .await);
+                }
+            }
+        } else {
+            None
+        };
         #[cfg(any(test, feature = "test-failpoints"))]
         let writer_claim_result =
             match check_storage_failpoint(StorageFailpoint::WriterClaimUnavailable(path.clone())) {
-                Ok(()) => claim_writer_epoch(coordination_store.as_ref(), None).await,
+                Ok(()) => {
+                    claim_writer_epoch(coordination_store.as_ref(), reset_takeover_epoch).await
+                }
                 Err(_) => Ok(None),
             };
         #[cfg(not(any(test, feature = "test-failpoints")))]
-        let writer_claim_result = claim_writer_epoch(coordination_store.as_ref(), None).await;
+        let writer_claim_result =
+            claim_writer_epoch(coordination_store.as_ref(), reset_takeover_epoch).await;
         let writer_claim = match writer_claim_result {
             Ok(claim) => claim,
             Err(error) => {
