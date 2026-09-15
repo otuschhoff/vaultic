@@ -26,7 +26,7 @@ fn version_flags_do_not_require_runtime_configuration() {
         );
         let report = String::from_utf8(output.stdout).unwrap();
         assert!(report.starts_with(&format!("{name} {}\n", env!("CARGO_PKG_VERSION"))));
-        assert!(report.contains("slatedb 0.15.0 (git "));
+        assert!(report.contains("slatedb 0.16.0 (git "));
         assert!(report.contains("aes-gcm 0.10.3"));
     }
 }

@@ -223,6 +223,7 @@ All daemon-specific environment variables are parsed once by `Config::from_env`.
 | `VAULTICDB_REPLICATED_<ID>_AZURE_ACCESS_KEY` | none | Optional Azure access key. |
 | `VAULTICDB_REPLICATED_<ID>_AZURE_BEARER_TOKEN` | none | Optional Azure bearer token. |
 | `VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS` | `300` | Integer of at least 10 seconds. |
+| `VAULTICDB_SLATEDB_MULTIGET` | `false` | `true` enables SlateDB-native batch reads; set `false` and restart to restore serial point reads. |
 | `VAULTICDB_METADATA_REBUILD_INITIALIZE` | `false` | Requires brokered encryption and an empty candidate metadata store. |
 | `VAULTICDB_BROKER_SOCKET` | none | Enables brokered metadata-DEK acquisition. |
 | `VAULTICDB_RELEASE_MANIFEST` | none | Required with `VAULTICDB_BROKER_SOCKET`. |

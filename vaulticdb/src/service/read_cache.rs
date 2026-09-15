@@ -228,6 +228,7 @@ mod tests {
                 provider_credentials: ProviderCredentials::new(HashMap::new()),
             },
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             topology_source: TopologySource::External,
             topology_override_local: None,
         }

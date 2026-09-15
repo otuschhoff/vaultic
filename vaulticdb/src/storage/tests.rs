@@ -63,6 +63,7 @@ mod tests {
                 provider_credentials: ProviderCredentials::new(HashMap::new()),
             },
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             topology_source: TopologySource::External,
             topology_override_local: None,
         }
@@ -282,6 +283,7 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(epoch),
@@ -702,46 +704,97 @@ mod tests {
 
     #[tokio::test]
     async fn multi_get_preserves_transaction_order_and_response_limit() {
+        for slatedb_multiget in [false, true] {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+            let path = format!("multi-get-{}", rand::random::<u64>());
+            let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+            let mut storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+            storage.slatedb_multiget = slatedb_multiget;
+            assert!(storage
+                .multi_get(&[], "unknown", usize::MAX)
+                .await
+                .unwrap()
+                .is_empty());
+            storage
+                .write_batch(&WriteBatchRequest {
+                    puts: vec![KeyValue {
+                        key: b"committed".to_vec(),
+                        value: b"stored".to_vec(),
+                    }],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let committed = storage
+                .multi_get(&[b"committed".to_vec(), b"missing".to_vec()], "", usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(committed[0].value, b"stored");
+            assert!(!committed[1].found);
+
+            let transaction_id = storage.begin().await.unwrap().transaction_id;
+            storage
+                .write_batch(&WriteBatchRequest {
+                    puts: vec![KeyValue {
+                        key: b"present".to_vec(),
+                        value: b"value".to_vec(),
+                    }],
+                    transaction_id: transaction_id.clone(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+
+            let keys = vec![
+                b"present".to_vec(),
+                b"missing".to_vec(),
+                b"present".to_vec(),
+            ];
+            let results = storage
+                .multi_get(&keys, &transaction_id, usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|result| result.key.as_slice())
+                    .collect::<Vec<_>>(),
+                keys
+            );
+            assert_eq!(results[0].value, b"value");
+            assert!(!results[1].found);
+            assert_eq!(results[2].value, b"value");
+
+            let error = storage.multi_get(&keys, &transaction_id, 0).await.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+            storage.rollback(&transaction_id).await.unwrap();
+            storage.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn slatedb_multi_get_reads_non_fencing_reader() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
-        let path = format!("multi-get-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
-        let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
-        assert!(storage
-            .multi_get(&[], "unknown", usize::MAX)
+        let path = format!("reader-multi-get-{}", rand::random::<u64>());
+        let db = Db::open(path.as_str(), object_store.clone()).await.unwrap();
+        db.put(b"present", b"value")
             .await
             .unwrap()
-            .is_empty());
-        let transaction_id = storage.begin().await.unwrap().transaction_id;
-        storage
-            .write_batch(&WriteBatchRequest {
-                puts: vec![KeyValue {
-                    key: b"present".to_vec(),
-                    value: b"value".to_vec(),
-                }],
-                transaction_id: transaction_id.clone(),
-                ..Default::default()
-            })
+            .await_durable()
             .await
             .unwrap();
+        db.close().await.unwrap();
+        let reader = open_reader(&path, object_store.clone(), None).await.unwrap();
+        let mut storage = transition_storage(Database::Reader(reader), path, object_store, 0);
+        storage.slatedb_multiget = true;
 
-        let keys = vec![
-            b"present".to_vec(),
-            b"missing".to_vec(),
-            b"present".to_vec(),
-        ];
         let results = storage
-            .multi_get(&keys, &transaction_id, usize::MAX)
+            .multi_get(&[b"present".to_vec(), b"missing".to_vec()], "", usize::MAX)
             .await
             .unwrap();
-        assert_eq!(results.iter().map(|result| result.key.as_slice()).collect::<Vec<_>>(), keys);
         assert_eq!(results[0].value, b"value");
         assert!(!results[1].found);
-        assert_eq!(results[2].value, b"value");
-
-        let error = storage.multi_get(&keys, &transaction_id, 0).await.unwrap_err();
-        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
-        storage.rollback(&transaction_id).await.unwrap();
         storage.close().await.unwrap();
     }
 
@@ -833,6 +886,7 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1013,6 +1067,7 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1074,6 +1129,7 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1153,6 +1209,7 @@ mod tests {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
+            slatedb_multiget: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(0),

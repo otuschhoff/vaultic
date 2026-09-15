@@ -237,6 +237,7 @@ pub(crate) struct Storage {
     next_transaction: AtomicU64,
     last_durable_sequence: AtomicU64,
     transaction_idle_timeout_ms: u64,
+    slatedb_multiget: bool,
     credential_manager: Option<StorageCredentialManager>,
     broker_lease_metadata: Option<BrokerLeaseMetadata>,
     writer_epoch: AtomicU64,
@@ -286,6 +287,7 @@ pub(crate) struct StorageConfig {
     pub(crate) broker: Option<BrokerLeaseConfig>,
     pub(crate) encryption: envelope::EncryptionConfig,
     pub(crate) transaction_idle_timeout_ms: u64,
+    pub(crate) slatedb_multiget: bool,
     pub(crate) topology_source: TopologySource,
     pub(crate) topology_override_local: Option<(String, PathBuf)>,
 }
@@ -1589,12 +1591,17 @@ impl Storage {
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
+            slatedb_multiget: config.slatedb_multiget,
             credential_manager,
             broker_lease_metadata,
             writer_epoch: AtomicU64::new(writer_epoch),
             wal_target: wal_store_kind(&effective_wal_store),
             wal_durability: wal_store_durability(&effective_wal_store),
         };
+        eprintln!(
+            "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_multiget_configured\",\"fields\":{{\"enabled\":{}}}}}",
+            storage.slatedb_multiget
+        );
         let initialize = async {
             storage.ensure_encryption_policy(repository_id).await?;
             if recovery_initialize {
@@ -2612,15 +2619,40 @@ impl Storage {
         }
         let mut response_bytes = 0usize;
         if transaction_id.is_empty() {
-            for key in keys {
-                let value = self.read_value(key).await?;
-                Self::push_multi_get_result(
-                    &mut results,
-                    &mut response_bytes,
-                    max_response_bytes,
-                    key,
-                    value,
-                )?;
+            if self.slatedb_multiget {
+                let database = self.database.read().await;
+                let values = match &*database {
+                    Database::Writer(db) => db.multi_get(keys).await.map_err(storage_error)?,
+                    Database::Reader(reader) => {
+                        reader.multi_get(keys).await.map_err(storage_error)?
+                    }
+                    Database::Unavailable => {
+                        return Err(VaulticDbError::StorageUnavailable {
+                            message: "vaulticdb storage is transitioning".to_owned(),
+                        }
+                        .into())
+                    }
+                };
+                for (key, value) in keys.iter().zip(values) {
+                    Self::push_multi_get_result(
+                        &mut results,
+                        &mut response_bytes,
+                        max_response_bytes,
+                        key,
+                        value,
+                    )?;
+                }
+            } else {
+                for key in keys {
+                    let value = self.read_value(key).await?;
+                    Self::push_multi_get_result(
+                        &mut results,
+                        &mut response_bytes,
+                        max_response_bytes,
+                        key,
+                        value,
+                    )?;
+                }
             }
         } else {
             let transaction = self.transaction(transaction_id).await?;
@@ -2628,15 +2660,28 @@ impl Storage {
             let transaction = transaction
                 .as_ref()
                 .ok_or_else(|| transaction_not_found("transaction was closed"))?;
-            for key in keys {
-                let value = transaction.get(key).await.map_err(storage_error)?;
-                Self::push_multi_get_result(
-                    &mut results,
-                    &mut response_bytes,
-                    max_response_bytes,
-                    key,
-                    value,
-                )?;
+            if self.slatedb_multiget {
+                let values = transaction.multi_get(keys).await.map_err(storage_error)?;
+                for (key, value) in keys.iter().zip(values) {
+                    Self::push_multi_get_result(
+                        &mut results,
+                        &mut response_bytes,
+                        max_response_bytes,
+                        key,
+                        value,
+                    )?;
+                }
+            } else {
+                for key in keys {
+                    let value = transaction.get(key).await.map_err(storage_error)?;
+                    Self::push_multi_get_result(
+                        &mut results,
+                        &mut response_bytes,
+                        max_response_bytes,
+                        key,
+                        value,
+                    )?;
+                }
             }
         }
         Ok(results)

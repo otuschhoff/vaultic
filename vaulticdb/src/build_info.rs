@@ -27,7 +27,7 @@ mod tests {
     fn report_contains_application_storage_and_crypto_versions() {
         let report = version_report("vaulticdb");
         assert!(report.starts_with(&format!("vaulticdb {}\n", env!("CARGO_PKG_VERSION"))));
-        assert!(report.contains("slatedb 0.15.0 (git "));
+        assert!(report.contains("slatedb 0.16.0 (git "));
         assert!(report.contains("object_store 0.14.1"));
         assert!(report.contains("aes-gcm 0.10.3"));
         assert!(report.contains("rustls "));

@@ -95,6 +95,7 @@ impl Config {
 
 fn storage_from_env() -> Result<StorageConfig> {
     let metadata_rebuild_initialize = env_bool("VAULTICDB_METADATA_REBUILD_INITIALIZE")?;
+    let slatedb_multiget = optional_bool("VAULTICDB_SLATEDB_MULTIGET", false)?;
     let broker = match env::var_os("VAULTICDB_BROKER_SOCKET") {
         Some(socket) => {
             let storage_token_ttl = configured_duration(
@@ -204,6 +205,7 @@ fn storage_from_env() -> Result<StorageConfig> {
         broker,
         encryption: encryption_from_env()?,
         transaction_idle_timeout_ms,
+        slatedb_multiget,
         topology_source,
         topology_override_local,
     })
@@ -748,6 +750,18 @@ mod tests {
     fn environment_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn slatedb_multiget_flag_is_strict_and_defaults_off() {
+        let _guard = environment_lock().lock().unwrap();
+        unsafe { env::remove_var("VAULTICDB_SLATEDB_MULTIGET") };
+        assert!(!optional_bool("VAULTICDB_SLATEDB_MULTIGET", false).unwrap());
+        unsafe { env::set_var("VAULTICDB_SLATEDB_MULTIGET", "true") };
+        assert!(optional_bool("VAULTICDB_SLATEDB_MULTIGET", false).unwrap());
+        unsafe { env::set_var("VAULTICDB_SLATEDB_MULTIGET", "yes") };
+        assert!(optional_bool("VAULTICDB_SLATEDB_MULTIGET", false).is_err());
+        unsafe { env::remove_var("VAULTICDB_SLATEDB_MULTIGET") };
     }
 
     fn clear_cache_environment() {

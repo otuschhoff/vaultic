@@ -4700,6 +4700,7 @@ mod tests {
             kind,
             sst_type,
             retry: retry.then_some(RetryReason::CrcMismatch),
+            segment: None,
         });
         GetOptions {
             extensions,
