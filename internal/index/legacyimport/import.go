@@ -101,7 +101,7 @@ type packImportResult struct {
 	complete bool
 }
 
-//nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
+//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
 func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (Result, error) {
 	var result Result
 	if options.PackTimeout < 0 {

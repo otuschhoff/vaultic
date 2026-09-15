@@ -400,24 +400,9 @@ func runIndexImport(
 	globalOptions global.Options,
 	term ui.Terminal,
 ) (result legacyimport.Result, err error) {
-	if !options.FromLegacy {
-		return result, fmt.Errorf("no import source selected; --from-legacy is currently required")
-	}
-	if options.ForceResetOldIndex {
-		if !options.Daemon.Start {
-			return result, fmt.Errorf("--force-reset-old-idx requires --start-daemon")
-		}
-		if options.DryRun {
-			return result, fmt.Errorf("--force-reset-old-idx cannot be combined with --dry-run")
-		}
-		if _, err := validateMetadataRebuildTarget(options.Daemon, true); err != nil {
-			return result, fmt.Errorf("validate reset target: %w", err)
-		}
-		options.Resume = false
-		options.Daemon.RebuildReset = true
-	}
-	if options.DryRun && options.Activate {
-		return result, fmt.Errorf("--activate cannot be combined with --dry-run")
+	options, err = validateIndexImportOptions(options)
+	if err != nil {
+		return result, err
 	}
 	if err := prepareMetadataRebuild(ctx, options, globalOptions); err != nil {
 		return result, err
@@ -514,6 +499,29 @@ func runIndexImport(
 		return result, fmt.Errorf("%w: import completed with %d findings", errIndexIncomplete, result.ErrorsSeen)
 	}
 	return result, nil
+}
+
+func validateIndexImportOptions(options indexImportOptions) (indexImportOptions, error) {
+	if !options.FromLegacy {
+		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
+	}
+	if options.ForceResetOldIndex {
+		if !options.Daemon.Start {
+			return options, fmt.Errorf("--force-reset-old-idx requires --start-daemon")
+		}
+		if options.DryRun {
+			return options, fmt.Errorf("--force-reset-old-idx cannot be combined with --dry-run")
+		}
+		if _, err := validateMetadataRebuildTarget(options.Daemon, true); err != nil {
+			return options, fmt.Errorf("validate reset target: %w", err)
+		}
+		options.Resume = false
+		options.Daemon.RebuildReset = true
+	}
+	if options.DryRun && options.Activate {
+		return options, fmt.Errorf("--activate cannot be combined with --dry-run")
+	}
+	return options, nil
 }
 
 func prepareMetadataRebuild(ctx context.Context, options indexImportOptions, globalOptions global.Options) error {

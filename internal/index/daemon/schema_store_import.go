@@ -213,27 +213,34 @@ func planImportedBlobs(
 		}
 		for offset, blobID := range blobIDs[start:end] {
 			incoming := imported.Blobs[blobID]
-			if found[offset] {
-				existing, err := schema.UnmarshalBlobRecord(values[offset].Value)
-				if err != nil {
-					return packImportPlan{}, err
-				}
-				if err := accumulateNewLocations(&plan, existing, incoming); err != nil {
-					return packImportPlan{}, err
-				}
-				incoming = mergeBlobRecords(existing, incoming)
-			} else if err := accumulateAllLocations(&plan, incoming); err != nil {
+			if err := appendImportedBlobMutation(&plan, keys[start+offset], incoming, values[offset].Value, found[offset]); err != nil {
 				return packImportPlan{}, err
 			}
-			encoded, err := incoming.MarshalBinary()
-			if err != nil {
-				return packImportPlan{}, err
-			}
-			plan.puts = append(plan.puts, Mutation{Key: keys[start+offset], Value: encoded})
 		}
 		start = end
 	}
 	return plan, nil
+}
+
+func appendImportedBlobMutation(plan *packImportPlan, key []byte, incoming schema.BlobRecord, value []byte, found bool) error {
+	if found {
+		existing, err := schema.UnmarshalBlobRecord(value)
+		if err != nil {
+			return err
+		}
+		if err := accumulateNewLocations(plan, existing, incoming); err != nil {
+			return err
+		}
+		incoming = mergeBlobRecords(existing, incoming)
+	} else if err := accumulateAllLocations(plan, incoming); err != nil {
+		return err
+	}
+	encoded, err := incoming.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	plan.puts = append(plan.puts, Mutation{Key: key, Value: encoded})
+	return nil
 }
 
 func blobLookupBatchEnd(limits Limits, keys [][]byte, start int) (int, error) {
