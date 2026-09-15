@@ -1,8 +1,8 @@
-# Phase 35: NFSv3 locking and recovery
+# Phase 36: NFSv3 locking and recovery
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 34](phase-34-writable-nfsv3-exports.md) | [Next: Phase 36](phase-36-nfs-server-side-group-authorization.md)
+[Previous: Phase 35](phase-35-writable-nfsv3-exports.md) | [Next: Phase 37](phase-37-nfs-server-side-group-authorization.md)
 
 **Status: design specification, not yet implemented.**
 
@@ -20,7 +20,7 @@ Locks are advisory, not mandatory access control: ordinary NFS READ/WRITE does n
 
 Persist the bounded recovery information needed to recognize reclaiming clients and owners. On server restart, enter a configured grace period: allow valid reclaim, deny conflicting new lock acquisition, and expire unreclaimed state only under the documented protocol. Integrate NSM client reboot notifications, durable server incarnation state, and callbacks so rebooted clients release stale locks without trusting arbitrary packets to clear another client's locks. Duplicate callbacks and crash-during-reclaim are safe.
 
-A network partition is not proof that a client rebooted. Do not discard a live client's lock just because a health timeout expired. Specify the cleanup and administrative recovery policy and its safety limits. Coordinate server/lock-manager lifetime with the workspace writer epoch; a fenced server cannot grant new locks. Multi-server shared lock state is deferred to Phase 37.
+A network partition is not proof that a client rebooted. Do not discard a live client's lock just because a health timeout expired. Specify the cleanup and administrative recovery policy and its safety limits. Coordinate server/lock-manager lifetime with the workspace writer epoch; a fenced server cannot grant new locks. Multi-server shared lock state is deferred to Phase 38.
 
 Document fixed/configured NLM and NSM ports, callback addresses, firewall rules, and rpcbind registration requirements for supported native clients. Phase 31's two-port, no-rpcbind deployment assumption may no longer suffice; review collision handling, privilege needs and existing system statd integration rather than silently starting competing daemons. Expose only the reviewed TCP/UDP transports required by the compatibility matrix. Callbacks use admitted client identities/addresses with rate limits, not arbitrary caller-supplied destinations.
 
@@ -29,7 +29,7 @@ Document fixed/configured NLM and NSM ports, callback addresses, firewall rules,
 1. Select the NLM/NSM integration and publish procedure, transport, and client compatibility matrices.
 2. Implement bounded lock state, owner/range semantics, wait queues, callbacks, replay and cancellation.
 3. Add restart persistence, grace/reclaim, NSM reboot handling, and writer-fence integration.
-4. Add lock-service configuration, security controls, and Phase 32 lock/conflict/wait/grace metrics without paths as labels.
+4. Add lock-service configuration, security controls, and Phase 33 lock/conflict/wait/grace metrics without paths as labels.
 5. Document client setup, advisory-lock limits, manual recovery, and cross-protocol behavior.
 
 ## Tests

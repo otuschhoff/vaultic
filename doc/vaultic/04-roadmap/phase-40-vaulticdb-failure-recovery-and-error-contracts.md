@@ -1,4 +1,8 @@
-# Phase 39: VaulticDB failure recovery and error contracts
+# Phase 40: VaulticDB failure recovery and error contracts
+
+[← Back to roadmap index](00-overview.md)
+
+[← Phase 39](phase-39-remote-principals-and-brokered-vaulticdb-access-tickets.md)
 
 Status: proposed
 

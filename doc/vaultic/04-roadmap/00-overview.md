@@ -50,13 +50,15 @@ commit series so it can be reviewed or reverted independently.
 | 29 | [VaulticDB/SlateDB read-cache tiers](phase-29-slatedb-read-cache-tiers.md) | complete |
 | 30 | [Vaultic best-effort read-cache tier](phase-30-vaultic-best-effort-read-cache-tier.md) | design |
 | 31 | [Read-only NFSv3 snapshot server](phase-31-read-only-nfsv3-snapshot-server.md) | implemented; native validation pending |
-| 32 | [Operational monitoring and bounded metrics export](phase-32-operational-monitoring-and-metrics-export.md) | design |
-| 33 | [Writable FUSE and durable writeback](phase-33-writable-fuse-and-durable-writeback.md) | design |
-| 34 | [Writable NFSv3 workspace exports](phase-34-writable-nfsv3-exports.md) | design |
-| 35 | [NFSv3 locking and recovery](phase-35-nfsv3-locking-and-recovery.md) | design |
-| 36 | [NFS server-side group authorization](phase-36-nfs-server-side-group-authorization.md) | design |
-| 37 | [Multi-server writable NFS availability research](phase-37-multi-server-nfs-ha-research.md) | research planned |
-| 38 | [Remote principals and brokered VaulticDB access tickets](phase-38-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 32 | [Scalable legacy metadata bulk import](phase-32-scalable-legacy-metadata-bulk-import.md) | design |
+| 33 | [Operational monitoring and bounded metrics export](phase-33-operational-monitoring-and-metrics-export.md) | design |
+| 34 | [Writable FUSE and durable writeback](phase-34-writable-fuse-and-durable-writeback.md) | design |
+| 35 | [Writable NFSv3 workspace exports](phase-35-writable-nfsv3-exports.md) | design |
+| 36 | [NFSv3 locking and recovery](phase-36-nfsv3-locking-and-recovery.md) | design |
+| 37 | [NFS server-side group authorization](phase-37-nfs-server-side-group-authorization.md) | design |
+| 38 | [Multi-server writable NFS availability research](phase-38-multi-server-nfs-ha-research.md) | research planned |
+| 39 | [Remote principals and brokered VaulticDB access tickets](phase-39-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 40 | [VaulticDB failure recovery and error contracts](phase-40-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
 
 ## Supporting plans
 

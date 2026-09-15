@@ -6,7 +6,7 @@
 
 **Normative language:** MUST and MUST NOT identify acceptance requirements. SHOULD identifies a default that requires a documented exception.
 
-Related documents: [testing strategy](01-testing-strategy.md), [operational telemetry](phase-32-operational-monitoring-and-metrics-export.md).
+Related documents: [testing strategy](01-testing-strategy.md), [operational telemetry](phase-33-operational-monitoring-and-metrics-export.md).
 
 ## 1. Scope and Current Integration Points
 
@@ -16,7 +16,7 @@ The current [dependency manifest](../../../vaulticdb/Cargo.toml) pins SlateDB to
 
 The storage implementation imports the `slatedb::object_store` re-export while the package also directly depends on `object_store`. Test adapters MUST implement the exact trait used by the pinned engine; do not assume two dependency versions have identical types. Record resolved versions from `Cargo.lock` and `cargo tree -d` when implementing adapters.
 
-InfluxDB v2 export is proposed in the operational telemetry specification. This specification extends that design with required InfluxDB v2 and v3 compatibility profiles; it does not assume the Phase 32 exporter is already implemented. `kv_flush_latency` is a contract to implement and verify here, not an assertion that the current code already exports this metric.
+InfluxDB v2 export is proposed in the operational telemetry specification. This specification extends that design with required InfluxDB v2 and v3 compatibility profiles; it does not assume the Phase 33 exporter is already implemented. `kv_flush_latency` is a contract to implement and verify here, not an assertion that the current code already exports this metric.
 
 ### 1.1 Required Contract Inventory
 
@@ -320,7 +320,7 @@ Track GET request amplification per logical read/scan and origin bytes for foreg
 
 ### 6.3 InfluxDB v2 and v3 Assertions
 
-Implement instrumentation through the Phase 32 bounded snapshot/exporter interface. Use a fast in-memory recorder with the virtual clock in DST and real isolated InfluxDB v2 and v3 instances for exporter integration/soaks. The real databases are never part of deterministic scheduling. Keep test identities in bucket/database selection and artifacts, not per-operation metric labels.
+Implement instrumentation through the Phase 33 bounded snapshot/exporter interface. Use a fast in-memory recorder with the virtual clock in DST and real isolated InfluxDB v2 and v3 instances for exporter integration/soaks. The real databases are never part of deterministic scheduling. Keep test identities in bucket/database selection and artifacts, not per-operation metric labels.
 
 #### Backend Profiles and Query Adapters
 
@@ -571,7 +571,7 @@ R08 and R10 do not need full-engine DST. R09's process tests do not wait on VM p
 
 #### R11: Recorder and Amplification Accounting
 
-**Read:** Sections 6.1-6.3 and the Phase 32 bounded telemetry contract.
+**Read:** Sections 6.1-6.3 and the Phase 33 bounded telemetry contract.
 
 **Implement:** fixed-schema bounded snapshots and the actual engine flush start/terminal observer. Add virtual-clock tests before export code. Instrument logical committed bytes separately from attempted/transferred/published store bytes; distinguish replicas, encryption overhead, foreground reads, compaction, and retained physical space. Reconcile a small fixture against independent inventory.
 
