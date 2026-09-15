@@ -456,7 +456,7 @@ impl EncryptedObjectStore {
         let store = self.clone();
         let location = location.clone();
         self.crypto
-            .run(move || store.decrypt_chunks_sync(&location, header, first_chunk, &ciphertext))
+            .run(move || store.decrypt_chunks_sync(&location, header, first_chunk, ciphertext))
             .await
     }
 
@@ -465,7 +465,7 @@ impl EncryptedObjectStore {
         location: &Path,
         header: Header,
         first_chunk: usize,
-        ciphertext: &[u8],
+        ciphertext: Bytes,
     ) -> Result<Bytes> {
         let cipher = self.cipher(header.key_version)?;
         let chunk_stride = header.chunk_size + TAG_SIZE;
@@ -480,6 +480,52 @@ impl EncryptedObjectStore {
         if plaintext_len + selected_chunks * TAG_SIZE != ciphertext.len() {
             return Err(encryption_error(EncryptionError::Length));
         }
+        let ciphertext = match ciphertext.try_into_mut() {
+            Ok(mut result) => {
+                let decrypt = |offset: usize, encrypted: &mut [u8]| {
+                    let index = first_chunk + offset;
+                    let plaintext_chunk_len = plaintext_chunk_len(header, index);
+                    let (plaintext, tag) = encrypted.split_at_mut(plaintext_chunk_len);
+                    let nonce = Nonce::assume_unique_for_key(chunk_nonce(header.nonce, index)?);
+                    let aad = associated_data(
+                        &self.repository_id,
+                        location,
+                        header,
+                        index,
+                        plaintext_chunk_len,
+                    );
+                    cipher
+                        .open_in_place_separate_tag(nonce, Aad::from(aad), tag, plaintext)
+                        .map(|_| ())
+                        .map_err(|_| encryption_error(EncryptionError::Authentication))
+                };
+                if selected_chunks >= PARALLEL_CRYPTO_CHUNKS {
+                    result
+                        .par_chunks_mut(chunk_stride)
+                        .enumerate()
+                        .try_for_each(|(offset, encrypted)| decrypt(offset, encrypted))?;
+                } else {
+                    result
+                        .chunks_mut(chunk_stride)
+                        .enumerate()
+                        .try_for_each(|(offset, encrypted)| decrypt(offset, encrypted))?;
+                }
+                let mut plaintext_offset = 0;
+                for offset in 0..selected_chunks {
+                    let index = first_chunk + offset;
+                    let chunk_len = plaintext_chunk_len(header, index);
+                    let ciphertext_offset = offset * chunk_stride;
+                    result.copy_within(
+                        ciphertext_offset..ciphertext_offset + chunk_len,
+                        plaintext_offset,
+                    );
+                    plaintext_offset += chunk_len;
+                }
+                result.truncate(plaintext_len);
+                return Ok(result.freeze());
+            }
+            Err(ciphertext) => ciphertext,
+        };
         if selected_chunks >= PARALLEL_CRYPTO_CHUNKS {
             let mut result = BytesMut::zeroed(plaintext_len);
             ciphertext

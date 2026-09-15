@@ -33,6 +33,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decryption_reuses_unique_ciphertext_allocation() {
+        let encrypted = store(Arc::new(InMemory::new()), "repo-a");
+        let location = Path::from("compacted/reused.sst");
+        for plaintext_len in [7, 16 * PARALLEL_CRYPTO_CHUNKS + 7] {
+            let plaintext = Bytes::from(vec![0x5a; plaintext_len]);
+            let object = encrypted.encrypt_sync(&location, &plaintext).unwrap();
+            let header = decode_header(&object).unwrap();
+            let ciphertext = BytesMut::from(&object[HEADER_SIZE..]).freeze();
+            let allocation = ciphertext.as_ptr();
+
+            let decrypted = encrypted
+                .decrypt_chunks_sync(&location, header, 0, ciphertext)
+                .unwrap();
+
+            assert_eq!(decrypted, plaintext);
+            assert_eq!(decrypted.as_ptr(), allocation);
+        }
+    }
+
     fn rustcrypto_encrypt(location: &Path, plaintext: &[u8]) -> Bytes {
         let header = Header {
             key_version: 1,

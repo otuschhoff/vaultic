@@ -179,6 +179,7 @@ func daemonEnvironment(options Options) []string {
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")
 		if found && (allowed[name] ||
+			strings.HasPrefix(name, "VAULTICDB_READ_CACHE_") ||
 			(options.ObjectStore == "s3" && strings.HasPrefix(name, "AWS_")) ||
 			(options.WALStore == "s3" && walS3Credentials[name])) {
 			result = append(result, entry)

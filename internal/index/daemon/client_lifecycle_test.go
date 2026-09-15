@@ -237,6 +237,9 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTICDB_WAL_S3_ENDPOINT", "must-come-from-options")
 	t.Setenv("VAULTICDB_SLATEDB_MULTIGET", "true")
 	t.Setenv("VAULTICDB_CRYPTO_THREADS", "12")
+	t.Setenv("VAULTICDB_READ_CACHE_TIERS", "trusted-ram")
+	t.Setenv("VAULTICDB_READ_CACHE_TRUSTED_RAM_OBJECT_STORE", "memory")
+	t.Setenv("VAULTICDB_READ_CACHE_TRUSTED_RAM_ACKNOWLEDGE_PLAINTEXT", "true")
 	t.Setenv("PATH", "/test/bin")
 
 	local := strings.Join(daemonEnvironment(Options{ObjectStore: "local"}), "\n")
@@ -245,7 +248,10 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 		t.Fatalf("local daemon inherited a secret-bearing environment: %s", local)
 	}
 	if !strings.Contains(local, "PATH=/test/bin") || !strings.Contains(local, "VAULTICDB_SLATEDB_MULTIGET=true") ||
-		!strings.Contains(local, "VAULTICDB_CRYPTO_THREADS=12") {
+		!strings.Contains(local, "VAULTICDB_CRYPTO_THREADS=12") ||
+		!strings.Contains(local, "VAULTICDB_READ_CACHE_TIERS=trusted-ram") ||
+		!strings.Contains(local, "VAULTICDB_READ_CACHE_TRUSTED_RAM_OBJECT_STORE=memory") ||
+		!strings.Contains(local, "VAULTICDB_READ_CACHE_TRUSTED_RAM_ACKNOWLEDGE_PLAINTEXT=true") {
 		t.Fatalf("local daemon lost required runtime environment: %s", local)
 	}
 

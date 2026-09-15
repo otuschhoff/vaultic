@@ -97,8 +97,9 @@ digits, `-`, and `_`; configuration variable names uppercase IDs and replace
 `-` with `_`, so IDs must remain distinct after that conversion.
 
 Each tier requires `VAULTICDB_READ_CACHE_<ID>_OBJECT_STORE` (`local`, `memory`,
-`s3`, or `rados`) and `VAULTICDB_READ_CACHE_<ID>_MAX_BYTES`. `memory` is for
-tests. Local tiers require `_DATA_DIR`; S3 tiers require `_S3_BUCKET` and accept
+`s3`, or `rados`) and `VAULTICDB_READ_CACHE_<ID>_MAX_BYTES`. `memory` is a
+volatile process-local tier whose contents are lost when VaulticDB stops. Local
+tiers require `_DATA_DIR`; S3 tiers require `_S3_BUCKET` and accept
 `_S3_PREFIX`, `_S3_ENDPOINT`, `_S3_REGION`, `_S3_PROVIDER`,
 `_S3_BUCKET_LOOKUP`, `_S3_ACCESS_KEY_ID`, and `_S3_SECRET_ACCESS_KEY`. Cache
 credentials are currently static. `_S3_SESSION_TOKEN` is rejected because this
@@ -138,6 +139,27 @@ Larger responses still succeed from the authority but bypass caching. Fill and
 promotion writes are bounded best-effort background work; cache hits update only
 generation-aware in-memory recency and never persist access metadata. Cache
 timeouts and write failures do not turn an origin-successful read into a failure.
+
+For a highly trusted host with spare RAM, a bounded decrypted memory tier can
+avoid both authority reads and metadata decryption on hits. For example, a 64
+GiB tier with a 16 MiB admission ceiling and 256 MiB fill budget uses:
+
+```text
+VAULTICDB_READ_CACHE_TIERS=trusted-ram
+VAULTICDB_READ_CACHE_TRUSTED_RAM_OBJECT_STORE=memory
+VAULTICDB_READ_CACHE_TRUSTED_RAM_MAX_BYTES=68719476736
+VAULTICDB_READ_CACHE_TRUSTED_RAM_CONFIDENTIALITY=decrypted
+VAULTICDB_READ_CACHE_TRUSTED_RAM_ACKNOWLEDGE_PLAINTEXT=true
+VAULTICDB_READ_CACHE_TRUSTED_RAM_IDLE_AGE=2h
+VAULTICDB_READ_CACHE_TRUSTED_RAM_ABSOLUTE_AGE=24h
+VAULTICDB_READ_CACHE_PART_SIZE_BYTES=16777216
+VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES=268435456
+VAULTICDB_READ_CACHE_AGGREGATE_MAX_BYTES=68719476736
+```
+
+The part size is only the largest response eligible for admission; it does not
+preallocate that amount for smaller entries. Set the in-flight limit explicitly
+when raising the part size because its default is eight parts.
 
 `CacheStatus` reports policy revisions and synchronization errors, namespace,
 shared and process-local global/per-tier accounting, metrics, circuit state,
