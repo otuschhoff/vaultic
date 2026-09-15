@@ -51,6 +51,9 @@ jobs:
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --version 0.23.2 --locked
 
+      - name: Install debug symbol tools
+        run: sudo apt-get update && sudo apt-get install --yes llvm
+
       - name: Install protobuf compiler
         env:
           PROTOC_VERSION: "36.0"
@@ -66,7 +69,7 @@ jobs:
           echo "$install_dir/bin" >> "$GITHUB_PATH"
 
       - name: Build static Linux binaries
-        run: make vaultic-${{ matrix.platform }} vaulticdb-${{ matrix.platform }}
+        run: make vaultic-${{ matrix.platform }} vaulticdb-${{ matrix.platform }} VAULTICDB_PREPARE_DEBUG=1 AR=llvm-ar OBJCOPY=llvm-objcopy
 
       - name: Verify static Linux binaries
         run: |
@@ -98,12 +101,15 @@ jobs:
         run: |
           cp LICENSE bin/${{ matrix.platform }}/LICENSE
           tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz" "${{ matrix.platform }}"
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}-debug.tar.gz" "${{ matrix.platform }}-debug"
 
       - name: Upload Linux release archive
         uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
-          path: vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+          path: |
+            vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+            vaultic-${{ github.ref_name }}-${{ matrix.platform }}-debug.tar.gz
           if-no-files-found: error
 
   build-linux-rados:
@@ -127,13 +133,17 @@ jobs:
               VAULTICDB_NATIVE_SMOKE=1 /opt/vaultic/vaulticdb'
 
       - name: Package RADOS-enabled Linux binaries
-        run: tar -C bin -czf "vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz" linux-amd64-rados
+        run: |
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz" linux-amd64-rados
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-linux-amd64-rados-debug.tar.gz" linux-amd64-rados-debug
 
       - name: Upload RADOS-enabled Linux archive
         uses: actions/upload-artifact@v7
         with:
           name: release-linux-amd64-rados
-          path: vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz
+          path: |
+            vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz
+            vaultic-${{ github.ref_name }}-linux-amd64-rados-debug.tar.gz
           if-no-files-found: error
 
   build-macos:
@@ -152,7 +162,7 @@ jobs:
         run: brew install protobuf
 
       - name: Build native macOS binaries
-        run: make vaultic-macos-arm64 vaulticdb-macos-arm64
+        run: make vaultic-macos-arm64 vaulticdb-macos-arm64 VAULTICDB_PREPARE_DEBUG=1
 
       - name: Verify and run macOS binaries
         run: |
@@ -173,12 +183,15 @@ jobs:
         run: |
           cp LICENSE bin/macos-arm64/LICENSE
           tar -C bin -czf "vaultic-${{ github.ref_name }}-macos-arm64.tar.gz" macos-arm64
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-macos-arm64-debug.tar.gz" macos-arm64-debug
 
       - name: Upload macOS release archive
         uses: actions/upload-artifact@v7
         with:
           name: release-macos-arm64
-          path: vaultic-${{ github.ref_name }}-macos-arm64.tar.gz
+          path: |
+            vaultic-${{ github.ref_name }}-macos-arm64.tar.gz
+            vaultic-${{ github.ref_name }}-macos-arm64-debug.tar.gz
           if-no-files-found: error
 
   build-windows:
@@ -233,9 +246,13 @@ jobs:
       - name: Require Linux and macOS archives
         run: |
           test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64.tar.gz"
+          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64-debug.tar.gz"
           test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz"
+          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64-rados-debug.tar.gz"
           test -f "release-assets/vaultic-${{ github.ref_name }}-linux-arm64.tar.gz"
+          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-arm64-debug.tar.gz"
           test -f "release-assets/vaultic-${{ github.ref_name }}-macos-arm64.tar.gz"
+          test -f "release-assets/vaultic-${{ github.ref_name }}-macos-arm64-debug.tar.gz"
 
       - name: Generate checksums
         working-directory: release-assets

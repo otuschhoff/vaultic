@@ -37,6 +37,7 @@ ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 RUN dnf install --assumeyes --setopt=install_weak_deps=False \
         cmake \
+        binutils \
         gcc \
         gcc-c++ \
         git \
@@ -56,13 +57,15 @@ RUN cargo build --manifest-path vaulticdb/Cargo.toml --release --features rados 
     && cp vaulticdb/target/release/vaulticdb \
         vaulticdb/target/release/vaultic-key-broker \
         vaulticdb/target/release/vaultic-key-custodian \
-        /out/
+        /out/ \
+    && vaulticdb/prepare-debug-symbols.sh linux /out /debug
 
 FROM scratch AS binaries
 
 COPY --from=vaultic-builder /out/vaultic /linux-amd64-rados/vaultic
 COPY --from=vaulticdb-builder /out/ /linux-amd64-rados/
 COPY LICENSE /linux-amd64-rados/LICENSE
+COPY --from=vaulticdb-builder /debug/ /linux-amd64-rados-debug/
 
 FROM quay.io/ceph/ceph:v${CEPH_VERSION}
 

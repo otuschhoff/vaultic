@@ -1,6 +1,6 @@
 [package]
 name = "vaulticdb"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 default-run = "vaulticdb"
 publish = false
@@ -52,6 +52,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 url = "2.5"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+tikv-jemallocator = "0.6"
 
 [dependencies.ctap-hid-fido2]
 path = "vendor/ctap-hid-fido2"
@@ -74,3 +75,7 @@ expect_used = "warn"
 
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }
+
+[profile.release]
+debug = 1
+strip = false

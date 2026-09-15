@@ -6,6 +6,7 @@ PLATFORMS := macos-arm64 linux-amd64 linux-arm64
 
 BIN_DIR := bin
 VAULTICDB_RUST_TOOLCHAIN ?= stable
+VAULTICDB_PREPARE_DEBUG ?= 0
 MACOS_CODESIGN_IDENTITY ?= -
 MACOS_CUSTODIAN_ENTITLEMENTS ?= contrib/macos/vaultic-key-custodian.entitlements
 VAULTIC_RADOS_IMAGE ?= vaultic:rados-linux-amd64
@@ -68,7 +69,8 @@ vaultic-%:
 vaulticdb: vaulticdb-$(HOST_PLATFORM)
 
 vaulticdb-%:
-	@case "$*" in \
+	@set -e; \
+	case "$*" in \
 		macos-arm64) target=aarch64-apple-darwin ;; \
 		linux-amd64) target=x86_64-unknown-linux-musl ;; \
 		linux-arm64) target=aarch64-unknown-linux-musl ;; \
@@ -88,6 +90,10 @@ vaulticdb-%:
 	cp vaulticdb/target/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb; \
 	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker; \
 	cp vaulticdb/target/$$target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian; \
+	if [ "$(VAULTICDB_PREPARE_DEBUG)" = "1" ]; then \
+		case "$$target" in *-linux-*) os=linux ;; *-apple-*) os=macos ;; esac; \
+		./vaulticdb/prepare-debug-symbols.sh "$$os" $(BIN_DIR)/$* $(BIN_DIR)/$*-debug; \
+	fi; \
 	case "$$target" in *-musl) ./vaulticdb/verify-static-linux.sh $(BIN_DIR)/$*/vaulticdb $(BIN_DIR)/$*/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-custodian ;; esac; \
 	case "$*" in macos-*) \
 		codesign --force --sign "$(MACOS_CODESIGN_IDENTITY)" --identifier com.vaultic.key-custodian --entitlements "$(MACOS_CUSTODIAN_ENTITLEMENTS)" $(BIN_DIR)/$*/vaultic-key-custodian; \

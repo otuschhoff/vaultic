@@ -28,6 +28,9 @@ use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;
 use vaulticdb::writer_role::{WriterRole as CoreWriterRole, WriterRoleState};
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod config;
 mod error;
 mod lifecycle;
