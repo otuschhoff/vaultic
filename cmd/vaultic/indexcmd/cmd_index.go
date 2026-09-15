@@ -641,7 +641,8 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 			return options, fmt.Errorf("--force-reset-old-idx cannot be combined with --dry-run")
 		}
 		if options.Daemon.Persistent {
-			return options, fmt.Errorf("--force-reset-old-idx cannot be combined with --persistent-daemon because the successful import must hand off from memory WAL to local WAL")
+			return options, fmt.Errorf("--force-reset-old-idx cannot be combined with --persistent-daemon because " +
+				"the successful import must hand off from memory WAL to local WAL")
 		}
 		if _, err := validateMetadataRebuildTarget(options.Daemon, true); err != nil {
 			return options, fmt.Errorf("validate reset target: %w", err)
