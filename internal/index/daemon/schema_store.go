@@ -366,10 +366,11 @@ func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyP
 		return ctx.Err()
 	}
 	hints := store.freshImportLookupHints(imported)
+	deferDurability := store.freshImportSeen != nil
 
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.importPackOnce(ctx, imported, true, hints)
+		err := store.importPackOnce(ctx, imported, true, hints, deferDurability)
 		if status.Code(err) != codes.Aborted {
 			if err == nil && store.freshImportSeen != nil {
 				store.freshImportSeen.insert(imported.PackID)

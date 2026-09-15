@@ -41,12 +41,17 @@ type Options struct {
 }
 
 type Progress struct {
-	IndexesCompleted uint64
-	IndexesTotal     uint64
-	IndexesImported  uint64
-	IndexesResumed   uint64
-	PacksImported    uint64
-	BlobsImported    uint64
+	IndexesCompleted   uint64
+	IndexesTotal       uint64
+	IndexesImported    uint64
+	IndexesResumed     uint64
+	SnapshotsCompleted uint64
+	SnapshotsTotal     uint64
+	SnapshotsImported  uint64
+	SnapshotsResumed   uint64
+	PacksImported      uint64
+	BlobsImported      uint64
+	NodesImported      uint64
 }
 
 type Finding struct {
@@ -66,6 +71,7 @@ type Result struct {
 	RecordsImported   uint64    `json:"records_imported"`
 	RecordsSkipped    uint64    `json:"records_skipped"`
 	CrawlDebtCreated  uint64    `json:"crawl_debt_created"`
+	SnapshotsTotal    uint64    `json:"snapshots_total"`
 	SnapshotsSeen     uint64    `json:"snapshots_seen"`
 	SnapshotsImported uint64    `json:"snapshots_imported"`
 	SnapshotsResumed  uint64    `json:"snapshots_resumed"`
@@ -117,15 +123,33 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	}); err != nil {
 		return result, err
 	}
+	var snapshotList vaultic.Lister
+	if options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0 {
+		snapshotList, err = vaultic.MemorizeList(ctx, source, vaultic.SnapshotFile)
+		if err != nil {
+			return result, err
+		}
+		if err := snapshotList.List(ctx, vaultic.SnapshotFile, func(vaultic.ID, int64) error {
+			result.SnapshotsTotal++
+			return nil
+		}); err != nil {
+			return result, err
+		}
+	}
 	reportProgress := func() {
 		if options.Progress != nil {
 			options.Progress(Progress{
-				IndexesCompleted: result.IndexesSeen,
-				IndexesTotal:     result.IndexesTotal,
-				IndexesImported:  result.IndexesImported,
-				IndexesResumed:   result.IndexesResumed,
-				PacksImported:    result.PacksImported,
-				BlobsImported:    result.BlobsImported,
+				IndexesCompleted:   result.IndexesSeen,
+				IndexesTotal:       result.IndexesTotal,
+				IndexesImported:    result.IndexesImported,
+				IndexesResumed:     result.IndexesResumed,
+				SnapshotsCompleted: result.SnapshotsSeen,
+				SnapshotsTotal:     result.SnapshotsTotal,
+				SnapshotsImported:  result.SnapshotsImported,
+				SnapshotsResumed:   result.SnapshotsResumed,
+				PacksImported:      result.PacksImported,
+				BlobsImported:      result.BlobsImported,
+				NodesImported:      result.NodesImported,
 			})
 		}
 	}
@@ -225,7 +249,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		if !ok {
 			return result, fmt.Errorf("snapshot import requires revision storage support")
 		}
-		if err := importSnapshots(ctx, treeSource, treeStore, options, &result); err != nil {
+		if err := importSnapshots(ctx, snapshotList, treeSource, treeStore, options, &result, reportProgress); err != nil {
 			return result, err
 		}
 	}

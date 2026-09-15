@@ -21,6 +21,7 @@ import (
 	"time"
 
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/topology"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -217,6 +218,61 @@ func TestProcessCommitDurabilityFailureRecoversAcrossRestart(t *testing.T) {
 	}
 	if committed, err := client.IdempotencyCommitted(ctx, "commit-durability-request"); err != nil || !committed {
 		t.Fatalf("restarted idempotency record = %t, %v", committed, err)
+	}
+}
+
+func TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "fresh-import-deferred", DaemonPath: failureDaemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "local", RebuildReset: true,
+		testEnvironment: []string{"VAULTICDB_TEST_FAILPOINTS=before-transaction-durability"},
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(ctx) }()
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+	packID, blobID, indexID := daemonTestID(70), daemonTestID(71), daemonTestID(72)
+	imported := LegacyPackImport{
+		SourceIndex: indexID,
+		PackID:      packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PayloadSize: 8, BlobCount: 1, Lifecycle: schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 8, Type: schema.BlobData}}},
+		},
+	}
+	if err := store.ImportLegacyPack(ctx, imported); err != nil {
+		t.Fatalf("fresh pack import waited for durability: %v", err)
+	}
+	checkpoint, err := (schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointKey := schema.ImportCheckpointKey(indexID)
+	if err := store.Put(ctx, checkpointKey, checkpoint, true); err != nil {
+		t.Fatalf("publish durable import checkpoint: %v", err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	options.Socket = testSocket(t)
+	options.RebuildReset = false
+	options.testEnvironment = nil
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = NewSchemaStore(client)
+	for _, key := range [][]byte{schema.PackKey(packID), schema.BlobKey(blobID), checkpointKey} {
+		if _, found, readErr := store.Get(ctx, key); readErr != nil || !found {
+			t.Fatalf("read imported state after checkpoint barrier: found=%t err=%v", found, readErr)
+		}
 	}
 }
 

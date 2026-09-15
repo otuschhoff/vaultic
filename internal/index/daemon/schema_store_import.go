@@ -35,7 +35,7 @@ func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPa
 	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.importPackOnce(ctx, imported, false, legacyImportHints{})
+		err := store.importPackOnce(ctx, imported, false, legacyImportHints{}, false)
 		if status.Code(err) != codes.Aborted {
 			return err
 		}
@@ -56,6 +56,7 @@ func (store *SchemaStore) importPackOnce(
 	imported LegacyPackImport,
 	legacy bool,
 	hints legacyImportHints,
+	deferDurability bool,
 ) error {
 	if err := preparePackImport(&imported, legacy); err != nil {
 		return err
@@ -75,7 +76,11 @@ func (store *SchemaStore) importPackOnce(
 	if err := writeTransactionBatches(ctx, transaction, limits, plan.puts, nil); err != nil {
 		return fail(err)
 	}
-	if err := transaction.Commit(ctx); err != nil {
+	commit := transaction.Commit
+	if deferDurability {
+		commit = transaction.CommitDeferred
+	}
+	if err := commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
 	}

@@ -94,12 +94,12 @@ mod role_tests {
             .await
             .unwrap();
         assert!(storage
-            .commit(&transaction_id, "commit-one")
+            .commit(&transaction_id, "commit-one", false)
             .await
             .unwrap()
             .consumed);
         assert!(!storage
-            .commit(&transaction_id, "commit-one")
+            .commit(&transaction_id, "commit-one", false)
             .await
             .unwrap()
             .consumed);

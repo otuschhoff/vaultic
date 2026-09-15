@@ -300,6 +300,7 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+			metadata_rebuild_reset: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(epoch),
@@ -365,12 +366,60 @@ mod tests {
         assert_eq!(storage.transactions.read().await.len(), 1);
 
         arm_storage_failpoint(StorageFailpoint::BeforeTransactionCommit(path));
-        let failure = storage.commit(&transaction_id, "").await.unwrap_err();
+        let failure = storage.commit(&transaction_id, "", false).await.unwrap_err();
 
         assert!(failure.consumed);
         assert_eq!(storage.transactions.read().await.len(), 0);
-        let missing = storage.commit("unknown", "").await.unwrap_err();
+        let missing = storage.commit("unknown", "", false).await.unwrap_err();
         assert!(!missing.consumed);
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deferred_commit_requires_rebuild_reset_and_skips_durability_wait() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("deferred-commit-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None).await.unwrap();
+        let mut storage = transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage
+            .write_batch(&WriteBatchRequest {
+                transaction_id: transaction_id.clone(),
+                puts: vec![KeyValue {
+                    key: b"deferred".to_vec(),
+                    value: b"value".to_vec(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let rejected = storage.commit(&transaction_id, "", true).await.unwrap_err();
+        assert!(!rejected.consumed);
+        assert_eq!(rejected.status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(storage.transactions.read().await.len(), 1);
+
+        storage.metadata_rebuild_reset = true;
+        arm_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(path.clone()));
+        assert!(storage.commit(&transaction_id, "", true).await.unwrap().consumed);
+        assert_eq!(storage.last_durable_sequence.load(Ordering::Acquire), 0);
+
+        let durable_id = storage.begin().await.unwrap().transaction_id;
+        storage
+            .write_batch(&WriteBatchRequest {
+                transaction_id: durable_id.clone(),
+                puts: vec![KeyValue {
+                    key: b"durable".to_vec(),
+                    value: b"value".to_vec(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let failure = storage.commit(&durable_id, "", false).await.unwrap_err();
+        assert!(failure.consumed);
         storage.close().await.unwrap();
     }
 
@@ -971,6 +1020,7 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+			metadata_rebuild_reset: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1152,6 +1202,7 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+			metadata_rebuild_reset: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1214,6 +1265,7 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+			metadata_rebuild_reset: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(1),
@@ -1297,6 +1349,7 @@ mod tests {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+			metadata_rebuild_reset: false,
             credential_manager: None,
             broker_lease_metadata: None,
             writer_epoch: AtomicU64::new(0),

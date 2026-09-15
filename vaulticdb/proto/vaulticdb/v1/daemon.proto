@@ -85,6 +85,7 @@ message TransactionRequest {
   RequestContext context = 1;
   string transaction_id = 2;
   string idempotency_key = 3;
+  bool defer_durability = 4;
 }
 
 message BeginResponse {

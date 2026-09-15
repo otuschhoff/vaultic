@@ -701,11 +701,20 @@ func (t *Transaction) WriteBatch(ctx context.Context, puts []Mutation, deletes [
 
 // Commit atomically publishes all mutations and waits for durability.
 func (t *Transaction) Commit(ctx context.Context) error {
-	return t.CommitWithIdempotency(ctx, "")
+	return t.commit(ctx, "", false)
+}
+
+// CommitDeferred publishes all mutations without waiting for durability.
+func (t *Transaction) CommitDeferred(ctx context.Context) error {
+	return t.commit(ctx, "", true)
 }
 
 // CommitWithIdempotency commits once and permits recovery of an uncertain response using the same key.
 func (t *Transaction) CommitWithIdempotency(ctx context.Context, idempotencyKey string) error {
+	return t.commit(ctx, idempotencyKey, false)
+}
+
+func (t *Transaction) commit(ctx context.Context, idempotencyKey string, deferDurability bool) error {
 	state := t.state.Load()
 	if state == transactionCommitUncertain {
 		if idempotencyKey == "" || idempotencyKey != t.idempotencyKey {
@@ -719,6 +728,7 @@ func (t *Transaction) CommitWithIdempotency(ctx context.Context, idempotencyKey 
 	defer cancel()
 	response, err := t.client.rpc.Commit(ctx, &vaulticdbv1.TransactionRequest{
 		Context: requestContext(ctx), TransactionId: t.id, IdempotencyKey: idempotencyKey,
+		DeferDurability: deferDurability,
 	})
 	if err != nil {
 		t.client.auditRPCError(ctx, "commit", err)
@@ -729,7 +739,7 @@ func (t *Transaction) CommitWithIdempotency(ctx context.Context, idempotencyKey 
 		}
 		return err
 	}
-	if !response.GetDurable() {
+	if !deferDurability && !response.GetDurable() {
 		return fmt.Errorf("vaulticdb committed transaction without durability acknowledgement")
 	}
 	t.state.Store(transactionClosed)

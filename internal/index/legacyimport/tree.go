@@ -42,9 +42,18 @@ type treeImporter struct {
 }
 
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
-func importSnapshots(ctx context.Context, source SnapshotSource, store TreeStore, options Options, result *Result) error {
-	return data.ForAllSnapshots(ctx, source, source, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
+func importSnapshots(
+	ctx context.Context,
+	snapshots vaultic.Lister,
+	source SnapshotSource,
+	store TreeStore,
+	options Options,
+	result *Result,
+	reportProgress func(),
+) error {
+	return data.ForAllSnapshots(ctx, snapshots, source, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
 		result.SnapshotsSeen++
+		defer reportProgress()
 		if loadErr != nil {
 			if err := writeDebt(ctx, debtWrite{
 				store: store, options: options, result: result, snapshot: snapshotID,

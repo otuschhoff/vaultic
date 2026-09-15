@@ -294,6 +294,9 @@ type importProgressReporter struct {
 	started     time.Time
 	lastPrinted time.Time
 	lastPercent uint64
+	lastPacks   uint64
+	lastBlobs   uint64
+	lastNodes   uint64
 	printed     bool
 	stdout      func(string)
 	log         func(string)
@@ -312,26 +315,51 @@ func (reporter *importProgressReporter) Update(progress legacyimport.Progress) {
 }
 
 func (reporter *importProgressReporter) update(now time.Time, progress legacyimport.Progress) {
+	completed := progress.IndexesCompleted + progress.SnapshotsCompleted
+	total := progress.IndexesTotal + progress.SnapshotsTotal
 	percentBucket := uint64(100)
 	percent := 100.0
-	if progress.IndexesTotal > 0 {
-		percentBucket = progress.IndexesCompleted * 100 / progress.IndexesTotal
-		percent = float64(progress.IndexesCompleted) * 100 / float64(progress.IndexesTotal)
+	if total > 0 {
+		percentBucket = completed * 100 / total
+		percent = float64(completed) * 100 / float64(total)
 	}
-	if reporter.printed && progress.IndexesCompleted != progress.IndexesTotal &&
+	if reporter.printed && completed != total &&
 		percentBucket <= reporter.lastPercent && now.Sub(reporter.lastPrinted) < 10*time.Second {
 		return
 	}
+	remaining, eta := importProgressEstimate(reporter.started, now, completed, total)
+	intervalRate := "unknown"
+	if reporter.printed {
+		intervalRate = formatImportRate(
+			progress.PacksImported-reporter.lastPacks,
+			progress.BlobsImported-reporter.lastBlobs,
+			progress.NodesImported-reporter.lastNodes,
+			now.Sub(reporter.lastPrinted),
+		)
+	}
+	overallRate := formatImportRate(
+		progress.PacksImported, progress.BlobsImported, progress.NodesImported, now.Sub(reporter.started),
+	)
 	message := fmt.Sprintf(
-		"legacy import progress: %.1f%%; indexes %d/%d (imported %d, resumed %d); packs %d; blobs %d; elapsed %s",
+		"legacy import progress: %.1f%%; indexes %d/%d (imported %d, resumed %d); "+
+			"snapshots %d/%d (imported %d, resumed %d); packs %d; blobs %d; "+
+			"speed last interval %s; speed since start %s; elapsed %s; est. remaining %s; ETA %s",
 		percent,
 		progress.IndexesCompleted,
 		progress.IndexesTotal,
 		progress.IndexesImported,
 		progress.IndexesResumed,
+		progress.SnapshotsCompleted,
+		progress.SnapshotsTotal,
+		progress.SnapshotsImported,
+		progress.SnapshotsResumed,
 		progress.PacksImported,
 		progress.BlobsImported,
+		intervalRate,
+		overallRate,
 		now.Sub(reporter.started).Round(time.Second),
+		remaining,
+		eta,
 	)
 	if reporter.stdout != nil {
 		reporter.stdout(message)
@@ -340,6 +368,31 @@ func (reporter *importProgressReporter) update(now time.Time, progress legacyimp
 	reporter.printed = true
 	reporter.lastPrinted = now
 	reporter.lastPercent = percentBucket
+	reporter.lastPacks = progress.PacksImported
+	reporter.lastBlobs = progress.BlobsImported
+	reporter.lastNodes = progress.NodesImported
+}
+
+func formatImportRate(packs, blobs, nodes uint64, elapsed time.Duration) string {
+	if elapsed <= 0 {
+		return "unknown"
+	}
+	seconds := elapsed.Seconds()
+	return fmt.Sprintf(
+		"%.1f packs/s, %.1f blobs/s, %.1f nodes/s",
+		float64(packs)/seconds,
+		float64(blobs)/seconds,
+		float64(nodes)/seconds,
+	)
+}
+
+func importProgressEstimate(started, now time.Time, completed, total uint64) (string, string) {
+	if completed == 0 || total == 0 || completed > total {
+		return "unknown", "unknown"
+	}
+	elapsed := now.Sub(started)
+	remaining := time.Duration(float64(elapsed) * float64(total-completed) / float64(completed)).Round(time.Second)
+	return remaining.String(), now.Add(remaining).Format(time.RFC3339)
 }
 
 func emitImportStatus(printer interface{ P(string, ...any) }, json bool, message string) {

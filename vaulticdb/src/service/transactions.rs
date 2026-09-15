@@ -124,6 +124,7 @@ impl Service {
             .commit(
                 &request.get_ref().transaction_id,
                 &request.get_ref().idempotency_key,
+                request.get_ref().defer_durability,
             )
             .await;
         let consumed = match &result {
@@ -138,7 +139,9 @@ impl Service {
             self.ensure_writer_authority().await?;
         }
         result.map_err(|failure| failure.status)?;
-        Ok(Response::new(CommitResponse { durable: true }))
+        Ok(Response::new(CommitResponse {
+            durable: !request.get_ref().defer_durability,
+        }))
     }
 
     pub(super) async fn handle_rollback(

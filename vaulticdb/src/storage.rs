@@ -238,6 +238,7 @@ pub(crate) struct Storage {
     last_durable_sequence: AtomicU64,
     transaction_idle_timeout_ms: u64,
     slatedb_multiget: bool,
+    metadata_rebuild_reset: bool,
     credential_manager: Option<StorageCredentialManager>,
     broker_lease_metadata: Option<BrokerLeaseMetadata>,
     writer_epoch: AtomicU64,
@@ -1605,6 +1606,7 @@ impl Storage {
             last_durable_sequence: AtomicU64::new(0),
             transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
             slatedb_multiget: config.slatedb_multiget,
+            metadata_rebuild_reset: config.metadata_rebuild_reset,
             credential_manager,
             broker_lease_metadata,
             writer_epoch: AtomicU64::new(writer_epoch),
@@ -2935,7 +2937,17 @@ impl Storage {
         &self,
         transaction_id: &str,
         idempotency_key: &str,
+        defer_durability: bool,
     ) -> Result<TransactionOutcome, TransactionFailure> {
+        if defer_durability && !self.metadata_rebuild_reset {
+            return Err(TransactionFailure::before_consumption(
+                VaulticDbError::Precondition {
+                    field: "defer_durability".to_owned(),
+                    message: "deferred durability requires metadata rebuild reset".to_owned(),
+                }
+                .into(),
+            ));
+        }
         self.assert_current_writer_epoch()
             .await
             .map_err(TransactionFailure::before_consumption)?;
@@ -2999,19 +3011,23 @@ impl Storage {
             .map_err(storage_error)
             .map_err(TransactionFailure::after_consumption)?
         {
-            #[cfg(any(test, feature = "test-failpoints"))]
-            check_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(
-                self.database_path.clone(),
-            ))
-            .map_err(storage_status)
-            .map_err(TransactionFailure::after_consumption)?;
-            handle
-                .await_durable()
-                .await
-                .map_err(storage_error)
+            if !defer_durability {
+                #[cfg(any(test, feature = "test-failpoints"))]
+                check_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(
+                    self.database_path.clone(),
+                ))
+                .map_err(storage_status)
                 .map_err(TransactionFailure::after_consumption)?;
+                handle
+                    .await_durable()
+                    .await
+                    .map_err(storage_error)
+                    .map_err(TransactionFailure::after_consumption)?;
+            }
         }
-        self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
+        if !defer_durability {
+            self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
+        }
         Ok(TransactionOutcome { consumed: true })
     }
 

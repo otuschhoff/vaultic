@@ -556,6 +556,7 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 		RepositoryID: "phase4-pack-import",
 		DaemonPath:   daemonBinary(t),
 		DataDir:      t.TempDir(),
+		RebuildReset: true,
 	}
 	client, err := Ensure(context.Background(), options)
 	if err != nil {

@@ -533,7 +533,11 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 		blobs: map[vaultic.ID][]byte{rootTreeID: rootTree, childTreeID: childTree},
 	}
 	store := newMemoryStore()
-	options := Options{Resume: true, SnapshotDepth: 1}
+	var updates []Progress
+	options := Options{
+		Resume: true, SnapshotDepth: 1,
+		Progress: func(progress Progress) { updates = append(updates, progress) },
+	}
 	result, err := Import(context.Background(), source, fixedStatter{}, store, options)
 	if err != nil {
 		t.Fatal(err)
@@ -541,6 +545,11 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	if result.SnapshotsImported != 1 || result.NodesImported != 1 || result.CrawlDebtCreated < 3 ||
 		store.revisionsWritten != 1 {
 		t.Fatalf("unexpected tree import result: %#v, revisions=%d", result, store.revisionsWritten)
+	}
+	finalProgress := updates[len(updates)-1]
+	if finalProgress.SnapshotsCompleted != 1 || finalProgress.SnapshotsTotal != 1 ||
+		finalProgress.SnapshotsImported != 1 {
+		t.Fatalf("final snapshot progress = %#v", finalProgress)
 	}
 	current := schema.CurrentInodeKey(7, 11)
 	pointerValue, found := store.values[string(current)]

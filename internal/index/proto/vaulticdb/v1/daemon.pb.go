@@ -887,12 +887,13 @@ func (x *ScanResponse) GetDone() bool {
 }
 
 type TransactionRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Context        *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
-	TransactionId  string                 `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
-	IdempotencyKey string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Context         *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	TransactionId   string                 `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	IdempotencyKey  string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	DeferDurability bool                   `protobuf:"varint,4,opt,name=defer_durability,json=deferDurability,proto3" json:"defer_durability,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TransactionRequest) Reset() {
@@ -944,6 +945,13 @@ func (x *TransactionRequest) GetIdempotencyKey() string {
 		return x.IdempotencyKey
 	}
 	return ""
+}
+
+func (x *TransactionRequest) GetDeferDurability() bool {
+	if x != nil {
+		return x.DeferDurability
+	}
+	return false
 }
 
 type BeginResponse struct {
@@ -4903,11 +4911,12 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x0etransaction_id\x18\x05 \x01(\tR\rtransactionId\"T\n" +
 	"\fScanResponse\x120\n" +
 	"\aentries\x18\x01 \x03(\v2\x16.vaulticdb.v1.KeyValueR\aentries\x12\x12\n" +
-	"\x04done\x18\x02 \x01(\bR\x04done\"\x9c\x01\n" +
+	"\x04done\x18\x02 \x01(\bR\x04done\"\xc7\x01\n" +
 	"\x12TransactionRequest\x126\n" +
 	"\acontext\x18\x01 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12%\n" +
 	"\x0etransaction_id\x18\x02 \x01(\tR\rtransactionId\x12'\n" +
-	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\"6\n" +
+	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\x12)\n" +
+	"\x10defer_durability\x18\x04 \x01(\bR\x0fdeferDurability\"6\n" +
 	"\rBeginResponse\x12%\n" +
 	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"*\n" +
 	"\x0eCommitResponse\x12\x18\n" +
