@@ -284,6 +284,7 @@ pub(crate) struct StorageConfig {
     pub(crate) cache: cache::CacheConfig,
     pub(crate) fencing_replica: Option<String>,
     pub(crate) metadata_rebuild_initialize: bool,
+    pub(crate) metadata_rebuild_reset: bool,
     pub(crate) broker: Option<BrokerLeaseConfig>,
     pub(crate) encryption: envelope::EncryptionConfig,
     pub(crate) transaction_idle_timeout_ms: u64,
@@ -1171,6 +1172,9 @@ async fn failed_open_cleanup(
 
 impl Storage {
     pub(crate) async fn open(repository_id: &str, config: &StorageConfig) -> Result<Self> {
+        if config.metadata_rebuild_reset && !config.cache.tiers.is_empty() {
+            bail!("metadata rebuild reset requires read-cache tiers to be disabled");
+        }
         let (effective_store, effective_wal_store, effective_fencing, topology_leases) =
             if config.topology_source == TopologySource::Capsule {
                 let broker = config
@@ -1206,6 +1210,15 @@ impl Storage {
             )?,
             None => raw_control_store.clone(),
         };
+        if config.metadata_rebuild_reset {
+            reset_metadata_store(raw_control_store.as_ref(), false).await?;
+            if let Some(wal_store) = &raw_wal_object_store {
+                reset_metadata_store(wal_store.as_ref(), true).await?;
+            }
+            eprintln!(
+                "{{\"category\":\"integrity\",\"component\":\"vaulticdb\",\"event\":\"metadata_rebuild_candidate_reset\"}}"
+            );
+        }
         let metadata_exists =
             metadata_store_has_database_objects(raw_control_store.as_ref()).await?;
         let recovery_initialize = config.metadata_rebuild_initialize;
@@ -1603,7 +1616,9 @@ impl Storage {
             storage.slatedb_multiget
         );
         let initialize = async {
-            storage.ensure_encryption_policy(repository_id).await?;
+            storage
+                .ensure_encryption_policy(repository_id, config.metadata_rebuild_reset)
+                .await?;
             if recovery_initialize {
                 storage
                     .record_metadata_rebuild_handoff(repository_id)
@@ -1667,7 +1682,11 @@ impl Storage {
         })
     }
 
-    async fn ensure_encryption_policy(&self, repository_id: &str) -> Result<()> {
+    async fn ensure_encryption_policy(
+        &self,
+        repository_id: &str,
+        allow_missing: bool,
+    ) -> Result<()> {
         let database = self.database.read().await;
         let existing = match &*database {
             Database::Writer(db) => db.get(ENCRYPTION_POLICY_RECORD).await,
@@ -1698,7 +1717,7 @@ impl Storage {
             }
             return Ok(());
         }
-        if !self.encryption.initializing {
+        if !self.encryption.initializing && !allow_missing {
             bail!("metadata encryption policy is missing while encryption is required");
         }
         let Database::Writer(db) = &*database else {

@@ -7,6 +7,30 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
 
+func TestFreshImportLookupHintsNeverForgetCommittedIDs(t *testing.T) {
+	packID, firstBlob, secondBlob := daemonTestID(1), daemonTestID(2), daemonTestID(3)
+	store := &SchemaStore{freshImportSeen: newIDSeenFilter(1024)}
+	imported := LegacyPackImport{PackID: packID, Blobs: map[schema.ID]schema.BlobRecord{
+		firstBlob: {}, secondBlob: {},
+	}}
+	hints := store.freshImportLookupHints(imported)
+	if !hints.packAbsent || len(hints.blobsAbsent) != 2 {
+		t.Fatalf("initial fresh import hints = %#v", hints)
+	}
+	store.freshImportSeen.insert(packID)
+	store.freshImportSeen.insert(firstBlob)
+	hints = store.freshImportLookupHints(imported)
+	if hints.packAbsent {
+		t.Fatal("committed pack was reported absent")
+	}
+	if _, absent := hints.blobsAbsent[firstBlob]; absent {
+		t.Fatal("committed blob was reported absent")
+	}
+	if _, absent := hints.blobsAbsent[secondBlob]; !absent {
+		t.Fatal("new blob did not receive an absence hint")
+	}
+}
+
 func TestPrepareReconciledRevisionPlanInput(t *testing.T) {
 	record := schema.InodeRevision{Known: schema.KnownUID, UID: 42, Freshness: schema.FreshnessVerified}
 	value, err := record.MarshalBinary()

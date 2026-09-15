@@ -50,6 +50,27 @@ async fn metadata_store_has_database_objects(store: &dyn ObjectStore) -> Result<
     Ok(false)
 }
 
+async fn reset_metadata_store(store: &dyn ObjectStore, include_control: bool) -> Result<()> {
+    let mut objects = store.list(None);
+    let mut locations = Vec::new();
+    while let Some(object) = objects.next().await {
+        let object = object.context("list metadata rebuild candidate for reset")?;
+        if include_control
+            || !object.location.as_ref().starts_with("_vaultic/")
+            || object.location.as_ref() == WAL_TARGET_PATH
+        {
+            locations.push(object.location);
+        }
+    }
+    for location in locations {
+        store
+            .delete(&location)
+            .await
+            .with_context(|| format!("reset metadata rebuild candidate object {location}"))?;
+    }
+    Ok(())
+}
+
 async fn ensure_wal_target_identity(
     store: &dyn ObjectStore,
     identity: &str,

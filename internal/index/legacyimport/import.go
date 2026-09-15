@@ -37,6 +37,16 @@ type Options struct {
 	WorkBudget         uint64
 	SnapshotDepth      uint
 	SnapshotWorkBudget uint64
+	Progress           func(Progress)
+}
+
+type Progress struct {
+	IndexesCompleted uint64
+	IndexesTotal     uint64
+	IndexesImported  uint64
+	IndexesResumed   uint64
+	PacksImported    uint64
+	BlobsImported    uint64
 }
 
 type Finding struct {
@@ -46,6 +56,7 @@ type Finding struct {
 }
 
 type Result struct {
+	IndexesTotal      uint64    `json:"indexes_total"`
 	IndexesSeen       uint64    `json:"indexes_seen"`
 	IndexesImported   uint64    `json:"indexes_imported"`
 	IndexesResumed    uint64    `json:"indexes_resumed"`
@@ -64,6 +75,7 @@ type Result struct {
 	WarningsSeen      uint64    `json:"warnings"`
 	ErrorsSeen        uint64    `json:"errors"`
 	Checkpoint        string    `json:"checkpoint,omitempty"`
+	ResetElapsedMS    uint64    `json:"reset_elapsed_ms,omitempty"`
 	Findings          []Finding `json:"findings,omitempty"`
 }
 
@@ -95,9 +107,33 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	if options.PackTimeout < 0 {
 		return result, fmt.Errorf("pack timeout must not be negative")
 	}
+	indexList, err := vaultic.MemorizeList(ctx, source, vaultic.IndexFile)
+	if err != nil {
+		return result, err
+	}
+	if err := indexList.List(ctx, vaultic.IndexFile, func(vaultic.ID, int64) error {
+		result.IndexesTotal++
+		return nil
+	}); err != nil {
+		return result, err
+	}
+	reportProgress := func() {
+		if options.Progress != nil {
+			options.Progress(Progress{
+				IndexesCompleted: result.IndexesSeen,
+				IndexesTotal:     result.IndexesTotal,
+				IndexesImported:  result.IndexesImported,
+				IndexesResumed:   result.IndexesResumed,
+				PacksImported:    result.PacksImported,
+				BlobsImported:    result.BlobsImported,
+			})
+		}
+	}
+	reportProgress()
 	var workUsed uint64
-	err := legacyindex.ForAllIndexes(ctx, source, source, func(indexID vaultic.ID, index *legacyindex.Index, loadErr error) error {
+	err = legacyindex.ForAllIndexes(ctx, indexList, source, func(indexID vaultic.ID, index *legacyindex.Index, loadErr error) error {
 		result.IndexesSeen++
+		defer reportProgress()
 		if loadErr != nil {
 			return recordFinding(&result, options, indexID, "decode-index", loadErr)
 		}

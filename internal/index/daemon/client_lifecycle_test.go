@@ -167,7 +167,7 @@ func TestPrepareDaemonCommand(t *testing.T) {
 		AuthToken: "secret", RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "s3",
 		S3Bucket: "metadata", S3Prefix: "repo", S3Endpoint: "https://s3.eu-central-2.wasabisys.com",
 		S3Region: "eu-central-2", S3Provider: "wasabi", S3BucketLookup: "dns",
-		RecoveryUnlock: true, BrokerLease: 3 * time.Second, RebuildInitialize: true,
+		RecoveryUnlock: true, BrokerLease: 3 * time.Second, RebuildInitialize: true, RebuildReset: true,
 	}).withDefaults()
 	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
 	if err != nil {
@@ -199,6 +199,7 @@ func TestPrepareDaemonCommand(t *testing.T) {
 		"VAULTICDB_ENCRYPTION_RECOVERY_ACK=true",
 		"VAULTICDB_BROKER_LEASE_SECONDS=3",
 		"VAULTICDB_METADATA_REBUILD_INITIALIZE=true",
+		"VAULTICDB_METADATA_REBUILD_RESET=true",
 	} {
 		if !strings.Contains(environment, entry) {
 			t.Errorf("daemon environment missing %q: %s", entry, environment)
@@ -234,6 +235,7 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTICDB_WAL_S3_SECRET_ACCESS_KEY", "wal-s3-credential")
 	t.Setenv("VAULTICDB_WAL_S3_SESSION_TOKEN", "wal-session-token")
 	t.Setenv("VAULTICDB_WAL_S3_ENDPOINT", "must-come-from-options")
+	t.Setenv("VAULTICDB_SLATEDB_MULTIGET", "true")
 	t.Setenv("PATH", "/test/bin")
 
 	local := strings.Join(daemonEnvironment(Options{ObjectStore: "local"}), "\n")
@@ -241,7 +243,7 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 		strings.Contains(local, "VAULTICDB_WAL_S3_SECRET_ACCESS_KEY") {
 		t.Fatalf("local daemon inherited a secret-bearing environment: %s", local)
 	}
-	if !strings.Contains(local, "PATH=/test/bin") {
+	if !strings.Contains(local, "PATH=/test/bin") || !strings.Contains(local, "VAULTICDB_SLATEDB_MULTIGET=true") {
 		t.Fatalf("local daemon lost required runtime environment: %s", local)
 	}
 

@@ -55,6 +55,7 @@ mod tests {
             },
             fencing_replica: None,
             metadata_rebuild_initialize: false,
+            metadata_rebuild_reset: false,
             broker: None,
             encryption: EncryptionConfig {
                 mode: EncryptionMode::Off,
@@ -85,6 +86,21 @@ mod tests {
             Err(error) => error.to_string(),
         };
         assert!(error.contains("encrypted read-cache tiers require metadata encryption"));
+    }
+
+    #[tokio::test]
+    async fn metadata_rebuild_reset_rejects_configured_read_cache() {
+        let repository_id = format!("reset-cache-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.metadata_rebuild_reset = true;
+        let error = match Storage::open(&repository_id, &config).await {
+            Ok(storage) => {
+                storage.close().await.unwrap();
+                panic!("metadata reset unexpectedly accepted a read cache")
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("requires read-cache tiers to be disabled"));
     }
 
     #[tokio::test]
@@ -682,6 +698,74 @@ mod tests {
             .unwrap();
         assert!(metadata_store_has_database_objects(&store).await.unwrap());
     }
+
+    #[tokio::test]
+    async fn metadata_rebuild_reset_removes_database_and_wal_binding_but_preserves_control() {
+        let store = InMemory::new();
+        let capsule = Path::from("_vaultic/recovery-capsules/one.json");
+        let wal_target = Path::from(WAL_TARGET_PATH);
+        let manifest = Path::from("manifest/0001");
+        for path in [&capsule, &wal_target, &manifest] {
+            store.put(path, vec![1_u8].into()).await.unwrap();
+        }
+
+        reset_metadata_store(&store, false).await.unwrap();
+
+        assert!(store.head(&capsule).await.is_ok());
+        assert!(matches!(
+            store.head(&wal_target).await,
+            Err(slatedb::object_store::Error::NotFound { .. })
+        ));
+        assert!(matches!(
+            store.head(&manifest).await,
+            Err(slatedb::object_store::Error::NotFound { .. })
+        ));
+        assert!(!metadata_store_has_database_objects(&store).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn metadata_rebuild_reset_reopens_empty_writable_local_candidate() {
+        let root = env::temp_dir().join(format!(
+            "vaulticdb-reset-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let repository_id = format!("reset-repository-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+
+        let storage = Storage::open(&repository_id, &config).await.unwrap();
+        let database = storage.database.read().await;
+        let Database::Writer(db) = &*database else {
+            panic!("new reset candidate did not open as writer")
+        };
+        db.put(b"p:stale", b"old".to_vec())
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        drop(database);
+        storage.close().await.unwrap();
+
+        config.metadata_rebuild_reset = true;
+        let reset = Storage::open(&repository_id, &config).await.unwrap();
+        assert!(reset.read_value(b"p:stale").await.unwrap().is_none());
+        let database = reset.database.read().await;
+        let Database::Writer(db) = &*database else {
+            panic!("reset candidate did not reopen as writer")
+        };
+        db.put(b"p:new", b"new".to_vec())
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        drop(database);
+        reset.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use slatedb::object_store::memory::InMemory;
 
     #[test]
@@ -1137,7 +1221,10 @@ mod tests {
             wal_durability: "inherited",
         };
 
-        storage.ensure_encryption_policy("repo").await.unwrap();
+        storage
+            .ensure_encryption_policy("repo", false)
+            .await
+            .unwrap();
         storage.close().await.unwrap();
     }
 

@@ -220,6 +220,7 @@ mod tests {
             cache,
             fencing_replica: None,
             metadata_rebuild_initialize: false,
+            metadata_rebuild_reset: false,
             broker: None,
             encryption: EncryptionConfig {
                 mode: EncryptionMode::Off,

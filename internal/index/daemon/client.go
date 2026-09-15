@@ -94,6 +94,7 @@ type Options struct {
 	BrokerManifest    string
 	BrokerLease       time.Duration
 	RebuildInitialize bool
+	RebuildReset      bool
 	testEnvironment   []string
 }
 
@@ -400,7 +401,7 @@ func connectExistingDaemon(ctx context.Context, options Options) (*Client, error
 	client, connectErr := Connect(probeCtx, options)
 	cancelProbe()
 	if connectErr == nil {
-		if options.RebuildInitialize {
+		if options.RebuildInitialize || options.RebuildReset {
 			vaulticerrors.LogCleanup(
 				"close existing vaulticdb client",
 				func() error { return client.Close(ctx) },
@@ -562,6 +563,9 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 	}
 	if options.RebuildInitialize {
 		cmd.Env = append(cmd.Env, "VAULTICDB_METADATA_REBUILD_INITIALIZE=true")
+	}
+	if options.RebuildReset {
+		cmd.Env = append(cmd.Env, "VAULTICDB_METADATA_REBUILD_RESET=true")
 	}
 	var authRead, authWrite *os.File
 	if options.AuthToken != "" {

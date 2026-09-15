@@ -618,6 +618,32 @@ func TestImportRealLegacyRepository(t *testing.T) {
 	}
 }
 
+func TestImportReportsIndexProgressAndTotals(t *testing.T) {
+	source := &memorySource{indexes: map[vaultic.ID][]byte{
+		vaultic.NewRandomID(): []byte(`{"packs":[]}`),
+		vaultic.NewRandomID(): []byte(`{"packs":[]}`),
+	}}
+	var updates []Progress
+	result, err := Import(context.Background(), source, fixedStatter{}, newMemoryStore(), Options{
+		Progress: func(progress Progress) { updates = append(updates, progress) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IndexesTotal != 2 || result.IndexesImported != 2 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(updates) != 3 {
+		t.Fatalf("got %d progress updates, want initial plus two completed indexes: %#v", len(updates), updates)
+	}
+	if initial := updates[0]; initial.IndexesCompleted != 0 || initial.IndexesTotal != 2 {
+		t.Fatalf("initial progress = %#v", initial)
+	}
+	if final := updates[len(updates)-1]; final.IndexesCompleted != 2 || final.IndexesTotal != 2 || final.IndexesImported != 2 {
+		t.Fatalf("final progress = %#v", final)
+	}
+}
+
 func TestImportClassifiesEmptyPackAsUnknown(t *testing.T) {
 	indexID, packID := vaultic.NewRandomID(), vaultic.NewRandomID()
 	source := &memorySource{indexes: map[vaultic.ID][]byte{

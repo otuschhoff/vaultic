@@ -35,7 +35,7 @@ func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPa
 	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.importPackOnce(ctx, imported, false)
+		err := store.importPackOnce(ctx, imported, false, legacyImportHints{})
 		if status.Code(err) != codes.Aborted {
 			return err
 		}
@@ -51,7 +51,12 @@ func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPa
 	return fmt.Errorf("publish pack: transaction conflict retry limit exceeded")
 }
 
-func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPackImport, legacy bool) error {
+func (store *SchemaStore) importPackOnce(
+	ctx context.Context,
+	imported LegacyPackImport,
+	legacy bool,
+	hints legacyImportHints,
+) error {
 	if err := preparePackImport(&imported, legacy); err != nil {
 		return err
 	}
@@ -63,7 +68,7 @@ func (store *SchemaStore) importPackOnce(ctx context.Context, imported LegacyPac
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
-	plan, limits, err := store.planPackImport(ctx, transaction, imported, legacy)
+	plan, limits, err := store.planPackImport(ctx, transaction, imported, legacy, hints)
 	if err != nil {
 		return fail(err)
 	}
@@ -82,15 +87,16 @@ func (store *SchemaStore) planPackImport(
 	transaction *Transaction,
 	imported LegacyPackImport,
 	legacy bool,
+	hints legacyImportHints,
 ) (packImportPlan, Limits, error) {
-	state, err := loadPackImportState(ctx, transaction, &imported, legacy)
+	state, err := loadPackImportState(ctx, transaction, &imported, legacy, hints.packAbsent)
 	if err != nil {
 		return packImportPlan{}, Limits{}, err
 	}
 	sort.Slice(imported.Record.SourceIndexIDs, func(left, right int) bool {
 		return bytes.Compare(imported.Record.SourceIndexIDs[left][:], imported.Record.SourceIndexIDs[right][:]) < 0
 	})
-	plan, err := planImportedBlobs(ctx, transaction, imported)
+	plan, err := planImportedBlobs(ctx, transaction, imported, hints.blobsAbsent)
 	if err != nil {
 		return packImportPlan{}, Limits{}, err
 	}
@@ -148,7 +154,14 @@ func loadPackImportState(
 	transaction *Transaction,
 	imported *LegacyPackImport,
 	legacy bool,
+	knownAbsent bool,
 ) (packImportState, error) {
+	if knownAbsent {
+		if legacy {
+			imported.Record.SourceIndexIDs = appendUniqueID(imported.Record.SourceIndexIDs, imported.SourceIndex)
+		}
+		return packImportState{}, nil
+	}
 	value, found, err := transaction.Get(ctx, schema.PackKey(imported.PackID))
 	if err != nil || !found {
 		if legacy && err == nil {
@@ -168,12 +181,24 @@ func planImportedBlobs(
 	ctx context.Context,
 	transaction *Transaction,
 	imported LegacyPackImport,
+	knownAbsent map[schema.ID]struct{},
 ) (packImportPlan, error) {
 	plan := packImportPlan{puts: make([]Mutation, 0, len(imported.Blobs)+7)}
 	blobIDs := make([]schema.ID, 0, len(imported.Blobs))
 	keys := make([][]byte, 0, len(imported.Blobs))
 	for blobID, incoming := range imported.Blobs {
 		imported.Blobs[blobID] = canonicalBlobRecord(incoming)
+		if _, absent := knownAbsent[blobID]; absent {
+			if err := accumulateAllLocations(&plan, incoming); err != nil {
+				return packImportPlan{}, err
+			}
+			encoded, err := incoming.MarshalBinary()
+			if err != nil {
+				return packImportPlan{}, err
+			}
+			plan.puts = append(plan.puts, Mutation{Key: schema.BlobKey(blobID), Value: encoded})
+			continue
+		}
 		blobIDs = append(blobIDs, blobID)
 		keys = append(keys, schema.BlobKey(blobID))
 	}

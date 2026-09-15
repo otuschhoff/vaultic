@@ -15,12 +15,72 @@ import (
 
 const revisionAllocationAttempts = 128
 
+const freshImportSeenBytes = 64 << 20
+
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
 type SchemaStore struct {
 	client           *Client
 	publicationMu    sync.RWMutex
 	legacyImportGate chan struct{}
+	freshImportSeen  *idSeenFilter
+}
+
+type idSeenFilter struct {
+	bits []byte
+}
+
+func newIDSeenFilter(size int) *idSeenFilter {
+	return &idSeenFilter{bits: make([]byte, size)}
+}
+
+func (filter *idSeenFilter) possiblyContains(id schema.ID) bool {
+	for offset := 0; offset < len(id); offset += 8 {
+		value := uint64(id[offset])<<56 | uint64(id[offset+1])<<48 | uint64(id[offset+2])<<40 |
+			uint64(id[offset+3])<<32 | uint64(id[offset+4])<<24 | uint64(id[offset+5])<<16 |
+			uint64(id[offset+6])<<8 | uint64(id[offset+7])
+		bit := value % uint64(len(filter.bits)*8)
+		if filter.bits[bit/8]&(1<<uint(bit%8)) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (filter *idSeenFilter) insert(id schema.ID) {
+	for offset := 0; offset < len(id); offset += 8 {
+		value := uint64(id[offset])<<56 | uint64(id[offset+1])<<48 | uint64(id[offset+2])<<40 |
+			uint64(id[offset+3])<<32 | uint64(id[offset+4])<<24 | uint64(id[offset+5])<<16 |
+			uint64(id[offset+6])<<8 | uint64(id[offset+7])
+		bit := value % uint64(len(filter.bits)*8)
+		filter.bits[bit/8] |= 1 << uint(bit%8)
+	}
+}
+
+func (s *SchemaStore) freshImportLookupHints(imported LegacyPackImport) legacyImportHints {
+	hints := legacyImportHints{}
+	if s.freshImportSeen == nil {
+		return hints
+	}
+	hints.packAbsent = !s.freshImportSeen.possiblyContains(imported.PackID)
+	hints.blobsAbsent = make(map[schema.ID]struct{}, len(imported.Blobs))
+	for blobID := range imported.Blobs {
+		if !s.freshImportSeen.possiblyContains(blobID) {
+			hints.blobsAbsent[blobID] = struct{}{}
+		}
+	}
+	return hints
+}
+
+// EnableFreshLegacyImport skips reads only for IDs not previously committed by
+// this store. It is safe only for a candidate reset to empty immediately before import.
+func (s *SchemaStore) EnableFreshLegacyImport() {
+	s.freshImportSeen = newIDSeenFilter(freshImportSeenBytes)
+}
+
+type legacyImportHints struct {
+	packAbsent  bool
+	blobsAbsent map[schema.ID]struct{}
 }
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.
@@ -305,11 +365,18 @@ func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyP
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	hints := store.freshImportLookupHints(imported)
 
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.importPackOnce(ctx, imported, true)
+		err := store.importPackOnce(ctx, imported, true, hints)
 		if status.Code(err) != codes.Aborted {
+			if err == nil && store.freshImportSeen != nil {
+				store.freshImportSeen.insert(imported.PackID)
+				for blobID := range imported.Blobs {
+					store.freshImportSeen.insert(blobID)
+				}
+			}
 			return err
 		}
 		timer := time.NewTimer(backoff)

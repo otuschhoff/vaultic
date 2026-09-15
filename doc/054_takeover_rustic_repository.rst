@@ -220,6 +220,46 @@ Flags used here:
    Defaults to true. Completed source-index and snapshot checkpoints are
    skipped on later runs, so interruption does not restart completed work.
 
+Restarting a partial candidate from empty
+-----------------------------------------
+
+If an early import is too slow to retain, stop its ``vaulticdb`` process and
+restart the import with ``--force-reset-old-idx`` and the same explicit
+candidate target:
+
+.. code-block:: console
+
+   $ vaultic index import \
+         --from-legacy \
+         --snapshot-depth 0 \
+         --start-daemon \
+         --force-reset-old-idx \
+         --daemon-data-dir /srv/vaulticdb \
+         --metadata-encryption required \
+         --metadata-recovery-passphrase-file /etc/vaultic/metadata-recovery
+
+This option is destructive. It refuses an already-running daemon and an
+authoritative SlateDB repository, then removes the selected repository's
+SlateDB objects and separate WAL objects before starting again. Encryption
+envelopes and repository control metadata are retained. Resume checkpoints are
+discarded with the database and ``--resume`` is forced off for this run. Disable
+all VaulticDB read-cache tiers for the reset and import; they can be enabled
+again after the fresh import finishes.
+
+The fresh import avoids existing-value reads for blob and pack IDs not already
+committed during the new run. Possible duplicate IDs still use the normal merge
+path, preserving every physical blob location and source-index provenance. The
+seen-ID filter is bounded in memory; false positives only cause an unnecessary
+lookup and cannot cause metadata to be overwritten without merging.
+
+Import progress is written to standard output and the configured log file. It
+reports the percentage and completed/total source indexes, imported and resumed
+indexes, cumulative packs and blobs, and elapsed time. Updates are limited to a
+new integer percentage or ten seconds, plus the final update. A forced reset
+also reports the time from candidate launch until VaulticDB is ready; this is
+labeled as reset and startup time because startup is the first client-visible
+completion boundary.
+
 Without ``--persistent-daemon``, a daemon started by this command is shut down
 when the command closes. An already-running daemon is never stopped by a client
 that merely attached to it.

@@ -95,6 +95,7 @@ impl Config {
 
 fn storage_from_env() -> Result<StorageConfig> {
     let metadata_rebuild_initialize = env_bool("VAULTICDB_METADATA_REBUILD_INITIALIZE")?;
+    let metadata_rebuild_reset = env_bool("VAULTICDB_METADATA_REBUILD_RESET")?;
     let slatedb_multiget = optional_bool("VAULTICDB_SLATEDB_MULTIGET", false)?;
     let broker = match env::var_os("VAULTICDB_BROKER_SOCKET") {
         Some(socket) => {
@@ -202,6 +203,7 @@ fn storage_from_env() -> Result<StorageConfig> {
         cache: cache_from_env()?,
         fencing_replica,
         metadata_rebuild_initialize,
+        metadata_rebuild_reset,
         broker,
         encryption: encryption_from_env()?,
         transaction_idle_timeout_ms,

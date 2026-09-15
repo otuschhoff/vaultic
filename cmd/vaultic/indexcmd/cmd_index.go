@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/global"
+	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/legacyimport"
@@ -75,6 +76,7 @@ type indexDaemonOptions struct {
 	BrokerManifest    string
 	BrokerLease       time.Duration
 	RebuildInitialize bool
+	RebuildReset      bool
 	Start             bool
 	Persistent        bool
 }
@@ -216,6 +218,7 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		RecoveryUnlock: options.RecoveryUnlock,
 		BrokerSocket:   options.BrokerSocket, BrokerManifest: options.BrokerManifest,
 		BrokerLease: options.BrokerLease, RebuildInitialize: options.RebuildInitialize,
+		RebuildReset: options.RebuildReset,
 	}
 	if options.Start {
 		config.PersistentDaemon = options.Persistent
@@ -273,6 +276,7 @@ func NewCommand(globalOptions *global.Options) *cobra.Command {
 type indexImportOptions struct {
 	Daemon                     indexDaemonOptions
 	Resume                     bool
+	ForceResetOldIndex         bool
 	DryRun                     bool
 	Activate                   bool
 	FromLegacy                 bool
@@ -284,6 +288,65 @@ type indexImportOptions struct {
 	SnapshotDepth              uint
 	SnapshotWorkBudget         uint64
 	ConfirmMetadataLossRebuild bool
+}
+
+type importProgressReporter struct {
+	started     time.Time
+	lastPrinted time.Time
+	lastPercent uint64
+	printed     bool
+	stdout      func(string)
+	log         func(string)
+}
+
+func newImportProgressReporter(printer interface{ P(string, ...any) }, json bool, started time.Time) *importProgressReporter {
+	reporter := &importProgressReporter{started: started, log: func(message string) { log.Print(message) }}
+	if !json {
+		reporter.stdout = func(message string) { printer.P("%s\n", message) }
+	}
+	return reporter
+}
+
+func (reporter *importProgressReporter) Update(progress legacyimport.Progress) {
+	reporter.update(time.Now(), progress)
+}
+
+func (reporter *importProgressReporter) update(now time.Time, progress legacyimport.Progress) {
+	percentBucket := uint64(100)
+	percent := 100.0
+	if progress.IndexesTotal > 0 {
+		percentBucket = progress.IndexesCompleted * 100 / progress.IndexesTotal
+		percent = float64(progress.IndexesCompleted) * 100 / float64(progress.IndexesTotal)
+	}
+	if reporter.printed && progress.IndexesCompleted != progress.IndexesTotal &&
+		percentBucket <= reporter.lastPercent && now.Sub(reporter.lastPrinted) < 10*time.Second {
+		return
+	}
+	message := fmt.Sprintf(
+		"legacy import progress: %.1f%%; indexes %d/%d (imported %d, resumed %d); packs %d; blobs %d; elapsed %s",
+		percent,
+		progress.IndexesCompleted,
+		progress.IndexesTotal,
+		progress.IndexesImported,
+		progress.IndexesResumed,
+		progress.PacksImported,
+		progress.BlobsImported,
+		now.Sub(reporter.started).Round(time.Second),
+	)
+	if reporter.stdout != nil {
+		reporter.stdout(message)
+	}
+	reporter.log(message)
+	reporter.printed = true
+	reporter.lastPrinted = now
+	reporter.lastPercent = percentBucket
+}
+
+func emitImportStatus(printer interface{ P(string, ...any) }, json bool, message string) {
+	if !json {
+		printer.P("%s\n", message)
+	}
+	log.Print(message)
 }
 
 func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
@@ -306,6 +369,12 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags := command.Flags()
 	options.Daemon.AddFlags(flags)
 	flags.BoolVar(&options.Resume, "resume", true, "skip sources with durable import checkpoints")
+	flags.BoolVar(
+		&options.ForceResetOldIndex,
+		"force-reset-old-idx",
+		false,
+		"destroy an existing rebuild candidate and import it again from empty",
+	)
 	flags.BoolVar(&options.DryRun, "dry-run", false, "scan and validate without writing SlateDB")
 	flags.BoolVar(&options.Activate, "activate", false, "make SlateDB authoritative after a complete import")
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
@@ -334,6 +403,19 @@ func runIndexImport(
 	if !options.FromLegacy {
 		return result, fmt.Errorf("no import source selected; --from-legacy is currently required")
 	}
+	if options.ForceResetOldIndex {
+		if !options.Daemon.Start {
+			return result, fmt.Errorf("--force-reset-old-idx requires --start-daemon")
+		}
+		if options.DryRun {
+			return result, fmt.Errorf("--force-reset-old-idx cannot be combined with --dry-run")
+		}
+		if _, err := validateMetadataRebuildTarget(options.Daemon, true); err != nil {
+			return result, fmt.Errorf("validate reset target: %w", err)
+		}
+		options.Resume = false
+		options.Daemon.RebuildReset = true
+	}
 	if options.DryRun && options.Activate {
 		return result, fmt.Errorf("--activate cannot be combined with --dry-run")
 	}
@@ -344,18 +426,41 @@ func runIndexImport(
 	if err != nil {
 		return result, err
 	}
-	ctx = repository.WithDaemonOptions(ctx, config)
+	repositoryConfig := config
+	repositoryConfig.RebuildReset = false
+	ctx = repository.WithDaemonOptions(ctx, repositoryConfig)
 	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return result, err
 	}
 	defer unlock()
+	if options.ForceResetOldIndex {
+		if _, authoritative := repo.Engine().(*metadataindex.DaemonEngine); authoritative {
+			return result, fmt.Errorf("--force-reset-old-idx refuses an authoritative SlateDB index")
+		}
+	}
+	resetStarted := time.Time{}
+	if options.ForceResetOldIndex {
+		resetStarted = time.Now()
+	}
 	storeSession, err := openStoreSession(ctx, repo, options.Daemon)
 	if err != nil {
 		return result, fmt.Errorf("connect vaulticdb: %w", err)
 	}
+	var resetElapsed time.Duration
+	if options.ForceResetOldIndex {
+		resetElapsed = time.Since(resetStarted)
+		emitImportStatus(
+			printer,
+			globalOptions.JSON,
+			fmt.Sprintf("legacy import candidate reset and VaulticDB startup completed in %s", resetElapsed.Round(time.Millisecond)),
+		)
+	}
 	store, client := storeSession.Store, storeSession.Client
+	if options.ForceResetOldIndex {
+		store.EnableFreshLegacyImport()
+	}
 	defer func() {
 		err = errors.Join(err, storeSession.Close())
 	}()
@@ -365,16 +470,19 @@ func runIndexImport(
 		}
 	}
 	started := time.Now()
+	progressReporter := newImportProgressReporter(printer, globalOptions.JSON, started)
 	log.Printf(
-		"legacy metadata import started: pack_workers=%d batch_size=%d snapshot_depth=%d resume=%t",
-		options.PackWorkers, options.BatchSize, options.SnapshotDepth, options.Resume,
+		"legacy metadata import started: pack_workers=%d batch_size=%d snapshot_depth=%d resume=%t fresh=%t",
+		options.PackWorkers, options.BatchSize, options.SnapshotDepth, options.Resume, options.ForceResetOldIndex,
 	)
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
 		Resume: options.Resume, DryRun: options.DryRun, MaxErrors: options.MaxErrors,
 		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers, PackTimeout: options.PackTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget,
+		Progress:           progressReporter.Update,
 	})
+	result.ResetElapsedMS = uint64(resetElapsed / time.Millisecond)
 	if err != nil {
 		log.Printf(
 			"legacy metadata import failed after %s: indexes=%d packs=%d blobs=%d snapshots=%d: %v",
@@ -415,7 +523,7 @@ func prepareMetadataRebuild(ctx context.Context, options indexImportOptions, glo
 	if !options.ConfirmMetadataLossRebuild || !options.Daemon.Start || !globalOptions.MetadataLossRecovery {
 		return fmt.Errorf("metadata rebuild initialization requires --confirm-metadata-loss-rebuild, --start-daemon, and --metadata-loss-recovery")
 	}
-	candidate, err := validateMetadataRebuildTarget(options.Daemon)
+	candidate, err := validateMetadataRebuildTarget(options.Daemon, options.ForceResetOldIndex)
 	if err != nil {
 		return err
 	}
@@ -483,7 +591,7 @@ func printIndexImportResult(printer interface {
 	}
 }
 
-func validateMetadataRebuildTarget(options indexDaemonOptions) (string, error) {
+func validateMetadataRebuildTarget(options indexDaemonOptions, allowExisting bool) (string, error) {
 	if options.ObjectStore == "s3" {
 		if options.DataDir != "" {
 			return "", fmt.Errorf("S3 metadata rebuild candidate does not accept --daemon-data-dir")
@@ -504,7 +612,9 @@ func validateMetadataRebuildTarget(options indexDaemonOptions) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("inspect metadata rebuild candidate: %w", err)
 		}
-		return "", fmt.Errorf("metadata rebuild candidate directory already exists")
+		if !allowExisting {
+			return "", fmt.Errorf("metadata rebuild candidate directory already exists")
+		}
 	}
 	return options.DataDir, nil
 }

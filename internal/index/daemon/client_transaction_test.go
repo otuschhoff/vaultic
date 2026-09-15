@@ -563,6 +563,7 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	}
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
 	ctx := context.Background()
 	source1, source2 := daemonTestID(1), daemonTestID(2)
 	pack1, pack2, blobID := daemonTestID(3), daemonTestID(4), daemonTestID(5)

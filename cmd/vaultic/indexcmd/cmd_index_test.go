@@ -28,6 +28,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/index/legacyimport"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/ui"
@@ -771,21 +772,81 @@ func TestMetadataRebuildImportRequiresRecoveryGuards(t *testing.T) {
 
 func TestValidateMetadataRebuildTarget(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "new-candidate")
-	if target, err := validateMetadataRebuildTarget(indexDaemonOptions{DataDir: local}); err != nil || target != local {
+	if target, err := validateMetadataRebuildTarget(indexDaemonOptions{DataDir: local}, false); err != nil || target != local {
 		t.Fatalf("local candidate = %q, %v", target, err)
 	}
 	remote := indexDaemonOptions{ObjectStore: "s3", S3Bucket: "metadata-bucket", S3Prefix: "/repo-a/rebuild-2026/"}
-	if target, err := validateMetadataRebuildTarget(remote); err != nil || target != "s3://metadata-bucket/repo-a/rebuild-2026" {
+	if target, err := validateMetadataRebuildTarget(remote, false); err != nil || target != "s3://metadata-bucket/repo-a/rebuild-2026" {
 		t.Fatalf("remote candidate = %q, %v", target, err)
+	}
+	existing := t.TempDir()
+	if target, err := validateMetadataRebuildTarget(indexDaemonOptions{DataDir: existing}, true); err != nil || target != existing {
+		t.Fatalf("reset local candidate = %q, %v", target, err)
 	}
 	for _, invalid := range []indexDaemonOptions{
 		{ObjectStore: "s3", S3Bucket: "metadata-bucket"},
 		{ObjectStore: "s3", S3Bucket: "metadata-bucket", S3Prefix: "candidate", DataDir: local},
 		{ObjectStore: "memory"},
 	} {
-		if _, err := validateMetadataRebuildTarget(invalid); err == nil {
+		if _, err := validateMetadataRebuildTarget(invalid, false); err == nil {
 			t.Fatalf("invalid rebuild target accepted: %+v", invalid)
 		}
+	}
+}
+
+func TestForceResetOldIndexRequiresStartedPersistentTarget(t *testing.T) {
+	base := indexImportOptions{ForceResetOldIndex: true, FromLegacy: true}
+	tests := []struct {
+		name   string
+		mutate func(*indexImportOptions)
+		want   string
+	}{
+		{name: "started daemon", want: "requires --start-daemon"},
+		{name: "not dry run", mutate: func(options *indexImportOptions) {
+			options.Daemon.Start = true
+			options.DryRun = true
+		}, want: "cannot be combined with --dry-run"},
+		{name: "persistent target", mutate: func(options *indexImportOptions) {
+			options.Daemon.Start = true
+		}, want: "local metadata rebuild candidate requires a new --daemon-data-dir"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := base
+			if test.mutate != nil {
+				test.mutate(&options)
+			}
+			_, err := runIndexImport(context.Background(), options, global.Options{}, nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("reset guard = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
+	started := time.Date(2026, time.July, 7, 12, 0, 0, 0, time.UTC)
+	var stdout, logged []string
+	reporter := &importProgressReporter{
+		started: started,
+		stdout:  func(message string) { stdout = append(stdout, message) },
+		log:     func(message string) { logged = append(logged, message) },
+	}
+	reporter.update(started, legacyimport.Progress{IndexesTotal: 4})
+	reporter.update(started.Add(time.Second), legacyimport.Progress{IndexesTotal: 4})
+	reporter.update(started.Add(2*time.Second), legacyimport.Progress{
+		IndexesCompleted: 4, IndexesTotal: 4, IndexesImported: 3, IndexesResumed: 1,
+		PacksImported: 12, BlobsImported: 34,
+	})
+	if len(stdout) != 2 || len(logged) != 2 {
+		t.Fatalf("progress messages stdout=%q log=%q", stdout, logged)
+	}
+	if stdout[0] != "legacy import progress: 0.0%; indexes 0/4 (imported 0, resumed 0); packs 0; blobs 0; elapsed 0s" {
+		t.Fatalf("initial progress = %q", stdout[0])
+	}
+	wantFinal := "legacy import progress: 100.0%; indexes 4/4 (imported 3, resumed 1); packs 12; blobs 34; elapsed 2s"
+	if stdout[1] != wantFinal || logged[1] != wantFinal {
+		t.Fatalf("final progress stdout=%q log=%q", stdout[1], logged[1])
 	}
 }
 
