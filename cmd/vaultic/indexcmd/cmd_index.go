@@ -298,6 +298,10 @@ type indexImportOptions struct {
 	BatchSize                  uint32
 	PackWorkers                uint
 	PackTimeout                time.Duration
+	PacksPerTransaction        uint
+	ImportTransactionBytes     uint64
+	PreparedImportBytes        uint64
+	ImportBatchTimeout         time.Duration
 	MaxErrors                  uint64
 	WorkBudget                 uint64
 	SnapshotDepth              uint
@@ -358,6 +362,18 @@ func applyFreshBulkImportDefaults(options indexImportOptions) indexImportOptions
 	if options.PackWorkers == 0 {
 		options.PackWorkers = uint(min(32, runtime.GOMAXPROCS(0)))
 	}
+	if options.PacksPerTransaction == 0 {
+		options.PacksPerTransaction = 8
+	}
+	if options.ImportTransactionBytes == 0 {
+		options.ImportTransactionBytes = 8 << 20
+	}
+	if options.PreparedImportBytes == 0 {
+		options.PreparedImportBytes = 256 << 20
+	}
+	if options.ImportBatchTimeout == 0 {
+		options.ImportBatchTimeout = 4 * time.Minute
+	}
 	options.Daemon.FreshBulkImport = true
 	options.Daemon.BulkImportPhysicalMemoryBytes = profile.physicalBytes
 	options.Daemon.BulkImportReadCacheBytes = profile.readCacheBytes
@@ -411,7 +427,10 @@ func (reporter *importProgressReporter) update(now time.Time, progress legacyimp
 	)
 	message := fmt.Sprintf(
 		"legacy import progress: %.1f%%; indexes %d/%d (imported %d, resumed %d); "+
-			"snapshots %d/%d (imported %d, resumed %d); packs %d; blobs %d; "+
+			"snapshots %d/%d (imported %d, resumed %d); packs prepared/committed %d/%d; blobs %d; "+
+			"batches %d (adaptive splits %d); prepared bytes total %d; queue %d packs/%d bytes "+
+			"(peak %d packs/%d bytes); "+
+			"stage time prepare aggregate=%s publish=%s checkpoint batch=%s; checkpoint pending %t; "+
 			"speed last interval %s; speed since start %s; elapsed %s; est. remaining %s; ETA %s",
 		percent,
 		progress.IndexesCompleted,
@@ -422,8 +441,20 @@ func (reporter *importProgressReporter) update(now time.Time, progress legacyimp
 		progress.SnapshotsTotal,
 		progress.SnapshotsImported,
 		progress.SnapshotsResumed,
+		progress.PacksPrepared,
 		progress.PacksImported,
 		progress.BlobsImported,
+		progress.BatchesCommitted,
+		progress.AdaptiveSplits,
+		progress.PreparedBytes,
+		progress.QueuedPreparedPacks,
+		progress.QueuedPreparedBytes,
+		progress.PeakPreparedPacks,
+		progress.PeakPreparedBytes,
+		progress.PreparationTime.Round(time.Millisecond),
+		progress.PublicationTime.Round(time.Millisecond),
+		progress.CheckpointBatchTime.Round(time.Millisecond),
+		progress.CheckpointPending,
 		intervalRate,
 		overallRate,
 		now.Sub(reporter.started).Round(time.Second),
@@ -495,8 +526,18 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.BoolVar(&options.Activate, "activate", false, "make SlateDB authoritative after a complete import")
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
 	flags.Uint32Var(&options.BatchSize, "batch-size", 0, "maximum mutations per daemon transaction batch (zero uses daemon limit)")
-	flags.UintVar(&options.PackWorkers, "pack-workers", 0, "concurrent legacy pack imports (zero uses up to eight available CPUs)")
-	flags.DurationVar(&options.PackTimeout, "pack-timeout", 5*time.Minute, "maximum time for one legacy pack import")
+	flags.UintVar(&options.PackWorkers, "pack-workers", 0, "concurrent legacy pack preparations (zero uses up to eight available CPUs)")
+	flags.DurationVar(&options.PackTimeout, "pack-timeout", 5*time.Minute, "maximum time to prepare one legacy pack")
+	flags.UintVar(
+		&options.PacksPerTransaction, "packs-per-transaction", 0,
+		"maximum packs per import transaction and minimum prepared-pack floor, up to 256 (zero uses eight)",
+	)
+	flags.Uint64Var(&options.ImportTransactionBytes, "import-transaction-bytes", 0, "estimated encoded bytes per import transaction (zero uses 8 MiB)")
+	flags.Uint64Var(&options.PreparedImportBytes, "prepared-import-bytes", 0, "maximum queued prepared pack bytes (zero uses 256 MiB)")
+	flags.DurationVar(
+		&options.ImportBatchTimeout, "import-batch-timeout", 0,
+		"maximum time for one import transaction, up to five minutes (zero uses four minutes)",
+	)
 	flags.Uint64Var(&options.MaxErrors, "max-errors", 0, "stop after this many source errors (zero is unlimited)")
 	flags.Uint64Var(&options.WorkBudget, "work-budget", 0, "maximum blob records to examine (zero is unlimited)")
 	flags.UintVar(&options.SnapshotDepth, "snapshot-depth", math.MaxUint, "maximum tree depth to import (zero disables snapshot import)")
@@ -565,7 +606,7 @@ func runIndexImport(
 			resetElapsed.Round(time.Millisecond),
 		))
 	}
-	store, client := storeSession.Store, storeSession.Client
+	store := storeSession.Store
 	if options.ForceResetOldIndex {
 		store.EnableFreshLegacyImport()
 	}
@@ -580,22 +621,87 @@ func runIndexImport(
 	started := time.Now()
 	progressReporter := newImportProgressReporter(started)
 	log.Printf(
-		"legacy metadata import started: pack_workers=%d batch_size=%d snapshot_depth=%d resume=%t fresh=%t",
-		options.PackWorkers, options.BatchSize, options.SnapshotDepth, options.Resume, options.ForceResetOldIndex,
+		"legacy metadata import started: pack_workers=%d batch_size=%d packs_per_transaction=%d "+
+			"transaction_bytes=%d prepared_bytes=%d batch_timeout=%s snapshot_depth=%d resume=%t fresh=%t",
+		options.PackWorkers, options.BatchSize, options.PacksPerTransaction, options.ImportTransactionBytes,
+		options.PreparedImportBytes, options.ImportBatchTimeout, options.SnapshotDepth, options.Resume,
+		options.ForceResetOldIndex,
 	)
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
 		Resume: options.Resume, DryRun: options.DryRun, MaxErrors: options.MaxErrors,
 		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers, PackTimeout: options.PackTimeout,
+		PacksPerTransaction: options.PacksPerTransaction, ImportTransactionBytes: options.ImportTransactionBytes,
+		PreparedImportBytes: options.PreparedImportBytes, ImportBatchTimeout: options.ImportBatchTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget,
 		Progress:           progressReporter.Update,
 	})
+	logLegacyImportStats(store.LegacyImportStats())
 	result.ResetElapsedMS = uint64(resetElapsed / time.Millisecond)
-	if err == nil && result.ErrorsSeen == 0 && options.Daemon.FreshBulkImport {
-		if markErr := store.MarkBulkImportComplete(ctx); markErr != nil {
-			return result, fmt.Errorf("mark successful bulk import complete: %w", markErr)
+	logLegacyImportCompletion(started, result, err)
+	if err != nil && !errors.Is(err, legacyimport.ErrLimitReached) {
+		return result, err
+	}
+	if !globalOptions.JSON {
+		printIndexImportResult(printer, result)
+	}
+	if errors.Is(err, legacyimport.ErrLimitReached) {
+		return result, fmt.Errorf("%w: work or error limit reached", errIndexIncomplete)
+	}
+	if result.ErrorsSeen != 0 {
+		return result, fmt.Errorf("%w: import completed with %d findings", errIndexIncomplete, result.ErrorsSeen)
+	}
+	if options.Activate && options.Daemon.RebuildInitialize {
+		if validationErr := validateRebuiltIndex(ctx, options, repo, store, result); validationErr != nil {
+			return result, validationErr
 		}
 	}
+	storeSession, client, err := completeFreshBulkImport(ctx, options, repo, storeSession)
+	if err != nil {
+		return result, err
+	}
+	if options.Activate {
+		if activateErr := activateImportedIndex(ctx, options, repo, client); activateErr != nil {
+			return result, activateErr
+		}
+	}
+	return result, nil
+}
+
+func completeFreshBulkImport(
+	ctx context.Context,
+	options indexImportOptions,
+	repo *repository.Repository,
+	session *Session,
+) (*Session, *daemon.Client, error) {
+	if !options.Daemon.FreshBulkImport {
+		return session, session.Client, nil
+	}
+	if err := session.Store.MarkBulkImportComplete(ctx); err != nil {
+		return session, nil, fmt.Errorf("mark successful bulk import complete: %w", err)
+	}
+	if !options.Activate {
+		return session, session.Client, nil
+	}
+	if err := session.Close(); err != nil {
+		return session, nil, fmt.Errorf("finalize bulk-import WAL handoff: %w", err)
+	}
+	reopened, err := openStoreSession(ctx, repo, completedBulkImportDaemonOptions(options.Daemon))
+	if err != nil {
+		return session, nil, fmt.Errorf("reopen completed bulk import on persistent WAL: %w", err)
+	}
+	return reopened, reopened.Client, nil
+}
+
+func completedBulkImportDaemonOptions(options indexDaemonOptions) indexDaemonOptions {
+	options.RebuildInitialize = false
+	options.RebuildReset = false
+	options.FreshBulkImport = false
+	options.WALStore = ""
+	return options
+}
+
+func logLegacyImportCompletion(started time.Time, result legacyimport.Result, err error) {
 	if err != nil {
 		log.Printf(
 			"legacy metadata import failed after %s: indexes=%d packs=%d blobs=%d snapshots=%d: %v",
@@ -609,29 +715,34 @@ func runIndexImport(
 			result.BlobsImported, result.SnapshotsImported,
 		)
 	}
-	if err != nil && !errors.Is(err, legacyimport.ErrLimitReached) {
-		return result, err
-	}
-	if options.Activate {
-		if activateErr := activateImportedIndex(ctx, options, repo, store, client, result, err); activateErr != nil {
-			return result, activateErr
-		}
-	}
-	if !globalOptions.JSON {
-		printIndexImportResult(printer, result)
-	}
-	if errors.Is(err, legacyimport.ErrLimitReached) {
-		return result, fmt.Errorf("%w: work or error limit reached", errIndexIncomplete)
-	}
-	if result.ErrorsSeen != 0 {
-		return result, fmt.Errorf("%w: import completed with %d findings", errIndexIncomplete, result.ErrorsSeen)
-	}
-	return result, nil
+}
+
+func logLegacyImportStats(importStats daemon.LegacyImportStats) {
+	log.Printf(
+		"legacy import transactions: batches=%d attempts=%d commits=%d retries=%d conflicts=%d "+
+			"packs=%d unique_blobs=%d source_indexes=%d mutations=%d bytes=%d replanned_bytes=%d "+
+			"mutation_rpcs=%d planning_reads=%d gate_wait=%s planning=%s "+
+			"mutation_rpc=%s commit=%s total=%s lookups_absent=%d lookups_possible=%d lookups_found=%d "+
+			"lookups_false_positive_equivalent=%d filter_layers=%d filter_bytes=%d filter_inserts=%d "+
+			"filter_false_positive=%g filter_occupancy=%v filter_fallback=%t",
+		importStats.Batches, importStats.Attempts, importStats.Commits, importStats.Retries, importStats.Conflicts,
+		importStats.PacksCommitted, importStats.BlobsCommitted, importStats.SourceIndexesCommitted,
+		importStats.MutationsCommitted, importStats.EncodedBytesCommitted, importStats.ReplannedBytes,
+		importStats.MutationRPCs, importStats.PlanningReads, importStats.GateWait, importStats.PlanningTime,
+		importStats.MutationRPCTime, importStats.CommitTime, importStats.TotalTime,
+		importStats.DefinitelyAbsentLookups, importStats.PossiblyPresentLookups, importStats.FoundLookups,
+		importStats.FalsePositiveEquivalentLookups, importStats.FilterLayers, importStats.FilterBytes,
+		importStats.FilterInserts, importStats.FilterFalsePositive, importStats.FilterLayerOccupancy,
+		importStats.FilterFallbackToDatabase,
+	)
 }
 
 func validateIndexImportOptions(options indexImportOptions) (indexImportOptions, error) {
 	if !options.FromLegacy {
 		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
+	}
+	if options.PacksPerTransaction > legacyimport.MaxPacksPerTransaction {
+		return options, fmt.Errorf("--packs-per-transaction must not exceed %d", legacyimport.MaxPacksPerTransaction)
 	}
 	if options.ForceResetOldIndex {
 		if !options.Daemon.Start {
@@ -676,19 +787,14 @@ func prepareMetadataRebuild(ctx context.Context, options indexImportOptions, glo
 	return nil
 }
 
-func activateImportedIndex(ctx context.Context, options indexImportOptions, repo *repository.Repository, store *daemon.SchemaStore,
-	client *daemon.Client, result legacyimport.Result, importErr error,
+func activateImportedIndex(
+	ctx context.Context,
+	options indexImportOptions,
+	repo *repository.Repository,
+	client *daemon.Client,
 ) error {
-	if errors.Is(importErr, legacyimport.ErrLimitReached) || result.ErrorsSeen != 0 {
-		return fmt.Errorf("cannot activate an incomplete import")
-	}
 	if client == nil {
 		return fmt.Errorf("repository is already SlateDB-authoritative")
-	}
-	if options.Daemon.RebuildInitialize {
-		if err := validateRebuiltIndex(ctx, options, repo, store, result); err != nil {
-			return err
-		}
 	}
 	if err := repo.EnableSlateDBAuthority(ctx, client); err != nil {
 		return fmt.Errorf("activate SlateDB authority: %w", err)

@@ -99,7 +99,17 @@ func TestSchemaStoreLegacyPackImportWaitHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := store.ImportLegacyPack(ctx, LegacyPackImport{})
+	packID, sourceID, blobID := daemonTestID(20), daemonTestID(21), daemonTestID(22)
+	err := store.ImportLegacyPack(ctx, LegacyPackImport{
+		SourceIndex: sourceID,
+		PackID:      packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PayloadSize: 1, BlobCount: 1, Lifecycle: schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{
+			PackID: packID, Length: 1, Type: schema.BlobData,
+		}}}},
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("import error = %v, want context cancellation", err)
 	}

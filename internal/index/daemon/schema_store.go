@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -15,7 +16,11 @@ import (
 
 const revisionAllocationAttempts = 128
 
-const freshImportSeenBytes = 64 << 20
+const (
+	freshImportInitialCapacity = 8_000_000
+	freshImportSeenMaxBytes    = 1536 << 20
+	freshImportFalsePositive   = 0.001
+)
 
 const bulkImportCompleteKey = "_vaultic/bulk-import-complete-v1"
 
@@ -26,6 +31,91 @@ type SchemaStore struct {
 	publicationMu    sync.RWMutex
 	legacyImportGate chan struct{}
 	freshImportSeen  *idSeenFilter
+	legacyMetrics    legacyImportMetrics
+}
+
+type legacyImportMetrics struct {
+	batches               atomic.Uint64
+	attempts              atomic.Uint64
+	commits               atomic.Uint64
+	retries               atomic.Uint64
+	conflicts             atomic.Uint64
+	packsCommitted        atomic.Uint64
+	blobsCommitted        atomic.Uint64
+	mutationsCommitted    atomic.Uint64
+	encodedBytesCommitted atomic.Uint64
+	mutationRPCs          atomic.Uint64
+	mutationRPCNanos      atomic.Uint64
+	planningReads         atomic.Uint64
+	replannedBytes        atomic.Uint64
+	sourceIndexes         atomic.Uint64
+	definitelyAbsent      atomic.Uint64
+	possiblyPresent       atomic.Uint64
+	found                 atomic.Uint64
+	gateWaitNanos         atomic.Uint64
+	planningNanos         atomic.Uint64
+	commitNanos           atomic.Uint64
+	totalNanos            atomic.Uint64
+}
+
+// LegacyImportStats is a process-local, low-cardinality snapshot of bulk
+// import activity. Phase 33 can export these fields without changing import behavior.
+type LegacyImportStats struct {
+	Batches                        uint64
+	Attempts                       uint64
+	Commits                        uint64
+	Retries                        uint64
+	Conflicts                      uint64
+	PacksCommitted                 uint64
+	BlobsCommitted                 uint64
+	MutationsCommitted             uint64
+	EncodedBytesCommitted          uint64
+	MutationRPCs                   uint64
+	MutationRPCTime                time.Duration
+	PlanningReads                  uint64
+	ReplannedBytes                 uint64
+	SourceIndexesCommitted         uint64
+	DefinitelyAbsentLookups        uint64
+	PossiblyPresentLookups         uint64
+	FoundLookups                   uint64
+	FalsePositiveEquivalentLookups uint64
+	GateWait                       time.Duration
+	PlanningTime                   time.Duration
+	CommitTime                     time.Duration
+	TotalTime                      time.Duration
+	FilterLayers                   uint64
+	FilterBytes                    uint64
+	FilterInserts                  uint64
+	FilterFalsePositive            float64
+	FilterFallbackToDatabase       bool
+	FilterLayerOccupancy           []float64
+}
+
+func (store *SchemaStore) LegacyImportStats() LegacyImportStats {
+	metrics := &store.legacyMetrics
+	result := LegacyImportStats{
+		Batches: metrics.batches.Load(), Attempts: metrics.attempts.Load(), Commits: metrics.commits.Load(),
+		Retries: metrics.retries.Load(), Conflicts: metrics.conflicts.Load(),
+		PacksCommitted: metrics.packsCommitted.Load(), BlobsCommitted: metrics.blobsCommitted.Load(),
+		MutationsCommitted: metrics.mutationsCommitted.Load(), EncodedBytesCommitted: metrics.encodedBytesCommitted.Load(),
+		MutationRPCs: metrics.mutationRPCs.Load(), MutationRPCTime: time.Duration(metrics.mutationRPCNanos.Load()),
+		PlanningReads: metrics.planningReads.Load(), ReplannedBytes: metrics.replannedBytes.Load(),
+		SourceIndexesCommitted:  metrics.sourceIndexes.Load(),
+		DefinitelyAbsentLookups: metrics.definitelyAbsent.Load(), PossiblyPresentLookups: metrics.possiblyPresent.Load(),
+		FoundLookups: metrics.found.Load(), GateWait: time.Duration(metrics.gateWaitNanos.Load()),
+		PlanningTime: time.Duration(metrics.planningNanos.Load()), CommitTime: time.Duration(metrics.commitNanos.Load()),
+		TotalTime: time.Duration(metrics.totalNanos.Load()),
+	}
+	if result.PossiblyPresentLookups > result.FoundLookups {
+		result.FalsePositiveEquivalentLookups = result.PossiblyPresentLookups - result.FoundLookups
+	}
+	if store.freshImportSeen != nil {
+		filter := store.freshImportSeen.stats()
+		result.FilterLayers, result.FilterBytes, result.FilterInserts = filter.Layers, filter.Bytes, filter.Inserts
+		result.FilterFalsePositive, result.FilterFallbackToDatabase = filter.EstimatedFalsePositive, filter.FallbackToDatabase
+		result.FilterLayerOccupancy = append([]float64(nil), filter.LayerOccupancy...)
+	}
+	return result
 }
 
 // MarkBulkImportComplete durably authorizes the temporary memory WAL to hand
@@ -47,61 +137,10 @@ func (store *SchemaStore) MarkBulkImportComplete(ctx context.Context) error {
 	return nil
 }
 
-type idSeenFilter struct {
-	bits []byte
-}
-
-func newIDSeenFilter(size int) *idSeenFilter {
-	return &idSeenFilter{bits: make([]byte, size)}
-}
-
-func (filter *idSeenFilter) possiblyContains(id schema.ID) bool {
-	for offset := 0; offset < len(id); offset += 8 {
-		value := uint64(id[offset])<<56 | uint64(id[offset+1])<<48 | uint64(id[offset+2])<<40 |
-			uint64(id[offset+3])<<32 | uint64(id[offset+4])<<24 | uint64(id[offset+5])<<16 |
-			uint64(id[offset+6])<<8 | uint64(id[offset+7])
-		bit := value % uint64(len(filter.bits)*8)
-		if filter.bits[bit/8]&(1<<uint(bit%8)) == 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func (filter *idSeenFilter) insert(id schema.ID) {
-	for offset := 0; offset < len(id); offset += 8 {
-		value := uint64(id[offset])<<56 | uint64(id[offset+1])<<48 | uint64(id[offset+2])<<40 |
-			uint64(id[offset+3])<<32 | uint64(id[offset+4])<<24 | uint64(id[offset+5])<<16 |
-			uint64(id[offset+6])<<8 | uint64(id[offset+7])
-		bit := value % uint64(len(filter.bits)*8)
-		filter.bits[bit/8] |= 1 << uint(bit%8)
-	}
-}
-
-func (s *SchemaStore) freshImportLookupHints(imported LegacyPackImport) legacyImportHints {
-	hints := legacyImportHints{}
-	if s.freshImportSeen == nil {
-		return hints
-	}
-	hints.packAbsent = !s.freshImportSeen.possiblyContains(imported.PackID)
-	hints.blobsAbsent = make(map[schema.ID]struct{}, len(imported.Blobs))
-	for blobID := range imported.Blobs {
-		if !s.freshImportSeen.possiblyContains(blobID) {
-			hints.blobsAbsent[blobID] = struct{}{}
-		}
-	}
-	return hints
-}
-
 // EnableFreshLegacyImport skips reads only for IDs not previously committed by
 // this store. It is safe only for a candidate reset to empty immediately before import.
 func (s *SchemaStore) EnableFreshLegacyImport() {
-	s.freshImportSeen = newIDSeenFilter(freshImportSeenBytes)
-}
-
-type legacyImportHints struct {
-	packAbsent  bool
-	blobsAbsent map[schema.ID]struct{}
+	s.freshImportSeen = newIDSeenFilter(freshImportInitialCapacity, freshImportSeenMaxBytes, freshImportFalsePositive)
 }
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.
@@ -110,14 +149,15 @@ func (s *SchemaStore) CheckEncryption(ctx context.Context) (EncryptionAudit, err
 }
 
 type LegacyPackImport struct {
-	SourceIndex schema.ID
-	PackID      schema.ID
-	Record      schema.PackRecord
-	Blobs       map[schema.ID]schema.BlobRecord
-	Placements  map[uint64]schema.PlacementRecord
-	BatchSize   uint32
-	DebtKey     []byte
-	Debt        *schema.CrawlDebtRecord
+	SourceIndex      schema.ID
+	PackID           schema.ID
+	Record           schema.PackRecord
+	Blobs            map[schema.ID]schema.BlobRecord
+	Placements       map[uint64]schema.PlacementRecord
+	BatchSize        uint32
+	TransactionBytes uint64
+	DebtKey          []byte
+	Debt             *schema.CrawlDebtRecord
 	// RunID groups the history events emitted by one operator-visible run.
 	RunID schema.ID
 	// PredecessorPackIDs records repack lineage when this pack replaces others.
@@ -377,30 +417,113 @@ func (store *SchemaStore) recordCrawlDebtFailureOnce(ctx context.Context, keys [
 	return nil
 }
 
-// ImportLegacyPack atomically merges one legacy pack's blob locations,
-// provenance, catalog record, aggregates, and optional pack-stat debt.
-func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyPackImport) error {
+// ImportLegacyPacks atomically merges a bounded ordered group of legacy packs
+// and, when provided, the checkpoint for the completed source index.
+func (store *SchemaStore) ImportLegacyPacks(
+	ctx context.Context,
+	imports []LegacyPackImport,
+	finalCheckpoint *Mutation,
+) error {
+	started := time.Now()
+	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
+	prepared, err := prepareLegacyImportBatch(imports, finalCheckpoint)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 && finalCheckpoint == nil {
+		return nil
+	}
+	if err := store.acquireLegacyImportGate(ctx); err != nil {
+		return err
+	}
+	defer func() { <-store.legacyImportGate }()
+	store.legacyMetrics.batches.Add(1)
+	return store.importLegacyPacksWithRetry(ctx, prepared, finalCheckpoint)
+}
+
+func prepareLegacyImportBatch(imports []LegacyPackImport, finalCheckpoint *Mutation) ([]LegacyPackImport, error) {
+	prepared := append([]LegacyPackImport(nil), imports...)
+	for index := range prepared {
+		if err := preparePackImport(&prepared[index], true); err != nil {
+			return nil, fmt.Errorf("prepare legacy pack %d: %w", index, err)
+		}
+		if err := validateLegacyImportDebt(prepared[index]); err != nil {
+			return nil, fmt.Errorf("prepare legacy pack %d: %w", index, err)
+		}
+		if index > 0 && prepared[index].TransactionBytes != prepared[0].TransactionBytes {
+			return nil, fmt.Errorf("legacy import packs have inconsistent transaction byte limits")
+		}
+	}
+	if err := validateLegacyImportCheckpoint(finalCheckpoint); err != nil {
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func validateLegacyImportDebt(imported LegacyPackImport) error {
+	if imported.Debt == nil {
+		return nil
+	}
+	if len(imported.DebtKey) == 0 {
+		return fmt.Errorf("legacy pack debt requires a key")
+	}
+	value, err := imported.Debt.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return schema.ValidateValue(imported.DebtKey, value)
+}
+
+func (store *SchemaStore) acquireLegacyImportGate(ctx context.Context) error {
+	gateStarted := time.Now()
 	select {
 	case store.legacyImportGate <- struct{}{}:
-		defer func() { <-store.legacyImportGate }()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	hints := store.freshImportLookupHints(imported)
-	deferDurability := store.freshImportSeen != nil
+	store.legacyMetrics.gateWaitNanos.Add(uint64(time.Since(gateStarted)))
+	return nil
+}
 
+func (store *SchemaStore) importLegacyPacksWithRetry(
+	ctx context.Context,
+	prepared []LegacyPackImport,
+	finalCheckpoint *Mutation,
+) error {
+	hints := store.freshImportLookupHintsForBatch(prepared)
+	deferDurability := store.freshImportSeen != nil
 	backoff := 100 * time.Microsecond
-	for range revisionAllocationAttempts {
-		err := store.importPackOnce(ctx, imported, true, hints, deferDurability)
+	for attempt := range revisionAllocationAttempts {
+		store.legacyMetrics.attempts.Add(1)
+		attemptHints := hints
+		if attempt > 0 {
+			// A conflicting writer may have committed an ID that the process-local
+			// fresh-import filter has never seen. Retried plans therefore read all
+			// relevant keys from their new transaction snapshot.
+			attemptHints = legacyImportBatchHints{}
+		}
+		err := store.importLegacyPacksOnce(ctx, prepared, finalCheckpoint, attemptHints, deferDurability, attempt > 0)
 		if status.Code(err) != codes.Aborted {
 			if err == nil && store.freshImportSeen != nil {
-				store.freshImportSeen.insert(imported.PackID)
-				for blobID := range imported.Blobs {
+				packIDs, blobIDs := uniqueLegacyImportIDs(prepared)
+				for _, packID := range packIDs {
+					store.freshImportSeen.insert(packID)
+				}
+				for _, blobID := range blobIDs {
 					store.freshImportSeen.insert(blobID)
 				}
 			}
+			if err == nil {
+				store.legacyMetrics.commits.Add(1)
+				packIDs, blobIDs := uniqueLegacyImportIDs(prepared)
+				store.legacyMetrics.packsCommitted.Add(uint64(len(packIDs)))
+				store.legacyMetrics.blobsCommitted.Add(uint64(len(blobIDs)))
+				store.legacyMetrics.sourceIndexes.Add(uniqueLegacySourceIndexCount(prepared))
+			}
 			return err
 		}
+		store.legacyMetrics.conflicts.Add(1)
+		store.legacyMetrics.retries.Add(1)
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
@@ -410,5 +533,19 @@ func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyP
 		}
 		backoff = min(backoff*2, 25*time.Millisecond)
 	}
-	return fmt.Errorf("import legacy pack: %w", errors.New("transaction conflict retry limit exceeded"))
+	return fmt.Errorf("import legacy packs: %w", errors.New("transaction conflict retry limit exceeded"))
+}
+
+func uniqueLegacySourceIndexCount(imports []LegacyPackImport) uint64 {
+	ids := make(map[schema.ID]struct{}, len(imports))
+	for _, imported := range imports {
+		ids[imported.SourceIndex] = struct{}{}
+	}
+	return uint64(len(ids))
+}
+
+// ImportLegacyPack preserves the one-pack API for callers that do not use the
+// bulk importer while sharing the same transaction planner.
+func (store *SchemaStore) ImportLegacyPack(ctx context.Context, imported LegacyPackImport) error {
+	return store.ImportLegacyPacks(ctx, []LegacyPackImport{imported}, nil)
 }

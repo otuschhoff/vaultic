@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -9,18 +10,18 @@ import (
 
 func TestFreshImportLookupHintsNeverForgetCommittedIDs(t *testing.T) {
 	packID, firstBlob, secondBlob := daemonTestID(1), daemonTestID(2), daemonTestID(3)
-	store := &SchemaStore{freshImportSeen: newIDSeenFilter(1024)}
+	store := &SchemaStore{freshImportSeen: newIDSeenFilter(100, 1024, 0.001)}
 	imported := LegacyPackImport{PackID: packID, Blobs: map[schema.ID]schema.BlobRecord{
 		firstBlob: {}, secondBlob: {},
 	}}
-	hints := store.freshImportLookupHints(imported)
-	if !hints.packAbsent || len(hints.blobsAbsent) != 2 {
+	hints := store.freshImportLookupHintsForBatch([]LegacyPackImport{imported})
+	if _, absent := hints.packsAbsent[packID]; !absent || len(hints.blobsAbsent) != 2 {
 		t.Fatalf("initial fresh import hints = %#v", hints)
 	}
 	store.freshImportSeen.insert(packID)
 	store.freshImportSeen.insert(firstBlob)
-	hints = store.freshImportLookupHints(imported)
-	if hints.packAbsent {
+	hints = store.freshImportLookupHintsForBatch([]LegacyPackImport{imported})
+	if _, absent := hints.packsAbsent[packID]; absent {
 		t.Fatal("committed pack was reported absent")
 	}
 	if _, absent := hints.blobsAbsent[firstBlob]; absent {
@@ -28,6 +29,109 @@ func TestFreshImportLookupHintsNeverForgetCommittedIDs(t *testing.T) {
 	}
 	if _, absent := hints.blobsAbsent[secondBlob]; !absent {
 		t.Fatal("new blob did not receive an absence hint")
+	}
+}
+
+func TestIDSeenFilterRollsOverWithoutFalseNegatives(t *testing.T) {
+	filter := newIDSeenFilter(2, 1024, 0.001)
+	ids := []schema.ID{daemonTestID(1), daemonTestID(2), daemonTestID(3), daemonTestID(4), daemonTestID(5)}
+	for _, id := range ids {
+		filter.insert(id)
+	}
+	for _, id := range ids {
+		if !filter.possiblyContains(id) {
+			t.Fatalf("committed ID %x was reported absent", id)
+		}
+	}
+	stats := filter.stats()
+	if stats.Layers < 2 || stats.Inserts == 0 || stats.Inserts > uint64(len(ids)) || stats.Bytes == 0 || stats.FallbackToDatabase {
+		t.Fatalf("unexpected scalable filter stats: %#v", stats)
+	}
+	if stats.EstimatedFalsePositive > 0.001 {
+		t.Fatalf("estimated false-positive probability = %g", stats.EstimatedFalsePositive)
+	}
+}
+
+func TestIDSeenFilterFallsBackSafelyAtMemoryLimit(t *testing.T) {
+	filter := newIDSeenFilter(1, 2, 0.5)
+	filter.insert(daemonTestID(1))
+	filter.insert(daemonTestID(2))
+	if stats := filter.stats(); !stats.FallbackToDatabase {
+		t.Fatalf("filter did not enter database fallback: %#v", stats)
+	}
+	if !filter.possiblyContains(daemonTestID(99)) {
+		t.Fatal("fallback reported an unknown ID definitely absent")
+	}
+}
+
+func TestIDSeenFilterFallsBackWhenInitialLayerDoesNotFit(t *testing.T) {
+	filter := newIDSeenFilter(1_000, 1, 0.001)
+	if !filter.possiblyContains(daemonTestID(1)) {
+		t.Fatal("memory-limited filter reported definitely absent")
+	}
+	filter.insert(daemonTestID(1))
+	stats := filter.stats()
+	if !stats.FallbackToDatabase || stats.Layers != 0 || stats.Bytes != 0 || stats.Inserts != 0 {
+		t.Fatalf("initial fallback stats = %#v", stats)
+	}
+}
+
+func TestIDSeenFilterDoesNotCountDuplicateInserts(t *testing.T) {
+	filter := newIDSeenFilter(2, 1024, 0.001)
+	id := daemonTestID(7)
+	filter.insert(id)
+	filter.insert(id)
+	if stats := filter.stats(); stats.Inserts != 1 || stats.Layers != 1 {
+		t.Fatalf("duplicate insert stats = %#v", stats)
+	}
+}
+
+func TestIDSeenFilterInvalidParametersFallBackSafely(t *testing.T) {
+	for _, falsePositive := range []float64{-1, 0, 1, 2, math.NaN(), math.Inf(1)} {
+		filter := newIDSeenFilter(10, 1024, falsePositive)
+		if !filter.possiblyContains(daemonTestID(1)) {
+			t.Fatalf("false-positive target %g reported an unknown ID absent", falsePositive)
+		}
+		if stats := filter.stats(); !stats.FallbackToDatabase || stats.Layers != 0 || stats.Bytes != 0 {
+			t.Fatalf("false-positive target %g stats = %#v", falsePositive, stats)
+		}
+	}
+	if bytes, probes := seenFilterLayerParameters(0, 0.001); bytes != 0 || probes != 0 {
+		t.Fatalf("zero-capacity parameters = bytes %d probes %d", bytes, probes)
+	}
+}
+
+func TestIDSeenFilterExtremeParametersDoNotWrapProbeCount(t *testing.T) {
+	bytes, probes := seenFilterLayerParameters(1, math.SmallestNonzeroFloat64)
+	if bytes == 0 || probes != math.MaxUint8 {
+		t.Fatalf("extreme parameters = bytes %d probes %d", bytes, probes)
+	}
+	bytes, probes = seenFilterLayerParameters(math.MaxUint64, math.SmallestNonzeroFloat64)
+	if bytes != 0 || probes != 0 {
+		t.Fatalf("overflowing parameters = bytes %d probes %d", bytes, probes)
+	}
+}
+
+func TestIDSeenFilterProjectionSupportsFourHundredMillionIDs(t *testing.T) {
+	const supportedIDs = uint64(400_000_000)
+	var capacity, allocated uint64
+	probabilityAbsent := 1.0
+	for layer, layerCapacity := 0, uint64(freshImportInitialCapacity); capacity < supportedIDs; layer++ {
+		falsePositive := freshImportFalsePositive / math.Pow(2, float64(layer+1))
+		bytes, probes := seenFilterLayerParameters(layerCapacity, falsePositive)
+		if bytes == 0 || probes == 0 {
+			t.Fatalf("layer %d parameters = bytes %d probes %d", layer, bytes, probes)
+		}
+		allocated += bytes
+		capacity += layerCapacity
+		probabilityAbsent *= 1 - falsePositive
+		layerCapacity *= seenFilterGrowth
+	}
+	if capacity < supportedIDs || allocated > freshImportSeenMaxBytes {
+		t.Fatalf("projected capacity=%d bytes=%d", capacity, allocated)
+	}
+	if aggregate := 1 - probabilityAbsent; aggregate > freshImportFalsePositive {
+		t.Fatalf("projected aggregate false-positive probability = %g", aggregate)
 	}
 }
 

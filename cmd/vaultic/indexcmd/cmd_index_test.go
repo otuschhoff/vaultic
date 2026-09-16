@@ -828,6 +828,16 @@ func TestForceResetOldIndexRequiresStartedPersistentTarget(t *testing.T) {
 	}
 }
 
+func TestIndexImportRejectsUnboundedPackFloorBeforeReset(t *testing.T) {
+	_, err := validateIndexImportOptions(indexImportOptions{
+		FromLegacy: true, ForceResetOldIndex: true,
+		PacksPerTransaction: legacyimport.MaxPacksPerTransaction + 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--packs-per-transaction must not exceed 256") {
+		t.Fatalf("unbounded pack floor error = %v", err)
+	}
+}
+
 func TestBulkImportMemoryProfileScalesAndCaps(t *testing.T) {
 	const gib = uint64(1024 * 1024 * 1024)
 	for _, test := range []struct {
@@ -852,14 +862,30 @@ func TestFreshBulkImportDefaultsPreserveExplicitTuning(t *testing.T) {
 			WALStore: "local", WALFlushInterval: time.Second,
 			MaxUnflushedBytes: 2, L0SSTSizeBytes: 3,
 		},
-		PackWorkers: 7,
+		PackWorkers: 7, PacksPerTransaction: 4, ImportTransactionBytes: 1024,
+		PreparedImportBytes: 2048, ImportBatchTimeout: time.Minute,
 	})
 	if options.Daemon.WALStore != "local" || options.Daemon.WALFlushInterval != time.Second ||
-		options.Daemon.MaxUnflushedBytes != 2 || options.Daemon.L0SSTSizeBytes != 3 || options.PackWorkers != 7 {
+		options.Daemon.MaxUnflushedBytes != 2 || options.Daemon.L0SSTSizeBytes != 3 || options.PackWorkers != 7 ||
+		options.PacksPerTransaction != 4 || options.ImportTransactionBytes != 1024 ||
+		options.PreparedImportBytes != 2048 || options.ImportBatchTimeout != time.Minute {
 		t.Fatalf("explicit bulk-import tuning was replaced: %+v", options)
 	}
 	if !options.Daemon.FreshBulkImport {
 		t.Fatal("fresh bulk-import profile was not marked active")
+	}
+}
+
+func TestCompletedBulkImportReopensPersistentWALWithoutReset(t *testing.T) {
+	options := completedBulkImportDaemonOptions(indexDaemonOptions{
+		Start: true, RebuildInitialize: true, RebuildReset: true, FreshBulkImport: true,
+		WALStore: "memory", WALDataDir: "/var/lib/vaultic/wal", DataDir: "/var/lib/vaultic/candidate",
+	})
+	if options.RebuildInitialize || options.RebuildReset || options.FreshBulkImport || options.WALStore != "" {
+		t.Fatalf("completed bulk-import options retain destructive or memory-WAL state: %+v", options)
+	}
+	if !options.Start || options.WALDataDir != "/var/lib/vaultic/wal" || options.DataDir != "/var/lib/vaultic/candidate" {
+		t.Fatalf("completed bulk-import options lost restart identity: %+v", options)
 	}
 }
 
@@ -878,7 +904,9 @@ func TestForceResetEnablesFreshBulkImportProfile(t *testing.T) {
 	if !options.Daemon.FreshBulkImport || options.Daemon.WALStore != "memory" ||
 		options.Daemon.WALFlushInterval != 500*time.Millisecond ||
 		options.Daemon.L0SSTSizeBytes != bulkImportL0SSTSizeBytes ||
-		options.Daemon.MaxUnflushedBytes == 0 || options.PackWorkers == 0 {
+		options.Daemon.MaxUnflushedBytes == 0 || options.PackWorkers == 0 || options.PacksPerTransaction != 8 ||
+		options.ImportTransactionBytes != 8<<20 || options.PreparedImportBytes != 256<<20 ||
+		options.ImportBatchTimeout != 4*time.Minute {
 		t.Fatalf("fresh bulk-import profile is incomplete: %+v", options)
 	}
 }
@@ -894,28 +922,35 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 	reporter.update(started.Add(time.Second), legacyimport.Progress{IndexesTotal: 4, SnapshotsTotal: 2})
 	reporter.update(started.Add(4*time.Second), legacyimport.Progress{
 		IndexesCompleted: 2, IndexesTotal: 4, IndexesImported: 1, IndexesResumed: 1,
-		SnapshotsTotal: 2, PacksImported: 6, BlobsImported: 17,
+		SnapshotsTotal: 2, PacksPrepared: 8, PacksImported: 6, BlobsImported: 17,
+		PreparedBytes: 4096, BatchesCommitted: 2, CheckpointPending: true,
 	})
 	reporter.update(started.Add(8*time.Second), legacyimport.Progress{
 		IndexesCompleted: 4, IndexesTotal: 4, IndexesImported: 3, IndexesResumed: 1,
-		SnapshotsTotal: 2, PacksImported: 12, BlobsImported: 34,
+		SnapshotsTotal: 2, PacksPrepared: 12, PacksImported: 12, BlobsImported: 34,
+		PreparedBytes: 8192, BatchesCommitted: 4,
 	})
 	reporter.update(started.Add(12*time.Second), legacyimport.Progress{
 		IndexesCompleted: 4, IndexesTotal: 4, IndexesImported: 3, IndexesResumed: 1,
 		SnapshotsCompleted: 2, SnapshotsTotal: 2, SnapshotsImported: 2,
-		PacksImported: 12, BlobsImported: 34, NodesImported: 8,
+		PacksPrepared: 12, PacksImported: 12, BlobsImported: 34, PreparedBytes: 8192,
+		BatchesCommitted: 4, NodesImported: 8,
 	})
 	if len(logged) != 4 {
 		t.Fatalf("progress messages = %q", logged)
 	}
 	wantInitial := "legacy import progress: 0.0%; indexes 0/4 (imported 0, resumed 0); " +
-		"snapshots 0/2 (imported 0, resumed 0); packs 0; blobs 0; speed last interval unknown; " +
+		"snapshots 0/2 (imported 0, resumed 0); packs prepared/committed 0/0; blobs 0; " +
+		"batches 0 (adaptive splits 0); prepared bytes total 0; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
+		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending false; speed last interval unknown; " +
 		"speed since start unknown; elapsed 0s; est. remaining unknown; ETA unknown"
 	if logged[0] != wantInitial {
 		t.Fatalf("initial progress = %q", logged[0])
 	}
 	wantPartial := "legacy import progress: 33.3%; indexes 2/4 (imported 1, resumed 1); " +
-		"snapshots 0/2 (imported 0, resumed 0); packs 6; blobs 17; " +
+		"snapshots 0/2 (imported 0, resumed 0); packs prepared/committed 8/6; blobs 17; " +
+		"batches 2 (adaptive splits 0); prepared bytes total 4096; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
+		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending true; " +
 		"speed last interval 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; " +
 		"speed since start 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; elapsed 4s; " +
 		"est. remaining 8s; ETA 2026-07-07T12:00:12Z"
@@ -923,7 +958,9 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 		t.Fatalf("partial progress = %q", logged[1])
 	}
 	wantIndexesComplete := "legacy import progress: 66.7%; indexes 4/4 (imported 3, resumed 1); " +
-		"snapshots 0/2 (imported 0, resumed 0); packs 12; blobs 34; " +
+		"snapshots 0/2 (imported 0, resumed 0); packs prepared/committed 12/12; blobs 34; " +
+		"batches 4 (adaptive splits 0); prepared bytes total 8192; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
+		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending false; " +
 		"speed last interval 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; " +
 		"speed since start 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; elapsed 8s; " +
 		"est. remaining 4s; ETA 2026-07-07T12:00:12Z"
@@ -931,12 +968,25 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 		t.Fatalf("index completion progress = %q", logged[2])
 	}
 	wantFinal := "legacy import progress: 100.0%; indexes 4/4 (imported 3, resumed 1); " +
-		"snapshots 2/2 (imported 2, resumed 0); packs 12; blobs 34; " +
+		"snapshots 2/2 (imported 2, resumed 0); packs prepared/committed 12/12; blobs 34; " +
+		"batches 4 (adaptive splits 0); prepared bytes total 8192; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
+		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending false; " +
 		"speed last interval 0.0 packs/s, 0.0 blobs/s, 2.0 nodes/s; " +
 		"speed since start 1.0 packs/s, 2.8 blobs/s, 0.7 nodes/s; elapsed 12s; " +
 		"est. remaining 0s; ETA 2026-07-07T12:00:12Z"
 	if logged[3] != wantFinal {
 		t.Fatalf("final progress = %q", logged[3])
+	}
+}
+
+func TestIndexImportRegistersBulkTransactionFlags(t *testing.T) {
+	command := newIndexImportCommand(&global.Options{})
+	for _, name := range []string{
+		"packs-per-transaction", "import-transaction-bytes", "prepared-import-bytes", "import-batch-timeout",
+	} {
+		if command.Flags().Lookup(name) == nil {
+			t.Errorf("import flag --%s is not registered", name)
+		}
 	}
 }
 

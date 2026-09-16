@@ -570,8 +570,20 @@ func validateRelatedMutations(puts []Mutation, deletes [][]byte) error {
 }
 
 func writeTransactionBatches(ctx context.Context, transaction *Transaction, limits Limits, puts []Mutation, deletes [][]byte) error {
+	_, err := writeTransactionBatchesMeasured(ctx, transaction, limits, puts, deletes)
+	return err
+}
+
+func writeTransactionBatchesMeasured(
+	ctx context.Context,
+	transaction *Transaction,
+	limits Limits,
+	puts []Mutation,
+	deletes [][]byte,
+) (uint64, error) {
+	var calls uint64
 	if limits.MaxBatchItems == 0 || limits.MaxMessageBytes < 1024 {
-		return fmt.Errorf("vaulticdb advertised insufficient transaction batch limits")
+		return calls, fmt.Errorf("vaulticdb advertised insufficient transaction batch limits")
 	}
 	maxBytes := uint64(limits.MaxMessageBytes) - 512
 	for putStart := 0; putStart < len(puts); {
@@ -580,7 +592,7 @@ func writeTransactionBatches(ctx context.Context, transaction *Transaction, limi
 		for putEnd < len(puts) && uint64(putEnd-putStart) < uint64(limits.MaxBatchItems) {
 			size := uint64(len(puts[putEnd].Key)+len(puts[putEnd].Value)) + 32
 			if size > maxBytes {
-				return fmt.Errorf("schema mutation exceeds daemon message limit")
+				return calls, fmt.Errorf("schema mutation exceeds daemon message limit")
 			}
 			if used+size > maxBytes {
 				break
@@ -589,11 +601,12 @@ func writeTransactionBatches(ctx context.Context, transaction *Transaction, limi
 			putEnd++
 		}
 		if putEnd == putStart {
-			return fmt.Errorf("schema mutation batch made no progress")
+			return calls, fmt.Errorf("schema mutation batch made no progress")
 		}
 		if err := transaction.WriteBatch(ctx, puts[putStart:putEnd], nil); err != nil {
-			return err
+			return calls, err
 		}
+		calls++
 		putStart = putEnd
 	}
 	for deleteStart := 0; deleteStart < len(deletes); {
@@ -602,7 +615,7 @@ func writeTransactionBatches(ctx context.Context, transaction *Transaction, limi
 		for deleteEnd < len(deletes) && uint64(deleteEnd-deleteStart) < uint64(limits.MaxBatchItems) {
 			size := uint64(len(deletes[deleteEnd])) + 16
 			if size > maxBytes {
-				return fmt.Errorf("schema delete exceeds daemon message limit")
+				return calls, fmt.Errorf("schema delete exceeds daemon message limit")
 			}
 			if used+size > maxBytes {
 				break
@@ -611,14 +624,15 @@ func writeTransactionBatches(ctx context.Context, transaction *Transaction, limi
 			deleteEnd++
 		}
 		if deleteEnd == deleteStart {
-			return fmt.Errorf("schema delete batch made no progress")
+			return calls, fmt.Errorf("schema delete batch made no progress")
 		}
 		if err := transaction.WriteBatch(ctx, nil, deletes[deleteStart:deleteEnd]); err != nil {
-			return err
+			return calls, err
 		}
+		calls++
 		deleteStart = deleteEnd
 	}
-	return nil
+	return calls, nil
 }
 
 func validateDistinctMutations(puts []Mutation, deletes [][]byte) error {

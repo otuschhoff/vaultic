@@ -298,13 +298,20 @@ pack aggregates. ``--include-crawl-debt`` includes individual deferred or
 unknown facts in the report. Add ``--fail-on-warning`` in automation when
 expected incompleteness should produce exit status 2.
 
-For an unattended import, ``--batch-size N`` limits mutations per daemon
-transaction; zero uses the negotiated daemon limit. ``--pack-workers N`` bounds
-concurrent pack imports; zero uses up to eight available CPUs.
-``--pack-timeout DURATION`` limits each pack's complete storage transaction and
-defaults to five minutes, allowing durable object-store commits to exceed the
-short per-RPC safety deadline. An index checkpoint is published only after all
-of its selected pack workers complete.
+For an unattended import, ``--batch-size N`` limits mutations per daemon RPC;
+zero uses the negotiated daemon limit. ``--pack-workers N`` bounds concurrent
+pack preparation; zero uses up to eight available CPUs. ``--pack-timeout
+DURATION`` limits source lookup and preparation for one pack and defaults to
+five minutes. Database publication runs through one ordered lane.
+
+``--packs-per-transaction N`` and ``--import-transaction-bytes BYTES`` bound one
+logical multi-pack transaction; their zero defaults are eight packs and 8 MiB.
+``--prepared-import-bytes BYTES`` bounds retained prepared work and defaults to
+256 MiB. ``--import-batch-timeout DURATION`` independently limits one database
+transaction, defaults to four minutes, and cannot exceed five minutes. If an
+encoded transaction exceeds its estimate, the importer splits it while
+preserving order. A single oversized pack is admitted alone. The final pack
+batch and its index checkpoint commit atomically.
 ``--work-budget N`` limits blob records examined, ``--snapshot-work-budget N``
 limits snapshot nodes, and ``--max-errors N`` stops after that many source
 findings. A reached budget exits as incomplete and is suitable for controlled

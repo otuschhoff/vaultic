@@ -29,6 +29,58 @@ func TestIndexWorkflowsS3CompatibleMetadata(t *testing.T) {
 	testIndexWorkflows(t, true)
 }
 
+func TestIndexFreshBulkImportHandoffAndActivation(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, env)
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	env.globalOptions.BackendTestHook = nil
+
+	daemonPath, err := filepath.Abs(filepath.Join("..", "..", "vaulticdb", "target", "debug", "vaulticdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(daemonPath); err != nil {
+		t.Skipf("compiled vaulticdb unavailable: %v", err)
+	}
+	socket := filepath.Join(env.base, "fresh-vaulticdb.sock")
+	dataDir := filepath.Join(env.base, "fresh-vaulticdb")
+	repoID := repositoryID(t, env)
+	daemonOptions := indexDaemonOptions{Socket: socket, DaemonPath: daemonPath, DataDir: dataDir, Start: true}
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+
+	var imported uint64
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, runErr := runIndexImport(ctx, indexImportOptions{
+			Daemon: daemonOptions, FromLegacy: true, ForceResetOldIndex: true,
+			Activate: true, SnapshotDepth: 0,
+		}, globalOptions, globalOptions.Term)
+		imported = result.PacksImported
+		return runErr
+	})
+	if err != nil || imported == 0 {
+		t.Fatalf("fresh bulk import packs=%d err=%v", imported, err)
+	}
+
+	client, err := daemon.Ensure(context.Background(), daemon.Options{
+		Socket: socket, RepositoryID: repoID, DaemonPath: daemonPath,
+		DataDir: dataDir, WALDataDir: filepath.Join(dataDir, "wal"), ObjectStore: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := daemon.NewSchemaStore(client)
+	marker, found, err := client.Get(context.Background(), []byte("_vaultic/bulk-import-complete-v1"), "")
+	if err != nil || !found || string(marker) != "complete" {
+		t.Fatalf("bulk import completion marker: found=%t value=%q err=%v", found, marker, err)
+	}
+	packs, _, err := store.ScanPrefix(context.Background(), []byte("p:"), nil, 100)
+	if err != nil || uint64(len(packs)) != imported {
+		t.Fatalf("persistent-WAL catalog packs=%d want=%d err=%v", len(packs), imported, err)
+	}
+}
+
 func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	t.Helper()
 	env, cleanup := withTestEnvironment(t)
@@ -122,6 +174,9 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	})
 	if !errors.Is(err, errIndexIncomplete) {
 		t.Fatalf("partial import error = %v", err)
+	}
+	if entries, _, scanErr := store.ScanPrefix(context.Background(), []byte("p:"), nil, 10); scanErr != nil || len(entries) != 2 {
+		t.Fatalf("partial import pack catalog: entries=%d err=%v", len(entries), scanErr)
 	}
 
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()

@@ -16,17 +16,22 @@ Options should include:
 
 - repository and backend options shared with existing commands
 - `--from-legacy` or equivalent explicit source selection
-- `--batch-size`
-- `--pack-workers` for bounded concurrent pack imports
-- `--pack-timeout` for a storage-appropriate per-pack transaction deadline
+- `--batch-size` for the per-RPC mutation limit
+- `--pack-workers` for bounded concurrent pack preparation
+- `--pack-timeout` for a storage-appropriate per-pack preparation deadline
+- `--packs-per-transaction` and `--import-transaction-bytes` for logical transaction bounds
+- `--prepared-import-bytes` for bounded prepared work
+- `--import-batch-timeout` for an independent database transaction deadline
 - `--max-errors`
 - `--resume`
 - `--snapshot-depth` for bounded optional tree traversal
 - `--dry-run`
 - `--json`
 
-The command must be safe to rerun. It should detect already imported index IDs
-and skip or verify them rather than duplicating records.
+The command must be safe to rerun. It detects already imported index IDs and
+skips them rather than duplicating records. Pack preparation is concurrent,
+but publication is ordered and batched through one writer. The checkpoint for
+a completed index is committed atomically with its final pack batch.
 
 ### `vaultic index export`
 

@@ -119,13 +119,13 @@ func (store *SchemaStore) updatePackUsageOnce(
 			return fail(encodeErr)
 		}
 		puts = append(puts, Mutation{Key: key, Value: encoded})
-		changes = append(changes, packChange{packID: id, old: current, current: updated})
+		changes = append(changes, packChange{packID: id, old: &current, current: updated})
 	}
 	if len(changes) == 0 {
 		rollbackTransaction(ctx, transaction)
 		return 0, nil
 	}
-	aggregates, err := applyPackAggregateDeltas(ctx, transaction, changes)
+	aggregates, err := applyPackAggregateDeltas(ctx, transaction, changes, false)
 	if err != nil {
 		return fail(err)
 	}
@@ -133,7 +133,7 @@ func (store *SchemaStore) updatePackUsageOnce(
 	// One coalesced usage event per pack per run, never one per blob.
 	events := make([]PackEvent, 0, len(changes))
 	for _, change := range changes {
-		usedDelta, unusedDelta := usageDeltas(&change.old, change.current)
+		usedDelta, unusedDelta := usageDeltas(change.old, change.current)
 		events = append(events, PackEvent{
 			PackID: change.packID,
 			Record: schema.PackHistoryEvent{
@@ -158,8 +158,9 @@ func (store *SchemaStore) updatePackUsageOnce(
 }
 
 type packChange struct {
-	packID       schema.ID
-	old, current schema.PackRecord
+	packID  schema.ID
+	old     *schema.PackRecord
+	current schema.PackRecord
 }
 
 // applyPackAggregateDeltas folds several pack changes into one read-modify-write
@@ -168,7 +169,12 @@ type packChange struct {
 // earlier packs, so every delta but the last would be lost.
 //
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
-func applyPackAggregateDeltas(ctx context.Context, transaction *Transaction, changes []packChange) ([]Mutation, error) {
+func applyPackAggregateDeltas(
+	ctx context.Context,
+	transaction *Transaction,
+	changes []packChange,
+	advanceUntouched bool,
+) ([]Mutation, error) {
 	keys := aggregateKeys()
 	values, found, err := transaction.MultiGet(ctx, keys)
 	if err != nil {
@@ -185,9 +191,9 @@ func applyPackAggregateDeltas(ctx context.Context, transaction *Transaction, cha
 		}
 		touched := false
 		for _, change := range changes {
-			if aggregateAppliesTo(offset, change.old) {
+			if change.old != nil && aggregateAppliesTo(offset, *change.old) {
 				if found[offset] || !isTierAggregateOffset(offset) {
-					if err := subtractPackAggregate(&aggregate, change.old); err != nil {
+					if err := subtractPackAggregate(&aggregate, *change.old); err != nil {
 						return nil, err
 					}
 					touched = true
@@ -200,10 +206,12 @@ func applyPackAggregateDeltas(ctx context.Context, transaction *Transaction, cha
 				touched = true
 			}
 		}
-		// An aggregate that gained and lost nothing is unchanged, so it is
-		// left untouched rather than rewritten with a bumped sequence.
+		// Match one-pack publication once per batch: every type aggregate and
+		// every existing tier aggregate advances, while unused tiers stay sparse.
 		if !touched {
-			continue
+			if !advanceUntouched || isTierAggregateOffset(offset) && !found[offset] {
+				continue
+			}
 		}
 		aggregate.UpdateSequence++
 		encoded, err := aggregate.MarshalBinary()

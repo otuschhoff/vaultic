@@ -276,6 +276,55 @@ func TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint(t *testing.T) {
 	}
 }
 
+func TestProcessFailedLegacyBatchDoesNotPublishFilterOrCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "fresh-import-failed-commit", DaemonPath: failureDaemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "local", RebuildReset: true,
+		testEnvironment: []string{"VAULTICDB_TEST_FAILPOINTS=before-transaction-commit"},
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(ctx) }()
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+	packID, blobID, indexID := daemonTestID(73), daemonTestID(74), daemonTestID(75)
+	imported := LegacyPackImport{
+		SourceIndex: indexID,
+		PackID:      packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PayloadSize: 8, BlobCount: 1, Lifecycle: schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 8, Type: schema.BlobData}}},
+		},
+	}
+	checkpointValue, err := (schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := Mutation{Key: schema.ImportCheckpointKey(indexID), Value: checkpointValue}
+	if err := store.ImportLegacyPacks(ctx, []LegacyPackImport{imported}, &checkpoint); err == nil {
+		t.Fatal("legacy batch unexpectedly committed through failpoint")
+	}
+	for _, key := range [][]byte{schema.PackKey(packID), schema.BlobKey(blobID), checkpoint.Key} {
+		if _, found, readErr := store.Get(ctx, key); readErr != nil || found {
+			t.Fatalf("failed batch key %q: found=%t err=%v", key, found, readErr)
+		}
+	}
+	if stats := store.freshImportSeen.stats(); stats.Inserts != 0 {
+		t.Fatalf("failed batch filter stats = %#v", stats)
+	}
+	if err := store.ImportLegacyPacks(ctx, []LegacyPackImport{imported}, &checkpoint); err != nil {
+		t.Fatalf("retry legacy batch: %v", err)
+	}
+	if stats := store.freshImportSeen.stats(); stats.Inserts != 2 {
+		t.Fatalf("committed batch filter stats = %#v", stats)
+	}
+}
+
 func TestProcessRollbackRejectsStaleWriterEpoch(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

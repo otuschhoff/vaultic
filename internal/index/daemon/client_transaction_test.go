@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -58,6 +59,48 @@ func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.
 	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
 	if err != nil || aggregate.PackCount != 2 || aggregate.BlobCount != 2 || aggregate.PayloadSize != 20 {
 		t.Fatalf("aggregate = %#v, err=%v", aggregate, err)
+	}
+}
+
+func TestLegacyImportAdvancesUntouchedAggregateSequence(t *testing.T) {
+	client, err := Ensure(
+		context.Background(),
+		Options{Socket: testSocket(t), RepositoryID: "phase32-aggregate-sequence", DaemonPath: daemonBinary(t), DataDir: t.TempDir()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	ctx := context.Background()
+	treePack, treeBlob := daemonTestID(201), daemonTestID(202)
+	if err := store.PublishPack(ctx, PublishedPack{
+		PackID: treePack,
+		Record: schema.PackRecord{Type: schema.PackTree, PayloadSize: 5, BlobCount: 1, Lifecycle: schema.PackExportPending},
+		Blobs: map[schema.ID]schema.BlobRecord{treeBlob: {
+			Locations: []schema.BlobLocation{{PackID: treePack, Length: 5, Type: schema.BlobTree}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	treeBefore, found := readAggregate(t, store, ctx, schema.PackAggregateKey(schema.AggregateTree))
+	if !found {
+		t.Fatal("tree aggregate missing before legacy import")
+	}
+	dataPack, dataBlob := daemonTestID(203), daemonTestID(204)
+	if err := store.ImportLegacyPack(ctx, LegacyPackImport{
+		SourceIndex: daemonTestID(205), PackID: dataPack,
+		Record: schema.PackRecord{Type: schema.PackData, PayloadSize: 7, BlobCount: 1, Lifecycle: schema.PackImported},
+		Blobs: map[schema.ID]schema.BlobRecord{dataBlob: {
+			Locations: []schema.BlobLocation{{PackID: dataPack, Length: 7, Type: schema.BlobData}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	treeAfter, found := readAggregate(t, store, ctx, schema.PackAggregateKey(schema.AggregateTree))
+	if !found || treeAfter.UpdateSequence != treeBefore.UpdateSequence+1 ||
+		treeAfter.PackCount != treeBefore.PackCount || treeAfter.PayloadSize != treeBefore.PayloadSize {
+		t.Fatalf("untouched tree aggregate before=%+v after=%+v found=%t", treeBefore, treeAfter, found)
 	}
 }
 
@@ -666,5 +709,300 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	resolvedDebt, err := schema.UnmarshalCrawlDebtRecord(debtValue)
 	if err != nil || resolvedDebt.Status != schema.DebtResolved || resolvedDebt.ErrorClass != "" {
 		t.Fatalf("resolved pack debt = %#v, err=%v", resolvedDebt, err)
+	}
+}
+
+func TestSchemaStoreImportsLegacyPackBatchWithCheckpoint(t *testing.T) {
+	options := Options{
+		Socket:       testSocket(t),
+		RepositoryID: "phase32-pack-batch-import",
+		DaemonPath:   daemonBinary(t),
+		DataDir:      t.TempDir(),
+		RebuildReset: true,
+	}
+	client, err := Ensure(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+	ctx := context.Background()
+	source, pack1, pack2, blobID := daemonTestID(31), daemonTestID(32), daemonTestID(33), daemonTestID(34)
+	packImport := func(packID schema.ID, offset uint64, size uint64) LegacyPackImport {
+		return LegacyPackImport{
+			SourceIndex: source,
+			PackID:      packID,
+			BatchSize:   2,
+			Record: schema.PackRecord{
+				Type:              schema.PackData,
+				SourceIndexIDs:    []schema.ID{daemonTestID(99), daemonTestID(1)},
+				PhysicalSize:      size + 2,
+				PhysicalSizeKnown: true,
+				PayloadSize:       size,
+				HeaderSize:        2,
+				BlobCount:         1,
+				Lifecycle:         schema.PackImported,
+			},
+			Blobs: map[schema.ID]schema.BlobRecord{
+				blobID: {Locations: []schema.BlobLocation{{
+					PackID: packID, Offset: offset, Length: uint32(size), UncompressedSize: uint32(size),
+					Type: schema.BlobData,
+				}}},
+			},
+		}
+	}
+	checkpointRecord := schema.ImportCheckpointRecord{PacksImported: 2, BlobsImported: 2}
+	checkpoint := Mutation{
+		Key:   schema.ImportCheckpointKey(source),
+		Value: encodeSchemaRecord(t, checkpointRecord),
+	}
+	if err := store.ImportLegacyPacks(
+		ctx,
+		[]LegacyPackImport{packImport(pack1, 1, 8), packImport(pack2, 2, 9)},
+		&checkpoint,
+	); err != nil {
+		t.Fatal(err)
+	}
+	packValue, found, err := store.Get(ctx, schema.PackKey(pack1))
+	if err != nil || !found {
+		t.Fatalf("read batched pack: found=%t err=%v", found, err)
+	}
+	packRecord, err := schema.UnmarshalPackRecord(packValue)
+	expectedSources := []schema.ID{daemonTestID(1), source, daemonTestID(99)}
+	if err != nil || !reflect.DeepEqual(packRecord.SourceIndexIDs, expectedSources) {
+		t.Fatalf("canonical source indexes = %#v, want %#v, err=%v", packRecord.SourceIndexIDs, expectedSources, err)
+	}
+
+	blobValue, found, err := store.Get(ctx, schema.BlobKey(blobID))
+	if err != nil || !found {
+		t.Fatalf("read batched blob: found=%t err=%v", found, err)
+	}
+	blob, err := schema.UnmarshalBlobRecord(blobValue)
+	if err != nil || len(blob.Locations) != 2 || blob.Locations[0].PackID != pack1 || blob.Locations[1].PackID != pack2 {
+		t.Fatalf("batched blob locations = %#v, err=%v", blob.Locations, err)
+	}
+	aggregateValue, found, err := store.Get(ctx, schema.PackAggregateKey(schema.AggregateAll))
+	if err != nil || !found {
+		t.Fatalf("read batched aggregate: found=%t err=%v", found, err)
+	}
+	aggregate, err := schema.UnmarshalPackAggregate(aggregateValue)
+	if err != nil || aggregate.PackCount != 2 || aggregate.PhysicalSize != 21 || aggregate.PayloadSize != 17 ||
+		aggregate.HeaderSize != 4 || aggregate.BlobCount != 2 {
+		t.Fatalf("batched aggregate = %#v, err=%v", aggregate, err)
+	}
+	checkpointValue, found, err := store.Get(ctx, checkpoint.Key)
+	if err != nil || !found {
+		t.Fatalf("read batch checkpoint: found=%t err=%v", found, err)
+	}
+	storedCheckpoint, err := schema.UnmarshalImportCheckpointRecord(checkpointValue)
+	if err != nil || storedCheckpoint != checkpointRecord {
+		t.Fatalf("batch checkpoint = %#v, err=%v", storedCheckpoint, err)
+	}
+	stats := store.LegacyImportStats()
+	if stats.Batches != 1 || stats.Attempts != 1 || stats.Commits != 1 || stats.PacksCommitted != 2 ||
+		stats.BlobsCommitted != 1 || stats.MutationsCommitted == 0 || stats.EncodedBytesCommitted == 0 ||
+		stats.MutationRPCs <= 1 || stats.PlanningReads == 0 || stats.SourceIndexesCommitted != 1 ||
+		stats.DefinitelyAbsentLookups != 3 || stats.FilterLayers == 0 || stats.FilterInserts != 3 ||
+		len(stats.FilterLayerOccupancy) != int(stats.FilterLayers) || stats.FilterLayerOccupancy[0] <= 0 {
+		t.Fatalf("legacy import stats = %#v", stats)
+	}
+}
+
+func TestLegacyImportCheckpointOnlySkipsAggregatesAndNonFreshFilterMetrics(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "phase32-checkpoint-only", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), RebuildReset: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	store := NewSchemaStore(client)
+	source, packID, blobID := daemonTestID(38), daemonTestID(39), daemonTestID(40)
+	checkpoint := Mutation{
+		Key: schema.ImportCheckpointKey(source),
+		Value: encodeSchemaRecord(t, schema.ImportCheckpointRecord{
+			PacksImported: 0,
+		}),
+	}
+	if err := store.ImportLegacyPacks(ctx, nil, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Get(ctx, schema.PackAggregateKey(schema.AggregateAll)); err != nil || found {
+		t.Fatalf("checkpoint-only aggregate: found=%t err=%v", found, err)
+	}
+	imported := LegacyPackImport{
+		SourceIndex: source,
+		PackID:      packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PhysicalSize: 2, PhysicalSizeKnown: true,
+			PayloadSize: 1, HeaderSize: 1, BlobCount: 1, Lifecycle: schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{
+			PackID: packID, Length: 1, UncompressedSize: 1, Type: schema.BlobData,
+		}}}},
+	}
+	if err := store.ImportLegacyPack(ctx, imported); err != nil {
+		t.Fatal(err)
+	}
+	stats := store.LegacyImportStats()
+	if stats.PossiblyPresentLookups != 0 || stats.FalsePositiveEquivalentLookups != 0 || stats.FilterLayers != 0 {
+		t.Fatalf("non-fresh filter metrics = %#v", stats)
+	}
+}
+
+func TestPrepareLegacyImportBatchRejectsDebtWithoutKey(t *testing.T) {
+	packID, blobID := daemonTestID(35), daemonTestID(37)
+	_, err := prepareLegacyImportBatch([]LegacyPackImport{{
+		SourceIndex: daemonTestID(36),
+		PackID:      packID,
+		Record: schema.PackRecord{
+			Type: schema.PackData, PhysicalSize: 2, PhysicalSizeKnown: true,
+			PayloadSize: 1, HeaderSize: 1, BlobCount: 1, Lifecycle: schema.PackImported,
+		},
+		Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{
+			PackID: packID, Length: 1, UncompressedSize: 1, Type: schema.BlobData,
+		}}}},
+		Debt: &schema.CrawlDebtRecord{
+			SourceIndexOrPack: packID, SourceKnown: true, Reason: schema.DebtUnavailablePack,
+			Status: schema.DebtPending,
+		},
+	}}, nil)
+	if err == nil || err.Error() != "prepare legacy pack 0: legacy pack debt requires a key" {
+		t.Fatalf("missing debt key error = %v", err)
+	}
+}
+
+func TestSchemaStoreLegacyBatchMatchesOrderedOnePackImports(t *testing.T) {
+	originalClock := historyClock
+	historyClock = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	t.Cleanup(func() { historyClock = originalClock })
+	ctx := context.Background()
+	newStore := func(repositoryID string) (*SchemaStore, *Client) {
+		client, err := Ensure(ctx, Options{
+			Socket: testSocket(t), RepositoryID: repositoryID, DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+			RebuildReset: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewSchemaStore(client), client
+	}
+	oneAtATime, sequentialClient := newStore("phase32-equivalence-sequential")
+	defer sequentialClient.Close(ctx)
+	batched, batchClient := newStore("phase32-equivalence-batch")
+	defer batchClient.Close(ctx)
+	batched.freshImportSeen = newIDSeenFilter(1, 1, freshImportFalsePositive)
+
+	source1, source2 := daemonTestID(61), daemonTestID(62)
+	packID, blob1, blob2 := daemonTestID(63), daemonTestID(64), daemonTestID(65)
+	debtKey := schema.CrawlDebtKey(schema.ID{}, packID)
+	debt := schema.CrawlDebtRecord{
+		SourceIndexOrPack: packID, SourceKnown: true, Reason: schema.DebtUnavailablePack,
+		Status: schema.DebtPending, ErrorClass: "offline",
+	}
+	makeImport := func(source, blob schema.ID, offset uint64) LegacyPackImport {
+		return LegacyPackImport{
+			SourceIndex: source,
+			PackID:      packID,
+			Record: schema.PackRecord{
+				Type: schema.PackData, PhysicalSize: 24, PhysicalSizeKnown: true,
+				PayloadSize: 8, HeaderSize: 16, BlobCount: 1, Lifecycle: schema.PackImported,
+			},
+			Blobs: map[schema.ID]schema.BlobRecord{blob: {Locations: []schema.BlobLocation{{
+				PackID: packID, Offset: offset, Length: 8, UncompressedSize: 9, Type: schema.BlobData,
+			}}}},
+			Placements: map[uint64]schema.PlacementRecord{7: {
+				State: schema.PlacementLive, StorageClass: "hot", Bytes: 24,
+			}},
+			DebtKey: debtKey,
+			Debt:    &debt,
+		}
+	}
+	imports := []LegacyPackImport{makeImport(source1, blob1, 1), makeImport(source2, blob2, 9)}
+	imports[1].Debt = nil
+	checkpointRecord := schema.ImportCheckpointRecord{PacksImported: 2, BlobsImported: 2, ErrorsSeen: 2}
+	checkpoint := Mutation{Key: schema.ImportCheckpointKey(source2), Value: encodeSchemaRecord(t, checkpointRecord)}
+	for _, imported := range imports {
+		if err := oneAtATime.ImportLegacyPack(ctx, imported); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := oneAtATime.Put(ctx, checkpoint.Key, checkpoint.Value, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := batched.ImportLegacyPacks(ctx, imports, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	prefixes := [][]byte{[]byte("b:"), []byte("p:"), []byte("pl:"), []byte("q:"), []byte("a:"), []byte("ph:"), []byte("meta:")}
+	sequentialRecords := readSchemaPrefixes(t, oneAtATime, prefixes)
+	batchRecords := readSchemaPrefixes(t, batched, prefixes)
+	normalizeAggregateSequences(t, sequentialRecords)
+	normalizeAggregateSequences(t, batchRecords)
+	normalizeDebtAttemptTime(t, sequentialRecords, debtKey)
+	normalizeDebtAttemptTime(t, batchRecords, debtKey)
+	if !reflect.DeepEqual(batchRecords, sequentialRecords) {
+		t.Fatalf("batched authoritative metadata differs:\nsequential=%#v\nbatched=%#v", sequentialRecords, batchRecords)
+	}
+	if stats := batched.LegacyImportStats(); !stats.FilterFallbackToDatabase || stats.DefinitelyAbsentLookups != 0 {
+		t.Fatalf("fallback filter stats = %#v", stats)
+	}
+	resolvedDebt, err := schema.UnmarshalCrawlDebtRecord(batchRecords[string(debtKey)])
+	if err != nil || resolvedDebt.Status != schema.DebtResolved || resolvedDebt.ErrorClass != "" {
+		t.Fatalf("mixed batch debt = %#v, err=%v", resolvedDebt, err)
+	}
+}
+
+func normalizeDebtAttemptTime(t *testing.T, records map[string][]byte, key []byte) {
+	t.Helper()
+	value, found := records[string(key)]
+	if !found {
+		return
+	}
+	debt, err := schema.UnmarshalCrawlDebtRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debt.LastAttemptUnixNano = 0
+	records[string(key)] = encodeSchemaRecord(t, debt)
+}
+
+func readSchemaPrefixes(t *testing.T, store *SchemaStore, prefixes [][]byte) map[string][]byte {
+	t.Helper()
+	result := make(map[string][]byte)
+	for _, prefix := range prefixes {
+		var after []byte
+		for {
+			entries, done, err := store.ScanPrefix(context.Background(), prefix, after, 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				result[string(entry.Key)] = append([]byte(nil), entry.Value...)
+				after = entry.Key
+			}
+			if done {
+				break
+			}
+		}
+	}
+	return result
+}
+
+func normalizeAggregateSequences(t *testing.T, records map[string][]byte) {
+	t.Helper()
+	for key, value := range records {
+		if !bytes.HasPrefix([]byte(key), []byte("a:")) {
+			continue
+		}
+		aggregate, err := schema.UnmarshalPackAggregate(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aggregate.UpdateSequence = 0
+		records[key] = encodeSchemaRecord(t, aggregate)
 	}
 }

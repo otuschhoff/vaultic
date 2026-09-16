@@ -6,7 +6,7 @@
 
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) · [Operational monitoring](phase-33-operational-monitoring-and-metrics-export.md)
 
-**Status: design specification, not yet implemented.**
+**Status: implemented.**
 
 **Goal:** make a fresh legacy JSON-index rebuild sustain useful throughput as the SlateDB candidate grows, without weakening duplicate-location preservation, aggregate accuracy, history ordering, transaction atomicity, resumability, or metadata durability. Pack preparation remains parallel, publication amortizes fixed transaction work across bounded multi-pack batches, and fresh-import lookup avoidance keeps a stable false-positive rate for repositories containing hundreds of millions of blob IDs.
 
@@ -78,7 +78,7 @@ Split import into three bounded stages:
 
 A bounded prepared-result channel provides backpressure. Track both item count and estimated retained bytes so a few unusually large packs cannot exceed the memory budget. Cancellation closes admission, lets in-flight preparation finish or abort, and prevents a later batch from committing after the first terminal error.
 
-Pack preparation timeout and database batch timeout are separate. `--pack-timeout` continues to bound source `Stat` and preparation for one pack. Add `--import-batch-timeout` for one database batch, with a default derived from the existing transaction timeout and an explicit upper bound.
+Pack preparation timeout and database batch timeout are separate. `--pack-timeout` continues to bound source `Stat` and preparation for one pack. Add `--import-batch-timeout` for one database batch, with a default derived from the existing transaction timeout and an explicit upper bound. `--packs-per-transaction` is capped at 256 because one transaction's pack count is also the minimum in-flight preparation floor needed to guarantee progress under byte backpressure.
 
 ## Multi-pack transaction API
 
@@ -120,7 +120,7 @@ The planner must not rely on transaction read-your-write behavior between indivi
 
 ### Aggregates and history
 
-Read `aggregateKeys()` once. For each unique pack, calculate the delta from its pre-batch record to its final record, apply all deltas in memory, increment each touched aggregate sequence once, and emit one mutation per touched aggregate key. This removes the principal shared-key conflict and repeated read/write amplification.
+Read `aggregateKeys()` once. For each unique pack, calculate the delta from its pre-batch record to its final record and apply all deltas in memory. Preserve the existing publication contract by incrementing every type aggregate and every existing tier aggregate once per batch; missing unused tiers remain sparse. Emit at most one mutation per aggregate key. This removes the principal shared-key conflict and repeated read/write amplification.
 
 Read the history-enabled marker and next-event sequence once. Allocate one contiguous range for all successfully encoded events, emit deterministic event keys, and update the next sequence once. Preserve the current rule that an unencodable advisory history event does not fail catalog publication.
 
@@ -175,7 +175,7 @@ Replace it with a scalable Bloom filter:
 - enforce a memory ceiling derived from the fresh-import memory profile;
 - if the ceiling is reached, degrade explicitly to database lookups without violating correctness.
 
-Target an aggregate false-positive probability no worse than 0.1% through the supported import size. Approximately 400 million IDs require about 720 MiB at that target, well below the existing high-memory bulk-import allowances. Tests must use deterministic hashes and tiny layers to exercise rollover and saturation cheaply.
+Target an aggregate false-positive probability no worse than 0.1% through the supported import size. With geometric capacities and successively tighter layer probabilities, covering 400 million IDs allocates approximately 1.31 GiB and remains within the 1.5 GiB fresh-import ceiling. Tests must use deterministic hashes and tiny layers to exercise rollover and saturation cheaply.
 
 ## Checkpoints, retries, and shutdown
 
@@ -183,7 +183,7 @@ For an index that fits in one transaction, commit all packs and its checkpoint t
 
 Only update process-local progress counters after a successful batch commit. Return the first input position associated with a planning or commit failure so reporting remains actionable. An aborted transaction retries the entire batch from fresh reads. A validation, timeout, cancellation, or permanent storage error aborts the batch and prevents its filter updates.
 
-The existing successful-import marker remains the sole authorization for memory-WAL handoff. Batching must not make a work-budget stop, partial index, finding, or failed checkpoint appear complete.
+The existing successful-import marker remains the sole authorization for memory-WAL handoff. Batching must not make a work-budget stop, partial index, finding, or failed checkpoint appear complete. When activation is requested, validate the complete candidate, write the marker, cleanly stop the temporary daemon so the memory WAL is handed off, reopen the candidate on the inherited persistent local WAL, and only then publish SlateDB authority. A shutdown, handoff, or reopen failure must leave legacy metadata authoritative.
 
 ## Observability
 
@@ -270,7 +270,43 @@ Phase 32 is complete when:
 - the selected default reduces transaction commits by at least 4x on the 20-million-record fixture;
 - the 20-million-record fixture improves pack throughput by at least 2x without increased errors or unbounded memory;
 - interval throughput no longer declines because the membership filter saturates;
-- metrics identify preparation, publication, lookup, WAL, flush, compaction, backend, and checkpoint waiting separately;
+- local metrics identify preparation, publication, lookup, transaction retries, and checkpoint waiting separately; the configured WAL profile is logged, while live WAL, flush, compaction, and backend attribution remains part of the Phase 33 monitoring schema;
 - normal `PublishPack`, non-fresh import, activation, and metadata durability semantics remain unchanged.
 
 If Stage 2 cannot meet the throughput target because the single writer remains dominant, Stage 3 becomes required and its aggregate/history rebuild must complete and validate before the candidate can be activated.
+
+## Implementation validation
+
+The Stage 2 implementation was validated on the same filesystem-backed
+repository and candidate directories on an NFSv3 mount used for the baseline.
+The candidate used the local object-store adapter, memory WAL, and no configured
+read-cache tier. The command used 32 preparers, the default eight packs and
+8 MiB per logical transaction, a 256 MiB prepared-work limit, snapshots
+disabled, and a 20-million-record work budget. Reaching that budget
+intentionally returns the incomplete exit status and does not authorize
+memory-WAL handoff.
+
+| Measurement | Per-pack baseline | Phase 32 |
+| --- | ---: | ---: |
+| Elapsed time | 9m28.1s | 4m32.6s |
+| Overall pack throughput | 43.9 packs/s | 91.6 packs/s |
+| Overall blob throughput | 35,219 blobs/s | 73,422 blobs/s |
+| Logical commits | 24,942 | 4,616 |
+| Final interval pack throughput | 31.3 packs/s | 79.6 packs/s |
+
+The measured speedup was 2.08x and logical commits fell by 5.4x. The final run
+imported 24,942 packs and 19,999,995 blob records with no transaction conflicts,
+retries, adaptive splits, or import errors. It issued 5,344 mutation RPCs for
+20,062,630 final mutations. The prepared queue peaked at 151 packs and 13.4 MiB.
+
+The scalable filter held 19,950,312 unique IDs in two layers using 50,346,239
+bytes. Its estimated aggregate false-positive probability was 0.052%, below the
+0.1% target; 6,353 of 68,259 possibly-present lookups missed, and the filter did
+not enter database fallback. A zero-allocation sizing test projects the layered
+configuration through 400 million IDs within the 1.5 GiB ceiling and false-
+positive budget.
+
+A deterministic 64-pack benchmark also exercises transaction sizes 1, 4, 8,
+and 16. It reports 64, 16, 8, and 4 commits per operation respectively. Eight
+packs remains the default because it clears the commit-reduction target while
+keeping transaction lifetime and encoded-size exposure conservative.
