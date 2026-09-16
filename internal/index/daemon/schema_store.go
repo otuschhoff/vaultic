@@ -27,40 +27,50 @@ const bulkImportCompleteKey = "_vaultic/bulk-import-complete-v1"
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
 type SchemaStore struct {
-	client           *Client
-	publicationMu    sync.RWMutex
-	legacyImportGate chan struct{}
-	freshImportSeen  *idSeenFilter
-	legacySplitMu    sync.Mutex
-	legacySplitAuth  map[schema.ID]struct{}
-	legacyMetrics    legacyImportMetrics
+	client             *Client
+	publicationMu      sync.RWMutex
+	legacyImportGate   chan struct{}
+	freshImportSeen    *idSeenFilter
+	legacySplitMu      sync.Mutex
+	legacySplitAuth    map[schema.ID]struct{}
+	legacyMetrics      legacyImportMetrics
+	deferLegacyCleanup bool
 }
 
 type legacyImportMetrics struct {
-	batches               atomic.Uint64
-	ingestedBatches       atomic.Uint64
-	reducedBatches        atomic.Uint64
-	attempts              atomic.Uint64
-	commits               atomic.Uint64
-	retries               atomic.Uint64
-	conflicts             atomic.Uint64
-	packsCommitted        atomic.Uint64
-	blobsCommitted        atomic.Uint64
-	mutationsCommitted    atomic.Uint64
-	encodedBytesCommitted atomic.Uint64
-	mutationRPCs          atomic.Uint64
-	mutationRPCNanos      atomic.Uint64
-	planningReads         atomic.Uint64
-	replannedBytes        atomic.Uint64
-	sourceIndexes         atomic.Uint64
-	definitelyAbsent      atomic.Uint64
-	possiblyPresent       atomic.Uint64
-	found                 atomic.Uint64
-	gateWaitNanos         atomic.Uint64
-	planningNanos         atomic.Uint64
-	reductionNanos        atomic.Uint64
-	commitNanos           atomic.Uint64
-	totalNanos            atomic.Uint64
+	batches                atomic.Uint64
+	ingestedBatches        atomic.Uint64
+	reducedBatches         atomic.Uint64
+	attempts               atomic.Uint64
+	commits                atomic.Uint64
+	retries                atomic.Uint64
+	conflicts              atomic.Uint64
+	packsCommitted         atomic.Uint64
+	blobsCommitted         atomic.Uint64
+	mutationsCommitted     atomic.Uint64
+	encodedBytesCommitted  atomic.Uint64
+	mutationRPCs           atomic.Uint64
+	mutationRPCNanos       atomic.Uint64
+	planningReads          atomic.Uint64
+	replannedBytes         atomic.Uint64
+	sourceIndexes          atomic.Uint64
+	definitelyAbsent       atomic.Uint64
+	possiblyPresent        atomic.Uint64
+	found                  atomic.Uint64
+	gateWaitNanos          atomic.Uint64
+	planningNanos          atomic.Uint64
+	reductionNanos         atomic.Uint64
+	commitNanos            atomic.Uint64
+	totalNanos             atomic.Uint64
+	cleanupCalls           atomic.Uint64
+	cleanupPages           atomic.Uint64
+	cleanupReceipts        atomic.Uint64
+	cleanupNanos           atomic.Uint64
+	cleanupScanNanos       atomic.Uint64
+	cleanupBeginNanos      atomic.Uint64
+	cleanupWriteNanos      atomic.Uint64
+	cleanupCommitNanos     atomic.Uint64
+	cleanupDeferredCommits atomic.Uint64
 }
 
 // LegacyImportStats is a process-local, low-cardinality snapshot of bulk
@@ -90,6 +100,15 @@ type LegacyImportStats struct {
 	PlanningTime                   time.Duration
 	ReductionTime                  time.Duration
 	CommitTime                     time.Duration
+	CleanupCalls                   uint64
+	CleanupPages                   uint64
+	CleanupReceipts                uint64
+	CleanupTime                    time.Duration
+	CleanupScanTime                time.Duration
+	CleanupBeginTime               time.Duration
+	CleanupWriteTime               time.Duration
+	CleanupCommitTime              time.Duration
+	CleanupDeferredCommits         uint64
 	// TotalTime is aggregate importer transaction time across attempts/lanes,
 	// not wall-clock elapsed time.
 	TotalTime                time.Duration
@@ -115,8 +134,13 @@ func (store *SchemaStore) LegacyImportStats() LegacyImportStats {
 		DefinitelyAbsentLookups: metrics.definitelyAbsent.Load(), PossiblyPresentLookups: metrics.possiblyPresent.Load(),
 		FoundLookups: metrics.found.Load(), GateWait: time.Duration(metrics.gateWaitNanos.Load()),
 		PlanningTime: time.Duration(metrics.planningNanos.Load()), ReductionTime: time.Duration(metrics.reductionNanos.Load()),
-		CommitTime: time.Duration(metrics.commitNanos.Load()),
-		TotalTime:  time.Duration(metrics.totalNanos.Load()),
+		CommitTime:   time.Duration(metrics.commitNanos.Load()),
+		TotalTime:    time.Duration(metrics.totalNanos.Load()),
+		CleanupCalls: metrics.cleanupCalls.Load(), CleanupPages: metrics.cleanupPages.Load(),
+		CleanupReceipts: metrics.cleanupReceipts.Load(), CleanupTime: time.Duration(metrics.cleanupNanos.Load()),
+		CleanupScanTime: time.Duration(metrics.cleanupScanNanos.Load()), CleanupBeginTime: time.Duration(metrics.cleanupBeginNanos.Load()),
+		CleanupWriteTime: time.Duration(metrics.cleanupWriteNanos.Load()), CleanupCommitTime: time.Duration(metrics.cleanupCommitNanos.Load()),
+		CleanupDeferredCommits: metrics.cleanupDeferredCommits.Load(),
 	}
 	if result.PossiblyPresentLookups > result.FoundLookups {
 		result.FalsePositiveEquivalentLookups = result.PossiblyPresentLookups - result.FoundLookups
@@ -158,6 +182,14 @@ func (s *SchemaStore) EnableFreshLegacyImport() {
 		s.legacySplitAuth = make(map[schema.ID]struct{})
 	}
 	s.legacySplitMu.Unlock()
+}
+
+func (s *SchemaStore) EnableDeferredLegacyImportCleanup() error {
+	if s.freshImportSeen == nil {
+		return ErrLegacyImportFreshRequired
+	}
+	s.deferLegacyCleanup = true
+	return nil
 }
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.

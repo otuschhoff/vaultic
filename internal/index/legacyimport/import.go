@@ -52,6 +52,7 @@ type Options struct {
 	SnapshotDepth          uint
 	SnapshotWorkBudget     uint64
 	Progress               func(Progress)
+	Telemetry              *SchedulerTelemetry
 }
 
 type Progress struct {
@@ -241,6 +242,8 @@ type packPipelineStats struct {
 
 //nolint:funlen,gocognit,gocyclo,nestif // Existing domain flow is an explicit complexity exception; Stage 3 remains gated.
 func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (Result, error) {
+	options.Telemetry.phase("source")
+	defer options.Telemetry.phase("finished")
 	var result Result
 	if options.PackTimeout < 0 {
 		return result, fmt.Errorf("pack timeout must not be negative")

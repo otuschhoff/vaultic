@@ -1,12 +1,13 @@
 PLATFORMS := macos-arm64 linux-amd64 linux-arm64
 
-.PHONY: all build clean test metrics vaultic vaulticdb \
+.PHONY: all build profile clean test metrics vaultic vaulticdb \
 	vaulticdb-proto vaulticdb-musl vaulticdb-smoke \
 	vaultic-rados-linux-amd64 vaultic-rados-image-linux-amd64
 
 BIN_DIR := bin
 VAULTICDB_RUST_TOOLCHAIN ?= stable
 VAULTICDB_PREPARE_DEBUG ?= 0
+VAULTIC_BUILD_TAGS ?=
 MACOS_CODESIGN_IDENTITY ?= -
 MACOS_CUSTODIAN_ENTITLEMENTS ?= contrib/macos/vaultic-key-custodian.entitlements
 VAULTIC_RADOS_IMAGE ?= vaultic:rados-linux-amd64
@@ -31,6 +32,9 @@ all: build
 
 # Alias to build the CLI, metadata daemon, and key broker for the host platform.
 build: vaultic vaulticdb
+
+profile:
+	$(MAKE) BIN_DIR=$(BIN_DIR)/profile VAULTIC_BUILD_TAGS=profile VAULTICDB_PREPARE_DEBUG=0 build
 
 clean:
 	rm -rf $(BIN_DIR)
@@ -59,7 +63,7 @@ vaultic-%:
 		*) echo "vaultic: unsupported platform '$*'; supported: $(PLATFORMS)" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p $(BIN_DIR)/$*; \
-	go run build.go --goos "$$goos" --goarch "$$goarch" -o $(BIN_DIR)/$*/vaultic
+	go run build.go --goos "$$goos" --goarch "$$goarch" $(if $(VAULTIC_BUILD_TAGS),--tags "$(VAULTIC_BUILD_TAGS)") -o $(BIN_DIR)/$*/vaultic
 
 # --- vaulticdb (Rust daemon and key broker) ---
 # Linux targets use the *-musl target triple (statically linked by default)

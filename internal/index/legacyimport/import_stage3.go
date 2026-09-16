@@ -50,6 +50,9 @@ func importPacksStage3(
 	checkpointIndex bool,
 	report func(packPipelineStats),
 ) ([]packImportResult, uint64, packPipelineStats, int) {
+	options.Telemetry.phase("schedule")
+	defer options.Telemetry.phase("source")
+	defer options.Telemetry.queues(0, 0, 0)
 	outcomes := make([]packImportResult, len(packs))
 	counters := &packPipelineCounters{report: report}
 	if len(packs) == 0 {
@@ -173,8 +176,10 @@ func importPacksStage3(
 			current := counters.activeLanes.Add(1)
 			updateAtomicMaximum(&counters.peakLanes, current)
 			go func(logical stage3LogicalBatch) {
+				options.Telemetry.lane(1)
 				outcome := stage3IngestOutcome{ordinal: logical.ordinal}
 				parts, failureOffset, err := stage3IngestSplitBatch(workerCtx, store, sourceIndex, logical, options, counters)
+				options.Telemetry.lane(-1)
 				if failureOffset >= 0 && failureOffset < len(logical.items) {
 					outcome.failedPack = logical.items[failureOffset].index
 				} else {
@@ -225,7 +230,10 @@ func importPacksStage3(
 				if index == len(outcome.parts)-1 {
 					finalCheckpoint = logical.checkpoint
 				}
-				if err := reduceLegacyImportBatch(ctx, store, sourceIndex, part, finalCheckpoint, options, counters); err != nil {
+				options.Telemetry.phase("reduce")
+				err := reduceLegacyImportBatch(ctx, store, sourceIndex, part, finalCheckpoint, options, counters)
+				options.Telemetry.phase("schedule")
+				if err != nil {
 					failures = append(failures, stage3IngestOutcome{ordinal: outcome.ordinal, failedPack: logical.items[0].index, err: err})
 					if failedPack < 0 {
 						failedPack = logical.items[0].index
@@ -260,6 +268,7 @@ func importPacksStage3(
 	}
 
 	for {
+		options.Telemetry.phase("schedule")
 		progress := false
 		for {
 			item, found := pendingPrepared[nextPack]
@@ -297,6 +306,7 @@ func importPacksStage3(
 		}
 
 		admitReady()
+		options.Telemetry.queues(len(ready), len(completed), counters.preparedBytes.Load())
 		if reduceReady() {
 			progress = true
 		}
@@ -313,6 +323,14 @@ func importPacksStage3(
 			break
 		}
 		if !progress {
+			switch {
+			case len(ready) > 0 && activeLanes < lanes:
+				options.Telemetry.phase("dependency_wait")
+			case activeLanes > 0:
+				options.Telemetry.phase("ingest_wait")
+			default:
+				options.Telemetry.phase("prepare_wait")
+			}
 			select {
 			case item, ok := <-prepared:
 				if !ok {
@@ -406,6 +424,7 @@ func importPacksStage3(
 	}
 
 	if checkpointIndex && !options.DryRun {
+		options.Telemetry.phase("cleanup")
 		if err := store.CompleteLegacyImportSession(ctx, sourceIndex); err != nil {
 			outcomes[len(outcomes)-1].err = err
 			return outcomes, counters.committedBatches.Load(), counters.snapshot(), len(outcomes) - 1

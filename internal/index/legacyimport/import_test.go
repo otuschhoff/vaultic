@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -487,6 +489,7 @@ func encodedIndexWithPacks(t *testing.T, packIDs []vaultic.ID) []byte {
 }
 
 func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
 	indexID := vaultic.NewRandomID()
 	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()}
 	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
@@ -502,7 +505,7 @@ func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
 			source,
 			fixedStatter{size: 16},
 			store,
-			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+			Options{PublicationLanes: 2, PacksPerTransaction: 1, Telemetry: telemetry},
 		)
 		if err != nil {
 			t.Errorf("stage 3 import failed: %v", err)
@@ -535,6 +538,30 @@ func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
 	}
 	if !slices.Equal(store.reduceCheckpoint, []bool{false, false, false, true}) {
 		t.Fatalf("checkpoint flags = %v", store.reduceCheckpoint)
+	}
+	stats := telemetry.Snapshot()
+	if stats.ActiveLanes != 0 || stats.LaneTime[2] <= 0 || stats.PhaseTime["reduce"] <= 0 || stats.PhaseTime["cleanup"] <= 0 {
+		t.Fatalf("scheduler attribution: %+v", stats)
+	}
+}
+
+func TestSchedulerTelemetryAccountsDisjointTime(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	telemetry.last = time.Now().Add(-3 * time.Second)
+	telemetry.state.ActiveLanes = 2
+	telemetry.account(telemetry.last.Add(time.Second))
+	telemetry.state.ActiveLanes = 0
+	telemetry.state.Phase = "cleanup"
+	stats := telemetry.Snapshot()
+	if stats.PhaseTime["source"] != time.Second || stats.LaneTime[2] != time.Second {
+		t.Fatalf("initial time accounting: %+v", stats)
+	}
+	if stats.PhaseTime["cleanup"] < 2*time.Second || stats.PhaseTime["cleanup"] != stats.LaneTime[0] {
+		t.Fatalf("cleanup attribution: %+v", stats)
+	}
+	stats.PhaseTime["source"] = 0
+	if telemetry.Snapshot().PhaseTime["source"] != time.Second {
+		t.Fatal("snapshot aliases mutable telemetry")
 	}
 }
 
@@ -1455,6 +1482,110 @@ func BenchmarkImportPackTransactionSizes(b *testing.B) {
 			}
 			b.ReportMetric(float64(commits)/float64(b.N), "commits/op")
 			b.ReportMetric(float64(packCount), "packs/op")
+		})
+	}
+}
+
+func BenchmarkImportStage3Daemon(b *testing.B) {
+	binaryPath := os.Getenv("VAULTICDB_TEST_BINARY")
+	if binaryPath == "" {
+		b.Skip("set VAULTICDB_TEST_BINARY to an optimized symbol-enabled daemon")
+	}
+	const packCount, blobsPerPack = 128, 512
+	indexID := vaultic.ID(sha256.Sum256([]byte("phase32-benchmark-index")))
+	idx := index.NewIndex()
+	for packNumber := range packCount {
+		packID := vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "pack-%d", packNumber)))
+		blobs := make(pack.Blobs, blobsPerPack)
+		for blobNumber := range blobs {
+			blobID := vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "blob-%d-%d", packNumber, blobNumber)))
+			blobs[blobNumber] = pack.Blob{BlobHandle: vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob}, Offset: uint(blobNumber), Length: 1}
+		}
+		idx.StorePack(packID, blobs)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		b.Fatal(err)
+	}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}}
+	for _, variant := range []struct {
+		lanes    uint
+		deferred bool
+	}{{1, false}, {2, false}, {2, true}, {4, true}, {8, true}} {
+		b.Run(fmt.Sprintf("lanes=%d/deferred=%t", variant.lanes, variant.deferred), func(b *testing.B) {
+			var cleanup, reduce, finalization time.Duration
+			b.ReportAllocs()
+			for range b.N {
+				b.StopTimer()
+				directory, err := os.MkdirTemp("", "vi-bench-")
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer os.RemoveAll(directory)
+				ctx := context.Background()
+				config := daemon.Options{
+					Socket: filepath.Join(directory, "d.sock"), RepositoryID: "phase32-benchmark",
+					DaemonPath: binaryPath, DataDir: filepath.Join(directory, "db"), ObjectStore: "local",
+					WALStore: "memory", WALDataDir: filepath.Join(directory, "wal"), WALFlushInterval: 500 * time.Millisecond,
+					MaxUnflushedBytes: 16 << 30, L0SSTSizeBytes: 256 << 20,
+					RebuildReset: true, FreshBulkImport: true,
+				}
+				client, err := daemon.Ensure(ctx, config)
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer client.Close(ctx)
+				store := daemon.NewSchemaStore(client)
+				store.EnableFreshLegacyImport()
+				if variant.deferred {
+					if err := store.EnableDeferredLegacyImportCleanup(); err != nil {
+						b.Fatal(err)
+					}
+				}
+				telemetry := NewSchedulerTelemetry()
+				b.StartTimer()
+				result, err := Import(ctx, source, fixedStatter{size: blobsPerPack}, store, Options{
+					PublicationLanes: variant.lanes, PackWorkers: 8, PacksPerTransaction: 8,
+					ImportTransactionBytes: 8 << 20, PreparedImportBytes: 256 << 20, Telemetry: telemetry,
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+				if result.PacksImported != packCount || result.BlobsImported != packCount*blobsPerPack {
+					b.Fatalf("incomplete fixture: %+v", result)
+				}
+				stats := store.LegacyImportStats()
+				cleanup += stats.CleanupTime
+				reduce += telemetry.Snapshot().PhaseTime["reduce"]
+				closeStarted := time.Now()
+				if err := store.MarkBulkImportComplete(ctx); err != nil {
+					b.Fatal(err)
+				}
+				if err := client.Close(ctx); err != nil {
+					b.Fatal(err)
+				}
+				config.WALStore = "local"
+				config.RebuildReset = false
+				config.FreshBulkImport = false
+				reopened, err := daemon.Ensure(ctx, config)
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer reopened.Close(ctx)
+				if _, found, err := daemon.NewSchemaStore(reopened).Get(ctx, schema.ImportCheckpointKey(schema.ID(indexID))); err != nil || !found {
+					b.Fatalf("reopen checkpoint: found=%t err=%v", found, err)
+				}
+				if err := reopened.Close(ctx); err != nil {
+					b.Fatal(err)
+				}
+				finalization += time.Since(closeStarted)
+				b.StopTimer()
+				b.Logf("scheduler=%+v cleanup=%s commit=%s deferred=%d", telemetry.Snapshot(), stats.CleanupTime, stats.CleanupCommitTime, stats.CleanupDeferredCommits)
+			}
+			b.ReportMetric(float64(packCount*blobsPerPack*b.N)/b.Elapsed().Seconds(), "blobs/s")
+			b.ReportMetric(cleanup.Seconds()/float64(b.N), "cleanup-s/op")
+			b.ReportMetric(reduce.Seconds()/float64(b.N), "reduce-s/op")
+			b.ReportMetric(finalization.Seconds()/float64(b.N), "finalize-s/op")
 		})
 	}
 }

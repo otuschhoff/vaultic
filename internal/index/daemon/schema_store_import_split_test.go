@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -386,6 +387,14 @@ func TestSchemaStoreLegacySplitRequiresFreshImportMode(t *testing.T) {
 }
 
 func TestSchemaStoreLegacyCompleteSessionDeletesInBoundedPages(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%t", deferred), func(t *testing.T) {
+			testLegacyCompleteSessionDeletesInBoundedPages(t, deferred)
+		})
+	}
+}
+
+func testLegacyCompleteSessionDeletesInBoundedPages(t *testing.T, deferred bool) {
 	ctx := context.Background()
 	client, err := Ensure(ctx, Options{
 		Socket: testSocket(t), RepositoryID: "phase32-stage3-cleanup-bounded", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
@@ -398,6 +407,11 @@ func TestSchemaStoreLegacyCompleteSessionDeletesInBoundedPages(t *testing.T) {
 	store := NewSchemaStore(client)
 	store.EnableFreshLegacyImport()
 	session := daemonTestID(207)
+	if deferred {
+		if err := store.EnableDeferredLegacyImportCleanup(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	source := daemonTestID(67)
 
 	originalScanPage := legacyImportCleanupScanPageSize
@@ -433,6 +447,85 @@ func TestSchemaStoreLegacyCompleteSessionDeletesInBoundedPages(t *testing.T) {
 	}
 	if !done || len(entries) != 0 {
 		t.Fatalf("cleanup left receipts: done=%t entries=%d", done, len(entries))
+	}
+	stats := store.LegacyImportStats()
+	if stats.CleanupCalls != 1 || stats.CleanupPages != 5 || stats.CleanupReceipts != 9 {
+		t.Fatalf("cleanup counters: %+v", stats)
+	}
+	if stats.CleanupTime <= 0 || stats.CleanupScanTime <= 0 || stats.CleanupCommitTime <= 0 {
+		t.Fatalf("missing cleanup timings: %+v", stats)
+	}
+	if (deferred && stats.CleanupDeferredCommits != 5) || (!deferred && stats.CleanupDeferredCommits != 0) {
+		t.Fatalf("cleanup durability counters: %+v", stats)
+	}
+	if err := store.CompleteLegacyImportSession(ctx, session); err != nil {
+		t.Fatalf("cleanup replay: %v", err)
+	}
+	if _, found, err := client.Get(ctx, []byte(bulkImportCompleteKey), ""); err != nil || found {
+		t.Fatalf("cleanup authorized incomplete import: found=%t err=%v", found, err)
+	}
+}
+
+func TestSchemaStoreDeferredCleanupRequiresFreshImport(t *testing.T) {
+	store := &SchemaStore{}
+	if err := store.EnableDeferredLegacyImportCleanup(); !errors.Is(err, ErrLegacyImportFreshRequired) {
+		t.Fatalf("deferred cleanup fresh guard: %v", err)
+	}
+}
+
+func TestSchemaStoreDeferredCleanupSurvivesBulkImportHandoff(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "phase32-deferred-cleanup-handoff",
+		DaemonPath: daemonBinary(t), DataDir: directory, ObjectStore: "local",
+		WALStore: "memory", WALDataDir: directory + "/wal", WALFlushInterval: 500 * time.Millisecond,
+		MaxUnflushedBytes: 16 << 30, L0SSTSizeBytes: 256 << 20,
+		RebuildReset: true, FreshBulkImport: true,
+	}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+	if err := store.EnableDeferredLegacyImportCleanup(); err != nil {
+		t.Fatal(err)
+	}
+	source, session, packID, blobID := daemonTestID(220), daemonTestID(221), daemonTestID(222), daemonTestID(223)
+	imports := []LegacyPackImport{legacyPackImport(source, packID, map[schema.ID]schema.BlobRecord{
+		blobID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 1, Type: schema.BlobData}}},
+	})}
+	checkpoint := Mutation{Key: schema.ImportCheckpointKey(source), Value: encodeSchemaRecord(t, schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1})}
+	if err := store.IngestLegacyPacks(ctx, session, 1, imports); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReduceLegacyImportBatch(ctx, session, 1, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteLegacyImportSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if stats := store.LegacyImportStats(); stats.CleanupDeferredCommits != 1 {
+		t.Fatalf("cleanup durability stats: %+v", stats)
+	}
+	if err := store.MarkBulkImportComplete(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	options.WALStore = "local"
+	options.RebuildReset = false
+	options.FreshBulkImport = false
+	reopened, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(ctx)
+	if _, found, err := NewSchemaStore(reopened).Get(ctx, checkpoint.Key); err != nil || !found {
+		t.Fatalf("reopen checkpoint: found=%t err=%v", found, err)
 	}
 }
 

@@ -901,6 +901,49 @@ func TestFreshBulkImportDefaultsPreserveExplicitTuning(t *testing.T) {
 	}
 }
 
+func TestImportDeferredCleanupValidation(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		fresh bool
+		wal   string
+		lanes uint
+		valid bool
+	}{
+		{"nonfresh", false, "memory", 2, false},
+		{"persistent", true, "local", 2, false},
+		{"serial", true, "memory", 1, false},
+		{"fresh", true, "memory", 2, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := validateIndexImportOptions(indexImportOptions{
+				FromLegacy: true, ForceResetOldIndex: test.fresh, ImportDeferCleanup: true, ImportPublicationLanes: test.lanes,
+				Daemon: indexDaemonOptions{Start: true, DataDir: filepath.Join(t.TempDir(), "candidate"), WALStore: test.wal},
+			})
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%t error=%v", test.valid, err)
+			}
+		})
+	}
+}
+
+func TestImportStatsReportsWithoutProgressAndStops(t *testing.T) {
+	reported := make(chan struct{}, 1)
+	stop := startLegacyImportStats(context.Background(), &daemon.SchemaStore{}, time.Millisecond, func(daemon.LegacyImportStats) {
+		select {
+		case reported <- struct{}{}:
+		default:
+		}
+	})
+	defer stop()
+	select {
+	case <-reported:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no telemetry without progress")
+	}
+	stop()
+	stop()
+}
+
 func TestCompletedBulkImportReopensPersistentWALWithoutReset(t *testing.T) {
 	options := completedBulkImportDaemonOptions(indexDaemonOptions{
 		Start: true, RebuildInitialize: true, RebuildReset: true, FreshBulkImport: true,

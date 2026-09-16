@@ -303,6 +303,7 @@ type indexImportOptions struct {
 	ImportTransactionBytes     uint64
 	PreparedImportBytes        uint64
 	ImportBatchTimeout         time.Duration
+	ImportDeferCleanup         bool
 	MaxErrors                  uint64
 	WorkBudget                 uint64
 	SnapshotDepth              uint
@@ -529,6 +530,7 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.BoolVar(&options.DryRun, "dry-run", false, "scan and validate without writing SlateDB")
 	flags.BoolVar(&options.Activate, "activate", false, "make SlateDB authoritative after a complete import")
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
+	flags.BoolVar(&options.ImportDeferCleanup, "import-defer-cleanup", false, "defer receipt cleanup durability during a fresh memory-WAL import")
 	flags.Uint32Var(&options.BatchSize, "batch-size", 0, "maximum mutations per daemon transaction batch (zero uses daemon limit)")
 	flags.UintVar(&options.PackWorkers, "pack-workers", 0, "concurrent legacy pack preparations (zero uses up to eight available CPUs)")
 	flags.UintVar(
@@ -567,6 +569,10 @@ func runIndexImport(
 	globalOptions global.Options,
 	term ui.Terminal,
 ) (result legacyimport.Result, err error) {
+	commandStarted := time.Now()
+	defer func() {
+		log.Printf("legacy import lifecycle: total=%s success=%t", time.Since(commandStarted), err == nil)
+	}()
 	options, err = validateIndexImportOptions(options)
 	if err != nil {
 		return result, err
@@ -621,8 +627,22 @@ func runIndexImport(
 		store.EnableFreshLegacyImport()
 	}
 	defer func() {
-		err = errors.Join(err, storeSession.Close())
+		closeStarted := time.Now()
+		closeErr := storeSession.Close()
+		log.Printf("legacy import lifecycle: close=%s success=%t", time.Since(closeStarted), closeErr == nil)
+		err = errors.Join(err, closeErr)
 	}()
+	if options.ImportDeferCleanup {
+		if err := store.EnableDeferredLegacyImportCleanup(); err != nil {
+			return result, err
+		}
+	}
+	telemetry := legacyimport.NewSchedulerTelemetry()
+	stopStats := startLegacyImportStats(ctx, store, 10*time.Second, func(stats daemon.LegacyImportStats) {
+		logLegacyImportStats(stats)
+		log.Printf("legacy import scheduler: %+v", telemetry.Snapshot())
+	})
+	defer stopStats()
 	if options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0 {
 		if err := repo.LoadIndex(ctx, printer); err != nil {
 			return result, fmt.Errorf("load source indexes for snapshot import: %w", err)
@@ -646,7 +666,10 @@ func runIndexImport(
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget,
 		Progress:           progressReporter.Update,
+		Telemetry:          telemetry,
 	})
+	stopStats()
+	log.Printf("legacy import scheduler: %+v", telemetry.Snapshot())
 	logLegacyImportStats(store.LegacyImportStats())
 	result.ResetElapsedMS = uint64(resetElapsed / time.Millisecond)
 	logLegacyImportCompletion(started, result, err)
@@ -688,6 +711,10 @@ func completeFreshBulkImport(
 	if !options.Daemon.FreshBulkImport {
 		return session, session.Client, nil
 	}
+	finalizationStarted := time.Now()
+	defer func() {
+		log.Printf("legacy import lifecycle: completion_handoff_reopen=%s", time.Since(finalizationStarted))
+	}()
 	if err := session.Store.MarkBulkImportComplete(ctx); err != nil {
 		return session, nil, fmt.Errorf("mark successful bulk import complete: %w", err)
 	}
@@ -733,6 +760,12 @@ func logLegacyImportCompletion(started time.Time, result legacyimport.Result, er
 }
 
 func logLegacyImportStats(importStats daemon.LegacyImportStats) {
+	log.Printf(
+		"legacy import cleanup: calls=%d pages=%d receipts=%d total=%s scan=%s begin=%s write=%s commit=%s deferred_commits=%d",
+		importStats.CleanupCalls, importStats.CleanupPages, importStats.CleanupReceipts,
+		importStats.CleanupTime, importStats.CleanupScanTime, importStats.CleanupBeginTime,
+		importStats.CleanupWriteTime, importStats.CleanupCommitTime, importStats.CleanupDeferredCommits,
+	)
 	log.Printf(
 		"legacy import transactions: batches=%d ingested=%d reduced=%d attempts=%d commits=%d retries=%d conflicts=%d "+
 			"packs=%d unique_blobs=%d source_indexes=%d mutations=%d bytes=%d replanned_bytes=%d "+
@@ -787,6 +820,9 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 	}
 	if options.ImportPublicationLanes == 0 {
 		options.ImportPublicationLanes = 1
+	}
+	if options.ImportDeferCleanup && (!options.ForceResetOldIndex || options.Daemon.WALStore != "memory" || options.ImportPublicationLanes < 2) {
+		return options, fmt.Errorf("--import-defer-cleanup requires a fresh memory-WAL import with at least two publication lanes")
 	}
 	if options.DryRun && options.Activate {
 		return options, fmt.Errorf("--activate cannot be combined with --dry-run")

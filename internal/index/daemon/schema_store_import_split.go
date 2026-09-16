@@ -733,6 +733,9 @@ func (store *SchemaStore) lookupReducedLegacyImportReceipt(ctx context.Context, 
 }
 
 func (store *SchemaStore) CompleteLegacyImportSession(ctx context.Context, session schema.ID) error {
+	started := time.Now()
+	store.legacyMetrics.cleanupCalls.Add(1)
+	defer func() { store.legacyMetrics.cleanupNanos.Add(uint64(time.Since(started))) }()
 	if session == (schema.ID{}) {
 		return fmt.Errorf("legacy import session is required")
 	}
@@ -770,6 +773,8 @@ func (store *SchemaStore) clearLegacySplitSession(session schema.ID) {
 }
 
 func (store *SchemaStore) ensureLegacyImportSessionReduced(ctx context.Context, prefix []byte) error {
+	started := time.Now()
+	defer func() { store.legacyMetrics.cleanupScanNanos.Add(uint64(time.Since(started))) }()
 	var cursor []byte
 	for {
 		entries, done, err := store.ScanPrefix(ctx, prefix, cursor, legacyImportCleanupScanPageSize)
@@ -795,7 +800,9 @@ func (store *SchemaStore) ensureLegacyImportSessionReduced(ctx context.Context, 
 func (store *SchemaStore) deleteLegacyImportReceiptsBounded(ctx context.Context, prefix []byte) error {
 	var cursor []byte
 	for {
+		started := time.Now()
 		entries, done, err := store.ScanPrefix(ctx, prefix, cursor, legacyImportCleanupDeletePageSize)
+		store.legacyMetrics.cleanupScanNanos.Add(uint64(time.Since(started)))
 		if err != nil {
 			return err
 		}
@@ -812,6 +819,8 @@ func (store *SchemaStore) deleteLegacyImportReceiptsBounded(ctx context.Context,
 		if err := store.deleteLegacyImportReceiptChunkWithRetry(ctx, deletes); err != nil {
 			return err
 		}
+		store.legacyMetrics.cleanupPages.Add(1)
+		store.legacyMetrics.cleanupReceipts.Add(uint64(len(deletes)))
 		cursor = entries[len(entries)-1].Key
 		if done {
 			return nil
@@ -822,16 +831,28 @@ func (store *SchemaStore) deleteLegacyImportReceiptsBounded(ctx context.Context,
 func (store *SchemaStore) deleteLegacyImportReceiptChunkWithRetry(ctx context.Context, deletes [][]byte) error {
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
+		started := time.Now()
 		transaction, err := store.client.Begin(ctx)
+		store.legacyMetrics.cleanupBeginNanos.Add(uint64(time.Since(started)))
 		if err != nil {
 			return err
 		}
-		if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), nil, deletes); err != nil {
-			rollbackTransaction(ctx, transaction)
-			if status.Code(err) != codes.Aborted {
-				return err
+		started = time.Now()
+		err = writeTransactionBatches(ctx, transaction, store.client.Limits(), nil, deletes)
+		store.legacyMetrics.cleanupWriteNanos.Add(uint64(time.Since(started)))
+		if err == nil {
+			started = time.Now()
+			if store.deferLegacyCleanup && store.freshImportSeen != nil {
+				err = transaction.CommitDeferred(ctx)
+				if err == nil {
+					store.legacyMetrics.cleanupDeferredCommits.Add(1)
+				}
+			} else {
+				err = transaction.Commit(ctx)
 			}
-		} else if err := transaction.Commit(ctx); err != nil {
+			store.legacyMetrics.cleanupCommitNanos.Add(uint64(time.Since(started)))
+		}
+		if err != nil {
 			rollbackTransaction(ctx, transaction)
 			if status.Code(err) != codes.Aborted {
 				return err
