@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,92 @@ const (
 
 const bulkImportCompleteKey = "_vaultic/bulk-import-complete-v1"
 
+const legacyDurationBuckets = 64
+
+type DurationDistribution struct {
+	Count uint64
+	Sum   time.Duration
+	P50   time.Duration
+	P95   time.Duration
+	P99   time.Duration
+}
+
+type lockedDurationHistogram struct {
+	mu     sync.Mutex
+	counts [legacyDurationBuckets]uint64
+	count  uint64
+	sum    uint64
+}
+
+func (histogram *lockedDurationHistogram) observe(elapsed time.Duration) {
+	nanos := uint64(max(elapsed, 0))
+	bucket := min(bits.Len64(nanos), legacyDurationBuckets-1)
+	histogram.mu.Lock()
+	defer histogram.mu.Unlock()
+	histogram.counts[bucket]++
+	histogram.count++
+	histogram.sum += nanos
+}
+
+func (histogram *lockedDurationHistogram) snapshot() DurationDistribution {
+	histogram.mu.Lock()
+	defer histogram.mu.Unlock()
+	return DurationDistribution{
+		Count: histogram.count, Sum: time.Duration(histogram.sum),
+		P50: durationQuantile(histogram.counts, histogram.count, 50),
+		P95: durationQuantile(histogram.counts, histogram.count, 95),
+		P99: durationQuantile(histogram.counts, histogram.count, 99),
+	}
+}
+
+func durationQuantile(counts [legacyDurationBuckets]uint64, count, percent uint64) time.Duration {
+	if count == 0 {
+		return 0
+	}
+	target := (count*percent + 99) / 100
+	var cumulative uint64
+	for bucket, bucketCount := range counts {
+		cumulative += bucketCount
+		if cumulative < target {
+			continue
+		}
+		if bucket == 0 {
+			return 0
+		}
+		if bucket == legacyDurationBuckets-1 {
+			return time.Duration(math.MaxInt64)
+		}
+		return time.Duration((uint64(1) << bucket) - 1)
+	}
+	return time.Duration(math.MaxInt64)
+}
+
+type legacyOperationMetrics struct {
+	prepare, hash, hints, ingestBegin, receiptRead, packRead, blobRead lockedDurationHistogram
+	planBuild, mutationRPC, commit, postCommit, ingestRecoveryRead     lockedDurationHistogram
+	reduceCheckpointRead, ingestRetryBackoff                           lockedDurationHistogram
+	reduceReceiptRead, reduceAggregateRead, reduceHistoryRead          lockedDurationHistogram
+	reduceBegin, reduceEncode, reduceMutationRPC, reduceCommit         lockedDurationHistogram
+	reduceRecoveryRead, reduceRetryBackoff                             lockedDurationHistogram
+}
+
+func (metrics *legacyOperationMetrics) snapshots() map[string]DurationDistribution {
+	return map[string]DurationDistribution{
+		"prepare": metrics.prepare.snapshot(), "hash": metrics.hash.snapshot(), "hints": metrics.hints.snapshot(),
+		"ingest_begin": metrics.ingestBegin.snapshot(), "receipt_read": metrics.receiptRead.snapshot(),
+		"pack_read": metrics.packRead.snapshot(), "blob_read": metrics.blobRead.snapshot(),
+		"plan_build": metrics.planBuild.snapshot(), "mutation_rpc": metrics.mutationRPC.snapshot(),
+		"commit": metrics.commit.snapshot(), "post_commit": metrics.postCommit.snapshot(),
+		"ingest_recovery_read": metrics.ingestRecoveryRead.snapshot(), "reduce_receipt_read": metrics.reduceReceiptRead.snapshot(),
+		"reduce_checkpoint_read": metrics.reduceCheckpointRead.snapshot(),
+		"reduce_aggregate_plan":  metrics.reduceAggregateRead.snapshot(), "reduce_history_plan": metrics.reduceHistoryRead.snapshot(),
+		"reduce_encode": metrics.reduceEncode.snapshot(), "reduce_mutation_rpc": metrics.reduceMutationRPC.snapshot(),
+		"reduce_begin": metrics.reduceBegin.snapshot(), "reduce_commit": metrics.reduceCommit.snapshot(),
+		"ingest_retry_backoff": metrics.ingestRetryBackoff.snapshot(),
+		"reduce_recovery_read": metrics.reduceRecoveryRead.snapshot(), "reduce_retry_backoff": metrics.reduceRetryBackoff.snapshot(),
+	}
+}
+
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
 type SchemaStore struct {
@@ -38,48 +125,70 @@ type SchemaStore struct {
 }
 
 type legacyImportMetrics struct {
-	batches                atomic.Uint64
-	ingestedBatches        atomic.Uint64
-	reducedBatches         atomic.Uint64
-	attempts               atomic.Uint64
-	commits                atomic.Uint64
-	retries                atomic.Uint64
-	conflicts              atomic.Uint64
-	packsCommitted         atomic.Uint64
-	blobsCommitted         atomic.Uint64
-	mutationsCommitted     atomic.Uint64
-	encodedBytesCommitted  atomic.Uint64
-	mutationRPCs           atomic.Uint64
-	mutationRPCNanos       atomic.Uint64
-	planningReads          atomic.Uint64
-	replannedBytes         atomic.Uint64
-	sourceIndexes          atomic.Uint64
-	definitelyAbsent       atomic.Uint64
-	possiblyPresent        atomic.Uint64
-	found                  atomic.Uint64
-	gateWaitNanos          atomic.Uint64
-	planningNanos          atomic.Uint64
-	reductionNanos         atomic.Uint64
-	commitNanos            atomic.Uint64
-	totalNanos             atomic.Uint64
-	cleanupCalls           atomic.Uint64
-	cleanupPages           atomic.Uint64
-	cleanupReceipts        atomic.Uint64
-	cleanupNanos           atomic.Uint64
-	cleanupScanNanos       atomic.Uint64
-	cleanupBeginNanos      atomic.Uint64
-	cleanupWriteNanos      atomic.Uint64
-	cleanupCommitNanos     atomic.Uint64
-	cleanupDeferredCommits atomic.Uint64
+	operations                   legacyOperationMetrics
+	batches                      atomic.Uint64
+	ingestedBatches              atomic.Uint64
+	reducedBatches               atomic.Uint64
+	attempts                     atomic.Uint64
+	ingestAttempts               atomic.Uint64
+	reduceAttempts               atomic.Uint64
+	ingestFailures               atomic.Uint64
+	reduceFailures               atomic.Uint64
+	commits                      atomic.Uint64
+	retries                      atomic.Uint64
+	conflicts                    atomic.Uint64
+	packsCommitted               atomic.Uint64
+	blobsCommitted               atomic.Uint64
+	mutationsCommitted           atomic.Uint64
+	encodedBytesCommitted        atomic.Uint64
+	mutationRPCs                 atomic.Uint64
+	mutationRPCAttempts          atomic.Uint64
+	reductionMutationRPCs        atomic.Uint64
+	reductionMutationRPCAttempts atomic.Uint64
+	reductionMutations           atomic.Uint64
+	receiptReads                 atomic.Uint64
+	reductionReceiptReads        atomic.Uint64
+	recoveryReads                atomic.Uint64
+	reduceCheckpointReads        atomic.Uint64
+	catalogReadRPCs              atomic.Uint64
+	catalogReadKeys              atomic.Uint64
+	reductionPlanReadRPCs        atomic.Uint64
+	reductionPlanReadKeys        atomic.Uint64
+	mutationRPCNanos             atomic.Uint64
+	planningReads                atomic.Uint64
+	replannedBytes               atomic.Uint64
+	sourceIndexes                atomic.Uint64
+	definitelyAbsent             atomic.Uint64
+	possiblyPresent              atomic.Uint64
+	found                        atomic.Uint64
+	gateWaitNanos                atomic.Uint64
+	planningNanos                atomic.Uint64
+	reductionNanos               atomic.Uint64
+	commitNanos                  atomic.Uint64
+	totalNanos                   atomic.Uint64
+	cleanupCalls                 atomic.Uint64
+	cleanupPages                 atomic.Uint64
+	cleanupReceipts              atomic.Uint64
+	cleanupNanos                 atomic.Uint64
+	cleanupScanNanos             atomic.Uint64
+	cleanupBeginNanos            atomic.Uint64
+	cleanupWriteNanos            atomic.Uint64
+	cleanupCommitNanos           atomic.Uint64
+	cleanupDeferredCommits       atomic.Uint64
 }
 
 // LegacyImportStats is a process-local, low-cardinality snapshot of bulk
-// import activity. Phase 33 can export these fields without changing import behavior.
+// import activity. Phase 34 can export these fields without changing import behavior.
 type LegacyImportStats struct {
+	Operations                     map[string]DurationDistribution
 	Batches                        uint64
 	IngestedBatches                uint64
 	ReducedBatches                 uint64
 	Attempts                       uint64
+	IngestAttempts                 uint64
+	ReduceAttempts                 uint64
+	IngestFailures                 uint64
+	ReduceFailures                 uint64
 	Commits                        uint64
 	Retries                        uint64
 	Conflicts                      uint64
@@ -88,6 +197,18 @@ type LegacyImportStats struct {
 	MutationsCommitted             uint64
 	EncodedBytesCommitted          uint64
 	MutationRPCs                   uint64
+	MutationRPCAttempts            uint64
+	ReductionMutationRPCs          uint64
+	ReductionMutationRPCAttempts   uint64
+	ReductionMutations             uint64
+	ReceiptReads                   uint64
+	ReductionReceiptReads          uint64
+	RecoveryReads                  uint64
+	ReduceCheckpointReads          uint64
+	CatalogReadRPCs                uint64
+	CatalogReadKeys                uint64
+	ReductionPlanReadRPCs          uint64
+	ReductionPlanReadKeys          uint64
 	MutationRPCTime                time.Duration
 	PlanningReads                  uint64
 	ReplannedBytes                 uint64
@@ -123,12 +244,22 @@ type LegacyImportStats struct {
 func (store *SchemaStore) LegacyImportStats() LegacyImportStats {
 	metrics := &store.legacyMetrics
 	result := LegacyImportStats{
-		Batches: metrics.batches.Load(), Attempts: metrics.attempts.Load(), Commits: metrics.commits.Load(),
+		Operations: metrics.operations.snapshots(),
+		Batches:    metrics.batches.Load(), Attempts: metrics.attempts.Load(), Commits: metrics.commits.Load(),
+		IngestAttempts: metrics.ingestAttempts.Load(), ReduceAttempts: metrics.reduceAttempts.Load(),
+		IngestFailures: metrics.ingestFailures.Load(), ReduceFailures: metrics.reduceFailures.Load(),
 		IngestedBatches: metrics.ingestedBatches.Load(), ReducedBatches: metrics.reducedBatches.Load(),
 		Retries: metrics.retries.Load(), Conflicts: metrics.conflicts.Load(),
 		PacksCommitted: metrics.packsCommitted.Load(), BlobsCommitted: metrics.blobsCommitted.Load(),
 		MutationsCommitted: metrics.mutationsCommitted.Load(), EncodedBytesCommitted: metrics.encodedBytesCommitted.Load(),
-		MutationRPCs: metrics.mutationRPCs.Load(), MutationRPCTime: time.Duration(metrics.mutationRPCNanos.Load()),
+		MutationRPCs: metrics.mutationRPCs.Load(), MutationRPCAttempts: metrics.mutationRPCAttempts.Load(),
+		MutationRPCTime:       time.Duration(metrics.mutationRPCNanos.Load()),
+		ReductionMutationRPCs: metrics.reductionMutationRPCs.Load(), ReductionMutations: metrics.reductionMutations.Load(),
+		ReductionMutationRPCAttempts: metrics.reductionMutationRPCAttempts.Load(),
+		ReceiptReads:                 metrics.receiptReads.Load(), ReductionReceiptReads: metrics.reductionReceiptReads.Load(),
+		RecoveryReads: metrics.recoveryReads.Load(), ReduceCheckpointReads: metrics.reduceCheckpointReads.Load(),
+		CatalogReadRPCs: metrics.catalogReadRPCs.Load(), CatalogReadKeys: metrics.catalogReadKeys.Load(),
+		ReductionPlanReadRPCs: metrics.reductionPlanReadRPCs.Load(), ReductionPlanReadKeys: metrics.reductionPlanReadKeys.Load(),
 		PlanningReads: metrics.planningReads.Load(), ReplannedBytes: metrics.replannedBytes.Load(),
 		SourceIndexesCommitted:  metrics.sourceIndexes.Load(),
 		DefinitelyAbsentLookups: metrics.definitelyAbsent.Load(), PossiblyPresentLookups: metrics.possiblyPresent.Load(),

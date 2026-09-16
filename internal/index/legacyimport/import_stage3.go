@@ -30,13 +30,15 @@ type stage3LogicalBatch struct {
 	imports    []daemon.LegacyPackImport
 	checkpoint *daemon.Mutation
 	deps       []string
+	queuedAt   time.Time
 }
 
 type stage3IngestOutcome struct {
-	ordinal    uint64
-	parts      []uint64
-	failedPack int
-	err        error
+	ordinal     uint64
+	parts       []uint64
+	failedPack  int
+	err         error
+	completedAt time.Time
 }
 
 //nolint:funlen,gocognit,gocyclo,nestif // Ordered preparation, concurrent ingestion, and reduction form one scheduler state machine.
@@ -52,7 +54,7 @@ func importPacksStage3(
 ) ([]packImportResult, uint64, packPipelineStats, int) {
 	options.Telemetry.phase("schedule")
 	defer options.Telemetry.phase("source")
-	defer options.Telemetry.queues(0, 0, 0)
+	defer options.Telemetry.queues(0, 0, 0, 0, time.Time{})
 	outcomes := make([]packImportResult, len(packs))
 	counters := &packPipelineCounters{report: report}
 	if len(packs) == 0 {
@@ -138,7 +140,7 @@ func importPacksStage3(
 		}
 		ready = append(ready, stage3LogicalBatch{
 			ordinal: nextOrdinal, rootBatch: rootBatch, items: append([]packPreparation(nil), batch.items...),
-			imports: imports, checkpoint: finalCheckpoint, deps: stage3DependencyKeys(imports),
+			imports: imports, checkpoint: finalCheckpoint, deps: stage3DependencyKeys(imports), queuedAt: time.Now(),
 		})
 		nextOrdinal++
 		batch.reset()
@@ -185,10 +187,30 @@ func importPacksStage3(
 				} else {
 					outcome.failedPack = logical.items[0].index
 				}
-				outcome.parts, outcome.err = parts, err
+				outcome.parts, outcome.err, outcome.completedAt = parts, err, time.Now()
+				options.Telemetry.pendingCompletion(1)
 				ingested <- outcome
 			}(batchToIngest)
 		}
+	}
+
+	acceptIngested := func(outcome stage3IngestOutcome) {
+		options.Telemetry.pendingCompletion(-1)
+		receivedAt := time.Now()
+		options.Telemetry.observe("completion_to_receive", receivedAt.Sub(outcome.completedAt))
+		if activeLanes > 0 {
+			activeLanes--
+		}
+		counters.activeLanes.Add(^uint64(0))
+		if outcome.err != nil {
+			if failedPack < 0 {
+				failedPack = outcome.failedPack
+			}
+			stopAdmission = true
+			failureSeen = true
+			cancel()
+		}
+		completed[outcome.ordinal] = outcome
 	}
 
 	reduceReady := func() bool {
@@ -231,7 +253,47 @@ func importPacksStage3(
 					finalCheckpoint = logical.checkpoint
 				}
 				options.Telemetry.phase("reduce")
+				reductionStarted := time.Now()
+				var cancellationMu sync.Mutex
+				var cancellationTime time.Time
+				cancellationObserved := make(chan struct{})
+				stopCancellationWatch := context.AfterFunc(ctx, func() {
+					cancellationMu.Lock()
+					cancellationTime = time.Now()
+					cancellationMu.Unlock()
+					close(cancellationObserved)
+				})
 				err := reduceLegacyImportBatch(ctx, store, sourceIndex, part, finalCheckpoint, options, counters)
+				reductionEnded := time.Now()
+				if !stopCancellationWatch() {
+					<-cancellationObserved
+				}
+				cancellationMu.Lock()
+				observedCancellation := cancellationTime
+				cancellationMu.Unlock()
+				drained := make([]stage3IngestOutcome, 0, lanes)
+				for {
+					select {
+					case completedOutcome := <-ingested:
+						drained = append(drained, completedOutcome)
+					default:
+						goto ingestsDrained
+					}
+				}
+			ingestsDrained:
+				sort.Slice(drained, func(left, right int) bool {
+					return drained[left].completedAt.Before(drained[right].completedAt)
+				})
+				eligibleDuration := stage3EligibleRefillDuration(
+					reductionStarted, reductionEnded, activeLanes, lanes, stopAdmission,
+					stage3ReadyAfterCompletion(ready, depBusy), observedCancellation, drained,
+				)
+				if eligibleDuration > 0 {
+					options.Telemetry.observe("eligible_ready_during_reduce", eligibleDuration)
+				}
+				for _, completedOutcome := range drained {
+					acceptIngested(completedOutcome)
+				}
 				options.Telemetry.phase("schedule")
 				if err != nil {
 					failures = append(failures, stage3IngestOutcome{ordinal: outcome.ordinal, failedPack: logical.items[0].index, err: err})
@@ -306,8 +368,13 @@ func importPacksStage3(
 		}
 
 		admitReady()
-		options.Telemetry.queues(len(ready), len(completed), counters.preparedBytes.Load())
+		unreducedBytes, oldestUnreduced := stage3UnreducedState(ready, active)
+		options.Telemetry.queues(
+			len(ready), len(completed), counters.preparedBytes.Load(), unreducedBytes, oldestUnreduced,
+		)
+		reduceStarted := time.Now()
 		if reduceReady() {
+			options.Telemetry.observe("reduce_blocking", time.Since(reduceStarted))
 			progress = true
 		}
 
@@ -344,19 +411,7 @@ func importPacksStage3(
 				}
 				pendingPrepared[item.index] = item
 			case outcome := <-ingested:
-				if activeLanes > 0 {
-					activeLanes--
-				}
-				counters.activeLanes.Add(^uint64(0))
-				if outcome.err != nil {
-					if failedPack < 0 {
-						failedPack = outcome.failedPack
-					}
-					stopAdmission = true
-					failureSeen = true
-					cancel()
-				}
-				completed[outcome.ordinal] = outcome
+				acceptIngested(outcome)
 			case <-ctx.Done():
 				if failedPack < 0 {
 					failedPack = min(nextPack, len(outcomes)-1)
@@ -372,6 +427,9 @@ func importPacksStage3(
 		if failureSeen {
 			for activeLanes > 0 {
 				outcome := <-ingested
+				options.Telemetry.pendingCompletion(-1)
+				receivedAt := time.Now()
+				options.Telemetry.observe("completion_to_receive", receivedAt.Sub(outcome.completedAt))
 				activeLanes--
 				counters.activeLanes.Add(^uint64(0))
 				if outcome.err != nil {
@@ -432,6 +490,87 @@ func importPacksStage3(
 	}
 
 	return outcomes, counters.committedBatches.Load(), counters.snapshot(), -1
+}
+
+func stage3UnreducedState(ready []stage3LogicalBatch, active map[uint64]stage3LogicalBatch) (uint64, time.Time) {
+	var bytes uint64
+	var oldest time.Time
+	account := func(batch stage3LogicalBatch) {
+		for _, item := range batch.items {
+			bytes += item.outcome.bytes
+		}
+		if oldest.IsZero() || batch.queuedAt.Before(oldest) {
+			oldest = batch.queuedAt
+		}
+	}
+	for _, batch := range ready {
+		account(batch)
+	}
+	for _, batch := range active {
+		account(batch)
+	}
+	return bytes, oldest
+}
+
+func stage3ReadyAfterCompletion(ready []stage3LogicalBatch, busy map[string]uint64) bool {
+	blockedDeps := make(map[string]struct{})
+	for _, candidate := range ready {
+		if !stage3DependenciesFree(busy, candidate.deps) || stage3DependenciesOverlap(blockedDeps, candidate.deps) {
+			for _, dependency := range candidate.deps {
+				blockedDeps[dependency] = struct{}{}
+			}
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func stage3EligibleRefillDuration(
+	started, ended time.Time,
+	activeLanes, lanes uint,
+	stopAdmission, readyEligible bool,
+	canceledAt time.Time,
+	completions []stage3IngestOutcome,
+) time.Duration {
+	cutoff := ended
+	if !canceledAt.IsZero() && canceledAt.Before(cutoff) {
+		cutoff = maxTime(canceledAt, started)
+	}
+	eligible := !stopAdmission && readyEligible && activeLanes < lanes
+	cursor := started
+	var elapsed time.Duration
+	for _, outcome := range completions {
+		completedAt := outcome.completedAt
+		if completedAt.Before(started) {
+			completedAt = started
+		}
+		if completedAt.After(cutoff) {
+			break
+		}
+		if eligible && completedAt.After(cursor) {
+			elapsed += completedAt.Sub(cursor)
+		}
+		if activeLanes > 0 {
+			activeLanes--
+		}
+		if outcome.err != nil {
+			stopAdmission = true
+		}
+		eligible = !stopAdmission && readyEligible && activeLanes < lanes
+		cursor = completedAt
+	}
+	if eligible && cutoff.After(cursor) {
+		elapsed += cutoff.Sub(cursor)
+	}
+	return elapsed
+}
+
+func maxTime(left, right time.Time) time.Time {
+	if left.After(right) {
+		return left
+	}
+	return right
 }
 
 func stage3IngestSplitBatch(

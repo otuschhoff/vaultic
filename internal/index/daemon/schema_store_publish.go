@@ -574,14 +574,19 @@ func writeTransactionBatches(ctx context.Context, transaction *Transaction, limi
 	return err
 }
 
+type mutationRPCCalls struct {
+	attempted uint64
+	succeeded uint64
+}
+
 func writeTransactionBatchesMeasured(
 	ctx context.Context,
 	transaction *Transaction,
 	limits Limits,
 	puts []Mutation,
 	deletes [][]byte,
-) (uint64, error) {
-	var calls uint64
+) (mutationRPCCalls, error) {
+	var calls mutationRPCCalls
 	if limits.MaxBatchItems == 0 || limits.MaxMessageBytes < 1024 {
 		return calls, fmt.Errorf("vaulticdb advertised insufficient transaction batch limits")
 	}
@@ -603,10 +608,11 @@ func writeTransactionBatchesMeasured(
 		if putEnd == putStart {
 			return calls, fmt.Errorf("schema mutation batch made no progress")
 		}
+		calls.attempted++
 		if err := transaction.WriteBatch(ctx, puts[putStart:putEnd], nil); err != nil {
 			return calls, err
 		}
-		calls++
+		calls.succeeded++
 		putStart = putEnd
 	}
 	for deleteStart := 0; deleteStart < len(deletes); {
@@ -626,10 +632,11 @@ func writeTransactionBatchesMeasured(
 		if deleteEnd == deleteStart {
 			return calls, fmt.Errorf("schema delete batch made no progress")
 		}
+		calls.attempted++
 		if err := transaction.WriteBatch(ctx, nil, deletes[deleteStart:deleteEnd]); err != nil {
 			return calls, err
 		}
-		calls++
+		calls.succeeded++
 		deleteStart = deleteEnd
 	}
 	return calls, nil

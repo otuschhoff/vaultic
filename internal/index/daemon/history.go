@@ -30,11 +30,14 @@ var historyClock = time.Now
 // History is advisory: an event that cannot be encoded is dropped rather than
 // failing the transition it describes. Losing a history record degrades a
 // report; failing the transition would lose a backup.
-func appendPackHistory(ctx context.Context, transaction *Transaction, events []PackEvent) ([]Mutation, error) {
+func appendPackHistory(ctx context.Context, transaction *Transaction, events []PackEvent, observeRead func()) ([]Mutation, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
 	key := schema.NextEventSequenceKey()
+	if observeRead != nil {
+		observeRead()
+	}
 	encoded, found, err := transaction.Get(ctx, key)
 	if err != nil {
 		return nil, err
@@ -83,8 +86,11 @@ func appendPackHistory(ctx context.Context, transaction *Transaction, events []P
 // covering earlier periods are reported as reconstructed rather than complete,
 // so a repository that enabled history late never presents an inferred series
 // as observed.
-func ensureHistoryEnabledMarker(ctx context.Context, transaction *Transaction) ([]Mutation, error) {
+func ensureHistoryEnabledMarker(ctx context.Context, transaction *Transaction, observeRead func()) ([]Mutation, error) {
 	key := schema.HistoryEnabledAtKey()
+	if observeRead != nil {
+		observeRead()
+	}
 	_, found, err := transaction.Get(ctx, key)
 	if err != nil || found {
 		return nil, err
@@ -103,14 +109,23 @@ func ensureHistoryEnabledMarker(ctx context.Context, transaction *Transaction) (
 // packHistoryMutations builds the history mutations for a transition, including
 // the collection-enabled marker on first use.
 func packHistoryMutations(ctx context.Context, transaction *Transaction, events []PackEvent) ([]Mutation, error) {
+	return packHistoryMutationsMeasured(ctx, transaction, events, nil)
+}
+
+func packHistoryMutationsMeasured(
+	ctx context.Context,
+	transaction *Transaction,
+	events []PackEvent,
+	observeRead func(),
+) ([]Mutation, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
-	marker, err := ensureHistoryEnabledMarker(ctx, transaction)
+	marker, err := ensureHistoryEnabledMarker(ctx, transaction, observeRead)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := appendPackHistory(ctx, transaction, events)
+	entries, err := appendPackHistory(ctx, transaction, events, observeRead)
 	if err != nil {
 		return nil, err
 	}

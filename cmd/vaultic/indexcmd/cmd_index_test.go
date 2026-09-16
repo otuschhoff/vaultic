@@ -944,6 +944,38 @@ func TestImportStatsReportsWithoutProgressAndStops(t *testing.T) {
 	stop()
 }
 
+func TestFormatLegacyOperationStatsIsStableAndSkipsEmpty(t *testing.T) {
+	formatted := formatLegacyOperationStats(map[string]daemon.DurationDistribution{
+		"zeta":  {Count: 2, Sum: 3 * time.Millisecond, P50: time.Millisecond, P95: 2 * time.Millisecond, P99: 2 * time.Millisecond},
+		"empty": {},
+		"alpha": {Count: 1, Sum: time.Microsecond, P50: time.Microsecond, P95: time.Microsecond, P99: time.Microsecond},
+	})
+	want := "alpha=count:1,sum:1µs,p50<=1µs,p95<=1µs,p99<=1µs zeta=count:2,sum:3ms,p50<=1ms,p95<=2ms,p99<=2ms"
+	if formatted != want {
+		t.Fatalf("formatted operation stats = %q, want %q", formatted, want)
+	}
+}
+
+func TestFormatLegacySchedulerStatsIsStableAndSkipsEmptyOperations(t *testing.T) {
+	formatted := formatLegacySchedulerStats(legacyimport.SchedulerSnapshot{
+		Phase: "reduce", PhaseTime: map[string]time.Duration{"reduce": 2 * time.Millisecond, "source": time.Millisecond},
+		LaneTime: [9]time.Duration{time.Millisecond, 2 * time.Millisecond}, ActiveLanes: 1,
+		ReadyBatches: 2, PendingReductionBatches: 3, RetainedPreparedBytes: 4, UnreducedPreparedBytes: 5,
+		OldestUnreducedAge: 6 * time.Millisecond,
+		Operations: map[string]legacyimport.DurationDistribution{
+			"zeta":  {Count: 2, Sum: 3 * time.Millisecond, P50: time.Millisecond, P95: 2 * time.Millisecond, P99: 2 * time.Millisecond},
+			"empty": {},
+			"alpha": {Count: 1, Sum: time.Microsecond, P50: time.Microsecond, P95: time.Microsecond, P99: time.Microsecond},
+		},
+	})
+	want := "phase=reduce phase_time=[reduce:2ms,source:1ms] lane_time=[0:1ms,1:2ms] active_lanes=1 ready=2 " +
+		"pending_reduction=3 retained_bytes=4 unreduced_bytes=5 oldest_unreduced=6ms operations=[" +
+		"alpha=count:1,sum:1µs,p50<=1µs,p95<=1µs,p99<=1µs zeta=count:2,sum:3ms,p50<=1ms,p95<=2ms,p99<=2ms]"
+	if formatted != want {
+		t.Fatalf("formatted scheduler stats = %q, want %q", formatted, want)
+	}
+}
+
 func TestCompletedBulkImportReopensPersistentWALWithoutReset(t *testing.T) {
 	options := completedBulkImportDaemonOptions(indexDaemonOptions{
 		Start: true, RebuildInitialize: true, RebuildReset: true, FreshBulkImport: true,

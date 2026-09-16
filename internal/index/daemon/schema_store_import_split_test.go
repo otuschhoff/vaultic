@@ -6,11 +6,40 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
+
+func TestLegacyImportOperationStatsConcurrentSnapshots(t *testing.T) {
+	store := &SchemaStore{}
+	const workers = 8
+	const observations = 1000
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for range observations {
+				store.legacyMetrics.operations.ingestBegin.observe(8 * time.Nanosecond)
+				_ = store.LegacyImportStats()
+			}
+		}()
+	}
+	group.Wait()
+	stats := store.LegacyImportStats()
+	distribution := stats.Operations["ingest_begin"]
+	if distribution.Count != workers*observations || distribution.Sum != workers*observations*8*time.Nanosecond ||
+		distribution.P50 != 15*time.Nanosecond || distribution.P95 != 15*time.Nanosecond || distribution.P99 != 15*time.Nanosecond {
+		t.Fatalf("begin distribution = %+v", distribution)
+	}
+	stats.Operations["ingest_begin"] = DurationDistribution{}
+	if store.LegacyImportStats().Operations["ingest_begin"].Count != workers*observations {
+		t.Fatal("operation snapshot aliases metric state")
+	}
+}
 
 func TestSchemaStoreLegacyIngestReduceMatchesStage2(t *testing.T) {
 	originalClock := historyClock
@@ -87,6 +116,109 @@ func TestSchemaStoreLegacyIngestReduceMatchesStage2(t *testing.T) {
 
 	if !reflect.DeepEqual(stage3Records, stage2Records) {
 		t.Fatalf("stage3 reduction metadata differs from stage2:\nstage2=%#v\nstage3=%#v", stage2Records, stage3Records)
+	}
+	stats := stage3.LegacyImportStats()
+	if stats.Attempts != 2 || stats.IngestAttempts != 2 || stats.ReduceAttempts != 2 || stats.IngestFailures != 0 || stats.ReduceFailures != 0 {
+		t.Fatalf("stage 3 phase counters = %#v", stats)
+	}
+	if stats.ReceiptReads != 2 || stats.ReductionReceiptReads != 2 || stats.ReductionMutationRPCs == 0 || stats.ReductionMutations == 0 {
+		t.Fatalf("stage 3 read/write counters = %#v", stats)
+	}
+	if stats.MutationRPCAttempts != stats.MutationRPCs || stats.ReductionMutationRPCAttempts != stats.ReductionMutationRPCs {
+		t.Fatalf("successful stage 3 RPC attempt counters = %#v", stats)
+	}
+	if stats.CatalogReadRPCs == 0 || stats.CatalogReadKeys == 0 ||
+		stats.ReductionPlanReadRPCs == 0 || stats.ReductionPlanReadKeys == 0 {
+		t.Fatalf("stage 3 actual read counters = %#v", stats)
+	}
+	for _, operation := range []string{
+		"prepare", "hash", "hints", "ingest_begin", "receipt_read", "pack_read", "blob_read", "plan_build",
+		"mutation_rpc", "commit", "post_commit", "reduce_receipt_read", "reduce_aggregate_plan",
+		"reduce_history_plan", "reduce_begin", "reduce_encode", "reduce_mutation_rpc", "reduce_commit",
+	} {
+		if stats.Operations[operation].Count == 0 {
+			t.Errorf("operation %q was not observed: %#v", operation, stats.Operations)
+		}
+	}
+}
+
+func TestSchemaStoreLegacySplitValidationFailuresAreCounted(t *testing.T) {
+	store := &SchemaStore{}
+	if err := store.IngestLegacyPacks(context.Background(), schema.ID{}, 1, nil); err == nil {
+		t.Fatal("zero-session ingest succeeded")
+	}
+	if err := store.ReduceLegacyImportBatch(context.Background(), schema.ID{}, 1, nil); err == nil {
+		t.Fatal("zero-session reduction succeeded")
+	}
+	stats := store.LegacyImportStats()
+	if stats.Batches != 2 || stats.IngestFailures != 1 || stats.ReduceFailures != 1 ||
+		stats.IngestAttempts != 0 || stats.ReduceAttempts != 0 {
+		t.Fatalf("validation failure counters = %#v", stats)
+	}
+}
+
+func TestSchemaStoreLegacySplitCancellationAndFailedRPCAttemptAreCounted(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "phase32-stage3-cancellation", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+		RebuildReset: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+
+	transaction, err := client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	calls, err := writeTransactionBatchesMeasured(canceled, transaction, client.Limits(), []Mutation{{
+		Key: schema.ImportCheckpointKey(daemonTestID(91)), Value: []byte("value"),
+	}}, nil)
+	rollbackTransaction(ctx, transaction)
+	if err == nil || calls.attempted != 1 || calls.succeeded != 0 {
+		t.Fatalf("canceled mutation calls = %#v, error = %v", calls, err)
+	}
+
+	transaction, err = client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make([][]byte, int(client.Limits().MaxBatchItems)+1)
+	for index := range keys {
+		keys[index] = schema.PackKey(daemonTestID(byte(index + 1)))
+	}
+	_, _, readRPCs, readKeys, err := legacyMultiGet(canceled, transaction, keys)
+	rollbackTransaction(ctx, transaction)
+	if err == nil || readRPCs != 1 || readKeys == 0 || readKeys >= uint64(len(keys)) {
+		t.Fatalf("canceled catalog reads: rpcs=%d keys=%d planned=%d error=%v", readRPCs, readKeys, len(keys), err)
+	}
+
+	transaction, err = client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historyReads uint64
+	_, err = packHistoryMutationsMeasured(canceled, transaction, []PackEvent{{PackID: daemonTestID(90)}}, func() {
+		historyReads++
+	})
+	rollbackTransaction(ctx, transaction)
+	if err == nil || historyReads != 1 {
+		t.Fatalf("canceled history reads = %d, error = %v", historyReads, err)
+	}
+
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+	session, source, packID := daemonTestID(92), daemonTestID(93), daemonTestID(94)
+	err = store.IngestLegacyPacks(canceled, session, 1, []LegacyPackImport{legacyPackImport(source, packID, nil)})
+	if err == nil {
+		t.Fatal("canceled ingest succeeded")
+	}
+	stats := store.LegacyImportStats()
+	if stats.IngestFailures != 1 || stats.IngestAttempts != 0 || stats.Operations["prepare"].Count != 1 {
+		t.Fatalf("canceled ingest counters = %#v", stats)
 	}
 }
 
@@ -181,6 +313,9 @@ func TestSchemaStoreLegacyIngestIdempotencyConflict(t *testing.T) {
 	if err := store.IngestLegacyPacks(ctx, session, 1, imports); err != nil {
 		t.Fatalf("idempotent ingest failed: %v", err)
 	}
+	if err := store.IngestLegacyPacks(ctx, session, 2, imports); err != nil {
+		t.Fatalf("new batch catalog replay failed: %v", err)
+	}
 
 	conflicting := append([]LegacyPackImport(nil), imports...)
 	conflicting[0].Blobs = map[schema.ID]schema.BlobRecord{
@@ -189,6 +324,10 @@ func TestSchemaStoreLegacyIngestIdempotencyConflict(t *testing.T) {
 	err = store.IngestLegacyPacks(ctx, session, 1, conflicting)
 	if !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting ingest error = %v", err)
+	}
+	if stats := store.LegacyImportStats(); stats.IngestFailures != 1 || stats.IngestAttempts != 4 ||
+		stats.CatalogReadRPCs == 0 || stats.CatalogReadKeys == 0 {
+		t.Fatalf("conflicting ingest counters = %#v", stats)
 	}
 }
 
@@ -361,6 +500,10 @@ func TestSchemaStoreReduceLegacyImportMissingReceiptAllowedWhenCheckpointExists(
 	err = store.ReduceLegacyImportBatch(ctx, session, 7, nil)
 	if !errors.Is(err, ErrLegacyImportReceiptMissing) {
 		t.Fatalf("missing receipt error = %v", err)
+	}
+	if stats := store.LegacyImportStats(); stats.ReduceFailures != 1 || stats.ReduceAttempts != 2 ||
+		stats.ReduceCheckpointReads != 1 || stats.Operations["reduce_checkpoint_read"].Count != 1 {
+		t.Fatalf("missing receipt counters = %#v", stats)
 	}
 }
 

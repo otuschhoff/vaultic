@@ -114,7 +114,8 @@ func (store *SchemaStore) importLegacyPacksOnce(
 	mutationStarted := time.Now()
 	mutationRPCs, err := writeTransactionBatchesMeasured(ctx, transaction, limits, plan.puts, nil)
 	store.legacyMetrics.mutationRPCNanos.Add(uint64(time.Since(mutationStarted)))
-	store.legacyMetrics.mutationRPCs.Add(mutationRPCs)
+	store.legacyMetrics.mutationRPCAttempts.Add(mutationRPCs.attempted)
+	store.legacyMetrics.mutationRPCs.Add(mutationRPCs.succeeded)
 	if err != nil {
 		return fail(err)
 	}
@@ -361,7 +362,9 @@ func (store *SchemaStore) loadLegacyPackRecords(
 	result := make(map[schema.ID]*schema.PackRecord, len(ids))
 	keys, selected := legacyLookupKeys(ids, absent, schema.PackKey)
 	store.legacyMetrics.planningReads.Add(uint64(len(keys)))
-	values, found, err := legacyMultiGet(ctx, transaction, keys)
+	values, found, readRPCs, readKeys, err := legacyMultiGet(ctx, transaction, keys)
+	store.legacyMetrics.catalogReadRPCs.Add(readRPCs)
+	store.legacyMetrics.catalogReadKeys.Add(readKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +396,9 @@ func (store *SchemaStore) loadLegacyBlobRecords(
 	result := make(map[schema.ID]schema.BlobRecord, len(ids))
 	keys, selected := legacyLookupKeys(ids, absent, schema.BlobKey)
 	store.legacyMetrics.planningReads.Add(uint64(len(keys)))
-	values, found, err := legacyMultiGet(ctx, transaction, keys)
+	values, found, readRPCs, readKeys, err := legacyMultiGet(ctx, transaction, keys)
+	store.legacyMetrics.catalogReadRPCs.Add(readRPCs)
+	store.legacyMetrics.catalogReadKeys.Add(readKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -432,23 +437,26 @@ func legacyLookupKeys(
 	return keys, selected
 }
 
-func legacyMultiGet(ctx context.Context, transaction *Transaction, keys [][]byte) ([]KeyValue, []bool, error) {
+func legacyMultiGet(ctx context.Context, transaction *Transaction, keys [][]byte) ([]KeyValue, []bool, uint64, uint64, error) {
 	values := make([]KeyValue, len(keys))
 	found := make([]bool, len(keys))
+	var readRPCs, readKeys uint64
 	for start := 0; start < len(keys); {
 		end, err := blobLookupBatchEnd(transaction.client.Limits(), keys, start)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, readRPCs, readKeys, err
 		}
+		readRPCs++
+		readKeys += uint64(end - start)
 		batchValues, batchFound, err := transaction.MultiGet(ctx, keys[start:end])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, readRPCs, readKeys, err
 		}
 		copy(values[start:end], batchValues)
 		copy(found[start:end], batchFound)
 		start = end
 	}
-	return values, found, nil
+	return values, found, readRPCs, readKeys, nil
 }
 
 func clonePackRecordMap(records map[schema.ID]*schema.PackRecord) map[schema.ID]*schema.PackRecord {
@@ -488,6 +496,8 @@ func planLegacyBatchDebt(
 	keyString := string(key)
 	if imported.Debt == nil && !loaded[keyString] {
 		metrics.planningReads.Add(1)
+		metrics.catalogReadRPCs.Add(1)
+		metrics.catalogReadKeys.Add(1)
 		value, valueExists, err := transaction.Get(ctx, key)
 		if err != nil {
 			return err

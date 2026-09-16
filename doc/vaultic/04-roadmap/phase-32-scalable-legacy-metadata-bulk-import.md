@@ -421,6 +421,8 @@ performance claim.
 
 ### P1. Complete Vaultic Attribution
 
+**Status:** complete as of 2026-09-16.
+
 **Prerequisite:** P0. Touch the importer scheduler/metrics and Go `SchemaStore`
 ingest/reduce metrics only. First add phase/operation counters and bounded
 histograms; then add tests. Measure the gaps listed in recommendation 1, especially
@@ -434,6 +436,45 @@ time-weighted measurement.
 tests. Cover timer accounting, snapshot independence, concurrent reporting,
 failure/cancellation, and reporter shutdown. **Exit:** documented timer scopes,
 unchanged functional results, and measured instrumentation overhead on P0.
+
+P1 uses fixed 64-bucket, power-of-two nanosecond distributions. Reported p50,
+p95, and p99 values are conservative bucket upper bounds (`p95<=...`), not exact
+samples. SchemaStore histograms lock only while adding or copying 64 counters so
+concurrent snapshots are internally consistent. Scheduler distributions share
+the existing scheduler telemetry lock. Both snapshots return independent maps;
+operation names are fixed in code and cannot create input-dependent cardinality.
+
+| Scope | Counters and timer boundaries |
+|---|---|
+| Scheduler | Coordinator phase and time-weighted active-lane time; ready and pending-reduction batches; retained and unreduced prepared bytes; oldest unreduced ordinal age. |
+| Scheduler completion | Ingest-return to coordinator-receive latency for every outcome. This includes synchronous reduction delay but is not labeled RPC time. |
+| Scheduler reduction | Time spent synchronously draining reducible outcomes. Eligible-ready-during-reduce records only the overlap after an ingest completion when a lane could refill with dependency-fair independent ready work; completed dependencies remain retained until reduction. |
+| Ingest work | Input preparation/canonicalization, content hashing, fresh-filter hints, plan building after catalog reads (including a possible debt read), and post-commit filter/counter publication. |
+| Ingest transaction | Ingest begin, receipt read, pack reads, blob reads, mutation RPC, commit, ingest recovery receipt read, and ingest retry backoff. Attempts and terminal failures are split from reduction. |
+| Reducer transaction | Reducer begin, receipt read, aggregate planning (reads, delta computation, and encoding), history planning (marker/sequence reads and local work), final mutation encoding, mutation RPC, commit, reducer recovery read, checkpoint verification read, and reducer retry backoff. |
+| Request volume | Primary receipt reads, recovery reads, checkpoint verification reads, attempted catalog and reducer-planning read RPCs/keys, attempted and successful ingest/reducer mutation RPCs, committed ingest mutations/bytes, and committed reducer mutations. Planned keys remain separately available as `PlanningReads`. |
+
+The deterministic blocked-reducer test admits both ingest lanes, waits for
+independent ready work, completes the second ingest while the first reduction is
+blocked, and verifies completion-to-receive, eligible-ready overlap, reduction
+blocking, unreduced bytes, and oldest age. Additional tests cover concurrent
+observations/snapshots, map independence, normal Stage 2/Stage 3 equivalence,
+idempotency conflict and missing-receipt failure counts, pre-admission validation
+and cancellation failures, failed mutation RPC attempts, failed/stopped scheduler
+refill exclusion, deterministic log formatting, repeated reporting without
+progress, and idempotent reporter stop.
+
+Instrumentation overhead was rechecked after the final P1 changes with the P0
+command at `-benchtime=3x`
+against parent `236330f4403c0b89fc136f5a65e2fa17a56d1b7c`, using the same fixture
+and daemon digests. Ordinary variants changed end-to-end rate by +0.92% (one
+lane) and +0.45% (two lanes); allocation counts changed by less than 0.02%.
+Deferred variants changed import-only rate by +5.9% to +12.2% and remained
+dominated by finalization variance, including one slow P0 two-lane sample. There
+was no instrumentation regression. These three-iteration aggregate checks bound
+obvious overhead; they are not P3 performance evidence.
+The paired raw summary rows, identities, calculations, and source-output hashes
+are retained in [Phase 32 P1 instrumentation evidence](phase-32-p1-benchmark-evidence.md).
 
 ### P2. Complete VaulticDB and Engine Attribution
 

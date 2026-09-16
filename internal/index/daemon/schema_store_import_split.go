@@ -28,17 +28,24 @@ func (store *SchemaStore) IngestLegacyPacks(
 	session schema.ID,
 	batch uint64,
 	imports []LegacyPackImport,
-) error {
+) (returnErr error) {
+	started := time.Now()
+	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
+	store.legacyMetrics.batches.Add(1)
+	defer func() {
+		if returnErr != nil {
+			store.legacyMetrics.ingestFailures.Add(1)
+		}
+	}()
 	if session == (schema.ID{}) {
 		return fmt.Errorf("legacy import session is required")
 	}
 	if !store.allowLegacySplitSession(session, true) {
 		return fmt.Errorf("%w: rerun with --force-reset-old-idx to enable fresh import split sessions", ErrLegacyImportFreshRequired)
 	}
-	started := time.Now()
-	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
-	store.legacyMetrics.batches.Add(1)
+	prepareStarted := time.Now()
 	prepared, err := prepareLegacyImportBatch(imports, nil)
+	store.legacyMetrics.operations.prepare.observe(time.Since(prepareStarted))
 	if err != nil {
 		return err
 	}
@@ -46,15 +53,20 @@ func (store *SchemaStore) IngestLegacyPacks(
 		return nil
 	}
 	receiptKey := schema.LegacyImportReceiptKey(session, batch)
+	hashStarted := time.Now()
 	contentHash, err := legacyImportContentHash(session, batch, prepared)
+	store.legacyMetrics.operations.hash.observe(time.Since(hashStarted))
 	if err != nil {
 		return err
 	}
+	hintsStarted := time.Now()
 	hints := store.freshImportLookupHintsForBatch(prepared)
+	store.legacyMetrics.operations.hints.observe(time.Since(hintsStarted))
 	deferDurability := store.freshImportSeen != nil
 	backoff := 100 * time.Microsecond
 	for attempt := range revisionAllocationAttempts {
 		store.legacyMetrics.attempts.Add(1)
+		store.legacyMetrics.ingestAttempts.Add(1)
 		attemptHints := hints
 		if attempt > 0 {
 			// Retried plans must reread all keys because concurrent ingest writers
@@ -74,17 +86,23 @@ func (store *SchemaStore) IngestLegacyPacks(
 			store.legacyMetrics.conflicts.Add(1)
 			store.legacyMetrics.retries.Add(1)
 			timer := time.NewTimer(backoff)
+			backoffStarted := time.Now()
 			select {
 			case <-ctx.Done():
 				timer.Stop()
+				store.legacyMetrics.operations.ingestRetryBackoff.observe(time.Since(backoffStarted))
 				return ctx.Err()
 			case <-timer.C:
 			}
+			store.legacyMetrics.operations.ingestRetryBackoff.observe(time.Since(backoffStarted))
 			backoff = min(backoff*2, 25*time.Millisecond)
 			continue
 		}
 		if err != nil {
+			recoveryStarted := time.Now()
 			resolved, resolveErr := store.lookupLegacyImportReceipt(ctx, receiptKey, contentHash)
+			store.legacyMetrics.recoveryReads.Add(1)
+			store.legacyMetrics.operations.ingestRecoveryRead.observe(time.Since(recoveryStarted))
 			if resolveErr == nil {
 				switch resolved {
 				case receiptMatched:
@@ -99,6 +117,7 @@ func (store *SchemaStore) IngestLegacyPacks(
 		if !committed {
 			return nil
 		}
+		postCommitStarted := time.Now()
 		if store.freshImportSeen != nil {
 			packIDs, blobIDs := uniqueLegacyImportIDs(prepared)
 			for _, packID := range packIDs {
@@ -114,6 +133,7 @@ func (store *SchemaStore) IngestLegacyPacks(
 		store.legacyMetrics.packsCommitted.Add(uint64(len(packIDs)))
 		store.legacyMetrics.blobsCommitted.Add(uint64(len(blobIDs)))
 		store.legacyMetrics.sourceIndexes.Add(uniqueLegacySourceIndexCount(prepared))
+		store.legacyMetrics.operations.postCommit.observe(time.Since(postCommitStarted))
 		return nil
 	}
 	return fmt.Errorf("ingest legacy packs: %w", errors.New("transaction conflict retry limit exceeded"))
@@ -128,7 +148,9 @@ func (store *SchemaStore) ingestLegacyPacksOnce(
 	deferDurability bool,
 	replanned bool,
 ) (bool, error) {
+	beginStarted := time.Now()
 	transaction, err := store.client.Begin(ctx)
+	store.legacyMetrics.operations.ingestBegin.observe(time.Since(beginStarted))
 	if err != nil {
 		return false, err
 	}
@@ -136,7 +158,10 @@ func (store *SchemaStore) ingestLegacyPacksOnce(
 		rollbackTransaction(ctx, transaction)
 		return false, err
 	}
+	receiptStarted := time.Now()
 	value, found, err := transaction.Get(ctx, receiptKey)
+	store.legacyMetrics.receiptReads.Add(1)
+	store.legacyMetrics.operations.receiptRead.observe(time.Since(receiptStarted))
 	if err != nil {
 		return fail(err)
 	}
@@ -164,8 +189,11 @@ func (store *SchemaStore) ingestLegacyPacksOnce(
 	}
 	mutationStarted := time.Now()
 	mutationRPCs, err := writeTransactionBatchesMeasured(ctx, transaction, limits, plan.puts, nil)
-	store.legacyMetrics.mutationRPCNanos.Add(uint64(time.Since(mutationStarted)))
-	store.legacyMetrics.mutationRPCs.Add(mutationRPCs)
+	mutationElapsed := time.Since(mutationStarted)
+	store.legacyMetrics.mutationRPCNanos.Add(uint64(mutationElapsed))
+	store.legacyMetrics.operations.mutationRPC.observe(mutationElapsed)
+	store.legacyMetrics.mutationRPCAttempts.Add(mutationRPCs.attempted)
+	store.legacyMetrics.mutationRPCs.Add(mutationRPCs.succeeded)
 	if err != nil {
 		return fail(err)
 	}
@@ -175,11 +203,15 @@ func (store *SchemaStore) ingestLegacyPacksOnce(
 	}
 	commitStarted := time.Now()
 	if err := commit(ctx); err != nil {
-		store.legacyMetrics.commitNanos.Add(uint64(time.Since(commitStarted)))
+		commitElapsed := time.Since(commitStarted)
+		store.legacyMetrics.commitNanos.Add(uint64(commitElapsed))
+		store.legacyMetrics.operations.commit.observe(commitElapsed)
 		rollbackTransaction(ctx, transaction)
 		return false, err
 	}
-	store.legacyMetrics.commitNanos.Add(uint64(time.Since(commitStarted)))
+	commitElapsed := time.Since(commitStarted)
+	store.legacyMetrics.commitNanos.Add(uint64(commitElapsed))
+	store.legacyMetrics.operations.commit.observe(commitElapsed)
 	store.legacyMetrics.mutationsCommitted.Add(uint64(len(plan.puts)))
 	store.legacyMetrics.encodedBytesCommitted.Add(plan.encodedBytes)
 	return true, nil
@@ -199,14 +231,20 @@ func (store *SchemaStore) planLegacyIngestBatch(
 		store.legacyMetrics.definitelyAbsent.Add(definitelyAbsent)
 		store.legacyMetrics.possiblyPresent.Add(uint64(len(packIDs)+len(blobIDs)) - definitelyAbsent)
 	}
+	packReadStarted := time.Now()
 	packOriginal, err := store.loadLegacyPackRecords(ctx, transaction, packIDs, hints.packsAbsent, hints.filterUsed)
+	store.legacyMetrics.operations.packRead.observe(time.Since(packReadStarted))
 	if err != nil {
 		return legacyImportBatchPlan{}, Limits{}, err
 	}
+	blobReadStarted := time.Now()
 	blobCurrent, err := store.loadLegacyBlobRecords(ctx, transaction, blobIDs, hints.blobsAbsent, hints.filterUsed)
+	store.legacyMetrics.operations.blobRead.observe(time.Since(blobReadStarted))
 	if err != nil {
 		return legacyImportBatchPlan{}, Limits{}, err
 	}
+	buildStarted := time.Now()
+	defer func() { store.legacyMetrics.operations.planBuild.observe(time.Since(buildStarted)) }()
 	state := newLegacyImportBatchState(packOriginal, blobCurrent, len(packIDs)+len(blobIDs), len(imports))
 	for index, imported := range imports {
 		if err := state.applyImport(ctx, transaction, store, imported); err != nil {
@@ -477,7 +515,15 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 	session schema.ID,
 	batch uint64,
 	finalCheckpoint *Mutation,
-) error {
+) (returnErr error) {
+	started := time.Now()
+	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
+	store.legacyMetrics.batches.Add(1)
+	defer func() {
+		if returnErr != nil {
+			store.legacyMetrics.reduceFailures.Add(1)
+		}
+	}()
 	if session == (schema.ID{}) {
 		return fmt.Errorf("legacy import session is required")
 	}
@@ -487,13 +533,11 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 	if err := validateLegacyImportCheckpoint(finalCheckpoint); err != nil {
 		return err
 	}
-	started := time.Now()
-	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
-	store.legacyMetrics.batches.Add(1)
 	deferDurability := store.freshImportSeen != nil
 	backoff := 100 * time.Microsecond
 	receiptKey := schema.LegacyImportReceiptKey(session, batch)
 	for range revisionAllocationAttempts {
+		store.legacyMetrics.reduceAttempts.Add(1)
 		reduceStarted := time.Now()
 		committed, err := store.reduceLegacyImportBatchOnce(ctx, receiptKey, finalCheckpoint, deferDurability)
 		store.legacyMetrics.reductionNanos.Add(uint64(time.Since(reduceStarted)))
@@ -501,22 +545,32 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 			store.legacyMetrics.conflicts.Add(1)
 			store.legacyMetrics.retries.Add(1)
 			timer := time.NewTimer(backoff)
+			backoffStarted := time.Now()
 			select {
 			case <-ctx.Done():
 				timer.Stop()
+				store.legacyMetrics.operations.reduceRetryBackoff.observe(time.Since(backoffStarted))
 				return ctx.Err()
 			case <-timer.C:
 			}
+			store.legacyMetrics.operations.reduceRetryBackoff.observe(time.Since(backoffStarted))
 			backoff = min(backoff*2, 25*time.Millisecond)
 			continue
 		}
 		if err != nil {
+			recoveryStarted := time.Now()
 			state, lookupErr := store.lookupReducedLegacyImportReceipt(ctx, receiptKey)
+			store.legacyMetrics.recoveryReads.Add(1)
+			store.legacyMetrics.operations.reduceRecoveryRead.observe(time.Since(recoveryStarted))
 			if lookupErr == nil && state {
 				if finalCheckpoint == nil {
 					return nil
 				}
-				return store.ensureCheckpointMatches(ctx, *finalCheckpoint)
+				checkpointStarted := time.Now()
+				checkpointErr := store.ensureCheckpointMatches(ctx, *finalCheckpoint)
+				store.legacyMetrics.reduceCheckpointReads.Add(1)
+				store.legacyMetrics.operations.reduceCheckpointRead.observe(time.Since(checkpointStarted))
+				return checkpointErr
 			}
 			return err
 		}
@@ -537,7 +591,9 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	finalCheckpoint *Mutation,
 	deferDurability bool,
 ) (bool, error) {
+	beginStarted := time.Now()
 	transaction, err := store.client.Begin(ctx)
+	store.legacyMetrics.operations.reduceBegin.observe(time.Since(beginStarted))
 	if err != nil {
 		return false, err
 	}
@@ -545,13 +601,19 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 		rollbackTransaction(ctx, transaction)
 		return false, err
 	}
+	receiptStarted := time.Now()
 	value, found, err := transaction.Get(ctx, receiptKey)
+	store.legacyMetrics.reductionReceiptReads.Add(1)
+	store.legacyMetrics.operations.reduceReceiptRead.observe(time.Since(receiptStarted))
 	if err != nil {
 		return fail(err)
 	}
 	if !found {
 		if finalCheckpoint != nil {
+			checkpointStarted := time.Now()
 			applied, err := checkpointMatchesInTransaction(ctx, transaction, *finalCheckpoint)
+			store.legacyMetrics.reduceCheckpointReads.Add(1)
+			store.legacyMetrics.operations.reduceCheckpointRead.observe(time.Since(checkpointStarted))
 			if err != nil {
 				return fail(err)
 			}
@@ -575,7 +637,10 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	}
 	if receipt.Reduced {
 		if finalCheckpoint != nil {
+			checkpointStarted := time.Now()
 			applied, err := checkpointMatchesInTransaction(ctx, transaction, *finalCheckpoint)
+			store.legacyMetrics.reduceCheckpointReads.Add(1)
+			store.legacyMetrics.operations.reduceCheckpointRead.observe(time.Since(checkpointStarted))
 			if err != nil {
 				return fail(err)
 			}
@@ -595,7 +660,11 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	mutations := make([]Mutation, 0, len(changes)+len(receipt.Events)+2+len(aggregateKeys()))
 	if len(changes) > 0 {
 		store.legacyMetrics.planningReads.Add(uint64(len(aggregateKeys())))
+		aggregateStarted := time.Now()
+		store.legacyMetrics.reductionPlanReadRPCs.Add(1)
+		store.legacyMetrics.reductionPlanReadKeys.Add(uint64(len(aggregateKeys())))
 		aggregates, err := applyPackAggregateDeltas(ctx, transaction, changes, true)
+		store.legacyMetrics.operations.reduceAggregateRead.observe(time.Since(aggregateStarted))
 		if err != nil {
 			return fail(err)
 		}
@@ -608,35 +677,55 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	if len(events) > 0 {
 		store.legacyMetrics.planningReads.Add(2)
 	}
-	history, err := packHistoryMutations(ctx, transaction, events)
+	historyStarted := time.Now()
+	history, err := packHistoryMutationsMeasured(ctx, transaction, events, func() {
+		store.legacyMetrics.reductionPlanReadRPCs.Add(1)
+		store.legacyMetrics.reductionPlanReadKeys.Add(1)
+	})
+	store.legacyMetrics.operations.reduceHistoryRead.observe(time.Since(historyStarted))
 	if err != nil {
 		return fail(err)
 	}
-	mutations = append(mutations, history...)
-	if finalCheckpoint != nil {
-		mutations = append(mutations, *finalCheckpoint)
-	}
-	receipt.Reduced = true
-	encodedReceipt, err := receipt.MarshalBinary()
+	err = func() error {
+		encodeStarted := time.Now()
+		defer func() { store.legacyMetrics.operations.reduceEncode.observe(time.Since(encodeStarted)) }()
+		mutations = append(mutations, history...)
+		if finalCheckpoint != nil {
+			mutations = append(mutations, *finalCheckpoint)
+		}
+		receipt.Reduced = true
+		encodedReceipt, encodeErr := receipt.MarshalBinary()
+		if encodeErr != nil {
+			return encodeErr
+		}
+		mutations = append(mutations, Mutation{Key: receiptKey, Value: encodedReceipt})
+		sort.Slice(mutations, func(left, right int) bool { return bytes.Compare(mutations[left].Key, mutations[right].Key) < 0 })
+		return validateLegacyImportMutations(mutations)
+	}()
 	if err != nil {
 		return fail(err)
 	}
-	mutations = append(mutations, Mutation{Key: receiptKey, Value: encodedReceipt})
-	sort.Slice(mutations, func(left, right int) bool { return bytes.Compare(mutations[left].Key, mutations[right].Key) < 0 })
-	if err := validateLegacyImportMutations(mutations); err != nil {
+	mutationStarted := time.Now()
+	mutationRPCs, err := writeTransactionBatchesMeasured(ctx, transaction, store.client.Limits(), mutations, nil)
+	store.legacyMetrics.reductionMutationRPCAttempts.Add(mutationRPCs.attempted)
+	store.legacyMetrics.reductionMutationRPCs.Add(mutationRPCs.succeeded)
+	if err != nil {
+		store.legacyMetrics.operations.reduceMutationRPC.observe(time.Since(mutationStarted))
 		return fail(err)
 	}
-	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), mutations, nil); err != nil {
-		return fail(err)
-	}
+	store.legacyMetrics.operations.reduceMutationRPC.observe(time.Since(mutationStarted))
 	commit := transaction.Commit
 	if deferDurability {
 		commit = transaction.CommitDeferred
 	}
+	commitStarted := time.Now()
 	if err := commit(ctx); err != nil {
+		store.legacyMetrics.operations.reduceCommit.observe(time.Since(commitStarted))
 		rollbackTransaction(ctx, transaction)
 		return false, err
 	}
+	store.legacyMetrics.operations.reduceCommit.observe(time.Since(commitStarted))
+	store.legacyMetrics.reductionMutations.Add(uint64(len(mutations)))
 	return true, nil
 }
 

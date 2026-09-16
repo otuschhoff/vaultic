@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -640,7 +641,7 @@ func runIndexImport(
 	telemetry := legacyimport.NewSchedulerTelemetry()
 	stopStats := startLegacyImportStats(ctx, store, 10*time.Second, func(stats daemon.LegacyImportStats) {
 		logLegacyImportStats(stats)
-		log.Printf("legacy import scheduler: %+v", telemetry.Snapshot())
+		log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
 	})
 	defer stopStats()
 	if options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0 {
@@ -669,7 +670,7 @@ func runIndexImport(
 		Telemetry:          telemetry,
 	})
 	stopStats()
-	log.Printf("legacy import scheduler: %+v", telemetry.Snapshot())
+	log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
 	logLegacyImportStats(store.LegacyImportStats())
 	result.ResetElapsedMS = uint64(resetElapsed / time.Millisecond)
 	logLegacyImportCompletion(started, result, err)
@@ -767,17 +768,28 @@ func logLegacyImportStats(importStats daemon.LegacyImportStats) {
 		importStats.CleanupWriteTime, importStats.CleanupCommitTime, importStats.CleanupDeferredCommits,
 	)
 	log.Printf(
-		"legacy import transactions: batches=%d ingested=%d reduced=%d attempts=%d commits=%d retries=%d conflicts=%d "+
+		"legacy import transactions: batches=%d ingested=%d reduced=%d attempts=%d ingest_attempts=%d reduce_attempts=%d "+
+			"ingest_failures=%d reduce_failures=%d commits=%d retries=%d conflicts=%d "+
 			"packs=%d unique_blobs=%d source_indexes=%d mutations=%d bytes=%d replanned_bytes=%d "+
-			"mutation_rpcs=%d planning_reads=%d gate_wait=%s planning=%s reduction=%s "+
+			"mutation_rpc_attempts=%d mutation_rpcs=%d reduction_mutation_rpc_attempts=%d reduction_mutation_rpcs=%d "+
+			"reduction_mutations=%d receipt_reads=%d reduction_receipt_reads=%d recovery_reads=%d reduce_checkpoint_reads=%d "+
+			"catalog_read_rpcs=%d catalog_read_keys=%d reduction_plan_read_rpcs=%d reduction_plan_read_keys=%d "+
+			"planning_reads=%d gate_wait=%s planning=%s reduction=%s "+
 			"mutation_rpc=%s commit=%s total_lane_time=%s lookups_absent=%d lookups_possible=%d lookups_found=%d "+
 			"lookups_false_positive_equivalent=%d filter_layers=%d filter_bytes=%d filter_inserts=%d "+
 			"filter_false_positive=%g filter_occupancy=%v filter_fallback=%t",
 		importStats.Batches, importStats.IngestedBatches, importStats.ReducedBatches,
-		importStats.Attempts, importStats.Commits, importStats.Retries, importStats.Conflicts,
+		importStats.Attempts, importStats.IngestAttempts, importStats.ReduceAttempts,
+		importStats.IngestFailures, importStats.ReduceFailures, importStats.Commits, importStats.Retries, importStats.Conflicts,
 		importStats.PacksCommitted, importStats.BlobsCommitted, importStats.SourceIndexesCommitted,
 		importStats.MutationsCommitted, importStats.EncodedBytesCommitted, importStats.ReplannedBytes,
-		importStats.MutationRPCs, importStats.PlanningReads, importStats.GateWait, importStats.PlanningTime,
+		importStats.MutationRPCAttempts, importStats.MutationRPCs,
+		importStats.ReductionMutationRPCAttempts, importStats.ReductionMutationRPCs, importStats.ReductionMutations,
+		importStats.ReceiptReads, importStats.ReductionReceiptReads, importStats.RecoveryReads, importStats.ReduceCheckpointReads,
+		importStats.CatalogReadRPCs, importStats.CatalogReadKeys,
+		importStats.ReductionPlanReadRPCs, importStats.ReductionPlanReadKeys,
+		importStats.PlanningReads,
+		importStats.GateWait, importStats.PlanningTime,
 		importStats.ReductionTime,
 		importStats.MutationRPCTime, importStats.CommitTime, importStats.TotalTime,
 		importStats.DefinitelyAbsentLookups, importStats.PossiblyPresentLookups, importStats.FoundLookups,
@@ -785,6 +797,71 @@ func logLegacyImportStats(importStats daemon.LegacyImportStats) {
 		importStats.FilterInserts, importStats.FilterFalsePositive, importStats.FilterLayerOccupancy,
 		importStats.FilterFallbackToDatabase,
 	)
+	log.Printf("legacy import operation latency: %s", formatLegacyOperationStats(importStats.Operations))
+}
+
+func formatLegacyOperationStats(operations map[string]daemon.DurationDistribution) string {
+	names := make([]string, 0, len(operations))
+	for name, distribution := range operations {
+		if distribution.Count > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		distribution := operations[name]
+		parts = append(parts, fmt.Sprintf(
+			"%s=count:%d,sum:%s,p50<=%s,p95<=%s,p99<=%s",
+			name, distribution.Count, distribution.Sum, distribution.P50, distribution.P95, distribution.P99,
+		))
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatLegacySchedulerStats(snapshot legacyimport.SchedulerSnapshot) string {
+	phaseNames := make([]string, 0, len(snapshot.PhaseTime))
+	for name := range snapshot.PhaseTime {
+		phaseNames = append(phaseNames, name)
+	}
+	sort.Strings(phaseNames)
+	phases := make([]string, 0, len(phaseNames))
+	for _, name := range phaseNames {
+		phases = append(phases, fmt.Sprintf("%s:%s", name, snapshot.PhaseTime[name]))
+	}
+	lanes := make([]string, 0, len(snapshot.LaneTime))
+	for active, elapsed := range snapshot.LaneTime {
+		if elapsed > 0 {
+			lanes = append(lanes, fmt.Sprintf("%d:%s", active, elapsed))
+		}
+	}
+	return fmt.Sprintf(
+		"phase=%s phase_time=[%s] lane_time=[%s] active_lanes=%d ready=%d pending_reduction=%d "+
+			"retained_bytes=%d unreduced_bytes=%d oldest_unreduced=%s operations=[%s]",
+		snapshot.Phase, strings.Join(phases, ","), strings.Join(lanes, ","), snapshot.ActiveLanes,
+		snapshot.ReadyBatches, snapshot.PendingReductionBatches, snapshot.RetainedPreparedBytes,
+		snapshot.UnreducedPreparedBytes, snapshot.OldestUnreducedAge,
+		formatLegacySchedulerOperations(snapshot.Operations),
+	)
+}
+
+func formatLegacySchedulerOperations(operations map[string]legacyimport.DurationDistribution) string {
+	names := make([]string, 0, len(operations))
+	for name, distribution := range operations {
+		if distribution.Count > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		distribution := operations[name]
+		parts = append(parts, fmt.Sprintf(
+			"%s=count:%d,sum:%s,p50<=%s,p95<=%s,p99<=%s",
+			name, distribution.Count, distribution.Sum, distribution.P50, distribution.P95, distribution.P99,
+		))
+	}
+	return strings.Join(parts, " ")
 }
 
 func validateIndexImportOptions(options indexImportOptions) (indexImportOptions, error) {
