@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -1486,34 +1488,227 @@ func BenchmarkImportPackTransactionSizes(b *testing.B) {
 	}
 }
 
+type frozenBenchmarkIndex struct {
+	id      vaultic.ID
+	encoded []byte
+	packIDs []vaultic.ID
+	blobIDs []vaultic.ID
+}
+
+type frozenBenchmarkSource struct {
+	indexes []frozenBenchmarkIndex
+}
+
+func (*frozenBenchmarkSource) Connections() uint { return 1 }
+
+func (source *frozenBenchmarkSource) List(
+	ctx context.Context,
+	fileType vaultic.FileType,
+	fn func(vaultic.ID, int64) error,
+) error {
+	if fileType != vaultic.IndexFile {
+		return nil
+	}
+	for _, entry := range source.indexes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := fn(entry.id, int64(len(entry.encoded))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (source *frozenBenchmarkSource) LoadUnpacked(
+	_ context.Context,
+	fileType vaultic.FileType,
+	id vaultic.ID,
+) ([]byte, error) {
+	if fileType == vaultic.IndexFile {
+		for _, entry := range source.indexes {
+			if entry.id == id {
+				return append([]byte(nil), entry.encoded...), nil
+			}
+		}
+	}
+	return nil, errors.New("frozen benchmark input not found")
+}
+
+func newFrozenStage3BenchmarkSource(t testing.TB, indexCount, packsPerIndex, blobsPerPack int) *frozenBenchmarkSource {
+	t.Helper()
+	source := &frozenBenchmarkSource{indexes: make([]frozenBenchmarkIndex, indexCount)}
+	for indexNumber := range indexCount {
+		entry := frozenBenchmarkIndex{
+			id:      vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "phase32-benchmark-index-%d", indexNumber))),
+			packIDs: make([]vaultic.ID, 0, packsPerIndex),
+			blobIDs: make([]vaultic.ID, 0, packsPerIndex*blobsPerPack),
+		}
+		idx := index.NewIndex()
+		for packNumber := range packsPerIndex {
+			packID := vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "pack-%d-%d", indexNumber, packNumber)))
+			blobs := make(pack.Blobs, blobsPerPack)
+			for blobNumber := range blobs {
+				blobID := vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "blob-%d-%d-%d", indexNumber, packNumber, blobNumber)))
+				entry.blobIDs = append(entry.blobIDs, blobID)
+				blobs[blobNumber] = pack.Blob{
+					BlobHandle: vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob},
+					Offset:     uint(blobNumber), Length: 1,
+				}
+			}
+			entry.packIDs = append(entry.packIDs, packID)
+			idx.StorePack(packID, blobs)
+		}
+		var encoded bytes.Buffer
+		if err := idx.Encode(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		sort.Slice(entry.packIDs, func(left, right int) bool {
+			return bytes.Compare(entry.packIDs[left][:], entry.packIDs[right][:]) < 0
+		})
+		sort.Slice(entry.blobIDs, func(left, right int) bool {
+			return bytes.Compare(entry.blobIDs[left][:], entry.blobIDs[right][:]) < 0
+		})
+		entry.encoded = encoded.Bytes()
+		source.indexes[indexNumber] = entry
+	}
+	return source
+}
+
+func (source *frozenBenchmarkSource) manifestDigest() [sha256.Size]byte {
+	hasher := sha256.New()
+	var framed [8]byte
+	binary.BigEndian.PutUint64(framed[:], uint64(len(source.indexes)))
+	_, _ = hasher.Write(framed[:])
+	for _, entry := range source.indexes {
+		_, _ = hasher.Write(entry.id[:])
+		binary.BigEndian.PutUint64(framed[:], uint64(len(entry.encoded)))
+		_, _ = hasher.Write(framed[:])
+		_, _ = hasher.Write(entry.encoded)
+		binary.BigEndian.PutUint64(framed[:], uint64(len(entry.packIDs)))
+		_, _ = hasher.Write(framed[:])
+		for _, packID := range entry.packIDs {
+			_, _ = hasher.Write(packID[:])
+		}
+		binary.BigEndian.PutUint64(framed[:], uint64(len(entry.blobIDs)))
+		_, _ = hasher.Write(framed[:])
+		for _, blobID := range entry.blobIDs {
+			_, _ = hasher.Write(blobID[:])
+		}
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return digest
+}
+
+func (source *frozenBenchmarkSource) counts() (indexes, packs, blobs uint64) {
+	indexes = uint64(len(source.indexes))
+	for _, entry := range source.indexes {
+		packs += uint64(len(entry.packIDs))
+		blobs += uint64(len(entry.blobIDs))
+	}
+	return indexes, packs, blobs
+}
+
+func fileSHA256(path string) ([sha256.Size]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return digest, nil
+}
+
+func TestFrozenStage3BenchmarkFixtureReproducible(t *testing.T) {
+	first := newFrozenStage3BenchmarkSource(t, 4, 8, 16)
+	second := newFrozenStage3BenchmarkSource(t, 4, 8, 16)
+	const expectedDigest = "8131bd970bae45469fd851568b0970618e66eea1c2d2c49620702281618493fc"
+	if digest := fmt.Sprintf("%x", first.manifestDigest()); digest != expectedDigest {
+		t.Fatalf("frozen fixture digest = %s, want %s", digest, expectedDigest)
+	}
+	if first.manifestDigest() != second.manifestDigest() {
+		t.Fatal("identical frozen fixtures produced different manifests")
+	}
+	firstIndexes, firstPacks, firstBlobs := first.counts()
+	secondIndexes, secondPacks, secondBlobs := second.counts()
+	if firstIndexes != secondIndexes || firstPacks != secondPacks || firstBlobs != secondBlobs {
+		t.Fatalf(
+			"identical frozen fixtures produced different counts: (%d, %d, %d) != (%d, %d, %d)",
+			firstIndexes, firstPacks, firstBlobs, secondIndexes, secondPacks, secondBlobs,
+		)
+	}
+	var listed []vaultic.ID
+	if err := first.List(context.Background(), vaultic.IndexFile, func(id vaultic.ID, _ int64) error {
+		listed = append(listed, id)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for indexNumber, entry := range first.indexes {
+		if listed[indexNumber] != entry.id {
+			t.Fatalf("listed index %d = %s, want %s", indexNumber, listed[indexNumber], entry.id)
+		}
+	}
+	indexes, packs, blobs := first.counts()
+	for traversal, source := range []*frozenBenchmarkSource{first, second} {
+		result, err := Import(
+			context.Background(), source, fixedStatter{size: 16}, newMemoryStore(),
+			Options{DryRun: true, PreserveIndexOrder: true},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IndexesTotal != indexes || result.IndexesImported != indexes || result.PacksImported != packs || result.BlobsImported != blobs {
+			t.Fatalf(
+				"frozen selection changed during traversal %d: result=%+v want indexes=%d packs=%d blobs=%d",
+				traversal, result, indexes, packs, blobs,
+			)
+		}
+	}
+}
+
 func BenchmarkImportStage3Daemon(b *testing.B) {
 	binaryPath := os.Getenv("VAULTICDB_TEST_BINARY")
 	if binaryPath == "" {
 		b.Skip("set VAULTICDB_TEST_BINARY to an optimized symbol-enabled daemon")
 	}
-	const packCount, blobsPerPack = 128, 512
-	indexID := vaultic.ID(sha256.Sum256([]byte("phase32-benchmark-index")))
-	idx := index.NewIndex()
-	for packNumber := range packCount {
-		packID := vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "pack-%d", packNumber)))
-		blobs := make(pack.Blobs, blobsPerPack)
-		for blobNumber := range blobs {
-			blobID := vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "blob-%d-%d", packNumber, blobNumber)))
-			blobs[blobNumber] = pack.Blob{BlobHandle: vaultic.BlobHandle{ID: blobID, Type: vaultic.DataBlob}, Offset: uint(blobNumber), Length: 1}
-		}
-		idx.StorePack(packID, blobs)
+	if runtime.GOMAXPROCS(0) != 4 || os.Getenv("GOMEMLIMIT") != "8GiB" {
+		b.Fatal("frozen contract requires GOMAXPROCS=4 and GOMEMLIMIT=8GiB")
 	}
-	var encoded bytes.Buffer
-	if err := idx.Encode(&encoded); err != nil {
+	b.Setenv("VAULTICDB_READ_CACHE_TIERS", "")
+	daemonDigest, err := fileSHA256(binaryPath)
+	if err != nil {
 		b.Fatal(err)
 	}
-	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}}
+	const expectedDaemonDigest = "531d14a54ca983c10366ebd8759d20390deef437eac93eb93a7b07dc16b2e4c4"
+	if digest := fmt.Sprintf("%x", daemonDigest); digest != expectedDaemonDigest {
+		b.Fatalf("daemon digest = %s, want %s", digest, expectedDaemonDigest)
+	}
+	const indexCount, packsPerIndex, blobsPerPack = 4, 32, 512
+	const expectedManifestDigest = "f2b658363adcb6760a1fa9fd411fa60a4a9de0a0d2ff15d6ed961efeb9b9e943"
+	source := newFrozenStage3BenchmarkSource(b, indexCount, packsPerIndex, blobsPerPack)
+	manifestDigest := source.manifestDigest()
+	if digest := fmt.Sprintf("%x", manifestDigest); digest != expectedManifestDigest {
+		b.Fatalf("benchmark fixture digest = %s, want %s", digest, expectedManifestDigest)
+	}
+	indexes, packCount, blobCount := source.counts()
+	b.Logf(
+		"phase32 reproduction contract: input_sha256=%x daemon_sha256=%x indexes=%d packs=%d blobs=%d ordered_manifest=true selection=preselected work_budget=disabled object_store=local wal_import=memory wal_reopen=local wal_flush=%s read_cache_bytes=0 max_unflushed_bytes=%d l0_sst_bytes=%d GOMAXPROCS=%d GOMEMLIMIT=%q candidate_reset=per_iteration isolated_tempdir=true completion=mark_close_handoff_reopen_all_checkpoints",
+		manifestDigest, daemonDigest, indexes, packCount, blobCount, 500*time.Millisecond, uint64(16<<30), uint64(256<<20),
+		runtime.GOMAXPROCS(0), os.Getenv("GOMEMLIMIT"),
+	)
 	for _, variant := range []struct {
 		lanes    uint
 		deferred bool
 	}{{1, false}, {2, false}, {2, true}, {4, true}, {8, true}} {
 		b.Run(fmt.Sprintf("lanes=%d/deferred=%t", variant.lanes, variant.deferred), func(b *testing.B) {
-			var cleanup, reduce, finalization time.Duration
+			var cleanup, importElapsed, reduce, finalization time.Duration
 			b.ReportAllocs()
 			for range b.N {
 				b.StopTimer()
@@ -1521,7 +1716,7 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				defer os.RemoveAll(directory)
+				b.Cleanup(func() { _ = os.RemoveAll(directory) })
 				ctx := context.Background()
 				config := daemon.Options{
 					Socket: filepath.Join(directory, "d.sock"), RepositoryID: "phase32-benchmark",
@@ -1534,6 +1729,17 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
+				encryption, wal, limits := client.Encryption(), client.WALInfo(), client.Limits()
+				if encryption.Enabled || encryption.Algorithm != "" || encryption.ActiveDEKVersion != 0 ||
+					wal.Target != "memory" || wal.Durability != "local-process" || wal.Encrypted ||
+					limits.MaxBatchItems != 10000 || limits.MaxMessageBytes != 16<<20 || limits.MaxPageItems != 1000 {
+					b.Fatalf("effective daemon contract mismatch: encryption=%+v wal=%+v limits=%+v", encryption, wal, limits)
+				}
+				b.Logf(
+					"effective daemon contract: encryption_enabled=%t encryption_algorithm=%q dek_version=%d unlock_slot=%q wal_target=%q wal_durability=%q wal_encrypted=%t max_batch_items=%d max_message_bytes=%d max_page_items=%d",
+					encryption.Enabled, encryption.Algorithm, encryption.ActiveDEKVersion, encryption.UnlockSlot,
+					wal.Target, wal.Durability, wal.Encrypted, limits.MaxBatchItems, limits.MaxMessageBytes, limits.MaxPageItems,
+				)
 				defer client.Close(ctx)
 				store := daemon.NewSchemaStore(client)
 				store.EnableFreshLegacyImport()
@@ -1544,14 +1750,16 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 				}
 				telemetry := NewSchedulerTelemetry()
 				b.StartTimer()
+				importStarted := time.Now()
 				result, err := Import(ctx, source, fixedStatter{size: blobsPerPack}, store, Options{
-					PublicationLanes: variant.lanes, PackWorkers: 8, PacksPerTransaction: 8,
+					PreserveIndexOrder: true, PublicationLanes: variant.lanes, PackWorkers: 8, PacksPerTransaction: 8,
 					ImportTransactionBytes: 8 << 20, PreparedImportBytes: 256 << 20, Telemetry: telemetry,
 				})
 				if err != nil {
 					b.Fatal(err)
 				}
-				if result.PacksImported != packCount || result.BlobsImported != packCount*blobsPerPack {
+				importElapsed += time.Since(importStarted)
+				if result.IndexesImported != indexes || result.PacksImported != packCount || result.BlobsImported != blobCount {
 					b.Fatalf("incomplete fixture: %+v", result)
 				}
 				stats := store.LegacyImportStats()
@@ -1571,18 +1779,29 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
+				reopenedWAL := reopened.WALInfo()
+				if reopenedWAL.Target != "local" || reopenedWAL.Durability != "local-process" || reopenedWAL.Encrypted {
+					b.Fatalf("reopened WAL contract mismatch: %+v", reopenedWAL)
+				}
 				defer reopened.Close(ctx)
-				if _, found, err := daemon.NewSchemaStore(reopened).Get(ctx, schema.ImportCheckpointKey(schema.ID(indexID))); err != nil || !found {
-					b.Fatalf("reopen checkpoint: found=%t err=%v", found, err)
+				reopenedStore := daemon.NewSchemaStore(reopened)
+				for _, entry := range source.indexes {
+					if _, found, err := reopenedStore.Get(ctx, schema.ImportCheckpointKey(schema.ID(entry.id))); err != nil || !found {
+						b.Fatalf("reopen checkpoint for %s: found=%t err=%v", entry.id, found, err)
+					}
 				}
 				if err := reopened.Close(ctx); err != nil {
 					b.Fatal(err)
 				}
 				finalization += time.Since(closeStarted)
 				b.StopTimer()
+				if err := os.RemoveAll(directory); err != nil {
+					b.Fatal(err)
+				}
 				b.Logf("scheduler=%+v cleanup=%s commit=%s deferred=%d", telemetry.Snapshot(), stats.CleanupTime, stats.CleanupCommitTime, stats.CleanupDeferredCommits)
 			}
-			b.ReportMetric(float64(packCount*blobsPerPack*b.N)/b.Elapsed().Seconds(), "blobs/s")
+			b.ReportMetric(float64(blobCount*uint64(b.N))/importElapsed.Seconds(), "import-blobs/s")
+			b.ReportMetric(float64(blobCount*uint64(b.N))/b.Elapsed().Seconds(), "end-to-end-blobs/s")
 			b.ReportMetric(cleanup.Seconds()/float64(b.N), "cleanup-s/op")
 			b.ReportMetric(reduce.Seconds()/float64(b.N), "reduce-s/op")
 			b.ReportMetric(finalization.Seconds()/float64(b.N), "finalize-s/op")

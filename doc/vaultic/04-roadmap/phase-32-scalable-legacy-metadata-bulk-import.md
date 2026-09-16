@@ -353,6 +353,10 @@ a checklist of optimizations that must all ship. P7 validates the accepted resul
 
 ### P0. Freeze the Reproduction Contract
 
+**Status:** complete for the isolated synthetic baseline as of 2026-09-16.
+Repository-scale acceptance remains blocked on an authorized representative
+candidate; the active production import is not a benchmark resource.
+
 **Prerequisite:** current committed revisions and existing import/daemon fixtures.
 Inspect `BenchmarkImportStage3Daemon`, source callback ordering, and run settings.
 Record input identity/order, encryption, storage/WAL/cache settings, resource
@@ -366,6 +370,54 @@ do not use decode-completion order or record budget alone as input identity.
 **Exit:** reproducible isolated baseline command, input digest, and safety scope.
 If representative input is unavailable, report that blocker rather than infer
 large-repository gains from the small fixture.
+
+The benchmark now constructs a test-only, preselected four-index source rather
+than relying on map iteration, parallel decode-completion order, or a record
+budget. An opt-in importer path decodes in parallel but invokes callbacks in
+memorized list order with retained decoded indexes bounded by worker count. A
+gated-first-index test forces a later load to complete first and verifies that
+it still cannot overtake callback execution. The
+canonical digest covers each ordered index identity and its exact encoded bytes,
+plus sorted pack and blob identities. A focused test pins the smaller fixture at
+`8131bd970bae45469fd851568b0970618e66eea1c2d2c49620702281618493fc`
+and verifies repeated construction, list order, selected counts, and two complete
+ordered dry-run traversals. The real-daemon fixture pins and enforces this contract:
+
+| Field | Frozen value |
+|---|---|
+| Vaultic baseline parent | `c7211177ee5d6f9c3223c344cff6f6b9e61358db`; the P0 revision is the commit containing this record |
+| SlateDB fork revision | `5faf4b086b043c65afdf193a7e2f87a737a11205` |
+| Input | 4 indexes, 128 packs, 65,536 blobs; preselected with work budget disabled |
+| Input SHA-256 | `f2b658363adcb6760a1fa9fd411fa60a4a9de0a0d2ff15d6ed961efeb9b9e943` |
+| Validated daemon SHA-256 | `531d14a54ca983c10366ebd8759d20390deef437eac93eb93a7b07dc16b2e4c4` |
+| Resources | `GOMAXPROCS=4`, `GOMEMLIMIT=8GiB`; no process-affinity claim |
+| Storage | isolated temporary local object store; read-cache tiers explicitly cleared and configured cache zero; 16 GiB max unflushed; 256 MiB L0 SST |
+| WAL | memory/local-process during import, 500 ms flush setting, then local reopen |
+| Encryption | disabled in the validated synthetic daemon handshake; production encrypted runs remain separate evidence |
+| Variants | 1 lane ordinary; 2 lanes ordinary; 2, 4, and 8 lanes with deferred cleanup |
+| Reset and safety | fresh candidate reset in a new temporary directory for every iteration; no live repository paths or sockets |
+| Completion | mark complete, close, WAL handoff, reopen, and verify all four import checkpoints |
+
+Run the focused contract test and one complete smoke traversal with:
+
+```console
+go test ./internal/index/legacyimport \
+  -run '^TestFrozenStage3BenchmarkFixtureReproducible$' -count=1
+GOMAXPROCS=4 GOMEMLIMIT=8GiB \
+  VAULTICDB_TEST_BINARY="$PWD/bin/profile/linux-amd64/vaulticdb" \
+  go test -v ./internal/index/legacyimport -run '^$' \
+  -bench '^BenchmarkImportStage3Daemon$' -benchtime=1x -count=1
+```
+
+For comparison evidence, use `-benchtime=3x` and retain the full verbose output;
+each sub-benchmark iteration gets a newly reset candidate that is removed before
+the next iteration. The benchmark reports import-only and end-to-end completion
+rates separately, alongside the scheduler snapshot, cleanup mode, allocations,
+and finalization time. Input/daemon digest, Go resource, effective encryption,
+WAL, daemon-limit, or selected-count mismatches fail the run; any missing
+checkpoint fails after reopen. The P0 smoke passed all five variants against the
+daemon above. Its rates are fixture validation, not a repository-scale
+performance claim.
 
 ### P1. Complete Vaultic Attribution
 

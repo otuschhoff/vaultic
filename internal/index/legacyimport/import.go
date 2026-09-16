@@ -39,6 +39,7 @@ const (
 type Options struct {
 	Resume                 bool
 	DryRun                 bool
+	PreserveIndexOrder     bool
 	PublicationLanes       uint
 	BatchSize              uint32
 	PackWorkers            uint
@@ -320,7 +321,11 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	}
 	reportProgress()
 	var workUsed uint64
-	err = legacyindex.ForAllIndexes(ctx, indexList, source, func(indexID vaultic.ID, index *legacyindex.Index, loadErr error) error {
+	forAllIndexes := legacyindex.ForAllIndexes
+	if options.PreserveIndexOrder {
+		forAllIndexes = legacyindex.ForAllIndexesInOrder
+	}
+	err = forAllIndexes(ctx, indexList, source, func(indexID vaultic.ID, index *legacyindex.Index, loadErr error) error {
 		result.IndexesSeen++
 		defer reportProgress()
 		if loadErr != nil {
