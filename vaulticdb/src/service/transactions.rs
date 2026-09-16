@@ -47,13 +47,19 @@ impl Service {
         &self,
         request: Request<WriteBatchRequest>,
     ) -> Result<Response<WriteBatchResponse>, Status> {
-        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        validate_write_batch(request.get_ref())?;
-        let storage = self.storage().await?;
-        let durable = self
-            .with_write_intent(storage.write_batch(request.get_ref()))
-            .await?;
-        Ok(Response::new(WriteBatchResponse { durable }))
+        let mut timer = self.state.attribution.write_batch_request.timer();
+        let result = async {
+            check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            validate_write_batch(request.get_ref())?;
+            let storage = self.storage().await?;
+            let durable = self
+                .with_write_intent(storage.write_batch(request.get_ref()))
+                .await?;
+            Ok(Response::new(WriteBatchResponse { durable }))
+        }
+        .await;
+        timer.record_result(&result);
+        result
     }
 
     pub(super) async fn handle_begin(
@@ -70,36 +76,42 @@ impl Service {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<BeginResponse>, Status> {
-        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        let _admission = self.mutation_admission().await?;
-        let storage = self.storage().await?;
-        self.ensure_writer_authority().await?;
-        self.state
-            .writer_role
-            .lock()
-            .await
-            .transaction_opened()
-            .map_err(role_error)?;
-        let outcome = match storage.begin().await {
-            Ok(outcome) => outcome,
-            Err(failure) => {
-                let mut role = self.state.writer_role.lock().await;
-                role.transaction_closed();
-                for _ in 0..failure.expired {
+        let mut timer = self.state.attribution.begin_request.timer();
+        let result = async {
+            check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let _admission = self.mutation_admission().await?;
+            let storage = self.storage().await?;
+            self.ensure_writer_authority().await?;
+            self.state
+                .writer_role
+                .lock()
+                .await
+                .transaction_opened()
+                .map_err(role_error)?;
+            let outcome = match storage.begin().await {
+                Ok(outcome) => outcome,
+                Err(failure) => {
+                    let mut role = self.state.writer_role.lock().await;
                     role.transaction_closed();
+                    for _ in 0..failure.expired {
+                        role.transaction_closed();
+                    }
+                    drop(role);
+                    self.ensure_writer_authority().await?;
+                    return Err(failure.status);
                 }
-                drop(role);
-                self.ensure_writer_authority().await?;
-                return Err(failure.status);
+            };
+            for _ in 0..outcome.expired {
+                self.state.writer_role.lock().await.transaction_closed();
             }
-        };
-        for _ in 0..outcome.expired {
-            self.state.writer_role.lock().await.transaction_closed();
+            *self.state.last_writer_activity.lock().await = Instant::now();
+            Ok(Response::new(BeginResponse {
+                transaction_id: outcome.transaction_id,
+            }))
         }
-        *self.state.last_writer_activity.lock().await = Instant::now();
-        Ok(Response::new(BeginResponse {
-            transaction_id: outcome.transaction_id,
-        }))
+        .await;
+        timer.record_result(&result);
+        result
     }
 
     pub(super) async fn handle_commit(
@@ -116,32 +128,38 @@ impl Service {
         &self,
         request: Request<TransactionRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
-        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        let _admission = self.mutation_admission().await?;
-        let storage = self.storage().await?;
-        self.ensure_writer_authority().await?;
-        let result = storage
-            .commit(
-                &request.get_ref().transaction_id,
-                &request.get_ref().idempotency_key,
-                request.get_ref().defer_durability,
-            )
-            .await;
-        let consumed = match &result {
-            Ok(outcome) => outcome.consumed,
-            Err(failure) => failure.consumed,
-        };
-        if consumed {
-            self.state.writer_role.lock().await.transaction_closed();
-            *self.state.last_writer_activity.lock().await = Instant::now();
-        }
-        if result.is_err() && !consumed {
+        let mut timer = self.state.attribution.commit_request.timer();
+        let result = async {
+            check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let _admission = self.mutation_admission().await?;
+            let storage = self.storage().await?;
             self.ensure_writer_authority().await?;
+            let result = storage
+                .commit(
+                    &request.get_ref().transaction_id,
+                    &request.get_ref().idempotency_key,
+                    request.get_ref().defer_durability,
+                )
+                .await;
+            let consumed = match &result {
+                Ok(outcome) => outcome.consumed,
+                Err(failure) => failure.consumed,
+            };
+            if consumed {
+                self.state.writer_role.lock().await.transaction_closed();
+                *self.state.last_writer_activity.lock().await = Instant::now();
+            }
+            if result.is_err() && !consumed {
+                self.ensure_writer_authority().await?;
+            }
+            result.map_err(|failure| failure.status)?;
+            Ok(Response::new(CommitResponse {
+                durable: !request.get_ref().defer_durability,
+            }))
         }
-        result.map_err(|failure| failure.status)?;
-        Ok(Response::new(CommitResponse {
-            durable: !request.get_ref().defer_durability,
-        }))
+        .await;
+        timer.record_result(&result);
+        result
     }
 
     pub(super) async fn handle_rollback(
@@ -158,23 +176,29 @@ impl Service {
         &self,
         request: Request<TransactionRequest>,
     ) -> Result<Response<Empty>, Status> {
-        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
-        let _admission = self.mutation_admission().await?;
-        let storage = self.storage().await?;
-        self.ensure_writer_authority().await?;
-        let result = storage.rollback(&request.get_ref().transaction_id).await;
-        let consumed = match &result {
-            Ok(outcome) => outcome.consumed,
-            Err(failure) => failure.consumed,
-        };
-        if consumed {
-            self.state.writer_role.lock().await.transaction_closed();
-            *self.state.last_writer_activity.lock().await = Instant::now();
-        }
-        if result.is_err() && !consumed {
+        let mut timer = self.state.attribution.rollback_request.timer();
+        let result = async {
+            check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let _admission = self.mutation_admission().await?;
+            let storage = self.storage().await?;
             self.ensure_writer_authority().await?;
+            let result = storage.rollback(&request.get_ref().transaction_id).await;
+            let consumed = match &result {
+                Ok(outcome) => outcome.consumed,
+                Err(failure) => failure.consumed,
+            };
+            if consumed {
+                self.state.writer_role.lock().await.transaction_closed();
+                *self.state.last_writer_activity.lock().await = Instant::now();
+            }
+            if result.is_err() && !consumed {
+                self.ensure_writer_authority().await?;
+            }
+            result.map_err(|failure| failure.status)?;
+            Ok(Response::new(Empty { context: None }))
         }
-        result.map_err(|failure| failure.status)?;
-        Ok(Response::new(Empty { context: None }))
+        .await;
+        timer.record_result(&result);
+        result
     }
 }

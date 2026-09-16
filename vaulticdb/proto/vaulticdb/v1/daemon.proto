@@ -266,6 +266,88 @@ message WriterStatusResponse {
   uint64 last_durable_sequence = 9;
   int64 idle_deadline_unix_ms = 10;
   bool promotion_safe = 11;
+  AttributionSnapshot attribution = 12;
+}
+
+message TimingSnapshot {
+  uint64 attempts = 1;
+  uint64 failures = 2;
+  uint64 total_us = 3;
+  uint64 max_us = 4;
+  uint64 completed = 5;
+  uint64 successes = 6;
+  uint64 cancellations = 7;
+  uint64 timeouts = 8;
+  uint64 active = 9;
+  uint64 oldest_active_us = 10;
+  repeated uint64 latency_bucket_upper_us = 11;
+  repeated uint64 latency_bucket_counts = 12;
+  bool contention_available = 13;
+  uint64 contentions = 14;
+}
+
+message ObjectOperationSnapshot {
+  TimingSnapshot timing = 1;
+  uint64 transferred_bytes = 2;
+  bool transferred_bytes_available = 3;
+  bool timeout_outcomes_available = 4;
+}
+
+message ObjectStoreRoleSnapshot {
+  ObjectOperationSnapshot put = 1;
+  ObjectOperationSnapshot multipart_init = 2;
+  ObjectOperationSnapshot multipart_part = 3;
+  ObjectOperationSnapshot multipart_complete = 4;
+  ObjectOperationSnapshot multipart_abort = 5;
+  ObjectOperationSnapshot get = 6;
+  ObjectOperationSnapshot head = 7;
+  ObjectOperationSnapshot get_body = 8;
+  ObjectOperationSnapshot get_ranges = 9;
+  ObjectOperationSnapshot delete = 10;
+  ObjectOperationSnapshot list = 11;
+  ObjectOperationSnapshot list_with_offset = 12;
+  ObjectOperationSnapshot list_with_delimiter = 13;
+  ObjectOperationSnapshot copy = 14;
+  ObjectOperationSnapshot rename = 15;
+  bool retry_delay_available = 16;
+  bool background_pressure_available = 17;
+}
+
+message AttributionSnapshot {
+  TimingSnapshot admission_wait = 1;
+  TimingSnapshot fence_check = 2;
+  TimingSnapshot write_batch_request = 3;
+  TimingSnapshot begin_request = 4;
+  TimingSnapshot commit_request = 5;
+  TimingSnapshot rollback_request = 6;
+  TimingSnapshot transaction_begin = 7;
+  TimingSnapshot engine_submit = 8;
+  TimingSnapshot durable_wait = 9;
+  TimingSnapshot finalization = 10;
+  uint64 engine_write_batches = 11;
+  uint64 engine_write_ops = 12;
+  uint64 engine_backpressure_count = 13;
+  uint64 engine_immutable_memtable_flushes = 14;
+  uint64 engine_memtable_bytes = 15;
+  uint64 engine_l0_sst_count = 16;
+  uint64 engine_sst_count = 17;
+  uint64 engine_sorted_run_count = 18;
+  uint64 engine_l0_flush_bytes = 19;
+  uint64 engine_compacted_bytes = 20;
+  uint64 engine_compacted_ssts = 21;
+  uint64 engine_running_compactions = 22;
+  uint64 engine_l0_stalls_sst_count = 23;
+  uint64 engine_l0_stalls_ssts_per_key = 24;
+  uint64 engine_memtable_write_bytes = 25;
+  uint64 engine_wal_flush_bytes = 26;
+  TimingSnapshot admission_lock_hold = 27;
+  TimingSnapshot engine_backpressure = 28;
+  uint64 engine_batch_write_queue_depth = 29;
+  TimingSnapshot engine_batch_write_queue = 30;
+  TimingSnapshot engine_batch_write_service = 31;
+  ObjectStoreRoleSnapshot object_store_main = 32;
+  ObjectStoreRoleSnapshot object_store_wal = 33;
+  ObjectStoreRoleSnapshot object_store_coordination = 34;
 }
 
 message DemoteWriterRequest {

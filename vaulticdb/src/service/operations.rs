@@ -2,9 +2,7 @@
 pub(crate) async fn process_test_barrier(variable: &'static str) -> Result<(), Status> {
     use std::io::{Read, Write};
 
-    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
-        != Ok("vaulticdb-process-tests-v1")
-    {
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref() != Ok("vaulticdb-process-tests-v1") {
         return Ok(());
     }
     let Ok(path) = std::env::var(variable) else {
@@ -39,13 +37,11 @@ fn verify_capsule_migration_proof(
     verifier.update(repository_id.as_bytes());
     verifier.update(b"\0");
     verifier.update(capsule_sha256.as_bytes());
-    verifier
-        .verify_slice(proof)
-        .map_err(|_| {
-            Status::from(VaulticDbError::Authorization {
-                message: "capsule-recovered repository key proof failed".to_owned(),
-            })
+    verifier.verify_slice(proof).map_err(|_| {
+        Status::from(VaulticDbError::Authorization {
+            message: "capsule-recovered repository key proof failed".to_owned(),
         })
+    })
 }
 
 fn validate_capsule_mutation(
@@ -303,10 +299,11 @@ impl Service {
                 let phase = match (error.database, error.claim_held) {
                     (DatabaseState::Writer, true) => {
                         self.ensure_aborted_demotion_authority().await?;
-                        self.state.writer_role.lock().await.cancel_demotion(
-                            Instant::now(),
-                            "demotion failed before writer close",
-                        );
+                        self.state
+                            .writer_role
+                            .lock()
+                            .await
+                            .cancel_demotion(Instant::now(), "demotion failed before writer close");
                         DaemonPhase::ReadWrite
                     }
                     (DatabaseState::Reader, false) => {
@@ -390,7 +387,7 @@ impl Service {
 
     async fn authority_intent_with_admission(
         &self,
-        admission: tokio::sync::OwnedRwLockReadGuard<()>,
+        admission: AdmissionGuard,
     ) -> Result<WriteIntentGuard, Status> {
         self.ensure_writer_authority().await?;
         self.state
@@ -406,10 +403,23 @@ impl Service {
         })
     }
 
-    pub(super) async fn mutation_admission(
-        &self,
-    ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, Status> {
-        let admission = self.state.mutation_admission.clone().read_owned().await;
+    pub(super) async fn mutation_admission(&self) -> Result<AdmissionGuard, Status> {
+        let mut timer = self.state.attribution.admission_wait.timer();
+        let lock = self.state.mutation_admission.clone();
+        let admission = match lock.clone().try_read_owned() {
+            Ok(admission) => admission,
+            Err(_) => {
+                self.state.attribution.admission_wait.record_contention();
+                lock.read_owned().await
+            }
+        };
+        timer.succeeded();
+        drop(timer);
+        let admission = AdmissionGuard {
+            _guard: admission,
+            attribution: self.state.attribution.clone(),
+            hold: self.state.attribution.admission_lock_hold.start(),
+        };
         if self.state.draining.load(Ordering::Acquire) {
             return Err(VaulticDbError::StorageUnavailable {
                 message: "vaulticdb is draining".to_owned(),
@@ -421,8 +431,16 @@ impl Service {
     }
 
     async fn ensure_writer_authority(&self) -> Result<(), Status> {
-        let storage = self.storage().await?;
+        let mut timer = self.state.attribution.fence_check.timer();
+        let storage = match self.storage().await {
+            Ok(storage) => storage,
+            Err(error) => {
+                timer.failed();
+                return Err(error);
+            }
+        };
         if let Err(error) = storage.ensure_writer_fence().await {
+            timer.failed();
             match error {
                 crate::storage::WriterFenceFailure::Stale { observed_epoch } => {
                     let mut role = self.state.writer_role.lock().await;
@@ -445,6 +463,7 @@ impl Service {
                 }
             }
         }
+        timer.succeeded();
         Ok(())
     }
 
@@ -484,6 +503,115 @@ impl Service {
             }
             None => 0,
         };
+        let timing = |snapshot: crate::attribution::TimingSnapshot| proto::TimingSnapshot {
+            attempts: snapshot.attempts,
+            failures: snapshot.failures,
+            total_us: snapshot.total_us,
+            max_us: snapshot.max_us,
+            completed: snapshot.completed,
+            successes: snapshot.successes,
+            cancellations: snapshot.cancellations,
+            timeouts: snapshot.timeouts,
+            active: snapshot.active,
+            oldest_active_us: snapshot.oldest_active_us,
+            latency_bucket_upper_us: crate::attribution::LATENCY_BUCKET_UPPER_US.to_vec(),
+            latency_bucket_counts: snapshot.latency_buckets.to_vec(),
+            contention_available: snapshot.contention_available,
+            contentions: snapshot.contentions,
+        };
+        let engine_timing =
+            |snapshot: crate::storage::EngineTimingSnapshot| proto::TimingSnapshot {
+                attempts: snapshot.attempts,
+                failures: snapshot.failures,
+                total_us: snapshot.total_us,
+                max_us: snapshot.max_us,
+                completed: snapshot.completed,
+                successes: snapshot.successes,
+                cancellations: snapshot.cancellations,
+                timeouts: snapshot.timeouts,
+                active: snapshot.active,
+                oldest_active_us: snapshot.oldest_active_us,
+                latency_bucket_upper_us: snapshot.latency_bucket_upper_us,
+                latency_bucket_counts: snapshot.latency_bucket_counts,
+                contention_available: false,
+                contentions: 0,
+            };
+        let object_operation =
+            |snapshot: crate::storage::ObjectOperationSnapshot| proto::ObjectOperationSnapshot {
+                timing: Some(timing(snapshot.timing)),
+                transferred_bytes: snapshot.transferred_bytes,
+                transferred_bytes_available: snapshot.transferred_bytes_available,
+                timeout_outcomes_available: snapshot.timeout_outcomes_available,
+            };
+        let object_store_role =
+            |snapshot: crate::storage::ObjectStoreRoleSnapshot| proto::ObjectStoreRoleSnapshot {
+                put: Some(object_operation(snapshot.put)),
+                multipart_init: Some(object_operation(snapshot.multipart_init)),
+                multipart_part: Some(object_operation(snapshot.multipart_part)),
+                multipart_complete: Some(object_operation(snapshot.multipart_complete)),
+                multipart_abort: Some(object_operation(snapshot.multipart_abort)),
+                get: Some(object_operation(snapshot.get)),
+                head: Some(object_operation(snapshot.head)),
+                get_body: Some(object_operation(snapshot.get_body)),
+                get_ranges: Some(object_operation(snapshot.get_ranges)),
+                delete: Some(object_operation(snapshot.delete)),
+                list: Some(object_operation(snapshot.list)),
+                list_with_offset: Some(object_operation(snapshot.list_with_offset)),
+                list_with_delimiter: Some(object_operation(snapshot.list_with_delimiter)),
+                copy: Some(object_operation(snapshot.copy)),
+                rename: Some(object_operation(snapshot.rename)),
+                retry_delay_available: snapshot.retry_delay_available,
+                background_pressure_available: snapshot.background_pressure_available,
+            };
+        let attribution = storage.as_ref().map(|storage| {
+            let engine = storage.engine_metrics_snapshot();
+            proto::AttributionSnapshot {
+                admission_wait: Some(timing(self.state.attribution.admission_wait.snapshot())),
+                admission_lock_hold: Some(timing(
+                    self.state.attribution.admission_lock_hold.snapshot(),
+                )),
+                fence_check: Some(timing(self.state.attribution.fence_check.snapshot())),
+                write_batch_request: Some(timing(
+                    self.state.attribution.write_batch_request.snapshot(),
+                )),
+                begin_request: Some(timing(self.state.attribution.begin_request.snapshot())),
+                commit_request: Some(timing(self.state.attribution.commit_request.snapshot())),
+                rollback_request: Some(timing(self.state.attribution.rollback_request.snapshot())),
+                transaction_begin: Some(timing(storage.attribution().transaction_begin.snapshot())),
+                engine_submit: Some(timing(storage.attribution().engine_submit.snapshot())),
+                durable_wait: Some(timing(storage.attribution().durable_wait.snapshot())),
+                finalization: Some(timing(storage.attribution().finalization.snapshot())),
+                engine_write_batches: engine.write_batches,
+                engine_write_ops: engine.write_ops,
+                engine_backpressure_count: engine.backpressure_count,
+                engine_immutable_memtable_flushes: engine.immutable_memtable_flushes,
+                engine_memtable_bytes: engine.memtable_bytes,
+                engine_l0_sst_count: engine.l0_sst_count,
+                engine_sst_count: engine.sst_count,
+                engine_sorted_run_count: engine.sorted_run_count,
+                engine_l0_flush_bytes: engine.l0_flush_bytes,
+                engine_compacted_bytes: engine.compacted_bytes,
+                engine_compacted_ssts: engine.compacted_ssts,
+                engine_running_compactions: engine.running_compactions,
+                engine_l0_stalls_sst_count: engine.l0_stalls_sst_count,
+                engine_l0_stalls_ssts_per_key: engine.l0_stalls_ssts_per_key,
+                engine_memtable_write_bytes: engine.memtable_write_bytes,
+                engine_wal_flush_bytes: engine.wal_flush_bytes,
+                engine_backpressure: Some(engine_timing(engine.backpressure)),
+                engine_batch_write_queue_depth: engine.batch_write_queue_depth,
+                engine_batch_write_queue: Some(engine_timing(engine.batch_write_queue)),
+                engine_batch_write_service: Some(engine_timing(engine.batch_write_service)),
+                object_store_main: Some(object_store_role(
+                    storage.attribution().object_store_main.snapshot(),
+                )),
+                object_store_wal: Some(object_store_role(
+                    storage.attribution().object_store_wal.snapshot(),
+                )),
+                object_store_coordination: Some(object_store_role(
+                    storage.attribution().object_store_coordination.snapshot(),
+                )),
+            }
+        });
         WriterStatusResponse {
             instance_id: self.state.daemon_id.to_string(),
             role: match status.role {
@@ -504,6 +632,7 @@ impl Service {
                 .map_or(0, |storage| storage.last_durable_sequence()),
             idle_deadline_unix_ms,
             promotion_safe: status.promotion_safe,
+            attribution,
         }
     }
 

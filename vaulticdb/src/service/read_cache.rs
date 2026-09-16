@@ -232,6 +232,7 @@ mod tests {
             },
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+            attribution_disabled: false,
             topology_source: TopologySource::External,
             topology_override_local: None,
         }
@@ -285,6 +286,7 @@ mod tests {
                 ))),
                 writer_transition: Arc::new(Mutex::new(())),
                 mutation_admission: Arc::new(RwLock::new(())),
+                attribution: Arc::new(crate::attribution::ServiceAttribution::default()),
                 last_writer_activity: Arc::new(Mutex::new(now)),
                 minimum_writer_tenure: Duration::ZERO,
                 writer_idle_grace: None,

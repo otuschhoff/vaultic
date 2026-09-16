@@ -1,6 +1,608 @@
+use std::{
+    collections::VecDeque,
+    ops::Range,
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
+
+use bytes::Bytes;
+use futures_util::Stream;
+use slatedb::object_store::GetResultPayload;
+
+use crate::attribution::{OwnedTimingGuard, TimingMetric, TimingSnapshot};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ObjectOperationSnapshot {
+    pub(crate) timing: TimingSnapshot,
+    pub(crate) transferred_bytes: u64,
+    pub(crate) transferred_bytes_available: bool,
+    pub(crate) timeout_outcomes_available: bool,
+}
+
+#[derive(Debug)]
+struct ObjectOperationMetric {
+    timing: Arc<TimingMetric>,
+    transferred_bytes: AtomicU64,
+    transferred_bytes_available: bool,
+}
+
+impl ObjectOperationMetric {
+    fn new(enabled: bool, transferred_bytes_available: bool) -> Self {
+        Self {
+            timing: Arc::new(if enabled {
+                TimingMetric::default()
+            } else {
+                TimingMetric::disabled(false)
+            }),
+            transferred_bytes: AtomicU64::new(0),
+            transferred_bytes_available: enabled && transferred_bytes_available,
+        }
+    }
+
+    fn snapshot(&self) -> ObjectOperationSnapshot {
+        ObjectOperationSnapshot {
+            timing: self.timing.snapshot(),
+            transferred_bytes: self.transferred_bytes.load(Ordering::Relaxed),
+            transferred_bytes_available: self.transferred_bytes_available,
+            timeout_outcomes_available: false,
+        }
+    }
+
+    fn timer(&self) -> OwnedTimingGuard {
+        self.timing.timer_owned()
+    }
+
+    fn add_bytes(&self, bytes: u64) {
+        let _ =
+            self.transferred_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_add(bytes))
+                });
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ObjectStoreRoleSnapshot {
+    pub(crate) put: ObjectOperationSnapshot,
+    pub(crate) multipart_init: ObjectOperationSnapshot,
+    pub(crate) multipart_part: ObjectOperationSnapshot,
+    pub(crate) multipart_complete: ObjectOperationSnapshot,
+    pub(crate) multipart_abort: ObjectOperationSnapshot,
+    pub(crate) get: ObjectOperationSnapshot,
+    pub(crate) head: ObjectOperationSnapshot,
+    pub(crate) get_body: ObjectOperationSnapshot,
+    pub(crate) get_ranges: ObjectOperationSnapshot,
+    pub(crate) delete: ObjectOperationSnapshot,
+    pub(crate) list: ObjectOperationSnapshot,
+    pub(crate) list_with_offset: ObjectOperationSnapshot,
+    pub(crate) list_with_delimiter: ObjectOperationSnapshot,
+    pub(crate) copy: ObjectOperationSnapshot,
+    pub(crate) rename: ObjectOperationSnapshot,
+    pub(crate) retry_delay_available: bool,
+    pub(crate) background_pressure_available: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ObjectStoreRoleMetrics {
+    put: Arc<ObjectOperationMetric>,
+    multipart_init: Arc<ObjectOperationMetric>,
+    multipart_part: Arc<ObjectOperationMetric>,
+    multipart_complete: Arc<ObjectOperationMetric>,
+    multipart_abort: Arc<ObjectOperationMetric>,
+    get: Arc<ObjectOperationMetric>,
+    head: Arc<ObjectOperationMetric>,
+    get_body: Arc<ObjectOperationMetric>,
+    get_ranges: Arc<ObjectOperationMetric>,
+    delete: Arc<ObjectOperationMetric>,
+    list: Arc<ObjectOperationMetric>,
+    list_with_offset: Arc<ObjectOperationMetric>,
+    list_with_delimiter: Arc<ObjectOperationMetric>,
+    copy: Arc<ObjectOperationMetric>,
+    rename: Arc<ObjectOperationMetric>,
+}
+
+impl Default for ObjectStoreRoleMetrics {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+impl ObjectStoreRoleMetrics {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            put: Arc::new(ObjectOperationMetric::new(enabled, true)),
+            multipart_init: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            multipart_part: Arc::new(ObjectOperationMetric::new(enabled, true)),
+            multipart_complete: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            multipart_abort: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            get: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            head: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            get_body: Arc::new(ObjectOperationMetric::new(enabled, true)),
+            get_ranges: Arc::new(ObjectOperationMetric::new(enabled, true)),
+            delete: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            list: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            list_with_offset: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            list_with_delimiter: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            copy: Arc::new(ObjectOperationMetric::new(enabled, false)),
+            rename: Arc::new(ObjectOperationMetric::new(enabled, false)),
+        }
+    }
+}
+
+impl ObjectStoreRoleMetrics {
+    pub(crate) fn snapshot(&self) -> ObjectStoreRoleSnapshot {
+        ObjectStoreRoleSnapshot {
+            put: self.put.snapshot(),
+            multipart_init: self.multipart_init.snapshot(),
+            multipart_part: self.multipart_part.snapshot(),
+            multipart_complete: self.multipart_complete.snapshot(),
+            multipart_abort: self.multipart_abort.snapshot(),
+            get: self.get.snapshot(),
+            head: self.head.snapshot(),
+            get_body: self.get_body.snapshot(),
+            get_ranges: self.get_ranges.snapshot(),
+            delete: self.delete.snapshot(),
+            list: self.list.snapshot(),
+            list_with_offset: self.list_with_offset.snapshot(),
+            list_with_delimiter: self.list_with_delimiter.snapshot(),
+            copy: self.copy.snapshot(),
+            rename: self.rename.snapshot(),
+            retry_delay_available: false,
+            background_pressure_available: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RoleAwareObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    metrics: Arc<ObjectStoreRoleMetrics>,
+    tagged_wal_metrics: Option<Arc<ObjectStoreRoleMetrics>>,
+}
+
+#[derive(Debug)]
+struct RoleAwareMultipartUpload {
+    inner: Box<dyn MultipartUpload>,
+    metrics: Arc<ObjectStoreRoleMetrics>,
+}
+
+struct MonitoredObjectStream<T> {
+    inner: BoxStream<'static, slatedb::object_store::Result<T>>,
+    guard: Option<OwnedTimingGuard>,
+}
+
+#[derive(Clone, Copy)]
+enum DeleteRole {
+    Main,
+    Wal,
+}
+
+struct DeleteRoleGuard {
+    guard: OwnedTimingGuard,
+    failed: bool,
+}
+
+#[derive(Default)]
+struct DeleteStreamState {
+    pending: VecDeque<DeleteRole>,
+    main: Option<DeleteRoleGuard>,
+    wal: Option<DeleteRoleGuard>,
+}
+
+struct MonitoredDeleteStream {
+    inner: BoxStream<'static, slatedb::object_store::Result<ObjectPath>>,
+    state: Arc<std::sync::Mutex<DeleteStreamState>>,
+}
+
+impl<T> std::fmt::Debug for MonitoredObjectStream<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MonitoredObjectStream")
+    }
+}
+
+impl<T> Stream for MonitoredObjectStream<T> {
+    type Item = slatedb::object_store::Result<T>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(item))) => Poll::Ready(Some(Ok(item))),
+            Poll::Ready(Some(Err(error))) => {
+                if let Some(mut guard) = this.guard.take() {
+                    guard.failed();
+                }
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                if let Some(mut guard) = this.guard.take() {
+                    guard.succeeded();
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Stream for MonitoredDeleteStream {
+    type Item = slatedb::object_store::Result<ObjectPath>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Err(error))) => {
+                let mut state = this
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let role = state.pending.pop_front().unwrap_or(DeleteRole::Main);
+                let role_guard = match role {
+                    DeleteRole::Main => &mut state.main,
+                    DeleteRole::Wal => &mut state.wal,
+                };
+                if let Some(role_guard) = role_guard {
+                    role_guard.guard.failed();
+                    role_guard.failed = true;
+                }
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(Some(Ok(path))) => {
+                this.state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pending
+                    .pop_front();
+                Poll::Ready(Some(Ok(path)))
+            }
+            Poll::Ready(None) => {
+                settle_delete_guards(&this.state);
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn settle_delete_guards(state: &std::sync::Mutex<DeleteStreamState>) {
+    let (main, wal) = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.main.take(), state.wal.take())
+    };
+    for mut role_guard in [main, wal].into_iter().flatten() {
+        if !role_guard.failed {
+            role_guard.guard.succeeded();
+        }
+    }
+}
+
+fn monitored_stream<T: Send + 'static>(
+    inner: BoxStream<'static, slatedb::object_store::Result<T>>,
+    metric: Arc<ObjectOperationMetric>,
+) -> BoxStream<'static, slatedb::object_store::Result<T>> {
+    let guard = metric.timing.timer_owned();
+    Box::pin(MonitoredObjectStream {
+        inner,
+        guard: Some(guard),
+    })
+}
+
+fn settle<T>(guard: &mut OwnedTimingGuard, result: &slatedb::object_store::Result<T>) {
+    if result.is_ok() {
+        guard.succeeded();
+    } else {
+        guard.failed();
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for RoleAwareMultipartUpload {
+    fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+        let bytes = payload.content_length().try_into().unwrap_or(u64::MAX);
+        let future = self.inner.put_part(payload);
+        let metrics = Arc::clone(&self.metrics);
+        let mut guard = metrics.multipart_part.timer();
+        Box::pin(async move {
+            let result = future.await;
+            settle(&mut guard, &result);
+            if result.is_ok() {
+                metrics.multipart_part.add_bytes(bytes);
+            }
+            result
+        })
+    }
+
+    async fn complete(&mut self) -> slatedb::object_store::Result<PutResult> {
+        let mut guard = self.metrics.multipart_complete.timer();
+        let result = self.inner.complete().await;
+        settle(&mut guard, &result);
+        result
+    }
+
+    async fn abort(&mut self) -> slatedb::object_store::Result<()> {
+        let mut guard = self.metrics.multipart_abort.timer();
+        let result = self.inner.abort().await;
+        settle(&mut guard, &result);
+        result
+    }
+}
+
+impl std::fmt::Display for RoleAwareObjectStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "role-aware ({})", self.inner)
+    }
+}
+
+impl RoleAwareObjectStore {
+    fn is_wal_path(path: &ObjectPath) -> bool {
+        let mut parts = path.as_ref().split('/').rev();
+        let last = parts.next();
+        last == Some("wal") || parts.next() == Some("wal")
+    }
+
+    fn metrics_for_path(&self, path: &ObjectPath) -> Arc<ObjectStoreRoleMetrics> {
+        if Self::is_wal_path(path) {
+            self.tagged_wal_metrics
+                .as_ref()
+                .map_or_else(|| Arc::clone(&self.metrics), Arc::clone)
+        } else {
+            Arc::clone(&self.metrics)
+        }
+    }
+
+    fn metrics_for_paths(&self, paths: &[&ObjectPath]) -> Arc<ObjectStoreRoleMetrics> {
+        paths
+            .iter()
+            .find_map(|path| {
+                Self::is_wal_path(path)
+                    .then(|| self.tagged_wal_metrics.as_ref())
+                    .flatten()
+            })
+            .map_or_else(|| Arc::clone(&self.metrics), Arc::clone)
+    }
+
+    fn metrics_for_extensions(
+        &self,
+        extensions: &slatedb::object_store::Extensions,
+    ) -> Arc<ObjectStoreRoleMetrics> {
+        let is_wal = slatedb::object_store_tag::ObjectStoreCallTag::from_extensions(extensions)
+            .is_some_and(|tag| tag.sst_type == slatedb::object_store_tag::SstType::Wal);
+        if is_wal {
+            self.tagged_wal_metrics
+                .as_ref()
+                .map_or_else(|| Arc::clone(&self.metrics), Arc::clone)
+        } else {
+            Arc::clone(&self.metrics)
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for RoleAwareObjectStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> slatedb::object_store::Result<PutResult> {
+        let bytes = payload.content_length().try_into().unwrap_or(u64::MAX);
+        let metrics = self.metrics_for_extensions(&options.extensions);
+        let mut guard = metrics.put.timer();
+        let result = self.inner.put_opts(location, payload, options).await;
+        settle(&mut guard, &result);
+        if result.is_ok() {
+            metrics.put.add_bytes(bytes);
+        }
+        result
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+        let metrics = self.metrics_for_extensions(&options.extensions);
+        let mut guard = metrics.multipart_init.timer();
+        let result = self.inner.put_multipart_opts(location, options).await;
+        settle(&mut guard, &result);
+        result.map(|inner| {
+            Box::new(RoleAwareMultipartUpload { inner, metrics }) as Box<dyn MultipartUpload>
+        })
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> slatedb::object_store::Result<GetResult> {
+        let metrics = self.metrics_for_extensions(&options.extensions);
+        let head = options.head;
+        let metric = if head {
+            Arc::clone(&metrics.head)
+        } else {
+            Arc::clone(&metrics.get)
+        };
+        let mut guard = metric.timer();
+        let result = self.inner.get_opts(location, options).await;
+        settle(&mut guard, &result);
+        result.map(|mut result| {
+            if head {
+                return result;
+            }
+            result.payload = match result.payload {
+                GetResultPayload::Stream(stream) => {
+                    let body_metrics = Arc::clone(&metrics.get_body);
+                    let counted = stream
+                        .map(move |result| {
+                            if let Ok(bytes) = &result {
+                                body_metrics.add_bytes(bytes.len().try_into().unwrap_or(u64::MAX));
+                            }
+                            result
+                        })
+                        .boxed();
+                    GetResultPayload::Stream(monitored_stream(
+                        counted,
+                        Arc::clone(&metrics.get_body),
+                    ))
+                }
+                #[allow(unreachable_patterns)]
+                payload => payload,
+            };
+            result
+        })
+    }
+
+    async fn get_ranges(
+        &self,
+        location: &ObjectPath,
+        ranges: &[Range<u64>],
+    ) -> slatedb::object_store::Result<Vec<Bytes>> {
+        let metrics = self.metrics_for_path(location);
+        let mut guard = metrics.get_ranges.timer();
+        let result = self.inner.get_ranges(location, ranges).await;
+        settle(&mut guard, &result);
+        if let Ok(parts) = &result {
+            metrics.get_ranges.add_bytes(
+                parts
+                    .iter()
+                    .map(|part| part.len() as u64)
+                    .fold(0, u64::saturating_add),
+            );
+        }
+        result
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, slatedb::object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectPath>> {
+        let main_metrics = Arc::clone(&self.metrics);
+        let wal_metrics = self.tagged_wal_metrics.clone();
+        let state = Arc::new(std::sync::Mutex::new(DeleteStreamState::default()));
+        let input_state = Arc::clone(&state);
+        let locations = locations
+            .map(move |location| {
+                let role = if location
+                    .as_ref()
+                    .is_ok_and(RoleAwareObjectStore::is_wal_path)
+                    && wal_metrics.is_some()
+                {
+                    DeleteRole::Wal
+                } else {
+                    DeleteRole::Main
+                };
+                let mut state = input_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.pending.push_back(role);
+                let role_guard = match role {
+                    DeleteRole::Main => &mut state.main,
+                    DeleteRole::Wal => &mut state.wal,
+                };
+                if role_guard.is_none() {
+                    let metrics = match role {
+                        DeleteRole::Main => &main_metrics,
+                        DeleteRole::Wal => wal_metrics.as_ref().unwrap_or(&main_metrics),
+                    };
+                    *role_guard = Some(DeleteRoleGuard {
+                        guard: metrics.delete.timer(),
+                        failed: false,
+                    });
+                }
+                location
+            })
+            .boxed();
+        Box::pin(MonitoredDeleteStream {
+            inner: self.inner.delete_stream(locations),
+            state,
+        })
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        let metrics = prefix.map_or_else(
+            || Arc::clone(&self.metrics),
+            |prefix| self.metrics_for_path(prefix),
+        );
+        monitored_stream(self.inner.list(prefix), Arc::clone(&metrics.list))
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&ObjectPath>,
+        offset: &ObjectPath,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        let metrics = prefix.map_or_else(
+            || self.metrics_for_path(offset),
+            |prefix| self.metrics_for_paths(&[prefix, offset]),
+        );
+        monitored_stream(
+            self.inner.list_with_offset(prefix, offset),
+            Arc::clone(&metrics.list_with_offset),
+        )
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> slatedb::object_store::Result<ListResult> {
+        let metrics = prefix.map_or_else(
+            || Arc::clone(&self.metrics),
+            |prefix| self.metrics_for_path(prefix),
+        );
+        let mut guard = metrics.list_with_delimiter.timer();
+        let result = self.inner.list_with_delimiter(prefix).await;
+        settle(&mut guard, &result);
+        result
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> slatedb::object_store::Result<()> {
+        let metrics = self.metrics_for_paths(&[from, to]);
+        let mut guard = metrics.copy.timer();
+        let result = self.inner.copy_opts(from, to, options).await;
+        settle(&mut guard, &result);
+        result
+    }
+
+    async fn rename_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: slatedb::object_store::RenameOptions,
+    ) -> slatedb::object_store::Result<()> {
+        let metrics = self.metrics_for_paths(&[from, to]);
+        let mut guard = metrics.rename.timer();
+        let result = self.inner.rename_opts(from, to, options).await;
+        settle(&mut guard, &result);
+        result
+    }
+}
+
+fn role_aware_object_store(
+    inner: Arc<dyn ObjectStore>,
+    metrics: Arc<ObjectStoreRoleMetrics>,
+    tagged_wal_metrics: Option<Arc<ObjectStoreRoleMetrics>>,
+) -> Arc<dyn ObjectStore> {
+    Arc::new(RoleAwareObjectStore {
+        inner,
+        metrics,
+        tagged_wal_metrics,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum ObjectStoreConfig {
-    Local { root: PathBuf },
+    Local {
+        root: PathBuf,
+    },
     Memory,
     S3 {
         bucket: String,
@@ -10,7 +612,9 @@ pub(crate) enum ObjectStoreConfig {
         provider: Option<String>,
         bucket_lookup: Option<String>,
     },
-    Replicated { replicas: Vec<ReplicaConfig> },
+    Replicated {
+        replicas: Vec<ReplicaConfig>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -21,7 +625,9 @@ pub(crate) struct ReplicaConfig {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ReplicaStoreConfig {
-    Local { root: PathBuf },
+    Local {
+        root: PathBuf,
+    },
     Memory,
     #[cfg(test)]
     Test(Arc<dyn ObjectStore>),
@@ -79,9 +685,7 @@ impl WalMetrics {
             .as_ref()
             .map(|objects| objects.values().map(|(size, _)| size).sum())
             .unwrap_or(0);
-        let retained_segments = retained
-            .as_ref()
-            .map_or(0, |objects| objects.len() as u64);
+        let retained_segments = retained.as_ref().map_or(0, |objects| objects.len() as u64);
         let oldest_segment_unix_ms = retained
             .as_ref()
             .and_then(|objects| objects.values().map(|(_, timestamp)| *timestamp).min())
@@ -136,9 +740,7 @@ impl MultipartUpload for MonitoredWalUpload {
         Box::pin(async move {
             let started = Instant::now();
             let result = upload.await;
-            metrics
-                .outstanding_flushes
-                .fetch_sub(1, Ordering::AcqRel);
+            metrics.outstanding_flushes.fetch_sub(1, Ordering::AcqRel);
             metrics.last_flush_latency_ms.store(
                 started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
                 Ordering::Release,
@@ -147,9 +749,7 @@ impl MultipartUpload for MonitoredWalUpload {
                 metrics.uploaded_bytes.fetch_add(size, Ordering::AcqRel);
                 uploaded_bytes.fetch_add(size, Ordering::AcqRel);
             } else {
-                metrics
-                    .durability_failures
-                    .fetch_add(1, Ordering::AcqRel);
+                metrics.durability_failures.fetch_add(1, Ordering::AcqRel);
             }
             result
         })
@@ -215,9 +815,10 @@ impl ObjectStore for MonitoredWalStore {
             Ordering::Release,
         );
         if result.is_ok() {
-            self.metrics.uploaded_bytes.fetch_add(size, Ordering::AcqRel);
             self.metrics
-                .retain(location, size, current_unix_ms());
+                .uploaded_bytes
+                .fetch_add(size, Ordering::AcqRel);
+            self.metrics.retain(location, size, current_unix_ms());
         } else {
             self.metrics
                 .durability_failures
@@ -287,7 +888,11 @@ impl ObjectStore for MonitoredWalStore {
         to: &ObjectPath,
         options: CopyOptions,
     ) -> slatedb::object_store::Result<()> {
-        let size = self.inner.head(from).await.map_or(0, |metadata| metadata.size);
+        let size = self
+            .inner
+            .head(from)
+            .await
+            .map_or(0, |metadata| metadata.size);
         let started = Instant::now();
         self.metrics
             .outstanding_flushes
@@ -301,7 +906,9 @@ impl ObjectStore for MonitoredWalStore {
             Ordering::Release,
         );
         if result.is_ok() {
-            self.metrics.uploaded_bytes.fetch_add(size, Ordering::AcqRel);
+            self.metrics
+                .uploaded_bytes
+                .fetch_add(size, Ordering::AcqRel);
             self.metrics.retain(to, size, current_unix_ms());
         } else {
             self.metrics
@@ -324,7 +931,11 @@ async fn monitored_wal_store(
         metrics.retain(
             &object.location,
             object.size,
-            object.last_modified.timestamp_millis().try_into().unwrap_or(0),
+            object
+                .last_modified
+                .timestamp_millis()
+                .try_into()
+                .unwrap_or(0),
         );
     }
     Ok((
@@ -405,18 +1016,17 @@ impl ObjectStore for ConditionalLocalFileSystem {
         let PutMode::Update(version) = &options.mode else {
             return self.inner.put_opts(location, payload, options).await;
         };
-        let expected = version.e_tag.clone().ok_or_else(|| {
-            slatedb::object_store::Error::Precondition {
-                path: location.to_string(),
-                source: "local conditional update requires an ETag".into(),
-            }
-        })?;
+        let expected =
+            version
+                .e_tag
+                .clone()
+                .ok_or_else(|| slatedb::object_store::Error::Precondition {
+                    path: location.to_string(),
+                    source: "local conditional update requires an ETag".into(),
+                })?;
         let _lock = self.lock().await?;
         self.inner
-            .get_opts(
-                location,
-                GetOptions::new().with_if_match(Some(expected)),
-            )
+            .get_opts(location, GetOptions::new().with_if_match(Some(expected)))
             .await?;
         options.mode = PutMode::Overwrite;
         self.inner.put_opts(location, payload, options).await
@@ -535,7 +1145,9 @@ impl ObjectStore for RenewableObjectStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> slatedb::object_store::Result<PutResult> {
-        self.current(true)?.put_opts(location, payload, options).await
+        self.current(true)?
+            .put_opts(location, payload, options)
+            .await
     }
 
     async fn put_multipart_opts(
@@ -624,8 +1236,8 @@ pub(crate) fn object_store(
                 provider.as_deref(),
                 bucket_lookup.as_deref(),
             )?
-                .build()
-                .context("configure S3-compatible object store")?;
+            .build()
+            .context("configure S3-compatible object store")?;
             let path = match prefix {
                 Some(prefix) => {
                     format!("{}/{repository_key}", prefix.trim_matches('/'))
@@ -723,9 +1335,7 @@ fn wal_store_identity(config: &WalStoreConfig) -> String {
             prefix,
             client,
             ..
-        }) => format!(
-            "rados:{cluster_fsid}:{monitors}:{pool}:{namespace}:{prefix}:{client}"
-        ),
+        }) => format!("rados:{cluster_fsid}:{monitors}:{pool}:{namespace}:{prefix}:{client}"),
         WalStoreConfig::Store(ReplicaStoreConfig::Azure { .. }) => "unsupported:azure".to_owned(),
         WalStoreConfig::Store(ReplicaStoreConfig::Gcs { .. }) => "unsupported:gcs".to_owned(),
     }
@@ -753,12 +1363,12 @@ fn wal_store_durability(config: &WalStoreConfig) -> &'static str {
         }
         #[cfg(test)]
         WalStoreConfig::Store(ReplicaStoreConfig::Test(_)) => "test",
-        WalStoreConfig::Store(
-            ReplicaStoreConfig::S3 { .. } | ReplicaStoreConfig::Rados { .. },
-        ) => "shared-remote",
-        WalStoreConfig::Store(ReplicaStoreConfig::Azure { .. } | ReplicaStoreConfig::Gcs { .. }) => {
-            "unsupported"
+        WalStoreConfig::Store(ReplicaStoreConfig::S3 { .. } | ReplicaStoreConfig::Rados { .. }) => {
+            "shared-remote"
         }
+        WalStoreConfig::Store(
+            ReplicaStoreConfig::Azure { .. } | ReplicaStoreConfig::Gcs { .. },
+        ) => "unsupported",
     }
 }
 
@@ -913,7 +1523,10 @@ fn configure_s3_builder(
         bail!("VaulticDB S3 provider profile requires an explicit endpoint");
     }
     let mut values = std::collections::BTreeMap::new();
-    values.insert("bucket".to_owned(), serde_json::Value::String(bucket.to_owned()));
+    values.insert(
+        "bucket".to_owned(),
+        serde_json::Value::String(bucket.to_owned()),
+    );
     values.insert(
         "url".to_owned(),
         serde_json::Value::String(endpoint.unwrap_or("https://s3.amazonaws.com").to_owned()),
@@ -923,7 +1536,10 @@ fn configure_s3_builder(
         serde_json::Value::String(region.unwrap_or_default().to_owned()),
     );
     if let Some(provider) = provider {
-        values.insert("provider".to_owned(), serde_json::Value::String(provider.to_owned()));
+        values.insert(
+            "provider".to_owned(),
+            serde_json::Value::String(provider.to_owned()),
+        );
     }
     if let Some(bucket_lookup) = bucket_lookup {
         values.insert(
@@ -962,7 +1578,10 @@ mod object_store_tests {
         )
         .unwrap();
 
-        assert_eq!(claim_writer_epoch(store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(store.as_ref(), None).await.unwrap(),
+            Some(1)
+        );
         assert_eq!(
             claim_writer_epoch(store.as_ref(), Some(1)).await.unwrap(),
             Some(2)

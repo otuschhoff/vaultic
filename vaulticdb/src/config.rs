@@ -97,6 +97,7 @@ fn storage_from_env() -> Result<StorageConfig> {
     let metadata_rebuild_initialize = env_bool("VAULTICDB_METADATA_REBUILD_INITIALIZE")?;
     let metadata_rebuild_reset = env_bool("VAULTICDB_METADATA_REBUILD_RESET")?;
     let slatedb_multiget = optional_bool("VAULTICDB_SLATEDB_MULTIGET", false)?;
+    let attribution_disabled = attribution_disabled_from_env()?;
     let broker = match env::var_os("VAULTICDB_BROKER_SOCKET") {
         Some(socket) => {
             let storage_token_ttl = configured_duration(
@@ -211,9 +212,24 @@ fn storage_from_env() -> Result<StorageConfig> {
         encryption: encryption_from_env()?,
         transaction_idle_timeout_ms,
         slatedb_multiget,
+        attribution_disabled,
         topology_source,
         topology_override_local,
     })
+}
+
+fn attribution_disabled_from_env() -> Result<bool> {
+    #[cfg(feature = "test-failpoints")]
+    {
+        if env::var("VAULTICDB_TEST_CAPABILITY").as_deref() != Ok("vaulticdb-process-tests-v1") {
+            return Ok(false);
+        }
+        return optional_bool("VAULTICDB_TEST_ATTRIBUTION_DISABLED", false);
+    }
+    #[cfg(not(feature = "test-failpoints"))]
+    {
+        Ok(false)
+    }
 }
 
 fn slatedb_tuning_from_env() -> Result<SlateDbTuning> {
@@ -789,6 +805,44 @@ mod tests {
         unsafe { env::set_var("VAULTICDB_SLATEDB_MULTIGET", "yes") };
         assert!(optional_bool("VAULTICDB_SLATEDB_MULTIGET", false).is_err());
         unsafe { env::remove_var("VAULTICDB_SLATEDB_MULTIGET") };
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[test]
+    fn attribution_disable_requires_process_test_capability() {
+        let _guard = environment_lock().lock().unwrap();
+        unsafe {
+            env::remove_var("VAULTICDB_TEST_CAPABILITY");
+            env::remove_var("VAULTICDB_TEST_ATTRIBUTION_DISABLED");
+        }
+        assert!(!attribution_disabled_from_env().unwrap());
+        unsafe { env::set_var("VAULTICDB_TEST_ATTRIBUTION_DISABLED", "true") };
+        assert!(!attribution_disabled_from_env().unwrap());
+        unsafe {
+            env::set_var("VAULTICDB_TEST_CAPABILITY", "vaulticdb-process-tests-v1");
+        }
+        assert!(attribution_disabled_from_env().unwrap());
+        unsafe { env::set_var("VAULTICDB_TEST_ATTRIBUTION_DISABLED", "yes") };
+        assert!(attribution_disabled_from_env().is_err());
+        unsafe {
+            env::remove_var("VAULTICDB_TEST_ATTRIBUTION_DISABLED");
+            env::remove_var("VAULTICDB_TEST_CAPABILITY");
+        }
+    }
+
+    #[cfg(not(feature = "test-failpoints"))]
+    #[test]
+    fn attribution_disable_is_compiled_out_without_test_failpoints() {
+        let _guard = environment_lock().lock().unwrap();
+        unsafe {
+            env::set_var("VAULTICDB_TEST_CAPABILITY", "vaulticdb-process-tests-v1");
+            env::set_var("VAULTICDB_TEST_ATTRIBUTION_DISABLED", "true");
+        }
+        assert!(!attribution_disabled_from_env().unwrap());
+        unsafe {
+            env::remove_var("VAULTICDB_TEST_ATTRIBUTION_DISABLED");
+            env::remove_var("VAULTICDB_TEST_CAPABILITY");
+        }
     }
 
     fn clear_slatedb_tuning_environment() {

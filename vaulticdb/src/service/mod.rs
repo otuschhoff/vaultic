@@ -19,6 +19,7 @@ use vaulticdb::encryption;
 use vaulticdb::ids::RepositoryId;
 
 use crate::{
+    attribution::ServiceAttribution,
     config::Config,
     error::VaulticDbError,
     lifecycle::{DaemonLifecycle, DaemonPhase},
@@ -71,6 +72,7 @@ pub(crate) struct DaemonState {
     pub(crate) writer_role: Arc<Mutex<WriterRoleState>>,
     pub(crate) writer_transition: Arc<Mutex<()>>,
     pub(crate) mutation_admission: Arc<RwLock<()>>,
+    pub(crate) attribution: Arc<ServiceAttribution>,
     pub(crate) last_writer_activity: Arc<Mutex<Instant>>,
     pub(crate) minimum_writer_tenure: Duration,
     pub(crate) writer_idle_grace: Option<Duration>,
@@ -117,9 +119,26 @@ impl Service {
 }
 
 struct WriteIntentGuard {
-    _admission: OwnedRwLockReadGuard<()>,
+    _admission: AdmissionGuard,
     writer_role: Arc<Mutex<WriterRoleState>>,
     last_writer_activity: Arc<Mutex<Instant>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdmissionGuard {
+    _guard: OwnedRwLockReadGuard<()>,
+    attribution: Arc<ServiceAttribution>,
+    hold: Option<crate::attribution::TimingToken>,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(hold) = self.hold.take() {
+            self.attribution
+                .admission_lock_hold
+                .complete(hold, crate::attribution::TimingOutcome::Success);
+        }
+    }
 }
 
 impl Drop for WriteIntentGuard {
@@ -415,6 +434,7 @@ mod lifecycle_tests {
                 ))),
                 writer_transition: Arc::new(Mutex::new(())),
                 mutation_admission: Arc::new(RwLock::new(())),
+                attribution: Arc::new(ServiceAttribution::default()),
                 last_writer_activity: Arc::new(Mutex::new(now)),
                 minimum_writer_tenure: Duration::ZERO,
                 writer_idle_grace: None,
@@ -438,6 +458,15 @@ mod lifecycle_tests {
             .transition(DaemonPhase::ReadWrite, "ready", 124)
             .unwrap();
         let admitted = service.mutation_admission().await.unwrap();
+        assert_eq!(
+            service
+                .state
+                .attribution
+                .admission_lock_hold
+                .snapshot()
+                .active,
+            1
+        );
         let draining = service.clone();
         let drain = tokio::spawn(async move {
             draining
@@ -453,10 +482,34 @@ mod lifecycle_tests {
         assert!(!drain.is_finished());
 
         drop(admitted);
+        let hold = service.state.attribution.admission_lock_hold.snapshot();
+        assert_eq!(hold.active, 0);
+        assert_eq!(hold.completed, 1);
+        assert_eq!(hold.successes, 1);
         drain.await.unwrap().unwrap();
         let error = service.mutation_admission().await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert!(!error.details().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admission_wait_reports_owned_lock_contention() {
+        let service = loading_service();
+        let exclusive = service.state.mutation_admission.clone().write_owned().await;
+        let waiting = service.clone();
+        let waiter = tokio::spawn(async move { waiting.mutation_admission().await });
+        tokio::task::yield_now().await;
+
+        let snapshot = service.state.attribution.admission_wait.snapshot();
+        assert!(snapshot.contention_available);
+        assert_eq!(snapshot.contentions, 1);
+        assert_eq!(snapshot.active, 1);
+
+        drop(exclusive);
+        drop(waiter.await.unwrap().unwrap());
+        let snapshot = service.state.attribution.admission_wait.snapshot();
+        assert_eq!(snapshot.active, 0);
+        assert_eq!(snapshot.successes, 1);
     }
 
     fn request_context() -> Option<RequestContext> {

@@ -3,8 +3,8 @@ mod role_tests {
     //! Storage writer-role integration tests.
 
     use super::*;
-    use std::env;
     use crate::proto::{KeyValue, WriteBatchRequest};
+    use std::env;
 
     #[tokio::test]
     async fn demote_reads_and_promote_writes_without_restart() {
@@ -93,16 +93,20 @@ mod role_tests {
             })
             .await
             .unwrap();
-        assert!(storage
-            .commit(&transaction_id, "commit-one", false)
-            .await
-            .unwrap()
-            .consumed);
-        assert!(!storage
-            .commit(&transaction_id, "commit-one", false)
-            .await
-            .unwrap()
-            .consumed);
+        assert!(
+            storage
+                .commit(&transaction_id, "commit-one", false)
+                .await
+                .unwrap()
+                .consumed
+        );
+        assert!(
+            !storage
+                .commit(&transaction_id, "commit-one", false)
+                .await
+                .unwrap()
+                .consumed
+        );
         assert_eq!(
             storage.get(b"transaction", "").await.unwrap().value,
             b"committed"

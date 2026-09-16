@@ -31,6 +31,7 @@ use vaulticdb::writer_role::{WriterRole as CoreWriterRole, WriterRoleState};
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod attribution;
 mod config;
 mod error;
 mod lifecycle;

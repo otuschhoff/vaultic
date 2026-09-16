@@ -492,6 +492,8 @@ are retained in [Phase 32 P1 instrumentation evidence](phase-32-p1-benchmark-evi
 
 ### P2. Complete VaulticDB and Engine Attribution
 
+**Status:** complete as of 2026-09-16.
+
 **Prerequisite:** P0; align operation names with P1. Split this into P2a service
 admission/fencing/transaction timers, P2b fork queue/apply/backpressure timers,
 and P2c SST/compaction/finalization counters. Validate each substep before the next.
@@ -516,6 +518,58 @@ blocking log path. Build optimized symbols and run the Go real-daemon smoke fixt
 with `VAULTICDB_TEST_BINARY` pointing to that exact binary.
 **Exit:** named client/server/engine boundaries and matching build IDs; no
 behavioral changes or unbounded metric cardinality.
+
+P2 extends the existing `WriterStatus` diagnostic response with fixed fields;
+it does not add an RPC or derive metric names or labels from requests. Each
+timing snapshot reports saturating attempts, completed outcomes, total and
+maximum microseconds, eight bounded latency buckets, active work, and oldest
+active age. A small synchronous mutex protects only active-start bookkeeping;
+no collector lock spans an await. Completed `Err` results are failures, while
+dropped guards are cancellations. Service boundaries include admission-lock
+wait and hold, writer-fence validation, and separate write-batch, begin, commit,
+and rollback request timers.
+
+| Boundary | Exact scope |
+|---|---|
+| `admission_wait` | Starts before the mutation-admission read-lock await and ends immediately after acquisition. Drain checks and the remaining request are excluded. |
+| `fence_check` | Starts before loading storage and reading active writer authority; ends only after authority is confirmed. Stale or unavailable authority is a failed attempt. |
+| `*_request` | One fixed timer for each write-batch, begin, commit, and rollback handler, including validation and all subordinate work. |
+| `transaction_begin` | SlateDB transaction creation, including expiry pruning, but not service admission or fencing. |
+| `engine_submit` | Starts before the VaulticDB storage failpoint and ends when SlateDB returns a write handle. It includes SlateDB backpressure, batch-writer enqueue/queue wait, conflict checking, and in-memory apply; it excludes explicit durability wait. Write-batch and transaction-commit submits share this storage metric and remain distinguishable through their service timers. |
+| `durable_wait` | Only `WriteHandle::await_durable`; deferred transaction commits do not create an attempt. |
+| `finalization` | The complete storage close path through flush/close, local-WAL handoff eligibility, cache/credential cleanup, and writer-claim release. |
+
+The pinned fork revision `fc68f09a25defb128edfd722ec82696492dbb692`
+adds fixed engine lifecycle metrics. Backpressure begins only when pressure is
+first observed and ends before enqueue. Queue wait starts after backpressure at
+enqueue and ends when the batch writer receives or drains the request. Writer
+service starts at receipt and ends when apply returns. Each stage reports bounded
+duration buckets, attempts/completed outcomes, active count where meaningful,
+and oldest active age where the fork can retain a live guard. Existing counters
+cover writes, pressure reasons, memtable/WAL bytes, flushes, L0/SST/sorted-run
+state, and compaction output/running work. One recorder snapshot supplies all
+engine fields in a status response; counters are cumulative for the `Storage`
+lifetime and gauges describe the latest recorder state.
+
+Role-aware object-store metrics separate main metadata, WAL, and coordination
+operations. They cover fixed PUT, multipart, GET/body/ranges, HEAD, delete, list,
+copy, and rename operations; byte availability is explicit per operation and
+stream timers remain active until EOF, error, or cancellation. A shared store
+uses path tagging to distinguish WAL. The current object-store interface does
+not expose internal retry delay, background pressure, or timeout classification,
+so those availability flags remain false rather than reporting inferred values.
+
+The process test holds a mutation after admission and observes that
+`admission_wait` has completed while `write_batch_request` has not, then proves
+the completed request advances engine submit, durability, and fork write
+counters. A second daemon takeover proves a stale owner records failed fence and
+request outcomes. Storage tests cover failed begin/finalization/submit,
+deferred-durability exclusion, and real recorder-backed writes. Collector and
+object-store tests cover explicit failure versus cancellation, active cleanup,
+bounded snapshots, streams, multipart, path-tagged WAL, and role isolation. The
+matching optimized build, fork tests, full suite results, overhead comparison,
+identities, and lint baseline are retained in
+[Phase 32 P2 attribution evidence](phase-32-p2-attribution-evidence.md).
 
 ### P3. Measure and Select One Experiment
 

@@ -35,11 +35,15 @@ use slatedb::{
     },
     Db, DbIterator, DbReader, DbReaderMode, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
 };
+use slatedb_common::metrics::{
+    DefaultMetricsRecorder, Metric, MetricValue, Metrics, MetricsRecorder, NoopMetricsRecorder,
+};
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
 use zeroize::Zeroizing;
 
 use crate::{
+    attribution::StorageAttribution,
     error::VaulticDbError,
     proto::{GetResponse, KeyValue, ScanResponse, WriteBatchRequest},
     replication::ReplicatedObjectStore,
@@ -231,6 +235,8 @@ pub(crate) struct Storage {
     cache_manager: Option<Arc<cache::CacheManager>>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     wal_metrics: Option<Arc<WalMetrics>>,
+    attribution: Arc<StorageAttribution>,
+    engine_metrics: Option<Arc<DefaultMetricsRecorder>>,
     coordination_store: Arc<dyn ObjectStore>,
     encryption: EncryptionStatus,
     key_manager: Option<Arc<KeyManager>>,
@@ -248,6 +254,143 @@ pub(crate) struct Storage {
     writer_epoch: AtomicU64,
     wal_target: &'static str,
     wal_durability: &'static str,
+}
+
+#[derive(Default)]
+pub(crate) struct EngineMetricsSnapshot {
+    pub(crate) write_batches: u64,
+    pub(crate) write_ops: u64,
+    pub(crate) backpressure_count: u64,
+    pub(crate) l0_stalls_sst_count: u64,
+    pub(crate) l0_stalls_ssts_per_key: u64,
+    pub(crate) immutable_memtable_flushes: u64,
+    pub(crate) memtable_bytes: u64,
+    pub(crate) memtable_write_bytes: u64,
+    pub(crate) wal_flush_bytes: u64,
+    pub(crate) l0_sst_count: u64,
+    pub(crate) sst_count: u64,
+    pub(crate) sorted_run_count: u64,
+    pub(crate) l0_flush_bytes: u64,
+    pub(crate) compacted_bytes: u64,
+    pub(crate) compacted_ssts: u64,
+    pub(crate) running_compactions: u64,
+    pub(crate) backpressure: EngineTimingSnapshot,
+    pub(crate) batch_write_queue_depth: u64,
+    pub(crate) batch_write_queue: EngineTimingSnapshot,
+    pub(crate) batch_write_service: EngineTimingSnapshot,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EngineTimingSnapshot {
+    pub(crate) attempts: u64,
+    pub(crate) failures: u64,
+    pub(crate) total_us: u64,
+    pub(crate) max_us: u64,
+    pub(crate) completed: u64,
+    pub(crate) successes: u64,
+    pub(crate) cancellations: u64,
+    pub(crate) timeouts: u64,
+    pub(crate) active: u64,
+    pub(crate) oldest_active_us: u64,
+    pub(crate) latency_bucket_upper_us: Vec<u64>,
+    pub(crate) latency_bucket_counts: Vec<u64>,
+}
+
+fn metric_value(metric: &Metric) -> u64 {
+    match metric.value {
+        MetricValue::Counter(value) => value,
+        MetricValue::Gauge(value) | MetricValue::UpDownCounter(value) => {
+            value.try_into().unwrap_or_default()
+        }
+        MetricValue::Histogram { count, .. } => count,
+    }
+}
+
+fn engine_metric(metrics: &Metrics, name: &str) -> u64 {
+    metrics.by_name(name).into_iter().fold(0, |total, metric| {
+        total.saturating_add(metric_value(metric))
+    })
+}
+
+fn engine_metric_with_labels(metrics: &Metrics, name: &str, labels: &[(&str, &str)]) -> u64 {
+    metrics
+        .by_name_and_labels(name, labels)
+        .map_or(0, metric_value)
+}
+
+fn engine_outcome_metric(metrics: &Metrics, name: &str, outcome: &str) -> u64 {
+    engine_metric_with_labels(
+        metrics,
+        name,
+        &[(slatedb::db_stats::OUTCOME_LABEL, outcome)],
+    )
+}
+
+fn seconds_to_us(seconds: f64) -> u64 {
+    if seconds.is_nan() || seconds <= 0.0 {
+        return 0;
+    }
+    let micros = seconds * 1_000_000.0;
+    if !micros.is_finite() || micros >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        micros.round() as u64
+    }
+}
+
+fn oldest_active_age_us(started_unix_ms: u64, now_unix_ms: u64) -> u64 {
+    if started_unix_ms == 0 {
+        return 0;
+    }
+    now_unix_ms
+        .saturating_sub(started_unix_ms)
+        .saturating_mul(1_000)
+}
+
+fn engine_timing(
+    metrics: &Metrics,
+    histogram_name: &str,
+    active: u64,
+    oldest_active_started_unix_ms: u64,
+    now_unix_ms: u64,
+    successes: u64,
+    failures: u64,
+    cancellations: u64,
+    timeouts: u64,
+) -> EngineTimingSnapshot {
+    let mut snapshot = EngineTimingSnapshot {
+        failures,
+        successes,
+        cancellations,
+        timeouts,
+        active,
+        oldest_active_us: oldest_active_age_us(oldest_active_started_unix_ms, now_unix_ms),
+        ..EngineTimingSnapshot::default()
+    };
+    if let Some(metric) = metrics.by_name_and_labels(histogram_name, &[]) {
+        if let MetricValue::Histogram {
+            count,
+            sum,
+            max,
+            boundaries,
+            bucket_counts,
+            ..
+        } = &metric.value
+        {
+            snapshot.completed = *count;
+            snapshot.total_us = seconds_to_us(*sum);
+            snapshot.max_us = seconds_to_us(*max);
+            snapshot.latency_bucket_upper_us = boundaries
+                .iter()
+                .copied()
+                .map(seconds_to_us)
+                .chain(std::iter::once(u64::MAX))
+                .collect();
+            snapshot.latency_bucket_counts = bucket_counts.clone();
+        }
+    }
+    snapshot.attempts = snapshot.completed.saturating_add(active);
+    snapshot
 }
 
 struct BrokerLeaseMetadata {
@@ -296,6 +439,7 @@ pub(crate) struct StorageConfig {
     pub(crate) encryption: envelope::EncryptionConfig,
     pub(crate) transaction_idle_timeout_ms: u64,
     pub(crate) slatedb_multiget: bool,
+    pub(crate) attribution_disabled: bool,
     pub(crate) topology_source: TopologySource,
     pub(crate) topology_override_local: Option<(String, PathBuf)>,
 }
@@ -341,11 +485,29 @@ pub(crate) struct WalStatus {
     pub(crate) cleanup_failures: u64,
 }
 
+#[cfg(test)]
 async fn open_writer(
     path: &str,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     tuning: &SlateDbTuning,
+) -> Result<Db> {
+    open_writer_with_metrics(
+        path,
+        object_store,
+        wal_object_store,
+        tuning,
+        Arc::new(DefaultMetricsRecorder::new()),
+    )
+    .await
+}
+
+async fn open_writer_with_metrics(
+    path: &str,
+    object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    tuning: &SlateDbTuning,
+    engine_metrics: Arc<dyn MetricsRecorder>,
 ) -> Result<Db> {
     #[cfg(any(test, feature = "test-failpoints"))]
     check_storage_failpoint(StorageFailpoint::OpenWriter(path.to_owned()))?;
@@ -353,7 +515,9 @@ async fn open_writer(
     eprintln!(
         "{{\"category\":\"lifecycle\",\"component\":\"vaulticdb\",\"event\":\"slatedb_writer_open_started\"}}"
     );
-    let mut builder = Db::builder(path, object_store).with_settings(tuning.settings());
+    let mut builder = Db::builder(path, object_store)
+        .with_settings(tuning.settings())
+        .with_metrics_recorder(engine_metrics);
     if let Some(wal_store) = wal_object_store {
         builder = builder.with_wal_object_store(wal_store);
     }
@@ -1536,6 +1700,26 @@ impl Storage {
                 wal_metrics,
             )
         };
+        let attribution = Arc::new(StorageAttribution::new(!config.attribution_disabled));
+        let (object_store, wal_object_store, coordination_store) = if config.attribution_disabled {
+            (object_store, wal_object_store, coordination_store)
+        } else {
+            (
+                role_aware_object_store(
+                    object_store,
+                    Arc::clone(&attribution.object_store_main),
+                    Some(Arc::clone(&attribution.object_store_wal)),
+                ),
+                wal_object_store.map(|store| {
+                    role_aware_object_store(store, Arc::clone(&attribution.object_store_wal), None)
+                }),
+                role_aware_object_store(
+                    coordination_store,
+                    Arc::clone(&attribution.object_store_coordination),
+                    None,
+                ),
+            )
+        };
         let reset_takeover_epoch = if config.metadata_rebuild_reset {
             match active_writer_epoch(coordination_store.as_ref()).await {
                 Ok(epoch) => epoch,
@@ -1579,14 +1763,22 @@ impl Storage {
                 .await);
             }
         };
+        let engine_metrics =
+            (!config.attribution_disabled).then(|| Arc::new(DefaultMetricsRecorder::new()));
+        let engine_metrics_recorder: Arc<dyn MetricsRecorder> =
+            engine_metrics.as_ref().map_or_else(
+                || Arc::new(NoopMetricsRecorder::new()) as Arc<dyn MetricsRecorder>,
+                |metrics| metrics.clone(),
+            );
         let (database, writer_epoch) =
             match writer_claim {
                 Some(epoch) => {
-                    let db = match open_writer(
+                    let db = match open_writer_with_metrics(
                         &path,
                         object_store.clone(),
                         wal_object_store.clone(),
                         &config.slatedb_tuning,
+                        engine_metrics_recorder.clone(),
                     )
                     .await
                     {
@@ -1657,6 +1849,8 @@ impl Storage {
             cache_manager,
             wal_object_store,
             wal_metrics,
+            attribution,
+            engine_metrics,
             coordination_store,
             encryption,
             key_manager,
@@ -1735,6 +1929,120 @@ impl Storage {
 
     pub(crate) fn last_durable_sequence(&self) -> u64 {
         self.last_durable_sequence.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn attribution(&self) -> &StorageAttribution {
+        &self.attribution
+    }
+
+    pub(crate) fn engine_metrics_snapshot(&self) -> EngineMetricsSnapshot {
+        let Some(engine_metrics) = &self.engine_metrics else {
+            return EngineMetricsSnapshot::default();
+        };
+        let metrics = engine_metrics.snapshot();
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let value = |name| engine_metric(&metrics, name);
+        let labeled = |name, labels| engine_metric_with_labels(&metrics, name, labels);
+        let outcome = |name, outcome| engine_outcome_metric(&metrics, name, outcome);
+        EngineMetricsSnapshot {
+            write_batches: value(slatedb::db_stats::WRITE_BATCH_COUNT),
+            write_ops: value(slatedb::db_stats::WRITE_OPS),
+            backpressure_count: value(slatedb::db_stats::BACKPRESSURE_COUNT),
+            l0_stalls_sst_count: labeled(
+                slatedb::db_stats::L0_STALL_COUNT,
+                &[((
+                    slatedb::db_stats::L0_STALL_TYPE_LABEL,
+                    slatedb::db_stats::L0_STALL_TYPE_NUM_SSTS,
+                ))],
+            ),
+            l0_stalls_ssts_per_key: labeled(
+                slatedb::db_stats::L0_STALL_COUNT,
+                &[((
+                    slatedb::db_stats::L0_STALL_TYPE_LABEL,
+                    slatedb::db_stats::L0_STALL_TYPE_NUM_SSTS_PER_KEY,
+                ))],
+            ),
+            immutable_memtable_flushes: value(slatedb::db_stats::IMMUTABLE_MEMTABLE_FLUSHES),
+            memtable_bytes: value(slatedb::db_stats::TOTAL_MEM_SIZE_BYTES),
+            memtable_write_bytes: value(slatedb::db_stats::MEMTABLE_WRITE_BYTES),
+            wal_flush_bytes: value(slatedb::wal_buffer_stats::WAL_FLUSH_BYTES),
+            l0_sst_count: value(slatedb::db_stats::L0_SST_COUNT),
+            sst_count: value(slatedb::db_stats::SST_COUNT),
+            sorted_run_count: value(slatedb::db_stats::SORTED_RUN_COUNT),
+            l0_flush_bytes: value(slatedb::db_stats::L0_FLUSH_BYTES),
+            compacted_bytes: value(slatedb::compactor::stats::BYTES_COMPACTED),
+            compacted_ssts: value(slatedb::compactor::stats::SSTS_WRITTEN),
+            running_compactions: value(slatedb::compactor::stats::RUNNING_COMPACTIONS),
+            backpressure: engine_timing(
+                &metrics,
+                slatedb::db_stats::BACKPRESSURE_WAIT_SECONDS,
+                value(slatedb::db_stats::BACKPRESSURE_WAITERS),
+                value(slatedb::db_stats::BACKPRESSURE_OLDEST_ACTIVE_STARTED_UNIX_MILLIS),
+                now_unix_ms,
+                outcome(
+                    slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_SUCCESS,
+                ),
+                outcome(
+                    slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_FAILURE,
+                ),
+                outcome(
+                    slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_CANCELLATION,
+                ),
+                outcome(
+                    slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_TIMEOUT,
+                ),
+            ),
+            batch_write_queue_depth: value(slatedb::db_stats::BATCH_WRITE_QUEUE_DEPTH),
+            batch_write_queue: engine_timing(
+                &metrics,
+                slatedb::db_stats::BATCH_WRITE_QUEUE_WAIT_SECONDS,
+                value(slatedb::db_stats::BATCH_WRITE_QUEUE_DEPTH),
+                0,
+                now_unix_ms,
+                outcome(
+                    slatedb::db_stats::BATCH_WRITE_QUEUE_OUTCOME_COUNT,
+                    slatedb::db_stats::QUEUE_OUTCOME_PROCESSED,
+                ),
+                outcome(
+                    slatedb::db_stats::BATCH_WRITE_QUEUE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_FAILURE,
+                ),
+                outcome(
+                    slatedb::db_stats::BATCH_WRITE_QUEUE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_CANCELLATION,
+                ),
+                0,
+            ),
+            batch_write_service: engine_timing(
+                &metrics,
+                slatedb::db_stats::BATCH_WRITE_SERVICE_SECONDS,
+                value(slatedb::db_stats::BATCH_WRITE_SERVICE_ACTIVE),
+                value(slatedb::db_stats::BATCH_WRITE_SERVICE_OLDEST_ACTIVE_STARTED_UNIX_MILLIS),
+                now_unix_ms,
+                outcome(
+                    slatedb::db_stats::BATCH_WRITE_SERVICE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_SUCCESS,
+                ),
+                outcome(
+                    slatedb::db_stats::BATCH_WRITE_SERVICE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_FAILURE,
+                ),
+                outcome(
+                    slatedb::db_stats::BATCH_WRITE_SERVICE_OUTCOME_COUNT,
+                    slatedb::db_stats::OUTCOME_CANCELLATION,
+                ),
+                0,
+            ),
+        }
     }
 
     pub(crate) fn key_manager(&self) -> Result<&Arc<KeyManager>, Status> {
@@ -2128,59 +2436,67 @@ impl Storage {
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
-        if let Some(manager) = &self.cache_manager {
-            manager.begin_close();
-        }
-        if let Some(manager) = &self.credential_manager {
-            manager.close().await;
-        }
-        self.transactions.write().await.clear();
-        let database = self.database.write().await;
-        let was_writer = matches!(&*database, Database::Writer(_));
-        let bulk_import_complete = match &*database {
-            Database::Writer(db) => db
-                .get(BULK_IMPORT_COMPLETE_RECORD)
-                .await
-                .context("read bulk-import completion marker before shutdown")?
-                .is_some(),
-            Database::Reader(_) | Database::Unavailable => false,
-        };
-        let database_close = match &*database {
-            Database::Writer(db) => db.close().await.context("close SlateDB writer"),
-            Database::Reader(reader) => reader.close().await.context("close SlateDB reader"),
-            Database::Unavailable => Ok(()),
-        };
-        let wal_rebind = if database_close.is_ok()
-            && was_writer
-            && self.metadata_rebuild_reset
-            && self.wal_target == "memory"
-            && bulk_import_complete
-        {
-            match &self.bulk_import_local_wal_data_dir {
-                Some(root) => mark_local_wal_handoff(self.coordination_store.as_ref(), root).await,
-                None => Ok(()),
+        let mut timer = self.attribution.finalization.timer();
+        let result = async {
+            if let Some(manager) = &self.cache_manager {
+                manager.begin_close();
             }
-        } else {
+            if let Some(manager) = &self.credential_manager {
+                manager.close().await;
+            }
+            self.transactions.write().await.clear();
+            let database = self.database.write().await;
+            let was_writer = matches!(&*database, Database::Writer(_));
+            let bulk_import_complete = match &*database {
+                Database::Writer(db) => db
+                    .get(BULK_IMPORT_COMPLETE_RECORD)
+                    .await
+                    .context("read bulk-import completion marker before shutdown")?
+                    .is_some(),
+                Database::Reader(_) | Database::Unavailable => false,
+            };
+            let database_close = match &*database {
+                Database::Writer(db) => db.close().await.context("close SlateDB writer"),
+                Database::Reader(reader) => reader.close().await.context("close SlateDB reader"),
+                Database::Unavailable => Ok(()),
+            };
+            let wal_rebind = if database_close.is_ok()
+                && was_writer
+                && self.metadata_rebuild_reset
+                && self.wal_target == "memory"
+                && bulk_import_complete
+            {
+                match &self.bulk_import_local_wal_data_dir {
+                    Some(root) => {
+                        mark_local_wal_handoff(self.coordination_store.as_ref(), root).await
+                    }
+                    None => Ok(()),
+                }
+            } else {
+                Ok(())
+            };
+            let writer_release = if database_close.is_ok() && wal_rebind.is_ok() && was_writer {
+                release_writer_claim(
+                    self.coordination_store.as_ref(),
+                    self.writer_epoch.load(Ordering::Acquire),
+                )
+                .await
+            } else {
+                Ok(())
+            };
+            let cache_close = match &self.cache_manager {
+                Some(manager) => close_cache_manager(manager).await,
+                None => Ok(()),
+            };
+            database_close?;
+            wal_rebind?;
+            writer_release?;
+            cache_close?;
             Ok(())
-        };
-        let writer_release = if database_close.is_ok() && wal_rebind.is_ok() && was_writer {
-            release_writer_claim(
-                self.coordination_store.as_ref(),
-                self.writer_epoch.load(Ordering::Acquire),
-            )
-            .await
-        } else {
-            Ok(())
-        };
-        let cache_close = match &self.cache_manager {
-            Some(manager) => close_cache_manager(manager).await,
-            None => Ok(()),
-        };
-        database_close?;
-        wal_rebind?;
-        writer_release?;
-        cache_close?;
-        Ok(())
+        }
+        .await;
+        timer.record_result(&result);
+        result
     }
 
     pub(crate) async fn demote(&self) -> Result<(), StorageTransitionFailure> {
@@ -2363,11 +2679,15 @@ impl Storage {
                 failure
             });
         }
-        let db = match open_writer(
+        let db = match open_writer_with_metrics(
             self.database_path.as_str(),
             self.object_store.clone(),
             self.wal_object_store.clone(),
             &self.slatedb_tuning,
+            self.engine_metrics.as_ref().map_or_else(
+                || Arc::new(NoopMetricsRecorder::new()) as Arc<dyn MetricsRecorder>,
+                |metrics| metrics.clone(),
+            ),
         )
         .await
         {
@@ -2921,14 +3241,36 @@ impl Storage {
             let db = database
                 .as_writer()
                 .ok_or_else(|| Status::from(VaulticDbError::WriterDemoted))?;
+            let mut submit_timer = self.attribution.engine_submit.timer();
             #[cfg(any(test, feature = "test-failpoints"))]
-            check_storage_failpoint(StorageFailpoint::BeforeWriteBatch(
+            if let Err(error) = check_storage_failpoint(StorageFailpoint::BeforeWriteBatch(
                 self.database_path.clone(),
             ))
-            .map_err(storage_status)?;
-            let handle = db.write(batch).await.map_err(storage_error)?;
+            .map_err(storage_status)
+            {
+                submit_timer.failed();
+                return Err(error);
+            }
+            let handle = match db.write(batch).await.map_err(storage_error) {
+                Ok(handle) => {
+                    submit_timer.succeeded();
+                    drop(submit_timer);
+                    handle
+                }
+                Err(error) => {
+                    submit_timer.failed();
+                    return Err(error);
+                }
+            };
             if request.await_durable || !request.idempotency_key.is_empty() {
-                handle.await_durable().await.map_err(storage_error)?;
+                let mut durable_timer = self.attribution.durable_wait.timer();
+                match handle.await_durable().await.map_err(storage_error) {
+                    Ok(()) => durable_timer.succeeded(),
+                    Err(error) => {
+                        durable_timer.failed();
+                        return Err(error);
+                    }
+                }
                 self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
             }
             return Ok(request.await_durable || !request.idempotency_key.is_empty());
@@ -2961,61 +3303,67 @@ impl Storage {
         self.assert_current_writer_epoch()
             .await
             .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
-        let mut transactions = self.transactions.write().await;
-        let now = unix_time_ms()
-            .map_err(storage_status)
-            .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
-        let count_before_expiry = transactions.len();
-        transactions.retain(|_, slot| {
-            Arc::strong_count(slot) > 1
-                || !transaction_expired(
-                    slot.last_touched_ms.load(Ordering::Relaxed),
-                    now,
-                    self.transaction_idle_timeout_ms,
-                )
-        });
-        let expired = count_before_expiry.saturating_sub(transactions.len());
-        if transactions.len() >= MAX_ACTIVE_TRANSACTIONS {
-            return Err(BeginTransactionFailure {
-                expired,
-                status: VaulticDbError::ResourceExhausted {
-                    message: "active transaction limit exceeded".to_owned(),
-                    retryable: true,
-                }
-                .into(),
+        let mut timer = self.attribution.transaction_begin.timer();
+        let result = async {
+            let mut transactions = self.transactions.write().await;
+            let now = unix_time_ms()
+                .map_err(storage_status)
+                .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
+            let count_before_expiry = transactions.len();
+            transactions.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || !transaction_expired(
+                        slot.last_touched_ms.load(Ordering::Relaxed),
+                        now,
+                        self.transaction_idle_timeout_ms,
+                    )
             });
-        }
-        let database = self
-            .writer()
-            .await
-            .map_err(|status| BeginTransactionFailure { expired, status })?;
-        let writer = database
-            .as_writer()
-            .ok_or_else(|| BeginTransactionFailure {
+            let expired = count_before_expiry.saturating_sub(transactions.len());
+            if transactions.len() >= MAX_ACTIVE_TRANSACTIONS {
+                return Err(BeginTransactionFailure {
+                    expired,
+                    status: VaulticDbError::ResourceExhausted {
+                        message: "active transaction limit exceeded".to_owned(),
+                        retryable: true,
+                    }
+                    .into(),
+                });
+            }
+            let database = self
+                .writer()
+                .await
+                .map_err(|status| BeginTransactionFailure { expired, status })?;
+            let writer = database
+                .as_writer()
+                .ok_or_else(|| BeginTransactionFailure {
+                    expired,
+                    status: VaulticDbError::WriterDemoted.into(),
+                })?;
+            let transaction = writer
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .map_err(storage_error)
+                .map_err(|status| BeginTransactionFailure { expired, status })?;
+            let id = format!(
+                "txn-{}-{}",
+                std::process::id(),
+                self.next_transaction.fetch_add(1, Ordering::Relaxed)
+            );
+            transactions.insert(
+                id.clone(),
+                Arc::new(TransactionSlot {
+                    transaction: Mutex::new(Some(transaction)),
+                    last_touched_ms: AtomicU64::new(now),
+                }),
+            );
+            Ok(BeginTransactionOutcome {
+                transaction_id: id,
                 expired,
-                status: VaulticDbError::WriterDemoted.into(),
-            })?;
-        let transaction = writer
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .map_err(storage_error)
-            .map_err(|status| BeginTransactionFailure { expired, status })?;
-        let id = format!(
-            "txn-{}-{}",
-            std::process::id(),
-            self.next_transaction.fetch_add(1, Ordering::Relaxed)
-        );
-        transactions.insert(
-            id.clone(),
-            Arc::new(TransactionSlot {
-                transaction: Mutex::new(Some(transaction)),
-                last_touched_ms: AtomicU64::new(now),
-            }),
-        );
-        Ok(BeginTransactionOutcome {
-            transaction_id: id,
-            expired,
-        })
+            })
+        }
+        .await;
+        timer.record_result(&result);
+        result
     }
 
     pub(crate) async fn commit(
@@ -3084,30 +3432,58 @@ impl Storage {
                 .map_err(storage_error)
                 .map_err(TransactionFailure::after_consumption)?;
         }
+        let mut submit_timer = self.attribution.engine_submit.timer();
         #[cfg(any(test, feature = "test-failpoints"))]
-        check_storage_failpoint(StorageFailpoint::BeforeTransactionCommit(
+        if let Err(error) = check_storage_failpoint(StorageFailpoint::BeforeTransactionCommit(
             self.database_path.clone(),
         ))
         .map_err(storage_status)
-        .map_err(TransactionFailure::after_consumption)?;
-        if let Some(handle) = transaction
+        .map_err(TransactionFailure::after_consumption)
+        {
+            submit_timer.failed();
+            return Err(error);
+        }
+        let commit = transaction
             .commit()
             .await
             .map_err(storage_error)
-            .map_err(TransactionFailure::after_consumption)?
-        {
-            if !defer_durability {
-                #[cfg(any(test, feature = "test-failpoints"))]
-                check_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(
-                    self.database_path.clone(),
-                ))
-                .map_err(storage_status)
-                .map_err(TransactionFailure::after_consumption)?;
+            .map_err(TransactionFailure::after_consumption);
+        let handle = match commit {
+            Ok(handle) => {
+                submit_timer.succeeded();
+                drop(submit_timer);
                 handle
+            }
+            Err(error) => {
+                submit_timer.failed();
+                return Err(error);
+            }
+        };
+        if let Some(handle) = handle {
+            if !defer_durability {
+                let mut durable_timer = self.attribution.durable_wait.timer();
+                #[cfg(any(test, feature = "test-failpoints"))]
+                if let Err(error) = check_storage_failpoint(
+                    StorageFailpoint::BeforeTransactionDurability(self.database_path.clone()),
+                )
+                .map_err(storage_status)
+                .map_err(TransactionFailure::after_consumption)
+                {
+                    durable_timer.failed();
+                    return Err(error);
+                }
+                let durability = handle
                     .await_durable()
                     .await
                     .map_err(storage_error)
-                    .map_err(TransactionFailure::after_consumption)?;
+                    .map_err(TransactionFailure::after_consumption);
+                match durability {
+                    Ok(()) => durable_timer.succeeded(),
+                    Err(error) => {
+                        durable_timer.failed();
+                        return Err(error);
+                    }
+                }
             }
         }
         if !defer_durability {

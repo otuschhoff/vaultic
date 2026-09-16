@@ -18,6 +18,7 @@ const IMPORTANT_DEPENDENCIES: &[&str] = &[
     "sha2",
     "sharks",
     "slatedb",
+    "slatedb-common",
     "tonic",
     "zeroize",
 ];
@@ -55,7 +56,7 @@ fn embed_dependency_versions() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(toml::Value::as_str)
             .ok_or("Cargo.lock package contains no version")?;
         let mut identity = version.to_owned();
-        if name == "slatedb" {
+        if matches!(name, "slatedb" | "slatedb-common") {
             if let Some(revision) = package
                 .get("source")
                 .and_then(toml::Value::as_str)

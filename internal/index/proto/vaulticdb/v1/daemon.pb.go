@@ -2331,6 +2331,7 @@ type WriterStatusResponse struct {
 	LastDurableSequence uint64                 `protobuf:"varint,9,opt,name=last_durable_sequence,json=lastDurableSequence,proto3" json:"last_durable_sequence,omitempty"`
 	IdleDeadlineUnixMs  int64                  `protobuf:"varint,10,opt,name=idle_deadline_unix_ms,json=idleDeadlineUnixMs,proto3" json:"idle_deadline_unix_ms,omitempty"`
 	PromotionSafe       bool                   `protobuf:"varint,11,opt,name=promotion_safe,json=promotionSafe,proto3" json:"promotion_safe,omitempty"`
+	Attribution         *AttributionSnapshot   `protobuf:"bytes,12,opt,name=attribution,proto3" json:"attribution,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -2442,6 +2443,709 @@ func (x *WriterStatusResponse) GetPromotionSafe() bool {
 	return false
 }
 
+func (x *WriterStatusResponse) GetAttribution() *AttributionSnapshot {
+	if x != nil {
+		return x.Attribution
+	}
+	return nil
+}
+
+type TimingSnapshot struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Attempts             uint64                 `protobuf:"varint,1,opt,name=attempts,proto3" json:"attempts,omitempty"`
+	Failures             uint64                 `protobuf:"varint,2,opt,name=failures,proto3" json:"failures,omitempty"`
+	TotalUs              uint64                 `protobuf:"varint,3,opt,name=total_us,json=totalUs,proto3" json:"total_us,omitempty"`
+	MaxUs                uint64                 `protobuf:"varint,4,opt,name=max_us,json=maxUs,proto3" json:"max_us,omitempty"`
+	Completed            uint64                 `protobuf:"varint,5,opt,name=completed,proto3" json:"completed,omitempty"`
+	Successes            uint64                 `protobuf:"varint,6,opt,name=successes,proto3" json:"successes,omitempty"`
+	Cancellations        uint64                 `protobuf:"varint,7,opt,name=cancellations,proto3" json:"cancellations,omitempty"`
+	Timeouts             uint64                 `protobuf:"varint,8,opt,name=timeouts,proto3" json:"timeouts,omitempty"`
+	Active               uint64                 `protobuf:"varint,9,opt,name=active,proto3" json:"active,omitempty"`
+	OldestActiveUs       uint64                 `protobuf:"varint,10,opt,name=oldest_active_us,json=oldestActiveUs,proto3" json:"oldest_active_us,omitempty"`
+	LatencyBucketUpperUs []uint64               `protobuf:"varint,11,rep,packed,name=latency_bucket_upper_us,json=latencyBucketUpperUs,proto3" json:"latency_bucket_upper_us,omitempty"`
+	LatencyBucketCounts  []uint64               `protobuf:"varint,12,rep,packed,name=latency_bucket_counts,json=latencyBucketCounts,proto3" json:"latency_bucket_counts,omitempty"`
+	ContentionAvailable  bool                   `protobuf:"varint,13,opt,name=contention_available,json=contentionAvailable,proto3" json:"contention_available,omitempty"`
+	Contentions          uint64                 `protobuf:"varint,14,opt,name=contentions,proto3" json:"contentions,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *TimingSnapshot) Reset() {
+	*x = TimingSnapshot{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TimingSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TimingSnapshot) ProtoMessage() {}
+
+func (x *TimingSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TimingSnapshot.ProtoReflect.Descriptor instead.
+func (*TimingSnapshot) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *TimingSnapshot) GetAttempts() uint64 {
+	if x != nil {
+		return x.Attempts
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetFailures() uint64 {
+	if x != nil {
+		return x.Failures
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetTotalUs() uint64 {
+	if x != nil {
+		return x.TotalUs
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetMaxUs() uint64 {
+	if x != nil {
+		return x.MaxUs
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetCompleted() uint64 {
+	if x != nil {
+		return x.Completed
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetSuccesses() uint64 {
+	if x != nil {
+		return x.Successes
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetCancellations() uint64 {
+	if x != nil {
+		return x.Cancellations
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetTimeouts() uint64 {
+	if x != nil {
+		return x.Timeouts
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetActive() uint64 {
+	if x != nil {
+		return x.Active
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetOldestActiveUs() uint64 {
+	if x != nil {
+		return x.OldestActiveUs
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetLatencyBucketUpperUs() []uint64 {
+	if x != nil {
+		return x.LatencyBucketUpperUs
+	}
+	return nil
+}
+
+func (x *TimingSnapshot) GetLatencyBucketCounts() []uint64 {
+	if x != nil {
+		return x.LatencyBucketCounts
+	}
+	return nil
+}
+
+func (x *TimingSnapshot) GetContentionAvailable() bool {
+	if x != nil {
+		return x.ContentionAvailable
+	}
+	return false
+}
+
+func (x *TimingSnapshot) GetContentions() uint64 {
+	if x != nil {
+		return x.Contentions
+	}
+	return 0
+}
+
+type ObjectOperationSnapshot struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	Timing                    *TimingSnapshot        `protobuf:"bytes,1,opt,name=timing,proto3" json:"timing,omitempty"`
+	TransferredBytes          uint64                 `protobuf:"varint,2,opt,name=transferred_bytes,json=transferredBytes,proto3" json:"transferred_bytes,omitempty"`
+	TransferredBytesAvailable bool                   `protobuf:"varint,3,opt,name=transferred_bytes_available,json=transferredBytesAvailable,proto3" json:"transferred_bytes_available,omitempty"`
+	TimeoutOutcomesAvailable  bool                   `protobuf:"varint,4,opt,name=timeout_outcomes_available,json=timeoutOutcomesAvailable,proto3" json:"timeout_outcomes_available,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *ObjectOperationSnapshot) Reset() {
+	*x = ObjectOperationSnapshot{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectOperationSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectOperationSnapshot) ProtoMessage() {}
+
+func (x *ObjectOperationSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectOperationSnapshot.ProtoReflect.Descriptor instead.
+func (*ObjectOperationSnapshot) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ObjectOperationSnapshot) GetTiming() *TimingSnapshot {
+	if x != nil {
+		return x.Timing
+	}
+	return nil
+}
+
+func (x *ObjectOperationSnapshot) GetTransferredBytes() uint64 {
+	if x != nil {
+		return x.TransferredBytes
+	}
+	return 0
+}
+
+func (x *ObjectOperationSnapshot) GetTransferredBytesAvailable() bool {
+	if x != nil {
+		return x.TransferredBytesAvailable
+	}
+	return false
+}
+
+func (x *ObjectOperationSnapshot) GetTimeoutOutcomesAvailable() bool {
+	if x != nil {
+		return x.TimeoutOutcomesAvailable
+	}
+	return false
+}
+
+type ObjectStoreRoleSnapshot struct {
+	state                       protoimpl.MessageState   `protogen:"open.v1"`
+	Put                         *ObjectOperationSnapshot `protobuf:"bytes,1,opt,name=put,proto3" json:"put,omitempty"`
+	MultipartInit               *ObjectOperationSnapshot `protobuf:"bytes,2,opt,name=multipart_init,json=multipartInit,proto3" json:"multipart_init,omitempty"`
+	MultipartPart               *ObjectOperationSnapshot `protobuf:"bytes,3,opt,name=multipart_part,json=multipartPart,proto3" json:"multipart_part,omitempty"`
+	MultipartComplete           *ObjectOperationSnapshot `protobuf:"bytes,4,opt,name=multipart_complete,json=multipartComplete,proto3" json:"multipart_complete,omitempty"`
+	MultipartAbort              *ObjectOperationSnapshot `protobuf:"bytes,5,opt,name=multipart_abort,json=multipartAbort,proto3" json:"multipart_abort,omitempty"`
+	Get                         *ObjectOperationSnapshot `protobuf:"bytes,6,opt,name=get,proto3" json:"get,omitempty"`
+	Head                        *ObjectOperationSnapshot `protobuf:"bytes,7,opt,name=head,proto3" json:"head,omitempty"`
+	GetBody                     *ObjectOperationSnapshot `protobuf:"bytes,8,opt,name=get_body,json=getBody,proto3" json:"get_body,omitempty"`
+	GetRanges                   *ObjectOperationSnapshot `protobuf:"bytes,9,opt,name=get_ranges,json=getRanges,proto3" json:"get_ranges,omitempty"`
+	Delete                      *ObjectOperationSnapshot `protobuf:"bytes,10,opt,name=delete,proto3" json:"delete,omitempty"`
+	List                        *ObjectOperationSnapshot `protobuf:"bytes,11,opt,name=list,proto3" json:"list,omitempty"`
+	ListWithOffset              *ObjectOperationSnapshot `protobuf:"bytes,12,opt,name=list_with_offset,json=listWithOffset,proto3" json:"list_with_offset,omitempty"`
+	ListWithDelimiter           *ObjectOperationSnapshot `protobuf:"bytes,13,opt,name=list_with_delimiter,json=listWithDelimiter,proto3" json:"list_with_delimiter,omitempty"`
+	Copy                        *ObjectOperationSnapshot `protobuf:"bytes,14,opt,name=copy,proto3" json:"copy,omitempty"`
+	Rename                      *ObjectOperationSnapshot `protobuf:"bytes,15,opt,name=rename,proto3" json:"rename,omitempty"`
+	RetryDelayAvailable         bool                     `protobuf:"varint,16,opt,name=retry_delay_available,json=retryDelayAvailable,proto3" json:"retry_delay_available,omitempty"`
+	BackgroundPressureAvailable bool                     `protobuf:"varint,17,opt,name=background_pressure_available,json=backgroundPressureAvailable,proto3" json:"background_pressure_available,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
+}
+
+func (x *ObjectStoreRoleSnapshot) Reset() {
+	*x = ObjectStoreRoleSnapshot{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectStoreRoleSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectStoreRoleSnapshot) ProtoMessage() {}
+
+func (x *ObjectStoreRoleSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectStoreRoleSnapshot.ProtoReflect.Descriptor instead.
+func (*ObjectStoreRoleSnapshot) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ObjectStoreRoleSnapshot) GetPut() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.Put
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetMultipartInit() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.MultipartInit
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetMultipartPart() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.MultipartPart
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetMultipartComplete() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.MultipartComplete
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetMultipartAbort() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.MultipartAbort
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetGet() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.Get
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetHead() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.Head
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetGetBody() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.GetBody
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetGetRanges() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.GetRanges
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetDelete() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.Delete
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetList() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.List
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetListWithOffset() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.ListWithOffset
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetListWithDelimiter() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.ListWithDelimiter
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetCopy() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.Copy
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetRename() *ObjectOperationSnapshot {
+	if x != nil {
+		return x.Rename
+	}
+	return nil
+}
+
+func (x *ObjectStoreRoleSnapshot) GetRetryDelayAvailable() bool {
+	if x != nil {
+		return x.RetryDelayAvailable
+	}
+	return false
+}
+
+func (x *ObjectStoreRoleSnapshot) GetBackgroundPressureAvailable() bool {
+	if x != nil {
+		return x.BackgroundPressureAvailable
+	}
+	return false
+}
+
+type AttributionSnapshot struct {
+	state                          protoimpl.MessageState   `protogen:"open.v1"`
+	AdmissionWait                  *TimingSnapshot          `protobuf:"bytes,1,opt,name=admission_wait,json=admissionWait,proto3" json:"admission_wait,omitempty"`
+	FenceCheck                     *TimingSnapshot          `protobuf:"bytes,2,opt,name=fence_check,json=fenceCheck,proto3" json:"fence_check,omitempty"`
+	WriteBatchRequest              *TimingSnapshot          `protobuf:"bytes,3,opt,name=write_batch_request,json=writeBatchRequest,proto3" json:"write_batch_request,omitempty"`
+	BeginRequest                   *TimingSnapshot          `protobuf:"bytes,4,opt,name=begin_request,json=beginRequest,proto3" json:"begin_request,omitempty"`
+	CommitRequest                  *TimingSnapshot          `protobuf:"bytes,5,opt,name=commit_request,json=commitRequest,proto3" json:"commit_request,omitempty"`
+	RollbackRequest                *TimingSnapshot          `protobuf:"bytes,6,opt,name=rollback_request,json=rollbackRequest,proto3" json:"rollback_request,omitempty"`
+	TransactionBegin               *TimingSnapshot          `protobuf:"bytes,7,opt,name=transaction_begin,json=transactionBegin,proto3" json:"transaction_begin,omitempty"`
+	EngineSubmit                   *TimingSnapshot          `protobuf:"bytes,8,opt,name=engine_submit,json=engineSubmit,proto3" json:"engine_submit,omitempty"`
+	DurableWait                    *TimingSnapshot          `protobuf:"bytes,9,opt,name=durable_wait,json=durableWait,proto3" json:"durable_wait,omitempty"`
+	Finalization                   *TimingSnapshot          `protobuf:"bytes,10,opt,name=finalization,proto3" json:"finalization,omitempty"`
+	EngineWriteBatches             uint64                   `protobuf:"varint,11,opt,name=engine_write_batches,json=engineWriteBatches,proto3" json:"engine_write_batches,omitempty"`
+	EngineWriteOps                 uint64                   `protobuf:"varint,12,opt,name=engine_write_ops,json=engineWriteOps,proto3" json:"engine_write_ops,omitempty"`
+	EngineBackpressureCount        uint64                   `protobuf:"varint,13,opt,name=engine_backpressure_count,json=engineBackpressureCount,proto3" json:"engine_backpressure_count,omitempty"`
+	EngineImmutableMemtableFlushes uint64                   `protobuf:"varint,14,opt,name=engine_immutable_memtable_flushes,json=engineImmutableMemtableFlushes,proto3" json:"engine_immutable_memtable_flushes,omitempty"`
+	EngineMemtableBytes            uint64                   `protobuf:"varint,15,opt,name=engine_memtable_bytes,json=engineMemtableBytes,proto3" json:"engine_memtable_bytes,omitempty"`
+	EngineL0SstCount               uint64                   `protobuf:"varint,16,opt,name=engine_l0_sst_count,json=engineL0SstCount,proto3" json:"engine_l0_sst_count,omitempty"`
+	EngineSstCount                 uint64                   `protobuf:"varint,17,opt,name=engine_sst_count,json=engineSstCount,proto3" json:"engine_sst_count,omitempty"`
+	EngineSortedRunCount           uint64                   `protobuf:"varint,18,opt,name=engine_sorted_run_count,json=engineSortedRunCount,proto3" json:"engine_sorted_run_count,omitempty"`
+	EngineL0FlushBytes             uint64                   `protobuf:"varint,19,opt,name=engine_l0_flush_bytes,json=engineL0FlushBytes,proto3" json:"engine_l0_flush_bytes,omitempty"`
+	EngineCompactedBytes           uint64                   `protobuf:"varint,20,opt,name=engine_compacted_bytes,json=engineCompactedBytes,proto3" json:"engine_compacted_bytes,omitempty"`
+	EngineCompactedSsts            uint64                   `protobuf:"varint,21,opt,name=engine_compacted_ssts,json=engineCompactedSsts,proto3" json:"engine_compacted_ssts,omitempty"`
+	EngineRunningCompactions       uint64                   `protobuf:"varint,22,opt,name=engine_running_compactions,json=engineRunningCompactions,proto3" json:"engine_running_compactions,omitempty"`
+	EngineL0StallsSstCount         uint64                   `protobuf:"varint,23,opt,name=engine_l0_stalls_sst_count,json=engineL0StallsSstCount,proto3" json:"engine_l0_stalls_sst_count,omitempty"`
+	EngineL0StallsSstsPerKey       uint64                   `protobuf:"varint,24,opt,name=engine_l0_stalls_ssts_per_key,json=engineL0StallsSstsPerKey,proto3" json:"engine_l0_stalls_ssts_per_key,omitempty"`
+	EngineMemtableWriteBytes       uint64                   `protobuf:"varint,25,opt,name=engine_memtable_write_bytes,json=engineMemtableWriteBytes,proto3" json:"engine_memtable_write_bytes,omitempty"`
+	EngineWalFlushBytes            uint64                   `protobuf:"varint,26,opt,name=engine_wal_flush_bytes,json=engineWalFlushBytes,proto3" json:"engine_wal_flush_bytes,omitempty"`
+	AdmissionLockHold              *TimingSnapshot          `protobuf:"bytes,27,opt,name=admission_lock_hold,json=admissionLockHold,proto3" json:"admission_lock_hold,omitempty"`
+	EngineBackpressure             *TimingSnapshot          `protobuf:"bytes,28,opt,name=engine_backpressure,json=engineBackpressure,proto3" json:"engine_backpressure,omitempty"`
+	EngineBatchWriteQueueDepth     uint64                   `protobuf:"varint,29,opt,name=engine_batch_write_queue_depth,json=engineBatchWriteQueueDepth,proto3" json:"engine_batch_write_queue_depth,omitempty"`
+	EngineBatchWriteQueue          *TimingSnapshot          `protobuf:"bytes,30,opt,name=engine_batch_write_queue,json=engineBatchWriteQueue,proto3" json:"engine_batch_write_queue,omitempty"`
+	EngineBatchWriteService        *TimingSnapshot          `protobuf:"bytes,31,opt,name=engine_batch_write_service,json=engineBatchWriteService,proto3" json:"engine_batch_write_service,omitempty"`
+	ObjectStoreMain                *ObjectStoreRoleSnapshot `protobuf:"bytes,32,opt,name=object_store_main,json=objectStoreMain,proto3" json:"object_store_main,omitempty"`
+	ObjectStoreWal                 *ObjectStoreRoleSnapshot `protobuf:"bytes,33,opt,name=object_store_wal,json=objectStoreWal,proto3" json:"object_store_wal,omitempty"`
+	ObjectStoreCoordination        *ObjectStoreRoleSnapshot `protobuf:"bytes,34,opt,name=object_store_coordination,json=objectStoreCoordination,proto3" json:"object_store_coordination,omitempty"`
+	unknownFields                  protoimpl.UnknownFields
+	sizeCache                      protoimpl.SizeCache
+}
+
+func (x *AttributionSnapshot) Reset() {
+	*x = AttributionSnapshot{}
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttributionSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttributionSnapshot) ProtoMessage() {}
+
+func (x *AttributionSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttributionSnapshot.ProtoReflect.Descriptor instead.
+func (*AttributionSnapshot) Descriptor() ([]byte, []int) {
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *AttributionSnapshot) GetAdmissionWait() *TimingSnapshot {
+	if x != nil {
+		return x.AdmissionWait
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetFenceCheck() *TimingSnapshot {
+	if x != nil {
+		return x.FenceCheck
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetWriteBatchRequest() *TimingSnapshot {
+	if x != nil {
+		return x.WriteBatchRequest
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetBeginRequest() *TimingSnapshot {
+	if x != nil {
+		return x.BeginRequest
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetCommitRequest() *TimingSnapshot {
+	if x != nil {
+		return x.CommitRequest
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetRollbackRequest() *TimingSnapshot {
+	if x != nil {
+		return x.RollbackRequest
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetTransactionBegin() *TimingSnapshot {
+	if x != nil {
+		return x.TransactionBegin
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetEngineSubmit() *TimingSnapshot {
+	if x != nil {
+		return x.EngineSubmit
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetDurableWait() *TimingSnapshot {
+	if x != nil {
+		return x.DurableWait
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetFinalization() *TimingSnapshot {
+	if x != nil {
+		return x.Finalization
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetEngineWriteBatches() uint64 {
+	if x != nil {
+		return x.EngineWriteBatches
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineWriteOps() uint64 {
+	if x != nil {
+		return x.EngineWriteOps
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineBackpressureCount() uint64 {
+	if x != nil {
+		return x.EngineBackpressureCount
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineImmutableMemtableFlushes() uint64 {
+	if x != nil {
+		return x.EngineImmutableMemtableFlushes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMemtableBytes() uint64 {
+	if x != nil {
+		return x.EngineMemtableBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineL0SstCount() uint64 {
+	if x != nil {
+		return x.EngineL0SstCount
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineSstCount() uint64 {
+	if x != nil {
+		return x.EngineSstCount
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineSortedRunCount() uint64 {
+	if x != nil {
+		return x.EngineSortedRunCount
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineL0FlushBytes() uint64 {
+	if x != nil {
+		return x.EngineL0FlushBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineCompactedBytes() uint64 {
+	if x != nil {
+		return x.EngineCompactedBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineCompactedSsts() uint64 {
+	if x != nil {
+		return x.EngineCompactedSsts
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineRunningCompactions() uint64 {
+	if x != nil {
+		return x.EngineRunningCompactions
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineL0StallsSstCount() uint64 {
+	if x != nil {
+		return x.EngineL0StallsSstCount
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineL0StallsSstsPerKey() uint64 {
+	if x != nil {
+		return x.EngineL0StallsSstsPerKey
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMemtableWriteBytes() uint64 {
+	if x != nil {
+		return x.EngineMemtableWriteBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineWalFlushBytes() uint64 {
+	if x != nil {
+		return x.EngineWalFlushBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetAdmissionLockHold() *TimingSnapshot {
+	if x != nil {
+		return x.AdmissionLockHold
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetEngineBackpressure() *TimingSnapshot {
+	if x != nil {
+		return x.EngineBackpressure
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetEngineBatchWriteQueueDepth() uint64 {
+	if x != nil {
+		return x.EngineBatchWriteQueueDepth
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineBatchWriteQueue() *TimingSnapshot {
+	if x != nil {
+		return x.EngineBatchWriteQueue
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetEngineBatchWriteService() *TimingSnapshot {
+	if x != nil {
+		return x.EngineBatchWriteService
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetObjectStoreMain() *ObjectStoreRoleSnapshot {
+	if x != nil {
+		return x.ObjectStoreMain
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetObjectStoreWal() *ObjectStoreRoleSnapshot {
+	if x != nil {
+		return x.ObjectStoreWal
+	}
+	return nil
+}
+
+func (x *AttributionSnapshot) GetObjectStoreCoordination() *ObjectStoreRoleSnapshot {
+	if x != nil {
+		return x.ObjectStoreCoordination
+	}
+	return nil
+}
+
 type DemoteWriterRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RepositoryId  string                 `protobuf:"bytes,1,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
@@ -2455,7 +3159,7 @@ type DemoteWriterRequest struct {
 
 func (x *DemoteWriterRequest) Reset() {
 	*x = DemoteWriterRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[28]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2467,7 +3171,7 @@ func (x *DemoteWriterRequest) String() string {
 func (*DemoteWriterRequest) ProtoMessage() {}
 
 func (x *DemoteWriterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[28]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2480,7 +3184,7 @@ func (x *DemoteWriterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DemoteWriterRequest.ProtoReflect.Descriptor instead.
 func (*DemoteWriterRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{28}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *DemoteWriterRequest) GetRepositoryId() string {
@@ -2531,7 +3235,7 @@ type PromoteWriterRequest struct {
 
 func (x *PromoteWriterRequest) Reset() {
 	*x = PromoteWriterRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[29]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2543,7 +3247,7 @@ func (x *PromoteWriterRequest) String() string {
 func (*PromoteWriterRequest) ProtoMessage() {}
 
 func (x *PromoteWriterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[29]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2556,7 +3260,7 @@ func (x *PromoteWriterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromoteWriterRequest.ProtoReflect.Descriptor instead.
 func (*PromoteWriterRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{29}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PromoteWriterRequest) GetRepositoryId() string {
@@ -2604,7 +3308,7 @@ type GenerationStatusRequest struct {
 
 func (x *GenerationStatusRequest) Reset() {
 	*x = GenerationStatusRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[30]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2616,7 +3320,7 @@ func (x *GenerationStatusRequest) String() string {
 func (*GenerationStatusRequest) ProtoMessage() {}
 
 func (x *GenerationStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[30]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2629,7 +3333,7 @@ func (x *GenerationStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerationStatusRequest.ProtoReflect.Descriptor instead.
 func (*GenerationStatusRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{30}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GenerationStatusRequest) GetRepositoryId() string {
@@ -2666,7 +3370,7 @@ type GenerationStatusResponse struct {
 
 func (x *GenerationStatusResponse) Reset() {
 	*x = GenerationStatusResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[31]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2678,7 +3382,7 @@ func (x *GenerationStatusResponse) String() string {
 func (*GenerationStatusResponse) ProtoMessage() {}
 
 func (x *GenerationStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[31]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2691,7 +3395,7 @@ func (x *GenerationStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerationStatusResponse.ProtoReflect.Descriptor instead.
 func (*GenerationStatusResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{31}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GenerationStatusResponse) GetRepositoryId() string {
@@ -2794,7 +3498,7 @@ type ActivateGenerationRequest struct {
 
 func (x *ActivateGenerationRequest) Reset() {
 	*x = ActivateGenerationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[32]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2806,7 +3510,7 @@ func (x *ActivateGenerationRequest) String() string {
 func (*ActivateGenerationRequest) ProtoMessage() {}
 
 func (x *ActivateGenerationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[32]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2819,7 +3523,7 @@ func (x *ActivateGenerationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivateGenerationRequest.ProtoReflect.Descriptor instead.
 func (*ActivateGenerationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{32}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ActivateGenerationRequest) GetRepositoryId() string {
@@ -2891,7 +3595,7 @@ type QuarantineGenerationRequest struct {
 
 func (x *QuarantineGenerationRequest) Reset() {
 	*x = QuarantineGenerationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[33]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2903,7 +3607,7 @@ func (x *QuarantineGenerationRequest) String() string {
 func (*QuarantineGenerationRequest) ProtoMessage() {}
 
 func (x *QuarantineGenerationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[33]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2916,7 +3620,7 @@ func (x *QuarantineGenerationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuarantineGenerationRequest.ProtoReflect.Descriptor instead.
 func (*QuarantineGenerationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{33}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *QuarantineGenerationRequest) GetRepositoryId() string {
@@ -2967,7 +3671,7 @@ type VerifyGenerationRequest struct {
 
 func (x *VerifyGenerationRequest) Reset() {
 	*x = VerifyGenerationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[34]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2979,7 +3683,7 @@ func (x *VerifyGenerationRequest) String() string {
 func (*VerifyGenerationRequest) ProtoMessage() {}
 
 func (x *VerifyGenerationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[34]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2992,7 +3696,7 @@ func (x *VerifyGenerationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyGenerationRequest.ProtoReflect.Descriptor instead.
 func (*VerifyGenerationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{34}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *VerifyGenerationRequest) GetRepositoryId() string {
@@ -3044,7 +3748,7 @@ type RollbackGenerationRequest struct {
 
 func (x *RollbackGenerationRequest) Reset() {
 	*x = RollbackGenerationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[35]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3056,7 +3760,7 @@ func (x *RollbackGenerationRequest) String() string {
 func (*RollbackGenerationRequest) ProtoMessage() {}
 
 func (x *RollbackGenerationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[35]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3069,7 +3773,7 @@ func (x *RollbackGenerationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackGenerationRequest.ProtoReflect.Descriptor instead.
 func (*RollbackGenerationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{35}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *RollbackGenerationRequest) GetRepositoryId() string {
@@ -3128,7 +3832,7 @@ type RetireGenerationRequest struct {
 
 func (x *RetireGenerationRequest) Reset() {
 	*x = RetireGenerationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[36]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3140,7 +3844,7 @@ func (x *RetireGenerationRequest) String() string {
 func (*RetireGenerationRequest) ProtoMessage() {}
 
 func (x *RetireGenerationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[36]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3153,7 +3857,7 @@ func (x *RetireGenerationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetireGenerationRequest.ProtoReflect.Descriptor instead.
 func (*RetireGenerationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{36}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *RetireGenerationRequest) GetRepositoryId() string {
@@ -3208,7 +3912,7 @@ type MasterKeyRequest struct {
 
 func (x *MasterKeyRequest) Reset() {
 	*x = MasterKeyRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[37]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3220,7 +3924,7 @@ func (x *MasterKeyRequest) String() string {
 func (*MasterKeyRequest) ProtoMessage() {}
 
 func (x *MasterKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[37]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3233,7 +3937,7 @@ func (x *MasterKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MasterKeyRequest.ProtoReflect.Descriptor instead.
 func (*MasterKeyRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{37}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *MasterKeyRequest) GetRepositoryId() string {
@@ -3260,7 +3964,7 @@ type MasterKeyResponse struct {
 
 func (x *MasterKeyResponse) Reset() {
 	*x = MasterKeyResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[38]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3272,7 +3976,7 @@ func (x *MasterKeyResponse) String() string {
 func (*MasterKeyResponse) ProtoMessage() {}
 
 func (x *MasterKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[38]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3285,7 +3989,7 @@ func (x *MasterKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MasterKeyResponse.ProtoReflect.Descriptor instead.
 func (*MasterKeyResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{38}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *MasterKeyResponse) GetFound() bool {
@@ -3313,7 +4017,7 @@ type StoreMasterKeyRequest struct {
 
 func (x *StoreMasterKeyRequest) Reset() {
 	*x = StoreMasterKeyRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[39]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3325,7 +4029,7 @@ func (x *StoreMasterKeyRequest) String() string {
 func (*StoreMasterKeyRequest) ProtoMessage() {}
 
 func (x *StoreMasterKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[39]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3338,7 +4042,7 @@ func (x *StoreMasterKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreMasterKeyRequest.ProtoReflect.Descriptor instead.
 func (*StoreMasterKeyRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{39}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *StoreMasterKeyRequest) GetRepositoryId() string {
@@ -3372,7 +4076,7 @@ type KeyStatusRequest struct {
 
 func (x *KeyStatusRequest) Reset() {
 	*x = KeyStatusRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[40]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3384,7 +4088,7 @@ func (x *KeyStatusRequest) String() string {
 func (*KeyStatusRequest) ProtoMessage() {}
 
 func (x *KeyStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[40]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3397,7 +4101,7 @@ func (x *KeyStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyStatusRequest.ProtoReflect.Descriptor instead.
 func (*KeyStatusRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{40}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *KeyStatusRequest) GetRepositoryId() string {
@@ -3428,7 +4132,7 @@ type KeySlotInfo struct {
 
 func (x *KeySlotInfo) Reset() {
 	*x = KeySlotInfo{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[41]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3440,7 +4144,7 @@ func (x *KeySlotInfo) String() string {
 func (*KeySlotInfo) ProtoMessage() {}
 
 func (x *KeySlotInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[41]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3453,7 +4157,7 @@ func (x *KeySlotInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeySlotInfo.ProtoReflect.Descriptor instead.
 func (*KeySlotInfo) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{41}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *KeySlotInfo) GetId() string {
@@ -3511,7 +4215,7 @@ type KeyStatusResponse struct {
 
 func (x *KeyStatusResponse) Reset() {
 	*x = KeyStatusResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[42]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3523,7 +4227,7 @@ func (x *KeyStatusResponse) String() string {
 func (*KeyStatusResponse) ProtoMessage() {}
 
 func (x *KeyStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[42]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3536,7 +4240,7 @@ func (x *KeyStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyStatusResponse.ProtoReflect.Descriptor instead.
 func (*KeyStatusResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{42}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *KeyStatusResponse) GetEnvelopeGeneration() uint64 {
@@ -3588,7 +4292,7 @@ type AddLocalKeySlotRequest struct {
 
 func (x *AddLocalKeySlotRequest) Reset() {
 	*x = AddLocalKeySlotRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[43]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3600,7 +4304,7 @@ func (x *AddLocalKeySlotRequest) String() string {
 func (*AddLocalKeySlotRequest) ProtoMessage() {}
 
 func (x *AddLocalKeySlotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[43]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3613,7 +4317,7 @@ func (x *AddLocalKeySlotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddLocalKeySlotRequest.ProtoReflect.Descriptor instead.
 func (*AddLocalKeySlotRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{43}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *AddLocalKeySlotRequest) GetRepositoryId() string {
@@ -3673,7 +4377,7 @@ type AddCloudKeySlotRequest struct {
 
 func (x *AddCloudKeySlotRequest) Reset() {
 	*x = AddCloudKeySlotRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[44]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3685,7 +4389,7 @@ func (x *AddCloudKeySlotRequest) String() string {
 func (*AddCloudKeySlotRequest) ProtoMessage() {}
 
 func (x *AddCloudKeySlotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[44]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3698,7 +4402,7 @@ func (x *AddCloudKeySlotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddCloudKeySlotRequest.ProtoReflect.Descriptor instead.
 func (*AddCloudKeySlotRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{44}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *AddCloudKeySlotRequest) GetRepositoryId() string {
@@ -3761,7 +4465,7 @@ type RemoveKeySlotRequest struct {
 
 func (x *RemoveKeySlotRequest) Reset() {
 	*x = RemoveKeySlotRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[45]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3773,7 +4477,7 @@ func (x *RemoveKeySlotRequest) String() string {
 func (*RemoveKeySlotRequest) ProtoMessage() {}
 
 func (x *RemoveKeySlotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[45]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3786,7 +4490,7 @@ func (x *RemoveKeySlotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveKeySlotRequest.ProtoReflect.Descriptor instead.
 func (*RemoveKeySlotRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{45}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *RemoveKeySlotRequest) GetRepositoryId() string {
@@ -3822,7 +4526,7 @@ type RotateLocalKeySlotRequest struct {
 
 func (x *RotateLocalKeySlotRequest) Reset() {
 	*x = RotateLocalKeySlotRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[46]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3834,7 +4538,7 @@ func (x *RotateLocalKeySlotRequest) String() string {
 func (*RotateLocalKeySlotRequest) ProtoMessage() {}
 
 func (x *RotateLocalKeySlotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[46]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3847,7 +4551,7 @@ func (x *RotateLocalKeySlotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RotateLocalKeySlotRequest.ProtoReflect.Descriptor instead.
 func (*RotateLocalKeySlotRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{46}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *RotateLocalKeySlotRequest) GetRepositoryId() string {
@@ -3888,7 +4592,7 @@ type RotateDekRequest struct {
 
 func (x *RotateDekRequest) Reset() {
 	*x = RotateDekRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[47]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3900,7 +4604,7 @@ func (x *RotateDekRequest) String() string {
 func (*RotateDekRequest) ProtoMessage() {}
 
 func (x *RotateDekRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[47]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3913,7 +4617,7 @@ func (x *RotateDekRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RotateDekRequest.ProtoReflect.Descriptor instead.
 func (*RotateDekRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{47}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *RotateDekRequest) GetRepositoryId() string {
@@ -3941,7 +4645,7 @@ type RewriteDekRequest struct {
 
 func (x *RewriteDekRequest) Reset() {
 	*x = RewriteDekRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[48]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3953,7 +4657,7 @@ func (x *RewriteDekRequest) String() string {
 func (*RewriteDekRequest) ProtoMessage() {}
 
 func (x *RewriteDekRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[48]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3966,7 +4670,7 @@ func (x *RewriteDekRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RewriteDekRequest.ProtoReflect.Descriptor instead.
 func (*RewriteDekRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{48}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *RewriteDekRequest) GetRepositoryId() string {
@@ -4000,7 +4704,7 @@ type RewriteDekResponse struct {
 
 func (x *RewriteDekResponse) Reset() {
 	*x = RewriteDekResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[49]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4012,7 +4716,7 @@ func (x *RewriteDekResponse) String() string {
 func (*RewriteDekResponse) ProtoMessage() {}
 
 func (x *RewriteDekResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[49]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4025,7 +4729,7 @@ func (x *RewriteDekResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RewriteDekResponse.ProtoReflect.Descriptor instead.
 func (*RewriteDekResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{49}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *RewriteDekResponse) GetRewritten() uint64 {
@@ -4056,7 +4760,7 @@ type EscrowMasterKeyRequest struct {
 
 func (x *EscrowMasterKeyRequest) Reset() {
 	*x = EscrowMasterKeyRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[50]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4068,7 +4772,7 @@ func (x *EscrowMasterKeyRequest) String() string {
 func (*EscrowMasterKeyRequest) ProtoMessage() {}
 
 func (x *EscrowMasterKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[50]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4081,7 +4785,7 @@ func (x *EscrowMasterKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EscrowMasterKeyRequest.ProtoReflect.Descriptor instead.
 func (*EscrowMasterKeyRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{50}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *EscrowMasterKeyRequest) GetRepositoryId() string {
@@ -4135,7 +4839,7 @@ type EscrowMasterKeyResponse struct {
 
 func (x *EscrowMasterKeyResponse) Reset() {
 	*x = EscrowMasterKeyResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[51]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4147,7 +4851,7 @@ func (x *EscrowMasterKeyResponse) String() string {
 func (*EscrowMasterKeyResponse) ProtoMessage() {}
 
 func (x *EscrowMasterKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[51]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4160,7 +4864,7 @@ func (x *EscrowMasterKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EscrowMasterKeyResponse.ProtoReflect.Descriptor instead.
 func (*EscrowMasterKeyResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{51}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *EscrowMasterKeyResponse) GetRecord() []byte {
@@ -4180,7 +4884,7 @@ type ExportKeyEnvelopeResponse struct {
 
 func (x *ExportKeyEnvelopeResponse) Reset() {
 	*x = ExportKeyEnvelopeResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[52]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4192,7 +4896,7 @@ func (x *ExportKeyEnvelopeResponse) String() string {
 func (*ExportKeyEnvelopeResponse) ProtoMessage() {}
 
 func (x *ExportKeyEnvelopeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[52]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4205,7 +4909,7 @@ func (x *ExportKeyEnvelopeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportKeyEnvelopeResponse.ProtoReflect.Descriptor instead.
 func (*ExportKeyEnvelopeResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{52}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ExportKeyEnvelopeResponse) GetEnvelope() []byte {
@@ -4238,7 +4942,7 @@ type EncryptionAuditResponse struct {
 
 func (x *EncryptionAuditResponse) Reset() {
 	*x = EncryptionAuditResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[53]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4250,7 +4954,7 @@ func (x *EncryptionAuditResponse) String() string {
 func (*EncryptionAuditResponse) ProtoMessage() {}
 
 func (x *EncryptionAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[53]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4263,7 +4967,7 @@ func (x *EncryptionAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EncryptionAuditResponse.ProtoReflect.Descriptor instead.
 func (*EncryptionAuditResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{53}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *EncryptionAuditResponse) GetObjects() uint64 {
@@ -4334,7 +5038,7 @@ type RecoverEscrowRequest struct {
 
 func (x *RecoverEscrowRequest) Reset() {
 	*x = RecoverEscrowRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[54]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4346,7 +5050,7 @@ func (x *RecoverEscrowRequest) String() string {
 func (*RecoverEscrowRequest) ProtoMessage() {}
 
 func (x *RecoverEscrowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[54]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4359,7 +5063,7 @@ func (x *RecoverEscrowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverEscrowRequest.ProtoReflect.Descriptor instead.
 func (*RecoverEscrowRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{54}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *RecoverEscrowRequest) GetRepositoryId() string {
@@ -4401,7 +5105,7 @@ type OfflineCapsuleMember struct {
 
 func (x *OfflineCapsuleMember) Reset() {
 	*x = OfflineCapsuleMember{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[55]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4413,7 +5117,7 @@ func (x *OfflineCapsuleMember) String() string {
 func (*OfflineCapsuleMember) ProtoMessage() {}
 
 func (x *OfflineCapsuleMember) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[55]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4426,7 +5130,7 @@ func (x *OfflineCapsuleMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OfflineCapsuleMember.ProtoReflect.Descriptor instead.
 func (*OfflineCapsuleMember) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{55}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *OfflineCapsuleMember) GetMemberId() string {
@@ -4467,7 +5171,7 @@ type PrepareCapsuleMigrationRequest struct {
 
 func (x *PrepareCapsuleMigrationRequest) Reset() {
 	*x = PrepareCapsuleMigrationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[56]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4479,7 +5183,7 @@ func (x *PrepareCapsuleMigrationRequest) String() string {
 func (*PrepareCapsuleMigrationRequest) ProtoMessage() {}
 
 func (x *PrepareCapsuleMigrationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[56]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4492,7 +5196,7 @@ func (x *PrepareCapsuleMigrationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareCapsuleMigrationRequest.ProtoReflect.Descriptor instead.
 func (*PrepareCapsuleMigrationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{56}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *PrepareCapsuleMigrationRequest) GetRepositoryId() string {
@@ -4571,7 +5275,7 @@ type PrepareCapsuleMigrationResponse struct {
 
 func (x *PrepareCapsuleMigrationResponse) Reset() {
 	*x = PrepareCapsuleMigrationResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[57]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4583,7 +5287,7 @@ func (x *PrepareCapsuleMigrationResponse) String() string {
 func (*PrepareCapsuleMigrationResponse) ProtoMessage() {}
 
 func (x *PrepareCapsuleMigrationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[57]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4596,7 +5300,7 @@ func (x *PrepareCapsuleMigrationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareCapsuleMigrationResponse.ProtoReflect.Descriptor instead.
 func (*PrepareCapsuleMigrationResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{57}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *PrepareCapsuleMigrationResponse) GetGeneration() uint64 {
@@ -4646,7 +5350,7 @@ type FinalizeCapsuleMigrationRequest struct {
 
 func (x *FinalizeCapsuleMigrationRequest) Reset() {
 	*x = FinalizeCapsuleMigrationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[58]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4658,7 +5362,7 @@ func (x *FinalizeCapsuleMigrationRequest) String() string {
 func (*FinalizeCapsuleMigrationRequest) ProtoMessage() {}
 
 func (x *FinalizeCapsuleMigrationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[58]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4671,7 +5375,7 @@ func (x *FinalizeCapsuleMigrationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalizeCapsuleMigrationRequest.ProtoReflect.Descriptor instead.
 func (*FinalizeCapsuleMigrationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{58}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *FinalizeCapsuleMigrationRequest) GetRepositoryId() string {
@@ -4716,7 +5420,7 @@ type PublishCapsuleMutationRequest struct {
 
 func (x *PublishCapsuleMutationRequest) Reset() {
 	*x = PublishCapsuleMutationRequest{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[59]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4728,7 +5432,7 @@ func (x *PublishCapsuleMutationRequest) String() string {
 func (*PublishCapsuleMutationRequest) ProtoMessage() {}
 
 func (x *PublishCapsuleMutationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[59]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4741,7 +5445,7 @@ func (x *PublishCapsuleMutationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishCapsuleMutationRequest.ProtoReflect.Descriptor instead.
 func (*PublishCapsuleMutationRequest) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{59}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *PublishCapsuleMutationRequest) GetRepositoryId() string {
@@ -4798,7 +5502,7 @@ type PublishCapsuleMutationResponse struct {
 
 func (x *PublishCapsuleMutationResponse) Reset() {
 	*x = PublishCapsuleMutationResponse{}
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[60]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4810,7 +5514,7 @@ func (x *PublishCapsuleMutationResponse) String() string {
 func (*PublishCapsuleMutationResponse) ProtoMessage() {}
 
 func (x *PublishCapsuleMutationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[60]
+	mi := &file_vaulticdb_v1_daemon_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4823,7 +5527,7 @@ func (x *PublishCapsuleMutationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishCapsuleMutationResponse.ProtoReflect.Descriptor instead.
 func (*PublishCapsuleMutationResponse) Descriptor() ([]byte, []int) {
-	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{60}
+	return file_vaulticdb_v1_daemon_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *PublishCapsuleMutationResponse) GetGeneration() uint64 {
@@ -5057,7 +5761,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x05tiers\x18\x04 \x03(\v2!.vaulticdb.v1.ReadCacheTierPolicyR\x05tiers\"r\n" +
 	"\x13WriterStatusRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
-	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xfd\x03\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xc2\x04\n" +
 	"\x14WriterStatusResponse\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12,\n" +
@@ -5071,7 +5775,86 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x15last_durable_sequence\x18\t \x01(\x04R\x13lastDurableSequence\x121\n" +
 	"\x15idle_deadline_unix_ms\x18\n" +
 	" \x01(\x03R\x12idleDeadlineUnixMs\x12%\n" +
-	"\x0epromotion_safe\x18\v \x01(\bR\rpromotionSafe\"\xbf\x01\n" +
+	"\x0epromotion_safe\x18\v \x01(\bR\rpromotionSafe\x12C\n" +
+	"\vattribution\x18\f \x01(\v2!.vaulticdb.v1.AttributionSnapshotR\vattribution\"\xfa\x03\n" +
+	"\x0eTimingSnapshot\x12\x1a\n" +
+	"\battempts\x18\x01 \x01(\x04R\battempts\x12\x1a\n" +
+	"\bfailures\x18\x02 \x01(\x04R\bfailures\x12\x19\n" +
+	"\btotal_us\x18\x03 \x01(\x04R\atotalUs\x12\x15\n" +
+	"\x06max_us\x18\x04 \x01(\x04R\x05maxUs\x12\x1c\n" +
+	"\tcompleted\x18\x05 \x01(\x04R\tcompleted\x12\x1c\n" +
+	"\tsuccesses\x18\x06 \x01(\x04R\tsuccesses\x12$\n" +
+	"\rcancellations\x18\a \x01(\x04R\rcancellations\x12\x1a\n" +
+	"\btimeouts\x18\b \x01(\x04R\btimeouts\x12\x16\n" +
+	"\x06active\x18\t \x01(\x04R\x06active\x12(\n" +
+	"\x10oldest_active_us\x18\n" +
+	" \x01(\x04R\x0eoldestActiveUs\x125\n" +
+	"\x17latency_bucket_upper_us\x18\v \x03(\x04R\x14latencyBucketUpperUs\x122\n" +
+	"\x15latency_bucket_counts\x18\f \x03(\x04R\x13latencyBucketCounts\x121\n" +
+	"\x14contention_available\x18\r \x01(\bR\x13contentionAvailable\x12 \n" +
+	"\vcontentions\x18\x0e \x01(\x04R\vcontentions\"\xfa\x01\n" +
+	"\x17ObjectOperationSnapshot\x124\n" +
+	"\x06timing\x18\x01 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x06timing\x12+\n" +
+	"\x11transferred_bytes\x18\x02 \x01(\x04R\x10transferredBytes\x12>\n" +
+	"\x1btransferred_bytes_available\x18\x03 \x01(\bR\x19transferredBytesAvailable\x12<\n" +
+	"\x1atimeout_outcomes_available\x18\x04 \x01(\bR\x18timeoutOutcomesAvailable\"\xa4\t\n" +
+	"\x17ObjectStoreRoleSnapshot\x127\n" +
+	"\x03put\x18\x01 \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x03put\x12L\n" +
+	"\x0emultipart_init\x18\x02 \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\rmultipartInit\x12L\n" +
+	"\x0emultipart_part\x18\x03 \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\rmultipartPart\x12T\n" +
+	"\x12multipart_complete\x18\x04 \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x11multipartComplete\x12N\n" +
+	"\x0fmultipart_abort\x18\x05 \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x0emultipartAbort\x127\n" +
+	"\x03get\x18\x06 \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x03get\x129\n" +
+	"\x04head\x18\a \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x04head\x12@\n" +
+	"\bget_body\x18\b \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\agetBody\x12D\n" +
+	"\n" +
+	"get_ranges\x18\t \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\tgetRanges\x12=\n" +
+	"\x06delete\x18\n" +
+	" \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x06delete\x129\n" +
+	"\x04list\x18\v \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x04list\x12O\n" +
+	"\x10list_with_offset\x18\f \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x0elistWithOffset\x12U\n" +
+	"\x13list_with_delimiter\x18\r \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x11listWithDelimiter\x129\n" +
+	"\x04copy\x18\x0e \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x04copy\x12=\n" +
+	"\x06rename\x18\x0f \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x06rename\x122\n" +
+	"\x15retry_delay_available\x18\x10 \x01(\bR\x13retryDelayAvailable\x12B\n" +
+	"\x1dbackground_pressure_available\x18\x11 \x01(\bR\x1bbackgroundPressureAvailable\"\xd6\x11\n" +
+	"\x13AttributionSnapshot\x12C\n" +
+	"\x0eadmission_wait\x18\x01 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\radmissionWait\x12=\n" +
+	"\vfence_check\x18\x02 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\n" +
+	"fenceCheck\x12L\n" +
+	"\x13write_batch_request\x18\x03 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x11writeBatchRequest\x12A\n" +
+	"\rbegin_request\x18\x04 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\fbeginRequest\x12C\n" +
+	"\x0ecommit_request\x18\x05 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\rcommitRequest\x12G\n" +
+	"\x10rollback_request\x18\x06 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x0frollbackRequest\x12I\n" +
+	"\x11transaction_begin\x18\a \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x10transactionBegin\x12A\n" +
+	"\rengine_submit\x18\b \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\fengineSubmit\x12?\n" +
+	"\fdurable_wait\x18\t \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\vdurableWait\x12@\n" +
+	"\ffinalization\x18\n" +
+	" \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\ffinalization\x120\n" +
+	"\x14engine_write_batches\x18\v \x01(\x04R\x12engineWriteBatches\x12(\n" +
+	"\x10engine_write_ops\x18\f \x01(\x04R\x0eengineWriteOps\x12:\n" +
+	"\x19engine_backpressure_count\x18\r \x01(\x04R\x17engineBackpressureCount\x12I\n" +
+	"!engine_immutable_memtable_flushes\x18\x0e \x01(\x04R\x1eengineImmutableMemtableFlushes\x122\n" +
+	"\x15engine_memtable_bytes\x18\x0f \x01(\x04R\x13engineMemtableBytes\x12-\n" +
+	"\x13engine_l0_sst_count\x18\x10 \x01(\x04R\x10engineL0SstCount\x12(\n" +
+	"\x10engine_sst_count\x18\x11 \x01(\x04R\x0eengineSstCount\x125\n" +
+	"\x17engine_sorted_run_count\x18\x12 \x01(\x04R\x14engineSortedRunCount\x121\n" +
+	"\x15engine_l0_flush_bytes\x18\x13 \x01(\x04R\x12engineL0FlushBytes\x124\n" +
+	"\x16engine_compacted_bytes\x18\x14 \x01(\x04R\x14engineCompactedBytes\x122\n" +
+	"\x15engine_compacted_ssts\x18\x15 \x01(\x04R\x13engineCompactedSsts\x12<\n" +
+	"\x1aengine_running_compactions\x18\x16 \x01(\x04R\x18engineRunningCompactions\x12:\n" +
+	"\x1aengine_l0_stalls_sst_count\x18\x17 \x01(\x04R\x16engineL0StallsSstCount\x12?\n" +
+	"\x1dengine_l0_stalls_ssts_per_key\x18\x18 \x01(\x04R\x18engineL0StallsSstsPerKey\x12=\n" +
+	"\x1bengine_memtable_write_bytes\x18\x19 \x01(\x04R\x18engineMemtableWriteBytes\x123\n" +
+	"\x16engine_wal_flush_bytes\x18\x1a \x01(\x04R\x13engineWalFlushBytes\x12L\n" +
+	"\x13admission_lock_hold\x18\x1b \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x11admissionLockHold\x12M\n" +
+	"\x13engine_backpressure\x18\x1c \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x12engineBackpressure\x12B\n" +
+	"\x1eengine_batch_write_queue_depth\x18\x1d \x01(\x04R\x1aengineBatchWriteQueueDepth\x12U\n" +
+	"\x18engine_batch_write_queue\x18\x1e \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x15engineBatchWriteQueue\x12Y\n" +
+	"\x1aengine_batch_write_service\x18\x1f \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x17engineBatchWriteService\x12Q\n" +
+	"\x11object_store_main\x18  \x01(\v2%.vaulticdb.v1.ObjectStoreRoleSnapshotR\x0fobjectStoreMain\x12O\n" +
+	"\x10object_store_wal\x18! \x01(\v2%.vaulticdb.v1.ObjectStoreRoleSnapshotR\x0eobjectStoreWal\x12a\n" +
+	"\x19object_store_coordination\x18\" \x01(\v2%.vaulticdb.v1.ObjectStoreRoleSnapshotR\x17objectStoreCoordination\"\xbf\x01\n" +
 	"\x13DemoteWriterRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12\x14\n" +
@@ -5351,7 +6134,7 @@ func file_vaulticdb_v1_daemon_proto_rawDescGZIP() []byte {
 }
 
 var file_vaulticdb_v1_daemon_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_vaulticdb_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 61)
+var file_vaulticdb_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 65)
 var file_vaulticdb_v1_daemon_proto_goTypes = []any{
 	(ReadCacheConfidentiality)(0),           // 0: vaulticdb.v1.ReadCacheConfidentiality
 	(WriterRole)(0),                         // 1: vaulticdb.v1.WriterRole
@@ -5383,167 +6166,205 @@ var file_vaulticdb_v1_daemon_proto_goTypes = []any{
 	(*UpdateReadCachePolicyRequest)(nil),    // 27: vaulticdb.v1.UpdateReadCachePolicyRequest
 	(*WriterStatusRequest)(nil),             // 28: vaulticdb.v1.WriterStatusRequest
 	(*WriterStatusResponse)(nil),            // 29: vaulticdb.v1.WriterStatusResponse
-	(*DemoteWriterRequest)(nil),             // 30: vaulticdb.v1.DemoteWriterRequest
-	(*PromoteWriterRequest)(nil),            // 31: vaulticdb.v1.PromoteWriterRequest
-	(*GenerationStatusRequest)(nil),         // 32: vaulticdb.v1.GenerationStatusRequest
-	(*GenerationStatusResponse)(nil),        // 33: vaulticdb.v1.GenerationStatusResponse
-	(*ActivateGenerationRequest)(nil),       // 34: vaulticdb.v1.ActivateGenerationRequest
-	(*QuarantineGenerationRequest)(nil),     // 35: vaulticdb.v1.QuarantineGenerationRequest
-	(*VerifyGenerationRequest)(nil),         // 36: vaulticdb.v1.VerifyGenerationRequest
-	(*RollbackGenerationRequest)(nil),       // 37: vaulticdb.v1.RollbackGenerationRequest
-	(*RetireGenerationRequest)(nil),         // 38: vaulticdb.v1.RetireGenerationRequest
-	(*MasterKeyRequest)(nil),                // 39: vaulticdb.v1.MasterKeyRequest
-	(*MasterKeyResponse)(nil),               // 40: vaulticdb.v1.MasterKeyResponse
-	(*StoreMasterKeyRequest)(nil),           // 41: vaulticdb.v1.StoreMasterKeyRequest
-	(*KeyStatusRequest)(nil),                // 42: vaulticdb.v1.KeyStatusRequest
-	(*KeySlotInfo)(nil),                     // 43: vaulticdb.v1.KeySlotInfo
-	(*KeyStatusResponse)(nil),               // 44: vaulticdb.v1.KeyStatusResponse
-	(*AddLocalKeySlotRequest)(nil),          // 45: vaulticdb.v1.AddLocalKeySlotRequest
-	(*AddCloudKeySlotRequest)(nil),          // 46: vaulticdb.v1.AddCloudKeySlotRequest
-	(*RemoveKeySlotRequest)(nil),            // 47: vaulticdb.v1.RemoveKeySlotRequest
-	(*RotateLocalKeySlotRequest)(nil),       // 48: vaulticdb.v1.RotateLocalKeySlotRequest
-	(*RotateDekRequest)(nil),                // 49: vaulticdb.v1.RotateDekRequest
-	(*RewriteDekRequest)(nil),               // 50: vaulticdb.v1.RewriteDekRequest
-	(*RewriteDekResponse)(nil),              // 51: vaulticdb.v1.RewriteDekResponse
-	(*EscrowMasterKeyRequest)(nil),          // 52: vaulticdb.v1.EscrowMasterKeyRequest
-	(*EscrowMasterKeyResponse)(nil),         // 53: vaulticdb.v1.EscrowMasterKeyResponse
-	(*ExportKeyEnvelopeResponse)(nil),       // 54: vaulticdb.v1.ExportKeyEnvelopeResponse
-	(*EncryptionAuditResponse)(nil),         // 55: vaulticdb.v1.EncryptionAuditResponse
-	(*RecoverEscrowRequest)(nil),            // 56: vaulticdb.v1.RecoverEscrowRequest
-	(*OfflineCapsuleMember)(nil),            // 57: vaulticdb.v1.OfflineCapsuleMember
-	(*PrepareCapsuleMigrationRequest)(nil),  // 58: vaulticdb.v1.PrepareCapsuleMigrationRequest
-	(*PrepareCapsuleMigrationResponse)(nil), // 59: vaulticdb.v1.PrepareCapsuleMigrationResponse
-	(*FinalizeCapsuleMigrationRequest)(nil), // 60: vaulticdb.v1.FinalizeCapsuleMigrationRequest
-	(*PublishCapsuleMutationRequest)(nil),   // 61: vaulticdb.v1.PublishCapsuleMutationRequest
-	(*PublishCapsuleMutationResponse)(nil),  // 62: vaulticdb.v1.PublishCapsuleMutationResponse
+	(*TimingSnapshot)(nil),                  // 30: vaulticdb.v1.TimingSnapshot
+	(*ObjectOperationSnapshot)(nil),         // 31: vaulticdb.v1.ObjectOperationSnapshot
+	(*ObjectStoreRoleSnapshot)(nil),         // 32: vaulticdb.v1.ObjectStoreRoleSnapshot
+	(*AttributionSnapshot)(nil),             // 33: vaulticdb.v1.AttributionSnapshot
+	(*DemoteWriterRequest)(nil),             // 34: vaulticdb.v1.DemoteWriterRequest
+	(*PromoteWriterRequest)(nil),            // 35: vaulticdb.v1.PromoteWriterRequest
+	(*GenerationStatusRequest)(nil),         // 36: vaulticdb.v1.GenerationStatusRequest
+	(*GenerationStatusResponse)(nil),        // 37: vaulticdb.v1.GenerationStatusResponse
+	(*ActivateGenerationRequest)(nil),       // 38: vaulticdb.v1.ActivateGenerationRequest
+	(*QuarantineGenerationRequest)(nil),     // 39: vaulticdb.v1.QuarantineGenerationRequest
+	(*VerifyGenerationRequest)(nil),         // 40: vaulticdb.v1.VerifyGenerationRequest
+	(*RollbackGenerationRequest)(nil),       // 41: vaulticdb.v1.RollbackGenerationRequest
+	(*RetireGenerationRequest)(nil),         // 42: vaulticdb.v1.RetireGenerationRequest
+	(*MasterKeyRequest)(nil),                // 43: vaulticdb.v1.MasterKeyRequest
+	(*MasterKeyResponse)(nil),               // 44: vaulticdb.v1.MasterKeyResponse
+	(*StoreMasterKeyRequest)(nil),           // 45: vaulticdb.v1.StoreMasterKeyRequest
+	(*KeyStatusRequest)(nil),                // 46: vaulticdb.v1.KeyStatusRequest
+	(*KeySlotInfo)(nil),                     // 47: vaulticdb.v1.KeySlotInfo
+	(*KeyStatusResponse)(nil),               // 48: vaulticdb.v1.KeyStatusResponse
+	(*AddLocalKeySlotRequest)(nil),          // 49: vaulticdb.v1.AddLocalKeySlotRequest
+	(*AddCloudKeySlotRequest)(nil),          // 50: vaulticdb.v1.AddCloudKeySlotRequest
+	(*RemoveKeySlotRequest)(nil),            // 51: vaulticdb.v1.RemoveKeySlotRequest
+	(*RotateLocalKeySlotRequest)(nil),       // 52: vaulticdb.v1.RotateLocalKeySlotRequest
+	(*RotateDekRequest)(nil),                // 53: vaulticdb.v1.RotateDekRequest
+	(*RewriteDekRequest)(nil),               // 54: vaulticdb.v1.RewriteDekRequest
+	(*RewriteDekResponse)(nil),              // 55: vaulticdb.v1.RewriteDekResponse
+	(*EscrowMasterKeyRequest)(nil),          // 56: vaulticdb.v1.EscrowMasterKeyRequest
+	(*EscrowMasterKeyResponse)(nil),         // 57: vaulticdb.v1.EscrowMasterKeyResponse
+	(*ExportKeyEnvelopeResponse)(nil),       // 58: vaulticdb.v1.ExportKeyEnvelopeResponse
+	(*EncryptionAuditResponse)(nil),         // 59: vaulticdb.v1.EncryptionAuditResponse
+	(*RecoverEscrowRequest)(nil),            // 60: vaulticdb.v1.RecoverEscrowRequest
+	(*OfflineCapsuleMember)(nil),            // 61: vaulticdb.v1.OfflineCapsuleMember
+	(*PrepareCapsuleMigrationRequest)(nil),  // 62: vaulticdb.v1.PrepareCapsuleMigrationRequest
+	(*PrepareCapsuleMigrationResponse)(nil), // 63: vaulticdb.v1.PrepareCapsuleMigrationResponse
+	(*FinalizeCapsuleMigrationRequest)(nil), // 64: vaulticdb.v1.FinalizeCapsuleMigrationRequest
+	(*PublishCapsuleMutationRequest)(nil),   // 65: vaulticdb.v1.PublishCapsuleMutationRequest
+	(*PublishCapsuleMutationResponse)(nil),  // 66: vaulticdb.v1.PublishCapsuleMutationResponse
 }
 var file_vaulticdb_v1_daemon_proto_depIdxs = []int32{
-	2,  // 0: vaulticdb.v1.Empty.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 1: vaulticdb.v1.GetRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 2: vaulticdb.v1.MultiGetRequest.context:type_name -> vaulticdb.v1.RequestContext
-	8,  // 3: vaulticdb.v1.MultiGetResponse.results:type_name -> vaulticdb.v1.GetResponse
-	2,  // 4: vaulticdb.v1.WriteBatchRequest.context:type_name -> vaulticdb.v1.RequestContext
-	6,  // 5: vaulticdb.v1.WriteBatchRequest.puts:type_name -> vaulticdb.v1.KeyValue
-	2,  // 6: vaulticdb.v1.ScanRequest.context:type_name -> vaulticdb.v1.RequestContext
-	6,  // 7: vaulticdb.v1.ScanResponse.entries:type_name -> vaulticdb.v1.KeyValue
-	2,  // 8: vaulticdb.v1.TransactionRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 9: vaulticdb.v1.HealthRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 10: vaulticdb.v1.CapabilitiesRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 11: vaulticdb.v1.ReadCacheStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
-	24, // 12: vaulticdb.v1.ReadCacheTierStatus.policy:type_name -> vaulticdb.v1.ReadCacheTierPolicy
-	23, // 13: vaulticdb.v1.ReadCacheTierStatus.metrics:type_name -> vaulticdb.v1.ReadCacheMetrics
-	0,  // 14: vaulticdb.v1.ReadCacheTierStatus.confidentiality:type_name -> vaulticdb.v1.ReadCacheConfidentiality
-	23, // 15: vaulticdb.v1.ReadCacheStatusResponse.metrics:type_name -> vaulticdb.v1.ReadCacheMetrics
-	25, // 16: vaulticdb.v1.ReadCacheStatusResponse.tiers:type_name -> vaulticdb.v1.ReadCacheTierStatus
-	2,  // 17: vaulticdb.v1.UpdateReadCachePolicyRequest.context:type_name -> vaulticdb.v1.RequestContext
-	24, // 18: vaulticdb.v1.UpdateReadCachePolicyRequest.tiers:type_name -> vaulticdb.v1.ReadCacheTierPolicy
-	2,  // 19: vaulticdb.v1.WriterStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
-	1,  // 20: vaulticdb.v1.WriterStatusResponse.role:type_name -> vaulticdb.v1.WriterRole
-	2,  // 21: vaulticdb.v1.DemoteWriterRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 22: vaulticdb.v1.PromoteWriterRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 23: vaulticdb.v1.GenerationStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 24: vaulticdb.v1.ActivateGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 25: vaulticdb.v1.QuarantineGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 26: vaulticdb.v1.VerifyGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 27: vaulticdb.v1.RollbackGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 28: vaulticdb.v1.RetireGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 29: vaulticdb.v1.MasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 30: vaulticdb.v1.StoreMasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 31: vaulticdb.v1.KeyStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
-	43, // 32: vaulticdb.v1.KeyStatusResponse.slots:type_name -> vaulticdb.v1.KeySlotInfo
-	2,  // 33: vaulticdb.v1.AddLocalKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 34: vaulticdb.v1.AddCloudKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 35: vaulticdb.v1.RemoveKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 36: vaulticdb.v1.RotateLocalKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 37: vaulticdb.v1.RotateDekRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 38: vaulticdb.v1.RewriteDekRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 39: vaulticdb.v1.EscrowMasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 40: vaulticdb.v1.RecoverEscrowRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 41: vaulticdb.v1.PrepareCapsuleMigrationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	57, // 42: vaulticdb.v1.PrepareCapsuleMigrationRequest.members:type_name -> vaulticdb.v1.OfflineCapsuleMember
-	2,  // 43: vaulticdb.v1.FinalizeCapsuleMigrationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	2,  // 44: vaulticdb.v1.PublishCapsuleMutationRequest.context:type_name -> vaulticdb.v1.RequestContext
-	18, // 45: vaulticdb.v1.VaulticDB.Health:input_type -> vaulticdb.v1.HealthRequest
-	20, // 46: vaulticdb.v1.VaulticDB.Capabilities:input_type -> vaulticdb.v1.CapabilitiesRequest
-	22, // 47: vaulticdb.v1.VaulticDB.CacheStatus:input_type -> vaulticdb.v1.ReadCacheStatusRequest
-	27, // 48: vaulticdb.v1.VaulticDB.UpdateCachePolicy:input_type -> vaulticdb.v1.UpdateReadCachePolicyRequest
-	28, // 49: vaulticdb.v1.VaulticDB.WriterStatus:input_type -> vaulticdb.v1.WriterStatusRequest
-	30, // 50: vaulticdb.v1.VaulticDB.DemoteWriter:input_type -> vaulticdb.v1.DemoteWriterRequest
-	31, // 51: vaulticdb.v1.VaulticDB.PromoteWriter:input_type -> vaulticdb.v1.PromoteWriterRequest
-	32, // 52: vaulticdb.v1.VaulticDB.GenerationStatus:input_type -> vaulticdb.v1.GenerationStatusRequest
-	35, // 53: vaulticdb.v1.VaulticDB.QuarantineGeneration:input_type -> vaulticdb.v1.QuarantineGenerationRequest
-	34, // 54: vaulticdb.v1.VaulticDB.ActivateGeneration:input_type -> vaulticdb.v1.ActivateGenerationRequest
-	36, // 55: vaulticdb.v1.VaulticDB.VerifyGeneration:input_type -> vaulticdb.v1.VerifyGenerationRequest
-	37, // 56: vaulticdb.v1.VaulticDB.RollbackGeneration:input_type -> vaulticdb.v1.RollbackGenerationRequest
-	38, // 57: vaulticdb.v1.VaulticDB.RetireGeneration:input_type -> vaulticdb.v1.RetireGenerationRequest
-	3,  // 58: vaulticdb.v1.VaulticDB.Drain:input_type -> vaulticdb.v1.Empty
-	3,  // 59: vaulticdb.v1.VaulticDB.Shutdown:input_type -> vaulticdb.v1.Empty
-	7,  // 60: vaulticdb.v1.VaulticDB.Get:input_type -> vaulticdb.v1.GetRequest
-	9,  // 61: vaulticdb.v1.VaulticDB.MultiGet:input_type -> vaulticdb.v1.MultiGetRequest
-	13, // 62: vaulticdb.v1.VaulticDB.Scan:input_type -> vaulticdb.v1.ScanRequest
-	11, // 63: vaulticdb.v1.VaulticDB.WriteBatch:input_type -> vaulticdb.v1.WriteBatchRequest
-	3,  // 64: vaulticdb.v1.VaulticDB.Begin:input_type -> vaulticdb.v1.Empty
-	15, // 65: vaulticdb.v1.VaulticDB.Commit:input_type -> vaulticdb.v1.TransactionRequest
-	15, // 66: vaulticdb.v1.VaulticDB.Rollback:input_type -> vaulticdb.v1.TransactionRequest
-	39, // 67: vaulticdb.v1.VaulticDB.GetMasterKey:input_type -> vaulticdb.v1.MasterKeyRequest
-	41, // 68: vaulticdb.v1.VaulticDB.StoreMasterKey:input_type -> vaulticdb.v1.StoreMasterKeyRequest
-	42, // 69: vaulticdb.v1.VaulticDB.KeyStatus:input_type -> vaulticdb.v1.KeyStatusRequest
-	45, // 70: vaulticdb.v1.VaulticDB.AddLocalKeySlot:input_type -> vaulticdb.v1.AddLocalKeySlotRequest
-	46, // 71: vaulticdb.v1.VaulticDB.AddCloudKeySlot:input_type -> vaulticdb.v1.AddCloudKeySlotRequest
-	47, // 72: vaulticdb.v1.VaulticDB.RemoveKeySlot:input_type -> vaulticdb.v1.RemoveKeySlotRequest
-	48, // 73: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:input_type -> vaulticdb.v1.RotateLocalKeySlotRequest
-	49, // 74: vaulticdb.v1.VaulticDB.RotateDek:input_type -> vaulticdb.v1.RotateDekRequest
-	50, // 75: vaulticdb.v1.VaulticDB.RewriteDek:input_type -> vaulticdb.v1.RewriteDekRequest
-	52, // 76: vaulticdb.v1.VaulticDB.EscrowMasterKey:input_type -> vaulticdb.v1.EscrowMasterKeyRequest
-	56, // 77: vaulticdb.v1.VaulticDB.RecoverEscrow:input_type -> vaulticdb.v1.RecoverEscrowRequest
-	42, // 78: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:input_type -> vaulticdb.v1.KeyStatusRequest
-	42, // 79: vaulticdb.v1.VaulticDB.CheckEncryption:input_type -> vaulticdb.v1.KeyStatusRequest
-	58, // 80: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:input_type -> vaulticdb.v1.PrepareCapsuleMigrationRequest
-	60, // 81: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:input_type -> vaulticdb.v1.FinalizeCapsuleMigrationRequest
-	61, // 82: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:input_type -> vaulticdb.v1.PublishCapsuleMutationRequest
-	19, // 83: vaulticdb.v1.VaulticDB.Health:output_type -> vaulticdb.v1.HealthResponse
-	21, // 84: vaulticdb.v1.VaulticDB.Capabilities:output_type -> vaulticdb.v1.CapabilitiesResponse
-	26, // 85: vaulticdb.v1.VaulticDB.CacheStatus:output_type -> vaulticdb.v1.ReadCacheStatusResponse
-	26, // 86: vaulticdb.v1.VaulticDB.UpdateCachePolicy:output_type -> vaulticdb.v1.ReadCacheStatusResponse
-	29, // 87: vaulticdb.v1.VaulticDB.WriterStatus:output_type -> vaulticdb.v1.WriterStatusResponse
-	29, // 88: vaulticdb.v1.VaulticDB.DemoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
-	29, // 89: vaulticdb.v1.VaulticDB.PromoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
-	33, // 90: vaulticdb.v1.VaulticDB.GenerationStatus:output_type -> vaulticdb.v1.GenerationStatusResponse
-	33, // 91: vaulticdb.v1.VaulticDB.QuarantineGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	33, // 92: vaulticdb.v1.VaulticDB.ActivateGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	33, // 93: vaulticdb.v1.VaulticDB.VerifyGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	33, // 94: vaulticdb.v1.VaulticDB.RollbackGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	33, // 95: vaulticdb.v1.VaulticDB.RetireGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	3,  // 96: vaulticdb.v1.VaulticDB.Drain:output_type -> vaulticdb.v1.Empty
-	3,  // 97: vaulticdb.v1.VaulticDB.Shutdown:output_type -> vaulticdb.v1.Empty
-	8,  // 98: vaulticdb.v1.VaulticDB.Get:output_type -> vaulticdb.v1.GetResponse
-	10, // 99: vaulticdb.v1.VaulticDB.MultiGet:output_type -> vaulticdb.v1.MultiGetResponse
-	14, // 100: vaulticdb.v1.VaulticDB.Scan:output_type -> vaulticdb.v1.ScanResponse
-	12, // 101: vaulticdb.v1.VaulticDB.WriteBatch:output_type -> vaulticdb.v1.WriteBatchResponse
-	16, // 102: vaulticdb.v1.VaulticDB.Begin:output_type -> vaulticdb.v1.BeginResponse
-	17, // 103: vaulticdb.v1.VaulticDB.Commit:output_type -> vaulticdb.v1.CommitResponse
-	3,  // 104: vaulticdb.v1.VaulticDB.Rollback:output_type -> vaulticdb.v1.Empty
-	40, // 105: vaulticdb.v1.VaulticDB.GetMasterKey:output_type -> vaulticdb.v1.MasterKeyResponse
-	3,  // 106: vaulticdb.v1.VaulticDB.StoreMasterKey:output_type -> vaulticdb.v1.Empty
-	44, // 107: vaulticdb.v1.VaulticDB.KeyStatus:output_type -> vaulticdb.v1.KeyStatusResponse
-	44, // 108: vaulticdb.v1.VaulticDB.AddLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	44, // 109: vaulticdb.v1.VaulticDB.AddCloudKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	44, // 110: vaulticdb.v1.VaulticDB.RemoveKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	44, // 111: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	44, // 112: vaulticdb.v1.VaulticDB.RotateDek:output_type -> vaulticdb.v1.KeyStatusResponse
-	51, // 113: vaulticdb.v1.VaulticDB.RewriteDek:output_type -> vaulticdb.v1.RewriteDekResponse
-	53, // 114: vaulticdb.v1.VaulticDB.EscrowMasterKey:output_type -> vaulticdb.v1.EscrowMasterKeyResponse
-	40, // 115: vaulticdb.v1.VaulticDB.RecoverEscrow:output_type -> vaulticdb.v1.MasterKeyResponse
-	54, // 116: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:output_type -> vaulticdb.v1.ExportKeyEnvelopeResponse
-	55, // 117: vaulticdb.v1.VaulticDB.CheckEncryption:output_type -> vaulticdb.v1.EncryptionAuditResponse
-	59, // 118: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:output_type -> vaulticdb.v1.PrepareCapsuleMigrationResponse
-	3,  // 119: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:output_type -> vaulticdb.v1.Empty
-	62, // 120: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:output_type -> vaulticdb.v1.PublishCapsuleMutationResponse
-	83, // [83:121] is the sub-list for method output_type
-	45, // [45:83] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	2,   // 0: vaulticdb.v1.Empty.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 1: vaulticdb.v1.GetRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 2: vaulticdb.v1.MultiGetRequest.context:type_name -> vaulticdb.v1.RequestContext
+	8,   // 3: vaulticdb.v1.MultiGetResponse.results:type_name -> vaulticdb.v1.GetResponse
+	2,   // 4: vaulticdb.v1.WriteBatchRequest.context:type_name -> vaulticdb.v1.RequestContext
+	6,   // 5: vaulticdb.v1.WriteBatchRequest.puts:type_name -> vaulticdb.v1.KeyValue
+	2,   // 6: vaulticdb.v1.ScanRequest.context:type_name -> vaulticdb.v1.RequestContext
+	6,   // 7: vaulticdb.v1.ScanResponse.entries:type_name -> vaulticdb.v1.KeyValue
+	2,   // 8: vaulticdb.v1.TransactionRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 9: vaulticdb.v1.HealthRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 10: vaulticdb.v1.CapabilitiesRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 11: vaulticdb.v1.ReadCacheStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
+	24,  // 12: vaulticdb.v1.ReadCacheTierStatus.policy:type_name -> vaulticdb.v1.ReadCacheTierPolicy
+	23,  // 13: vaulticdb.v1.ReadCacheTierStatus.metrics:type_name -> vaulticdb.v1.ReadCacheMetrics
+	0,   // 14: vaulticdb.v1.ReadCacheTierStatus.confidentiality:type_name -> vaulticdb.v1.ReadCacheConfidentiality
+	23,  // 15: vaulticdb.v1.ReadCacheStatusResponse.metrics:type_name -> vaulticdb.v1.ReadCacheMetrics
+	25,  // 16: vaulticdb.v1.ReadCacheStatusResponse.tiers:type_name -> vaulticdb.v1.ReadCacheTierStatus
+	2,   // 17: vaulticdb.v1.UpdateReadCachePolicyRequest.context:type_name -> vaulticdb.v1.RequestContext
+	24,  // 18: vaulticdb.v1.UpdateReadCachePolicyRequest.tiers:type_name -> vaulticdb.v1.ReadCacheTierPolicy
+	2,   // 19: vaulticdb.v1.WriterStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
+	1,   // 20: vaulticdb.v1.WriterStatusResponse.role:type_name -> vaulticdb.v1.WriterRole
+	33,  // 21: vaulticdb.v1.WriterStatusResponse.attribution:type_name -> vaulticdb.v1.AttributionSnapshot
+	30,  // 22: vaulticdb.v1.ObjectOperationSnapshot.timing:type_name -> vaulticdb.v1.TimingSnapshot
+	31,  // 23: vaulticdb.v1.ObjectStoreRoleSnapshot.put:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 24: vaulticdb.v1.ObjectStoreRoleSnapshot.multipart_init:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 25: vaulticdb.v1.ObjectStoreRoleSnapshot.multipart_part:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 26: vaulticdb.v1.ObjectStoreRoleSnapshot.multipart_complete:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 27: vaulticdb.v1.ObjectStoreRoleSnapshot.multipart_abort:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 28: vaulticdb.v1.ObjectStoreRoleSnapshot.get:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 29: vaulticdb.v1.ObjectStoreRoleSnapshot.head:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 30: vaulticdb.v1.ObjectStoreRoleSnapshot.get_body:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 31: vaulticdb.v1.ObjectStoreRoleSnapshot.get_ranges:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 32: vaulticdb.v1.ObjectStoreRoleSnapshot.delete:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 33: vaulticdb.v1.ObjectStoreRoleSnapshot.list:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 34: vaulticdb.v1.ObjectStoreRoleSnapshot.list_with_offset:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 35: vaulticdb.v1.ObjectStoreRoleSnapshot.list_with_delimiter:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 36: vaulticdb.v1.ObjectStoreRoleSnapshot.copy:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	31,  // 37: vaulticdb.v1.ObjectStoreRoleSnapshot.rename:type_name -> vaulticdb.v1.ObjectOperationSnapshot
+	30,  // 38: vaulticdb.v1.AttributionSnapshot.admission_wait:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 39: vaulticdb.v1.AttributionSnapshot.fence_check:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 40: vaulticdb.v1.AttributionSnapshot.write_batch_request:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 41: vaulticdb.v1.AttributionSnapshot.begin_request:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 42: vaulticdb.v1.AttributionSnapshot.commit_request:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 43: vaulticdb.v1.AttributionSnapshot.rollback_request:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 44: vaulticdb.v1.AttributionSnapshot.transaction_begin:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 45: vaulticdb.v1.AttributionSnapshot.engine_submit:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 46: vaulticdb.v1.AttributionSnapshot.durable_wait:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 47: vaulticdb.v1.AttributionSnapshot.finalization:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 48: vaulticdb.v1.AttributionSnapshot.admission_lock_hold:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 49: vaulticdb.v1.AttributionSnapshot.engine_backpressure:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 50: vaulticdb.v1.AttributionSnapshot.engine_batch_write_queue:type_name -> vaulticdb.v1.TimingSnapshot
+	30,  // 51: vaulticdb.v1.AttributionSnapshot.engine_batch_write_service:type_name -> vaulticdb.v1.TimingSnapshot
+	32,  // 52: vaulticdb.v1.AttributionSnapshot.object_store_main:type_name -> vaulticdb.v1.ObjectStoreRoleSnapshot
+	32,  // 53: vaulticdb.v1.AttributionSnapshot.object_store_wal:type_name -> vaulticdb.v1.ObjectStoreRoleSnapshot
+	32,  // 54: vaulticdb.v1.AttributionSnapshot.object_store_coordination:type_name -> vaulticdb.v1.ObjectStoreRoleSnapshot
+	2,   // 55: vaulticdb.v1.DemoteWriterRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 56: vaulticdb.v1.PromoteWriterRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 57: vaulticdb.v1.GenerationStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 58: vaulticdb.v1.ActivateGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 59: vaulticdb.v1.QuarantineGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 60: vaulticdb.v1.VerifyGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 61: vaulticdb.v1.RollbackGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 62: vaulticdb.v1.RetireGenerationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 63: vaulticdb.v1.MasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 64: vaulticdb.v1.StoreMasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 65: vaulticdb.v1.KeyStatusRequest.context:type_name -> vaulticdb.v1.RequestContext
+	47,  // 66: vaulticdb.v1.KeyStatusResponse.slots:type_name -> vaulticdb.v1.KeySlotInfo
+	2,   // 67: vaulticdb.v1.AddLocalKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 68: vaulticdb.v1.AddCloudKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 69: vaulticdb.v1.RemoveKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 70: vaulticdb.v1.RotateLocalKeySlotRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 71: vaulticdb.v1.RotateDekRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 72: vaulticdb.v1.RewriteDekRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 73: vaulticdb.v1.EscrowMasterKeyRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 74: vaulticdb.v1.RecoverEscrowRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 75: vaulticdb.v1.PrepareCapsuleMigrationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	61,  // 76: vaulticdb.v1.PrepareCapsuleMigrationRequest.members:type_name -> vaulticdb.v1.OfflineCapsuleMember
+	2,   // 77: vaulticdb.v1.FinalizeCapsuleMigrationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	2,   // 78: vaulticdb.v1.PublishCapsuleMutationRequest.context:type_name -> vaulticdb.v1.RequestContext
+	18,  // 79: vaulticdb.v1.VaulticDB.Health:input_type -> vaulticdb.v1.HealthRequest
+	20,  // 80: vaulticdb.v1.VaulticDB.Capabilities:input_type -> vaulticdb.v1.CapabilitiesRequest
+	22,  // 81: vaulticdb.v1.VaulticDB.CacheStatus:input_type -> vaulticdb.v1.ReadCacheStatusRequest
+	27,  // 82: vaulticdb.v1.VaulticDB.UpdateCachePolicy:input_type -> vaulticdb.v1.UpdateReadCachePolicyRequest
+	28,  // 83: vaulticdb.v1.VaulticDB.WriterStatus:input_type -> vaulticdb.v1.WriterStatusRequest
+	34,  // 84: vaulticdb.v1.VaulticDB.DemoteWriter:input_type -> vaulticdb.v1.DemoteWriterRequest
+	35,  // 85: vaulticdb.v1.VaulticDB.PromoteWriter:input_type -> vaulticdb.v1.PromoteWriterRequest
+	36,  // 86: vaulticdb.v1.VaulticDB.GenerationStatus:input_type -> vaulticdb.v1.GenerationStatusRequest
+	39,  // 87: vaulticdb.v1.VaulticDB.QuarantineGeneration:input_type -> vaulticdb.v1.QuarantineGenerationRequest
+	38,  // 88: vaulticdb.v1.VaulticDB.ActivateGeneration:input_type -> vaulticdb.v1.ActivateGenerationRequest
+	40,  // 89: vaulticdb.v1.VaulticDB.VerifyGeneration:input_type -> vaulticdb.v1.VerifyGenerationRequest
+	41,  // 90: vaulticdb.v1.VaulticDB.RollbackGeneration:input_type -> vaulticdb.v1.RollbackGenerationRequest
+	42,  // 91: vaulticdb.v1.VaulticDB.RetireGeneration:input_type -> vaulticdb.v1.RetireGenerationRequest
+	3,   // 92: vaulticdb.v1.VaulticDB.Drain:input_type -> vaulticdb.v1.Empty
+	3,   // 93: vaulticdb.v1.VaulticDB.Shutdown:input_type -> vaulticdb.v1.Empty
+	7,   // 94: vaulticdb.v1.VaulticDB.Get:input_type -> vaulticdb.v1.GetRequest
+	9,   // 95: vaulticdb.v1.VaulticDB.MultiGet:input_type -> vaulticdb.v1.MultiGetRequest
+	13,  // 96: vaulticdb.v1.VaulticDB.Scan:input_type -> vaulticdb.v1.ScanRequest
+	11,  // 97: vaulticdb.v1.VaulticDB.WriteBatch:input_type -> vaulticdb.v1.WriteBatchRequest
+	3,   // 98: vaulticdb.v1.VaulticDB.Begin:input_type -> vaulticdb.v1.Empty
+	15,  // 99: vaulticdb.v1.VaulticDB.Commit:input_type -> vaulticdb.v1.TransactionRequest
+	15,  // 100: vaulticdb.v1.VaulticDB.Rollback:input_type -> vaulticdb.v1.TransactionRequest
+	43,  // 101: vaulticdb.v1.VaulticDB.GetMasterKey:input_type -> vaulticdb.v1.MasterKeyRequest
+	45,  // 102: vaulticdb.v1.VaulticDB.StoreMasterKey:input_type -> vaulticdb.v1.StoreMasterKeyRequest
+	46,  // 103: vaulticdb.v1.VaulticDB.KeyStatus:input_type -> vaulticdb.v1.KeyStatusRequest
+	49,  // 104: vaulticdb.v1.VaulticDB.AddLocalKeySlot:input_type -> vaulticdb.v1.AddLocalKeySlotRequest
+	50,  // 105: vaulticdb.v1.VaulticDB.AddCloudKeySlot:input_type -> vaulticdb.v1.AddCloudKeySlotRequest
+	51,  // 106: vaulticdb.v1.VaulticDB.RemoveKeySlot:input_type -> vaulticdb.v1.RemoveKeySlotRequest
+	52,  // 107: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:input_type -> vaulticdb.v1.RotateLocalKeySlotRequest
+	53,  // 108: vaulticdb.v1.VaulticDB.RotateDek:input_type -> vaulticdb.v1.RotateDekRequest
+	54,  // 109: vaulticdb.v1.VaulticDB.RewriteDek:input_type -> vaulticdb.v1.RewriteDekRequest
+	56,  // 110: vaulticdb.v1.VaulticDB.EscrowMasterKey:input_type -> vaulticdb.v1.EscrowMasterKeyRequest
+	60,  // 111: vaulticdb.v1.VaulticDB.RecoverEscrow:input_type -> vaulticdb.v1.RecoverEscrowRequest
+	46,  // 112: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:input_type -> vaulticdb.v1.KeyStatusRequest
+	46,  // 113: vaulticdb.v1.VaulticDB.CheckEncryption:input_type -> vaulticdb.v1.KeyStatusRequest
+	62,  // 114: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:input_type -> vaulticdb.v1.PrepareCapsuleMigrationRequest
+	64,  // 115: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:input_type -> vaulticdb.v1.FinalizeCapsuleMigrationRequest
+	65,  // 116: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:input_type -> vaulticdb.v1.PublishCapsuleMutationRequest
+	19,  // 117: vaulticdb.v1.VaulticDB.Health:output_type -> vaulticdb.v1.HealthResponse
+	21,  // 118: vaulticdb.v1.VaulticDB.Capabilities:output_type -> vaulticdb.v1.CapabilitiesResponse
+	26,  // 119: vaulticdb.v1.VaulticDB.CacheStatus:output_type -> vaulticdb.v1.ReadCacheStatusResponse
+	26,  // 120: vaulticdb.v1.VaulticDB.UpdateCachePolicy:output_type -> vaulticdb.v1.ReadCacheStatusResponse
+	29,  // 121: vaulticdb.v1.VaulticDB.WriterStatus:output_type -> vaulticdb.v1.WriterStatusResponse
+	29,  // 122: vaulticdb.v1.VaulticDB.DemoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
+	29,  // 123: vaulticdb.v1.VaulticDB.PromoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
+	37,  // 124: vaulticdb.v1.VaulticDB.GenerationStatus:output_type -> vaulticdb.v1.GenerationStatusResponse
+	37,  // 125: vaulticdb.v1.VaulticDB.QuarantineGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	37,  // 126: vaulticdb.v1.VaulticDB.ActivateGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	37,  // 127: vaulticdb.v1.VaulticDB.VerifyGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	37,  // 128: vaulticdb.v1.VaulticDB.RollbackGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	37,  // 129: vaulticdb.v1.VaulticDB.RetireGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	3,   // 130: vaulticdb.v1.VaulticDB.Drain:output_type -> vaulticdb.v1.Empty
+	3,   // 131: vaulticdb.v1.VaulticDB.Shutdown:output_type -> vaulticdb.v1.Empty
+	8,   // 132: vaulticdb.v1.VaulticDB.Get:output_type -> vaulticdb.v1.GetResponse
+	10,  // 133: vaulticdb.v1.VaulticDB.MultiGet:output_type -> vaulticdb.v1.MultiGetResponse
+	14,  // 134: vaulticdb.v1.VaulticDB.Scan:output_type -> vaulticdb.v1.ScanResponse
+	12,  // 135: vaulticdb.v1.VaulticDB.WriteBatch:output_type -> vaulticdb.v1.WriteBatchResponse
+	16,  // 136: vaulticdb.v1.VaulticDB.Begin:output_type -> vaulticdb.v1.BeginResponse
+	17,  // 137: vaulticdb.v1.VaulticDB.Commit:output_type -> vaulticdb.v1.CommitResponse
+	3,   // 138: vaulticdb.v1.VaulticDB.Rollback:output_type -> vaulticdb.v1.Empty
+	44,  // 139: vaulticdb.v1.VaulticDB.GetMasterKey:output_type -> vaulticdb.v1.MasterKeyResponse
+	3,   // 140: vaulticdb.v1.VaulticDB.StoreMasterKey:output_type -> vaulticdb.v1.Empty
+	48,  // 141: vaulticdb.v1.VaulticDB.KeyStatus:output_type -> vaulticdb.v1.KeyStatusResponse
+	48,  // 142: vaulticdb.v1.VaulticDB.AddLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	48,  // 143: vaulticdb.v1.VaulticDB.AddCloudKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	48,  // 144: vaulticdb.v1.VaulticDB.RemoveKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	48,  // 145: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	48,  // 146: vaulticdb.v1.VaulticDB.RotateDek:output_type -> vaulticdb.v1.KeyStatusResponse
+	55,  // 147: vaulticdb.v1.VaulticDB.RewriteDek:output_type -> vaulticdb.v1.RewriteDekResponse
+	57,  // 148: vaulticdb.v1.VaulticDB.EscrowMasterKey:output_type -> vaulticdb.v1.EscrowMasterKeyResponse
+	44,  // 149: vaulticdb.v1.VaulticDB.RecoverEscrow:output_type -> vaulticdb.v1.MasterKeyResponse
+	58,  // 150: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:output_type -> vaulticdb.v1.ExportKeyEnvelopeResponse
+	59,  // 151: vaulticdb.v1.VaulticDB.CheckEncryption:output_type -> vaulticdb.v1.EncryptionAuditResponse
+	63,  // 152: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:output_type -> vaulticdb.v1.PrepareCapsuleMigrationResponse
+	3,   // 153: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:output_type -> vaulticdb.v1.Empty
+	66,  // 154: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:output_type -> vaulticdb.v1.PublishCapsuleMutationResponse
+	117, // [117:155] is the sub-list for method output_type
+	79,  // [79:117] is the sub-list for method input_type
+	79,  // [79:79] is the sub-list for extension type_name
+	79,  // [79:79] is the sub-list for extension extendee
+	0,   // [0:79] is the sub-list for field type_name
 }
 
 func init() { file_vaulticdb_v1_daemon_proto_init() }
@@ -5559,7 +6380,7 @@ func file_vaulticdb_v1_daemon_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vaulticdb_v1_daemon_proto_rawDesc), len(file_vaulticdb_v1_daemon_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   61,
+			NumMessages:   65,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

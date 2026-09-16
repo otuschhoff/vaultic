@@ -298,6 +298,8 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	t.Setenv("VAULTICDB_WAL_S3_ENDPOINT", "must-come-from-options")
 	t.Setenv("VAULTICDB_SLATEDB_MULTIGET", "true")
 	t.Setenv("VAULTICDB_CRYPTO_THREADS", "12")
+	t.Setenv("VAULTICDB_TEST_ATTRIBUTION_DISABLED", "true")
+	t.Setenv("VAULTICDB_TEST_CAPABILITY", "vaulticdb-process-tests-v1")
 	t.Setenv("VAULTICDB_READ_CACHE_TIERS", "trusted-ram")
 	t.Setenv("VAULTICDB_READ_CACHE_TRUSTED_RAM_OBJECT_STORE", "memory")
 	t.Setenv("VAULTICDB_READ_CACHE_TRUSTED_RAM_ACKNOWLEDGE_PLAINTEXT", "true")
@@ -305,7 +307,9 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 
 	local := strings.Join(daemonEnvironment(Options{ObjectStore: "local"}), "\n")
 	if strings.Contains(local, "VAULTIC_UNRELATED_SECRET") || strings.Contains(local, "AWS_SECRET_ACCESS_KEY") ||
-		strings.Contains(local, "VAULTICDB_WAL_S3_SECRET_ACCESS_KEY") {
+		strings.Contains(local, "VAULTICDB_WAL_S3_SECRET_ACCESS_KEY") ||
+		strings.Contains(local, "VAULTICDB_TEST_ATTRIBUTION_DISABLED") ||
+		strings.Contains(local, "VAULTICDB_TEST_CAPABILITY") {
 		t.Fatalf("local daemon inherited a secret-bearing environment: %s", local)
 	}
 	if !strings.Contains(local, "PATH=/test/bin") || !strings.Contains(local, "VAULTICDB_SLATEDB_MULTIGET=true") ||

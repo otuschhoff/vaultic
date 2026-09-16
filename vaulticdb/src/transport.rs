@@ -65,6 +65,9 @@ async fn main() -> Result<()> {
         ))),
         writer_transition: Arc::new(Mutex::new(())),
         mutation_admission: Arc::new(RwLock::new(())),
+        attribution: Arc::new(crate::attribution::ServiceAttribution::new(
+            !storage_config.attribution_disabled,
+        )),
         last_writer_activity: Arc::new(Mutex::new(clock_started)),
         minimum_writer_tenure,
         writer_idle_grace,

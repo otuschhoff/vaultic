@@ -5,11 +5,111 @@ mod tests {
     use super::*;
     use std::{collections::HashMap, env};
     use slatedb::object_store::{path::Path, ObjectStoreExt};
+    use slatedb_common::metrics::{MetricsRecorder, LATENCY_BOUNDARIES};
     use vaulticdb::encryption::envelope::{
         EncryptionConfig, EncryptionMode, ProviderCredentials,
     };
 
     static STORAGE_FAILPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[derive(Debug, Default)]
+    struct ControlledObjectStore {
+        inner: InMemory,
+        delay_put: std::sync::atomic::AtomicBool,
+        fail_put: std::sync::atomic::AtomicBool,
+        fail_main_delete: Arc<std::sync::atomic::AtomicBool>,
+        put_started: tokio::sync::Notify,
+        put_release: tokio::sync::Notify,
+    }
+
+    impl std::fmt::Display for ControlledObjectStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("controlled object store")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for ControlledObjectStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> slatedb::object_store::Result<PutResult> {
+            if self.delay_put.load(Ordering::Acquire) {
+                self.put_started.notify_waiters();
+                self.put_release.notified().await;
+            }
+            if self.fail_put.swap(false, Ordering::AcqRel) {
+                return Err(slatedb::object_store::Error::Generic {
+                    store: "controlled",
+                    source: "injected put failure".into(),
+                });
+            }
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> slatedb::object_store::Result<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, slatedb::object_store::Result<Path>>,
+        ) -> BoxStream<'static, slatedb::object_store::Result<Path>> {
+            let fail_main_delete = Arc::clone(&self.fail_main_delete);
+            self.inner
+                .delete_stream(locations)
+                .map(move |result| match result {
+                    Ok(path)
+                        if path.as_ref() == "main-delete"
+                            && fail_main_delete.swap(false, Ordering::AcqRel) =>
+                    {
+                        Err(slatedb::object_store::Error::Generic {
+                            store: "controlled",
+                            source: "injected delete failure".into(),
+                        })
+                    }
+                    result => result,
+                })
+                .boxed()
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> slatedb::object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> slatedb::object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     #[test]
     fn slatedb_tuning_preserves_unset_defaults() {
@@ -82,9 +182,65 @@ mod tests {
             },
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
+            attribution_disabled: false,
             topology_source: TopologySource::External,
             topology_override_local: None,
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_attribution_preserves_operations_without_wrappers_or_metrics() {
+        let repository_id = format!("disabled-attribution-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.attribution_disabled = true;
+        let storage = Storage::open(&repository_id, &config).await.unwrap();
+
+        assert!(!storage.object_store.to_string().contains("role-aware"));
+        assert!(!storage.coordination_store.to_string().contains("role-aware"));
+        assert!(storage
+            .write_batch(&WriteBatchRequest {
+                puts: vec![KeyValue {
+                    key: b"key".to_vec(),
+                    value: b"value".to_vec(),
+                }],
+                await_durable: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap());
+        assert_eq!(storage.get(b"key", "").await.unwrap().value, b"value");
+
+        for snapshot in [
+            storage.attribution.transaction_begin.snapshot(),
+            storage.attribution.engine_submit.snapshot(),
+            storage.attribution.durable_wait.snapshot(),
+            storage.attribution.finalization.snapshot(),
+            storage.attribution.object_store_main.snapshot().put.timing,
+            storage.attribution.object_store_main.snapshot().get.timing,
+            storage
+                .attribution
+                .object_store_coordination
+                .snapshot()
+                .put
+                .timing,
+        ] {
+            assert_eq!(snapshot.attempts, 0);
+            assert_eq!(snapshot.completed, 0);
+            assert_eq!(snapshot.active, 0);
+        }
+        let engine = storage.engine_metrics_snapshot();
+        assert_eq!(engine.write_batches, 0);
+        assert_eq!(engine.write_ops, 0);
+        assert_eq!(engine.batch_write_queue.completed, 0);
+        assert_eq!(engine.batch_write_service.completed, 0);
+        assert!(!storage
+            .attribution
+            .object_store_main
+            .snapshot()
+            .put
+            .transferred_bytes_available);
+        storage.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -335,6 +491,152 @@ mod tests {
         assert!(compacted.len() >= 2, "each flush must publish a fresh compacted SST identity");
     }
 
+    #[tokio::test]
+    async fn engine_metrics_snapshot_reports_real_writes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let database = format!("engine-metrics-{}", rand::random::<u64>());
+        let engine_metrics = Arc::new(DefaultMetricsRecorder::new());
+        let db = open_writer_with_metrics(
+            &database,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+            engine_metrics.clone(),
+        )
+        .await
+        .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(b"key", b"value");
+        db.write(batch).await.unwrap().await_durable().await.unwrap();
+        db.close().await.unwrap();
+
+        let counter = |name, outcome| {
+            engine_metrics.register_counter(
+                name,
+                "",
+                &[(slatedb::db_stats::OUTCOME_LABEL, outcome)],
+            )
+        };
+        counter(
+            slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_SUCCESS,
+        )
+        .increment(2);
+        counter(
+            slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_FAILURE,
+        )
+        .increment(3);
+        counter(
+            slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_CANCELLATION,
+        )
+        .increment(4);
+        counter(
+            slatedb::db_stats::BACKPRESSURE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_TIMEOUT,
+        )
+        .increment(5);
+        engine_metrics
+            .register_up_down_counter(slatedb::db_stats::BACKPRESSURE_WAITERS, "", &[])
+            .increment(2);
+        let now_unix_ms: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+        engine_metrics
+            .register_gauge(
+                slatedb::db_stats::BACKPRESSURE_OLDEST_ACTIVE_STARTED_UNIX_MILLIS,
+                "",
+                &[],
+            )
+            .set(now_unix_ms.saturating_sub(5));
+        let backpressure_histogram = engine_metrics.register_histogram(
+            slatedb::db_stats::BACKPRESSURE_WAIT_SECONDS,
+            "",
+            &[],
+            LATENCY_BOUNDARIES,
+        );
+        backpressure_histogram.record(0.002);
+        backpressure_histogram.record(20.0);
+
+        counter(
+            slatedb::db_stats::BATCH_WRITE_QUEUE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_FAILURE,
+        )
+        .increment(2);
+        counter(
+            slatedb::db_stats::BATCH_WRITE_QUEUE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_CANCELLATION,
+        )
+        .increment(3);
+        counter(
+            slatedb::db_stats::BATCH_WRITE_SERVICE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_FAILURE,
+        )
+        .increment(4);
+        counter(
+            slatedb::db_stats::BATCH_WRITE_SERVICE_OUTCOME_COUNT,
+            slatedb::db_stats::OUTCOME_CANCELLATION,
+        )
+        .increment(5);
+        engine_metrics
+            .register_up_down_counter(slatedb::db_stats::BATCH_WRITE_SERVICE_ACTIVE, "", &[])
+            .increment(1);
+        engine_metrics
+            .register_gauge(
+                slatedb::db_stats::BATCH_WRITE_SERVICE_OLDEST_ACTIVE_STARTED_UNIX_MILLIS,
+                "",
+                &[],
+            )
+            .set(now_unix_ms.saturating_add(60_000));
+
+        let mut storage = transition_storage(
+            Database::Writer(db),
+            database,
+            object_store,
+            1,
+        );
+        storage.engine_metrics = Some(engine_metrics);
+        let engine = storage.engine_metrics_snapshot();
+        assert_eq!(engine.write_batches, 1);
+        assert_eq!(engine.write_ops, 1);
+        assert!(engine.memtable_write_bytes > 0);
+        assert_eq!(engine.backpressure.active, 2);
+        assert!((4_000..=20_000).contains(&engine.backpressure.oldest_active_us));
+        assert_eq!(engine.backpressure.completed, 2);
+        assert_eq!(engine.backpressure.successes, 2);
+        assert_eq!(engine.backpressure.failures, 3);
+        assert_eq!(engine.backpressure.cancellations, 4);
+        assert_eq!(engine.backpressure.timeouts, 5);
+        assert_eq!(engine.backpressure.total_us, 20_002_000);
+        assert_eq!(engine.backpressure.max_us, 20_000_000);
+        assert_eq!(engine.backpressure.latency_bucket_upper_us.len(), 13);
+        assert_eq!(engine.backpressure.latency_bucket_upper_us[0], 1_000);
+        assert_eq!(engine.backpressure.latency_bucket_upper_us[12], u64::MAX);
+        assert_eq!(engine.backpressure.latency_bucket_counts[1], 1);
+        assert_eq!(engine.backpressure.latency_bucket_counts[12], 1);
+        assert_eq!(engine.batch_write_queue_depth, 0);
+        assert_eq!(engine.batch_write_queue.successes, 1);
+        assert_eq!(engine.batch_write_queue.failures, 2);
+        assert_eq!(engine.batch_write_queue.cancellations, 3);
+        assert_eq!(engine.batch_write_queue.completed, 1);
+        assert_eq!(engine.batch_write_queue.latency_bucket_upper_us.len(), 13);
+        assert_eq!(engine.batch_write_queue.latency_bucket_counts.iter().sum::<u64>(), 1);
+        assert_eq!(engine.batch_write_service.successes, 1);
+        assert_eq!(engine.batch_write_service.failures, 4);
+        assert_eq!(engine.batch_write_service.cancellations, 5);
+        assert_eq!(engine.batch_write_service.active, 1);
+        assert_eq!(engine.batch_write_service.oldest_active_us, 0);
+        assert_eq!(engine.batch_write_service.completed, 1);
+        assert_eq!(engine.batch_write_service.latency_bucket_upper_us.len(), 13);
+        assert_eq!(engine.batch_write_service.latency_bucket_counts.iter().sum::<u64>(), 1);
+        assert_eq!(oldest_active_age_us(0, 100), 0);
+        assert_eq!(oldest_active_age_us(101, 100), 0);
+    }
+
     fn transition_storage(
         database: Database,
         path: String,
@@ -349,6 +651,8 @@ mod tests {
             cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
+            attribution: Arc::new(StorageAttribution::default()),
+            engine_metrics: Some(Arc::new(DefaultMetricsRecorder::new())),
             encryption: EncryptionStatus {
                 enabled: false,
                 algorithm: "none",
@@ -458,6 +762,8 @@ mod tests {
 
         assert!(failure.consumed);
         assert_eq!(storage.transactions.read().await.len(), 0);
+        assert_eq!(storage.attribution.engine_submit.snapshot().attempts, 1);
+        assert_eq!(storage.attribution.engine_submit.snapshot().failures, 1);
         let missing = storage.commit("unknown", "", false).await.unwrap_err();
         assert!(!missing.consumed);
         storage.close().await.unwrap();
@@ -495,11 +801,13 @@ mod tests {
         assert!(!rejected.consumed);
         assert_eq!(rejected.status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(storage.transactions.read().await.len(), 1);
+        assert_eq!(storage.attribution.durable_wait.snapshot().attempts, 0);
 
         storage.metadata_rebuild_reset = true;
         arm_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(path.clone()));
         assert!(storage.commit(&transaction_id, "", true).await.unwrap().consumed);
         assert_eq!(storage.last_durable_sequence.load(Ordering::Acquire), 0);
+        assert_eq!(storage.attribution.durable_wait.snapshot().attempts, 0);
 
         let durable_id = storage.begin().await.unwrap().transaction_id;
         storage
@@ -515,6 +823,10 @@ mod tests {
             .unwrap();
         let failure = storage.commit(&durable_id, "", false).await.unwrap_err();
         assert!(failure.consumed);
+        assert_eq!(storage.attribution.engine_submit.snapshot().attempts, 2);
+        assert_eq!(storage.attribution.engine_submit.snapshot().failures, 0);
+        assert_eq!(storage.attribution.durable_wait.snapshot().attempts, 1);
+        assert_eq!(storage.attribution.durable_wait.snapshot().failures, 1);
         storage.close().await.unwrap();
     }
 
@@ -540,6 +852,7 @@ mod tests {
             Err(WriterFenceFailure::Stale { observed_epoch: 2 })
         ));
         assert!(storage.close().await.is_err());
+        assert_eq!(storage.attribution.finalization.snapshot().failures, 1);
         release_writer_claim(object_store.as_ref(), 2).await.unwrap();
     }
 
@@ -592,6 +905,174 @@ mod tests {
         assert_eq!(status.retained_segments, 1);
         assert_eq!(status.outstanding_flushes, 0);
         assert_eq!(status.durability_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn object_store_metrics_keep_stalled_put_active_and_cancel_on_drop() {
+        let controlled = Arc::new(ControlledObjectStore::default());
+        controlled.delay_put.store(true, Ordering::Release);
+        let metrics = Arc::new(ObjectStoreRoleMetrics::default());
+        let store = role_aware_object_store(controlled.clone(), metrics.clone(), None);
+        let pending_store = store.clone();
+        let pending = tokio::spawn(async move {
+            pending_store
+                .put(&Path::from("stalled"), Bytes::from_static(b"payload").into())
+                .await
+        });
+        controlled.put_started.notified().await;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        let active = metrics.snapshot().put.timing;
+        assert_eq!(active.attempts, 1);
+        assert_eq!(active.active, 1);
+        assert!(active.oldest_active_us > 0);
+
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        let cancelled = metrics.snapshot().put.timing;
+        assert_eq!(cancelled.active, 0);
+        assert_eq!(cancelled.cancellations, 1);
+        assert_eq!(cancelled.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn object_store_metrics_settle_bytes_streams_and_fixed_roles() {
+        let controlled = Arc::new(ControlledObjectStore::default());
+        let main_metrics = Arc::new(ObjectStoreRoleMetrics::default());
+        let wal_metrics = Arc::new(ObjectStoreRoleMetrics::default());
+        let coordination_metrics = Arc::new(ObjectStoreRoleMetrics::default());
+        let main = role_aware_object_store(
+            controlled.clone(),
+            main_metrics.clone(),
+            Some(wal_metrics.clone()),
+        );
+        let coordination = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            coordination_metrics.clone(),
+            None,
+        );
+
+        main.put(&Path::from("main"), Bytes::from_static(b"main-data").into())
+            .await
+            .unwrap();
+        controlled.fail_put.store(true, Ordering::Release);
+        assert!(main
+            .put(&Path::from("failed"), Bytes::from_static(b"nope").into())
+            .await
+            .is_err());
+
+        let mut wal_options = PutOptions::default();
+        wal_options.extensions.insert(
+            slatedb::object_store_tag::ObjectStoreCallTag::new(
+                slatedb::object_store_tag::TableStoreKind::Main,
+                slatedb::object_store_tag::SstType::Wal,
+            ),
+        );
+        main.put_opts(
+            &Path::from("database/wal/0001.sst"),
+            Bytes::from_static(b"wal-data").into(),
+            wal_options,
+        )
+        .await
+        .unwrap();
+        main.list(Some(&Path::from("database/wal")))
+            .collect::<Vec<_>>()
+            .await;
+        main.delete(&Path::from("database/wal/0001.sst"))
+            .await
+            .unwrap();
+        controlled
+            .inner
+            .put(&Path::from("main-delete"), Bytes::from_static(b"main").into())
+            .await
+            .unwrap();
+        controlled
+            .inner
+            .put(
+                &Path::from("database/wal/mixed.sst"),
+                Bytes::from_static(b"wal").into(),
+            )
+            .await
+            .unwrap();
+        controlled.fail_main_delete.store(true, Ordering::Release);
+        let mixed_delete = main
+            .delete_stream(
+                futures_util::stream::iter([
+                    Ok(Path::from("main-delete")),
+                    Ok(Path::from("database/wal/mixed.sst")),
+                ])
+                .boxed(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(mixed_delete[0].is_err());
+        assert!(mixed_delete[1].is_ok());
+        let mut cancelled_delete = main.delete_stream(
+            futures_util::stream::once(async {
+                Ok(Path::from("database/wal/cancelled.sst"))
+            })
+            .chain(futures_util::stream::pending())
+            .boxed(),
+        );
+        assert!(futures_util::poll!(&mut cancelled_delete.next()).is_ready());
+        assert_eq!(wal_metrics.snapshot().delete.timing.active, 1);
+        assert!(futures_util::poll!(&mut cancelled_delete.next()).is_pending());
+        drop(cancelled_delete);
+
+        let body = main.get(&Path::from("main")).await.unwrap().bytes().await.unwrap();
+        assert_eq!(body, Bytes::from_static(b"main-data"));
+
+        let mut upload = main
+            .put_multipart(&Path::from("multipart"))
+            .await
+            .unwrap();
+        upload
+            .put_part(Bytes::from_static(b"part-one").into())
+            .await
+            .unwrap();
+        upload.complete().await.unwrap();
+
+        let abandoned_list = main.list(None);
+        assert_eq!(main_metrics.snapshot().list.timing.active, 1);
+        drop(abandoned_list);
+        let list_cancelled = main_metrics.snapshot().list.timing;
+        assert_eq!(list_cancelled.active, 0);
+        assert_eq!(list_cancelled.cancellations, 1);
+        main.list(None).collect::<Vec<_>>().await;
+
+        coordination
+            .put(&Path::from("claim"), Bytes::from_static(b"epoch").into())
+            .await
+            .unwrap();
+        coordination.head(&Path::from("claim")).await.unwrap();
+
+        let main_snapshot = main_metrics.snapshot();
+        assert_eq!(main_snapshot.put.timing.successes, 1);
+        assert_eq!(main_snapshot.put.timing.failures, 1);
+        assert_eq!(main_snapshot.put.transferred_bytes, 9);
+        assert_eq!(main_snapshot.get_body.transferred_bytes, 9);
+        assert_eq!(main_snapshot.get_body.timing.successes, 1);
+        assert_eq!(main_snapshot.multipart_part.transferred_bytes, 8);
+        assert_eq!(main_snapshot.multipart_complete.timing.successes, 1);
+        assert_eq!(main_snapshot.list.timing.successes, 1);
+        assert!(!main_snapshot.put.timeout_outcomes_available);
+        assert!(!main_snapshot.retry_delay_available);
+        assert!(!main_snapshot.background_pressure_available);
+
+        let wal_snapshot = wal_metrics.snapshot();
+        assert_eq!(wal_snapshot.put.timing.successes, 1);
+        assert_eq!(wal_snapshot.put.transferred_bytes, 8);
+        assert_eq!(wal_snapshot.list.timing.successes, 1);
+        assert_eq!(wal_snapshot.delete.timing.successes, 2);
+        assert_eq!(wal_snapshot.delete.timing.cancellations, 1);
+        assert_eq!(wal_snapshot.delete.timing.active, 0);
+        assert_eq!(wal_snapshot.get.timing.attempts, 0);
+        assert_eq!(main_snapshot.delete.timing.failures, 1);
+
+        let coordination_snapshot = coordination_metrics.snapshot();
+        assert_eq!(coordination_snapshot.put.timing.successes, 1);
+        assert_eq!(coordination_snapshot.head.timing.successes, 1);
+        assert_eq!(main_snapshot.head.timing.attempts, 0);
     }
 
     #[tokio::test]
@@ -1210,6 +1691,7 @@ mod tests {
         let failure = storage.begin().await.unwrap_err();
         assert_eq!(failure.expired, 1);
         assert_eq!(storage.transactions.read().await.len(), 0);
+        assert_eq!(storage.attribution.transaction_begin.snapshot().failures, 1);
         release_writer_claim(object_store.as_ref(), 1).await.unwrap();
     }
 
@@ -1233,6 +1715,8 @@ mod tests {
             cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
+            attribution: Arc::new(StorageAttribution::default()),
+            engine_metrics: Some(Arc::new(DefaultMetricsRecorder::new())),
             encryption: EncryptionStatus {
                 enabled: true,
                 algorithm: "AES-256-GCM",
@@ -1431,6 +1915,8 @@ mod tests {
             cache_manager: None,
             wal_object_store: Some(wal_object_store),
             wal_metrics: None,
+            attribution: Arc::new(StorageAttribution::default()),
+            engine_metrics: Some(Arc::new(DefaultMetricsRecorder::new())),
             encryption: EncryptionStatus {
                 enabled: false,
                 algorithm: "none",
@@ -1496,6 +1982,8 @@ mod tests {
             cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
+            attribution: Arc::new(StorageAttribution::default()),
+            engine_metrics: Some(Arc::new(DefaultMetricsRecorder::new())),
             encryption: EncryptionStatus {
                 enabled: true,
                 algorithm: "AES-256-GCM",
@@ -1582,6 +2070,8 @@ mod tests {
             cache_manager: None,
             wal_object_store: None,
             wal_metrics: None,
+            attribution: Arc::new(StorageAttribution::default()),
+            engine_metrics: Some(Arc::new(DefaultMetricsRecorder::new())),
             encryption: EncryptionStatus {
                 enabled: false,
                 algorithm: "none",

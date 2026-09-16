@@ -225,17 +225,99 @@ type EncryptionAudit struct {
 
 // WriterStatus describes observable VaulticDB writer ownership without exposing protobuf types.
 type WriterStatus struct {
-	InstanceID          string `json:"instance_id"`
-	Role                string `json:"role"`
-	CurrentEpoch        uint64 `json:"current_epoch"`
-	ObservedEpoch       uint64 `json:"observed_epoch"`
-	TransitionReason    string `json:"transition_reason"`
-	TransitionUnixMS    int64  `json:"transition_unix_ms"`
-	ActiveWriteIntents  uint64 `json:"active_write_intents"`
-	ActiveTransactions  uint64 `json:"active_transactions"`
-	LastDurableSequence uint64 `json:"last_durable_sequence"`
-	IdleDeadlineUnixMS  int64  `json:"idle_deadline_unix_ms"`
-	PromotionSafe       bool   `json:"promotion_safe"`
+	InstanceID          string              `json:"instance_id"`
+	Role                string              `json:"role"`
+	CurrentEpoch        uint64              `json:"current_epoch"`
+	ObservedEpoch       uint64              `json:"observed_epoch"`
+	TransitionReason    string              `json:"transition_reason"`
+	TransitionUnixMS    int64               `json:"transition_unix_ms"`
+	ActiveWriteIntents  uint64              `json:"active_write_intents"`
+	ActiveTransactions  uint64              `json:"active_transactions"`
+	LastDurableSequence uint64              `json:"last_durable_sequence"`
+	IdleDeadlineUnixMS  int64               `json:"idle_deadline_unix_ms"`
+	PromotionSafe       bool                `json:"promotion_safe"`
+	Attribution         AttributionSnapshot `json:"attribution"`
+}
+
+type TimingSnapshot struct {
+	Attempts             uint64   `json:"attempts"`
+	Failures             uint64   `json:"failures"`
+	TotalUS              uint64   `json:"total_us"`
+	MaxUS                uint64   `json:"max_us"`
+	Completed            uint64   `json:"completed"`
+	Successes            uint64   `json:"successes"`
+	Cancellations        uint64   `json:"cancellations"`
+	Timeouts             uint64   `json:"timeouts"`
+	Active               uint64   `json:"active"`
+	OldestActiveUS       uint64   `json:"oldest_active_us"`
+	LatencyBucketUpperUS []uint64 `json:"latency_bucket_upper_us"`
+	LatencyBucketCounts  []uint64 `json:"latency_bucket_counts"`
+	ContentionAvailable  bool     `json:"contention_available"`
+	Contentions          uint64   `json:"contentions"`
+}
+
+type ObjectOperationSnapshot struct {
+	Timing                    TimingSnapshot `json:"timing"`
+	TransferredBytes          uint64         `json:"transferred_bytes"`
+	TransferredBytesAvailable bool           `json:"transferred_bytes_available"`
+	TimeoutOutcomesAvailable  bool           `json:"timeout_outcomes_available"`
+}
+
+type ObjectStoreRoleSnapshot struct {
+	Put                         ObjectOperationSnapshot `json:"put"`
+	MultipartInit               ObjectOperationSnapshot `json:"multipart_init"`
+	MultipartPart               ObjectOperationSnapshot `json:"multipart_part"`
+	MultipartComplete           ObjectOperationSnapshot `json:"multipart_complete"`
+	MultipartAbort              ObjectOperationSnapshot `json:"multipart_abort"`
+	Get                         ObjectOperationSnapshot `json:"get"`
+	Head                        ObjectOperationSnapshot `json:"head"`
+	GetBody                     ObjectOperationSnapshot `json:"get_body"`
+	GetRanges                   ObjectOperationSnapshot `json:"get_ranges"`
+	Delete                      ObjectOperationSnapshot `json:"delete"`
+	List                        ObjectOperationSnapshot `json:"list"`
+	ListWithOffset              ObjectOperationSnapshot `json:"list_with_offset"`
+	ListWithDelimiter           ObjectOperationSnapshot `json:"list_with_delimiter"`
+	Copy                        ObjectOperationSnapshot `json:"copy"`
+	Rename                      ObjectOperationSnapshot `json:"rename"`
+	RetryDelayAvailable         bool                    `json:"retry_delay_available"`
+	BackgroundPressureAvailable bool                    `json:"background_pressure_available"`
+}
+
+type AttributionSnapshot struct {
+	AdmissionWait            TimingSnapshot          `json:"admission_wait"`
+	AdmissionLockHold        TimingSnapshot          `json:"admission_lock_hold"`
+	FenceCheck               TimingSnapshot          `json:"fence_check"`
+	WriteBatchRequest        TimingSnapshot          `json:"write_batch_request"`
+	BeginRequest             TimingSnapshot          `json:"begin_request"`
+	CommitRequest            TimingSnapshot          `json:"commit_request"`
+	RollbackRequest          TimingSnapshot          `json:"rollback_request"`
+	TransactionBegin         TimingSnapshot          `json:"transaction_begin"`
+	EngineSubmit             TimingSnapshot          `json:"engine_submit"`
+	DurableWait              TimingSnapshot          `json:"durable_wait"`
+	Finalization             TimingSnapshot          `json:"finalization"`
+	EngineWriteBatches       uint64                  `json:"engine_write_batches"`
+	EngineWriteOps           uint64                  `json:"engine_write_ops"`
+	EngineBackpressureCount  uint64                  `json:"engine_backpressure_count"`
+	EngineImmutableFlushes   uint64                  `json:"engine_immutable_memtable_flushes"`
+	EngineMemtableBytes      uint64                  `json:"engine_memtable_bytes"`
+	EngineL0SSTCount         uint64                  `json:"engine_l0_sst_count"`
+	EngineSSTCount           uint64                  `json:"engine_sst_count"`
+	EngineSortedRunCount     uint64                  `json:"engine_sorted_run_count"`
+	EngineL0FlushBytes       uint64                  `json:"engine_l0_flush_bytes"`
+	EngineCompactedBytes     uint64                  `json:"engine_compacted_bytes"`
+	EngineCompactedSSTs      uint64                  `json:"engine_compacted_ssts"`
+	EngineRunningCompactions uint64                  `json:"engine_running_compactions"`
+	EngineL0StallsSSTCount   uint64                  `json:"engine_l0_stalls_sst_count"`
+	EngineL0StallsSSTsPerKey uint64                  `json:"engine_l0_stalls_ssts_per_key"`
+	EngineMemtableWriteBytes uint64                  `json:"engine_memtable_write_bytes"`
+	EngineWALFlushBytes      uint64                  `json:"engine_wal_flush_bytes"`
+	EngineBackpressure       TimingSnapshot          `json:"engine_backpressure"`
+	EngineBatchQueueDepth    uint64                  `json:"engine_batch_write_queue_depth"`
+	EngineBatchQueue         TimingSnapshot          `json:"engine_batch_write_queue"`
+	EngineBatchService       TimingSnapshot          `json:"engine_batch_write_service"`
+	ObjectStoreMain          ObjectStoreRoleSnapshot `json:"object_store_main"`
+	ObjectStoreWAL           ObjectStoreRoleSnapshot `json:"object_store_wal"`
+	ObjectStoreCoordination  ObjectStoreRoleSnapshot `json:"object_store_coordination"`
 }
 
 type GenerationStatus struct {
@@ -1411,5 +1493,107 @@ func writerStatus(response *vaulticdbv1.WriterStatusResponse) WriterStatus {
 		LastDurableSequence: response.GetLastDurableSequence(),
 		IdleDeadlineUnixMS:  response.GetIdleDeadlineUnixMs(),
 		PromotionSafe:       response.GetPromotionSafe(),
+		Attribution:         attributionSnapshot(response.GetAttribution()),
+	}
+}
+
+func timingSnapshot(response *vaulticdbv1.TimingSnapshot) TimingSnapshot {
+	if response == nil {
+		return TimingSnapshot{}
+	}
+	return TimingSnapshot{
+		Attempts:             response.GetAttempts(),
+		Failures:             response.GetFailures(),
+		TotalUS:              response.GetTotalUs(),
+		MaxUS:                response.GetMaxUs(),
+		Completed:            response.GetCompleted(),
+		Successes:            response.GetSuccesses(),
+		Cancellations:        response.GetCancellations(),
+		Timeouts:             response.GetTimeouts(),
+		Active:               response.GetActive(),
+		OldestActiveUS:       response.GetOldestActiveUs(),
+		LatencyBucketUpperUS: response.GetLatencyBucketUpperUs(),
+		LatencyBucketCounts:  response.GetLatencyBucketCounts(),
+		ContentionAvailable:  response.GetContentionAvailable(),
+		Contentions:          response.GetContentions(),
+	}
+}
+
+func objectOperationSnapshot(response *vaulticdbv1.ObjectOperationSnapshot) ObjectOperationSnapshot {
+	if response == nil {
+		return ObjectOperationSnapshot{}
+	}
+	return ObjectOperationSnapshot{
+		Timing:                    timingSnapshot(response.GetTiming()),
+		TransferredBytes:          response.GetTransferredBytes(),
+		TransferredBytesAvailable: response.GetTransferredBytesAvailable(),
+		TimeoutOutcomesAvailable:  response.GetTimeoutOutcomesAvailable(),
+	}
+}
+
+func objectStoreRoleSnapshot(response *vaulticdbv1.ObjectStoreRoleSnapshot) ObjectStoreRoleSnapshot {
+	if response == nil {
+		return ObjectStoreRoleSnapshot{}
+	}
+	return ObjectStoreRoleSnapshot{
+		Put:                         objectOperationSnapshot(response.GetPut()),
+		MultipartInit:               objectOperationSnapshot(response.GetMultipartInit()),
+		MultipartPart:               objectOperationSnapshot(response.GetMultipartPart()),
+		MultipartComplete:           objectOperationSnapshot(response.GetMultipartComplete()),
+		MultipartAbort:              objectOperationSnapshot(response.GetMultipartAbort()),
+		Get:                         objectOperationSnapshot(response.GetGet()),
+		Head:                        objectOperationSnapshot(response.GetHead()),
+		GetBody:                     objectOperationSnapshot(response.GetGetBody()),
+		GetRanges:                   objectOperationSnapshot(response.GetGetRanges()),
+		Delete:                      objectOperationSnapshot(response.GetDelete()),
+		List:                        objectOperationSnapshot(response.GetList()),
+		ListWithOffset:              objectOperationSnapshot(response.GetListWithOffset()),
+		ListWithDelimiter:           objectOperationSnapshot(response.GetListWithDelimiter()),
+		Copy:                        objectOperationSnapshot(response.GetCopy()),
+		Rename:                      objectOperationSnapshot(response.GetRename()),
+		RetryDelayAvailable:         response.GetRetryDelayAvailable(),
+		BackgroundPressureAvailable: response.GetBackgroundPressureAvailable(),
+	}
+}
+
+func attributionSnapshot(response *vaulticdbv1.AttributionSnapshot) AttributionSnapshot {
+	if response == nil {
+		return AttributionSnapshot{}
+	}
+	return AttributionSnapshot{
+		AdmissionWait:            timingSnapshot(response.GetAdmissionWait()),
+		AdmissionLockHold:        timingSnapshot(response.GetAdmissionLockHold()),
+		FenceCheck:               timingSnapshot(response.GetFenceCheck()),
+		WriteBatchRequest:        timingSnapshot(response.GetWriteBatchRequest()),
+		BeginRequest:             timingSnapshot(response.GetBeginRequest()),
+		CommitRequest:            timingSnapshot(response.GetCommitRequest()),
+		RollbackRequest:          timingSnapshot(response.GetRollbackRequest()),
+		TransactionBegin:         timingSnapshot(response.GetTransactionBegin()),
+		EngineSubmit:             timingSnapshot(response.GetEngineSubmit()),
+		DurableWait:              timingSnapshot(response.GetDurableWait()),
+		Finalization:             timingSnapshot(response.GetFinalization()),
+		EngineWriteBatches:       response.GetEngineWriteBatches(),
+		EngineWriteOps:           response.GetEngineWriteOps(),
+		EngineBackpressureCount:  response.GetEngineBackpressureCount(),
+		EngineImmutableFlushes:   response.GetEngineImmutableMemtableFlushes(),
+		EngineMemtableBytes:      response.GetEngineMemtableBytes(),
+		EngineL0SSTCount:         response.GetEngineL0SstCount(),
+		EngineSSTCount:           response.GetEngineSstCount(),
+		EngineSortedRunCount:     response.GetEngineSortedRunCount(),
+		EngineL0FlushBytes:       response.GetEngineL0FlushBytes(),
+		EngineCompactedBytes:     response.GetEngineCompactedBytes(),
+		EngineCompactedSSTs:      response.GetEngineCompactedSsts(),
+		EngineRunningCompactions: response.GetEngineRunningCompactions(),
+		EngineL0StallsSSTCount:   response.GetEngineL0StallsSstCount(),
+		EngineL0StallsSSTsPerKey: response.GetEngineL0StallsSstsPerKey(),
+		EngineMemtableWriteBytes: response.GetEngineMemtableWriteBytes(),
+		EngineWALFlushBytes:      response.GetEngineWalFlushBytes(),
+		EngineBackpressure:       timingSnapshot(response.GetEngineBackpressure()),
+		EngineBatchQueueDepth:    response.GetEngineBatchWriteQueueDepth(),
+		EngineBatchQueue:         timingSnapshot(response.GetEngineBatchWriteQueue()),
+		EngineBatchService:       timingSnapshot(response.GetEngineBatchWriteService()),
+		ObjectStoreMain:          objectStoreRoleSnapshot(response.GetObjectStoreMain()),
+		ObjectStoreWAL:           objectStoreRoleSnapshot(response.GetObjectStoreWal()),
+		ObjectStoreCoordination:  objectStoreRoleSnapshot(response.GetObjectStoreCoordination()),
 	}
 }
