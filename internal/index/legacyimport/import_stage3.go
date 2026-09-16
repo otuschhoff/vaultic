@@ -148,11 +148,15 @@ func importPacksStage3(
 		}
 		for activeLanes < lanes {
 			selected := -1
+			blockedDeps := make(map[string]struct{})
 			for i := range ready {
 				if failureSeen {
 					continue
 				}
-				if !stage3DependenciesFree(depBusy, ready[i].deps) {
+				if !stage3DependenciesFree(depBusy, ready[i].deps) || stage3DependenciesOverlap(blockedDeps, ready[i].deps) {
+					for _, dependency := range ready[i].deps {
+						blockedDeps[dependency] = struct{}{}
+					}
 					continue
 				}
 				selected = i
@@ -742,6 +746,15 @@ func stage3DependenciesFree(inFlight map[string]uint64, deps []string) bool {
 		}
 	}
 	return true
+}
+
+func stage3DependenciesOverlap(blocked map[string]struct{}, deps []string) bool {
+	for _, key := range deps {
+		if _, found := blocked[key]; found {
+			return true
+		}
+	}
+	return false
 }
 
 func stage3ReserveDependencies(inFlight map[string]uint64, batch stage3LogicalBatch) {

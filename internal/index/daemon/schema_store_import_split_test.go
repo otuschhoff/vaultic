@@ -436,7 +436,7 @@ func TestSchemaStoreLegacyCompleteSessionDeletesInBoundedPages(t *testing.T) {
 	}
 }
 
-func TestSchemaStoreLegacyIngestSinglePackTooLargeRejectedBeforeCommit(t *testing.T) {
+func TestSchemaStoreLegacyIngestSinglePackExceedsPlanningBoundsCommits(t *testing.T) {
 	ctx := context.Background()
 	client, err := Ensure(ctx, Options{
 		Socket: testSocket(t), RepositoryID: "phase32-stage3-single-pack-too-large", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
@@ -455,19 +455,18 @@ func TestSchemaStoreLegacyIngestSinglePackTooLargeRejectedBeforeCommit(t *testin
 	})}
 	imports[0].TransactionBytes = 1
 
-	err = store.IngestLegacyPacks(ctx, session, 1, imports)
-	if !errors.Is(err, ErrLegacyImportBatchTooLarge) {
-		t.Fatalf("single-pack oversized ingest error = %v", err)
+	if err := store.IngestLegacyPacks(ctx, session, 1, imports); err != nil {
+		t.Fatalf("single-pack oversized ingest: %v", err)
 	}
-	if _, found, getErr := store.Get(ctx, schema.PackKey(packID)); getErr != nil || found {
-		t.Fatalf("oversized single-pack wrote pack: found=%t err=%v", found, getErr)
+	if _, found, getErr := store.Get(ctx, schema.PackKey(packID)); getErr != nil || !found {
+		t.Fatalf("oversized single-pack missing pack: found=%t err=%v", found, getErr)
 	}
-	if _, found, getErr := store.Get(ctx, schema.LegacyImportReceiptKey(session, 1)); getErr != nil || found {
-		t.Fatalf("oversized single-pack wrote receipt: found=%t err=%v", found, getErr)
+	if _, found, getErr := store.Get(ctx, schema.LegacyImportReceiptKey(session, 1)); getErr != nil || !found {
+		t.Fatalf("oversized single-pack missing receipt: found=%t err=%v", found, getErr)
 	}
 	stats := store.LegacyImportStats()
-	if stats.Commits != 0 || stats.IngestedBatches != 0 {
-		t.Fatalf("oversized single-pack unexpectedly committed: %#v", stats)
+	if stats.Commits != 1 || stats.IngestedBatches != 1 {
+		t.Fatalf("oversized single-pack commit stats: %#v", stats)
 	}
 }
 

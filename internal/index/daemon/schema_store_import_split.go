@@ -244,7 +244,7 @@ func (store *SchemaStore) planLegacyIngestBatch(
 	if len(imports) > 0 && imports[0].TransactionBytes > 0 {
 		transactionBytes = imports[0].TransactionBytes
 	}
-	if len(puts) > LegacyImportTransactionMutationLimit || encodedBytes > transactionBytes {
+	if len(imports) > 1 && (len(puts) > LegacyImportTransactionMutationLimit || encodedBytes > transactionBytes) {
 		return legacyImportBatchPlan{}, Limits{}, fmt.Errorf(
 			"%w: mutations=%d bytes=%d",
 			ErrLegacyImportBatchTooLarge,

@@ -585,6 +585,57 @@ func TestImportStage3OverlappingDependenciesDoNotOverlap(t *testing.T) {
 	}
 }
 
+func TestImportStage3BlockedBatchPreventsDependencyInversion(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	leftBlob := vaultic.NewRandomID()
+	rightBlob := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	idx.StorePack(vaultic.ID{1}, pack.Blobs{
+		{BlobHandle: vaultic.BlobHandle{ID: leftBlob, Type: vaultic.DataBlob}, Length: 1},
+	})
+	idx.StorePack(vaultic.ID{2}, pack.Blobs{
+		{BlobHandle: vaultic.BlobHandle{ID: leftBlob, Type: vaultic.DataBlob}, Length: 1},
+		{BlobHandle: vaultic.BlobHandle{ID: rightBlob, Type: vaultic.DataBlob}, Length: 1},
+	})
+	idx.StorePack(vaultic.ID{3}, pack.Blobs{
+		{BlobHandle: vaultic.BlobHandle{ID: rightBlob, Type: vaultic.DataBlob}, Length: 1},
+	})
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := newSplitStore()
+	firstBlock := make(chan struct{})
+	store.blockByEnter[1] = firstBlock
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		done <- err
+	}()
+
+	<-store.entered
+	select {
+	case <-store.entered:
+		t.Fatal("later batch bypassed an earlier dependency waiter")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(firstBlock)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import deadlocked after dependency inversion")
+	}
+}
+
 func TestImportStage3IngestFailureCancelsAndStopsReduction(t *testing.T) {
 	indexID := vaultic.NewRandomID()
 	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()}
