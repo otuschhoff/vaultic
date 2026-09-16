@@ -1,684 +1,546 @@
 # Phase 32: Scalable legacy metadata bulk import
 
-[← Back to roadmap index](00-overview.md)
+[Back to roadmap index](00-overview.md) |
+[Phase 31](phase-31-read-only-nfsv3-snapshot-server.md) |
+[Phase 33](phase-33-operational-monitoring-and-metrics-export.md)
 
-[← Phase 31](phase-31-read-only-nfsv3-snapshot-server.md) · [Phase 33 →](phase-33-operational-monitoring-and-metrics-export.md)
+[CLI and operations architecture](../02-architecture/04-cli-and-operations.md) |
+[Operational monitoring](phase-33-operational-monitoring-and-metrics-export.md)
 
-[CLI and operations architecture](../02-architecture/04-cli-and-operations.md) · [Operational monitoring](phase-33-operational-monitoring-and-metrics-export.md)
+**Status:** Stages 1-3 implemented. Stage 3 is fresh-reset-only and defaults to
+two ingestion lanes; deferred cleanup is opt-in. Dependency inversion and the
+indivisible-pack regression were fixed in `902b94389`; instrumentation and
+guarded cleanup deferral landed in `8bc9cd7cb`. Full-import completion and
+repository-scale Stage 3 performance acceptance remain pending.
 
-**Status: Stages 1-3 implemented; Stage 3 split-session importer is enabled only for fresh imports (`--force-reset-old-idx`) with deterministic content-derived root receipt IDs, bounded cleanup, and resume-safe receipt replay. Live testing on 2026-09-16 exposed dependency inversion and oversized-pack rejection, fixed in `902b94389`. Full-run completion and controlled Stage 3 performance acceptance remain pending.**
+**Goal:** sustain legacy-index-to-SlateDB throughput as the candidate grows,
+without weakening duplicate preservation, metadata ordering, atomicity,
+bounded recovery, or final durability. Normal backup publication is unchanged.
 
-**Goal:** make a fresh legacy JSON-index rebuild sustain useful throughput as the SlateDB candidate grows, without weakening duplicate-location preservation, aggregate accuracy, history ordering, transaction atomicity, resumability, or metadata durability. Pack preparation remains parallel, publication amortizes fixed transaction work across bounded multi-pack batches, and fresh-import lookup avoidance keeps a stable false-positive rate for repositories containing hundreds of millions of blob IDs.
+## Conclusions
 
-## Motivation and measured baseline
+The evidence supports a **latency-sensitive publication pipeline with two
+serialization points**, not a proven CPU, RAM, NFS-bandwidth, or daemon-only
+bottleneck:
 
-The pre-Phase-32 importer started multiple pack workers, but `SchemaStore.ImportLegacyPack` admitted publication through a one-slot gate. Serialization was required because every pack transaction updated shared aggregate and history keys; unrestricted optimistic transactions repeatedly invalidated one another and could exhaust conflict retries. The worker count therefore overlapped pack `Stat` and Go-side record construction, but could not create concurrent successful publications.
+1. **Vaultic admission/reduction:** `importPacksStage3.reduceReady` performs
+   ordered reduction synchronously. Existing ingests continue, but the coordinator
+   cannot receive their completions or admit replacements during reduction.
+   Dependencies and prepared-byte reservations remain held until reduction ends.
+2. **VaulticDB/SlateDB apply:** the pinned SlateDB transaction implementation
+   submits commits to one sequential batch-writer task. Deferred commit skips
+   explicit durability waiting, but still waits for backpressure admission,
+   queue service, conflict checking, WAL append, and memtable application.
 
-Each admitted pack paid for a transaction begin, pack and duplicate-blob lookups, aggregate reads and rewrites, history marker and sequence reads, one or more mutation RPCs, and a commit. As the candidate gained SSTs, false-positive duplicate lookups and LSM read/compaction work increased the latency of that single publication lane. More workers could not compensate, so the producer waited while most host CPUs remained idle.
+Both are established code constraints. Their separate contributions to the
+critical path are **not yet measured**. More daemon CPU does not prove daemon
+saturation; idle ingest lanes do not prove all missing overlap is recoverable.
+Measure eligible-ready work during reduction and engine queue/service time before
+choosing between client pipelining and engine optimization.
 
-A controlled fresh import with memory WAL, a 16 GiB unflushed limit, 256 MiB L0 SSTs, 32 pack workers, snapshots disabled, and a 20-million-record work budget established this baseline:
+Cleanup deferral has removed the earlier per-index durability barrier from the
+hot path. Preparation and prepared-buffer capacity are not current priorities.
+The later decline in throughput still needs read/flush/compaction attribution.
+Library changes, including a SlateDB fork, are in scope when measurements identify
+the limiting function; replacing the backend is not a prerequisite.
 
-| Measurement | Result |
-|---|---:|
-| Imported blobs | 19,999,995 |
-| Imported packs | 24,942 |
-| Completed indexes | 470 |
-| Elapsed time | 9m28s |
-| Initial pack rate | 61-70 packs/s |
-| Final observed pack rate | 29-31 packs/s |
-| Mean blob rate | 35,219 blobs/s |
-| Final candidate size | 3.9 GiB in 17 SSTs |
-| Typical host idle CPU | more than 90% |
+## Required Invariants
 
-The database backend in that experiment was NFS and showed queued latency during SST flush bursts, but neither CPU nor sustained backend bandwidth was saturated. Enabling a large SlateDB read cache in earlier runs did not remove the slowdown. This phase treats storage latency as an amplifier rather than the root utilization limit.
+- Preserve every physical blob location, including repeated packs and duplicate
+  blob IDs within and across indexes. Reject contradictory facts as before.
+- Match sequential metadata results for identical batch boundaries. Aggregate
+  sequence increments and advisory history ordering remain defined per batch;
+  physical adaptive child reductions are distinct from logical batches.
+- Replan aborted transactions from current state; publish fresh-filter inserts
+  only after commit. False positives may add reads; false negatives must not
+  suppress required reads. Take hints only after dependency admission.
+- Admit overlapping pack/blob/debt/placement keys in input order. Preserve the
+  `A, A+B, B` dependency-fairness regression and reserve progress capacity for
+  the earliest unresolved batch. Do not merely enlarge the publication gate.
+- Catalog mutations and their content-addressed receipt commit atomically.
+  Reduction applies aggregates/history and marks the receipt exactly once;
+  mismatched receipt content is an error. Resolve ambiguous acknowledgements
+  through receipts before resubmission.
+- Checkpoints advance only behind the contiguous reduced prefix. Work/error
+  budgets select a pack-boundary prefix before admission. Cancellation stops
+  admission and settles in-flight work without checkpointing past a failure.
+- Bound transaction items, bytes, lifetime, preparation memory, retry work, and
+  recovery state. One indivisible pack may exceed planning targets, never RPC
+  limits or validation rules. Preserve the oversized-pack regression.
+- Fresh memory-WAL work is destructively restartable, not crash-durable
+  resumable work. Partial, failed, interrupted, or finding-bearing imports never
+  authorize handoff or activation. Preserve writer fencing and encryption.
+- The durable successful-import marker alone authorizes handoff. Clean close,
+  persistent-WAL reopen, required validation, and authority publication must
+  succeed before claiming an activated repository. Normal `PublishPack` and
+  non-fresh import semantics remain unchanged.
 
-## Scope
+## Implemented Pipeline
 
-This phase changes only forced or explicitly selected legacy metadata import. Normal backup publication retains the existing per-pack transaction path.
+### Vaultic: Selection Through Reduction
 
-In scope:
+| Step | Owning code | Behavior and throughput implications |
+|---|---|---|
+| Fetch/decode/select | [ForAllIndexes](../../../internal/repository/index/index_parallel.go), [Import](../../../internal/index/legacyimport/import.go) | Fetch/decode uses `Connections()+GOMAXPROCS` workers; a mutex serializes callbacks. Each source drains publication and cleanup before the next callback proceeds. Decode-completion order is not a frozen benchmark manifest. |
+| Prepare | [preparePackJobs / dispatchPackJobs](../../../internal/index/legacyimport/import.go) | Parallel pack `Stat` and record construction, ordered collection, bounded byte reservations. More preparers cannot remove downstream serialization. |
+| Identify/admit | [importPacksStage3](../../../internal/index/legacyimport/import_stage3.go) | `queueBatch` hashes canonical content and computes dependencies on the coordinator; `admitReady` dispatches independent work. Dependencies remain held through reduction. |
+| Ingest | [IngestLegacyPacks / planLegacyIngestBatch](../../../internal/index/daemon/schema_store_import_split.go) | Runs **inside Go Vaultic**, despite the package name `daemon`. Canonicalization, hashes, filter hints, transaction begin, receipt/possibly-present-key reads, merge/encode/sort, mutation RPCs, commit, then filter updates. |
+| Reduce | [reduceLegacyImportBatchOnce](../../../internal/index/daemon/schema_store_import_split.go) | Sequential `Begin`, receipt `Get`, aggregate `MultiGet`, history marker/sequence reads, local encoding, mutation RPCs, and commit. `reduceReady` waits for all of this before receiving completions/refilling lanes. |
+| Cleanup/finalize | [CompleteLegacyImportSession](../../../internal/index/daemon/schema_store_import_split.go), [completeFreshBulkImport](../../../cmd/vaultic/indexcmd/cmd_index.go) | Validate reduced receipts, delete bounded pages, then eventually mark completion and perform required close/handoff/reopen/activation. Per-index cleanup is not final durability. |
 
-- a bounded `ImportLegacyPacks` API and planner;
-- a producer/preparer/writer pipeline with bounded memory;
-- one aggregate update and one history-sequence allocation per committed batch;
-- duplicate pack and blob coalescing within a batch;
-- adaptive batch limits based on mutation count and encoded bytes;
-- a scalable fresh-import membership filter with a bounded false-positive rate;
-- index checkpoint integration and crash-safe replay;
-- import-specific metrics and repeatable performance gates.
+Stage 2 retains `SchemaStore.ImportLegacyPacks(imports, finalCheckpoint)` behind
+one publication gate; `ImportLegacyPack` is its one-item wrapper. Its planner
+coalesces duplicate keys, reads original states once, updates aggregates and
+history once per batch, and commits the checkpoint with the final batch.
+Stage 3 separates catalog ingestion from ordered shared-metadata reduction using
+private receipts. Debt and placement changes remain dependency-protected.
 
-Stage 3 extends this scope to bounded concurrent VaulticDB ingestion, ordered
-metadata reduction, and daemon transaction scheduling. Its objective is to hide
-existing backend latency, not to reduce the latency of the backend itself.
-Legacy index discovery, download, decoding, and source-pack preparation are not
-optimization targets for this extension. The ordered selected-input stream is
-its input contract.
+### VaulticDB: RPC Through SST Files
 
-Out of scope for the first implementation:
+The dependency is already a fork, pinned in [Cargo.toml](../../../vaulticdb/Cargo.toml)
+to `otuschhoff/slatedb` revision `5faf4b086b043c65afdf193a7e2f87a737a11205`.
+Engine function names below refer to the
+[pinned engine source](https://github.com/otuschhoff/slatedb/tree/5faf4b086b043c65afdf193a7e2f87a737a11205/slatedb/src).
 
-- changing SlateDB or its transaction isolation model;
-- allowing arbitrary concurrent legacy pack commits;
-- weakening metadata encryption, writer fencing, or schema validation;
-- requiring local NVMe, a particular NFS implementation, or a read cache for acceptable behavior;
-- changing normal `PublishPack` semantics;
-- activating an incomplete candidate.
+| Boundary | Code | What may limit progress |
+|---|---|---|
+| RPC admission/fencing | [commit_inner / begin_inner](../../../vaulticdb/src/service/transactions.rs), [mutation_admission](../../../vaulticdb/src/service/operations.rs) | Admission takes a shared read guard, not an exclusive one-request gate. Authority/fence checks and lifecycle locks still need timing. |
+| Transaction construction | [Storage::begin / write_batch](../../../vaulticdb/src/storage.rs) | Serializable-snapshot creation; `begin` holds the transaction-map write lock across `writer.begin().await`. Mutation RPCs populate a buffered batch under its transaction-slot mutex. Lock contention is a candidate, not a measured bottleneck. |
+| Commit submission | [Storage::commit](../../../vaulticdb/src/storage.rs), `DbTransaction::commit_with_options` in `db_transaction.rs` | Fence/registry work, batch clone and conflict-key tracking, then engine submission. Fresh deferred calls **skip** `handle.await_durable()`; client commit latency is not synonymous with a 500 ms WAL flush. |
+| Engine admission | `DbInner::write_with_options` / `maybe_apply_backpressure` in `db.rs` | Checks estimated active/immutable memtable plus WAL bytes against `max_unflushed_bytes`, may wait for WAL flush or memtable upload, enqueues `BatchWriterMessage`, then awaits a oneshot result. |
+| Sequential apply | `WriteBatchEventHandler::handle` / `DbInner::write_batch` in `batch_write.rs` | One writer loop assigns sequence, checks conflicts, extracts entries, validates segments, appends WAL, inserts memtable entries, and updates transaction/visibility state. Flush messages share this handler. More RPC lanes do not parallelize apply. |
+| File production | `memtable_flusher`, `DbInner::stream_imm_ssts` / `stream_imm_sst` in `flush.rs`, `compactor` | Frozen tables are encoded/written through the table/object store; compaction reads and rewrites SSTs. Encryption and local/NFS I/O occur here. Apply acknowledgement does not mean the corresponding SST output is finalized. |
+| Final durability | [Storage::close](../../../vaulticdb/src/storage.rs) | Reads completion marker, awaits `db.close()`, records eligible local-WAL handoff only after successful close, then releases writer ownership. Include this tail and required reopen in throughput. |
 
-## Required invariants
+The path is: legacy JSON -> Go canonical records/plans -> transaction RPC
+buffers -> sequential engine apply/WAL/memtable -> SST flush/compaction -> final
+close/handoff. Caller RPC timers span multiple owners, not pure server execution.
 
-1. A committed batch is equivalent to applying its input packs one at a time in deterministic order, except that aggregate update sequences and history sequence allocation are amortized over the batch. Adaptive splits are reduced as physical child receipts; metrics must label those as physical reductions rather than one logical wall-time batch.
-2. Every physical blob location present in any input survives, including duplicate blob IDs in different packs and repeated pack IDs in different legacy indexes.
-3. A retry after an aborted transaction replans from current database state. It never reuses mutations derived from a stale transaction snapshot.
-4. Fresh-import membership state is updated only after a successful commit. False positives may cause reads; false negatives must never suppress a required read.
-5. A completed index checkpoint is never visible unless every selected pack from that index is committed. A missing checkpoint may cause idempotent replay but not lost metadata.
-6. Work-budget and error-limit behavior remains deterministic at pack boundaries. A batch never imports records beyond the selected input prefix.
-7. Cancellation and timeout remain effective while preparing, waiting for publication, issuing transaction RPCs, retrying conflicts, and awaiting the final checkpoint.
-8. Mutation count, encoded bytes, transaction lifetime, queued prepared bytes, and retry work have independent controls. Adaptive item/byte targets admit one indivisible oversized pack; this exception does not relax per-RPC limits, record validation, transaction timeouts, or the single-pack preparation floor.
-9. Failed, interrupted, or partial fresh imports never authorize memory-WAL handoff or candidate activation.
+### Controls and Lookup Avoidance
 
-## Import pipeline
+Fresh defaults: 8 packs, 8,000 planned mutations, 8 MiB transaction target,
+256 MiB prepared budget, and 2 lanes. The observed memory-WAL run uses a
+500 ms flush interval, 16 GiB unflushed limit, and 256 MiB L0 SST target.
+`--pack-timeout` and `--import-batch-timeout` bound different work;
+`--batch-size` limits each mutation RPC, not the entire transaction.
+`--packs-per-transaction` is capped at 256; preparation reserves a batch's
+progress floor. Adaptive splits retain deterministic content-derived identities.
 
-Split import into three bounded stages:
+`--import-defer-cleanup` requires fresh reset, memory WAL, and at least two
+lanes. It changes bounded receipt-deletion commits only; ordinary cleanup and
+the final successful-import marker retain durable acknowledgement.
 
-1. **Index reader.** Decode one legacy index, apply resume and work-budget selection, and emit ordered pack jobs.
-2. **Pack preparers.** Run backend `Stat` and construct validated `LegacyPackImport` values concurrently. They do not call VaulticDB.
-3. **Batch writer.** Restore deterministic input order, collect a bounded batch, and call `SchemaStore.ImportLegacyPacks` through one publication lane.
+The former fixed 64 MiB/four-probe filter would reach approximately 81% false
+positives at 400M IDs. The implemented geometric layered filter targets <=0.1%,
+projects about 1.31 GiB at 400M IDs, and has a 1.5 GiB ceiling with explicit
+database fallback. It avoids most reads, but probes/inserts still cost CPU.
+Growing it beyond measured needs is not a throughput recommendation.
 
-A bounded prepared-result channel provides backpressure. Track both item count and estimated retained bytes so a few unusually large packs cannot exceed the memory budget. Cancellation closes admission, lets in-flight preparation finish or abort, and prevents a later batch from committing after the first terminal error.
+## Measured Evidence
 
-Pack preparation timeout and database batch timeout are separate. `--pack-timeout` continues to bound source `Stat` and preparation for one pack. Add `--import-batch-timeout` for one database batch, with a default derived from the existing transaction timeout and an explicit upper bound. `--packs-per-transaction` is capped at 256 because one transaction's pack count is also the minimum in-flight preparation floor needed to guarantee progress under byte backpressure.
+### Baseline and Controlled Experiment
 
-## Multi-pack transaction API
+Stage 2's recorded 20M comparison imported 24,942 packs and 19,999,995 blobs
+with no conflicts/retries/errors: 9m28.1s -> 4m32.6s, 35,219 -> 73,422 blobs/s,
+and 24,942 -> 4,616 logical commits (2.08x time improvement, 5.4x fewer commits).
+A separate clean timing run took 276.893s, including 271.334s publication,
+87.520s planning, 31.621s mutation RPC, and 91.925s commit. These budgeted
+incomplete runs do not prove final handoff or activation.
 
-Add a bulk-only method without changing the normal publication API:
+The real-daemon `BenchmarkImportStage3Daemon` uses one fixed 128-pack/65,536-blob
+index, cold temporary candidates, local object store, memory WAL, and verifies
+checkpoint persistence after handoff/reopen. Means include import/finalization,
+exclude initial daemon setup, and use three repeats per variant. This small
+fixture does not reproduce production encryption, duplicates, NFS, or LSM scale.
 
-```go
-func (store *SchemaStore) ImportLegacyPacks(
-    ctx context.Context,
-    imports []LegacyPackImport,
-    finalCheckpoint *Mutation,
-) error
-```
+| CPUs | Lanes / cleanup | Mean elapsed (SD) | Blobs/s | Cleanup | Finalization |
+|---:|---|---:|---:|---:|---:|
+| 4 | 1 / Stage 2 | 1,149.8 (1.6) ms | 56,999 | n/a | 597.1 ms |
+| 4 | 2 / ordinary | 1,146.5 (1.1) ms | 57,161 | 122.5 ms | 636.1 ms |
+| 4 | 2 / deferred | 673.5 (0.7) ms | 97,301 | 2.0 ms | 272.7 ms |
+| 4 | 4 / deferred | 674.6 (1.7) ms | 97,155 | 1.7 ms | 337.6 ms |
+| 4 | 8 / deferred | 676.0 (1.4) ms | 96,952 | 1.9 ms | 318.2 ms |
+| 32 | 1 / Stage 2 | 1,172.3 (4.8) ms | 55,904 | n/a | 547.3 ms |
+| 32 | 2 / ordinary | 1,175.7 (11.9) ms | 55,748 | 93.4 ms | 666.2 ms |
+| 32 | 2 / deferred | 691.8 (7.0) ms | 94,744 | 2.4 ms | 260.5 ms |
+| 32 | 4 / deferred | 695.5 (9.1) ms | 94,250 | 2.4 ms | 372.9 ms |
+| 32 | 8 / deferred | 696.9 (2.9) ms | 94,046 | 2.8 ms | 356.6 ms |
 
-`finalCheckpoint` is non-nil only when the batch completes a legacy index. Keeping it in the same transaction makes index completion atomic with the final packs. Earlier batches from a large index may remain committed without a checkpoint; replay merges them idempotently.
+Deferral improved the four-CPU two-lane fixture by about 70%; extra lanes/CPUs
+did not help. Much of the elapsed difference is in finalization, not cleanup
+alone. Do not extrapolate this short result to repository-scale acceptance.
 
-The method acquires the existing legacy-import gate once, validates all inputs before opening a transaction, derives fresh-import lookup hints, and retries aborted transactions with bounded exponential backoff. Every retry begins a new transaction and rebuilds the complete plan. After commit, it updates the membership filter for every committed pack and blob.
+### Full-Run Observations: 2026-09-16
 
-Keep `ImportLegacyPack` as a compatibility wrapper around a one-element `ImportLegacyPacks` call. This leaves normal callers and focused tests intact while ensuring the two paths cannot drift semantically.
+Source: 10,019 indexes, approximately 19.25 GB. Both full runs used 32 preparers,
+`local.connections=32`, two lanes, snapshots disabled, metadata encryption,
+memory WAL, and disabled shared read-cache tiers. Logged derived cache sizing
+is not proof a cache was enabled; distinguish policy from active tiers.
 
-## Batch planner
+| Run/sample | Result | Interpretation |
+|---|---|---|
+| Ordinary cleanup, intentionally stopped | 2,025 indexes, 107,076 packs, 85,864,124 blobs, 30m32s, ~46.9k blobs/s, exit 130 | Incomplete baseline, not a matched-prefix experiment. |
+| Deferred `8bc9cd7cb`, 09:53:17 UTC | 702 indexes, 29.84M blobs, 6m8s, ~81.2k blobs/s | Early sample, not a sustained full-run speedup. |
+| Same run, 10:16:44 UTC | 2,763 indexes (27.6%), 148,116 packs, 116.57M blobs, 29m34s, ~65.7k blobs/s | Rate declined as input/candidate changed; cause is not established. |
 
-The planner operates on final states, not a concatenation of per-pack plans.
+At 10:16:29, the coordinator's 1,760 seconds split into ingest wait 744.4s
+(42.3%), reduce 575.9s (32.7%), schedule 264.3s (15.0%), dependency wait 106.3s
+(6.0%), cleanup 42.7s (2.4%), source 17.1s (1.0%), and prepare wait 9.2s (0.5%).
+Two/one/zero ingests were active for 54.2%/27.4%/18.4%, averaging 1.36 lanes.
+Active-ingest time includes Go transaction preparation and RPC waits, not just
+engine service. Queue snapshots do not establish eligible work throughout reduction.
+`ingest_wait` labels a coordinator `select` with active ingests; it can wake on
+preparation too. It is not a measured interval spent exclusively waiting for
+VaulticDB. `schedule` is elapsed coordinator work, not a pure on-CPU timer.
 
-### Canonicalization and coalescing
+The same sample reports ingest planning 748.0s, ingest mutation RPC 201.1s,
+ingest commit 706.9s, and whole reduction attempts 575.5s. These timers overlap
+across lanes and must **not** be added to coordinator wall time. `reduction`
+includes its own reads/write/commit; existing `commit` and `mutation_rpc` here
+cover ingestion, not all transaction categories. Begin, receipt lookup,
+canonicalization/hash/filter, and post-commit work lack complete sub-attribution.
 
-Validate and canonicalize every input first. Preserve original order for deterministic error reporting and history ordering, then build:
+Across 27,305 completed ingests/reductions, this is approximately 27.4 ms ingest
+planning, 7.4 ms mutation RPC, 25.9 ms ingest commit, and 21.1 ms complete reduction
+per batch, at 15.5 batches/s. These are means, not tail latency or independent
+wall-time fractions. The reducer is not continuously busy, so its existence
+alone does not prove that it sets the throughput ceiling.
 
-- one accumulator per pack ID containing all source index IDs, locations, placement data, debt, and lineage inputs;
-- one accumulator per blob ID containing all distinct physical locations from every pack in the batch;
-- ordered history events representing the same logical transitions as the current per-pack path.
+Other evidence and corrections:
 
-A repeated pack ID is loaded once and merged through the existing pack-record rules. A repeated blob ID is loaded once and all incoming locations are merged in deterministic pack and location order. Conflicting facts that the existing one-pack path would reject must still reject the batch with the responsible pack ID.
+- Short per-process samples measured Vaultic at 0.47 cores and VaulticDB at
+  1.16; separate combined samples ranged from 1.64 to 2.61. More active CPU in
+  VaulticDB does not assign it 71% of wall latency. `ps` elapsed/%CPU was anomalous;
+  use interval counters. The earlier "mostly VaulticDB" conclusion was too strong.
+- The 09:48:41 Go profile contains 15 CPU-seconds over 15 seconds.
+  `planLegacyIngestBatch` is 20.5% cumulative; flat costs include filter probes
+  5.5%, inserts 4.9%, SHA-256 5.3%, and `memmove` 6.3%, plus sorting, marshaling,
+  and allocation. These are **Vaultic**, not Rust planner costs.
+- Earlier/synthetic Rust profiles show skip-list/memtable work, copies,
+  allocation, SST codecs, and encryption. The full-run DWARF report did not
+  finish resolving; retain the raw capture without claiming a completed Rust
+  critical-path profile. CPU profiles do not attribute off-CPU waits.
+- At ~116M blobs there were zero reported conflicts/retries, filter fallback
+  was false, filter storage was 286 MB with estimated false positives ~0.09%,
+  and cumulative Go stop-the-world pause was ~448 ms. Heap was ~1.1 GiB and
+  prepared bytes peaked at 13.57 MB against 256 MiB. Queue capacity and GC
+  pauses are not primary limits; this does not rule out GC CPU/allocation cost.
+- Affinity is 32 CPUs with no observed ancestor quota/throttling or memory cap.
+  `/proc/meminfo` showed ~293 GiB total while the import's detector reported
+  ~755 GiB. Reconcile container/host views before sizing defaults. Spare RAM
+  alone does not justify larger buffers or caches.
+- **Storage correction:** `/volume2/NASDA2/rustic/db` resolves to
+  `/ncl1-1-vs-50/fme_dump/amakura/db`. `du -sh` measured the symlink; `du -shL`
+  measured ~35 GiB at 10:17, and daemon descriptors pointed to real compacted
+  SSTs there. The earlier 4 KiB observation was not missing SST output.
+- The first `nfsiostat` report is cumulative. Quiet short intervals, especially
+  on the wrong NASDA2 mount, cannot exclude NFS latency or bursty flush/compaction.
+  Zero dirty/writeback pages and process I/O totals likewise do not establish
+  storage headroom or physical network bytes. Measure the resolved mount and
+  object-store/engine counters over matching intervals.
 
-### Existing-state reads
+## Implementation Recommendations
 
-Use fresh-import membership hints to divide pack and blob IDs into definitely absent and possibly present sets. Issue bounded `MultiGet` calls only for possibly present IDs, deduplicating keys across the whole batch. Apply database values to the in-memory accumulators once.
+### 1. Attribute the Critical Path
 
-The planner must not rely on transaction read-your-write behavior between individual pack plans. It computes each final blob and pack value in memory and emits at most one mutation per key.
+Add bounded histograms/counters by ingest/reduce/cleanup operation, without raw
+IDs as metric labels. Correlate sampled traces by logical/physical batch and
+transaction; separate local CPU work, RPC elapsed, queue waits, and durability.
 
-### Aggregates and history
+| Point | Measurement and decision enabled |
+|---|---|
+| Vaultic scheduler | Eligible-ready time while reducer is busy, completion-receive delay, unreduced bytes and oldest ordinal age. Distinguishes refill starvation from true dependencies. |
+| Go ingest/reducer | Begin, receipt/pack/blob/aggregate/history reads, local encode/hash/filter, mutation RPC, commit, post-commit, retries; p50/p95/p99 plus key/RPC counts. Separates client work from remote latency. |
+| VaulticDB service/storage | Shared admission, fencing/coordination reads, transaction-map/slot lock waits, begin, mutation buffering, commit submission/response, explicit durability wait. Tests service/fencing contention. |
+| SlateDB apply | Backpressure duration and WAL/active/immutable bytes; enqueue-to-dequeue delay; writer service split into conflict tracking, entry extraction, WAL append, memtable insertion, freeze/flush messages. Distinguishes an idle from a saturated writer. |
+| SST output | Flush backlog/age, L0/compaction pressure, SST bytes/read amplification, encode/encrypt/upload time, object-store request latency/concurrency, cache hits/misses and resolved paths. Locates file-production stalls. |
+| Finalization | Marker acknowledgement, close/flush, handoff, reopen, validation/activation and total elapsed. Prevents moving costs out of the measured import window. |
 
-Read `aggregateKeys()` once. For each unique pack, calculate the delta from its pre-batch record to its final record and apply all deltas in memory. Preserve the existing publication contract by incrementing every type aggregate and every existing tier aggregate once per batch; missing unused tiers remain sparse. Emit at most one mutation per aggregate key. This removes the principal shared-key conflict and repeated read/write amplification.
+Reuse existing SlateDB statistics, supplementing the fork at these boundaries
+where necessary. Keep periodic reporting alive when progress stalls. Never infer
+durability latency solely from the configured flush interval.
 
-Read the history-enabled marker and next-event sequence once. Allocate one contiguous range for all successfully encoded events, emit deterministic event keys, and update the next sequence once. Preserve the current rule that an unencodable advisory history event does not fail catalog publication.
+### 2. Test a Bounded Asynchronous Reducer
 
-Debt and placement mutations are coalesced by key. If two inputs produce incompatible values for one mutable key, reject the batch rather than depending on mutation order.
+Use one ordered reducer worker while the coordinator receives completions and
+admits independent ready work. Keep dependency ownership/accounting in the
+coordinator; release dependencies/bytes only after successful reduction acknowledgement.
+Keep one owner for aggregates/history/checkpoints. Bound queued/active reduction
+bytes, receipt count, and distance ahead of the contiguous prefix; reserve
+capacity for the earliest unresolved batch. Cancellation joins all workers and
+preserves the earliest meaningful failure.
 
-### Mutation publication
+Accept only if eligible work waits during reduction and the experiment improves
+end-to-end throughput without growing engine queues unboundedly. This cannot
+remove sequential apply cost or safely parallelize shared metadata. Do not
+predict a 33% gain from the reduce bucket: ingestion already overlaps some of it.
 
-Sort mutations by key for deterministic requests and tests. Use the existing `writeTransactionBatches` helper to respect advertised per-RPC item and message limits while retaining one transaction. Commit with deferred durability only under the existing destructive fresh-import precondition.
+### 3. Reduce Proven Per-Batch Overhead
 
-A server-side transaction may span several mutation RPCs, so client RPC limits do not by themselves bound transaction memory or lifetime. The client therefore applies stricter batch admission limits before `Begin`.
+- **Vaultic:** `uniqueLegacyImportIDs` is recomputed across hints/planning and
+  twice after fresh ingestion (filter updates and metrics). Reuse immutable
+  prepared IDs/canonical representations when safe; preserve byte-identical
+  hashes, duplicate merges, fresh-read retries, and memory bounds. Measure
+  allocation/CPU savings before changing the filter or hashing algorithm.
+- **Reducer RPCs:** if round trips dominate, test combined known-key reads or
+  bounded contiguous-receipt reduction. Preserve per-physical-batch aggregate
+  sequence increments, advisory history order, receipt idempotence, and checkpoint
+  atomicity. Fewer transactions are not automatically equivalent semantics.
+- **Service locks:** if transaction-map contention is material, narrow
+  `Storage::begin`'s write-lock lifetime using reserved admission slots; preserve
+  expiry, maximum active transactions, and drain/demotion races. Do not cache or
+  remove fencing checks without an equivalent ownership proof.
 
-## Adaptive batch limits
+### 4. Optimize Imported Libraries Where Justified
 
-Add explicit import controls:
+The existing SlateDB fork is the preferred home for engine changes; retain a
+pinned revision and separate instrumentation, optimization, and dependency-bump
+commits. Propose upstreamable changes instead of duplicating an engine in VaulticDB.
+
+| Evidence needed | Targeted fork/library experiment | Required safety gate |
+|---|---|---|
+| Writer queue stays occupied; entry extraction dominates | Move sequence-independent validation/canonicalization outside `DbInner::write_batch`, or reuse prepared entries; keep sequence/time/TTL-dependent work ordered. | Identical validation/errors, transaction conflicts, merge/TTL/segment semantics and atomic visibility; no stale precomputation after retries. |
+| Transaction cloning/allocation dominates | Reduce copies in `DbTransaction::commit_with_options` and batch extraction using ownership transfer or immutable sharing. | Snapshot/read-your-write behavior, iterators, rollback/cancellation, and transaction lifetime tests; no aliasing mutations. |
+| Memtable insertion dominates the single writer | Benchmark a batch insertion path or a cache-efficient memtable alternative against the current skip-list. | MVCC sequence visibility, concurrent readers, sorted scans, retention, memory bounds, and replay equivalence. Do not parallelize commit visibility casually. |
+| WAL append/flush messages monopolize writer service | Measure current coalescing, then test bounded append grouping or separating expensive preparation from ordered append. | Per-transaction atomic WAL records, conflict/order semantics, bounded acknowledgement latency, crash replay, fencing, and durable-handle correctness. Deferred commit is not permission to lose required durability. |
+| Flush/compaction backlog or encode/encrypt/upload dominates | Tune existing flusher/compactor concurrency or optimize measured codec/object-store work; parallelize independent SST preparation where supported. | Bounded in-flight bytes, manifest publication ordering, authenticated-encryption integrity, recovery, and no foreground starvation. |
+
+Do not begin with parallel apply, new group commit, a second flush scheduler,
+or a backend replacement. First establish which writer substage is occupied
+and whether more submission concurrency improves its utilization. An engine
+with one ordered commit point can still benefit from parallel preparation;
+that is different from making transaction visibility concurrent.
+The pinned fork already exposes `l0_flush_parallelism` in its memtable uploader;
+measure existing settings and utilization before inventing another uploader pool.
+
+### 5. Keep Resource Defaults Conservative
+
+Retain two lanes and the prepared budget until repository-sized tests show
+otherwise. Do not generalize the tiny fixture's four-CPU result into production
+affinity changes. Compare 1/2/4/8 lanes and CPU limits independently with fixed
+input/encryption/backend; stop at a plateau or rising latency/backlog. Test cache
+and RAM after observing misses or byte-budget/backpressure stalls. More unflushed
+RAM absorbs bursts but cannot raise steady-state disk or sequential-writer
+capacity, and may worsen shutdown/recovery. Never trade fencing, isolation,
+encryption, or durability for benchmark speed.
+
+## Phased Execution Plan
+
+This is the next implementation sequence, not a claim that the work is complete.
+Use P0-P7 to distinguish it from the already implemented Stages 1-3. All phases
+start pending. P0-P3 establish evidence; P4-P6 are conditional experiments, not
+a checklist of optimizations that must all ship. P7 validates the accepted result.
+
+### Execution Contract
+
+- Execute one phase, or one explicitly named substep, per coding session. Read
+  the current worktree and relevant tests first; preserve unrelated edits.
+- Before editing, state the local hypothesis, owning function, smallest change,
+  and a check that can disprove it. Run that check immediately after the edit;
+  repair the same slice before expanding scope.
+- Reuse neighboring tests, telemetry helpers, and benchmarks. Keep normal backup,
+  non-fresh import, schema/receipt formats, durability, and defaults unchanged
+  unless a phase explicitly requires a reviewed change.
+- Do not stop/reset/activate a live repository, overwrite its binaries, or run
+  destructive experiments without explicit authorization. Use isolated candidate
+  directories, sockets, and artifact prefixes. Never record credentials.
+- For dependency work, use an owned checkout of the pinned fork, not Cargo's
+  shared checkout cache. Keep instrumentation, optimization, and dependency-pin
+  changes independently reviewable; do not commit or publish without authorization.
+- A failing correctness check blocks promotion. A performance loss or ambiguous
+  result blocks default changes; retain the baseline and record the finding.
+  Roll back only the experiment's own changes, never unrelated work.
+
+### P0. Freeze the Reproduction Contract
+
+**Prerequisite:** current committed revisions and existing import/daemon fixtures.
+Inspect `BenchmarkImportStage3Daemon`, source callback ordering, and run settings.
+Record input identity/order, encryption, storage/WAL/cache settings, resource
+limits, candidate reset policy, and completion criteria. The one-index fixture
+is sufficient for smoke tests, not repository-scale acceptance.
+
+For comparative large runs, first add the smallest test-only deterministic
+source/selection adapter to an existing harness if one is missing. Verify the
+same ordered index/pack manifest and selected counts across repeated traversal;
+do not use decode-completion order or record budget alone as input identity.
+**Exit:** reproducible isolated baseline command, input digest, and safety scope.
+If representative input is unavailable, report that blocker rather than infer
+large-repository gains from the small fixture.
+
+### P1. Complete Vaultic Attribution
+
+**Prerequisite:** P0. Touch the importer scheduler/metrics and Go `SchemaStore`
+ingest/reduce metrics only. First add phase/operation counters and bounded
+histograms; then add tests. Measure the gaps listed in recommendation 1, especially
+begin/receipt reads, reducer suboperations, and completion-to-receive latency.
+Choose a concurrency-safe way to observe eligible-ready time during reduction
+without changing admission behavior or treating occasional queue samples as a
+time-weighted measurement.
+
+**Check:** `go test -race ./internal/index/legacyimport ./cmd/vaultic/indexcmd
+-run 'Stage3|SchedulerTelemetry|ImportStats' -count=1` and focused daemon metric
+tests. Cover timer accounting, snapshot independence, concurrent reporting,
+failure/cancellation, and reporter shutdown. **Exit:** documented timer scopes,
+unchanged functional results, and measured instrumentation overhead on P0.
+
+### P2. Complete VaulticDB and Engine Attribution
+
+**Prerequisite:** P0; align operation names with P1. Split this into P2a service
+admission/fencing/transaction timers, P2b fork queue/apply/backpressure timers,
+and P2c SST/compaction/finalization counters. Validate each substep before the next.
+Reuse engine statistics and expose bounded snapshots through an existing
+diagnostic path; avoid a new RPC/protocol unless existing paths are insufficient.
+
+**Check:** discover and run the pinned fork's relevant transaction, flush,
+backpressure, and fencing tests. Add focused tests proving queue wait is distinct
+from service time, failed attempts are counted, deferred durability is not counted
+as an explicit durable wait, and instrumentation creates no await-under-lock or
+blocking log path. Build optimized symbols and run the Go real-daemon smoke fixture
+with `VAULTICDB_TEST_BINARY` pointing to that exact binary.
+**Exit:** named client/server/engine boundaries and matching build IDs; no
+behavioral changes or unbounded metric cardinality.
+
+### P3. Measure and Select One Experiment
+
+**Prerequisite:** P0-P2. Run identical isolated input at least three times,
+including a candidate large enough to flush/compact. Capture unprofiled throughput
+separately from short profiles. Report queue occupancy, service/wait distributions,
+eligible work during reduction, CPU/RSS, file-output counters, and finalization.
+
+**Decision:** choose P4 if eligible work is blocked by synchronous reduction;
+choose one P5 substep if local planning, reducer RPCs, or service locks dominate;
+choose one P6 substep if the engine/output path is demonstrably limiting. Multiple
+causes may exist, but change one at a time and rerun P3 after each accepted change.
+**Exit:** a cited artifact and falsifiable expected improvement for the selected
+experiment. If attribution is inconclusive, return to the missing P1/P2 timer;
+do not proceed by increasing lanes, memory, or disabling safety checks.
+
+### P4. Decouple Ordered Reduction
+
+**Prerequisite:** P3 evidence of eligible work waiting during reduction. Start
+in `importPacksStage3` and its existing tests. P4a adds a deterministic blocked-
+reducer test proving the current refill gap. P4b introduces one bounded reducer
+worker and coordinator-owned acknowledgement processing, then reruns that test.
+P4c covers cancellation/failure/limits before any performance run.
+
+**Checks:** prove independent ingests can refill while reduction is blocked;
+overlapping keys cannot overtake; checkpoints, counters, and dependency/byte
+release occur only after the correct reduction acknowledgement. Exercise `A,
+A+B, B`, delayed earliest ingest, adaptive child receipts, failed reducer, a full
+handoff channel, and cancellation with both worker types active. Run the complete
+legacyimport suite under `-race` and real-daemon equivalence/handoff tests.
+**Exit:** bounded worker lifecycle and identical ordered metadata, followed by
+P3 comparison. Stop if only backlog grows or the engine bottleneck is unchanged.
+
+### P5. Remove One Measured Client/RPC Cost
+
+**Prerequisite:** a specific P3 profile/timer. Select only one: P5a immutable
+ID/canonical-data reuse in Go, P5b reducer read/transaction amortization, or P5c
+`Storage::begin` lock-scope reduction. Follow recommendation 3's safety constraints.
+Do not combine this phase with P4 or change a public format for convenience.
+
+**Checks:** P5a compares exact hashes/mutations and allocation counts, including
+duplicates/retries; P5b compares aggregate sequences/history/checkpoints and
+ambiguous-reply replay; P5c tests expiry, admission bounds, drain/demotion, and
+concurrent begin/cancel. **Exit:** the selected cost falls without correctness or
+memory regression; rerun P3 to establish whether total throughput improves.
+
+### P6. Optimize One Fork/Library Boundary
+
+**Prerequisite:** P3 evidence identifying a library function and its queue/service
+or output limit. Select one row from recommendation 4. P6a adds a deterministic
+engine-level reproducer and baseline benchmark. P6b makes the smallest ownership,
+preparation, batching, or concurrency change and runs the row's safety tests.
+P6c pins the tested revision in VaulticDB and reruns real-daemon integration.
+
+Never infer that the single-writer design must be removed. Retain ordered conflict
+checking, sequence assignment, atomic visibility, and WAL/manifest guarantees.
+**Exit:** reproducible fork commit/diff and dependency pin, engine regression
+results, and P3 end-to-end evidence. A faster engine microbenchmark with slower
+encrypted import or worse finalization is not an accepted optimization.
+
+### P7. Integrate and Establish Acceptance
+
+**Prerequisite:** one or more independently validated experiments, or a documented
+decision to keep the baseline. Run affected Go package suites and race checks,
+real-daemon crash/replay/handoff tests, and changed Rust/fork suites. Account for
+known unrelated failures explicitly; never label a failing broad suite as passed.
+
+Repeat the frozen Stage 2/Stage 3 comparison and the full uncapped import through
+the required close/reopen/validation path using authorized isolated resources.
+Tune one resource dimension at a time only if P3 warrants it. Promote a default
+only after the acceptance criteria below pass; otherwise retain the baseline or
+experimental opt-in. **Exit:** updated evidence table, exact commands/revisions,
+remaining limitations, and a clear completed/partial/failed run status.
+
+### Session Handoff
+
+End every execution session with this compact record in the phase's work notes
+or change description; update status here only when the phase actually advances:
 
 ```text
---packs-per-transaction N
---import-transaction-bytes BYTES
---prepared-import-bytes BYTES
---import-batch-timeout DURATION
+Phase/substep: Pn / pending|in-progress|blocked|validated|rejected
+Baseline and worktree: revisions, relevant pre-existing changes
+Hypothesis and scope: limiting function, expected measurable effect
+Changes: files/symbols, preserved invariants
+Validation: exact commands, results, artifact paths, input/build IDs
+Decision: accept/reject/inconclusive; unmet gate or next bounded substep
+Live resources: owned processes, sockets/candidates; untouched user resources
 ```
 
-Zero selects derived defaults. Start conservatively with:
+## Validation and Profiling
 
-- at most 8 packs;
-- at most 8,000 estimated unique mutations;
-- at most 8 MiB of estimated encoded keys and values;
-- at most 256 MiB of queued prepared pack data.
+Freeze ordered source indexes **and pack selection**, not just a record budget:
+parallel decode completion can select different prefixes. Repeat at least three
+times; report spread, warm/cold cache, candidate age, encryption, WAL/cache/SST
+settings, resources, and exact revisions. Include unique-heavy, duplicate-heavy,
+large-pack, and dependency-chain inputs at sizes crossing flush/compaction
+thresholds (20M, 100M, projected/real 400M IDs).
 
-Whichever limit is reached first closes the batch. An oversized multi-pack plan returns `ErrLegacyImportBatchTooLarge` and is split adaptively. A single pack is indivisible and may exceed these planning targets, matching Stage 2: keep its catalog and receipt atomic in one transaction, using multiple bounded mutation RPCs as necessary. Per-RPC message/item limits, record validation, and transaction timeouts still apply; this is not unlimited admission of multiple packs. Report oversized single-pack count and maximum actual transaction bytes/mutations separately. The estimate includes protobuf framing headroom, receipt/update overhead, pack records, aggregates, history, debt, placement, and checkpoint mutations. Record actual values and tighten the estimator if an RPC must split unexpectedly often.
+Required tests cover Stage 2 equivalence, aggregate/history sequences, duplicate
+locations, stale hints, out-of-order completion, dependency inversion, oversized
+packs, adaptive splitting, RPC limits, cancellation, expiry, every mid-index
+resume boundary, and bounded backpressure. Inject crashes/ambiguous replies around
+ingest, receipt, reduction, checkpoint, partial cleanup, marker, handoff, and
+activation. Existing cleanup replay and successful handoff tests are not exhaustive
+crash proof. Independently recompute aggregates and verify no unresolved recovery
+state before claiming completion. Run race tests for coordinator/worker changes
+and the fork's transaction/replay/flush/fencing tests for engine changes.
 
-Do not reinterpret the existing `--batch-size`; it limits mutations per daemon transaction RPC. The new pack and byte controls bound the larger logical transaction.
+Stage 1-2 acceptance retains >=4x commit reduction, >=2x pack throughput on the
+20M fixture, stable filter bounds through 400M IDs, and unchanged ordinary
+publication. Stage 3 requires >=20% sustained publication improvement over
+Stage 2 on identical repository-scale input, bounded pressure, and no end-to-end
+regression. A complete uncapped run through required finalization is still
+necessary; Stage 2 remains the fallback.
 
-## Scalable fresh-import membership filter
+Build optimized symbols separately from live executables:
 
-The current 64 MiB filter uses four bit positions per ID. For $m$ bits, $k=4$ probes, and $n$ inserted IDs, its approximate false-positive probability is:
-
-$$
-p = \left(1-e^{-kn/m}\right)^k
-$$
-
-At 20 million IDs the false-positive rate is negligible, but it is approximately 4% at 80 million, 8% at 100 million, 36% at 200 million, and 81% at 400 million. A false positive is safe but forces an unnecessary SlateDB lookup; at repository scale the fixed filter therefore recreates the database-size-dependent read path it was intended to avoid.
-
-Replace it with a scalable Bloom filter:
-
-- allocate immutable-capacity layers as the population grows;
-- size each layer for a declared capacity and false-positive target;
-- use the near-optimal probe count for that layer rather than fixing four probes;
-- query all layers and insert into the newest layer;
-- allocate the next layer before the active layer exceeds its design capacity;
-- expose layer count, bytes, inserted IDs, estimated false-positive rate, and lookup outcomes;
-- enforce a memory ceiling derived from the fresh-import memory profile;
-- if the ceiling is reached, degrade explicitly to database lookups without violating correctness.
-
-Target an aggregate false-positive probability no worse than 0.1% through the supported import size. With geometric capacities and successively tighter layer probabilities, covering 400 million IDs allocates approximately 1.31 GiB and remains within the 1.5 GiB fresh-import ceiling. Tests must use deterministic hashes and tiny layers to exercise rollover and saturation cheaply.
-
-## Checkpoints, retries, and shutdown
-
-For an index that fits in one transaction, commit all packs and its checkpoint together. For an index split across transactions, commit the checkpoint only in the final transaction. Root receipt IDs derive from canonical batch content (high 48 bits) with the low 16 bits reserved for deterministic split paths, so partial resume and later full replay avoid ordinal collisions while preserving deterministic child IDs. If the process stops earlier, the next resumable import replays that index; existing pack and blob merge rules make prior batches idempotent.
-
-Only update process-local progress counters after a successful batch commit. Return the first input position associated with a planning or commit failure so reporting remains actionable. An aborted transaction retries the entire batch from fresh reads. A validation, timeout, cancellation, or permanent storage error aborts the batch and prevents its filter updates.
-
-The existing successful-import marker remains the sole authorization for memory-WAL handoff. Batching must not make a work-budget stop, partial index, finding, or failed checkpoint appear complete. When activation is requested, validate the complete candidate, write the marker, cleanly stop the temporary daemon so the memory WAL is handed off, reopen the candidate on the inherited persistent local WAL, and only then publish SlateDB authority. A shutdown, handoff, or reopen failure must leave legacy metadata authoritative.
-
-## Observability
-
-Implement the counters locally in this phase and expose them through the Phase 33 monitoring schema when that phase lands:
-
-- packs, blobs, unique keys, encoded bytes, and source indexes per batch;
-- preparation queue depth and bytes;
-- preparation time, gate wait, planning reads, mutation RPC time, commit time, and total batch latency;
-- transaction commits, mutation RPCs, retries, conflicts, and replanned bytes;
-- definitely-absent, possibly-present, found, and false-positive-equivalent lookups;
-- membership-filter layers, bytes, occupancy, inserts, and estimated false-positive rate;
-- SST flush/compaction backpressure observed during import;
-- current limiting reason: preparation, transaction item limit, transaction byte limit, publication, WAL, flush, compaction, backend, or checkpoint.
-
-Import progress must distinguish records selected, prepared, committed, skipped as duplicate, and awaiting checkpoint publication. Paths, pack IDs, blob IDs, and raw backend errors remain excluded from metric labels.
-
-## Phased implementation
-
-### Stage 1: Measurement and scalable lookup avoidance
-
-1. Add import batch/transaction timing, lookup outcome, queue, and filter occupancy counters.
-2. Replace the fixed 64 MiB membership filter with the bounded scalable filter.
-3. Preserve one-pack transactions and establish before/after results with identical fixtures.
-
-This stage isolates the database-growth component and can ship independently.
-
-### Stage 2: Serial multi-pack transactions
-
-1. Add `ImportLegacyPacks` and retain `ImportLegacyPack` as a one-item wrapper.
-2. Implement batch coalescing, unique existing-state reads, one aggregate update, one history allocation, and post-commit filter publication.
-3. Refactor legacy import into bounded preparation and writer stages.
-4. Add atomic final-index checkpoint mutation and adaptive pack/mutation/byte limits.
-5. Benchmark pack counts of 1, 4, 8, and 16, then choose the smallest default that captures most of the gain.
-
-This is the completed baseline for Phase 32. The implemented Stage 3 extension
-has separate performance acceptance gates below.
-
-### Stage 3: Write-side latency hiding
-
-#### Evidence and measurement gate
-
-The post-implementation clean 20-million-record run took 276.893 seconds, with
-271.334 seconds inside publication, 87.520 seconds in planning, 31.621 seconds
-in mutation RPCs, and 91.925 seconds in commit. It completed 4,616 transactions
-at approximately 72,230 blobs/s. Publication therefore occupies about 98% of
-import time. Planning includes VaulticDB reads and record encoding, not reading
-the initial legacy indexes. The approximately 60.3 seconds outside the three
-named publication sub-timers must be attributed before choosing optimizations;
-they include transaction begin, validation, membership hints, and filter updates.
-
-These measurements establish serialized publication as the bottleneck, but do
-not establish NFS as its dominant cause. Memory-WAL deferred commit time must
-not be labeled NFS or durable-flush time without server-side evidence. Low CPU
-utilization likewise does not distinguish RPC waiting, locks, storage waits,
-allocation, or memory-access costs. No backend replacement or latency reduction
-is a prerequisite for this work.
-
-The short eight-versus-sixteen-pack experiment reduced transactions from 475 to
-341 and elapsed time from 24.993 to 24.262 seconds, but processed 2,664 versus
-2,491 packs. It is suggestive, not a controlled proof of a 2.9% tuning gain.
-Repeat tuning with a frozen selected-input prefix and repeated runs before
-changing defaults. Larger batches alone have not demonstrated a large gain.
-
-Add non-overlapping client timers for admission, validation/filter work, begin,
-planning, mutation submission, commit acknowledgement, and post-commit work.
-Split planner reads by pack/blob, aggregate, history, and debt/placement category,
-separating key counts from RPC counts and RPC wait from local encoding work.
-Correlate daemon admission, lock/conflict waits, transaction apply, WAL waits,
-flush/compaction stalls, and object-store request latency with these timers.
-Report overlapping asynchronous durations separately from wall-time totals.
-
-#### Live-run observations: 2026-09-16
-
-The full source contains 10,019 legacy index files, approximately 19.25 GB
-(18 GiB). The run used 32 preparers, `local.connections=32`, two publication
-lanes, eight packs per transaction, 8 MiB transaction and 256 MiB prepared-data
-targets, snapshots disabled, memory WAL with a 500 ms flush interval, a 16 GiB
-unflushed limit, and 256 MiB L0 SSTs. The configured candidate path was
-`/volume2/NASDA2/rustic/db`; shared read-cache tiers were disabled. Record the
-resolved storage configuration, not just environment variables, in future runs.
-
-The binary was built from `ef5af31bd` with the fixes subsequently committed as
-`902b94389`; its embedded version still reported the former revision as dirty.
-The following is an intermediate sample at 09:02:09 UTC, not a completion result:
-
-| Measurement | Observed result |
-|---|---:|
-| Completed source indexes | 656 / 10,019 |
-| Committed packs / blobs | 34,923 / 28,061,467 |
-| Wall time | 8m51s |
-| Cumulative throughput | 65.8 packs/s; 52,880 blobs/s |
-| Preparation aggregate time | 31.532s |
-| Publication aggregate-lane time | 9m18.699s |
-| Checkpoint batch time | 9.282s |
-| Prepared queue at sample | empty; peak 353 packs / 13,444,704 bytes |
-| Combined CPU over a separate five-second sample | 1.64 cores |
-
-Publication and preparation durations accumulate overlapping work; checkpoint
-time is not an additional disjoint wall-time bucket. Publication exceeding wall
-time is expected with multiple lanes and cannot establish its wall-time share.
-An empty queue at a source boundary does not establish preparation starvation.
-The early Stage 3 rate cannot be compared directly with the 72,230 blobs/s
-Stage 2 budgeted result: source order, selected records, candidate age, and total
-work differ. No Stage 3 speedup or completed-import ETA is established yet.
-
-Live profiling found:
-
-- Approximately 65% of sampled CPU cycles belonged to daemon worker/encryption
-    threads and 35% to Vaultic. Hot work included SlateDB skip-list traversal,
-    memory copies, SST encoding, local reads, and encryption. This is CPU-time
-    attribution, not off-CPU wait attribution or proof of a single dominant function.
-- Interval NFS samples showed essentially no data reads or writes, apart from
-    small log writes, despite continuing progress. The first `nfsiostat` report
-    is a cumulative mount average, not current throughput; the earlier inference
-    of a 478 KB/s source-read bottleneck was invalid.
-- Daemon process I/O and the configured candidate directory size did not agree
-    with a simple NFS-only storage interpretation. Resolve actual SST/WAL/cache
-    paths, mounts, cached reads, and object-store request counters before assigning
-    those bytes or delays to NFS. Short file-open tracing did not resolve this.
-- Modest CPU/RSS and a small prepared queue point to limited useful concurrency,
-    not a reason by themselves to increase worker counts, memory limits, or caches.
-
-The run exposed two correctness failures before useful measurement was possible:
-
-1. Dependency inversion: with batches requesting `A`, `A+B`, and `B`, bypassing
-     the middle waiter could leave a later receipt holding `B` while ordered
-     reduction waited for the middle batch. Admission now carries forward all
-     blocked dependencies, including transitive waiters. Unrelated work may still
-     proceed; later work must never reserve a dependency needed by an earlier waiter.
-2. A pack with 10,000 blobs produced 10,002 mutations, exceeding the 8,000-mutation
-     planning target. Restoring the indivisible-pack exception avoids rejection
-     while retaining transaction atomicity and bounded RPC submission.
-
-Keep both regressions in the performance fixture. A prior daemon SIGHUP was a
-launch/lifecycle failure, not evidence of a storage bottleneck. Preserve failed
-run diagnostics separately from successful benchmark results.
-
-Raw logs use `/volume2/NASDA2/rustic/log/index-import-stage3-full` with `.log`,
-`.console.log`, `.run`, `.time`, and `.exit` suffixes. `legacy-import-live.log`
-points to the application log; `.cpu-profile.txt` contains the CPU report.
-Check run timestamps and exit status together: an empty or stale timing file
-must not be presented as the current run's completed measurement.
-
-The run was intentionally stopped with SIGINT before controlled profiling so it
-would not contend with the experiment. Its final logged boundary was 2,025 of
-10,019 indexes, 107,076 packs, and 85,864,124 blobs after 30m32s; the exit status
-is 130. This remains an incomplete diagnostic run, not an end-to-end result.
-
-#### Implemented measurement and controlled experiment
-
-The importer now reports mutually exclusive coordinator phase totals, a
-time-weighted active-lane histogram, ready and unreduced queue depths, retained
-prepared bytes, periodic Go heap/GC state independent of progress callbacks,
-and detailed receipt-cleanup scan/begin/write/commit totals and counts. Command
-lifecycle logs separately include close, successful-marker/handoff/reopen, and
-total wall time. These coordinator states classify what the scheduler was doing
-when it blocked; they are not daemon-side causal wait attribution.
-
-`--import-defer-cleanup` changes receipt deletion to `CommitDeferred` only when
-all three guards hold: destructive fresh reset, memory WAL, and at least two
-publication lanes. Ingest and reduction correctness remains receipt-backed;
-the existing durable successful-import marker is still the only handoff
-authorization. Tests cover bounded deletion, idempotent replay, fresh-import
-rejection, absence of premature authorization, and successful persistent-WAL
-handoff/reopen after deferred deletion.
-
-`make profile` writes optimized binaries to `bin/profile/<platform>` without
-overwriting production binaries. Go is built with the existing `profile` tag so
-DWARF and the symbol table are retained; Rust release builds already use
-`debug=1` and `strip=false`. Verify both artifacts before observing them:
-
-```
-readelf -S bin/profile/linux-amd64/vaultic \
-    bin/profile/linux-amd64/vaulticdb | rg 'debug_info|symtab'
-perf record -F 499 --call-graph dwarf -o run.perf.data -- <command>
+```sh
+make profile
+readelf -S bin/profile/linux-amd64/vaultic bin/profile/linux-amd64/vaulticdb \
+  | rg 'debug_info|symtab'
+perf record -F 99 --call-graph dwarf -o run.perf.data -- <command>
 perf report --stdio -i run.perf.data
 ```
 
-A deterministic real-daemon fixture imported the same 128 packs and 65,536
-blobs for every variant, completed the memory-WAL handoff, reopened the local
-persistent WAL, and verified the source checkpoint. Each cell below is the mean
-of three cold temporary candidates; standard deviation is for total wall time.
+Go's `profile` tag preserves symbols and enables profiling controls; Rust release
+uses `debug=1`, `strip=false`. Verify build IDs and symbolize both processes.
+Keep pprof on loopback. Use short captures and offline reporting; do not let
+DWARF reporting compete with the import. A completed 499 Hz synthetic capture
+had 1,897 samples and zero loss; it is separate from the unresolved full-run
+report. CPU profiles need RPC/queue and off-CPU data for wall-time attribution.
 
-| Available CPUs | Lanes / cleanup | Wall time | Blobs/s | Cleanup | Finalize | Wall-time SD |
-|---:|---|---:|---:|---:|---:|---:|
-| 4 | 1 / ordinary Stage 2 | 1,149.8 ms | 56,999 | n/a | 597.1 ms | 1.6 ms |
-| 4 | 2 / ordinary | 1,146.5 ms | 57,161 | 122.5 ms | 636.1 ms | 1.1 ms |
-| 4 | 2 / deferred | 673.5 ms | 97,301 | 2.0 ms | 272.7 ms | 0.7 ms |
-| 4 | 4 / deferred | 674.6 ms | 97,155 | 1.7 ms | 337.6 ms | 1.7 ms |
-| 4 | 8 / deferred | 676.0 ms | 96,952 | 1.9 ms | 318.2 ms | 1.4 ms |
-| 32 | 1 / ordinary Stage 2 | 1,172.3 ms | 55,904 | n/a | 547.3 ms | 4.8 ms |
-| 32 | 2 / ordinary | 1,175.7 ms | 55,748 | 93.4 ms | 666.2 ms | 11.9 ms |
-| 32 | 2 / deferred | 691.8 ms | 94,744 | 2.4 ms | 260.5 ms | 7.0 ms |
-| 32 | 4 / deferred | 695.5 ms | 94,250 | 2.4 ms | 372.9 ms | 9.1 ms |
-| 32 | 8 / deferred | 696.9 ms | 94,046 | 2.8 ms | 356.6 ms | 2.9 ms |
+Artifacts under `/volume2/NASDA2/rustic/log/`:
 
-On this fixture, guarded cleanup deferral improved two-lane end-to-end
-throughput by 70.2%. Four and eight lanes did not improve on two, and exposing
-32 CPUs was 2.6% slower than restricting the run to four. The host affinity is
-CPUs 0-31; no ancestor CPU quota, throttling, `memory.max`, or `memory.high` was
-observed. The interrupted production run used about 1.4 GiB RSS in Vaultic and
-9.8 GiB in VaulticDB while approximately 273 GiB remained available. Its peak
-prepared queue was only 13.4 MiB against a 256 MiB budget. More preparers,
-publication lanes, prepared memory, or a larger Go memory limit therefore have
-no supporting evidence. Retain two lanes, and consider reducing CPU affinity
-for operational isolation rather than increasing it.
+- `index-import-stage3-full.*`: interrupted ordinary-cleanup run, exit 130.
+- `index-import-stage3-full-deferred.*`: retry started 09:47:07 UTC at
+  `8bc9cd7cb`; `.profiles/go-cpu.pb.gz`, `.profiles/go-cpu.txt`, and
+  `.profiles/steady.perf.data` hold captured evidence.
+- `phase32-scaling-cpu4.txt`, `phase32-scaling-cpu32.txt`, and
+  `phase32-scaling-lanes2-deferred.perf.*`: controlled fixture results. The
+  separately labeled contended pilot is excluded from the table above.
 
-The corresponding 499 Hz DWARF profile captured 1,897 samples with zero loss
-and named frames from both Go and Rust. Go CPU was distributed across SHA-256
-batch/receipt identity, sorting/comparison, memory movement, and the fresh-ID
-filter. Rust CPU included SlateDB skip-list/memtable traversal, bytes clone/drop,
-memory copy/compare, allocation, and block encoding. No single CPU hotspot
-explains wall time. Finalization remained 38-55% of the deferred fixture, so the
-next repository-scale run must test whether deferred cleanup merely moves work
-to flush/handoff after crossing L0 and compaction thresholds.
-
-#### Throughput investigation and decision plan
-
-The strongest current hypothesis is a serial publication/control path with
-insufficient overlap. Three implementation points require separate attribution:
-
-- [Per-index cleanup](../../../internal/index/daemon/schema_store_import_split.go)
-    scans receipts and deletes them with ordinary `Commit`, unlike deferred ingest
-    and reduction. The daemon's
-    [commit path](../../../vaulticdb/src/storage.rs) then awaits durability. This is
-    a real barrier before the next source index, but its measured cost is unknown.
-    A 500 ms flush interval is not proof that every cleanup waits 500 ms, nor that
-    memory-WAL acknowledgement requires an NFS flush.
-- The [Stage 3 scheduler](../../../internal/index/legacyimport/import_stage3.go)
-    performs reduction synchronously. Existing ingests can continue, but it cannot
-    admit replacements while blocked in reduction. Dependency retention through
-    ordered reduction can further reduce effective lane occupancy.
-- [Index callbacks](../../../internal/repository/index/index_parallel.go) are
-    serialized although fetch/decode is parallel. Each callback drains its pack
-    pipeline and completes receipt cleanup before the next callback proceeds.
-    More index download workers cannot remove this publication boundary.
-
-Bounded periodic telemetry is now implemented. Collect the following in the
-next repository-scale run before changing additional defaults:
-
-| Question | Required measurement |
-|---|---|
-| Where does wall time go? | Mutually exclusive coordinator states: source/selection, waiting for preparation, dependency-blocked admission, ingest-result wait, reduction, cleanup, and finalization; keep overlapping worker timers separate. |
-| Is cleanup the barrier? | Per-index receipt validation scan, delete scan, begin, mutation RPC, commit acknowledgement, daemon durability wait, cleanup pages/bytes, and total cleanup wall time. |
-| Are lanes actually occupied? | Time-weighted active-ingest histogram for 0..N lanes, ready queue depth/bytes, completed-but-unreduced bytes, oldest pending age, dependency-blocked time, and reducer-busy time. Peak lanes alone is insufficient. |
-| Which transaction work costs most? | Separate ingest/reduce/cleanup counts and p50/p95/p99 begin, planning reads, local encoding, mutation submission, commit/apply, and post-commit times, including retries. |
-| Is the engine or backend stalling? | Daemon admission/lock waits, WAL enqueue/flush/durable sequence lag, memtable/L0 pressure, flush/compaction bytes, object-store operation latency and concurrency, cache hits/misses, and actual SST/WAL/cache destinations. |
-| Are resources restricted? | Interval per-process/per-thread CPU, off-CPU stacks or Go execution trace, RSS and heap/GC data, effective CPU affinity and ancestor cgroup quota/throttle deltas, device I/O and interval NFS statistics. |
-
-Correlate bounded traces by run, source ordinal, logical batch, physical receipt,
-and transaction operation; do not expose raw repository identities as metric
-labels. Report liveness periodically even when no index or batch completes.
-Instrument cleanup and final handoff explicitly: the existing publication and
-checkpoint timers do not cover all source-completion/finalization work.
-
-Prioritize experiments according to those measurements:
-
-1. **Cleanup durability and frequency.** If cleanup contributes materially to
-     wall time, test deferred cleanup only for the fenced destructive memory-WAL
-     rebuild, or bounded cleanup amortized across sources. Preserve ordinary
-     durability for non-fresh/persistent operation. Crash-test a checkpoint whose
-     receipt deletions are lost, partial deletion, replay, and ambiguous commit;
-     retain bounded recovery state, final durable handoff, reopen validation, and
-     the prohibition on activating an incomplete candidate. Do not merely remove
-     durability waits or postpone all cleanup until the end.
-2. **Reducer scheduling.** If ready work waits while the coordinator reduces,
-     test a dedicated ordered reducer with bounded handoff so independent ingestion
-     can refill lanes. Preserve dependency fairness, one owner for shared metadata,
-     ordered checkpoints, cancellation, and capacity for the earliest unresolved
-     batch. Do not release overlapping-key dependencies earlier without a proof
-     that filter hints and old/new receipt states remain correct.
-3. **Lane and batch tuning.** Only when independent ready work exists, compare
-     one, two, four, and eight lanes. Tune pack/item/byte targets separately if fixed
-     transaction overhead dominates. Stop increasing concurrency when conflicts,
-     unreduced bytes, p99 latency, or compaction pressure rise without useful gain.
-     Extra preparers or memory are justified only by measured preparation starvation
-     or byte-budget blocking, respectively.
-4. **Engine/cache/backend changes.** Pursue these only if attributed read,
-     allocation/GC, WAL, flush, or compaction costs dominate. CPU hotspot percentages
-     alone do not justify replacing the backend or adding a second commit scheduler.
-
-Freeze an ordered manifest of source indexes and pack selections, not only a
-record-count budget: parallel decode completion may otherwise change the selected
-prefix. Compare identical input and batch semantics, snapshot policy, resolved
-WAL/cache/backend settings, encryption, and candidate starting state. Change one
-variable at a time and repeat at least three times, reporting spread and warm/cold
-cache conditions. Include duplicate-heavy, large-pack, and dependency-chain cases,
-plus runs large enough to cross SST flush and compaction thresholds.
-
-Choose an optimization only when it reduces an attributed wall-time component
-and improves repeated end-to-end blobs/s without violating correctness, memory,
-or tail-latency bounds. Report startup/reset, import, cleanup, successful marker,
-shutdown/handoff, reopen, validation, and requested activation separately and in
-the total. A hot-path gain that moves work into finalization is not a total
-throughput gain. Keep the existing 20% Stage 3 acceptance target and require a
-complete uncapped run before claiming repository-scale completion or durability.
-
-#### Ownership and concurrency model
-
-The VaulticDB daemon owns bounded admission, transaction execution, completion
-receipts, and any supported commit coalescing. Vaultic's `SchemaStore` and legacy
-import writer own deterministic input selection, batch identity, and submission
-through a capability-negotiated bulk-import interface. The existing serial API
-remains the compatibility path. Inspect daemon and SlateDB scheduling first:
-if independent transactions are already concurrent, reuse that capability;
-change the engine only where measured serialization requires it.
-
-Introduce a fresh-candidate-only bulk session fenced against other writers,
-identified by candidate generation and stable ordered batch IDs. The session
-admits several bounded transactions without changing normal `PublishPack` or
-resumable non-fresh import semantics. Candidate activation remains forbidden
-throughout ingestion and reduction. Merely increasing `legacyImportGate`
-capacity is not an implementation of this design.
-
-Use the following logical pipeline:
-
-1. Admit ordered selected batches into a bounded daemon queue.
-2. Plan and write independent pack/blob records concurrently, atomically with
-     private reduction inputs and a batch completion receipt.
-3. Reduce completed batches in selected-input order into canonical aggregate,
-     history, debt, and placement state where those keys are shared.
-4. Advance index checkpoints only behind the contiguous reduced prefix.
-5. Validate the completed candidate before the existing handoff and activation.
-
-Bound outstanding transactions, retained bytes, unreduced bytes, and distance
-ahead of the contiguous prefix independently. Start with two publication lanes;
-evaluate four and eight only while useful throughput improves without excessive
-tail latency, conflicts, or backend pressure. Keep preparation worker count
-independent. Backpressure must reserve capacity for the earliest unresolved
-batch and the reducer so later work cannot prevent forward progress.
-
-#### Shared keys, ordering, and replay
-
-Pack/blob transactions must not update canonical aggregate counters or the
-global history sequence. Write immutable per-batch reduction records under
-disjoint session/batch keys in the same transaction as their catalog changes
-and receipt. Define a versioned private namespace and validate its encoding;
-it must not become part of an activated repository's unresolved state.
-
-Duplicate blob and pack IDs still create cross-batch dependencies. Schedule
-overlapping read/write key sets in input order, allowing only independent sets
-to execute concurrently; include mutable debt and placement keys in dependency
-analysis. Never infer independence from pack IDs alone. Use bounded conflict
-retries with fresh reads as a correctness backstop. Acquire dependencies in a
-deterministic order and release them on every failure path. Fresh-filter hints
-must be taken after dependencies are satisfied and prior committed inserts are
-published; concurrent admission must not introduce stale definitely-absent hints.
-
-The ordered reducer allocates history sequences and applies aggregate deltas
-exactly once, atomically with its reduction watermark. Derive deltas from the
-actual pre/post states of successful catalog transactions, preserving Stage 2
-batch sequence semantics and advisory-history rules. Replay must neither append
-history twice nor double-count aggregates. A receipt resolves an ambiguous
-commit acknowledgement before resubmission. An identical batch ID with different
-content is rejected. Preallocating sequence ranges or reconstructing history is
-not a substitute unless equivalence with the existing history contract is proven.
-
-Canonical records may be ahead of canonical aggregates only inside the fenced,
-inactive candidate. Checkpoints and progress distinguish ingested, reduced, and
-checkpointed work. Publish an index checkpoint atomically with the reducer
-watermark only after every selected preceding batch and all of that index's
-required effects are complete. Out-of-order receipts cannot close a gap.
-
-On terminal error or cancellation, stop admission, cancel or settle in-flight
-transactions, resolve ambiguous outcomes, and report the earliest failing input
-position. Already admitted later batches may have committed privately, but must
-not advance the checkpoint past a failure. Persisted sessions replay receipts
-and reduction watermarks idempotently; memory-WAL sessions follow the existing
-destructive restart policy and must not claim crash-resumable durability.
-Work-budget selection occurs before concurrent admission so no batch can extend
-the selected prefix. Any partial run still forbids successful-import marking.
-
-#### Commit scheduling and durability
-
-Allow multiple independent submissions to overlap backend waits where the
-daemon and SlateDB support this. Evaluate group commit only if measured WAL or
-flush waits are substantial and the existing engine does not already coalesce
-them. Do not add a second flush scheduler without evidence. Grouping must retain
-per-transaction atomicity, conflict isolation, bounded acknowledgement latency,
-and the requested durability level. Deferred memory-WAL acknowledgement is not
-durable completion; a flush must never be added per transaction merely to enable
-grouping. Retain the existing successful-import marker, clean shutdown, persistent
-WAL reopen, validation, and authority-switch requirements.
-
-#### Delivery and acceptance
-
-Implement attribution first, then private receipt/reduction semantics with one
-lane, then bounded concurrency, and only then any justified engine scheduling
-change. The current CLI selects two lanes for fresh reset imports; that default
-is not evidence that the performance gate passed. Retain one-lane Stage 2 as
-the comparison/fallback and do not expand Stage 3 beyond fresh imports before
-all gates pass:
-
-- Compare canonical metadata and ordered history with Stage 2 using identical
-    batch boundaries, including duplicate-heavy and repeated-source fixtures.
-- Inject crashes and ambiguous acknowledgements before and after catalog commit,
-    receipt persistence, reduction, checkpoint, handoff, and activation; prove
-    exactly-once reduction and no activation of an incomplete candidate.
-- Exercise cross-batch duplicate keys, stale filter hints, out-of-order finishes,
-    reducer failure, transaction expiry, cancellation, and byte-limit exhaustion;
-    prove bounded memory, deterministic checkpoints, and no admission deadlock.
-- Recompute canonical aggregates independently before completion and verify all
-    receipts are reduced, all required checkpoints exist, and private recovery
-    state is finalized before writing the successful-import marker.
-- Benchmark one, two, four, and eight lanes on the same fixed input and unchanged
-    backend/WAL/cache configuration, including a candidate large enough to flush
-    and compact. Report repeated-run spread, conflicts, reducer backlog, resource
-    bounds, backend request concurrency, and p95/p99 acknowledgement latency.
-- Target at least 20% sustained publication-throughput improvement over Stage 2
-    on the fixed 20-million-record NFS fixture, with no correctness regression or
-    unbounded pressure. This is a proposed acceptance target, not a measured gain;
-    keep the extension opt-in if it is unmet and report the remaining limiter.
-
-## Tests
-
-- Compare one-pack and multi-pack imports byte-for-byte for pack, blob, placement, debt, aggregate, history, and checkpoint namespaces after normal, duplicate-heavy, and repeated-index fixtures.
-- Import the same pack from multiple source indexes in one batch and across batches; verify source provenance, physical-size handling, blob counts, payload totals, and aggregate deltas.
-- Import the same blob from multiple packs and repeated locations; verify canonical ordering, deduplication, and no lost location.
-- Inject transaction conflicts before and during commit; verify full replanning, bounded retry, no stale mutations, and no pre-commit membership inserts.
-- Inject cancellation and timeout during preparation, gate wait, reads, mutation batches, commit, and final checkpoint.
-- Split an index at every batch boundary, terminate after each committed batch, resume, and compare with an uninterrupted import.
-- Exercise one oversized pack, exact item/byte boundaries, estimator undercount, multiple mutation RPCs, and server transaction expiry.
-- Test scalable-filter rollover, target false-positive rate, memory ceiling, deterministic serialization-free startup, and correctness after forced fallback to database lookup.
-- Run race tests over preparers, ordered collection, progress reporting, filter publication, and cancellation.
-
-## Performance validation
-
-Use deterministic legacy-index fixtures with unique-heavy and duplicate-heavy distributions at 20 million, 100 million, and a projected or real 400 million IDs. Report, rather than infer:
-
-- packs and blobs per second by interval and cumulatively;
-- transaction commits and mutation RPCs per million blobs;
-- lookup count and found rate per million blobs;
-- filter false-positive estimate and memory;
-- CPU time by `vaultic` and `vaulticdb`;
-- peak prepared bytes and transaction bytes;
-- SST bytes read/written, compaction bytes, and backend latency;
-- p50, p95, and p99 batch planning and commit latency.
-
-Run local-filesystem and NFS-backed candidates when available, with the read cache both disabled and enabled. Storage choice is a reported dimension, not a correctness prerequisite. Compare against the measured per-pack baseline and retain raw logs plus exact binary revisions.
-
-## Exit criterion
-
-The implemented Stage 1-2 baseline is complete when:
-
-- the scalable filter stays within its declared memory and false-positive bounds at the largest supported import;
-- one-pack and batched imports produce equivalent authoritative metadata and resume safely after every injected interruption;
-- the selected default reduces transaction commits by at least 4x on the 20-million-record fixture;
-- the 20-million-record fixture improves pack throughput by at least 2x without increased errors or unbounded memory;
-- interval throughput no longer declines because the membership filter saturates;
-- local metrics identify preparation, publication, lookup, transaction retries, and checkpoint waiting separately; the configured WAL profile is logged, while live WAL, flush, compaction, and backend attribution remains part of the Phase 33 monitoring schema;
-- normal `PublishPack`, non-fresh import, activation, and metadata durability semantics remain unchanged.
-
-The Stage 3 extension is accepted only when its delivery and acceptance
-gates pass. Stage 2 remains the fallback; no Stage 3 candidate may activate with
-unreduced records or unvalidated aggregate/history state.
-
-## Implementation validation
-
-The Stage 2 implementation was validated on the same filesystem-backed
-repository and candidate directories on an NFSv3 mount used for the baseline.
-The candidate used the local object-store adapter, memory WAL, and no configured
-read-cache tier. The command used 32 preparers, the default eight packs and
-8 MiB per logical transaction, a 256 MiB prepared-work limit, snapshots
-disabled, and a 20-million-record work budget. Reaching that budget
-intentionally returns the incomplete exit status and does not authorize
-memory-WAL handoff.
-
-| Measurement | Per-pack baseline | Phase 32 |
-| --- | ---: | ---: |
-| Elapsed time | 9m28.1s | 4m32.6s |
-| Overall pack throughput | 43.9 packs/s | 91.6 packs/s |
-| Overall blob throughput | 35,219 blobs/s | 73,422 blobs/s |
-| Logical commits | 24,942 | 4,616 |
-| Final interval pack throughput | 31.3 packs/s | 79.6 packs/s |
-
-The measured speedup was 2.08x and logical commits fell by 5.4x. The final run
-imported 24,942 packs and 19,999,995 blob records with no transaction conflicts,
-retries, adaptive splits, or import errors. It issued 5,344 mutation RPCs for
-20,062,630 final mutations. The prepared queue peaked at 151 packs and 13.4 MiB.
-
-The scalable filter held 19,950,312 unique IDs in two layers using 50,346,239
-bytes. Its estimated aggregate false-positive probability was 0.052%, below the
-0.1% target; 6,353 of 68,259 possibly-present lookups missed, and the filter did
-not enter database fallback. A zero-allocation sizing test projects the layered
-configuration through 400 million IDs within the 1.5 GiB ceiling and false-
-positive budget.
-
-A deterministic 64-pack benchmark also exercises transaction sizes 1, 4, 8,
-and 16. It reports 64, 16, 8, and 4 commits per operation respectively. Eight
-packs remains the default because it clears the commit-reduction target while
-keeping transaction lifetime and encoded-size exposure conservative.
+Check timestamps/exit status before describing a run as completed. An active
+run's empty timing file, ETA, or cumulative pack count does not prove final
+SlateDB output is durable or authoritative.
