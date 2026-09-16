@@ -111,6 +111,38 @@ type memoryStore struct {
 	revisionsWritten  uint64
 }
 
+type deferredSnapshotStore struct {
+	*memoryStore
+	events []string
+}
+
+func (store *deferredSnapshotStore) AllocateRevisionBlock(ctx context.Context, count uint64) (uint64, error) {
+	store.events = append(store.events, fmt.Sprintf("reserve:%d", count))
+	return store.memoryStore.AllocateRevisionBlock(ctx, count)
+}
+
+func (store *deferredSnapshotStore) PublishRevisionBatchDeferred(
+	ctx context.Context,
+	currentKey, revisionKey, value []byte,
+	revision uint64,
+	related []daemon.Mutation,
+	deletes [][]byte,
+) error {
+	store.events = append(store.events, "revision:deferred")
+	return store.memoryStore.PublishRevisionBatch(ctx, currentKey, revisionKey, value, revision, related, deletes)
+}
+
+func (store *deferredSnapshotStore) Put(ctx context.Context, key, value []byte, durable bool) error {
+	parsed, err := schema.ParseKey(key)
+	if err != nil {
+		return err
+	}
+	if parsed.Kind == schema.KeySnapshotImportCheckpoint {
+		store.events = append(store.events, fmt.Sprintf("checkpoint:durable=%t", durable))
+	}
+	return store.memoryStore.Put(ctx, key, value, durable)
+}
+
 func newMemoryStore() *memoryStore { return &memoryStore{values: make(map[string][]byte)} }
 func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
 	store.mu.Lock()
@@ -140,10 +172,22 @@ func (store *memoryStore) Put(_ context.Context, key, value []byte, _ bool) erro
 	return nil
 }
 func (store *memoryStore) AllocateRevision(context.Context) (uint64, error) {
+	return store.AllocateRevisionBlock(context.Background(), 1)
+}
+func (store *memoryStore) AllocateRevisionBlock(_ context.Context, count uint64) (uint64, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.revisions++
-	return store.revisions, nil
+	start := store.revisions + 1
+	store.revisions += count
+	return start, nil
+}
+func (store *memoryStore) WriteMutableBatch(_ context.Context, puts []daemon.Mutation, _ [][]byte, _ bool) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, mutation := range puts {
+		store.values[string(mutation.Key)] = append([]byte(nil), mutation.Value...)
+	}
+	return nil
 }
 
 func (store *memoryStore) PublishRevisionBatch(
@@ -168,6 +212,16 @@ func (store *memoryStore) PublishRevisionBatch(
 	return nil
 }
 
+func (store *memoryStore) PublishRevisionBatchDeferred(
+	ctx context.Context,
+	currentKey, revisionKey, value []byte,
+	revision uint64,
+	related []daemon.Mutation,
+	deletes [][]byte,
+) error {
+	return store.PublishRevisionBatch(ctx, currentKey, revisionKey, value, revision, related, deletes)
+}
+
 func (store *memoryStore) PublishContentManifest(
 	_ context.Context,
 	ids []schema.ID,
@@ -180,6 +234,15 @@ func (store *memoryStore) PublishContentManifest(
 		store.values[string(mutation.Key)] = append([]byte(nil), mutation.Value...)
 	}
 	return schema.ContentManifestID(ids), nil
+}
+
+func (store *memoryStore) PublishContentManifestDeferred(
+	ctx context.Context,
+	ids []schema.ID,
+	related []daemon.Mutation,
+	deletes [][]byte,
+) (schema.ID, error) {
+	return store.PublishContentManifest(ctx, ids, related, deletes)
 }
 
 type blockingImportStore struct {
@@ -2193,6 +2256,35 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	}
 	if result.SnapshotsResumed != 1 || store.revisionsWritten != 1 {
 		t.Fatalf("snapshot resume replayed revisions: %#v, revisions=%d", result, store.revisionsWritten)
+	}
+}
+
+func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
+	childTree := treeJSON(t, &data.Node{Name: "file", Type: data.NodeTypeFile, DeviceID: 7, Inode: 11})
+	childTreeID := vaultic.Hash(childTree)
+	rootTree := treeJSON(t, &data.Node{
+		Name: "top", Type: data.NodeTypeDir, DeviceID: 7, Inode: 10, Subtree: &childTreeID,
+	})
+	rootTreeID := vaultic.Hash(rootTree)
+	snapshotID := vaultic.NewRandomID()
+	snapshotJSON, err := json.Marshal(data.Snapshot{Tree: &rootTreeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &memorySource{
+		indexes: map[vaultic.ID][]byte{}, snapshots: map[vaultic.ID][]byte{snapshotID: snapshotJSON},
+		blobs: map[vaultic.ID][]byte{rootTreeID: rootTree, childTreeID: childTree},
+	}
+	store := &deferredSnapshotStore{memoryStore: newMemoryStore()}
+	result, err := Import(context.Background(), source, fixedStatter{}, store, Options{
+		Resume: true, SnapshotDepth: 1, DeferSnapshotDurability: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"reserve:1024", "revision:deferred", "checkpoint:durable=true"}
+	if !slices.Equal(store.events, want) || result.SnapshotsImported != 1 {
+		t.Fatalf("events = %v, result = %#v", store.events, result)
 	}
 }
 

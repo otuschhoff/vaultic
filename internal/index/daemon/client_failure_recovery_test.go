@@ -249,6 +249,18 @@ func TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint(t *testing.T) {
 	if err := store.ImportLegacyPack(ctx, imported); err != nil {
 		t.Fatalf("fresh pack import waited for durability: %v", err)
 	}
+	revisionRecord := schema.InodeRevision{
+		ParentInode: 10, Known: schema.KnownParent, Freshness: schema.FreshnessImported,
+	}
+	revisionValue, err := revisionRecord.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentKey := schema.CurrentInodeKey(7, 11)
+	revisionKey := schema.InodeRevisionKey(7, 11, 1)
+	if err := store.PublishRevisionBatchDeferred(ctx, currentKey, revisionKey, revisionValue, 1, nil, nil); err != nil {
+		t.Fatalf("fresh snapshot revision waited for durability: %v", err)
+	}
 	checkpoint, err := (schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1}).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
@@ -269,7 +281,7 @@ func TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = NewSchemaStore(client)
-	for _, key := range [][]byte{schema.PackKey(packID), schema.BlobKey(blobID), checkpointKey} {
+	for _, key := range [][]byte{schema.PackKey(packID), schema.BlobKey(blobID), currentKey, revisionKey, checkpointKey} {
 		if _, found, readErr := store.Get(ctx, key); readErr != nil || !found {
 			t.Fatalf("read imported state after checkpoint barrier: found=%t err=%v", found, readErr)
 		}

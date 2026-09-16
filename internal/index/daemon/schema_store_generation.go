@@ -991,6 +991,27 @@ func (store *SchemaStore) PublishContentManifest(
 	relatedPuts []Mutation,
 	relatedDeletes [][]byte,
 ) (schema.ID, error) {
+	return store.publishContentManifest(ctx, ids, relatedPuts, relatedDeletes, false)
+}
+
+// PublishContentManifestDeferred publishes a manifest without waiting for
+// durability. VaulticDB accepts it only during a rebuild-reset session.
+func (store *SchemaStore) PublishContentManifestDeferred(
+	ctx context.Context,
+	ids []schema.ID,
+	relatedPuts []Mutation,
+	relatedDeletes [][]byte,
+) (schema.ID, error) {
+	return store.publishContentManifest(ctx, ids, relatedPuts, relatedDeletes, true)
+}
+
+func (store *SchemaStore) publishContentManifest(
+	ctx context.Context,
+	ids []schema.ID,
+	relatedPuts []Mutation,
+	relatedDeletes [][]byte,
+	deferDurability bool,
+) (schema.ID, error) {
 	if err := validateRelatedMutations(relatedPuts, relatedDeletes); err != nil {
 		return schema.ID{}, err
 	}
@@ -1053,7 +1074,11 @@ func (store *SchemaStore) PublishContentManifest(
 			return schema.ID{}, err
 		}
 	}
-	if err := transaction.Commit(ctx); err != nil {
+	commit := transaction.Commit
+	if deferDurability {
+		commit = transaction.CommitDeferred
+	}
+	if err := commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return schema.ID{}, err
 	}
@@ -1102,6 +1127,29 @@ func (store *SchemaStore) PublishRevisionBatch(
 	revision uint64,
 	relatedPuts []Mutation,
 	relatedDeletes [][]byte,
+) error {
+	return store.publishRevisionBatch(ctx, currentKey, revisionKey, revisionValue, revision, relatedPuts, relatedDeletes, false)
+}
+
+// PublishRevisionBatchDeferred publishes a revision without waiting for
+// durability. VaulticDB accepts it only during a rebuild-reset session.
+func (store *SchemaStore) PublishRevisionBatchDeferred(
+	ctx context.Context,
+	currentKey, revisionKey, revisionValue []byte,
+	revision uint64,
+	relatedPuts []Mutation,
+	relatedDeletes [][]byte,
+) error {
+	return store.publishRevisionBatch(ctx, currentKey, revisionKey, revisionValue, revision, relatedPuts, relatedDeletes, true)
+}
+
+func (store *SchemaStore) publishRevisionBatch(
+	ctx context.Context,
+	currentKey, revisionKey, revisionValue []byte,
+	revision uint64,
+	relatedPuts []Mutation,
+	relatedDeletes [][]byte,
+	deferDurability bool,
 ) error {
 	if err := validateRelatedMutations(relatedPuts, relatedDeletes); err != nil {
 		return err
@@ -1162,7 +1210,11 @@ func (store *SchemaStore) PublishRevisionBatch(
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
-	if err := transaction.Commit(ctx); err != nil {
+	commit := transaction.Commit
+	if deferDurability {
+		commit = transaction.CommitDeferred
+	}
+	if err := commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
 	}

@@ -37,23 +37,24 @@ const (
 )
 
 type Options struct {
-	Resume                 bool
-	DryRun                 bool
-	PreserveIndexOrder     bool
-	PublicationLanes       uint
-	BatchSize              uint32
-	PackWorkers            uint
-	PackTimeout            time.Duration
-	PacksPerTransaction    uint
-	ImportTransactionBytes uint64
-	PreparedImportBytes    uint64
-	ImportBatchTimeout     time.Duration
-	MaxErrors              uint64
-	WorkBudget             uint64
-	SnapshotDepth          uint
-	SnapshotWorkBudget     uint64
-	Progress               func(Progress)
-	Telemetry              *SchedulerTelemetry
+	Resume                  bool
+	DryRun                  bool
+	PreserveIndexOrder      bool
+	PublicationLanes        uint
+	BatchSize               uint32
+	PackWorkers             uint
+	PackTimeout             time.Duration
+	PacksPerTransaction     uint
+	ImportTransactionBytes  uint64
+	PreparedImportBytes     uint64
+	ImportBatchTimeout      time.Duration
+	MaxErrors               uint64
+	WorkBudget              uint64
+	SnapshotDepth           uint
+	SnapshotWorkBudget      uint64
+	DeferSnapshotDurability bool
+	Progress                func(Progress)
+	Telemetry               *SchedulerTelemetry
 }
 
 type Progress struct {

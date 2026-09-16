@@ -375,6 +375,29 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 			t.Fatalf("revision[%d] = %d", index, revision)
 		}
 	}
+	const blocks = 8
+	const blockSize = 7
+	starts := make([]uint64, blocks)
+	errs = make([]error, blocks)
+	for index := range blocks {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			starts[index], errs[index] = store.AllocateRevisionBlock(ctx, blockSize)
+		}(index)
+	}
+	group.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+	for index, start := range starts {
+		if want := uint64(count + 1 + index*blockSize); start != want {
+			t.Fatalf("revision block %d starts at %d, want %d", index, start, want)
+		}
+	}
 
 	revision := revisions[len(revisions)-1]
 	key := schema.InodeRevisionKey(1, 2, revision)

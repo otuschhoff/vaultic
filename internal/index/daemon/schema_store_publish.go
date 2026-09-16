@@ -664,6 +664,15 @@ func validateDistinctMutations(puts []Mutation, deletes [][]byte) error {
 // AllocateRevision atomically returns one durable, monotonically increasing
 // repository revision sequence. Serializable conflicts are retried.
 func (store *SchemaStore) AllocateRevision(ctx context.Context) (uint64, error) {
+	return store.AllocateRevisionBlock(ctx, 1)
+}
+
+// AllocateRevisionBlock atomically reserves count monotonically increasing
+// repository revisions and returns the first reserved revision.
+func (store *SchemaStore) AllocateRevisionBlock(ctx context.Context, count uint64) (uint64, error) {
+	if count == 0 {
+		return 0, fmt.Errorf("revision block size must be positive")
+	}
 	key := schema.NextRevisionKey()
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
@@ -684,11 +693,11 @@ func (store *SchemaStore) AllocateRevision(ctx context.Context) (uint64, error) 
 				return 0, err
 			}
 		}
-		if next == math.MaxUint64 {
+		if next > math.MaxUint64-count {
 			rollbackTransaction(ctx, transaction)
 			return 0, fmt.Errorf("repository revision sequence exhausted")
 		}
-		encodedNext, err := schema.MarshalNextRevision(next + 1)
+		encodedNext, err := schema.MarshalNextRevision(next + count)
 		if err != nil {
 			rollbackTransaction(ctx, transaction)
 			return 0, err

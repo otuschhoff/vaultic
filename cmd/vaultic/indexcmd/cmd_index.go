@@ -665,9 +665,9 @@ func runIndexImport(
 		PacksPerTransaction: options.PacksPerTransaction, ImportTransactionBytes: options.ImportTransactionBytes,
 		PreparedImportBytes: options.PreparedImportBytes, ImportBatchTimeout: options.ImportBatchTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
-		SnapshotWorkBudget: options.SnapshotWorkBudget,
-		Progress:           progressReporter.Update,
-		Telemetry:          telemetry,
+		SnapshotWorkBudget: options.SnapshotWorkBudget, DeferSnapshotDurability: options.ForceResetOldIndex,
+		Progress:  progressReporter.Update,
+		Telemetry: telemetry,
 	})
 	stopStats()
 	log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))

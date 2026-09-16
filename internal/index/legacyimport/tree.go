@@ -21,10 +21,18 @@ type SnapshotSource interface {
 
 type TreeStore interface {
 	Store
-	AllocateRevision(context.Context) (uint64, error)
+	AllocateRevisionBlock(context.Context, uint64) (uint64, error)
+	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 	PublishRevisionBatch(context.Context, []byte, []byte, []byte, uint64, []daemon.Mutation, [][]byte) error
+	PublishRevisionBatchDeferred(context.Context, []byte, []byte, []byte, uint64, []daemon.Mutation, [][]byte) error
 	PublishContentManifest(context.Context, []schema.ID, []daemon.Mutation, [][]byte) (schema.ID, error)
+	PublishContentManifestDeferred(context.Context, []schema.ID, []daemon.Mutation, [][]byte) (schema.ID, error)
 }
+
+const (
+	snapshotRevisionBlockSize = 1024
+	snapshotDebtBatchSize     = 256
+)
 
 type nodeIdentity struct {
 	fsid  uint32
@@ -32,13 +40,16 @@ type nodeIdentity struct {
 }
 
 type treeImporter struct {
-	ctx       context.Context
-	source    SnapshotSource
-	store     TreeStore
-	options   Options
-	result    *Result
-	snapshot  vaultic.ID
-	ancestors map[vaultic.ID]struct{}
+	ctx          context.Context
+	source       SnapshotSource
+	store        TreeStore
+	options      Options
+	result       *Result
+	snapshot     vaultic.ID
+	ancestors    map[vaultic.ID]struct{}
+	pendingDebt  []daemon.Mutation
+	revisionNext uint64
+	revisionEnd  uint64
 }
 
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
@@ -100,11 +111,14 @@ func importSnapshots(
 		if err != nil {
 			return err
 		}
-		if err := writeDebt(ctx, debtWrite{
+		if err := importer.writeDebt(debtWrite{
 			store: store, options: options, result: result, snapshot: snapshotID, work: *snapshot.Tree,
 			pathHint: "snapshot-root", reason: schema.DebtMissingInode,
 			errorClass: "legacy-snapshot-root-has-no-inode-identity",
 		}); err != nil {
+			return err
+		}
+		if err := importer.flushDebt(); err != nil {
 			return err
 		}
 		if !options.DryRun {
@@ -127,7 +141,7 @@ func importSnapshots(
 
 func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity, parentPath string, depth uint) ([]schema.DirectoryChild, bool, error) {
 	if _, cycle := importer.ancestors[treeID]; cycle {
-		if err := writeDebt(importer.ctx, debtWrite{
+		if err := importer.writeDebt(debtWrite{
 			store: importer.store, options: importer.options, result: importer.result,
 			snapshot: importer.snapshot, work: treeID, pathHint: parentPath,
 			reason: schema.DebtMissingDirectory, errorClass: "tree-cycle",
@@ -140,7 +154,7 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 	defer delete(importer.ancestors, treeID)
 	tree, err := data.LoadTree(importer.ctx, importer.source, treeID)
 	if err != nil {
-		if debtErr := writeDebt(importer.ctx, debtWrite{
+		if debtErr := importer.writeDebt(debtWrite{
 			store: importer.store, options: importer.options, result: importer.result,
 			snapshot: importer.snapshot, work: treeID, pathHint: parentPath,
 			reason: schema.DebtMissingDirectory, errorClass: "tree-load-failed",
@@ -185,7 +199,7 @@ func (importer *treeImporter) importNode(node *data.Node, parent *nodeIdentity, 
 	identity, identityKnown := legacyIdentity(node)
 	parentKnown := parent != nil
 	if !identityKnown || !parentKnown {
-		if err := writeDebt(importer.ctx, debtWrite{
+		if err := importer.writeDebt(debtWrite{
 			store: importer.store, options: importer.options, result: importer.result,
 			snapshot: importer.snapshot, work: workID(nodePath), pathHint: nodePath,
 			reason: schema.DebtMissingInode, errorClass: "legacy-node-identity-or-parent-unknown",
@@ -193,7 +207,7 @@ func (importer *treeImporter) importNode(node *data.Node, parent *nodeIdentity, 
 			return schema.DirectoryChild{}, false, err
 		}
 	}
-	if err := writeDebt(importer.ctx, debtWrite{
+	if err := importer.writeDebt(debtWrite{
 		store: importer.store, options: importer.options, result: importer.result,
 		snapshot: importer.snapshot, work: workID(nodePath), pathHint: nodePath,
 		reason: schema.DebtUnknownFreshness, errorClass: "legacy-metadata-not-live-verified",
@@ -204,7 +218,7 @@ func (importer *treeImporter) importNode(node *data.Node, parent *nodeIdentity, 
 	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if node.Type == data.NodeTypeDir {
 		if node.Subtree == nil || node.Subtree.IsNull() {
-			if err := writeDebt(importer.ctx, debtWrite{
+			if err := importer.writeDebt(debtWrite{
 				store: importer.store, options: importer.options, result: importer.result,
 				snapshot: importer.snapshot, work: workID(nodePath), pathHint: nodePath,
 				reason: schema.DebtMissingDirectory, errorClass: "directory-subtree-missing",
@@ -214,7 +228,7 @@ func (importer *treeImporter) importNode(node *data.Node, parent *nodeIdentity, 
 			return schema.DirectoryChild{}, false, nil
 		}
 		if importer.options.SnapshotDepth > 0 && depth >= importer.options.SnapshotDepth {
-			if err := writeDebt(importer.ctx, debtWrite{
+			if err := importer.writeDebt(debtWrite{
 				store: importer.store, options: importer.options, result: importer.result,
 				snapshot: importer.snapshot, work: *node.Subtree, pathHint: nodePath,
 				reason: schema.DebtMissingDirectory, errorClass: "snapshot-depth-limit",
@@ -342,7 +356,11 @@ func (importer *treeImporter) inodeRecord(node *data.Node, parent nodeIdentity, 
 			reverse = append(reverse, daemon.Mutation{Key: schema.ReverseManifestKey(id, manifestID), Value: value})
 		}
 		if !importer.options.DryRun {
-			createdID, err := importer.store.PublishContentManifest(importer.ctx, ids, reverse, nil)
+			publish := importer.store.PublishContentManifest
+			if importer.options.DeferSnapshotDurability {
+				publish = importer.store.PublishContentManifestDeferred
+			}
+			createdID, err := publish(importer.ctx, ids, reverse, nil)
 			if err != nil {
 				return schema.InodeRevision{}, nil, err
 			}
@@ -381,7 +399,7 @@ func (importer *treeImporter) publishRevision(currentKey []byte, identity nodeId
 		importer.result.NodesImported++
 		return key, nil
 	}
-	revision, err := importer.store.AllocateRevision(importer.ctx)
+	revision, err := importer.allocateRevision()
 	if err != nil {
 		return nil, err
 	}
@@ -397,11 +415,60 @@ func (importer *treeImporter) publishRevision(currentKey []byte, identity nodeId
 		}
 		related = append(related, daemon.Mutation{Key: schema.ReverseInodeKey(id, identity.fsid, identity.inode), Value: reverseValue})
 	}
-	if err := importer.store.PublishRevisionBatch(importer.ctx, currentKey, revisionKey, value, revision, related, nil); err != nil {
+	related = append(related, importer.pendingDebt...)
+	publish := importer.store.PublishRevisionBatch
+	if importer.options.DeferSnapshotDurability {
+		publish = importer.store.PublishRevisionBatchDeferred
+	}
+	if err := publish(importer.ctx, currentKey, revisionKey, value, revision, related, nil); err != nil {
 		return nil, err
 	}
+	importer.pendingDebt = importer.pendingDebt[:0]
 	importer.result.NodesImported++
 	return revisionKey, nil
+}
+
+func (importer *treeImporter) allocateRevision() (uint64, error) {
+	if importer.revisionNext == importer.revisionEnd {
+		start, err := importer.store.AllocateRevisionBlock(importer.ctx, snapshotRevisionBlockSize)
+		if err != nil {
+			return 0, err
+		}
+		importer.revisionNext = start
+		importer.revisionEnd = start + snapshotRevisionBlockSize
+	}
+	revision := importer.revisionNext
+	importer.revisionNext++
+	return revision, nil
+}
+
+func (importer *treeImporter) writeDebt(debt debtWrite) error {
+	mutation, err := debtMutation(debt)
+	if err != nil {
+		return err
+	}
+	if !debt.options.DryRun {
+		importer.pendingDebt = append(importer.pendingDebt, mutation)
+		if len(importer.pendingDebt) >= snapshotDebtBatchSize {
+			if err := importer.flushDebt(); err != nil {
+				return err
+			}
+		}
+	}
+	debt.result.CrawlDebtCreated++
+	return nil
+}
+
+func (importer *treeImporter) flushDebt() error {
+	if len(importer.pendingDebt) == 0 {
+		return nil
+	}
+	durable := !importer.options.DeferSnapshotDurability
+	if err := importer.store.WriteMutableBatch(importer.ctx, importer.pendingDebt, nil, durable); err != nil {
+		return err
+	}
+	importer.pendingDebt = importer.pendingDebt[:0]
+	return nil
 }
 
 func uniqueIDs(ids []schema.ID) []schema.ID {
@@ -449,6 +516,20 @@ type debtWrite struct {
 }
 
 func writeDebt(ctx context.Context, debt debtWrite) error {
+	mutation, err := debtMutation(debt)
+	if err != nil {
+		return err
+	}
+	if !debt.options.DryRun {
+		if err := debt.store.Put(ctx, mutation.Key, mutation.Value, true); err != nil {
+			return err
+		}
+	}
+	debt.result.CrawlDebtCreated++
+	return nil
+}
+
+func debtMutation(debt debtWrite) (daemon.Mutation, error) {
 	if debt.work.IsNull() {
 		debt.work = workID(fmt.Sprintf("%d:%s", debt.reason, debt.pathHint))
 	}
@@ -459,15 +540,9 @@ func writeDebt(ctx context.Context, debt debtWrite) error {
 	}
 	encoded, err := record.MarshalBinary()
 	if err != nil {
-		return err
+		return daemon.Mutation{}, err
 	}
-	if !debt.options.DryRun {
-		if err := debt.store.Put(ctx, key, encoded, true); err != nil {
-			return err
-		}
-	}
-	debt.result.CrawlDebtCreated++
-	return nil
+	return daemon.Mutation{Key: key, Value: encoded}, nil
 }
 
 func workID(value string) vaultic.ID {
