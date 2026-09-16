@@ -224,6 +224,16 @@ remains valid. Report coverage and consistency identity with the final summary.
 Reuse bounded telemetry primitives; the next monitoring phase may consume this
 data but is not a prerequisite for implementing the checker.
 
+Use the [Phase 34 wait-state contract](phase-34-operational-monitoring-and-metrics-export.md#wait-state-accounting-contract)
+and its M0-M2 foundation, delivered incrementally with Phase 32, rather than
+checker-specific accounting or injection libraries. Monitor commands/exporters
+remain independent. Track per-operation waits for scan pages and batched lookups,
+source reads, lock acquisition/hold, RPC admission/service, memory/byte budgets,
+scratch reads/writes and merge prerequisites. Measure active wait ages as well
+as completed distributions; preserve cancellation/timeout outcomes. Worker-time
+and nested RPC/backend spans are not additive stage wall-time. CPU/runtime
+profiles complement, rather than replace, explicit prerequisite measurements.
+
 Durable resume is deferred. Baseline cancellation starts a fresh session on the
 next invocation; cursors alone cannot safely resume a multi-source check. A later
 resume design must authenticate encrypted scratch/checkpoints, validate identical
@@ -237,6 +247,15 @@ commands and results, benchmark artifacts, remaining limitations and the next
 stage's input contract. Keep patches reviewable; do not combine an algorithm
 rewrite with protocol changes or unrelated import tuning. Stop on a failed gate.
 
+For each named substep, inspect its current owner and neighboring tests, state
+one falsifiable hypothesis and smallest check, edit only that boundary, then run
+the focused check immediately and the owner suites before advancing. Reuse existing
+fixtures and choose real test names after inspection. Preserve unrelated work;
+never use a live repository, service or production cache for fault injection.
+Record pending/in-progress/blocked/validated status, exact revisions/commands,
+artifact paths, unmet gates and the next prerequisite in each handoff. The new
+substeps below start pending; documentation is not implementation evidence.
+
 ### A. Freeze semantics and measure the existing pipeline
 
 Add a coverage matrix and oracle fixtures in the existing maintenance tests,
@@ -245,9 +264,27 @@ Record actual scan limits and all whole-input collections, including subordinate
 checkers and daemon encryption audit. Distinguish worker wait from RPC service
 and backend wait. Measure unmodified results, RSS, allocation and CPU profiles.
 
+Execute A1-A4 independently, without changing checker algorithms:
+
+| Substep | Prerequisite, owner and bounded change | Focused gate and handoff |
+|---|---|---|
+| A1: freeze the oracle | Existing maintenance/analytics checkers and tests, daemon schema scans and index CLI. Build deterministic coverage/expected-result fixtures and record effective page limits and whole-input collections. | Clean/corrupt/duplicate/skew/unresolved and reduced-coverage fixtures pin verdicts/counters. Publish input/result digests, coverage map and exact baseline commands. |
+| A2: measure read prerequisites | A1 and Phase 34 M0/minimum M1. Instrument existing scan/lookup, source filesystem, RPC and daemon object-store boundaries one owner at a time. Reuse Phase 32's server instrumentation. | Controlled delayed pages/lookups/source reads produce the expected inclusive/exclusive timing, active ages and outcomes without changing results. Publish timer boundaries, request/byte counts and cold/warm baseline artifacts. |
+| A3: measure queues and scratch | A2. Instrument existing admission/queues where present; define hooks consumed by C/F for byte reservations, run creation, merge input and scratch transfer. Do not invent a queue to measure it. | Bounded snapshots, hold-versus-wait timing, cancellation and overflow tests pass. Mark future or unavailable boundaries explicitly, not as zero waits. C/F must wire and test their hooks before claiming coverage. Publish memory/overhead evidence with telemetry enabled/disabled. |
+| A4: prove isolated injection | A2/A3 and relevant Phase 34 M2 wrappers. Extend existing small-fixture harnesses for source, database and scratch roles; activate scratch tests when C implements it. | No-injection parity plus delayed/stalled stream, deadline and cancellation checks identify the intended role with bounded cleanup. Use immutable/quiescent fixture inputs before B; do not claim coherent concurrent checking yet. Publish reusable scenario commands and unresolved hooks. |
+
 **Gate:** clean, corrupt, duplicate, unresolved and reduced-coverage fixtures pin
 all verdicts/counters; instrumentation does not alter results. Publish baseline
 artifacts and proposed resource/default contracts before choosing tuning values.
+
+Complete A4-response as a separate pending substep after Phase 34 M2d: reuse the
+daemon-client delivery wrapper to delay selected scan-page and batched-lookup
+responses after successful service, independently of object-store read delay.
+Use barrier-driven immutable/quiescent fixtures before Stage B; assert exact
+result parity, unchanged server service timing, bounded delayed pages and prompt
+caller timeout/cancellation. Once B exists, a response delayed past read-session
+expiry must fail incomplete rather than silently retry against a newer view.
+Hand off response-mode fixtures, commands and timer boundaries to H2-response.
 
 ### B. Establish coherent check sessions
 
@@ -272,6 +309,11 @@ interfaces consumed by the next stage without changing default check behavior.
 oversized records, skew, cancellation and descriptor-leak tests pass at tiny
 budgets. Runs larger than RAM merge correctly; scratch is never mistaken for
 authoritative metadata and cleanup cannot escape its owned directory.
+
+Complete A3/A4 scratch hooks as a separate C substep: distinguish byte admission,
+scratch create/read/write/close, transfer and merge-input wait using shared
+primitives. Inject delay into session-owned scratch only. The same result digest
+and cleanup bounds must hold under delayed reads/writes, full queues and cancellation.
 
 ### D. Replace location and pack materialization
 
@@ -308,6 +350,12 @@ boundaries, empty ranges and skew. Go race tests and native concurrency tests
 pass. Faulted/stalled RPCs, cancellation and backpressure cannot deadlock, leak,
 duplicate ranges, skip records or overshoot byte budgets.
 
+Wire the A3 queue hooks as an independent F substep before worker tuning.
+Blocked producers/consumers must report dependency versus memory/RPC admission
+wait and oldest age correctly, including fair progress for oversized work.
+Use barrier-driven tests to verify counters; sleep-based timing alone is not
+proof of a dependency. Keep observer overhead out of tuning conclusions.
+
 ### G. Integrate CLI, progress and operational documentation
 
 Finalize defaults using measured working sets, publish coverage/consistency and
@@ -328,6 +376,34 @@ commands, binary revisions and raw artifacts. Tune one variable per experiment.
 Use at least three repeats for performance comparisons and report variance.
 Do not declare production-scale acceptance from scaled-down unit tests.
 
+Use the [shared profiles and evidence schema](phase-34-operational-monitoring-and-metrics-export.md#backend-scenarios-and-experiment-contract)
+for HDD-array NFS, native three-replica RADOS and S3 with the explicit assumed
+8 ms RTT. Reuse Phase 34 M2 rather than adding another scenario harness. Execute:
+
+| Substep | Prerequisite and experiment | Gate and handoff |
+|---|---|---|
+| H1: freeze placement and baseline | A-G and oracle/session gates. Map legacy source, repository packs, database/WAL/coordination, caches and encrypted scratch to shared or independent resources. Freeze input/read-view identity, page size and worker/budget settings. | No-injection repeats preserve result digest and coverage. Record cold/warm policy, enabled/disabled instrumentation overhead, actual RPC limits and all resource/delay boundaries. |
+| H2: isolate read and scratch sensitivity | H1. Vary only one role/operation: source metadata/read, database range read/list or batched lookup, then scratch I/O. Keep worker/page/cache settings fixed for each latency comparison. | Test whether slow pages leave workers waiting on input versus RPC admission, and whether slow scratch blocks producers through byte budgets. Preserve exact verdicts and stable reads; unexpected stalls return to the missing A/C/F boundary before tuning. |
+| H3: evaluate combined backend profiles | H2. Run all three profiles, adding jitter, long/correlated stalls and shared capacity, then vary workers/page sizes and cache state in separate comparisons. Include normal compaction and representative recovery/backfill conditions only in isolated authorized infrastructure. | Report throughput/elapsed, p50/p95/p99, worker-wait time, active ages, queues, origin traffic, scratch amplification, read-session retention and CPU/RSS. Growing backlog is not steady state; more workers are accepted only when end-to-end results improve within budgets. |
+| H4: scale and publish decisions | H3, the 1x/10x matrix below and at least three repeats per performance comparison. Validate representative hardware independently of synthetic API-level injection. | All correctness, consistency, memory, scale and failure gates hold. Rank tuning by measured end-to-end sensitivity; publish versioned artifacts, variance, missing infrastructure/scale and accepted/rejected/inconclusive decisions to Phase 34 M7. No simulator-based prediction substitutes for a measured gate. |
+
+H2-response is a pending independently executable extension of H2, requiring
+A4-response, Stage B and Phase 34 M2d. Follow the
+[shared response-delay contract](phase-34-operational-monitoring-and-metrics-export.md#synthetic-dependency-responses):
+keep storage, page size, cache and worker limits fixed, then vary only post-service
+scan-page delivery or batched-lookup delivery at 0/1/8/25/100/250 ms added delay.
+Compare with the separate object-store service-delay experiment before combining
+them. Test constant and equal-mean jitter distributions, then correlated tails;
+vary page size and worker concurrency only in subsequent matched comparisons.
+
+**Gate/handoff:** at least three repeats preserve exact verdict/counter digest and
+read-session identity; delayed pages remain bounded and cannot reorder/skip ranges.
+Report caller input/admission wait separately from daemon service/backend wait,
+throughput, p95/p99, queue ages, memory and lease retention. Deadline/lease-expiry
+runs must be classified incomplete, not slower successful checks. Publish the
+action-by-method sensitivity artifact to H3/H4 and Phase 34 M7. Checker read
+results do not certify restore destination writes or backup durability behavior.
+
 ## Benchmark matrix and acceptance gates
 
 Build deterministic 1x and 10x fixtures with measured physical sizes near 50 GB
@@ -339,8 +415,10 @@ fan-out and duplicate-heavy legacy indexes. Inject corruption in every domain
 and near range/page boundaries with known expected counts.
 
 Compare the old checker at 1x where feasible, the new checker at worker=1, and
-2/4/8/quota-available cores. Test local SSD and representative NFS-backed metadata
-with local scratch, cold/warm cache, encryption enabled, daemon cache limits,
+2/4/8/quota-available cores. Keep local SSD as a control; test the three shared
+backend profiles with representative NFS, native three-replica RADOS and S3
+metadata, local scratch plus separately delayed scratch, cold/warm cache,
+encryption enabled, daemon cache limits,
 different effective RPC page sizes, and normal background compaction. Keep
 durability, coverage and source identity identical across comparisons. Never
 drop production caches or reset a production database to obtain a cold run.
@@ -385,7 +463,9 @@ commands. Record required build and CI gates with the stage handoff.
 
 A full differential check of the 10x dataset completes with fixed memory budgets,
 exact results, bounded secure scratch, coherent reads, and documented performance
-on local and NFS storage. Available cores improve eligible CPU-bound work without
+on the local control and three shared backend profiles, clearly separating
+synthetic injection from representative hardware and disclosing missing gates.
+Available cores improve eligible CPU-bound work without
 unbounded RPCs or nested worker pools. Operators can see progress and resource
 pressure, distinguish incomplete work from clean results, and reproduce the
 acceptance measurements. The feature remains design-only until these gates pass.

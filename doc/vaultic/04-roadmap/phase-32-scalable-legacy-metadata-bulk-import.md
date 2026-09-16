@@ -260,6 +260,20 @@ Reuse existing SlateDB statistics, supplementing the fork at these boundaries
 where necessary. Keep periodic reporting alive when progress stalls. Never infer
 durability latency solely from the configured flush interval.
 
+Use the [Phase 34 wait-state contract](phase-34-operational-monitoring-and-metrics-export.md#wait-state-accounting-contract)
+for shared names, bounded histograms/active wait ages and outcome semantics.
+Observe operation/worker states, not a new process scheduler. Separate lock
+acquisition from hold time, client RPC from server queue/service, and inclusive
+spans from exclusive phases. Close submit timers before explicit durability
+waits; do not assume marking a drop-based timer successful ends it. Concurrent
+wait totals are worker-time, not additive job wall-time. Correlate sampled
+dependencies without raw IDs as metric labels. Profiles remain necessary for
+CPU/runtime scheduling time not explained by explicit waits.
+
+P2/P3 deliver the minimum Phase 34 M0-M2 foundation and first write-heavy
+experiments, without waiting for monitor commands or exporters. These additions
+remain pending; completed P0/P1 evidence does not certify the new contract.
+
 ### 2. Test a Bounded Asynchronous Reducer
 
 Use one ordered reducer worker while the coordinator receives completions and
@@ -484,6 +498,16 @@ and P2c SST/compaction/finalization counters. Validate each substep before the n
 Reuse engine statistics and expose bounded snapshots through an existing
 diagnostic path; avoid a new RPC/protocol unless existing paths are insufficient.
 
+Execute the following substeps independently under the execution contract. Freeze
+the shared schema through Phase 34 M0 and implement only the missing M1 primitives
+at their existing owners; do not duplicate the Go/Rust accounting libraries.
+
+| Substep | Owning boundary and bounded change | Focused gate and handoff |
+|---|---|---|
+| P2a: service and storage waits | Existing `vaulticdb/src/attribution.rs`, service admission/fencing and `Storage::begin`, `write_batch`, `commit`. Add active wait ages, contention/hold timing where supported and explicit outcomes; correct overlapping submit/durability scopes before comparing durations. | Controlled lock/admission and durable-handle stalls distinguish acquisition, hold, submit and durability. Immediate acquisition, failed/cancelled/timed-out requests and dropped futures settle counters. Deferred commits record no explicit durable wait. Publish exact timer boundaries and focused Rust/Go daemon test results. |
+| P2b: engine queue and apply | Inspect statistics in the pinned fork first. Add only missing enqueue/dequeue, writer-service and backpressure observations, separating WAL/memtable pressure. Keep fork instrumentation and dependency pin changes separately reviewable. | Controlled queue/service/backpressure stalls attribute to the correct bucket; transaction conflicts, ordered visibility and replay are unchanged. Publish fork/build IDs, bounded snapshots and relevant fork test commands/results. |
+| P2c: object-store output and finalization | Existing storage object-store/WAL wrappers, flush/compaction statistics and marker/close/handoff/reopen owners. Separate WAL, SST/manifest and coordination attempts, stream transfer, retry delay and background pressure. | Streaming/multipart and flush stalls remain visible until completion; cancellation clears active accounting. Marker acknowledgement, close, reopen and checkpoints retain correctness. Publish role/coverage map and enabled/disabled instrumentation overhead on the frozen fixture. |
+
 **Check:** discover and run the pinned fork's relevant transaction, flush,
 backpressure, and fencing tests. Add focused tests proving queue wait is distinct
 from service time, failed attempts are counted, deferred durability is not counted
@@ -499,6 +523,35 @@ behavioral changes or unbounded metric cardinality.
 including a candidate large enough to flush/compact. Capture unprofiled throughput
 separately from short profiles. Report queue occupancy, service/wait distributions,
 eligible work during reduction, CPU/RSS, file-output counters, and finalization.
+
+Use the [shared backend profiles and artifact contract](phase-34-operational-monitoring-and-metrics-export.md#backend-scenarios-and-experiment-contract)
+for HDD-array NFS, native three-replica RADOS and cloud S3 with an explicitly
+assumed 8 ms network RTT unless an operation-specific measurement replaces it.
+Map source indexes/pack metadata, repository packs, SST/manifest, WAL,
+coordination and caches to physical resources; share capacity when they share
+an array, pool or link. Unknown hardware parameters remain unknown.
+
+Execute one substep per session; reuse the existing real-daemon/import harness
+and Phase 34 M2 wrappers, never create a workload-specific injection framework.
+
+| Substep | Prerequisite and smallest experiment | Gate and artifact |
+|---|---|---|
+| P3a: baseline and harness | P0-P2 and Phase 34 M0-M2 minimum contracts/wrappers. Freeze profile placement, ordered input and delay boundaries. Run no-injection enabled/disabled telemetry baselines. | Same input/result/checkpoints and bounded resources; quantify overhead. Profile validation, test-target gating, stream/multipart, conditional-write and cancellation checks pass before latency sweeps. Publish exact commands, binary IDs, seed and settings. |
+| P3b: WAL sensitivity pilot | P3a. Use a bounded durable-commit workload with explicit durable acknowledgements in an isolated candidate. Vary only added WAL PUT latency, initially 0/10/50/200 ms; hold flush cadence, batching and concurrency fixed. | Test the hypothesis that delay increases durability wait first, with lock/admission waits downstream only when shared resources remain held. Report submit separately, commit p95/p99, batch size, flush/queue growth and throughput. Unexpected submit growth returns to P2b backpressure attribution, not an assumed WAL explanation. |
+| P3c: import role sweeps | P3a and validated P3b instrumentation. Run frozen fresh imports with memory WAL, then a separately labeled supported durable-WAL import configuration. Vary source operations, SST/manifest and coordination latency independently; include pack-storage operations only where the workload issues them. | Never apply WAL-PUT conclusions to memory-WAL deferred commits. Preserve each mode's recovery/acknowledgement contract. Include successful marker, close/handoff/reopen and validation tail, and enough data/time to expose flush/compaction. Record inactive roles as not applicable. |
+| P3d: combined scenarios and decision | P3c. Apply all three profiles, cold/warm cache states, independent jitter followed by correlated stalls and shared-capacity contention. Use at least three repeats per comparison. | Unchanged logical metadata, durability and bounded queues; report variance, active wait ages and injected versus observed delays. Rank candidate improvements by end-to-end sensitivity. Separate synthetic from hardware evidence; missing representative infrastructure blocks that acceptance claim, not isolated correctness work. |
+
+Before selecting an optimization, complete these pending response-test substeps
+using [Phase 34's dependency-response contract](phase-34-operational-monitoring-and-metrics-export.md#synthetic-dependency-responses)
+and M2d/M2e. They extend P3b/P3c, not completed P2 evidence. Run them separately
+from storage-latency injection so client confirmation sensitivity is not mistaken
+for slower SlateDB persistence.
+
+| Substep | Prerequisite and experiment | Gate and handoff |
+|---|---|---|
+| P3b-response: delayed durable confirmation | P3a, P3b and M2d. Keep real isolated WAL/storage fast and fixed; after successful durable commit, delay only the selected client's commit response by 0/1/8/25/100/250 ms. | Verify durability before withholding with a barrier. Report client commit wait, server submit/durability, eligible idle lanes, end-to-end throughput, queues and memory. Server duration must not include the client delivery delay. Publish comparison with the separate WAL-PUT sweep. |
+| P3b-recovery: success followed by timeout | P3b-response and M2e. Let selected responses exceed the caller deadline or be lost after committed success; reuse existing receipt/idempotency recovery with unchanged identities. | No duplicate receipts/reduction/publication or lost committed state; checkpoints and final reopen remain correct. Separate timeout-limited runs from successful throughput evidence and record actual retries/final state. |
+| P3c-response: import dependency matrix | P3c and preceding response gates. Delay begin/read/mutation/commit responses one method at a time; compare constant delay with equal-mean jitter, then correlated tails. Label fresh deferred commits as apply acknowledgements, not durable confirmations. | Preserve input order, mode-specific recovery and full finalization. Vary batching/lanes separately; publish ingest/reducer sensitivity and p95/p99 with three repeats. Pack stat/read evidence does not certify backup pack-upload behavior; that uses Phase 34 M2f. |
 
 **Decision:** choose P4 if eligible work is blocked by synchronous reduction;
 choose one P5 substep if local planning, reducer RPCs, or service locks dominate;
@@ -565,6 +618,16 @@ Tune one resource dimension at a time only if P3 warrants it. Promote a default
 only after the acceptance criteria below pass; otherwise retain the baseline or
 experimental opt-in. **Exit:** updated evidence table, exact commands/revisions,
 remaining limitations, and a clear completed/partial/failed run status.
+
+Complete P7a correctness/crash/replay regression before P7b repeated scenario
+comparisons, then P7c evidence/default review. P7b consumes P3's versioned artifacts
+and all three shared backend profiles; representative runs must distinguish NFS
+stable writes, RADOS acknowledgement semantics and S3 RTT from operation latency.
+Retain wait distributions, shared-resource placement, cache state, growing-backlog
+warnings and finalization in the evidence. A missing backend or scale is an
+explicit partial gate, not permission to extrapolate synthetic performance.
+P7c hands the result and sensitivity-based recommendation to Phase 34 M7; no
+standalone predictive simulator is required for this phase.
 
 ### Session Handoff
 
