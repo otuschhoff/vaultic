@@ -1143,6 +1143,121 @@ func (store *SchemaStore) PublishRevisionBatchDeferred(
 	return store.publishRevisionBatch(ctx, currentKey, revisionKey, revisionValue, revision, relatedPuts, relatedDeletes, true)
 }
 
+// RevisionPublication describes one immutable revision and its mutable indexes.
+type RevisionPublication struct {
+	CurrentKey     []byte
+	RevisionKey    []byte
+	RevisionValue  []byte
+	Revision       uint64
+	RelatedPuts    []Mutation
+	RelatedDeletes [][]byte
+}
+
+// PublishRevisionBatchesDeferred atomically publishes multiple revisions without
+// waiting for durability. VaulticDB accepts it only during a rebuild-reset session.
+func (store *SchemaStore) PublishRevisionBatchesDeferred(ctx context.Context, publications []RevisionPublication) error {
+	if len(publications) == 0 {
+		return nil
+	}
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		rollbackTransaction(ctx, transaction)
+		return err
+	}
+	keys := make([][]byte, 0, len(publications)*2)
+	for _, publication := range publications {
+		if err := validateRevisionPublication(publication); err != nil {
+			return fail(err)
+		}
+		keys = append(keys, publication.RevisionKey, publication.CurrentKey)
+	}
+	values, found, err := multiGetTransactionBatches(ctx, transaction, store.client.Limits(), keys)
+	if err != nil {
+		return fail(err)
+	}
+	puts := make([]Mutation, 0, len(publications)*2)
+	var deletes [][]byte
+	for index, publication := range publications {
+		revisionOffset := index * 2
+		if found[revisionOffset] && !bytes.Equal(values[revisionOffset].Value, publication.RevisionValue) {
+			return fail(fmt.Errorf("immutable revision already exists with different data"))
+		}
+		if found[revisionOffset+1] {
+			pointer, decodeErr := schema.UnmarshalCurrentPointer(values[revisionOffset+1].Value)
+			if decodeErr != nil {
+				return fail(decodeErr)
+			}
+			if pointer.Revision > publication.Revision {
+				return fail(fmt.Errorf("current revision %d is newer than %d", pointer.Revision, publication.Revision))
+			}
+		}
+		current, marshalErr := schema.CurrentPointer{
+			Revision: publication.Revision, RecordKey: publication.RevisionKey,
+		}.MarshalBinary()
+		if marshalErr != nil {
+			return fail(marshalErr)
+		}
+		puts = append(puts, Mutation{Key: publication.CurrentKey, Value: current})
+		if !found[revisionOffset] {
+			puts = append(puts, Mutation{Key: publication.RevisionKey, Value: publication.RevisionValue})
+		}
+		puts = append(puts, publication.RelatedPuts...)
+		deletes = append(deletes, publication.RelatedDeletes...)
+	}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, deletes); err != nil {
+		return fail(err)
+	}
+	if err := transaction.CommitDeferred(ctx); err != nil {
+		return fail(err)
+	}
+	return nil
+}
+
+func validateRevisionPublication(publication RevisionPublication) error {
+	if err := validateRelatedMutations(publication.RelatedPuts, publication.RelatedDeletes); err != nil {
+		return err
+	}
+	currentParsed, err := schema.ParseKey(publication.CurrentKey)
+	if err != nil {
+		return err
+	}
+	parsed, err := schema.ParseKey(publication.RevisionKey)
+	validPair := currentParsed.FSID == parsed.FSID && currentParsed.Inode == parsed.Inode &&
+		((currentParsed.Kind == schema.KeyCurrentInode && parsed.Kind == schema.KeyInodeRevision) ||
+			(currentParsed.Kind == schema.KeyCurrentDirectory && parsed.Kind == schema.KeyDirectoryRevision))
+	if err != nil || parsed.Revision != publication.Revision || !validPair {
+		return fmt.Errorf("revision key does not match revision %d", publication.Revision)
+	}
+	return schema.ValidateValue(publication.RevisionKey, publication.RevisionValue)
+}
+
+func multiGetTransactionBatches(
+	ctx context.Context,
+	transaction *Transaction,
+	limits Limits,
+	keys [][]byte,
+) ([]KeyValue, []bool, error) {
+	if limits.MaxBatchItems == 0 {
+		return nil, nil, fmt.Errorf("vaulticdb advertised an invalid multi-get item limit")
+	}
+	values := make([]KeyValue, 0, len(keys))
+	found := make([]bool, 0, len(keys))
+	for start := 0; start < len(keys); {
+		end := min(start+int(limits.MaxBatchItems), len(keys))
+		batchValues, batchFound, err := transaction.MultiGet(ctx, keys[start:end])
+		if err != nil {
+			return nil, nil, err
+		}
+		values = append(values, batchValues...)
+		found = append(found, batchFound...)
+		start = end
+	}
+	return values, found, nil
+}
+
 func (store *SchemaStore) publishRevisionBatch(
 	ctx context.Context,
 	currentKey, revisionKey, revisionValue []byte,

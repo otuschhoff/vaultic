@@ -109,6 +109,7 @@ type memoryStore struct {
 	checkpointBatches []int
 	revisions         uint64
 	revisionsWritten  uint64
+	getCalls          uint64
 }
 
 type deferredSnapshotStore struct {
@@ -132,6 +133,14 @@ func (store *deferredSnapshotStore) PublishRevisionBatchDeferred(
 	return store.memoryStore.PublishRevisionBatch(ctx, currentKey, revisionKey, value, revision, related, deletes)
 }
 
+func (store *deferredSnapshotStore) PublishRevisionBatchesDeferred(
+	ctx context.Context,
+	publications []daemon.RevisionPublication,
+) error {
+	store.events = append(store.events, fmt.Sprintf("revisions:deferred=%d", len(publications)))
+	return store.memoryStore.PublishRevisionBatchesDeferred(ctx, publications)
+}
+
 func (store *deferredSnapshotStore) Put(ctx context.Context, key, value []byte, durable bool) error {
 	parsed, err := schema.ParseKey(key)
 	if err != nil {
@@ -147,6 +156,7 @@ func newMemoryStore() *memoryStore { return &memoryStore{values: make(map[string
 func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.getCalls++
 	value, found := store.values[string(key)]
 	return append([]byte(nil), value...), found, nil
 }
@@ -220,6 +230,26 @@ func (store *memoryStore) PublishRevisionBatchDeferred(
 	deletes [][]byte,
 ) error {
 	return store.PublishRevisionBatch(ctx, currentKey, revisionKey, value, revision, related, deletes)
+}
+
+func (store *memoryStore) PublishRevisionBatchesDeferred(
+	ctx context.Context,
+	publications []daemon.RevisionPublication,
+) error {
+	for _, publication := range publications {
+		if err := store.PublishRevisionBatch(
+			ctx,
+			publication.CurrentKey,
+			publication.RevisionKey,
+			publication.RevisionValue,
+			publication.Revision,
+			publication.RelatedPuts,
+			publication.RelatedDeletes,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (store *memoryStore) PublishContentManifest(
@@ -1999,7 +2029,10 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	const expectedDaemonDigest = "531d14a54ca983c10366ebd8759d20390deef437eac93eb93a7b07dc16b2e4c4"
+	expectedDaemonDigest := os.Getenv("VAULTICDB_TEST_EXPECTED_SHA256")
+	if expectedDaemonDigest == "" {
+		expectedDaemonDigest = "531d14a54ca983c10366ebd8759d20390deef437eac93eb93a7b07dc16b2e4c4"
+	}
 	if digest := fmt.Sprintf("%x", daemonDigest); digest != expectedDaemonDigest {
 		b.Fatalf("daemon digest = %s, want %s", digest, expectedDaemonDigest)
 	}
@@ -2260,7 +2293,10 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 }
 
 func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
-	childTree := treeJSON(t, &data.Node{Name: "file", Type: data.NodeTypeFile, DeviceID: 7, Inode: 11})
+	childTree := treeJSON(t,
+		&data.Node{Name: "first", Type: data.NodeTypeFile, DeviceID: 7, Inode: 11},
+		&data.Node{Name: "second", Type: data.NodeTypeFile, DeviceID: 7, Inode: 12},
+	)
 	childTreeID := vaultic.Hash(childTree)
 	rootTree := treeJSON(t, &data.Node{
 		Name: "top", Type: data.NodeTypeDir, DeviceID: 7, Inode: 10, Subtree: &childTreeID,
@@ -2282,8 +2318,8 @@ func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"reserve:1024", "revision:deferred", "checkpoint:durable=true"}
-	if !slices.Equal(store.events, want) || result.SnapshotsImported != 1 {
+	want := []string{"reserve:1024", "revisions:deferred=2", "checkpoint:durable=true"}
+	if !slices.Equal(store.events, want) || result.SnapshotsImported != 1 || store.getCalls != 1 {
 		t.Fatalf("events = %v, result = %#v", store.events, result)
 	}
 }

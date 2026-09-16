@@ -25,6 +25,7 @@ type TreeStore interface {
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 	PublishRevisionBatch(context.Context, []byte, []byte, []byte, uint64, []daemon.Mutation, [][]byte) error
 	PublishRevisionBatchDeferred(context.Context, []byte, []byte, []byte, uint64, []daemon.Mutation, [][]byte) error
+	PublishRevisionBatchesDeferred(context.Context, []daemon.RevisionPublication) error
 	PublishContentManifest(context.Context, []schema.ID, []daemon.Mutation, [][]byte) (schema.ID, error)
 	PublishContentManifestDeferred(context.Context, []schema.ID, []daemon.Mutation, [][]byte) (schema.ID, error)
 }
@@ -32,6 +33,8 @@ type TreeStore interface {
 const (
 	snapshotRevisionBlockSize = 1024
 	snapshotDebtBatchSize     = 256
+	snapshotRevisionBatchSize = 256
+	snapshotProgressNodes     = 1024
 )
 
 type nodeIdentity struct {
@@ -40,16 +43,19 @@ type nodeIdentity struct {
 }
 
 type treeImporter struct {
-	ctx          context.Context
-	source       SnapshotSource
-	store        TreeStore
-	options      Options
-	result       *Result
-	snapshot     vaultic.ID
-	ancestors    map[vaultic.ID]struct{}
-	pendingDebt  []daemon.Mutation
-	revisionNext uint64
-	revisionEnd  uint64
+	ctx              context.Context
+	source           SnapshotSource
+	store            TreeStore
+	options          Options
+	result           *Result
+	snapshot         vaultic.ID
+	ancestors        map[vaultic.ID]struct{}
+	pendingDebt      []daemon.Mutation
+	pendingRevisions []daemon.RevisionPublication
+	pendingCurrent   map[string]struct{}
+	revisionNext     uint64
+	revisionEnd      uint64
+	reportProgress   func()
 }
 
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
@@ -99,16 +105,21 @@ func importSnapshots(
 		}
 		beforeTrees, beforeNodes, beforeDebts := result.TreesVisited, result.NodesImported, result.CrawlDebtCreated
 		importer := treeImporter{
-			ctx:       ctx,
-			source:    source,
-			store:     store,
-			options:   options,
-			result:    result,
-			snapshot:  snapshotID,
-			ancestors: make(map[vaultic.ID]struct{}),
+			ctx:            ctx,
+			source:         source,
+			store:          store,
+			options:        options,
+			result:         result,
+			snapshot:       snapshotID,
+			ancestors:      make(map[vaultic.ID]struct{}),
+			pendingCurrent: make(map[string]struct{}),
+			reportProgress: reportProgress,
 		}
 		_, _, err := importer.importTree(*snapshot.Tree, nil, "", 0)
 		if err != nil {
+			return err
+		}
+		if err := importer.flushRevisions(); err != nil {
 			return err
 		}
 		if err := importer.writeDebt(debtWrite{
@@ -180,6 +191,9 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 			return nil, false, ErrLimitReached
 		}
 		importer.result.NodesVisited++
+		if importer.result.NodesVisited%snapshotProgressNodes == 0 {
+			importer.reportProgress()
+		}
 		nodePath := path.Join(parentPath, item.Node.Name)
 		child, imported, err := importer.importNode(item.Node, parent, nodePath, depth)
 		if err != nil {
@@ -375,20 +389,22 @@ func (importer *treeImporter) inodeRecord(node *data.Node, parent nodeIdentity, 
 }
 
 func (importer *treeImporter) publishRevision(currentKey []byte, identity nodeIdentity, value []byte, directory bool, contentIDs []schema.ID) ([]byte, error) {
-	if existing, found, err := importer.store.Get(importer.ctx, currentKey); err != nil {
-		return nil, err
-	} else if found {
-		pointer, err := schema.UnmarshalCurrentPointer(existing)
-		if err != nil {
+	if !importer.options.DeferSnapshotDurability {
+		if existing, found, err := importer.store.Get(importer.ctx, currentKey); err != nil {
 			return nil, err
-		}
-		existingValue, valueFound, err := importer.store.Get(importer.ctx, pointer.RecordKey)
-		if err != nil {
-			return nil, err
-		}
-		if valueFound && bytes.Equal(existingValue, value) {
-			importer.result.NodesImported++
-			return pointer.RecordKey, nil
+		} else if found {
+			pointer, err := schema.UnmarshalCurrentPointer(existing)
+			if err != nil {
+				return nil, err
+			}
+			existingValue, valueFound, err := importer.store.Get(importer.ctx, pointer.RecordKey)
+			if err != nil {
+				return nil, err
+			}
+			if valueFound && bytes.Equal(existingValue, value) {
+				importer.result.NodesImported++
+				return pointer.RecordKey, nil
+			}
 		}
 	}
 	if importer.options.DryRun {
@@ -416,16 +432,44 @@ func (importer *treeImporter) publishRevision(currentKey []byte, identity nodeId
 		related = append(related, daemon.Mutation{Key: schema.ReverseInodeKey(id, identity.fsid, identity.inode), Value: reverseValue})
 	}
 	related = append(related, importer.pendingDebt...)
-	publish := importer.store.PublishRevisionBatch
 	if importer.options.DeferSnapshotDurability {
-		publish = importer.store.PublishRevisionBatchDeferred
+		currentID := string(currentKey)
+		if _, duplicate := importer.pendingCurrent[currentID]; duplicate {
+			if err := importer.flushRevisions(); err != nil {
+				return nil, err
+			}
+		}
+		importer.pendingRevisions = append(importer.pendingRevisions, daemon.RevisionPublication{
+			CurrentKey: currentKey, RevisionKey: revisionKey, RevisionValue: value, Revision: revision,
+			RelatedPuts: related,
+		})
+		importer.pendingCurrent[currentID] = struct{}{}
+		importer.pendingDebt = importer.pendingDebt[:0]
+		if len(importer.pendingRevisions) >= snapshotRevisionBatchSize {
+			if err := importer.flushRevisions(); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if err := importer.store.PublishRevisionBatch(importer.ctx, currentKey, revisionKey, value, revision, related, nil); err != nil {
+			return nil, err
+		}
+		importer.pendingDebt = importer.pendingDebt[:0]
 	}
-	if err := publish(importer.ctx, currentKey, revisionKey, value, revision, related, nil); err != nil {
-		return nil, err
-	}
-	importer.pendingDebt = importer.pendingDebt[:0]
 	importer.result.NodesImported++
 	return revisionKey, nil
+}
+
+func (importer *treeImporter) flushRevisions() error {
+	if len(importer.pendingRevisions) == 0 {
+		return nil
+	}
+	if err := importer.store.PublishRevisionBatchesDeferred(importer.ctx, importer.pendingRevisions); err != nil {
+		return err
+	}
+	importer.pendingRevisions = importer.pendingRevisions[:0]
+	clear(importer.pendingCurrent)
+	return nil
 }
 
 func (importer *treeImporter) allocateRevision() (uint64, error) {
