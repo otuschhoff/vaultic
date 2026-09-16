@@ -297,6 +297,7 @@ type indexImportOptions struct {
 	FromLegacy                 bool
 	BatchSize                  uint32
 	PackWorkers                uint
+	ImportPublicationLanes     uint
 	PackTimeout                time.Duration
 	PacksPerTransaction        uint
 	ImportTransactionBytes     uint64
@@ -361,6 +362,9 @@ func applyFreshBulkImportDefaults(options indexImportOptions) indexImportOptions
 	}
 	if options.PackWorkers == 0 {
 		options.PackWorkers = uint(min(32, runtime.GOMAXPROCS(0)))
+	}
+	if options.ImportPublicationLanes == 0 {
+		options.ImportPublicationLanes = 2
 	}
 	if options.PacksPerTransaction == 0 {
 		options.PacksPerTransaction = 8
@@ -430,7 +434,7 @@ func (reporter *importProgressReporter) update(now time.Time, progress legacyimp
 			"snapshots %d/%d (imported %d, resumed %d); packs prepared/committed %d/%d; blobs %d; "+
 			"batches %d (adaptive splits %d); prepared bytes total %d; queue %d packs/%d bytes "+
 			"(peak %d packs/%d bytes); "+
-			"stage time prepare aggregate=%s publish=%s checkpoint batch=%s; checkpoint pending %t; "+
+			"stage time prepare aggregate=%s publish aggregate-lane=%s checkpoint batch=%s; checkpoint pending %t; "+
 			"speed last interval %s; speed since start %s; elapsed %s; est. remaining %s; ETA %s",
 		percent,
 		progress.IndexesCompleted,
@@ -527,6 +531,12 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
 	flags.Uint32Var(&options.BatchSize, "batch-size", 0, "maximum mutations per daemon transaction batch (zero uses daemon limit)")
 	flags.UintVar(&options.PackWorkers, "pack-workers", 0, "concurrent legacy pack preparations (zero uses up to eight available CPUs)")
+	flags.UintVar(
+		&options.ImportPublicationLanes,
+		"import-publication-lanes",
+		0,
+		"concurrent stage 3 split-publication lanes (zero selects command defaults)",
+	)
 	flags.DurationVar(&options.PackTimeout, "pack-timeout", 5*time.Minute, "maximum time to prepare one legacy pack")
 	flags.UintVar(
 		&options.PacksPerTransaction, "packs-per-transaction", 0,
@@ -622,14 +632,15 @@ func runIndexImport(
 	progressReporter := newImportProgressReporter(started)
 	log.Printf(
 		"legacy metadata import started: pack_workers=%d batch_size=%d packs_per_transaction=%d "+
-			"transaction_bytes=%d prepared_bytes=%d batch_timeout=%s snapshot_depth=%d resume=%t fresh=%t",
+			"transaction_bytes=%d prepared_bytes=%d publication_lanes=%d batch_timeout=%s snapshot_depth=%d resume=%t fresh=%t",
 		options.PackWorkers, options.BatchSize, options.PacksPerTransaction, options.ImportTransactionBytes,
-		options.PreparedImportBytes, options.ImportBatchTimeout, options.SnapshotDepth, options.Resume,
+		options.PreparedImportBytes, options.ImportPublicationLanes, options.ImportBatchTimeout, options.SnapshotDepth, options.Resume,
 		options.ForceResetOldIndex,
 	)
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
 		Resume: options.Resume, DryRun: options.DryRun, MaxErrors: options.MaxErrors,
-		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers, PackTimeout: options.PackTimeout,
+		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers,
+		PublicationLanes: options.ImportPublicationLanes, PackTimeout: options.PackTimeout,
 		PacksPerTransaction: options.PacksPerTransaction, ImportTransactionBytes: options.ImportTransactionBytes,
 		PreparedImportBytes: options.PreparedImportBytes, ImportBatchTimeout: options.ImportBatchTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
@@ -704,31 +715,37 @@ func completedBulkImportDaemonOptions(options indexDaemonOptions) indexDaemonOpt
 func logLegacyImportCompletion(started time.Time, result legacyimport.Result, err error) {
 	if err != nil {
 		log.Printf(
-			"legacy metadata import failed after %s: indexes=%d packs=%d blobs=%d snapshots=%d: %v",
+			"legacy metadata import failed after %s: indexes=%d packs=%d blobs=%d snapshots=%d "+
+				"batches_ingested=%d batches_reduced=%d batches_committed=%d peak_publication_lanes=%d: %v",
 			time.Since(started).Round(time.Millisecond), result.IndexesImported, result.PacksImported,
-			result.BlobsImported, result.SnapshotsImported, err,
+			result.BlobsImported, result.SnapshotsImported, result.BatchesIngested, result.BatchesReduced,
+			result.BatchesCommitted, result.PeakPublicationLanes, err,
 		)
 	} else {
 		log.Printf(
-			"legacy metadata import completed after %s: indexes=%d packs=%d blobs=%d snapshots=%d",
+			"legacy metadata import completed after %s: indexes=%d packs=%d blobs=%d snapshots=%d "+
+				"batches_ingested=%d batches_reduced=%d batches_committed=%d peak_publication_lanes=%d",
 			time.Since(started).Round(time.Millisecond), result.IndexesImported, result.PacksImported,
-			result.BlobsImported, result.SnapshotsImported,
+			result.BlobsImported, result.SnapshotsImported, result.BatchesIngested, result.BatchesReduced,
+			result.BatchesCommitted, result.PeakPublicationLanes,
 		)
 	}
 }
 
 func logLegacyImportStats(importStats daemon.LegacyImportStats) {
 	log.Printf(
-		"legacy import transactions: batches=%d attempts=%d commits=%d retries=%d conflicts=%d "+
+		"legacy import transactions: batches=%d ingested=%d reduced=%d attempts=%d commits=%d retries=%d conflicts=%d "+
 			"packs=%d unique_blobs=%d source_indexes=%d mutations=%d bytes=%d replanned_bytes=%d "+
-			"mutation_rpcs=%d planning_reads=%d gate_wait=%s planning=%s "+
-			"mutation_rpc=%s commit=%s total=%s lookups_absent=%d lookups_possible=%d lookups_found=%d "+
+			"mutation_rpcs=%d planning_reads=%d gate_wait=%s planning=%s reduction=%s "+
+			"mutation_rpc=%s commit=%s total_lane_time=%s lookups_absent=%d lookups_possible=%d lookups_found=%d "+
 			"lookups_false_positive_equivalent=%d filter_layers=%d filter_bytes=%d filter_inserts=%d "+
 			"filter_false_positive=%g filter_occupancy=%v filter_fallback=%t",
-		importStats.Batches, importStats.Attempts, importStats.Commits, importStats.Retries, importStats.Conflicts,
+		importStats.Batches, importStats.IngestedBatches, importStats.ReducedBatches,
+		importStats.Attempts, importStats.Commits, importStats.Retries, importStats.Conflicts,
 		importStats.PacksCommitted, importStats.BlobsCommitted, importStats.SourceIndexesCommitted,
 		importStats.MutationsCommitted, importStats.EncodedBytesCommitted, importStats.ReplannedBytes,
 		importStats.MutationRPCs, importStats.PlanningReads, importStats.GateWait, importStats.PlanningTime,
+		importStats.ReductionTime,
 		importStats.MutationRPCTime, importStats.CommitTime, importStats.TotalTime,
 		importStats.DefinitelyAbsentLookups, importStats.PossiblyPresentLookups, importStats.FoundLookups,
 		importStats.FalsePositiveEquivalentLookups, importStats.FilterLayers, importStats.FilterBytes,
@@ -740,6 +757,12 @@ func logLegacyImportStats(importStats daemon.LegacyImportStats) {
 func validateIndexImportOptions(options indexImportOptions) (indexImportOptions, error) {
 	if !options.FromLegacy {
 		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
+	}
+	if options.ImportPublicationLanes > 8 {
+		return options, fmt.Errorf("--import-publication-lanes must not exceed 8")
+	}
+	if options.ImportPublicationLanes > 1 && !options.ForceResetOldIndex {
+		return options, fmt.Errorf("--import-publication-lanes >1 requires --force-reset-old-idx (Stage 3 split import is fresh-import-only)")
 	}
 	if options.PacksPerTransaction > legacyimport.MaxPacksPerTransaction {
 		return options, fmt.Errorf("--packs-per-transaction must not exceed %d", legacyimport.MaxPacksPerTransaction)
@@ -761,6 +784,9 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 		options.Resume = false
 		options.Daemon.RebuildReset = true
 		options = applyFreshBulkImportDefaults(options)
+	}
+	if options.ImportPublicationLanes == 0 {
+		options.ImportPublicationLanes = 1
 	}
 	if options.DryRun && options.Activate {
 		return options, fmt.Errorf("--activate cannot be combined with --dry-run")

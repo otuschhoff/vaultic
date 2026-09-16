@@ -220,6 +220,12 @@ Flags used here:
    Defaults to true. Completed source-index and snapshot checkpoints are
    skipped on later runs, so interruption does not restart completed work.
 
+``--import-publication-lanes``
+   Selects Stage 3 split-session publication lanes when greater than one,
+   and falls back to Stage 2 single-transaction publication otherwise.
+   Zero selects command defaults: 1 for normal imports, 2 for
+   ``--force-reset-old-idx`` fresh imports.
+
 Restarting a partial candidate from empty
 -----------------------------------------
 

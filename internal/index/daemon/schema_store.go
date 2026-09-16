@@ -31,11 +31,15 @@ type SchemaStore struct {
 	publicationMu    sync.RWMutex
 	legacyImportGate chan struct{}
 	freshImportSeen  *idSeenFilter
+	legacySplitMu    sync.Mutex
+	legacySplitAuth  map[schema.ID]struct{}
 	legacyMetrics    legacyImportMetrics
 }
 
 type legacyImportMetrics struct {
 	batches               atomic.Uint64
+	ingestedBatches       atomic.Uint64
+	reducedBatches        atomic.Uint64
 	attempts              atomic.Uint64
 	commits               atomic.Uint64
 	retries               atomic.Uint64
@@ -54,6 +58,7 @@ type legacyImportMetrics struct {
 	found                 atomic.Uint64
 	gateWaitNanos         atomic.Uint64
 	planningNanos         atomic.Uint64
+	reductionNanos        atomic.Uint64
 	commitNanos           atomic.Uint64
 	totalNanos            atomic.Uint64
 }
@@ -62,6 +67,8 @@ type legacyImportMetrics struct {
 // import activity. Phase 33 can export these fields without changing import behavior.
 type LegacyImportStats struct {
 	Batches                        uint64
+	IngestedBatches                uint64
+	ReducedBatches                 uint64
 	Attempts                       uint64
 	Commits                        uint64
 	Retries                        uint64
@@ -81,20 +88,24 @@ type LegacyImportStats struct {
 	FalsePositiveEquivalentLookups uint64
 	GateWait                       time.Duration
 	PlanningTime                   time.Duration
+	ReductionTime                  time.Duration
 	CommitTime                     time.Duration
-	TotalTime                      time.Duration
-	FilterLayers                   uint64
-	FilterBytes                    uint64
-	FilterInserts                  uint64
-	FilterFalsePositive            float64
-	FilterFallbackToDatabase       bool
-	FilterLayerOccupancy           []float64
+	// TotalTime is aggregate importer transaction time across attempts/lanes,
+	// not wall-clock elapsed time.
+	TotalTime                time.Duration
+	FilterLayers             uint64
+	FilterBytes              uint64
+	FilterInserts            uint64
+	FilterFalsePositive      float64
+	FilterFallbackToDatabase bool
+	FilterLayerOccupancy     []float64
 }
 
 func (store *SchemaStore) LegacyImportStats() LegacyImportStats {
 	metrics := &store.legacyMetrics
 	result := LegacyImportStats{
 		Batches: metrics.batches.Load(), Attempts: metrics.attempts.Load(), Commits: metrics.commits.Load(),
+		IngestedBatches: metrics.ingestedBatches.Load(), ReducedBatches: metrics.reducedBatches.Load(),
 		Retries: metrics.retries.Load(), Conflicts: metrics.conflicts.Load(),
 		PacksCommitted: metrics.packsCommitted.Load(), BlobsCommitted: metrics.blobsCommitted.Load(),
 		MutationsCommitted: metrics.mutationsCommitted.Load(), EncodedBytesCommitted: metrics.encodedBytesCommitted.Load(),
@@ -103,8 +114,9 @@ func (store *SchemaStore) LegacyImportStats() LegacyImportStats {
 		SourceIndexesCommitted:  metrics.sourceIndexes.Load(),
 		DefinitelyAbsentLookups: metrics.definitelyAbsent.Load(), PossiblyPresentLookups: metrics.possiblyPresent.Load(),
 		FoundLookups: metrics.found.Load(), GateWait: time.Duration(metrics.gateWaitNanos.Load()),
-		PlanningTime: time.Duration(metrics.planningNanos.Load()), CommitTime: time.Duration(metrics.commitNanos.Load()),
-		TotalTime: time.Duration(metrics.totalNanos.Load()),
+		PlanningTime: time.Duration(metrics.planningNanos.Load()), ReductionTime: time.Duration(metrics.reductionNanos.Load()),
+		CommitTime: time.Duration(metrics.commitNanos.Load()),
+		TotalTime:  time.Duration(metrics.totalNanos.Load()),
 	}
 	if result.PossiblyPresentLookups > result.FoundLookups {
 		result.FalsePositiveEquivalentLookups = result.PossiblyPresentLookups - result.FoundLookups
@@ -141,6 +153,11 @@ func (store *SchemaStore) MarkBulkImportComplete(ctx context.Context) error {
 // this store. It is safe only for a candidate reset to empty immediately before import.
 func (s *SchemaStore) EnableFreshLegacyImport() {
 	s.freshImportSeen = newIDSeenFilter(freshImportInitialCapacity, freshImportSeenMaxBytes, freshImportFalsePositive)
+	s.legacySplitMu.Lock()
+	if s.legacySplitAuth == nil {
+		s.legacySplitAuth = make(map[schema.ID]struct{})
+	}
+	s.legacySplitMu.Unlock()
 }
 
 // CheckEncryption validates the underlying metadata objects without exposing keys.
@@ -211,7 +228,11 @@ type ReconciledRevision struct {
 }
 
 func NewSchemaStore(client *Client) *SchemaStore {
-	return &SchemaStore{client: client, legacyImportGate: make(chan struct{}, 1)}
+	return &SchemaStore{
+		client:           client,
+		legacyImportGate: make(chan struct{}, 1),
+		legacySplitAuth:  make(map[schema.ID]struct{}),
+	}
 }
 
 func (store *SchemaStore) LockAnalyticsPublication() {

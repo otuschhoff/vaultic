@@ -291,6 +291,10 @@ func (metadataKeyCodec) parse(key []byte) (ParsedKey, error) {
 	case len(key) == 53 && string(key[:21]) == "meta:import-snapshot:":
 		parsed.Kind = KeySnapshotImportCheckpoint
 		copy(parsed.ID[:], key[21:])
+	case len(key) == 60 && string(key[:20]) == "meta:import-receipt:":
+		parsed.Kind = KeyLegacyImportReceipt
+		copy(parsed.ID[:], key[20:52])
+		parsed.Revision = binary.BigEndian.Uint64(key[52:])
 	case len(key) == 53 && string(key[:21]) == "meta:export-snapshot:":
 		parsed.Kind = KeyExportCheckpoint
 		copy(parsed.ID[:], key[21:])
@@ -570,6 +574,9 @@ func (metadataKeyCodec) validate(parsed ParsedKey, value []byte) error {
 	switch parsed.Kind {
 	case KeyImportCheckpoint:
 		_, err := UnmarshalImportCheckpointRecord(value)
+		return err
+	case KeyLegacyImportReceipt:
+		_, err := UnmarshalLegacyImportReceiptRecord(value)
 		return err
 	case KeySnapshotImportCheckpoint:
 		_, err := UnmarshalSnapshotImportCheckpointRecord(value)

@@ -91,6 +91,7 @@ const (
 	KeyDeletionCertificate
 	KeyVerificationState
 	KeyVerificationEvent
+	KeyLegacyImportReceipt
 	keyKindCount
 )
 
@@ -346,6 +347,21 @@ func CrawlDebtKey(snapshot, work ID) []byte {
 func ImportCheckpointKey(index ID) []byte { return idKey("meta:import-index:", index) }
 
 func SnapshotImportCheckpointKey(snapshot ID) []byte { return idKey("meta:import-snapshot:", snapshot) }
+
+func LegacyImportReceiptKey(session ID, batch uint64) []byte {
+	key := make([]byte, 20+len(session)+8)
+	copy(key, "meta:import-receipt:")
+	copy(key[20:], session[:])
+	binary.BigEndian.PutUint64(key[52:], batch)
+	return key
+}
+
+func LegacyImportReceiptPrefix(session ID) []byte {
+	key := make([]byte, 20+len(session))
+	copy(key, "meta:import-receipt:")
+	copy(key[20:], session[:])
+	return key
+}
 
 func ExportCheckpointKey(snapshot ID) []byte { return idKey("meta:export-snapshot:", snapshot) }
 

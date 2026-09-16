@@ -297,6 +297,155 @@ func UnmarshalImportCheckpointRecord(data []byte) (ImportCheckpointRecord, error
 	return record, d.done()
 }
 
+type LegacyImportReceiptRecord struct {
+	ContentHash   ID
+	SourceIndex   ID
+	PacksImported uint64
+	BlobsImported uint64
+	ErrorsSeen    uint64
+	Reduced       bool
+	Changes       []LegacyImportPackChange
+	Events        []LegacyImportEvent
+}
+
+type LegacyImportPackChange struct {
+	PackID  ID
+	Old     []byte
+	Current []byte
+}
+
+type LegacyImportEvent struct {
+	PackID ID
+	Value  []byte
+}
+
+func (record LegacyImportReceiptRecord) MarshalBinary() ([]byte, error) {
+	if record.ContentHash == (ID{}) || record.SourceIndex == (ID{}) || len(record.Changes) > 256 || len(record.Events) > 1024 {
+		return nil, fmt.Errorf("%w: invalid legacy import receipt", ErrMalformed)
+	}
+	e := newEncoder()
+	e.id(record.ContentHash)
+	e.id(record.SourceIndex)
+	e.u64(record.PacksImported)
+	e.u64(record.BlobsImported)
+	e.u64(record.ErrorsSeen)
+	e.bool(record.Reduced)
+	e.u32(uint32(len(record.Changes)))
+	for _, change := range record.Changes {
+		if change.PackID == (ID{}) || len(change.Current) == 0 {
+			return nil, fmt.Errorf("%w: invalid legacy import receipt change", ErrMalformed)
+		}
+		if len(change.Old) > 0 {
+			if _, err := UnmarshalPackRecord(change.Old); err != nil {
+				return nil, err
+			}
+		}
+		if _, err := UnmarshalPackRecord(change.Current); err != nil {
+			return nil, err
+		}
+		e.id(change.PackID)
+		if err := e.bytes(change.Old); err != nil {
+			return nil, err
+		}
+		if err := e.bytes(change.Current); err != nil {
+			return nil, err
+		}
+	}
+	e.u32(uint32(len(record.Events)))
+	for _, event := range record.Events {
+		if event.PackID == (ID{}) {
+			return nil, fmt.Errorf("%w: invalid legacy import receipt event", ErrMalformed)
+		}
+		if _, err := UnmarshalPackHistoryEvent(event.Value); err != nil {
+			return nil, err
+		}
+		e.id(event.PackID)
+		if err := e.bytes(event.Value); err != nil {
+			return nil, err
+		}
+	}
+	return e.finish()
+}
+
+//nolint:gocognit // The bounded nested receipt encoding validates each persisted reduction input.
+func UnmarshalLegacyImportReceiptRecord(data []byte) (LegacyImportReceiptRecord, error) {
+	d, err := newDecoder(data)
+	if err != nil {
+		return LegacyImportReceiptRecord{}, err
+	}
+	var record LegacyImportReceiptRecord
+	if record.ContentHash, err = d.id(); err != nil {
+		return record, err
+	}
+	if record.SourceIndex, err = d.id(); err != nil {
+		return record, err
+	}
+	if record.PacksImported, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.BlobsImported, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.ErrorsSeen, err = d.u64(); err != nil {
+		return record, err
+	}
+	if record.Reduced, err = d.bool(); err != nil {
+		return record, err
+	}
+	changeCount, err := d.u32()
+	if err != nil || changeCount > 256 {
+		return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt changes", ErrMalformed)
+	}
+	record.Changes = make([]LegacyImportPackChange, changeCount)
+	for index := range record.Changes {
+		change := &record.Changes[index]
+		if change.PackID, err = d.id(); err != nil {
+			return record, err
+		}
+		if change.Old, err = d.bytes(); err != nil {
+			return record, err
+		}
+		if change.Current, err = d.bytes(); err != nil {
+			return record, err
+		}
+		if change.PackID == (ID{}) || len(change.Current) == 0 {
+			return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt change", ErrMalformed)
+		}
+		if len(change.Old) > 0 {
+			if _, err := UnmarshalPackRecord(change.Old); err != nil {
+				return LegacyImportReceiptRecord{}, err
+			}
+		}
+		if _, err := UnmarshalPackRecord(change.Current); err != nil {
+			return LegacyImportReceiptRecord{}, err
+		}
+	}
+	eventCount, err := d.u32()
+	if err != nil || eventCount > 1024 {
+		return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt events", ErrMalformed)
+	}
+	record.Events = make([]LegacyImportEvent, eventCount)
+	for index := range record.Events {
+		event := &record.Events[index]
+		if event.PackID, err = d.id(); err != nil {
+			return record, err
+		}
+		if event.Value, err = d.bytes(); err != nil {
+			return record, err
+		}
+		if event.PackID == (ID{}) {
+			return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt event", ErrMalformed)
+		}
+		if _, err := UnmarshalPackHistoryEvent(event.Value); err != nil {
+			return LegacyImportReceiptRecord{}, err
+		}
+	}
+	if record.ContentHash == (ID{}) || record.SourceIndex == (ID{}) {
+		return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt", ErrMalformed)
+	}
+	return record, d.done()
+}
+
 type SnapshotImportCheckpointRecord struct {
 	TreesVisited  uint64
 	NodesImported uint64

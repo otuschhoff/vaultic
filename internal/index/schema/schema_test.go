@@ -141,6 +141,7 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 			KeyGarbageCollection,
 		}, {GarbageCollectionKey(GCPack, id), KeyGarbageCollection},
 		{CrawlDebtKey(id, second), KeyCrawlDebt}, {ImportCheckpointKey(id), KeyImportCheckpoint},
+		{LegacyImportReceiptKey(id, 7), KeyLegacyImportReceipt},
 		{
 			SnapshotImportCheckpointKey(id),
 			KeySnapshotImportCheckpoint,
@@ -172,6 +173,49 @@ func TestEveryKeyNamespaceRoundTrips(t *testing.T) {
 		if _, err := ParseKey(malformed); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("ParseKey(%x) = %v", malformed, err)
 		}
+	}
+}
+
+func TestLegacyImportReceiptRoundTrips(t *testing.T) {
+	id := testID(1)
+	second := testID(2)
+	packValue, err := (PackRecord{Type: PackData, Lifecycle: PackImported}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventValue, err := (PackHistoryEvent{Type: EventImported, PackType: PackData}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := LegacyImportReceiptRecord{
+		ContentHash: id, SourceIndex: second, PacksImported: 3, BlobsImported: 4, ErrorsSeen: 5, Reduced: true,
+		Changes: []LegacyImportPackChange{{PackID: id, Current: packValue}},
+		Events:  []LegacyImportEvent{{PackID: id, Value: eventValue}},
+	}
+	encoded, err := want.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnmarshalLegacyImportReceiptRecord(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("receipt = %#v, want %#v", got, want)
+	}
+	if err := ValidateValue(LegacyImportReceiptKey(id, 7), encoded); err != nil {
+		t.Fatalf("validate receipt: %v", err)
+	}
+}
+
+func TestLegacyImportReceiptPrefix(t *testing.T) {
+	session := testID(9)
+	prefix := LegacyImportReceiptPrefix(session)
+	if len(prefix) != len("meta:import-receipt:")+len(session) {
+		t.Fatalf("receipt prefix length = %d", len(prefix))
+	}
+	if !bytes.HasPrefix(LegacyImportReceiptKey(session, 7), prefix) {
+		t.Fatalf("receipt key is missing expected prefix")
 	}
 }
 

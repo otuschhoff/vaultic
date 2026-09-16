@@ -838,6 +838,30 @@ func TestIndexImportRejectsUnboundedPackFloorBeforeReset(t *testing.T) {
 	}
 }
 
+func TestIndexImportRejectsExcessPublicationLanes(t *testing.T) {
+	_, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true, ImportPublicationLanes: 9})
+	if err == nil || !strings.Contains(err.Error(), "--import-publication-lanes must not exceed 8") {
+		t.Fatalf("publication lanes validation error = %v", err)
+	}
+}
+
+func TestIndexImportRejectsSplitLanesWithoutFreshReset(t *testing.T) {
+	_, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true, ImportPublicationLanes: 2})
+	if err == nil || !strings.Contains(err.Error(), "requires --force-reset-old-idx") {
+		t.Fatalf("fresh split-lane validation error = %v", err)
+	}
+}
+
+func TestIndexImportDefaultsPublicationLanesForNonFresh(t *testing.T) {
+	options, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ImportPublicationLanes != 1 {
+		t.Fatalf("non-fresh publication lanes default = %d, want 1", options.ImportPublicationLanes)
+	}
+}
+
 func TestBulkImportMemoryProfileScalesAndCaps(t *testing.T) {
 	const gib = uint64(1024 * 1024 * 1024)
 	for _, test := range []struct {
@@ -862,11 +886,12 @@ func TestFreshBulkImportDefaultsPreserveExplicitTuning(t *testing.T) {
 			WALStore: "local", WALFlushInterval: time.Second,
 			MaxUnflushedBytes: 2, L0SSTSizeBytes: 3,
 		},
-		PackWorkers: 7, PacksPerTransaction: 4, ImportTransactionBytes: 1024,
+		PackWorkers: 7, ImportPublicationLanes: 5, PacksPerTransaction: 4, ImportTransactionBytes: 1024,
 		PreparedImportBytes: 2048, ImportBatchTimeout: time.Minute,
 	})
 	if options.Daemon.WALStore != "local" || options.Daemon.WALFlushInterval != time.Second ||
 		options.Daemon.MaxUnflushedBytes != 2 || options.Daemon.L0SSTSizeBytes != 3 || options.PackWorkers != 7 ||
+		options.ImportPublicationLanes != 5 ||
 		options.PacksPerTransaction != 4 || options.ImportTransactionBytes != 1024 ||
 		options.PreparedImportBytes != 2048 || options.ImportBatchTimeout != time.Minute {
 		t.Fatalf("explicit bulk-import tuning was replaced: %+v", options)
@@ -904,7 +929,8 @@ func TestForceResetEnablesFreshBulkImportProfile(t *testing.T) {
 	if !options.Daemon.FreshBulkImport || options.Daemon.WALStore != "memory" ||
 		options.Daemon.WALFlushInterval != 500*time.Millisecond ||
 		options.Daemon.L0SSTSizeBytes != bulkImportL0SSTSizeBytes ||
-		options.Daemon.MaxUnflushedBytes == 0 || options.PackWorkers == 0 || options.PacksPerTransaction != 8 ||
+		options.Daemon.MaxUnflushedBytes == 0 || options.PackWorkers == 0 || options.ImportPublicationLanes != 2 ||
+		options.PacksPerTransaction != 8 ||
 		options.ImportTransactionBytes != 8<<20 || options.PreparedImportBytes != 256<<20 ||
 		options.ImportBatchTimeout != 4*time.Minute {
 		t.Fatalf("fresh bulk-import profile is incomplete: %+v", options)
@@ -942,7 +968,7 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 	wantInitial := "legacy import progress: 0.0%; indexes 0/4 (imported 0, resumed 0); " +
 		"snapshots 0/2 (imported 0, resumed 0); packs prepared/committed 0/0; blobs 0; " +
 		"batches 0 (adaptive splits 0); prepared bytes total 0; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
-		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending false; speed last interval unknown; " +
+		"stage time prepare aggregate=0s publish aggregate-lane=0s checkpoint batch=0s; checkpoint pending false; speed last interval unknown; " +
 		"speed since start unknown; elapsed 0s; est. remaining unknown; ETA unknown"
 	if logged[0] != wantInitial {
 		t.Fatalf("initial progress = %q", logged[0])
@@ -950,7 +976,7 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 	wantPartial := "legacy import progress: 33.3%; indexes 2/4 (imported 1, resumed 1); " +
 		"snapshots 0/2 (imported 0, resumed 0); packs prepared/committed 8/6; blobs 17; " +
 		"batches 2 (adaptive splits 0); prepared bytes total 4096; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
-		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending true; " +
+		"stage time prepare aggregate=0s publish aggregate-lane=0s checkpoint batch=0s; checkpoint pending true; " +
 		"speed last interval 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; " +
 		"speed since start 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; elapsed 4s; " +
 		"est. remaining 8s; ETA 2026-07-07T12:00:12Z"
@@ -960,7 +986,7 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 	wantIndexesComplete := "legacy import progress: 66.7%; indexes 4/4 (imported 3, resumed 1); " +
 		"snapshots 0/2 (imported 0, resumed 0); packs prepared/committed 12/12; blobs 34; " +
 		"batches 4 (adaptive splits 0); prepared bytes total 8192; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
-		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending false; " +
+		"stage time prepare aggregate=0s publish aggregate-lane=0s checkpoint batch=0s; checkpoint pending false; " +
 		"speed last interval 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; " +
 		"speed since start 1.5 packs/s, 4.2 blobs/s, 0.0 nodes/s; elapsed 8s; " +
 		"est. remaining 4s; ETA 2026-07-07T12:00:12Z"
@@ -970,7 +996,7 @@ func TestImportProgressReporterFormatsAndThrottles(t *testing.T) {
 	wantFinal := "legacy import progress: 100.0%; indexes 4/4 (imported 3, resumed 1); " +
 		"snapshots 2/2 (imported 2, resumed 0); packs prepared/committed 12/12; blobs 34; " +
 		"batches 4 (adaptive splits 0); prepared bytes total 8192; queue 0 packs/0 bytes (peak 0 packs/0 bytes); " +
-		"stage time prepare aggregate=0s publish=0s checkpoint batch=0s; checkpoint pending false; " +
+		"stage time prepare aggregate=0s publish aggregate-lane=0s checkpoint batch=0s; checkpoint pending false; " +
 		"speed last interval 0.0 packs/s, 0.0 blobs/s, 2.0 nodes/s; " +
 		"speed since start 1.0 packs/s, 2.8 blobs/s, 0.7 nodes/s; elapsed 12s; " +
 		"est. remaining 0s; ETA 2026-07-07T12:00:12Z"
@@ -983,6 +1009,7 @@ func TestIndexImportRegistersBulkTransactionFlags(t *testing.T) {
 	command := newIndexImportCommand(&global.Options{})
 	for _, name := range []string{
 		"packs-per-transaction", "import-transaction-bytes", "prepared-import-bytes", "import-batch-timeout",
+		"import-publication-lanes",
 	} {
 		if command.Flags().Lookup(name) == nil {
 			t.Errorf("import flag --%s is not registered", name)

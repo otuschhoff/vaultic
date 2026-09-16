@@ -26,6 +26,7 @@ var (
 
 const (
 	maxDefaultPackWorkers         = 8
+	maxPublicationLanes           = 8
 	defaultPacksPerTransaction    = 8
 	MaxPacksPerTransaction        = 256
 	defaultImportTransactionBytes = 8 << 20
@@ -38,6 +39,7 @@ const (
 type Options struct {
 	Resume                 bool
 	DryRun                 bool
+	PublicationLanes       uint
 	BatchSize              uint32
 	PackWorkers            uint
 	PackTimeout            time.Duration
@@ -65,12 +67,18 @@ type Progress struct {
 	BlobsImported       uint64
 	PacksPrepared       uint64
 	PreparedBytes       uint64
+	BatchesIngested     uint64
+	BatchesReduced      uint64
 	QueuedPreparedPacks uint64
 	QueuedPreparedBytes uint64
 	BatchesCommitted    uint64
+	InFlightLanes       uint64
+	PeakLanes           uint64
 	PeakPreparedPacks   uint64
 	PeakPreparedBytes   uint64
 	PreparationTime     time.Duration
+	IngestTime          time.Duration
+	ReductionTime       time.Duration
 	PublicationTime     time.Duration
 	CheckpointBatchTime time.Duration
 	AdaptiveSplits      uint64
@@ -93,10 +101,15 @@ type Result struct {
 	BlobsImported         uint64    `json:"blobs_imported"`
 	PacksPrepared         uint64    `json:"packs_prepared"`
 	PreparedBytes         uint64    `json:"prepared_bytes"`
+	BatchesIngested       uint64    `json:"batches_ingested"`
+	BatchesReduced        uint64    `json:"batches_reduced"`
 	BatchesCommitted      uint64    `json:"batches_committed"`
+	PeakPublicationLanes  uint64    `json:"peak_publication_lanes"`
 	PeakPreparedPacks     uint64    `json:"peak_prepared_packs"`
 	PeakPreparedBytes     uint64    `json:"peak_prepared_bytes"`
 	PreparationTimeMS     uint64    `json:"preparation_time_ms"`
+	IngestTimeMS          uint64    `json:"ingest_time_ms"`
+	ReductionTimeMS       uint64    `json:"reduction_time_ms"`
 	PublicationTimeMS     uint64    `json:"publication_time_ms"`
 	CheckpointBatchTimeMS uint64    `json:"checkpoint_batch_time_ms"`
 	AdaptiveSplits        uint64    `json:"adaptive_splits"`
@@ -131,6 +144,13 @@ type Store interface {
 	Get(context.Context, []byte) ([]byte, bool, error)
 	ImportLegacyPacks(context.Context, []daemon.LegacyPackImport, *daemon.Mutation) error
 	Put(context.Context, []byte, []byte, bool) error
+}
+
+type SplitStore interface {
+	Store
+	IngestLegacyPacks(context.Context, schema.ID, uint64, []daemon.LegacyPackImport) error
+	ReduceLegacyImportBatch(context.Context, schema.ID, uint64, *daemon.Mutation) error
+	CompleteLegacyImportSession(context.Context, schema.ID) error
 }
 
 type packImportResult struct {
@@ -179,11 +199,17 @@ type packPipelineCounters struct {
 	totalPreparedBytes   atomic.Uint64
 	committedPacks       atomic.Uint64
 	committedBlobs       atomic.Uint64
+	ingestedBatches      atomic.Uint64
+	reducedBatches       atomic.Uint64
 	committedBatches     atomic.Uint64
+	activeLanes          atomic.Uint64
+	peakLanes            atomic.Uint64
 	checkpointPending    atomic.Bool
 	peakPreparedPacks    atomic.Uint64
 	peakPreparedBytes    atomic.Uint64
 	preparationNanos     atomic.Uint64
+	ingestNanos          atomic.Uint64
+	reductionNanos       atomic.Uint64
 	publicationNanos     atomic.Uint64
 	checkpointBatchNanos atomic.Uint64
 	adaptiveSplits       atomic.Uint64
@@ -197,17 +223,23 @@ type packPipelineStats struct {
 	queuedPreparedBytes uint64
 	committedPacks      uint64
 	committedBlobs      uint64
+	ingestedBatches     uint64
+	reducedBatches      uint64
 	committedBatches    uint64
+	inFlightLanes       uint64
+	peakLanes           uint64
 	checkpointPending   bool
 	peakPreparedPacks   uint64
 	peakPreparedBytes   uint64
 	preparationTime     time.Duration
+	ingestTime          time.Duration
+	reductionTime       time.Duration
 	publicationTime     time.Duration
 	checkpointBatchTime time.Duration
 	adaptiveSplits      uint64
 }
 
-//nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
+//nolint:funlen,gocognit,gocyclo,nestif // Existing domain flow is an explicit complexity exception; Stage 3 remains gated.
 func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (Result, error) {
 	var result Result
 	if options.PackTimeout < 0 {
@@ -215,6 +247,9 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	}
 	if options.ImportBatchTimeout < 0 || options.ImportBatchTimeout > maxImportBatchTimeout {
 		return result, fmt.Errorf("import batch timeout must be between zero and %s", maxImportBatchTimeout)
+	}
+	if options.PublicationLanes > maxPublicationLanes {
+		return result, fmt.Errorf("publication lanes must not exceed %d", maxPublicationLanes)
 	}
 	if options.PacksPerTransaction > MaxPacksPerTransaction {
 		return result, fmt.Errorf("packs per transaction must not exceed %d", MaxPacksPerTransaction)
@@ -230,6 +265,8 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		return result, err
 	}
 	var snapshotList vaultic.Lister
+	splitStore, splitCapable := store.(SplitStore)
+	useStage3 := options.PublicationLanes > 1 && !options.DryRun && splitCapable
 	if options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0 {
 		snapshotList, err = vaultic.MemorizeList(ctx, source, vaultic.SnapshotFile)
 		if err != nil {
@@ -242,8 +279,9 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 			return result, err
 		}
 	}
-	var preparationTime, publicationTime, checkpointBatchTime time.Duration
+	var preparationTime, ingestTime, reductionTime, publicationTime, checkpointBatchTime time.Duration
 	var checkpointPending bool
+	var inFlightLanes, peakLanes uint64
 	reportProgress := func() {
 		if options.Progress != nil {
 			options.Progress(Progress{
@@ -259,10 +297,16 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 				BlobsImported:       result.BlobsImported,
 				PacksPrepared:       result.PacksPrepared,
 				PreparedBytes:       result.PreparedBytes,
+				BatchesIngested:     result.BatchesIngested,
+				BatchesReduced:      result.BatchesReduced,
 				BatchesCommitted:    result.BatchesCommitted,
+				InFlightLanes:       inFlightLanes,
+				PeakLanes:           peakLanes,
 				PeakPreparedPacks:   result.PeakPreparedPacks,
 				PeakPreparedBytes:   result.PeakPreparedBytes,
 				PreparationTime:     preparationTime,
+				IngestTime:          ingestTime,
+				ReductionTime:       reductionTime,
 				PublicationTime:     publicationTime,
 				CheckpointBatchTime: checkpointBatchTime,
 				AdaptiveSplits:      result.AdaptiveSplits,
@@ -289,6 +333,11 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 				if _, err := schema.UnmarshalImportCheckpointRecord(value); err != nil {
 					return fmt.Errorf("decode import checkpoint for %s: %w", indexID.Str(), err)
 				}
+				if useStage3 {
+					if err := splitStore.CompleteLegacyImportSession(ctx, schemaIndexID); err != nil {
+						return fmt.Errorf("cleanup split-session receipts for %s: %w", indexID.Str(), err)
+					}
+				}
 				result.IndexesResumed++
 				result.Checkpoint = indexID.String()
 				return nil
@@ -314,8 +363,11 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		}
 		basePacks, baseBlobs := result.PacksImported, result.BlobsImported
 		basePrepared, basePreparedBytes := result.PacksPrepared, result.PreparedBytes
-		basePreparationTime, basePublicationTime := preparationTime, publicationTime
+		basePreparationTime, baseIngestTime := preparationTime, ingestTime
+		baseReductionTime, basePublicationTime := reductionTime, publicationTime
 		baseCheckpointBatchTime, baseAdaptiveSplits := checkpointBatchTime, result.AdaptiveSplits
+		baseBatchesIngested, baseBatchesReduced := result.BatchesIngested, result.BatchesReduced
+		basePeakLanes := result.PeakPublicationLanes
 		liveProgress := func(stats packPipelineStats) {
 			if options.Progress == nil {
 				return
@@ -327,31 +379,61 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 				SnapshotsImported: result.SnapshotsImported, SnapshotsResumed: result.SnapshotsResumed,
 				PacksPrepared:       basePrepared + stats.totalPreparedPacks,
 				PreparedBytes:       basePreparedBytes + stats.totalPreparedBytes,
+				BatchesIngested:     baseBatchesIngested + stats.ingestedBatches,
+				BatchesReduced:      baseBatchesReduced + stats.reducedBatches,
 				QueuedPreparedPacks: stats.queuedPreparedPacks, QueuedPreparedBytes: stats.queuedPreparedBytes,
 				PacksImported: basePacks + stats.committedPacks, BlobsImported: baseBlobs + stats.committedBlobs,
 				BatchesCommitted:    result.BatchesCommitted + stats.committedBatches,
+				InFlightLanes:       stats.inFlightLanes,
+				PeakLanes:           max(basePeakLanes, stats.peakLanes),
 				PeakPreparedPacks:   max(result.PeakPreparedPacks, stats.peakPreparedPacks),
 				PeakPreparedBytes:   max(result.PeakPreparedBytes, stats.peakPreparedBytes),
 				PreparationTime:     basePreparationTime + stats.preparationTime,
+				IngestTime:          baseIngestTime + stats.ingestTime,
+				ReductionTime:       baseReductionTime + stats.reductionTime,
 				PublicationTime:     basePublicationTime + stats.publicationTime,
 				CheckpointBatchTime: baseCheckpointBatchTime + stats.checkpointBatchTime,
 				AdaptiveSplits:      baseAdaptiveSplits + stats.adaptiveSplits, CheckpointPending: stats.checkpointPending,
 				NodesImported: result.NodesImported,
 			})
 		}
-		outcomes, batchesCommitted, pipelineStats, failedPack := importPacks(
+		importPacksFn := importPacks
+		if useStage3 {
+			importPacksFn = func(
+				ctx context.Context,
+				statter PackStatter,
+				_ Store,
+				sourceIndex schema.ID,
+				packs []legacyindex.PackBlobs,
+				options Options,
+				checkpointIndex bool,
+				report func(packPipelineStats),
+			) ([]packImportResult, uint64, packPipelineStats, int) {
+				return importPacksStage3(ctx, statter, splitStore, sourceIndex, packs, options, checkpointIndex, report)
+			}
+		}
+		outcomes, batchesCommitted, pipelineStats, failedPack := importPacksFn(
 			ctx, statter, store, schemaIndexID, selected, options, !limitReached, liveProgress,
 		)
+		result.BatchesIngested += pipelineStats.ingestedBatches
+		result.BatchesReduced += pipelineStats.reducedBatches
 		result.BatchesCommitted += batchesCommitted
+		result.PeakPublicationLanes = max(result.PeakPublicationLanes, pipelineStats.peakLanes)
 		result.PeakPreparedPacks = max(result.PeakPreparedPacks, pipelineStats.peakPreparedPacks)
 		result.PeakPreparedBytes = max(result.PeakPreparedBytes, pipelineStats.peakPreparedBytes)
 		preparationTime += pipelineStats.preparationTime
+		ingestTime += pipelineStats.ingestTime
+		reductionTime += pipelineStats.reductionTime
 		publicationTime += pipelineStats.publicationTime
 		checkpointBatchTime += pipelineStats.checkpointBatchTime
 		result.PreparationTimeMS = uint64(preparationTime / time.Millisecond)
+		result.IngestTimeMS = uint64(ingestTime / time.Millisecond)
+		result.ReductionTimeMS = uint64(reductionTime / time.Millisecond)
 		result.PublicationTimeMS = uint64(publicationTime / time.Millisecond)
 		result.CheckpointBatchTimeMS = uint64(checkpointBatchTime / time.Millisecond)
 		checkpointPending = pipelineStats.checkpointPending
+		inFlightLanes = pipelineStats.inFlightLanes
+		peakLanes = max(peakLanes, pipelineStats.peakLanes)
 		result.AdaptiveSplits += pipelineStats.adaptiveSplits
 		for packIndex, outcome := range outcomes {
 			if outcome.imported.PackID != (schema.ID{}) {
@@ -851,10 +933,14 @@ func (counters *packPipelineCounters) snapshot() packPipelineStats {
 		totalPreparedPacks: counters.totalPreparedPacks.Load(), totalPreparedBytes: counters.totalPreparedBytes.Load(),
 		queuedPreparedPacks: counters.preparedPacks.Load(), queuedPreparedBytes: counters.preparedBytes.Load(),
 		committedPacks: counters.committedPacks.Load(), committedBlobs: counters.committedBlobs.Load(),
-		committedBatches:  counters.committedBatches.Load(),
+		ingestedBatches: counters.ingestedBatches.Load(), reducedBatches: counters.reducedBatches.Load(),
+		committedBatches: counters.committedBatches.Load(),
+		inFlightLanes:    counters.activeLanes.Load(), peakLanes: counters.peakLanes.Load(),
 		checkpointPending: counters.checkpointPending.Load(),
 		peakPreparedPacks: counters.peakPreparedPacks.Load(), peakPreparedBytes: counters.peakPreparedBytes.Load(),
 		preparationTime:     time.Duration(counters.preparationNanos.Load()),
+		ingestTime:          time.Duration(counters.ingestNanos.Load()),
+		reductionTime:       time.Duration(counters.reductionNanos.Load()),
 		publicationTime:     time.Duration(counters.publicationNanos.Load()),
 		checkpointBatchTime: time.Duration(counters.checkpointBatchNanos.Load()), adaptiveSplits: counters.adaptiveSplits.Load(),
 	}
@@ -914,7 +1000,9 @@ func estimateIndexedPackBytes(indexed legacyindex.PackBlobs) uint64 {
 }
 
 func estimatePreparedImportBytes(imported daemon.LegacyPackImport) uint64 {
-	bytes := uint64(1024 + len(imported.DebtKey))
+	// Include receipt/update overhead so pre-admission splitting avoids
+	// single-pack oversize commits when batch limits are tight.
+	bytes := uint64(1280 + len(imported.DebtKey))
 	for _, blob := range imported.Blobs {
 		bytes += 128 + uint64(len(blob.Locations))*96
 	}

@@ -3,6 +3,7 @@ package legacyimport
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -264,6 +265,177 @@ type deadlineImportStore struct {
 	remaining chan time.Duration
 }
 
+type splitStore struct {
+	*memoryStore
+	mu sync.Mutex
+
+	entered            chan uint64
+	blockByEnter       map[uint64]chan struct{}
+	blockByBatch       map[uint64]chan struct{}
+	ingestCalls        uint64
+	failByEnter        map[uint64]error
+	failIngest         map[uint64]error
+	failAnyIngest      error
+	failReduce         map[uint64]error
+	maxIngestPacks     int
+	batchFingerprints  map[uint64][32]byte
+	failedPacksByBatch map[uint64]schema.ID
+
+	ingestedImports  map[uint64][]daemon.LegacyPackImport
+	ingestedOrder    []uint64
+	reducedOrder     []uint64
+	reduceCheckpoint []bool
+
+	activeIngest uint64
+	peakIngest   uint64
+
+	completeCalls uint64
+}
+
+func newSplitStore() *splitStore {
+	return &splitStore{
+		memoryStore:        newMemoryStore(),
+		entered:            make(chan uint64, 64),
+		blockByEnter:       make(map[uint64]chan struct{}),
+		blockByBatch:       make(map[uint64]chan struct{}),
+		failByEnter:        make(map[uint64]error),
+		failIngest:         make(map[uint64]error),
+		failReduce:         make(map[uint64]error),
+		ingestedImports:    make(map[uint64][]daemon.LegacyPackImport),
+		batchFingerprints:  make(map[uint64][32]byte),
+		failedPacksByBatch: make(map[uint64]schema.ID),
+	}
+}
+
+func (store *splitStore) IngestLegacyPacks(
+	ctx context.Context,
+	_ schema.ID,
+	batch uint64,
+	imports []daemon.LegacyPackImport,
+) error {
+	store.mu.Lock()
+	store.activeIngest++
+	store.ingestCalls++
+	if store.activeIngest > store.peakIngest {
+		store.peakIngest = store.activeIngest
+	}
+	blockEnter := store.blockByEnter[store.ingestCalls]
+	block := store.blockByBatch[batch]
+	fail := store.failIngest[batch]
+	if fail == nil {
+		fail = store.failByEnter[store.ingestCalls]
+	}
+	if store.failAnyIngest != nil {
+		fail = store.failAnyIngest
+	}
+	store.ingestedOrder = append(store.ingestedOrder, batch)
+	store.entered <- batch
+	store.mu.Unlock()
+	defer func() {
+		store.mu.Lock()
+		store.activeIngest--
+		store.mu.Unlock()
+	}()
+	if blockEnter != nil {
+		select {
+		case <-blockEnter:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if fail != nil {
+		store.mu.Lock()
+		if len(imports) > 0 {
+			store.failedPacksByBatch[batch] = imports[0].PackID
+		}
+		store.mu.Unlock()
+		return fail
+	}
+	if store.maxIngestPacks > 0 && len(imports) > store.maxIngestPacks {
+		return daemon.ErrLegacyImportBatchTooLarge
+	}
+	fingerprint := stage3TestBatchFingerprint(imports)
+	store.mu.Lock()
+	if existing, found := store.batchFingerprints[batch]; found && existing != fingerprint {
+		store.mu.Unlock()
+		return daemon.ErrIdempotencyConflict
+	}
+	store.batchFingerprints[batch] = fingerprint
+	store.ingestedImports[batch] = append([]daemon.LegacyPackImport(nil), imports...)
+	store.mu.Unlock()
+	return nil
+}
+
+func (store *splitStore) ReduceLegacyImportBatch(
+	ctx context.Context,
+	_ schema.ID,
+	batch uint64,
+	checkpoint *daemon.Mutation,
+) error {
+	store.mu.Lock()
+	fail := store.failReduce[batch]
+	imports := store.ingestedImports[batch]
+	store.reducedOrder = append(store.reducedOrder, batch)
+	store.reduceCheckpoint = append(store.reduceCheckpoint, checkpoint != nil)
+	store.mu.Unlock()
+	if fail != nil {
+		return fail
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(imports) == 0 {
+		return daemon.ErrLegacyImportReceiptMissing
+	}
+	return store.memoryStore.ImportLegacyPacks(ctx, imports, checkpoint)
+}
+
+func (store *splitStore) CompleteLegacyImportSession(_ context.Context, _ schema.ID) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.completeCalls++
+	return nil
+}
+
+func stage3TestBatchFingerprint(imports []daemon.LegacyPackImport) [32]byte {
+	hasher := sha256.New()
+	var framed [8]byte
+	binary.BigEndian.PutUint64(framed[:], uint64(len(imports)))
+	_, _ = hasher.Write(framed[:])
+	for _, imported := range imports {
+		_, _ = hasher.Write(imported.SourceIndex[:])
+		_, _ = hasher.Write(imported.PackID[:])
+		recordValue, _ := imported.Record.MarshalBinary()
+		binary.BigEndian.PutUint64(framed[:], uint64(len(recordValue)))
+		_, _ = hasher.Write(framed[:])
+		_, _ = hasher.Write(recordValue)
+		blobIDs := make([]schema.ID, 0, len(imported.Blobs))
+		for blobID := range imported.Blobs {
+			blobIDs = append(blobIDs, blobID)
+		}
+		sort.Slice(blobIDs, func(left, right int) bool { return bytes.Compare(blobIDs[left][:], blobIDs[right][:]) < 0 })
+		binary.BigEndian.PutUint64(framed[:], uint64(len(blobIDs)))
+		_, _ = hasher.Write(framed[:])
+		for _, blobID := range blobIDs {
+			_, _ = hasher.Write(blobID[:])
+			blobValue, _ := imported.Blobs[blobID].MarshalBinary()
+			binary.BigEndian.PutUint64(framed[:], uint64(len(blobValue)))
+			_, _ = hasher.Write(framed[:])
+			_, _ = hasher.Write(blobValue)
+		}
+	}
+	var digest [32]byte
+	copy(digest[:], hasher.Sum(nil))
+	return digest
+}
+
 func (store *deadlineImportStore) ImportLegacyPacks(
 	ctx context.Context,
 	imports []daemon.LegacyPackImport,
@@ -296,6 +468,344 @@ func encodedIndex(t *testing.T, packID, blobID vaultic.ID) []byte {
 		t.Fatal(err)
 	}
 	return encoded.Bytes()
+}
+
+func encodedIndexWithPacks(t *testing.T, packIDs []vaultic.ID) []byte {
+	t.Helper()
+	idx := index.NewIndex()
+	for _, packID := range packIDs {
+		idx.StorePack(
+			packID,
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}},
+		)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
+func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
+	store := newSplitStore()
+	gate := make(chan struct{})
+	store.blockByEnter[1] = gate
+	store.blockByEnter[2] = gate
+
+	done := make(chan struct{})
+	go func() {
+		_, err := Import(
+			context.Background(),
+			source,
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		if err != nil {
+			t.Errorf("stage 3 import failed: %v", err)
+		}
+		close(done)
+	}()
+
+	<-store.entered
+	<-store.entered
+	close(gate)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import did not complete")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.peakIngest < 2 {
+		t.Fatalf("peak concurrent stage 3 ingests = %d, want >=2", store.peakIngest)
+	}
+	if len(store.reducedOrder) != 4 {
+		t.Fatalf("reduced batches = %d, want 4", len(store.reducedOrder))
+	}
+	reducedSeen := make(map[uint64]struct{}, len(store.reducedOrder))
+	for _, batch := range store.reducedOrder {
+		reducedSeen[batch] = struct{}{}
+	}
+	if len(reducedSeen) != 4 {
+		t.Fatalf("reduced order has duplicates: %v", store.reducedOrder)
+	}
+	if !slices.Equal(store.reduceCheckpoint, []bool{false, false, false, true}) {
+		t.Fatalf("checkpoint flags = %v", store.reduceCheckpoint)
+	}
+}
+
+func TestImportStage3OverlappingDependenciesDoNotOverlap(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	sharedBlob := vaultic.NewRandomID()
+	for range 2 {
+		idx.StorePack(
+			vaultic.NewRandomID(),
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: sharedBlob, Type: vaultic.DataBlob}, Length: 1}},
+		)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := newSplitStore()
+	firstBlock := make(chan struct{})
+	store.blockByEnter[1] = firstBlock
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		done <- err
+	}()
+
+	<-store.entered
+	select {
+	case <-store.entered:
+		t.Fatal("overlapping stage 3 batches were ingested concurrently")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(firstBlock)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.peakIngest != 1 {
+		t.Fatalf("peak overlapping stage 3 ingests = %d, want 1", store.peakIngest)
+	}
+}
+
+func TestImportStage3IngestFailureCancelsAndStopsReduction(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
+	store := newSplitStore()
+	store.failAnyIngest = errors.New("injected stage 3 ingest failure")
+
+	_, err := Import(
+		context.Background(),
+		source,
+		fixedStatter{size: 16},
+		store,
+		Options{PublicationLanes: 2, PacksPerTransaction: 1},
+	)
+	if err == nil || !strings.Contains(err.Error(), "injected stage 3 ingest failure") {
+		t.Fatalf("stage 3 ingest failure error = %v", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.reducedOrder) > 0 {
+		t.Fatalf("reduction continued after stage 3 ingest failure: %v", store.reducedOrder)
+	}
+}
+
+func TestImportStage3AdaptiveSplitUsesDeterministicChildrenAndFinalCheckpoint(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID()}
+	store := newSplitStore()
+	store.maxIngestPacks = 1
+	result, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}},
+		fixedStatter{size: 16},
+		store,
+		Options{PublicationLanes: 2, PacksPerTransaction: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.ingestedOrder) != 3 {
+		t.Fatalf("ingested batch count = %d, want 3", len(store.ingestedOrder))
+	}
+	root := store.ingestedOrder[0]
+	left, right, err := stage3SplitBatchIDs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(store.ingestedOrder, []uint64{root, left, right}) {
+		t.Fatalf("ingested batch IDs = %v", store.ingestedOrder)
+	}
+	if !slices.Equal(store.reducedOrder, []uint64{left, right}) {
+		t.Fatalf("reduced batch IDs = %v", store.reducedOrder)
+	}
+	if !slices.Equal(store.reduceCheckpoint, []bool{false, true}) {
+		t.Fatalf("checkpoint flags = %v", store.reduceCheckpoint)
+	}
+	if result.AdaptiveSplits != 1 || result.BatchesCommitted != 1 || result.BatchesReduced != 2 {
+		t.Fatalf("unexpected stage 3 split result: %#v", result)
+	}
+}
+
+func TestImportStage3PartialWorkBudgetSkipsCleanupButFinalCompletesSession(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID()}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
+
+	partialStore := newSplitStore()
+	_, err := Import(
+		context.Background(), source, fixedStatter{size: 16}, partialStore,
+		Options{PublicationLanes: 2, PacksPerTransaction: 1, WorkBudget: 1},
+	)
+	if !errors.Is(err, ErrLimitReached) {
+		t.Fatalf("partial stage 3 error = %v", err)
+	}
+	partialStore.mu.Lock()
+	if partialStore.completeCalls != 0 {
+		partialStore.mu.Unlock()
+		t.Fatalf("partial import completed session %d times", partialStore.completeCalls)
+	}
+	partialStore.mu.Unlock()
+
+	finalStore := newSplitStore()
+	_, err = Import(
+		context.Background(), source, fixedStatter{size: 16}, finalStore,
+		Options{PublicationLanes: 2, PacksPerTransaction: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalStore.mu.Lock()
+	defer finalStore.mu.Unlock()
+	if finalStore.completeCalls != 1 {
+		t.Fatalf("final import completed session %d times, want 1", finalStore.completeCalls)
+	}
+}
+
+func TestImportStage3ResumeCheckpointRunsCleanupBeforeSkip(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	store := newSplitStore()
+	checkpoint, err := (schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.values[string(schema.ImportCheckpointKey(schema.ID(indexID)))] = checkpoint
+	result, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, []vaultic.ID{vaultic.NewRandomID()})}},
+		fixedStatter{size: 16},
+		store,
+		Options{Resume: true, PublicationLanes: 2, PacksPerTransaction: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if result.IndexesResumed != 1 || result.IndexesImported != 0 {
+		t.Fatalf("resume result = %#v", result)
+	}
+	if store.completeCalls != 1 {
+		t.Fatalf("cleanup calls on resume skip = %d, want 1", store.completeCalls)
+	}
+}
+
+func TestImportStage3PartialThenFullRunAvoidsReceiptConflictAndCompletes(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
+	store := newSplitStore()
+
+	partialResult, err := Import(
+		context.Background(), source, fixedStatter{size: 16}, store,
+		Options{Resume: true, PublicationLanes: 2, PacksPerTransaction: 2, WorkBudget: 1},
+	)
+	if !errors.Is(err, ErrLimitReached) {
+		t.Fatalf("partial stage 3 run error = %v", err)
+	}
+	if partialResult.PacksImported != 1 || partialResult.BatchesCommitted != 1 {
+		t.Fatalf("partial stage 3 result = %#v", partialResult)
+	}
+
+	fullResult, err := Import(
+		context.Background(), source, fixedStatter{size: 16}, store,
+		Options{Resume: true, PublicationLanes: 2, PacksPerTransaction: 2},
+	)
+	if err != nil {
+		t.Fatalf("full stage 3 run after partial failed: %v", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if fullResult.PacksImported != 3 || fullResult.BlobsImported != 3 || fullResult.BatchesCommitted != 2 {
+		t.Fatalf("full stage 3 result = %#v", fullResult)
+	}
+	if store.completeCalls != 1 {
+		t.Fatalf("complete session calls = %d, want 1", store.completeCalls)
+	}
+	checkpointKey := schema.ImportCheckpointKey(schema.ID(indexID))
+	if _, found := store.values[string(checkpointKey)]; !found {
+		t.Fatal("full stage 3 run did not publish final checkpoint")
+	}
+}
+
+func TestImportStage3PrefersRealLaneFailureOverEarlierCanceledLane(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	var firstPack vaultic.ID
+	var secondPack vaultic.ID
+	firstPack[31] = 1
+	secondPack[31] = 2
+	packIDs := []vaultic.ID{firstPack, secondPack}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
+	store := newSplitStore()
+	blockFirst := make(chan struct{})
+	store.blockByEnter[1] = blockFirst
+	store.failByEnter[2] = errors.New("later-lane-sentinel")
+
+	sentinel := store.failByEnter[2]
+	resultErr := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(), source, fixedStatter{size: 16}, store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		resultErr <- err
+	}()
+
+	firstBatch := <-store.entered
+	secondBatch := <-store.entered
+	close(blockFirst)
+
+	err := <-resultErr
+	if err == nil || !strings.Contains(err.Error(), sentinel.Error()) {
+		t.Fatalf("preferred lane failure error = %v", err)
+	}
+	if !strings.Contains(err.Error(), secondPack.Str()) {
+		t.Fatalf("preferred lane failure pack mismatch: err=%v first=%d second=%d", err, firstBatch, secondBatch)
+	}
+}
+
+func TestImportStage3FallbackAndLaneValidation(t *testing.T) {
+	_, err := Import(context.Background(), &memorySource{}, fixedStatter{}, newMemoryStore(), Options{PublicationLanes: 9})
+	if err == nil || !strings.Contains(err.Error(), "publication lanes must not exceed 8") {
+		t.Fatalf("publication lane validation error = %v", err)
+	}
+
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	store := newMemoryStore()
+	result, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}},
+		fixedStatter{size: 16},
+		store,
+		Options{PublicationLanes: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.imports) != 1 || result.BatchesCommitted != 1 || result.BatchesIngested != 0 || result.BatchesReduced != 0 {
+		t.Fatalf("stage 2 fallback result=%#v imports=%d", result, len(store.imports))
+	}
 }
 
 func TestImportContinuesMalformedIndexesAndResumes(t *testing.T) {
