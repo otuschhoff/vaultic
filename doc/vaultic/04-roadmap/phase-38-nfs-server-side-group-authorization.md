@@ -1,8 +1,8 @@
-# Phase 37: NFS server-side group authorization
+# Phase 38: NFS server-side group authorization
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 36](phase-36-nfsv3-locking-and-recovery.md) | [Next: Phase 38](phase-38-multi-server-nfs-ha-research.md)
+[Previous: Phase 37](phase-37-nfsv3-locking-and-recovery.md) | [Next: Phase 39](phase-39-multi-server-nfs-ha-research.md)
 
 **Status: design specification, not yet implemented.**
 
@@ -46,7 +46,7 @@ A later `adbind` adapter will implement that interface once its authenticated AP
 1. Define the identity resolver API and JSON schema, validation, atomic reload, domain and expiry policy.
 2. Implement server-side effective-identity resolution and shared inode-operation authorization for read-only and writable NFS exports.
 3. Integrate revision-aware caches, handle/mutation rechecks, NLM admission, root squash and permission-display constraints.
-4. Document JSON administration, AUTH_SYS limitations and the future adbind contract; extend Phase 33 with bounded lookup/denial/cache metrics.
+4. Document JSON administration, AUTH_SYS limitations and the future adbind contract; extend Phase 34 with bounded lookup/denial/cache metrics.
 
 ## Tests
 

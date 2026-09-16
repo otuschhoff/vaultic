@@ -1,8 +1,8 @@
-# Phase 34: Writable FUSE and durable writeback
+# Phase 35: Writable FUSE and durable writeback
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 33](phase-33-operational-monitoring-and-metrics-export.md) | [Next: Phase 35](phase-35-writable-nfsv3-exports.md)
+[Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-writable-nfsv3-exports.md)
 
 **Status: design specification, not yet implemented.**
 
@@ -10,9 +10,9 @@
 
 ## Scope and prerequisites
 
-Extend Phase 31's protocol-neutral snapshot filesystem so Phase 35 can reuse the same mutation, durability, and snapshot implementation. This is overlayfs-like semantics, not a dependency on Linux overlayfs or a modification of an existing snapshot. Read-only mount behavior remains unchanged. Use Phase 22's fenced VaulticDB writer, Phase 28's WAL durability, Phase 30's disposable read-cache manager, and Phase 33's monitoring contract.
+Extend Phase 31's protocol-neutral snapshot filesystem so Phase 36 can reuse the same mutation, durability, and snapshot implementation. This is overlayfs-like semantics, not a dependency on Linux overlayfs or a modification of an existing snapshot. Read-only mount behavior remains unchanged. Use Phase 22's fenced VaulticDB writer, Phase 28's WAL durability, Phase 30's disposable read-cache manager, and Phase 34's monitoring contract.
 
-One fenced workspace mutation authority serializes updates in this phase. Multiple clients may use that authority; independently writable frontends for the same workspace require the Phase 38 investigation. Broker and backend authorization use existing local controls; remote principal delegation remains Phase 39 work.
+One fenced workspace mutation authority serializes updates in this phase. Multiple clients may use that authority; independently writable frontends for the same workspace require the Phase 39 investigation. Broker and backend authorization use existing local controls; remote principal delegation remains Phase 40 work.
 
 ## Workspace and filesystem semantics
 
@@ -79,7 +79,7 @@ Snapshot creation may be requested at any time but completion can wait for backe
 3. Extend the shared filesystem layer and FUSE adapter with mutations, permissions, bounded buffering, and truthful sync/error semantics.
 4. Implement resumable packing, atomic placement/reference publication, concurrent-version protection, and safe Phase 30 cache admission/reclamation.
 5. Add scheduling, capacity reservations, policy controls, lifecycle handling, and snapshot barriers with ordinary snapshot publication.
-6. Extend Phase 33 metrics for dirty bytes/age, writeback read hits, packing throughput, durable-ack latency, snapshot progress, blocked writes, and cache demotion.
+6. Extend Phase 34 metrics for dirty bytes/age, writeback read hits, packing throughput, durable-ack latency, snapshot progress, blocked writes, and cache demotion.
 
 ## Tests
 

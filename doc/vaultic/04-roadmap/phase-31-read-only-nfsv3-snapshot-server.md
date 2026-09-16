@@ -146,7 +146,7 @@ NFSv3 clients may cache attributes and directory entries. Since an export is imm
 
 ### Security boundary
 
-Default binding is loopback. Binding a non-loopback address requires at least one `--allow-cidr` and an explicit `--acknowledge-insecure-nfsv3` flag. Startup explains that AUTH_SYS UID/GID claims are client-controlled, traffic and file contents are unencrypted, source addresses can be spoofed on hostile networks, and NFSv3 provides no equivalent to Phase 39 principal authentication.
+Default binding is loopback. Binding a non-loopback address requires at least one `--allow-cidr` and an explicit `--acknowledge-insecure-nfsv3` flag. Startup explains that AUTH_SYS UID/GID claims are client-controlled, traffic and file contents are unencrypted, source addresses can be spoofed on hostile networks, and NFSv3 provides no equivalent to Phase 40 principal authentication.
 
 Source CIDR filtering is defense in depth, not authentication. Remote deployments should use WireGuard, another authenticated VPN, an SSH TCP tunnel, or host firewall rules. The server does not accept wildcard exports, hostname-based allowlists, privileged-client assumptions, or `no_root_squash`-style authority. Reported UID/GID affects client presentation only; all server operations remain read-only regardless of AUTH_SYS identity.
 
@@ -158,7 +158,7 @@ NFS and mount listeners bind before readiness is announced. Partial startup clos
 
 A machine-readable readiness record may be written only when explicitly requested and contains PID, repository ID, snapshot ID, addresses, ports, export name, and start time, but no credentials, keys, or repository password. Stale records are advisory and removed only after process-identity verification.
 
-Bounded in-process counters cover active mounts, active connections, denied source addresses, and RPCs by procedure. Rich status, byte, cache, backend-latency, malformed-request, stale-handle, and shutdown-reason metrics belong to Phase 33. Paths, symlink targets, file contents, repository keys, and client AUTH_SYS auxiliary groups are not logged by default.
+Bounded in-process counters cover active mounts, active connections, denied source addresses, and RPCs by procedure. Rich status, byte, cache, backend-latency, malformed-request, stale-handle, and shutdown-reason metrics belong to Phase 34. Paths, symlink targets, file contents, repository keys, and client AUTH_SYS auxiliary groups are not logged by default.
 
 ## Implementation steps
 

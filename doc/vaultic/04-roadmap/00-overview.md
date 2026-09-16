@@ -51,14 +51,15 @@ commit series so it can be reviewed or reverted independently.
 | 30 | [Vaultic best-effort read-cache tier](phase-30-vaultic-best-effort-read-cache-tier.md) | design |
 | 31 | [Read-only NFSv3 snapshot server](phase-31-read-only-nfsv3-snapshot-server.md) | implemented; native validation pending |
 | 32 | [Scalable legacy metadata bulk import](phase-32-scalable-legacy-metadata-bulk-import.md) | design |
-| 33 | [Operational monitoring and bounded metrics export](phase-33-operational-monitoring-and-metrics-export.md) | design |
-| 34 | [Writable FUSE and durable writeback](phase-34-writable-fuse-and-durable-writeback.md) | design |
-| 35 | [Writable NFSv3 workspace exports](phase-35-writable-nfsv3-exports.md) | design |
-| 36 | [NFSv3 locking and recovery](phase-36-nfsv3-locking-and-recovery.md) | design |
-| 37 | [NFS server-side group authorization](phase-37-nfs-server-side-group-authorization.md) | design |
-| 38 | [Multi-server writable NFS availability research](phase-38-multi-server-nfs-ha-research.md) | research planned |
-| 39 | [Remote principals and brokered VaulticDB access tickets](phase-39-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
-| 40 | [VaulticDB failure recovery and error contracts](phase-40-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
+| 33 | [index check scalability & performance](phase-33-index-check-scalability-and-performance.md) | design |
+| 34 | [Operational monitoring and bounded metrics export](phase-34-operational-monitoring-and-metrics-export.md) | design |
+| 35 | [Writable FUSE and durable writeback](phase-35-writable-fuse-and-durable-writeback.md) | design |
+| 36 | [Writable NFSv3 workspace exports](phase-36-writable-nfsv3-exports.md) | design |
+| 37 | [NFSv3 locking and recovery](phase-37-nfsv3-locking-and-recovery.md) | design |
+| 38 | [NFS server-side group authorization](phase-38-nfs-server-side-group-authorization.md) | design |
+| 39 | [Multi-server writable NFS availability research](phase-39-multi-server-nfs-ha-research.md) | research planned |
+| 40 | [Remote principals and brokered VaulticDB access tickets](phase-40-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 41 | [VaulticDB failure recovery and error contracts](phase-41-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
 
 ## Supporting plans
 

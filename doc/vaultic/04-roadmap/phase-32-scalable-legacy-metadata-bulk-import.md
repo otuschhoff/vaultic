@@ -2,10 +2,10 @@
 
 [Back to roadmap index](00-overview.md) |
 [Phase 31](phase-31-read-only-nfsv3-snapshot-server.md) |
-[Phase 33](phase-33-operational-monitoring-and-metrics-export.md)
+[Phase 33](phase-33-index-check-scalability-and-performance.md)
 
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) |
-[Operational monitoring](phase-33-operational-monitoring-and-metrics-export.md)
+[Operational monitoring](phase-34-operational-monitoring-and-metrics-export.md)
 
 **Status:** Stages 1-3 implemented. Stage 3 is fresh-reset-only and defaults to
 two ingestion lanes; deferred cleanup is opt-in. Dependency inversion and the
