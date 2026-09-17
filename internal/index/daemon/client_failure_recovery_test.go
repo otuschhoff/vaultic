@@ -249,17 +249,23 @@ func TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint(t *testing.T) {
 	if err := store.ImportLegacyPack(ctx, imported); err != nil {
 		t.Fatalf("fresh pack import waited for durability: %v", err)
 	}
-	revisionRecord := schema.InodeRevision{
-		ParentInode: 10, Known: schema.KnownParent, Freshness: schema.FreshnessImported,
+	publications := make([]RevisionPublication, 2)
+	for index := range publications {
+		revision := uint64(index + 1)
+		revisionValue, marshalErr := (schema.InodeRevision{
+			ParentInode: 10, Known: schema.KnownParent, Freshness: schema.FreshnessImported,
+		}).MarshalBinary()
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		inode := uint64(11 + index)
+		publications[index] = RevisionPublication{
+			CurrentKey: schema.CurrentInodeKey(7, inode), RevisionKey: schema.InodeRevisionKey(7, inode, revision),
+			RevisionValue: revisionValue, Revision: revision,
+		}
 	}
-	revisionValue, err := revisionRecord.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentKey := schema.CurrentInodeKey(7, 11)
-	revisionKey := schema.InodeRevisionKey(7, 11, 1)
-	if err := store.PublishRevisionBatchDeferred(ctx, currentKey, revisionKey, revisionValue, 1, nil, nil); err != nil {
-		t.Fatalf("fresh snapshot revision waited for durability: %v", err)
+	if err := store.PublishRevisionBatchesDeferred(ctx, publications); err != nil {
+		t.Fatalf("fresh snapshot revision batch waited for durability: %v", err)
 	}
 	checkpoint, err := (schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1}).MarshalBinary()
 	if err != nil {
@@ -281,7 +287,11 @@ func TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = NewSchemaStore(client)
-	for _, key := range [][]byte{schema.PackKey(packID), schema.BlobKey(blobID), currentKey, revisionKey, checkpointKey} {
+	keys := [][]byte{schema.PackKey(packID), schema.BlobKey(blobID), checkpointKey}
+	for _, publication := range publications {
+		keys = append(keys, publication.CurrentKey, publication.RevisionKey)
+	}
+	for _, key := range keys {
 		if _, found, readErr := store.Get(ctx, key); readErr != nil || !found {
 			t.Fatalf("read imported state after checkpoint barrier: found=%t err=%v", found, readErr)
 		}
