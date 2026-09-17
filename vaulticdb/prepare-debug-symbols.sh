@@ -116,8 +116,12 @@ Build IDs are listed in BUILDIDS. Verify a pair with:
 
 Keep vaulticdb.debug beside the exact vaulticdb executable used for recording.
 GNU debuglink lets perf load it automatically:
-	perf record -g -- ./vaulticdb [arguments]
-	perf report --input perf.data
+	vaulticdb/profile-linux.sh <pid> <output-directory> [seconds] [fp|dwarf] [debug-file]
+
+The helper snapshots the running executable, verifies matching Build IDs, and
+uses an isolated symbol root so a later deployment cannot invalidate the capture.
+Use "fp" with a build compiled using -C force-frame-pointers=yes; otherwise use
+"dwarf". It writes a fast flat report and bounds slower call-graph expansion.
 EOF
 		;;
 	macos)

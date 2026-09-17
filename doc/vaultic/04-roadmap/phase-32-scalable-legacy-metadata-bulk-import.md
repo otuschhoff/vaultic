@@ -782,16 +782,17 @@ Build optimized symbols separately from live executables:
 make profile
 readelf -S bin/profile/linux-amd64/vaultic bin/profile/linux-amd64/vaulticdb \
   | rg 'debug_info|symtab'
-perf record -F 99 --call-graph dwarf -o run.perf.data -- <command>
-perf report --stdio -i run.perf.data
+vaulticdb/profile-linux.sh "$(pgrep -n -x vaulticdb)" run-profile 30 fp
 ```
 
 Go's `profile` tag preserves symbols and enables profiling controls; Rust release
-uses `debug=1`, `strip=false`. Verify build IDs and symbolize both processes.
-Keep pprof on loopback. Use short captures and offline reporting; do not let
-DWARF reporting compete with the import. A completed 499 Hz synthetic capture
-had 1,897 samples and zero loss; it is separate from the unresolved full-run
-report. CPU profiles need RPC/queue and off-CPU data for wall-time attribution.
+uses `debug=1`, `strip=false`, and the profile target retains frame pointers.
+The helper snapshots the exact running ELF, verifies any external DWARF Build ID,
+injects Build IDs, reports through an isolated symbol root, and writes a bounded
+call graph plus a fast flat-symbol fallback. Use its default `dwarf` mode for a
+binary not built by `make profile`. Keep pprof on loopback. Use short captures
+and offline reporting; do not let DWARF reporting compete with the import. CPU
+profiles need RPC/queue and off-CPU data for wall-time attribution.
 
 Artifacts under `/volume2/NASDA2/rustic/log/`:
 

@@ -34,7 +34,8 @@ all: build
 build: vaultic vaulticdb
 
 profile:
-	$(MAKE) BIN_DIR=$(BIN_DIR)/profile VAULTIC_BUILD_TAGS=profile VAULTICDB_PREPARE_DEBUG=0 build
+	RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-C force-frame-pointers=yes" \
+		$(MAKE) BIN_DIR=$(BIN_DIR)/profile VAULTIC_BUILD_TAGS=profile VAULTICDB_PREPARE_DEBUG=0 build
 
 clean:
 	rm -rf $(BIN_DIR)
