@@ -377,6 +377,8 @@ type splitStore struct {
 	ingestCalls        uint64
 	reduceCalls        uint64
 	failByEnter        map[uint64]error
+	failByPack         map[schema.ID]error
+	failReduceByEnter  map[uint64]error
 	failIngest         map[uint64]error
 	failAnyIngest      error
 	failReduce         map[uint64]error
@@ -406,6 +408,8 @@ func newSplitStore() *splitStore {
 		blockByPack:        make(map[schema.ID]chan struct{}),
 		blockReduceByEnter: make(map[uint64]chan struct{}),
 		failByEnter:        make(map[uint64]error),
+		failByPack:         make(map[schema.ID]error),
+		failReduceByEnter:  make(map[uint64]error),
 		failIngest:         make(map[uint64]error),
 		failReduce:         make(map[uint64]error),
 		ingestedImports:    make(map[uint64][]daemon.LegacyPackImport),
@@ -432,6 +436,9 @@ func (store *splitStore) IngestLegacyPacks(
 		block = store.blockByPack[imports[0].PackID]
 	}
 	fail := store.failIngest[batch]
+	if len(imports) > 0 && store.failByPack[imports[0].PackID] != nil {
+		fail = store.failByPack[imports[0].PackID]
+	}
 	if fail == nil {
 		fail = store.failByEnter[store.ingestCalls]
 	}
@@ -493,6 +500,9 @@ func (store *splitStore) ReduceLegacyImportBatch(
 	store.mu.Lock()
 	store.reduceCalls++
 	fail := store.failReduce[batch]
+	if enterFailure := store.failReduceByEnter[store.reduceCalls]; enterFailure != nil {
+		fail = enterFailure
+	}
 	block := store.blockReduceByEnter[store.reduceCalls]
 	imports := store.ingestedImports[batch]
 	store.reducedOrder = append(store.reducedOrder, batch)
@@ -663,7 +673,8 @@ func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
 		t.Fatalf("checkpoint flags = %v", store.reduceCheckpoint)
 	}
 	stats := telemetry.Snapshot()
-	if stats.ActiveLanes != 0 || stats.LaneTime[2] <= 0 || stats.PhaseTime["reduce"] <= 0 || stats.PhaseTime["cleanup"] <= 0 {
+	if stats.ActiveLanes != 0 || stats.LaneTime[2] <= 0 || stats.Operations["reduce_service"].Count != 4 ||
+		stats.PhaseTime["cleanup"] <= 0 {
 		t.Fatalf("scheduler attribution: %+v", stats)
 	}
 }
@@ -713,16 +724,29 @@ func TestImportStage3AttributesReducerBlockedRefill(t *testing.T) {
 	store := newSplitStore()
 	firstIngestGate := make(chan struct{})
 	secondIngestGate := make(chan struct{})
+	thirdIngestGate := make(chan struct{})
 	reduceGate := make(chan struct{})
 	store.blockByPack[schema.ID(packIDs[0])] = firstIngestGate
 	store.blockByPack[schema.ID(packIDs[1])] = secondIngestGate
+	store.blockByPack[schema.ID(packIDs[2])] = thirdIngestGate
 	store.blockReduceByEnter[1] = reduceGate
+	var progressMu sync.Mutex
+	var latestProgress Progress
+	progressCalls := 0
 
 	done := make(chan error, 1)
 	go func() {
 		_, err := Import(
 			context.Background(), source, fixedStatter{size: 16}, store,
-			Options{PublicationLanes: 2, PacksPerTransaction: 1, Telemetry: telemetry},
+			Options{
+				PublicationLanes: 2, PacksPerTransaction: 1, Telemetry: telemetry,
+				Progress: func(update Progress) {
+					progressMu.Lock()
+					latestProgress = update
+					progressCalls++
+					progressMu.Unlock()
+				},
+			},
 		)
 		done <- err
 	}()
@@ -759,17 +783,44 @@ readyLoop:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first ingest completion was not published")
 	}
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("third ingest was not admitted before reduction")
+	}
 	close(secondIngestGate)
 	select {
 	case <-store.ingestCompleted:
 	case <-time.After(5 * time.Second):
 		t.Fatal("ingest did not complete while reducer was blocked")
 	}
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("independent ingest was not admitted while reducer was blocked")
+	}
+	close(thirdIngestGate)
 	eligibleHold := 25 * time.Millisecond
 	<-time.After(eligibleHold)
 	blocked := telemetry.Snapshot()
 	if blocked.PendingReductionBatches == 0 || blocked.UnreducedPreparedBytes == 0 || blocked.OldestUnreducedAge <= 0 {
 		t.Fatalf("blocked unreduced state = %+v", blocked)
+	}
+	if blocked.RetainedPreparedBytes != blocked.UnreducedPreparedBytes {
+		t.Fatalf(
+			"prepared bytes released before reduction acknowledgement: retained=%d unreduced=%d",
+			blocked.RetainedPreparedBytes, blocked.UnreducedPreparedBytes,
+		)
+	}
+	progressMu.Lock()
+	blockedProgress := latestProgress
+	blockedProgressCalls := progressCalls
+	progressMu.Unlock()
+	if blockedProgressCalls == 0 {
+		t.Fatal("no progress callback was delivered while reduction was blocked")
+	}
+	if blockedProgress.BatchesCommitted != 0 || blockedProgress.PacksImported != 0 {
+		t.Fatalf("progress advanced before reduction acknowledgement: %+v", blockedProgress)
 	}
 	close(reduceGate)
 	select {
@@ -784,38 +835,23 @@ readyLoop:
 	if finalSnapshot.PendingReductionBatches != 0 {
 		t.Fatalf("final pending reductions = %d", finalSnapshot.PendingReductionBatches)
 	}
+	progressMu.Lock()
+	finalProgress := latestProgress
+	progressMu.Unlock()
+	if finalProgress.BatchesCommitted != uint64(len(packIDs)) || finalProgress.PacksImported != uint64(len(packIDs)) ||
+		finalProgress.QueuedPreparedBytes != 0 {
+		t.Fatalf("progress did not advance after reduction acknowledgements: %+v", finalProgress)
+	}
 	operations := finalSnapshot.Operations
-	if operations["completion_to_receive"].Count == 0 || operations["eligible_ready_during_reduce"].Count == 0 ||
-		operations["reduce_blocking"].Count == 0 {
+	if operations["completion_to_receive"].Count == 0 || operations["reduce_service"].Count != uint64(len(packIDs)) {
 		t.Fatalf("blocked reducer operations = %+v", operations)
 	}
-	eligible := operations["eligible_ready_during_reduce"]
-	if eligible.Sum < eligibleHold || eligible.Sum > operations["reduce_blocking"].Sum {
-		t.Fatalf("eligible reducer interval = %s, blocking = %s, hold = %s", eligible.Sum, operations["reduce_blocking"].Sum, eligibleHold)
+	if service := operations["reduce_service"].Sum; service < eligibleHold {
+		t.Fatalf("reducer service = %s, want at least %s", service, eligibleHold)
 	}
 }
 
-func TestStage3EligibleRefillDurationStopsAtFailure(t *testing.T) {
-	started := time.Now()
-	completed := started.Add(2 * time.Millisecond)
-	failed := started.Add(5 * time.Millisecond)
-	ended := started.Add(9 * time.Millisecond)
-	completions := []stage3IngestOutcome{
-		{completedAt: completed},
-		{completedAt: failed, err: errors.New("ingest failed")},
-	}
-	if elapsed := stage3EligibleRefillDuration(started, ended, 2, 2, false, true, time.Time{}, completions); elapsed != 3*time.Millisecond {
-		t.Fatalf("eligible duration = %s, want 3ms", elapsed)
-	}
-	if elapsed := stage3EligibleRefillDuration(started, ended, 2, 2, true, true, time.Time{}, completions); elapsed != 0 {
-		t.Fatalf("stopped-admission duration = %s, want 0", elapsed)
-	}
-	if elapsed := stage3EligibleRefillDuration(started, ended, 1, 2, false, true, started.Add(4*time.Millisecond), nil); elapsed != 4*time.Millisecond {
-		t.Fatalf("mid-reduction cancellation duration = %s, want 4ms", elapsed)
-	}
-}
-
-func TestImportStage3EligibleRefillStopsAtCancellation(t *testing.T) {
+func TestImportStage3CancellationStopsActiveReducerAndIngests(t *testing.T) {
 	telemetry := NewSchedulerTelemetry()
 	indexID := vaultic.NewRandomID()
 	packIDs := make([]vaultic.ID, 4)
@@ -824,7 +860,6 @@ func TestImportStage3EligibleRefillStopsAtCancellation(t *testing.T) {
 	}
 	sort.Slice(packIDs, func(left, right int) bool { return bytes.Compare(packIDs[left][:], packIDs[right][:]) < 0 })
 	store := newSplitStore()
-	store.ignoreReduceCancel = true
 	store.blockByPack[schema.ID(packIDs[0])] = make(chan struct{})
 	store.blockByPack[schema.ID(packIDs[1])] = make(chan struct{})
 	reduceGate := make(chan struct{})
@@ -870,9 +905,6 @@ readyLoop:
 	firstHold := 25 * time.Millisecond
 	<-time.After(firstHold)
 	cancel()
-	postCancelHold := 25 * time.Millisecond
-	<-time.After(postCancelHold)
-	close(reduceGate)
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
@@ -882,10 +914,14 @@ readyLoop:
 		t.Fatal("canceled import did not finish")
 	}
 	operations := telemetry.Snapshot().Operations
-	eligible := operations["eligible_ready_during_reduce"].Sum
-	blocking := operations["reduce_blocking"].Sum
-	if eligible < firstHold || blocking-eligible < postCancelHold/2 {
-		t.Fatalf("cancellation interval: eligible=%s blocking=%s", eligible, blocking)
+	service := operations["reduce_service"]
+	if service.Count == 0 || service.Sum < firstHold {
+		t.Fatalf("canceled reducer service = %+v", service)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.activeIngest != 0 || store.completeCalls != 0 {
+		t.Fatalf("canceled worker state: active ingests=%d cleanup=%d", store.activeIngest, store.completeCalls)
 	}
 }
 
@@ -954,6 +990,485 @@ func TestImportStage3OverlappingDependenciesDoNotOverlap(t *testing.T) {
 	defer store.mu.Unlock()
 	if store.peakIngest != 1 {
 		t.Fatalf("peak overlapping stage 3 ingests = %d, want 1", store.peakIngest)
+	}
+}
+
+func TestImportStage3DependenciesRemainReservedUntilReductionAcknowledged(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	sharedBlob := vaultic.NewRandomID()
+	for range 2 {
+		idx.StorePack(
+			vaultic.NewRandomID(),
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: sharedBlob, Type: vaultic.DataBlob}, Length: 1}},
+		)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := newSplitStore()
+	reduceGate := make(chan struct{})
+	store.blockReduceByEnter[1] = reduceGate
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		done <- err
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first ingest did not start")
+	}
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first reduction did not start")
+	}
+	select {
+	case <-store.entered:
+		t.Fatal("overlapping batch entered before reduction acknowledgement")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(reduceGate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import did not finish after reduction acknowledgement")
+	}
+}
+
+func TestImportStage3FinalCheckpointWaitsForReductionAcknowledgement(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packID := vaultic.NewRandomID()
+	store := newSplitStore()
+	reduceGate := make(chan struct{})
+	store.blockReduceByEnter[1] = reduceGate
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, []vaultic.ID{packID})}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		done <- err
+	}()
+
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("final reduction did not start")
+	}
+	store.memoryStore.mu.Lock()
+	checkpointBatches := len(store.checkpointBatches)
+	store.memoryStore.mu.Unlock()
+	store.mu.Lock()
+	checkpointPlanned := len(store.reduceCheckpoint) == 1 && store.reduceCheckpoint[0]
+	completeCalls := store.completeCalls
+	store.mu.Unlock()
+	if !checkpointPlanned || checkpointBatches != 0 || completeCalls != 0 {
+		t.Fatalf(
+			"checkpoint advanced before reduction acknowledgement: planned=%t published=%d cleanup=%d",
+			checkpointPlanned, checkpointBatches, completeCalls,
+		)
+	}
+	close(reduceGate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import did not finish after final reduction acknowledgement")
+	}
+	store.memoryStore.mu.Lock()
+	checkpointBatches = len(store.checkpointBatches)
+	store.memoryStore.mu.Unlock()
+	store.mu.Lock()
+	completeCalls = store.completeCalls
+	store.mu.Unlock()
+	if checkpointBatches != 1 || completeCalls != 1 {
+		t.Fatalf("checkpoint acknowledgement state: published=%d cleanup=%d", checkpointBatches, completeCalls)
+	}
+}
+
+func TestImportStage3DelayedEarliestIngestStillReducesInOrder(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := make([]vaultic.ID, 4)
+	for index := range packIDs {
+		packIDs[index] = vaultic.NewRandomID()
+	}
+	sort.Slice(packIDs, func(left, right int) bool { return bytes.Compare(packIDs[left][:], packIDs[right][:]) < 0 })
+	store := newSplitStore()
+	firstGate := make(chan struct{})
+	store.blockByPack[schema.ID(packIDs[0])] = firstGate
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		done <- err
+	}()
+
+	for range 2 {
+		select {
+		case <-store.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both ingest lanes were not admitted")
+		}
+	}
+	select {
+	case <-store.ingestCompleted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("later ingest did not complete")
+	}
+	select {
+	case batch := <-store.reduceEntered:
+		t.Fatalf("batch %d reduced before the earliest ingest completed", batch)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(firstGate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import did not finish")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	wantOrder := make([]uint64, len(packIDs))
+	for batch, imports := range store.ingestedImports {
+		for index, packID := range packIDs {
+			if len(imports) == 1 && imports[0].PackID == schema.ID(packID) {
+				wantOrder[index] = batch
+			}
+		}
+	}
+	if !slices.Equal(store.reducedOrder, wantOrder) {
+		t.Fatalf("reduction order = %v, want %v", store.reducedOrder, wantOrder)
+	}
+}
+
+func TestImportStage3ReducerFailureCancelsAndDrainsActiveIngests(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := make([]vaultic.ID, 4)
+	for index := range packIDs {
+		packIDs[index] = vaultic.NewRandomID()
+	}
+	sort.Slice(packIDs, func(left, right int) bool { return bytes.Compare(packIDs[left][:], packIDs[right][:]) < 0 })
+	store := newSplitStore()
+	secondGate := make(chan struct{})
+	reduceGate := make(chan struct{})
+	store.blockByPack[schema.ID(packIDs[1])] = secondGate
+	store.blockReduceByEnter[1] = reduceGate
+	store.failReduceByEnter[1] = errors.New("injected reducer failure")
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+		)
+		done <- err
+	}()
+
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reducer did not start")
+	}
+	close(reduceGate)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "injected reducer failure") {
+			t.Fatalf("stage 3 reducer failure = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 reducer failure did not drain active workers")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.activeIngest != 0 || store.completeCalls != 0 || len(store.reducedOrder) != 1 {
+		t.Fatalf("reducer failure state: active=%d cleanup=%d reductions=%v", store.activeIngest, store.completeCalls, store.reducedOrder)
+	}
+}
+
+func TestImportStage3LaterIngestFailureDoesNotCancelEarlierReduction(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	indexID := vaultic.NewRandomID()
+	packIDs := make([]vaultic.ID, 3)
+	for index := range packIDs {
+		packIDs[index] = vaultic.NewRandomID()
+	}
+	sort.Slice(packIDs, func(left, right int) bool { return bytes.Compare(packIDs[left][:], packIDs[right][:]) < 0 })
+	sharedBlob := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	idx.StorePack(
+		packIDs[0],
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}},
+	)
+	for _, packID := range packIDs[1:] {
+		idx.StorePack(
+			packID,
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: sharedBlob, Type: vaultic.DataBlob}, Length: 1}},
+		)
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := newSplitStore()
+	secondGate := make(chan struct{})
+	reduceGate := make(chan struct{})
+	store.blockByPack[schema.ID(packIDs[1])] = secondGate
+	store.blockReduceByEnter[1] = reduceGate
+	store.failByPack[schema.ID(packIDs[1])] = errors.New("later ingest failed")
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1, Telemetry: telemetry},
+		)
+		done <- err
+	}()
+
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("earlier reduction did not start")
+	}
+	close(secondGate)
+	failureDeadline := time.NewTimer(5 * time.Second)
+	defer failureDeadline.Stop()
+failureLoop:
+	for {
+		select {
+		case batch := <-store.ingestCompleted:
+			store.mu.Lock()
+			failedPack := store.failedPacksByBatch[batch]
+			store.mu.Unlock()
+			if failedPack == schema.ID(packIDs[1]) {
+				break failureLoop
+			}
+		case <-failureDeadline.C:
+			t.Fatal("later failing ingest did not complete")
+		}
+	}
+	waitForStage3FailureAcceptance(t, telemetry)
+	select {
+	case err := <-done:
+		t.Fatalf("import returned before earlier reduction completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(reduceGate)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "later ingest failed") {
+			t.Fatalf("stage 3 ingest failure = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import did not finish after earlier reduction")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.reducedOrder) != 1 {
+		t.Fatalf("completed reductions = %v, want the earlier reduction only", store.reducedOrder)
+	}
+}
+
+func TestImportStage3NonContiguousIngestFailureIsNotMasked(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	indexID := vaultic.NewRandomID()
+	packIDs := make([]vaultic.ID, 3)
+	for index := range packIDs {
+		packIDs[index] = vaultic.NewRandomID()
+	}
+	sort.Slice(packIDs, func(left, right int) bool { return bytes.Compare(packIDs[left][:], packIDs[right][:]) < 0 })
+	sharedBlob := vaultic.NewRandomID()
+	idx := index.NewIndex()
+	idx.StorePack(
+		packIDs[0],
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: sharedBlob, Type: vaultic.DataBlob}, Length: 1}},
+	)
+	idx.StorePack(
+		packIDs[1],
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: sharedBlob, Type: vaultic.DataBlob}, Length: 1}},
+	)
+	idx.StorePack(
+		packIDs[2],
+		pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}},
+	)
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	store := newSplitStore()
+	failureGate := make(chan struct{})
+	reduceGate := make(chan struct{})
+	store.blockByPack[schema.ID(packIDs[2])] = failureGate
+	store.failByPack[schema.ID(packIDs[2])] = errors.New("non-contiguous ingest failed")
+	store.blockReduceByEnter[1] = reduceGate
+	done := make(chan error, 1)
+	go func() {
+		_, err := Import(
+			context.Background(),
+			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}},
+			fixedStatter{size: 16},
+			store,
+			Options{PublicationLanes: 2, PacksPerTransaction: 1, Telemetry: telemetry},
+		)
+		done <- err
+	}()
+
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("earlier reduction did not start")
+	}
+	close(failureGate)
+	failureDeadline := time.NewTimer(5 * time.Second)
+	defer failureDeadline.Stop()
+failureLoop:
+	for {
+		select {
+		case batch := <-store.ingestCompleted:
+			store.mu.Lock()
+			failedPack := store.failedPacksByBatch[batch]
+			store.mu.Unlock()
+			if failedPack == schema.ID(packIDs[2]) {
+				break failureLoop
+			}
+		case <-failureDeadline.C:
+			t.Fatal("non-contiguous failing ingest did not complete")
+		}
+	}
+	waitForStage3FailureAcceptance(t, telemetry)
+	select {
+	case err := <-done:
+		t.Fatalf("import returned before earlier reduction completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(reduceGate)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "non-contiguous ingest failed") {
+			t.Fatalf("stage 3 ingest failure = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stage 3 import did not report non-contiguous failure")
+	}
+}
+
+func waitForStage3FailureAcceptance(t *testing.T, telemetry *SchedulerTelemetry) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot := telemetry.Snapshot()
+		if snapshot.Operations["completion_to_receive"].Count >= 2 {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("coordinator did not accept later failure while reduction was active: %+v", snapshot)
+		}
+	}
+}
+
+func TestStage3ReducerStopsWhenCanceledWithFullOutcomeChannel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := newSplitStore()
+	jobs := make(chan stage3ReductionJob, 1)
+	outcomes := make(chan stage3ReductionOutcome, 1)
+	outcomes <- stage3ReductionOutcome{ordinal: 99}
+	done := make(chan struct{})
+	go func() {
+		stage3ReduceBatches(ctx, store, schema.ID{1}, jobs, outcomes, Options{}, &packPipelineCounters{})
+		close(done)
+	}()
+	jobs <- stage3ReductionJob{
+		logical: stage3LogicalBatch{items: []packPreparation{{index: 0}}},
+		outcome: stage3IngestOutcome{ordinal: 1, parts: []uint64{1}},
+	}
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reducer did not receive work")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reducer did not stop after cancellation with a full outcome channel")
+	}
+}
+
+func TestStage3ReducerPublishesToFullOutcomeChannelAfterSpaceIsAvailable(t *testing.T) {
+	store := newSplitStore()
+	jobs := make(chan stage3ReductionJob, 1)
+	outcomes := make(chan stage3ReductionOutcome, 1)
+	outcomes <- stage3ReductionOutcome{ordinal: 99}
+	done := make(chan struct{})
+	go func() {
+		stage3ReduceBatches(
+			context.Background(), store, schema.ID{1}, jobs, outcomes, Options{}, &packPipelineCounters{},
+		)
+		close(done)
+	}()
+	jobs <- stage3ReductionJob{
+		logical: stage3LogicalBatch{items: []packPreparation{{index: 0}}},
+		outcome: stage3IngestOutcome{ordinal: 1, parts: []uint64{1}},
+	}
+	select {
+	case <-store.reduceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reducer did not receive work")
+	}
+	select {
+	case <-done:
+		t.Fatal("reducer exited while its outcome channel was full")
+	case <-time.After(25 * time.Millisecond):
+	}
+	<-outcomes
+	select {
+	case outcome := <-outcomes:
+		if outcome.ordinal != 1 || !errors.Is(outcome.err, daemon.ErrLegacyImportReceiptMissing) {
+			t.Fatalf("reducer outcome = %+v", outcome)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reducer did not publish after outcome channel space became available")
+	}
+	close(jobs)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reducer did not stop after its job channel closed")
 	}
 }
 
@@ -2130,7 +2645,7 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 				}
 				stats := store.LegacyImportStats()
 				cleanup += stats.CleanupTime
-				reduce += telemetry.Snapshot().PhaseTime["reduce"]
+				reduce += telemetry.Snapshot().Operations["reduce_service"].Sum
 				closeStarted := time.Now()
 				if err := store.MarkBulkImportComplete(ctx); err != nil {
 					b.Fatal(err)

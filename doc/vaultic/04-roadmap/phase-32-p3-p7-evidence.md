@@ -2,11 +2,10 @@
 
 This record reports the currently executable Phase 32 work as of 2026-09-17.
 P3a, P3b, P7a, matched NFS/RGW/native-RADOS sampling, native RADOS lifecycle
-tests, and live RADOS-WAL latency are validated. P3c remains partial: its memory-WAL
-role pilots pass, but the complete response matrix is not yet run.
-Representative evidence identifies sustained eligible work waiting during
-ordered reduction and therefore selects P4 for a separately reviewed
-experiment. P5 and P6 remain unselected. A current full import remains
+tests, live RADOS-WAL latency, and P4 are validated. P3c remains partial: its
+memory-WAL role pilots pass, but the complete response matrix is not yet run.
+P4 decouples ordered reduction with a bounded worker and coordinator-owned
+acknowledgements. P5 and P6 remain unselected. A current full import remains
 incomplete, so this is not final repository-scale acceptance.
 
 ## Frozen Inputs and Build
@@ -41,6 +40,15 @@ RADOS-enabled VaulticDB SHA-256 was
 `3a430bd05057c4df275608c46669395de562b0e60218d76847876e49eb45b8ad`.
 Main data used pool `db-sst`; WAL used `db-wal`. Both used namespace
 `vaultic-perf` with fresh, independent `phase32/668e08a93-*-45m-v2` prefixes.
+
+The P4 comparison used the working tree based on
+`36c396c19c466456dcc981f59e216afa0f5bd2c4`. Vaultic SHA-256 was
+`d063ed0595c5296f735ed25551b8a08e3f533e10230d559903660d58607d2593`;
+the RADOS-enabled VaulticDB SHA-256 remained
+`3a430bd05057c4df275608c46669395de562b0e60218d76847876e49eb45b8ad`.
+Main data used `db-sst`, WAL used `db-wal`, and fresh prefixes were
+`phase32/p4-20260917-main-45m-v2` and
+`phase32/p4-20260917-wal-45m-v2` in namespace `vaultic-perf`.
 
 The versioned object-delay profile is accepted only by a build with
 `test-failpoints`, requires `target=isolated` and the process-test capability,
@@ -143,6 +151,59 @@ ordered reduction on representative storage. It does not prove that decoupling
 will improve end-to-end throughput, so P4 remains an experiment with the
 roadmap's stop condition rather than an accepted optimization. The evidence
 does not isolate a P5 client/RPC target or P6 SlateDB function.
+
+## P4 Results
+
+One bounded reducer worker now consumes successful ingests in ordinal order
+while the coordinator continues receiving completions and refilling independent
+lanes. Only coordinator acknowledgement releases dependencies and prepared
+bytes or publishes committed counters and checkpoints. Tests cover blocked
+refill, `A, A+B, B`, `A, A, C-fails`, delayed earliest completion, adaptive
+children, reducer and ingest failures, caller cancellation, a full reducer
+outcome channel, exact retained bytes, and final-checkpoint acknowledgement.
+
+The frozen real-daemon fixture used the same baseline revision, input, daemon,
+`GOMAXPROCS=4`, `GOMEMLIMIT=8GiB`, two lanes, deferred cleanup, and three
+repetitions per candidate:
+
+| Candidate | Median import blobs/s | Median end-to-end blobs/s | Median finalize |
+|---|---:|---:|---:|
+| Synchronous baseline | 151,963 | 90,849 | 0.2850 s |
+| P4 bounded reducer | 158,744 | 90,807 | 0.3089 s |
+
+Import-only throughput improved 4.5%. End-to-end throughput was flat on this
+small fixture because finalization dominates; all 60 final scheduler snapshots
+per candidate drained ready batches, pending reductions, retained bytes, and
+unreduced bytes to zero. Higher lane counts remained flat, so two lanes remain
+the accepted setting.
+
+The representative P4 run reused the native-RADOS workload and 45-minute
+boundary with 32 pack workers, two lanes, deferred cleanup, `db-sst` main data,
+and `db-wal` WAL:
+
+| Candidate | Boundary | Indexes | Packs | Blobs | Blobs/s | Peak prepared queue | Max RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Synchronous baseline | 44m42s | 1,114 | 58,226 | 47,651,281 | 17,766 | 13,565,280 B | 20,017,120 KiB |
+| P4 bounded reducer | 44m58s | 1,140 | 60,165 | 48,618,467 | 18,018.6 | 13,565,280 B | 20,413,300 KiB |
+
+P4 improved blob throughput 1.42%, packs 3.33%, and indexes 2.33%. Coordinator
+`reducer_wait` was 7m06.858s while measured reducer service was 32m29.674s,
+compared with 27m11.354s of synchronous reduction blocking in the baseline.
+The final scheduler state was `finished` with zero active lanes, ready batches,
+pending reductions, retained bytes, and unreduced bytes. Before the interrupt
+there were no failures, retries, conflicts, recovery reads, or filter fallback.
+The boundary caused the expected one ingest failure, one reduction failure, and
+two recovery reads while cancellation drained; exit 124 and `context canceled`
+are the planned comparison boundary, not data findings.
+
+Artifacts are `import-45m-v2.console.log` (SHA-256
+`8b199c89c137c47c0304b4f41443d38764575218c3c394e454b01f5aee8427a0`) and
+`import-45m-v2.time` (SHA-256
+`8c96845590a23a44430318855a2004633f76163296f4b507e6f19347ee17bb02`) under
+`/volume2/NASDA2/rustic/db.test/rados/phase32-p4/log`. The wrapper elapsed
+45m02.91s and exited 124. P4 therefore passes its boundedness, correctness, and
+matched-performance gates as a modest optimization. It does not justify more
+lanes or select P5/P6.
 
 Native RADOS access was verified against the supplied three-monitor cluster,
 sealed FSID, and isolated `vaultic-perf` namespace. The Go backend's live
@@ -265,5 +326,5 @@ accepted comparison boundary.
 
 Representative NFS, RADOS, and RGW/S3 are no longer external blockers. Full
 current-revision import, close/handoff/reopen, and post-import validation remain
-P7b work. Keep the two-lane baseline while P4 is tested; do not ship decoupling,
-increase lanes, or select P5/P6 from these measurements alone.
+P7b work. P4 is accepted with the two-lane setting; do not increase lanes or
+select P5/P6 from these measurements alone.

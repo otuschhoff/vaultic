@@ -664,6 +664,15 @@ reducer test proving the current refill gap. P4b introduces one bounded reducer
 worker and coordinator-owned acknowledgement processing, then reruns that test.
 P4c covers cancellation/failure/limits before any performance run.
 
+**Completed 2026-09-17:** Stage 3 now uses exactly one bounded ordered reducer
+worker. The coordinator remains the sole owner of admission, dependency state,
+committed counters, checkpoints, and prepared-byte release; all advance only
+after reduction acknowledgement. Ingest-worker cancellation does not interrupt
+an earlier reduction, caller cancellation stops both worker types, and reducer
+result publication cannot deadlock shutdown when its bounded channel is full.
+Ingest failures are captured when received so an independent later failure
+cannot be hidden behind a dependency-blocked ordinal.
+
 **Checks:** prove independent ingests can refill while reduction is blocked;
 overlapping keys cannot overtake; checkpoints, counters, and dependency/byte
 release occur only after the correct reduction acknowledgement. Exercise `A,
@@ -672,6 +681,19 @@ handoff channel, and cancellation with both worker types active. Run the complet
 legacyimport suite under `-race` and real-daemon equivalence/handoff tests.
 **Exit:** bounded worker lifecycle and identical ordered metadata, followed by
 P3 comparison. Stop if only backlog grows or the engine bottleneck is unchanged.
+
+The deterministic suite additionally covers `A, A, C-fails`, exact retained
+bytes, final-checkpoint publication, and a later ingest failure while an earlier
+reduction runs. Normal and race-enabled legacy-import suites, focused stress,
+CLI telemetry tests, vet, and real-daemon equivalence/idempotency/handoff tests
+pass. A matched three-repeat local real-daemon fixture improved median two-lane
+import throughput from 151,963 to 158,744 blobs/s (4.5%); end-to-end throughput
+was effectively flat at 90,849 versus 90,807 blobs/s because fixture finalization
+dominates. The representative 45-minute native-RADOS run improved from 17,766
+to 18,018.6 blobs/s (1.42%) and reduced coordinator reducer wait from 27m11.354s
+to 7m06.858s while 32m29.674s of reducer service overlapped other work. Its
+bounded queue drained to zero. P4 is accepted as a modest improvement; retain
+two lanes and do not infer selection of P5 or P6 from this result.
 
 ### P5. Remove One Measured Client/RPC Cost
 
