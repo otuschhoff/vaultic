@@ -1,6 +1,6 @@
 module github.com/otuschhoff/vaultic
 
-go 1.26.0
+go 1.26.8
 
 // keep the old behavior for reparse points on windows until handling reparse points has been improved in vaultic
 // https://forum.vaultic.net/t/windows-junction-backup-with-go1-23-or-later/8940
@@ -21,7 +21,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.49.0
 	github.com/cenkalti/backoff/v4 v4.3.0
-	github.com/ceph/go-ceph v0.41.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cloudflare/circl v1.6.5
 	github.com/cockroachdb/pebble v1.1.5
@@ -38,6 +37,7 @@ require (
 	github.com/ncw/swift/v2 v2.0.5
 	github.com/otuschhoff/cwalk v0.0.0-20260815164352-9b009e22a463
 	github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20
+	github.com/otuschhoff/rados-go v0.1.1-0.20260917080311-c8bb148a1379
 	github.com/peterbourgon/unixtransport v0.0.7
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/profile v1.7.0
@@ -115,6 +115,8 @@ require (
 	github.com/googleapis/gax-go/v2 v2.24.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/itchyny/timefmt-go v0.1.8 // indirect
+	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
+	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/kr/fs v0.1.0 // indirect
@@ -124,6 +126,7 @@ require (
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/otuschhoff/gokrb5/v8 v8.5.3 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect

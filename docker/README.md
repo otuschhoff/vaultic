@@ -32,19 +32,18 @@ will assign a random hostname each time.
 The generic image contains only the Vaultic CLI. Two native RADOS build targets
 are available for Linux amd64.
 
-Build non-container executables for hosts that provide compatible glibc and
-librados installations:
+Build non-container executables. Vaultic uses a pure-Go RADOS client;
+VaulticDB requires compatible glibc and librados installations:
 
 ```
 make vaultic-rados-linux-amd64
 ```
 
-This writes all four executables to `bin/linux-amd64-rados`. Rust, Go, and their
-language dependencies are linked into the executables. Glibc, librados, and
-librados' native dependency closure remain dynamically linked. This is the
-most-static practical configuration for the native Ceph client stack. The
-binaries are built against Ceph Tentacle 20.2.4 on the CentOS Stream 9 glibc
-2.34 baseline and require Tentacle 20 or newer on a native host.
+This writes all four executables to `bin/linux-amd64-rados`. Vaultic is built
+with `CGO_ENABLED=0` and does not load librados. VaulticDB dynamically links
+glibc, librados, and librados' native dependency closure. VaulticDB is built
+against Ceph Tentacle 20.2.4 on the CentOS Stream 9 glibc 2.34 baseline and
+requires Tentacle 20 or newer on a native host.
 
 Build an image containing Vaultic, VaulticDB, the key broker, the key custodian,
 and the matching dynamically loaded librados runtime:
@@ -55,8 +54,8 @@ make vaultic-rados-image-linux-amd64
 
 The default image name is `vaultic:rados-linux-amd64`. Override it with
 `VAULTIC_RADOS_IMAGE=registry.example/vaultic:rados`.
-The image includes the matching official Ceph Tentacle 20.2.4 runtime and does
-not use librados libraries from the host.
+The image includes the matching official Ceph Tentacle 20.2.4 runtime for
+VaulticDB and does not use librados libraries from the host.
 
 The image defaults to the Vaultic CLI. Select another component by placing its
 name first:

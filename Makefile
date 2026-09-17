@@ -113,16 +113,16 @@ vaulticdb-musl:
 vaulticdb-smoke:
 	VAULTICDB_NATIVE_SMOKE=1 rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo run --manifest-path vaulticdb/Cargo.toml --quiet
 
-# Produce non-container Linux amd64 binaries with native RADOS support. Rust,
-# Go, and their language dependencies are linked into the executables; glibc,
-# librados, and librados' native dependency closure remain dynamic.
+# Produce non-container Linux amd64 binaries with native RADOS support. Vaultic
+# uses the pure-Go RADOS client. VaulticDB dynamically links glibc, librados,
+# and librados' native dependency closure.
 vaultic-rados-linux-amd64:
 	rm -rf $(BIN_DIR)/linux-amd64-rados
 	docker build --platform linux/amd64 --file docker/Dockerfile.rados \
 		--target binaries --output type=local,dest=$(BIN_DIR) .
 
 # Build all Linux amd64 components with native RADOS support and package the
-# matching dynamic librados runtime. Generic non-container builds stay static.
+# dynamic librados runtime required by VaulticDB. Generic builds stay static.
 vaultic-rados-image-linux-amd64:
 	docker build --platform linux/amd64 --file docker/Dockerfile.rados \
 		--tag $(VAULTIC_RADOS_IMAGE) .

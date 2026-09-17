@@ -3,24 +3,24 @@
 package rados
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"math"
 	"strings"
+	"syscall"
 	"time"
 
-	cephrados "github.com/ceph/go-ceph/rados"
+	radosgo "github.com/otuschhoff/rados-go"
 	"github.com/otuschhoff/vaultic/internal/backend"
 )
 
-type cephObjectStore struct {
-	connection *cephrados.Conn
-	ioctx      *cephrados.IOContext
+type radosObjectStore struct {
+	client     *radosgo.Client
+	poolHandle radosgo.Pool
 	pool       string
-	namespace  string
+	opTTL      time.Duration
 	cursors    nativeListCursorRegistry
 }
 
@@ -28,47 +28,41 @@ func openNative(ctx context.Context, config Config) (driver, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	connection, err := cephrados.NewConnWithUser(strings.TrimPrefix(config.Client, "client."))
+	client, err := radosgo.New(radosgo.Config{
+		Monitors:         splitMonitors(config.Monitors),
+		Entity:           config.Client,
+		ClusterFSID:      config.ClusterFSID,
+		Key:              []byte(config.Key.Unwrap()),
+		DialTimeout:      config.OperationTTL,
+		HandshakeTimeout: config.OperationTTL,
+		OperationTimeout: config.OperationTTL,
+	})
 	if err != nil {
-		return nil, mapNativeError(err)
+		return nil, mapRadosGoError(err)
 	}
 	failed := true
 	defer func() {
 		if failed {
-			connection.Shutdown()
+			_ = client.Close()
 		}
 	}()
-	timeout := fmt.Sprintf("%d", max(1, int(config.OperationTTL.Seconds())))
-	for option, value := range map[string]string{
-		"mon_host": config.Monitors, "key": config.Key.Unwrap(),
-		"rados_osd_op_timeout": timeout, "rados_mon_op_timeout": timeout,
-		"client_mount_timeout": timeout,
-	} {
-		if err := connection.SetConfigOption(option, value); err != nil {
-			return nil, fmt.Errorf("configure native RADOS %s: %w", option, mapNativeError(err))
-		}
-	}
-	if err := connection.Connect(); err != nil {
-		return nil, fmt.Errorf("connect native RADOS: %w", mapNativeError(err))
+	if err := client.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("connect native RADOS: %w", mapRadosGoError(err))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	fsid, err := connection.GetFSID()
-	if err != nil {
-		return nil, fmt.Errorf("read native RADOS cluster identity: %w", mapNativeError(err))
-	}
+	fsid := client.FSID()
 	if !strings.EqualFold(fsid, config.ClusterFSID) {
 		return nil, fmt.Errorf("native RADOS cluster identity %q does not match sealed identity %q", fsid, config.ClusterFSID)
 	}
-	ioctx, err := connection.OpenIOContext(config.Pool)
+	pool, err := client.OpenPool(ctx, config.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("open native RADOS pool %q: %w", config.Pool, mapNativeError(err))
+		return nil, fmt.Errorf("open native RADOS pool %q: %w", config.Pool, mapRadosGoError(err))
 	}
-	ioctx.SetNamespace(config.Namespace)
 	failed = false
 	native := &nativeDriver{
-		raw:                 &cephObjectStore{connection: connection, ioctx: ioctx, pool: config.Pool, namespace: config.Namespace},
+		raw:                 &radosObjectStore{client: client, poolHandle: pool.WithNamespace(config.Namespace), pool: config.Pool, opTTL: config.OperationTTL},
 		prefix:              strings.Trim(config.Prefix, "/") + "/",
 		pool:                config.Pool,
 		opTTL:               config.OperationTTL,
@@ -81,131 +75,159 @@ func openNative(ctx context.Context, config Config) (driver, error) {
 	return native, nil
 }
 
-func (store *cephObjectStore) stat(name string) (uint64, error) {
-	value, err := store.ioctx.Stat(name)
-	return value.Size, err
+func (store *radosObjectStore) operationContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), store.opTTL)
 }
 
-func (store *cephObjectStore) statWithModTime(name string) (uint64, time.Time, bool, error) {
-	value, err := store.ioctx.Stat(name)
+func (store *radosObjectStore) stat(name string) (uint64, error) {
+	ctx, cancel := store.operationContext()
+	defer cancel()
+	value, err := store.poolHandle.Object(name).Stat(ctx)
+	return value.Size, mapRadosGoError(err)
+}
+
+func (store *radosObjectStore) statWithModTime(name string) (uint64, time.Time, bool, error) {
+	ctx, cancel := store.operationContext()
+	defer cancel()
+	value, err := store.poolHandle.Object(name).Stat(ctx)
 	if err != nil {
-		return 0, time.Time{}, false, err
+		return 0, time.Time{}, false, mapRadosGoError(err)
 	}
 	return value.Size, value.ModTime, true, nil
 }
 
-func (store *cephObjectStore) read(name string, buffer []byte, offset uint64) (int, error) {
-	return store.ioctx.Read(name, buffer, offset)
+func (store *radosObjectStore) read(name string, buffer []byte, offset uint64) (int, error) {
+	ctx, cancel := store.operationContext()
+	defer cancel()
+	data, _, err := store.poolHandle.Object(name).Read(ctx, offset, uint64(len(buffer)))
+	if err != nil {
+		return 0, mapRadosGoError(err)
+	}
+	return copy(buffer, data), nil
 }
 
-func (store *cephObjectStore) write(name string, data []byte, exclusive bool) error {
-	operation := cephrados.CreateWriteOp()
-	defer operation.Release()
+func (store *radosObjectStore) write(name string, data []byte, exclusive bool) error {
+	ctx, cancel := store.operationContext()
+	defer cancel()
+	operation := radosgo.NewWriteOp()
 	if exclusive {
-		operation.Create(cephrados.CreateExclusive)
+		operation.Create(true)
 	}
 	operation.WriteFull(data)
-	return operation.Operate(store.ioctx, name, cephrados.OperationNoFlag)
+	_, err := store.poolHandle.Object(name).ExecuteWrite(ctx, operation)
+	return mapRadosGoError(err)
 }
 
-func (store *cephObjectStore) compareAndSwap(name string, expected []byte, replacement []byte, createOnly bool) (bool, error) {
+func (store *radosObjectStore) compareAndSwap(name string, expected []byte, replacement []byte, createOnly bool) (bool, error) {
+	ctx, cancel := store.operationContext()
+	defer cancel()
+	object := store.poolHandle.Object(name)
 	if createOnly {
-		operation := cephrados.CreateWriteOp()
-		defer operation.Release()
-		operation.Create(cephrados.CreateExclusive)
+		operation := radosgo.NewWriteOp()
+		operation.Create(true)
 		operation.WriteFull(replacement)
-		err := operation.Operate(store.ioctx, name, cephrados.OperationNoFlag)
+		_, err := object.ExecuteWrite(ctx, operation)
 		if err == nil {
 			return true, nil
 		}
-		if stderrors.Is(mapNativeError(err), ErrExists) {
+		if stderrors.Is(err, radosgo.ErrExists) {
 			return false, nil
 		}
-		return false, err
+		return false, mapRadosGoError(err)
 	}
-	ioctx, err := store.connection.OpenIOContext(store.pool)
-	if err != nil {
-		return false, err
-	}
-	defer ioctx.Destroy()
-	ioctx.SetNamespace(store.namespace)
-	stat, err := ioctx.Stat(name)
-	if stderrors.Is(err, cephrados.ErrNotFound) {
+	stat, err := object.Stat(ctx)
+	if stderrors.Is(err, radosgo.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, mapRadosGoError(err)
 	}
 	if stat.Size != uint64(len(expected)) {
 		return false, nil
 	}
-	version, err := ioctx.GetLastVersion()
-	if err != nil {
-		return false, err
-	}
-	operation := cephrados.CreateWriteOp()
-	defer operation.Release()
-	operation.AssertVersion(version)
-	cmpStep := operation.CmpExt(expected, 0)
+	operation := radosgo.NewWriteOp()
+	operation.AssertVersion(stat.Version)
+	compareIndex := operation.CompareExtent(0, expected)
 	operation.WriteFull(replacement)
-	err = operation.Operate(ioctx, name, cephrados.OperationNoFlag)
+	result, err := object.ExecuteWrite(ctx, operation)
 	if err == nil {
 		return true, nil
 	}
-	if cmpStep.Result != 0 || stderrors.Is(mapNativeError(err), ErrNotFound) {
+	if stderrors.Is(err, radosgo.ErrConflict) || stderrors.Is(err, radosgo.ErrNotFound) || compareIndex < len(result.Results) && result.Results[compareIndex].Err != nil {
 		return false, nil
 	}
-	currentStat, statErr := ioctx.Stat(name)
-	if stderrors.Is(statErr, cephrados.ErrNotFound) || statErr == nil && currentStat.Size != uint64(len(expected)) {
-		return false, nil
-	}
-	if statErr == nil {
-		current := make([]byte, len(expected))
-		read, readErr := ioctx.Read(name, current, 0)
-		if readErr == nil && (read != len(current) || !bytes.Equal(current, expected)) {
-			return false, nil
-		}
-	}
-	return false, err
+	return false, mapRadosGoError(err)
 }
 
-func (store *cephObjectStore) remove(name string) error {
-	return store.ioctx.Delete(name)
+func (store *radosObjectStore) remove(name string) error {
+	ctx, cancel := store.operationContext()
+	defer cancel()
+	_, err := store.poolHandle.Object(name).Remove(ctx)
+	return mapRadosGoError(err)
 }
 
-func (store *cephObjectStore) listPage(ctx context.Context, prefix string, after string, limit int) ([]string, string, bool, error) {
+func (store *radosObjectStore) listPage(ctx context.Context, prefix string, after string, limit int) ([]string, string, bool, error) {
 	return store.cursors.page(ctx, prefix, after, limit, func() (nativeObjectIterator, error) {
-		return store.ioctx.Iter()
+		return &radosObjectIterator{ctx: ctx, pool: store.poolHandle, cursor: store.poolHandle.BeginObjectCursor(), index: -1}, nil
 	})
 }
 
-func (store *cephObjectStore) close() {
-	store.cursors.close()
-	store.ioctx.Destroy()
-	store.connection.Shutdown()
+type radosObjectIterator struct {
+	ctx    context.Context
+	pool   radosgo.Pool
+	cursor radosgo.ObjectCursor
+	values []radosgo.ObjectEntry
+	index  int
+	done   bool
+	err    error
 }
 
-func (store *cephObjectStore) capacity(ctx context.Context, pool string) (backend.CapacityTelemetrySample, error) {
+func (iterator *radosObjectIterator) Next() bool {
+	for !iterator.done && iterator.err == nil {
+		iterator.index++
+		if iterator.index < len(iterator.values) {
+			return true
+		}
+		if iterator.cursor.IsEnd() {
+			iterator.done = true
+			break
+		}
+		page, err := iterator.pool.ListObjects(iterator.ctx, iterator.cursor, orphanChunkScanPageLimit)
+		if err != nil {
+			iterator.err = mapRadosGoError(err)
+			break
+		}
+		iterator.values, iterator.cursor, iterator.index = page.Values, page.Next, 0
+		if len(iterator.values) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (iterator *radosObjectIterator) Value() string { return iterator.values[iterator.index].Name }
+func (iterator *radosObjectIterator) Err() error    { return iterator.err }
+func (iterator *radosObjectIterator) Close()        { iterator.done = true }
+func (iterator *radosObjectIterator) setContext(ctx context.Context) {
+	iterator.ctx = ctx
+}
+
+func (store *radosObjectStore) close() {
+	store.cursors.close()
+	_ = store.client.Close()
+}
+
+func (store *radosObjectStore) capacity(ctx context.Context, pool string) (backend.CapacityTelemetrySample, error) {
 	if err := ctx.Err(); err != nil {
 		return backend.CapacityTelemetrySample{}, err
 	}
-	cluster, clusterErr := store.connection.GetClusterStats()
+	cluster, clusterErr := store.client.ClusterStats(ctx)
 	if clusterErr != nil {
-		return backend.CapacityTelemetrySample{}, mapNativeError(clusterErr)
+		return backend.CapacityTelemetrySample{}, mapRadosGoError(clusterErr)
 	}
-	poolStats, poolErr := store.ioctx.GetPoolStats()
-	if poolErr != nil {
-		return backend.CapacityTelemetrySample{}, mapNativeError(poolErr)
-	}
-	sample := backend.CapacityTelemetrySample{TotalRawBytes: uint64(cluster.Kb) * 1024, FreeRawBytes: uint64(cluster.Kb_avail) * 1024, Health: "healthy"}
+	sample := backend.CapacityTelemetrySample{TotalRawBytes: cluster.KB * 1024, FreeRawBytes: cluster.KBAvailable * 1024, Health: "healthy"}
 	if sample.FreeRawBytes > sample.TotalRawBytes {
 		sample.Inconsistent = true
-	}
-	if poolStats.Num_objects > 0 {
-		amp := float64(poolStats.Num_object_copies) / float64(poolStats.Num_objects)
-		if amp >= 1 && !math.IsInf(amp, 0) && !math.IsNaN(amp) {
-			sample.RawAmplification = amp
-		}
 	}
 	if health, ok := store.healthStatus(ctx); ok {
 		sample.Health = health
@@ -238,7 +260,7 @@ func (store *cephObjectStore) capacity(ctx context.Context, pool string) (backen
 	return sample, ctx.Err()
 }
 
-func (store *cephObjectStore) healthStatus(ctx context.Context) (string, bool) {
+func (store *radosObjectStore) healthStatus(ctx context.Context) (string, bool) {
 	raw, _, err := store.monCommand(ctx, map[string]any{"prefix": "status", "format": "json"})
 	if err != nil {
 		return "", false
@@ -263,7 +285,7 @@ func (store *cephObjectStore) healthStatus(ctx context.Context) (string, bool) {
 	}
 }
 
-func (store *cephObjectStore) poolSpaceFacts(ctx context.Context, pool string) (uint64, uint64, uint64, bool) {
+func (store *radosObjectStore) poolSpaceFacts(ctx context.Context, pool string) (uint64, uint64, uint64, bool) {
 	raw, _, err := store.monCommand(ctx, map[string]any{"prefix": "df", "format": "json"})
 	if err != nil {
 		return 0, 0, 0, false
@@ -291,7 +313,7 @@ func (store *cephObjectStore) poolSpaceFacts(ctx context.Context, pool string) (
 	return 0, 0, 0, false
 }
 
-func (store *cephObjectStore) poolReplicaValue(ctx context.Context, pool string, variable string) (uint64, bool) {
+func (store *radosObjectStore) poolReplicaValue(ctx context.Context, pool string, variable string) (uint64, bool) {
 	raw, _, err := store.monCommand(ctx, map[string]any{"prefix": "osd pool get", "pool": pool, "var": variable, "format": "json"})
 	if err != nil {
 		return 0, false
@@ -307,7 +329,7 @@ func (store *cephObjectStore) poolReplicaValue(ctx context.Context, pool string,
 	return uint64(value), true
 }
 
-func (store *cephObjectStore) monCommand(ctx context.Context, command map[string]any) ([]byte, string, error) {
+func (store *radosObjectStore) monCommand(ctx context.Context, command map[string]any) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
@@ -315,9 +337,32 @@ func (store *cephObjectStore) monCommand(ctx context.Context, command map[string
 	if err != nil {
 		return nil, "", err
 	}
-	response, status, commandErr := store.connection.MonCommand(raw)
+	result, commandErr := store.client.MonitorCommand(ctx, raw, nil)
 	if commandErr != nil {
-		return nil, status, mapNativeError(commandErr)
+		return result.Output, result.Status, mapRadosGoError(commandErr)
 	}
-	return response, status, nil
+	return result.Output, result.Status, nil
+}
+
+func splitMonitors(value string) []string {
+	return strings.FieldsFunc(value, func(character rune) bool {
+		return character == ',' || character == ';' || character == ' ' || character == '\t' || character == '\n'
+	})
+}
+
+func mapRadosGoError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case stderrors.Is(err, radosgo.ErrNotFound):
+		return fmt.Errorf("%w: %v", ErrNotFound, err)
+	case stderrors.Is(err, radosgo.ErrExists):
+		return fmt.Errorf("%w: %v", ErrExists, err)
+	case stderrors.Is(err, radosgo.ErrPermission):
+		return fmt.Errorf("%w: %v", syscall.EACCES, err)
+	case stderrors.Is(err, radosgo.ErrInvalidArgument):
+		return fmt.Errorf("%w: %v", syscall.EINVAL, err)
+	default:
+		return err
+	}
 }

@@ -131,13 +131,13 @@ jobs:
       - name: Build RADOS-enabled Linux binaries
         run: make vaultic-rados-linux-amd64
 
-      - name: Verify dynamic RADOS linkage and executables
+      - name: Verify RADOS linkage and executables
         run: |
           docker run --rm --platform linux/amd64 \
             --volume "$PWD/bin/linux-amd64-rados:/opt/vaultic:ro" \
             quay.io/ceph/ceph:v20.2.4 \
             /bin/sh -c 'test "$(rpm -q --queryformat "%{VERSION}" librados2)" = 20.2.4 &&
-              ldd /opt/vaultic/vaultic | grep -q librados.so &&
+              ! ldd /opt/vaultic/vaultic 2>&1 | grep -q librados.so &&
               ldd /opt/vaultic/vaulticdb | grep -q librados.so &&
               /opt/vaultic/vaultic version &&
               VAULTICDB_NATIVE_SMOKE=1 /opt/vaultic/vaulticdb'

@@ -77,6 +77,15 @@ func (*fakeNativeObjectIterator) Err() error { return nil }
 
 func (iterator *fakeNativeObjectIterator) Close() { iterator.closed = true }
 
+type contextualFakeNativeObjectIterator struct {
+	fakeNativeObjectIterator
+	contexts []context.Context
+}
+
+func (iterator *contextualFakeNativeObjectIterator) setContext(ctx context.Context) {
+	iterator.contexts = append(iterator.contexts, ctx)
+}
+
 func newFakeNative() (*nativeDriver, *fakeRawStore) {
 	raw := &fakeRawStore{
 		objects:    make(map[string][]byte),
@@ -370,6 +379,33 @@ func TestNativeListCursorRegistryPreservesExactIteratorPosition(t *testing.T) {
 	}
 	if !iterator.closed {
 		t.Fatal("exhausted iterator was not closed")
+	}
+}
+
+func TestNativeListCursorRegistryRefreshesContextOnResume(t *testing.T) {
+	iterator := &contextualFakeNativeObjectIterator{fakeNativeObjectIterator: fakeNativeObjectIterator{
+		values: []string{"repository/a", "repository/b"}, index: -1,
+	}}
+	registry := &nativeListCursorRegistry{}
+	defer registry.close()
+	firstContext, cancel := context.WithCancel(t.Context())
+	_, cursor, done, err := registry.page(firstContext, "repository/", "", 1, func() (nativeObjectIterator, error) {
+		return iterator, nil
+	})
+	if err != nil || done || cursor == "" {
+		t.Fatalf("first page cursor=%q done=%v err=%v", cursor, done, err)
+	}
+	cancel()
+	secondContext := t.Context()
+	_, _, _, err = registry.page(secondContext, "repository/", cursor, 1, func() (nativeObjectIterator, error) {
+		t.Fatal("resumed cursor must not create a replacement iterator")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(iterator.contexts) != 2 || iterator.contexts[0] != firstContext || iterator.contexts[1] != secondContext {
+		t.Fatalf("iterator contexts were not refreshed: %v", iterator.contexts)
 	}
 }
 
@@ -1663,16 +1699,48 @@ func TestNativeCompareAndSwapRetriesWhenRawEncodingChangesConcurrently(t *testin
 	}
 }
 
-func TestNativeLiveRADOS(t *testing.T) {
+func liveRADOSConfig(t *testing.T, prefix string, operationTTL time.Duration) (Config, bool) {
+	t.Helper()
 	monitors, key := os.Getenv("VAULTIC_RADOS_TEST_MONITORS"), os.Getenv("VAULTIC_RADOS_TEST_KEY")
 	if monitors == "" || key == "" {
+		return Config{}, false
+	}
+	valueOrDefault := func(name, defaultValue string) string {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+		return defaultValue
+	}
+	return Config{
+		Monitors: monitors, ClusterFSID: valueOrDefault("VAULTIC_RADOS_TEST_FSID", "2f525d6a-8f31-4f79-b731-82a6acb235f5"),
+		Pool: valueOrDefault("VAULTIC_RADOS_TEST_POOL", "vaultic"), Namespace: valueOrDefault("VAULTIC_RADOS_TEST_NAMESPACE", "repo"), Prefix: prefix,
+		Client: valueOrDefault("VAULTIC_RADOS_TEST_CLIENT", "client.vaultic"), Key: options.NewSecretString(key), OperationTTL: operationTTL,
+	}, true
+}
+
+func registerLiveRADOSCleanup(t *testing.T, config Config) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		store, err := Open(ctx, config)
+		if err != nil {
+			t.Errorf("open live RADOS cleanup: %v", err)
+			return
+		}
+		defer store.Close()
+		if err := store.Delete(ctx); err != nil {
+			t.Errorf("clean live RADOS prefix: %v", err)
+		}
+	})
+}
+
+func TestNativeLiveRADOS(t *testing.T) {
+	config, enabled := liveRADOSConfig(t, fmt.Sprintf("live-go-%d/", time.Now().UnixNano()), 5*time.Second)
+	if !enabled {
 		t.Skip("set VAULTIC_RADOS_TEST_MONITORS and VAULTIC_RADOS_TEST_KEY")
 	}
-	config := Config{
-		Monitors: monitors, ClusterFSID: "2f525d6a-8f31-4f79-b731-82a6acb235f5",
-		Pool: "vaultic", Namespace: "repo", Prefix: fmt.Sprintf("live-go-%d/", time.Now().UnixNano()),
-		Client: "client.vaultic", Key: options.NewSecretString(key), OperationTTL: 5 * time.Second,
-	}
+	registerLiveRADOSCleanup(t, config)
 	store, err := Open(t.Context(), config)
 	if err != nil {
 		t.Fatal(err)
@@ -1723,8 +1791,11 @@ func TestNativeLiveRADOS(t *testing.T) {
 	}
 
 	denied := config
-	denied.Namespace = "forbidden"
-	denied.Prefix = "live-denied/"
+	denied.Namespace = os.Getenv("VAULTIC_RADOS_TEST_DENIED_NAMESPACE")
+	if denied.Namespace == "" {
+		return
+	}
+	denied.Prefix = config.Prefix + "denied/"
 	deniedStore, err := Open(t.Context(), denied)
 	if err != nil {
 		t.Fatal(err)
@@ -1737,15 +1808,11 @@ func TestNativeLiveRADOS(t *testing.T) {
 }
 
 func TestNativeLiveOSDUnavailableIsBounded(t *testing.T) {
-	monitors, key := os.Getenv("VAULTIC_RADOS_TEST_MONITORS"), os.Getenv("VAULTIC_RADOS_TEST_KEY")
-	if monitors == "" || key == "" || os.Getenv("VAULTIC_RADOS_TEST_OSD_DOWN") == "" {
+	config, enabled := liveRADOSConfig(t, fmt.Sprintf("outage-%d/", time.Now().UnixNano()), 2*time.Second)
+	if !enabled || os.Getenv("VAULTIC_RADOS_TEST_OSD_DOWN") == "" {
 		t.Skip("set live RADOS test variables and VAULTIC_RADOS_TEST_OSD_DOWN")
 	}
-	config := Config{
-		Monitors: monitors, ClusterFSID: "2f525d6a-8f31-4f79-b731-82a6acb235f5",
-		Pool: "vaultic", Namespace: "repo", Prefix: fmt.Sprintf("outage-%d/", time.Now().UnixNano()),
-		Client: "client.vaultic", Key: options.NewSecretString(key), OperationTTL: 2 * time.Second,
-	}
+	registerLiveRADOSCleanup(t, config)
 	store, err := Open(t.Context(), config)
 	if err != nil {
 		t.Fatal(err)

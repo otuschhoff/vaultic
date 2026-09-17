@@ -27,6 +27,10 @@ type nativeObjectIterator interface {
 	Close()
 }
 
+type nativeContextualObjectIterator interface {
+	setContext(context.Context)
+}
+
 type nativeListCursor struct {
 	iterator nativeObjectIterator
 	expires  time.Time
@@ -60,6 +64,9 @@ func (registry *nativeListCursorRegistry) page(
 	iterator, err := registry.take(cursor, create)
 	if err != nil {
 		return nil, "", false, err
+	}
+	if contextual, ok := iterator.(nativeContextualObjectIterator); ok {
+		contextual.setContext(ctx)
 	}
 	retained := false
 	defer func() {

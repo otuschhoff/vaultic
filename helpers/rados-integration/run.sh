@@ -18,7 +18,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 cleanup
 docker build --platform linux/amd64 --file "$root/docker/Dockerfile.rados" \
-    --target rados-go-toolchain --tag "$go_builder" "$root"
+    --target go-toolchain --tag "$go_builder" "$root"
 docker build --platform linux/amd64 --file "$root/docker/Dockerfile.rados" \
     --target rados-rust-toolchain --tag "$rust_builder" "$root"
 docker network create "$network" >/dev/null
@@ -33,7 +33,7 @@ until docker exec "$cluster" test -f /tmp/vaultic-ready 2>/dev/null; do
 done
 
 key=$(docker exec "$cluster" ceph auth get-key client.vaultic)
-common="--rm --platform linux/amd64 --network $network -e VAULTIC_RADOS_TEST_MONITORS=ceph-test:6789 -e VAULTIC_RADOS_TEST_KEY=$key -v $root:/work"
+common="--rm --platform linux/amd64 --network $network -e VAULTIC_RADOS_TEST_MONITORS=ceph-test:6789 -e VAULTIC_RADOS_TEST_KEY=$key -e VAULTIC_RADOS_TEST_DENIED_NAMESPACE=forbidden -v $root:/work"
 
 docker run $common -w /work --entrypoint /bin/sh "$go_builder" -c \
     'go test -tags rados ./internal/backend/rados -run "TestNativeLiveRADOS|TestLiveEncryptedRepositoryLifecycle" -v'
