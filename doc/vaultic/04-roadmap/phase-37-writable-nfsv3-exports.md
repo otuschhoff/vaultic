@@ -1,8 +1,8 @@
-# Phase 36: Writable NFSv3 workspace exports
+# Phase 37: Writable NFSv3 workspace exports
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 35](phase-35-writable-fuse-and-durable-writeback.md) | [Next: Phase 37](phase-37-nfsv3-locking-and-recovery.md)
+[Previous: Phase 36](phase-36-writable-fuse-and-durable-writeback.md) | [Next: Phase 38](phase-38-nfsv3-locking-and-recovery.md)
 
 **Status: design specification, not yet implemented.**
 
@@ -10,7 +10,7 @@
 
 ## Scope and prerequisites
 
-Extend Phase 31's NFS adapter over the Phase 35 mutable filesystem API. Retain read-only exports unchanged and make write access explicit. Initially one fenced workspace authority owns mutations; multiple NFS clients are supported, but independently active server instances for the same workspace are not enabled here. NLM is Phase 37; authoritative server-sourced group membership is Phase 38. Until then, writable exports are restricted to explicitly trusted clients and workloads that do not require distributed advisory locks.
+Extend Phase 31's NFS adapter over the Phase 36 mutable filesystem API. Retain read-only exports unchanged and make write access explicit. Initially one fenced workspace authority owns mutations; multiple NFS clients are supported, but independently active server instances for the same workspace are not enabled here. NLM is Phase 38; authoritative server-sourced group membership is Phase 39. Until then, writable exports are restricted to explicitly trusted clients and workloads that do not require distributed advisory locks.
 
 ## Export and protocol contract
 
@@ -20,7 +20,7 @@ Proposed command:
 vaultic serve nfs --read-write --workspace NAME --writeback-profile PROFILE SNAPSHOT[:PATH]
 ```
 
-Resolve the immutable base once, persist the workspace/export binding, and reject attempts to reopen the workspace with a different repository/base/root. Workspace status, policy, drain, and snapshot commands are the Phase 35 commands. Writable export capacity reflects admissible writeback headroom, not unlimited underlying repository capacity.
+Resolve the immutable base once, persist the workspace/export binding, and reject attempts to reopen the workspace with a different repository/base/root. Workspace status, policy, drain, and snapshot commands are the Phase 36 commands. Writable export capacity reflects admissible writeback headroom, not unlimited underlying repository capacity.
 
 Implement `WRITE`, `COMMIT`, `CREATE`, `SETATTR`, `REMOVE`, `RENAME`, `LINK`, `MKDIR`, `RMDIR`, and `SYMLINK` through shared transactions. Define `MKNOD` support explicitly or return the appropriate unsupported/permission error; never instantiate host devices. Implement NFSv3 exclusive-create verifiers and guarded attribute updates, weak cache consistency attributes, mutation timestamps, cross-directory rename and directory cookie invalidation. Writable mode must not reuse Phase 31's immutable-attribute caching assumptions. Read-only exports still return `ROFS` for every mutation.
 
@@ -28,7 +28,7 @@ Use stable workspace inode IDs and generations independent of paths. Authenticat
 
 ## Stable writes, replay, and snapshots
 
-Follow NFSv3 `UNSTABLE`, `DATA_SYNC`, `FILE_SYNC`, write verifier, and `COMMIT` semantics. The conservative first implementation may make every accepted write `FILE_SYNC`, even when a client requests weaker stability: reply only after Phase 35's data and inode recovery state are durable. A stable reply means recoverable workspace data, not immediate pack conversion. `COMMIT` must enforce the relevant durability barrier and return truthful errors and verifier state, never inherit the read-only no-op shortcut without validation.
+Follow NFSv3 `UNSTABLE`, `DATA_SYNC`, `FILE_SYNC`, write verifier, and `COMMIT` semantics. The conservative first implementation may make every accepted write `FILE_SYNC`, even when a client requests weaker stability: reply only after Phase 36's data and inode recovery state are durable. A stable reply means recoverable workspace data, not immediate pack conversion. `COMMIT` must enforce the relevant durability barrier and return truthful errors and verifier state, never inherit the read-only no-op shortcut without validation.
 
 If unstable writes are later enabled, define bounded buffering, retransmission on verifier change, range-commit behavior, and crash recovery before exposing that mode. A restart or failover that loses unstable state must change the write verifier. Do not claim client-side buffered data is included in a server-side workspace snapshot; NFS clients/applications must flush for application-consistent snapshots.
 
@@ -36,16 +36,16 @@ Use the chosen NFS library's duplicate-request handling and augment it with boun
 
 ## Security and lifecycle
 
-Keep loopback default, explicit network exposure acknowledgement, source restrictions, and trusted-network/VPN requirements. AUTH_SYS does not authenticate the incoming UID. Apply server-side POSIX operation checks, root squashing by default, and explicit anonymous UID/GID mapping; reject read-only presentation overrides such as `--permissions readable` when they would bypass writable authorization. Phase 38 replaces reliance on client-provided group lists with authoritative server-side membership, not with stronger UID authentication.
+Keep loopback default, explicit network exposure acknowledgement, source restrictions, and trusted-network/VPN requirements. AUTH_SYS does not authenticate the incoming UID. Apply server-side POSIX operation checks, root squashing by default, and explicit anonymous UID/GID mapping; reject read-only presentation overrides such as `--permissions readable` when they would bypass writable authorization. Phase 39 replaces reliance on client-provided group lists with authoritative server-side membership, not with stronger UID authentication.
 
 Share the workspace authority's permission and inode-version checks, cache identity, quotas, and snapshot consistency with FUSE. Simultaneous FUSE and NFS access is supported only through that same authority with a tested invalidation model; otherwise reject the second attachment rather than allowing divergent views. Credential loss and shutdown stop admission, drain bounded work, preserve durable writeback, and expose pending pack commits for restart.
 
 ## Implementation steps
 
-1. Extend export configuration and persistent handles to attach Phase 35 workspaces while retaining immutable exports.
+1. Extend export configuration and persistent handles to attach Phase 36 workspaces while retaining immutable exports.
 2. Map NFSv3 mutations, stable writes, COMMIT, replay protection, attributes and cookies onto shared filesystem transactions.
 3. Add writable export permissions, capacity/error reporting, lifecycle handling, and workspace snapshot controls.
-4. Document trusted-client and no-NLM limitations, supported client mount options, durability guarantees, and later Phase 37/38 upgrades.
+4. Document trusted-client and no-NLM limitations, supported client mount options, durability guarantees, and later Phase 38/39 upgrades.
 5. Extend Phase 34 metrics for write/COMMIT latency, stable bytes, replay hits, dirty backlog, and protocol failures.
 
 ## Tests

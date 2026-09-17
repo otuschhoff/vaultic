@@ -1,8 +1,8 @@
-# Phase 35: Writable FUSE and durable writeback
+# Phase 36: Writable FUSE and durable writeback
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-writable-nfsv3-exports.md)
+[Previous: Phase 35](phase-35-native-smb-backup-source.md) | [Next: Phase 37](phase-37-writable-nfsv3-exports.md)
 
 **Status: design specification, not yet implemented.**
 
@@ -10,9 +10,9 @@
 
 ## Scope and prerequisites
 
-Extend Phase 31's protocol-neutral snapshot filesystem so Phase 36 can reuse the same mutation, durability, and snapshot implementation. This is overlayfs-like semantics, not a dependency on Linux overlayfs or a modification of an existing snapshot. Read-only mount behavior remains unchanged. Use Phase 22's fenced VaulticDB writer, Phase 28's WAL durability, Phase 30's disposable read-cache manager, and Phase 34's monitoring contract.
+Extend Phase 31's protocol-neutral snapshot filesystem so Phase 37 can reuse the same mutation, durability, and snapshot implementation. This is overlayfs-like semantics, not a dependency on Linux overlayfs or a modification of an existing snapshot. Read-only mount behavior remains unchanged. Use Phase 22's fenced VaulticDB writer, Phase 28's WAL durability, Phase 30's disposable read-cache manager, and Phase 34's monitoring contract.
 
-One fenced workspace mutation authority serializes updates in this phase. Multiple clients may use that authority; independently writable frontends for the same workspace require the Phase 39 investigation. Broker and backend authorization use existing local controls; remote principal delegation remains Phase 40 work.
+One fenced workspace mutation authority serializes updates in this phase. Multiple clients may use that authority; independently writable frontends for the same workspace require the Phase 40 investigation. Broker and backend authorization use existing local controls; remote principal delegation remains Phase 41 work.
 
 ## Workspace and filesystem semantics
 

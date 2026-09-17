@@ -1,8 +1,8 @@
-# Phase 37: NFSv3 locking and recovery
+# Phase 38: NFSv3 locking and recovery
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 36](phase-36-writable-nfsv3-exports.md) | [Next: Phase 38](phase-38-nfs-server-side-group-authorization.md)
+[Previous: Phase 37](phase-37-writable-nfsv3-exports.md) | [Next: Phase 39](phase-39-nfs-server-side-group-authorization.md)
 
 **Status: design specification, not yet implemented.**
 
@@ -20,7 +20,7 @@ Locks are advisory, not mandatory access control: ordinary NFS READ/WRITE does n
 
 Persist the bounded recovery information needed to recognize reclaiming clients and owners. On server restart, enter a configured grace period: allow valid reclaim, deny conflicting new lock acquisition, and expire unreclaimed state only under the documented protocol. Integrate NSM client reboot notifications, durable server incarnation state, and callbacks so rebooted clients release stale locks without trusting arbitrary packets to clear another client's locks. Duplicate callbacks and crash-during-reclaim are safe.
 
-A network partition is not proof that a client rebooted. Do not discard a live client's lock just because a health timeout expired. Specify the cleanup and administrative recovery policy and its safety limits. Coordinate server/lock-manager lifetime with the workspace writer epoch; a fenced server cannot grant new locks. Multi-server shared lock state is deferred to Phase 39.
+A network partition is not proof that a client rebooted. Do not discard a live client's lock just because a health timeout expired. Specify the cleanup and administrative recovery policy and its safety limits. Coordinate server/lock-manager lifetime with the workspace writer epoch; a fenced server cannot grant new locks. Multi-server shared lock state is deferred to Phase 40.
 
 Document fixed/configured NLM and NSM ports, callback addresses, firewall rules, and rpcbind registration requirements for supported native clients. Phase 31's two-port, no-rpcbind deployment assumption may no longer suffice; review collision handling, privilege needs and existing system statd integration rather than silently starting competing daemons. Expose only the reviewed TCP/UDP transports required by the compatibility matrix. Callbacks use admitted client identities/addresses with rate limits, not arbitrary caller-supplied destinations.
 

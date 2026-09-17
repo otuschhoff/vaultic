@@ -1,8 +1,8 @@
-# Phase 39: Multi-server writable NFS availability research
+# Phase 40: Multi-server writable NFS availability research
 
 [Back to roadmap index](00-overview.md)
 
-[Previous: Phase 38](phase-38-nfs-server-side-group-authorization.md) | [Next: Phase 40](phase-40-remote-principals-and-brokered-vaulticdb-access-tickets.md)
+[Previous: Phase 39](phase-39-nfs-server-side-group-authorization.md) | [Next: Phase 41](phase-41-remote-principals-and-brokered-vaulticdb-access-tickets.md)
 
 **Status: research and design, not yet implemented.**
 
@@ -36,9 +36,9 @@ Measure interrupted syscalls, retry/retransmission behavior, handle validity, lo
 
 ## Security and broker availability
 
-All nodes must agree on Phase 38 identity revisions, export policy, root squash and permission-cache invalidation. Protect cluster control traffic and ensure a frontend compromise does not imply permission to change broker policy or issue credentials. Ordinary writable-workspace mutation is not automatically covered by Phase 40's additive-only remote-worker tickets; identify the required service authorization separately.
+All nodes must agree on Phase 39 identity revisions, export policy, root squash and permission-cache invalidation. Protect cluster control traffic and ensure a frontend compromise does not imply permission to change broker policy or issue credentials. Ordinary writable-workspace mutation is not automatically covered by Phase 41's additive-only remote-worker tickets; identify the required service authorization separately.
 
-Model broker lock, key/storage lease expiry and broker-host loss as explicit HA dependencies. Phase 40 provides remote principals, not broker federation or automatic ceremonial unlock. Research may use independently authorized laboratory nodes, but must not bypass quorum custody, clone broker private identities, or assume an expired key can no longer decrypt data already obtained. State when continued availability requires a new ceremony and propose any broker-succession work separately.
+Model broker lock, key/storage lease expiry and broker-host loss as explicit HA dependencies. Phase 41 provides remote principals, not broker federation or automatic ceremonial unlock. Research may use independently authorized laboratory nodes, but must not bypass quorum custody, clone broker private identities, or assume an expired key can no longer decrypt data already obtained. State when continued availability requires a new ceremony and propose any broker-succession work separately.
 
 ## Research steps and deliverables
 

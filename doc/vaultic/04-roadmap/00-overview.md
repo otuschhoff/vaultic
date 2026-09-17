@@ -53,13 +53,14 @@ commit series so it can be reviewed or reverted independently.
 | 32 | [Scalable legacy metadata bulk import](phase-32-scalable-legacy-metadata-bulk-import.md) | design |
 | 33 | [index check scalability & performance](phase-33-index-check-scalability-and-performance.md) | design |
 | 34 | [Operational monitoring and bounded metrics export](phase-34-operational-monitoring-and-metrics-export.md) | design |
-| 35 | [Writable FUSE and durable writeback](phase-35-writable-fuse-and-durable-writeback.md) | design |
-| 36 | [Writable NFSv3 workspace exports](phase-36-writable-nfsv3-exports.md) | design |
-| 37 | [NFSv3 locking and recovery](phase-37-nfsv3-locking-and-recovery.md) | design |
-| 38 | [NFS server-side group authorization](phase-38-nfs-server-side-group-authorization.md) | design |
-| 39 | [Multi-server writable NFS availability research](phase-39-multi-server-nfs-ha-research.md) | research planned |
-| 40 | [Remote principals and brokered VaulticDB access tickets](phase-40-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
-| 41 | [VaulticDB failure recovery and error contracts](phase-41-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
+| 35 | [Native SMB backup, restore, and Windows metadata indexing](phase-35-native-smb-backup-source.md) | design |
+| 36 | [Writable FUSE and durable writeback](phase-36-writable-fuse-and-durable-writeback.md) | design |
+| 37 | [Writable NFSv3 workspace exports](phase-37-writable-nfsv3-exports.md) | design |
+| 38 | [NFSv3 locking and recovery](phase-38-nfsv3-locking-and-recovery.md) | design |
+| 39 | [NFS server-side group authorization](phase-39-nfs-server-side-group-authorization.md) | design |
+| 40 | [Multi-server writable NFS availability research](phase-40-multi-server-nfs-ha-research.md) | research planned |
+| 41 | [Remote principals and brokered VaulticDB access tickets](phase-41-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 42 | [VaulticDB failure recovery and error contracts](phase-42-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
 
 ## Supporting plans
 
