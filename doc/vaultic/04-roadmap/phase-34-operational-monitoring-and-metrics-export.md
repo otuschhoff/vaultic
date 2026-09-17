@@ -50,6 +50,68 @@ Instrumentation on request and I/O paths uses atomics or thread-local aggregatio
 
 Metric names, units, counter-reset semantics, histogram buckets, and labels form a versioned schema. Labels are restricted to bounded enums and configured identities such as component, operation class, backend ID, storage role, cache target, representation, outcome, and throttle reason. Paths, snapshot IDs, pack IDs, object keys, principal IDs, client addresses, error strings, and arbitrary user labels are forbidden metric dimensions. Detailed identifiers belong only in access-controlled active-operation views or rate-limited structured events.
 
+## Durability, visibility and writeback contract
+
+Atomicity, visibility and durability are independent properties. Every transaction
+must retain atomic conflict/visibility semantics even when its caller does not
+wait for persistence. An applied acknowledgement means the transaction is visible
+to the current writer process; it is not a crash-durability claim. A durable
+acknowledgement means the engine can recover through that transaction from its
+configured durable WAL or stronger storage. SST creation is not required when
+a durable WAL can replay the transaction. A memory WAL is never process-crash
+durability, regardless of the method name or flush interval.
+
+The guarantee is only as strong as the configured storage acknowledgement. For
+example, local/NFS write completion without the required sync/stable-storage
+semantics cannot be called durable, and object-store durability follows the
+documented successful PUT/multipart-completion contract. Record WAL role, medium,
+replication/failure domain and acknowledgement boundary in status and evidence.
+
+Do not infer that one later durable transaction covers earlier deferred writes.
+First prove and pin the engine ordering rule, then expose a sequence-scoped API:
+
+- an applied commit returns an opaque writer-generation and applied sequence;
+- `await durable through` waits until recovery is guaranteed through that token;
+- a durable commit is equivalent to applied commit plus that transaction's fence;
+- tokens are rejected after writer-generation change and are never guessed from
+	monitoring counters such as `last_durable_sequence`;
+- a fence may coalesce writes from many actions, but each action retains its own
+	highest required token and cannot treat another action's acknowledgement as
+	proof without sequence comparison.
+
+If the pinned engine cannot prove ordered prefix durability, retain per-commit
+durability until the engine/fork supplies the contract. A final marker written
+durably is a valid fence only when its ordered commit is proven to cover every
+earlier write it represents. Closing or flushing the database is not a substitute
+for an operation-scoped token unless its API explicitly guarantees the same
+prefix and failure behavior.
+
+### Action durability classes
+
+| Action/state | Permitted acknowledgement | Required durable boundary and recovery |
+|---|---|---|
+| Fresh legacy import into a private reset generation | Intermediate catalog, revision and reduction transactions may be applied-only and batched behind bounded memory/backpressure. | Restart-from-zero needs no durable intermediate checkpoint. Resume requires a durable checkpoint containing input identity, cursor/contiguous reduced prefix and a durable-through token covering all referenced writes. Current memory-WAL Stage 3 is destructively restartable, not crash-resumable. Activation requires the existing completion marker, successful close/handoff, persistent reopen and validation. Missing SSTs are acceptable only when a durable WAL can replay them. |
+| Normal backup pack publication | Pack bytes must reach the configured backend completion guarantee before metadata can make them reachable. Metadata transactions remain atomic. | Current `PublishPack` is durable per transaction. Deferral requires idempotent/reconstructible pack metadata plus a bounded fence before any dependent durable checkpoint or snapshot publication; crash recovery must reconcile uploaded but unpublished packs. |
+| Normal backup inode/directory revisions | Revision, current pointer and reverse-reference changes remain one atomic unit. Applied-only publication is unsafe as a general default because current pointers are visible to concurrent work and later planning. | Deferral requires a job-private staging namespace or a proven sequence fence, idempotent replay, stable source/data cursor and rules for concurrent readers/writers. The final snapshot transaction must verify its root and fence every referenced revision. Current normal publication remains durable. |
+| Snapshot publication | Never applied-only once success is returned externally. Pack availability, root revision and required metadata must already be covered by durable guarantees. | Atomically and durably publish snapshot record, commit sequence, export checkpoint and related authoritative state. Timeout-after-success uses the existing idempotency/recovery contract rather than republishing blindly. |
+| Destructive or externally acknowledged metadata work | Default to durable acknowledgement for forget/prune decisions, placement transitions, authority/generation changes, writer fencing, key/encryption state, lease/credential state when required for safety, and any mutation whose loss can expose deleted/unavailable data. | Relax only with a separate owner-reviewed recovery proof and crash tests. Small size or high frequency is not sufficient justification for deferral. |
+| Read-only check and ephemeral scratch | No authoritative DB writeback is needed for check results or disposable scratch. | Stable read-session leases/fences remain strict correctness prerequisites. Scratch may be lost and the check restarted; a future resume checkpoint must authenticate its input/read identity and durable local state before reuse. |
+
+The current safe optimization target is therefore not “no transaction guarantees
+until the end.” It is “preserve transaction atomicity, avoid waiting on selected
+durability acknowledgements, and establish explicit durable prefixes before
+publishing dependent or externally visible state.” Restart and resume are separate:
+resume is permitted only from a durable cursor whose prerequisite prefix is also
+durable. Never resume from the latest observed in-memory progress counter.
+
+SlateDB already supplies the principal writeback architecture through memtables,
+WAL, flush and compaction. Additional RAM may increase a bounded unflushed window
+and absorb bursts, but cannot improve steady-state storage bandwidth and increases
+recovery/finalization work. Prefer measured batching, pipelining and coalesced
+durability fences over a second Vaultic metadata writeback cache. Any added queue
+must be byte-bounded, apply backpressure, expose oldest age/high-water tokens and
+stop admitting work before memory threatens correctness or liveness.
+
 ## Wait-state accounting contract
 
 Observe states per operation or worker, not one global process state. This
@@ -314,9 +376,18 @@ import/daemon attribution, `vaulticdb/src/attribution.rs`, storage/service metri
 and Phase 9/12/22/28/29/30/31 status sources. Define versioned metric names, units,
 scope/outcome semantics, bounded labels/buckets, reset/unavailable states and
 profile/artifact fields. Preserve compatible existing counters or version changes.
+As M0a, inventory every mutating action and classify atomic visibility, applied
+acknowledgement, durable acknowledgement, externally visible publication,
+restart and resume requirements using the table above. As M0b, prove or reject
+ordered prefix durability in the pinned SlateDB revision and each WAL backend;
+record exact API/source evidence and storage acknowledgement assumptions. As M0c,
+specify generation-bound durability tokens and the minimum client/RPC changes,
+without implementing deferred behavior or changing defaults.
 **Gate/handoff:** schema fixtures reject unknown/invalid profile parameters and
 unbounded labels, preserve explicit unknowns and distinguish S3 RTT from service
-latency. Publish the owner-to-metric map and artifacts consumed by M1/M2.
+latency. Crash-model review demonstrates that no published state references an
+unfenced prerequisite and that every resumable cursor names a durable prefix.
+Publish the owner-to-metric/durability map and artifacts consumed by M1/M2.
 
 ### M1. Implement bounded accounting primitives
 
@@ -354,6 +425,20 @@ Existing wrapper coverage may satisfy a gate only with recorded evidence.
 | M2d: Vaultic RPC response delivery | M2a and existing daemon-client tests. Add a test-only method-selective post-response delivery wrapper, then separate server-service hooks only where required. | Barrier tests prove underlying completion before delayed delivery; client wait rises without artificial server hold time. Preserve RPC results/errors, stream bounds, deadlines and cancellation. Publish mode-specific attribution evidence for Phase 32/33. |
 | M2e: ambiguous successful responses | M2d and existing real-daemon receipt/idempotency tests. Withhold a successful commit response until deadline, then test lost delivery and normal recovery independently. | Same-identity retry/recovery neither republishes nor loses committed state; no success claimed for incomplete work. Compare failure-before-execution and delayed apply-only acknowledgements. Publish exact final-state and recovery assertions. |
 | M2f: action adapters and response sweeps | Relevant M2b-M2e gates. Reuse Phase 32/33 adapters; add backup, restore and forget/prune individually at the owners above. Freeze each fixture/oracle before its no-delay baseline and one-boundary sweep. | At least three repeats, identical successful result/coverage and bounded memory/queues; publish action-by-dependency sensitivity, variance and timeout classification. Missing adapters/infrastructure remain gaps. Never combine an adapter with pipeline optimization. |
+
+### M2g. Prove durability fences before throughput tuning
+
+**Prerequisite:** M0b/M0c and M2b/M2d. First add deterministic engine tests for
+applied sequence ordering, durable-through prefix coverage, coalesced concurrent
+waiters, generation change, WAL failure and restart/replay. Then add action crash
+matrices at: before apply, after applied acknowledgement, before/after fence,
+after fence but before publication response, and after final publication. Use
+barriers/failpoints, not timing sleeps. Test persistent WAL and memory WAL as
+different contracts. **Gate/handoff:** every acknowledged durable prefix survives
+restart; no unfenced prefix is advertised as resumable or externally complete;
+concurrent action B may cause action A's sequence to become durable but cannot
+corrupt ownership/accounting. Only after this gate may Phase 32 compare deferred
+and per-transaction durability throughput.
 
 ### M3. Wire one production boundary at a time
 

@@ -70,6 +70,11 @@ the limiting function; replacing the backend is not a prerequisite.
 - Fresh memory-WAL work is destructively restartable, not crash-durable
   resumable work. Partial, failed, interrupted, or finding-bearing imports never
   authorize handoff or activation. Preserve writer fencing and encryption.
+- Transaction atomicity and ordered visibility remain mandatory for every
+  deferred commit. “Deferred” means the caller skips a persistence wait, not
+  that a partial batch may become visible. A resume checkpoint is valid only if
+  it durably identifies the input/cursor and fences every preceding ingest,
+  reduction and revision write; otherwise restart the private generation.
 - The durable successful-import marker alone authorizes handoff. Clean close,
   persistent-WAL reopen, required validation, and authority publication must
   succeed before claiming an activated repository. Normal `PublishPack` and
@@ -590,10 +595,19 @@ and Phase 34 M2 wrappers, never create a workload-specific injection framework.
 
 | Substep | Prerequisite and smallest experiment | Gate and artifact |
 |---|---|---|
+| P3a0: freeze import durability | Phase 34 M0a-M0c and M2g. Document current fresh memory-WAL restart-from-zero, any persistent-WAL resume mode, checkpoint cursor/input identity and final activation guarantees. Prove whether a durable-through token covers an ordered prefix; do not infer it from a later acknowledgement or `last_durable_sequence`. | Barrier/failpoint crashes before/after apply, checkpoint fence, completion marker, close/handoff and reopen either resume from a fully covered prefix or reject/discard the candidate. Missing SSTs recover from a proven durable WAL; memory-WAL loss never claims resume. No default changes before this gate. |
 | P3a: baseline and harness | P0-P2 and Phase 34 M0-M2 minimum contracts/wrappers. Freeze profile placement, ordered input and delay boundaries. Run no-injection enabled/disabled telemetry baselines. | Same input/result/checkpoints and bounded resources; quantify overhead. Profile validation, test-target gating, stream/multipart, conditional-write and cancellation checks pass before latency sweeps. Publish exact commands, binary IDs, seed and settings. |
 | P3b: WAL sensitivity pilot | P3a. Use a bounded durable-commit workload with explicit durable acknowledgements in an isolated candidate. Vary only added WAL PUT latency, initially 0/10/50/200 ms; hold flush cadence, batching and concurrency fixed. | Test the hypothesis that delay increases durability wait first, with lock/admission waits downstream only when shared resources remain held. Report submit separately, commit p95/p99, batch size, flush/queue growth and throughput. Unexpected submit growth returns to P2b backpressure attribution, not an assumed WAL explanation. |
 | P3c: import role sweeps | P3a and validated P3b instrumentation. Run frozen fresh imports with memory WAL, then a separately labeled supported durable-WAL import configuration. Vary source operations, SST/manifest and coordination latency independently; include pack-storage operations only where the workload issues them. | Never apply WAL-PUT conclusions to memory-WAL deferred commits. Preserve each mode's recovery/acknowledgement contract. Include successful marker, close/handoff/reopen and validation tail, and enough data/time to expose flush/compaction. Record inactive roles as not applicable. |
 | P3d: combined scenarios and decision | P3c. Apply all three profiles, cold/warm cache states, independent jitter followed by correlated stalls and shared-capacity contention. Use at least three repeats per comparison. | Unchanged logical metadata, durability and bounded queues; report variance, active wait ages and injected versus observed delays. Rank candidate improvements by end-to-end sensitivity. Separate synthetic from hardware evidence; missing representative infrastructure blocks that acceptance claim, not isolated correctness work. |
+
+With no completed P3 benchmark, start at P3a0 and then P3a on the existing frozen
+real-daemon fixture. The first performance experiment is P3b's persistent-WAL
+durable-commit sweep at 0/10/50/200 ms, not a larger import or more lanes. It
+provides a falsifiable baseline for how much latency can be hidden by current
+batching. Follow with the matched P3b-response acknowledgement sweep; only then
+compare fresh memory-WAL import deferral. This order prevents a fast restartable
+mode from being presented as a durable-WAL optimization.
 
 Before selecting an optimization, complete these pending response-test substeps
 using [Phase 34's dependency-response contract](phase-34-operational-monitoring-and-metrics-export.md#synthetic-dependency-responses)

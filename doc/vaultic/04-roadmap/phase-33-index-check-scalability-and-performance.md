@@ -98,6 +98,15 @@ mutation belongs in this command. Existing backend locks and any explicitly
 required read-session lifecycle bookkeeping remain governed by their owning
 abstractions; do not promise literally zero physical writes from a running DB.
 
+Phase 34's writeback optimization does not authorize deferred authoritative
+metadata from the checker. Check output and encrypted scratch are disposable:
+they may be buffered and lost, causing a restart, unless a later authenticated
+resume design durably binds them to the same input inventory, generation, read
+sequence, schema and options. In contrast, the read-session lease/fence and any
+retention state preventing SST/WAL reclamation are correctness state and follow
+their owning durability contract. A faster check must not weaken that protection
+or certify a view whose lease expired while a delayed response was in flight.
+
 ## Bounded execution architecture
 
 ### Exact external comparison and reductions
