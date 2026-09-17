@@ -68,6 +68,13 @@ type Options struct {
 	S3Region                      string
 	S3Provider                    string
 	S3BucketLookup                string
+	RadosMonitors                 string
+	RadosFSID                     string
+	RadosPool                     string
+	RadosNamespace                string
+	RadosPrefix                   string
+	RadosClient                   string
+	RadosKey                      string
 	WALStore                      string
 	WALDataDir                    string
 	WALFlushInterval              time.Duration
@@ -448,8 +455,13 @@ func validateStorageOptions(options Options) error {
 		return fmt.Errorf("%w: S3 bucket is not configured", ErrUnavailable)
 	}
 	if options.ObjectStore != "" && options.ObjectStore != "local" && options.ObjectStore != "memory" &&
-		options.ObjectStore != "s3" {
+		options.ObjectStore != "s3" && options.ObjectStore != "rados" {
 		return fmt.Errorf("%w: unsupported object store %q", ErrUnavailable, options.ObjectStore)
+	}
+	if options.ObjectStore == "rados" && (options.RadosMonitors == "" || options.RadosFSID == "" ||
+		options.RadosPool == "" || options.RadosNamespace == "" || options.RadosPrefix == "" ||
+		options.RadosClient == "" || options.RadosKey == "") {
+		return fmt.Errorf("%w: RADOS endpoint and CephX credentials are incomplete", ErrUnavailable)
 	}
 	if options.WALStore != "" && options.WALStore != "inherit" && options.WALStore != "local" &&
 		options.WALStore != "memory" && options.WALStore != "s3" && options.WALStore != "rados" {
@@ -623,6 +635,13 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		"VAULTICDB_S3_REGION":                  options.S3Region,
 		"VAULTICDB_S3_PROVIDER":                options.S3Provider,
 		"VAULTICDB_S3_BUCKET_LOOKUP":           options.S3BucketLookup,
+		"VAULTICDB_RADOS_MONITORS":             options.RadosMonitors,
+		"VAULTICDB_RADOS_CLUSTER_FSID":         options.RadosFSID,
+		"VAULTICDB_RADOS_POOL":                 options.RadosPool,
+		"VAULTICDB_RADOS_NAMESPACE":            options.RadosNamespace,
+		"VAULTICDB_RADOS_PREFIX":               options.RadosPrefix,
+		"VAULTICDB_RADOS_CLIENT":               options.RadosClient,
+		"VAULTICDB_RADOS_KEY":                  options.RadosKey,
 		"VAULTICDB_WAL_STORE":                  options.WALStore,
 		"VAULTICDB_WAL_DATA_DIR":               options.WALDataDir,
 		"VAULTICDB_WAL_S3_BUCKET":              options.WALS3Bucket,

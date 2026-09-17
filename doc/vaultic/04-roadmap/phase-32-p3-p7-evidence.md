@@ -1,8 +1,8 @@
 # Phase 32 P3-P7 Experiment and Acceptance Evidence
 
 This record reports the currently executable Phase 32 work as of 2026-09-17.
-P3a, P3b, P7a, representative NFS/RGW sampling, native RADOS lifecycle tests,
-and live RADOS-WAL latency are validated. P3c remains partial: its memory-WAL
+P3a, P3b, P7a, matched NFS/RGW/native-RADOS sampling, native RADOS lifecycle
+tests, and live RADOS-WAL latency are validated. P3c remains partial: its memory-WAL
 role pilots pass, but the complete response matrix is not yet run.
 Representative evidence identifies sustained eligible work waiting during
 ordered reduction and therefore selects P4 for a separately reviewed
@@ -31,6 +31,16 @@ resolved to `/ncl1-1-vs-50/fme_dump/amakura/db-test` on
 The HDD path remained on `172.21.33.209:/volume2/NASDA2`, NFSv3/TCP with 128 KiB
 reads/writes. Results are comparisons of those deployed paths, not media-only
 microbenchmarks.
+
+The native RADOS comparison used the working tree based on
+`668e08a939f9c346a19889a8cbb1ee46479c7f65`, including direct main-store RADOS
+support and atomic object attributes required by SlateDB retry verification.
+Vaultic SHA-256 was
+`47f3eb608c207ce5e1bddc3ae9107ca45a3cbf4aca7319381a39c4d4c267dd64`; the
+RADOS-enabled VaulticDB SHA-256 was
+`3a430bd05057c4df275608c46669395de562b0e60218d76847876e49eb45b8ad`.
+Main data used pool `db-sst`; WAL used `db-wal`. Both used namespace
+`vaultic-perf` with fresh, independent `phase32/668e08a93-*-45m-v2` prefixes.
 
 The versioned object-delay profile is accepted only by a build with
 `test-failpoints`, requires `target=isolated` and the process-test capability,
@@ -93,23 +103,31 @@ Increasing lanes also has no benefit. The isolated pilot alone therefore did
 not select P4-P6; two lanes, deferred cleanup opt-in, and all durability checks
 were retained pending representative evidence.
 
-Representative NFS sampling did reopen that decision. Matched runs used the
-same source, fresh candidate settings, 32 pack workers, two publication lanes,
-deferred cleanup, and a 45-minute interrupt boundary:
+Representative storage sampling did reopen that decision. Matched runs used
+the same source, fresh candidate settings, 32 pack workers, two publication
+lanes, deferred cleanup, and a 45-minute interrupt boundary:
 
-| Main metadata path | Boundary | Indexes | Packs | Blobs | Blobs/s | Peak prepared queue |
-|---|---:|---:|---:|---:|---:|---:|
-| SSD NFS export | 45m02s | 2,369 | 126,229 | 100,525,966 | 37,200 | 13,565,280 B |
-| HDD NFS export | 44m59s | 2,241 | 119,381 | 94,882,587 | 35,151 | 13,565,280 B |
+| Main metadata path | Boundary | Indexes | Packs | Blobs | Blobs/s | Peak prepared queue | Max RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SSD NFS export | 45m02s | 2,369 | 126,229 | 100,525,966 | 37,200 | 13,565,280 B | 38.9 GB |
+| HDD NFS export | 44m59s | 2,241 | 119,381 | 94,882,587 | 35,151 | 13,565,280 B | 24.3 GB |
+| Native RADOS (`db-sst`; WAL `db-wal`) | 44m42s | 1,114 | 58,226 | 47,651,281 | 17,766 | 13,565,280 B | 20,017,120 KiB |
+| RGW/S3 | 44m55s | 404 | 20,481 | 17,158,835 | 6,367 | 13,442,816 B | 4,555,272 KiB |
 
-Both boundaries drained the prepared queue to zero. Neither run reported a
-retry, conflict, reduction failure, or filter fallback. The HDD timeout caused
-one expected interrupted ingest/recovery read while draining; exit 124 and the
-final `context canceled` record are the planned comparison boundary, not a data
-finding. The SSD row is an in-process checkpoint from its longer run; the HDD
-importer stopped at 44m59.315s within a 45m02.46s timeout wrapper. Maximum
-resident memory was 38.9 GB for the longer SSD run and 24.3 GB for the bounded
-HDD run.
+The selected checkpoints drained the prepared queue to zero. Before their
+planned boundaries, no run reported a retry, conflict, reduction failure, or
+filter fallback. Timeout cancellation caused one expected interrupted
+ingest/recovery read for HDD and one reduction failure/recovery read for RADOS
+while draining; exit 124 and final `context canceled` records are comparison
+boundaries, not data findings. The SSD row is an in-process checkpoint from its
+longer run; the HDD importer stopped at 44m59.315s within a 45m02.46s wrapper.
+The RADOS wrapper ended at 45m03.08s and its final scheduler state was
+`finished`, with no pending reduction or retained bytes.
+
+Native RADOS delivered 47.8% of SSD-NFS and 50.5% of HDD-NFS blob throughput,
+and 2.79 times RGW throughput. The NFS and RGW rows used revision `2b30207fc`;
+RADOS required the current working tree above, so this is a matched workload
+and boundary comparison rather than a single-revision backend isolation.
 
 The scheduler evidence is decisive for P4:
 
@@ -117,6 +135,8 @@ The scheduler evidence is decisive for P4:
 |---|---:|---:|
 | SSD NFS export | 10,198 observations / 7m49.316s | 11,861 / 20m41.020s |
 | HDD NFS export | 9,907 observations / 9m35.565s | 11,059 / 22m11.127s |
+| Native RADOS | 6,273 observations / 12m49.730s | 4,644 / 27m11.354s |
+| RGW/S3 | 2,325 observations / 15m28.918s | 1,481 / 28m42.631s |
 
 This satisfies P4's prerequisite of eligible work waiting during synchronous
 ordered reduction on representative storage. It does not prove that decoupling
@@ -155,11 +175,8 @@ reported separately below.
 
 The matched RGW main-store run used endpoint `172.21.33.25:7480`, bucket
 `vaultic-phase32-perf`, and isolated prefix
-`phase32/2b30207fc/import-45m`. At its planned interrupt boundary it reported:
-
-| Boundary | Indexes | Packs | Blobs | Blobs/s | Peak prepared queue | Max RSS |
-|---:|---:|---:|---:|---:|---:|---:|
-| 44m55.013s | 404 | 20,481 | 17,158,835 | 6,367 | 13,442,816 B | 4,555,272 KiB |
+`phase32/2b30207fc/import-45m`; its planned interrupt boundary is included in
+the consolidated comparison above.
 
 The timeout wrapper ended at 45m00.82s with exit 124. Before cancellation there
 were no ingest failures, retries, conflicts, or filter fallback. Cancellation
@@ -167,8 +184,7 @@ interrupted one reduction and triggered one recovery read; the final queue was
 drained to zero. Scheduler totals were 2,325 eligible-ready observations over
 15m28.918s and 1,481 reduction-blocking observations over 28m42.631s. Commit
 p50/p95/p99 were all bounded by 268.435 ms; mutation RPC p95/p99 were bounded by
-536.871 ms. RGW delivered 17.1% of SSD-NFS and 18.1% of HDD-NFS blob throughput
-at the matched boundary.
+536.871 ms.
 
 The otherwise idle Ceph cluster's total-operation dashboard showed sustained
 roughly 250-330 read operations/s with low bandwidth, plus infrequent read and

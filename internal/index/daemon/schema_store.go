@@ -285,8 +285,8 @@ func (store *SchemaStore) LegacyImportStats() LegacyImportStats {
 	return result
 }
 
-// MarkBulkImportComplete durably authorizes the temporary memory WAL to hand
-// the completed metadata generation to its configured local WAL on shutdown.
+// MarkBulkImportComplete durably fences prior writes before handing off the
+// completed metadata generation on shutdown.
 func (store *SchemaStore) MarkBulkImportComplete(ctx context.Context) error {
 	acknowledged, err := store.client.WriteBatch(
 		ctx,

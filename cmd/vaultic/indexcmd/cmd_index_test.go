@@ -779,6 +779,13 @@ func TestValidateMetadataRebuildTarget(t *testing.T) {
 	if target, err := validateMetadataRebuildTarget(remote, false); err != nil || target != "s3://metadata-bucket/repo-a/rebuild-2026" {
 		t.Fatalf("remote candidate = %q, %v", target, err)
 	}
+	rados := indexDaemonOptions{ObjectStore: "rados", RadosPool: "db-sst", RadosNamespace: "vaultic-perf", RadosPrefix: "/repo-a/rebuild-2026/"}
+	if target, err := validateMetadataRebuildTarget(rados, false); err != nil || target != "rados://db-sst/vaultic-perf/repo-a/rebuild-2026" {
+		t.Fatalf("RADOS candidate = %q, %v", target, err)
+	}
+	if candidate := rebuildCandidateName(rados); candidate != "rados://db-sst/vaultic-perf/repo-a/rebuild-2026" {
+		t.Fatalf("RADOS candidate name = %q", candidate)
+	}
 	existing := t.TempDir()
 	if target, err := validateMetadataRebuildTarget(indexDaemonOptions{DataDir: existing}, true); err != nil || target != existing {
 		t.Fatalf("reset local candidate = %q, %v", target, err)
@@ -786,6 +793,8 @@ func TestValidateMetadataRebuildTarget(t *testing.T) {
 	for _, invalid := range []indexDaemonOptions{
 		{ObjectStore: "s3", S3Bucket: "metadata-bucket"},
 		{ObjectStore: "s3", S3Bucket: "metadata-bucket", S3Prefix: "candidate", DataDir: local},
+		{ObjectStore: "rados", RadosPool: "db-sst", RadosNamespace: "vaultic-perf"},
+		{ObjectStore: "rados", RadosPool: "db-sst", RadosNamespace: "vaultic-perf", RadosPrefix: "candidate", DataDir: local},
 		{ObjectStore: "memory"},
 	} {
 		if _, err := validateMetadataRebuildTarget(invalid, false); err == nil {
@@ -913,6 +922,7 @@ func TestImportDeferredCleanupValidation(t *testing.T) {
 		{"persistent", true, "local", 2, false},
 		{"serial", true, "memory", 1, false},
 		{"fresh", true, "memory", 2, true},
+		{"rados", true, "rados", 2, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := validateIndexImportOptions(indexImportOptions{
@@ -1273,14 +1283,22 @@ func TestIndexDaemonOptionsRequireExplicitTCPConfiguration(t *testing.T) {
 	if err := os.WriteFile(keyringFile, []byte("[client.amakura]\n\tkey = AQIDBA==\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	walKeyringFile := filepath.Join(t.TempDir(), "ceph-wal.keyring")
+	if err := os.WriteFile(walKeyringFile, []byte("[client.amakura]\n\tkey = BQYHCA==\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	rados, err := (indexDaemonOptions{
-		Start: true, DaemonPath: "vaulticdb", WALStore: "rados", WALRadosKeyFile: keyringFile,
+		Start: true, DaemonPath: "vaulticdb", ObjectStore: "rados", RadosKeyFile: keyringFile,
+		RadosMonitors: "mon-a:3300", RadosFSID: "2f525d6a-8f31-4f79-b731-82a6acb235f5",
+		RadosPool: "db-sst", RadosNamespace: "repository", RadosPrefix: "main",
+		RadosClient: "client.amakura", WALStore: "rados", WALRadosKeyFile: walKeyringFile,
 		WALRadosMonitors: "mon-a:3300", WALRadosFSID: "2f525d6a-8f31-4f79-b731-82a6acb235f5",
-		WALRadosPool: "wal", WALRadosNamespace: "repository", WALRadosPrefix: "wal",
+		WALRadosPool: "db-wal", WALRadosNamespace: "repository", WALRadosPrefix: "wal",
 		WALRadosClient: "client.amakura",
 	}).Config("repository")
-	if err != nil || rados.WALRadosKey != "AQIDBA==" {
-		t.Fatalf("RADOS keyring config key loaded = %t, error = %v", rados.WALRadosKey != "", err)
+	if err != nil || rados.RadosPool != "db-sst" || rados.WALRadosPool != "db-wal" ||
+		rados.RadosKey != "AQIDBA==" || rados.WALRadosKey != "BQYHCA==" {
+		t.Fatalf("dual-pool RADOS keyring config loaded = %t, error = %v", rados.RadosKey != "" && rados.WALRadosKey != "", err)
 	}
 }
 

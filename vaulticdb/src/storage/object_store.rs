@@ -707,6 +707,15 @@ pub(crate) enum ObjectStoreConfig {
         provider: Option<String>,
         bucket_lookup: Option<String>,
     },
+    Rados {
+        monitors: String,
+        cluster_fsid: String,
+        pool: String,
+        namespace: String,
+        prefix: String,
+        client: String,
+        key: Zeroizing<String>,
+    },
     Replicated {
         replicas: Vec<ReplicaConfig>,
     },
@@ -1341,6 +1350,27 @@ pub(crate) fn object_store(
             };
             Ok((path, Arc::new(store)))
         }
+        ObjectStoreConfig::Rados {
+            monitors,
+            cluster_fsid,
+            pool,
+            namespace,
+            prefix,
+            client,
+            key,
+        } => Ok((
+            "db".to_owned(),
+            rados::open(rados::Config {
+                monitors,
+                cluster_fsid,
+                pool,
+                namespace,
+                prefix: &format!("{}/{repository_key}", prefix.trim_matches('/')),
+                client,
+                key,
+            })
+            .context("configure native RADOS object store")?,
+        )),
         ObjectStoreConfig::Replicated { replicas } => {
             replicated_object_store(replicas, &repository_key)
         }

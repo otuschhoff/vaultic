@@ -54,6 +54,13 @@ type indexDaemonOptions struct {
 	S3Region                      string
 	S3Provider                    string
 	S3BucketLookup                string
+	RadosMonitors                 string
+	RadosFSID                     string
+	RadosPool                     string
+	RadosNamespace                string
+	RadosPrefix                   string
+	RadosClient                   string
+	RadosKeyFile                  string
 	WALStore                      string
 	WALDataDir                    string
 	WALFlushInterval              time.Duration
@@ -119,13 +126,20 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.BoolVar(&options.Persistent, "persistent-daemon", false, "leave a daemon started by this command running")
 	flags.StringVar(&options.DaemonPath, "daemon-path", "vaulticdb", "path to vaulticdb when --start-daemon is set")
 	flags.StringVar(&options.DataDir, "daemon-data-dir", "", "local vaulticdb data directory")
-	flags.StringVar(&options.ObjectStore, "daemon-object-store", "", "vaulticdb object store: local, memory, or s3")
+	flags.StringVar(&options.ObjectStore, "daemon-object-store", "", "vaulticdb object store: local, memory, s3, or rados")
 	flags.StringVar(&options.S3Bucket, "daemon-s3-bucket", "", "vaulticdb S3 bucket")
 	flags.StringVar(&options.S3Prefix, "daemon-s3-prefix", "", "vaulticdb S3 key prefix")
 	flags.StringVar(&options.S3Endpoint, "daemon-s3-endpoint", "", "vaulticdb S3 endpoint URL")
 	flags.StringVar(&options.S3Region, "daemon-s3-region", "", "vaulticdb S3 signing region")
 	flags.StringVar(&options.S3Provider, "daemon-s3-provider", "", "vaulticdb S3 provider: generic, backblaze, or wasabi")
 	flags.StringVar(&options.S3BucketLookup, "daemon-s3-bucket-lookup", "", "vaulticdb S3 bucket lookup: auto, dns, or path")
+	flags.StringVar(&options.RadosMonitors, "daemon-rados-monitors", "", "vaulticdb Ceph monitor endpoints")
+	flags.StringVar(&options.RadosFSID, "daemon-rados-fsid", "", "vaulticdb Ceph cluster FSID")
+	flags.StringVar(&options.RadosPool, "daemon-rados-pool", "", "vaulticdb Ceph pool")
+	flags.StringVar(&options.RadosNamespace, "daemon-rados-namespace", "", "vaulticdb Ceph namespace")
+	flags.StringVar(&options.RadosPrefix, "daemon-rados-prefix", "", "vaulticdb RADOS object prefix")
+	flags.StringVar(&options.RadosClient, "daemon-rados-client", "", "vaulticdb CephX client identity")
+	flags.StringVar(&options.RadosKeyFile, "daemon-rados-key-file", "", "protected file containing the vaulticdb CephX raw key or client keyring")
 	flags.StringVar(&options.WALStore, "daemon-wal-store", "", "vaulticdb WAL store: inherit, local, memory (volatile), s3, or rados")
 	flags.StringVar(&options.WALDataDir, "daemon-wal-data-dir", "", "local vaulticdb WAL directory")
 	flags.DurationVar(&options.WALFlushInterval, "daemon-wal-flush-interval", 0, "SlateDB WAL flush interval (zero uses the default)")
@@ -208,6 +222,18 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 			return daemon.Options{}, err
 		}
 	}
+	var radosKey string
+	if options.RadosKeyFile != "" {
+		value, err := readProtectedBinary(options.RadosKeyFile, "vaulticdb CephX key", true)
+		if err != nil {
+			return daemon.Options{}, err
+		}
+		defer clear(value)
+		radosKey, err = parseCephXKey(value, options.RadosClient)
+		if err != nil {
+			return daemon.Options{}, err
+		}
+	}
 	config := daemon.Options{
 		Socket: options.Socket, TCPAddress: options.TCPAddress, TCPAllowlist: options.TCPAllowlist,
 		AuthToken: authToken, RepositoryID: repositoryID, DataDir: options.DataDir,
@@ -215,6 +241,9 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		ObjectStore: options.ObjectStore, S3Bucket: options.S3Bucket, S3Prefix: options.S3Prefix,
 		S3Endpoint: options.S3Endpoint, S3Region: options.S3Region,
 		S3Provider: options.S3Provider, S3BucketLookup: options.S3BucketLookup,
+		RadosMonitors: options.RadosMonitors, RadosFSID: options.RadosFSID,
+		RadosPool: options.RadosPool, RadosNamespace: options.RadosNamespace,
+		RadosPrefix: options.RadosPrefix, RadosClient: options.RadosClient, RadosKey: radosKey,
 		WALStore: options.WALStore, WALDataDir: options.WALDataDir,
 		WALFlushInterval: options.WALFlushInterval, MaxUnflushedBytes: options.MaxUnflushedBytes,
 		L0SSTSizeBytes: options.L0SSTSizeBytes,
@@ -246,7 +275,7 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 func parseCephXKey(encoded []byte, client string) (string, error) {
 	value := strings.TrimSpace(string(encoded))
 	if value == "" {
-		return "", errors.New("vaulticdb WAL CephX key is empty")
+		return "", errors.New("vaulticdb CephX key is empty")
 	}
 	keyring := false
 	for _, line := range strings.Split(value, "\n") {
@@ -259,10 +288,10 @@ func parseCephXKey(encoded []byte, client string) (string, error) {
 	}
 	if !keyring {
 		if strings.ContainsAny(value, "\r\n") {
-			return "", errors.New("vaulticdb WAL CephX raw key must be one line")
+			return "", errors.New("vaulticdb CephX raw key must be one line")
 		}
 		if decoded, err := base64.StdEncoding.DecodeString(value); err != nil || len(decoded) == 0 {
-			return "", errors.New("vaulticdb WAL CephX raw key is not valid Base64")
+			return "", errors.New("vaulticdb CephX raw key is not valid Base64")
 		}
 		return value, nil
 	}
@@ -281,15 +310,15 @@ func parseCephXKey(encoded []byte, client string) (string, error) {
 		}
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" || key != "" {
-			return "", fmt.Errorf("vaulticdb WAL CephX keyring section %q must contain exactly one non-empty key", client)
+			return "", fmt.Errorf("vaulticdb CephX keyring section %q must contain exactly one non-empty key", client)
 		}
 		key = candidate
 	}
 	if key == "" {
-		return "", fmt.Errorf("vaulticdb WAL CephX keyring has no key for section %q", client)
+		return "", fmt.Errorf("vaulticdb CephX keyring has no key for section %q", client)
 	}
 	if decoded, err := base64.StdEncoding.DecodeString(key); err != nil || len(decoded) == 0 {
-		return "", fmt.Errorf("vaulticdb WAL CephX keyring section %q contains an invalid Base64 key", client)
+		return "", fmt.Errorf("vaulticdb CephX keyring section %q contains an invalid Base64 key", client)
 	}
 	return key, nil
 }
@@ -583,7 +612,7 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.BoolVar(&options.DryRun, "dry-run", false, "scan and validate without writing SlateDB")
 	flags.BoolVar(&options.Activate, "activate", false, "make SlateDB authoritative after a complete import")
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
-	flags.BoolVar(&options.ImportDeferCleanup, "import-defer-cleanup", false, "defer receipt cleanup durability during a fresh memory-WAL import")
+	flags.BoolVar(&options.ImportDeferCleanup, "import-defer-cleanup", false, "defer receipt cleanup durability during a fresh memory- or RADOS-WAL import")
 	flags.Uint32Var(&options.BatchSize, "batch-size", 0, "maximum mutations per daemon transaction batch (zero uses daemon limit)")
 	flags.UintVar(&options.PackWorkers, "pack-workers", 0, "concurrent legacy pack preparations (zero uses up to eight available CPUs)")
 	flags.UintVar(
@@ -947,8 +976,9 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 	if options.ImportPublicationLanes == 0 {
 		options.ImportPublicationLanes = 1
 	}
-	if options.ImportDeferCleanup && (!options.ForceResetOldIndex || options.Daemon.WALStore != "memory" || options.ImportPublicationLanes < 2) {
-		return options, fmt.Errorf("--import-defer-cleanup requires a fresh memory-WAL import with at least two publication lanes")
+	deferredCleanupWAL := options.Daemon.WALStore == "memory" || options.Daemon.WALStore == "rados"
+	if options.ImportDeferCleanup && (!options.ForceResetOldIndex || !deferredCleanupWAL || options.ImportPublicationLanes < 2) {
+		return options, fmt.Errorf("--import-defer-cleanup requires a fresh memory- or RADOS-WAL import with at least two publication lanes")
 	}
 	if options.DryRun && options.Activate {
 		return options, fmt.Errorf("--activate cannot be combined with --dry-run")
@@ -1037,8 +1067,18 @@ func validateMetadataRebuildTarget(options indexDaemonOptions, allowExisting boo
 		}
 		return "s3://" + options.S3Bucket + "/" + prefix, nil
 	}
+	if options.ObjectStore == "rados" {
+		if options.DataDir != "" {
+			return "", fmt.Errorf("RADOS metadata rebuild candidate does not accept --daemon-data-dir")
+		}
+		prefix := strings.Trim(options.RadosPrefix, "/")
+		if options.RadosPool == "" || options.RadosNamespace == "" || prefix == "" {
+			return "", fmt.Errorf("RADOS metadata rebuild candidate requires --daemon-rados-pool, --daemon-rados-namespace, and a dedicated non-empty --daemon-rados-prefix")
+		}
+		return "rados://" + options.RadosPool + "/" + options.RadosNamespace + "/" + prefix, nil
+	}
 	if options.ObjectStore != "" && options.ObjectStore != "local" {
-		return "", fmt.Errorf("metadata rebuild candidate must use a persistent local or S3 object store")
+		return "", fmt.Errorf("metadata rebuild candidate must use a persistent local, S3, or RADOS object store")
 	}
 	if options.DataDir == "" {
 		return "", fmt.Errorf("local metadata rebuild candidate requires a new --daemon-data-dir")
@@ -1057,6 +1097,9 @@ func validateMetadataRebuildTarget(options indexDaemonOptions, allowExisting boo
 func rebuildCandidateName(options indexDaemonOptions) string {
 	if options.ObjectStore == "s3" {
 		return "s3://" + options.S3Bucket + "/" + strings.Trim(options.S3Prefix, "/")
+	}
+	if options.ObjectStore == "rados" {
+		return "rados://" + options.RadosPool + "/" + options.RadosNamespace + "/" + strings.Trim(options.RadosPrefix, "/")
 	}
 	return options.DataDir
 }

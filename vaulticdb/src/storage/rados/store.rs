@@ -3,18 +3,22 @@ use std::{fmt, ops::Range, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, A
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{stream, stream::BoxStream, StreamExt};
+use serde::{Deserialize, Serialize};
 use slatedb::object_store::{
-    path::Path, Attributes, CopyMode, CopyOptions, GetOptions, GetResult, GetResultPayload,
+    path::Path, Attribute, AttributeValue, Attributes, CopyMode, CopyOptions, GetOptions, GetResult, GetResultPayload,
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions,
     PutPayload, PutResult, Result, UploadPart,
 };
 use tokio::sync::Notify;
 
 const STALE_MULTIPART_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+pub(super) const ATTRIBUTES_XATTR: &str = "vaultic.attributes";
+pub(super) const MAX_ATTRIBUTES_SIZE: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub(super) struct StoredObject {
     pub(super) bytes: Bytes,
+    pub(super) attributes: Bytes,
     pub(super) size: u64,
     pub(super) version: u64,
     pub(super) modified: SystemTime,
@@ -45,7 +49,7 @@ pub(super) enum DriverError {
 }
 
 pub(super) trait Driver: fmt::Debug + Send + Sync {
-    fn put(&self, name: &str, bytes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError>;
+    fn put(&self, name: &str, bytes: Bytes, attributes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError>;
     fn get(&self, name: &str, range: Option<Range<u64>>) -> std::result::Result<StoredObject, DriverError>;
     fn delete(&self, name: &str) -> std::result::Result<(), DriverError>;
     fn list(&self, prefix: &str) -> std::result::Result<Vec<StoredMeta>, DriverError>;
@@ -53,6 +57,63 @@ pub(super) trait Driver: fmt::Debug + Send + Sync {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WriteMode { Overwrite, Create, Update(u64) }
+
+#[derive(Deserialize, Serialize)]
+struct EncodedAttributes {
+    version: u8,
+    values: Vec<EncodedAttribute>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct EncodedAttribute {
+    kind: String,
+    key: Option<String>,
+    value: String,
+}
+
+fn encode_attributes(attributes: &Attributes) -> std::result::Result<Bytes, DriverError> {
+    let mut values = attributes.iter().map(|(attribute, value)| {
+        let (kind, key) = match attribute {
+            Attribute::CacheControl => ("cache-control", None),
+            Attribute::ContentDisposition => ("content-disposition", None),
+            Attribute::ContentEncoding => ("content-encoding", None),
+            Attribute::ContentLanguage => ("content-language", None),
+            Attribute::ContentType => ("content-type", None),
+            Attribute::StorageClass => ("storage-class", None),
+            Attribute::Metadata(key) => ("metadata", Some(key.to_string())),
+            _ => return Err(DriverError::Other("unsupported object attribute type".to_owned())),
+        };
+        Ok(EncodedAttribute { kind: kind.to_owned(), key, value: value.to_string() })
+    }).collect::<std::result::Result<Vec<_>, DriverError>>()?;
+    values.sort_by(|left, right| (&left.kind, &left.key).cmp(&(&right.kind, &right.key)));
+    let encoded = serde_json::to_vec(&EncodedAttributes { version: 1, values })
+        .map_err(|error| DriverError::Other(format!("encode object attributes: {error}")))?;
+    if encoded.len() > MAX_ATTRIBUTES_SIZE {
+        return Err(DriverError::Other(format!("encoded object attributes exceed {MAX_ATTRIBUTES_SIZE} bytes")));
+    }
+    Ok(Bytes::from(encoded))
+}
+
+fn decode_attributes(encoded: &[u8]) -> std::result::Result<Attributes, DriverError> {
+    if encoded.is_empty() { return Ok(Attributes::new()); }
+    if encoded.len() > MAX_ATTRIBUTES_SIZE { return Err(DriverError::Other("encoded object attributes exceed size limit".to_owned())); }
+    let encoded: EncodedAttributes = serde_json::from_slice(encoded)
+        .map_err(|error| DriverError::Other(format!("decode object attributes: {error}")))?;
+    if encoded.version != 1 { return Err(DriverError::Other(format!("unsupported object attributes version {}", encoded.version))); }
+    encoded.values.into_iter().map(|entry| {
+        let attribute = match (entry.kind.as_str(), entry.key) {
+            ("cache-control", None) => Attribute::CacheControl,
+            ("content-disposition", None) => Attribute::ContentDisposition,
+            ("content-encoding", None) => Attribute::ContentEncoding,
+            ("content-language", None) => Attribute::ContentLanguage,
+            ("content-type", None) => Attribute::ContentType,
+            ("storage-class", None) => Attribute::StorageClass,
+            ("metadata", Some(key)) => Attribute::Metadata(key.into()),
+            _ => return Err(DriverError::Other("invalid encoded object attribute".to_owned())),
+        };
+        Ok((attribute, AttributeValue::from(entry.value)))
+    }).collect()
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct RadosStore { driver: Arc<dyn Driver>, prefix: String }
@@ -106,14 +167,14 @@ impl fmt::Display for RadosStore {
 #[async_trait]
 impl ObjectStore for RadosStore {
     async fn put_opts(&self, location: &Path, payload: PutPayload, options: PutOptions) -> Result<PutResult> {
-        if !options.attributes.is_empty() { return Err(slatedb::object_store::Error::NotSupported { source: "RADOS attributes unsupported".into() }); }
+        let attributes = encode_attributes(&options.attributes).map_err(|error| map_error(location.clone(), error))?;
         let mode = match options.mode {
             PutMode::Overwrite => WriteMode::Overwrite,
             PutMode::Create => WriteMode::Create,
             PutMode::Update(value) => WriteMode::Update(value.version.or(value.e_tag).ok_or_else(|| precondition(location, "missing RADOS version"))?.parse().map_err(|_| precondition(location, "invalid RADOS version"))?),
         };
         let name = self.name(location); let driver = Arc::clone(&self.driver); let bytes = Bytes::from(payload);
-        let version = blocking(move || driver.put(&name, bytes, mode)).await.map_err(|error| map_error(location.clone(), error))?;
+        let version = blocking(move || driver.put(&name, bytes, attributes, mode)).await.map_err(|error| map_error(location.clone(), error))?;
         Ok(PutResult { e_tag: Some(version.to_string()), version: Some(version.to_string()), extensions: Default::default() })
     }
     async fn put_multipart_opts(&self, location: &Path, options: PutMultipartOptions) -> Result<Box<dyn MultipartUpload>> {
@@ -137,7 +198,8 @@ impl ObjectStore for RadosStore {
             let name = self.name(location); let driver = Arc::clone(&self.driver); let read_range = range.clone();
             blocking(move || driver.get(&name, Some(read_range))).await.map_err(|error| map_error(location.clone(), error))?.bytes
         };
-        Ok(GetResult { payload: GetResultPayload::Stream(stream::once(async { Ok(bytes) }).boxed()), meta, range, attributes: Attributes::new(), extensions: options.extensions })
+        let attributes = decode_attributes(&head.attributes).map_err(|error| map_error(location.clone(), error))?;
+        Ok(GetResult { payload: GetResultPayload::Stream(stream::once(async { Ok(bytes) }).boxed()), meta, range, attributes, extensions: options.extensions })
     }
     fn delete_stream(&self, locations: BoxStream<'static, Result<Path>>) -> BoxStream<'static, Result<Path>> {
         let store = self.clone(); locations.then(move |location| { let store = store.clone(); async move {
@@ -231,7 +293,7 @@ impl MultipartUpload for Multipart {
             let cleanup_name = staged_name.clone();
             blocking(move || {
             let _guard = guard;
-                let result = match driver.put(&staged_name, Bytes::from(payload), WriteMode::Create) {
+                let result = match driver.put(&staged_name, Bytes::from(payload), Bytes::new(), WriteMode::Create) {
                     Ok(version) => match parts.lock() {
                         Ok(mut registered) => {
                             if cancelled.load(Ordering::Acquire) {
@@ -381,7 +443,7 @@ mod tests {
     }
 
     impl Driver for MemoryDriver {
-        fn put(&self, name: &str, bytes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError> {
+        fn put(&self, name: &str, bytes: Bytes, attributes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError> {
             let mut objects = self.objects.write().map_err(|_| DriverError::Other("lock poisoned".to_owned()))?;
             match (mode, objects.get(name)) {
                 (WriteMode::Create, Some(_)) => return Err(DriverError::Exists),
@@ -390,7 +452,7 @@ mod tests {
                 _ => {}
             }
             let version = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            objects.insert(name.to_owned(), StoredObject { size: bytes.len() as u64, bytes, version, modified: SystemTime::now() });
+            objects.insert(name.to_owned(), StoredObject { size: bytes.len() as u64, bytes, attributes, version, modified: SystemTime::now() });
             Ok(version)
         }
         fn get(&self, name: &str, range: Option<Range<u64>>) -> std::result::Result<StoredObject, DriverError> {
@@ -417,10 +479,16 @@ mod tests {
         let driver = Arc::new(MemoryDriver::default());
         let store = RadosStore::new(driver.clone(), "repo/db");
         let current = Path::from("manifest/current");
-        let created = store.put_opts(&current, Bytes::from_static(b"0123456789").into(), PutOptions::from(PutMode::Create)).await.unwrap();
+        let attributes = Attributes::from_iter([
+            (Attribute::ContentType, "application/octet-stream"),
+            (Attribute::Metadata("put-id".into()), "first-attempt"),
+        ]);
+        let created = store.put_opts(&current, Bytes::from_static(b"0123456789").into(), PutOptions { mode: PutMode::Create, attributes: attributes.clone(), ..Default::default() }).await.unwrap();
+        assert_eq!(store.get(&current).await.unwrap().attributes, attributes);
         assert!(matches!(store.put_opts(&current, Bytes::from_static(b"conflict").into(), PutOptions::from(PutMode::Create)).await, Err(slatedb::object_store::Error::AlreadyExists { .. })));
         assert_eq!(&store.get_range(&current, 3..7).await.unwrap()[..], b"3456");
         store.put_opts(&current, Bytes::from_static(b"next").into(), PutOptions::from(PutMode::Update(created.into()))).await.unwrap();
+        assert!(store.get(&current).await.unwrap().attributes.is_empty());
         let stale = store
             .put_opts(
                 &current,
@@ -432,7 +500,8 @@ mod tests {
             )
             .await;
         assert!(matches!(stale, Err(slatedb::object_store::Error::Precondition { .. })));
-        let mut upload = store.put_multipart(&Path::from("sst/one")).await.unwrap();
+        let multipart_attributes = Attributes::from_iter([(Attribute::Metadata("put-id".into()), "multipart-attempt")]);
+        let mut upload = store.put_multipart_opts(&Path::from("sst/one"), PutMultipartOptions { attributes: multipart_attributes.clone(), ..Default::default() }).await.unwrap();
         upload.put_part(Bytes::from_static(b"part-a").into()).await.unwrap();
         upload.put_part(Bytes::from_static(b"part-b").into()).await.unwrap();
         assert_eq!(driver.objects.read().unwrap().keys().filter(|name| name.starts_with(".vaultic-rados/multipart/")).count(), 2);
@@ -441,6 +510,7 @@ mod tests {
         assert!(upload.put_part(Bytes::from_static(b"late").into()).await.is_err());
         assert!(!driver.objects.read().unwrap().keys().any(|name| name.starts_with(".vaultic-rados/multipart/")));
         assert_eq!(&store.get(&Path::from("sst/one")).await.unwrap().bytes().await.unwrap()[..], b"part-apart-b");
+        assert_eq!(store.get(&Path::from("sst/one")).await.unwrap().attributes, multipart_attributes);
 
         let mut raced = store.put_multipart(&Path::from("sst/raced")).await.unwrap();
         let issued = raced.put_part(Bytes::from_static(b"issued-before-complete").into());
@@ -461,17 +531,24 @@ mod tests {
 
         let stale_name = store.staging_name(7, 0);
         driver.objects.write().unwrap().insert(stale_name.clone(), StoredObject {
-            bytes: Bytes::from_static(b"stale"), size: 5, version: 50,
+            bytes: Bytes::from_static(b"stale"), attributes: Bytes::new(), size: 5, version: 50,
             modified: SystemTime::now() - STALE_MULTIPART_AGE - std::time::Duration::from_secs(1),
         });
         let fresh_name = store.staging_name(8, 0);
         driver.objects.write().unwrap().insert(fresh_name.clone(), StoredObject {
-            bytes: Bytes::from_static(b"fresh"), size: 5, version: 51, modified: SystemTime::now(),
+            bytes: Bytes::from_static(b"fresh"), attributes: Bytes::new(), size: 5, version: 51, modified: SystemTime::now(),
         });
         let mut upload = store.put_multipart(&Path::from("sst/sweep")).await.unwrap();
         assert!(!driver.objects.read().unwrap().contains_key(&stale_name));
         assert!(driver.objects.read().unwrap().contains_key(&fresh_name));
         upload.abort().await.unwrap();
+    }
+
+    #[test]
+    fn malformed_attributes_are_rejected() {
+        assert!(decode_attributes(br#"{"version":2,"values":[]}"#).is_err());
+        assert!(decode_attributes(br#"{"version":1,"values":[{"kind":"metadata","key":null,"value":"bad"}]}"#).is_err());
+        assert!(decode_attributes(&vec![b'x'; MAX_ATTRIBUTES_SIZE + 1]).is_err());
     }
 
     #[tokio::test]

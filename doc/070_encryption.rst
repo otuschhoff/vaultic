@@ -840,15 +840,16 @@ objects, writes authenticated recovery provenance before normal records, and
 Vaultic compares the completed candidate against legacy metadata before
 activating SlateDB authority.
 
-For a remote candidate, select ``--daemon-object-store s3`` and provide a
-bucket plus a dedicated non-empty ``--daemon-s3-prefix`` instead of
-``--daemon-data-dir``. Use a new generation-specific prefix whose access policy
-does not permit other writers. The daemon lists that prefix and rejects it if
-any database object already exists; recovery-capsule mirrors under
-``_vaultic/`` do not count as database objects. Activation occurs only after
-the same encrypted provenance, full import, and consistency checks used for a
-local candidate. Preserve the old prefix until the rebuilt authority has been
-independently listed and restored.
+For a remote candidate, select ``--daemon-object-store s3`` with a bucket and a
+dedicated non-empty ``--daemon-s3-prefix``, or ``--daemon-object-store rados``
+with a pool, namespace, and dedicated non-empty ``--daemon-rados-prefix``.
+Do not provide ``--daemon-data-dir``. Use a new generation-specific prefix whose
+access policy does not permit other writers. The daemon lists that prefix and
+rejects it if any database object already exists; recovery-capsule mirrors
+under ``_vaultic/`` do not count as database objects. Activation occurs only
+after the same encrypted provenance, full import, and consistency checks used
+for a local candidate. Preserve the old prefix until the rebuilt authority has
+been independently listed and restored.
 
 Complete broker-host loss also loses the session-signing identity. Start the
 replacement broker only with its explicit identity-recovery configuration and

@@ -238,6 +238,37 @@ func TestPrepareDaemonCommandWithMemoryWAL(t *testing.T) {
 	}
 }
 
+func TestPrepareDaemonCommandWithDualPoolRADOS(t *testing.T) {
+	options := (Options{
+		RepositoryID: "repo", DaemonPath: "/path/to/vaulticdb", ObjectStore: "rados",
+		RadosMonitors: "mon-a:3300", RadosFSID: "2f525d6a-8f31-4f79-b731-82a6acb235f5",
+		RadosPool: "db-sst", RadosNamespace: "vaultic-perf", RadosPrefix: "main",
+		RadosClient: "client.amakura", RadosKey: "main-key",
+		WALStore: "rados", WALRadosMonitors: "mon-a:3300", WALRadosFSID: "2f525d6a-8f31-4f79-b731-82a6acb235f5",
+		WALRadosPool: "db-wal", WALRadosNamespace: "vaultic-perf", WALRadosPrefix: "wal",
+		WALRadosClient: "client.amakura", WALRadosKey: "wal-key",
+	}).withDefaults()
+	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authRead != nil || authWrite != nil {
+		t.Fatal("Unix daemon unexpectedly created TCP authentication pipes")
+	}
+	for _, entry := range []string{
+		"VAULTICDB_OBJECT_STORE=rados",
+		"VAULTICDB_RADOS_POOL=db-sst",
+		"VAULTICDB_RADOS_KEY=main-key",
+		"VAULTICDB_WAL_STORE=rados",
+		"VAULTICDB_WAL_RADOS_POOL=db-wal",
+		"VAULTICDB_WAL_RADOS_KEY=wal-key",
+	} {
+		if !slices.Contains(cmd.Env, entry) {
+			t.Errorf("daemon environment missing %q: %q", entry, cmd.Env)
+		}
+	}
+}
+
 func TestPrepareDaemonCommandWithFreshBulkImportCache(t *testing.T) {
 	t.Setenv("VAULTICDB_READ_CACHE_TIERS", "")
 	options := (Options{

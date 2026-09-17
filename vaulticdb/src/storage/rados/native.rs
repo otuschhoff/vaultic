@@ -3,7 +3,7 @@ use std::{ffi::{CStr, CString}, os::raw::{c_char, c_int, c_void}, ptr, sync::Mut
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 
-use super::{Config, store::{Driver, DriverError, StoredMeta, StoredObject, WriteMode}};
+use super::{Config, store::{ATTRIBUTES_XATTR, Driver, DriverError, MAX_ATTRIBUTES_SIZE, StoredMeta, StoredObject, WriteMode}};
 
 type Rados = *mut c_void;
 type IoCtx = *mut c_void;
@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn rados_ioctx_set_namespace(ioctx: IoCtx, namespace: *const c_char);
     fn rados_stat(ioctx: IoCtx, object: *const c_char, size: *mut u64, mtime: *mut i64) -> c_int;
     fn rados_read(ioctx: IoCtx, object: *const c_char, buffer: *mut c_char, length: usize, offset: u64) -> isize;
+    fn rados_getxattr(ioctx: IoCtx, object: *const c_char, name: *const c_char, buffer: *mut c_char, length: usize) -> c_int;
     fn rados_remove(ioctx: IoCtx, object: *const c_char) -> c_int;
     fn rados_get_last_version(ioctx: IoCtx) -> u64;
     fn rados_create_write_op() -> WriteOp;
@@ -29,6 +30,7 @@ unsafe extern "C" {
     fn rados_write_op_create(operation: WriteOp, exclusive: c_int, category: *const c_char);
     fn rados_write_op_assert_version(operation: WriteOp, version: u64);
     fn rados_write_op_write_full(operation: WriteOp, buffer: *const c_char, length: usize);
+    fn rados_write_op_setxattr(operation: WriteOp, name: *const c_char, value: *const c_char, value_length: usize);
     fn rados_write_op_operate(operation: WriteOp, ioctx: IoCtx, object: *const c_char, mtime: *mut c_void, flags: c_int) -> c_int;
     fn rados_nobjects_list_open(ioctx: IoCtx, context: *mut ListCtx) -> c_int;
     fn rados_nobjects_list_next(context: ListCtx, entry: *mut *const c_char, key: *mut *const c_char, namespace: *mut *const c_char) -> c_int;
@@ -72,13 +74,15 @@ pub(super) fn open(config: Config<'_>) -> Result<std::sync::Arc<dyn Driver>> {
 }
 
 impl Driver for Native {
-    fn put(&self, name: &str, bytes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError> {
+    fn put(&self, name: &str, bytes: Bytes, attributes: Bytes, mode: WriteMode) -> std::result::Result<u64, DriverError> {
         let handles = self.handles.lock().map_err(|_| other("RADOS lock poisoned"))?;
         let operation = unsafe { rados_create_write_op() };
         if operation.is_null() { return Err(other("create RADOS write operation failed")); }
         let guard = WriteGuard(operation);
         match mode { WriteMode::Create => unsafe { rados_write_op_create(operation, 1, ptr::null()) }, WriteMode::Update(version) => unsafe { rados_write_op_assert_version(operation, version) }, WriteMode::Overwrite => {} }
         unsafe { rados_write_op_write_full(operation, bytes.as_ptr().cast(), bytes.len()); }
+        let attribute_name = cstring_driver(ATTRIBUTES_XATTR)?;
+        unsafe { rados_write_op_setxattr(operation, attribute_name.as_ptr(), attributes.as_ptr().cast(), attributes.len()); }
         let object = cstring_driver(name)?;
         let result = unsafe { rados_write_op_operate(operation, handles.ioctx, object.as_ptr(), ptr::null_mut(), 0) };
         drop(guard);
@@ -99,8 +103,20 @@ impl Driver for Native {
             let read = unsafe { rados_read(handles.ioctx, object.as_ptr(), bytes.as_mut_ptr().cast(), bytes.len(), selected.start) };
             if read < 0 { map_status(read as c_int, WriteMode::Overwrite)?; }
             if read as usize != bytes.len() { return Err(DriverError::Range); }
+            let mut attributes = vec![0_u8; MAX_ATTRIBUTES_SIZE];
+            let attribute_name = cstring_driver(ATTRIBUTES_XATTR)?;
+            let attribute_length = unsafe { rados_getxattr(handles.ioctx, object.as_ptr(), attribute_name.as_ptr(), attributes.as_mut_ptr().cast(), attributes.len()) };
+            if attribute_length < 0 {
+                if -attribute_length == 61 {
+                    attributes.clear();
+                } else {
+                    map_status(attribute_length, WriteMode::Overwrite)?;
+                }
+            } else {
+                attributes.truncate(attribute_length as usize);
+            }
             let after = unsafe { rados_get_last_version(handles.ioctx) };
-            if after == version { return Ok(StoredObject { bytes: Bytes::from(bytes), size, version, modified: UNIX_EPOCH + Duration::from_secs(mtime.max(0) as u64) }); }
+            if after == version { return Ok(StoredObject { bytes: Bytes::from(bytes), attributes: Bytes::from(attributes), size, version, modified: UNIX_EPOCH + Duration::from_secs(mtime.max(0) as u64) }); }
         }
         Err(DriverError::Precondition)
     }
@@ -142,6 +158,32 @@ mod tests {
     use slatedb::{config::DbReaderOptions, Db, DbReader, DbReaderMode, WriteBatch};
     use zeroize::Zeroizing;
 
+    #[test]
+    fn live_rados_attributes_round_trip() {
+        let required = |name| std::env::var(name).ok();
+        let (Some(monitors), Some(cluster_fsid), Some(pool), Some(namespace), Some(client), Some(secret)) = (
+            required("VAULTIC_RADOS_TEST_MONITORS"),
+            required("VAULTIC_RADOS_TEST_CLUSTER_FSID"),
+            required("VAULTIC_RADOS_TEST_POOL"),
+            required("VAULTIC_RADOS_TEST_NAMESPACE"),
+            required("VAULTIC_RADOS_TEST_CLIENT"),
+            required("VAULTIC_RADOS_TEST_KEY"),
+        ) else { return; };
+        let key = Zeroizing::new(secret);
+        let driver = open(Config {
+            monitors: &monitors, cluster_fsid: &cluster_fsid, pool: &pool,
+            namespace: &namespace, prefix: "live-attributes", client: &client, key: &key,
+        }).expect("open live RADOS");
+        let name = format!("live-attributes/{}", rand::random::<u128>());
+        let first = Bytes::from_static(br#"{"version":1,"values":[{"kind":"metadata","key":"put-id","value":"attempt-1"}]}"#);
+        let created = driver.put(&name, Bytes::from_static(b"first"), first.clone(), WriteMode::Create).expect("create attributed object");
+        assert_eq!(driver.get(&name, None).expect("read attributed object").attributes, first);
+        let empty = Bytes::from_static(br#"{"version":1,"values":[]}"#);
+        driver.put(&name, Bytes::from_static(b"second"), empty.clone(), WriteMode::Update(created)).expect("replace attributed object");
+        assert_eq!(driver.get(&name, None).expect("read replaced object").attributes, empty);
+        driver.delete(&name).expect("delete attributed object");
+    }
+
     #[tokio::test]
     async fn live_rados_atomicity_reopen_and_isolation() {
         let Ok(monitors) = std::env::var("VAULTIC_RADOS_TEST_MONITORS") else { return; };
@@ -153,12 +195,14 @@ mod tests {
         };
         let driver = open(config()).expect("open live RADOS");
         let name = "live-rust/manifest/current";
-        let created = driver.put(name, Bytes::from_static(b"0123456789"), WriteMode::Create).expect("create object");
-        assert!(matches!(driver.put(name, Bytes::from_static(b"conflict"), WriteMode::Create), Err(DriverError::Exists)));
+        let attributes = Bytes::from_static(br#"{"version":1,"values":[]}"#);
+        let created = driver.put(name, Bytes::from_static(b"0123456789"), attributes.clone(), WriteMode::Create).expect("create object");
+        assert!(matches!(driver.put(name, Bytes::from_static(b"conflict"), attributes.clone(), WriteMode::Create), Err(DriverError::Exists)));
         assert_eq!(&driver.get(name, Some(3..7)).expect("range read").bytes[..], b"3456");
-        let updated = driver.put(name, Bytes::from_static(b"updated"), WriteMode::Update(created)).expect("conditional update");
+        assert_eq!(driver.get(name, None).expect("read attributes").attributes, attributes);
+        let updated = driver.put(name, Bytes::from_static(b"updated"), attributes.clone(), WriteMode::Update(created)).expect("conditional update");
         assert!(updated > created);
-        assert!(matches!(driver.put(name, Bytes::from_static(b"stale"), WriteMode::Update(created)), Err(DriverError::Precondition)));
+        assert!(matches!(driver.put(name, Bytes::from_static(b"stale"), attributes.clone(), WriteMode::Update(created)), Err(DriverError::Precondition)));
         assert_eq!(driver.list("live-rust/").expect("list objects").len(), 1);
         drop(driver);
         let reopened = open(config()).expect("reopen live RADOS");
@@ -167,7 +211,7 @@ mod tests {
 
         let denied = Config { namespace: "forbidden", ..config() };
         let denied = open(denied).expect("open forbidden namespace handle");
-        assert!(matches!(denied.put("live-rust/denied", Bytes::from_static(b"denied"), WriteMode::Create), Err(DriverError::Other(_))));
+        assert!(matches!(denied.put("live-rust/denied", Bytes::from_static(b"denied"), attributes, WriteMode::Create), Err(DriverError::Other(_))));
 
         let store = std::sync::Arc::new(RadosStore::new(open(config()).expect("open SlateDB RADOS store"), "live-rust-db"));
         let wal_store = std::sync::Arc::new(RadosStore::new(open(config()).expect("open SlateDB RADOS WAL store"), "live-rust-wal"));

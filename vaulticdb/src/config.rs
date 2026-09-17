@@ -457,6 +457,24 @@ fn object_store_from_env() -> Result<ObjectStoreConfig> {
             provider: optional_nonempty("VAULTICDB_S3_PROVIDER")?,
             bucket_lookup: optional_nonempty("VAULTICDB_S3_BUCKET_LOOKUP")?,
         }),
+        "rados" => Ok(ObjectStoreConfig::Rados {
+            monitors: env::var("VAULTICDB_RADOS_MONITORS")
+                .context("VAULTICDB_RADOS_MONITORS is required for RADOS storage")?,
+            cluster_fsid: env::var("VAULTICDB_RADOS_CLUSTER_FSID")
+                .context("VAULTICDB_RADOS_CLUSTER_FSID is required for RADOS storage")?,
+            pool: env::var("VAULTICDB_RADOS_POOL")
+                .context("VAULTICDB_RADOS_POOL is required for RADOS storage")?,
+            namespace: env::var("VAULTICDB_RADOS_NAMESPACE")
+                .context("VAULTICDB_RADOS_NAMESPACE is required for RADOS storage")?,
+            prefix: env::var("VAULTICDB_RADOS_PREFIX")
+                .context("VAULTICDB_RADOS_PREFIX is required for RADOS storage")?,
+            client: env::var("VAULTICDB_RADOS_CLIENT")
+                .context("VAULTICDB_RADOS_CLIENT is required for RADOS storage")?,
+            key: Zeroizing::new(
+                env::var("VAULTICDB_RADOS_KEY")
+                    .context("VAULTICDB_RADOS_KEY is required for RADOS storage")?,
+            ),
+        }),
         "replicated" => {
             let replicas = env::var("VAULTICDB_REPLICATED_REPLICAS")
                 .context("VAULTICDB_REPLICATED_REPLICAS is required for replicated storage")?
@@ -470,7 +488,7 @@ fn object_store_from_env() -> Result<ObjectStoreConfig> {
             Ok(ObjectStoreConfig::Replicated { replicas })
         }
         value => bail!(
-            "unsupported VAULTICDB_OBJECT_STORE {value:?}; expected local, memory, s3, or replicated"
+            "unsupported VAULTICDB_OBJECT_STORE {value:?}; expected local, memory, s3, rados, or replicated"
         ),
     }
 }
@@ -805,6 +823,55 @@ mod tests {
         unsafe { env::set_var("VAULTICDB_SLATEDB_MULTIGET", "yes") };
         assert!(optional_bool("VAULTICDB_SLATEDB_MULTIGET", false).is_err());
         unsafe { env::remove_var("VAULTICDB_SLATEDB_MULTIGET") };
+    }
+
+    #[test]
+    fn parses_independent_main_and_wal_rados_stores() {
+        let _guard = environment_lock().lock().unwrap();
+        let values = [
+            ("VAULTICDB_OBJECT_STORE", "rados"),
+            ("VAULTICDB_RADOS_MONITORS", "mon-a:3300"),
+            (
+                "VAULTICDB_RADOS_CLUSTER_FSID",
+                "2f525d6a-8f31-4f79-b731-82a6acb235f5",
+            ),
+            ("VAULTICDB_RADOS_POOL", "db-sst"),
+            ("VAULTICDB_RADOS_NAMESPACE", "vaultic-perf"),
+            ("VAULTICDB_RADOS_PREFIX", "main"),
+            ("VAULTICDB_RADOS_CLIENT", "client.amakura"),
+            ("VAULTICDB_RADOS_KEY", "main-key"),
+            ("VAULTICDB_WAL_STORE", "rados"),
+            ("VAULTICDB_WAL_RADOS_MONITORS", "mon-a:3300"),
+            (
+                "VAULTICDB_WAL_RADOS_CLUSTER_FSID",
+                "2f525d6a-8f31-4f79-b731-82a6acb235f5",
+            ),
+            ("VAULTICDB_WAL_RADOS_POOL", "db-wal"),
+            ("VAULTICDB_WAL_RADOS_NAMESPACE", "vaultic-perf"),
+            ("VAULTICDB_WAL_RADOS_PREFIX", "wal"),
+            ("VAULTICDB_WAL_RADOS_CLIENT", "client.amakura"),
+            ("VAULTICDB_WAL_RADOS_KEY", "wal-key"),
+        ];
+        for (name, value) in values {
+            unsafe { env::set_var(name, value) };
+        }
+
+        let main = object_store_from_env().unwrap();
+        let wal = wal_store_from_env().unwrap();
+        assert!(matches!(
+            main,
+            ObjectStoreConfig::Rados { pool, key, .. }
+                if pool == "db-sst" && key.as_str() == "main-key"
+        ));
+        assert!(matches!(
+            wal,
+            WalStoreConfig::Store(ReplicaStoreConfig::Rados { pool, key, .. })
+                if pool == "db-wal" && key.as_str() == "wal-key"
+        ));
+
+        for (name, _) in values {
+            unsafe { env::remove_var(name) };
+        }
     }
 
     #[cfg(feature = "test-failpoints")]

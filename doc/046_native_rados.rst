@@ -127,10 +127,33 @@ pool, namespace, and prefix fields, ``durability: shared-remote``, and a
 dedicated CephX ``storage-maintain`` binding. VaulticDB leases this credential
 under target ``wal`` rather than reusing metadata or repository credentials.
 
-For direct CLI operation, ``--daemon-wal-rados-key-file`` accepts either the
-raw CephX key or a standard keyring containing a ``key =`` entry in the section
-named by ``--daemon-wal-rados-client``. The file must pass protected-file
-permission checks; do not pass the key in command arguments.
+For direct CLI operation, select native main storage with
+``--daemon-object-store rados`` and the ``--daemon-rados-*`` endpoint flags.
+A separate native WAL uses ``--daemon-wal-store rados`` and the
+``--daemon-wal-rados-*`` flags. The main and WAL stores may use different pools,
+namespaces, prefixes, clients, and credentials. For example, keep SlateDB SSTs
+and manifests in a ``db-sst`` pool and WAL objects in a ``db-wal`` pool.
+
+Both ``--daemon-rados-key-file`` and ``--daemon-wal-rados-key-file`` accept
+either a raw CephX key or a standard keyring containing a ``key =`` entry in the
+section named by the corresponding client flag. The files must pass
+protected-file permission checks; do not pass keys in command arguments.
+
+.. code-block:: console
+
+    $ vaultic index import --force-reset-old-idx --start-daemon \
+        --daemon-object-store rados \
+        --daemon-rados-monitors mon-a.example:3300,mon-b.example:3300 \
+        --daemon-rados-fsid 2f525d6a-8f31-4f79-b731-82a6acb235f5 \
+        --daemon-rados-pool db-sst --daemon-rados-namespace repository-7 \
+        --daemon-rados-prefix metadata --daemon-rados-client client.vaultic \
+        --daemon-rados-key-file /run/secrets/vaultic-rados.keyring \
+        --daemon-wal-store rados \
+        --daemon-wal-rados-monitors mon-a.example:3300,mon-b.example:3300 \
+        --daemon-wal-rados-fsid 2f525d6a-8f31-4f79-b731-82a6acb235f5 \
+        --daemon-wal-rados-pool db-wal --daemon-wal-rados-namespace repository-7 \
+        --daemon-wal-rados-prefix wal --daemon-wal-rados-client client.vaultic \
+        --daemon-wal-rados-key-file /run/secrets/vaultic-rados.keyring
 
 SlateDB publishes immutable WAL objects through librados before a durable write
 handle resolves. The RADOS adapter's completed atomic write is the durability
