@@ -4,8 +4,7 @@ This record closes P2 against the frozen P0 fixture. The final Linux amd64
 VaulticDB binary was built with Rust `1.98.1`, release optimization, debug
 symbols, and the `test-failpoints` feature. Its SHA-256 is
 `3699f624c6d06e2b2f15a4f7277278d5e47a36422120cc7c2cf5a2cb328ffc7a`.
-Cargo pins `slatedb`, `slatedb-common`, and `slatedb-txn-obj` version `0.16.0`
-to the published fork revision
+Cargo pins `slatedb` and `slatedb-common` directly to fork revision
 `fc68f09a25defb128edfd722ec82696492dbb692`; the binary's embedded dependency
 report attests the direct `slatedb` and `slatedb-common` identities. That
 revision contains parent `a970051`, which introduced batch-writer queue and

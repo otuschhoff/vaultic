@@ -80,6 +80,7 @@ const GENERATION_DECISION_PREFIX: &str = "_vaultic/metadata-authority-decisions"
 #[cfg(any(test, feature = "test-failpoints"))]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum StorageFailpoint {
+    AfterFlushBeforeHandoff(String),
     BeforeWriteBatch(String),
     BeforeTransactionCommit(String),
     BeforeTransactionDurability(String),
@@ -144,6 +145,7 @@ fn check_storage_failpoint(failpoint: StorageFailpoint) -> Result<()> {
     #[cfg(feature = "test-failpoints")]
     {
         let name = match failpoint {
+            StorageFailpoint::AfterFlushBeforeHandoff(_) => "after-flush-before-handoff",
             StorageFailpoint::BeforeWriteBatch(_) => "provider-unavailable",
             StorageFailpoint::BeforeTransactionCommit(_) => "before-transaction-commit",
             StorageFailpoint::BeforeTransactionDurability(_) => "before-transaction-durability",
@@ -1701,6 +1703,10 @@ impl Storage {
             )
         };
         let attribution = Arc::new(StorageAttribution::new(!config.attribution_disabled));
+        let test_delay_profile = test_object_delay_profile_from_env()?;
+        if test_delay_profile.is_some() && config.attribution_disabled {
+            bail!("test object delay profiles require storage attribution");
+        }
         let (object_store, wal_object_store, coordination_store) = if config.attribution_disabled {
             (object_store, wal_object_store, coordination_store)
         } else {
@@ -1709,14 +1715,24 @@ impl Storage {
                     object_store,
                     Arc::clone(&attribution.object_store_main),
                     Some(Arc::clone(&attribution.object_store_wal)),
+                    ObjectStoreRole::Main,
+                    test_delay_profile.clone(),
                 ),
                 wal_object_store.map(|store| {
-                    role_aware_object_store(store, Arc::clone(&attribution.object_store_wal), None)
+                    role_aware_object_store(
+                        store,
+                        Arc::clone(&attribution.object_store_wal),
+                        None,
+                        ObjectStoreRole::Wal,
+                        test_delay_profile.clone(),
+                    )
                 }),
                 role_aware_object_store(
                     coordination_store,
                     Arc::clone(&attribution.object_store_coordination),
                     None,
+                    ObjectStoreRole::Coordination,
+                    test_delay_profile,
                 ),
             )
         };
@@ -2468,6 +2484,10 @@ impl Storage {
             {
                 match &self.bulk_import_local_wal_data_dir {
                     Some(root) => {
+                        #[cfg(any(test, feature = "test-failpoints"))]
+                        check_storage_failpoint(StorageFailpoint::AfterFlushBeforeHandoff(
+                            self.database_path.clone(),
+                        ))?;
                         mark_local_wal_handoff(self.coordination_store.as_ref(), root).await
                     }
                     None => Ok(()),

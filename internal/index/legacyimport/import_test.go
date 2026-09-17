@@ -1839,7 +1839,8 @@ type frozenBenchmarkIndex struct {
 }
 
 type frozenBenchmarkSource struct {
-	indexes []frozenBenchmarkIndex
+	indexes   []frozenBenchmarkIndex
+	loadDelay time.Duration
 }
 
 func (*frozenBenchmarkSource) Connections() uint { return 1 }
@@ -1864,10 +1865,19 @@ func (source *frozenBenchmarkSource) List(
 }
 
 func (source *frozenBenchmarkSource) LoadUnpacked(
-	_ context.Context,
+	ctx context.Context,
 	fileType vaultic.FileType,
 	id vaultic.ID,
 ) ([]byte, error) {
+	if source.loadDelay > 0 {
+		timer := time.NewTimer(source.loadDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if fileType == vaultic.IndexFile {
 		for _, entry := range source.indexes {
 			if entry.id == id {
@@ -2039,15 +2049,23 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 	const indexCount, packsPerIndex, blobsPerPack = 4, 32, 512
 	const expectedManifestDigest = "f2b658363adcb6760a1fa9fd411fa60a4a9de0a0d2ff15d6ed961efeb9b9e943"
 	source := newFrozenStage3BenchmarkSource(b, indexCount, packsPerIndex, blobsPerPack)
+	if configured := os.Getenv("VAULTICDB_BENCH_SOURCE_LOAD_DELAY"); configured != "" {
+		source.loadDelay, err = time.ParseDuration(configured)
+		if err != nil || source.loadDelay < 0 || source.loadDelay > time.Second {
+			b.Fatalf("source load delay must be a duration from 0 through 1s: %q", configured)
+		}
+	}
 	manifestDigest := source.manifestDigest()
 	if digest := fmt.Sprintf("%x", manifestDigest); digest != expectedManifestDigest {
 		b.Fatalf("benchmark fixture digest = %s, want %s", digest, expectedManifestDigest)
 	}
 	indexes, packCount, blobCount := source.counts()
+	attributionDisabled := os.Getenv("VAULTICDB_BENCH_ATTRIBUTION_DISABLED") == "true"
+	objectDelayProfile := os.Getenv("VAULTICDB_BENCH_OBJECT_DELAY_PROFILE")
 	b.Logf(
-		"phase32 reproduction contract: input_sha256=%x daemon_sha256=%x indexes=%d packs=%d blobs=%d ordered_manifest=true selection=preselected work_budget=disabled object_store=local wal_import=memory wal_reopen=local wal_flush=%s read_cache_bytes=0 max_unflushed_bytes=%d l0_sst_bytes=%d GOMAXPROCS=%d GOMEMLIMIT=%q candidate_reset=per_iteration isolated_tempdir=true completion=mark_close_handoff_reopen_all_checkpoints",
-		manifestDigest, daemonDigest, indexes, packCount, blobCount, 500*time.Millisecond, uint64(16<<30), uint64(256<<20),
-		runtime.GOMAXPROCS(0), os.Getenv("GOMEMLIMIT"),
+		"phase32 reproduction contract: input_sha256=%x daemon_sha256=%x indexes=%d packs=%d blobs=%d ordered_manifest=true selection=preselected work_budget=disabled source_load_delay=%s object_store=local wal_import=memory wal_reopen=local wal_flush=%s read_cache_bytes=0 max_unflushed_bytes=%d l0_sst_bytes=%d GOMAXPROCS=%d GOMEMLIMIT=%q attribution_disabled=%t object_delay_profile=%q candidate_reset=per_iteration isolated_tempdir=true completion=mark_close_handoff_reopen_all_checkpoints",
+		manifestDigest, daemonDigest, indexes, packCount, blobCount, source.loadDelay, 500*time.Millisecond, uint64(16<<30), uint64(256<<20),
+		runtime.GOMAXPROCS(0), os.Getenv("GOMEMLIMIT"), attributionDisabled, objectDelayProfile,
 	)
 	for _, variant := range []struct {
 		lanes    uint
@@ -2070,6 +2088,8 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 					WALStore: "memory", WALDataDir: filepath.Join(directory, "wal"), WALFlushInterval: 500 * time.Millisecond,
 					MaxUnflushedBytes: 16 << 30, L0SSTSizeBytes: 256 << 20,
 					RebuildReset: true, FreshBulkImport: true,
+					AttributionDisabledForTesting: attributionDisabled,
+					ObjectDelayProfileForTesting:  objectDelayProfile,
 				}
 				client, err := daemon.Ensure(ctx, config)
 				if err != nil {

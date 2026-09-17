@@ -912,7 +912,13 @@ mod tests {
         let controlled = Arc::new(ControlledObjectStore::default());
         controlled.delay_put.store(true, Ordering::Release);
         let metrics = Arc::new(ObjectStoreRoleMetrics::default());
-        let store = role_aware_object_store(controlled.clone(), metrics.clone(), None);
+        let store = role_aware_object_store(
+            controlled.clone(),
+            metrics.clone(),
+            None,
+            ObjectStoreRole::Main,
+            None,
+        );
         let pending_store = store.clone();
         let pending = tokio::spawn(async move {
             pending_store
@@ -936,6 +942,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_delay_profile_targets_only_wal_puts() {
+        let profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"wal","operation":"put","delay_ms":25}"#,
+            )
+            .unwrap(),
+        );
+        let main_metrics = Arc::new(ObjectStoreRoleMetrics::default());
+        let wal_metrics = Arc::new(ObjectStoreRoleMetrics::default());
+        let main = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            main_metrics.clone(),
+            Some(wal_metrics.clone()),
+            ObjectStoreRole::Main,
+            Some(profile),
+        );
+
+        main.put(&Path::from("main"), Bytes::from_static(b"main").into())
+            .await
+            .unwrap();
+
+        let mut wal_options = PutOptions::default();
+        wal_options.extensions.insert(
+            slatedb::object_store_tag::ObjectStoreCallTag::new(
+                slatedb::object_store_tag::TableStoreKind::Main,
+                slatedb::object_store_tag::SstType::Wal,
+            ),
+        );
+        let wal_started = Instant::now();
+        main.put_opts(
+            &Path::from("database/wal/0001.sst"),
+            Bytes::from_static(b"wal").into(),
+            wal_options,
+        )
+        .await
+        .unwrap();
+        assert!(wal_started.elapsed() >= std::time::Duration::from_millis(25));
+        assert_eq!(main_metrics.snapshot().put.timing.attempts, 1);
+        assert_eq!(wal_metrics.snapshot().put.timing.attempts, 1);
+    }
+
+    #[tokio::test]
     async fn object_store_metrics_settle_bytes_streams_and_fixed_roles() {
         let controlled = Arc::new(ControlledObjectStore::default());
         let main_metrics = Arc::new(ObjectStoreRoleMetrics::default());
@@ -945,10 +993,14 @@ mod tests {
             controlled.clone(),
             main_metrics.clone(),
             Some(wal_metrics.clone()),
+            ObjectStoreRole::Main,
+            None,
         );
         let coordination = role_aware_object_store(
             Arc::new(InMemory::new()),
             coordination_metrics.clone(),
+            None,
+            ObjectStoreRole::Coordination,
             None,
         );
 
@@ -1411,6 +1463,50 @@ mod tests {
             Some(bytes::Bytes::from_static(b"value"))
         );
         local.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn flushed_memory_wal_rebuild_without_handoff_cannot_reopen() {
+        let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
+        let root = env::temp_dir().join(format!(
+            "vaulticdb-torn-memory-wal-handoff-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let repository_id = format!("torn-memory-wal-handoff-{}", rand::random::<u64>());
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+        config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
+        config.metadata_rebuild_reset = true;
+        config.bulk_import_local_wal_data_dir = Some(root.join("wal"));
+
+        let memory = Storage::open(&repository_id, &config).await.unwrap();
+        let database = memory.database.read().await;
+        let Database::Writer(db) = &*database else {
+            panic!("bulk import did not open a writer")
+        };
+        db.put(b"p:imported", b"value".to_vec()).await.unwrap();
+        db.put(BULK_IMPORT_COMPLETE_RECORD, b"complete".to_vec())
+            .await
+            .unwrap();
+        drop(database);
+
+        arm_storage_failpoint(StorageFailpoint::AfterFlushBeforeHandoff(
+            memory.database_path.clone(),
+        ));
+        assert!(memory.close().await.is_err());
+        assert!(local_wal_handoff_target(memory.coordination_store.as_ref())
+            .await
+            .unwrap()
+            .is_none());
+        drop(memory);
+
+        config.wal_store = WalStoreConfig::Inherit;
+        config.metadata_rebuild_reset = false;
+        config.bulk_import_local_wal_data_dir = None;
+        assert!(Storage::open(&repository_id, &config).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

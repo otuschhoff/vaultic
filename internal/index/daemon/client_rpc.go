@@ -744,6 +744,16 @@ func (t *Transaction) commit(ctx context.Context, idempotencyKey string, deferDu
 	if !deferDurability && !response.GetDurable() {
 		return fmt.Errorf("vaulticdb committed transaction without durability acknowledgement")
 	}
+	if delay := t.client.options.commitResponseDelayForTesting; delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			t.state.Store(transactionCommitUncertain)
+			return ctx.Err()
+		}
+	}
 	t.state.Store(transactionClosed)
 	return nil
 }

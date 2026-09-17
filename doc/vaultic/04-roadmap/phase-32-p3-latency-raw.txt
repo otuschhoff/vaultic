@@ -1,0 +1,28 @@
+Phase 32 P3b latency benchmark output
+Date: 2026-09-17
+Platform: linux/amd64, Intel Xeon Gold 5217 @ 3.00GHz
+GOMAXPROCS: 4
+VaulticDB SHA-256: 6e83382b752e372c6434496973fc48d1a635f77fa759118fdfe8113d6b4648a5
+SlateDB revision: fc68f09a25defb128edfd722ec82696492dbb692
+
+Command:
+GOMAXPROCS=4 VAULTICDB_FAILURE_TEST_BINARY="$PWD/vaulticdb/target/release/vaulticdb" go test -v ./internal/index/daemon -run '^$' -bench '^BenchmarkProcessDurableCommitWALLatency$' -benchtime=100x -count=1
+
+BenchmarkProcessDurableCommitWALLatency/wal-put-delay=0s-4        100    1611242 ns/op      2.539 commit-p95-ms      2.788 commit-p99-ms      1308 durable-wait-us/op       1.000 durable-waits/op      3.230 queue-us/op       7.070 service-us/op         82.82 wal-put-us/op       2.000 wal-puts/op
+BenchmarkProcessDurableCommitWALLatency/wal-put-delay=10ms-4      100   24539283 ns/op      25.43 commit-p95-ms      25.55 commit-p99-ms     23960 durable-wait-us/op       1.000 durable-waits/op      6.060 queue-us/op       14.91 service-us/op         22495 wal-put-us/op       2.000 wal-puts/op
+BenchmarkProcessDurableCommitWALLatency/wal-put-delay=50ms-4      100  104590593 ns/op      105.7 commit-p95-ms      105.8 commit-p99-ms    103924 durable-wait-us/op       1.000 durable-waits/op      8.670 queue-us/op       17.08 service-us/op        102501 wal-put-us/op       2.000 wal-puts/op
+BenchmarkProcessDurableCommitWALLatency/wal-put-delay=200ms-4     100  405175499 ns/op      406.5 commit-p95-ms      406.6 commit-p99-ms    404278 durable-wait-us/op       1.000 durable-waits/op      11.02 queue-us/op       26.22 service-us/op        402706 wal-put-us/op       2.000 wal-puts/op
+PASS
+ok github.com/otuschhoff/vaultic/internal/index/daemon 56.205s
+
+Command:
+GOMAXPROCS=4 VAULTICDB_FAILURE_TEST_BINARY="$PWD/vaulticdb/target/release/vaulticdb" go test -v ./internal/index/daemon -run '^$' -bench '^BenchmarkProcessDurableCommitResponseLatency$' -benchtime=100x -count=1
+
+BenchmarkProcessDurableCommitResponseLatency/commit-response-delay=0s-4       100    1618725 ns/op      2.614 client-p95-ms      2.711 client-p99-ms      1315 durable-wait-us/op      1486 server-commit-us/op
+BenchmarkProcessDurableCommitResponseLatency/commit-response-delay=1ms-4      100    3080234 ns/op      3.776 client-p95-ms      4.022 client-p99-ms      1641 durable-wait-us/op      1804 server-commit-us/op
+BenchmarkProcessDurableCommitResponseLatency/commit-response-delay=8ms-4      100   10415877 ns/op      11.31 client-p95-ms      11.43 client-p99-ms      1712 durable-wait-us/op      2005 server-commit-us/op
+BenchmarkProcessDurableCommitResponseLatency/commit-response-delay=25ms-4     100   27627412 ns/op      28.58 client-p95-ms      28.82 client-p99-ms      1756 durable-wait-us/op      2116 server-commit-us/op
+BenchmarkProcessDurableCommitResponseLatency/commit-response-delay=100ms-4    100  102663026 ns/op      103.6 client-p95-ms      103.6 client-p99-ms      1815 durable-wait-us/op      2120 server-commit-us/op
+BenchmarkProcessDurableCommitResponseLatency/commit-response-delay=250ms-4    100  252850441 ns/op      254.1 client-p95-ms      254.3 client-p99-ms      1766 durable-wait-us/op      2140 server-commit-us/op
+PASS
+ok github.com/otuschhoff/vaultic/internal/index/daemon 41.859s

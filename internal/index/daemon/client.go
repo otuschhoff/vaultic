@@ -50,57 +50,60 @@ func (err *daemonNotReadyError) Error() string {
 
 // Options controls how a vaultic process connects to or starts vaulticdb.
 type Options struct {
-	Socket                   string
-	TCPAddress               string
-	TCPAllowlist             []string
-	AuthToken                string
-	RepositoryID             string
-	DaemonPath               string
-	StartTimeout             time.Duration
-	RetryInterval            time.Duration
-	PersistentDaemon         bool
-	TopologySource           string
-	ObjectStore              string
-	DataDir                  string
-	S3Bucket                 string
-	S3Prefix                 string
-	S3Endpoint               string
-	S3Region                 string
-	S3Provider               string
-	S3BucketLookup           string
-	WALStore                 string
-	WALDataDir               string
-	WALFlushInterval         time.Duration
-	MaxUnflushedBytes        uint64
-	L0SSTSizeBytes           uint64
-	WALS3Bucket              string
-	WALS3Prefix              string
-	WALS3Endpoint            string
-	WALS3Region              string
-	WALS3Provider            string
-	WALS3BucketLookup        string
-	WALRadosMonitors         string
-	WALRadosFSID             string
-	WALRadosPool             string
-	WALRadosNamespace        string
-	WALRadosPrefix           string
-	WALRadosClient           string
-	WALRadosKey              string
-	EncryptionMode           string
-	PassphraseFile           string
-	AzureTokenFile           string
-	GCPTokenFile             string
-	VaultTokenFile           string
-	PKCS11PINFile            string
-	RecoveryUnlock           bool
-	BrokerSocket             string
-	BrokerManifest           string
-	BrokerLease              time.Duration
-	RebuildInitialize        bool
-	RebuildReset             bool
-	FreshBulkImport          bool
-	BulkImportReadCacheBytes uint64
-	testEnvironment          []string
+	Socket                        string
+	TCPAddress                    string
+	TCPAllowlist                  []string
+	AuthToken                     string
+	RepositoryID                  string
+	DaemonPath                    string
+	StartTimeout                  time.Duration
+	RetryInterval                 time.Duration
+	PersistentDaemon              bool
+	TopologySource                string
+	ObjectStore                   string
+	DataDir                       string
+	S3Bucket                      string
+	S3Prefix                      string
+	S3Endpoint                    string
+	S3Region                      string
+	S3Provider                    string
+	S3BucketLookup                string
+	WALStore                      string
+	WALDataDir                    string
+	WALFlushInterval              time.Duration
+	MaxUnflushedBytes             uint64
+	L0SSTSizeBytes                uint64
+	WALS3Bucket                   string
+	WALS3Prefix                   string
+	WALS3Endpoint                 string
+	WALS3Region                   string
+	WALS3Provider                 string
+	WALS3BucketLookup             string
+	WALRadosMonitors              string
+	WALRadosFSID                  string
+	WALRadosPool                  string
+	WALRadosNamespace             string
+	WALRadosPrefix                string
+	WALRadosClient                string
+	WALRadosKey                   string
+	EncryptionMode                string
+	PassphraseFile                string
+	AzureTokenFile                string
+	GCPTokenFile                  string
+	VaultTokenFile                string
+	PKCS11PINFile                 string
+	RecoveryUnlock                bool
+	BrokerSocket                  string
+	BrokerManifest                string
+	BrokerLease                   time.Duration
+	RebuildInitialize             bool
+	RebuildReset                  bool
+	FreshBulkImport               bool
+	BulkImportReadCacheBytes      uint64
+	AttributionDisabledForTesting bool
+	ObjectDelayProfileForTesting  string
+	commitResponseDelayForTesting time.Duration
+	testEnvironment               []string
 }
 
 func (o Options) withDefaults() Options {
@@ -602,7 +605,13 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 		"VAULTICDB_TOPOLOGY_SOURCE="+options.TopologySource,
 	)
 	cmd.Env = append(cmd.Env, options.testEnvironment...)
-	if len(options.testEnvironment) != 0 {
+	if options.AttributionDisabledForTesting {
+		cmd.Env = append(cmd.Env, "VAULTICDB_TEST_ATTRIBUTION_DISABLED=true")
+	}
+	if options.ObjectDelayProfileForTesting != "" {
+		cmd.Env = append(cmd.Env, "VAULTICDB_TEST_OBJECT_DELAY_PROFILE="+options.ObjectDelayProfileForTesting)
+	}
+	if len(options.testEnvironment) != 0 || options.AttributionDisabledForTesting || options.ObjectDelayProfileForTesting != "" {
 		cmd.Env = append(cmd.Env, "VAULTICDB_TEST_CAPABILITY=vaulticdb-process-tests-v1")
 	}
 	for name, value := range map[string]string{

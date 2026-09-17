@@ -7,11 +7,13 @@
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) |
 [Operational monitoring](phase-34-operational-monitoring-and-metrics-export.md)
 
-**Status:** Stages 1-3 implemented. Stage 3 is fresh-reset-only and defaults to
-two ingestion lanes; deferred cleanup is opt-in. Dependency inversion and the
-indivisible-pack regression were fixed in `902b94389`; instrumentation and
-guarded cleanup deferral landed in `8bc9cd7cb`. Full-import completion and
-repository-scale Stage 3 performance acceptance remain pending.
+**Status:** Stages 1-3, P0-P2, P3a0-P3b, and P7a are complete as of 2026-09-17.
+Stage 3 is fresh-reset-only and defaults to two ingestion lanes; deferred cleanup
+is opt-in. P3 evidence retains that baseline and does not select P4-P6 for lack
+of a qualifying measured target. P3c, P3d, and P7b remain partial: durable-WAL
+import, flush/compaction-scale, representative NFS/RADOS/S3, and current-revision
+uncapped acceptance are blocked on suitable authorized resources, so repository-
+scale performance acceptance is not claimed.
 
 **Goal:** sustain legacy-index-to-SlateDB throughput as the candidate grows,
 without weakening duplicate preservation, metadata ordering, atomicity,
@@ -103,9 +105,9 @@ private receipts. Debt and placement changes remain dependency-protected.
 ### VaulticDB: RPC Through SST Files
 
 The dependency is already a fork, pinned in [Cargo.toml](../../../vaulticdb/Cargo.toml)
-to `otuschhoff/slatedb` revision `5faf4b086b043c65afdf193a7e2f87a737a11205`.
+to `otuschhoff/slatedb` revision `fc68f09a25defb128edfd722ec82696492dbb692`.
 Engine function names below refer to the
-[pinned engine source](https://github.com/otuschhoff/slatedb/tree/5faf4b086b043c65afdf193a7e2f87a737a11205/slatedb/src).
+[pinned engine source](https://github.com/otuschhoff/slatedb/tree/fc68f09a25defb128edfd722ec82696492dbb692/slatedb/src).
 
 | Boundary | Code | What may limit progress |
 |---|---|---|
@@ -601,17 +603,35 @@ and Phase 34 M2 wrappers, never create a workload-specific injection framework.
 | P3c: import role sweeps | P3a and validated P3b instrumentation. Run frozen fresh imports with memory WAL, then a separately labeled supported durable-WAL import configuration. Vary source operations, SST/manifest and coordination latency independently; include pack-storage operations only where the workload issues them. | Never apply WAL-PUT conclusions to memory-WAL deferred commits. Preserve each mode's recovery/acknowledgement contract. Include successful marker, close/handoff/reopen and validation tail, and enough data/time to expose flush/compaction. Record inactive roles as not applicable. |
 | P3d: combined scenarios and decision | P3c. Apply all three profiles, cold/warm cache states, independent jitter followed by correlated stalls and shared-capacity contention. Use at least three repeats per comparison. | Unchanged logical metadata, durability and bounded queues; report variance, active wait ages and injected versus observed delays. Rank candidate improvements by end-to-end sensitivity. Separate synthetic from hardware evidence; missing representative infrastructure blocks that acceptance claim, not isolated correctness work. |
 
-With no completed P3 benchmark, start at P3a0 and then P3a on the existing frozen
-real-daemon fixture. The first performance experiment is P3b's persistent-WAL
-durable-commit sweep at 0/10/50/200 ms, not a larger import or more lanes. It
-provides a falsifiable baseline for how much latency can be hidden by current
-batching. Follow with the matched P3b-response acknowledgement sweep; only then
-compare fresh memory-WAL import deferral. This order prevents a fast restartable
-mode from being presented as a durable-WAL optimization.
+**P3a0 status:** complete as of 2026-09-16 for the supported fresh-import
+restart-from-zero contract. Fresh memory-WAL checkpoints and the completion
+marker are applied-state fences, not process-crash resume points. A successful
+`Storage::close` flush, WAL handoff, and completed-shape reopen are all required
+before activation. SIGKILL before close discards the candidate on reset and
+cannot reopen in completed mode. A failpoint after the close flush but before
+handoff likewise leaves the memory binding in place and rejects inherited-WAL
+reopen. `last_durable_sequence` is a process-local operation count, not a SlateDB
+sequence or durable-through token. SlateDB's ordered-prefix `WriteHandle` token
+is internal and, with memory WAL, does not establish process-crash durability.
+The contract trace, crash matrix, focused tests, and residual limits are retained
+in [Phase 32 P3a0 durability evidence](phase-32-p3a0-durability-evidence.md).
 
-Before selecting an optimization, complete these pending response-test substeps
+**P3a-P3b status:** validated on isolated resources as of 2026-09-17. The
+persistent-WAL 0/10/50/200 ms PUT sweep reaches durability wait at approximately
+twice the injected delay because each transaction issues two WAL PUTs. The
+matched post-success response sweep changes client latency without changing
+server commit duration, and timeout recovery remains idempotent. **P3c status:**
+partial. Independent memory-WAL source, main-store and coordination pilots place
+the observable fixture sensitivity in mandatory finalization, not sustained
+ingest/reducer or engine queue/service work. A supported durable-WAL import and
+enough scale to expose flush/compaction were not available. P3d's representative
+combined profiles remain blocked on authorized NFS, RADOS and S3 resources.
+Commands, measurements, build identity, and limitations are retained in
+[Phase 32 P3-P7 evidence](phase-32-p3-p7-evidence.md).
+
+Before revisiting an optimization, complete the remaining P3c response substep
 using [Phase 34's dependency-response contract](phase-34-operational-monitoring-and-metrics-export.md#synthetic-dependency-responses)
-and M2d/M2e. They extend P3b/P3c, not completed P2 evidence. Run them separately
+and M2d/M2e. It extends P3c, not completed P2 evidence. Run it separately
 from storage-latency injection so client confirmation sensitivity is not mistaken
 for slower SlateDB persistence.
 
@@ -625,6 +645,10 @@ for slower SlateDB persistence.
 choose one P5 substep if local planning, reducer RPCs, or service locks dominate;
 choose one P6 substep if the engine/output path is demonstrably limiting. Multiple
 causes may exist, but change one at a time and rerun P3 after each accepted change.
+The completed isolated P3 evidence meets none of those prerequisites. P4-P6 are
+therefore not selected on current evidence and the existing two-lane,
+opt-in-deferred baseline is retained; representative P3d evidence may reopen
+that decision.
 **Exit:** a cited artifact and falsifiable expected improvement for the selected
 experiment. If attribution is inconclusive, return to the missing P1/P2 timer;
 do not proceed by increasing lanes, memory, or disabling safety checks.
@@ -696,6 +720,17 @@ warnings and finalization in the evidence. A missing backend or scale is an
 explicit partial gate, not permission to extrapolate synthetic performance.
 P7c hands the result and sensitivity-based recommendation to Phase 34 M7; no
 standalone predictive simulator is required for this phase.
+
+**P7 status:** P7a and the frozen-fixture component of P7b are validated as of
+2026-09-17; P7b overall remains partial. The two-lane deferred fixture is 41.6%
+faster end to end than the Stage 2 equivalent; four and eight lanes are flat. Go
+race suites, Rust library and serial binary suites, crash/replay/handoff gates,
+and timeout recovery pass. A successful 379,934,385-blob uncapped run is
+historical evidence from revision `8bc9cd7cb`, not current-revision acceptance.
+Current uncapped and representative backend runs remain blocked on authorized
+isolated resources. P7c therefore retains all current defaults and reports
+external acceptance as partial. See
+[Phase 32 P3-P7 evidence](phase-32-p3-p7-evidence.md).
 
 ### Session Handoff
 

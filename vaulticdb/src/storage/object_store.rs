@@ -11,6 +11,71 @@ use slatedb::object_store::GetResultPayload;
 
 use crate::attribution::{OwnedTimingGuard, TimingMetric, TimingSnapshot};
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ObjectStoreRole {
+    Main,
+    Wal,
+    Coordination,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestObjectDelayProfile {
+    version: u32,
+    target: String,
+    role: ObjectStoreRole,
+    operation: String,
+    delay_ms: u64,
+}
+
+impl TestObjectDelayProfile {
+    fn parse(encoded: &str) -> Result<Self> {
+        let profile: Self =
+            serde_json::from_str(encoded).context("decode test object delay profile")?;
+        if profile.version != 1 {
+            bail!("test object delay profile version must be 1");
+        }
+        if profile.target != "isolated" {
+            bail!("test object delay profile target must be isolated");
+        }
+        if profile.operation != "put" {
+            bail!("test object delay profile operation must be put");
+        }
+        if profile.delay_ms > 1_000 {
+            bail!("test object delay profile delay must not exceed 1000 ms");
+        }
+        Ok(profile)
+    }
+
+    async fn delay(&self, role: ObjectStoreRole, operation: &str) {
+        if self.role == role && self.operation == operation && self.delay_ms != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        }
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+fn test_object_delay_profile_from_env() -> Result<Option<Arc<TestObjectDelayProfile>>> {
+    let Some(encoded) = std::env::var_os("VAULTICDB_TEST_OBJECT_DELAY_PROFILE") else {
+        return Ok(None);
+    };
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
+        != Ok("vaulticdb-process-tests-v1")
+    {
+        bail!("test object delay profiles require the process-test capability");
+    }
+    let encoded = encoded
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("test object delay profile is not UTF-8"))?;
+    Ok(Some(Arc::new(TestObjectDelayProfile::parse(&encoded)?)))
+}
+
+#[cfg(not(feature = "test-failpoints"))]
+fn test_object_delay_profile_from_env() -> Result<Option<Arc<TestObjectDelayProfile>>> {
+    Ok(None)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ObjectOperationSnapshot {
     pub(crate) timing: TimingSnapshot,
@@ -158,6 +223,8 @@ struct RoleAwareObjectStore {
     inner: Arc<dyn ObjectStore>,
     metrics: Arc<ObjectStoreRoleMetrics>,
     tagged_wal_metrics: Option<Arc<ObjectStoreRoleMetrics>>,
+    role: ObjectStoreRole,
+    test_delay_profile: Option<Arc<TestObjectDelayProfile>>,
 }
 
 #[derive(Debug)]
@@ -376,6 +443,25 @@ impl RoleAwareObjectStore {
             Arc::clone(&self.metrics)
         }
     }
+
+    fn role_for_extensions(
+        &self,
+        extensions: &slatedb::object_store::Extensions,
+    ) -> ObjectStoreRole {
+        let is_wal = slatedb::object_store_tag::ObjectStoreCallTag::from_extensions(extensions)
+            .is_some_and(|tag| tag.sst_type == slatedb::object_store_tag::SstType::Wal);
+        if is_wal && self.tagged_wal_metrics.is_some() {
+            ObjectStoreRole::Wal
+        } else {
+            self.role
+        }
+    }
+
+    async fn test_delay(&self, role: ObjectStoreRole, operation: &str) {
+        if let Some(profile) = &self.test_delay_profile {
+            profile.delay(role, operation).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -388,7 +474,9 @@ impl ObjectStore for RoleAwareObjectStore {
     ) -> slatedb::object_store::Result<PutResult> {
         let bytes = payload.content_length().try_into().unwrap_or(u64::MAX);
         let metrics = self.metrics_for_extensions(&options.extensions);
+        let role = self.role_for_extensions(&options.extensions);
         let mut guard = metrics.put.timer();
+        self.test_delay(role, "put").await;
         let result = self.inner.put_opts(location, payload, options).await;
         settle(&mut guard, &result);
         if result.is_ok() {
@@ -590,11 +678,15 @@ fn role_aware_object_store(
     inner: Arc<dyn ObjectStore>,
     metrics: Arc<ObjectStoreRoleMetrics>,
     tagged_wal_metrics: Option<Arc<ObjectStoreRoleMetrics>>,
+    role: ObjectStoreRole,
+    test_delay_profile: Option<Arc<TestObjectDelayProfile>>,
 ) -> Arc<dyn ObjectStore> {
     Arc::new(RoleAwareObjectStore {
         inner,
         metrics,
         tagged_wal_metrics,
+        role,
+        test_delay_profile,
     })
 }
 
