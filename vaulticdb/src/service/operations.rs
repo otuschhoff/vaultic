@@ -633,6 +633,8 @@ impl Service {
             idle_deadline_unix_ms,
             promotion_safe: status.promotion_safe,
             attribution,
+            process_started_unix_ms: self.state.clock_started_unix_ms,
+            captured_unix_ms: unix_time_ms_i64().unwrap_or_default(),
         }
     }
 

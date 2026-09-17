@@ -125,6 +125,7 @@ pub async fn handle_request(
     peer: &PeerProcess,
     endpoint_binding: &str,
     protocol: &mut ConnectionProtocol,
+    process_started_unix_ms: u64,
 ) -> Result<BrokerResponse> {
     let now = unix_time_ms()?;
     let mut broker = broker.lock().await;
@@ -172,6 +173,8 @@ pub async fn handle_request(
             let status = broker.status(now)?;
             Ok(BrokerResponse::Status {
                 protocol: PROTOCOL_VERSION,
+                process_started_unix_ms,
+                captured_unix_ms: now,
                 locked: status.locked,
                 repository_id: status.repository_id.into_string(),
                 capsule_generation: status.capsule_generation,
@@ -677,6 +680,8 @@ pub enum BrokerResponse {
     },
     Status {
         protocol: &'static str,
+        process_started_unix_ms: u64,
+        captured_unix_ms: u64,
         locked: bool,
         repository_id: String,
         capsule_generation: u64,

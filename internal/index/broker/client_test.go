@@ -77,6 +77,42 @@ func TestRequestErrorPreservesBrokerCode(t *testing.T) {
 	}
 }
 
+func TestStatusRequiresOrderedProcessTimestamps(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "valid", response: `{"result":"status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1000,"captured_unix_ms":1001}`},
+		{name: "legacy missing", response: `{"result":"status","protocol":"vaultic-key-broker.v1"}`},
+		{name: "partial", response: `{"result":"status","protocol":"vaultic-key-broker.v1","captured_unix_ms":1000}`, wantErr: true},
+		{name: "captured before start", response: `{"result":"status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1001,"captured_unix_ms":1000}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clientConnection, serverConnection := net.Pipe()
+			defer clientConnection.Close()
+			defer serverConnection.Close()
+			client := &Client{
+				connection: clientConnection,
+				reader:     bufio.NewReader(clientConnection),
+				protocol:   protocolVersion,
+			}
+			go func() {
+				_, _ = bufio.NewReader(serverConnection).ReadBytes('\n')
+				_, _ = serverConnection.Write([]byte(test.response + "\n"))
+			}()
+			status, err := client.Status(t.Context())
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Status() error = %v, wantErr %t", err, test.wantErr)
+			}
+			if !test.wantErr && test.name == "legacy missing" && (status.ProcessStartedUnixMS != 0 || status.CapturedUnixMS != 0) {
+				t.Fatalf("legacy timestamps = %d/%d, want zero fallback", status.ProcessStartedUnixMS, status.CapturedUnixMS)
+			}
+		})
+	}
+}
+
 func TestExternalShareBindingCrossLanguageFixture(t *testing.T) {
 	value := capsule{
 		Header: capsuleHeader{RepositoryID: "repo-a", Generation: 8, RootKeyVersion: 1, PolicyHash: "policy-hash"},

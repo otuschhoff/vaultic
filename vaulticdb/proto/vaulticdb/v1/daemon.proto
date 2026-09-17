@@ -267,6 +267,8 @@ message WriterStatusResponse {
   int64 idle_deadline_unix_ms = 10;
   bool promotion_safe = 11;
   AttributionSnapshot attribution = 12;
+  int64 process_started_unix_ms = 13;
+  int64 captured_unix_ms = 14;
 }
 
 message TimingSnapshot {

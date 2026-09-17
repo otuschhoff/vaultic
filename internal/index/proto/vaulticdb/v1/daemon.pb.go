@@ -2319,21 +2319,23 @@ func (x *WriterStatusRequest) GetContext() *RequestContext {
 }
 
 type WriterStatusResponse struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	InstanceId          string                 `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
-	Role                WriterRole             `protobuf:"varint,2,opt,name=role,proto3,enum=vaulticdb.v1.WriterRole" json:"role,omitempty"`
-	CurrentEpoch        uint64                 `protobuf:"varint,3,opt,name=current_epoch,json=currentEpoch,proto3" json:"current_epoch,omitempty"`
-	ObservedEpoch       uint64                 `protobuf:"varint,4,opt,name=observed_epoch,json=observedEpoch,proto3" json:"observed_epoch,omitempty"`
-	TransitionReason    string                 `protobuf:"bytes,5,opt,name=transition_reason,json=transitionReason,proto3" json:"transition_reason,omitempty"`
-	TransitionUnixMs    int64                  `protobuf:"varint,6,opt,name=transition_unix_ms,json=transitionUnixMs,proto3" json:"transition_unix_ms,omitempty"`
-	ActiveWriteIntents  uint64                 `protobuf:"varint,7,opt,name=active_write_intents,json=activeWriteIntents,proto3" json:"active_write_intents,omitempty"`
-	ActiveTransactions  uint64                 `protobuf:"varint,8,opt,name=active_transactions,json=activeTransactions,proto3" json:"active_transactions,omitempty"`
-	LastDurableSequence uint64                 `protobuf:"varint,9,opt,name=last_durable_sequence,json=lastDurableSequence,proto3" json:"last_durable_sequence,omitempty"`
-	IdleDeadlineUnixMs  int64                  `protobuf:"varint,10,opt,name=idle_deadline_unix_ms,json=idleDeadlineUnixMs,proto3" json:"idle_deadline_unix_ms,omitempty"`
-	PromotionSafe       bool                   `protobuf:"varint,11,opt,name=promotion_safe,json=promotionSafe,proto3" json:"promotion_safe,omitempty"`
-	Attribution         *AttributionSnapshot   `protobuf:"bytes,12,opt,name=attribution,proto3" json:"attribution,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	InstanceId           string                 `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	Role                 WriterRole             `protobuf:"varint,2,opt,name=role,proto3,enum=vaulticdb.v1.WriterRole" json:"role,omitempty"`
+	CurrentEpoch         uint64                 `protobuf:"varint,3,opt,name=current_epoch,json=currentEpoch,proto3" json:"current_epoch,omitempty"`
+	ObservedEpoch        uint64                 `protobuf:"varint,4,opt,name=observed_epoch,json=observedEpoch,proto3" json:"observed_epoch,omitempty"`
+	TransitionReason     string                 `protobuf:"bytes,5,opt,name=transition_reason,json=transitionReason,proto3" json:"transition_reason,omitempty"`
+	TransitionUnixMs     int64                  `protobuf:"varint,6,opt,name=transition_unix_ms,json=transitionUnixMs,proto3" json:"transition_unix_ms,omitempty"`
+	ActiveWriteIntents   uint64                 `protobuf:"varint,7,opt,name=active_write_intents,json=activeWriteIntents,proto3" json:"active_write_intents,omitempty"`
+	ActiveTransactions   uint64                 `protobuf:"varint,8,opt,name=active_transactions,json=activeTransactions,proto3" json:"active_transactions,omitempty"`
+	LastDurableSequence  uint64                 `protobuf:"varint,9,opt,name=last_durable_sequence,json=lastDurableSequence,proto3" json:"last_durable_sequence,omitempty"`
+	IdleDeadlineUnixMs   int64                  `protobuf:"varint,10,opt,name=idle_deadline_unix_ms,json=idleDeadlineUnixMs,proto3" json:"idle_deadline_unix_ms,omitempty"`
+	PromotionSafe        bool                   `protobuf:"varint,11,opt,name=promotion_safe,json=promotionSafe,proto3" json:"promotion_safe,omitempty"`
+	Attribution          *AttributionSnapshot   `protobuf:"bytes,12,opt,name=attribution,proto3" json:"attribution,omitempty"`
+	ProcessStartedUnixMs int64                  `protobuf:"varint,13,opt,name=process_started_unix_ms,json=processStartedUnixMs,proto3" json:"process_started_unix_ms,omitempty"`
+	CapturedUnixMs       int64                  `protobuf:"varint,14,opt,name=captured_unix_ms,json=capturedUnixMs,proto3" json:"captured_unix_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *WriterStatusResponse) Reset() {
@@ -2448,6 +2450,20 @@ func (x *WriterStatusResponse) GetAttribution() *AttributionSnapshot {
 		return x.Attribution
 	}
 	return nil
+}
+
+func (x *WriterStatusResponse) GetProcessStartedUnixMs() int64 {
+	if x != nil {
+		return x.ProcessStartedUnixMs
+	}
+	return 0
+}
+
+func (x *WriterStatusResponse) GetCapturedUnixMs() int64 {
+	if x != nil {
+		return x.CapturedUnixMs
+	}
+	return 0
 }
 
 type TimingSnapshot struct {
@@ -5761,7 +5777,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x05tiers\x18\x04 \x03(\v2!.vaulticdb.v1.ReadCacheTierPolicyR\x05tiers\"r\n" +
 	"\x13WriterStatusRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
-	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xc2\x04\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xa3\x05\n" +
 	"\x14WriterStatusResponse\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12,\n" +
@@ -5776,7 +5792,9 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x15idle_deadline_unix_ms\x18\n" +
 	" \x01(\x03R\x12idleDeadlineUnixMs\x12%\n" +
 	"\x0epromotion_safe\x18\v \x01(\bR\rpromotionSafe\x12C\n" +
-	"\vattribution\x18\f \x01(\v2!.vaulticdb.v1.AttributionSnapshotR\vattribution\"\xfa\x03\n" +
+	"\vattribution\x18\f \x01(\v2!.vaulticdb.v1.AttributionSnapshotR\vattribution\x125\n" +
+	"\x17process_started_unix_ms\x18\r \x01(\x03R\x14processStartedUnixMs\x12(\n" +
+	"\x10captured_unix_ms\x18\x0e \x01(\x03R\x0ecapturedUnixMs\"\xfa\x03\n" +
 	"\x0eTimingSnapshot\x12\x1a\n" +
 	"\battempts\x18\x01 \x01(\x04R\battempts\x12\x1a\n" +
 	"\bfailures\x18\x02 \x01(\x04R\bfailures\x12\x19\n" +

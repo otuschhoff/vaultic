@@ -17,7 +17,7 @@ use vaulticdb::broker::{
     startup::{
         disable_core_dumps, identity_init, load, release_sign, remove_stale_socket, set_mode,
     },
-    KeyBroker,
+    unix_time_ms, KeyBroker,
 };
 
 #[cfg(test)]
@@ -30,7 +30,7 @@ use vaulticdb::{
             PROTOCOL_VERSION,
         },
         startup::write_new_file,
-        unix_time_ms, Capability, ContributionRejection,
+        Capability, ContributionRejection,
     },
     encryption::recovery_capsule::{MemberProvider, UnlockPolicy},
 };
@@ -40,6 +40,7 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     disable_core_dumps();
+    let process_started_unix_ms = unix_time_ms()?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments.len() == 1 && arguments[0] == "--version" {
         vaulticdb::build_info::print_version("vaultic-key-broker");
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
                 let endpoint_binding = startup.endpoint_binding.clone();
                 let lock_notification = lock_notification.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = serve_connection(stream, broker, endpoint_binding, lock_notification).await {
+                    if let Err(error) = serve_connection(stream, broker, endpoint_binding, lock_notification, process_started_unix_ms).await {
                         eprintln!("vaultic-key-broker: connection rejected: {error:#}");
                     }
                 });
@@ -102,6 +103,7 @@ async fn serve_connection(
     broker: Arc<Mutex<KeyBroker>>,
     endpoint_binding: String,
     lock_notification: Arc<Notify>,
+    process_started_unix_ms: u64,
 ) -> Result<()> {
     let peer = inspect_peer(&stream)?;
     let connection_id = random_id();
@@ -134,6 +136,7 @@ async fn serve_connection(
                         &peer,
                         &endpoint_binding,
                         &mut protocol,
+                        process_started_unix_ms,
                     )
                     .await
                     .unwrap_or_else(|error| {

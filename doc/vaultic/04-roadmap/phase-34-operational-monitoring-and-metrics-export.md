@@ -6,7 +6,7 @@
 
 [Operational observability](02-observability.md) · [CLI and operations architecture](../02-architecture/04-cli-and-operations.md)
 
-**Status: design specification, not yet implemented.**
+**Status: implementation in progress.**
 
 **Goal:** make storage use, active work, queues, throughput, latency, WAL pressure, and read-cache effectiveness visible across `vaultic`, `vaulticdb`, and the key broker without retaining an unbounded local time series or adding material hot-path overhead. Operators get cheap point-in-time commands and an optional live terminal dashboard. Long-term graphing and retention belong to an explicitly configured exporter, initially InfluxDB v2, rather than process memory or the repository metadata database.
 
@@ -21,6 +21,27 @@ different metric vocabulary or scheduler per workload. Neither workload waits
 for monitor commands, the dashboard or exporters. Existing instrumentation is
 partial; the additions below remain pending and do not retroactively certify
 completed benchmark stages.
+
+## Implementation and acceptance ledger
+
+The initial monitoring foundation was implemented on 2026-09-17. This ledger
+separates executable delivery from milestone acceptance; `partial` does not
+authorize a later milestone to treat a missing prerequisite as complete.
+
+| Milestone | Status | Delivered or inherited evidence | Remaining gate |
+|---|---|---|---|
+| M0 | Partial | Versioned bounded snapshot schema, units, availability, reset identity, label allowlists, histogram bounds, and duplicate/cardinality validation. Phase 32 P2 and P3a0 retain attribution and fresh-import durability evidence. | Publish the complete owner-to-metric/action durability matrix. There is no exposed generation-bound durable-through token or persistent import-resume contract. |
+| M1 | Partial | Go saturating counters, gauges, timers, fixed and rotating histograms, and bounded active-operation registry have concurrency, rotation, overflow, and cancellation tests. Existing Phase 32 Rust attribution remains the Rust owner. | Wire the registry and missing wait/queue boundaries into each production action; publish enabled/disabled CPU, allocation, and memory measurements. |
+| M2 | Partial | Phase 32 supplies isolated object-delay, response-delay, durability, cancellation, and import evidence for its named boundaries. | Backup, restore, forget/prune, checker scratch, shared-capacity, and full action response-sweep adapters remain missing. Small fixtures are not representative throughput evidence. |
+| M3 | Partial | VaulticDB writer, engine, role-aware object-store, WAL, and read-cache status are mapped; repository aggregate and opt-in placement reconciliation are exposed. | Source, pack-transfer, VFS/FUSE/NFS, maintenance, broker-wait, and remaining production queue/operation boundaries need owner-scoped instrumentation and overhead evidence. |
+| M4 | Partial | VaulticDB and key-broker process/capture identity is served over existing protected protocols. `vaultic` applies bounded schema validation, timeout, stale/unavailable handling, and redaction rules. | Complete compatibility, authorization, response-size, collector-timeout, and golden snapshot handoff evidence for every exposed component. |
+| M5 | Partial | `vaultic monitor` owns snapshot commands, filters, deterministic rendering, reset-aware rates, bucket-bounded percentiles, terminal-only watch, and opt-in reconciliation. | Keyboard view selection, sorting, pause/reset controls, bounded 1/5/15-minute windows, narrow/resize behavior, asynchronous reconciliation progress, and operator output examples remain missing. |
+| M6 | Partial | `vaultic` owns the vendor-neutral asynchronous exporter and opt-in InfluxDB v2 client with protected token sources, bounded batches/queue/retry, timeout, reset markers, and drop/failure counters. Rust services contain no exporter clients. | Publish maximum-cardinality CPU/memory/drop/staleness measurements and an end-to-end blocked-endpoint isolation run. |
+| M7 | Blocked | Phase 32 P3/P7 artifacts provide import-only synthetic and representative results with explicit revision and coverage limits. | Phase 33 checker evidence, complete M2f action matrices, all shared-profile current-revision runs, and representative infrastructure evidence do not exist. They must not be inferred from the monitoring unit tests. |
+
+Current delivery is therefore a bounded monitoring foundation, not Phase 34
+acceptance. M7 remains blocked until Phase 33 and the named infrastructure runs
+produce their own artifacts.
 
 ## Questions this phase must answer
 
@@ -325,11 +346,16 @@ vaultic monitor storage [--backend ID] [--reconcile] [--json]
 vaultic monitor operations [--active] [--json]
 vaultic monitor caches [--cache ID] [--json]
 vaultic monitor watch [--interval DURATION] [--view overview|storage|operations|wal|caches|latency]
-vaulticdb monitor status|storage|operations|wal|caches [--json]
-vaultic-key-broker monitor status|operations [--json]
 ```
 
-`vaultic monitor` is the preferred aggregate client. It reads the local Vaultic process where applicable and authenticated status endpoints from VaulticDB, the shared cache coordinator, and the key broker. Missing, unauthorized, incompatible, or stale components remain visible as unavailable sections. Component-native commands remain useful for diagnosis and bootstrap without a working aggregate client.
+`vaultic monitor` is the only monitoring client and user-facing command surface.
+It reads the local Vaultic process where applicable and queries authenticated
+status endpoints from VaulticDB, the shared cache coordinator, and the key
+broker. Missing, unauthorized, incompatible, or stale components remain visible
+as unavailable sections. VaulticDB, the key broker, and other long-running
+components do not implement monitor CLI clients, terminal rendering, or exporter
+delivery; they only account for their own work and serve bounded snapshots over
+their existing protected control channels.
 
 Snapshot commands exit after one collection and are suitable for scripts. `monitor watch` requires a terminal, maintains only the samples needed for its displayed windows, and never changes daemon retention. It provides keyboard-selectable overview, storage, active operations, WAL/writeback, cache, and latency views; sortable tables; pause/reset-window controls; explicit sample age; counter-reset markers; and narrow-terminal fallback. Rendering is rate-limited and decoupled from collection. Non-interactive use requires `--json` or a snapshot command rather than emitting terminal control sequences.
 
@@ -337,13 +363,13 @@ The default overview emphasizes actionable saturation: slowest backend, writebac
 
 ## Collection and transport
 
-Define one shared telemetry schema and small instrumentation library per implementation language, not a second metrics vocabulary in each command. Each long-running component exposes an authenticated local status API over its existing protected control channel. Short-lived `vaultic` commands can expose an ephemeral in-process collector to the aggregate monitor or emit a final snapshot. Remote status follows the component's existing authentication and least-privilege rules; Phase 41 later extends this access to enrolled remote principals.
+Define one shared telemetry schema and small instrumentation library per implementation language, not a second metrics vocabulary in each command. Each long-running component only generates bounded statistics and exposes an authenticated local status API over its existing protected control channel. The `vaultic` process owns all polling, aggregation, rate/window derivation, terminal rendering, and export delivery. Short-lived `vaultic` commands can expose an ephemeral in-process collector to the aggregate monitor or emit a final snapshot. Remote status follows the component's existing authentication and least-privilege rules; Phase 41 later extends this access to enrolled remote principals.
 
 Collection has configurable timeouts, maximum response size, maximum active-operation records, histogram count, and refresh frequency. Metrics collection and export have separate bounded queues. On overflow, coalesce gauges, preserve counters through the next successful snapshot where possible, drop distribution intervals or events according to documented policy, and expose dropped-export counters. Telemetry failure never blocks backup, restore, database durability, cache reads, or broker lease handling.
 
 ## InfluxDB v2 and future exporters
 
-Keep the collector independent from any monitoring vendor. Define an exporter interface over schema-versioned snapshots, then provide an opt-in InfluxDB v2 exporter using its HTTP write endpoint. Configuration includes URL, organization, bucket, token file or protected environment source, export interval, batch limit, timeout, TLS trust, and bounded retry/backoff. Tokens are never accepted as command-line flags, returned by status, or written to logs.
+Keep the collector independent from any monitoring vendor. Define an exporter interface over schema-versioned snapshots in `vaultic`, then provide an opt-in InfluxDB v2 exporter using its HTTP write endpoint. Configuration includes URL, organization, bucket, token file or protected environment source, export interval, batch limit, timeout, TLS trust, and bounded retry/backoff. Tokens are never accepted as command-line flags, returned by status, or written to logs. VaulticDB, the key broker, cache coordinators, and other service processes never contain InfluxDB, Prometheus, OpenTelemetry, or other exporter clients and never contact monitoring destinations.
 
 Export gauges, counter deltas with reset markers, and histogram buckets or agreed quantiles using low-cardinality tags. A deployment ID and process start ID distinguish restarts without creating one series per operation. Active-operation details and arbitrary IDs are not exported as metric tags; export counts and oldest ages by class, with lifecycle details going to the existing structured event path. The exporter keeps only one bounded retry batch or spool budget and drops oldest telemetry when exhausted. It must never write monitoring history into VaulticDB, the repository, a WAL, or a read-cache tier.
 
@@ -454,14 +480,15 @@ measurements. Publish the coverage map and measured overhead before proceeding.
 ### M4. Expose authenticated snapshots
 
 **Prerequisite:** M0/M1 and each exposed M3 boundary. Implement component status
-endpoints and native snapshot commands one component at a time over existing
-protected channels, with bounded responses, timeouts and redaction.
+endpoints one component at a time over existing protected channels, with bounded
+responses, timeouts and redaction. Components generate and serve statistics only;
+do not add component-native monitor commands, renderers, pollers, or exporters.
 **Gate/handoff:** golden JSON, authorization, compatibility, stale/unavailable,
 reset and collector-timeout tests pass without blocking data-path work.
 
 ### M5. Build aggregate monitoring and terminal views
 
-**Prerequisite:** M4. Deliver aggregate JSON snapshots first, then counter/window
+**Prerequisite:** M4. In `vaultic`, deliver aggregate JSON snapshots first, then counter/window
 derivation, then terminal views and explicit asynchronous reconciliation as
 independently tested substeps. Do not make inventory scanning a refresh action.
 **Gate/handoff:** deterministic snapshots verify rates, bucket-derived percentiles,
@@ -470,8 +497,9 @@ bounded regardless of attachment. Publish operator examples with real output.
 
 ### M6. Add optional export
 
-**Prerequisite:** M4's snapshot contract. Implement the vendor-neutral exporter
-interface, then opt-in InfluxDB v2 batching/authentication and bounded retry.
+**Prerequisite:** M4's snapshot contract. In `vaultic` only, implement the
+vendor-neutral exporter interface, then opt-in InfluxDB v2 batching/authentication
+and bounded retry. Service processes expose snapshots but never send exports.
 **Gate/handoff:** unavailable/slow exporters, overflow, counter resets, redaction
 and secret handling pass; blocked export has no data-path dependency. Record
 memory/CPU and drop/staleness behavior under maximum configured cardinality.

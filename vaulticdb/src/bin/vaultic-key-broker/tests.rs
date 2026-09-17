@@ -287,12 +287,14 @@ mod tests {
             broker.clone(),
             "unix:/test/broker.sock".to_owned(),
             notification.clone(),
+            1_000,
         ));
         let task_b = tokio::spawn(serve_connection(
             server_b,
             broker.clone(),
             "unix:/test/broker.sock".to_owned(),
             notification,
+            1_000,
         ));
 
         for stream in [&mut client_a, &mut client_b] {
@@ -310,6 +312,8 @@ mod tests {
         let status = exchange(&mut client_b, serde_json::json!({"operation":"status"})).await;
         assert_eq!(status["result"], "status");
         assert_eq!(status["repository_id"], "repo-a");
+        assert_eq!(status["process_started_unix_ms"], 1_000);
+        assert!(status["captured_unix_ms"].as_u64().is_some_and(|value| value >= 1_000));
 
         let locked = exchange(&mut client_a, serde_json::json!({"operation":"lock"})).await;
         assert_eq!(locked["result"], "ok");
@@ -430,6 +434,7 @@ mod tests {
             &peer,
             "unix:/test/broker.sock",
             &mut protocol,
+            1_000,
         )
         .await
         .unwrap();
@@ -453,6 +458,7 @@ mod tests {
             &peer,
             "unix:/test/broker.sock",
             &mut protocol,
+            1_000,
         )
         .await
         .unwrap();
@@ -477,6 +483,7 @@ mod tests {
             &peer,
             "unix:/test/broker.sock",
             &mut protocol,
+            1_000,
         )
         .await
         .is_err());
@@ -499,6 +506,7 @@ mod tests {
             &peer,
             "unix:/test/broker.sock",
             &mut protocol,
+            1_000,
         )
         .await
         .unwrap();

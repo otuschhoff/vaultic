@@ -133,12 +133,14 @@ impl CacheConfidentiality {
 impl CacheTierConfig {
     fn validate(&self) -> Result<()> {
         if self.id.is_empty()
+            || self.id.len() > 128
+            || self.id == "slatedb"
             || !self
                 .id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
-            bail!("read-cache tier ID must contain only ASCII letters, digits, '-' or '_'");
+            bail!("read-cache tier ID must be 1-128 ASCII letters, digits, '-' or '_' and must not be 'slatedb'");
         }
         self.policy.validate(&self.id)
     }
@@ -4970,6 +4972,17 @@ mod tests {
         assert!(config.validate().is_err());
         config.max_inflight_bytes = DEFAULT_PART_SIZE_BYTES;
         config.aggregate_max_bytes = Some(0);
+        assert!(config.validate().is_err());
+
+        config.aggregate_max_bytes = None;
+        config.tiers = vec![CacheTierConfig {
+            id: "slatedb".to_owned(),
+            store: ReplicaStoreConfig::Memory,
+            confidentiality: CacheConfidentiality::Encrypted,
+            policy: policy(4096),
+        }];
+        assert!(config.validate().is_err());
+        config.tiers[0].id = "a".repeat(129);
         assert!(config.validate().is_err());
     }
 

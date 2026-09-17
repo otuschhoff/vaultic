@@ -235,18 +235,20 @@ type EncryptionAudit struct {
 
 // WriterStatus describes observable VaulticDB writer ownership without exposing protobuf types.
 type WriterStatus struct {
-	InstanceID          string              `json:"instance_id"`
-	Role                string              `json:"role"`
-	CurrentEpoch        uint64              `json:"current_epoch"`
-	ObservedEpoch       uint64              `json:"observed_epoch"`
-	TransitionReason    string              `json:"transition_reason"`
-	TransitionUnixMS    int64               `json:"transition_unix_ms"`
-	ActiveWriteIntents  uint64              `json:"active_write_intents"`
-	ActiveTransactions  uint64              `json:"active_transactions"`
-	LastDurableSequence uint64              `json:"last_durable_sequence"`
-	IdleDeadlineUnixMS  int64               `json:"idle_deadline_unix_ms"`
-	PromotionSafe       bool                `json:"promotion_safe"`
-	Attribution         AttributionSnapshot `json:"attribution"`
+	InstanceID           string              `json:"instance_id"`
+	Role                 string              `json:"role"`
+	CurrentEpoch         uint64              `json:"current_epoch"`
+	ObservedEpoch        uint64              `json:"observed_epoch"`
+	TransitionReason     string              `json:"transition_reason"`
+	TransitionUnixMS     int64               `json:"transition_unix_ms"`
+	ActiveWriteIntents   uint64              `json:"active_write_intents"`
+	ActiveTransactions   uint64              `json:"active_transactions"`
+	LastDurableSequence  uint64              `json:"last_durable_sequence"`
+	IdleDeadlineUnixMS   int64               `json:"idle_deadline_unix_ms"`
+	PromotionSafe        bool                `json:"promotion_safe"`
+	Attribution          AttributionSnapshot `json:"attribution"`
+	ProcessStartedUnixMS int64               `json:"process_started_unix_ms"`
+	CapturedUnixMS       int64               `json:"captured_unix_ms"`
 }
 
 type TimingSnapshot struct {
@@ -291,6 +293,68 @@ type ObjectStoreRoleSnapshot struct {
 	Rename                      ObjectOperationSnapshot `json:"rename"`
 	RetryDelayAvailable         bool                    `json:"retry_delay_available"`
 	BackgroundPressureAvailable bool                    `json:"background_pressure_available"`
+}
+
+type ReadCacheMetrics struct {
+	Hits                uint64 `json:"hits"`
+	Misses              uint64 `json:"misses"`
+	OriginReads         uint64 `json:"origin_reads"`
+	OriginReadsAvoided  uint64 `json:"origin_reads_avoided"`
+	Corruptions         uint64 `json:"corruptions"`
+	Timeouts            uint64 `json:"timeouts"`
+	Failures            uint64 `json:"failures"`
+	Bypasses            uint64 `json:"bypasses"`
+	Admissions          uint64 `json:"admissions"`
+	AdmissionRejections uint64 `json:"admission_rejections"`
+	CapacityEvictions   uint64 `json:"capacity_evictions"`
+	IdleEvictions       uint64 `json:"idle_evictions"`
+	AbsoluteEvictions   uint64 `json:"absolute_evictions"`
+	CorruptionEvictions uint64 `json:"corruption_evictions"`
+	ReadLatencyTotalUS  uint64 `json:"read_latency_total_us"`
+	ReadLatencyCount    uint64 `json:"read_latency_count"`
+	WriteLatencyTotalUS uint64 `json:"write_latency_total_us"`
+	WriteLatencyCount   uint64 `json:"write_latency_count"`
+}
+
+type ReadCacheTierStatus struct {
+	ID                  string           `json:"id"`
+	Enabled             bool             `json:"enabled"`
+	Confidentiality     string           `json:"confidentiality"`
+	RequestedMaxBytes   uint64           `json:"requested_max_bytes"`
+	UsedBytes           uint64           `json:"used_bytes"`
+	ReservedBytes       uint64           `json:"reserved_bytes"`
+	LocalUsedBytes      uint64           `json:"local_used_bytes"`
+	LocalReservedBytes  uint64           `json:"local_reserved_bytes"`
+	PinnedBytes         uint64           `json:"pinned_bytes"`
+	PendingReclaimBytes uint64           `json:"pending_reclaim_bytes"`
+	ReconciliationLag   uint64           `json:"reconciliation_lag"`
+	CircuitOpen         bool             `json:"circuit_open"`
+	Metrics             ReadCacheMetrics `json:"metrics"`
+}
+
+type ReadCacheStatus struct {
+	Configured               bool                  `json:"configured"`
+	Revision                 uint64                `json:"revision"`
+	Namespace                string                `json:"namespace"`
+	AggregateMaxBytes        uint64                `json:"aggregate_max_bytes"`
+	AggregateMaxBytesKnown   bool                  `json:"aggregate_max_bytes_known"`
+	UsedBytes                uint64                `json:"used_bytes"`
+	ReservedBytes            uint64                `json:"reserved_bytes"`
+	LocalUsedBytes           uint64                `json:"local_used_bytes"`
+	LocalReservedBytes       uint64                `json:"local_reserved_bytes"`
+	PinnedBytes              uint64                `json:"pinned_bytes"`
+	InflightBytes            uint64                `json:"inflight_bytes"`
+	MaxInflightBytes         uint64                `json:"max_inflight_bytes"`
+	PendingReclaimBytes      uint64                `json:"pending_reclaim_bytes"`
+	QuotaCoordinationHealthy bool                  `json:"quota_coordination_healthy"`
+	QuotaLedgerRevision      uint64                `json:"quota_ledger_revision"`
+	QuotaLeaseExpiryUnixMS   uint64                `json:"quota_lease_expiry_unix_ms"`
+	UnverifiedStaleBytes     uint64                `json:"unverified_stale_bytes"`
+	QuotaReconciliationLag   uint64                `json:"quota_reconciliation_lag"`
+	PolicySyncLag            uint64                `json:"policy_sync_lag"`
+	PolicySyncError          string                `json:"policy_sync_error,omitempty"`
+	Metrics                  ReadCacheMetrics      `json:"metrics"`
+	Tiers                    []ReadCacheTierStatus `json:"tiers"`
 }
 
 type AttributionSnapshot struct {
@@ -1282,6 +1346,19 @@ func (c *Client) writerStatus(ctx context.Context) (WriterStatus, error) {
 	return writerStatus(response), nil
 }
 
+func (c *Client) ReadCacheStatus(ctx context.Context) (ReadCacheStatus, error) {
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.CacheStatus(
+		ctx,
+		&vaulticdbv1.ReadCacheStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+	)
+	if err != nil {
+		return ReadCacheStatus{}, err
+	}
+	return readCacheStatus(response), nil
+}
+
 func (c *Client) generationStatus(ctx context.Context) (GenerationStatus, error) {
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
@@ -1510,19 +1587,71 @@ func writerStatus(response *vaulticdbv1.WriterStatusResponse) WriterStatus {
 	role := strings.ToLower(strings.TrimPrefix(response.GetRole().String(), "WRITER_ROLE_"))
 	role = strings.ReplaceAll(role, "_", "-")
 	return WriterStatus{
-		InstanceID:          response.GetInstanceId(),
-		Role:                role,
-		CurrentEpoch:        response.GetCurrentEpoch(),
-		ObservedEpoch:       response.GetObservedEpoch(),
-		TransitionReason:    response.GetTransitionReason(),
-		TransitionUnixMS:    response.GetTransitionUnixMs(),
-		ActiveWriteIntents:  response.GetActiveWriteIntents(),
-		ActiveTransactions:  response.GetActiveTransactions(),
-		LastDurableSequence: response.GetLastDurableSequence(),
-		IdleDeadlineUnixMS:  response.GetIdleDeadlineUnixMs(),
-		PromotionSafe:       response.GetPromotionSafe(),
-		Attribution:         attributionSnapshot(response.GetAttribution()),
+		InstanceID:           response.GetInstanceId(),
+		Role:                 role,
+		CurrentEpoch:         response.GetCurrentEpoch(),
+		ObservedEpoch:        response.GetObservedEpoch(),
+		TransitionReason:     response.GetTransitionReason(),
+		TransitionUnixMS:     response.GetTransitionUnixMs(),
+		ActiveWriteIntents:   response.GetActiveWriteIntents(),
+		ActiveTransactions:   response.GetActiveTransactions(),
+		LastDurableSequence:  response.GetLastDurableSequence(),
+		IdleDeadlineUnixMS:   response.GetIdleDeadlineUnixMs(),
+		PromotionSafe:        response.GetPromotionSafe(),
+		Attribution:          attributionSnapshot(response.GetAttribution()),
+		ProcessStartedUnixMS: response.GetProcessStartedUnixMs(),
+		CapturedUnixMS:       response.GetCapturedUnixMs(),
 	}
+}
+
+func readCacheMetrics(response *vaulticdbv1.ReadCacheMetrics) ReadCacheMetrics {
+	if response == nil {
+		return ReadCacheMetrics{}
+	}
+	return ReadCacheMetrics{
+		Hits: response.GetHits(), Misses: response.GetMisses(), OriginReads: response.GetOriginReads(),
+		OriginReadsAvoided: response.GetOriginReadsAvoided(), Corruptions: response.GetCorruptions(),
+		Timeouts: response.GetTimeouts(), Failures: response.GetFailures(), Bypasses: response.GetBypasses(),
+		Admissions: response.GetAdmissions(), AdmissionRejections: response.GetAdmissionRejections(),
+		CapacityEvictions: response.GetCapacityEvictions(), IdleEvictions: response.GetIdleEvictions(),
+		AbsoluteEvictions: response.GetAbsoluteEvictions(), CorruptionEvictions: response.GetCorruptionEvictions(),
+		ReadLatencyTotalUS: response.GetReadLatencyTotalUs(), ReadLatencyCount: response.GetReadLatencyCount(),
+		WriteLatencyTotalUS: response.GetWriteLatencyTotalUs(), WriteLatencyCount: response.GetWriteLatencyCount(),
+	}
+}
+
+func readCacheStatus(response *vaulticdbv1.ReadCacheStatusResponse) ReadCacheStatus {
+	if response == nil {
+		return ReadCacheStatus{}
+	}
+	status := ReadCacheStatus{
+		Configured: response.GetNamespace() != "", Revision: response.GetRevision(), Namespace: response.GetNamespace(),
+		UsedBytes: response.GetUsedBytes(), ReservedBytes: response.GetReservedBytes(),
+		LocalUsedBytes: response.GetLocalUsedBytes(), LocalReservedBytes: response.GetLocalReservedBytes(),
+		PinnedBytes: response.GetPinnedBytes(), InflightBytes: response.GetInflightBytes(),
+		MaxInflightBytes: response.GetMaxInflightBytes(), PendingReclaimBytes: response.GetPendingReclaimBytes(),
+		QuotaCoordinationHealthy: response.GetQuotaCoordinationHealthy(), QuotaLedgerRevision: response.GetQuotaLedgerRevision(),
+		QuotaLeaseExpiryUnixMS: response.GetQuotaLeaseExpiryUnixMs(), UnverifiedStaleBytes: response.GetUnverifiedStaleBytes(),
+		QuotaReconciliationLag: response.GetQuotaReconciliationLag(), PolicySyncLag: response.GetPolicySyncLag(),
+		PolicySyncError: response.GetPolicySyncError(), Metrics: readCacheMetrics(response.GetMetrics()),
+	}
+	if response.AggregateMaxBytes != nil {
+		status.AggregateMaxBytes = response.GetAggregateMaxBytes()
+		status.AggregateMaxBytesKnown = true
+	}
+	for _, tier := range response.GetTiers() {
+		policy := tier.GetPolicy()
+		confidentiality := strings.ToLower(strings.TrimPrefix(tier.GetConfidentiality().String(), "READ_CACHE_CONFIDENTIALITY_"))
+		status.Tiers = append(status.Tiers, ReadCacheTierStatus{
+			ID: policy.GetTierId(), Enabled: policy.GetEnabled(), Confidentiality: confidentiality,
+			RequestedMaxBytes: tier.GetRequestedMaxBytes(), UsedBytes: tier.GetUsedBytes(),
+			ReservedBytes: tier.GetReservedBytes(), LocalUsedBytes: tier.GetLocalUsedBytes(),
+			LocalReservedBytes: tier.GetLocalReservedBytes(), PinnedBytes: tier.GetPinnedBytes(),
+			PendingReclaimBytes: tier.GetPendingReclaimBytes(), ReconciliationLag: tier.GetReconciliationLag(),
+			CircuitOpen: tier.GetCircuitOpen(), Metrics: readCacheMetrics(tier.GetMetrics()),
+		})
+	}
+	return status
 }
 
 func timingSnapshot(response *vaulticdbv1.TimingSnapshot) TimingSnapshot {

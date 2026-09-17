@@ -51,6 +51,8 @@ func (err *RequestError) Error() string {
 
 type Status struct {
 	Protocol                 string   `json:"protocol"`
+	ProcessStartedUnixMS     int64    `json:"process_started_unix_ms"`
+	CapturedUnixMS           int64    `json:"captured_unix_ms"`
 	Locked                   bool     `json:"locked"`
 	RepositoryID             string   `json:"repository_id"`
 	CapsuleGeneration        uint64   `json:"capsule_generation"`
@@ -254,6 +256,8 @@ type responseEnvelope struct {
 	Code                     string          `json:"code"`
 	Message                  string          `json:"message"`
 	Protocol                 string          `json:"protocol"`
+	ProcessStartedUnixMS     int64           `json:"process_started_unix_ms"`
+	CapturedUnixMS           int64           `json:"captured_unix_ms"`
 	Challenge                string          `json:"challenge"`
 	Locked                   bool            `json:"locked"`
 	RepositoryID             string          `json:"repository_id"`
@@ -322,8 +326,13 @@ func (client *Client) Status(ctx context.Context) (Status, error) {
 	if response.Result != "status" || response.Protocol != protocolVersion {
 		return Status{}, fmt.Errorf("unexpected broker status response or protocol %q", response.Protocol)
 	}
+	if (response.ProcessStartedUnixMS == 0) != (response.CapturedUnixMS == 0) || response.ProcessStartedUnixMS < 0 || response.CapturedUnixMS < response.ProcessStartedUnixMS {
+		return Status{}, errors.New("key broker returned invalid status timestamps")
+	}
 	return Status{
 		Protocol:                 response.Protocol,
+		ProcessStartedUnixMS:     response.ProcessStartedUnixMS,
+		CapturedUnixMS:           response.CapturedUnixMS,
 		Locked:                   response.Locked,
 		RepositoryID:             response.RepositoryID,
 		CapsuleGeneration:        response.CapsuleGeneration,

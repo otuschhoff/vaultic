@@ -9,6 +9,8 @@ import (
 
 func TestWriterStatusAttributionMapping(t *testing.T) {
 	status := writerStatus(&vaulticdbv1.WriterStatusResponse{
+		ProcessStartedUnixMs: 100,
+		CapturedUnixMs:       200,
 		Attribution: &vaulticdbv1.AttributionSnapshot{
 			AdmissionWait: &vaulticdbv1.TimingSnapshot{
 				Attempts:             3,
@@ -80,6 +82,9 @@ func TestWriterStatusAttributionMapping(t *testing.T) {
 			},
 		},
 	})
+	if status.ProcessStartedUnixMS != 100 || status.CapturedUnixMS != 200 {
+		t.Fatalf("status identity = %+v", status)
+	}
 
 	wait := status.Attribution.AdmissionWait
 	if wait.Attempts != 3 || wait.Failures != 1 || wait.TotalUS != 17 || wait.MaxUS != 9 || wait.Completed != 3 || wait.Successes != 1 || wait.Cancellations != 1 || wait.Timeouts != 1 || wait.Active != 2 || wait.OldestActiveUS != 23 || !wait.ContentionAvailable || wait.Contentions != 4 {

@@ -118,6 +118,7 @@ The documentation can be found at https://github.com/otuschhoff/vaultic/tree/mai
 		querycmd.NewLsCommand(globalOptions),
 		newMigrateCommand(globalOptions),
 		newMergeCommand(globalOptions),
+		newMonitorCommand(globalOptions),
 		newOptionsCommand(globalOptions),
 		newPruneCommand(globalOptions),
 		newRepoInfoCommand(globalOptions),
