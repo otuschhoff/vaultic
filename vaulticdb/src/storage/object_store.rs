@@ -22,7 +22,9 @@ enum ObjectStoreRole {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestObjectDelayProfile {
+    #[cfg_attr(not(any(test, feature = "test-failpoints")), allow(dead_code))]
     version: u32,
+    #[cfg_attr(not(any(test, feature = "test-failpoints")), allow(dead_code))]
     target: String,
     role: ObjectStoreRole,
     operation: String,
@@ -30,6 +32,7 @@ struct TestObjectDelayProfile {
 }
 
 impl TestObjectDelayProfile {
+    #[cfg(any(test, feature = "test-failpoints"))]
     fn parse(encoded: &str) -> Result<Self> {
         let profile: Self =
             serde_json::from_str(encoded).context("decode test object delay profile")?;

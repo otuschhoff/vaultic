@@ -127,6 +127,11 @@ pool, namespace, and prefix fields, ``durability: shared-remote``, and a
 dedicated CephX ``storage-maintain`` binding. VaulticDB leases this credential
 under target ``wal`` rather than reusing metadata or repository credentials.
 
+For direct CLI operation, ``--daemon-wal-rados-key-file`` accepts either the
+raw CephX key or a standard keyring containing a ``key =`` entry in the section
+named by ``--daemon-wal-rados-client``. The file must pass protected-file
+permission checks; do not pass the key in command arguments.
+
 SlateDB publishes immutable WAL objects through librados before a durable write
 handle resolves. The RADOS adapter's completed atomic write is the durability
 boundary; errors and credential expiry fail the write and never select local

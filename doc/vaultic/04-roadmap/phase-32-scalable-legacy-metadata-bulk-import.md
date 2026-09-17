@@ -9,11 +9,12 @@
 
 **Status:** Stages 1-3, P0-P2, P3a0-P3b, and P7a are complete as of 2026-09-17.
 Stage 3 is fresh-reset-only and defaults to two ingestion lanes; deferred cleanup
-is opt-in. P3 evidence retains that baseline and does not select P4-P6 for lack
-of a qualifying measured target. P3c, P3d, and P7b remain partial: durable-WAL
-import, flush/compaction-scale, representative NFS/RADOS/S3, and current-revision
-uncapped acceptance are blocked on suitable authorized resources, so repository-
-scale performance acceptance is not claimed.
+is opt-in. Representative NFS evidence selects P4 as the next isolated experiment
+because eligible work waits during synchronous ordered reduction. The baseline
+remains unchanged until P4 satisfies its correctness and performance gates; P5
+and P6 are not selected. P3c, P3d, and P7b remain partial pending the complete
+response matrix, remote main-store comparison, and current-revision uncapped
+acceptance, so repository-scale performance acceptance is not claimed.
 
 **Goal:** sustain legacy-index-to-SlateDB throughput as the candidate grows,
 without weakening duplicate preservation, metadata ordering, atomicity,
@@ -645,10 +646,12 @@ for slower SlateDB persistence.
 choose one P5 substep if local planning, reducer RPCs, or service locks dominate;
 choose one P6 substep if the engine/output path is demonstrably limiting. Multiple
 causes may exist, but change one at a time and rerun P3 after each accepted change.
-The completed isolated P3 evidence meets none of those prerequisites. P4-P6 are
-therefore not selected on current evidence and the existing two-lane,
-opt-in-deferred baseline is retained; representative P3d evidence may reopen
-that decision.
+Representative SSD/HDD NFS samples record 7m49s/9m36s of eligible-ready wait
+during reduction and 20m41s/22m11s of reduction blocking at matched 45-minute
+boundaries. This satisfies P4's prerequisite and selects it as the next isolated
+experiment. It does not establish benefit: retain the existing two-lane,
+opt-in-deferred baseline unless P4 passes its checks and improves the matched
+end-to-end result. Current evidence does not select P5 or P6.
 **Exit:** a cited artifact and falsifiable expected improvement for the selected
 experiment. If attribution is inconclusive, return to the missing P1/P2 timer;
 do not proceed by increasing lanes, memory, or disabling safety checks.

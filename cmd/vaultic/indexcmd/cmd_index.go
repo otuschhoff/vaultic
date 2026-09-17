@@ -2,6 +2,7 @@ package indexcmd
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -142,7 +143,7 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&options.WALRadosNamespace, "daemon-wal-rados-namespace", "", "vaulticdb WAL Ceph namespace")
 	flags.StringVar(&options.WALRadosPrefix, "daemon-wal-rados-prefix", "", "vaulticdb WAL RADOS object prefix")
 	flags.StringVar(&options.WALRadosClient, "daemon-wal-rados-client", "", "vaulticdb WAL CephX client identity")
-	flags.StringVar(&options.WALRadosKeyFile, "daemon-wal-rados-key-file", "", "protected file containing the vaulticdb WAL CephX key")
+	flags.StringVar(&options.WALRadosKeyFile, "daemon-wal-rados-key-file", "", "protected file containing the vaulticdb WAL CephX raw key or client keyring")
 	flags.StringVar(&options.EncryptionMode, "metadata-encryption", "", "metadata encryption mode: off, required, or initialize")
 	flags.StringVar(&options.PassphraseFile, "metadata-recovery-passphrase-file", "", "file containing the metadata recovery passphrase")
 	flags.StringVar(&options.AzureTokenFile, "metadata-azure-token-file", "", "protected Azure Key Vault bearer-token file")
@@ -202,9 +203,9 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 			return daemon.Options{}, err
 		}
 		defer clear(value)
-		walRadosKey = strings.TrimSpace(string(value))
-		if walRadosKey == "" {
-			return daemon.Options{}, errors.New("vaulticdb WAL CephX key is empty")
+		walRadosKey, err = parseCephXKey(value, options.WALRadosClient)
+		if err != nil {
+			return daemon.Options{}, err
 		}
 	}
 	config := daemon.Options{
@@ -240,6 +241,57 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		config.PersistentDaemon = options.Persistent
 	}
 	return config, nil
+}
+
+func parseCephXKey(encoded []byte, client string) (string, error) {
+	value := strings.TrimSpace(string(encoded))
+	if value == "" {
+		return "", errors.New("vaulticdb WAL CephX key is empty")
+	}
+	keyring := false
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		keyring = strings.HasPrefix(line, "[")
+		break
+	}
+	if !keyring {
+		if strings.ContainsAny(value, "\r\n") {
+			return "", errors.New("vaulticdb WAL CephX raw key must be one line")
+		}
+		if decoded, err := base64.StdEncoding.DecodeString(value); err != nil || len(decoded) == 0 {
+			return "", errors.New("vaulticdb WAL CephX raw key is not valid Base64")
+		}
+		return value, nil
+	}
+
+	section := ""
+	key := ""
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			continue
+		}
+		name, candidate, found := strings.Cut(line, "=")
+		if section != client || !found || strings.TrimSpace(name) != "key" {
+			continue
+		}
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || key != "" {
+			return "", fmt.Errorf("vaulticdb WAL CephX keyring section %q must contain exactly one non-empty key", client)
+		}
+		key = candidate
+	}
+	if key == "" {
+		return "", fmt.Errorf("vaulticdb WAL CephX keyring has no key for section %q", client)
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(key); err != nil || len(decoded) == 0 {
+		return "", fmt.Errorf("vaulticdb WAL CephX keyring section %q contains an invalid Base64 key", client)
+	}
+	return key, nil
 }
 
 func (options indexDaemonOptions) Config(repositoryID string) (daemon.Options, error) {
@@ -718,9 +770,6 @@ func completeFreshBulkImport(
 	}()
 	if err := session.Store.MarkBulkImportComplete(ctx); err != nil {
 		return session, nil, fmt.Errorf("mark successful bulk import complete: %w", err)
-	}
-	if !options.Activate {
-		return session, session.Client, nil
 	}
 	if err := session.Close(); err != nil {
 		return session, nil, fmt.Errorf("finalize bulk-import WAL handoff: %w", err)

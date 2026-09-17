@@ -1,14 +1,13 @@
 # Phase 32 P3-P7 Experiment and Acceptance Evidence
 
-This record closes the currently executable Phase 32 work as of 2026-09-17.
-P3a, P3b, and P7a are validated on isolated resources. P3c remains partial: its
-memory-WAL role pilots pass, but the response matrix, durable-WAL import, and
-flush/compaction-scale gates are incomplete. P4-P6 are not selected because the
-measurements do not identify a qualifying implementation target, and the
-existing two-lane baseline remains unchanged. P3d's representative combined
-profiles and P7b's current uncapped import remain blocked pending authorized
-NFS, RADOS, and S3 resources. No result below is presented as representative
-hardware or repository-scale acceptance.
+This record reports the currently executable Phase 32 work as of 2026-09-17.
+P3a, P3b, P7a, representative NFS/RGW sampling, native RADOS lifecycle tests,
+and live RADOS-WAL latency are validated. P3c remains partial: its memory-WAL
+role pilots pass, but the complete response matrix is not yet run.
+Representative evidence identifies sustained eligible work waiting during
+ordered reduction and therefore selects P4 for a separately reviewed
+experiment. P5 and P6 remain unselected. A current full import remains
+incomplete, so this is not final repository-scale acceptance.
 
 ## Frozen Inputs and Build
 
@@ -20,6 +19,18 @@ the optimized Linux amd64 daemon with SHA-256
 `6e83382b752e372c6434496973fc48d1a635f77fa759118fdfe8113d6b4648a5`.
 The daemon uses SlateDB fork revision
 `fc68f09a25defb128edfd722ec82696492dbb692` and Rust `1.98.1`.
+
+The representative NFS runs used the profile binaries built from
+`2b30207fc77a2711fe83a09bfc4cdc208961ee2e`: Vaultic SHA-256
+`ffb4383328ca5dd97958aa068f0465cdd421674593092506c2fba5d6fb3d51e1` and
+VaulticDB SHA-256
+`dad411c615b4f530f82fffbfde19f3299c0b963eadadcb8fde10ebb209810d83`.
+They ran on 32 logical Intel Xeon Gold 5217 CPUs with 292 GiB RAM. The SSD path
+resolved to `/ncl1-1-vs-50/fme_dump/amakura/db-test` on
+`ncl1-1-vs-55.eu.socionext.com:/fme_dump`, NFSv3/TCP with 64 KiB reads/writes.
+The HDD path remained on `172.21.33.209:/volume2/NASDA2`, NFSv3/TCP with 128 KiB
+reads/writes. Results are comparisons of those deployed paths, not media-only
+microbenchmarks.
 
 The versioned object-delay profile is accepted only by a build with
 `test-failpoints`, requires `target=isolated` and the process-test capability,
@@ -78,9 +89,97 @@ Source delay is hidden at this scale. Main and coordination PUT delays affect
 the mandatory finalization tail while import-only throughput remains broadly
 flat. The fixture does not show sustained eligible-work blockage that justifies
 P4, a dominant Go/RPC cost for P5, or a specific SlateDB function for P6.
-Increasing lanes also has no benefit. P4-P6 are therefore not selected on the
-available evidence; two lanes, deferred cleanup opt-in, and all durability
-checks are retained. Representative P3d evidence may reopen that decision.
+Increasing lanes also has no benefit. The isolated pilot alone therefore did
+not select P4-P6; two lanes, deferred cleanup opt-in, and all durability checks
+were retained pending representative evidence.
+
+Representative NFS sampling did reopen that decision. Matched runs used the
+same source, fresh candidate settings, 32 pack workers, two publication lanes,
+deferred cleanup, and a 45-minute interrupt boundary:
+
+| Main metadata path | Boundary | Indexes | Packs | Blobs | Blobs/s | Peak prepared queue |
+|---|---:|---:|---:|---:|---:|---:|
+| SSD NFS export | 45m02s | 2,369 | 126,229 | 100,525,966 | 37,200 | 13,565,280 B |
+| HDD NFS export | 44m59s | 2,241 | 119,381 | 94,882,587 | 35,151 | 13,565,280 B |
+
+Both boundaries drained the prepared queue to zero. Neither run reported a
+retry, conflict, reduction failure, or filter fallback. The HDD timeout caused
+one expected interrupted ingest/recovery read while draining; exit 124 and the
+final `context canceled` record are the planned comparison boundary, not a data
+finding. The SSD row is an in-process checkpoint from its longer run; the HDD
+importer stopped at 44m59.315s within a 45m02.46s timeout wrapper. Maximum
+resident memory was 38.9 GB for the longer SSD run and 24.3 GB for the bounded
+HDD run.
+
+The scheduler evidence is decisive for P4:
+
+| Main metadata path | Eligible-ready during reduction | Reduction blocking |
+|---|---:|---:|
+| SSD NFS export | 10,198 observations / 7m49.316s | 11,861 / 20m41.020s |
+| HDD NFS export | 9,907 observations / 9m35.565s | 11,059 / 22m11.127s |
+
+This satisfies P4's prerequisite of eligible work waiting during synchronous
+ordered reduction on representative storage. It does not prove that decoupling
+will improve end-to-end throughput, so P4 remains an experiment with the
+roadmap's stop condition rather than an accepted optimization. The evidence
+does not isolate a P5 client/RPC target or P6 SlateDB function.
+
+Native RADOS access was verified against the supplied three-monitor cluster,
+sealed FSID, and isolated `vaultic-perf` namespace. The Go backend's live
+create/CAS/range/read/reopen/delete test passed against both `db-sst` (0.44s)
+and `db-wal` (0.47s), including cleanup. VaulticDB was then built in release
+mode with its `rados` feature against an isolated Ceph 20.2.4 runtime; binary
+SHA-256 was
+`357b68761590edf492302aadb8ca31356eae7f3619c22d85af8cd0e54e2a211a`.
+Its native smoke test passed. A 100-commit `db-wal` benchmark produced exactly
+two WAL PUTs and one durability wait per commit:
+
+| Commit p95 | Commit p99 | WAL PUT/op | Durable wait/op | Queue/op | Service/op |
+|---:|---:|---:|---:|---:|---:|
+| 4.858 ms | 18.83 ms | 2.271 ms | 3.833 ms | 3.72 us | 8.25 us |
+
+The live benchmark is gated as `BenchmarkProcessDurableCommitRADOSWAL`, requires
+an explicit RADOS-enabled binary, endpoint/pool/namespace/prefix/client
+variables, and a protected `VAULTICDB_BENCH_RADOS_KEY_FILE`; ordinary test runs
+skip it.
+
+RGW compatibility was verified separately before the main-store comparison.
+VaulticDB's live S3 durability/reopen test passed against both supplied RGW
+endpoints, `http://172.21.33.25:7480` in 4.09s and
+`http://172.21.33.24:7480` in 3.77s, using isolated prefixes in
+`vaultic-phase32-perf`. Each test covered durable write, close/reopen/replay,
+repository isolation, and cleanup. Credentials were loaded from a protected
+local file and are not retained in commands, logs, or this record. These
+preflights establish compatibility only; the 45-minute RGW main-store sample is
+reported separately below.
+
+The matched RGW main-store run used endpoint `172.21.33.25:7480`, bucket
+`vaultic-phase32-perf`, and isolated prefix
+`phase32/2b30207fc/import-45m`. At its planned interrupt boundary it reported:
+
+| Boundary | Indexes | Packs | Blobs | Blobs/s | Peak prepared queue | Max RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 44m55.013s | 404 | 20,481 | 17,158,835 | 6,367 | 13,442,816 B | 4,555,272 KiB |
+
+The timeout wrapper ended at 45m00.82s with exit 124. Before cancellation there
+were no ingest failures, retries, conflicts, or filter fallback. Cancellation
+interrupted one reduction and triggered one recovery read; the final queue was
+drained to zero. Scheduler totals were 2,325 eligible-ready observations over
+15m28.918s and 1,481 reduction-blocking observations over 28m42.631s. Commit
+p50/p95/p99 were all bounded by 268.435 ms; mutation RPC p95/p99 were bounded by
+536.871 ms. RGW delivered 17.1% of SSD-NFS and 18.1% of HDD-NFS blob throughput
+at the matched boundary.
+
+The otherwise idle Ceph cluster's total-operation dashboard showed sustained
+roughly 250-330 read operations/s with low bandwidth, plus infrequent read and
+write bursts up to approximately 84/77 MB/s. Those are cluster-internal Ceph
+operations, not one-for-one RGW requests: three-copy replication and RGW
+bucket-index/metadata work amplify writes. Simultaneous high-bandwidth read and
+write bursts are consistent with SST compaction. VaulticDB leaves SlateDB's
+10-second manifest polling default unchanged, which cannot explain hundreds of
+operations per second by itself. The evidence therefore points to remote
+transaction/LSM read amplification and compaction, not a tight polling loop;
+that attribution remains observational and was not independently isolated.
 
 The principal benchmark commands were:
 
@@ -143,13 +242,12 @@ response, and timeout recovery tests also pass.
 A historical uncapped run at revision `8bc9cd7cb` successfully imported 10,019
 indexes, 419,530 packs, and 379,934,385 blobs through close, handoff, and reopen
 in 1:54:32. It proves that revision's completion path only; it does not certify
-the current changes. A current uncapped run was not launched because the
-available mounted data was not authorized for destructive isolated-candidate
-testing.
+the current changes. A current SSD run reached 6,049 imported indexes, 327,065
+packs, and 254,818,044 blobs in 2h52m39s before an operator cancellation; it is
+not a completion result. The matched 45-minute checkpoints above are the
+accepted comparison boundary.
 
-No representative HDD-array NFS, native three-replica RADOS, or cloud S3
-environment was available. Consequently P3d and the representative/current-
-scale portion of P7b remain blocked, and Phase 32's external acceptance status
-is partial. The code/default decision is complete: retain the baseline and hand
-the measured WAL, response, main-store, and coordination sensitivities to Phase
-34 rather than shipping an unsubstantiated optimization.
+Representative NFS, RADOS, and RGW/S3 are no longer external blockers. Full
+current-revision import, close/handoff/reopen, and post-import validation remain
+P7b work. Keep the two-lane baseline while P4 is tested; do not ship decoupling,
+increase lanes, or select P5/P6 from these measurements alone.
