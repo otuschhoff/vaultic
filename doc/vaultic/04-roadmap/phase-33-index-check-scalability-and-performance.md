@@ -308,6 +308,14 @@ Consequently the H1-H4 memory, scale, CPU-scaling, and latency targets remain
 pending external execution; no synthetic or small-fixture result is presented
 as satisfying those gates.
 
+The [local synthetic benchmark evidence](phase-33-local-benchmark-evidence.md)
+records three-repeat 1x/10x worker and memory-budget controls, matched local/NFS
+scratch runs, exact result digests, failure checks, and symbolized CPU, block,
+mutex, heap, and runtime-trace findings. It identifies encrypted spill I/O,
+tuple merge/allocation work, and shared legacy-spool contention as the dominant
+local costs. It also records that four-worker throughput improved only 5.8% on
+the synthetic 10x fixture, so the CPU-scaling gate remains open.
+
 ## LLM-executable implementation stages
 
 Execute one stage at a time. Each handoff records touched owners, invariants,
