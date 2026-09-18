@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -43,6 +44,28 @@ func TestFixedDistributionUsesCumulativeBuckets(t *testing.T) {
 	}
 }
 
+func TestFixedDistributionSnapshotIsCoherentDuringObservation(t *testing.T) {
+	distribution := NewFixedDistribution([]uint64{10, 100})
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 1000 {
+				distribution.Observe(50)
+				snapshot := distribution.Snapshot()
+				if snapshot.BucketCounts[len(snapshot.BucketCounts)-1] != snapshot.Count ||
+					snapshot.Count == 0 && (snapshot.Sum != 0 || snapshot.Maximum != 0) ||
+					snapshot.Maximum > snapshot.Sum {
+					t.Errorf("incoherent snapshot = %+v", snapshot)
+					return
+				}
+			}
+		}()
+	}
+	workers.Wait()
+}
+
 func TestRotatingDistributionExpiresOldSlots(t *testing.T) {
 	distribution := NewRotatingDistribution([]uint64{10}, time.Minute, 3)
 	now := time.Unix(600, 0)
@@ -81,10 +104,10 @@ func TestOperationRegistryIsBoundedAndCleanupSafe(t *testing.T) {
 	overflowed := registry.Start("restore", "source", "")
 	overflowed.Done()
 	now = now.Add(time.Second)
-	handle.Progress("write", "backend_retry", 4, 10)
+	handle.Progress("write", "retry_backoff", 4, 10)
 	operations, overflow := registry.Snapshot()
-	if len(operations) != 1 || overflow != 1 {
-		t.Fatalf("operations = %+v, overflow = %d", operations, overflow)
+	if len(operations) != 1 || len(overflow) != 1 || overflow[0].Class != "restore" || overflow[0].Count != 1 {
+		t.Fatalf("operations = %+v, overflow = %+v", operations, overflow)
 	}
 	if operations[0].Phase != "write" || operations[0].CompletedUnits != 4 || operations[0].UpdatedUnixMS != now.UnixMilli() {
 		t.Fatalf("operation = %+v", operations[0])
@@ -94,5 +117,44 @@ func TestOperationRegistryIsBoundedAndCleanupSafe(t *testing.T) {
 	operations, _ = registry.Snapshot()
 	if len(operations) != 0 {
 		t.Fatalf("operations after cleanup = %+v", operations)
+	}
+}
+
+func TestOperationRegistryRejectsUnboundedIdentityBeforeOverflow(t *testing.T) {
+	registry := NewOperationRegistry(1)
+	registry.Start("restore", "source", "")
+	for index := range 1000 {
+		registry.Start(fmt.Sprintf("custom-%d", index), "source", "")
+	}
+	_, overflow := registry.Snapshot()
+	if len(overflow) != 0 {
+		t.Fatalf("invalid identities entered overflow: %+v", overflow)
+	}
+}
+
+func TestOperationRegistryRejectsInvalidParentAndProgressIdentity(t *testing.T) {
+	registry := NewOperationRegistry(2)
+	if handle := registry.Start("restore", "source", "/private/path"); handle.registry != nil {
+		t.Fatal("invalid parent identity was admitted")
+	}
+	handle := registry.Start("restore", "source", "")
+	handle.Progress("custom_phase", "", 1, 2)
+	handle.Progress("write", "custom_blocker", 1, 2)
+	operations, _ := registry.Snapshot()
+	if len(operations) != 1 || operations[0].Phase != "source" || operations[0].BlockingReason != "" {
+		t.Fatalf("invalid progress changed operation: %+v", operations)
+	}
+}
+
+func TestOperationRegistryRejectsTokenExhaustion(t *testing.T) {
+	registry := NewOperationRegistry(1)
+	registry.next = ^uint64(0)
+	handle := registry.Start("backup", "planning", "")
+	active, overflow := registry.Snapshot()
+	if handle.registry != nil || len(active) != 0 {
+		t.Fatal("exhausted operation token created an active operation")
+	}
+	if len(overflow) != 1 || overflow[0].Class != "backup" || overflow[0].Count != 1 {
+		t.Fatalf("overflow = %#v", overflow)
 	}
 }

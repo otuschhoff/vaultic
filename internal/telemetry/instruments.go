@@ -64,7 +64,6 @@ func NewFixedDistribution(bounds []uint64) *FixedDistribution {
 }
 
 func (distribution *FixedDistribution) Observe(value uint64) {
-	distribution.count.Add(1)
 	distribution.sum.Add(value)
 	for {
 		current := distribution.maximum.Load()
@@ -76,15 +75,26 @@ func (distribution *FixedDistribution) Observe(value uint64) {
 	for ; index < len(distribution.buckets); index++ {
 		incrementAtomic(&distribution.buckets[index])
 	}
+	distribution.count.Add(1)
 }
 
 func (distribution *FixedDistribution) Snapshot() DistributionSnapshot {
+	count := distribution.count.Load()
+	sum := distribution.sum.Load()
+	maximum := min(distribution.maximum.Load(), sum)
+	if count == 0 {
+		sum = 0
+		maximum = 0
+	}
 	counts := make([]uint64, len(distribution.buckets))
 	for index := range distribution.buckets {
-		counts[index] = distribution.buckets[index].Load()
+		counts[index] = min(distribution.buckets[index].Load(), count)
+		if index > 0 && counts[index] < counts[index-1] {
+			counts[index] = counts[index-1]
+		}
 	}
 	return DistributionSnapshot{
-		Count: distribution.count.Load(), Sum: distribution.sum.Load(), Maximum: distribution.maximum.Load(),
+		Count: count, Sum: sum, Maximum: maximum,
 		BucketUpper: append([]uint64(nil), distribution.bounds...), BucketCounts: counts,
 	}
 }
@@ -195,7 +205,7 @@ type OperationRegistry struct {
 	capacity int
 	next     uint64
 	active   map[uint64]ActiveOperation
-	overflow Counter
+	overflow map[string]uint64
 	clock    func() time.Time
 }
 
@@ -209,15 +219,28 @@ func NewOperationRegistry(capacity int) *OperationRegistry {
 	if capacity <= 0 || capacity > MaxMonitorOperations {
 		panic("telemetry operation registry capacity is out of bounds")
 	}
-	return &OperationRegistry{capacity: capacity, active: make(map[uint64]ActiveOperation, capacity), clock: time.Now}
+	return &OperationRegistry{capacity: capacity, active: make(map[uint64]ActiveOperation, capacity), overflow: make(map[string]uint64), clock: time.Now}
 }
 
 func (registry *OperationRegistry) Start(class, phase, parentID string) *OperationHandle {
+	if _, known := monitorValues("operation")[class]; !known {
+		return &OperationHandle{}
+	}
+	if _, known := monitorValues("phase")[phase]; !known {
+		return &OperationHandle{}
+	}
+	if parentID != "" && !validOpaqueID(parentID) {
+		return &OperationHandle{}
+	}
 	now := registry.clock().UnixMilli()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if len(registry.active) >= registry.capacity {
-		registry.overflow.Add(1)
+		registry.overflow[class] = saturatingAdd(registry.overflow[class], 1)
+		return &OperationHandle{}
+	}
+	if registry.next == ^uint64(0) {
+		registry.overflow[class] = saturatingAdd(registry.overflow[class], 1)
 		return &OperationHandle{}
 	}
 	registry.next++
@@ -232,6 +255,14 @@ func (registry *OperationRegistry) Start(class, phase, parentID string) *Operati
 func (handle *OperationHandle) Progress(phase, blockingReason string, completed, expected uint64) {
 	if handle == nil || handle.registry == nil || handle.settled.Load() {
 		return
+	}
+	if _, known := monitorValues("phase")[phase]; !known {
+		return
+	}
+	if blockingReason != "" {
+		if _, known := monitorValues("blocking")[blockingReason]; !known {
+			return
+		}
 	}
 	registry := handle.registry
 	registry.mu.Lock()
@@ -257,7 +288,7 @@ func (handle *OperationHandle) Done() {
 	handle.registry.mu.Unlock()
 }
 
-func (registry *OperationRegistry) Snapshot() ([]ActiveOperation, uint64) {
+func (registry *OperationRegistry) Snapshot() ([]ActiveOperation, []OperationOverflowSnapshot) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	operations := make([]ActiveOperation, 0, len(registry.active))
@@ -265,7 +296,12 @@ func (registry *OperationRegistry) Snapshot() ([]ActiveOperation, uint64) {
 		operations = append(operations, operation)
 	}
 	sort.Slice(operations, func(left, right int) bool { return operations[left].ID < operations[right].ID })
-	return operations, registry.overflow.Load()
+	overflow := make([]OperationOverflowSnapshot, 0, len(registry.overflow))
+	for class, count := range registry.overflow {
+		overflow = append(overflow, OperationOverflowSnapshot{Class: class, Count: count})
+	}
+	sort.Slice(overflow, func(left, right int) bool { return overflow[left].Class < overflow[right].Class })
+	return operations, overflow
 }
 
 func operationID(token uint64) string {

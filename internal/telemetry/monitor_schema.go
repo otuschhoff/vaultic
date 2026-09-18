@@ -3,14 +3,16 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	MonitorSchemaVersion   = 1
+	MonitorSchemaVersion   = 2
 	MaxMonitorComponents   = 16
 	MaxMonitorMetrics      = 256
 	MaxMonitorOperations   = 128
@@ -24,13 +26,57 @@ const (
 
 var monitorNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-var monitorLabelValues = map[string]map[string]struct{}{
-	"component":      values("vaultic", "vaulticdb", "key_broker", "cache_coordinator"),
-	"operation":      values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "compaction", "recovery"),
-	"outcome":        values("success", "failure", "cancellation", "timeout"),
-	"role":           values("repository", "database", "wal", "coordination", "source", "scratch", "cache"),
-	"representation": values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata"),
-	"throttle":       values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown"),
+type metricSpec struct {
+	kind     MetricKind
+	unit     string
+	labels   []string
+	required []string
+	bounds   [][]uint64
+}
+
+func vaulticLatencyBounds() []uint64 {
+	return []uint64{10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, math.MaxUint64}
+}
+
+func slateDBLatencyBounds() []uint64 {
+	return []uint64{1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000, math.MaxUint64}
+}
+
+func monitorValues(kind string) map[string]struct{} {
+	switch kind {
+	case "component":
+		return values("vaultic", "vaulticdb", "key_broker", "cache_coordinator")
+	case "queue":
+		return values("batch_write", "legacy_import_ingest", "legacy_import_reduce")
+	case "operation":
+		return values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery")
+	case "outcome":
+		return values("success", "failure", "cancellation", "timeout")
+	case "role":
+		return values("repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker")
+	case "representation":
+		return values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata")
+	case "throttle":
+		return values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown")
+	case "phase":
+		return values("queued", "admission", "planning", "source", "read", "write", "upload", "publish", "reconcile", "ingest", "reduce", "cleanup", "finalize", "verify", "delete", "retry", "wait", "complete")
+	case "blocking":
+		return values("prerequisite", "lock", "concurrency", "byte_budget", "source_io", "backend_io", "rpc_response", "retry_backoff", "credential_renewal", "writer_fencing", "durability", "wal_flush", "compaction", "human_confirmation", "shutdown")
+	case "storage_role":
+		return values("repository", "database", "wal", "coordination", "source", "scratch", "cache")
+	case "storage_class":
+		return values("pack", "index", "snapshot", "sst", "manifest", "wal_segment", "coordination", "scratch", "unknown")
+	case "placement_state":
+		return values("primary", "replica", "pending", "deleting", "reconciled", "unknown")
+	case "cache_family":
+		return values("aggregate", "memory", "disk", "remote", "slatedb", "unknown")
+	case "acknowledgement":
+		return values("unknown", "inherited", "memory", "persistent", "local-process", "shared-remote", "durable-object-store", "test", "unsupported")
+	case "wal_target":
+		return values("inherited", "local", "memory", "s3", "rados", "test", "unsupported-azure", "unsupported-gcs")
+	default:
+		return nil
+	}
 }
 
 type Availability string
@@ -71,16 +117,17 @@ type Metric struct {
 }
 
 type QueueSnapshot struct {
-	Name             string       `json:"name"`
-	Availability     Availability `json:"availability"`
-	Depth            uint64       `json:"depth"`
-	Capacity         uint64       `json:"capacity"`
-	ActiveWorkers    uint64       `json:"active_workers"`
-	Admitted         uint64       `json:"admitted"`
-	Rejected         uint64       `json:"rejected"`
-	OldestItemAgeUS  uint64       `json:"oldest_item_age_us"`
-	Backpressure     string       `json:"backpressure,omitempty"`
-	BackpressureTime uint64       `json:"backpressure_time_us,omitempty"`
+	Name                 string       `json:"name"`
+	Availability         Availability `json:"availability"`
+	CapacityAvailability Availability `json:"capacity_availability"`
+	Depth                uint64       `json:"depth"`
+	Capacity             uint64       `json:"capacity"`
+	ActiveWorkers        uint64       `json:"active_workers"`
+	Admitted             uint64       `json:"admitted"`
+	Rejected             uint64       `json:"rejected"`
+	OldestItemAgeUS      uint64       `json:"oldest_item_age_us"`
+	Backpressure         string       `json:"backpressure,omitempty"`
+	BackpressureTime     uint64       `json:"backpressure_time_us,omitempty"`
 }
 
 type ActiveOperation struct {
@@ -96,34 +143,61 @@ type ActiveOperation struct {
 }
 
 type StorageSnapshot struct {
-	BackendID       string       `json:"backend_id"`
-	Role            string       `json:"role"`
-	Availability    Availability `json:"availability"`
-	ObjectCount     uint64       `json:"object_count"`
-	PayloadBytes    uint64       `json:"payload_bytes"`
-	PhysicalBytes   uint64       `json:"physical_bytes,omitempty"`
-	ReconciledAtMS  int64        `json:"reconciled_at_ms,omitempty"`
-	Acknowledgement string       `json:"acknowledgement,omitempty"`
+	BackendID                  string       `json:"backend_id"`
+	Role                       string       `json:"role"`
+	Availability               Availability `json:"availability"`
+	ObjectCount                uint64       `json:"object_count"`
+	PayloadBytes               uint64       `json:"payload_bytes"`
+	PhysicalBytes              uint64       `json:"physical_bytes,omitempty"`
+	ReconciledAtMS             int64        `json:"reconciled_at_ms,omitempty"`
+	Acknowledgement            string       `json:"acknowledgement,omitempty"`
+	ObjectClass                string       `json:"object_class,omitempty"`
+	PlacementState             string       `json:"placement_state,omitempty"`
+	Representation             string       `json:"representation,omitempty"`
+	ObjectCountAvailability    Availability `json:"object_count_availability"`
+	PayloadAvailability        Availability `json:"payload_availability"`
+	PhysicalAvailability       Availability `json:"physical_availability"`
+	ReconciliationAvailability Availability `json:"reconciliation_availability"`
 }
 
 type CacheSnapshot struct {
-	ID                  string       `json:"id"`
-	Availability        Availability `json:"availability"`
-	RequestedBytes      uint64       `json:"requested_bytes"`
-	EffectiveBytes      uint64       `json:"effective_bytes"`
-	UsedBytes           uint64       `json:"used_bytes"`
-	ReservedBytes       uint64       `json:"reserved_bytes"`
-	PinnedBytes         uint64       `json:"pinned_bytes"`
-	StagingBytes        uint64       `json:"staging_bytes"`
-	ReclaimPendingBytes uint64       `json:"reclaim_pending_bytes"`
-	AvailableBytes      uint64       `json:"available_bytes"`
-	Hits                uint64       `json:"hits"`
-	Misses              uint64       `json:"misses"`
-	OriginBytes         uint64       `json:"origin_bytes"`
-	CacheBytes          uint64       `json:"cache_bytes"`
-	OriginReadsAvoided  uint64       `json:"origin_reads_avoided"`
-	InflightFills       uint64       `json:"inflight_fills"`
-	ReconciliationAgeMS uint64       `json:"reconciliation_age_ms,omitempty"`
+	ID                            string       `json:"id"`
+	Availability                  Availability `json:"availability"`
+	RequestedBytes                uint64       `json:"requested_bytes"`
+	EffectiveBytes                uint64       `json:"effective_bytes"`
+	UsedBytes                     uint64       `json:"used_bytes"`
+	ReservedBytes                 uint64       `json:"reserved_bytes"`
+	PinnedBytes                   uint64       `json:"pinned_bytes"`
+	StagingBytes                  uint64       `json:"staging_bytes"`
+	DeletionPendingBytes          uint64       `json:"deletion_pending_bytes"`
+	ReclaimPendingBytes           uint64       `json:"reclaim_pending_bytes"`
+	AvailableBytes                uint64       `json:"available_bytes"`
+	Hits                          uint64       `json:"hits"`
+	Misses                        uint64       `json:"misses"`
+	OriginBytes                   uint64       `json:"origin_bytes"`
+	CacheBytes                    uint64       `json:"cache_bytes"`
+	OriginReadsAvoided            uint64       `json:"origin_reads_avoided"`
+	InflightFills                 uint64       `json:"inflight_fills"`
+	ReconciliationAgeMS           uint64       `json:"reconciliation_age_ms,omitempty"`
+	ReconciliationLag             uint64       `json:"reconciliation_lag"`
+	ControllerState               string       `json:"controller_state,omitempty"`
+	CircuitState                  string       `json:"circuit_state,omitempty"`
+	Enabled                       bool         `json:"enabled"`
+	Family                        string       `json:"family,omitempty"`
+	Representation                string       `json:"representation,omitempty"`
+	ObjectCount                   uint64       `json:"object_count"`
+	TrafficAvailability           Availability `json:"traffic_availability,omitempty"`
+	TrafficBytesAvailability      Availability `json:"traffic_bytes_availability,omitempty"`
+	FillAvailability              Availability `json:"fill_availability,omitempty"`
+	InventoryAvailability         Availability `json:"inventory_availability,omitempty"`
+	DeletionAvailability          Availability `json:"deletion_availability,omitempty"`
+	ReconciliationAgeAvailability Availability `json:"reconciliation_age_availability,omitempty"`
+	ReconciliationLagAvailability Availability `json:"reconciliation_lag_availability,omitempty"`
+}
+
+type OperationOverflowSnapshot struct {
+	Class string `json:"class"`
+	Count uint64 `json:"count"`
 }
 
 type WALSnapshot struct {
@@ -141,19 +215,19 @@ type WALSnapshot struct {
 }
 
 type ComponentSnapshot struct {
-	Component          string            `json:"component"`
-	ProcessStartID     string            `json:"process_start_id"`
-	CapturedUnixMS     int64             `json:"captured_unix_ms"`
-	Availability       Availability      `json:"availability"`
-	Stale              bool              `json:"stale"`
-	Metrics            []Metric          `json:"metrics,omitempty"`
-	Queues             []QueueSnapshot   `json:"queues,omitempty"`
-	Operations         []ActiveOperation `json:"operations,omitempty"`
-	OperationOverflow  uint64            `json:"operation_overflow"`
-	CardinalityDropped uint64            `json:"cardinality_dropped"`
-	Storage            []StorageSnapshot `json:"storage,omitempty"`
-	Caches             []CacheSnapshot   `json:"caches,omitempty"`
-	WAL                *WALSnapshot      `json:"wal,omitempty"`
+	Component          string                      `json:"component"`
+	ProcessStartID     string                      `json:"process_start_id"`
+	CapturedUnixMS     int64                       `json:"captured_unix_ms"`
+	Availability       Availability                `json:"availability"`
+	Stale              bool                        `json:"stale"`
+	Metrics            []Metric                    `json:"metrics,omitempty"`
+	Queues             []QueueSnapshot             `json:"queues,omitempty"`
+	Operations         []ActiveOperation           `json:"operations,omitempty"`
+	OperationOverflow  []OperationOverflowSnapshot `json:"operation_overflow,omitempty"`
+	CardinalityDropped uint64                      `json:"cardinality_dropped"`
+	Storage            []StorageSnapshot           `json:"storage,omitempty"`
+	Caches             []CacheSnapshot             `json:"caches,omitempty"`
+	WAL                *WALSnapshot                `json:"wal,omitempty"`
 }
 
 type MonitorSnapshot struct {
@@ -184,6 +258,9 @@ func (snapshot MonitorSnapshot) Validate() error {
 		if err := validateMonitorName("component", component.Component); err != nil {
 			return err
 		}
+		if _, known := monitorValues("component")[component.Component]; !known {
+			return fmt.Errorf("unknown monitor component %q", component.Component)
+		}
 		if _, exists := seenComponents[component.Component]; exists {
 			return fmt.Errorf("duplicate monitor component %q", component.Component)
 		}
@@ -203,6 +280,9 @@ func (snapshot MonitorSnapshot) Validate() error {
 		if len(component.Operations) > MaxMonitorOperations {
 			return fmt.Errorf("component %q operations exceed limit %d", component.Component, MaxMonitorOperations)
 		}
+		if len(component.OperationOverflow) > len(monitorValues("operation")) {
+			return fmt.Errorf("component %q operation overflow records exceed bounded classes", component.Component)
+		}
 		if len(component.Queues) > MaxMonitorQueues {
 			return fmt.Errorf("component %q queues exceed limit %d", component.Component, MaxMonitorQueues)
 		}
@@ -220,6 +300,9 @@ func (snapshot MonitorSnapshot) Validate() error {
 			if err := validateMonitorName("queue", queue.Name); err != nil {
 				return err
 			}
+			if _, known := monitorValues("queue")[queue.Name]; !known {
+				return fmt.Errorf("queue %q is not in monitor schema", queue.Name)
+			}
 			if _, exists := seenQueues[queue.Name]; exists {
 				return fmt.Errorf("component %q has duplicate queue %q", component.Component, queue.Name)
 			}
@@ -227,12 +310,18 @@ func (snapshot MonitorSnapshot) Validate() error {
 			if !validAvailability(queue.Availability) {
 				return fmt.Errorf("queue %q has invalid availability %q", queue.Name, queue.Availability)
 			}
-			if queue.Capacity != 0 && queue.Depth > queue.Capacity {
+			if !validAvailability(queue.CapacityAvailability) {
+				return fmt.Errorf("queue %q has invalid capacity availability %q", queue.Name, queue.CapacityAvailability)
+			}
+			if queue.CapacityAvailability == AvailabilityExact && queue.Capacity != 0 && queue.Depth > queue.Capacity {
 				return fmt.Errorf("queue %q depth exceeds capacity", queue.Name)
 			}
 			if queue.Backpressure != "" {
 				if err := validateMonitorName("backpressure", queue.Backpressure); err != nil {
 					return err
+				}
+				if _, known := monitorValues("throttle")[queue.Backpressure]; !known {
+					return fmt.Errorf("queue %q has unbounded backpressure %q", queue.Name, queue.Backpressure)
 				}
 			}
 		}
@@ -251,20 +340,36 @@ func (snapshot MonitorSnapshot) Validate() error {
 			if err := validateMonitorName("operation class", operation.Class); err != nil {
 				return err
 			}
-			if _, known := monitorLabelValues["operation"][operation.Class]; !known {
+			if _, known := monitorValues("operation")[operation.Class]; !known {
 				return fmt.Errorf("active operation %q has unbounded class %q", operation.ID, operation.Class)
 			}
 			if err := validateMonitorName("operation phase", operation.Phase); err != nil {
 				return err
 			}
+			if _, known := monitorValues("phase")[operation.Phase]; !known {
+				return fmt.Errorf("active operation %q has unbounded phase %q", operation.ID, operation.Phase)
+			}
 			if operation.BlockingReason != "" {
 				if err := validateMonitorName("blocking reason", operation.BlockingReason); err != nil {
 					return err
 				}
+				if _, known := monitorValues("blocking")[operation.BlockingReason]; !known {
+					return fmt.Errorf("active operation %q has unbounded blocking reason %q", operation.ID, operation.BlockingReason)
+				}
 			}
-			if operation.StartedUnixMS <= 0 || operation.UpdatedUnixMS < operation.StartedUnixMS {
+			if operation.StartedUnixMS <= 0 || operation.UpdatedUnixMS < operation.StartedUnixMS || operation.StartedUnixMS > component.CapturedUnixMS || operation.UpdatedUnixMS > component.CapturedUnixMS {
 				return fmt.Errorf("active operation %q has invalid timestamps", operation.ID)
 			}
+		}
+		seenOverflow := make(map[string]struct{}, len(component.OperationOverflow))
+		for _, overflow := range component.OperationOverflow {
+			if _, known := monitorValues("operation")[overflow.Class]; !known {
+				return fmt.Errorf("operation overflow has unbounded class %q", overflow.Class)
+			}
+			if _, exists := seenOverflow[overflow.Class]; exists {
+				return fmt.Errorf("component %q has duplicate operation overflow class %q", component.Component, overflow.Class)
+			}
+			seenOverflow[overflow.Class] = struct{}{}
 		}
 		seenStorage := make(map[string]struct{}, len(component.Storage))
 		for _, storage := range component.Storage {
@@ -274,7 +379,10 @@ func (snapshot MonitorSnapshot) Validate() error {
 			if err := validateMonitorName("storage role", storage.Role); err != nil {
 				return err
 			}
-			storageIdentity := storage.BackendID + "\x00" + storage.Role
+			if _, known := monitorValues("storage_role")[storage.Role]; !known {
+				return fmt.Errorf("storage backend %q has unbounded role %q", storage.BackendID, storage.Role)
+			}
+			storageIdentity := strings.Join([]string{storage.BackendID, storage.Role, storage.ObjectClass, storage.PlacementState, storage.Representation}, "\x00")
 			if _, exists := seenStorage[storageIdentity]; exists {
 				return fmt.Errorf("component %q has duplicate storage identity", component.Component)
 			}
@@ -282,8 +390,31 @@ func (snapshot MonitorSnapshot) Validate() error {
 			if !validAvailability(storage.Availability) {
 				return fmt.Errorf("storage backend %q has invalid availability %q", storage.BackendID, storage.Availability)
 			}
-			if storage.Acknowledgement != "" && !monitorNamePattern.MatchString(storage.Acknowledgement) {
-				return fmt.Errorf("storage backend %q has invalid acknowledgement", storage.BackendID)
+			if storage.Acknowledgement != "" {
+				if _, known := monitorValues("acknowledgement")[storage.Acknowledgement]; !known {
+					return fmt.Errorf("storage backend %q has invalid acknowledgement", storage.BackendID)
+				}
+			}
+			if storage.ObjectClass != "" {
+				if _, known := monitorValues("storage_class")[storage.ObjectClass]; !known {
+					return fmt.Errorf("storage backend %q has invalid object class", storage.BackendID)
+				}
+			}
+			if storage.PlacementState != "" {
+				if _, known := monitorValues("placement_state")[storage.PlacementState]; !known {
+					return fmt.Errorf("storage backend %q has invalid placement state", storage.BackendID)
+				}
+			}
+			if storage.Representation != "" {
+				if _, known := monitorValues("representation")[storage.Representation]; !known {
+					return fmt.Errorf("storage backend %q has invalid representation", storage.BackendID)
+				}
+			}
+			if !validAvailability(storage.ObjectCountAvailability) || !validAvailability(storage.PayloadAvailability) || !validAvailability(storage.PhysicalAvailability) || !validAvailability(storage.ReconciliationAvailability) {
+				return fmt.Errorf("storage backend %q has invalid field availability", storage.BackendID)
+			}
+			if storage.ReconciledAtMS < 0 || storage.ReconciledAtMS > component.CapturedUnixMS || storage.ReconciliationAvailability == AvailabilityExact && storage.ReconciledAtMS == 0 {
+				return fmt.Errorf("storage backend %q has invalid reconciliation timestamp", storage.BackendID)
 			}
 		}
 		seenCaches := make(map[string]struct{}, len(component.Caches))
@@ -291,21 +422,76 @@ func (snapshot MonitorSnapshot) Validate() error {
 			if !validConfiguredID(cache.ID) {
 				return fmt.Errorf("cache ID %q is invalid", cache.ID)
 			}
-			if _, exists := seenCaches[cache.ID]; exists {
+			cacheIdentity := strings.Join([]string{cache.ID, cache.Family, cache.Representation}, "\x00")
+			if _, exists := seenCaches[cacheIdentity]; exists {
 				return fmt.Errorf("component %q has duplicate cache %q", component.Component, cache.ID)
 			}
-			seenCaches[cache.ID] = struct{}{}
+			seenCaches[cacheIdentity] = struct{}{}
 			if !validAvailability(cache.Availability) {
 				return fmt.Errorf("cache %q has invalid availability %q", cache.ID, cache.Availability)
+			}
+			if cache.ControllerState != "" && !slices.Contains([]string{"healthy", "degraded", "not_applicable"}, cache.ControllerState) {
+				return fmt.Errorf("cache %q has invalid controller state %q", cache.ID, cache.ControllerState)
+			}
+			if !slices.Contains([]string{"closed", "open", "not_applicable", "unknown"}, cache.CircuitState) {
+				return fmt.Errorf("cache %q has invalid circuit state %q", cache.ID, cache.CircuitState)
+			}
+			if cache.Family != "" {
+				if _, known := monitorValues("cache_family")[cache.Family]; !known {
+					return fmt.Errorf("cache %q has invalid family", cache.ID)
+				}
+			}
+			if cache.Representation != "" {
+				if _, known := monitorValues("representation")[cache.Representation]; !known {
+					return fmt.Errorf("cache %q has invalid representation", cache.ID)
+				}
+			}
+			if !validAvailability(cache.TrafficAvailability) || !validAvailability(cache.TrafficBytesAvailability) || !validAvailability(cache.FillAvailability) || !validAvailability(cache.InventoryAvailability) || !validAvailability(cache.DeletionAvailability) || !validAvailability(cache.ReconciliationAgeAvailability) || !validAvailability(cache.ReconciliationLagAvailability) {
+				return fmt.Errorf("cache %q has invalid field availability", cache.ID)
+			}
+			if cache.DeletionPendingBytes > cache.UsedBytes || cache.PinnedBytes > cache.UsedBytes || cache.ReclaimPendingBytes > cache.UsedBytes {
+				return fmt.Errorf("cache %q has inconsistent capacity accounting", cache.ID)
+			}
+			if cache.Availability == AvailabilityExact && cache.Enabled {
+				expectedAvailable := uint64(0)
+				if cache.UsedBytes <= cache.EffectiveBytes && cache.ReservedBytes < cache.EffectiveBytes-cache.UsedBytes {
+					expectedAvailable = cache.EffectiveBytes - cache.UsedBytes - cache.ReservedBytes
+				}
+				if cache.AvailableBytes != expectedAvailable {
+					return fmt.Errorf("cache %q has inconsistent available capacity", cache.ID)
+				}
+			} else if cache.AvailableBytes > cache.EffectiveBytes {
+				return fmt.Errorf("cache %q has inconsistent capacity accounting", cache.ID)
 			}
 		}
 		if component.WAL != nil {
 			if !validAvailability(component.WAL.Availability) {
 				return fmt.Errorf("component %q WAL has invalid availability %q", component.Component, component.WAL.Availability)
 			}
-			for name, value := range map[string]string{"target": component.WAL.Target, "durability": component.WAL.Durability, "throttle reason": component.WAL.ThrottleReason} {
-				if value != "" && !monitorNamePattern.MatchString(value) {
-					return fmt.Errorf("component %q WAL %s %q is invalid", component.Component, name, value)
+			if component.WAL.Availability != AvailabilityUnavailable && (component.WAL.Target == "" || component.WAL.Durability == "") {
+				return fmt.Errorf("component %q available WAL requires target and durability", component.Component)
+			}
+			if component.WAL.Target != "" {
+				if _, known := monitorValues("wal_target")[component.WAL.Target]; !known {
+					return fmt.Errorf("component %q WAL target %q is invalid", component.Component, component.WAL.Target)
+				}
+			}
+			if component.WAL.Durability != "" {
+				if _, known := monitorValues("acknowledgement")[component.WAL.Durability]; !known {
+					return fmt.Errorf("component %q WAL durability %q is invalid", component.Component, component.WAL.Durability)
+				}
+			}
+			walDurability := map[string]string{
+				"inherited": "inherited", "local": "local-process", "memory": "local-process",
+				"s3": "shared-remote", "rados": "shared-remote", "test": "test",
+				"unsupported-azure": "unsupported", "unsupported-gcs": "unsupported",
+			}
+			if component.WAL.Target != "" && walDurability[component.WAL.Target] != component.WAL.Durability {
+				return fmt.Errorf("component %q WAL target and durability are incompatible", component.Component)
+			}
+			if component.WAL.ThrottleReason != "" {
+				if _, known := monitorValues("throttle")[component.WAL.ThrottleReason]; !known {
+					return fmt.Errorf("component %q WAL throttle reason %q is invalid", component.Component, component.WAL.ThrottleReason)
 				}
 			}
 		}
@@ -321,6 +507,13 @@ func validateMetrics(metrics []Metric) error {
 		}
 		if err := validateMonitorName("unit", metric.Unit); err != nil {
 			return err
+		}
+		spec, known := newMonitorMetricSpecs()[metric.Name]
+		if !known {
+			return fmt.Errorf("metric %q is not in monitor schema v%d", metric.Name, MonitorSchemaVersion)
+		}
+		if metric.Kind != spec.kind || metric.Unit != spec.unit {
+			return fmt.Errorf("metric %q has kind/unit %q/%q, want %q/%q", metric.Name, metric.Kind, metric.Unit, spec.kind, spec.unit)
 		}
 		if !validAvailability(metric.Availability) {
 			return fmt.Errorf("metric %q has invalid availability %q", metric.Name, metric.Availability)
@@ -341,14 +534,28 @@ func validateMetrics(metrics []Metric) error {
 			if label.Value == "" || len(label.Value) > MaxMonitorStringLength || strings.ContainsAny(label.Value, "\r\n\x00") {
 				return fmt.Errorf("metric %q has invalid label %q", metric.Name, label.Name)
 			}
-			allowed, known := monitorLabelValues[label.Name]
+			allowed := monitorValues(label.Name)
+			known := allowed != nil
 			if !known {
 				return fmt.Errorf("metric %q uses unbounded label %q", metric.Name, label.Name)
 			}
 			if _, known = allowed[label.Value]; !known {
 				return fmt.Errorf("metric %q label %q has unbounded value %q", metric.Name, label.Name, label.Value)
 			}
+			if !slices.Contains(spec.labels, label.Name) {
+				return fmt.Errorf("metric %q does not allow label %q", metric.Name, label.Name)
+			}
 			identity += "\x00" + label.Name + "=" + label.Value
+		}
+		for _, required := range spec.required {
+			if !slices.ContainsFunc(labels, func(label Label) bool { return label.Name == required }) {
+				return fmt.Errorf("metric %q requires label %q", metric.Name, required)
+			}
+		}
+		operation := labelValue(labels, "operation")
+		role := labelValue(labels, "role")
+		if operation != "" && role != "" && !validOperationRole(operation, role) {
+			return fmt.Errorf("metric %q has unsupported operation/role pair %q/%q", metric.Name, operation, role)
 		}
 		if _, exists := seen[identity]; exists {
 			return fmt.Errorf("duplicate metric identity %q", metric.Name)
@@ -356,10 +563,16 @@ func validateMetrics(metrics []Metric) error {
 		seen[identity] = struct{}{}
 		switch metric.Kind {
 		case MetricGauge, MetricCounter:
-			if len(metric.BucketUpper) != 0 || len(metric.BucketCounts) != 0 || metric.Count != 0 || metric.Sum != 0 {
+			if len(metric.BucketUpper) != 0 || len(metric.BucketCounts) != 0 || metric.Count != 0 || metric.Sum != 0 || metric.Maximum != 0 {
 				return fmt.Errorf("metric %q has histogram fields for kind %q", metric.Name, metric.Kind)
 			}
 		case MetricHistogram:
+			if metric.Value != 0 {
+				return fmt.Errorf("metric %q has scalar value for histogram kind", metric.Name)
+			}
+			if metric.Count == 0 && (metric.Sum != 0 || metric.Maximum != 0) || metric.Maximum > metric.Sum {
+				return fmt.Errorf("metric %q histogram aggregates are inconsistent", metric.Name)
+			}
 			if len(metric.BucketUpper) == 0 || len(metric.BucketUpper) != len(metric.BucketCounts) {
 				return fmt.Errorf("metric %q has invalid histogram buckets", metric.Name)
 			}
@@ -381,11 +594,99 @@ func validateMetrics(metrics []Metric) error {
 			if metric.BucketCounts[len(metric.BucketCounts)-1] != metric.Count {
 				return fmt.Errorf("metric %q histogram terminal bucket does not match count", metric.Name)
 			}
+			if metric.Availability == AvailabilityUnavailable && (!slices.Equal(metric.BucketUpper, []uint64{math.MaxUint64}) || metric.Count != 0 || metric.Sum != 0 || metric.Maximum != 0 || !slices.Equal(metric.BucketCounts, []uint64{0})) {
+				return fmt.Errorf("metric %q unavailable histogram must use an empty sentinel", metric.Name)
+			}
+			validBounds := metric.Availability == AvailabilityUnavailable && slices.Equal(metric.BucketUpper, []uint64{math.MaxUint64})
+			for _, bounds := range spec.bounds {
+				validBounds = validBounds || slices.Equal(metric.BucketUpper, bounds)
+			}
+			if !validBounds {
+				return fmt.Errorf("metric %q histogram bounds are not defined by monitor schema v%d", metric.Name, MonitorSchemaVersion)
+			}
 		default:
 			return fmt.Errorf("metric %q has invalid kind %q", metric.Name, metric.Kind)
 		}
 	}
 	return nil
+}
+
+func labelValue(labels []Label, name string) string {
+	for _, label := range labels {
+		if label.Name == name {
+			return label.Value
+		}
+	}
+	return ""
+}
+
+func validOperationRole(operation, role string) bool {
+	roles := map[string][]string{
+		"backup":            {"source", "repository", "database"},
+		"restore":           {"repository", "source"},
+		"check":             {"repository", "database", "scratch"},
+		"legacy_import":     {"source", "database", "wal", "coordination", "rpc"},
+		"forget":            {"database"},
+		"prune":             {"repository", "database"},
+		"replicate":         {"source", "repository"},
+		"cache_fill":        {"cache", "coordination"},
+		"cache_evict":       {"cache", "coordination"},
+		"placement":         {"repository", "database"},
+		"export":            {"repository", "source", "database"},
+		"analytics":         {"repository", "database"},
+		"maintenance":       {"repository", "database", "scratch"},
+		"gdpr":              {"repository", "database"},
+		"staging_reconcile": {"repository", "database", "coordination"},
+		"key_management":    {"broker", "coordination", "repository"},
+		"compaction":        {"database"},
+		"recovery":          {"database", "wal", "coordination"},
+	}
+	return slices.Contains(roles[operation], role)
+}
+
+func newMonitorMetricSpecs() map[string]metricSpec {
+	specs := make(map[string]metricSpec)
+	add := func(name string, kind MetricKind, unit string, labels, required []string, bounds ...[]uint64) {
+		specs[name] = metricSpec{kind: kind, unit: unit, labels: labels, required: required, bounds: bounds}
+	}
+	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "monitor_export_failures", "monitor_export_dropped"} {
+		add(name, MetricCounter, "operations", nil, nil)
+	}
+	for _, name := range []string{"engine_memtable_write_bytes", "engine_wal_flush_bytes", "engine_compacted_bytes"} {
+		add(name, MetricCounter, "bytes", nil, nil)
+	}
+	add("engine_memtable_bytes", MetricGauge, "bytes", nil, nil)
+	for _, name := range []string{"engine_l0_sst_objects", "engine_sst_objects", "engine_sorted_runs"} {
+		add(name, MetricGauge, "objects", nil, nil)
+	}
+	for _, name := range []string{"engine_running_compactions", "broker_active_sessions", "broker_active_leases"} {
+		add(name, MetricGauge, "operations", nil, nil)
+	}
+	add("broker_locked", MetricGauge, "state", nil, nil)
+	for _, name := range []string{"admission_wait_latency", "admission_lock_hold_latency", "fence_check_latency", "write_batch_request_latency", "transaction_begin_latency", "engine_submit_latency", "durable_wait_latency", "finalization_latency"} {
+		add(name, MetricHistogram, "microseconds", []string{"outcome"}, nil, vaulticLatencyBounds())
+	}
+	for _, name := range []string{"engine_backpressure_latency", "engine_batch_queue_latency", "engine_batch_service_latency"} {
+		add(name, MetricHistogram, "microseconds", []string{"outcome"}, nil, slateDBLatencyBounds())
+	}
+	for _, operation := range []string{"put", "multipart_init", "multipart_part", "multipart_complete", "multipart_abort", "get", "head", "get_body", "get_ranges", "delete", "list", "list_with_offset", "list_with_delimiter", "copy", "rename"} {
+		add("object_"+operation+"_latency", MetricHistogram, "microseconds", []string{"role", "outcome"}, []string{"role"}, vaulticLatencyBounds())
+		add("object_"+operation+"_bytes", MetricCounter, "bytes", []string{"role"}, []string{"role"})
+	}
+	add("operation_started", MetricCounter, "operations", []string{"operation"}, []string{"operation"})
+	add("operation_completed", MetricCounter, "operations", []string{"operation", "outcome"}, []string{"operation", "outcome"})
+	add("operation_active", MetricGauge, "operations", []string{"operation"}, []string{"operation"})
+	add("operation_processed_bytes", MetricCounter, "bytes", []string{"operation", "role"}, []string{"operation", "role"})
+	add("wait_attempts", MetricCounter, "operations", []string{"operation", "role", "throttle"}, []string{"operation", "role", "throttle"})
+	add("wait_contentions", MetricCounter, "operations", []string{"operation", "role", "throttle"}, []string{"operation", "role", "throttle"})
+	add("wait_completed", MetricCounter, "operations", []string{"operation", "role", "throttle", "outcome"}, []string{"operation", "role", "throttle", "outcome"})
+	add("wait_active", MetricGauge, "operations", []string{"operation", "role", "throttle"}, []string{"operation", "role", "throttle"})
+	add("wait_oldest_age", MetricGauge, "microseconds", []string{"operation", "role", "throttle"}, []string{"operation", "role", "throttle"})
+	add("wait_duration", MetricHistogram, "microseconds", []string{"operation", "role", "throttle", "outcome"}, []string{"operation", "role", "throttle", "outcome"}, vaulticLatencyBounds())
+	add("dependency_requests", MetricCounter, "operations", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
+	add("dependency_bytes", MetricCounter, "bytes", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
+	add("dependency_latency", MetricHistogram, "microseconds", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"}, vaulticLatencyBounds())
+	return specs
 }
 
 func validateMonitorName(kind, value string) error {

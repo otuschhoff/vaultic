@@ -262,7 +262,7 @@ func newMonitorExportCommand(globalOptions *global.Options) *cobra.Command {
 	influx.Flags().StringVar(&options.Org, "org", "", "InfluxDB organization")
 	influx.Flags().StringVar(&options.Bucket, "bucket", "", "InfluxDB bucket")
 	influx.Flags().StringVar(&options.DeploymentID, "deployment-id", "default", "bounded deployment identity")
-	influx.Flags().StringVar(&options.TokenFile, "token-file", "", "protected file containing the InfluxDB token")
+	influx.Flags().StringVar(&options.TokenFile, "token-file", "", "protected Unix file containing the InfluxDB token")
 	influx.Flags().StringVar(&options.TokenEnv, "token-env", "", "environment variable containing the InfluxDB token")
 	influx.Flags().DurationVar(&options.Interval, "interval", options.Interval, "snapshot export interval")
 	influx.Flags().DurationVar(&options.Timeout, "timeout", options.Timeout, "collection and request timeout")
@@ -390,21 +390,31 @@ func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, 
 	cache, cacheErr := daemonEngine.Client().ReadCacheStatus(ctx)
 	component := telemetry.VaulticDBComponent(writer, cache, daemonEngine.Client().WALInfo())
 	if cacheErr != nil {
-		component.Caches = []telemetry.CacheSnapshot{{ID: "slatedb", Availability: telemetry.AvailabilityUnavailable}}
+		component.Caches = []telemetry.CacheSnapshot{{
+			ID: "slatedb", Availability: telemetry.AvailabilityUnavailable,
+			CircuitState:        "unknown",
+			TrafficAvailability: telemetry.AvailabilityUnavailable, TrafficBytesAvailability: telemetry.AvailabilityUnavailable, FillAvailability: telemetry.AvailabilityUnavailable,
+			InventoryAvailability: telemetry.AvailabilityUnavailable, DeletionAvailability: telemetry.AvailabilityUnavailable,
+			ReconciliationAgeAvailability: telemetry.AvailabilityUnavailable,
+			ReconciliationLagAvailability: telemetry.AvailabilityUnavailable,
+		}}
 	}
 	components = append(components, component)
 	return telemetry.NewMonitorSnapshot(now, components...), nil
 }
 
 func repositoryAggregateStorage(stats maintenance.StatsResult) []telemetry.StorageSnapshot {
-	availability := telemetry.AvailabilityExact
+	physicalAvailability := telemetry.AvailabilityExact
 	if stats.PhysicalSizeUnknownPacks != 0 || stats.UsageUnaccountedPacks != 0 {
-		availability = telemetry.AvailabilityEstimated
+		physicalAvailability = telemetry.AvailabilityEstimated
 	}
 	return []telemetry.StorageSnapshot{{
-		BackendID: "repository", Role: "repository", Availability: availability,
+		BackendID: "repository", Role: "repository", Availability: telemetry.AvailabilityExact,
 		ObjectCount: stats.Totals.PackCount, PayloadBytes: stats.Totals.PayloadSize,
-		PhysicalBytes: stats.StoredPhysicalSize,
+		PhysicalBytes: stats.StoredPhysicalSize, ObjectClass: "pack",
+		PlacementState: "unknown", Representation: "encrypted_pack",
+		ObjectCountAvailability: telemetry.AvailabilityExact, PayloadAvailability: telemetry.AvailabilityExact,
+		PhysicalAvailability: physicalAvailability, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
 	}}
 }
 
@@ -414,6 +424,9 @@ func placementStorageSnapshots(counts map[string]maintenance.BackendPlacementCou
 		storage = append(storage, telemetry.StorageSnapshot{
 			BackendID: backendID, Role: "repository", Availability: telemetry.AvailabilityEstimated,
 			ObjectCount: count.Objects, PayloadBytes: count.Bytes, ReconciledAtMS: captured.UnixMilli(),
+			ObjectClass: "pack", PlacementState: "reconciled", Representation: "encrypted_pack",
+			ObjectCountAvailability: telemetry.AvailabilityEstimated, PayloadAvailability: telemetry.AvailabilityEstimated,
+			PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityExact,
 		})
 	}
 	sort.Slice(storage, func(left, right int) bool { return storage[left].BackendID < storage[right].BackendID })
@@ -463,22 +476,50 @@ func repositoryMonitorComponent(repo *repository.Repository, now time.Time) tele
 		CapturedUnixMS: now.UnixMilli(), Availability: telemetry.AvailabilityExact,
 		Storage: []telemetry.StorageSnapshot{{
 			BackendID: "repository", Role: "repository", Availability: telemetry.AvailabilityUnavailable,
+			ObjectClass: "unknown", PlacementState: "unknown", Representation: "encrypted_pack",
+			ObjectCountAvailability: telemetry.AvailabilityUnavailable, PayloadAvailability: telemetry.AvailabilityUnavailable,
+			PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
 		}},
 	}
 	if status.Enabled {
+		availability, reconciliationAgeAvailability := repositoryCacheAvailability(status.TelemetryState)
+		controllerState := "healthy"
+		if availability != telemetry.AvailabilityExact || status.CapacityHealth != "" && status.CapacityHealth != "healthy" {
+			controllerState = "degraded"
+		}
 		available := uint64(0)
-		if status.AggregateMaxBytes > status.UsedBytes+status.ReservedBytes {
+		if status.UsedBytes <= status.AggregateMaxBytes && status.ReservedBytes < status.AggregateMaxBytes-status.UsedBytes {
 			available = status.AggregateMaxBytes - status.UsedBytes - status.ReservedBytes
 		}
 		component.Caches = append(component.Caches, telemetry.CacheSnapshot{
-			ID: "repository", Availability: telemetry.AvailabilityExact,
+			ID: "repository", Availability: availability,
 			RequestedBytes: status.RequestedMaxBytes, EffectiveBytes: status.AggregateMaxBytes,
 			UsedBytes: status.UsedBytes, ReservedBytes: status.ReservedBytes,
 			PinnedBytes: status.PinnedBytes, StagingBytes: status.InflightBytes,
-			ReclaimPendingBytes: status.PendingDeleteBytes, AvailableBytes: available,
+			DeletionPendingBytes: status.PendingDeleteBytes, AvailableBytes: available,
+			Enabled: true, Family: "aggregate", Representation: "encrypted_pack",
+			ControllerState: controllerState, ReconciliationAgeMS: status.TelemetryAgeMS,
+			CircuitState:        "not_applicable",
+			TrafficAvailability: telemetry.AvailabilityUnavailable, TrafficBytesAvailability: telemetry.AvailabilityUnavailable, FillAvailability: telemetry.AvailabilityUnavailable,
+			InventoryAvailability: telemetry.AvailabilityUnavailable, DeletionAvailability: availability,
+			ReconciliationAgeAvailability: reconciliationAgeAvailability,
+			ReconciliationLagAvailability: telemetry.AvailabilityUnavailable,
 		})
 	}
 	return component
+}
+
+func repositoryCacheAvailability(state string) (telemetry.Availability, telemetry.Availability) {
+	switch state {
+	case "fixed", "fresh":
+		return telemetry.AvailabilityExact, telemetry.AvailabilityExact
+	case "stale":
+		return telemetry.AvailabilityStale, telemetry.AvailabilityExact
+	case "denied", "inconsistent", "unavailable":
+		return telemetry.AvailabilityUnavailable, telemetry.AvailabilityUnavailable
+	default:
+		return telemetry.AvailabilityEstimated, telemetry.AvailabilityUnavailable
+	}
 }
 
 func unavailableMonitorComponent(name string, now time.Time) telemetry.ComponentSnapshot {
@@ -544,34 +585,73 @@ func monitorLines(snapshot telemetry.MonitorSnapshot, view string) []string {
 		lines = append(lines, fmt.Sprintf("%-12s availability=%s stale=%v metrics=%d queues=%d operations=%d storage=%d caches=%d", component.Component, component.Availability, component.Stale, len(component.Metrics), len(component.Queues), len(component.Operations), len(component.Storage), len(component.Caches)))
 		if view == "operations" {
 			for _, queue := range component.Queues {
-				lines = append(lines, fmt.Sprintf("  queue %-20s depth=%d capacity=%d active=%d oldest=%s throttle=%s", queue.Name, queue.Depth, queue.Capacity, queue.ActiveWorkers, time.Duration(queue.OldestItemAgeUS)*time.Microsecond, queue.Backpressure))
+				availability := monitorInheritedAvailability(component.Availability, queue.Availability)
+				capacityAvailability := monitorInheritedAvailability(component.Availability, queue.CapacityAvailability)
+				lines = append(lines, fmt.Sprintf("  queue %-20s availability=%s depth=%s capacity=%s active=%s oldest=%s throttle=%s", queue.Name, availability, monitorAvailableUint(queue.Depth, availability), monitorAvailableUint(queue.Capacity, capacityAvailability), monitorAvailableUint(queue.ActiveWorkers, availability), monitorAvailableDuration(queue.OldestItemAgeUS, availability), queue.Backpressure))
 			}
 			for _, operation := range component.Operations {
 				age := time.Duration(component.CapturedUnixMS-operation.StartedUnixMS) * time.Millisecond
 				if age < 0 {
 					age = 0
 				}
-				lines = append(lines, fmt.Sprintf("  operation %-16s class=%s phase=%s progress=%d/%d age=%s blocked=%s", operation.ID, operation.Class, operation.Phase, operation.CompletedUnits, operation.ExpectedUnits, age.Round(time.Second), operation.BlockingReason))
+				lines = append(lines, fmt.Sprintf("  operation %-16s availability=%s class=%s phase=%s progress=%s/%s age=%s blocked=%s", operation.ID, component.Availability, operation.Class, operation.Phase, monitorAvailableUint(operation.CompletedUnits, component.Availability), monitorAvailableUint(operation.ExpectedUnits, component.Availability), monitorAvailableDuration(uint64(age/time.Microsecond), component.Availability), operation.BlockingReason))
 			}
 		}
 		if view == "storage" {
 			for _, storage := range component.Storage {
-				lines = append(lines, fmt.Sprintf("  storage %-18s role=%s availability=%s objects=%d payload=%d physical=%d acknowledgement=%s", storage.BackendID, storage.Role, storage.Availability, storage.ObjectCount, storage.PayloadBytes, storage.PhysicalBytes, storage.Acknowledgement))
+				availability := monitorInheritedAvailability(component.Availability, storage.Availability)
+				lines = append(lines, fmt.Sprintf("  storage %-18s role=%s availability=%s objects=%s payload=%s physical=%s acknowledgement=%s", storage.BackendID, storage.Role, availability, monitorAvailableUint(storage.ObjectCount, monitorInheritedAvailability(component.Availability, storage.ObjectCountAvailability)), monitorAvailableUint(storage.PayloadBytes, monitorInheritedAvailability(component.Availability, storage.PayloadAvailability)), monitorAvailableUint(storage.PhysicalBytes, monitorInheritedAvailability(component.Availability, storage.PhysicalAvailability)), storage.Acknowledgement))
 			}
 		}
 		if view == "caches" || view == "status" {
 			for _, cache := range component.Caches {
-				lines = append(lines, fmt.Sprintf("  cache %-20s used=%d reserved=%d available=%d hits=%d misses=%d", cache.ID, cache.UsedBytes, cache.ReservedBytes, cache.AvailableBytes, cache.Hits, cache.Misses))
+				availability := monitorInheritedAvailability(component.Availability, cache.Availability)
+				trafficAvailability := monitorInheritedAvailability(component.Availability, cache.TrafficAvailability)
+				lines = append(lines, fmt.Sprintf("  cache %-20s availability=%s used=%s reserved=%s available=%s hits=%s misses=%s", cache.ID, availability, monitorAvailableUint(cache.UsedBytes, availability), monitorAvailableUint(cache.ReservedBytes, availability), monitorAvailableUint(cache.AvailableBytes, availability), monitorAvailableUint(cache.Hits, trafficAvailability), monitorAvailableUint(cache.Misses, trafficAvailability)))
 			}
 		}
 		if (view == "wal" || view == "status") && component.WAL != nil {
-			lines = append(lines, fmt.Sprintf("  wal target=%s durability=%s retained=%d flushes=%d throttle=%s", component.WAL.Target, component.WAL.Durability, component.WAL.RetainedBytes, component.WAL.OutstandingFlushes, component.WAL.ThrottleReason))
+			availability := monitorInheritedAvailability(component.Availability, component.WAL.Availability)
+			lines = append(lines, fmt.Sprintf("  wal target=%s durability=%s availability=%s retained=%s flushes=%s throttle=%s", component.WAL.Target, component.WAL.Durability, availability, monitorAvailableUint(component.WAL.RetainedBytes, availability), monitorAvailableUint(component.WAL.OutstandingFlushes, availability), component.WAL.ThrottleReason))
 		}
 	}
 	if len(snapshot.Components) == 0 {
 		lines = append(lines, "no matching components")
 	}
 	return lines
+}
+
+func monitorAvailableUint(value uint64, availability telemetry.Availability) string {
+	switch availability {
+	case telemetry.AvailabilityExact:
+		return strconv.FormatUint(value, 10)
+	case telemetry.AvailabilityEstimated, telemetry.AvailabilityStale:
+		return fmt.Sprintf("%d(%s)", value, availability)
+	default:
+		return string(availability)
+	}
+}
+
+func monitorAvailableDuration(value uint64, availability telemetry.Availability) string {
+	formatted := (time.Duration(value) * time.Microsecond).String()
+	if availability == telemetry.AvailabilityExact {
+		return formatted
+	}
+	return fmt.Sprintf("%s(%s)", formatted, availability)
+}
+
+func monitorInheritedAvailability(parent, child telemetry.Availability) telemetry.Availability {
+	if child == telemetry.AvailabilityNotApplicable {
+		return child
+	}
+	order := map[telemetry.Availability]int{
+		telemetry.AvailabilityExact: 0, telemetry.AvailabilityEstimated: 1,
+		telemetry.AvailabilityStale: 2, telemetry.AvailabilityUnavailable: 3,
+	}
+	if order[parent] > order[child] {
+		return parent
+	}
+	return child
 }
 
 func validateMonitorFilter(value string) error {

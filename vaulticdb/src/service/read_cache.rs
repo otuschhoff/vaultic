@@ -66,6 +66,9 @@ fn status_response(status: Option<CacheStatus>) -> ReadCacheStatusResponse {
         pinned_bytes: status.pinned_bytes,
         inflight_bytes: status.inflight_bytes,
         max_inflight_bytes: status.max_inflight_bytes,
+        deletion_pending_bytes: status
+            .deletion_pending_known
+            .then_some(status.deletion_pending_bytes),
         pending_reclaim_bytes: status.pending_reclaim_bytes,
         quota_coordination_healthy: status.quota_coordination_healthy,
         quota_ledger_revision: status.quota_ledger_revision,
@@ -86,6 +89,9 @@ fn status_response(status: Option<CacheStatus>) -> ReadCacheStatusResponse {
                 reserved_bytes: tier.reserved_bytes,
                 pinned_bytes: tier.pinned_bytes,
                 requested_max_bytes: tier.requested_max_bytes,
+                deletion_pending_bytes: tier
+                    .deletion_pending_known
+                    .then_some(tier.deletion_pending_bytes),
                 pending_reclaim_bytes: tier.pending_reclaim_bytes,
                 reconciliation_lag: tier.reconciliation_lag,
                 circuit_open: tier.circuit_open,

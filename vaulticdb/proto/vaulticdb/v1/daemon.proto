@@ -208,6 +208,7 @@ message ReadCacheTierStatus {
   ReadCacheConfidentiality confidentiality = 10;
   uint64 local_used_bytes = 11;
   uint64 local_reserved_bytes = 12;
+  optional uint64 deletion_pending_bytes = 13;
 }
 
 message ReadCacheStatusResponse {
@@ -231,6 +232,7 @@ message ReadCacheStatusResponse {
   uint64 local_reserved_bytes = 18;
   uint64 policy_sync_lag = 19;
   string policy_sync_error = 20;
+  optional uint64 deletion_pending_bytes = 21;
 }
 
 message UpdateReadCachePolicyRequest {

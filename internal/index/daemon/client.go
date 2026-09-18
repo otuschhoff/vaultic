@@ -317,19 +317,21 @@ type ReadCacheMetrics struct {
 }
 
 type ReadCacheTierStatus struct {
-	ID                  string           `json:"id"`
-	Enabled             bool             `json:"enabled"`
-	Confidentiality     string           `json:"confidentiality"`
-	RequestedMaxBytes   uint64           `json:"requested_max_bytes"`
-	UsedBytes           uint64           `json:"used_bytes"`
-	ReservedBytes       uint64           `json:"reserved_bytes"`
-	LocalUsedBytes      uint64           `json:"local_used_bytes"`
-	LocalReservedBytes  uint64           `json:"local_reserved_bytes"`
-	PinnedBytes         uint64           `json:"pinned_bytes"`
-	PendingReclaimBytes uint64           `json:"pending_reclaim_bytes"`
-	ReconciliationLag   uint64           `json:"reconciliation_lag"`
-	CircuitOpen         bool             `json:"circuit_open"`
-	Metrics             ReadCacheMetrics `json:"metrics"`
+	ID                   string           `json:"id"`
+	Enabled              bool             `json:"enabled"`
+	Confidentiality      string           `json:"confidentiality"`
+	RequestedMaxBytes    uint64           `json:"requested_max_bytes"`
+	UsedBytes            uint64           `json:"used_bytes"`
+	ReservedBytes        uint64           `json:"reserved_bytes"`
+	LocalUsedBytes       uint64           `json:"local_used_bytes"`
+	LocalReservedBytes   uint64           `json:"local_reserved_bytes"`
+	PinnedBytes          uint64           `json:"pinned_bytes"`
+	DeletionPendingBytes uint64           `json:"deletion_pending_bytes"`
+	DeletionPendingKnown bool             `json:"deletion_pending_known"`
+	PendingReclaimBytes  uint64           `json:"pending_reclaim_bytes"`
+	ReconciliationLag    uint64           `json:"reconciliation_lag"`
+	CircuitOpen          bool             `json:"circuit_open"`
+	Metrics              ReadCacheMetrics `json:"metrics"`
 }
 
 type ReadCacheStatus struct {
@@ -345,6 +347,8 @@ type ReadCacheStatus struct {
 	PinnedBytes              uint64                `json:"pinned_bytes"`
 	InflightBytes            uint64                `json:"inflight_bytes"`
 	MaxInflightBytes         uint64                `json:"max_inflight_bytes"`
+	DeletionPendingBytes     uint64                `json:"deletion_pending_bytes"`
+	DeletionPendingKnown     bool                  `json:"deletion_pending_known"`
 	PendingReclaimBytes      uint64                `json:"pending_reclaim_bytes"`
 	QuotaCoordinationHealthy bool                  `json:"quota_coordination_healthy"`
 	QuotaLedgerRevision      uint64                `json:"quota_ledger_revision"`
@@ -1629,7 +1633,7 @@ func readCacheStatus(response *vaulticdbv1.ReadCacheStatusResponse) ReadCacheSta
 		UsedBytes: response.GetUsedBytes(), ReservedBytes: response.GetReservedBytes(),
 		LocalUsedBytes: response.GetLocalUsedBytes(), LocalReservedBytes: response.GetLocalReservedBytes(),
 		PinnedBytes: response.GetPinnedBytes(), InflightBytes: response.GetInflightBytes(),
-		MaxInflightBytes: response.GetMaxInflightBytes(), PendingReclaimBytes: response.GetPendingReclaimBytes(),
+		MaxInflightBytes: response.GetMaxInflightBytes(), DeletionPendingBytes: response.GetDeletionPendingBytes(), DeletionPendingKnown: response.DeletionPendingBytes != nil, PendingReclaimBytes: response.GetPendingReclaimBytes(),
 		QuotaCoordinationHealthy: response.GetQuotaCoordinationHealthy(), QuotaLedgerRevision: response.GetQuotaLedgerRevision(),
 		QuotaLeaseExpiryUnixMS: response.GetQuotaLeaseExpiryUnixMs(), UnverifiedStaleBytes: response.GetUnverifiedStaleBytes(),
 		QuotaReconciliationLag: response.GetQuotaReconciliationLag(), PolicySyncLag: response.GetPolicySyncLag(),
@@ -1647,7 +1651,7 @@ func readCacheStatus(response *vaulticdbv1.ReadCacheStatusResponse) ReadCacheSta
 			RequestedMaxBytes: tier.GetRequestedMaxBytes(), UsedBytes: tier.GetUsedBytes(),
 			ReservedBytes: tier.GetReservedBytes(), LocalUsedBytes: tier.GetLocalUsedBytes(),
 			LocalReservedBytes: tier.GetLocalReservedBytes(), PinnedBytes: tier.GetPinnedBytes(),
-			PendingReclaimBytes: tier.GetPendingReclaimBytes(), ReconciliationLag: tier.GetReconciliationLag(),
+			DeletionPendingBytes: tier.GetDeletionPendingBytes(), DeletionPendingKnown: tier.DeletionPendingBytes != nil, PendingReclaimBytes: tier.GetPendingReclaimBytes(), ReconciliationLag: tier.GetReconciliationLag(),
 			CircuitOpen: tier.GetCircuitOpen(), Metrics: readCacheMetrics(tier.GetMetrics()),
 		})
 	}

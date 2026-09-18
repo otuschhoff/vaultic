@@ -3,8 +3,10 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,12 +43,18 @@ type AsyncExporterConfig struct {
 	Timeout      time.Duration
 }
 
+const (
+	maxExporterRetryBackoff  = time.Minute
+	maxExporterRetryDuration = 5 * time.Minute
+	maxTokenFileBytes        = 64 * 1024
+)
+
 func NewAsyncExporter(exporter SnapshotExporter, capacity int) *AsyncExporter {
 	return NewAsyncExporterWithConfig(exporter, AsyncExporterConfig{Capacity: capacity})
 }
 
 func NewAsyncExporterWithConfig(exporter SnapshotExporter, config AsyncExporterConfig) *AsyncExporter {
-	if exporter == nil || config.Capacity <= 0 || config.Capacity > 1024 || config.RetryLimit < 0 || config.RetryLimit > 16 || config.RetryBackoff < 0 || config.Timeout < 0 {
+	if exporter == nil || config.Capacity <= 0 || config.Capacity > 1024 || config.RetryLimit < 0 || config.RetryLimit > 16 || config.RetryBackoff < 0 || config.RetryBackoff > maxExporterRetryBackoff || config.Timeout < 0 {
 		panic("telemetry exporter requires an implementation and bounded positive capacity")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -61,6 +69,7 @@ func (worker *AsyncExporter) Submit(snapshot MonitorSnapshot) bool {
 	if worker.closed.Load() || snapshot.Validate() != nil {
 		return false
 	}
+	snapshot = cloneMonitorSnapshot(snapshot)
 	select {
 	case worker.queue <- snapshot:
 		return true
@@ -78,6 +87,31 @@ func (worker *AsyncExporter) Submit(snapshot MonitorSnapshot) bool {
 			return false
 		}
 	}
+}
+
+func cloneMonitorSnapshot(snapshot MonitorSnapshot) MonitorSnapshot {
+	clone := snapshot
+	clone.Components = append([]ComponentSnapshot(nil), snapshot.Components...)
+	for componentIndex := range clone.Components {
+		component := &clone.Components[componentIndex]
+		component.Metrics = append([]Metric(nil), component.Metrics...)
+		for metricIndex := range component.Metrics {
+			metric := &component.Metrics[metricIndex]
+			metric.Labels = append([]Label(nil), metric.Labels...)
+			metric.BucketUpper = append([]uint64(nil), metric.BucketUpper...)
+			metric.BucketCounts = append([]uint64(nil), metric.BucketCounts...)
+		}
+		component.Queues = append([]QueueSnapshot(nil), component.Queues...)
+		component.Operations = append([]ActiveOperation(nil), component.Operations...)
+		component.OperationOverflow = append([]OperationOverflowSnapshot(nil), component.OperationOverflow...)
+		component.Storage = append([]StorageSnapshot(nil), component.Storage...)
+		component.Caches = append([]CacheSnapshot(nil), component.Caches...)
+		if component.WAL != nil {
+			wal := *component.WAL
+			component.WAL = &wal
+		}
+	}
+	return clone
 }
 
 func (worker *AsyncExporter) Dropped() uint64  { return worker.dropped.Load() }
@@ -111,6 +145,7 @@ func (worker *AsyncExporter) CloseWithin(timeout time.Duration) {
 func (worker *AsyncExporter) run() {
 	defer close(worker.done)
 	for snapshot := range worker.queue {
+		var retryBackoffTotal time.Duration
 		for attempt := 0; ; attempt++ {
 			ctx := worker.ctx
 			cancel := func() {}
@@ -123,11 +158,21 @@ func (worker *AsyncExporter) run() {
 				break
 			}
 			worker.failures.Add(1)
-			if attempt >= worker.config.RetryLimit {
+			if !retryableExportError(err) || attempt >= worker.config.RetryLimit || retryBackoffTotal >= maxExporterRetryDuration {
 				worker.dropped.Add(1)
 				break
 			}
-			delay := worker.config.RetryBackoff << attempt
+			delay := worker.config.RetryBackoff
+			for exponent := 0; exponent < attempt && delay < maxExporterRetryBackoff; exponent++ {
+				if delay > maxExporterRetryBackoff/2 {
+					delay = maxExporterRetryBackoff
+					break
+				}
+				delay *= 2
+			}
+			if remaining := maxExporterRetryDuration - retryBackoffTotal; delay > remaining {
+				delay = remaining
+			}
 			if delay <= 0 {
 				continue
 			}
@@ -141,31 +186,51 @@ func (worker *AsyncExporter) run() {
 				}
 				return
 			case <-timer.C:
+				retryBackoffTotal += delay
 			}
 		}
 	}
 }
 
+type influxHTTPError struct {
+	statusCode int
+	status     string
+}
+
+func (err *influxHTTPError) Error() string {
+	return "export monitoring snapshot to InfluxDB: server returned " + err.status
+}
+
+func retryableExportError(err error) bool {
+	var httpErr *influxHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.statusCode == http.StatusRequestTimeout || httpErr.statusCode == http.StatusTooManyRequests || httpErr.statusCode >= http.StatusInternalServerError
+	}
+	return !errors.Is(err, context.Canceled)
+}
+
 type InfluxConfig struct {
-	URL          string
-	Org          string
-	Bucket       string
-	DeploymentID string
-	TokenFile    string
-	TokenEnv     string
-	Timeout      time.Duration
-	BatchLimit   int
-	Client       *http.Client
+	URL               string
+	Org               string
+	Bucket            string
+	DeploymentID      string
+	TokenFile         string
+	TokenEnv          string
+	Timeout           time.Duration
+	BatchLimit        int
+	Client            *http.Client
+	AllowInsecureHTTP bool
 }
 
 type InfluxExporter struct {
-	endpoint     string
-	token        string
-	client       *http.Client
-	deploymentID string
-	mu           sync.Mutex
-	previous     map[string]uint64
-	batchLimit   int
+	endpoint      string
+	token         string
+	client        *http.Client
+	deploymentID  string
+	mu            sync.Mutex
+	previous      map[string]uint64
+	processStarts map[string]string
+	batchLimit    int
 }
 
 func NewInfluxExporter(config InfluxConfig) (*InfluxExporter, error) {
@@ -178,7 +243,7 @@ func NewInfluxExporter(config InfluxConfig) (*InfluxExporter, error) {
 	var encoded []byte
 	var err error
 	if config.TokenFile != "" {
-		encoded, err = os.ReadFile(config.TokenFile)
+		encoded, err = readProtectedTokenFile(config.TokenFile)
 		if err != nil {
 			return nil, fmt.Errorf("read InfluxDB token file: %w", err)
 		}
@@ -189,6 +254,9 @@ func NewInfluxExporter(config InfluxConfig) (*InfluxExporter, error) {
 		}
 		encoded = []byte(value)
 	}
+	if len(encoded) > maxTokenFileBytes {
+		return nil, fmt.Errorf("InfluxDB token source exceeds %d bytes", maxTokenFileBytes)
+	}
 	token := strings.TrimSpace(string(encoded))
 	if token == "" || strings.ContainsAny(token, "\r\n\x00") {
 		return nil, fmt.Errorf("InfluxDB token source is empty or malformed")
@@ -196,6 +264,13 @@ func NewInfluxExporter(config InfluxConfig) (*InfluxExporter, error) {
 	endpoint, err := url.Parse(config.URL)
 	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
 		return nil, fmt.Errorf("invalid InfluxDB URL")
+	}
+	loopback := endpoint.Hostname() == "localhost"
+	if address := net.ParseIP(endpoint.Hostname()); address != nil {
+		loopback = address.IsLoopback()
+	}
+	if endpoint.Scheme != "https" && !(config.AllowInsecureHTTP && endpoint.Scheme == "http" && loopback) {
+		return nil, fmt.Errorf("InfluxDB URL must use HTTPS")
 	}
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/")
 	if !strings.HasSuffix(endpoint.Path, "/api/v2/write") {
@@ -214,6 +289,11 @@ func NewInfluxExporter(config InfluxConfig) (*InfluxExporter, error) {
 		}
 		client = &http.Client{Timeout: timeout}
 	}
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client = &clientCopy
 	deploymentID := config.DeploymentID
 	if deploymentID == "" {
 		deploymentID = "default"
@@ -228,7 +308,7 @@ func NewInfluxExporter(config InfluxConfig) (*InfluxExporter, error) {
 	if batchLimit < 1 || batchLimit > 10000 {
 		return nil, fmt.Errorf("InfluxDB batch limit must be between 1 and 10000")
 	}
-	return &InfluxExporter{endpoint: endpoint.String(), token: token, client: client, deploymentID: deploymentID, previous: make(map[string]uint64), batchLimit: batchLimit}, nil
+	return &InfluxExporter{endpoint: endpoint.String(), token: token, client: client, deploymentID: deploymentID, previous: make(map[string]uint64), processStarts: make(map[string]string), batchLimit: batchLimit}, nil
 }
 
 func (exporter *InfluxExporter) Export(ctx context.Context, snapshot MonitorSnapshot) error {
@@ -237,7 +317,7 @@ func (exporter *InfluxExporter) Export(ctx context.Context, snapshot MonitorSnap
 	}
 	exporter.mu.Lock()
 	defer exporter.mu.Unlock()
-	body, next := influxSnapshot(snapshot, exporter.deploymentID, exporter.previous)
+	body, next, nextProcesses := influxSnapshotWithProcesses(snapshot, exporter.deploymentID, exporter.previous, exporter.processStarts)
 	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 	for start := 0; start < len(lines); start += exporter.batchLimit {
 		end := start + exporter.batchLimit
@@ -246,10 +326,12 @@ func (exporter *InfluxExporter) Export(ctx context.Context, snapshot MonitorSnap
 		}
 		if err := exporter.write(ctx, strings.Join(lines[start:end], "\n")+"\n"); err != nil {
 			exporter.previous = make(map[string]uint64)
+			exporter.processStarts = make(map[string]string)
 			return err
 		}
 	}
 	exporter.previous = next
+	exporter.processStarts = nextProcesses
 	return nil
 }
 
@@ -266,41 +348,63 @@ func (exporter *InfluxExporter) write(ctx context.Context, body string) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("export monitoring snapshot to InfluxDB: server returned %s", response.Status)
+		if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 4096)); err != nil {
+			return fmt.Errorf("drain InfluxDB error response: %w", err)
+		}
+		return &influxHTTPError{statusCode: response.StatusCode, status: response.Status}
 	}
 	return nil
 }
 
 func influxSnapshot(snapshot MonitorSnapshot, deploymentID string, previous map[string]uint64) (string, map[string]uint64) {
+	body, next, _ := influxSnapshotWithProcesses(snapshot, deploymentID, previous, nil)
+	return body, next
+}
+
+func influxSnapshotWithProcesses(snapshot MonitorSnapshot, deploymentID string, previous map[string]uint64, previousProcesses map[string]string) (string, map[string]uint64, map[string]string) {
+	const measurementPrefix = "vaultic_monitor_v2_"
 	var output bytes.Buffer
 	next := make(map[string]uint64, MaxMonitorComponents*MaxMonitorMetrics)
+	nextProcesses := make(map[string]string, len(snapshot.Components))
 	for _, component := range snapshot.Components {
-		baseTags := ",component=" + escapeTag(component.Component) + ",deployment=" + escapeTag(deploymentID) + ",process_start=" + escapeTag(component.ProcessStartID)
-		fmt.Fprintf(&output, "vaultic_component%s available=%v,stale=%v %d\n", baseTags, component.Availability == AvailabilityExact, component.Stale, component.CapturedUnixMS)
+		baseTags := ",component=" + escapeTag(component.Component) + ",deployment=" + escapeTag(deploymentID)
+		counterPrevious := previous
+		if previousProcesses != nil {
+			if prior, found := previousProcesses[component.Component]; !found || prior != component.ProcessStartID {
+				counterPrevious = nil
+			}
+		}
+		nextProcesses[component.Component] = component.ProcessStartID
+		fmt.Fprintf(&output, measurementPrefix+"component%s process_start_id=\"%s\",available=%v,availability=\"%s\",stale=%v %d\n", baseTags, escapeFieldString(component.ProcessStartID), component.Availability == AvailabilityExact, component.Availability, component.Stale, component.CapturedUnixMS)
 		for _, metric := range component.Metrics {
 			tags := baseTags
-			for _, label := range metric.Labels {
+			labels := append([]Label(nil), metric.Labels...)
+			sort.Slice(labels, func(left, right int) bool { return labels[left].Name < labels[right].Name })
+			for _, label := range labels {
 				tags += "," + escapeTag(label.Name) + "=" + escapeTag(label.Value)
 			}
-			measurement := "vaultic_" + metric.Name + tags
+			measurement := measurementPrefix + metric.Name + tags
+			metricAvailability := inheritedAvailability(component.Availability, metric.Availability)
+			availability := escapeTag(string(metricAvailability))
 			switch metric.Kind {
 			case MetricGauge:
-				fmt.Fprintf(&output, "%s value=%si,available=%v %d\n", measurement, strconv.FormatUint(metric.Value, 10), metric.Availability == AvailabilityExact, component.CapturedUnixMS)
+				fmt.Fprintf(&output, "%s value=%su,available=%v,availability=\"%s\" %d\n", measurement, strconv.FormatUint(metric.Value, 10), metricAvailability == AvailabilityExact, availability, component.CapturedUnixMS)
 			case MetricCounter:
-				writeCounter(&output, previous, next, measurement, metric.Value, metric.Availability == AvailabilityExact, component.CapturedUnixMS)
+				writeCounter(&output, counterPrevious, next, measurement, metric.Value, metricAvailability, component.CapturedUnixMS)
 			case MetricHistogram:
-				fmt.Fprintf(&output, "%s count=%si,sum=%si,maximum=%si,available=%v %d\n", measurement, strconv.FormatUint(metric.Count, 10), strconv.FormatUint(metric.Sum, 10), strconv.FormatUint(metric.Maximum, 10), metric.Availability == AvailabilityExact, component.CapturedUnixMS)
+				fmt.Fprintf(&output, "%s count=%su,sum=%su,maximum=%su,available=%v,availability=\"%s\" %d\n", measurement, strconv.FormatUint(metric.Count, 10), strconv.FormatUint(metric.Sum, 10), strconv.FormatUint(metric.Maximum, 10), metricAvailability == AvailabilityExact, availability, component.CapturedUnixMS)
 				for index := range metric.BucketUpper {
-					fmt.Fprintf(&output, "vaultic_%s_bucket%s,le=%s count=%si %d\n", metric.Name, tags, strconv.FormatUint(metric.BucketUpper[index], 10), strconv.FormatUint(metric.BucketCounts[index], 10), component.CapturedUnixMS)
+					fmt.Fprintf(&output, measurementPrefix+"%s_bucket%s,le=%s count=%su,available=%v,availability=\"%s\" %d\n", metric.Name, tags, strconv.FormatUint(metric.BucketUpper[index], 10), strconv.FormatUint(metric.BucketCounts[index], 10), metricAvailability == AvailabilityExact, availability, component.CapturedUnixMS)
 				}
 			}
 		}
 		for _, queue := range component.Queues {
 			tags := baseTags + ",queue=" + escapeTag(queue.Name)
-			fmt.Fprintf(&output, "vaultic_queue%s depth=%si,capacity=%si,active_workers=%si,oldest_age_us=%si,available=%v %d\n", tags, u64(queue.Depth), u64(queue.Capacity), u64(queue.ActiveWorkers), u64(queue.OldestItemAgeUS), queue.Availability == AvailabilityExact, component.CapturedUnixMS)
-			writeCounter(&output, previous, next, "vaultic_queue_admitted"+tags, queue.Admitted, queue.Availability == AvailabilityExact, component.CapturedUnixMS)
-			writeCounter(&output, previous, next, "vaultic_queue_rejected"+tags, queue.Rejected, queue.Availability == AvailabilityExact, component.CapturedUnixMS)
+			availability := inheritedAvailability(component.Availability, queue.Availability)
+			capacityAvailability := inheritedAvailability(component.Availability, queue.CapacityAvailability)
+			fmt.Fprintf(&output, measurementPrefix+"queue%s depth=%su,capacity=%su,capacity_available=%v,capacity_availability=\"%s\",active_workers=%su,oldest_age_us=%su,backpressure=\"%s\",backpressure_time_us=%su,available=%v,availability=\"%s\" %d\n", tags, u64(queue.Depth), u64(queue.Capacity), capacityAvailability == AvailabilityExact, capacityAvailability, u64(queue.ActiveWorkers), u64(queue.OldestItemAgeUS), queue.Backpressure, u64(queue.BackpressureTime), availability == AvailabilityExact, availability, component.CapturedUnixMS)
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"queue_admitted"+tags, queue.Admitted, availability, component.CapturedUnixMS)
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"queue_rejected"+tags, queue.Rejected, availability, component.CapturedUnixMS)
 		}
 		operationCounts := make(map[string]uint64)
 		operationOldest := make(map[string]uint64)
@@ -308,52 +412,120 @@ func influxSnapshot(snapshot MonitorSnapshot, deploymentID string, previous map[
 			operationCounts[operation.Class]++
 			age := uint64(0)
 			if component.CapturedUnixMS > operation.StartedUnixMS {
-				age = uint64(component.CapturedUnixMS-operation.StartedUnixMS) * 1000
+				age = saturatingMultiply(uint64(component.CapturedUnixMS-operation.StartedUnixMS), 1000)
 			}
 			if age > operationOldest[operation.Class] {
 				operationOldest[operation.Class] = age
 			}
 		}
-		classes := make([]string, 0, len(operationCounts))
-		for class := range operationCounts {
+		classes := make([]string, 0, len(monitorValues("operation")))
+		for class := range monitorValues("operation") {
 			classes = append(classes, class)
 		}
 		sort.Strings(classes)
 		for _, class := range classes {
 			count := operationCounts[class]
-			fmt.Fprintf(&output, "vaultic_active_operations%s,operation=%s count=%si,oldest_age_us=%si %d\n", baseTags, escapeTag(class), u64(count), u64(operationOldest[class]), component.CapturedUnixMS)
+			fmt.Fprintf(&output, measurementPrefix+"active_operations%s,operation=%s count=%su,oldest_age_us=%su,available=%v,availability=\"%s\" %d\n", baseTags, escapeTag(class), u64(count), u64(operationOldest[class]), component.Availability == AvailabilityExact, component.Availability, component.CapturedUnixMS)
+		}
+		for _, overflow := range component.OperationOverflow {
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"operation_overflow"+baseTags+",operation="+escapeTag(overflow.Class), overflow.Count, component.Availability, component.CapturedUnixMS)
 		}
 		for _, storage := range component.Storage {
 			tags := baseTags + ",backend=" + escapeTag(storage.BackendID) + ",role=" + escapeTag(storage.Role)
-			fmt.Fprintf(&output, "vaultic_storage%s objects=%si,payload_bytes=%si,physical_bytes=%si,available=%v %d\n", tags, u64(storage.ObjectCount), u64(storage.PayloadBytes), u64(storage.PhysicalBytes), storage.Availability == AvailabilityExact, component.CapturedUnixMS)
+			if storage.Acknowledgement != "" {
+				tags += ",acknowledgement=" + escapeTag(storage.Acknowledgement)
+			}
+			if storage.ObjectClass != "" {
+				tags += ",object_class=" + escapeTag(storage.ObjectClass)
+			}
+			if storage.PlacementState != "" {
+				tags += ",placement_state=" + escapeTag(storage.PlacementState)
+			}
+			if storage.Representation != "" {
+				tags += ",representation=" + escapeTag(storage.Representation)
+			}
+			availability := inheritedAvailability(component.Availability, storage.Availability)
+			objectAvailability := inheritedAvailability(availability, storage.ObjectCountAvailability)
+			payloadAvailability := inheritedAvailability(availability, storage.PayloadAvailability)
+			physicalAvailability := inheritedAvailability(availability, storage.PhysicalAvailability)
+			reconciliationAvailability := inheritedAvailability(availability, storage.ReconciliationAvailability)
+			fmt.Fprintf(&output, measurementPrefix+"storage%s objects=%su,objects_available=%v,objects_availability=\"%s\",payload_bytes=%su,payload_available=%v,payload_availability=\"%s\",physical_bytes=%su,physical_available=%v,physical_availability=\"%s\",reconciled_at_ms=%di,reconciliation_available=%v,reconciliation_availability=\"%s\",available=%v,availability=\"%s\" %d\n", tags, u64(storage.ObjectCount), objectAvailability == AvailabilityExact, objectAvailability, u64(storage.PayloadBytes), payloadAvailability == AvailabilityExact, payloadAvailability, u64(storage.PhysicalBytes), physicalAvailability == AvailabilityExact, physicalAvailability, storage.ReconciledAtMS, reconciliationAvailability == AvailabilityExact, reconciliationAvailability, availability == AvailabilityExact, availability, component.CapturedUnixMS)
 		}
 		for _, cache := range component.Caches {
 			tags := baseTags + ",cache=" + escapeTag(cache.ID)
-			fmt.Fprintf(&output, "vaultic_cache%s requested_bytes=%si,effective_bytes=%si,used_bytes=%si,reserved_bytes=%si,pinned_bytes=%si,staging_bytes=%si,reclaim_pending_bytes=%si,available_bytes=%si,inflight_fills=%si,available=%v %d\n", tags, u64(cache.RequestedBytes), u64(cache.EffectiveBytes), u64(cache.UsedBytes), u64(cache.ReservedBytes), u64(cache.PinnedBytes), u64(cache.StagingBytes), u64(cache.ReclaimPendingBytes), u64(cache.AvailableBytes), u64(cache.InflightFills), cache.Availability == AvailabilityExact, component.CapturedUnixMS)
+			if cache.Family != "" {
+				tags += ",family=" + escapeTag(cache.Family)
+			}
+			if cache.Representation != "" {
+				tags += ",representation=" + escapeTag(cache.Representation)
+			}
+			availability := inheritedAvailability(component.Availability, cache.Availability)
+			trafficAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.TrafficAvailability))
+			trafficBytesAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.TrafficBytesAvailability))
+			fillAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.FillAvailability))
+			inventoryAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.InventoryAvailability))
+			deletionAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.DeletionAvailability))
+			reconciliationAgeAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.ReconciliationAgeAvailability))
+			reconciliationLagAvailability := inheritedAvailability(component.Availability, optionalAvailability(cache.ReconciliationLagAvailability))
+			fmt.Fprintf(&output, measurementPrefix+"cache%s requested_bytes=%su,effective_bytes=%su,used_bytes=%su,reserved_bytes=%su,pinned_bytes=%su,staging_bytes=%su,deletion_pending_bytes=%su,deletion_pending_available=%v,deletion_pending_availability=\"%s\",reclaim_pending_bytes=%su,available_bytes=%su,object_count=%su,object_count_available=%v,object_count_availability=\"%s\",enabled=%v,inflight_fills=%su,inflight_fills_available=%v,inflight_fills_availability=\"%s\",reconciliation_age_ms=%su,reconciliation_age_available=%v,reconciliation_age_availability=\"%s\",reconciliation_lag=%su,reconciliation_lag_available=%v,reconciliation_lag_availability=\"%s\",controller_state=\"%s\",circuit_state=\"%s\",available=%v,availability=\"%s\" %d\n", tags, u64(cache.RequestedBytes), u64(cache.EffectiveBytes), u64(cache.UsedBytes), u64(cache.ReservedBytes), u64(cache.PinnedBytes), u64(cache.StagingBytes), u64(cache.DeletionPendingBytes), deletionAvailability == AvailabilityExact, deletionAvailability, u64(cache.ReclaimPendingBytes), u64(cache.AvailableBytes), u64(cache.ObjectCount), inventoryAvailability == AvailabilityExact, inventoryAvailability, cache.Enabled, u64(cache.InflightFills), fillAvailability == AvailabilityExact, fillAvailability, u64(cache.ReconciliationAgeMS), reconciliationAgeAvailability == AvailabilityExact, reconciliationAgeAvailability, u64(cache.ReconciliationLag), reconciliationLagAvailability == AvailabilityExact, reconciliationLagAvailability, cache.ControllerState, cache.CircuitState, availability == AvailabilityExact, availability, component.CapturedUnixMS)
 			for _, counter := range []struct {
 				name  string
 				value uint64
-			}{{"hits", cache.Hits}, {"misses", cache.Misses}, {"origin_bytes", cache.OriginBytes}, {"cache_bytes", cache.CacheBytes}, {"origin_reads_avoided", cache.OriginReadsAvoided}} {
-				writeCounter(&output, previous, next, "vaultic_cache_"+counter.name+tags, counter.value, cache.Availability == AvailabilityExact, component.CapturedUnixMS)
+			}{{"hits", cache.Hits}, {"misses", cache.Misses}, {"origin_reads_avoided", cache.OriginReadsAvoided}} {
+				writeCounter(&output, counterPrevious, next, measurementPrefix+"cache_"+counter.name+tags, counter.value, trafficAvailability, component.CapturedUnixMS)
 			}
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"cache_origin_bytes"+tags, cache.OriginBytes, trafficBytesAvailability, component.CapturedUnixMS)
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"cache_cache_bytes"+tags, cache.CacheBytes, trafficBytesAvailability, component.CapturedUnixMS)
 		}
 		if wal := component.WAL; wal != nil {
-			tags := baseTags + ",target=" + escapeTag(wal.Target)
-			fmt.Fprintf(&output, "vaultic_wal%s uploaded_bytes=%si,outstanding_flushes=%si,retained_bytes=%si,retained_segments=%si,oldest_uncheckpointed_ms=%si,available=%v %d\n", tags, u64(wal.UploadedBytes), u64(wal.OutstandingFlushes), u64(wal.RetainedBytes), u64(wal.RetainedSegments), u64(wal.OldestUncheckpointedMS), wal.Availability == AvailabilityExact, component.CapturedUnixMS)
-			writeCounter(&output, previous, next, "vaultic_wal_durability_failures"+tags, wal.DurabilityFailures, wal.Availability == AvailabilityExact, component.CapturedUnixMS)
-			writeCounter(&output, previous, next, "vaultic_wal_cleanup_failures"+tags, wal.CleanupFailures, wal.Availability == AvailabilityExact, component.CapturedUnixMS)
+			availability := inheritedAvailability(component.Availability, wal.Availability)
+			tags := baseTags
+			if wal.Target != "" {
+				tags += ",target=" + escapeTag(wal.Target)
+			}
+			if wal.Durability != "" {
+				tags += ",durability=" + escapeTag(wal.Durability)
+			}
+			fmt.Fprintf(&output, measurementPrefix+"wal%s outstanding_flushes=%su,retained_bytes=%su,retained_segments=%su,oldest_uncheckpointed_ms=%su,throttle=\"%s\",available=%v,availability=\"%s\" %d\n", tags, u64(wal.OutstandingFlushes), u64(wal.RetainedBytes), u64(wal.RetainedSegments), u64(wal.OldestUncheckpointedMS), wal.ThrottleReason, availability == AvailabilityExact, availability, component.CapturedUnixMS)
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"wal_uploaded_bytes"+tags, wal.UploadedBytes, availability, component.CapturedUnixMS)
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"wal_durability_failures"+tags, wal.DurabilityFailures, availability, component.CapturedUnixMS)
+			writeCounter(&output, counterPrevious, next, measurementPrefix+"wal_cleanup_failures"+tags, wal.CleanupFailures, availability, component.CapturedUnixMS)
 		}
 	}
-	return output.String(), next
+	return output.String(), next, nextProcesses
 }
 
-func writeCounter(output *bytes.Buffer, previous, next map[string]uint64, series string, value uint64, available bool, timestamp int64) {
+func escapeFieldString(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
+}
+
+func optionalAvailability(value Availability) Availability {
+	if value == "" {
+		return AvailabilityUnavailable
+	}
+	return value
+}
+
+func inheritedAvailability(parent, child Availability) Availability {
+	if child == AvailabilityNotApplicable {
+		return child
+	}
+	severity := map[Availability]int{
+		AvailabilityExact: 0, AvailabilityEstimated: 1, AvailabilityStale: 2, AvailabilityUnavailable: 3,
+	}
+	if severity[parent] > severity[child] {
+		return parent
+	}
+	return child
+}
+
+func writeCounter(output *bytes.Buffer, previous, next map[string]uint64, series string, value uint64, availability Availability, timestamp int64) {
 	old, found := previous[series]
-	if !available {
+	if availability != AvailabilityExact {
 		if found {
 			next[series] = old
 		}
-		fmt.Fprintf(output, "%s value=%si,delta=0i,reset=true,available=false %d\n", series, u64(value), timestamp)
+		fmt.Fprintf(output, "%s value=%su,delta=0u,reset=false,available=false,availability=\"%s\" %d\n", series, u64(value), availability, timestamp)
 		return
 	}
 	reset := !found || value < old
@@ -362,7 +534,14 @@ func writeCounter(output *bytes.Buffer, previous, next map[string]uint64, series
 		delta = value - old
 	}
 	next[series] = value
-	fmt.Fprintf(output, "%s value=%si,delta=%si,reset=%v,available=%v %d\n", series, u64(value), u64(delta), reset, available, timestamp)
+	fmt.Fprintf(output, "%s value=%su,delta=%su,reset=%v,available=true,availability=\"%s\" %d\n", series, u64(value), u64(delta), reset, availability, timestamp)
 }
 
 func u64(value uint64) string { return strconv.FormatUint(value, 10) }
+
+func saturatingMultiply(value, multiplier uint64) uint64 {
+	if multiplier != 0 && value > ^uint64(0)/multiplier {
+		return ^uint64(0)
+	}
+	return value * multiplier
+}

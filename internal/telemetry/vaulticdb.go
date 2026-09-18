@@ -18,7 +18,7 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 		CapturedUnixMS: captured, Availability: AvailabilityExact,
 		Metrics: append(vaulticDBEngineMetrics(writer.Attribution), vaulticDBObjectMetrics(writer.Attribution)...),
 		Queues: []QueueSnapshot{{
-			Name: "batch_write", Availability: AvailabilityExact,
+			Name: "batch_write", Availability: AvailabilityExact, CapacityAvailability: AvailabilityUnavailable,
 			Depth:            writer.Attribution.EngineBatchQueueDepth,
 			ActiveWorkers:    writer.Attribution.EngineBatchService.Active,
 			Admitted:         writer.Attribution.EngineBatchQueue.Successes,
@@ -38,28 +38,99 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 		Storage: []StorageSnapshot{
 			{
 				BackendID: "database", Role: "database", Availability: AvailabilityEstimated,
-				ObjectCount: writer.Attribution.EngineSSTCount,
+				ObjectCount: writer.Attribution.EngineSSTCount, Acknowledgement: "unknown",
+				ObjectClass: "sst", PlacementState: "primary", Representation: "sst",
+				ObjectCountAvailability: AvailabilityEstimated, PayloadAvailability: AvailabilityUnavailable,
+				PhysicalAvailability: AvailabilityUnavailable, ReconciliationAvailability: AvailabilityUnavailable,
 			},
 			{
 				BackendID: "wal", Role: "wal", Availability: AvailabilityExact,
 				ObjectCount: wal.RetainedSegments, PhysicalBytes: wal.RetainedBytes,
-				Acknowledgement: monitorAcknowledgement(wal.Durability),
+				Acknowledgement: monitorAcknowledgement(wal.Durability), ObjectClass: "wal_segment",
+				PlacementState: "primary", Representation: "metadata",
+				ObjectCountAvailability: AvailabilityExact, PayloadAvailability: AvailabilityUnavailable,
+				PhysicalAvailability: AvailabilityExact, ReconciliationAvailability: AvailabilityUnavailable,
 			},
 		},
 	}
+	if writer.InstanceID != "" {
+		component.ProcessStartID += "-" + writer.InstanceID
+	}
+	if wal.Target == "" || wal.Durability == "" {
+		component.WAL.Availability = AvailabilityUnavailable
+		component.Storage[1].Availability = AvailabilityUnavailable
+		component.Storage[1].ObjectCountAvailability = AvailabilityUnavailable
+		component.Storage[1].PhysicalAvailability = AvailabilityUnavailable
+	}
 	if writer.ProcessStartedUnixMS <= 0 {
 		component.ProcessStartID = "legacy"
+		if writer.InstanceID != "" {
+			component.ProcessStartID += "-" + writer.InstanceID
+		}
 		component.Availability = AvailabilityEstimated
 	}
 	if cache.Configured {
-		component.Caches = append(component.Caches, vaulticDBCacheSnapshot("slatedb", cache))
+		globalAvailability := AvailabilityExact
+		if !cache.QuotaCoordinationHealthy || cache.QuotaReconciliationLag != 0 || cache.PolicySyncLag != 0 || cache.PolicySyncError != "" {
+			globalAvailability = AvailabilityStale
+		}
+		aggregateAvailability := globalAvailability
+		aggregateLag := cache.QuotaReconciliationLag
+		aggregateEnabled := len(cache.Tiers) == 0
+		aggregateCircuitOpen := false
+		aggregateAvailable := uint64(0)
+		if cache.AggregateMaxBytesKnown && cache.UsedBytes <= cache.AggregateMaxBytes && cache.ReservedBytes <= cache.AggregateMaxBytes-cache.UsedBytes {
+			aggregateAvailable = cache.AggregateMaxBytes - cache.UsedBytes - cache.ReservedBytes
+		}
 		for _, tier := range cache.Tiers {
+			aggregateCircuitOpen = aggregateCircuitOpen || tier.CircuitOpen
+			aggregateEnabled = aggregateEnabled || tier.Enabled
+			aggregateLag = saturatingAdd(aggregateLag, tier.ReconciliationLag)
+			if tier.ReconciliationLag != 0 || tier.CircuitOpen {
+				aggregateAvailability = AvailabilityStale
+			}
+		}
+		component.Caches = append(component.Caches, vaulticDBCacheSnapshot("slatedb", cache, aggregateAvailability, aggregateLag, aggregateEnabled, aggregateCircuitOpen))
+		for _, tier := range cache.Tiers {
+			tierAvailability := globalAvailability
+			if tier.ReconciliationLag != 0 || tier.CircuitOpen {
+				tierAvailability = AvailabilityStale
+			}
+			effectiveBytes := tier.RequestedMaxBytes
+			availableBytes := uint64(0)
+			if tier.UsedBytes <= tier.RequestedMaxBytes && tier.ReservedBytes < tier.RequestedMaxBytes-tier.UsedBytes {
+				availableBytes = tier.RequestedMaxBytes - tier.UsedBytes - tier.ReservedBytes
+			}
+			if cache.AggregateMaxBytesKnown && availableBytes > aggregateAvailable {
+				availableBytes = aggregateAvailable
+			}
+			effectiveBytes = saturatingAdd(saturatingAdd(tier.UsedBytes, tier.ReservedBytes), availableBytes)
+			controllerState := "healthy"
+			circuitState := "closed"
+			if globalAvailability == AvailabilityStale || tier.ReconciliationLag != 0 || tier.CircuitOpen {
+				controllerState = "degraded"
+			}
+			if !tier.Enabled {
+				effectiveBytes = 0
+				availableBytes = 0
+				controllerState = "not_applicable"
+				circuitState = "not_applicable"
+			} else if tier.CircuitOpen {
+				circuitState = "open"
+			}
 			component.Caches = append(component.Caches, CacheSnapshot{
-				ID: tier.ID, Availability: AvailabilityExact, RequestedBytes: tier.RequestedMaxBytes,
-				EffectiveBytes: tier.RequestedMaxBytes, UsedBytes: tier.UsedBytes,
+				ID: tier.ID, Availability: tierAvailability, RequestedBytes: tier.RequestedMaxBytes,
+				EffectiveBytes: effectiveBytes, UsedBytes: tier.UsedBytes,
 				ReservedBytes: tier.ReservedBytes, PinnedBytes: tier.PinnedBytes,
-				ReclaimPendingBytes: tier.PendingReclaimBytes, Hits: tier.Metrics.Hits,
+				DeletionPendingBytes: tier.DeletionPendingBytes,
+				ReclaimPendingBytes:  tier.PendingReclaimBytes, Hits: tier.Metrics.Hits,
 				Misses: tier.Metrics.Misses, OriginReadsAvoided: tier.Metrics.OriginReadsAvoided,
+				AvailableBytes: availableBytes, ReconciliationLag: tier.ReconciliationLag,
+				ControllerState: controllerState, CircuitState: circuitState, Enabled: tier.Enabled, Family: "unknown",
+				Representation: "block", TrafficAvailability: AvailabilityExact,
+				TrafficBytesAvailability: AvailabilityUnavailable, FillAvailability: AvailabilityUnavailable, InventoryAvailability: AvailabilityUnavailable,
+				DeletionAvailability:          inheritedAvailability(tierAvailability, availabilityFromKnown(tier.DeletionPendingKnown)),
+				ReconciliationAgeAvailability: AvailabilityUnavailable, ReconciliationLagAvailability: AvailabilityExact,
 			})
 		}
 	}
@@ -68,30 +139,69 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 
 func monitorAcknowledgement(value string) string {
 	switch value {
-	case "persistent", "memory", "inherited", "unknown":
+	case "persistent", "memory", "inherited", "local-process", "shared-remote", "durable-object-store", "test", "unsupported", "unknown":
 		return value
 	default:
 		return "unknown"
 	}
 }
 
-func vaulticDBCacheSnapshot(id string, status daemon.ReadCacheStatus) CacheSnapshot {
-	availability := AvailabilityExact
-	if !status.AggregateMaxBytesKnown {
+func vaulticDBCacheSnapshot(id string, status daemon.ReadCacheStatus, availability Availability, reconciliationLag uint64, enabled, circuitOpen bool) CacheSnapshot {
+	if !status.AggregateMaxBytesKnown && availability == AvailabilityExact {
 		availability = AvailabilityEstimated
 	}
 	available := uint64(0)
-	if status.AggregateMaxBytesKnown && status.AggregateMaxBytes > status.UsedBytes+status.ReservedBytes {
+	effectiveBytes := status.AggregateMaxBytes
+	if enabled && status.AggregateMaxBytesKnown && status.UsedBytes <= status.AggregateMaxBytes && status.ReservedBytes < status.AggregateMaxBytes-status.UsedBytes {
 		available = status.AggregateMaxBytes - status.UsedBytes - status.ReservedBytes
+	}
+	if !enabled {
+		effectiveBytes = 0
 	}
 	return CacheSnapshot{
 		ID: id, Availability: availability, RequestedBytes: status.AggregateMaxBytes,
-		EffectiveBytes: status.AggregateMaxBytes, UsedBytes: status.UsedBytes,
+		EffectiveBytes: effectiveBytes, UsedBytes: status.UsedBytes,
 		ReservedBytes: status.ReservedBytes, PinnedBytes: status.PinnedBytes,
-		StagingBytes: status.InflightBytes, ReclaimPendingBytes: status.PendingReclaimBytes,
+		StagingBytes: status.InflightBytes, DeletionPendingBytes: status.DeletionPendingBytes, ReclaimPendingBytes: status.PendingReclaimBytes,
 		AvailableBytes: available, Hits: status.Metrics.Hits, Misses: status.Metrics.Misses,
-		OriginReadsAvoided: status.Metrics.OriginReadsAvoided,
+		OriginReadsAvoided:            status.Metrics.OriginReadsAvoided,
+		ReconciliationLag:             reconciliationLag,
+		Enabled:                       enabled,
+		Family:                        "aggregate",
+		Representation:                "block",
+		TrafficAvailability:           AvailabilityExact,
+		TrafficBytesAvailability:      AvailabilityUnavailable,
+		FillAvailability:              AvailabilityUnavailable,
+		InventoryAvailability:         AvailabilityUnavailable,
+		DeletionAvailability:          inheritedAvailability(availability, availabilityFromKnown(status.DeletionPendingKnown)),
+		ReconciliationAgeAvailability: AvailabilityUnavailable,
+		ReconciliationLagAvailability: AvailabilityExact,
+		ControllerState: func() string {
+			if !enabled {
+				return "not_applicable"
+			}
+			if availability != AvailabilityStale && status.QuotaCoordinationHealthy && status.PolicySyncLag == 0 && status.PolicySyncError == "" {
+				return "healthy"
+			}
+			return "degraded"
+		}(),
+		CircuitState: func() string {
+			if !enabled {
+				return "not_applicable"
+			}
+			if circuitOpen {
+				return "open"
+			}
+			return "closed"
+		}(),
 	}
+}
+
+func availabilityFromKnown(known bool) Availability {
+	if known {
+		return AvailabilityExact
+	}
+	return AvailabilityUnavailable
 }
 
 func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {

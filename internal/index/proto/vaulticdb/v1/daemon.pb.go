@@ -1871,21 +1871,22 @@ func (x *ReadCacheTierPolicy) GetTimeoutMs() uint64 {
 }
 
 type ReadCacheTierStatus struct {
-	state               protoimpl.MessageState   `protogen:"open.v1"`
-	Policy              *ReadCacheTierPolicy     `protobuf:"bytes,1,opt,name=policy,proto3" json:"policy,omitempty"`
-	UsedBytes           uint64                   `protobuf:"varint,2,opt,name=used_bytes,json=usedBytes,proto3" json:"used_bytes,omitempty"`
-	ReservedBytes       uint64                   `protobuf:"varint,3,opt,name=reserved_bytes,json=reservedBytes,proto3" json:"reserved_bytes,omitempty"`
-	PinnedBytes         uint64                   `protobuf:"varint,4,opt,name=pinned_bytes,json=pinnedBytes,proto3" json:"pinned_bytes,omitempty"`
-	RequestedMaxBytes   uint64                   `protobuf:"varint,5,opt,name=requested_max_bytes,json=requestedMaxBytes,proto3" json:"requested_max_bytes,omitempty"`
-	PendingReclaimBytes uint64                   `protobuf:"varint,6,opt,name=pending_reclaim_bytes,json=pendingReclaimBytes,proto3" json:"pending_reclaim_bytes,omitempty"`
-	ReconciliationLag   uint64                   `protobuf:"varint,7,opt,name=reconciliation_lag,json=reconciliationLag,proto3" json:"reconciliation_lag,omitempty"`
-	CircuitOpen         bool                     `protobuf:"varint,8,opt,name=circuit_open,json=circuitOpen,proto3" json:"circuit_open,omitempty"`
-	Metrics             *ReadCacheMetrics        `protobuf:"bytes,9,opt,name=metrics,proto3" json:"metrics,omitempty"`
-	Confidentiality     ReadCacheConfidentiality `protobuf:"varint,10,opt,name=confidentiality,proto3,enum=vaulticdb.v1.ReadCacheConfidentiality" json:"confidentiality,omitempty"`
-	LocalUsedBytes      uint64                   `protobuf:"varint,11,opt,name=local_used_bytes,json=localUsedBytes,proto3" json:"local_used_bytes,omitempty"`
-	LocalReservedBytes  uint64                   `protobuf:"varint,12,opt,name=local_reserved_bytes,json=localReservedBytes,proto3" json:"local_reserved_bytes,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state                protoimpl.MessageState   `protogen:"open.v1"`
+	Policy               *ReadCacheTierPolicy     `protobuf:"bytes,1,opt,name=policy,proto3" json:"policy,omitempty"`
+	UsedBytes            uint64                   `protobuf:"varint,2,opt,name=used_bytes,json=usedBytes,proto3" json:"used_bytes,omitempty"`
+	ReservedBytes        uint64                   `protobuf:"varint,3,opt,name=reserved_bytes,json=reservedBytes,proto3" json:"reserved_bytes,omitempty"`
+	PinnedBytes          uint64                   `protobuf:"varint,4,opt,name=pinned_bytes,json=pinnedBytes,proto3" json:"pinned_bytes,omitempty"`
+	RequestedMaxBytes    uint64                   `protobuf:"varint,5,opt,name=requested_max_bytes,json=requestedMaxBytes,proto3" json:"requested_max_bytes,omitempty"`
+	PendingReclaimBytes  uint64                   `protobuf:"varint,6,opt,name=pending_reclaim_bytes,json=pendingReclaimBytes,proto3" json:"pending_reclaim_bytes,omitempty"`
+	ReconciliationLag    uint64                   `protobuf:"varint,7,opt,name=reconciliation_lag,json=reconciliationLag,proto3" json:"reconciliation_lag,omitempty"`
+	CircuitOpen          bool                     `protobuf:"varint,8,opt,name=circuit_open,json=circuitOpen,proto3" json:"circuit_open,omitempty"`
+	Metrics              *ReadCacheMetrics        `protobuf:"bytes,9,opt,name=metrics,proto3" json:"metrics,omitempty"`
+	Confidentiality      ReadCacheConfidentiality `protobuf:"varint,10,opt,name=confidentiality,proto3,enum=vaulticdb.v1.ReadCacheConfidentiality" json:"confidentiality,omitempty"`
+	LocalUsedBytes       uint64                   `protobuf:"varint,11,opt,name=local_used_bytes,json=localUsedBytes,proto3" json:"local_used_bytes,omitempty"`
+	LocalReservedBytes   uint64                   `protobuf:"varint,12,opt,name=local_reserved_bytes,json=localReservedBytes,proto3" json:"local_reserved_bytes,omitempty"`
+	DeletionPendingBytes *uint64                  `protobuf:"varint,13,opt,name=deletion_pending_bytes,json=deletionPendingBytes,proto3,oneof" json:"deletion_pending_bytes,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ReadCacheTierStatus) Reset() {
@@ -2002,6 +2003,13 @@ func (x *ReadCacheTierStatus) GetLocalReservedBytes() uint64 {
 	return 0
 }
 
+func (x *ReadCacheTierStatus) GetDeletionPendingBytes() uint64 {
+	if x != nil && x.DeletionPendingBytes != nil {
+		return *x.DeletionPendingBytes
+	}
+	return 0
+}
+
 type ReadCacheStatusResponse struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
 	Revision                 uint64                 `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
@@ -2024,6 +2032,7 @@ type ReadCacheStatusResponse struct {
 	LocalReservedBytes       uint64                 `protobuf:"varint,18,opt,name=local_reserved_bytes,json=localReservedBytes,proto3" json:"local_reserved_bytes,omitempty"`
 	PolicySyncLag            uint64                 `protobuf:"varint,19,opt,name=policy_sync_lag,json=policySyncLag,proto3" json:"policy_sync_lag,omitempty"`
 	PolicySyncError          string                 `protobuf:"bytes,20,opt,name=policy_sync_error,json=policySyncError,proto3" json:"policy_sync_error,omitempty"`
+	DeletionPendingBytes     *uint64                `protobuf:"varint,21,opt,name=deletion_pending_bytes,json=deletionPendingBytes,proto3,oneof" json:"deletion_pending_bytes,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -2196,6 +2205,13 @@ func (x *ReadCacheStatusResponse) GetPolicySyncError() string {
 		return x.PolicySyncError
 	}
 	return ""
+}
+
+func (x *ReadCacheStatusResponse) GetDeletionPendingBytes() uint64 {
+	if x != nil && x.DeletionPendingBytes != nil {
+		return *x.DeletionPendingBytes
+	}
+	return 0
 }
 
 type UpdateReadCachePolicyRequest struct {
@@ -5730,7 +5746,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x12admission_priority\x18\a \x01(\rR\x11admissionPriority\x12\x1d\n" +
 	"\n" +
 	"timeout_ms\x18\b \x01(\x04R\ttimeoutMsB\x12\n" +
-	"\x10_absolute_age_ms\"\xd7\x04\n" +
+	"\x10_absolute_age_ms\"\xad\x05\n" +
 	"\x13ReadCacheTierStatus\x129\n" +
 	"\x06policy\x18\x01 \x01(\v2!.vaulticdb.v1.ReadCacheTierPolicyR\x06policy\x12\x1d\n" +
 	"\n" +
@@ -5745,7 +5761,9 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x0fconfidentiality\x18\n" +
 	" \x01(\x0e2&.vaulticdb.v1.ReadCacheConfidentialityR\x0fconfidentiality\x12(\n" +
 	"\x10local_used_bytes\x18\v \x01(\x04R\x0elocalUsedBytes\x120\n" +
-	"\x14local_reserved_bytes\x18\f \x01(\x04R\x12localReservedBytes\"\xd3\a\n" +
+	"\x14local_reserved_bytes\x18\f \x01(\x04R\x12localReservedBytes\x129\n" +
+	"\x16deletion_pending_bytes\x18\r \x01(\x04H\x00R\x14deletionPendingBytes\x88\x01\x01B\x19\n" +
+	"\x17_deletion_pending_bytes\"\xa9\b\n" +
 	"\x17ReadCacheStatusResponse\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x123\n" +
@@ -5768,8 +5786,10 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x10local_used_bytes\x18\x11 \x01(\x04R\x0elocalUsedBytes\x120\n" +
 	"\x14local_reserved_bytes\x18\x12 \x01(\x04R\x12localReservedBytes\x12&\n" +
 	"\x0fpolicy_sync_lag\x18\x13 \x01(\x04R\rpolicySyncLag\x12*\n" +
-	"\x11policy_sync_error\x18\x14 \x01(\tR\x0fpolicySyncErrorB\x16\n" +
-	"\x14_aggregate_max_bytes\"\xe1\x01\n" +
+	"\x11policy_sync_error\x18\x14 \x01(\tR\x0fpolicySyncError\x129\n" +
+	"\x16deletion_pending_bytes\x18\x15 \x01(\x04H\x01R\x14deletionPendingBytes\x88\x01\x01B\x16\n" +
+	"\x14_aggregate_max_bytesB\x19\n" +
+	"\x17_deletion_pending_bytes\"\xe1\x01\n" +
 	"\x1cUpdateReadCachePolicyRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12+\n" +
@@ -6391,6 +6411,7 @@ func file_vaulticdb_v1_daemon_proto_init() {
 		return
 	}
 	file_vaulticdb_v1_daemon_proto_msgTypes[22].OneofWrappers = []any{}
+	file_vaulticdb_v1_daemon_proto_msgTypes[23].OneofWrappers = []any{}
 	file_vaulticdb_v1_daemon_proto_msgTypes[24].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

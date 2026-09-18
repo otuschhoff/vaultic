@@ -217,6 +217,8 @@ pub(crate) struct CacheTierStatus {
     pub(crate) local_reserved_bytes: u64,
     pub(crate) pinned_bytes: u64,
     pub(crate) requested_max_bytes: u64,
+    pub(crate) deletion_pending_bytes: u64,
+    pub(crate) deletion_pending_known: bool,
     pub(crate) pending_reclaim_bytes: u64,
     pub(crate) reconciliation_lag: u64,
     pub(crate) circuit_open: bool,
@@ -234,6 +236,8 @@ pub(crate) struct CacheStatus {
     pub(crate) pinned_bytes: u64,
     pub(crate) inflight_bytes: u64,
     pub(crate) max_inflight_bytes: u64,
+    pub(crate) deletion_pending_bytes: u64,
+    pub(crate) deletion_pending_known: bool,
     pub(crate) pending_reclaim_bytes: u64,
     pub(crate) quota_coordination_healthy: bool,
     pub(crate) quota_ledger_revision: u64,
@@ -306,6 +310,7 @@ struct CacheTier {
     metrics: CacheMetrics,
     circuit: StdMutex<CircuitState>,
     reconciliation_lag: AtomicU64,
+    inventory_reconciliation_failed: AtomicBool,
 }
 
 impl fmt::Debug for CacheTier {
@@ -466,6 +471,65 @@ struct QuotaLedger {
     managers: HashMap<String, QuotaManagerGrant>,
     entries: HashMap<String, QuotaEntry>,
     reconciler: Option<QuotaReconciler>,
+}
+
+fn quota_ledger_accounting_valid(ledger: &QuotaLedger) -> bool {
+    let committed = ledger
+        .entries
+        .values()
+        .filter(|entry| entry.state != QuotaEntryState::Admitting)
+        .try_fold(0u64, |total, entry| total.checked_add(entry.bytes));
+    let reserved = ledger
+        .managers
+        .values()
+        .flat_map(|grant| grant.reserved_by_tier.values())
+        .try_fold(0u64, |total, bytes| total.checked_add(*bytes));
+    let mut expected_reserved = HashMap::<(&str, &str), u64>::new();
+    for entry in ledger
+        .entries
+        .values()
+        .filter(|entry| entry.state == QuotaEntryState::Admitting)
+    {
+        if !ledger.managers.contains_key(&entry.owner_manager_id) {
+            return false;
+        }
+        let reserved = expected_reserved
+            .entry((&entry.owner_manager_id, &entry.tier_id))
+            .or_default();
+        let Some(total) = reserved.checked_add(entry.bytes) else {
+            return false;
+        };
+        *reserved = total;
+    }
+    let reservations_match = ledger.managers.iter().all(|(manager_id, grant)| {
+        grant.reserved_by_tier.iter().all(|(tier_id, bytes)| {
+            expected_reserved
+                .remove(&(manager_id.as_str(), tier_id.as_str()))
+                .unwrap_or(0)
+                == *bytes
+        })
+    }) && expected_reserved.is_empty();
+    reservations_match
+        && committed
+            .zip(reserved)
+            .and_then(|(committed, reserved)| committed.checked_add(reserved))
+            .is_some()
+}
+
+fn next_quota_generation(next_generation: &mut u64) -> Option<u64> {
+    let generation = next_generation.checked_add(1)?;
+    *next_generation = generation;
+    Some(generation)
+}
+
+fn advance_quota_revision(ledger: &mut QuotaLedger) -> Option<u64> {
+    let revision = ledger.revision.checked_add(1)?;
+    ledger.revision = revision;
+    Some(revision)
+}
+
+fn next_policy_generation(generation: u64, changed: bool) -> Option<u64> {
+    generation.checked_add(u64::from(changed))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -659,7 +723,8 @@ impl CacheManager {
             .unwrap_or_else(|lock| lock.into_inner()) = Arc::new(PolicySnapshot {
             revision: current.revision,
             canonical: current.canonical.clone(),
-            generation: current.generation.saturating_add(1),
+            generation: next_policy_generation(current.generation, true)
+                .unwrap_or(current.generation),
             policies,
         });
         *self
@@ -737,6 +802,7 @@ impl CacheManager {
                 metrics: CacheMetrics::default(),
                 circuit: StdMutex::new(CircuitState::default()),
                 reconciliation_lag: AtomicU64::new(0),
+                inventory_reconciliation_failed: AtomicBool::new(false),
             }));
         }
         let initial_canonical = canonical_policy(0, &tiers, &initial_policies)?;
@@ -862,16 +928,28 @@ impl CacheManager {
                     ledger
                         .entries
                         .values()
-                        .filter(|entry| entry.tier_id == tier.id)
+                        .filter(|entry| {
+                            entry.tier_id == tier.id && entry.state != QuotaEntryState::Admitting
+                        })
                         .map(|entry| entry.bytes)
-                        .sum()
+                        .fold(0u64, u64::saturating_add)
                 });
                 let reserved = ledger.as_ref().map_or(local_reserved, |ledger| {
                     ledger
                         .managers
                         .values()
                         .map(|grant| grant.reserved_by_tier.get(&tier.id).copied().unwrap_or(0))
-                        .sum()
+                        .fold(0u64, u64::saturating_add)
+                });
+                let deletion_pending_bytes = ledger.as_ref().map_or(0, |ledger| {
+                    ledger
+                        .entries
+                        .values()
+                        .filter(|entry| {
+                            entry.tier_id == tier.id && entry.state == QuotaEntryState::Deleting
+                        })
+                        .map(|entry| entry.bytes)
+                        .fold(0u64, u64::saturating_add)
                 });
                 CacheTierStatus {
                     id: tier.id.clone(),
@@ -884,6 +962,8 @@ impl CacheManager {
                     local_reserved_bytes: local_reserved,
                     pinned_bytes: state.pinned_by_tier.get(&index).copied().unwrap_or(0),
                     requested_max_bytes: policy.max_bytes,
+                    deletion_pending_bytes,
+                    deletion_pending_known: ledger.is_some(),
                     pending_reclaim_bytes: if policy.enabled {
                         used.saturating_sub(policy.max_bytes)
                     } else {
@@ -899,12 +979,27 @@ impl CacheManager {
                 }
             })
             .collect::<Vec<_>>();
-        let shared_used = tiers.iter().map(|tier| tier.used_bytes).sum::<u64>();
-        let shared_reserved = tiers.iter().map(|tier| tier.reserved_bytes).sum::<u64>();
+        let shared_used = tiers
+            .iter()
+            .map(|tier| tier.used_bytes)
+            .fold(0u64, u64::saturating_add);
+        let shared_reserved = tiers
+            .iter()
+            .map(|tier| tier.reserved_bytes)
+            .fold(0u64, u64::saturating_add);
+        let deletion_pending_bytes = tiers
+            .iter()
+            .map(|tier| tier.deletion_pending_bytes)
+            .fold(0u64, u64::saturating_add);
         let pending_reclaim_bytes = self
             .aggregate_max_bytes
             .map_or(0, |limit| shared_used.saturating_sub(limit))
-            .max(tiers.iter().map(|tier| tier.pending_reclaim_bytes).sum());
+            .max(
+                tiers
+                    .iter()
+                    .map(|tier| tier.pending_reclaim_bytes)
+                    .fold(0u64, u64::saturating_add),
+            );
         CacheStatus {
             revision: policy_snapshot.revision,
             namespace: self.namespace.clone(),
@@ -913,9 +1008,15 @@ impl CacheManager {
             reserved_bytes: shared_reserved,
             local_used_bytes: state.aggregate_used,
             local_reserved_bytes: state.aggregate_reserved,
-            pinned_bytes: state.pinned_by_tier.values().sum(),
+            pinned_bytes: state
+                .pinned_by_tier
+                .values()
+                .copied()
+                .fold(0u64, u64::saturating_add),
             inflight_bytes: state.inflight_reserved,
             max_inflight_bytes: self.max_inflight_bytes,
+            deletion_pending_bytes,
+            deletion_pending_known: ledger.is_some(),
             pending_reclaim_bytes,
             quota_coordination_healthy: self.quota.healthy.load(Ordering::Acquire),
             quota_ledger_revision: self.quota.ledger_revision.load(Ordering::Acquire),
@@ -968,6 +1069,8 @@ impl CacheManager {
         let revision = expected_revision
             .checked_add(1)
             .context("read-cache policy revision overflow")?;
+        let generation = next_policy_generation(current.generation, true)
+            .context("read-cache policy generation exhausted")?;
         self.persist_policy(expected_revision, revision, &proposed)
             .await?;
         let next_policies = proposed
@@ -981,7 +1084,7 @@ impl CacheManager {
             .unwrap_or_else(|lock| lock.into_inner()) = Arc::new(PolicySnapshot {
             revision,
             canonical,
-            generation: current.generation.saturating_add(1),
+            generation,
             policies: next_policies,
         });
         if let Err(error) = self.sync_quota_policy(revision).await {
@@ -1106,7 +1209,8 @@ impl CacheManager {
             .unwrap_or_else(|lock| lock.into_inner()) = Arc::new(PolicySnapshot {
             revision: document_revision,
             canonical,
-            generation: current.generation.saturating_add(u64::from(changed)),
+            generation: next_policy_generation(current.generation, changed)
+                .context("read-cache policy generation exhausted")?,
             policies,
         });
         self.quota.policy_sync_lag.store(0, Ordering::Release);
@@ -1220,6 +1324,9 @@ impl CacheManager {
                 if ledger.format != QUOTA_FORMAT || ledger.namespace != self.namespace {
                     bail!("cache quota ledger identity mismatch");
                 }
+                if !quota_ledger_accounting_valid(&ledger) {
+                    bail!("cache quota ledger accounting overflows");
+                }
                 if ledger.aggregate_max_bytes != self.aggregate_max_bytes {
                     bail!("cache quota aggregate limit does not match shared ledger");
                 }
@@ -1292,7 +1399,7 @@ impl CacheManager {
                 bail!("cache quota policy revision is newer than local policy");
             }
             ledger.policy_revision = policy_revision;
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
@@ -1371,7 +1478,7 @@ impl CacheManager {
             {
                 ledger.reconciler = None;
             }
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
@@ -1448,7 +1555,7 @@ impl CacheManager {
                     reserved_by_tier: HashMap::new(),
                 })
                 .lease_expires_ms = lease_expires_ms;
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
@@ -1556,13 +1663,12 @@ impl CacheManager {
                         tier_id: tier_id.clone(),
                         owner_manager_id,
                         bytes: *bytes,
-                        generation: ledger.entries.get(entry_id).map_or_else(
-                            || {
-                                ledger.next_generation = ledger.next_generation.saturating_add(1);
-                                ledger.next_generation
-                            },
-                            |entry| entry.generation,
-                        ),
+                        generation: if let Some(entry) = ledger.entries.get(entry_id) {
+                            entry.generation
+                        } else {
+                            next_quota_generation(&mut ledger.next_generation)
+                                .context("cache quota generation exhausted")?
+                        },
                         policy_revision,
                         expires_ms: 0,
                         state: if *complete {
@@ -1576,7 +1682,7 @@ impl CacheManager {
             ledger.entries = entries;
             ledger.policy_revision = policy_revision;
             ledger.reconciler = None;
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
@@ -1586,7 +1692,11 @@ impl CacheManager {
                         .lease_expiry_ms
                         .store(lease_expires_ms, Ordering::Release);
                     self.quota.verified_bytes.store(
-                        ledger.entries.values().map(|entry| entry.bytes).sum(),
+                        ledger
+                            .entries
+                            .values()
+                            .map(|entry| entry.bytes)
+                            .fold(0u64, u64::saturating_add),
                         Ordering::Release,
                     );
                     self.quota.unverified_bytes.store(0, Ordering::Release);
@@ -1698,7 +1808,8 @@ impl CacheManager {
                                 Arc::new(PolicySnapshot {
                                     revision: current.revision,
                                     canonical: current.canonical.clone(),
-                                    generation: current.generation.saturating_add(1),
+                                    generation: next_policy_generation(current.generation, true)
+                                        .unwrap_or(current.generation),
                                     policies: disabled,
                                 });
                             quota.policy_sync_lag.fetch_add(1, Ordering::AcqRel);
@@ -1710,10 +1821,35 @@ impl CacheManager {
                         } else {
                             let changed = next_revision != current.revision
                                 || next_policies != current.policies;
+                            let Some(generation) =
+                                next_policy_generation(current.generation, changed)
+                            else {
+                                let mut disabled = current.policies.clone();
+                                for policy in &mut disabled {
+                                    policy.enabled = false;
+                                }
+                                *policy_snapshot
+                                    .write()
+                                    .unwrap_or_else(|lock| lock.into_inner()) =
+                                    Arc::new(PolicySnapshot {
+                                        revision: current.revision,
+                                        canonical: current.canonical.clone(),
+                                        generation: current.generation,
+                                        policies: disabled,
+                                    });
+                                quota.policy_sync_lag.fetch_add(1, Ordering::AcqRel);
+                                *quota
+                                    .policy_sync_error
+                                    .lock()
+                                    .unwrap_or_else(|lock| lock.into_inner()) =
+                                    "read-cache policy generation exhausted".to_owned();
+                                drop(policy_guard);
+                                continue;
+                            };
                             let installed = Arc::new(PolicySnapshot {
                                 revision: next_revision,
                                 canonical,
-                                generation: current.generation.saturating_add(u64::from(changed)),
+                                generation,
                                 policies: next_policies,
                             });
                             *policy_snapshot
@@ -1752,7 +1888,8 @@ impl CacheManager {
                             .unwrap_or_else(|lock| lock.into_inner()) = Arc::new(PolicySnapshot {
                             revision: current.revision,
                             canonical: current.canonical.clone(),
-                            generation: current.generation.saturating_add(1),
+                            generation: next_policy_generation(current.generation, true)
+                                .unwrap_or(current.generation),
                             policies: disabled,
                         });
                         quota.policy_sync_lag.fetch_add(1, Ordering::AcqRel);
@@ -1834,6 +1971,7 @@ impl CacheManager {
             *state = CapacityState::default();
         }
         for (index, tier) in self.tiers.iter().enumerate() {
+            let mut tier_complete = true;
             let namespace = cache_domain_namespace(&self.namespace, tier.confidentiality);
             let mut listed = tier.store.list(Some(&ObjectPath::from("entries")));
             loop {
@@ -1890,12 +2028,26 @@ impl CacheManager {
                         self.reconcile_object(index, &key, meta.size, None, true);
                     }
                     Ok(Some(Err(_))) | Err(_) => {
-                        tier.reconciliation_lag.fetch_add(1, Ordering::AcqRel);
+                        tier.inventory_reconciliation_failed
+                            .store(true, Ordering::Release);
+                        tier.reconciliation_lag.store(1, Ordering::Release);
+                        tier_complete = false;
                         complete = false;
                         break;
                     }
                     Ok(None) => break,
                 }
+            }
+            let tier_has_pending_deletions = self
+                .pending_deletions
+                .lock()
+                .unwrap_or_else(|lock| lock.into_inner())
+                .values()
+                .any(|pending| pending.index == index);
+            if tier_complete && !tier_has_pending_deletions {
+                tier.inventory_reconciliation_failed
+                    .store(false, Ordering::Release);
+                tier.reconciliation_lag.store(0, Ordering::Release);
             }
         }
         complete
@@ -2451,34 +2603,37 @@ impl CacheManager {
                     entry.tier_id == *tier_id && entry.state != QuotaEntryState::Admitting
                 })
                 .map(|entry| entry.bytes)
-                .sum::<u64>();
+                .try_fold(0u64, |total, bytes| total.checked_add(bytes));
             let tier_reserved = ledger
                 .managers
                 .values()
                 .map(|grant| grant.reserved_by_tier.get(tier_id).copied().unwrap_or(0))
-                .sum::<u64>();
+                .try_fold(0u64, |total, bytes| total.checked_add(bytes));
             let aggregate_committed = ledger
                 .entries
                 .values()
                 .filter(|entry| entry.state != QuotaEntryState::Admitting)
                 .map(|entry| entry.bytes)
-                .sum::<u64>();
+                .try_fold(0u64, |total, bytes| total.checked_add(bytes));
             let aggregate_reserved = ledger
                 .managers
                 .values()
                 .flat_map(|grant| grant.reserved_by_tier.values())
                 .copied()
-                .sum::<u64>();
-            if tier_committed
-                .saturating_add(tier_reserved)
-                .saturating_add(bytes)
-                > policy.max_bytes
-                || self.aggregate_max_bytes.is_some_and(|limit| {
-                    aggregate_committed
-                        .saturating_add(aggregate_reserved)
-                        .saturating_add(bytes)
-                        > limit
-                })
+                .try_fold(0u64, |total, bytes| total.checked_add(bytes));
+            let tier_requested = tier_committed
+                .zip(tier_reserved)
+                .and_then(|(committed, reserved)| committed.checked_add(reserved))
+                .and_then(|used| used.checked_add(bytes));
+            let aggregate_requested = aggregate_committed
+                .zip(aggregate_reserved)
+                .and_then(|(committed, reserved)| committed.checked_add(reserved))
+                .and_then(|used| used.checked_add(bytes));
+            if tier_requested.is_none_or(|used| used > policy.max_bytes)
+                || aggregate_requested.is_none()
+                || self
+                    .aggregate_max_bytes
+                    .is_some_and(|limit| aggregate_requested.is_none_or(|used| used > limit))
             {
                 return Ok(None);
             }
@@ -2487,9 +2642,11 @@ impl CacheManager {
                 .get_mut(&self.quota.manager_id)
                 .context("cache quota manager grant disappeared")?;
             let reserved = grant.reserved_by_tier.entry(tier_id.clone()).or_default();
-            *reserved = reserved.saturating_add(bytes);
-            ledger.next_generation = ledger.next_generation.saturating_add(1);
-            let generation = ledger.next_generation;
+            *reserved = reserved
+                .checked_add(bytes)
+                .context("cache quota reservation overflow")?;
+            let generation = next_quota_generation(&mut ledger.next_generation)
+                .context("cache quota generation exhausted")?;
             let policy_revision = ledger.policy_revision;
             ledger.entries.insert(
                 entry_id.to_owned(),
@@ -2504,7 +2661,7 @@ impl CacheManager {
                     state: QuotaEntryState::Admitting,
                 },
             );
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
@@ -2543,14 +2700,18 @@ impl CacheManager {
                 let reserved = grant.reserved_by_tier.entry(tier_id.clone()).or_default();
                 *reserved = reserved.saturating_sub(reservation.bytes);
             }
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
                         .ledger_revision
                         .store(ledger.revision, Ordering::Release);
                     self.quota.verified_bytes.store(
-                        ledger.entries.values().map(|entry| entry.bytes).sum(),
+                        ledger
+                            .entries
+                            .values()
+                            .map(|entry| entry.bytes)
+                            .fold(0u64, u64::saturating_add),
                         Ordering::Release,
                     );
                     return Ok(());
@@ -2617,14 +2778,18 @@ impl CacheManager {
             entry.expires_ms = 0;
             entry.state = QuotaEntryState::Active;
             let generation = entry.generation;
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
                         .ledger_revision
                         .store(ledger.revision, Ordering::Release);
                     self.quota.verified_bytes.store(
-                        ledger.entries.values().map(|entry| entry.bytes).sum(),
+                        ledger
+                            .entries
+                            .values()
+                            .map(|entry| entry.bytes)
+                            .fold(0u64, u64::saturating_add),
                         Ordering::Release,
                     );
                     return Ok(generation);
@@ -2660,7 +2825,7 @@ impl CacheManager {
                 bail!("cache quota reconciliation is active");
             }
             let Some(entry) = ledger.entries.get(&entry_id) else {
-                return Ok(None);
+                return Ok(expected_generation);
             };
             if expected_generation.is_some_and(|expected| entry.generation != expected) {
                 return Ok(None);
@@ -2698,7 +2863,7 @@ impl CacheManager {
                 let committed = grant.committed_by_tier.entry(tier_id).or_default();
                 *committed = committed.saturating_add(bytes);
             }
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
@@ -2725,10 +2890,10 @@ impl CacheManager {
             {
                 bail!("cache quota reconciliation is active");
             }
-            let removable = ledger.entries.get(&entry_id).is_some_and(|entry| {
-                entry.generation == generation && entry.state == QuotaEntryState::Deleting
-            });
-            if !removable {
+            let Some(entry) = ledger.entries.get(&entry_id) else {
+                return Ok(true);
+            };
+            if entry.generation != generation || entry.state != QuotaEntryState::Deleting {
                 return Ok(false);
             }
             let previous = ledger
@@ -2739,14 +2904,18 @@ impl CacheManager {
                 let committed = owner.committed_by_tier.entry(previous.tier_id).or_default();
                 *committed = committed.saturating_sub(previous.bytes);
             }
-            ledger.revision = ledger.revision.saturating_add(1);
+            advance_quota_revision(&mut ledger).context("cache quota revision exhausted")?;
             match self.write_quota_ledger(&ledger, version).await {
                 Ok(()) => {
                     self.quota
                         .ledger_revision
                         .store(ledger.revision, Ordering::Release);
                     self.quota.verified_bytes.store(
-                        ledger.entries.values().map(|entry| entry.bytes).sum(),
+                        ledger
+                            .entries
+                            .values()
+                            .map(|entry| entry.bytes)
+                            .fold(0u64, u64::saturating_add),
                         Ordering::Release,
                     );
                     return Ok(true);
@@ -3092,10 +3261,26 @@ impl CacheManager {
                     .finalize_delete(pending.index, &pending.key, generation)
                     .await
             {
+                let index = pending.index;
                 self.pending_deletions
                     .lock()
                     .unwrap_or_else(|lock| lock.into_inner())
                     .remove(&(pending.index, pending.key));
+                let tier_has_pending_deletions = self
+                    .pending_deletions
+                    .lock()
+                    .unwrap_or_else(|lock| lock.into_inner())
+                    .values()
+                    .any(|pending| pending.index == index);
+                if !tier_has_pending_deletions
+                    && !self.tiers[index]
+                        .inventory_reconciliation_failed
+                        .load(Ordering::Acquire)
+                {
+                    self.tiers[index]
+                        .reconciliation_lag
+                        .store(0, Ordering::Release);
+                }
             } else {
                 pending.generation = Some(generation);
                 self.defer_pending_deletion(&mut pending);
@@ -3106,7 +3291,7 @@ impl CacheManager {
     fn defer_pending_deletion(&self, pending: &mut PendingDeletion) {
         self.tiers[pending.index]
             .reconciliation_lag
-            .fetch_add(1, Ordering::AcqRel);
+            .store(1, Ordering::Release);
         pending.retry_at_ms = now_ms().saturating_add(duration_ms(pending.backoff));
         pending.backoff = pending.backoff.saturating_mul(2).min(DELETION_BACKOFF_MAX);
         self.pending_deletions
@@ -3723,7 +3908,8 @@ async fn renew_quota_lease(
             Ok(ledger)
                 if ledger.format == QUOTA_FORMAT
                     && ledger.namespace == namespace
-                    && ledger.aggregate_max_bytes == aggregate_max_bytes =>
+                    && ledger.aggregate_max_bytes == aggregate_max_bytes
+                    && quota_ledger_accounting_valid(&ledger) =>
             {
                 ledger
             }
@@ -3749,7 +3935,9 @@ async fn renew_quota_lease(
             }
             ledger.policy_revision = policy_revision;
         }
-        ledger.revision = ledger.revision.saturating_add(1);
+        let Some(_) = advance_quota_revision(&mut ledger) else {
+            break;
+        };
         let encoded = match serde_json::to_vec(&ledger) {
             Ok(encoded) => encoded,
             Err(_) => break,
@@ -3769,7 +3957,11 @@ async fn renew_quota_lease(
                     .lease_expiry_ms
                     .store(lease_expires_ms, Ordering::Release);
                 quota.verified_bytes.store(
-                    ledger.entries.values().map(|entry| entry.bytes).sum(),
+                    ledger
+                        .entries
+                        .values()
+                        .map(|entry| entry.bytes)
+                        .fold(0u64, u64::saturating_add),
                     Ordering::Release,
                 );
                 *quota
@@ -3851,7 +4043,9 @@ async fn recover_quota_coordination(
             reserved_by_tier: HashMap::new(),
         })
         .lease_expires_ms = lease_expires_ms;
-    ledger.revision = ledger.revision.saturating_add(1);
+    if advance_quota_revision(&mut ledger).is_none() {
+        return false;
+    }
     if write_quota_ledger_raw(store, &quota.ledger_path, &ledger, version)
         .await
         .is_err()
@@ -3989,13 +4183,14 @@ async fn recover_quota_coordination(
             continue;
         }
         let previous = ledger.entries.get(&entry_id).cloned();
-        let generation = previous.as_ref().map_or_else(
-            || {
-                ledger.next_generation = ledger.next_generation.saturating_add(1);
-                ledger.next_generation
-            },
-            |entry| entry.generation,
-        );
+        let generation = if let Some(previous) = previous.as_ref() {
+            previous.generation
+        } else {
+            let Some(generation) = next_quota_generation(&mut ledger.next_generation) else {
+                return false;
+            };
+            generation
+        };
         entry.generation = generation;
         let owner_manager_id = previous.map_or_else(
             || quota.manager_id.clone(),
@@ -4052,7 +4247,9 @@ async fn recover_quota_coordination(
     });
     ledger.policy_revision = policy_revision;
     ledger.reconciler = None;
-    ledger.revision = ledger.revision.saturating_add(1);
+    if advance_quota_revision(&mut ledger).is_none() {
+        return false;
+    }
     if write_quota_ledger_raw(store, &quota.ledger_path, &ledger, version)
         .await
         .is_err()
@@ -4086,6 +4283,20 @@ async fn recover_quota_coordination(
     if scheduled {
         deletion_wake.notify_one();
     }
+    for (index, tier) in tiers.iter().enumerate() {
+        tier.inventory_reconciliation_failed
+            .store(false, Ordering::Release);
+        let tier_has_pending_deletions = pending_deletions
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner())
+            .values()
+            .any(|pending| pending.index == index);
+        if !tier_has_pending_deletions {
+            if !tier.inventory_reconciliation_failed.load(Ordering::Acquire) {
+                tier.reconciliation_lag.store(0, Ordering::Release);
+            }
+        }
+    }
     quota
         .ledger_revision
         .store(ledger.revision, Ordering::Release);
@@ -4093,7 +4304,11 @@ async fn recover_quota_coordination(
         .lease_expiry_ms
         .store(lease_expires_ms, Ordering::Release);
     quota.verified_bytes.store(
-        ledger.entries.values().map(|entry| entry.bytes).sum(),
+        ledger
+            .entries
+            .values()
+            .map(|entry| entry.bytes)
+            .fold(0u64, u64::saturating_add),
         Ordering::Release,
     );
     quota.unverified_bytes.store(0, Ordering::Release);
@@ -4103,6 +4318,7 @@ async fn recover_quota_coordination(
         .unwrap_or_else(|lock| lock.into_inner()) = Some(ledger);
     quota.reconciliation_pending.store(false, Ordering::Release);
     quota.reconciliation_retry_at_ms.store(0, Ordering::Release);
+    quota.reconciliation_lag.store(0, Ordering::Release);
     quota.healthy.store(true, Ordering::Release);
     true
 }
@@ -4130,6 +4346,9 @@ async fn read_quota_ledger_raw(
                 || ledger.aggregate_max_bytes != aggregate_max_bytes
             {
                 bail!("cache quota ledger identity mismatch");
+            }
+            if !quota_ledger_accounting_valid(&ledger) {
+                bail!("cache quota ledger accounting overflows");
             }
             Ok((ledger, Some(version)))
         }
@@ -4519,6 +4738,91 @@ mod tests {
     use slatedb::{object_store::memory::InMemory, object_store_tag::RetryReason};
     use std::sync::atomic::AtomicBool;
 
+    #[test]
+    fn quota_ledger_rejects_overflowing_accounting() {
+        let entry = |bytes| QuotaEntry {
+            key: "key".to_owned(),
+            tier_id: "tier".to_owned(),
+            owner_manager_id: "manager".to_owned(),
+            bytes,
+            generation: 0,
+            policy_revision: 0,
+            expires_ms: 0,
+            state: QuotaEntryState::Active,
+        };
+        let mut ledger = QuotaLedger {
+            format: QUOTA_FORMAT,
+            namespace: "test".to_owned(),
+            revision: 0,
+            next_generation: 0,
+            policy_revision: 0,
+            aggregate_max_bytes: None,
+            managers: HashMap::new(),
+            entries: HashMap::from([
+                ("one".to_owned(), entry(u64::MAX)),
+                ("two".to_owned(), entry(1)),
+            ]),
+            reconciler: None,
+        };
+        assert!(!quota_ledger_accounting_valid(&ledger));
+        ledger.entries.clear();
+        ledger.managers.insert(
+            "manager".to_owned(),
+            QuotaManagerGrant {
+                lease_expires_ms: 0,
+                committed_by_tier: HashMap::new(),
+                reserved_by_tier: HashMap::from([
+                    ("one".to_owned(), u64::MAX),
+                    ("two".to_owned(), 1),
+                ]),
+            },
+        );
+        assert!(!quota_ledger_accounting_valid(&ledger));
+        let mut admitting = entry(u64::MAX);
+        admitting.state = QuotaEntryState::Admitting;
+        ledger.entries = HashMap::from([("one".to_owned(), admitting)]);
+        ledger.managers.get_mut("manager").unwrap().reserved_by_tier =
+            HashMap::from([("tier".to_owned(), u64::MAX)]);
+        assert!(quota_ledger_accounting_valid(&ledger));
+        ledger.managers.get_mut("manager").unwrap().reserved_by_tier =
+            HashMap::from([("tier".to_owned(), u64::MAX - 1)]);
+        assert!(!quota_ledger_accounting_valid(&ledger));
+        ledger
+            .managers
+            .get_mut("manager")
+            .unwrap()
+            .reserved_by_tier
+            .clear();
+        assert!(!quota_ledger_accounting_valid(&ledger));
+        ledger.entries = HashMap::from([("one".to_owned(), entry(u64::MAX))]);
+        ledger.managers.get_mut("manager").unwrap().reserved_by_tier =
+            HashMap::from([("one".to_owned(), 1)]);
+        assert!(!quota_ledger_accounting_valid(&ledger));
+    }
+
+    #[test]
+    fn quota_generation_rejects_exhaustion() {
+        let mut generation = u64::MAX;
+        assert_eq!(next_quota_generation(&mut generation), None);
+        assert_eq!(generation, u64::MAX);
+        assert_eq!(next_policy_generation(u64::MAX, true), None);
+        assert_eq!(next_policy_generation(u64::MAX, false), Some(u64::MAX));
+
+        let mut ledger = QuotaLedger {
+            format: QUOTA_FORMAT,
+            namespace: "test".to_owned(),
+            revision: u64::MAX,
+            next_generation: 0,
+            policy_revision: 0,
+            aggregate_max_bytes: None,
+            managers: HashMap::new(),
+            entries: HashMap::new(),
+            reconciler: None,
+        };
+        assert_eq!(advance_quota_revision(&mut ledger), None);
+        assert_eq!(ledger.revision, u64::MAX);
+    }
+
     #[derive(Debug)]
     struct CountingStore {
         inner: InMemory,
@@ -4787,6 +5091,7 @@ mod tests {
             metrics: CacheMetrics::default(),
             circuit: StdMutex::new(CircuitState::default()),
             reconciliation_lag: AtomicU64::new(0),
+            inventory_reconciliation_failed: AtomicBool::new(false),
         })];
         let initial_policies = vec![policy(max_bytes)];
         let initial_canonical = canonical_policy(0, &tiers, &initial_policies).unwrap();
@@ -6454,6 +6759,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let status = first.status();
+        assert!(status.deletion_pending_bytes > 0);
+        assert!(status.tiers[0].deletion_pending_bytes > 0);
         assert!(second
             .reserve(0, &key, 128, 128, &policy(4096))
             .await
@@ -6464,6 +6772,9 @@ mod tests {
             .reserve(0, &key, 128, 128, &policy(4096))
             .await
             .is_some());
+        let status = second.status();
+        assert_eq!(status.used_bytes, 0);
+        assert_eq!(status.reserved_bytes, 128);
     }
 
     #[tokio::test]
@@ -6989,6 +7300,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quota_deletion_survives_lost_cas_response() {
+        let cache_store = Arc::new(CountingStore::new());
+        let policy_store = Arc::new(CountingStore::new());
+        let (origin, cache) = manager_with_shared_stores(
+            4096,
+            Some(4096),
+            cache_store,
+            policy_store.clone(),
+            "delete-response-lost",
+            QuotaOptions::default(),
+        )
+        .await;
+        let path = ObjectPath::from("sst/delete-response-lost");
+        let request = options(TableStoreKind::Main, SstType::Compacted, false);
+        let key = cache_key(
+            &cache_domain_namespace(&cache.namespace, CacheConfidentiality::Encrypted),
+            &path,
+            &request,
+        );
+        origin
+            .put(&path, Bytes::from_static(b"value").into())
+            .await
+            .unwrap();
+        cached_get(&*cache, &path, request).await;
+        wait_for_admissions(&cache, 1).await;
+        policy_store
+            .fail_put_after_commit_once
+            .store(true, Ordering::Release);
+        cache.enqueue_pending_deletion(0, &key, None);
+        cache.process_pending_deletions(false).await;
+        assert!(!cache.pending_deletions.lock().unwrap().is_empty());
+        for pending in cache.pending_deletions.lock().unwrap().values_mut() {
+            pending.retry_at_ms = 0;
+        }
+        cache.process_pending_deletions(false).await;
+        assert!(cache.pending_deletions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn startup_policy_outage_fails_closed_then_recovers() {
         let origin = Arc::new(CountingStore::new());
         let policy_store = Arc::new(CountingStore::new());
@@ -7375,6 +7725,8 @@ mod tests {
         assert!(status.tiers[0].policy.enabled);
         assert_eq!(status.policy_sync_lag, 0);
         assert!(!status.quota_coordination_healthy);
+        assert!(status.quota_reconciliation_lag > 0);
+        assert!(status.tiers[0].reconciliation_lag > 0);
         assert!(cache.quota.reconciliation_pending.load(Ordering::Acquire));
         assert_eq!(
             cache
@@ -7446,6 +7798,8 @@ mod tests {
         let status = cache.status();
         assert!(status.quota_coordination_healthy);
         assert!(!cache.quota.reconciliation_pending.load(Ordering::Acquire));
+        assert_eq!(status.quota_reconciliation_lag, 0);
+        assert_eq!(status.tiers[0].reconciliation_lag, 0);
         assert!(status.used_bytes <= status.aggregate_max_bytes.unwrap());
         assert!(status.tiers[0].used_bytes <= status.tiers[0].policy.max_bytes);
     }

@@ -44,6 +44,17 @@ type blockingExporter struct {
 	count   int
 }
 
+type snapshotCaptureExporter struct {
+	release chan struct{}
+	result  chan MonitorSnapshot
+}
+
+func (exporter snapshotCaptureExporter) Export(_ context.Context, snapshot MonitorSnapshot) error {
+	<-exporter.release
+	exporter.result <- snapshot
+	return nil
+}
+
 func (exporter *blockingExporter) Export(context.Context, MonitorSnapshot) error {
 	exporter.once.Do(func() { close(exporter.started) })
 	<-exporter.release
@@ -124,6 +135,23 @@ func TestAsyncExporterCloseDrainsQueue(t *testing.T) {
 	}
 }
 
+func TestAsyncExporterOwnsSubmittedSnapshot(t *testing.T) {
+	exporter := snapshotCaptureExporter{release: make(chan struct{}), result: make(chan MonitorSnapshot, 1)}
+	worker := NewAsyncExporter(exporter, 1)
+	snapshot := validMonitorSnapshot()
+	if !worker.Submit(snapshot) {
+		t.Fatal("submit failed")
+	}
+	snapshot.Components[0].Metrics[0].BucketCounts[0] = 99
+	snapshot.Components[0].WAL = &WALSnapshot{Target: "memory"}
+	close(exporter.release)
+	got := <-exporter.result
+	worker.Close()
+	if got.Components[0].Metrics[0].BucketCounts[0] == 99 || got.Components[0].WAL != nil {
+		t.Fatalf("exported snapshot retained caller ownership: %+v", got.Components[0])
+	}
+}
+
 func TestAsyncExporterCloseWithinInterruptsRetryBackoff(t *testing.T) {
 	worker := NewAsyncExporterWithConfig(failingExporter{}, AsyncExporterConfig{Capacity: 2, RetryLimit: 16, RetryBackoff: time.Minute})
 	worker.Submit(validMonitorSnapshot())
@@ -147,6 +175,19 @@ func TestAsyncExporterRetriesWithinBound(t *testing.T) {
 	}
 }
 
+func TestRetryableExportErrorClassifiesHTTPStatus(t *testing.T) {
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		if !retryableExportError(&influxHTTPError{statusCode: status}) {
+			t.Fatalf("status %d was not retryable", status)
+		}
+	}
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden} {
+		if retryableExportError(&influxHTTPError{statusCode: status}) {
+			t.Fatalf("status %d was retryable", status)
+		}
+	}
+}
+
 func TestInfluxExporterUsesTokenFileAndBoundedTags(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("secret-token\n"), 0o600); err != nil {
@@ -160,7 +201,7 @@ func TestInfluxExporterUsesTokenFileAndBoundedTags(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile})
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, AllowInsecureHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,23 +225,65 @@ func TestInfluxExporterEmitsAggregateSectionsAndCounterResets(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile})
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, AllowInsecureHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot := validMonitorSnapshot()
-	snapshot.Components[0].Caches = []CacheSnapshot{{ID: "db", Availability: AvailabilityExact, Hits: 10}}
-	snapshot.Components[0].Storage = []StorageSnapshot{{BackendID: "primary", Role: "database", Availability: AvailabilityExact, ObjectCount: 2}}
-	snapshot.Components[0].WAL = &WALSnapshot{Target: "local", Durability: "persistent", Availability: AvailabilityExact}
+	snapshot.Components[0].Caches = []CacheSnapshot{{
+		ID: "db", Availability: AvailabilityExact, Hits: 10, Enabled: true, CircuitState: "closed",
+		TrafficAvailability: AvailabilityExact, TrafficBytesAvailability: AvailabilityUnavailable, FillAvailability: AvailabilityUnavailable,
+		InventoryAvailability: AvailabilityUnavailable, DeletionAvailability: AvailabilityUnavailable, ReconciliationAgeAvailability: AvailabilityUnavailable, ReconciliationLagAvailability: AvailabilityUnavailable,
+	}}
+	snapshot.Components[0].Storage = []StorageSnapshot{{
+		BackendID: "primary", Role: "database", Acknowledgement: "local-process", Availability: AvailabilityExact, ObjectCount: 2,
+		ObjectCountAvailability: AvailabilityExact, PayloadAvailability: AvailabilityUnavailable,
+		PhysicalAvailability: AvailabilityUnavailable, ReconciliationAvailability: AvailabilityUnavailable,
+	}}
+	snapshot.Components[0].WAL = &WALSnapshot{Target: "local", Durability: "local-process", ThrottleReason: "capacity", UploadedBytes: 10, Availability: AvailabilityExact}
 	if err := exporter.Export(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Components[0].Caches[0].Hits = 13
+	snapshot.Components[0].WAL.UploadedBytes = 13
 	if err := exporter.Export(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != 2 || !strings.Contains(bodies[0], "vaultic_storage") || !strings.Contains(bodies[0], "vaultic_wal") || !strings.Contains(bodies[0], "reset=true") || !strings.Contains(bodies[1], "delta=3i,reset=false") {
+	if len(bodies) != 2 || !strings.Contains(bodies[0], "vaultic_monitor_v2_storage") || !strings.Contains(bodies[0], "acknowledgement=local-process") || !strings.Contains(bodies[0], "vaultic_monitor_v2_wal_uploaded_bytes") || !strings.Contains(bodies[0], "durability=local-process") || !strings.Contains(bodies[0], `throttle="capacity"`) || !strings.Contains(bodies[0], "reset=true") || !strings.Contains(bodies[1], "vaultic_monitor_v2_wal_uploaded_bytes") || !strings.Contains(bodies[1], "delta=3u,reset=false") {
 		t.Fatalf("bodies = %#v", bodies)
+	}
+}
+
+func TestInfluxExporterOmitsUnavailableWALIdentityAndKeepsThrottleOutOfCounterSeries(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].WAL = &WALSnapshot{Availability: AvailabilityUnavailable}
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	if strings.Contains(body, ",target=,") || strings.Contains(body, ",durability=,") {
+		t.Fatalf("empty WAL tag emitted: %q", body)
+	}
+
+	snapshot.Components[0].WAL = &WALSnapshot{
+		Target: "local", Durability: "local-process", ThrottleReason: "none",
+		DurabilityFailures: 10, Availability: AvailabilityExact,
+	}
+	_, previous := influxSnapshot(snapshot, "default", nil)
+	snapshot.Components[0].WAL.ThrottleReason = "capacity"
+	snapshot.Components[0].WAL.DurabilityFailures = 13
+	body, _ = influxSnapshot(snapshot, "default", previous)
+	if !strings.Contains(body, "vaultic_monitor_v2_wal_durability_failures") || !strings.Contains(body, "delta=3u,reset=false") {
+		t.Fatalf("throttle change reset WAL counter identity: %q", body)
+	}
+}
+
+func TestInfluxExporterEncodesMaximumUint64(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].Metrics = []Metric{{
+		Name: "engine_memtable_bytes", Kind: MetricGauge, Unit: "bytes",
+		Availability: AvailabilityExact, Value: ^uint64(0),
+	}}
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, "value=18446744073709551615u") {
+		t.Fatalf("maximum uint64 was not encoded unsigned: %q", body)
 	}
 }
 
@@ -209,15 +292,112 @@ func TestInfluxCounterKeepsLastExactBaselineAcrossUnavailableSample(t *testing.T
 	previous := map[string]uint64{series: 10}
 	var unavailable bytes.Buffer
 	next := make(map[string]uint64)
-	writeCounter(&unavailable, previous, next, series, 0, false, 2)
-	if next[series] != 10 || !strings.Contains(unavailable.String(), "delta=0i,reset=true,available=false") {
+	writeCounter(&unavailable, previous, next, series, 0, AvailabilityUnavailable, 2)
+	if next[series] != 10 || !strings.Contains(unavailable.String(), "delta=0u,reset=false,available=false") {
 		t.Fatalf("unavailable output=%q next=%v", unavailable.String(), next)
 	}
 	var recovered bytes.Buffer
 	recoveredNext := make(map[string]uint64)
-	writeCounter(&recovered, next, recoveredNext, series, 13, true, 3)
-	if recoveredNext[series] != 13 || !strings.Contains(recovered.String(), "delta=3i,reset=false,available=true") {
+	writeCounter(&recovered, next, recoveredNext, series, 13, AvailabilityExact, 3)
+	if recoveredNext[series] != 13 || !strings.Contains(recovered.String(), "delta=3u,reset=false,available=true") {
 		t.Fatalf("recovered output=%q next=%v", recovered.String(), recoveredNext)
+	}
+}
+
+func TestInfluxMetricIdentityIsIndependentOfLabelOrder(t *testing.T) {
+	metric := Metric{
+		Name: "dependency_requests", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact,
+		Labels: []Label{{Name: "role", Value: "database"}, {Name: "operation", Value: "backup"}, {Name: "outcome", Value: "success"}}, Value: 10,
+	}
+	snapshot := NewMonitorSnapshot(time.Unix(1, 0), ComponentSnapshot{
+		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: AvailabilityExact, Metrics: []Metric{metric},
+	})
+	_, previous := influxSnapshot(snapshot, "default", nil)
+	snapshot.Components[0].Metrics[0].Labels[0], snapshot.Components[0].Metrics[0].Labels[2] = snapshot.Components[0].Metrics[0].Labels[2], snapshot.Components[0].Metrics[0].Labels[0]
+	snapshot.Components[0].Metrics[0].Value = 13
+	body, _ := influxSnapshot(snapshot, "default", previous)
+	if !strings.Contains(body, "delta=3u,reset=false") {
+		t.Fatalf("reordered labels changed identity: %q", body)
+	}
+}
+
+func TestInfluxExporterPreservesAvailabilityState(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].Metrics[0].Availability = AvailabilityStale
+	snapshot.Components[0].Metrics[0].BucketUpper = []uint64{^uint64(0)}
+	snapshot.Components[0].Metrics[0].BucketCounts = []uint64{0}
+	snapshot.Components[0].Metrics[0].Count = 0
+	snapshot.Components[0].Metrics[0].Sum = 0
+	snapshot.Components[0].Metrics[0].Maximum = 0
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	bucketAvailability := false
+	for line := range strings.SplitSeq(body, "\n") {
+		if strings.Contains(line, "vaultic_monitor_v2_durable_wait_latency_bucket") && strings.Contains(line, `availability="stale"`) {
+			bucketAvailability = true
+		}
+	}
+	if !strings.Contains(body, `availability="stale"`) || !bucketAvailability {
+		t.Fatalf("availability state was lost: %q", body)
+	}
+}
+
+func TestInfluxExporterDoesNotBaselineExactChildOfEstimatedComponent(t *testing.T) {
+	snapshot := NewMonitorSnapshot(time.Unix(1, 0), ComponentSnapshot{
+		Component: "vaulticdb", ProcessStartID: "legacy", CapturedUnixMS: 1000,
+		Availability: AvailabilityEstimated,
+		Metrics:      []Metric{{Name: "engine_write_batches", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
+	})
+	body, next := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, `availability="estimated"`) || len(next) != 0 {
+		t.Fatalf("estimated component established counter baseline: body=%q next=%v", body, next)
+	}
+}
+
+func TestInfluxExporterPreservesQueueBackpressureState(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].Queues[0].Backpressure = "capacity"
+	snapshot.Components[0].Queues[0].BackpressureTime = 42
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, `backpressure="capacity"`) || !strings.Contains(body, "backpressure_time_us=42u") {
+		t.Fatalf("queue backpressure was lost: %q", body)
+	}
+}
+
+func TestInfluxExporterPreservesCacheReconciliationState(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].Caches = []CacheSnapshot{{
+		ID: "slatedb", Availability: AvailabilityStale, ReconciliationLag: 2,
+		ReconciliationAgeMS: 30, ControllerState: "degraded", CircuitState: "open",
+		TrafficAvailability: AvailabilityUnavailable, TrafficBytesAvailability: AvailabilityUnavailable, FillAvailability: AvailabilityUnavailable,
+		InventoryAvailability: AvailabilityUnavailable, DeletionAvailability: AvailabilityExact, ReconciliationAgeAvailability: AvailabilityExact, ReconciliationLagAvailability: AvailabilityExact,
+	}}
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, "reconciliation_lag=2u") || !strings.Contains(body, "reconciliation_age_ms=30u") || !strings.Contains(body, `controller_state="degraded"`) || !strings.Contains(body, `circuit_state="open"`) {
+		t.Fatalf("cache reconciliation state was lost: %q", body)
+	}
+}
+
+func TestInfluxExporterPreservesInventoryAndFieldAvailability(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].Storage = []StorageSnapshot{{
+		BackendID: "primary", Role: "repository", Availability: AvailabilityExact,
+		ObjectClass: "pack", PlacementState: "reconciled", Representation: "encrypted_pack", ReconciledAtMS: 900,
+		ObjectCountAvailability: AvailabilityExact, PayloadAvailability: AvailabilityExact,
+		PhysicalAvailability: AvailabilityUnavailable, ReconciliationAvailability: AvailabilityExact,
+	}}
+	snapshot.Components[0].Caches = []CacheSnapshot{{
+		ID: "slatedb", Availability: AvailabilityExact, Enabled: true, Family: "slatedb", Representation: "block",
+		ControllerState: "healthy", CircuitState: "closed", TrafficAvailability: AvailabilityUnavailable, TrafficBytesAvailability: AvailabilityUnavailable, FillAvailability: AvailabilityUnavailable,
+		InventoryAvailability: AvailabilityUnavailable, DeletionAvailability: AvailabilityUnavailable, ReconciliationAgeAvailability: AvailabilityUnavailable, ReconciliationLagAvailability: AvailabilityUnavailable,
+	}}
+	body, next := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, "object_class=pack") || !strings.Contains(body, "placement_state=reconciled") || !strings.Contains(body, "reconciled_at_ms=900i") || !strings.Contains(body, `inflight_fills_availability="unavailable"`) || !strings.Contains(body, `deletion_pending_availability="unavailable"`) {
+		t.Fatalf("inventory dimensions were lost: %q", body)
+	}
+	for series := range next {
+		if strings.Contains(series, "cache_origin_bytes") || strings.Contains(series, "cache_cache_bytes") || strings.Contains(series, "cache_hits") || strings.Contains(series, "cache_misses") || strings.Contains(series, "cache_origin_reads_avoided") {
+			t.Fatalf("unavailable traffic established baseline: %q", series)
+		}
 	}
 }
 
@@ -236,6 +416,176 @@ func TestInfluxExporterRequiresProtectedTokenSource(t *testing.T) {
 	}
 }
 
+func TestInfluxExporterRejectsOversizedEnvironmentToken(t *testing.T) {
+	t.Setenv("VAULTIC_TEST_INFLUX_TOKEN", strings.Repeat("x", maxTokenFileBytes+1))
+	if _, err := NewInfluxExporter(InfluxConfig{URL: "https://localhost", Org: "ops", Bucket: "monitor", TokenEnv: "VAULTIC_TEST_INFLUX_TOKEN"}); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized environment token error = %v", err)
+	}
+}
+
+func TestInfluxExporterClearsInactiveOperationClasses(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, "active_operations,component=vaulticdb,deployment=default,operation=backup count=0u") || !strings.Contains(body, "operation=legacy_import count=1u") {
+		t.Fatalf("active operation gauges = %q", body)
+	}
+}
+
+func TestInfluxExporterMarksUnavailableOperationAndQueueCapacity(t *testing.T) {
+	snapshot := validMonitorSnapshot()
+	snapshot.Components[0].Availability = AvailabilityUnavailable
+	body, _ := influxSnapshot(snapshot, "default", nil)
+	if !strings.Contains(body, `active_operations,component=vaulticdb,deployment=default,operation=backup count=0u,oldest_age_us=0u,available=false,availability="unavailable"`) || !strings.Contains(body, `capacity_available=false,capacity_availability="unavailable"`) {
+		t.Fatalf("unavailable operation or capacity = %q", body)
+	}
+}
+
+func TestInfluxSnapshotUsesStableSeriesAndResetsOnProcessChange(t *testing.T) {
+	snapshot := NewMonitorSnapshot(time.Unix(1, 0), ComponentSnapshot{
+		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: AvailabilityExact,
+		Metrics: []Metric{{Name: "engine_write_batches", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
+	})
+	body, previous, processes := influxSnapshotWithProcesses(snapshot, "default", nil, map[string]string{})
+	if strings.Contains(body, ",process_start=") || !strings.Contains(body, `process_start_id="one"`) {
+		t.Fatalf("process identity encoding = %q", body)
+	}
+	snapshot.Components[0].ProcessStartID = "two"
+	snapshot.Components[0].Metrics[0].Value = 13
+	body, _, _ = influxSnapshotWithProcesses(snapshot, "default", previous, processes)
+	if !strings.Contains(body, "delta=0u,reset=true") {
+		t.Fatalf("restart counter = %q", body)
+	}
+}
+
+func TestInfluxExporterInvalidatesBaselineAfterPartialDelivery(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("secret-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	failAt := 0
+	var finalBody string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
+		requests++
+		encoded, _ := io.ReadAll(incoming.Body)
+		if requests == failAt {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if failAt != 0 && requests > failAt {
+			finalBody += string(encoded)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 1000, AllowInsecureHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := NewMonitorSnapshot(time.Unix(1, 0), ComponentSnapshot{
+		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: AvailabilityExact,
+		Metrics: []Metric{{Name: "engine_write_batches", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
+	})
+	if err := exporter.Export(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	exporter.batchLimit = 1
+	failAt = requests + 2
+	snapshot.Components[0].Metrics[0].Value = 13
+	if err := exporter.Export(context.Background(), snapshot); err == nil {
+		t.Fatal("partial delivery failure was ignored")
+	}
+	exporter.batchLimit = 1000
+	snapshot.Components[0].Metrics[0].Value = 15
+	if err := exporter.Export(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(finalBody, "vaultic_monitor_v2_engine_write_batches") || !strings.Contains(finalBody, "delta=0u,reset=true") {
+		t.Fatalf("final body = %q", finalBody)
+	}
+}
+
+func TestInfluxExporterRejectsInsecureTokenFile(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewInfluxExporter(InfluxConfig{URL: "https://localhost", Org: "ops", Bucket: "monitor", TokenFile: tokenFile}); err == nil || !strings.Contains(err.Error(), "owner-accessible only") {
+		t.Fatalf("insecure token error = %v", err)
+	}
+}
+
+func TestInfluxExporterRequiresHTTPS(t *testing.T) {
+	t.Setenv("VAULTIC_TEST_INFLUX_TOKEN", "secret")
+	if _, err := NewInfluxExporter(InfluxConfig{URL: "http://influx.example", Org: "ops", Bucket: "monitor", TokenEnv: "VAULTIC_TEST_INFLUX_TOKEN"}); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("HTTP endpoint error = %v", err)
+	}
+	if _, err := NewInfluxExporter(InfluxConfig{URL: "http://influx.example", Org: "ops", Bucket: "monitor", TokenEnv: "VAULTIC_TEST_INFLUX_TOKEN", AllowInsecureHTTP: true}); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("non-loopback HTTP endpoint error = %v", err)
+	}
+}
+
+func TestInfluxExporterRejectsRedirectWithoutForwardingToken(t *testing.T) {
+	var targetAuthorization string
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		targetAuthorization = request.Header.Get("Authorization")
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	t.Setenv("VAULTIC_TEST_INFLUX_TOKEN", "secret")
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: redirect.URL, Org: "ops", Bucket: "monitor", TokenEnv: "VAULTIC_TEST_INFLUX_TOKEN", AllowInsecureHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Export(context.Background(), validMonitorSnapshot()); err == nil {
+		t.Fatal("redirect was accepted")
+	}
+	if targetAuthorization != "" {
+		t.Fatalf("redirect target received authorization %q", targetAuthorization)
+	}
+}
+
+func TestInfluxExporterRejectsTokenSymlink(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target")
+	link := filepath.Join(directory, "token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewInfluxExporter(InfluxConfig{URL: "https://localhost", Org: "ops", Bucket: "monitor", TokenFile: link}); err == nil {
+		t.Fatal("token symlink was accepted")
+	}
+}
+
+func TestInfluxExporterRejectsOversizedTokenFile(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, make([]byte, maxTokenFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewInfluxExporter(InfluxConfig{URL: "https://localhost", Org: "ops", Bucket: "monitor", TokenFile: tokenFile}); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized token error = %v", err)
+	}
+}
+
+func TestInheritedAvailabilityUsesMostSevereApplicableState(t *testing.T) {
+	if got := inheritedAvailability(AvailabilityUnavailable, AvailabilityStale); got != AvailabilityUnavailable {
+		t.Fatalf("availability = %q", got)
+	}
+	if got := inheritedAvailability(AvailabilityStale, AvailabilityEstimated); got != AvailabilityStale {
+		t.Fatalf("availability = %q", got)
+	}
+	if got := inheritedAvailability(AvailabilityUnavailable, AvailabilityNotApplicable); got != AvailabilityNotApplicable {
+		t.Fatalf("not-applicable availability = %q", got)
+	}
+}
+
 func TestInfluxExporterBoundsRequestBatch(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("secret-token"), 0o600); err != nil {
@@ -251,7 +601,7 @@ func TestInfluxExporterBoundsRequestBatch(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 2})
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 2, AllowInsecureHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,14 +633,18 @@ func TestInfluxExporterMarksResetAfterPartialBatchFailure(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 1})
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 1, AllowInsecureHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot := NewMonitorSnapshot(time.Unix(1, 0), ComponentSnapshot{
 		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: AvailabilityExact,
-		Metrics: []Metric{{Name: "requests", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
-		Storage: []StorageSnapshot{{BackendID: "primary", Role: "repository", Availability: AvailabilityExact}},
+		Metrics: []Metric{{Name: "engine_write_batches", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
+		Storage: []StorageSnapshot{{
+			BackendID: "primary", Role: "repository", Availability: AvailabilityExact,
+			ObjectCountAvailability: AvailabilityUnavailable, PayloadAvailability: AvailabilityUnavailable,
+			PhysicalAvailability: AvailabilityUnavailable, ReconciliationAvailability: AvailabilityUnavailable,
+		}},
 	})
 	if err := exporter.Export(context.Background(), snapshot); err == nil {
 		t.Fatal("partial batch failure was ignored")
@@ -299,7 +653,7 @@ func TestInfluxExporterMarksResetAfterPartialBatchFailure(t *testing.T) {
 	if err := exporter.Export(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(finalBody, "vaultic_requests") || !strings.Contains(finalBody, "reset=true") {
+	if !strings.Contains(finalBody, "vaultic_monitor_v2_engine_write_batches") || !strings.Contains(finalBody, "reset=true") {
 		t.Fatalf("final body = %q", finalBody)
 	}
 }
@@ -322,13 +676,13 @@ func TestInfluxExporterMarksResetAfterFirstBatchFailure(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 1000})
+	exporter, err := NewInfluxExporter(InfluxConfig{URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile, BatchLimit: 1000, AllowInsecureHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot := NewMonitorSnapshot(time.Unix(1, 0), ComponentSnapshot{
 		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: AvailabilityExact,
-		Metrics: []Metric{{Name: "requests", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
+		Metrics: []Metric{{Name: "engine_write_batches", Kind: MetricCounter, Unit: "operations", Availability: AvailabilityExact, Value: 10}},
 	})
 	if err := exporter.Export(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
@@ -342,7 +696,7 @@ func TestInfluxExporterMarksResetAfterFirstBatchFailure(t *testing.T) {
 	if err := exporter.Export(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(finalBody, "vaultic_requests") || !strings.Contains(finalBody, "reset=true") {
+	if !strings.Contains(finalBody, "vaultic_monitor_v2_engine_write_batches") || !strings.Contains(finalBody, "delta=0u,reset=true") {
 		t.Fatalf("final body = %q", finalBody)
 	}
 }

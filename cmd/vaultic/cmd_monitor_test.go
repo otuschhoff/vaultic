@@ -88,7 +88,12 @@ func TestFilterMonitorSnapshotKeepsExplicitUnavailableComponent(t *testing.T) {
 		telemetry.ComponentSnapshot{
 			Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000,
 			Availability: telemetry.AvailabilityExact,
-			Caches:       []telemetry.CacheSnapshot{{ID: "repository", Availability: telemetry.AvailabilityExact}},
+			Caches: []telemetry.CacheSnapshot{{
+				ID: "repository", Availability: telemetry.AvailabilityExact, CircuitState: "not_applicable",
+				TrafficAvailability: telemetry.AvailabilityUnavailable, TrafficBytesAvailability: telemetry.AvailabilityUnavailable, FillAvailability: telemetry.AvailabilityUnavailable,
+				InventoryAvailability: telemetry.AvailabilityUnavailable, DeletionAvailability: telemetry.AvailabilityUnavailable, ReconciliationAgeAvailability: telemetry.AvailabilityUnavailable,
+				ReconciliationLagAvailability: telemetry.AvailabilityUnavailable,
+			}},
 		},
 		telemetry.ComponentSnapshot{
 			Component: "vaulticdb", ProcessStartID: "unavailable", CapturedUnixMS: 1000,
@@ -126,12 +131,33 @@ func TestActiveOperationFilterRemovesQueueSummaries(t *testing.T) {
 	snapshot := telemetry.NewMonitorSnapshot(time.Unix(1, 0), telemetry.ComponentSnapshot{
 		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000,
 		Availability: telemetry.AvailabilityExact,
-		Queues:       []telemetry.QueueSnapshot{{Name: "work", Availability: telemetry.AvailabilityExact}},
+		Queues:       []telemetry.QueueSnapshot{{Name: "batch_write", Availability: telemetry.AvailabilityExact, CapacityAvailability: telemetry.AvailabilityUnavailable}},
 		Operations:   []telemetry.ActiveOperation{{ID: "one", Class: "backup", Phase: "write", StartedUnixMS: 1, UpdatedUnixMS: 1}},
 	})
 	filterMonitorSnapshot(&snapshot, "operations", monitorOptions{Active: true})
 	if len(snapshot.Components[0].Queues) != 0 || len(snapshot.Components[0].Operations) != 1 {
 		t.Fatalf("snapshot = %+v", snapshot)
+	}
+}
+
+func TestRepositoryCacheAvailability(t *testing.T) {
+	tests := []struct {
+		state          string
+		availability   telemetry.Availability
+		reconciliation telemetry.Availability
+	}{
+		{state: "fresh", availability: telemetry.AvailabilityExact, reconciliation: telemetry.AvailabilityExact},
+		{state: "fixed", availability: telemetry.AvailabilityExact, reconciliation: telemetry.AvailabilityExact},
+		{state: "stale", availability: telemetry.AvailabilityStale, reconciliation: telemetry.AvailabilityExact},
+		{state: "denied", availability: telemetry.AvailabilityUnavailable, reconciliation: telemetry.AvailabilityUnavailable},
+		{state: "inconsistent", availability: telemetry.AvailabilityUnavailable, reconciliation: telemetry.AvailabilityUnavailable},
+		{state: "unavailable", availability: telemetry.AvailabilityUnavailable, reconciliation: telemetry.AvailabilityUnavailable},
+	}
+	for _, test := range tests {
+		availability, reconciliation := repositoryCacheAvailability(test.state)
+		if availability != test.availability || reconciliation != test.reconciliation {
+			t.Fatalf("state %q = (%q, %q)", test.state, availability, reconciliation)
+		}
 	}
 }
 
@@ -141,12 +167,31 @@ func TestMonitorLinesRenderOperationsAndStorage(t *testing.T) {
 		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: captured.Add(time.Second).UnixMilli(),
 		Availability: telemetry.AvailabilityExact,
 		Operations:   []telemetry.ActiveOperation{{ID: "op-one", Class: "backup", Phase: "write", StartedUnixMS: captured.Add(-time.Second).UnixMilli(), UpdatedUnixMS: captured.UnixMilli()}},
-		Storage:      []telemetry.StorageSnapshot{{BackendID: "primary", Role: "repository", Availability: telemetry.AvailabilityExact, ObjectCount: 2}},
+		Storage: []telemetry.StorageSnapshot{{
+			BackendID: "primary", Role: "repository", Availability: telemetry.AvailabilityExact, ObjectCount: 2,
+			ObjectCountAvailability: telemetry.AvailabilityExact, PayloadAvailability: telemetry.AvailabilityUnavailable,
+			PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
+		}},
 	})
 	if output := strings.Join(monitorLines(snapshot, "operations"), "\n"); !strings.Contains(output, "operation op-one") || !strings.Contains(output, "class=backup") || !strings.Contains(output, "age=2s") {
 		t.Fatalf("operations output = %q", output)
 	}
 	if output := strings.Join(monitorLines(snapshot, "storage"), "\n"); !strings.Contains(output, "storage primary") || !strings.Contains(output, "objects=2") {
+		t.Fatalf("storage output = %q", output)
+	}
+}
+
+func TestMonitorLinesRenderUnavailableStorageFields(t *testing.T) {
+	snapshot := telemetry.NewMonitorSnapshot(time.Unix(1, 0), telemetry.ComponentSnapshot{
+		Component: "vaultic", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: telemetry.AvailabilityExact,
+		Storage: []telemetry.StorageSnapshot{{
+			BackendID: "primary", Role: "repository", Availability: telemetry.AvailabilityExact,
+			ObjectCountAvailability: telemetry.AvailabilityExact, PayloadAvailability: telemetry.AvailabilityUnavailable,
+			PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
+		}},
+	})
+	output := strings.Join(monitorLines(snapshot, "storage"), "\n")
+	if !strings.Contains(output, "objects=0") || !strings.Contains(output, "payload=unavailable") || !strings.Contains(output, "physical=unavailable") {
 		t.Fatalf("storage output = %q", output)
 	}
 }
@@ -165,7 +210,7 @@ func TestRepositoryAggregateStoragePreservesUnknownCoverage(t *testing.T) {
 		Totals: maintenance.StatsGroup{PackCount: 3, PayloadSize: 20}, StoredPhysicalSize: 30,
 		PhysicalSizeUnknownPacks: 1,
 	})
-	if len(storage) != 1 || storage[0].ObjectCount != 3 || storage[0].PhysicalBytes != 30 || storage[0].Availability != telemetry.AvailabilityEstimated {
+	if len(storage) != 1 || storage[0].ObjectCount != 3 || storage[0].PhysicalBytes != 30 || storage[0].Availability != telemetry.AvailabilityExact || storage[0].ObjectCountAvailability != telemetry.AvailabilityExact || storage[0].PayloadAvailability != telemetry.AvailabilityExact || storage[0].PhysicalAvailability != telemetry.AvailabilityEstimated {
 		t.Fatalf("storage = %+v", storage)
 	}
 }
