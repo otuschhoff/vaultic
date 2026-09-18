@@ -43,6 +43,23 @@ func TestCheckConsistencyCorruptValueIsUnreadable(t *testing.T) {
 	assertConsistencyFinding(t, findings, "analytics_manifest_malformed", key)
 }
 
+func TestCheckConsistencyLimitedRetainsBoundedCanonicalFindings(t *testing.T) {
+	ctx, store, metadata := consistencyTestStore(t)
+	key := schema.AnalyticsManifestKey(metadata.Generation)
+	store.values[string(key)] = []byte("broken")
+
+	findings, total, err := CheckConsistencyLimited(ctx, store, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || total <= uint64(len(findings)) {
+		t.Fatalf("findings=%+v total=%d", findings, total)
+	}
+	if findings[0].Kind != "analytics_fact_count_mismatch" {
+		t.Fatalf("non-canonical retained finding: %+v", findings[0])
+	}
+}
+
 func TestCheckConsistencyUnreadableMetadata(t *testing.T) {
 	ctx, store, _ := consistencyTestStore(t)
 	key := schema.AnalyticsMetadataKey()

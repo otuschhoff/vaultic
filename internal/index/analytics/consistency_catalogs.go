@@ -16,14 +16,25 @@ func (checker *consistencyChecker) checkIndexCatalog() error {
 			checker.unreadable("analytics_index_malformed", kv.Key, "valid index key", err)
 			return nil
 		}
-		if _, active := checker.activeSegments[key.Generation]; !active {
+		if !checker.segmentActive(key.Generation) {
 			checker.add("analytics_index_inactive_segment", kv.Key, "active segment", fmt.Sprint(key.Generation))
-		}
-		if _, expected := checker.expectedIndexKeys[string(kv.Key)]; !expected && key.Generation != 0 {
-			checker.add("analytics_index_unexpected", kv.Key, "index derived from active rows", "no matching dimension value")
 		}
 		if _, err := schema.UnmarshalAnalyticsDimensionIndexRecord(kv.Value); err != nil {
 			checker.unreadable("analytics_index_malformed", kv.Key, "decodable index", err)
+			return nil
+		}
+		segmentValue, found := checker.get(schema.AnalyticsFactSegmentKey(key.Generation), "readable index fact segment")
+		if !found {
+			return nil
+		}
+		rows, err := decodeSegment(segmentValue)
+		if err != nil {
+			checker.unreadable("analytics_index_malformed", kv.Key, "decodable index fact segment", err)
+			return nil
+		}
+		values := indexValues(rows)[key.Dimension]
+		if _, expected := values[key.Value]; !expected {
+			checker.add("analytics_index_unexpected", kv.Key, "index derived from active rows", "no matching dimension value")
 		}
 		return nil
 	})
@@ -40,7 +51,7 @@ func (checker *consistencyChecker) checkOverlayCatalog() error {
 				firstConsistencyError(parseErr, decodeErr))
 			return nil
 		}
-		if _, active := checker.activeSegments[overlay.FactSegment]; !active {
+		if !checker.segmentActive(overlay.FactSegment) {
 			checker.add("analytics_overlay_inactive_segment", logicalKey, "active fact segment", fmt.Sprint(overlay.FactSegment))
 			return nil
 		}
@@ -102,7 +113,7 @@ func (checker *consistencyChecker) checkJobs() error {
 				fmt.Sprintf("repository=%d epoch=%d", job.RepositoryGeneration, job.ClassificationEpoch))
 		}
 		for _, segment := range job.CompletedSegments {
-			if _, active := checker.activeSegments[segment]; !active && job.ClassificationEpoch == checker.metadata.Generation {
+			if !checker.segmentActive(segment) && job.ClassificationEpoch == checker.metadata.Generation {
 				checker.add("analytics_job_segment_inactive", kv.Key, "completed active segment", fmt.Sprint(segment))
 			}
 		}

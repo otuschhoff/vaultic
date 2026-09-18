@@ -17,7 +17,15 @@ func ForAllIndexes(ctx context.Context, lister vaultic.Lister, repo vaultic.Load
 	// decoding an index can take quite some time such that this can be both CPU- or IO-bound
 	// as the whole index is kept in memory anyways, a few workers too much don't matter
 	workerCount := repo.Connections() + uint(runtime.GOMAXPROCS(0))
+	return ForAllIndexesWorkers(ctx, lister, repo, workerCount, fn)
+}
 
+// ForAllIndexesWorkers is ForAllIndexes with an explicit global worker bound.
+func ForAllIndexesWorkers(ctx context.Context, lister vaultic.Lister, repo vaultic.LoaderUnpacked, workerCount uint,
+	fn func(id vaultic.ID, index *Index, err error) error) error {
+	if workerCount == 0 {
+		workerCount = 1
+	}
 	var m sync.Mutex
 	return vaultic.ParallelList(ctx, lister, vaultic.IndexFile, workerCount, func(ctx context.Context, id vaultic.ID, _ int64) error {
 		var err error

@@ -142,6 +142,19 @@ func TestPathIndexRebuildWritesOnlyBindingChanges(t *testing.T) {
 	if _, found, _ := store.Get(context.Background(), schema.PathVersionKey(0, "a.txt", 3)); !found {
 		t.Fatal("missing changed binding")
 	}
+	result, err = Rebuild(context.Background(), store, []string{"a.txt"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.BindingsChanged != 0 {
+		t.Fatalf("unchanged rebuild changed %d bindings", result.BindingsChanged)
+	}
+	if _, found, _ := store.Get(context.Background(), schema.PathVersionKey(0, "a.txt", 1)); !found {
+		t.Fatal("unchanged rebuild deleted initial binding")
+	}
+	if _, found, _ := store.Get(context.Background(), schema.PathVersionKey(0, "a.txt", 3)); !found {
+		t.Fatal("unchanged rebuild deleted changed binding")
+	}
 }
 
 func TestPathIndexKeyOrderingAndBoundary(t *testing.T) {
@@ -200,6 +213,44 @@ func TestPathIndexRebuildDoesNotDeleteOtherPaths(t *testing.T) {
 	}
 	if _, found, _ := store.Get(context.Background(), otherKey); !found {
 		t.Fatal("rebuilding a.txt deleted other.txt pv binding")
+	}
+}
+
+func TestPathIndexCheckReportsExactDifferences(t *testing.T) {
+	store := newMemoryStore()
+	root1 := rootWithFile(t, store, 1, "a.txt", 10, 1, 10)
+	root2 := rootWithFile(t, store, 2, "a.txt", 10, 2, 20)
+	addSnapshot(t, store, 1, 1, root1)
+	addSnapshot(t, store, 2, 2, root2)
+	if _, err := Rebuild(context.Background(), store, []string{"a.txt"}, false); err != nil {
+		t.Fatal(err)
+	}
+	missing := schema.PathVersionKey(0, "a.txt", 1)
+	delete(store.values, string(missing))
+	drift := schema.PathVersionKey(0, "a.txt", 2)
+	store.values[string(drift)] = []byte("wrong")
+	stale := schema.PathVersionKey(0, "a.txt", 3)
+	store.values[string(stale)] = store.values[string(drift)]
+
+	var differences []Difference
+	result, err := Check(context.Background(), store, []string{"a.txt"}, func(difference Difference) error {
+		differences = append(differences, difference)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SnapshotsScanned != 2 || result.BindingsChanged != 3 || len(differences) != 3 {
+		t.Fatalf("check result = %#v, differences = %#v", result, differences)
+	}
+	if !bytes.Equal(differences[0].Key, missing) || differences[0].Actual != nil {
+		t.Fatalf("missing difference = %#v", differences[0])
+	}
+	if !bytes.Equal(differences[1].Key, drift) || differences[1].Expected == nil || differences[1].Actual == nil {
+		t.Fatalf("drift difference = %#v", differences[1])
+	}
+	if !bytes.Equal(differences[2].Key, stale) || differences[2].Expected != nil {
+		t.Fatalf("stale difference = %#v", differences[2])
 	}
 }
 

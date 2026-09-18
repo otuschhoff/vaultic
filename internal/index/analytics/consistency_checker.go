@@ -3,6 +3,8 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -15,45 +17,64 @@ type ConsistencyFinding struct {
 	Got  string
 }
 
-type consistencyActiveFact struct {
-	fact         schema.AnalyticsFactRecord
-	identity     segmentIdentity
-	lastComplete int64
+type ConsistencyWorkspace interface {
+	AddDictionary(schema.AnalyticsDictionaryKind, uint32, string) error
+	ForEachDictionary(func(schema.AnalyticsDictionaryKind, uint32, string) error) error
+	AddAggregate([]byte, schema.AnalyticsAggregateRecord) error
+	AddSummary([]byte, schema.AnalyticsSummaryRecord) error
+	AddGDPR([]byte, []byte) error
+	ForEachAggregate(func([]byte, schema.AnalyticsAggregateRecord) error) error
+	ForEachSummary(func([]byte, schema.AnalyticsSummaryRecord) error) error
+	ForEachGDPR(func([]byte, []byte) error) error
 }
 
 type consistencyChecker struct {
-	ctx               context.Context
-	store             Store
-	metadata          schema.AnalyticsMetadataRecord
-	watermark         *schema.AnalyticsWatermarkRecord
-	manifest          *schema.AnalyticsManifestRecord
-	layers            []schema.AnalyticsManifestRecord
-	segments          []uint64
-	activeSegments    map[uint64]struct{}
-	dictionaries      map[schema.AnalyticsDictionaryKind]map[uint32]string
-	activeFacts       []consistencyActiveFact
-	expectedIndexKeys map[string]struct{}
-	facts             uint64
-	findings          []ConsistencyFinding
+	ctx             context.Context
+	store           Store
+	workspace       ConsistencyWorkspace
+	metadata        schema.AnalyticsMetadataRecord
+	watermark       *schema.AnalyticsWatermarkRecord
+	manifest        *schema.AnalyticsManifestRecord
+	layers          []schema.AnalyticsManifestRecord
+	facts           uint64
+	maximumFindings uint
+	totalFindings   uint64
+	findings        []ConsistencyFinding
 }
 
 func CheckConsistency(ctx context.Context, store Store) ([]ConsistencyFinding, error) {
+	findings, _, err := CheckConsistencyLimited(ctx, store, 0)
+	return findings, err
+}
+
+func CheckConsistencyLimited(ctx context.Context, store Store, maximumFindings uint) ([]ConsistencyFinding, uint64, error) {
+	return CheckConsistencyWithWorkspace(ctx, store, maximumFindings, nil)
+}
+
+func CheckConsistencyWithWorkspace(
+	ctx context.Context,
+	store Store,
+	maximumFindings uint,
+	workspace ConsistencyWorkspace,
+) ([]ConsistencyFinding, uint64, error) {
 	metadataKey := schema.AnalyticsMetadataKey()
 	value, found, err := store.Get(ctx, metadataKey)
 	if err != nil {
-		return []ConsistencyFinding{{Kind: "unreadable", Key: string(metadataKey), Want: "readable analytics metadata", Got: err.Error()}}, nil
+		return []ConsistencyFinding{{Kind: "unreadable", Key: string(metadataKey), Want: "readable analytics metadata", Got: err.Error()}}, 1, nil
 	}
 	if !found {
-		return nil, nil
+		return nil, 0, nil
 	}
 	metadata, err := schema.UnmarshalAnalyticsMetadataRecord(value)
 	if err != nil {
-		return []ConsistencyFinding{{Kind: "unreadable", Key: string(metadataKey), Want: "decodable analytics metadata", Got: err.Error()}}, nil
+		return []ConsistencyFinding{{Kind: "unreadable", Key: string(metadataKey), Want: "decodable analytics metadata", Got: err.Error()}}, 1, nil
 	}
 	if !metadata.Enabled {
-		return nil, nil
+		return nil, 0, nil
 	}
 	checker := newConsistencyChecker(ctx, store, metadata)
+	checker.maximumFindings = maximumFindings
+	checker.workspace = workspace
 	checker.checkRootRecords()
 	if checker.manifest != nil {
 		checker.checkManifestChain()
@@ -73,26 +94,47 @@ func CheckConsistency(ctx context.Context, store Store) ([]ConsistencyFinding, e
 	}
 	for _, check := range checks {
 		if err := check(); err != nil {
-			return nil, err
+			return nil, checker.totalFindings, err
 		}
 	}
-	return checker.findings, nil
+	return checker.findings, checker.totalFindings, nil
 }
 
 func newConsistencyChecker(ctx context.Context, store Store, metadata schema.AnalyticsMetadataRecord) *consistencyChecker {
 	return &consistencyChecker{
-		ctx:               ctx,
-		store:             store,
-		metadata:          metadata,
-		activeSegments:    map[uint64]struct{}{},
-		dictionaries:      map[schema.AnalyticsDictionaryKind]map[uint32]string{},
-		activeFacts:       make([]consistencyActiveFact, 0, metadata.Facts),
-		expectedIndexKeys: map[string]struct{}{},
+		ctx: ctx, store: store, metadata: metadata,
 	}
 }
 
 func (checker *consistencyChecker) add(kind string, key []byte, want, got string) {
-	checker.findings = append(checker.findings, ConsistencyFinding{Kind: kind, Key: string(key), Want: want, Got: got})
+	checker.totalFindings++
+	finding := ConsistencyFinding{Kind: kind, Key: string(key), Want: want, Got: got}
+	if checker.maximumFindings == 0 {
+		checker.findings = append(checker.findings, finding)
+		return
+	}
+	index, _ := slices.BinarySearchFunc(checker.findings, finding, compareConsistencyFinding)
+	if uint(len(checker.findings)) < checker.maximumFindings {
+		checker.findings = slices.Insert(checker.findings, index, finding)
+		return
+	}
+	if index < len(checker.findings) {
+		checker.findings = slices.Insert(checker.findings, index, finding)
+		checker.findings = checker.findings[:checker.maximumFindings]
+	}
+}
+
+func compareConsistencyFinding(left, right ConsistencyFinding) int {
+	if left.Kind != right.Kind {
+		return strings.Compare(left.Kind, right.Kind)
+	}
+	if left.Key != right.Key {
+		return strings.Compare(left.Key, right.Key)
+	}
+	if left.Want != right.Want {
+		return strings.Compare(left.Want, right.Want)
+	}
+	return strings.Compare(left.Got, right.Got)
 }
 
 func (checker *consistencyChecker) unreadable(family string, key []byte, want string, err error) {
@@ -165,7 +207,6 @@ func (checker *consistencyChecker) checkRootRecords() {
 func (checker *consistencyChecker) checkManifestChain() {
 	current := *checker.manifest
 	checker.layers = append(checker.layers, current)
-	checker.segments = append(checker.segments, current.Segments...)
 	for depth := 0; current.ParentGeneration != 0; depth++ {
 		key := schema.AnalyticsManifestKey(current.ParentGeneration)
 		if depth >= maxManifestLayerDepth || current.LayerDepth == 0 {
@@ -191,18 +232,32 @@ func (checker *consistencyChecker) checkManifestChain() {
 			return
 		}
 		checker.layers = append(checker.layers, parent)
-		checker.segments = append(append([]uint64(nil), parent.Segments...), checker.segments...)
 		current = parent
-	}
-	for _, segment := range checker.segments {
-		checker.activeSegments[segment] = struct{}{}
 	}
 }
 
 func (checker *consistencyChecker) clearManifestChain() {
 	checker.layers = nil
-	checker.segments = nil
-	checker.activeSegments = map[uint64]struct{}{}
+}
+
+func (checker *consistencyChecker) forEachSegment(visit func(uint64) error) error {
+	for layer := len(checker.layers) - 1; layer >= 0; layer-- {
+		for _, segment := range checker.layers[layer].Segments {
+			if err := visit(segment); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (checker *consistencyChecker) segmentActive(target uint64) bool {
+	for _, layer := range checker.layers {
+		if slices.Contains(layer.Segments, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (checker *consistencyChecker) checkCompletionMarkers() {
@@ -216,11 +271,11 @@ func (checker *consistencyChecker) checkCompletionMarkers() {
 }
 
 func (checker *consistencyChecker) checkDictionaries() error {
+	values := map[schema.AnalyticsDictionaryKind]map[string]uint32{}
 	for _, kind := range []schema.AnalyticsDictionaryKind{
 		schema.AnalyticsDictionarySVM, schema.AnalyticsDictionaryVolume, schema.AnalyticsDictionaryPathGroup,
 	} {
-		checker.dictionaries[kind] = map[uint32]string{}
-		values := map[string]uint32{}
+		values[kind] = map[string]uint32{}
 		err := scan(checker.ctx, checker.store, schema.AnalyticsDictionaryPrefix(kind), func(kv daemon.KeyValue) error {
 			key, parseErr := schema.ParseKey(kv.Key)
 			record, decodeErr := schema.UnmarshalAnalyticsDictionaryRecord(kv.Value)
@@ -229,16 +284,31 @@ func (checker *consistencyChecker) checkDictionaries() error {
 					firstConsistencyError(parseErr, decodeErr))
 				return nil
 			}
-			if previous, duplicate := values[record.Value]; duplicate && previous != key.Ordinal {
+			if checker.workspace != nil {
+				return checker.workspace.AddDictionary(kind, key.Ordinal, record.Value)
+			}
+			previous, duplicate := values[kind][record.Value]
+			if duplicate && previous != key.Ordinal {
 				checker.add("analytics_dictionary_duplicate", kv.Key, "one ID per value", fmt.Sprintf("also ID %d", previous))
 			}
-			values[record.Value] = key.Ordinal
-			checker.dictionaries[kind][key.Ordinal] = record.Value
+			values[kind][record.Value] = key.Ordinal
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 	}
-	return nil
+	if checker.workspace == nil {
+		return nil
+	}
+	var previousKind schema.AnalyticsDictionaryKind
+	var previousID uint32
+	var previousValue string
+	return checker.workspace.ForEachDictionary(func(kind schema.AnalyticsDictionaryKind, id uint32, value string) error {
+		if kind == previousKind && value == previousValue {
+			checker.add("analytics_dictionary_duplicate", schema.AnalyticsDictionaryKey(kind, id), "one ID per value", fmt.Sprintf("also ID %d", previousID))
+		}
+		previousKind, previousID, previousValue = kind, id, value
+		return nil
+	})
 }

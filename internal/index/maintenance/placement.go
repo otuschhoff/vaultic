@@ -338,43 +338,128 @@ func placementsFromTier(pack schema.PackRecord, model PlacementModel) placementS
 func checkPlacementRecords(
 	ctx context.Context,
 	store Store,
-	packs map[vaultic.ID]schema.PackRecord,
+	scratch *checkScratch,
+	memoryBytes uint64,
 	model PlacementModel,
 	result *CheckResult,
 	maxFindings uint,
 ) error {
-	placements, malformed, err := loadPlacements(ctx, store)
+	membership, err := newLocationSpool(ctx, scratch, max(memoryBytes, uint64(locationTupleSize)), 32)
 	if err != nil {
 		return err
 	}
-	result.PlacementRecordsMalformed = malformed
+	defer membership.close()
 	backendByHash := map[uint64]PlacementBackend{}
 	for _, backend := range model.Backends {
 		backendByHash[backend.Hash] = backend
 	}
-	for packID, pack := range packs {
-		if len(model.Backends) != 0 && len(placements[packID]) == 0 && pack.Tier != schema.TierUnknown {
+	var current vaultic.ID
+	var summary placementCheckSummary
+	haveCurrent := false
+	flush := func() error {
+		if !haveCurrent {
+			return nil
+		}
+		value, found, err := store.Get(ctx, schema.PackKey(schema.ID(current)))
+		if err != nil || !found {
+			return err
+		}
+		pack, err := schema.UnmarshalPackRecord(value)
+		if err != nil {
+			return err
+		}
+		derived := summary.derivedTier(len(model.Backends))
+		if pack.Tier != derived {
+			result.DerivedTierMismatch++
+			addFinding(result, maxFindings, Finding{Kind: "derived_tier_mismatch", Key: current.String(), Want: derived.String(), Got: pack.Tier.String()})
+		}
+		if !summary.durable(model.Policy) {
+			result.PacksBelowDurability++
+			addFinding(result, maxFindings, Finding{Kind: "below_durability", Key: current.String()})
+		}
+		return nil
+	}
+	if err := scan(ctx, store, []byte("pl:"), func(entry daemon.KeyValue) error {
+		parsed, parseErr := schema.ParseKey(entry.Key)
+		if parseErr != nil || parsed.Kind != schema.KeyPackPlacement {
+			result.PlacementRecordsMalformed++
+			return nil
+		}
+		placement, decodeErr := schema.UnmarshalPlacementRecord(entry.Value)
+		if decodeErr != nil {
+			result.PlacementRecordsMalformed++
+			return nil
+		}
+		packID := vaultic.ID(parsed.ID)
+		if haveCurrent && packID != current {
+			if err := flush(); err != nil {
+				return err
+			}
+			summary = placementCheckSummary{}
+		}
+		current, haveCurrent = packID, true
+		if err := membership.add(locationTuple{BlobID: packID}); err != nil {
+			return err
+		}
+		expected, err := (schema.BackendPackRecord{
+			State: placement.State, Bytes: placement.Bytes, PlacedAt: placement.PlacedAt,
+		}).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		value, found, err := store.Get(ctx, schema.BackendPackKey(parsed.Backend, parsed.ID))
+		if err != nil {
+			return err
+		}
+		if !found || !bytes.Equal(value, expected) {
+			result.BackendPackMismatch++
+			addFinding(result, maxFindings, Finding{Kind: "backend_pack_mismatch", Key: packID.String(), Want: fmt.Sprintf("backend=%016x", parsed.Backend)})
+		}
+		backend, known := backendByHash[parsed.Backend]
+		if len(model.Backends) != 0 && !known {
+			result.UnknownPlacementBackends++
+			addFinding(result, maxFindings, Finding{Kind: "unknown_placement_backend", Key: packID.String(), Got: fmt.Sprintf("backend=%016x", parsed.Backend)})
+		}
+		summary.add(placement, backend, known)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	placements, err := membership.iterator()
+	if err != nil {
+		return err
+	}
+	defer placements.close()
+	placement, hasPlacement, err := placements.next()
+	if err != nil {
+		return err
+	}
+	if err := scan(ctx, store, []byte("p:"), func(entry daemon.KeyValue) error {
+		parsed, err := schema.ParseKey(entry.Key)
+		if err != nil || parsed.Kind != schema.KeyPack {
+			return fmt.Errorf("invalid pack key %q", entry.Key)
+		}
+		pack, err := schema.UnmarshalPackRecord(entry.Value)
+		if err != nil {
+			return err
+		}
+		packID := vaultic.ID(parsed.ID)
+		for hasPlacement && bytes.Compare(placement.BlobID[:], packID[:]) < 0 {
+			placement, hasPlacement, err = placements.next()
+			if err != nil {
+				return err
+			}
+		}
+		if len(model.Backends) != 0 && (!hasPlacement || placement.BlobID != packID) && pack.Tier != schema.TierUnknown {
 			result.MissingPlacementRecords++
 			addFinding(result, maxFindings, Finding{Kind: "missing_placement_records", Key: packID.String(), Got: pack.Tier.String()})
 		}
-	}
-	for packID, packPlacements := range placements {
-		if err := checkPackPlacementRecords(ctx, store, packID, packPlacements, backendByHash, len(model.Backends), result, maxFindings); err != nil {
-			return err
-		}
-		pack, found := packs[packID]
-		if !found {
-			continue
-		}
-		derived := derivedTier(packPlacements, backendByHash, len(model.Backends))
-		if pack.Tier != derived {
-			result.DerivedTierMismatch++
-			addFinding(result, maxFindings, Finding{Kind: "derived_tier_mismatch", Key: packID.String(), Want: derived.String(), Got: pack.Tier.String()})
-		}
-		if !durable(packPlacements, backendByHash, model.Policy) {
-			result.PacksBelowDurability++
-			addFinding(result, maxFindings, Finding{Kind: "below_durability", Key: packID.String()})
-		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if err := scan(ctx, store, []byte("bp:"), func(entry daemon.KeyValue) error {
 		parsed, parseErr := schema.ParseKey(entry.Key)
@@ -383,12 +468,14 @@ func checkPlacementRecords(
 			return nil
 		}
 		packID := vaultic.ID(parsed.ID)
-		if placements[packID] == nil {
-			result.BackendPackMismatch++
-			addFinding(result, maxFindings, Finding{Kind: "orphan_backend_pack", Key: packID.String(), Got: fmt.Sprintf("backend=%016x", parsed.Backend)})
-			return nil
+		value, found, err := store.Get(ctx, schema.PackPlacementKey(parsed.ID, parsed.Backend))
+		if err != nil {
+			return err
 		}
-		if _, ok := placements[packID][parsed.Backend]; !ok {
+		if found {
+			_, err = schema.UnmarshalPlacementRecord(value)
+		}
+		if !found || err != nil {
 			result.BackendPackMismatch++
 			addFinding(result, maxFindings, Finding{Kind: "orphan_backend_pack", Key: packID.String(), Got: fmt.Sprintf("backend=%016x", parsed.Backend)})
 		}
@@ -397,6 +484,74 @@ func checkPlacementRecords(
 		return err
 	}
 	return nil
+}
+
+type placementCheckSummary struct {
+	live, unknownLive, copies, offsite uint
+	oneRole                            string
+	domains                            map[string]struct{}
+}
+
+func (summary *placementCheckSummary) add(placement schema.PlacementRecord, backend PlacementBackend, known bool) {
+	if placement.State != schema.PlacementLive {
+		return
+	}
+	if !known {
+		summary.live++
+		summary.unknownLive++
+		return
+	}
+	if backend.Role == "read-cache" {
+		return
+	}
+	summary.live++
+	summary.oneRole = backend.Role
+	summary.copies++
+	if summary.domains == nil {
+		summary.domains = make(map[string]struct{})
+	}
+	summary.domains[backend.FailureDomain] = struct{}{}
+	if backend.Offsite {
+		summary.offsite++
+	}
+}
+
+func (summary placementCheckSummary) derivedTier(backendCount int) schema.PackTier {
+	if summary.live == 0 {
+		return schema.TierUnknown
+	}
+	if summary.live > 1 {
+		return schema.TierMirrored
+	}
+	if summary.unknownLive == 1 {
+		if backendCount == 1 {
+			return schema.TierSingle
+		}
+		return schema.TierUnknown
+	}
+	switch summary.oneRole {
+	case "archival":
+		return schema.TierCold
+	case "primary":
+		if backendCount == 1 {
+			return schema.TierSingle
+		}
+		return schema.TierHot
+	default:
+		return schema.TierUnknown
+	}
+}
+
+func (summary placementCheckSummary) durable(policy DurabilityPolicy) bool {
+	minCopies := policy.MinCopies
+	if minCopies == 0 {
+		minCopies = 1
+	}
+	minDomains := policy.MinDomains
+	if minDomains == 0 {
+		minDomains = minCopies
+	}
+	return summary.copies >= minCopies && uint(len(summary.domains)) >= minDomains && summary.offsite >= policy.MinOffsite
 }
 
 func checkPackPlacementRecords(

@@ -267,8 +267,12 @@ func TestPlacementCheckReportsBPAndTierDrift(t *testing.T) {
 		Bytes: 100, RetentionSource: schema.RetentionUnknown,
 	})
 	result := CheckResult{}
-	packs := map[vaultic.ID]schema.PackRecord{packID: placementPack(schema.TierCold)}
-	if err := checkPlacementRecords(context.Background(), store, packs, testPlacementModel(), &result, 10); err != nil {
+	scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	if err := checkPlacementRecords(context.Background(), store, scratch, 1<<20, testPlacementModel(), &result, 10); err != nil {
 		t.Fatal(err)
 	}
 	if result.BackendPackMismatch != 1 {

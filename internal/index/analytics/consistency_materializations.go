@@ -10,22 +10,129 @@ import (
 )
 
 func (checker *consistencyChecker) checkMaterializations() error {
-	aggregates, summaries := checker.expectedMaterializations()
+	if checker.workspace != nil {
+		if err := checker.spoolExpectedMaterializations(); err != nil {
+			return err
+		}
+		if err := checker.workspace.ForEachAggregate(func(key []byte, expected schema.AnalyticsAggregateRecord) error {
+			checker.checkAggregate(key, expected)
+			return nil
+		}); err != nil {
+			return err
+		}
+		return checker.workspace.ForEachSummary(func(key []byte, expected schema.AnalyticsSummaryRecord) error {
+			checker.checkSummary(key, expected)
+			return nil
+		})
+	}
+	aggregates, summaries, err := checker.expectedMaterializations()
+	if err != nil {
+		return err
+	}
 	for key, expected := range aggregates {
-		value, found := checker.getDerived([]byte(key), "readable materialized aggregate")
-		if !found {
-			checker.add("analytics_materialized_aggregate_mismatch", []byte(key), fmt.Sprintf("%+v", expected), "missing")
-			continue
-		}
-		actual, err := schema.UnmarshalAnalyticsAggregateRecord(value)
-		if err != nil {
-			checker.unreadable("analytics_materialized_aggregate_mismatch", []byte(key), "decodable materialized aggregate", err)
-		} else if actual != expected {
-			checker.add("analytics_materialized_aggregate_mismatch", []byte(key), fmt.Sprintf("%+v", expected), fmt.Sprintf("%+v", actual))
-		}
+		checker.checkAggregate([]byte(key), expected)
 	}
 	for key, expected := range summaries {
 		checker.checkSummary([]byte(key), expected)
+	}
+	return nil
+}
+
+func (checker *consistencyChecker) checkAggregate(key []byte, expected schema.AnalyticsAggregateRecord) {
+	value, found := checker.getDerived(key, "readable materialized aggregate")
+	if !found {
+		checker.add("analytics_materialized_aggregate_mismatch", key, fmt.Sprintf("%+v", expected), "missing")
+		return
+	}
+	actual, err := schema.UnmarshalAnalyticsAggregateRecord(value)
+	if err != nil {
+		checker.unreadable("analytics_materialized_aggregate_mismatch", key, "decodable materialized aggregate", err)
+	} else if actual != expected {
+		checker.add("analytics_materialized_aggregate_mismatch", key, fmt.Sprintf("%+v", expected), fmt.Sprintf("%+v", actual))
+	}
+}
+
+func (checker *consistencyChecker) spoolExpectedMaterializations() error {
+	return checker.forEachActiveFact(func(fact schema.AnalyticsFactRecord, _ segmentIdentity, lastComplete int64) error {
+		size := uint64(0)
+		if fact.Known&schema.KnownSize != 0 {
+			size = fact.LogicalSize
+		}
+		if fact.CreationBasis != schema.AnalyticsTimeUnknown {
+			if err := emitConsistencyBuckets(checker.workspace.AddAggregate, fact, time.Unix(0, fact.CreatedAt).UTC(), size, false); err != nil {
+				return err
+			}
+		}
+		if lastComplete != 0 && (fact.Residency == schema.AnalyticsArchiveOnly || fact.Residency == schema.AnalyticsExpired) {
+			if err := emitConsistencyBuckets(checker.workspace.AddAggregate, fact, time.Unix(0, lastComplete).UTC(), size, true); err != nil {
+				return err
+			}
+		}
+		return emitConsistencySummaries(checker.workspace.AddSummary, fact, size)
+	})
+}
+
+func emitConsistencyBuckets(
+	add func([]byte, schema.AnalyticsAggregateRecord) error,
+	fact schema.AnalyticsFactRecord,
+	instant time.Time,
+	size uint64,
+	deleted bool,
+) error {
+	weekday := (int(instant.Weekday()) + 6) % 7
+	buckets := []struct {
+		granularity schema.AnalyticsGranularity
+		timestamp   int64
+	}{
+		{schema.AnalyticsGranularityYear, time.Date(instant.Year(), 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()},
+		{schema.AnalyticsGranularityMonth, time.Date(instant.Year(), instant.Month(), 1, 0, 0, 0, 0, time.UTC).UnixNano()},
+		{schema.AnalyticsGranularityWeek, time.Date(instant.Year(), instant.Month(), instant.Day()-weekday, 0, 0, 0, 0, time.UTC).UnixNano()},
+	}
+	for _, bucket := range buckets {
+		record := schema.AnalyticsAggregateRecord{FilesAdded: 1, BytesAdded: size}
+		if deleted {
+			record = schema.AnalyticsAggregateRecord{FilesDeleted: 1, BytesDeleted: size}
+		}
+		if err := add(schema.GrowthTimeKey(bucket.granularity, bucket.timestamp, schema.TierUnknown), record); err != nil {
+			return err
+		}
+		if fact.PathGroup != "unknown" {
+			if err := add(schema.GrowthPathKey(fact.PathGroup, bucket.granularity, bucket.timestamp), record); err != nil {
+				return err
+			}
+		}
+		if fact.Known&schema.KnownUID != 0 {
+			if err := add(schema.UserChurnKey(fact.UID, bucket.granularity, bucket.timestamp), record); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func emitConsistencySummaries(
+	add func([]byte, schema.AnalyticsSummaryRecord) error,
+	fact schema.AnalyticsFactRecord,
+	size uint64,
+) error {
+	record := schema.AnalyticsSummaryRecord{ActiveFiles: 1, ActiveBytes: size}
+	var keys [][]byte
+	if fact.Known&schema.KnownUID != 0 {
+		keys = append(keys, schema.UserStatsKey(fact.UID, fact.Residency))
+		if fact.Residency == schema.AnalyticsLive {
+			keys = append(keys, schema.UserSummaryKey(fact.UID))
+		}
+	}
+	if fact.Known&schema.KnownGID != 0 {
+		keys = append(keys, schema.GroupStatsKey(fact.GID, fact.Residency))
+		if fact.Residency == schema.AnalyticsLive {
+			keys = append(keys, schema.GroupSummaryKey(fact.GID))
+		}
+	}
+	for _, key := range keys {
+		if err := add(key, record); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -44,24 +151,28 @@ func (checker *consistencyChecker) checkSummary(key []byte, expected schema.Anal
 	}
 }
 
-func (checker *consistencyChecker) expectedMaterializations() (map[string]schema.AnalyticsAggregateRecord, map[string]schema.AnalyticsSummaryRecord) {
+func (checker *consistencyChecker) expectedMaterializations() (
+	map[string]schema.AnalyticsAggregateRecord,
+	map[string]schema.AnalyticsSummaryRecord,
+	error,
+) {
 	aggregates := map[string]schema.AnalyticsAggregateRecord{}
 	summaries := map[string]schema.AnalyticsSummaryRecord{}
-	for _, item := range checker.activeFacts {
+	err := checker.forEachActiveFact(func(fact schema.AnalyticsFactRecord, _ segmentIdentity, lastComplete int64) error {
 		size := uint64(0)
-		if item.fact.Known&schema.KnownSize != 0 {
-			size = item.fact.LogicalSize
+		if fact.Known&schema.KnownSize != 0 {
+			size = fact.LogicalSize
 		}
-		if item.fact.CreationBasis != schema.AnalyticsTimeUnknown {
-			addConsistencyBuckets(aggregates, item.fact, time.Unix(0, item.fact.CreatedAt).UTC(), size, false)
+		if fact.CreationBasis != schema.AnalyticsTimeUnknown {
+			addConsistencyBuckets(aggregates, fact, time.Unix(0, fact.CreatedAt).UTC(), size, false)
 		}
-		if item.lastComplete != 0 &&
-			(item.fact.Residency == schema.AnalyticsArchiveOnly || item.fact.Residency == schema.AnalyticsExpired) {
-			addConsistencyBuckets(aggregates, item.fact, time.Unix(0, item.lastComplete).UTC(), size, true)
+		if lastComplete != 0 && (fact.Residency == schema.AnalyticsArchiveOnly || fact.Residency == schema.AnalyticsExpired) {
+			addConsistencyBuckets(aggregates, fact, time.Unix(0, lastComplete).UTC(), size, true)
 		}
-		addConsistencySummaries(summaries, item.fact, size)
-	}
-	return aggregates, summaries
+		addConsistencySummaries(summaries, fact, size)
+		return nil
+	})
+	return aggregates, summaries, err
 }
 
 func addConsistencyBuckets(records map[string]schema.AnalyticsAggregateRecord, fact schema.AnalyticsFactRecord, instant time.Time, size uint64, deleted bool) {
@@ -120,13 +231,36 @@ func addConsistencySummary(records map[string]schema.AnalyticsSummaryRecord, key
 }
 
 func (checker *consistencyChecker) checkGDPR() error {
-	expected := checker.expectedGDPR()
-	for key, want := range expected {
-		actual, found := checker.getDerived([]byte(key), "readable GDPR materialization")
-		if !found || !bytes.Equal(actual, want) {
-			checker.add("analytics_gdpr_view_mismatch", []byte(key), fmt.Sprintf("%x", want), fmt.Sprintf("%x", actual))
+	if checker.workspace != nil {
+		if err := checker.spoolExpectedGDPR(); err != nil {
+			return err
 		}
+		if err := checker.workspace.ForEachGDPR(func(key, want []byte) error {
+			checker.checkGDPRValue(key, want)
+			return nil
+		}); err != nil {
+			return err
+		}
+		return checker.checkGDPRPrefixes()
 	}
+	expected, err := checker.expectedGDPR()
+	if err != nil {
+		return err
+	}
+	for key, want := range expected {
+		checker.checkGDPRValue([]byte(key), want)
+	}
+	return checker.checkGDPRPrefixes()
+}
+
+func (checker *consistencyChecker) checkGDPRValue(key, want []byte) {
+	actual, found := checker.getDerived(key, "readable GDPR materialization")
+	if !found || !bytes.Equal(actual, want) {
+		checker.add("analytics_gdpr_view_mismatch", key, fmt.Sprintf("%x", want), fmt.Sprintf("%x", actual))
+	}
+}
+
+func (checker *consistencyChecker) checkGDPRPrefixes() error {
 	for _, prefix := range [][]byte{
 		schema.AnalyticsDerivedPrefix(checker.metadata.Generation, []byte("u:inodes:")),
 		schema.AnalyticsDerivedPrefix(checker.metadata.Generation, []byte("u:blobs:")),
@@ -139,50 +273,102 @@ func (checker *consistencyChecker) checkGDPR() error {
 	return nil
 }
 
-func (checker *consistencyChecker) expectedGDPR() map[string][]byte {
-	expected := map[string][]byte{}
-	for _, item := range checker.activeFacts {
-		if item.fact.Known&schema.KnownUID == 0 {
-			continue
+func (checker *consistencyChecker) spoolExpectedGDPR() error {
+	return checker.forEachActiveFact(func(fact schema.AnalyticsFactRecord, identity segmentIdentity, _ int64) error {
+		if fact.Known&schema.KnownUID == 0 {
+			return nil
 		}
-		key := schema.InodeRevisionKey(item.identity.FSID, item.identity.Inode, item.identity.Revision)
+		key := schema.InodeRevisionKey(identity.FSID, identity.Inode, identity.Revision)
 		value, found := checker.get(key, "readable authoritative revision")
 		if !found {
 			checker.add("analytics_gdpr_source_missing", key, "authoritative revision", "missing")
-			continue
+			return nil
 		}
 		revision, err := schema.UnmarshalInodeRevision(value)
 		if err != nil {
 			checker.unreadable("analytics_gdpr_source_malformed", key, "decodable authoritative revision", err)
-			continue
+			return nil
 		}
-		checker.addExpectedGDPR(expected, item, revision)
-	}
-	return expected
+		return checker.addExpectedGDPRWorkspace(fact, identity, revision)
+	})
 }
 
-func (checker *consistencyChecker) addExpectedGDPR(expected map[string][]byte, item consistencyActiveFact, revision schema.InodeRevision) {
-	inodeKey := schema.UserInodeKey(item.fact.UID, item.identity.FSID, item.identity.Inode)
-	inodeValue, err := (schema.AnalyticsUserInodeRecord{LatestRevision: item.identity.Revision, PathSample: revision.SourcePath}).MarshalBinary()
+func (checker *consistencyChecker) addExpectedGDPRWorkspace(
+	fact schema.AnalyticsFactRecord,
+	identity segmentIdentity,
+	revision schema.InodeRevision,
+) error {
+	inodeKey := schema.UserInodeKey(fact.UID, identity.FSID, identity.Inode)
+	inodeValue, err := (schema.AnalyticsUserInodeRecord{LatestRevision: identity.Revision, PathSample: revision.SourcePath}).MarshalBinary()
+	if err != nil {
+		checker.unreadable("analytics_gdpr_source_malformed", inodeKey, "encodable GDPR inode materialization", err)
+		return nil
+	}
+	if err := checker.workspace.AddGDPR(inodeKey, inodeValue); err != nil {
+		return err
+	}
+	if fact.CreatedAt == 0 {
+		return nil
+	}
+	return visitInodeContent(checker.ctx, checker.store, revision, func(ordinal uint32, blob schema.ID) error {
+		key := schema.UserBlobContributionKey(fact.UID, blob, identity.FSID, identity.Inode, identity.Generation, ordinal)
+		value, err := (schema.AnalyticsUserBlobRecord{ReferenceCount: 1, FirstSeen: fact.CreatedAt}).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return checker.workspace.AddGDPR(key, value)
+	})
+}
+
+func (checker *consistencyChecker) expectedGDPR() (map[string][]byte, error) {
+	expected := map[string][]byte{}
+	err := checker.forEachActiveFact(func(fact schema.AnalyticsFactRecord, identity segmentIdentity, _ int64) error {
+		if fact.Known&schema.KnownUID == 0 {
+			return nil
+		}
+		key := schema.InodeRevisionKey(identity.FSID, identity.Inode, identity.Revision)
+		value, found := checker.get(key, "readable authoritative revision")
+		if !found {
+			checker.add("analytics_gdpr_source_missing", key, "authoritative revision", "missing")
+			return nil
+		}
+		revision, err := schema.UnmarshalInodeRevision(value)
+		if err != nil {
+			checker.unreadable("analytics_gdpr_source_malformed", key, "decodable authoritative revision", err)
+			return nil
+		}
+		checker.addExpectedGDPR(expected, fact, identity, revision)
+		return nil
+	})
+	return expected, err
+}
+
+func (checker *consistencyChecker) addExpectedGDPR(
+	expected map[string][]byte,
+	fact schema.AnalyticsFactRecord,
+	identity segmentIdentity,
+	revision schema.InodeRevision,
+) {
+	inodeKey := schema.UserInodeKey(fact.UID, identity.FSID, identity.Inode)
+	inodeValue, err := (schema.AnalyticsUserInodeRecord{LatestRevision: identity.Revision, PathSample: revision.SourcePath}).MarshalBinary()
 	if err != nil {
 		checker.unreadable("analytics_gdpr_source_malformed", inodeKey, "encodable GDPR inode materialization", err)
 		return
 	}
 	expected[string(inodeKey)] = inodeValue
-	if item.fact.CreatedAt == 0 {
+	if fact.CreatedAt == 0 {
 		return
 	}
 	err = visitInodeContent(checker.ctx, checker.store, revision, func(ordinal uint32, blob schema.ID) error {
-		key := schema.UserBlobContributionKey(item.fact.UID, blob, item.identity.FSID, item.identity.Inode,
-			item.identity.Generation, ordinal)
-		value, marshalErr := (schema.AnalyticsUserBlobRecord{ReferenceCount: 1, FirstSeen: item.fact.CreatedAt}).MarshalBinary()
+		key := schema.UserBlobContributionKey(fact.UID, blob, identity.FSID, identity.Inode, identity.Generation, ordinal)
+		value, marshalErr := (schema.AnalyticsUserBlobRecord{ReferenceCount: 1, FirstSeen: fact.CreatedAt}).MarshalBinary()
 		if marshalErr == nil {
 			expected[string(key)] = value
 		}
 		return marshalErr
 	})
 	if err != nil {
-		key := schema.InodeRevisionKey(item.identity.FSID, item.identity.Inode, item.identity.Revision)
+		key := schema.InodeRevisionKey(identity.FSID, identity.Inode, identity.Revision)
 		checker.unreadable("analytics_gdpr_source_malformed", key, "decodable content references", err)
 	}
 }

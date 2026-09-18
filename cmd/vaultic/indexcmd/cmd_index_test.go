@@ -34,6 +34,26 @@ import (
 	"github.com/otuschhoff/vaultic/internal/ui"
 )
 
+func TestParsePositiveCheckBytes(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int64
+	}{
+		{value: "64M", want: 64 << 20},
+		{value: "8G", want: 8 << 30},
+	} {
+		got, err := parsePositiveCheckBytes("--limit", test.value)
+		if err != nil || got != test.want {
+			t.Fatalf("parse %q = %d, %v; want %d", test.value, got, err, test.want)
+		}
+	}
+	for _, value := range []string{"", "0", "64MiB", "-1"} {
+		if _, err := parsePositiveCheckBytes("--limit", value); err == nil {
+			t.Fatalf("accepted invalid limit %q", value)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	base := filepath.Base(os.Args[0])
 	if base == "custodian" || base == "custodian.exe" {
@@ -1333,5 +1353,19 @@ func TestIndexCheckTreatsAnalyticsMismatchAsDirty(t *testing.T) {
 	result := maintenance.CheckResult{AnalyticsMismatch: 1}
 	if result.Clean() {
 		t.Fatal("analytics consistency mismatch did not make index check dirty")
+	}
+}
+
+func TestIndexCheckResourceFlags(t *testing.T) {
+	command := newIndexCheckCommand(&global.Options{})
+	for name, defaultValue := range map[string]string{
+		"check-memory": "64M", "check-temp-max-bytes": "8G",
+		"check-workers": "0", "check-rpc-concurrency": "0",
+		"check-progress-interval": "30s",
+	} {
+		flag := command.Flags().Lookup(name)
+		if flag == nil || flag.DefValue != defaultValue {
+			t.Fatalf("--%s default = %v, want %q", name, flag, defaultValue)
+		}
 	}
 }

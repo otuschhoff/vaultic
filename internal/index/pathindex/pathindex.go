@@ -24,16 +24,174 @@ type BuildResult struct {
 	BytesWritten     uint64 `json:"bytes_written"`
 }
 
+type Difference struct {
+	Key      []byte
+	Expected []byte
+	Actual   []byte
+}
+
+// Check streams expected and stored path-version records in key order. A nil
+// Expected value denotes a stale stored record; a nil Actual value denotes a
+// missing record.
+func Check(ctx context.Context, store Store, paths []string, visit func(Difference) error) (BuildResult, error) {
+	var result BuildResult
+	for pathIndex, target := range paths {
+		expected := newExpectedPathIterator(ctx, store, cleanPath(target))
+		actual := newPrefixIterator(ctx, store, expected.prefix)
+		want, hasWant, err := expected.next()
+		if err != nil {
+			return result, err
+		}
+		got, hasGot, err := actual.next()
+		if err != nil {
+			return result, err
+		}
+		for hasWant || hasGot {
+			switch {
+			case !hasGot || hasWant && bytes.Compare(want.Key, got.Key) < 0:
+				result.BindingsChanged++
+				result.BytesWritten += uint64(len(want.Key) + len(want.Value))
+				if err := visit(Difference{Key: want.Key, Expected: want.Value}); err != nil {
+					return result, err
+				}
+				want, hasWant, err = expected.next()
+			case !hasWant || bytes.Compare(got.Key, want.Key) < 0:
+				result.BindingsChanged++
+				if err := visit(Difference{Key: got.Key, Actual: got.Value}); err != nil {
+					return result, err
+				}
+				got, hasGot, err = actual.next()
+			default:
+				if !bytes.Equal(want.Value, got.Value) {
+					result.BindingsChanged++
+					result.BytesWritten += uint64(len(want.Key) + len(want.Value))
+					if err := visit(Difference{Key: want.Key, Expected: want.Value, Actual: got.Value}); err != nil {
+						return result, err
+					}
+				}
+				want, hasWant, err = expected.next()
+				if err == nil {
+					got, hasGot, err = actual.next()
+				}
+			}
+			if err != nil {
+				return result, err
+			}
+		}
+		if pathIndex == 0 {
+			result.SnapshotsScanned = expected.commits
+		}
+	}
+	return result, nil
+}
+
+type prefixIterator struct {
+	ctx     context.Context
+	store   Store
+	prefix  []byte
+	after   []byte
+	entries []daemon.KeyValue
+	index   int
+	done    bool
+}
+
+func newPrefixIterator(ctx context.Context, store Store, prefix []byte) *prefixIterator {
+	return &prefixIterator{ctx: ctx, store: store, prefix: prefix}
+}
+
+func (iterator *prefixIterator) next() (daemon.KeyValue, bool, error) {
+	for iterator.index == len(iterator.entries) {
+		if iterator.done {
+			return daemon.KeyValue{}, false, nil
+		}
+		entries, done, err := iterator.store.ScanPrefix(iterator.ctx, iterator.prefix, iterator.after, 256)
+		if err != nil {
+			return daemon.KeyValue{}, false, err
+		}
+		if len(entries) == 0 && !done {
+			return daemon.KeyValue{}, false, fmt.Errorf("scan %q made no progress", iterator.prefix)
+		}
+		iterator.entries, iterator.index, iterator.done = entries, 0, done
+	}
+	entry := iterator.entries[iterator.index]
+	iterator.index++
+	iterator.after = append(iterator.after[:0], entry.Key...)
+	return entry, true, nil
+}
+
+type expectedPathIterator struct {
+	ctx       context.Context
+	store     Store
+	target    string
+	prefix    []byte
+	commits   uint64
+	commit    *prefixIterator
+	previous  indexhistory.Binding
+	hasPrior  bool
+	overflow  bool
+	overflowV []byte
+}
+
+func newExpectedPathIterator(ctx context.Context, store Store, target string) *expectedPathIterator {
+	overflow := len(target) > schema.MaxPathIndexPathBytes
+	prefix := schema.PathVersionPrefix(0, target)
+	iterator := &expectedPathIterator{
+		ctx: ctx, store: store, target: target, prefix: prefix,
+		commit: newPrefixIterator(ctx, store, schema.SnapshotCommitPrefix()), overflow: overflow,
+	}
+	if overflow {
+		overflowKey := schema.PathOverflowKey(0, target, 0)
+		iterator.prefix = overflowKey[:len(overflowKey)-8]
+		iterator.overflowV, _ = (schema.PathVersionRecord{State: schema.PathOverflow, Path: target}).MarshalBinary()
+	}
+	return iterator
+}
+
+func (iterator *expectedPathIterator) next() (daemon.KeyValue, bool, error) {
+	for {
+		entry, found, err := iterator.commit.next()
+		if err != nil || !found {
+			return daemon.KeyValue{}, found, err
+		}
+		parsed, err := schema.ParseKey(entry.Key)
+		if err != nil || parsed.Kind != schema.KeySnapshotCommit {
+			return daemon.KeyValue{}, false, fmt.Errorf("invalid snapshot commit key %q", entry.Key)
+		}
+		iterator.commits++
+		if iterator.overflow {
+			return daemon.KeyValue{Key: schema.PathOverflowKey(0, iterator.target, parsed.Revision), Value: iterator.overflowV}, true, nil
+		}
+		binding, err := indexhistory.ResolvePathAtCommit(iterator.ctx, iterator.store, iterator.target, parsed.Revision)
+		if err != nil {
+			return daemon.KeyValue{}, false, err
+		}
+		if iterator.hasPrior && sameBinding(iterator.previous, binding) {
+			iterator.previous = binding
+			continue
+		}
+		record := schema.PathVersionRecord{State: schema.PathTombstone}
+		if binding.Present {
+			record = schema.PathVersionRecord{State: schema.PathBound, NodeType: binding.NodeType, Inode: binding.Inode, Revision: binding.Revision}
+		}
+		value, err := record.MarshalBinary()
+		if err != nil {
+			return daemon.KeyValue{}, false, err
+		}
+		iterator.previous, iterator.hasPrior = binding, true
+		return daemon.KeyValue{Key: schema.PathVersionKey(0, iterator.target, parsed.Revision), Value: value}, true, nil
+	}
+}
+
 func Rebuild(ctx context.Context, store Store, paths []string, dryRun bool) (BuildResult, error) {
 	var result BuildResult
 	if len(paths) == 0 {
 		return result, fmt.Errorf("path index rebuild requires at least one path")
 	}
-	mutations, err := expectedMutations(ctx, store, paths, &result)
+	mutations, expectedKeys, err := expectedMutations(ctx, store, paths, &result)
 	if err != nil {
 		return result, err
 	}
-	deletes, err := staleKeys(ctx, store, paths, mutations)
+	deletes, err := staleKeys(ctx, store, paths, expectedKeys)
 	if err != nil {
 		return result, err
 	}
@@ -68,13 +226,14 @@ func PruneBefore(ctx context.Context, store Store, beforeCommit uint64, dryRun b
 }
 
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
-func expectedMutations(ctx context.Context, store Store, paths []string, result *BuildResult) ([]daemon.Mutation, error) {
+func expectedMutations(ctx context.Context, store Store, paths []string, result *BuildResult) ([]daemon.Mutation, map[string]struct{}, error) {
 	commits, err := commits(ctx, store)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result.SnapshotsScanned = uint64(len(commits))
 	mutations := make([]daemon.Mutation, 0)
+	expectedKeys := make(map[string]struct{})
 	for _, target := range paths {
 		target = cleanPath(target)
 		if len(target) > schema.MaxPathIndexPathBytes {
@@ -83,8 +242,9 @@ func expectedMutations(ctx context.Context, store Store, paths []string, result 
 				key := schema.PathOverflowKey(0, target, commit)
 				value, err := (schema.PathVersionRecord{State: schema.PathOverflow, Path: target}).MarshalBinary()
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
+				expectedKeys[string(key)] = struct{}{}
 				if needsWrite(ctx, store, key, value) {
 					mutations = append(mutations, daemon.Mutation{Key: key, Value: value})
 					result.BindingsChanged++
@@ -97,7 +257,7 @@ func expectedMutations(ctx context.Context, store Store, paths []string, result 
 		for index, commit := range commits {
 			binding, err := indexhistory.ResolvePathAtCommit(ctx, store, target, commit)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if index > 0 && sameBinding(previous, binding) {
 				continue
@@ -115,8 +275,9 @@ func expectedMutations(ctx context.Context, store Store, paths []string, result 
 			}
 			value, err := record.MarshalBinary()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+			expectedKeys[string(key)] = struct{}{}
 			if needsWrite(ctx, store, key, value) {
 				mutations = append(mutations, daemon.Mutation{Key: key, Value: value})
 				result.BindingsChanged++
@@ -126,7 +287,7 @@ func expectedMutations(ctx context.Context, store Store, paths []string, result 
 		}
 	}
 	sort.Slice(mutations, func(i, j int) bool { return bytes.Compare(mutations[i].Key, mutations[j].Key) < 0 })
-	return mutations, nil
+	return mutations, expectedKeys, nil
 }
 
 func needsWrite(ctx context.Context, store Store, key, value []byte) bool {
@@ -134,11 +295,7 @@ func needsWrite(ctx context.Context, store Store, key, value []byte) bool {
 	return err != nil || !found || !bytes.Equal(current, value)
 }
 
-func staleKeys(ctx context.Context, store Store, paths []string, expected []daemon.Mutation) ([][]byte, error) {
-	expectedKeys := make(map[string]struct{}, len(expected))
-	for _, mutation := range expected {
-		expectedKeys[string(mutation.Key)] = struct{}{}
-	}
+func staleKeys(ctx context.Context, store Store, paths []string, expectedKeys map[string]struct{}) ([][]byte, error) {
 	deletes := make([][]byte, 0)
 	for _, target := range paths {
 		prefix := schema.PathVersionPrefix(0, cleanPath(target))

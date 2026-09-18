@@ -43,36 +43,65 @@ func snapshotCommitMutations(ctx context.Context, store Store) ([]daemon.Mutatio
 }
 
 func checkSnapshotCommitIndex(ctx context.Context, store Store, result *CheckResult, maxFindings uint) error {
-	expected, err := snapshotCommitMutations(ctx, store)
-	if err != nil {
-		return err
-	}
-	expectedByKey := make(map[string]daemon.Mutation, len(expected))
-	for _, mutation := range expected {
-		expectedByKey[string(mutation.Key)] = mutation
-		value, found, getErr := store.Get(ctx, mutation.Key)
-		if getErr != nil {
-			return getErr
+	if err := scan(ctx, store, []byte("s:"), func(entry daemon.KeyValue) error {
+		parsed, err := schema.ParseKey(entry.Key)
+		if err != nil || parsed.Kind != schema.KeySnapshot {
+			return fmt.Errorf("invalid snapshot key %q", entry.Key)
 		}
-		if !found || !bytes.Equal(value, mutation.Value) {
+		record, err := schema.UnmarshalSnapshotRecord(entry.Value)
+		if err != nil {
+			return err
+		}
+		key := schema.SnapshotCommitKey(record.CommitSequence, parsed.ID)
+		expected, err := (schema.SnapshotCommitRecord{
+			SnapshotTimeUnixNano: snapshotJSONTimeUnixNano(record.OriginalJSON),
+			RootKey:              schema.DirectoryRevisionKey(record.RootFSID, record.RootInode, record.RootRevision),
+		}).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		value, found, err := store.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !found || !bytes.Equal(value, expected) {
 			result.SnapshotCommitMismatch++
-			parsed, _ := schema.ParseKey(mutation.Key)
 			addFinding(
 				result,
 				maxFindings,
-				Finding{Kind: "snapshot_commit_drift", Key: vaultic.ID(parsed.ID).String(), Want: fmt.Sprintf("commit=%d", parsed.Revision)},
+				Finding{Kind: "snapshot_commit_drift", Key: vaultic.ID(parsed.ID).String(), Want: fmt.Sprintf("commit=%d", record.CommitSequence)},
 			)
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return scan(ctx, store, schema.SnapshotCommitPrefix(), func(entry daemon.KeyValue) error {
-		if _, ok := expectedByKey[string(entry.Key)]; ok {
-			return nil
-		}
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil || parsed.Kind != schema.KeySnapshotCommit {
 			result.SnapshotCommitMismatch++
 			addFinding(result, maxFindings, Finding{Kind: "snapshot_commit_malformed", Key: fmt.Sprintf("%x", entry.Key)})
 			return nil
+		}
+		value, found, err := store.Get(ctx, schema.SnapshotKey(parsed.ID))
+		if err != nil {
+			return err
+		}
+		if found {
+			snapshot, decodeErr := schema.UnmarshalSnapshotRecord(value)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			expected, encodeErr := (schema.SnapshotCommitRecord{
+				SnapshotTimeUnixNano: snapshotJSONTimeUnixNano(snapshot.OriginalJSON),
+				RootKey:              schema.DirectoryRevisionKey(snapshot.RootFSID, snapshot.RootInode, snapshot.RootRevision),
+			}).MarshalBinary()
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if snapshot.CommitSequence == parsed.Revision && bytes.Equal(entry.Value, expected) {
+				return nil
+			}
 		}
 		result.SnapshotCommitMismatch++
 		addFinding(

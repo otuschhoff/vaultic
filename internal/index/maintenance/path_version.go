@@ -1,11 +1,9 @@
 package maintenance
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 
-	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/pathindex"
 )
 
@@ -13,26 +11,16 @@ func checkPathVersionIndex(ctx context.Context, store Store, paths []string, res
 	if len(paths) == 0 {
 		return nil
 	}
-	expectedStore := &pathIndexDryRunStore{Store: store, puts: map[string][]byte{}, deletes: map[string]struct{}{}}
-	_, err := pathindex.Rebuild(ctx, expectedStore, paths, false)
-	if err != nil {
-		return err
-	}
-	for key, value := range expectedStore.puts {
-		current, found, getErr := store.Get(ctx, []byte(key))
-		if getErr != nil {
-			return getErr
-		}
-		if !found || !bytes.Equal(current, value) {
-			result.PathVersionMismatch++
-			addFinding(result, maxFindings, Finding{Kind: "path_version_drift", Key: fmt.Sprintf("%x", []byte(key))})
-		}
-	}
-	for key := range expectedStore.deletes {
+	_, err := pathindex.Check(ctx, pathIndexStore{Store: store}, paths, func(difference pathindex.Difference) error {
 		result.PathVersionMismatch++
-		addFinding(result, maxFindings, Finding{Kind: "stale_path_version", Key: fmt.Sprintf("%x", []byte(key))})
-	}
-	return nil
+		kind := "path_version_drift"
+		if difference.Expected == nil {
+			kind = "stale_path_version"
+		}
+		addFinding(result, maxFindings, Finding{Kind: kind, Key: fmt.Sprintf("%x", difference.Key)})
+		return nil
+	})
+	return err
 }
 
 func RebuildPathVersionIndex(ctx context.Context, store Store, paths []string, dryRun bool) (pathindex.BuildResult, error) {
@@ -47,19 +35,3 @@ func PrunePathVersionIndex(ctx context.Context, store Store, beforeCommit uint64
 }
 
 type pathIndexStore struct{ Store }
-
-type pathIndexDryRunStore struct {
-	Store
-	puts    map[string][]byte
-	deletes map[string]struct{}
-}
-
-func (store *pathIndexDryRunStore) WriteMutableBatch(_ context.Context, puts []daemon.Mutation, deletes [][]byte, _ bool) error {
-	for _, put := range puts {
-		store.puts[string(put.Key)] = append([]byte(nil), put.Value...)
-	}
-	for _, key := range deletes {
-		store.deletes[string(key)] = struct{}{}
-	}
-	return nil
-}

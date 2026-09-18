@@ -124,6 +124,128 @@ type SchemaStore struct {
 	deferLegacyCleanup bool
 }
 
+type ReadSessionIdentity struct {
+	RepositoryID string `json:"repository_id"`
+	Generation   uint64 `json:"generation"`
+	Sequence     uint64 `json:"sequence"`
+	SessionID    string `json:"session_id"`
+}
+
+// ReadSession pins all checker reads to one serializable SlateDB snapshot.
+// Embedded mutation methods remain available only to satisfy existing reader
+// interfaces; callers must use the session exclusively for read-only work.
+type ReadSession struct {
+	*SchemaStore
+	transaction *Transaction
+	decision    uint64
+	Identity    ReadSessionIdentity
+}
+
+func (store *SchemaStore) BeginReadSession(ctx context.Context) (*ReadSession, error) {
+	before, err := store.client.GenerationStatus(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read check generation: %w", err)
+	}
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin check read session: %w", err)
+	}
+	closeOnError := func(cause error) (*ReadSession, error) {
+		_ = transaction.Rollback(context.WithoutCancel(ctx))
+		return nil, cause
+	}
+	value, found, err := transaction.Get(ctx, schema.NextRevisionKey())
+	if err != nil {
+		return closeOnError(fmt.Errorf("read check sequence: %w", err))
+	}
+	sequence, err := readSessionSequence(value, found)
+	if err != nil {
+		return closeOnError(err)
+	}
+	after, err := store.client.GenerationStatus(ctx)
+	if err != nil {
+		return closeOnError(fmt.Errorf("confirm check generation: %w", err))
+	}
+	if before.RepositoryID != after.RepositoryID || before.ActiveGeneration != after.ActiveGeneration || before.Decision != after.Decision {
+		return closeOnError(fmt.Errorf("metadata generation changed while opening check read session"))
+	}
+	return &ReadSession{
+		SchemaStore: store,
+		transaction: transaction,
+		decision:    after.Decision,
+		Identity: ReadSessionIdentity{
+			RepositoryID: after.RepositoryID,
+			Generation:   after.ActiveGeneration,
+			Sequence:     sequence,
+			SessionID:    transaction.ID(),
+		},
+	}, nil
+}
+
+func (session *ReadSession) Validate(ctx context.Context) error {
+	value, found, err := session.transaction.Get(ctx, schema.NextRevisionKey())
+	if err != nil {
+		return fmt.Errorf("validate check read session: %w", err)
+	}
+	sequence, err := readSessionSequence(value, found)
+	if err != nil {
+		return err
+	}
+	if sequence != session.Identity.Sequence {
+		return fmt.Errorf("check read sequence changed from %d to %d", session.Identity.Sequence, sequence)
+	}
+	status, err := session.client.GenerationStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("validate check generation: %w", err)
+	}
+	if status.RepositoryID != session.Identity.RepositoryID || status.ActiveGeneration != session.Identity.Generation ||
+		status.Decision != session.decision {
+		return fmt.Errorf("metadata generation changed during check")
+	}
+	return nil
+}
+
+func readSessionSequence(value []byte, found bool) (uint64, error) {
+	if !found {
+		return 0, nil
+	}
+	next, err := schema.UnmarshalNextRevision(value)
+	if err != nil {
+		return 0, fmt.Errorf("decode check sequence: %w", err)
+	}
+	if next == 0 {
+		return 0, fmt.Errorf("decode check sequence: next revision is zero")
+	}
+	return next - 1, nil
+}
+
+func (session *ReadSession) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
+	if _, err := schema.ParseKey(key); err != nil {
+		return nil, false, err
+	}
+	return session.transaction.Get(ctx, key)
+}
+
+func (session *ReadSession) MultiGet(ctx context.Context, keys [][]byte) ([]KeyValue, []bool, error) {
+	for _, key := range keys {
+		if _, err := schema.ParseKey(key); err != nil {
+			return nil, nil, err
+		}
+	}
+	return session.transaction.MultiGet(ctx, keys)
+}
+
+func (session *ReadSession) ScanPrefix(ctx context.Context, prefix, afterKey []byte, pageSize uint32) ([]KeyValue, bool, error) {
+	if pageSize > session.client.Limits().MaxPageItems {
+		pageSize = session.client.Limits().MaxPageItems
+	}
+	return session.transaction.ScanPage(ctx, prefix, afterKey, pageSize)
+}
+
+func (session *ReadSession) Close(ctx context.Context) error {
+	return session.transaction.Rollback(ctx)
+}
+
 type legacyImportMetrics struct {
 	operations                   legacyOperationMetrics
 	batches                      atomic.Uint64

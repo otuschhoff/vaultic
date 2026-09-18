@@ -7,17 +7,14 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
-	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func checkVerificationState(
 	ctx context.Context,
 	store Store,
-	packs map[vaultic.ID]schema.PackRecord,
 	result *CheckResult,
 	maxFindings uint,
 ) error {
-	states := make(map[string]schema.VerificationStateRecord)
 	if err := scan(ctx, store, schema.VerificationStatePrefix(), func(kv daemon.KeyValue) error {
 		key, err := schema.ParseKey(kv.Key)
 		if err != nil {
@@ -29,8 +26,9 @@ func checkVerificationState(
 			addFinding(result, maxFindings, Finding{Kind: "verification_state_malformed", Key: hex.EncodeToString(kv.Key), Got: err.Error()})
 			return nil
 		}
-		states[verificationPlacementKey(key.ID, key.Backend)] = state
-		if _, found := packs[vaultic.ID(key.ID)]; !found {
+		if _, found, err := store.Get(ctx, schema.PackKey(key.ID)); err != nil {
+			return err
+		} else if !found {
 			result.VerificationStateMismatch++
 			addFinding(result, maxFindings, Finding{Kind: "verification_state_orphan_pack", Key: verificationPlacementKey(key.ID, key.Backend)})
 		}
@@ -71,7 +69,16 @@ func checkVerificationState(
 			return err
 		}
 		if placement.LastVerifiedAt != 0 {
-			if _, found := states[verificationPlacementKey(key.ID, key.Backend)]; !found {
+			value, found, getErr := store.Get(ctx, schema.VerificationStateKey(key.ID, key.Backend))
+			if getErr != nil {
+				return getErr
+			}
+			valid := false
+			if found {
+				_, decodeErr := schema.UnmarshalVerificationStateRecord(value)
+				valid = decodeErr == nil
+			}
+			if !valid {
 				result.VerificationStateMismatch++
 				addFinding(
 					result,

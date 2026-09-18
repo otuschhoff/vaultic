@@ -87,6 +87,56 @@ func RebuildTierAggregates(records []PackRecord, updateSequence uint64) (map[Pac
 	return result, nil
 }
 
+type PackAggregateAccumulator struct {
+	byType map[AggregateKind]PackAggregate
+	byTier map[PackTier]PackAggregate
+}
+
+func NewPackAggregateAccumulator() *PackAggregateAccumulator {
+	return &PackAggregateAccumulator{
+		byType: make(map[AggregateKind]PackAggregate),
+		byTier: make(map[PackTier]PackAggregate),
+	}
+}
+
+func (accumulator *PackAggregateAccumulator) Add(record PackRecord) error {
+	record = record.normalized()
+	if !validPackType(record.Type) || !validPackLifecycle(record.Lifecycle) || !validPackTier(record.Tier) {
+		return fmt.Errorf("%w: invalid pack record", ErrMalformed)
+	}
+	kindByPackType := map[PackType]AggregateKind{
+		PackData: AggregateData, PackTree: AggregateTree,
+		PackMixed: AggregateMixed, PackUnknown: AggregateUnknown,
+	}
+	for _, kind := range []AggregateKind{kindByPackType[record.Type], AggregateAll} {
+		aggregate := accumulator.byType[kind]
+		if err := accumulatePackAggregate(&aggregate, record); err != nil {
+			return err
+		}
+		accumulator.byType[kind] = aggregate
+	}
+	aggregate := accumulator.byTier[record.Tier]
+	if err := accumulatePackAggregate(&aggregate, record); err != nil {
+		return err
+	}
+	accumulator.byTier[record.Tier] = aggregate
+	return nil
+}
+
+func (accumulator *PackAggregateAccumulator) Results(updateSequence uint64) (map[AggregateKind]PackAggregate, map[PackTier]PackAggregate) {
+	for kind := AggregateData; kind <= AggregateAll; kind++ {
+		aggregate := accumulator.byType[kind]
+		aggregate.UpdateSequence = updateSequence
+		accumulator.byType[kind] = aggregate
+	}
+	for _, tier := range TierAggregateKinds() {
+		aggregate := accumulator.byTier[tier]
+		aggregate.UpdateSequence = updateSequence
+		accumulator.byTier[tier] = aggregate
+	}
+	return accumulator.byType, accumulator.byTier
+}
+
 // accumulatePackAggregate adds one pack's totals to an aggregate. Usage bytes
 // are only accumulated for packs whose usage is known, so an unaccounted pack
 // never contributes zero used bytes as though it were wholly unreachable.

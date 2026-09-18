@@ -3,8 +3,13 @@ package maintenance
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,10 +24,203 @@ type memoryStore struct {
 	batchWrites int
 }
 
+type validatingMemoryStore struct {
+	*memoryStore
+	validateErr error
+	validated   bool
+}
+
+type blockingMemoryStore struct {
+	*memoryStore
+	active  atomic.Int64
+	maximum atomic.Int64
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (store *blockingMemoryStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
+	active := store.active.Add(1)
+	defer store.active.Add(-1)
+	for {
+		maximum := store.maximum.Load()
+		if active <= maximum || store.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	store.entered <- struct{}{}
+	select {
+	case <-store.release:
+		return store.memoryStore.Get(ctx, key)
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+}
+
+func (store *validatingMemoryStore) Validate(context.Context) error {
+	store.validated = true
+	return store.validateErr
+}
+
 func TestCheckResultTreatsQuorumBypassAsDirty(t *testing.T) {
 	result := CheckResult{QuorumChecked: true, QuorumNonCompliant: true}
 	if result.Clean() {
 		t.Fatal("quorum bypass was reported as a clean index check")
+	}
+}
+
+func TestCheckCoverageIdentifiesReducedModes(t *testing.T) {
+	full := checkCoverage(CheckOptions{})
+	if !full.Complete || full.Mode != "full" || len(full.Skipped) != 0 || len(full.Included) != len(checkDomains) {
+		t.Fatalf("full coverage = %+v", full)
+	}
+	legacy := checkCoverage(CheckOptions{LegacyOnly: true})
+	if legacy.Complete || legacy.Mode != "legacy_only" || len(legacy.Included) != 2 || len(legacy.Skipped) == 0 {
+		t.Fatalf("legacy coverage = %+v", legacy)
+	}
+	slatedb := checkCoverage(CheckOptions{SlateDBOnly: true})
+	if slatedb.Complete || slatedb.Mode != "slatedb_only" || slices.Contains(slatedb.Included, "export_provenance") || !slices.Contains(slatedb.Skipped, "export_provenance") {
+		t.Fatalf("slatedb coverage = %+v", slatedb)
+	}
+}
+
+func TestCheckOptionsDigestIsCanonicalAndSensitive(t *testing.T) {
+	left, err := checkOptionsDigest(CheckOptions{PathIndexPaths: []string{"/b", "/a"}, MemoryBytes: 1024, TempMaxBytes: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := checkOptionsDigest(CheckOptions{PathIndexPaths: []string{"/a", "/b"}, MemoryBytes: 1024, TempMaxBytes: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := checkOptionsDigest(CheckOptions{PathIndexPaths: []string{"/a", "/b"}, MemoryBytes: 1025, TempMaxBytes: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != right || left == changed {
+		t.Fatalf("digests left=%q right=%q changed=%q", left, right, changed)
+	}
+}
+
+func TestCheckRejectsMemoryBelowTupleWorkingSet(t *testing.T) {
+	if _, err := CheckWithOptions(context.Background(), nil, nil, CheckOptions{LegacyOnly: true, MemoryBytes: locationTupleSize - 1}); err == nil {
+		t.Fatal("undersized checker memory was accepted")
+	}
+}
+
+func TestCheckValidatesDeclaredReadSession(t *testing.T) {
+	options := CheckOptions{SlateDBOnly: true, Consistency: CheckConsistency{SessionID: "session"}}
+	plain := &memoryStore{values: map[string][]byte{}}
+	if _, err := CheckWithOptions(context.Background(), nil, plain, options); err == nil {
+		t.Fatal("declared read session accepted a store without validation")
+	}
+	validationErr := fmt.Errorf("session expired")
+	validating := &validatingMemoryStore{memoryStore: plain, validateErr: validationErr}
+	if _, err := CheckWithOptions(context.Background(), nil, validating, options); !errors.Is(err, validationErr) {
+		t.Fatalf("validation error = %v, want %v", err, validationErr)
+	}
+	if !validating.validated {
+		t.Fatal("read session was not validated")
+	}
+}
+
+func TestLimitedStoreBoundsMetadataRPCs(t *testing.T) {
+	base := &blockingMemoryStore{
+		memoryStore: &memoryStore{values: map[string][]byte{}},
+		entered:     make(chan struct{}, 8), release: make(chan struct{}, 8),
+	}
+	store := &limitedStore{Store: base, semaphore: make(chan struct{}, 2)}
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			_, _, _ = store.Get(context.Background(), schema.PackKey(schema.ID{1}))
+		}()
+	}
+	<-base.entered
+	<-base.entered
+	if maximum := base.maximum.Load(); maximum != 2 {
+		t.Fatalf("maximum in-flight RPCs = %d, want 2", maximum)
+	}
+	for range 8 {
+		base.release <- struct{}{}
+	}
+	workers.Wait()
+	if maximum := base.maximum.Load(); maximum != 2 {
+		t.Fatalf("maximum in-flight RPCs = %d after completion, want 2", maximum)
+	}
+}
+
+func TestCheckProgressReportsStagesAndEffectiveLimits(t *testing.T) {
+	store := &memoryStore{values: map[string][]byte{}}
+	var updates []CheckProgress
+	result, err := CheckWithOptions(context.Background(), nil, store, CheckOptions{
+		SlateDBOnly: true, Workers: 2, RPCConcurrency: 3,
+		Progress: func(update CheckProgress) { updates = append(updates, update) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Resources.Workers != 2 || result.Resources.RPCConcurrency != 3 {
+		t.Fatalf("resources = %+v", result.Resources)
+	}
+	if len(updates) == 0 || updates[0].Stage != "inventory" || updates[len(updates)-1].Stage != "finalization" {
+		t.Fatalf("progress updates = %+v", updates)
+	}
+	for _, update := range updates {
+		if update.Workers != 2 || update.RPCConcurrency != 3 || update.MemoryLimitBytes == 0 || update.ScratchLimitBytes == 0 {
+			t.Fatalf("invalid progress update: %+v", update)
+		}
+	}
+}
+
+func TestCheckWorkerCountsPreserveResults(t *testing.T) {
+	store, _, _ := newMemoryStore(t, schema.PackPublished)
+	store.set(t, schema.PackAggregateKey(schema.AggregateAll), schema.PackAggregate{PackCount: 99})
+	store.set(t, schema.AnalyticsMetadataKey(), schema.AnalyticsMetadataRecord{Enabled: false})
+	var baseline CheckResult
+	for _, workers := range []uint{1, 2, 4, 8} {
+		result, err := CheckWithOptions(context.Background(), nil, store, CheckOptions{
+			SlateDBOnly: true, MaxFindings: 10, Workers: workers, RPCConcurrency: 2,
+		})
+		if err != nil {
+			t.Fatalf("workers=%d: %v", workers, err)
+		}
+		result.Resources.Workers = 0
+		result.Consistency.OptionsDigest = ""
+		if workers == 1 {
+			baseline = result
+		} else if !reflect.DeepEqual(result, baseline) {
+			t.Fatalf("workers=%d result differs\ngot:  %+v\nwant: %+v", workers, result, baseline)
+		}
+	}
+}
+func TestPackTypeSummaryMatchesClassifier(t *testing.T) {
+	for _, types := range [][]schema.BlobType{
+		nil,
+		{schema.BlobData},
+		{schema.BlobTree},
+		{schema.BlobData, schema.BlobTree, schema.BlobData},
+		{schema.BlobType(99)},
+	} {
+		var summary uint8
+		for _, blobType := range types {
+			summary = summarizePackType(summary, blobType)
+		}
+		if got, want := classifyPackSummary(summary), schema.ClassifyPack(types); got != want {
+			t.Fatalf("types=%v got=%v want=%v", types, got, want)
+		}
+	}
+}
+
+func TestAddFindingSelectsCanonicalBoundedPrefix(t *testing.T) {
+	result := CheckResult{}
+	for _, finding := range []Finding{{Kind: "z", Key: "2"}, {Kind: "a", Key: "2"}, {Kind: "a", Key: "1"}} {
+		addFinding(&result, 2, finding)
+	}
+	want := []Finding{{Kind: "a", Key: "1"}, {Kind: "a", Key: "2"}}
+	if !slices.Equal(result.Findings, want) {
+		t.Fatalf("findings = %+v, want %+v", result.Findings, want)
 	}
 }
 
@@ -55,7 +253,7 @@ func TestCheckReportsEncryptionIntegrityAndRewriteDebt(t *testing.T) {
 		!result.HasWarnings() {
 		t.Fatalf("encryption audit was not reflected in check result: %+v", result)
 	}
-	wantKinds := []string{"metadata_object_plaintext", "metadata_encryption_invalid", "metadata_dek_rewrite_pending"}
+	wantKinds := []string{"metadata_dek_rewrite_pending", "metadata_encryption_invalid", "metadata_object_plaintext"}
 	for index, kind := range wantKinds {
 		if len(result.Findings) <= index || result.Findings[index].Kind != kind {
 			t.Fatalf("missing encryption finding %q: %+v", kind, result.Findings)
@@ -80,14 +278,14 @@ func TestCheckVerificationStateDetectsProjectionDrift(t *testing.T) {
 	store.set(t, schema.PackPlacementKey(pack, backend), placement)
 	store.set(t, schema.VerificationStateKey(pack, backend), state)
 	result := CheckResult{}
-	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil ||
+	if err := checkVerificationState(ctx, store, &result, 10); err != nil ||
 		result.VerificationStateMismatch != 0 {
 		t.Fatalf("consistent verification state reported drift: %+v, %v", result, err)
 	}
 	placement.LastVerifiedAt = 99
 	store.set(t, schema.PackPlacementKey(pack, backend), placement)
 	result = CheckResult{}
-	if err := checkVerificationState(ctx, store, map[vaultic.ID]schema.PackRecord{packID: {}}, &result, 10); err != nil ||
+	if err := checkVerificationState(ctx, store, &result, 10); err != nil ||
 		result.VerificationStateMismatch != 1 ||
 		result.Clean() {
 		t.Fatalf("verification drift was not dirty: %+v, %v", result, err)
@@ -234,7 +432,7 @@ func TestCheckAnalyticsConsistency(t *testing.T) {
 	store.values[string(schema.AnalyticsDerivedGenerationMarkerKey(generation))] = []byte{schema.Version}
 	result, err = CheckWithOptions(context.Background(), nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 1})
 	if err != nil || result.AnalyticsMismatch != 2 || result.Clean() || len(result.Findings) != 1 ||
-		result.Findings[0].Kind != "analytics_segment_pair_missing" {
+		result.Findings[0].Kind != "analytics_fact_count_mismatch" {
 		t.Fatalf("missing analytics segment not reported with finding cap: %+v, %v", result, err)
 	}
 }

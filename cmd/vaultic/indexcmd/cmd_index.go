@@ -1188,6 +1188,12 @@ func runIndexExport(ctx context.Context, options indexExportOptions, globalOptio
 type indexCheckOptions struct {
 	Daemon               indexDaemonOptions
 	MaxFindings          uint
+	Memory               string
+	TempDir              string
+	TempMaxBytes         string
+	Workers              uint
+	RPCConcurrency       uint
+	ProgressInterval     time.Duration
 	LegacyOnly           bool
 	SlateDBOnly          bool
 	IncludeCrawlDebt     bool
@@ -1217,6 +1223,12 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().UintVar(&options.MaxFindings, "max-findings", 100, "maximum detailed differences in the summary (zero is unlimited)")
+	command.Flags().StringVar(&options.Memory, "check-memory", "64M", "memory budget for index-check buffers")
+	command.Flags().StringVar(&options.TempDir, "check-temp-dir", "", "parent directory for encrypted index-check scratch files")
+	command.Flags().StringVar(&options.TempMaxBytes, "check-temp-max-bytes", "8G", "maximum encrypted index-check scratch space")
+	command.Flags().UintVar(&options.Workers, "check-workers", 0, "checker workers (zero uses the effective CPU quota)")
+	command.Flags().UintVar(&options.RPCConcurrency, "check-rpc-concurrency", 0, "maximum in-flight metadata RPCs (zero follows workers)")
+	command.Flags().DurationVar(&options.ProgressInterval, "check-progress-interval", 30*time.Second, "index-check progress reporting interval (zero disables repeats)")
 	command.Flags().BoolVar(&options.LegacyOnly, "legacy-only", false, "validate only legacy JSON indexes")
 	command.Flags().BoolVar(&options.SlateDBOnly, "slatedb-only", false, "validate only SlateDB metadata")
 	command.Flags().BoolVar(&options.IncludeCrawlDebt, "include-crawl-debt", false, "include individual pending crawl-debt findings")
@@ -1239,6 +1251,14 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	if options.QuorumCapsule == "" && (options.BypassAttestation != "" || options.BypassAttestationKey != "") {
 		return result, fmt.Errorf("--bypass-attestation and --bypass-attestation-key require --quorum-capsule")
 	}
+	memoryBytes, err := parsePositiveCheckBytes("--check-memory", options.Memory)
+	if err != nil {
+		return result, err
+	}
+	tempMaxBytes, err := parsePositiveCheckBytes("--check-temp-max-bytes", options.TempMaxBytes)
+	if err != nil {
+		return result, err
+	}
 	config, err := options.Daemon.config("")
 	if err != nil {
 		return result, err
@@ -1251,6 +1271,8 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	}
 	defer unlock()
 	var store *daemon.SchemaStore
+	var checkStore maintenance.Store
+	var readSession *daemon.ReadSession
 	var storeSession *Session
 	if !options.LegacyOnly {
 		storeSession, err = openStoreSession(ctx, repo, options.Daemon)
@@ -1258,9 +1280,23 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			return result, err
 		}
 		store = storeSession.Store
+		readSession, err = store.BeginReadSession(ctx)
+		if err != nil {
+			return result, err
+		}
+		checkStore = readSession
 	}
 	if storeSession != nil {
 		defer storeSession.CloseAndLog()
+	}
+	if readSession != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if closeErr := readSession.Close(closeCtx); closeErr != nil {
+				log.Printf("close index check read session: %v", closeErr)
+			}
+		}()
 	}
 	placementModel, err := indexMaintenancePlacementModel(repo)
 	if err != nil {
@@ -1268,21 +1304,49 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	}
 	pathIndexPaths := append([]string(nil), repo.Config().PathIndexPaths...)
 	pathIndexPaths = append(pathIndexPaths, options.PathIndexPaths...)
+	var consistency maintenance.CheckConsistency
+	if readSession != nil {
+		consistency = maintenance.CheckConsistency{
+			RepositoryID: readSession.Identity.RepositoryID,
+			Generation:   readSession.Identity.Generation,
+			Sequence:     readSession.Identity.Sequence,
+			SessionID:    readSession.Identity.SessionID,
+		}
+	}
 	result, err = maintenance.CheckWithOptions(
 		ctx,
 		repo,
-		store,
+		checkStore,
 		maintenance.CheckOptions{
 			LegacyOnly:       options.LegacyOnly,
 			SlateDBOnly:      options.SlateDBOnly,
 			IncludeCrawlDebt: options.IncludeCrawlDebt,
 			MaxFindings:      options.MaxFindings,
-			PlacementModel:   placementModel,
-			PathIndexPaths:   pathIndexPaths,
+			MemoryBytes:      uint64(memoryBytes),
+			TempDir:          options.TempDir,
+			TempMaxBytes:     uint64(tempMaxBytes),
+			Workers:          options.Workers,
+			RPCConcurrency:   options.RPCConcurrency,
+			ProgressInterval: options.ProgressInterval,
+			Progress: func(update maintenance.CheckProgress) {
+				term.Error(fmt.Sprintf(
+					"index check: %s; elapsed %s; workers %d; RPCs %d; scratch %d/%d bytes",
+					update.Stage, update.Elapsed.Round(time.Second), update.Workers, update.RPCConcurrency,
+					update.ScratchPeakBytes, update.ScratchLimitBytes,
+				))
+			},
+			PlacementModel: placementModel,
+			PathIndexPaths: pathIndexPaths,
+			Consistency:    consistency,
 		},
 	)
 	if err != nil {
 		return result, err
+	}
+	if readSession != nil {
+		if err := readSession.Validate(ctx); err != nil {
+			return result, err
+		}
 	}
 	if options.QuorumCapsule != "" {
 		if err := checkIndexQuorum(ctx, options, globalOptions, repo, &result); err != nil {
@@ -1323,6 +1387,14 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 		return result, errIndexDifferences
 	}
 	return result, nil
+}
+
+func parsePositiveCheckBytes(name, value string) (int64, error) {
+	bytes, err := ui.ParseBytes(value)
+	if err != nil || bytes <= 0 {
+		return 0, fmt.Errorf("invalid %s %q", name, value)
+	}
+	return bytes, nil
 }
 
 func checkIndexQuorum(ctx context.Context, options indexCheckOptions, globalOptions global.Options, repo *repository.Repository,

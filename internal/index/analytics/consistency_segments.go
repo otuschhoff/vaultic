@@ -8,8 +8,11 @@ import (
 )
 
 func (checker *consistencyChecker) checkSegments() error {
-	for _, segment := range checker.segments {
+	if err := checker.forEachSegment(func(segment uint64) error {
 		checker.checkSegment(segment)
+		return nil
+	}); err != nil {
+		return err
 	}
 	if checker.facts != checker.metadata.Facts {
 		checker.add("analytics_fact_count_mismatch", schema.AnalyticsMetadataKey(),
@@ -41,14 +44,20 @@ func (checker *consistencyChecker) checkSegment(segment uint64) {
 			fmt.Sprintf("rows=%d epoch<=%d", len(rows.Identity), checker.metadata.Generation),
 			fmt.Sprintf("rows=%d epoch=%d", segmentMetadata.RowCount, segmentMetadata.ClassificationEpoch))
 	}
-	checker.checkSegmentRows(segment, segmentKey, rows)
+	dictionaries := checker.segmentDictionaries(rows)
+	checker.checkSegmentRows(segment, segmentKey, rows, dictionaries)
 	checker.checkSegmentIndexes(segment, rows)
 	checker.facts += uint64(len(rows.Identity))
 }
 
-func (checker *consistencyChecker) checkSegmentRows(segment uint64, segmentKey []byte, rows segmentRows) {
+func (checker *consistencyChecker) checkSegmentRows(
+	segment uint64,
+	segmentKey []byte,
+	rows segmentRows,
+	dictionaries map[schema.AnalyticsDictionaryKind]map[uint32]string,
+) {
 	for row := range rows.Identity {
-		checker.checkDictionaryReferences(segmentKey, rows, row)
+		checker.checkDictionaryReferences(segmentKey, rows, row, dictionaries)
 		identity := rows.Identity[row]
 		overlayKey := schema.AnalyticsResidencyKey(identity.FSID, identity.Inode, identity.Generation)
 		overlayValue, found := checker.getDerived(overlayKey, "readable residency overlay")
@@ -68,15 +77,51 @@ func (checker *consistencyChecker) checkSegmentRows(segment uint64, segmentKey [
 				fmt.Sprintf("segment=%d row=%d epoch=%d", overlay.FactSegment, overlay.Row, overlay.ClassificationEpoch))
 			continue
 		}
-		fact := rowFact(rows, row, checker.dictionaries)
+		fact := rowFact(rows, row, dictionaries)
 		fact.Residency = overlay.State
-		checker.activeFacts = append(checker.activeFacts, consistencyActiveFact{
-			fact: fact, identity: identity, lastComplete: overlay.LastCompleteCrawl,
-		})
 	}
 }
 
-func (checker *consistencyChecker) checkDictionaryReferences(segmentKey []byte, rows segmentRows, row int) {
+func (checker *consistencyChecker) forEachActiveFact(
+	visit func(schema.AnalyticsFactRecord, segmentIdentity, int64) error,
+) error {
+	return checker.forEachSegment(func(segment uint64) error {
+		segmentValue, found, err := checker.store.Get(checker.ctx, schema.AnalyticsFactSegmentKey(segment))
+		if err != nil || !found {
+			return nil
+		}
+		rows, err := decodeSegment(segmentValue)
+		if err != nil {
+			return nil
+		}
+		dictionaries := checker.segmentDictionaries(rows)
+		for row, identity := range rows.Identity {
+			overlayKey := schema.AnalyticsResidencyKey(identity.FSID, identity.Inode, identity.Generation)
+			overlayValue, found, err := getActiveDerived(checker.ctx, checker.store, checker.metadata.Generation, overlayKey)
+			if err != nil || !found {
+				continue
+			}
+			overlay, err := schema.UnmarshalAnalyticsResidencyRecord(overlayValue)
+			if err != nil || overlay.FactSegment != segment || overlay.Row != uint32(row) ||
+				overlay.ClassificationEpoch > checker.metadata.Generation {
+				continue
+			}
+			fact := rowFact(rows, row, dictionaries)
+			fact.Residency = overlay.State
+			if err := visit(fact, identity, overlay.LastCompleteCrawl); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (checker *consistencyChecker) checkDictionaryReferences(
+	segmentKey []byte,
+	rows segmentRows,
+	row int,
+	dictionaries map[schema.AnalyticsDictionaryKind]map[uint32]string,
+) {
 	references := []struct {
 		kind schema.AnalyticsDictionaryKind
 		id   uint32
@@ -86,18 +131,45 @@ func (checker *consistencyChecker) checkDictionaryReferences(segmentKey []byte, 
 		{schema.AnalyticsDictionaryPathGroup, rows.PathGroup[row]},
 	}
 	for _, reference := range references {
-		if reference.id != 0 && checker.dictionaries[reference.kind][reference.id] == "" {
+		if reference.id != 0 && dictionaries[reference.kind][reference.id] == "" {
 			checker.add("analytics_dictionary_reference_missing", segmentKey, "referenced dictionary ID",
 				fmt.Sprintf("kind=%d id=%d row=%d", reference.kind, reference.id, row))
 		}
 	}
 }
 
+func (checker *consistencyChecker) segmentDictionaries(rows segmentRows) map[schema.AnalyticsDictionaryKind]map[uint32]string {
+	result := map[schema.AnalyticsDictionaryKind]map[uint32]string{
+		schema.AnalyticsDictionarySVM: {}, schema.AnalyticsDictionaryVolume: {}, schema.AnalyticsDictionaryPathGroup: {},
+	}
+	for kind, ids := range map[schema.AnalyticsDictionaryKind][]uint32{
+		schema.AnalyticsDictionarySVM:       rows.SVM,
+		schema.AnalyticsDictionaryVolume:    rows.Volume,
+		schema.AnalyticsDictionaryPathGroup: rows.PathGroup,
+	} {
+		for _, id := range ids {
+			if id == 0 || result[kind][id] != "" {
+				continue
+			}
+			key := schema.AnalyticsDictionaryKey(kind, id)
+			value, found := checker.get(key, "readable referenced dictionary value")
+			if !found {
+				continue
+			}
+			record, err := schema.UnmarshalAnalyticsDictionaryRecord(value)
+			if err != nil {
+				continue
+			}
+			result[kind][id] = record.Value
+		}
+	}
+	return result
+}
+
 func (checker *consistencyChecker) checkSegmentIndexes(segment uint64, rows segmentRows) {
 	for dimension, values := range indexValues(rows) {
 		for value, expectedBitmap := range values {
 			key := schema.AnalyticsDimensionIndexKey(dimension, value, segment)
-			checker.expectedIndexKeys[string(key)] = struct{}{}
 			encoded, found := checker.get(key, "readable dimension index")
 			if !found {
 				checker.add("analytics_index_missing", key, "dimension index", "missing")

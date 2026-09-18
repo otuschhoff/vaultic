@@ -4,11 +4,17 @@ package maintenance
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"slices"
 	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/analytics"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -16,6 +22,7 @@ import (
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"golang.org/x/sync/errgroup"
 )
 
 const scanPageSize = 10_000
@@ -34,6 +41,56 @@ type Writer interface {
 type Store interface {
 	Reader
 	Writer
+}
+
+type limitedStore struct {
+	Store
+	semaphore chan struct{}
+}
+
+func (store *limitedStore) acquire(ctx context.Context) error {
+	select {
+	case store.semaphore <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (store *limitedStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
+	if err := store.acquire(ctx); err != nil {
+		return nil, false, err
+	}
+	defer func() { <-store.semaphore }()
+	return store.Store.Get(ctx, key)
+}
+
+func (store *limitedStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.KeyValue, []bool, error) {
+	if err := store.acquire(ctx); err != nil {
+		return nil, nil, err
+	}
+	defer func() { <-store.semaphore }()
+	return store.Store.MultiGet(ctx, keys)
+}
+
+func (store *limitedStore) ScanPrefix(ctx context.Context, prefix, after []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
+	if err := store.acquire(ctx); err != nil {
+		return nil, false, err
+	}
+	defer func() { <-store.semaphore }()
+	return store.Store.ScanPrefix(ctx, prefix, after, limit)
+}
+
+func (store *limitedStore) CheckEncryption(ctx context.Context) (daemon.EncryptionAudit, error) {
+	auditor, ok := store.Store.(EncryptionAuditor)
+	if !ok {
+		return daemon.EncryptionAudit{}, nil
+	}
+	if err := store.acquire(ctx); err != nil {
+		return daemon.EncryptionAudit{}, err
+	}
+	defer func() { <-store.semaphore }()
+	return auditor.CheckEncryption(ctx)
 }
 
 type EncryptionAuditor interface {
@@ -69,46 +126,49 @@ type ExportResult struct {
 }
 
 type CheckResult struct {
-	EncryptionEnabled         bool   `json:"encryption_enabled"`
-	EncryptionAlgorithm       string `json:"encryption_algorithm,omitempty"`
-	EnvelopeGeneration        uint64 `json:"envelope_generation,omitempty"`
-	ActiveDEKVersion          uint32 `json:"active_dek_version,omitempty"`
-	EncryptedObjects          uint64 `json:"encrypted_objects,omitempty"`
-	PlaintextObjects          uint64 `json:"plaintext_objects,omitempty"`
-	InvalidEncryptedObjects   uint64 `json:"invalid_encrypted_objects,omitempty"`
-	OldDEKObjects             uint64 `json:"old_dek_objects,omitempty"`
-	LegacyIndexes             uint64 `json:"legacy_indexes"`
-	LegacySnapshots           uint64 `json:"legacy_snapshots"`
-	SlateDBSnapshots          uint64 `json:"slatedb_snapshots"`
-	LegacyLocations           uint64 `json:"legacy_locations"`
-	SlateDBLocations          uint64 `json:"slatedb_locations"`
-	MissingInSlateDB          uint64 `json:"missing_in_slatedb"`
-	MissingInLegacy           uint64 `json:"missing_in_legacy"`
-	MissingPacks              uint64 `json:"missing_packs"`
-	InvalidPacks              uint64 `json:"invalid_packs"`
-	AggregateMismatch         uint64 `json:"aggregate_mismatches"`
-	ReverseEdgeMismatch       uint64 `json:"reverse_edge_mismatches"`
-	UnresolvedReferences      uint64 `json:"unresolved_references"`
-	SnapshotMismatch          uint64 `json:"snapshot_mismatches"`
-	SnapshotCommitMismatch    uint64 `json:"snapshot_commit_mismatches"`
-	PathVersionMismatch       uint64 `json:"path_version_mismatches"`
-	UnresolvedSnapshots       uint64 `json:"unresolved_snapshots"`
-	PendingCrawlDebt          uint64 `json:"pending_crawl_debt"`
-	PendingExports            uint64 `json:"pending_exports"`
-	FailedExports             uint64 `json:"failed_exports"`
-	ExportCheckpoints         uint64 `json:"export_checkpoints"`
-	MixedPacks                uint64 `json:"mixed_packs"`
-	UnknownPacks              uint64 `json:"unknown_packs"`
-	UnknownTierPacks          uint64 `json:"unknown_tier_packs"`
-	RetentionUnknownPacks     uint64 `json:"retention_unknown_packs"`
-	UsageUnaccountedPacks     uint64 `json:"usage_unaccounted_packs"`
-	PlacementRecordsMalformed uint64 `json:"placement_records_malformed"`
-	MissingPlacementRecords   uint64 `json:"missing_placement_records"`
-	BackendPackMismatch       uint64 `json:"backend_pack_mismatches"`
-	DerivedTierMismatch       uint64 `json:"derived_tier_mismatches"`
-	PacksBelowDurability      uint64 `json:"packs_below_durability"`
-	UnknownPlacementBackends  uint64 `json:"unknown_placement_backends"`
-	VerificationStateMismatch uint64 `json:"verification_state_mismatches"`
+	Coverage                  CheckCoverage    `json:"coverage"`
+	Consistency               CheckConsistency `json:"consistency"`
+	Resources                 CheckResources   `json:"resources"`
+	EncryptionEnabled         bool             `json:"encryption_enabled"`
+	EncryptionAlgorithm       string           `json:"encryption_algorithm,omitempty"`
+	EnvelopeGeneration        uint64           `json:"envelope_generation,omitempty"`
+	ActiveDEKVersion          uint32           `json:"active_dek_version,omitempty"`
+	EncryptedObjects          uint64           `json:"encrypted_objects,omitempty"`
+	PlaintextObjects          uint64           `json:"plaintext_objects,omitempty"`
+	InvalidEncryptedObjects   uint64           `json:"invalid_encrypted_objects,omitempty"`
+	OldDEKObjects             uint64           `json:"old_dek_objects,omitempty"`
+	LegacyIndexes             uint64           `json:"legacy_indexes"`
+	LegacySnapshots           uint64           `json:"legacy_snapshots"`
+	SlateDBSnapshots          uint64           `json:"slatedb_snapshots"`
+	LegacyLocations           uint64           `json:"legacy_locations"`
+	SlateDBLocations          uint64           `json:"slatedb_locations"`
+	MissingInSlateDB          uint64           `json:"missing_in_slatedb"`
+	MissingInLegacy           uint64           `json:"missing_in_legacy"`
+	MissingPacks              uint64           `json:"missing_packs"`
+	InvalidPacks              uint64           `json:"invalid_packs"`
+	AggregateMismatch         uint64           `json:"aggregate_mismatches"`
+	ReverseEdgeMismatch       uint64           `json:"reverse_edge_mismatches"`
+	UnresolvedReferences      uint64           `json:"unresolved_references"`
+	SnapshotMismatch          uint64           `json:"snapshot_mismatches"`
+	SnapshotCommitMismatch    uint64           `json:"snapshot_commit_mismatches"`
+	PathVersionMismatch       uint64           `json:"path_version_mismatches"`
+	UnresolvedSnapshots       uint64           `json:"unresolved_snapshots"`
+	PendingCrawlDebt          uint64           `json:"pending_crawl_debt"`
+	PendingExports            uint64           `json:"pending_exports"`
+	FailedExports             uint64           `json:"failed_exports"`
+	ExportCheckpoints         uint64           `json:"export_checkpoints"`
+	MixedPacks                uint64           `json:"mixed_packs"`
+	UnknownPacks              uint64           `json:"unknown_packs"`
+	UnknownTierPacks          uint64           `json:"unknown_tier_packs"`
+	RetentionUnknownPacks     uint64           `json:"retention_unknown_packs"`
+	UsageUnaccountedPacks     uint64           `json:"usage_unaccounted_packs"`
+	PlacementRecordsMalformed uint64           `json:"placement_records_malformed"`
+	MissingPlacementRecords   uint64           `json:"missing_placement_records"`
+	BackendPackMismatch       uint64           `json:"backend_pack_mismatches"`
+	DerivedTierMismatch       uint64           `json:"derived_tier_mismatches"`
+	PacksBelowDurability      uint64           `json:"packs_below_durability"`
+	UnknownPlacementBackends  uint64           `json:"unknown_placement_backends"`
+	VerificationStateMismatch uint64           `json:"verification_state_mismatches"`
 	// TierAggregatesUnbuilt marks a repository written before the tier
 	// dimension existed. It is a pending rebuild, not drift.
 	TierAggregatesUnbuilt bool `json:"tier_aggregates_unbuilt,omitempty"`
@@ -126,6 +186,81 @@ type CheckResult struct {
 	HardwareVerified       bool      `json:"hardware_verified,omitempty"`
 	CustodyAssumed         bool      `json:"custody_assumed,omitempty"`
 	Findings               []Finding `json:"findings,omitempty"`
+}
+
+type CheckConsistency struct {
+	RepositoryID          string `json:"repository_id,omitempty"`
+	Generation            uint64 `json:"generation,omitempty"`
+	Sequence              uint64 `json:"sequence,omitempty"`
+	SessionID             string `json:"session_id,omitempty"`
+	SchemaVersion         uint8  `json:"schema_version"`
+	OptionsDigest         string `json:"options_digest"`
+	LegacyInventoryDigest string `json:"legacy_inventory_digest,omitempty"`
+}
+
+type CheckResources struct {
+	MemoryLimitBytes  uint64 `json:"memory_limit_bytes"`
+	ScratchLimitBytes uint64 `json:"scratch_limit_bytes"`
+	ScratchPeakBytes  uint64 `json:"scratch_peak_bytes"`
+	MergePasses       uint64 `json:"merge_passes"`
+	Workers           uint   `json:"workers"`
+	RPCConcurrency    uint   `json:"rpc_concurrency"`
+}
+
+type CheckCoverage struct {
+	Mode     string   `json:"mode"`
+	Complete bool     `json:"complete"`
+	Included []string `json:"included"`
+	Skipped  []string `json:"skipped,omitempty"`
+}
+
+var checkDomains = []string{
+	"legacy_indexes", "legacy_snapshots", "metadata_encryption", "blob_locations", "pack_catalog",
+	"pack_aggregates", "pack_lifetime", "placements", "verification", "pack_history", "operational_state",
+	"export_provenance", "references", "snapshots", "snapshot_commits", "path_versions", "analytics",
+}
+
+func checkCoverage(options CheckOptions) CheckCoverage {
+	coverage := CheckCoverage{Mode: "full", Complete: true, Included: append([]string(nil), checkDomains...)}
+	if options.LegacyOnly {
+		coverage.Mode = "legacy_only"
+		coverage.Complete = false
+		coverage.Included = []string{"legacy_indexes", "legacy_snapshots"}
+		coverage.Skipped = append([]string(nil), checkDomains[2:]...)
+	} else if options.SlateDBOnly {
+		coverage.Mode = "slatedb_only"
+		coverage.Complete = false
+		coverage.Included = append([]string(nil), checkDomains[2:]...)
+		coverage.Skipped = []string{"legacy_indexes", "legacy_snapshots", "export_provenance"}
+		coverage.Included = slices.DeleteFunc(coverage.Included, func(domain string) bool { return domain == "export_provenance" })
+	}
+	return coverage
+}
+
+func checkOptionsDigest(options CheckOptions) (string, error) {
+	paths := append([]string(nil), options.PathIndexPaths...)
+	sort.Strings(paths)
+	encoded, err := json.Marshal(struct {
+		LegacyOnly, SlateDBOnly, IncludeCrawlDebt bool
+		MaxFindings                               uint
+		MemoryBytes, TempMaxBytes                 uint64
+		Workers, RPCConcurrency                   uint
+		ProgressInterval                          int64
+		PathIndexPaths                            []string
+		PlacementModel                            PlacementModel
+	}{
+		LegacyOnly: options.LegacyOnly, SlateDBOnly: options.SlateDBOnly,
+		IncludeCrawlDebt: options.IncludeCrawlDebt, MaxFindings: options.MaxFindings,
+		MemoryBytes: options.MemoryBytes, TempMaxBytes: options.TempMaxBytes,
+		Workers: options.Workers, RPCConcurrency: options.RPCConcurrency,
+		ProgressInterval: int64(options.ProgressInterval),
+		PathIndexPaths:   paths, PlacementModel: options.PlacementModel,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest[:]), nil
 }
 
 func (result CheckResult) Clean() bool {
@@ -155,8 +290,16 @@ type CheckOptions struct {
 	SlateDBOnly      bool
 	IncludeCrawlDebt bool
 	MaxFindings      uint
+	MemoryBytes      uint64
+	TempDir          string
+	TempMaxBytes     uint64
+	Workers          uint
+	RPCConcurrency   uint
+	ProgressInterval time.Duration
+	Progress         func(CheckProgress)
 	PlacementModel   PlacementModel
 	PathIndexPaths   []string
+	Consistency      CheckConsistency
 }
 
 type Finding struct {
@@ -164,6 +307,83 @@ type Finding struct {
 	Key  string `json:"key"`
 	Want string `json:"want,omitempty"`
 	Got  string `json:"got,omitempty"`
+}
+
+type CheckProgress struct {
+	Stage             string
+	Elapsed           time.Duration
+	Workers           uint
+	RPCConcurrency    uint
+	MemoryLimitBytes  uint64
+	ScratchLimitBytes uint64
+	ScratchPeakBytes  uint64
+}
+
+type checkProgressReporter struct {
+	mu       sync.Mutex
+	started  time.Time
+	stage    string
+	options  CheckOptions
+	scratch  *checkScratch
+	stop     chan struct{}
+	finished chan struct{}
+}
+
+func newCheckProgressReporter(options CheckOptions, scratch *checkScratch) *checkProgressReporter {
+	reporter := &checkProgressReporter{
+		started: time.Now(), options: options, scratch: scratch,
+		stop: make(chan struct{}), finished: make(chan struct{}),
+	}
+	if options.Progress == nil || options.ProgressInterval <= 0 {
+		close(reporter.finished)
+		return reporter
+	}
+	go func() {
+		defer close(reporter.finished)
+		ticker := time.NewTicker(options.ProgressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				reporter.emit()
+			case <-reporter.stop:
+				return
+			}
+		}
+	}()
+	return reporter
+}
+
+func (reporter *checkProgressReporter) set(stage string) {
+	reporter.mu.Lock()
+	reporter.stage = stage
+	reporter.mu.Unlock()
+	reporter.emit()
+}
+
+func (reporter *checkProgressReporter) emit() {
+	if reporter.options.Progress == nil {
+		return
+	}
+	reporter.mu.Lock()
+	stage := reporter.stage
+	reporter.mu.Unlock()
+	peak, _ := reporter.scratch.stats()
+	reporter.options.Progress(CheckProgress{
+		Stage: stage, Elapsed: time.Since(reporter.started), Workers: reporter.options.Workers,
+		RPCConcurrency: reporter.options.RPCConcurrency, MemoryLimitBytes: reporter.options.MemoryBytes,
+		ScratchLimitBytes: reporter.options.TempMaxBytes, ScratchPeakBytes: peak,
+	})
+}
+
+func (reporter *checkProgressReporter) close() {
+	select {
+	case <-reporter.finished:
+		return
+	default:
+		close(reporter.stop)
+		<-reporter.finished
+	}
 }
 
 type RebuildResult struct {
@@ -187,19 +407,34 @@ type AggregateDelta struct {
 	After  schema.PackAggregate  `json:"after"`
 }
 
-type location struct {
-	BlobID             vaultic.ID
-	PackID             vaultic.ID
-	Type               vaultic.BlobType
-	Offset             uint
-	Length             uint
-	UncompressedLength uint
+const (
+	packHasData uint8 = 1 << iota
+	packHasTree
+	packHasInvalid
+)
+
+func summarizePackType(summary uint8, blobType schema.BlobType) uint8 {
+	switch blobType {
+	case schema.BlobData:
+		return summary | packHasData
+	case schema.BlobTree:
+		return summary | packHasTree
+	default:
+		return summary | packHasInvalid
+	}
 }
 
-type packLocationStats struct {
-	types    map[vaultic.ID][]schema.BlobType
-	counts   map[vaultic.ID]uint64
-	payloads map[vaultic.ID]uint64
+func classifyPackSummary(summary uint8) schema.PackType {
+	switch summary {
+	case packHasData:
+		return schema.PackData
+	case packHasTree:
+		return schema.PackTree
+	case packHasData | packHasTree:
+		return schema.PackMixed
+	default:
+		return schema.PackUnknown
+	}
 }
 
 func Export(
@@ -312,91 +547,290 @@ func CheckWithOptions(
 	source LegacySource,
 	store Store,
 	options CheckOptions,
-) (CheckResult, error) {
+) (result CheckResult, err error) {
 	if options.LegacyOnly && options.SlateDBOnly {
 		return CheckResult{}, fmt.Errorf("legacy-only and SlateDB-only checks are mutually exclusive")
 	}
-	var result CheckResult
-	legacy := make(map[string]struct{})
-	legacyPacks := make(map[vaultic.ID]uint64)
-	legacySnapshots := make(map[vaultic.ID]struct{})
-	var err error
+	workers := options.Workers
+	if workers == 0 {
+		workers = uint(max(runtime.GOMAXPROCS(0), 1))
+	}
+	rpcConcurrency := options.RPCConcurrency
+	if rpcConcurrency == 0 {
+		rpcConcurrency = workers
+	}
+	if workers > 1024 || rpcConcurrency > 4096 {
+		return CheckResult{}, fmt.Errorf("checker worker or RPC concurrency limit is too large")
+	}
+	options.Workers, options.RPCConcurrency = workers, rpcConcurrency
+	if options.Consistency.SessionID != "" {
+		validator, ok := store.(interface{ Validate(context.Context) error })
+		if !ok {
+			return CheckResult{}, fmt.Errorf("checker store does not validate the declared read session")
+		}
+		defer func() {
+			if err == nil {
+				err = validator.Validate(ctx)
+			}
+		}()
+	}
+	if store != nil {
+		store = &limitedStore{Store: store, semaphore: make(chan struct{}, rpcConcurrency)}
+	}
+	memoryBytes := options.MemoryBytes
+	if memoryBytes == 0 {
+		memoryBytes = 64 << 20
+	}
+	minimumMemory := uint64(locationTupleSize)
+	if !options.LegacyOnly && !options.SlateDBOnly {
+		minimumMemory *= 4
+	}
+	if !options.LegacyOnly {
+		minimumMemory = max(minimumMemory, uint64(analyticsWorkspaceSpools*(schema.MaxPathIndexPathBytes+1024)))
+	}
+	if memoryBytes < minimumMemory {
+		return CheckResult{}, fmt.Errorf("checker memory limit must be at least %d bytes", minimumMemory)
+	}
+	tempMaxBytes := options.TempMaxBytes
+	if tempMaxBytes == 0 {
+		tempMaxBytes = 8 << 30
+	}
+	options.MemoryBytes, options.TempMaxBytes = memoryBytes, tempMaxBytes
+	optionsDigest, err := checkOptionsDigest(options)
+	if err != nil {
+		return CheckResult{}, fmt.Errorf("encode checker options: %w", err)
+	}
+	scratch, err := newCheckScratch(options.TempDir, tempMaxBytes)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	progress := newCheckProgressReporter(options, scratch)
+	defer progress.close()
+	defer func() {
+		result.Resources.ScratchPeakBytes, result.Resources.MergePasses = scratch.stats()
+		if closeErr := scratch.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("clean checker scratch: %w", closeErr))
+		}
+	}()
+	result = CheckResult{
+		Coverage: checkCoverage(options), Consistency: options.Consistency,
+		Resources: CheckResources{
+			MemoryLimitBytes: memoryBytes, ScratchLimitBytes: tempMaxBytes,
+			Workers: workers, RPCConcurrency: rpcConcurrency,
+		},
+	}
+	result.Consistency.SchemaVersion = schema.Version
+	result.Consistency.OptionsDigest = optionsDigest
+	progress.set("inventory")
 	if !options.SlateDBOnly {
-		legacy, legacyPacks, result.LegacyIndexes, err = loadLegacyLocations(ctx, source)
+		result.Consistency.LegacyInventoryDigest, err = legacyInventoryDigest(ctx, source, scratch, memoryBytes)
 		if err != nil {
 			return result, err
 		}
-		result.LegacyLocations = uint64(len(legacy))
-		legacySnapshots, err = loadLegacySnapshots(ctx, source)
+		defer func() {
+			if err != nil {
+				return
+			}
+			finalDigest, digestErr := legacyInventoryDigest(ctx, source, scratch, memoryBytes)
+			if digestErr != nil {
+				err = fmt.Errorf("confirm legacy inventory: %w", digestErr)
+			} else if finalDigest != result.Consistency.LegacyInventoryDigest {
+				err = fmt.Errorf("legacy index or snapshot inventory changed during check")
+			}
+		}()
+	}
+	spoolMemory := max(memoryBytes/4, uint64(locationTupleSize))
+	legacy, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
+	if err != nil {
+		return result, err
+	}
+	var legacyPacks *locationSpool
+	if !options.SlateDBOnly && !options.LegacyOnly {
+		legacyPacks, err = newLocationMultisetSpool(ctx, scratch, spoolMemory, 32)
 		if err != nil {
 			return result, err
 		}
-		result.LegacySnapshots = uint64(len(legacySnapshots))
+	}
+	if !options.SlateDBOnly {
+		progress.set("legacy_scan")
+		legacy, result.LegacyIndexes, err = loadLegacyLocations(ctx, source, legacy, legacyPacks, workers)
+		if err != nil {
+			return result, err
+		}
 	}
 	if options.LegacyOnly {
+		result.LegacyLocations, err = countLocationSpool(legacy)
+		if err != nil {
+			return result, err
+		}
+		progress.set("finalization")
 		return result, nil
 	}
+	progress.set("encryption_audit")
 	if err := checkEncryption(ctx, store, &result, options.MaxFindings); err != nil {
 		return result, err
 	}
-	slatedb, packStats, err := loadSlateDBLocations(ctx, store)
+	slatedb, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
 	if err != nil {
 		return result, err
 	}
-	result.SlateDBLocations = uint64(len(slatedb))
-	packs, err := loadPacks(ctx, store)
+	slatedbPacks, err := newLocationMultisetSpool(ctx, scratch, spoolMemory, 32)
+	if err != nil {
+		return result, err
+	}
+	progress.set("slatedb_scan")
+	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks); err != nil {
+		return result, err
+	}
+	progress.set("catalog_join")
+	wantAggregates, wantTierAggregates, err := checkPackCatalog(
+		ctx, store, legacyPacks, slatedbPacks, !options.SlateDBOnly, &result, options.MaxFindings,
+	)
 	if err != nil {
 		return result, err
 	}
 	if !options.SlateDBOnly {
-		if err := compareLegacyState(ctx, store, legacy, legacyPacks, slatedb, packs, &result, options.MaxFindings); err != nil {
+		if err := compareLocationSpools(legacy, slatedb, &result, options.MaxFindings); err != nil {
+			return result, err
+		}
+	} else {
+		result.SlateDBLocations, err = countLocationSpool(slatedb)
+		if err != nil {
 			return result, err
 		}
 	}
-	if err := checkPackCatalog(packs, packStats, &result, options.MaxFindings); err != nil {
+	if err := legacy.close(); err != nil {
 		return result, err
 	}
-	if err := checkAggregates(ctx, store, packs, &result, options.MaxFindings); err != nil {
+	if err := slatedb.close(); err != nil {
 		return result, err
 	}
-	checkPackLifetime(packs, &result)
-	if err := checkPlacementRecords(ctx, store, packs, options.PlacementModel, &result, options.MaxFindings); err != nil {
-		return result, err
-	}
-	if err := checkVerificationState(ctx, store, packs, &result, options.MaxFindings); err != nil {
-		return result, err
-	}
-	checkPackHistory(ctx, store, &result)
-	if err := checkOperationalState(ctx, store, options, packs, &result); err != nil {
-		return result, err
-	}
-	if !options.SlateDBOnly {
-		if err := checkExportProvenance(ctx, source, store, packs, &result, options.MaxFindings); err != nil {
+	if legacyPacks != nil {
+		if err := legacyPacks.close(); err != nil {
 			return result, err
 		}
 	}
-	if err := checkReferences(ctx, store, &result, options.MaxFindings); err != nil {
+	if err := slatedbPacks.close(); err != nil {
 		return result, err
 	}
-	if err := checkSnapshots(ctx, store, legacySnapshots, options.SlateDBOnly, &result, options.MaxFindings); err != nil {
+	if err := checkAggregateValues(ctx, store, wantAggregates, wantTierAggregates, &result, options.MaxFindings); err != nil {
 		return result, err
 	}
-	if err := checkPathVersionIndex(ctx, store, options.PathIndexPaths, &result, options.MaxFindings); err != nil {
+	progress.set("parallel_validation")
+	if err := runValidationJobs(ctx, source, store, scratch, memoryBytes, workers, options, &result); err != nil {
 		return result, err
 	}
-	analyticsFindings, err := analytics.CheckConsistency(ctx, store)
-	if err != nil {
-		return result, err
-	}
-	result.AnalyticsMismatch = uint64(len(analyticsFindings))
-	for _, finding := range analyticsFindings {
-		addFinding(
-			&result,
-			options.MaxFindings,
-			Finding{Kind: finding.Kind, Key: finding.Key, Want: finding.Want, Got: finding.Got},
-		)
-	}
+	progress.set("finalization")
 	return result, nil
+}
+
+func runValidationJobs(
+	ctx context.Context,
+	source LegacySource,
+	store Store,
+	scratch *checkScratch,
+	memoryBytes uint64,
+	workers uint,
+	options CheckOptions,
+	result *CheckResult,
+) error {
+	type validationJob func(context.Context, *CheckResult, uint64) error
+	jobs := []validationJob{
+		func(ctx context.Context, local *CheckResult, memory uint64) error {
+			return checkPlacementRecords(ctx, store, scratch, memory, options.PlacementModel, local, options.MaxFindings)
+		},
+		func(ctx context.Context, local *CheckResult, _ uint64) error {
+			if err := checkVerificationState(ctx, store, local, options.MaxFindings); err != nil {
+				return err
+			}
+			checkPackHistory(ctx, store, local)
+			return nil
+		},
+		func(ctx context.Context, local *CheckResult, _ uint64) error {
+			return checkOperationalState(ctx, store, options, local)
+		},
+		func(ctx context.Context, local *CheckResult, memory uint64) error {
+			if !options.SlateDBOnly {
+				if err := checkExportProvenance(ctx, source, store, local, options.MaxFindings); err != nil {
+					return err
+				}
+			}
+			return checkSnapshots(ctx, source, store, scratch, memory, options.SlateDBOnly, local, options.MaxFindings)
+		},
+		func(ctx context.Context, local *CheckResult, memory uint64) error {
+			return checkReferences(ctx, store, scratch, memory, local, options.MaxFindings)
+		},
+		func(ctx context.Context, local *CheckResult, _ uint64) error {
+			return checkPathVersionIndex(ctx, store, options.PathIndexPaths, local, options.MaxFindings)
+		},
+		func(ctx context.Context, local *CheckResult, memory uint64) error {
+			workspace, err := newAnalyticsCheckWorkspace(ctx, scratch, memory)
+			if err != nil {
+				return err
+			}
+			findings, total, checkErr := analytics.CheckConsistencyWithWorkspace(ctx, store, options.MaxFindings, workspace)
+			closeErr := workspace.close()
+			if checkErr != nil {
+				return checkErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			local.AnalyticsMismatch = total
+			for _, finding := range findings {
+				addFinding(local, options.MaxFindings, Finding{Kind: finding.Kind, Key: finding.Key, Want: finding.Want, Got: finding.Got})
+			}
+			return nil
+		},
+	}
+	parallel := min(int(workers), len(jobs))
+	jobMemory := memoryBytes / uint64(parallel)
+	if jobMemory < uint64(analyticsWorkspaceSpools*(schema.MaxPathIndexPathBytes+1024)) {
+		return fmt.Errorf("checker memory limit is too small for %d parallel validation workers", parallel)
+	}
+	results := make([]CheckResult, len(jobs))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(parallel)
+	for index, job := range jobs {
+		index, job := index, job
+		group.Go(func() error { return job(groupCtx, &results[index], jobMemory) })
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	for index := range results {
+		mergeValidationResult(result, &results[index], options.MaxFindings)
+	}
+	return nil
+}
+
+func mergeValidationResult(result, local *CheckResult, maxFindings uint) {
+	result.ReverseEdgeMismatch += local.ReverseEdgeMismatch
+	result.UnresolvedReferences += local.UnresolvedReferences
+	result.LegacySnapshots += local.LegacySnapshots
+	result.SlateDBSnapshots += local.SlateDBSnapshots
+	result.SnapshotMismatch += local.SnapshotMismatch
+	result.SnapshotCommitMismatch += local.SnapshotCommitMismatch
+	result.PathVersionMismatch += local.PathVersionMismatch
+	result.UnresolvedSnapshots += local.UnresolvedSnapshots
+	result.PendingCrawlDebt += local.PendingCrawlDebt
+	result.PendingExports += local.PendingExports
+	result.FailedExports += local.FailedExports
+	result.ExportCheckpoints += local.ExportCheckpoints
+	result.PlacementRecordsMalformed += local.PlacementRecordsMalformed
+	result.MissingPlacementRecords += local.MissingPlacementRecords
+	result.BackendPackMismatch += local.BackendPackMismatch
+	result.DerivedTierMismatch += local.DerivedTierMismatch
+	result.PacksBelowDurability += local.PacksBelowDurability
+	result.UnknownPlacementBackends += local.UnknownPlacementBackends
+	result.VerificationStateMismatch += local.VerificationStateMismatch
+	result.HistoryEventsMalformed += local.HistoryEventsMalformed
+	result.AnalyticsMismatch += local.AnalyticsMismatch
+	result.GCCandidates += local.GCCandidates
+	result.Warnings += local.Warnings
+	for _, finding := range local.Findings {
+		addFinding(result, maxFindings, finding)
+	}
 }
 
 // aggregateTarget is one aggregate record to compare and rewrite. Type
@@ -584,63 +1018,66 @@ func loadBlobLocations(
 func loadLegacyLocations(
 	ctx context.Context,
 	source LegacySource,
-) (map[string]struct{}, map[vaultic.ID]uint64, uint64, error) {
-	result := make(map[string]struct{})
-	packs := make(map[vaultic.ID]uint64)
+	result *locationSpool,
+	packs *locationSpool,
+	workers uint,
+) (*locationSpool, uint64, error) {
 	var indexes uint64
-	err := legacyindex.ForAllIndexes(
+	err := legacyindex.ForAllIndexesWorkers(
 		ctx,
 		source,
 		source,
+		workers,
 		func(_ vaultic.ID, index *legacyindex.Index, loadErr error) error {
 			indexes++
 			if loadErr != nil {
 				return loadErr
 			}
 			for item := range index.Values() {
-				result[locationKey(location{BlobID: item.Blob.ID,
+				if err := result.add(locationTuple{BlobID: item.Blob.ID,
 					PackID:             item.Pack,
-					Type:               item.Blob.Type,
-					Offset:             item.Blob.Offset,
-					Length:             item.Blob.Length,
-					UncompressedLength: item.Blob.UncompressedLength})] = struct{}{}
-				packs[item.Pack]++
+					Type:               uint8(item.Blob.Type),
+					Offset:             uint64(item.Blob.Offset),
+					Length:             uint64(item.Blob.Length),
+					UncompressedLength: uint64(item.Blob.UncompressedLength)}); err != nil {
+					return err
+				}
+				if packs != nil {
+					if err := packs.add(locationTuple{
+						BlobID: item.Pack, PackID: item.Blob.ID, Type: uint8(item.Blob.Type),
+						Offset: uint64(item.Blob.Offset), Length: uint64(item.Blob.Length),
+						UncompressedLength: uint64(item.Blob.UncompressedLength),
+					}); err != nil {
+						return err
+					}
+				}
 			}
-			for id := range index.Packs() {
-				if _, found := packs[id]; !found {
-					packs[id] = 0
+			if packs != nil {
+				for id := range index.Packs() {
+					if err := packs.add(locationTuple{BlobID: id}); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
 		},
 	)
-	return result, packs, indexes, err
+	return result, indexes, err
 }
 
-func loadLegacySnapshots(ctx context.Context, source LegacySource) (map[vaultic.ID]struct{}, error) {
-	result := make(map[vaultic.ID]struct{})
-	err := source.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
-		result[id] = struct{}{}
-		return nil
-	})
-	return result, err
-}
-
-type referenceStats struct {
-	inodes    map[[2]uint64]struct{}
-	manifests map[schema.ID]struct{}
-}
-
-func checkReferences(ctx context.Context, store Store, result *CheckResult, maxFindings uint) error {
-	stats := make(map[schema.ID]*referenceStats)
-	getStats := func(id schema.ID) *referenceStats {
-		value := stats[id]
-		if value == nil {
-			value = &referenceStats{inodes: make(map[[2]uint64]struct{}), manifests: make(map[schema.ID]struct{})}
-			stats[id] = value
-		}
-		return value
+func checkReferences(
+	ctx context.Context,
+	store Store,
+	scratch *checkScratch,
+	memoryBytes uint64,
+	result *CheckResult,
+	maxFindings uint,
+) error {
+	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleSize), 32)
+	if err != nil {
+		return err
 	}
+	defer spool.close()
 	if err := scan(ctx, store, []byte("ri:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil {
@@ -655,8 +1092,9 @@ func checkReferences(ctx context.Context, store Store, result *CheckResult, maxF
 			result.Warnings++
 			return nil
 		}
-		getStats(parsed.ID).inodes[[2]uint64{uint64(parsed.FSID), parsed.Inode}] = struct{}{}
-		return nil
+		return spool.add(locationTuple{
+			BlobID: vaultic.ID(parsed.ID), Type: 1, Offset: uint64(parsed.FSID), Length: parsed.Inode,
+		})
 	}); err != nil {
 		return err
 	}
@@ -674,12 +1112,12 @@ func checkReferences(ctx context.Context, store Store, result *CheckResult, maxF
 			result.Warnings++
 			return nil
 		}
-		getStats(parsed.ID).manifests[parsed.SecondID] = struct{}{}
-		return nil
+		return spool.add(locationTuple{
+			BlobID: vaultic.ID(parsed.ID), PackID: vaultic.ID(parsed.SecondID), Type: 2,
+		})
 	}); err != nil {
 		return err
 	}
-	counts := make(map[schema.ID]schema.ReferenceCountRecord)
 	if err := scan(ctx, store, []byte("rc:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil {
@@ -689,73 +1127,45 @@ func checkReferences(ctx context.Context, store Store, result *CheckResult, maxF
 		if err != nil {
 			return err
 		}
-		counts[parsed.ID] = record
-		return nil
+		return spool.add(locationTuple{
+			BlobID: vaultic.ID(parsed.ID), Type: 3, Offset: record.DistinctInodes,
+			Length: record.DistinctManifests, UncompressedLength: record.TotalReferences,
+		})
 	}); err != nil {
 		return err
 	}
-	for id, expected := range stats {
-		count, found := counts[id]
-		minimum := uint64(len(expected.inodes) + len(expected.manifests))
-		if !found || count.DistinctInodes != uint64(len(expected.inodes)) ||
-			count.DistinctManifests != uint64(len(expected.manifests)) ||
-			count.TotalReferences < minimum {
-			result.ReverseEdgeMismatch++
-			addFinding(
-				result,
-				maxFindings,
-				Finding{
-					Kind: "reference_count_drift",
-					Key:  vaultic.ID(id).String(),
-					Want: fmt.Sprintf(
-						"inodes=%d manifests=%d total>=%d",
-						len(expected.inodes),
-						len(expected.manifests),
-						minimum,
-					),
-					Got: fmt.Sprintf(
-						"inodes=%d manifests=%d total=%d",
-						count.DistinctInodes,
-						count.DistinctManifests,
-						count.TotalReferences,
-					),
-				},
-			)
-		}
-	}
-	for id, count := range counts {
-		if _, found := stats[id]; !found &&
-			(count.DistinctInodes != 0 || count.DistinctManifests != 0 || count.TotalReferences != 0) {
-			result.ReverseEdgeMismatch++
-			addFinding(
-				result,
-				maxFindings,
-				Finding{
-					Kind: "missing_reverse_edge",
-					Key:  vaultic.ID(id).String(),
-					Got: fmt.Sprintf(
-						"inodes=%d manifests=%d total=%d",
-						count.DistinctInodes,
-						count.DistinctManifests,
-						count.TotalReferences,
-					),
-				},
-			)
-		}
-	}
-	return nil
+	return reduceReferenceSpool(spool, result, maxFindings)
 }
 
 func checkSnapshots(
 	ctx context.Context,
+	source LegacySource,
 	store Store,
-	legacy map[vaultic.ID]struct{},
+	scratch *checkScratch,
+	memoryBytes uint64,
 	slatedbOnly bool,
 	result *CheckResult,
 	maxFindings uint,
 ) error {
-	slatedb := make(map[vaultic.ID]struct{})
-	err := scan(ctx, store, []byte("s:"), func(entry daemon.KeyValue) error {
+	spoolMemory := max(memoryBytes/2, uint64(locationTupleSize))
+	legacy, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
+	if err != nil {
+		return err
+	}
+	defer legacy.close()
+	if !slatedbOnly {
+		if err := source.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
+			return legacy.add(locationTuple{BlobID: id})
+		}); err != nil {
+			return err
+		}
+	}
+	slatedb, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
+	if err != nil {
+		return err
+	}
+	defer slatedb.close()
+	err = scan(ctx, store, []byte("s:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil {
 			return err
@@ -765,7 +1175,9 @@ func checkSnapshots(
 			return err
 		}
 		id := vaultic.ID(parsed.ID)
-		slatedb[id] = struct{}{}
+		if err := slatedb.add(locationTuple{BlobID: id}); err != nil {
+			return err
+		}
 		rootKey := schema.DirectoryRevisionKey(record.RootFSID, record.RootInode, record.RootRevision)
 		if _, found, getErr := store.Get(ctx, rootKey); getErr != nil {
 			return getErr
@@ -781,13 +1193,41 @@ func checkSnapshots(
 	if err := checkSnapshotCommitIndex(ctx, store, result, maxFindings); err != nil {
 		return err
 	}
-	result.SlateDBSnapshots = uint64(len(slatedb))
 	if slatedbOnly {
-		return nil
+		var err error
+		result.SlateDBSnapshots, err = countLocationSpool(slatedb)
+		return err
 	}
-	for id := range legacy {
-		//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
-		if _, found := slatedb[id]; !found {
+	legacyIterator, err := legacy.iterator()
+	if err != nil {
+		return err
+	}
+	defer legacyIterator.close()
+	slatedbIterator, err := slatedb.iterator()
+	if err != nil {
+		return err
+	}
+	defer slatedbIterator.close()
+	legacyTuple, hasLegacy, err := legacyIterator.next()
+	if err != nil {
+		return err
+	}
+	slatedbTuple, hasSlateDB, err := slatedbIterator.next()
+	if err != nil {
+		return err
+	}
+	for hasLegacy || hasSlateDB {
+		comparison := 0
+		switch {
+		case !hasLegacy:
+			comparison = 1
+		case !hasSlateDB:
+			comparison = -1
+		default:
+			comparison = bytes.Compare(legacyTuple.BlobID[:], slatedbTuple.BlobID[:])
+		}
+		if comparison < 0 {
+			id := legacyTuple.BlobID
 			checkpoint, checkpointFound, err := store.Get(ctx, schema.SnapshotImportCheckpointKey(schema.ID(id)))
 			if err != nil {
 				return err
@@ -811,53 +1251,163 @@ func checkSnapshots(
 				result.SnapshotMismatch++
 				addFinding(result, maxFindings, Finding{Kind: "missing_snapshot", Key: id.String(), Want: "slatedb"})
 			}
-		}
-	}
-	for id := range slatedb {
-		if _, found := legacy[id]; !found {
+			legacyTuple, hasLegacy, err = legacyIterator.next()
+			if err != nil {
+				return err
+			}
+		} else if comparison > 0 {
+			id := slatedbTuple.BlobID
 			result.SnapshotMismatch++
 			addFinding(result, maxFindings, Finding{Kind: "missing_snapshot", Key: id.String(), Want: "legacy"})
+			slatedbTuple, hasSlateDB, err = slatedbIterator.next()
+			if err != nil {
+				return err
+			}
+		} else {
+			legacyTuple, hasLegacy, err = legacyIterator.next()
+			if err == nil {
+				slatedbTuple, hasSlateDB, err = slatedbIterator.next()
+			}
+			if err != nil {
+				return err
+			}
 		}
+	}
+	result.LegacySnapshots, err = countLocationSpool(legacy)
+	if err != nil {
+		return err
+	}
+	result.SlateDBSnapshots, err = countLocationSpool(slatedb)
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 func checkPackCatalog(
-	packs map[vaultic.ID]schema.PackRecord,
-	stats packLocationStats,
+	ctx context.Context,
+	store Store,
+	legacy, slatedb *locationSpool,
+	compareLegacy bool,
 	result *CheckResult,
 	maxFindings uint,
-) error {
-	for id, record := range packs {
-		if record.BlobCount == 0 && len(stats.types[id]) == 0 {
-			continue
+) (map[schema.AggregateKind]schema.PackAggregate, map[schema.PackTier]schema.PackAggregate, error) {
+	accumulator := schema.NewPackAggregateAccumulator()
+	legacyIterator, err := optionalPackContributionIterator(legacy)
+	if err != nil {
+		return nil, nil, err
+	}
+	if legacyIterator != nil {
+		defer legacyIterator.close()
+	}
+	slatedbIterator, err := newPackContributionIterator(slatedb)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer slatedbIterator.close()
+	legacySummary, hasLegacy, err := nextPackContribution(legacyIterator)
+	if err != nil {
+		return nil, nil, err
+	}
+	slatedbSummary, hasSlateDB, err := slatedbIterator.next()
+	if err != nil {
+		return nil, nil, err
+	}
+	reportMissingLegacyPack := func(summary packContributionSummary) error {
+		if _, found, err := store.Get(ctx, schema.PackKey(schema.ID(summary.id))); err != nil {
+			return err
+		} else if found {
+			return fmt.Errorf("pack scan omitted existing pack %s", summary.id.String())
 		}
-		actualType := schema.ClassifyPack(stats.types[id])
-		if record.BlobCount != stats.counts[id] || record.PayloadSize != stats.payloads[id] ||
-			record.Type != actualType {
-			result.InvalidPacks++
-			addFinding(
-				result,
-				maxFindings,
-				Finding{
-					Kind: "pack_metadata_mismatch",
-					Key:  id.String(),
-					Want: fmt.Sprintf("type=%d blobs=%d payload=%d", actualType, stats.counts[id], stats.payloads[id]),
+		if summary.count == 0 {
+			result.Warnings++
+			addFinding(result, maxFindings, Finding{Kind: "catalog_only_pack", Key: summary.id.String(), Got: "zero blob locations"})
+		} else {
+			result.MissingPacks++
+			addFinding(result, maxFindings, Finding{
+				Kind: "missing_pack", Key: summary.id.String(), Want: "slatedb", Got: fmt.Sprintf("legacy blobs=%d", summary.count),
+			})
+		}
+		return nil
+	}
+	err = scan(ctx, store, []byte("p:"), func(entry daemon.KeyValue) error {
+		parsed, err := schema.ParseKey(entry.Key)
+		if err != nil || parsed.Kind != schema.KeyPack {
+			return fmt.Errorf("invalid pack key %q", entry.Key)
+		}
+		record, err := schema.UnmarshalPackRecord(entry.Value)
+		if err != nil {
+			return err
+		}
+		id := vaultic.ID(parsed.ID)
+		if err := accumulator.Add(record); err != nil {
+			return err
+		}
+		checkPackRecordState(id, record, result, maxFindings)
+		for hasLegacy && bytes.Compare(legacySummary.id[:], id[:]) < 0 {
+			if err := reportMissingLegacyPack(legacySummary); err != nil {
+				return err
+			}
+			legacySummary, hasLegacy, err = nextPackContribution(legacyIterator)
+			if err != nil {
+				return err
+			}
+		}
+		if compareLegacy {
+			if !hasLegacy || legacySummary.id != id {
+				result.MissingPacks++
+				addFinding(result, maxFindings, Finding{Kind: "missing_pack", Key: id.String(), Want: "legacy"})
+			} else {
+				legacySummary, hasLegacy, err = nextPackContribution(legacyIterator)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		for hasSlateDB && bytes.Compare(slatedbSummary.id[:], id[:]) < 0 {
+			slatedbSummary, hasSlateDB, err = slatedbIterator.next()
+			if err != nil {
+				return err
+			}
+		}
+		var stats packContributionSummary
+		if hasSlateDB && slatedbSummary.id == id {
+			stats = slatedbSummary
+			slatedbSummary, hasSlateDB, err = slatedbIterator.next()
+			if err != nil {
+				return err
+			}
+		}
+		if record.BlobCount != 0 || stats.types != 0 {
+			actualType := classifyPackSummary(stats.types)
+			if record.BlobCount != stats.count || record.PayloadSize != stats.payload || record.Type != actualType {
+				result.InvalidPacks++
+				addFinding(result, maxFindings, Finding{
+					Kind: "pack_metadata_mismatch", Key: id.String(),
+					Want: fmt.Sprintf("type=%d blobs=%d payload=%d", actualType, stats.count, stats.payload),
 					Got:  fmt.Sprintf("type=%d blobs=%d payload=%d", record.Type, record.BlobCount, record.PayloadSize),
-				},
-			)
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	for hasLegacy {
+		if err := reportMissingLegacyPack(legacySummary); err != nil {
+			return nil, nil, err
+		}
+		legacySummary, hasLegacy, err = nextPackContribution(legacyIterator)
+		if err != nil {
+			return nil, nil, err
 		}
 	}
-	return nil
+	want, wantTiers := accumulator.Results(0)
+	return want, wantTiers, nil
 }
 
-func loadSlateDBLocations(ctx context.Context, store Store) (map[string]struct{}, packLocationStats, error) {
-	result := make(map[string]struct{})
-	stats := packLocationStats{
-		types:    make(map[vaultic.ID][]schema.BlobType),
-		counts:   make(map[vaultic.ID]uint64),
-		payloads: make(map[vaultic.ID]uint64),
-	}
+func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locationSpool) error {
 	err := scan(ctx, store, []byte("b:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil {
@@ -869,22 +1419,24 @@ func loadSlateDBLocations(ctx context.Context, store Store) (map[string]struct{}
 		}
 		for _, item := range record.Locations {
 			packID := vaultic.ID(item.PackID)
-			result[locationKey(location{BlobID: vaultic.ID(parsed.ID),
+			if err := result.add(locationTuple{BlobID: vaultic.ID(parsed.ID),
 				PackID:             vaultic.ID(item.PackID),
-				Type:               vaultic.BlobType(item.Type),
-				Offset:             uint(item.Offset),
-				Length:             uint(item.Length),
-				UncompressedLength: uint(item.UncompressedSize)})] = struct{}{}
-			stats.types[packID] = append(stats.types[packID], item.Type)
-			stats.counts[packID]++
-			if math.MaxUint64-stats.payloads[packID] < uint64(item.Length) {
-				return fmt.Errorf("pack %s payload overflow", packID.Str())
+				Type:               uint8(item.Type),
+				Offset:             item.Offset,
+				Length:             uint64(item.Length),
+				UncompressedLength: uint64(item.UncompressedSize)}); err != nil {
+				return err
 			}
-			stats.payloads[packID] += uint64(item.Length)
+			if err := packs.add(locationTuple{
+				BlobID: packID, PackID: vaultic.ID(parsed.ID), Type: uint8(item.Type),
+				Offset: item.Offset, Length: uint64(item.Length), UncompressedLength: uint64(item.UncompressedSize),
+			}); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
-	return result, stats, err
+	return err
 }
 
 func checkAggregates(
@@ -906,6 +1458,17 @@ func checkAggregates(
 	if err != nil {
 		return err
 	}
+	return checkAggregateValues(ctx, store, want, wantTiers, result, maxFindings)
+}
+
+func checkAggregateValues(
+	ctx context.Context,
+	store Store,
+	want map[schema.AggregateKind]schema.PackAggregate,
+	wantTiers map[schema.PackTier]schema.PackAggregate,
+	result *CheckResult,
+	maxFindings uint,
+) error {
 	targets := aggregateTargets(want, wantTiers)
 	stored := make([]schema.PackAggregate, len(targets))
 	found := make([]bool, len(targets))
@@ -982,17 +1545,28 @@ func checkPackHistory(ctx context.Context, store Store, result *CheckResult) {
 // from a legacy import are legitimately tier-unknown and retention-unknown
 // forever, so they must neither fail an otherwise clean check nor crowd out
 // real findings on a repository with millions of packs.
-func checkPackLifetime(packs map[vaultic.ID]schema.PackRecord, result *CheckResult) {
-	for _, record := range packs {
-		if record.Tier == 0 || record.Tier == schema.TierUnknown {
-			result.UnknownTierPacks++
-		}
-		if record.RetentionSource == 0 || record.RetentionSource == schema.RetentionUnknown {
-			result.RetentionUnknownPacks++
-		}
-		if !record.UsageKnown {
-			result.UsageUnaccountedPacks++
-		}
+func checkPackRecordState(id vaultic.ID, record schema.PackRecord, result *CheckResult, maxFindings uint) {
+	if record.Tier == 0 || record.Tier == schema.TierUnknown {
+		result.UnknownTierPacks++
+	}
+	if record.RetentionSource == 0 || record.RetentionSource == schema.RetentionUnknown {
+		result.RetentionUnknownPacks++
+	}
+	if !record.UsageKnown {
+		result.UsageUnaccountedPacks++
+	}
+	switch record.Type {
+	case schema.PackMixed:
+		result.MixedPacks++
+	case schema.PackUnknown:
+		result.UnknownPacks++
+		result.Warnings++
+		addFinding(result, maxFindings, Finding{Kind: "unknown_pack_type", Key: id.String()})
+	case schema.PackData, schema.PackTree:
+	}
+	if record.Lifecycle == schema.PackImported || record.Lifecycle == schema.PackExportPending {
+		result.PendingExports++
+		result.Warnings++
 	}
 }
 
@@ -1072,7 +1646,6 @@ func checkExportProvenance(
 	ctx context.Context,
 	source LegacySource,
 	store Store,
-	packs map[vaultic.ID]schema.PackRecord,
 	result *CheckResult,
 	maxFindings uint,
 ) error {
@@ -1123,7 +1696,9 @@ func checkExportProvenance(
 		}
 		for _, packID := range record.PackIDs {
 			id := vaultic.ID(packID)
-			if _, found := packs[id]; !found {
+			if _, found, err := store.Get(ctx, schema.PackKey(packID)); err != nil {
+				return err
+			} else if !found {
 				result.FailedExports++
 				addFinding(
 					result,
@@ -1145,20 +1720,27 @@ func sortedPackIDs(packs map[vaultic.ID]schema.PackRecord) []vaultic.ID {
 	return ids
 }
 
-func locationKey(item location) string {
-	return fmt.Sprintf(
-		"%s:%s:%d:%d:%d:%d",
-		item.BlobID.String(),
-		item.PackID.String(),
-		item.Type,
-		item.Offset,
-		item.Length,
-		item.UncompressedLength,
-	)
+func addFinding(result *CheckResult, maximum uint, finding Finding) {
+	index, _ := slices.BinarySearchFunc(result.Findings, finding, compareFinding)
+	if maximum == 0 || uint(len(result.Findings)) < maximum {
+		result.Findings = slices.Insert(result.Findings, index, finding)
+		return
+	}
+	if index < len(result.Findings) {
+		result.Findings = slices.Insert(result.Findings, index, finding)
+		result.Findings = result.Findings[:maximum]
+	}
 }
 
-func addFinding(result *CheckResult, maximum uint, finding Finding) {
-	if maximum == 0 || uint(len(result.Findings)) < maximum {
-		result.Findings = append(result.Findings, finding)
+func compareFinding(left, right Finding) int {
+	if compared := strings.Compare(left.Kind, right.Kind); compared != 0 {
+		return compared
 	}
+	if compared := strings.Compare(left.Key, right.Key); compared != 0 {
+		return compared
+	}
+	if compared := strings.Compare(left.Want, right.Want); compared != 0 {
+		return compared
+	}
+	return strings.Compare(left.Got, right.Got)
 }

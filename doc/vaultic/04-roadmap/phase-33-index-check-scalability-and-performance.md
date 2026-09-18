@@ -4,7 +4,14 @@
 
 [← Phase 32](phase-32-scalable-legacy-metadata-bulk-import.md) · [Phase 34 →](phase-34-operational-monitoring-and-metrics-export.md)
 
-**Status: design specification, not yet implemented.**
+**Status: implementation complete; representative scale acceptance pending.**
+
+The bounded checker implementation is available on the development branch. It
+includes pinned serializable read sessions, immutable legacy inventory fencing,
+canonical encrypted external sorting, bounded pack/reference/snapshot/path and
+analytics reductions, deterministic finding selection, global worker and RPC
+limits, and stage progress. The 50/500 GB NFS, native RADOS, and S3 acceptance
+matrix remains an infrastructure gate and is not inferred from unit tests.
 
 **Goal:** make the complete `vaultic index check` practical at ten times the
 current metadata scale, with bounded working memory, exact results, observable
@@ -204,7 +211,7 @@ a consistent copy and clean lifecycle; never copy a live database casually.
 
 ## Proposed operator contract
 
-The following are proposed controls, not flags available in current binaries:
+The following controls are available:
 
 ```text
 vaultic index check [existing coverage options]
@@ -248,6 +255,58 @@ next invocation; cursors alone cannot safely resume a multi-source check. A late
 resume design must authenticate encrypted scratch/checkpoints, validate identical
 input inventory, generation, read sequence, schema and options, and retain the
 necessary read view. No cached previous success can substitute for this run.
+
+Interrupted runs can leave directories named `vaultic-check-*` below the
+configured `--check-temp-dir`. Their runs are authenticated and encrypted with
+an ephemeral key that is not persisted, so they are not resumable. After
+confirming that no `vaultic index check` process owns the directory, remove that
+specific directory. The checker only recursively removes a directory whose
+private ownership marker matches the current session; it never recursively
+removes the configured parent.
+
+## Implementation evidence
+
+Implemented ownership and bounds:
+
+- `daemon.ReadSession` routes scans and point reads through one serializable
+  transaction and validates repository, generation, decision, and committed
+  sequence before a successful result is returned.
+- Location equality, pack contribution multiplicity, references, snapshot
+  membership, snapshot-commit indexes, placements, path versions, analytics
+  dictionaries/materializations/GDPR expectations, and legacy inventory use
+  bounded scans or encrypted external runs. Merge fan-in is capped at 32.
+- Scratch admission has a hard byte limit, owner-only permissions, authenticated
+  AES-GCM records, unique nonce namespaces, cancellation checks, and ownership-
+  checked cleanup. Oversized records and exhausted scratch return errors.
+- `--check-workers`, `--check-rpc-concurrency`, `--check-memory`,
+  `--check-temp-dir`, `--check-temp-max-bytes`, and
+  `--check-progress-interval` are wired into the options digest and final
+  resource report. Independent validators publish private results and merge in
+  a fixed order; tests prove parity at 1, 2, 4, and 8 workers.
+- Finite finding limits retain the canonical prefix while all mismatch counters
+  continue to cover the full input. Explicit `--max-findings=0` retains all
+  requested output and therefore remains output-size proportional by contract.
+
+Validated locally:
+
+```text
+go test ./internal/index/schema ./internal/index/pathindex ./internal/repository/index \
+  ./internal/index/analytics ./internal/index/maintenance ./cmd/vaultic/indexcmd \
+  ./internal/index/daemon
+go test -race ./internal/index/maintenance ./internal/index/pathindex \
+  ./internal/index/analytics
+```
+
+Both commands pass. `go test ./...` reaches and passes every Phase 33 owner but
+the repository-wide run is currently red because the unrelated
+`internal/archiver/TestArchiverErrorReporting/file-unreadable` test panics.
+
+Not available in this workspace: representative 50 GB and 500 GB fixtures,
+dedicated HDD-array NFS, native three-replica RADOS, S3 at an independently
+controlled 8 ms RTT, and three-repeat cold/warm performance experiments.
+Consequently the H1-H4 memory, scale, CPU-scaling, and latency targets remain
+pending external execution; no synthetic or small-fixture result is presented
+as satisfying those gates.
 
 ## LLM-executable implementation stages
 

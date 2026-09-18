@@ -41,64 +41,12 @@ func checkEncryption(ctx context.Context, store Store, result *CheckResult, maxF
 	return nil
 }
 
-func compareLegacyState(
-	ctx context.Context,
-	store Store,
-	legacy map[string]struct{},
-	legacyPacks map[vaultic.ID]uint64,
-	slatedb map[string]struct{},
-	packs map[vaultic.ID]schema.PackRecord,
-	result *CheckResult,
-	maxFindings uint,
-) error {
-	for id, count := range legacyPacks {
-		if _, found := packs[id]; found {
-			continue
-		}
-		if _, found, err := store.Get(ctx, schema.PackKey(schema.ID(id))); err != nil {
-			return err
-		} else if found {
-			return fmt.Errorf("pack scan omitted existing pack %s", id.String())
-		}
-		if count == 0 {
-			result.Warnings++
-			addFinding(result, maxFindings, Finding{Kind: "catalog_only_pack", Key: id.String(), Got: "zero blob locations"})
-		} else {
-			result.MissingPacks++
-			addFinding(result, maxFindings, Finding{
-				Kind: "missing_pack", Key: id.String(), Want: "slatedb", Got: fmt.Sprintf("legacy blobs=%d", count),
-			})
-		}
-	}
-	for id := range packs {
-		if _, found := legacyPacks[id]; !found {
-			result.MissingPacks++
-			addFinding(result, maxFindings, Finding{Kind: "missing_pack", Key: id.String(), Want: "legacy"})
-		}
-	}
-	for key := range legacy {
-		if _, found := slatedb[key]; !found {
-			result.MissingInSlateDB++
-			addFinding(result, maxFindings, Finding{Kind: "missing_blob", Key: key})
-		}
-	}
-	for key := range slatedb {
-		if _, found := legacy[key]; !found {
-			result.MissingInLegacy++
-			addFinding(result, maxFindings, Finding{Kind: "unexpected_blob", Key: key})
-		}
-	}
-	return nil
-}
-
 func checkOperationalState(
 	ctx context.Context,
 	store Store,
 	options CheckOptions,
-	packs map[vaultic.ID]schema.PackRecord,
 	result *CheckResult,
 ) error {
-	checkPackOperationalState(packs, result, options.MaxFindings)
 	if err := scan(ctx, store, []byte("q:"), func(entry daemon.KeyValue) error {
 		record, err := schema.UnmarshalCrawlDebtRecord(entry.Value)
 		if err != nil {
@@ -155,22 +103,4 @@ func checkOperationalState(
 		}
 		return nil
 	})
-}
-
-func checkPackOperationalState(packs map[vaultic.ID]schema.PackRecord, result *CheckResult, maxFindings uint) {
-	for id, record := range packs {
-		switch record.Type {
-		case schema.PackMixed:
-			result.MixedPacks++
-		case schema.PackUnknown:
-			result.UnknownPacks++
-			result.Warnings++
-			addFinding(result, maxFindings, Finding{Kind: "unknown_pack_type", Key: id.String()})
-		case schema.PackData, schema.PackTree:
-		}
-		if record.Lifecycle == schema.PackImported || record.Lifecycle == schema.PackExportPending {
-			result.PendingExports++
-			result.Warnings++
-		}
-	}
 }
