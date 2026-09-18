@@ -397,6 +397,8 @@ const (
 	bulkImportL0SSTSizeBytes = 256 * 1024 * 1024
 	bulkImportCacheMaxBytes  = 64 * 1024 * 1024 * 1024
 	bulkImportMaxUnflushed   = 16 * 1024 * 1024 * 1024
+	checkMemoryMinBytes      = 64 * 1024 * 1024
+	checkMemoryMarginBytes   = 512 * 1024 * 1024
 )
 
 type bulkImportMemoryProfile struct {
@@ -1223,7 +1225,7 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().UintVar(&options.MaxFindings, "max-findings", 100, "maximum detailed differences in the summary (zero is unlimited)")
-	command.Flags().StringVar(&options.Memory, "check-memory", "64M", "memory budget for index-check buffers")
+	command.Flags().StringVar(&options.Memory, "check-memory", "auto", "memory budget for index-check buffers (bytes or auto)")
 	command.Flags().StringVar(&options.TempDir, "check-temp-dir", "", "parent directory for encrypted index-check scratch files")
 	command.Flags().StringVar(&options.TempMaxBytes, "check-temp-max-bytes", "8G", "maximum encrypted index-check scratch space")
 	command.Flags().UintVar(&options.Workers, "check-workers", 0, "checker workers (zero uses the effective CPU quota)")
@@ -1251,7 +1253,14 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 	if options.QuorumCapsule == "" && (options.BypassAttestation != "" || options.BypassAttestationKey != "") {
 		return result, fmt.Errorf("--bypass-attestation and --bypass-attestation-key require --quorum-capsule")
 	}
-	memoryBytes, err := parsePositiveCheckBytes("--check-memory", options.Memory)
+	if strings.TrimSpace(options.Memory) == "" {
+		options.Memory = "auto"
+	}
+	if strings.TrimSpace(options.TempMaxBytes) == "" {
+		options.TempMaxBytes = "8G"
+	}
+	availableBytes, availableOK := availableMemoryBytes()
+	memoryBytes, err := parseCheckMemoryBytes(options.Memory, availableBytes, availableOK)
 	if err != nil {
 		return result, err
 	}
@@ -1395,6 +1404,21 @@ func parsePositiveCheckBytes(name, value string) (int64, error) {
 		return 0, fmt.Errorf("invalid %s %q", name, value)
 	}
 	return bytes, nil
+}
+
+func parseCheckMemoryBytes(value string, availableBytes uint64, availableOK bool) (int64, error) {
+	if !strings.EqualFold(strings.TrimSpace(value), "auto") {
+		return parsePositiveCheckBytes("--check-memory", value)
+	}
+	if !availableOK {
+		return checkMemoryMinBytes, nil
+	}
+	margin := max(uint64(checkMemoryMarginBytes), availableBytes/10)
+	budget := availableBytes / 2
+	if margin < availableBytes/2 {
+		budget = availableBytes - margin
+	}
+	return int64(min(uint64(math.MaxInt64), max(uint64(1), budget))), nil
 }
 
 func checkIndexQuorum(ctx context.Context, options indexCheckOptions, globalOptions global.Options, repo *repository.Repository,

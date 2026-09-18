@@ -8,7 +8,7 @@
 
 The bounded checker implementation is available on the development branch. It
 includes pinned serializable read sessions, immutable legacy inventory fencing,
-canonical encrypted external sorting, bounded pack/reference/snapshot/path and
+memory-first canonical sorting with encrypted disk overflow, bounded pack/reference/snapshot/path and
 analytics reductions, deterministic finding selection, global worker and RPC
 limits, and stage progress. The 50/500 GB NFS, native RADOS, and S3 acceptance
 matrix remains an infrastructure gate and is not inferred from unit tests.
@@ -139,11 +139,19 @@ membership, snapshot-commit indexes, path-version checks, placements, backend
 reverse indexes, export provenance, history, and analytics. Maintain a coverage
 matrix mapping each current checker to its replacement and peak-memory bound.
 
-Disk spill is part of the design, not an emergency fallback hidden from users.
-Use an explicit scratch byte budget, bounded open files and merge fan-in, and
-check space before admission. Estimate spill amplification from measured tuple
-volumes and merge passes, not the compressed SlateDB size. Exceeding the budget
-must fail clearly without changing repository data or returning a clean result.
+Sorted runs remain in memory while they fit their assigned checker-memory share.
+When the next record would exceed that share, the spool switches to encrypted
+disk runs with bounded open files and merge fan-in. Disk spill remains an
+explicitly bounded part of the design: check space before admission and estimate
+spill amplification from measured tuple volumes and merge passes, not compressed
+SlateDB size. Exceeding the disk budget must fail clearly without changing
+repository data or returning a clean result.
+
+Location tuples use direct field comparison equivalent to their canonical wire
+order. Fixed-capacity memory runs are admitted using the Go tuple's actual
+in-memory size, sorted independently, and merged without geometric slice growth.
+This keeps retained tuple capacity within its assigned share while allowing a
+fitting spool to avoid encrypted scratch entirely.
 
 Temporary metadata can expose IDs, paths and relationships. Create owner-only
 directories and files, encrypt spill runs with an ephemeral per-run key by
@@ -217,11 +225,21 @@ The following controls are available:
 vaultic index check [existing coverage options]
   --check-workers N                 # 0: quota-aware automatic CPU budget
   --check-rpc-concurrency N         # bounded across all check stages
-  --check-memory BYTES              # CLI working-set admission budget
+  --check-memory BYTES|auto         # buffer budget; auto uses reclaimable memory
   --check-temp-dir PATH             # parent of an owned encrypted scratch dir
   --check-temp-max-bytes BYTES       # hard scratch admission limit
   --check-progress-interval DURATION
 ```
+
+`--check-memory=auto` is the CLI default. On Linux it starts with the smaller of
+host `MemAvailable` and finite cgroup headroom at any hierarchy level, counting
+inactive file cache as reclaimable. When capacity exceeds twice the greater of
+10% or 512 MiB, auto reserves that margin; smaller detected capacities are split
+equally instead. Detection failure falls back to 64 MiB. An explicit byte value
+selects a fixed checker-buffer admission budget. Neither mode is a hard process
+RSS limit because runtime, decoded RPC values, and native allocations remain
+outside these buffers. The effective byte value is included in progress, the
+result resource report, and the options digest.
 
 Freeze exact names, defaults and resource-limit exit mapping in Stage A after
 checking repository CLI conventions. Preserve exit 0 for successful coverage,
@@ -273,8 +291,9 @@ Implemented ownership and bounds:
   sequence before a successful result is returned.
 - Location equality, pack contribution multiplicity, references, snapshot
   membership, snapshot-commit indexes, placements, path versions, analytics
-  dictionaries/materializations/GDPR expectations, and legacy inventory use
-  bounded scans or encrypted external runs. Merge fan-in is capped at 32.
+  dictionaries/materializations/GDPR expectations, and legacy inventory retain
+  fitting sorted runs in bounded memory and overflow to encrypted external runs.
+  Merge fan-in is capped at 32.
 - Scratch admission has a hard byte limit, owner-only permissions, authenticated
   AES-GCM records, unique nonce namespaces, cancellation checks, and ownership-
   checked cleanup. Oversized records and exhausted scratch return errors.

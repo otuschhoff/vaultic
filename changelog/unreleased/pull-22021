@@ -1,0 +1,13 @@
+Enhancement: Make index checks memory-first and quota-aware
+
+`vaultic index check` now defaults `--check-memory` to `auto`, deriving a
+checker-buffer budget from available host and cgroup memory while preserving
+headroom for the operating system and reclaimable file cache. Explicit byte
+values continue to provide fixed admission budgets.
+
+Location and key/value checker spools retain sorted runs in memory while they
+fit, then use authenticated encrypted scratch on overflow. Direct tuple
+comparison and fixed-capacity memory runs reduce synthetic checker time,
+allocation volume, and peak RSS without changing exact comparison results.
+
+https://github.com/vaultic/vaultic/pull/22021

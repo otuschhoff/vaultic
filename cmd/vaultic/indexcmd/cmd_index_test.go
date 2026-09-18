@@ -54,6 +54,31 @@ func TestParsePositiveCheckBytes(t *testing.T) {
 	}
 }
 
+func TestParseCheckMemoryBytes(t *testing.T) {
+	const gib = uint64(1024 * 1024 * 1024)
+	for _, test := range []struct {
+		value       string
+		available   uint64
+		availableOK bool
+		want        int64
+	}{
+		{value: "256M", available: 32 * gib, want: 256 << 20},
+		{value: "auto", available: 32 * gib, availableOK: true, want: int64(32*gib - 32*gib/10)},
+		{value: " AUTO ", available: 256 * gib, availableOK: true, want: int64(256*gib - 256*gib/10)},
+		{value: "auto", available: gib, availableOK: true, want: 512 << 20},
+		{value: "auto", available: 128 << 20, availableOK: true, want: 64 << 20},
+		{value: "auto", available: 32 << 20, availableOK: true, want: 16 << 20},
+		{value: "auto", available: 1, availableOK: true, want: 1},
+		{value: "auto", available: 0, availableOK: true, want: 1},
+		{value: "auto", want: 64 << 20},
+	} {
+		got, err := parseCheckMemoryBytes(test.value, test.available, test.availableOK)
+		if err != nil || got != test.want {
+			t.Fatalf("parse %q with %d available bytes (detected=%t) = %d, %v; want %d", test.value, test.available, test.availableOK, got, err, test.want)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	base := filepath.Base(os.Args[0])
 	if base == "custodian" || base == "custodian.exe" {
@@ -1359,7 +1384,7 @@ func TestIndexCheckTreatsAnalyticsMismatchAsDirty(t *testing.T) {
 func TestIndexCheckResourceFlags(t *testing.T) {
 	command := newIndexCheckCommand(&global.Options{})
 	for name, defaultValue := range map[string]string{
-		"check-memory": "64M", "check-temp-max-bytes": "8G",
+		"check-memory": "auto", "check-temp-max-bytes": "8G",
 		"check-workers": "0", "check-rpc-concurrency": "0",
 		"check-progress-interval": "30s",
 	} {

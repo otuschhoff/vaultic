@@ -11,3 +11,5 @@ func physicalMemoryBytes() uint64 {
 	}
 	return bytes
 }
+
+func availableMemoryBytes() (uint64, bool) { return 0, false }

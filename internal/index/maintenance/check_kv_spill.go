@@ -77,14 +77,21 @@ func (spool *checkKVSpool) add(key, value []byte, sequence uint64) error {
 	}
 	spool.buffer = append(spool.buffer, record)
 	spool.bufferBytes += record.size()
+	if len(spool.runs) > 0 && spool.bufferBytes >= spool.memoryBytes {
+		return spool.flush()
+	}
 	return nil
+}
+
+func (spool *checkKVSpool) sortBuffer() {
+	sort.SliceStable(spool.buffer, func(left, right int) bool { return compareCheckKV(spool.buffer[left], spool.buffer[right]) < 0 })
 }
 
 func (spool *checkKVSpool) flush() error {
 	if len(spool.buffer) == 0 {
 		return nil
 	}
-	sort.SliceStable(spool.buffer, func(left, right int) bool { return compareCheckKV(spool.buffer[left], spool.buffer[right]) < 0 })
+	spool.sortBuffer()
 	writer, err := spool.newWriter()
 	if err != nil {
 		return err
@@ -108,8 +115,12 @@ func (spool *checkKVSpool) seal() error {
 	if spool.sealed {
 		return nil
 	}
-	if err := spool.flush(); err != nil {
-		return err
+	if len(spool.runs) == 0 {
+		spool.sortBuffer()
+	} else {
+		if err := spool.flush(); err != nil {
+			return err
+		}
 	}
 	for len(spool.runs) > spool.fanIn {
 		var reduced []checkRun
@@ -172,6 +183,9 @@ func (spool *checkKVSpool) merge(runs []checkRun) (checkRun, error) {
 func (spool *checkKVSpool) iterator() (*checkKVIterator, error) {
 	if err := spool.seal(); err != nil {
 		return nil, err
+	}
+	if len(spool.runs) == 0 {
+		return &checkKVIterator{ctx: spool.ctx, memory: spool.buffer}, nil
 	}
 	return newCheckKVIterator(spool.ctx, spool.runs, spool.scratch.key, spool.memoryBytes)
 }
@@ -273,13 +287,13 @@ func (writer *checkKVWriter) close() (checkRun, error) {
 func (writer *checkKVWriter) abort() {
 	if !writer.closed {
 		writer.closed = true
-		_ = writer.file.Close()
+		_ = writer.file.Close() // Abort preserves the primary writer error.
 	}
 	writer.abortFile()
 }
 
 func (writer *checkKVWriter) abortFile() {
-	_ = os.Remove(writer.path)
+	_ = os.Remove(writer.path) // Session cleanup removes any remaining run.
 	writer.spool.scratch.release(writer.reserved)
 	writer.reserved = 0
 }
@@ -301,17 +315,17 @@ func openCheckKVReader(run checkRun, key [32]byte, maxRecord uint64) (*checkKVRe
 	reader := bufio.NewReaderSize(file, 32<<10)
 	header := make([]byte, checkRunHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil || !bytes.Equal(header[:8], checkRunMagic[:]) {
-		_ = file.Close()
+		_ = file.Close() // Preserve the invalid-header error.
 		return nil, fmt.Errorf("invalid checker key/value run header")
 	}
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
-		_ = file.Close()
+		_ = file.Close() // Preserve the cipher-construction error.
 		return nil, err
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		_ = file.Close()
+		_ = file.Close() // Preserve the AEAD-construction error.
 		return nil, err
 	}
 	result := &checkKVReader{file: file, reader: reader, aead: aead, maxRecord: maxRecord}
@@ -375,9 +389,11 @@ func (items *checkKVHeap) Pop() any {
 }
 
 type checkKVIterator struct {
-	ctx     context.Context
-	readers []*checkKVReader
-	heap    checkKVHeap
+	ctx         context.Context
+	readers     []*checkKVReader
+	heap        checkKVHeap
+	memory      []checkKVRecord
+	memoryIndex int
 }
 
 func newCheckKVIterator(ctx context.Context, runs []checkRun, key [32]byte, maxRecord uint64) (*checkKVIterator, error) {
@@ -385,13 +401,13 @@ func newCheckKVIterator(ctx context.Context, runs []checkRun, key [32]byte, maxR
 	for _, run := range runs {
 		reader, err := openCheckKVReader(run, key, maxRecord)
 		if err != nil {
-			_ = iterator.close()
+			_ = iterator.close() // Preserve the reader-open error.
 			return nil, err
 		}
 		iterator.readers = append(iterator.readers, reader)
 		record, found, err := reader.next()
 		if err != nil {
-			_ = iterator.close()
+			_ = iterator.close() // Preserve the initial-read error.
 			return nil, err
 		}
 		if found {
@@ -404,6 +420,14 @@ func newCheckKVIterator(ctx context.Context, runs []checkRun, key [32]byte, maxR
 func (iterator *checkKVIterator) next() (checkKVRecord, bool, error) {
 	if err := iterator.ctx.Err(); err != nil {
 		return checkKVRecord{}, false, err
+	}
+	if iterator.memory != nil {
+		if iterator.memoryIndex >= len(iterator.memory) {
+			return checkKVRecord{}, false, nil
+		}
+		record := iterator.memory[iterator.memoryIndex]
+		iterator.memoryIndex++
+		return record, true, nil
 	}
 	if len(iterator.heap) == 0 {
 		return checkKVRecord{}, false, nil

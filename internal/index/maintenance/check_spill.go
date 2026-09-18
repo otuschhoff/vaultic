@@ -3,7 +3,7 @@ package maintenance
 import (
 	"bufio"
 	"bytes"
-	"container/heap"
+	"cmp"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -16,9 +16,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -27,6 +28,7 @@ import (
 const (
 	locationTupleVersion = 1
 	locationTupleSize    = 90
+	locationChunkBytes   = 4 << 20
 	checkRunHeaderSize   = 12
 	checkRunPrefix       = "run-"
 	checkScratchPrefix   = "vaultic-check-"
@@ -42,6 +44,8 @@ type locationTuple struct {
 	Length             uint64
 	UncompressedLength uint64
 }
+
+const locationTupleMemorySize = uint64(unsafe.Sizeof(locationTuple{}))
 
 func (tuple locationTuple) marshalBinary() [locationTupleSize]byte {
 	var encoded [locationTupleSize]byte
@@ -70,8 +74,22 @@ func unmarshalLocationTuple(encoded []byte) (locationTuple, error) {
 }
 
 func compareLocationTuple(left, right locationTuple) int {
-	leftEncoded, rightEncoded := left.marshalBinary(), right.marshalBinary()
-	return bytes.Compare(leftEncoded[:], rightEncoded[:])
+	if compared := bytes.Compare(left.BlobID[:], right.BlobID[:]); compared != 0 {
+		return compared
+	}
+	if compared := bytes.Compare(left.PackID[:], right.PackID[:]); compared != 0 {
+		return compared
+	}
+	if compared := cmp.Compare(left.Type, right.Type); compared != 0 {
+		return compared
+	}
+	if compared := cmp.Compare(left.Offset, right.Offset); compared != 0 {
+		return compared
+	}
+	if compared := cmp.Compare(left.Length, right.Length); compared != 0 {
+		return compared
+	}
+	return cmp.Compare(left.UncompressedLength, right.UncompressedLength)
 }
 
 func (tuple locationTuple) findingKey() string {
@@ -88,6 +106,7 @@ func (tuple locationTuple) findingKey() string {
 
 type checkScratch struct {
 	mu       sync.Mutex
+	parent   string
 	dir      string
 	marker   string
 	key      [32]byte
@@ -109,30 +128,36 @@ func newCheckScratch(parent string, maxBytes uint64) (*checkScratch, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("checker scratch parent must be an existing directory")
 	}
-	dir, err := os.MkdirTemp(parent, checkScratchPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("create checker scratch directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.Remove(dir)
-		return nil, fmt.Errorf("protect checker scratch directory: %w", err)
-	}
-	scratch := &checkScratch{dir: dir, maxBytes: maxBytes}
+	scratch := &checkScratch{parent: parent, maxBytes: maxBytes}
 	if _, err := rand.Read(scratch.key[:]); err != nil {
-		_ = os.Remove(dir)
 		return nil, fmt.Errorf("create checker scratch key: %w", err)
 	}
 	markerBytes := make([]byte, 32)
 	if _, err := rand.Read(markerBytes); err != nil {
-		_ = os.Remove(dir)
 		return nil, fmt.Errorf("create checker scratch marker: %w", err)
 	}
 	scratch.marker = fmt.Sprintf("%x", markerBytes)
-	if err := os.WriteFile(filepath.Join(dir, ".vaultic-check-owned"), []byte(scratch.marker), 0o600); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("write checker scratch marker: %w", err)
-	}
 	return scratch, nil
+}
+
+func (scratch *checkScratch) ensureDirLocked() error {
+	if scratch.dir != "" {
+		return nil
+	}
+	dir, err := os.MkdirTemp(scratch.parent, checkScratchPrefix)
+	if err != nil {
+		return fmt.Errorf("create checker scratch directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.Remove(dir) // The permission error is the actionable failure.
+		return fmt.Errorf("protect checker scratch directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".vaultic-check-owned"), []byte(scratch.marker), 0o600); err != nil {
+		_ = os.RemoveAll(dir) // The marker-write error is the actionable failure.
+		return fmt.Errorf("write checker scratch marker: %w", err)
+	}
+	scratch.dir = dir
+	return nil
 }
 
 func (scratch *checkScratch) reserve(bytes uint64) error {
@@ -159,6 +184,9 @@ func (scratch *checkScratch) nextPath() (string, [4]byte, error) {
 	scratch.mu.Lock()
 	defer scratch.mu.Unlock()
 	var prefix [4]byte
+	if err := scratch.ensureDirLocked(); err != nil {
+		return "", prefix, err
+	}
 	if scratch.nextRun == math.MaxUint32 {
 		return "", prefix, fmt.Errorf("checker scratch run limit exceeded")
 	}
@@ -180,15 +208,21 @@ func (scratch *checkScratch) stats() (peak, merges uint64) {
 }
 
 func (scratch *checkScratch) close() error {
-	base := filepath.Base(scratch.dir)
-	if !strings.HasPrefix(base, checkScratchPrefix) || filepath.Dir(scratch.dir) == scratch.dir {
+	scratch.mu.Lock()
+	dir := scratch.dir
+	scratch.mu.Unlock()
+	if dir == "" {
+		return nil
+	}
+	base := filepath.Base(dir)
+	if !strings.HasPrefix(base, checkScratchPrefix) || filepath.Dir(dir) == dir {
 		return fmt.Errorf("refusing to remove unowned checker scratch path")
 	}
-	marker, err := os.ReadFile(filepath.Join(scratch.dir, ".vaultic-check-owned"))
+	marker, err := os.ReadFile(filepath.Join(dir, ".vaultic-check-owned"))
 	if err != nil || string(marker) != scratch.marker {
 		return fmt.Errorf("refusing to remove checker scratch without matching ownership marker")
 	}
-	return os.RemoveAll(scratch.dir)
+	return os.RemoveAll(dir)
 }
 
 type checkRun struct {
@@ -200,10 +234,14 @@ type locationSpool struct {
 	ctx         context.Context
 	scratch     *checkScratch
 	memoryBytes uint64
+	memoryUsed  uint64
+	chunkItems  int
 	fanIn       int
 	deduplicate bool
 	buffer      []locationTuple
+	memoryRuns  [][]locationTuple
 	runs        []checkRun
+	diskMode    bool
 	sealed      bool
 }
 
@@ -216,14 +254,34 @@ func newLocationMultisetSpool(ctx context.Context, scratch *checkScratch, memory
 }
 
 func newLocationSpoolMode(ctx context.Context, scratch *checkScratch, memoryBytes uint64, fanIn int, deduplicate bool) (*locationSpool, error) {
-	if memoryBytes < locationTupleSize || fanIn < 2 || fanIn > 128 {
+	if memoryBytes < locationTupleMemorySize || fanIn < 2 || fanIn > 128 {
 		return nil, fmt.Errorf("invalid checker spool memory or fan-in limit")
 	}
-	capacity := int(memoryBytes / locationTupleSize)
+	chunkItems := int(min(memoryBytes, uint64(locationChunkBytes)) / locationTupleMemorySize)
 	return &locationSpool{
 		ctx: ctx, scratch: scratch, memoryBytes: memoryBytes, fanIn: fanIn,
-		deduplicate: deduplicate, buffer: make([]locationTuple, 0, capacity),
+		deduplicate: deduplicate, chunkItems: chunkItems,
 	}, nil
+}
+
+func (spool *locationSpool) allocateBuffer() error {
+	if spool.buffer != nil {
+		return nil
+	}
+	capacity := spool.chunkItems
+	if !spool.diskMode {
+		remaining := (spool.memoryBytes - spool.memoryUsed) / locationTupleMemorySize
+		if remaining == 0 {
+			if err := spool.spillMemoryRuns(); err != nil {
+				return err
+			}
+		} else {
+			capacity = int(min(uint64(capacity), remaining))
+		}
+	}
+	spool.buffer = make([]locationTuple, 0, capacity)
+	spool.memoryUsed += uint64(capacity) * locationTupleMemorySize
+	return nil
 }
 
 func (spool *locationSpool) add(tuple locationTuple) error {
@@ -233,34 +291,69 @@ func (spool *locationSpool) add(tuple locationTuple) error {
 	if err := spool.ctx.Err(); err != nil {
 		return err
 	}
+	if err := spool.allocateBuffer(); err != nil {
+		return err
+	}
+	if len(spool.buffer) == cap(spool.buffer) {
+		if err := spool.finishBuffer(); err != nil {
+			return err
+		}
+		if err := spool.allocateBuffer(); err != nil {
+			return err
+		}
+	}
 	spool.buffer = append(spool.buffer, tuple)
-	if uint64(len(spool.buffer))*locationTupleSize >= spool.memoryBytes {
-		return spool.flush()
+	if len(spool.buffer) == cap(spool.buffer) {
+		return spool.finishBuffer()
 	}
 	return nil
 }
 
-func (spool *locationSpool) flush() error {
-	if len(spool.buffer) == 0 {
-		return nil
-	}
-	sort.Slice(spool.buffer, func(left, right int) bool { return compareLocationTuple(spool.buffer[left], spool.buffer[right]) < 0 })
-	records := spool.buffer
+func (spool *locationSpool) sortRecords(records []locationTuple) []locationTuple {
+	slices.SortFunc(records, compareLocationTuple)
 	if spool.deduplicate {
-		unique := spool.buffer[:0]
-		for _, tuple := range spool.buffer {
+		unique := records[:0]
+		for _, tuple := range records {
 			if len(unique) == 0 || compareLocationTuple(unique[len(unique)-1], tuple) != 0 {
 				unique = append(unique, tuple)
 			}
 		}
-		records = unique
+		return unique
 	}
-	run, err := spool.writeRun(records)
-	if err != nil {
-		return err
+	return records
+}
+
+func (spool *locationSpool) finishBuffer() error {
+	if len(spool.buffer) == 0 {
+		return nil
 	}
-	spool.runs = append(spool.runs, run)
-	spool.buffer = spool.buffer[:0]
+	records := spool.sortRecords(spool.buffer)
+	if spool.diskMode {
+		run, err := spool.writeRun(records)
+		if err != nil {
+			return err
+		}
+		spool.runs = append(spool.runs, run)
+		spool.buffer = spool.buffer[:0]
+		return nil
+	}
+	spool.memoryRuns = append(spool.memoryRuns, records)
+	spool.buffer = nil
+	return nil
+}
+
+func (spool *locationSpool) spillMemoryRuns() error {
+	for len(spool.memoryRuns) > 0 {
+		records := spool.memoryRuns[0]
+		run, err := spool.writeRun(records)
+		if err != nil {
+			return err
+		}
+		spool.runs = append(spool.runs, run)
+		spool.memoryRuns = spool.memoryRuns[1:]
+		spool.memoryUsed -= uint64(cap(records)) * locationTupleMemorySize
+	}
+	spool.diskMode = true
 	return nil
 }
 
@@ -290,9 +383,9 @@ func (spool *locationSpool) writeRun(records []locationTuple) (checkRun, error) 
 	}
 	succeeded := false
 	defer func() {
-		_ = file.Close()
+		_ = file.Close() // Preserve the primary write or sync error.
 		if !succeeded {
-			_ = os.Remove(path)
+			_ = os.Remove(path) // Preserve the primary run-creation error.
 			spool.scratch.release(predicted)
 		}
 	}()
@@ -346,7 +439,7 @@ func (spool *locationSpool) seal() error {
 	if spool.sealed {
 		return nil
 	}
-	if err := spool.flush(); err != nil {
+	if err := spool.finishBuffer(); err != nil {
 		return err
 	}
 	for len(spool.runs) > spool.fanIn {
@@ -451,20 +544,20 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 func (writer *locationRunWriter) abort() {
 	if !writer.closed {
 		writer.closed = true
-		_ = writer.file.Close()
+		_ = writer.file.Close() // Abort preserves the primary writer error.
 	}
 	writer.abortFile()
 }
 
 func (writer *locationRunWriter) abortFile() {
-	_ = os.Remove(writer.path)
+	_ = os.Remove(writer.path) // Session cleanup removes any remaining run.
 	writer.spool.scratch.release(writer.reserved)
 	writer.reserved = 0
 }
 
 func (spool *locationSpool) mergeRuns(runs []checkRun) (checkRun, error) {
 	spool.scratch.recordMerge()
-	iterator, err := newLocationIterator(spool.ctx, runs, spool.scratch.key, spool.deduplicate)
+	iterator, err := newLocationIterator(spool.ctx, runs, nil, spool.scratch.key, spool.deduplicate)
 	if err != nil {
 		return checkRun{}, err
 	}
@@ -516,21 +609,21 @@ func openLocationRun(run checkRun, key [32]byte) (*locationRunReader, error) {
 	reader := bufio.NewReaderSize(file, 32<<10)
 	header := make([]byte, checkRunHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		_ = file.Close()
+		_ = file.Close() // Preserve the header-read error.
 		return nil, fmt.Errorf("read checker run header: %w", err)
 	}
 	if !bytes.Equal(header[:8], checkRunMagic[:]) {
-		_ = file.Close()
+		_ = file.Close() // Preserve the invalid-header error.
 		return nil, fmt.Errorf("invalid checker run header")
 	}
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
-		_ = file.Close()
+		_ = file.Close() // Preserve the cipher-construction error.
 		return nil, err
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		_ = file.Close()
+		_ = file.Close() // Preserve the AEAD-construction error.
 		return nil, err
 	}
 	result := &locationRunReader{file: file, reader: reader, aead: aead}
@@ -568,6 +661,27 @@ func (reader *locationRunReader) next() (locationTuple, bool, error) {
 
 func (reader *locationRunReader) close() error { return reader.file.Close() }
 
+type locationMemoryReader struct {
+	records []locationTuple
+	index   int
+}
+
+func (reader *locationMemoryReader) next() (locationTuple, bool, error) {
+	if reader.index >= len(reader.records) {
+		return locationTuple{}, false, nil
+	}
+	tuple := reader.records[reader.index]
+	reader.index++
+	return tuple, true, nil
+}
+
+func (*locationMemoryReader) close() error { return nil }
+
+type locationReader interface {
+	next() (locationTuple, bool, error)
+	close() error
+}
+
 type locationHeapItem struct {
 	tuple  locationTuple
 	reader int
@@ -575,24 +689,48 @@ type locationHeapItem struct {
 
 type locationHeap []locationHeapItem
 
-func (items locationHeap) Len() int { return len(items) }
-func (items locationHeap) Less(left, right int) bool {
-	return compareLocationTuple(items[left].tuple, items[right].tuple) < 0
+func (items *locationHeap) push(value locationHeapItem) {
+	*items = append(*items, value)
+	for index := len(*items) - 1; index > 0; {
+		parent := (index - 1) / 2
+		if compareLocationTuple((*items)[parent].tuple, (*items)[index].tuple) <= 0 {
+			break
+		}
+		(*items)[parent], (*items)[index] = (*items)[index], (*items)[parent]
+		index = parent
+	}
 }
-func (items locationHeap) Swap(left, right int) {
-	items[left], items[right] = items[right], items[left]
-}
-func (items *locationHeap) Push(value any) { *items = append(*items, value.(locationHeapItem)) }
-func (items *locationHeap) Pop() any {
-	old := *items
-	value := old[len(old)-1]
-	*items = old[:len(old)-1]
-	return value
+
+func (items *locationHeap) pop() locationHeapItem {
+	result := (*items)[0]
+	last := (*items)[len(*items)-1]
+	*items = (*items)[:len(*items)-1]
+	if len(*items) == 0 {
+		return result
+	}
+	(*items)[0] = last
+	for index := 0; ; {
+		left := index*2 + 1
+		if left >= len(*items) {
+			break
+		}
+		smallest := left
+		right := left + 1
+		if right < len(*items) && compareLocationTuple((*items)[right].tuple, (*items)[left].tuple) < 0 {
+			smallest = right
+		}
+		if compareLocationTuple((*items)[index].tuple, (*items)[smallest].tuple) <= 0 {
+			break
+		}
+		(*items)[index], (*items)[smallest] = (*items)[smallest], (*items)[index]
+		index = smallest
+	}
+	return result
 }
 
 type locationIterator struct {
 	ctx         context.Context
-	readers     []*locationRunReader
+	readers     []locationReader
 	heap        locationHeap
 	last        locationTuple
 	hasLast     bool
@@ -603,7 +741,7 @@ func (spool *locationSpool) iterator() (*locationIterator, error) {
 	if err := spool.seal(); err != nil {
 		return nil, err
 	}
-	return newLocationIterator(spool.ctx, spool.runs, spool.scratch.key, spool.deduplicate)
+	return newLocationIterator(spool.ctx, spool.runs, spool.memoryRuns, spool.scratch.key, spool.deduplicate)
 }
 
 func (spool *locationSpool) close() error {
@@ -617,42 +755,62 @@ func (spool *locationSpool) close() error {
 	}
 	spool.runs = nil
 	spool.buffer = nil
+	spool.memoryRuns = nil
+	spool.memoryUsed = 0
 	return first
 }
 
-func newLocationIterator(ctx context.Context, runs []checkRun, key [32]byte, deduplicate bool) (*locationIterator, error) {
+func newLocationIterator(
+	ctx context.Context,
+	runs []checkRun,
+	memoryRuns [][]locationTuple,
+	key [32]byte,
+	deduplicate bool,
+) (*locationIterator, error) {
 	iterator := &locationIterator{ctx: ctx, deduplicate: deduplicate}
 	for _, run := range runs {
 		reader, err := openLocationRun(run, key)
 		if err != nil {
-			_ = iterator.close()
+			_ = iterator.close() // Preserve the reader-open error.
 			return nil, err
 		}
 		iterator.readers = append(iterator.readers, reader)
 		tuple, found, err := reader.next()
 		if err != nil {
-			_ = iterator.close()
+			_ = iterator.close() // Preserve the initial-read error.
 			return nil, err
 		}
 		if found {
-			heap.Push(&iterator.heap, locationHeapItem{tuple: tuple, reader: len(iterator.readers) - 1})
+			iterator.heap.push(locationHeapItem{tuple: tuple, reader: len(iterator.readers) - 1})
+		}
+	}
+	for _, records := range memoryRuns {
+		reader := &locationMemoryReader{records: records}
+		iterator.readers = append(iterator.readers, reader)
+		tuple, found, err := reader.next()
+		if err != nil {
+			_ = iterator.close() // Preserve the initial-read error.
+			return nil, err
+		}
+		if found {
+			iterator.heap.push(locationHeapItem{tuple: tuple, reader: len(iterator.readers) - 1})
 		}
 	}
 	return iterator, nil
 }
 
 func (iterator *locationIterator) next() (locationTuple, bool, error) {
-	for iterator.heap.Len() > 0 {
+	for len(iterator.heap) > 0 {
 		if err := iterator.ctx.Err(); err != nil {
 			return locationTuple{}, false, err
 		}
-		item := heap.Pop(&iterator.heap).(locationHeapItem)
+		item := iterator.heap.pop()
 		next, found, err := iterator.readers[item.reader].next()
 		if err != nil {
 			return locationTuple{}, false, err
 		}
 		if found {
-			heap.Push(&iterator.heap, locationHeapItem{tuple: next, reader: item.reader})
+			iterator.heap.push(locationHeapItem{tuple: next, reader: item.reader})
 		}
 		if iterator.deduplicate && iterator.hasLast && compareLocationTuple(iterator.last, item.tuple) == 0 {
 			continue
@@ -694,7 +852,7 @@ func countLocationSpool(spool *locationSpool) (uint64, error) {
 }
 
 func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *checkScratch, memoryBytes uint64) (string, error) {
-	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleSize), 32)
+	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleMemorySize), 32)
 	if err != nil {
 		return "", err
 	}

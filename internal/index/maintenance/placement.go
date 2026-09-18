@@ -344,7 +344,7 @@ func checkPlacementRecords(
 	result *CheckResult,
 	maxFindings uint,
 ) error {
-	membership, err := newLocationSpool(ctx, scratch, max(memoryBytes, uint64(locationTupleSize)), 32)
+	membership, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleMemorySize), 32)
 	if err != nil {
 		return err
 	}

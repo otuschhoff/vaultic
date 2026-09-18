@@ -116,6 +116,128 @@ write/read allocation, reducing tuple heap churn/comparisons, and partitioning
 legacy output so decode workers do not contend on one spool. They should be
 measured one at a time; raising workers alone is not justified by this fixture.
 
+## Memory-first follow-up
+
+A subsequent memory-first run optimization retains a complete sorted spool in
+RAM when it fits its assigned checker-memory share and creates encrypted disk
+runs only after that share is exceeded. A matched synthetic 10x, four-worker
+follow-up used three one-iteration repetitions:
+
+| Memory budget | Median | Scratch peak | Allocation bytes/op |
+|---:|---:|---:|---:|
+| 8 MiB | 2,310.865 ms | 72,371,584 B | about 615.5 MB |
+| 64 MiB | 686.468 ms | 0 B | about 458.7 MB |
+
+The normalized result digest remained
+`c24e053b15fb7c10b68a973874b2ee3fbc6a83a1c911b30ab839490564fd4cbb`.
+The memory-only median was 70.3% lower. The three-repeat 64 MiB timing had
+visible first-run variance and remains synthetic evidence rather than
+representative acceptance. A 1 GiB control also used zero scratch and showed no
+benefit over 64 MiB, confirming that buffers grow on demand rather than eagerly
+reserving the configured maximum.
+
+### Sustained symbolized comparison
+
+A matched sustained comparison then ran each mode for a requested five-minute
+benchmark window. Harness setup and profile finalization made each process last
+about 5:59 wall time. Both runs used the same optimized, unstripped ELF with
+build ID `3c067ec788f7dea09d081518024018a138a268da`; `.debug_info`, `.debug_line`,
+and `.symtab` were verified before execution. CPU, allocation/live-heap, block,
+mutex, maximum-RSS, and short runtime-trace artifacts are retained under
+`/volume2/NASDA2/rustic/db.test/phase33-current/memory-first-10min/`.
+
+| Metric | 8 MiB encrypted spill | 64 MiB memory-first | Change |
+|---|---:|---:|---:|
+| Completed checks | 154 | 517 | 3.36x throughput |
+| Time/check | 2,324.156 ms | 692.540 ms | 70.2% lower |
+| CPU time/check | 2.865 s | 1.141 s | 60.2% lower |
+| System CPU/check | 0.767 s | 0.062 s | 91.9% lower |
+| Peak RSS | 216.4 MiB | 331.7 MiB | 53.3% higher |
+| Allocation bytes/check | 619.6 MB | 458.7 MB | 26.0% lower |
+| Allocations/check | 7,272,449 | 692,436 | 90.5% lower |
+| Scratch peak/check | 72,371,584 B | 0 B | eliminated |
+| Filesystem output blocks | 21,779,872 | 640 | effectively eliminated |
+
+Both runs produced result digest
+`c24e053b15fb7c10b68a973874b2ee3fbc6a83a1c911b30ab839490564fd4cbb`,
+had no major page faults or swap, and exited successfully. Linux reports the
+filesystem metric in 512-byte blocks, corresponding to about 10.4 GiB versus
+320 KiB over the complete profiled processes.
+
+The symbolized profiles explain the change and identify the next bottlenecks:
+
+- Spill mode spent 38.7% cumulative CPU in `locationSpool.writeRun`; raw write
+  syscalls were 26.5% flat CPU. Per-record AES-GCM seal/open and run-reader heap
+  operations also dominated allocation count. Memory-first removes this path.
+- Memory-first CPU is led by `compareLocationTuple` at 26.3% cumulative and
+  `locationSpool.sortBuffer` at 35.3% cumulative. Tuple sorting is now the main
+  algorithmic CPU target.
+- Slice growth at `locationSpool.add` accounts for 71.3% of memory-first
+  allocation bytes. It is the main allocation-volume and peak-RSS target;
+  metadata `ScanPrefix`, schema decoding, and legacy packed-blob conversion
+  dominate allocation object count.
+- Runtime scanning/GC remains material: `runtime.scanObject` is 17.2%
+  cumulative CPU and `runtime.tryDeferToSpanScan` 12.2% in memory-first mode.
+- Shared legacy-spool insertion remains the principal lock bottleneck, but
+  cumulative mutex delay fell from 392 s to 63 s even though memory-first
+  completed 3.36 times as many checks. Partitioned producer spools remain the
+  next concurrency improvement.
+- Short matched traces recorded only 106 ms and 317 ms total scheduler delay;
+  scheduler starvation is not the current throughput limit. Trace instrumentation
+  slowed both modes, so sustained CPU profiles remain the timing authority.
+
+The sustained result confirms the short-run speedup rather than a warmup or
+single-iteration artifact. It still represents the in-process synthetic 10x
+fixture, not the pending production-scale NFS/RADOS/S3 acceptance matrix.
+
+### Tuple sort and allocation follow-up
+
+The next optimization replaced serialized tuple comparisons with direct field
+comparisons and replaced geometrically growing location slices with
+fixed-capacity, 4 MiB memory runs. Admission accounts for the Go tuple's actual
+in-memory size rather than its 90-byte wire encoding. Memory runs are sorted
+independently and merged in memory; if their aggregate capacity would exceed the
+assigned share, the spool switches to the existing encrypted disk-run path.
+
+Three one-iteration repetitions of synthetic 10x with four workers produced:
+
+| Memory budget | Median | Change from prior follow-up | Scratch peak | Allocation bytes/op |
+|---:|---:|---:|---:|---:|
+| 8 MiB | 846.208 ms | 63.4% lower | 72,371,584 B | about 448.4 MB |
+| 64 MiB | 381.633 ms | 44.4% lower | 0 B | about 202.8 MB |
+
+Every repetition retained input digest
+`2ae93a4e572556db572d9ae847d8dee6aea2ab17294192b2ae33fb9f8a91c0fb`
+and result digest
+`c24e053b15fb7c10b68a973874b2ee3fbc6a83a1c911b30ab839490564fd4cbb`.
+The 64 MiB result allocated 55.8% fewer bytes than the preceding memory-first
+implementation. Allocation count stayed near 692,000/check because metadata
+scan and decode paths, rather than tuple-slice growth, now dominate object count.
+
+A normal optimized, unstripped test ELF with GNU build ID
+`49ce4776f03fd9a9ef4055aa3e7a7505aaabf881` then completed 100 checks while
+collecting CPU, heap, block, and mutex profiles. `.debug_info`, `.debug_line`,
+and `.symtab` were verified before execution.
+
+| Metric | Prior sustained memory-first | Tuple/chunk optimized | Change |
+|---|---:|---:|---:|
+| Time/check | 692.540 ms | 369.972 ms | 46.6% lower |
+| CPU time/check | 1.141 s | 0.679 s | 40.5% lower |
+| Peak RSS | 331.7 MiB | 278.2 MiB | 16.1% lower |
+| Allocation bytes/check | 458.7 MB | 202.8 MB | 55.8% lower |
+| Allocations/check | 692,436 | 692,381 | unchanged |
+| Scratch peak/check | 0 B | 0 B | unchanged |
+
+Tuple sorting fell from 35.3% to 15.2% cumulative CPU and direct tuple
+comparison fell from 26.3% to 6.4%. `locationSpool.add` fell to 15.9%
+cumulative CPU. Fixed-capacity allocation in `locationSpool.allocateBuffer` is
+now 36.7% of allocation space, about 72 MiB/check; unlike the prior 71.3%
+geometric-growth attribution, this is the admitted tuple storage retained for
+the check. JSON scan/decode, legacy packed-index construction, runtime scanning,
+and the shared legacy-spool mutex are now the principal synthetic bottlenecks.
+This follow-up remains local synthetic evidence and does not close any
+representative backend or production-scale gate.
+
 ## Commands and safety checks
 
 The worker matrix used:

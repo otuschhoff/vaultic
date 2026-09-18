@@ -102,7 +102,7 @@ func TestCheckOptionsDigestIsCanonicalAndSensitive(t *testing.T) {
 }
 
 func TestCheckRejectsMemoryBelowTupleWorkingSet(t *testing.T) {
-	if _, err := CheckWithOptions(context.Background(), nil, nil, CheckOptions{LegacyOnly: true, MemoryBytes: locationTupleSize - 1}); err == nil {
+	if _, err := CheckWithOptions(context.Background(), nil, nil, CheckOptions{LegacyOnly: true, MemoryBytes: locationTupleMemorySize - 1}); err == nil {
 		t.Fatal("undersized checker memory was accepted")
 	}
 }

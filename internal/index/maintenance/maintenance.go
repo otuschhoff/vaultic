@@ -581,7 +581,7 @@ func CheckWithOptions(
 	if memoryBytes == 0 {
 		memoryBytes = 64 << 20
 	}
-	minimumMemory := uint64(locationTupleSize)
+	minimumMemory := locationTupleMemorySize
 	if !options.LegacyOnly && !options.SlateDBOnly {
 		minimumMemory *= 4
 	}
@@ -639,7 +639,7 @@ func CheckWithOptions(
 			}
 		}()
 	}
-	spoolMemory := max(memoryBytes/4, uint64(locationTupleSize))
+	spoolMemory := max(memoryBytes/4, locationTupleMemorySize)
 	legacy, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
 	if err != nil {
 		return result, err
@@ -1073,7 +1073,7 @@ func checkReferences(
 	result *CheckResult,
 	maxFindings uint,
 ) error {
-	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleSize), 32)
+	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleMemorySize), 32)
 	if err != nil {
 		return err
 	}
@@ -1147,7 +1147,7 @@ func checkSnapshots(
 	result *CheckResult,
 	maxFindings uint,
 ) error {
-	spoolMemory := max(memoryBytes/2, uint64(locationTupleSize))
+	spoolMemory := max(memoryBytes/2, locationTupleMemorySize)
 	legacy, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
 	if err != nil {
 		return err

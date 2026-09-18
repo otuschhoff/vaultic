@@ -50,6 +50,38 @@ func TestCheckKVSpoolSortsDuplicatesAcrossMergePasses(t *testing.T) {
 	}
 }
 
+func TestCheckKVSpoolKeepsFittingRecordsInMemory(t *testing.T) {
+	scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	spool, err := newCheckKVSpool(context.Background(), scratch, 1<<10, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.close()
+	for _, record := range []checkKVRecord{
+		{key: []byte("b"), value: []byte("2"), sequence: 2},
+		{key: []byte("a"), value: []byte("1"), sequence: 1},
+	} {
+		if err := spool.add(record.key, record.value, record.sequence); err != nil {
+			t.Fatal(err)
+		}
+	}
+	iterator, err := spool.iterator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iterator.close()
+	if record, found, err := iterator.next(); err != nil || !found || string(record.key) != "a" {
+		t.Fatalf("first record = %+v, found=%t, err=%v", record, found, err)
+	}
+	if peak, _ := scratch.stats(); peak != 0 {
+		t.Fatalf("fitting key/value spool used %d bytes of disk scratch", peak)
+	}
+}
+
 func TestCheckKVSpoolRejectsOversizedRecord(t *testing.T) {
 	scratch, err := newCheckScratch(t.TempDir(), 1<<20)
 	if err != nil {
