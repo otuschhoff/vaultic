@@ -16,6 +16,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -123,6 +124,27 @@ func TestCheckValidatesDeclaredReadSession(t *testing.T) {
 	}
 }
 
+func TestCheckTelemetryIncludesFinalReadSessionValidation(t *testing.T) {
+	validationErr := fmt.Errorf("session expired")
+	store := &validatingMemoryStore{
+		memoryStore: &memoryStore{values: map[string][]byte{}},
+		validateErr: validationErr,
+	}
+	telemetry := NewCheckTelemetry()
+	_, err := CheckWithOptions(context.Background(), nil, store, CheckOptions{
+		SlateDBOnly: true,
+		Consistency: CheckConsistency{SessionID: "session"},
+		Telemetry:   telemetry,
+	})
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("validation error = %v, want %v", err, validationErr)
+	}
+	metrics := telemetry.Component(time.Now()).Metrics
+	if checkMetricValue(metrics, "operation_completed", map[string]string{"outcome": "failure"}) != 1 || checkMetricValue(metrics, "operation_completed", map[string]string{"outcome": "success"}) != 0 {
+		t.Fatalf("operation telemetry = %+v", metrics)
+	}
+}
+
 func TestLimitedStoreBoundsMetadataRPCs(t *testing.T) {
 	base := &blockingMemoryStore{
 		memoryStore: &memoryStore{values: map[string][]byte{}},
@@ -149,6 +171,231 @@ func TestLimitedStoreBoundsMetadataRPCs(t *testing.T) {
 	if maximum := base.maximum.Load(); maximum != 2 {
 		t.Fatalf("maximum in-flight RPCs = %d after completion, want 2", maximum)
 	}
+}
+
+func TestLimitedStoreTelemetryClassifiesAdmissionOutcomes(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	store := &limitedStore{
+		Store:     &memoryStore{values: map[string][]byte{}},
+		semaphore: make(chan struct{}, 1),
+		telemetry: telemetry,
+	}
+	store.semaphore <- struct{}{}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.acquire(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled acquire error = %v", err)
+	}
+	deadline, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	if err := store.acquire(deadline); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline acquire error = %v", err)
+	}
+	<-store.semaphore
+	if err := store.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-store.semaphore
+
+	snapshot := telemetry.rpcWait.Snapshot()
+	if snapshot.Attempts != 3 || snapshot.Contentions != 2 || snapshot.Active != 0 || snapshot.Completed[0] != 1 || snapshot.Completed[2] != 1 || snapshot.Completed[3] != 1 {
+		t.Fatalf("wait snapshot = %+v", snapshot)
+	}
+}
+
+func TestCheckTelemetryComponentAndResultEquivalence(t *testing.T) {
+	store, _, _ := newMemoryStore(t, schema.PackPublished)
+	store.set(t, schema.AnalyticsMetadataKey(), schema.AnalyticsMetadataRecord{Enabled: false})
+	options := CheckOptions{SlateDBOnly: true, MaxFindings: 10, Workers: 1, RPCConcurrency: 1}
+	want, err := CheckWithOptions(context.Background(), nil, store, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	telemetry := NewCheckTelemetry()
+	options.Telemetry = telemetry
+	got, err := CheckWithOptions(context.Background(), nil, store, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("enabled telemetry changed result\ngot:  %+v\nwant: %+v", got, want)
+	}
+	component := telemetry.Component(time.Now())
+	if err := monitor.ValidateVaulticDBComponent(component); err != nil {
+		t.Fatal(err)
+	}
+	if len(component.Operations) != 0 || checkMetricValue(component.Metrics, "operation_started", nil) != 1 || checkMetricValue(component.Metrics, "operation_completed", map[string]string{"outcome": "success"}) != 1 {
+		t.Fatalf("operation telemetry = %+v", component)
+	}
+	if checkMetricValue(component.Metrics, "dependency_requests", map[string]string{"role": "database", "outcome": "success"}) == 0 || checkMetricValue(component.Metrics, "dependency_bytes", map[string]string{"role": "database", "outcome": "success"}) == 0 {
+		t.Fatalf("database telemetry = %+v", component.Metrics)
+	}
+}
+
+func TestCheckTelemetrySupportsConcurrentChecks(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	options := CheckOptions{
+		SlateDBOnly: true,
+		Telemetry:   telemetry,
+		Progress: func(update CheckProgress) {
+			if update.Stage == "inventory" {
+				entered <- struct{}{}
+				<-release
+			}
+		},
+	}
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if _, err := CheckWithOptions(context.Background(), nil, &memoryStore{values: map[string][]byte{}}, options); err != nil {
+				t.Errorf("check: %v", err)
+			}
+		}()
+	}
+	<-entered
+	<-entered
+	close(release)
+	workers.Wait()
+	component := telemetry.Component(time.Now())
+	if len(component.Operations) != 0 || checkMetricValue(component.Metrics, "operation_started", nil) != 2 || checkMetricValue(component.Metrics, "operation_completed", map[string]string{"outcome": "success"}) != 2 {
+		t.Fatalf("concurrent operation telemetry = %+v", component)
+	}
+}
+
+func TestCheckScratchTelemetryAccountsDurableRunWrites(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	scratch, err := newCheckScratch(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch.telemetry = telemetry
+	spool := &locationSpool{ctx: context.Background(), scratch: scratch}
+	run, err := spool.writeRun([]locationTuple{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scratch.close(); err != nil {
+		t.Fatal(err)
+	}
+	metrics := telemetry.Component(time.Now()).Metrics
+	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "success"}) < 1 || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "success"}) < run.size {
+		t.Fatalf("scratch telemetry = %+v", metrics)
+	}
+}
+
+func TestCheckScratchTelemetryDoesNotSucceedCanceledRun(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	scratch, err := newCheckScratch(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch.telemetry = telemetry
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	spool := &locationSpool{ctx: ctx, scratch: scratch}
+	if _, err := spool.writeRun([]locationTuple{{}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("write error = %v, want cancellation", err)
+	}
+	if err := scratch.close(); err != nil {
+		t.Fatal(err)
+	}
+	metrics := telemetry.Component(time.Now()).Metrics
+	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "cancellation"}) != 1 || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "cancellation"}) != checkRunHeaderSize || checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "failure"}) != 0 {
+		t.Fatalf("scratch telemetry = %+v", metrics)
+	}
+}
+
+func TestCheckScratchTelemetryAccountsAnalyticsRunWrites(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	scratch, err := newCheckScratch(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch.telemetry = telemetry
+	spool, err := newCheckKVSpool(context.Background(), scratch, 128, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := spool.newWriter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.append(checkKVRecord{key: []byte("key"), value: []byte("value")}); err != nil {
+		writer.abort()
+		t.Fatal(err)
+	}
+	run, err := writer.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := telemetry.Component(time.Now()).Metrics
+	iterator, err := newCheckKVIterator(context.Background(), []checkRun{run}, scratch, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := iterator.next(); err != nil || !found {
+		t.Fatalf("read analytics run: found=%t err=%v", found, err)
+	}
+	if err := iterator.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := scratch.close(); err != nil {
+		t.Fatal(err)
+	}
+	metrics := telemetry.Component(time.Now()).Metrics
+	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "success"}) < 1 || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "success"}) < run.size {
+		t.Fatalf("analytics scratch telemetry = %+v", metrics)
+	}
+	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "success"}) <= checkMetricValue(before, "dependency_requests", map[string]string{"role": "scratch", "outcome": "success"}) || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "success"}) <= checkMetricValue(before, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "success"}) {
+		t.Fatalf("analytics scratch reads were not accounted: before=%+v after=%+v", before, metrics)
+	}
+}
+
+type partialErrorWriter struct{ err error }
+
+func (writer partialErrorWriter) Write(value []byte) (int, error) {
+	return min(3, len(value)), writer.err
+}
+
+func TestCheckScratchTelemetryCountsPartialFailedWrite(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	scratch := &checkScratch{telemetry: telemetry}
+	request := telemetry.startScratch()
+	writeErr := errors.New("partial write")
+	err := writeScratch(scratch, request, partialErrorWriter{err: writeErr}, []byte("abcdef"))
+	settleDependency(request, err)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("write error = %v, want %v", err, writeErr)
+	}
+	metrics := telemetry.Component(time.Now()).Metrics
+	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "failure"}) != 1 || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "failure"}) != 3 {
+		t.Fatalf("partial scratch telemetry = %+v", metrics)
+	}
+}
+
+func checkMetricValue(metrics []monitor.Metric, name string, labels map[string]string) uint64 {
+	for _, metric := range metrics {
+		if metric.Name != name {
+			continue
+		}
+		matched := true
+		for name, value := range labels {
+			if !slices.Contains(metric.Labels, monitor.Label{Name: name, Value: value}) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return metric.Value
+		}
+	}
+	return 0
 }
 
 func TestCheckProgressReportsStagesAndEffectiveLimits(t *testing.T) {

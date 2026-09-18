@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -105,16 +106,52 @@ func (tuple locationTuple) findingKey() string {
 }
 
 type checkScratch struct {
-	mu       sync.Mutex
-	parent   string
-	dir      string
-	marker   string
-	key      [32]byte
-	maxBytes uint64
-	used     uint64
-	peak     uint64
-	nextRun  uint64
-	merges   uint64
+	mu        sync.Mutex
+	parent    string
+	dir       string
+	marker    string
+	key       [32]byte
+	maxBytes  uint64
+	used      uint64
+	peak      uint64
+	nextRun   uint64
+	merges    uint64
+	telemetry *CheckTelemetry
+	operation *monitor.ActionGuard
+}
+
+type scratchReadFile struct {
+	file    *os.File
+	scratch *checkScratch
+}
+
+func (scratch *checkScratch) open(path string) (*scratchReadFile, error) {
+	request := scratch.telemetry.startScratch()
+	file, err := os.Open(path)
+	settleDependency(request, err)
+	if err != nil {
+		return nil, err
+	}
+	return &scratchReadFile{file: file, scratch: scratch}, nil
+}
+
+func (file *scratchReadFile) Read(value []byte) (int, error) {
+	request := file.scratch.telemetry.startScratch()
+	read, err := file.file.Read(value)
+	file.scratch.telemetry.processScratch(file.scratch.operation, request, uint64(read))
+	settlementErr := err
+	if errors.Is(err, io.EOF) {
+		settlementErr = nil
+	}
+	settleDependency(request, settlementErr)
+	return read, err
+}
+
+func (file *scratchReadFile) Close() error {
+	request := file.scratch.telemetry.startScratch()
+	err := file.file.Close()
+	settleDependency(request, err)
+	return err
 }
 
 func newCheckScratch(parent string, maxBytes uint64) (*checkScratch, error) {
@@ -144,15 +181,28 @@ func (scratch *checkScratch) ensureDirLocked() error {
 	if scratch.dir != "" {
 		return nil
 	}
+	request := scratch.telemetry.startScratch()
 	dir, err := os.MkdirTemp(scratch.parent, checkScratchPrefix)
+	settleDependency(request, err)
 	if err != nil {
 		return fmt.Errorf("create checker scratch directory: %w", err)
 	}
+	request = scratch.telemetry.startScratch()
 	if err := os.Chmod(dir, 0o700); err != nil {
+		settleDependency(request, err)
 		_ = os.Remove(dir) // The permission error is the actionable failure.
 		return fmt.Errorf("protect checker scratch directory: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".vaultic-check-owned"), []byte(scratch.marker), 0o600); err != nil {
+	settleDependency(request, nil)
+	request = scratch.telemetry.startScratch()
+	marker := []byte(scratch.marker)
+	file, err := os.OpenFile(filepath.Join(dir, ".vaultic-check-owned"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err == nil {
+		err = writeScratch(scratch, request, file, marker)
+		err = errors.Join(err, file.Close())
+	}
+	settleDependency(request, err)
+	if err != nil {
 		_ = os.RemoveAll(dir) // The marker-write error is the actionable failure.
 		return fmt.Errorf("write checker scratch marker: %w", err)
 	}
@@ -218,11 +268,26 @@ func (scratch *checkScratch) close() error {
 	if !strings.HasPrefix(base, checkScratchPrefix) || filepath.Dir(dir) == dir {
 		return fmt.Errorf("refusing to remove unowned checker scratch path")
 	}
-	marker, err := os.ReadFile(filepath.Join(dir, ".vaultic-check-owned"))
+	markerFile, err := scratch.open(filepath.Join(dir, ".vaultic-check-owned"))
+	if err != nil {
+		return fmt.Errorf("refusing to remove checker scratch without matching ownership marker")
+	}
+	marker, readErr := io.ReadAll(markerFile)
+	err = errors.Join(readErr, markerFile.Close())
 	if err != nil || string(marker) != scratch.marker {
 		return fmt.Errorf("refusing to remove checker scratch without matching ownership marker")
 	}
-	return os.RemoveAll(dir)
+	request := scratch.telemetry.startScratch()
+	err = os.RemoveAll(dir)
+	settleDependency(request, err)
+	return err
+}
+
+func (scratch *checkScratch) remove(path string) error {
+	request := scratch.telemetry.startScratch()
+	err := os.Remove(path)
+	settleDependency(request, err)
+	return err
 }
 
 type checkRun struct {
@@ -357,7 +422,7 @@ func (spool *locationSpool) spillMemoryRuns() error {
 	return nil
 }
 
-func (spool *locationSpool) writeRun(records []locationTuple) (checkRun, error) {
+func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err error) {
 	block, err := aes.NewCipher(spool.scratch.key[:])
 	if err != nil {
 		return checkRun{}, err
@@ -371,6 +436,8 @@ func (spool *locationSpool) writeRun(records []locationTuple) (checkRun, error) 
 	if err := spool.scratch.reserve(predicted); err != nil {
 		return checkRun{}, err
 	}
+	request := spool.scratch.telemetry.startScratch()
+	defer func() { settleDependency(request, err) }()
 	path, prefix, err := spool.scratch.nextPath()
 	if err != nil {
 		spool.scratch.release(predicted)
@@ -385,12 +452,12 @@ func (spool *locationSpool) writeRun(records []locationTuple) (checkRun, error) 
 	defer func() {
 		_ = file.Close() // Preserve the primary write or sync error.
 		if !succeeded {
-			_ = os.Remove(path) // Preserve the primary run-creation error.
+			_ = spool.scratch.remove(path) // Preserve the primary run-creation error.
 			spool.scratch.release(predicted)
 		}
 	}()
 	header := append(checkRunMagic[:], prefix[:]...)
-	if err := writeAll(file, header); err != nil {
+	if err := writeScratch(spool.scratch, request, file, header); err != nil {
 		return checkRun{}, err
 	}
 	for index, record := range records {
@@ -404,10 +471,10 @@ func (spool *locationSpool) writeRun(records []locationTuple) (checkRun, error) 
 		sealed := aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-		if err := writeAll(file, length[:]); err != nil {
+		if err := writeScratch(spool.scratch, request, file, length[:]); err != nil {
 			return checkRun{}, err
 		}
-		if err := writeAll(file, sealed); err != nil {
+		if err := writeScratch(spool.scratch, request, file, sealed); err != nil {
 			return checkRun{}, err
 		}
 	}
@@ -424,6 +491,21 @@ func (spool *locationSpool) writeRun(records []locationTuple) (checkRun, error) 
 func writeAll(writer io.Writer, value []byte) error {
 	for len(value) > 0 {
 		written, err := writer.Write(value)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+		value = value[written:]
+	}
+	return nil
+}
+
+func writeScratch(scratch *checkScratch, request *monitor.DependencyGuard, writer io.Writer, value []byte) error {
+	for len(value) > 0 {
+		written, err := writer.Write(value)
+		scratch.telemetry.processScratch(scratch.operation, request, uint64(written))
 		if err != nil {
 			return err
 		}
@@ -471,6 +553,7 @@ type locationRunWriter struct {
 	counter  uint64
 	reserved uint64
 	closed   bool
+	request  *monitor.DependencyGuard
 }
 
 func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
@@ -485,20 +568,24 @@ func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
 	if err := spool.scratch.reserve(checkRunHeaderSize); err != nil {
 		return nil, err
 	}
+	request := spool.scratch.telemetry.startScratch()
 	path, prefix, err := spool.scratch.nextPath()
 	if err != nil {
 		spool.scratch.release(checkRunHeaderSize)
+		settleDependency(request, err)
 		return nil, err
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		spool.scratch.release(checkRunHeaderSize)
+		settleDependency(request, err)
 		return nil, err
 	}
 	writer := &locationRunWriter{
-		spool: spool, file: file, path: path, aead: aead, prefix: prefix, reserved: checkRunHeaderSize,
+		spool: spool, file: file, path: path, aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request,
 	}
-	if err := writeAll(file, append(checkRunMagic[:], writer.prefix[:]...)); err != nil {
+	header := append(checkRunMagic[:], writer.prefix[:]...)
+	if err := writeScratch(spool.scratch, request, file, header); err != nil {
 		writer.abort()
 		return nil, err
 	}
@@ -519,10 +606,13 @@ func (writer *locationRunWriter) append(tuple locationTuple) error {
 	sealed := writer.aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
 	var length [4]byte
 	binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-	if err := writeAll(writer.file, length[:]); err != nil {
+	if err := writeScratch(writer.spool.scratch, writer.request, writer.file, length[:]); err != nil {
 		return err
 	}
-	return writeAll(writer.file, sealed)
+	if err := writeScratch(writer.spool.scratch, writer.request, writer.file, sealed); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (writer *locationRunWriter) close() (checkRun, error) {
@@ -538,6 +628,7 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 		writer.abortFile()
 		return checkRun{}, err
 	}
+	settleDependency(writer.request, nil)
 	return checkRun{path: writer.path, size: writer.reserved}, nil
 }
 
@@ -550,18 +641,22 @@ func (writer *locationRunWriter) abort() {
 }
 
 func (writer *locationRunWriter) abortFile() {
-	_ = os.Remove(writer.path) // Session cleanup removes any remaining run.
+	if writer.request != nil {
+		writer.request.Failed()
+		writer.request.Done()
+	}
+	_ = writer.spool.scratch.remove(writer.path) // Session cleanup removes any remaining run.
 	writer.spool.scratch.release(writer.reserved)
 	writer.reserved = 0
 }
 
-func (spool *locationSpool) mergeRuns(runs []checkRun) (checkRun, error) {
+func (spool *locationSpool) mergeRuns(runs []checkRun) (merged checkRun, err error) {
 	spool.scratch.recordMerge()
-	iterator, err := newLocationIterator(spool.ctx, runs, nil, spool.scratch.key, spool.deduplicate)
+	iterator, err := newLocationIterator(spool.ctx, runs, nil, spool.scratch, spool.deduplicate)
 	if err != nil {
 		return checkRun{}, err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	writer, err := spool.newRunWriter()
 	if err != nil {
 		return checkRun{}, err
@@ -580,12 +675,12 @@ func (spool *locationSpool) mergeRuns(runs []checkRun) (checkRun, error) {
 			return checkRun{}, err
 		}
 	}
-	merged, err := writer.close()
+	merged, err = writer.close()
 	if err != nil {
 		return checkRun{}, err
 	}
 	for _, run := range runs {
-		if err := os.Remove(run.path); err != nil {
+		if err := spool.scratch.remove(run.path); err != nil {
 			return checkRun{}, fmt.Errorf("remove merged checker run: %w", err)
 		}
 		spool.scratch.release(run.size)
@@ -594,15 +689,15 @@ func (spool *locationSpool) mergeRuns(runs []checkRun) (checkRun, error) {
 }
 
 type locationRunReader struct {
-	file    *os.File
+	file    *scratchReadFile
 	reader  *bufio.Reader
 	aead    cipher.AEAD
 	prefix  [4]byte
 	counter uint64
 }
 
-func openLocationRun(run checkRun, key [32]byte) (*locationRunReader, error) {
-	file, err := os.Open(run.path)
+func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, error) {
+	file, err := scratch.open(run.path)
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +711,7 @@ func openLocationRun(run checkRun, key [32]byte) (*locationRunReader, error) {
 		_ = file.Close() // Preserve the invalid-header error.
 		return nil, fmt.Errorf("invalid checker run header")
 	}
-	block, err := aes.NewCipher(key[:])
+	block, err := aes.NewCipher(scratch.key[:])
 	if err != nil {
 		_ = file.Close() // Preserve the cipher-construction error.
 		return nil, err
@@ -741,13 +836,13 @@ func (spool *locationSpool) iterator() (*locationIterator, error) {
 	if err := spool.seal(); err != nil {
 		return nil, err
 	}
-	return newLocationIterator(spool.ctx, spool.runs, spool.memoryRuns, spool.scratch.key, spool.deduplicate)
+	return newLocationIterator(spool.ctx, spool.runs, spool.memoryRuns, spool.scratch, spool.deduplicate)
 }
 
 func (spool *locationSpool) close() error {
 	var first error
 	for _, run := range spool.runs {
-		if err := os.Remove(run.path); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
+		if err := spool.scratch.remove(run.path); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
 			first = err
 			continue
 		}
@@ -764,21 +859,19 @@ func newLocationIterator(
 	ctx context.Context,
 	runs []checkRun,
 	memoryRuns [][]locationTuple,
-	key [32]byte,
+	scratch *checkScratch,
 	deduplicate bool,
 ) (*locationIterator, error) {
 	iterator := &locationIterator{ctx: ctx, deduplicate: deduplicate}
 	for _, run := range runs {
-		reader, err := openLocationRun(run, key)
+		reader, err := openLocationRun(run, scratch)
 		if err != nil {
-			_ = iterator.close() // Preserve the reader-open error.
-			return nil, err
+			return nil, errors.Join(err, iterator.close())
 		}
 		iterator.readers = append(iterator.readers, reader)
 		tuple, found, err := reader.next()
 		if err != nil {
-			_ = iterator.close() // Preserve the initial-read error.
-			return nil, err
+			return nil, errors.Join(err, iterator.close())
 		}
 		if found {
 			iterator.heap.push(locationHeapItem{tuple: tuple, reader: len(iterator.readers) - 1})
@@ -789,8 +882,7 @@ func newLocationIterator(
 		iterator.readers = append(iterator.readers, reader)
 		tuple, found, err := reader.next()
 		if err != nil {
-			_ = iterator.close() // Preserve the initial-read error.
-			return nil, err
+			return nil, errors.Join(err, iterator.close())
 		}
 		if found {
 			iterator.heap.push(locationHeapItem{tuple: tuple, reader: len(iterator.readers) - 1})
@@ -829,13 +921,12 @@ func (iterator *locationIterator) close() error {
 	return result
 }
 
-func countLocationSpool(spool *locationSpool) (uint64, error) {
+func countLocationSpool(spool *locationSpool) (count uint64, err error) {
 	iterator, err := spool.iterator()
 	if err != nil {
 		return 0, err
 	}
-	defer iterator.close()
-	var count uint64
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	for {
 		_, found, err := iterator.next()
 		if err != nil {
@@ -851,12 +942,12 @@ func countLocationSpool(spool *locationSpool) (uint64, error) {
 	}
 }
 
-func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *checkScratch, memoryBytes uint64) (string, error) {
+func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *checkScratch, memoryBytes uint64) (digest string, err error) {
 	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleMemorySize), 32)
 	if err != nil {
 		return "", err
 	}
-	defer spool.close()
+	defer func() { err = errors.Join(err, spool.close()) }()
 	for kind, fileType := range []vaultic.FileType{vaultic.IndexFile, vaultic.SnapshotFile} {
 		if err := source.List(ctx, fileType, func(id vaultic.ID, size int64) error {
 			if size < 0 {
@@ -871,7 +962,7 @@ func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *ch
 	if err != nil {
 		return "", err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	hash := sha256.New()
 	for {
 		tuple, found, err := iterator.next()
@@ -888,17 +979,17 @@ func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *ch
 	}
 }
 
-func compareLocationSpools(legacy, slatedb *locationSpool, result *CheckResult, maxFindings uint) error {
+func compareLocationSpools(legacy, slatedb *locationSpool, result *CheckResult, maxFindings uint) (err error) {
 	legacyIterator, err := legacy.iterator()
 	if err != nil {
 		return err
 	}
-	defer legacyIterator.close()
+	defer func() { err = errors.Join(err, legacyIterator.close()) }()
 	slatedbIterator, err := slatedb.iterator()
 	if err != nil {
 		return err
 	}
-	defer slatedbIterator.close()
+	defer func() { err = errors.Join(err, slatedbIterator.close()) }()
 	legacyTuple, hasLegacy, err := legacyIterator.next()
 	if err != nil {
 		return err
@@ -956,12 +1047,12 @@ func compareLocationSpools(legacy, slatedb *locationSpool, result *CheckResult, 
 	return nil
 }
 
-func reduceReferenceSpool(spool *locationSpool, result *CheckResult, maxFindings uint) error {
+func reduceReferenceSpool(spool *locationSpool, result *CheckResult, maxFindings uint) (err error) {
 	iterator, err := spool.iterator()
 	if err != nil {
 		return err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	var current vaultic.ID
 	var inodes, manifests uint64
 	var countInodes, countManifests, total uint64

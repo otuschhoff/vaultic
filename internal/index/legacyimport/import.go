@@ -243,10 +243,16 @@ type packPipelineStats struct {
 }
 
 //nolint:funlen,gocognit,gocyclo,nestif // Existing domain flow is an explicit complexity exception; Stage 3 remains gated.
-func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (Result, error) {
+func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (result Result, err error) {
+	ownsAction := options.Telemetry.startAction()
 	options.Telemetry.phase("source")
-	defer options.Telemetry.phase("finished")
-	var result Result
+	defer func() {
+		if ownsAction {
+			options.Telemetry.FinishAction(result, err)
+		} else {
+			options.Telemetry.phase("finalize")
+		}
+	}()
 	if options.PackTimeout < 0 {
 		return result, fmt.Errorf("pack timeout must not be negative")
 	}
@@ -288,36 +294,23 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	var checkpointPending bool
 	var inFlightLanes, peakLanes uint64
 	reportProgress := func() {
+		progress := Progress{
+			IndexesCompleted: result.IndexesSeen, IndexesTotal: result.IndexesTotal,
+			IndexesImported: result.IndexesImported, IndexesResumed: result.IndexesResumed,
+			SnapshotsCompleted: result.SnapshotsSeen, SnapshotsTotal: result.SnapshotsTotal,
+			SnapshotsImported: result.SnapshotsImported, SnapshotsResumed: result.SnapshotsResumed,
+			PacksImported: result.PacksImported, BlobsImported: result.BlobsImported,
+			PacksPrepared: result.PacksPrepared, PreparedBytes: result.PreparedBytes,
+			BatchesIngested: result.BatchesIngested, BatchesReduced: result.BatchesReduced,
+			BatchesCommitted: result.BatchesCommitted, InFlightLanes: inFlightLanes, PeakLanes: peakLanes,
+			PeakPreparedPacks: result.PeakPreparedPacks, PeakPreparedBytes: result.PeakPreparedBytes,
+			PreparationTime: preparationTime, IngestTime: ingestTime, ReductionTime: reductionTime,
+			PublicationTime: publicationTime, CheckpointBatchTime: checkpointBatchTime,
+			AdaptiveSplits: result.AdaptiveSplits, CheckpointPending: checkpointPending, NodesImported: result.NodesImported,
+		}
+		options.Telemetry.progress(progress)
 		if options.Progress != nil {
-			options.Progress(Progress{
-				IndexesCompleted:    result.IndexesSeen,
-				IndexesTotal:        result.IndexesTotal,
-				IndexesImported:     result.IndexesImported,
-				IndexesResumed:      result.IndexesResumed,
-				SnapshotsCompleted:  result.SnapshotsSeen,
-				SnapshotsTotal:      result.SnapshotsTotal,
-				SnapshotsImported:   result.SnapshotsImported,
-				SnapshotsResumed:    result.SnapshotsResumed,
-				PacksImported:       result.PacksImported,
-				BlobsImported:       result.BlobsImported,
-				PacksPrepared:       result.PacksPrepared,
-				PreparedBytes:       result.PreparedBytes,
-				BatchesIngested:     result.BatchesIngested,
-				BatchesReduced:      result.BatchesReduced,
-				BatchesCommitted:    result.BatchesCommitted,
-				InFlightLanes:       inFlightLanes,
-				PeakLanes:           peakLanes,
-				PeakPreparedPacks:   result.PeakPreparedPacks,
-				PeakPreparedBytes:   result.PeakPreparedBytes,
-				PreparationTime:     preparationTime,
-				IngestTime:          ingestTime,
-				ReductionTime:       reductionTime,
-				PublicationTime:     publicationTime,
-				CheckpointBatchTime: checkpointBatchTime,
-				AdaptiveSplits:      result.AdaptiveSplits,
-				CheckpointPending:   checkpointPending,
-				NodesImported:       result.NodesImported,
-			})
+			options.Progress(progress)
 		}
 	}
 	reportProgress()
@@ -378,10 +371,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		baseBatchesIngested, baseBatchesReduced := result.BatchesIngested, result.BatchesReduced
 		basePeakLanes := result.PeakPublicationLanes
 		liveProgress := func(stats packPipelineStats) {
-			if options.Progress == nil {
-				return
-			}
-			options.Progress(Progress{
+			progress := Progress{
 				IndexesCompleted: result.IndexesSeen - 1, IndexesTotal: result.IndexesTotal,
 				IndexesImported: result.IndexesImported, IndexesResumed: result.IndexesResumed,
 				SnapshotsCompleted: result.SnapshotsSeen, SnapshotsTotal: result.SnapshotsTotal,
@@ -404,7 +394,11 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 				CheckpointBatchTime: baseCheckpointBatchTime + stats.checkpointBatchTime,
 				AdaptiveSplits:      baseAdaptiveSplits + stats.adaptiveSplits, CheckpointPending: stats.checkpointPending,
 				NodesImported: result.NodesImported,
-			})
+			}
+			options.Telemetry.progress(progress)
+			if options.Progress != nil {
+				options.Progress(progress)
+			}
 		}
 		importPacksFn := importPacks
 		if useStage3 {
@@ -854,6 +848,15 @@ func commitPreparedBatch(
 				ctx, store, batch, checkpoint, options, outcomes, released, counters, err,
 			)
 		}
+		var publishedBytes uint64
+		for index := range batch {
+			if math.MaxUint64-publishedBytes < batch[index].outcome.bytes {
+				publishedBytes = math.MaxUint64
+			} else {
+				publishedBytes += batch[index].outcome.bytes
+			}
+		}
+		options.Telemetry.processed("database", publishedBytes)
 	}
 	for _, item := range batch {
 		outcome := outcomes[item.index]

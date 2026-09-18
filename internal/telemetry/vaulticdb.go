@@ -13,12 +13,16 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 	if captured <= 0 {
 		captured = time.Now().UnixMilli()
 	}
+	batchQueueAvailability := AvailabilityExact
+	if writer.Attribution.EngineBatchQueue.ActiveOverflow != 0 || writer.Attribution.EngineBatchService.ActiveOverflow != 0 {
+		batchQueueAvailability = AvailabilityEstimated
+	}
 	component := ComponentSnapshot{
 		Component: "vaulticdb", ProcessStartID: strconv.FormatInt(writer.ProcessStartedUnixMS, 10),
 		CapturedUnixMS: captured, Availability: AvailabilityExact,
 		Metrics: append(vaulticDBEngineMetrics(writer.Attribution), vaulticDBObjectMetrics(writer.Attribution)...),
 		Queues: []QueueSnapshot{{
-			Name: "batch_write", Availability: AvailabilityExact, CapacityAvailability: AvailabilityUnavailable,
+			Name: "batch_write", Availability: batchQueueAvailability, CapacityAvailability: AvailabilityUnavailable,
 			Depth:            writer.Attribution.EngineBatchQueueDepth,
 			ActiveWorkers:    writer.Attribution.EngineBatchService.Active,
 			Admitted:         writer.Attribution.EngineBatchQueue.Successes,

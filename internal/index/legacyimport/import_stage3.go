@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 const (
@@ -310,6 +311,7 @@ func importPacksStage3(
 			current := outcomes[item.index]
 			current.complete = true
 			outcomes[item.index] = current
+			options.Telemetry.processed("database", item.outcome.bytes)
 			counters.preparedPacks.Add(^uint64(0))
 			counters.preparedBytes.Add(^uint64(item.outcome.bytes - 1))
 			released <- item.reservedBytes
@@ -387,18 +389,21 @@ func importPacksStage3(
 			break
 		}
 		if !progress {
+			waitPhase := "prepare_wait"
 			switch {
 			case len(ready) > 0 && activeLanes < lanes:
-				options.Telemetry.phase("dependency_wait")
+				waitPhase = "dependency_wait"
 			case activeLanes > 0:
-				options.Telemetry.phase("ingest_wait")
+				waitPhase = "ingest_wait"
 			case reductionActive:
-				options.Telemetry.phase("reducer_wait")
-			default:
-				options.Telemetry.phase("prepare_wait")
+				waitPhase = "reducer_wait"
 			}
+			options.Telemetry.phase(waitPhase)
+			waitGuard := options.Telemetry.beginWait(waitPhase)
 			select {
 			case item, ok := <-prepared:
+				waitGuard.Succeeded()
+				waitGuard.Done()
 				if !ok {
 					prepareClosed = true
 					prepared = nil
@@ -410,10 +415,15 @@ func importPacksStage3(
 				}
 				pendingPrepared[item.index] = item
 			case outcome := <-ingested:
+				waitGuard.Succeeded()
+				waitGuard.Done()
 				acceptIngested(outcome)
 			case outcome := <-reduced:
+				waitGuard.Succeeded()
+				waitGuard.Done()
 				acceptReduced(outcome)
 			case <-ctx.Done():
+				settleImportWait(waitGuard, ctx.Err())
 				if failedPack < 0 {
 					failedPack = min(nextPack, len(outcomes)-1)
 					outcomes[failedPack].err = ctx.Err()
@@ -491,6 +501,13 @@ func importPacksStage3(
 	}
 
 	return outcomes, counters.committedBatches.Load(), counters.snapshot(), -1
+}
+
+func settleImportWait(guard *monitor.WaitGuard, err error) {
+	if monitor.ClassifyOutcome(err) == monitor.OutcomeTimeout {
+		guard.TimedOut()
+	}
+	guard.Done()
 }
 
 func stage3UnreducedState(ready []stage3LogicalBatch, active map[uint64]stage3LogicalBatch) (uint64, time.Time) {

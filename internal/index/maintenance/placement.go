@@ -3,6 +3,7 @@ package maintenance
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -343,12 +344,12 @@ func checkPlacementRecords(
 	model PlacementModel,
 	result *CheckResult,
 	maxFindings uint,
-) error {
+) (err error) {
 	membership, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleMemorySize), 32)
 	if err != nil {
 		return err
 	}
-	defer membership.close()
+	defer func() { err = errors.Join(err, membership.close()) }()
 	backendByHash := map[uint64]PlacementBackend{}
 	for _, backend := range model.Backends {
 		backendByHash[backend.Hash] = backend
@@ -432,7 +433,7 @@ func checkPlacementRecords(
 	if err != nil {
 		return err
 	}
-	defer placements.close()
+	defer func() { err = errors.Join(err, placements.close()) }()
 	placement, hasPlacement, err := placements.next()
 	if err != nil {
 		return err

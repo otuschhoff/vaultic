@@ -266,6 +266,7 @@ type TimingSnapshot struct {
 	LatencyBucketCounts  []uint64 `json:"latency_bucket_counts"`
 	ContentionAvailable  bool     `json:"contention_available"`
 	Contentions          uint64   `json:"contentions"`
+	ActiveOverflow       uint64   `json:"active_overflow"`
 }
 
 type ObjectOperationSnapshot struct {
@@ -1673,6 +1674,7 @@ func timingSnapshot(response *vaulticdbv1.TimingSnapshot) TimingSnapshot {
 		Timeouts:             response.GetTimeouts(),
 		Active:               response.GetActive(),
 		OldestActiveUS:       response.GetOldestActiveUs(),
+		ActiveOverflow:       response.GetActiveOverflow(),
 		LatencyBucketUpperUS: response.GetLatencyBucketUpperUs(),
 		LatencyBucketCounts:  response.GetLatencyBucketCounts(),
 		ContentionAvailable:  response.GetContentionAvailable(),

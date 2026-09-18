@@ -26,6 +26,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -677,6 +678,9 @@ func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
 		stats.PhaseTime["cleanup"] <= 0 {
 		t.Fatalf("scheduler attribution: %+v", stats)
 	}
+	if got := importMetricValue(telemetry.Component(time.Now()).Metrics, "operation_processed_bytes", map[string]string{"role": "database"}); got == 0 {
+		t.Fatal("Stage 3 did not account published database bytes")
+	}
 }
 
 func TestSchedulerTelemetryAccountsDisjointTime(t *testing.T) {
@@ -710,6 +714,101 @@ func TestSchedulerTelemetryAccountsDisjointTime(t *testing.T) {
 	if telemetry.Snapshot().Operations["receive"].Count != 3 {
 		t.Fatal("operation snapshot aliases mutable telemetry")
 	}
+}
+
+func TestSchedulerTelemetryProducesValidMonitorComponent(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	telemetry.startAction()
+	telemetry.progress(Progress{IndexesCompleted: 1, IndexesTotal: 2, QueuedPreparedPacks: 2})
+	telemetry.queues(2, 1, 32, 16, time.Now().Add(-time.Second))
+	wait := telemetry.beginWait("dependency_wait")
+	component := telemetry.Component(time.Now())
+	if err := monitor.ValidateVaulticDBComponent(component); err != nil {
+		t.Fatal(err)
+	}
+	if len(component.Operations) != 1 || len(component.Queues) != 2 || component.Queues[0].Depth != 2 {
+		t.Fatalf("component = %+v", component)
+	}
+	wait.Succeeded()
+	wait.Done()
+	telemetry.finishAction(Result{IndexesSeen: 2, IndexesTotal: 2, PreparedBytes: 32}, nil)
+	component = telemetry.Component(time.Now())
+	if err := monitor.ValidateVaulticDBComponent(component); err != nil {
+		t.Fatal(err)
+	}
+	if len(component.Operations) != 0 {
+		t.Fatalf("settled component = %+v", component)
+	}
+}
+
+func TestSchedulerTelemetryExternalOwnerIncludesFinalization(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	telemetry.StartAction()
+	result, err := Import(
+		context.Background(),
+		&memorySource{indexes: map[vaultic.ID][]byte{}},
+		fixedStatter{size: 16},
+		newSplitStore(),
+		Options{Telemetry: telemetry},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	component := telemetry.Component(time.Now())
+	if len(component.Operations) != 1 || component.Operations[0].Phase != "finalize" {
+		t.Fatalf("operation before finalization = %+v", component.Operations)
+	}
+	result.PreparedBytes = 32
+	telemetry.FinishAction(result, errors.New("activation failed"))
+	component = telemetry.Component(time.Now())
+	if len(component.Operations) != 0 || importMetricValue(component.Metrics, "operation_completed", map[string]string{"outcome": "failure"}) != 1 || importMetricValue(component.Metrics, "operation_processed_bytes", map[string]string{"role": "database"}) != 0 {
+		t.Fatalf("operation after finalization = %+v", component)
+	}
+}
+
+func TestImportTelemetryCountsOnlyPublishedDatabaseBytes(t *testing.T) {
+	indexID, packID, blobID := vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndex(t, packID, blobID)}}
+	for _, dryRun := range []bool{false, true} {
+		telemetry := NewSchedulerTelemetry()
+		result, err := Import(context.Background(), source, fixedStatter{size: 16}, newMemoryStore(), Options{DryRun: dryRun, Telemetry: telemetry})
+		if err != nil {
+			t.Fatalf("dry run %t: %v", dryRun, err)
+		}
+		got := importMetricValue(telemetry.Component(time.Now()).Metrics, "operation_processed_bytes", map[string]string{"role": "database"})
+		if dryRun && got != 0 || !dryRun && got != result.PreparedBytes {
+			t.Fatalf("dry run %t database bytes = %d, prepared = %d", dryRun, got, result.PreparedBytes)
+		}
+	}
+}
+
+func TestSettleImportWaitClassifiesDeadline(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	guard := telemetry.beginWait("reducer_wait")
+	settleImportWait(guard, context.DeadlineExceeded)
+	metrics := telemetry.Component(time.Now()).Metrics
+	if importMetricValue(metrics, "wait_completed", map[string]string{"role": "database", "throttle": "concurrency", "outcome": "timeout"}) != 1 || importMetricValue(metrics, "wait_completed", map[string]string{"role": "database", "throttle": "concurrency", "outcome": "cancellation"}) != 0 {
+		t.Fatalf("wait telemetry = %+v", metrics)
+	}
+}
+
+func importMetricValue(metrics []monitor.Metric, name string, labels map[string]string) uint64 {
+	for _, metric := range metrics {
+		if metric.Name != name {
+			continue
+		}
+		matched := true
+		for name, value := range labels {
+			if !slices.Contains(metric.Labels, monitor.Label{Name: name, Value: value}) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return metric.Value
+		}
+	}
+	return 0
 }
 
 func TestImportStage3AttributesReducerBlockedRefill(t *testing.T) {

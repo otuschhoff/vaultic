@@ -654,6 +654,12 @@ func runIndexImport(
 	term ui.Terminal,
 ) (result legacyimport.Result, err error) {
 	commandStarted := time.Now()
+	var telemetry *legacyimport.SchedulerTelemetry
+	defer func() {
+		if telemetry != nil {
+			telemetry.FinishAction(result, err)
+		}
+	}()
 	defer func() {
 		log.Printf("legacy import lifecycle: total=%s success=%t", time.Since(commandStarted), err == nil)
 	}()
@@ -721,7 +727,8 @@ func runIndexImport(
 			return result, err
 		}
 	}
-	telemetry := legacyimport.NewSchedulerTelemetry()
+	telemetry = legacyimport.NewSchedulerTelemetry()
+	telemetry.StartAction()
 	stopStats := startLegacyImportStats(ctx, store, 10*time.Second, func(stats daemon.LegacyImportStats) {
 		logLegacyImportStats(stats)
 		log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
@@ -1322,6 +1329,7 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			SessionID:    readSession.Identity.SessionID,
 		}
 	}
+	telemetry := maintenance.NewCheckTelemetry()
 	result, err = maintenance.CheckWithOptions(
 		ctx,
 		repo,
@@ -1347,15 +1355,11 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			PlacementModel: placementModel,
 			PathIndexPaths: pathIndexPaths,
 			Consistency:    consistency,
+			Telemetry:      telemetry,
 		},
 	)
 	if err != nil {
 		return result, err
-	}
-	if readSession != nil {
-		if err := readSession.Validate(ctx); err != nil {
-			return result, err
-		}
 	}
 	if options.QuorumCapsule != "" {
 		if err := checkIndexQuorum(ctx, options, globalOptions, repo, &result); err != nil {

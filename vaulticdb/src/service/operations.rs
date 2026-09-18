@@ -518,6 +518,7 @@ impl Service {
             latency_bucket_counts: snapshot.latency_buckets.to_vec(),
             contention_available: snapshot.contention_available,
             contentions: snapshot.contentions,
+            active_overflow: snapshot.active_overflow,
         };
         let engine_timing =
             |snapshot: crate::storage::EngineTimingSnapshot| proto::TimingSnapshot {
@@ -535,6 +536,7 @@ impl Service {
                 latency_bucket_counts: snapshot.latency_bucket_counts,
                 contention_available: false,
                 contentions: 0,
+                active_overflow: 0,
             };
         let object_operation =
             |snapshot: crate::storage::ObjectOperationSnapshot| proto::ObjectOperationSnapshot {

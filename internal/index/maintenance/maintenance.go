@@ -21,11 +21,13 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
 const scanPageSize = 10_000
+const MaxCheckRPCConcurrency = 4096
 
 type Reader interface {
 	Get(context.Context, []byte) ([]byte, bool, error)
@@ -46,13 +48,38 @@ type Store interface {
 type limitedStore struct {
 	Store
 	semaphore chan struct{}
+	telemetry *CheckTelemetry
+	operation *monitor.ActionGuard
 }
 
 func (store *limitedStore) acquire(ctx context.Context) error {
+	if store.telemetry == nil {
+		select {
+		case store.semaphore <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	guard := store.telemetry.rpcWait.Start()
 	select {
 	case store.semaphore <- struct{}{}:
+		guard.Succeeded()
+		guard.Done()
+		return nil
+	default:
+		guard.Contended()
+	}
+	select {
+	case store.semaphore <- struct{}{}:
+		guard.Succeeded()
+		guard.Done()
 		return nil
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			guard.TimedOut()
+		}
+		guard.Done()
 		return ctx.Err()
 	}
 }
@@ -62,7 +89,15 @@ func (store *limitedStore) Get(ctx context.Context, key []byte) ([]byte, bool, e
 		return nil, false, err
 	}
 	defer func() { <-store.semaphore }()
-	return store.Store.Get(ctx, key)
+	if store.telemetry == nil {
+		return store.Store.Get(ctx, key)
+	}
+	request := store.telemetry.database.Start()
+	value, found, err := store.Store.Get(ctx, key)
+	request.AddBytes(uint64(len(value)))
+	store.telemetry.process(store.operation, "database", uint64(len(value)))
+	settleDependency(request, err)
+	return value, found, err
 }
 
 func (store *limitedStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.KeyValue, []bool, error) {
@@ -70,7 +105,20 @@ func (store *limitedStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemo
 		return nil, nil, err
 	}
 	defer func() { <-store.semaphore }()
-	return store.Store.MultiGet(ctx, keys)
+	if store.telemetry == nil {
+		return store.Store.MultiGet(ctx, keys)
+	}
+	request := store.telemetry.database.Start()
+	values, found, err := store.Store.MultiGet(ctx, keys)
+	var bytes uint64
+	for index := range values {
+		bytes = saturatingAddCheck(bytes, uint64(len(values[index].Key)))
+		bytes = saturatingAddCheck(bytes, uint64(len(values[index].Value)))
+	}
+	request.AddBytes(bytes)
+	store.telemetry.process(store.operation, "database", bytes)
+	settleDependency(request, err)
+	return values, found, err
 }
 
 func (store *limitedStore) ScanPrefix(ctx context.Context, prefix, after []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
@@ -78,7 +126,20 @@ func (store *limitedStore) ScanPrefix(ctx context.Context, prefix, after []byte,
 		return nil, false, err
 	}
 	defer func() { <-store.semaphore }()
-	return store.Store.ScanPrefix(ctx, prefix, after, limit)
+	if store.telemetry == nil {
+		return store.Store.ScanPrefix(ctx, prefix, after, limit)
+	}
+	request := store.telemetry.database.Start()
+	values, more, err := store.Store.ScanPrefix(ctx, prefix, after, limit)
+	var bytes uint64
+	for index := range values {
+		bytes = saturatingAddCheck(bytes, uint64(len(values[index].Key)))
+		bytes = saturatingAddCheck(bytes, uint64(len(values[index].Value)))
+	}
+	request.AddBytes(bytes)
+	store.telemetry.process(store.operation, "database", bytes)
+	settleDependency(request, err)
+	return values, more, err
 }
 
 func (store *limitedStore) CheckEncryption(ctx context.Context) (daemon.EncryptionAudit, error) {
@@ -90,7 +151,20 @@ func (store *limitedStore) CheckEncryption(ctx context.Context) (daemon.Encrypti
 		return daemon.EncryptionAudit{}, err
 	}
 	defer func() { <-store.semaphore }()
-	return auditor.CheckEncryption(ctx)
+	if store.telemetry == nil {
+		return auditor.CheckEncryption(ctx)
+	}
+	request := store.telemetry.database.Start()
+	result, err := auditor.CheckEncryption(ctx)
+	settleDependency(request, err)
+	return result, err
+}
+
+func saturatingAddCheck(left, right uint64) uint64 {
+	if ^uint64(0)-left < right {
+		return ^uint64(0)
+	}
+	return left + right
 }
 
 type EncryptionAuditor interface {
@@ -300,6 +374,7 @@ type CheckOptions struct {
 	PlacementModel   PlacementModel
 	PathIndexPaths   []string
 	Consistency      CheckConsistency
+	Telemetry        *CheckTelemetry
 }
 
 type Finding struct {
@@ -320,13 +395,15 @@ type CheckProgress struct {
 }
 
 type checkProgressReporter struct {
-	mu       sync.Mutex
-	started  time.Time
-	stage    string
-	options  CheckOptions
-	scratch  *checkScratch
-	stop     chan struct{}
-	finished chan struct{}
+	mu        sync.Mutex
+	started   time.Time
+	stage     string
+	options   CheckOptions
+	scratch   *checkScratch
+	stop      chan struct{}
+	finished  chan struct{}
+	telemetry *CheckTelemetry
+	operation *monitor.ActionGuard
 }
 
 func newCheckProgressReporter(options CheckOptions, scratch *checkScratch) *checkProgressReporter {
@@ -362,18 +439,22 @@ func (reporter *checkProgressReporter) set(stage string) {
 }
 
 func (reporter *checkProgressReporter) emit() {
-	if reporter.options.Progress == nil {
+	if reporter.options.Progress == nil && reporter.telemetry == nil {
 		return
 	}
 	reporter.mu.Lock()
 	stage := reporter.stage
 	reporter.mu.Unlock()
 	peak, _ := reporter.scratch.stats()
-	reporter.options.Progress(CheckProgress{
+	update := CheckProgress{
 		Stage: stage, Elapsed: time.Since(reporter.started), Workers: reporter.options.Workers,
 		RPCConcurrency: reporter.options.RPCConcurrency, MemoryLimitBytes: reporter.options.MemoryBytes,
 		ScratchLimitBytes: reporter.options.TempMaxBytes, ScratchPeakBytes: peak,
-	})
+	}
+	if reporter.options.Progress != nil {
+		reporter.options.Progress(update)
+	}
+	reporter.telemetry.progress(reporter.operation, update)
 }
 
 func (reporter *checkProgressReporter) close() {
@@ -559,10 +640,16 @@ func CheckWithOptions(
 	if rpcConcurrency == 0 {
 		rpcConcurrency = workers
 	}
-	if workers > 1024 || rpcConcurrency > 4096 {
+	if workers > 1024 || rpcConcurrency > MaxCheckRPCConcurrency {
 		return CheckResult{}, fmt.Errorf("checker worker or RPC concurrency limit is too large")
 	}
 	options.Workers, options.RPCConcurrency = workers, rpcConcurrency
+	telemetry := options.Telemetry
+	if telemetry == nil {
+		telemetry = NewCheckTelemetryEnabled(false)
+	}
+	operation := telemetry.start()
+	defer func() { telemetry.finish(operation, result, err) }()
 	if options.Consistency.SessionID != "" {
 		validator, ok := store.(interface{ Validate(context.Context) error })
 		if !ok {
@@ -575,7 +662,7 @@ func CheckWithOptions(
 		}()
 	}
 	if store != nil {
-		store = &limitedStore{Store: store, semaphore: make(chan struct{}, rpcConcurrency)}
+		store = &limitedStore{Store: store, semaphore: make(chan struct{}, rpcConcurrency), telemetry: telemetry, operation: operation}
 	}
 	memoryBytes := options.MemoryBytes
 	if memoryBytes == 0 {
@@ -604,7 +691,11 @@ func CheckWithOptions(
 	if err != nil {
 		return CheckResult{}, err
 	}
+	scratch.telemetry = telemetry
+	scratch.operation = operation
 	progress := newCheckProgressReporter(options, scratch)
+	progress.telemetry = telemetry
+	progress.operation = operation
 	defer progress.close()
 	defer func() {
 		result.Resources.ScratchPeakBytes, result.Resources.MergePasses = scratch.stats()
@@ -1072,12 +1163,12 @@ func checkReferences(
 	memoryBytes uint64,
 	result *CheckResult,
 	maxFindings uint,
-) error {
+) (err error) {
 	spool, err := newLocationSpool(ctx, scratch, max(memoryBytes, locationTupleMemorySize), 32)
 	if err != nil {
 		return err
 	}
-	defer spool.close()
+	defer func() { err = errors.Join(err, spool.close()) }()
 	if err := scan(ctx, store, []byte("ri:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil {
@@ -1146,13 +1237,13 @@ func checkSnapshots(
 	slatedbOnly bool,
 	result *CheckResult,
 	maxFindings uint,
-) error {
+) (err error) {
 	spoolMemory := max(memoryBytes/2, locationTupleMemorySize)
 	legacy, err := newLocationSpool(ctx, scratch, spoolMemory, 32)
 	if err != nil {
 		return err
 	}
-	defer legacy.close()
+	defer func() { err = errors.Join(err, legacy.close()) }()
 	if !slatedbOnly {
 		if err := source.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
 			return legacy.add(locationTuple{BlobID: id})
@@ -1164,7 +1255,7 @@ func checkSnapshots(
 	if err != nil {
 		return err
 	}
-	defer slatedb.close()
+	defer func() { err = errors.Join(err, slatedb.close()) }()
 	err = scan(ctx, store, []byte("s:"), func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil {
@@ -1202,12 +1293,12 @@ func checkSnapshots(
 	if err != nil {
 		return err
 	}
-	defer legacyIterator.close()
+	defer func() { err = errors.Join(err, legacyIterator.close()) }()
 	slatedbIterator, err := slatedb.iterator()
 	if err != nil {
 		return err
 	}
-	defer slatedbIterator.close()
+	defer func() { err = errors.Join(err, slatedbIterator.close()) }()
 	legacyTuple, hasLegacy, err := legacyIterator.next()
 	if err != nil {
 		return err
@@ -1291,20 +1382,20 @@ func checkPackCatalog(
 	compareLegacy bool,
 	result *CheckResult,
 	maxFindings uint,
-) (map[schema.AggregateKind]schema.PackAggregate, map[schema.PackTier]schema.PackAggregate, error) {
+) (aggregates map[schema.AggregateKind]schema.PackAggregate, tiers map[schema.PackTier]schema.PackAggregate, err error) {
 	accumulator := schema.NewPackAggregateAccumulator()
 	legacyIterator, err := optionalPackContributionIterator(legacy)
 	if err != nil {
 		return nil, nil, err
 	}
 	if legacyIterator != nil {
-		defer legacyIterator.close()
+		defer func() { err = errors.Join(err, legacyIterator.close()) }()
 	}
 	slatedbIterator, err := newPackContributionIterator(slatedb)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer slatedbIterator.close()
+	defer func() { err = errors.Join(err, slatedbIterator.close()) }()
 	legacySummary, hasLegacy, err := nextPackContribution(legacyIterator)
 	if err != nil {
 		return nil, nil, err

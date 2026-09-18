@@ -1,13 +1,14 @@
 //! Fixed-cardinality timing attribution for VaulticDB operations.
 
 use std::{
-    collections::BTreeMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        OnceLock,
     },
     time::{Duration, Instant},
 };
+
+const ACTIVE_TIMING_CAPACITY: usize = 128;
 
 pub(crate) const LATENCY_BUCKET_UPPER_US: [u64; 8] = [
     10,
@@ -32,15 +33,10 @@ pub(crate) struct TimingSnapshot {
     pub(crate) timeouts: u64,
     pub(crate) active: u64,
     pub(crate) oldest_active_us: u64,
+    pub(crate) active_overflow: u64,
     pub(crate) latency_buckets: [u64; LATENCY_BUCKET_UPPER_US.len()],
     pub(crate) contention_available: bool,
     pub(crate) contentions: u64,
-}
-
-#[derive(Debug, Default)]
-struct ActiveTimings {
-    next_id: u64,
-    starts: BTreeMap<u64, Instant>,
 }
 
 #[derive(Debug)]
@@ -57,7 +53,9 @@ pub(crate) struct TimingMetric {
     latency_buckets: [AtomicU64; LATENCY_BUCKET_UPPER_US.len()],
     contention_available: bool,
     contentions: AtomicU64,
-    active: Mutex<ActiveTimings>,
+    active_count: AtomicU64,
+    active: [AtomicU64; ACTIVE_TIMING_CAPACITY],
+    active_overflow: AtomicU64,
 }
 
 impl Default for TimingMetric {
@@ -81,10 +79,9 @@ impl TimingMetric {
             latency_buckets: [const { AtomicU64::new(0) }; LATENCY_BUCKET_UPPER_US.len()],
             contention_available,
             contentions: AtomicU64::new(0),
-            active: Mutex::new(ActiveTimings {
-                next_id: 0,
-                starts: BTreeMap::new(),
-            }),
+            active_count: AtomicU64::new(0),
+            active: [const { AtomicU64::new(0) }; ACTIVE_TIMING_CAPACITY],
+            active_overflow: AtomicU64::new(0),
         }
     }
 
@@ -123,25 +120,33 @@ impl TimingMetric {
         }
         let started = Instant::now();
         saturating_increment(&self.attempts, 1);
-        let active_id = {
-            let mut active = self
-                .active
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let active_id = active.next_id;
-            active.next_id = active.next_id.wrapping_add(1);
-            active.starts.insert(active_id, started);
-            active_id
-        };
-        Some(TimingToken { started, active_id })
+        saturating_increment(&self.active_count, 1);
+        let stamp = monotonic_us();
+        let slot = self.active.iter().position(|active| {
+            active
+                .compare_exchange(0, stamp, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        });
+        if slot.is_none() {
+            saturating_increment(&self.active_overflow, 1);
+        }
+        Some(TimingToken {
+            started,
+            slot,
+            stamp,
+        })
     }
 
     pub(crate) fn complete(&self, token: TimingToken, outcome: TimingOutcome) {
-        self.active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .starts
-            .remove(&token.active_id);
+        if let Some(slot) = token.slot {
+            let _ = self.active[slot].compare_exchange(
+                token.stamp,
+                0,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
+        }
+        saturating_decrement(&self.active_count);
         self.settle(token.started.elapsed(), outcome);
     }
 
@@ -155,20 +160,17 @@ impl TimingMetric {
         if !self.enabled {
             return TimingSnapshot::default();
         }
-        let (active_count, oldest_active_us) = {
-            let active = self
-                .active
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = Instant::now();
-            let oldest = active
-                .starts
-                .values()
-                .min()
-                .map(|started| duration_us(now.saturating_duration_since(*started)))
-                .unwrap_or(0);
-            (active.starts.len().try_into().unwrap_or(u64::MAX), oldest)
-        };
+        let now = monotonic_us();
+        let mut oldest = u64::MAX;
+        for active in &self.active {
+            let stamp = active.load(Ordering::Acquire);
+            if stamp != 0 {
+                oldest = oldest.min(stamp);
+            }
+        }
+        let oldest_active_us = (oldest != u64::MAX)
+            .then(|| now.saturating_sub(oldest))
+            .unwrap_or(0);
         let completed = self.completed.load(Ordering::Relaxed);
         TimingSnapshot {
             attempts: self.attempts.load(Ordering::Relaxed),
@@ -179,8 +181,9 @@ impl TimingMetric {
             successes: self.successes.load(Ordering::Relaxed),
             cancellations: self.cancellations.load(Ordering::Relaxed),
             timeouts: self.timeouts.load(Ordering::Relaxed),
-            active: active_count,
+            active: self.active_count.load(Ordering::Relaxed),
             oldest_active_us,
+            active_overflow: self.active_overflow.load(Ordering::Relaxed),
             latency_buckets: std::array::from_fn(|index| {
                 self.latency_buckets[index].load(Ordering::Relaxed)
             }),
@@ -209,9 +212,20 @@ fn duration_us(elapsed: Duration) -> u64 {
     elapsed.as_micros().try_into().unwrap_or(u64::MAX)
 }
 
+fn monotonic_us() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    duration_us(EPOCH.get_or_init(Instant::now).elapsed()).saturating_add(1)
+}
+
 fn saturating_increment(value: &AtomicU64, increment: u64) {
     let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(increment))
+    });
+}
+
+fn saturating_decrement(value: &AtomicU64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(1))
     });
 }
 
@@ -227,7 +241,8 @@ pub(crate) enum TimingOutcome {
 #[derive(Debug)]
 pub(crate) struct TimingToken {
     started: Instant,
-    active_id: u64,
+    slot: Option<usize>,
+    stamp: u64,
 }
 
 pub(crate) struct TimingGuard<'a> {
@@ -438,6 +453,22 @@ mod tests {
         drop(first);
         assert_eq!(metric.snapshot().active, 1);
         drop(second);
+    }
+
+    #[test]
+    fn active_tracking_is_bounded_and_overflow_still_settles() {
+        let metric = TimingMetric::default();
+        let guards = (0..ACTIVE_TIMING_CAPACITY + 7)
+            .map(|_| metric.timer())
+            .collect::<Vec<_>>();
+        let active = metric.snapshot();
+        assert_eq!(active.active, (ACTIVE_TIMING_CAPACITY + 7) as u64);
+        assert_eq!(active.active_overflow, 7);
+        drop(guards);
+        let settled = metric.snapshot();
+        assert_eq!(settled.active, 0);
+        assert_eq!(settled.completed, (ACTIVE_TIMING_CAPACITY + 7) as u64);
+        assert_eq!(settled.cancellations, (ACTIVE_TIMING_CAPACITY + 7) as u64);
     }
 
     #[test]

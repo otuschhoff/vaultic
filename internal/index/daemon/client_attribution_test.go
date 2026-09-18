@@ -27,6 +27,7 @@ func TestWriterStatusAttributionMapping(t *testing.T) {
 				LatencyBucketCounts:  []uint64{1, 2},
 				ContentionAvailable:  true,
 				Contentions:          4,
+				ActiveOverflow:       5,
 			},
 			AdmissionLockHold:        &vaulticdbv1.TimingSnapshot{Completed: 7},
 			EngineWriteBatches:       5,
@@ -87,7 +88,7 @@ func TestWriterStatusAttributionMapping(t *testing.T) {
 	}
 
 	wait := status.Attribution.AdmissionWait
-	if wait.Attempts != 3 || wait.Failures != 1 || wait.TotalUS != 17 || wait.MaxUS != 9 || wait.Completed != 3 || wait.Successes != 1 || wait.Cancellations != 1 || wait.Timeouts != 1 || wait.Active != 2 || wait.OldestActiveUS != 23 || !wait.ContentionAvailable || wait.Contentions != 4 {
+	if wait.Attempts != 3 || wait.Failures != 1 || wait.TotalUS != 17 || wait.MaxUS != 9 || wait.Completed != 3 || wait.Successes != 1 || wait.Cancellations != 1 || wait.Timeouts != 1 || wait.Active != 2 || wait.OldestActiveUS != 23 || wait.ActiveOverflow != 5 || !wait.ContentionAvailable || wait.Contentions != 4 {
 		t.Fatalf("admission snapshot = %+v", status.Attribution.AdmissionWait)
 	}
 	if len(wait.LatencyBucketUpperUS) != 2 || wait.LatencyBucketUpperUS[1] != 100 || len(wait.LatencyBucketCounts) != 2 || wait.LatencyBucketCounts[1] != 2 {

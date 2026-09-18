@@ -288,6 +288,7 @@ message TimingSnapshot {
   repeated uint64 latency_bucket_counts = 12;
   bool contention_available = 13;
   uint64 contentions = 14;
+  uint64 active_overflow = 15;
 }
 
 message ObjectOperationSnapshot {

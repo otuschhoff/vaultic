@@ -2498,6 +2498,7 @@ type TimingSnapshot struct {
 	LatencyBucketCounts  []uint64               `protobuf:"varint,12,rep,packed,name=latency_bucket_counts,json=latencyBucketCounts,proto3" json:"latency_bucket_counts,omitempty"`
 	ContentionAvailable  bool                   `protobuf:"varint,13,opt,name=contention_available,json=contentionAvailable,proto3" json:"contention_available,omitempty"`
 	Contentions          uint64                 `protobuf:"varint,14,opt,name=contentions,proto3" json:"contentions,omitempty"`
+	ActiveOverflow       uint64                 `protobuf:"varint,15,opt,name=active_overflow,json=activeOverflow,proto3" json:"active_overflow,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -2626,6 +2627,13 @@ func (x *TimingSnapshot) GetContentionAvailable() bool {
 func (x *TimingSnapshot) GetContentions() uint64 {
 	if x != nil {
 		return x.Contentions
+	}
+	return 0
+}
+
+func (x *TimingSnapshot) GetActiveOverflow() uint64 {
+	if x != nil {
+		return x.ActiveOverflow
 	}
 	return 0
 }
@@ -5814,7 +5822,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x0epromotion_safe\x18\v \x01(\bR\rpromotionSafe\x12C\n" +
 	"\vattribution\x18\f \x01(\v2!.vaulticdb.v1.AttributionSnapshotR\vattribution\x125\n" +
 	"\x17process_started_unix_ms\x18\r \x01(\x03R\x14processStartedUnixMs\x12(\n" +
-	"\x10captured_unix_ms\x18\x0e \x01(\x03R\x0ecapturedUnixMs\"\xfa\x03\n" +
+	"\x10captured_unix_ms\x18\x0e \x01(\x03R\x0ecapturedUnixMs\"\xa3\x04\n" +
 	"\x0eTimingSnapshot\x12\x1a\n" +
 	"\battempts\x18\x01 \x01(\x04R\battempts\x12\x1a\n" +
 	"\bfailures\x18\x02 \x01(\x04R\bfailures\x12\x19\n" +
@@ -5830,7 +5838,8 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x17latency_bucket_upper_us\x18\v \x03(\x04R\x14latencyBucketUpperUs\x122\n" +
 	"\x15latency_bucket_counts\x18\f \x03(\x04R\x13latencyBucketCounts\x121\n" +
 	"\x14contention_available\x18\r \x01(\bR\x13contentionAvailable\x12 \n" +
-	"\vcontentions\x18\x0e \x01(\x04R\vcontentions\"\xfa\x01\n" +
+	"\vcontentions\x18\x0e \x01(\x04R\vcontentions\x12'\n" +
+	"\x0factive_overflow\x18\x0f \x01(\x04R\x0eactiveOverflow\"\xfa\x01\n" +
 	"\x17ObjectOperationSnapshot\x124\n" +
 	"\x06timing\x18\x01 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\x06timing\x12+\n" +
 	"\x11transferred_bytes\x18\x02 \x01(\x04R\x10transferredBytes\x12>\n" +

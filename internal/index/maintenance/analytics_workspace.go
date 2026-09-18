@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/bits"
 
@@ -57,12 +58,12 @@ func (workspace *analyticsCheckWorkspace) AddDictionary(kind schema.AnalyticsDic
 
 func (workspace *analyticsCheckWorkspace) ForEachDictionary(
 	visit func(schema.AnalyticsDictionaryKind, uint32, string) error,
-) error {
+) (err error) {
 	iterator, err := workspace.dictionaries.iterator()
 	if err != nil {
 		return err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	for {
 		record, found, err := iterator.next()
 		if err != nil || !found {
@@ -105,12 +106,12 @@ func (workspace *analyticsCheckWorkspace) AddGDPR(key, value []byte) error {
 
 func (workspace *analyticsCheckWorkspace) ForEachAggregate(
 	visit func([]byte, schema.AnalyticsAggregateRecord) error,
-) error {
+) (err error) {
 	iterator, err := workspace.aggregates.iterator()
 	if err != nil {
 		return err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	var key []byte
 	var total schema.AnalyticsAggregateRecord
 	flush := func() error {
@@ -155,12 +156,12 @@ func (workspace *analyticsCheckWorkspace) ForEachAggregate(
 
 func (workspace *analyticsCheckWorkspace) ForEachSummary(
 	visit func([]byte, schema.AnalyticsSummaryRecord) error,
-) error {
+) (err error) {
 	iterator, err := workspace.summaries.iterator()
 	if err != nil {
 		return err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	var key []byte
 	var total schema.AnalyticsSummaryRecord
 	flush := func() error {
@@ -203,12 +204,12 @@ func (workspace *analyticsCheckWorkspace) ForEachSummary(
 	}
 }
 
-func (workspace *analyticsCheckWorkspace) ForEachGDPR(visit func([]byte, []byte) error) error {
+func (workspace *analyticsCheckWorkspace) ForEachGDPR(visit func([]byte, []byte) error) (err error) {
 	iterator, err := workspace.gdpr.iterator()
 	if err != nil {
 		return err
 	}
-	defer iterator.close()
+	defer func() { err = errors.Join(err, iterator.close()) }()
 	var latest checkKVRecord
 	flush := func() error {
 		if latest.key == nil {
