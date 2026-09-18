@@ -177,6 +177,33 @@ func TestExperimentProfileRequiresExplicitHolds(t *testing.T) {
 	}
 }
 
+func TestExperimentProfileRequiresMatchingConfirmedDisposableTarget(t *testing.T) {
+	profile := validExperimentProfile()
+	for _, target := range []ExperimentTarget{
+		{ID: profile.TargetID, Disposable: false, Confirmed: true},
+		{ID: profile.TargetID, Disposable: true, Confirmed: false},
+		{ID: "another-target", Disposable: true, Confirmed: true},
+	} {
+		if err := profile.ValidateTarget(target); err == nil {
+			t.Fatalf("unsafe target was accepted: %+v", target)
+		}
+	}
+	if err := profile.ValidateTarget(ExperimentTarget{ID: profile.TargetID, Disposable: true, Confirmed: true}); err != nil {
+		t.Fatalf("disposable target was rejected: %v", err)
+	}
+
+	profile.Enabled = false
+	profile.Mode = DelayDisabled
+	profile.DelayUS = 0
+	profile.Concurrency = 0
+	profile.DeadlineMS = 0
+	profile.MaxRetries = 0
+	profile.RetryError = ""
+	if err := profile.ValidateTarget(ExperimentTarget{}); err != nil {
+		t.Fatalf("disabled profile required a target gate: %v", err)
+	}
+}
+
 func TestExperimentArtifactValidation(t *testing.T) {
 	artifact := ExperimentArtifact{
 		SchemaVersion:                ExperimentSchemaVersion,

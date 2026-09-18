@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -130,6 +131,57 @@ func TestLocationSpoolOverflowsToDiskAfterMemoryBudget(t *testing.T) {
 	defer iterator.close()
 	if peak, _ := scratch.stats(); peak == 0 {
 		t.Fatal("location spool exceeding memory budget did not use disk scratch")
+	}
+}
+
+func TestLocationSpoolScenarioPreservesDiskResultsAndCleanup(t *testing.T) {
+	profile, err := monitor.DecodeExperimentProfile([]byte(`{
+		"schema_version":1,"profile_id":"check-scratch-test","enabled":true,"test_only":true,
+		"scenario":"local","backend":"scratch","mode":"service","operation":"check",
+		"role":"scratch","method":"put","access_pattern":"sequential","target_id":"scratch-target",
+		"resource_id":"scratch-device","placement":"inside_service","latency_semantics":"service_completion",
+		"interpretation":"additive","endpoint":"dependency","acknowledgement":"unknown",
+		"delay_us":1000,"jitter_us":0,"tail_delay_us":0,"tail_every":0,"correlated_for":0,
+		"bandwidth_bytes_per_second":0,"concurrency":1,"deadline_ms":0,"max_retries":0,
+		"retry_error":"none","seed":34,"holds":["backend_capacity"]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := monitor.NewScenarioHarness().Controller(profile, monitor.ExperimentTarget{
+		ID: "scratch-target", Disposable: true, Confirmed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch, err := newCheckScratchWithScenario(context.Background(), t.TempDir(), 1<<20, controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	spool, err := newLocationSpool(context.Background(), scratch, locationTupleMemorySize*2, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tuple := range []locationTuple{testLocation(3), testLocation(1), testLocation(2)} {
+		if err := spool.add(tuple); err != nil {
+			t.Fatal(err)
+		}
+	}
+	iterator, err := spool.iterator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iterator.close()
+	for expected := byte(1); expected <= 3; expected++ {
+		tuple, found, nextErr := iterator.next()
+		if nextErr != nil || !found || tuple != testLocation(expected) {
+			t.Fatalf("tuple=%+v found=%t err=%v", tuple, found, nextErr)
+		}
+	}
+	observation := controller.Observation()
+	if observation.Completed == 0 || observation.Active != 0 {
+		t.Fatalf("scratch scenario observation = %+v", observation)
 	}
 }
 

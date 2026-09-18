@@ -72,8 +72,8 @@ mod role_tests {
             idempotency_key: "batch-one".to_owned(),
             ..Default::default()
         };
-        assert!(storage.write_batch(&request).await.unwrap());
-        assert!(storage.write_batch(&request).await.unwrap());
+        assert!(storage.write_batch(&request).await.unwrap().durable);
+        assert!(storage.write_batch(&request).await.unwrap().durable);
         let mut conflict = request.clone();
         conflict.puts[0].value = b"two".to_vec();
         assert_eq!(
@@ -95,14 +95,14 @@ mod role_tests {
             .unwrap();
         assert!(
             storage
-                .commit(&transaction_id, "commit-one", false)
+                .commit(&transaction_id, "commit-one", false, false)
                 .await
                 .unwrap()
                 .consumed
         );
         assert!(
             !storage
-                .commit(&transaction_id, "commit-one", false)
+                .commit(&transaction_id, "commit-one", false, false)
                 .await
                 .unwrap()
                 .consumed

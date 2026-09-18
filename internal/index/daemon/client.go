@@ -110,6 +110,7 @@ type Options struct {
 	AttributionDisabledForTesting bool
 	ObjectDelayProfileForTesting  string
 	commitResponseDelayForTesting time.Duration
+	ResponseDeliveryForTesting    func(context.Context, string) error
 	testEnvironment               []string
 }
 
@@ -1005,10 +1006,14 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 			return netDialer.DialContext(ctx, "tcp", address)
 		}
 	}
+	interceptors := []grpc.UnaryClientInterceptor{classifyUnaryClientError}
+	if options.ResponseDeliveryForTesting != nil {
+		interceptors = append(interceptors, responseDeliveryInterceptor(options.ResponseDeliveryForTesting))
+	}
 	conn, err := grpc.DialContext(ctx, target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(dialer),
-		grpc.WithUnaryInterceptor(classifyUnaryClientError),
+		grpc.WithChainUnaryInterceptor(interceptors...),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -1133,6 +1138,14 @@ func (c *authenticatedClient) WriteBatch(
 	callOptions ...grpc.CallOption,
 ) (*vaulticdbv1.WriteBatchResponse, error) {
 	return c.VaulticDBClient.WriteBatch(withAuth(ctx, c.token), in, callOptions...)
+}
+
+func (c *authenticatedClient) AwaitDurableThrough(
+	ctx context.Context,
+	in *vaulticdbv1.AwaitDurableThroughRequest,
+	callOptions ...grpc.CallOption,
+) (*vaulticdbv1.AwaitDurableThroughResponse, error) {
+	return c.VaulticDBClient.AwaitDurableThrough(withAuth(ctx, c.token), in, callOptions...)
 }
 
 func (c *authenticatedClient) Begin(

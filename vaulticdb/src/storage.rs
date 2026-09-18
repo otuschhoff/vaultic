@@ -34,6 +34,7 @@ use slatedb::{
         UpdateVersion, UploadPart,
     },
     Db, DbIterator, DbReader, DbReaderMode, DbTransaction, ErrorKind, IsolationLevel, WriteBatch,
+    WriteHandle,
 };
 use slatedb_common::metrics::{
     DefaultMetricsRecorder, Metric, MetricValue, Metrics, MetricsRecorder, NoopMetricsRecorder,
@@ -246,6 +247,9 @@ pub(crate) struct Storage {
     transactions: RwLock<HashMap<String, Arc<TransactionSlot>>>,
     next_transaction: AtomicU64,
     last_durable_sequence: AtomicU64,
+    last_applied_engine_sequence: AtomicU64,
+    durable_engine_sequence: AtomicU64,
+    latest_write_handle: Mutex<Option<WriteHandle>>,
     transaction_idle_timeout_ms: u64,
     slatedb_multiget: bool,
     slatedb_tuning: SlateDbTuning,
@@ -1187,6 +1191,13 @@ pub(crate) struct StorageTransitionFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TransactionOutcome {
     pub(crate) consumed: bool,
+    pub(crate) applied_sequence: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WriteBatchOutcome {
+    pub(crate) durable: bool,
+    pub(crate) applied_sequence: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1703,7 +1714,7 @@ impl Storage {
             )
         };
         let attribution = Arc::new(StorageAttribution::new(!config.attribution_disabled));
-        let test_delay_profile = test_object_delay_profile_from_env()?;
+        let test_delay_profile = test_object_delay_profile_from_env(repository_id)?;
         if test_delay_profile.is_some() && config.attribution_disabled {
             bail!("test object delay profiles require storage attribution");
         }
@@ -1874,6 +1885,9 @@ impl Storage {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
+            last_applied_engine_sequence: AtomicU64::new(0),
+            durable_engine_sequence: AtomicU64::new(0),
+            latest_write_handle: Mutex::new(None),
             transaction_idle_timeout_ms: config.transaction_idle_timeout_ms,
             slatedb_multiget: config.slatedb_multiget,
             slatedb_tuning: config.slatedb_tuning.clone(),
@@ -1945,6 +1959,79 @@ impl Storage {
 
     pub(crate) fn last_durable_sequence(&self) -> u64 {
         self.last_durable_sequence.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn writer_epoch(&self) -> u64 {
+        self.writer_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn supports_durability_tokens(&self) -> bool {
+        self.wal_target != "memory"
+    }
+
+    pub(crate) async fn active_generation(&self, repository_id: &str) -> Result<u64, Status> {
+        self.generation_authority(repository_id)
+            .await
+            .map(|authority| authority.active_generation)
+            .map_err(storage_status)
+    }
+
+    pub(crate) async fn await_durable_through(
+        &self,
+        repository_id: &str,
+        repository_generation: u64,
+        writer_epoch: u64,
+        applied_sequence: u64,
+    ) -> Result<u64, Status> {
+        if self.wal_target == "memory" {
+            return Err(Status::failed_precondition(
+                "durability tokens are unavailable with a memory WAL",
+            ));
+        }
+        if applied_sequence == 0 {
+            return Err(Status::invalid_argument(
+                "durability token applied_sequence must be non-zero",
+            ));
+        }
+        let active_generation = self.active_generation(repository_id).await?;
+        if repository_generation != active_generation {
+            return Err(Status::failed_precondition(format!(
+                "durability token generation {repository_generation} is stale; active generation is {active_generation}"
+            )));
+        }
+        self.assert_current_writer_epoch().await?;
+        let active_epoch = self.writer_epoch();
+        if writer_epoch != active_epoch {
+            return Err(Status::failed_precondition(format!(
+                "durability token writer epoch {writer_epoch} is stale; active epoch is {active_epoch}"
+            )));
+        }
+        let last_applied = self.last_applied_engine_sequence.load(Ordering::Acquire);
+        crate::service::process_test_barrier("VAULTICDB_TEST_DURABILITY_BEFORE_FENCE_BARRIER")
+            .await?;
+        let durable_sequence = await_engine_durable_through(
+            &self.latest_write_handle,
+            &self.durable_engine_sequence,
+            last_applied,
+            applied_sequence,
+        )
+        .await?;
+        crate::service::process_test_barrier("VAULTICDB_TEST_DURABILITY_AFTER_FENCE_BARRIER")
+            .await?;
+        let completed_generation = self.active_generation(repository_id).await?;
+        if repository_generation != completed_generation {
+            return Err(Status::failed_precondition(format!(
+                "durability token generation {repository_generation} became stale while waiting; active generation is {completed_generation}"
+            )));
+        }
+        self.assert_current_writer_epoch().await?;
+        let completed_epoch = self.writer_epoch();
+        if writer_epoch != completed_epoch {
+            return Err(Status::failed_precondition(format!(
+                "durability token writer epoch {writer_epoch} became stale while waiting; active epoch is {completed_epoch}"
+            )));
+        }
+        Ok(durable_sequence)
     }
 
     pub(crate) fn attribution(&self) -> &StorageAttribution {
@@ -3217,7 +3304,10 @@ impl Storage {
         collect_page(&mut iterator, page_size).await
     }
 
-    pub(crate) async fn write_batch(&self, request: &WriteBatchRequest) -> Result<bool, Status> {
+    pub(crate) async fn write_batch(
+        &self,
+        request: &WriteBatchRequest,
+    ) -> Result<WriteBatchOutcome, Status> {
         validate_mutations(request)?;
         self.assert_current_writer_epoch().await?;
         if request.transaction_id.is_empty() {
@@ -3233,7 +3323,10 @@ impl Storage {
                         }
                         .into());
                     }
-                    return Ok(existing.durable);
+                    return Ok(WriteBatchOutcome {
+                        durable: existing.durable,
+                        applied_sequence: None,
+                    });
                 }
             }
             let mut batch = WriteBatch::new();
@@ -3282,6 +3375,10 @@ impl Storage {
                     return Err(error);
                 }
             };
+            let applied_sequence = handle.seqnum();
+            self.last_applied_engine_sequence
+                .fetch_max(applied_sequence, Ordering::AcqRel);
+            retain_latest_write_handle(&self.latest_write_handle, &handle).await;
             if request.await_durable || !request.idempotency_key.is_empty() {
                 let mut durable_timer = self.attribution.durable_wait.timer();
                 match handle.await_durable().await.map_err(storage_error) {
@@ -3291,9 +3388,14 @@ impl Storage {
                         return Err(error);
                     }
                 }
+                self.durable_engine_sequence
+                    .fetch_max(applied_sequence, Ordering::AcqRel);
                 self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
             }
-            return Ok(request.await_durable || !request.idempotency_key.is_empty());
+            return Ok(WriteBatchOutcome {
+                durable: request.await_durable || !request.idempotency_key.is_empty(),
+                applied_sequence: Some(applied_sequence),
+            });
         }
 
         if request.await_durable {
@@ -3316,7 +3418,10 @@ impl Storage {
         for key in &request.deletes {
             transaction.delete(key).map_err(storage_error)?;
         }
-        Ok(false)
+        Ok(WriteBatchOutcome {
+            durable: false,
+            applied_sequence: None,
+        })
     }
 
     pub(crate) async fn begin(&self) -> Result<BeginTransactionOutcome, BeginTransactionFailure> {
@@ -3391,12 +3496,23 @@ impl Storage {
         transaction_id: &str,
         idempotency_key: &str,
         defer_durability: bool,
+        require_durability_token: bool,
     ) -> Result<TransactionOutcome, TransactionFailure> {
         if defer_durability && !self.metadata_rebuild_reset {
             return Err(TransactionFailure::before_consumption(
                 VaulticDbError::Precondition {
                     field: "defer_durability".to_owned(),
                     message: "deferred durability requires metadata rebuild reset".to_owned(),
+                }
+                .into(),
+            ));
+        }
+        if require_durability_token && (!defer_durability || !self.supports_durability_tokens()) {
+            return Err(TransactionFailure::before_consumption(
+                VaulticDbError::Precondition {
+                    field: "require_durability_token".to_owned(),
+                    message: "durability tokens require deferred commit with a persistent WAL"
+                        .to_owned(),
                 }
                 .into(),
             ));
@@ -3423,7 +3539,10 @@ impl Storage {
                         .into(),
                     ));
                 }
-                return Ok(TransactionOutcome { consumed: false });
+                return Ok(TransactionOutcome {
+                    consumed: false,
+                    applied_sequence: None,
+                });
             }
         }
         let transaction = self
@@ -3463,6 +3582,9 @@ impl Storage {
             submit_timer.failed();
             return Err(error);
         }
+        crate::service::process_test_barrier("VAULTICDB_TEST_TRANSACTION_BEFORE_APPLY_BARRIER")
+            .await
+            .map_err(TransactionFailure::after_consumption)?;
         let commit = transaction
             .commit()
             .await
@@ -3480,6 +3602,13 @@ impl Storage {
             }
         };
         if let Some(handle) = handle {
+            let applied_sequence = handle.seqnum();
+            self.last_applied_engine_sequence
+                .fetch_max(applied_sequence, Ordering::AcqRel);
+            retain_latest_write_handle(&self.latest_write_handle, &handle).await;
+            crate::service::process_test_barrier("VAULTICDB_TEST_TRANSACTION_AFTER_APPLY_BARRIER")
+                .await
+                .map_err(TransactionFailure::after_consumption)?;
             if !defer_durability {
                 let mut durable_timer = self.attribution.durable_wait.timer();
                 #[cfg(any(test, feature = "test-failpoints"))]
@@ -3498,18 +3627,29 @@ impl Storage {
                     .map_err(storage_error)
                     .map_err(TransactionFailure::after_consumption);
                 match durability {
-                    Ok(()) => durable_timer.succeeded(),
+                    Ok(()) => {
+                        self.durable_engine_sequence
+                            .fetch_max(applied_sequence, Ordering::AcqRel);
+                        durable_timer.succeeded();
+                    }
                     Err(error) => {
                         durable_timer.failed();
                         return Err(error);
                     }
                 }
             }
+            if !defer_durability {
+                self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
+            }
+            return Ok(TransactionOutcome {
+                consumed: true,
+                applied_sequence: Some(applied_sequence),
+            });
         }
-        if !defer_durability {
-            self.last_durable_sequence.fetch_add(1, Ordering::AcqRel);
-        }
-        Ok(TransactionOutcome { consumed: true })
+        Ok(TransactionOutcome {
+            consumed: true,
+            applied_sequence: None,
+        })
     }
 
     pub(crate) async fn rollback(
@@ -3524,7 +3664,10 @@ impl Storage {
             TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
         })?;
         transaction.rollback();
-        Ok(TransactionOutcome { consumed: true })
+        Ok(TransactionOutcome {
+            consumed: true,
+            applied_sequence: None,
+        })
     }
 
     async fn transaction(&self, transaction_id: &str) -> Result<Arc<TransactionSlot>, Status> {
@@ -3595,6 +3738,48 @@ impl Storage {
             })
             .transpose()
     }
+}
+
+async fn retain_latest_write_handle(
+    latest_write_handle: &Mutex<Option<WriteHandle>>,
+    candidate: &WriteHandle,
+) {
+    let mut latest = latest_write_handle.lock().await;
+    if latest
+        .as_ref()
+        .is_none_or(|current| candidate.seqnum() > current.seqnum())
+    {
+        *latest = Some(candidate.clone());
+    }
+}
+
+async fn await_engine_durable_through(
+    latest_write_handle: &Mutex<Option<WriteHandle>>,
+    durable_engine_sequence: &AtomicU64,
+    last_applied: u64,
+    applied_sequence: u64,
+) -> Result<u64, Status> {
+    if applied_sequence > last_applied {
+        return Err(Status::failed_precondition(format!(
+            "durability token sequence {applied_sequence} has not been applied; latest sequence is {last_applied}"
+        )));
+    }
+    let already_durable = durable_engine_sequence.load(Ordering::Acquire);
+    if applied_sequence <= already_durable {
+        return Ok(already_durable);
+    }
+    let handle =
+        latest_write_handle.lock().await.clone().ok_or_else(|| {
+            Status::failed_precondition("durability token is no longer available")
+        })?;
+    if handle.seqnum() < applied_sequence {
+        return Err(Status::failed_precondition(
+            "durability token is no longer available",
+        ));
+    }
+    handle.await_durable().await.map_err(storage_error)?;
+    durable_engine_sequence.fetch_max(handle.seqnum(), Ordering::AcqRel);
+    Ok(handle.seqnum())
 }
 
 mod rados {

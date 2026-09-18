@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    future::Future,
     ops::Range,
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -19,47 +20,216 @@ enum ObjectStoreRole {
     Coordination,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 struct TestObjectDelayProfile {
-    #[cfg_attr(not(any(test, feature = "test-failpoints")), allow(dead_code))]
+    role: ObjectStoreRole,
+    operation: String,
+    delay_us: u64,
+    capacity: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+#[cfg(any(test, feature = "test-failpoints"))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyTestObjectDelayProfile {
     version: u32,
-    #[cfg_attr(not(any(test, feature = "test-failpoints")), allow(dead_code))]
     target: String,
     role: ObjectStoreRole,
     operation: String,
     delay_ms: u64,
+    #[serde(default)]
+    concurrency: u32,
+}
+
+#[cfg(any(test, feature = "test-failpoints"))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedTestObjectDelayProfile {
+    schema_version: u32,
+    profile_id: String,
+    enabled: bool,
+    test_only: bool,
+    scenario: String,
+    backend: String,
+    mode: String,
+    operation: String,
+    role: ObjectStoreRole,
+    method: String,
+    access_pattern: String,
+    target_id: String,
+    resource_id: String,
+    placement: String,
+    latency_semantics: String,
+    interpretation: String,
+    endpoint: String,
+    acknowledgement: String,
+    delay_us: u64,
+    jitter_us: u64,
+    tail_delay_us: u64,
+    tail_every: u64,
+    correlated_for: u64,
+    bandwidth_bytes_per_second: u64,
+    concurrency: u32,
+    deadline_ms: u64,
+    max_retries: u32,
+    #[serde(default)]
+    retry_error: String,
+    seed: u64,
+    #[serde(default)]
+    holds: Vec<String>,
+    #[serde(default)]
+    unknowns: Vec<SharedExperimentUnknown>,
+}
+
+#[cfg(any(test, feature = "test-failpoints"))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedExperimentUnknown {
+    field: String,
+    reason: String,
+}
+
+#[cfg(any(test, feature = "test-failpoints"))]
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TestObjectDelayProfileWire {
+    Shared(SharedTestObjectDelayProfile),
+    Legacy(LegacyTestObjectDelayProfile),
 }
 
 impl TestObjectDelayProfile {
     #[cfg(any(test, feature = "test-failpoints"))]
-    fn parse(encoded: &str) -> Result<Self> {
-        let profile: Self =
+    fn parse(encoded: &str, repository_id: &str) -> Result<Self> {
+        let wire: TestObjectDelayProfileWire =
             serde_json::from_str(encoded).context("decode test object delay profile")?;
-        if profile.version != 1 {
-            bail!("test object delay profile version must be 1");
+        let (role, operation, delay_us, concurrency) = match wire {
+            TestObjectDelayProfileWire::Legacy(profile) => {
+                if profile.version != 1 || profile.target != "isolated" {
+                    bail!("legacy test object delay profile requires version 1 and isolated target");
+                }
+                (
+                    profile.role,
+                    profile.operation,
+                    profile.delay_ms.saturating_mul(1_000),
+                    profile.concurrency,
+                )
+            }
+            TestObjectDelayProfileWire::Shared(profile) => {
+                if profile.schema_version != 1
+                    || !profile.enabled
+                    || !profile.test_only
+                    || profile.target_id != repository_id
+                {
+                    bail!("active shared object delay profile requires schema 1 and an exact isolated repository target");
+                }
+                let boundary_supported = match profile.mode.as_str() {
+                    "service" => {
+                        profile.placement == "inside_service"
+                            && profile.latency_semantics == "service_completion"
+                            && matches!(profile.acknowledgement.as_str(), "unknown" | "unchanged")
+                    }
+                    "durability" => {
+                        profile.placement == "inside_service"
+                            && profile.latency_semantics == "durability_completion"
+                            && matches!(
+                                profile.acknowledgement.as_str(),
+                                "durable" | "object_put_completion"
+                            )
+                    }
+                    _ => false,
+                };
+                if profile.profile_id.is_empty()
+                    || profile.scenario.is_empty()
+                    || profile.backend.is_empty()
+                    || profile.operation.is_empty()
+                    || profile.access_pattern.is_empty()
+                    || profile.resource_id.is_empty()
+                    || profile.interpretation.is_empty()
+                    || profile.endpoint != "dependency"
+                    || !boundary_supported
+                    || profile.holds.len() != 1
+                    || profile.holds[0] != profile.resource_id
+                    || profile.unknowns.iter().any(|item| item.field.is_empty() || item.reason.is_empty())
+                    || profile.jitter_us != 0
+                    || profile.tail_delay_us != 0
+                    || profile.tail_every != 0
+                    || profile.correlated_for != 0
+                    || profile.bandwidth_bytes_per_second != 0
+                    || profile.deadline_ms != 0
+                    || profile.max_retries != 0
+                    || !matches!(profile.retry_error.as_str(), "" | "none")
+                    || profile.seed == 0
+                {
+                    bail!("shared object delay profile contains unsupported or incomplete fields");
+                }
+                (profile.role, profile.method, profile.delay_us, profile.concurrency)
+            }
+        };
+        if !matches!(
+            operation.as_str(),
+            "put"
+                | "conditional_put"
+                | "multipart_init"
+                | "multipart_part"
+                | "multipart_complete"
+                | "multipart_abort"
+                | "get"
+                | "head"
+                | "get_body"
+                | "get_ranges"
+                | "delete"
+                | "list"
+                | "list_with_offset"
+                | "list_with_delimiter"
+                | "copy"
+                | "rename"
+        ) {
+            bail!("unsupported test object delay profile operation");
         }
-        if profile.target != "isolated" {
-            bail!("test object delay profile target must be isolated");
+        if delay_us > 3_600_000_000 {
+            bail!("test object delay profile delay must not exceed 3600000000 microseconds");
         }
-        if profile.operation != "put" {
-            bail!("test object delay profile operation must be put");
+        if concurrency > 1_024 {
+            bail!("test object delay profile concurrency must not exceed 1024");
         }
-        if profile.delay_ms > 1_000 {
-            bail!("test object delay profile delay must not exceed 1000 ms");
-        }
-        Ok(profile)
+        Ok(Self {
+            role,
+            operation,
+            delay_us,
+            capacity: (concurrency != 0)
+                .then(|| Arc::new(tokio::sync::Semaphore::new(concurrency as usize))),
+        })
     }
 
     async fn delay(&self, role: ObjectStoreRole, operation: &str) {
-        if self.role == role && self.operation == operation && self.delay_ms != 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        if let Some(delay) = self.delay_duration(role, operation) {
+            let _permit = match &self.capacity {
+                Some(capacity) => Some(
+                    capacity
+                        .acquire()
+                        .await
+                        .expect("test object delay capacity remains open"),
+                ),
+                None => None,
+            };
+            tokio::time::sleep(delay).await;
         }
+    }
+
+    fn delay_duration(
+        &self,
+        role: ObjectStoreRole,
+        operation: &str,
+    ) -> Option<std::time::Duration> {
+        let operation_matches = self.operation == operation
+            || self.operation == "put" && operation == "conditional_put";
+        (self.role == role && operation_matches && self.delay_us != 0)
+            .then(|| std::time::Duration::from_micros(self.delay_us))
     }
 }
 
 #[cfg(feature = "test-failpoints")]
-fn test_object_delay_profile_from_env() -> Result<Option<Arc<TestObjectDelayProfile>>> {
+fn test_object_delay_profile_from_env(repository_id: &str) -> Result<Option<Arc<TestObjectDelayProfile>>> {
     let Some(encoded) = std::env::var_os("VAULTICDB_TEST_OBJECT_DELAY_PROFILE") else {
         return Ok(None);
     };
@@ -71,11 +241,14 @@ fn test_object_delay_profile_from_env() -> Result<Option<Arc<TestObjectDelayProf
     let encoded = encoded
         .into_string()
         .map_err(|_| anyhow::anyhow!("test object delay profile is not UTF-8"))?;
-    Ok(Some(Arc::new(TestObjectDelayProfile::parse(&encoded)?)))
+    Ok(Some(Arc::new(TestObjectDelayProfile::parse(
+        &encoded,
+        repository_id,
+    )?)))
 }
 
 #[cfg(not(feature = "test-failpoints"))]
-fn test_object_delay_profile_from_env() -> Result<Option<Arc<TestObjectDelayProfile>>> {
+fn test_object_delay_profile_from_env(_repository_id: &str) -> Result<Option<Arc<TestObjectDelayProfile>>> {
     Ok(None)
 }
 
@@ -234,11 +407,14 @@ struct RoleAwareObjectStore {
 struct RoleAwareMultipartUpload {
     inner: Box<dyn MultipartUpload>,
     metrics: Arc<ObjectStoreRoleMetrics>,
+    role: ObjectStoreRole,
+    test_delay_profile: Option<Arc<TestObjectDelayProfile>>,
 }
 
 struct MonitoredObjectStream<T> {
     inner: BoxStream<'static, slatedb::object_store::Result<T>>,
     guard: Option<OwnedTimingGuard>,
+    delay: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -275,6 +451,12 @@ impl<T> Stream for MonitoredObjectStream<T> {
 
     fn poll_next(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if let Some(delay) = &mut this.delay {
+            if delay.as_mut().poll(context).is_pending() {
+                return Poll::Pending;
+            }
+            this.delay = None;
+        }
         match this.inner.as_mut().poll_next(context) {
             Poll::Ready(Some(Ok(item))) => Poll::Ready(Some(Ok(item))),
             Poll::Ready(Some(Err(error))) => {
@@ -350,11 +532,13 @@ fn settle_delete_guards(state: &std::sync::Mutex<DeleteStreamState>) {
 fn monitored_stream<T: Send + 'static>(
     inner: BoxStream<'static, slatedb::object_store::Result<T>>,
     metric: Arc<ObjectOperationMetric>,
+    delay: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 ) -> BoxStream<'static, slatedb::object_store::Result<T>> {
     let guard = metric.timing.timer_owned();
     Box::pin(MonitoredObjectStream {
         inner,
         guard: Some(guard),
+        delay,
     })
 }
 
@@ -372,8 +556,13 @@ impl MultipartUpload for RoleAwareMultipartUpload {
         let bytes = payload.content_length().try_into().unwrap_or(u64::MAX);
         let future = self.inner.put_part(payload);
         let metrics = Arc::clone(&self.metrics);
+        let profile = self.test_delay_profile.clone();
+        let role = self.role;
         let mut guard = metrics.multipart_part.timer();
         Box::pin(async move {
+            if let Some(profile) = profile {
+                profile.delay(role, "multipart_part").await;
+            }
             let result = future.await;
             settle(&mut guard, &result);
             if result.is_ok() {
@@ -385,6 +574,9 @@ impl MultipartUpload for RoleAwareMultipartUpload {
 
     async fn complete(&mut self) -> slatedb::object_store::Result<PutResult> {
         let mut guard = self.metrics.multipart_complete.timer();
+        if let Some(profile) = &self.test_delay_profile {
+            profile.delay(self.role, "multipart_complete").await;
+        }
         let result = self.inner.complete().await;
         settle(&mut guard, &result);
         result
@@ -392,6 +584,9 @@ impl MultipartUpload for RoleAwareMultipartUpload {
 
     async fn abort(&mut self) -> slatedb::object_store::Result<()> {
         let mut guard = self.metrics.multipart_abort.timer();
+        if let Some(profile) = &self.test_delay_profile {
+            profile.delay(self.role, "multipart_abort").await;
+        }
         let result = self.inner.abort().await;
         settle(&mut guard, &result);
         result
@@ -460,10 +655,41 @@ impl RoleAwareObjectStore {
         }
     }
 
+    fn role_for_path(&self, path: &ObjectPath) -> ObjectStoreRole {
+        if Self::is_wal_path(path) && self.tagged_wal_metrics.is_some() {
+            ObjectStoreRole::Wal
+        } else {
+            self.role
+        }
+    }
+
+    fn role_for_paths(&self, paths: &[&ObjectPath]) -> ObjectStoreRole {
+        paths
+            .iter()
+            .find(|path| Self::is_wal_path(path))
+            .map_or(self.role, |path| self.role_for_path(path))
+    }
+
+    fn role_for_optional_path(&self, path: Option<&ObjectPath>) -> ObjectStoreRole {
+        path.map_or(self.role, |path| self.role_for_path(path))
+    }
+
     async fn test_delay(&self, role: ObjectStoreRole, operation: &str) {
         if let Some(profile) = &self.test_delay_profile {
             profile.delay(role, operation).await;
         }
+    }
+
+    fn test_delay_future(
+        &self,
+        role: ObjectStoreRole,
+        operation: &str,
+    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        let profile = self.test_delay_profile.as_ref()?;
+        profile.delay_duration(role, operation)?;
+        let profile = Arc::clone(profile);
+        let operation = operation.to_owned();
+        Some(Box::pin(async move { profile.delay(role, &operation).await }))
     }
 }
 
@@ -478,8 +704,13 @@ impl ObjectStore for RoleAwareObjectStore {
         let bytes = payload.content_length().try_into().unwrap_or(u64::MAX);
         let metrics = self.metrics_for_extensions(&options.extensions);
         let role = self.role_for_extensions(&options.extensions);
+        let operation = if matches!(&options.mode, PutMode::Overwrite) {
+            "put"
+        } else {
+            "conditional_put"
+        };
         let mut guard = metrics.put.timer();
-        self.test_delay(role, "put").await;
+        self.test_delay(role, operation).await;
         let result = self.inner.put_opts(location, payload, options).await;
         settle(&mut guard, &result);
         if result.is_ok() {
@@ -494,11 +725,18 @@ impl ObjectStore for RoleAwareObjectStore {
         options: PutMultipartOptions,
     ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
         let metrics = self.metrics_for_extensions(&options.extensions);
+        let role = self.role_for_extensions(&options.extensions);
         let mut guard = metrics.multipart_init.timer();
+        self.test_delay(role, "multipart_init").await;
         let result = self.inner.put_multipart_opts(location, options).await;
         settle(&mut guard, &result);
         result.map(|inner| {
-            Box::new(RoleAwareMultipartUpload { inner, metrics }) as Box<dyn MultipartUpload>
+            Box::new(RoleAwareMultipartUpload {
+                inner,
+                metrics,
+                role,
+                test_delay_profile: self.test_delay_profile.clone(),
+            }) as Box<dyn MultipartUpload>
         })
     }
 
@@ -514,7 +752,10 @@ impl ObjectStore for RoleAwareObjectStore {
         } else {
             Arc::clone(&metrics.get)
         };
+        let role = self.role_for_extensions(&options.extensions);
         let mut guard = metric.timer();
+        self.test_delay(role, if head { "head" } else { "get" })
+            .await;
         let result = self.inner.get_opts(location, options).await;
         settle(&mut guard, &result);
         result.map(|mut result| {
@@ -535,6 +776,7 @@ impl ObjectStore for RoleAwareObjectStore {
                     GetResultPayload::Stream(monitored_stream(
                         counted,
                         Arc::clone(&metrics.get_body),
+                        self.test_delay_future(role, "get_body"),
                     ))
                 }
                 #[allow(unreachable_patterns)]
@@ -551,6 +793,8 @@ impl ObjectStore for RoleAwareObjectStore {
     ) -> slatedb::object_store::Result<Vec<Bytes>> {
         let metrics = self.metrics_for_path(location);
         let mut guard = metrics.get_ranges.timer();
+        self.test_delay(self.role_for_path(location), "get_ranges")
+            .await;
         let result = self.inner.get_ranges(location, ranges).await;
         settle(&mut guard, &result);
         if let Ok(parts) = &result {
@@ -572,8 +816,9 @@ impl ObjectStore for RoleAwareObjectStore {
         let wal_metrics = self.tagged_wal_metrics.clone();
         let state = Arc::new(std::sync::Mutex::new(DeleteStreamState::default()));
         let input_state = Arc::clone(&state);
+        let test_delay_profile = self.test_delay_profile.clone();
         let locations = locations
-            .map(move |location| {
+            .then(move |location| {
                 let role = if location
                     .as_ref()
                     .is_ok_and(RoleAwareObjectStore::is_wal_path)
@@ -601,7 +846,17 @@ impl ObjectStore for RoleAwareObjectStore {
                         failed: false,
                     });
                 }
-                location
+                let profile = test_delay_profile.clone();
+                async move {
+                    if let Some(profile) = profile {
+                        let object_role = match role {
+                            DeleteRole::Main => ObjectStoreRole::Main,
+                            DeleteRole::Wal => ObjectStoreRole::Wal,
+                        };
+                        profile.delay(object_role, "delete").await;
+                    }
+                    location
+                }
             })
             .boxed();
         Box::pin(MonitoredDeleteStream {
@@ -618,7 +873,11 @@ impl ObjectStore for RoleAwareObjectStore {
             || Arc::clone(&self.metrics),
             |prefix| self.metrics_for_path(prefix),
         );
-        monitored_stream(self.inner.list(prefix), Arc::clone(&metrics.list))
+        monitored_stream(
+            self.inner.list(prefix),
+            Arc::clone(&metrics.list),
+            self.test_delay_future(self.role_for_optional_path(prefix), "list"),
+        )
     }
 
     fn list_with_offset(
@@ -633,6 +892,10 @@ impl ObjectStore for RoleAwareObjectStore {
         monitored_stream(
             self.inner.list_with_offset(prefix, offset),
             Arc::clone(&metrics.list_with_offset),
+            self.test_delay_future(
+                self.role_for_paths(&[prefix.unwrap_or(offset), offset]),
+                "list_with_offset",
+            ),
         )
     }
 
@@ -645,6 +908,8 @@ impl ObjectStore for RoleAwareObjectStore {
             |prefix| self.metrics_for_path(prefix),
         );
         let mut guard = metrics.list_with_delimiter.timer();
+        self.test_delay(self.role_for_optional_path(prefix), "list_with_delimiter")
+            .await;
         let result = self.inner.list_with_delimiter(prefix).await;
         settle(&mut guard, &result);
         result
@@ -658,6 +923,7 @@ impl ObjectStore for RoleAwareObjectStore {
     ) -> slatedb::object_store::Result<()> {
         let metrics = self.metrics_for_paths(&[from, to]);
         let mut guard = metrics.copy.timer();
+        self.test_delay(self.role_for_paths(&[from, to]), "copy").await;
         let result = self.inner.copy_opts(from, to, options).await;
         settle(&mut guard, &result);
         result
@@ -671,6 +937,8 @@ impl ObjectStore for RoleAwareObjectStore {
     ) -> slatedb::object_store::Result<()> {
         let metrics = self.metrics_for_paths(&[from, to]);
         let mut guard = metrics.rename.timer();
+        self.test_delay(self.role_for_paths(&[from, to]), "rename")
+            .await;
         let result = self.inner.rename_opts(from, to, options).await;
         settle(&mut guard, &result);
         result

@@ -1,7 +1,6 @@
 //! gRPC service implementation and request coordination.
 
 use std::{
-    future::Future,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -25,18 +24,19 @@ use crate::{
     lifecycle::{DaemonLifecycle, DaemonPhase},
     proto::{
         self, vaultic_db_server::VaulticDb, ActivateGenerationRequest, AddCloudKeySlotRequest,
-        AddLocalKeySlotRequest, BeginResponse, CapabilitiesRequest, CapabilitiesResponse,
-        CommitResponse, DemoteWriterRequest, Empty, EncryptionAuditResponse,
-        EscrowMasterKeyRequest, EscrowMasterKeyResponse, ExportKeyEnvelopeResponse,
-        FinalizeCapsuleMigrationRequest, GenerationStatusRequest, GenerationStatusResponse,
-        GetRequest, GetResponse, HealthRequest, HealthResponse, KeySlotInfo, KeyStatusRequest,
-        KeyStatusResponse, MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
-        PrepareCapsuleMigrationRequest, PrepareCapsuleMigrationResponse, PromoteWriterRequest,
-        PublishCapsuleMutationRequest, PublishCapsuleMutationResponse, QuarantineGenerationRequest,
-        ReadCacheStatusRequest, ReadCacheStatusResponse, RecoverEscrowRequest,
-        RemoveKeySlotRequest, RetireGenerationRequest, RewriteDekRequest, RewriteDekResponse,
-        RollbackGenerationRequest, RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest,
-        ScanResponse, StoreMasterKeyRequest, TransactionRequest, UpdateReadCachePolicyRequest,
+        AddLocalKeySlotRequest, AwaitDurableThroughRequest, AwaitDurableThroughResponse,
+        BeginResponse, CapabilitiesRequest, CapabilitiesResponse, CommitResponse,
+        DemoteWriterRequest, Empty, EncryptionAuditResponse, EscrowMasterKeyRequest,
+        EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, FinalizeCapsuleMigrationRequest,
+        GenerationStatusRequest, GenerationStatusResponse, GetRequest, GetResponse, HealthRequest,
+        HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest,
+        MasterKeyResponse, MultiGetRequest, MultiGetResponse, PrepareCapsuleMigrationRequest,
+        PrepareCapsuleMigrationResponse, PromoteWriterRequest, PublishCapsuleMutationRequest,
+        PublishCapsuleMutationResponse, QuarantineGenerationRequest, ReadCacheStatusRequest,
+        ReadCacheStatusResponse, RecoverEscrowRequest, RemoveKeySlotRequest,
+        RetireGenerationRequest, RewriteDekRequest, RewriteDekResponse, RollbackGenerationRequest,
+        RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest, ScanResponse,
+        StoreMasterKeyRequest, TransactionRequest, UpdateReadCachePolicyRequest,
         VerifyGenerationRequest, WriteBatchRequest, WriteBatchResponse, WriterStatusRequest,
         WriterStatusResponse,
     },
@@ -384,6 +384,13 @@ impl VaulticDb for Service {
         request: Request<WriteBatchRequest>,
     ) -> Result<Response<WriteBatchResponse>, Status> {
         self.handle_write_batch(request).await
+    }
+
+    async fn await_durable_through(
+        &self,
+        request: Request<AwaitDurableThroughRequest>,
+    ) -> Result<Response<AwaitDurableThroughResponse>, Status> {
+        self.handle_await_durable_through(request).await
     }
 
     async fn begin(&self, request: Request<Empty>) -> Result<Response<BeginResponse>, Status> {

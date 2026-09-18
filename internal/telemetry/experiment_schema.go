@@ -81,6 +81,28 @@ type ExperimentUnknown struct {
 	Reason string `json:"reason"`
 }
 
+type ExperimentTarget struct {
+	ID         string
+	Disposable bool
+	Confirmed  bool
+}
+
+func (profile ExperimentProfile) ValidateTarget(target ExperimentTarget) error {
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	if profile.Mode == DelayDisabled {
+		return nil
+	}
+	if target.ID != profile.TargetID {
+		return fmt.Errorf("experiment target identity does not match profile")
+	}
+	if !target.Disposable || !target.Confirmed {
+		return fmt.Errorf("experiment target must be explicitly confirmed disposable")
+	}
+	return nil
+}
+
 type EvidenceBoolean string
 
 const (
@@ -291,8 +313,8 @@ func (profile ExperimentProfile) Validate() error {
 	if !slices.Contains([]LatencySemantics{LatencyNetworkRTT, LatencyTimeToFirstByte, LatencyServiceCompletion, LatencyDurabilityCompletion, LatencyAcknowledgementWindow}, profile.Latency) {
 		return fmt.Errorf("invalid experiment latency semantics %q", profile.Latency)
 	}
-	if profile.Mode == DelayDisabled && (profile.Enabled || profile.DelayUS != 0 || profile.JitterUS != 0 || profile.TailDelayUS != 0 || profile.TailEvery != 0 || profile.CorrelatedFor != 0 || profile.BandwidthBPS != 0 || profile.Concurrency != 0 || profile.DeadlineMS != 0 || profile.MaxRetries != 0 || profile.RetryError != "") {
-		return fmt.Errorf("disabled experiment profile contains active injection parameters")
+	if profile.Mode == DelayDisabled && (profile.Enabled || profile.DelayUS != 0 || profile.JitterUS != 0 || profile.TailDelayUS != 0 || profile.TailEvery != 0 || profile.CorrelatedFor != 0 || profile.BandwidthBPS != 0 || profile.Concurrency != 0 || profile.DeadlineMS != 0 || profile.MaxRetries != 0 || profile.RetryError != "" && profile.RetryError != "none") {
+		return fmt.Errorf("disabled experiment profile contains active injection parameters: enabled=%t delay=%d jitter=%d tail_delay=%d tail_every=%d correlated_for=%d bandwidth=%d concurrency=%d deadline=%d retries=%d retry_error=%q", profile.Enabled, profile.DelayUS, profile.JitterUS, profile.TailDelayUS, profile.TailEvery, profile.CorrelatedFor, profile.BandwidthBPS, profile.Concurrency, profile.DeadlineMS, profile.MaxRetries, profile.RetryError)
 	}
 	if profile.Mode != DelayDisabled && !profile.Enabled {
 		return fmt.Errorf("active experiment delay mode requires enabled=true")

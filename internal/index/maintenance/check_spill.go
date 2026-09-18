@@ -107,6 +107,7 @@ func (tuple locationTuple) findingKey() string {
 
 type checkScratch struct {
 	mu        sync.Mutex
+	ctx       context.Context
 	parent    string
 	dir       string
 	marker    string
@@ -118,6 +119,7 @@ type checkScratch struct {
 	merges    uint64
 	telemetry *CheckTelemetry
 	operation *monitor.ActionGuard
+	scenario  *monitor.ExperimentController
 }
 
 type scratchReadFile struct {
@@ -127,7 +129,12 @@ type scratchReadFile struct {
 
 func (scratch *checkScratch) open(path string) (*scratchReadFile, error) {
 	request := scratch.telemetry.startScratch()
-	file, err := os.Open(path)
+	var file *os.File
+	err := scratch.run("open", 0, func() error {
+		var openErr error
+		file, openErr = os.Open(path)
+		return openErr
+	})
 	settleDependency(request, err)
 	if err != nil {
 		return nil, err
@@ -137,7 +144,12 @@ func (scratch *checkScratch) open(path string) (*scratchReadFile, error) {
 
 func (file *scratchReadFile) Read(value []byte) (int, error) {
 	request := file.scratch.telemetry.startScratch()
-	read, err := file.file.Read(value)
+	var read int
+	err := file.scratch.run("read", uint64(len(value)), func() error {
+		var readErr error
+		read, readErr = file.file.Read(value)
+		return readErr
+	})
 	file.scratch.telemetry.processScratch(file.scratch.operation, request, uint64(read))
 	settlementErr := err
 	if errors.Is(err, io.EOF) {
@@ -155,6 +167,10 @@ func (file *scratchReadFile) Close() error {
 }
 
 func newCheckScratch(parent string, maxBytes uint64) (*checkScratch, error) {
+	return newCheckScratchWithScenario(context.Background(), parent, maxBytes, nil)
+}
+
+func newCheckScratchWithScenario(ctx context.Context, parent string, maxBytes uint64, scenario *monitor.ExperimentController) (*checkScratch, error) {
 	if maxBytes == 0 {
 		return nil, fmt.Errorf("checker scratch byte limit must be positive")
 	}
@@ -165,7 +181,7 @@ func newCheckScratch(parent string, maxBytes uint64) (*checkScratch, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("checker scratch parent must be an existing directory")
 	}
-	scratch := &checkScratch{parent: parent, maxBytes: maxBytes}
+	scratch := &checkScratch{ctx: ctx, parent: parent, maxBytes: maxBytes, scenario: scenario}
 	if _, err := rand.Read(scratch.key[:]); err != nil {
 		return nil, fmt.Errorf("create checker scratch key: %w", err)
 	}
@@ -285,9 +301,19 @@ func (scratch *checkScratch) close() error {
 
 func (scratch *checkScratch) remove(path string) error {
 	request := scratch.telemetry.startScratch()
-	err := os.Remove(path)
+	err := scratch.run("delete", 0, func() error { return os.Remove(path) })
 	settleDependency(request, err)
 	return err
+}
+
+func (scratch *checkScratch) run(method string, bytes uint64, operation func() error) error {
+	if scratch.scenario == nil || !scratch.scenario.Matches("scratch", method) {
+		return operation()
+	}
+	return scratch.scenario.Run(scratch.ctx, monitor.ExperimentEvent{
+		Identity: "checker-scratch-" + method,
+		Bytes:    bytes,
+	}, func(context.Context) error { return operation() })
 }
 
 type checkRun struct {
@@ -504,7 +530,12 @@ func writeAll(writer io.Writer, value []byte) error {
 
 func writeScratch(scratch *checkScratch, request *monitor.DependencyGuard, writer io.Writer, value []byte) error {
 	for len(value) > 0 {
-		written, err := writer.Write(value)
+		var written int
+		err := scratch.run("put", uint64(len(value)), func() error {
+			var writeErr error
+			written, writeErr = writer.Write(value)
+			return writeErr
+		})
 		scratch.telemetry.processScratch(scratch.operation, request, uint64(written))
 		if err != nil {
 			return err

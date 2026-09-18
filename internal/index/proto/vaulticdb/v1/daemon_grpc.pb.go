@@ -38,6 +38,7 @@ const (
 	VaulticDB_MultiGet_FullMethodName                 = "/vaulticdb.v1.VaulticDB/MultiGet"
 	VaulticDB_Scan_FullMethodName                     = "/vaulticdb.v1.VaulticDB/Scan"
 	VaulticDB_WriteBatch_FullMethodName               = "/vaulticdb.v1.VaulticDB/WriteBatch"
+	VaulticDB_AwaitDurableThrough_FullMethodName      = "/vaulticdb.v1.VaulticDB/AwaitDurableThrough"
 	VaulticDB_Begin_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Begin"
 	VaulticDB_Commit_FullMethodName                   = "/vaulticdb.v1.VaulticDB/Commit"
 	VaulticDB_Rollback_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Rollback"
@@ -82,6 +83,7 @@ type VaulticDBClient interface {
 	MultiGet(ctx context.Context, in *MultiGetRequest, opts ...grpc.CallOption) (*MultiGetResponse, error)
 	Scan(ctx context.Context, in *ScanRequest, opts ...grpc.CallOption) (*ScanResponse, error)
 	WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error)
+	AwaitDurableThrough(ctx context.Context, in *AwaitDurableThroughRequest, opts ...grpc.CallOption) (*AwaitDurableThroughResponse, error)
 	Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error)
 	Commit(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*CommitResponse, error)
 	Rollback(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*Empty, error)
@@ -301,6 +303,16 @@ func (c *vaulticDBClient) WriteBatch(ctx context.Context, in *WriteBatchRequest,
 	return out, nil
 }
 
+func (c *vaulticDBClient) AwaitDurableThrough(ctx context.Context, in *AwaitDurableThroughRequest, opts ...grpc.CallOption) (*AwaitDurableThroughResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AwaitDurableThroughResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_AwaitDurableThrough_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *vaulticDBClient) Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BeginResponse)
@@ -514,6 +526,7 @@ type VaulticDBServer interface {
 	MultiGet(context.Context, *MultiGetRequest) (*MultiGetResponse, error)
 	Scan(context.Context, *ScanRequest) (*ScanResponse, error)
 	WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error)
+	AwaitDurableThrough(context.Context, *AwaitDurableThroughRequest) (*AwaitDurableThroughResponse, error)
 	Begin(context.Context, *Empty) (*BeginResponse, error)
 	Commit(context.Context, *TransactionRequest) (*CommitResponse, error)
 	Rollback(context.Context, *TransactionRequest) (*Empty, error)
@@ -599,6 +612,9 @@ func (UnimplementedVaulticDBServer) Scan(context.Context, *ScanRequest) (*ScanRe
 }
 func (UnimplementedVaulticDBServer) WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteBatch not implemented")
+}
+func (UnimplementedVaulticDBServer) AwaitDurableThrough(context.Context, *AwaitDurableThroughRequest) (*AwaitDurableThroughResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AwaitDurableThrough not implemented")
 }
 func (UnimplementedVaulticDBServer) Begin(context.Context, *Empty) (*BeginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Begin not implemented")
@@ -1016,6 +1032,24 @@ func _VaulticDB_WriteBatch_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VaulticDBServer).WriteBatch(ctx, req.(*WriteBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_AwaitDurableThrough_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AwaitDurableThroughRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).AwaitDurableThrough(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_AwaitDurableThrough_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).AwaitDurableThrough(ctx, req.(*AwaitDurableThroughRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1444,6 +1478,10 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WriteBatch",
 			Handler:    _VaulticDB_WriteBatch_Handler,
+		},
+		{
+			MethodName: "AwaitDurableThrough",
+			Handler:    _VaulticDB_AwaitDurableThrough_Handler,
 		},
 		{
 			MethodName: "Begin",

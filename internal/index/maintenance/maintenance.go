@@ -360,21 +360,22 @@ func (result CheckResult) Clean() bool {
 func (result CheckResult) HasWarnings() bool { return result.Warnings != 0 }
 
 type CheckOptions struct {
-	LegacyOnly       bool
-	SlateDBOnly      bool
-	IncludeCrawlDebt bool
-	MaxFindings      uint
-	MemoryBytes      uint64
-	TempDir          string
-	TempMaxBytes     uint64
-	Workers          uint
-	RPCConcurrency   uint
-	ProgressInterval time.Duration
-	Progress         func(CheckProgress)
-	PlacementModel   PlacementModel
-	PathIndexPaths   []string
-	Consistency      CheckConsistency
-	Telemetry        *CheckTelemetry
+	LegacyOnly         bool
+	SlateDBOnly        bool
+	IncludeCrawlDebt   bool
+	MaxFindings        uint
+	MemoryBytes        uint64
+	TempDir            string
+	TempMaxBytes       uint64
+	Workers            uint
+	RPCConcurrency     uint
+	ProgressInterval   time.Duration
+	Progress           func(CheckProgress)
+	PlacementModel     PlacementModel
+	PathIndexPaths     []string
+	Consistency        CheckConsistency
+	Telemetry          *CheckTelemetry
+	ScenarioForTesting *monitor.ExperimentController
 }
 
 type Finding struct {
@@ -687,7 +688,7 @@ func CheckWithOptions(
 	if err != nil {
 		return CheckResult{}, fmt.Errorf("encode checker options: %w", err)
 	}
-	scratch, err := newCheckScratch(options.TempDir, tempMaxBytes)
+	scratch, err := newCheckScratchWithScenario(ctx, options.TempDir, tempMaxBytes, options.ScenarioForTesting)
 	if err != nil {
 		return CheckResult{}, err
 	}

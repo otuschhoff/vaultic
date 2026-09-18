@@ -94,6 +94,7 @@ type indexDaemonOptions struct {
 	FreshBulkImport               bool
 	BulkImportPhysicalMemoryBytes uint64
 	BulkImportReadCacheBytes      uint64
+	ResponseDeliveryForTesting    func(context.Context, string) error
 	Start                         bool
 	Persistent                    bool
 }
@@ -262,9 +263,10 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		RecoveryUnlock: options.RecoveryUnlock,
 		BrokerSocket:   options.BrokerSocket, BrokerManifest: options.BrokerManifest,
 		BrokerLease: options.BrokerLease, RebuildInitialize: options.RebuildInitialize,
-		RebuildReset:             options.RebuildReset,
-		FreshBulkImport:          options.FreshBulkImport,
-		BulkImportReadCacheBytes: options.BulkImportReadCacheBytes,
+		RebuildReset:               options.RebuildReset,
+		FreshBulkImport:            options.FreshBulkImport,
+		BulkImportReadCacheBytes:   options.BulkImportReadCacheBytes,
+		ResponseDeliveryForTesting: options.ResponseDeliveryForTesting,
 	}
 	if options.Start {
 		config.PersistentDaemon = options.Persistent

@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/feature"
@@ -13,6 +16,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -79,6 +83,159 @@ func TestIndexFreshBulkImportHandoffAndActivation(t *testing.T) {
 	if err != nil || uint64(len(packs)) != imported {
 		t.Fatalf("persistent-WAL catalog packs=%d want=%d err=%v", len(packs), imported, err)
 	}
+}
+
+func phase34M2IndexFixture(t *testing.T) (*testEnvironment, string, string, *daemon.Client) {
+	t.Helper()
+	env, cleanup := withTestEnvironment(t)
+	t.Cleanup(cleanup)
+	testSetupBackupData(t, env)
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{}, env.globalOptions)
+	env.globalOptions.BackendTestHook = nil
+	daemonPath, err := filepath.Abs(filepath.Join("..", "..", "vaulticdb", "target", "debug", "vaulticdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(daemonPath); err != nil {
+		t.Skipf("compiled vaulticdb unavailable: %v", err)
+	}
+	socket := filepath.Join(env.base, "phase34-m2-vaulticdb.sock")
+	dataDir := filepath.Join(env.base, "phase34-m2-vaulticdb")
+	client, err := daemon.Ensure(context.Background(), daemon.Options{
+		Socket: socket, RepositoryID: repositoryID(t, env), DaemonPath: daemonPath,
+		DataDir: dataDir, WALDataDir: filepath.Join(dataDir, "wal"), ObjectStore: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	return env, socket, dataDir, client
+}
+
+func phase34M2IndexController(t *testing.T, profile telemetry.ExperimentProfile, targetID string) *telemetry.ExperimentController {
+	t.Helper()
+	profile.TargetID = targetID
+	controller, err := telemetry.NewScenarioHarness().Controller(profile, telemetry.ExperimentTarget{
+		ID: targetID, Disposable: true, Confirmed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller
+}
+
+func TestPhase34M2ImportCommitResponseSweep(t *testing.T) {
+	artifacts := t.TempDir()
+	phase34M2Sweep(t, func(t *testing.T, delay time.Duration, _ int) {
+		env, socket, dataDir, client := phase34M2IndexFixture(t)
+		repositoryIdentity := repositoryID(t, env)
+		if err := client.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		daemonPath, err := filepath.Abs(filepath.Join("..", "..", "vaulticdb", "target", "debug", "vaulticdb"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile := phase34M2Profile("legacy_import", "rpc", "commit", delay)
+		profile.TargetID = repositoryIdentity
+		controller := phase34M2IndexController(t, profile, repositoryIdentity)
+		defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+		started := time.Now()
+		var packsImported, indexesImported uint64
+		err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			result, runErr := runIndexImport(ctx, indexImportOptions{
+				Daemon: indexDaemonOptions{
+					Socket: socket, DaemonPath: daemonPath, DataDir: dataDir, Start: true,
+					ResponseDeliveryForTesting: controller.ResponseDelivery("commit"),
+				},
+				FromLegacy: true, ForceResetOldIndex: true, Activate: true, SnapshotDepth: ^uint(0),
+			}, globalOptions, globalOptions.Term)
+			packsImported, indexesImported = result.PacksImported, result.IndexesImported
+			return runErr
+		})
+		if err != nil || packsImported == 0 || indexesImported == 0 {
+			t.Fatalf("import packs=%d indexes=%d err=%v", packsImported, indexesImported, err)
+		}
+		client, err = daemon.Ensure(context.Background(), daemon.Options{
+			Socket: socket, RepositoryID: repositoryIdentity, DaemonPath: daemonPath,
+			DataDir: dataDir, WALDataDir: filepath.Join(dataDir, "wal"), ObjectStore: "local",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		marker, found, err := client.Get(context.Background(), []byte("_vaultic/bulk-import-complete-v1"), "")
+		if err != nil || !found || string(marker) != "complete" {
+			t.Fatalf("bulk import completion marker: found=%t value=%q err=%v", found, marker, err)
+		}
+		packs, _, err := daemon.NewSchemaStore(client).ScanPrefix(context.Background(), []byte("p:"), nil, 100)
+		if err != nil || uint64(len(packs)) != packsImported {
+			t.Fatalf("imported catalog packs=%d want=%d err=%v", len(packs), packsImported, err)
+		}
+		observation := controller.Observation()
+		if observation.Started == 0 || observation.Active != 0 {
+			t.Fatalf("commit response observation = %+v", observation)
+		}
+		phase34M2Artifact(t, artifacts, profile, observation, time.Since(started), repositoryIdentity, fmt.Sprintf("packs=%d indexes=%d marker=%s", packsImported, indexesImported, marker))
+	})
+}
+
+func TestPhase34M2CheckScanResponseSweep(t *testing.T) {
+	artifacts := t.TempDir()
+	phase34M2Sweep(t, func(t *testing.T, delay time.Duration, _ int) {
+		env, socket, _, _ := phase34M2IndexFixture(t)
+		repositoryIdentity := repositoryID(t, env)
+		defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+		err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			_, runErr := runIndexImport(ctx, indexImportOptions{
+				Daemon: indexDaemonOptions{Socket: socket}, FromLegacy: true, Resume: true, Activate: true, SnapshotDepth: ^uint(0),
+			}, globalOptions, globalOptions.Term)
+			return runErr
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var baseline maintenance.CheckResult
+		err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			var runErr error
+			baseline, runErr = runIndexCheck(ctx, indexCheckOptions{
+				Daemon: indexDaemonOptions{Socket: socket}, MaxFindings: 10,
+			}, globalOptions, globalOptions.Term)
+			return runErr
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile := phase34M2Profile("check", "rpc", "scan", delay)
+		profile.TargetID = repositoryIdentity
+		controller := phase34M2IndexController(t, profile, repositoryIdentity)
+		started := time.Now()
+		var result maintenance.CheckResult
+		err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			var runErr error
+			result, runErr = runIndexCheck(ctx, indexCheckOptions{
+				Daemon:      indexDaemonOptions{Socket: socket, ResponseDeliveryForTesting: controller.ResponseDelivery("scan")},
+				MaxFindings: 10,
+			}, globalOptions, globalOptions.Term)
+			return runErr
+		})
+		if err != nil {
+			t.Fatalf("check result=%+v err=%v", result, err)
+		}
+		baseline.Consistency.SessionID = ""
+		result.Consistency.SessionID = ""
+		baseline.Consistency.OptionsDigest = ""
+		result.Consistency.OptionsDigest = ""
+		baseline.Resources.MemoryLimitBytes = 0
+		result.Resources.MemoryLimitBytes = 0
+		if !reflect.DeepEqual(result, baseline) {
+			t.Fatalf("injected check result differs from baseline:\nbaseline=%+v\ninjected=%+v", baseline, result)
+		}
+		observation := controller.Observation()
+		if observation.Started == 0 || observation.Active != 0 {
+			t.Fatalf("scan response observation = %+v", observation)
+		}
+		phase34M2Artifact(t, artifacts, profile, observation, time.Since(started), baseline.Consistency.LegacyInventoryDigest, fmt.Sprintf("snapshots=%d locations=%d findings=%d", result.SlateDBSnapshots, result.SlateDBLocations, len(result.Findings)))
+	})
 }
 
 func testIndexWorkflows(t *testing.T, s3Metadata bool) {

@@ -128,3 +128,15 @@ func classifyUnaryClientError(
 ) error {
 	return classifyRPCError(invoker(ctx, method, request, response, connection, options...))
 }
+
+func responseDeliveryInterceptor(deliver func(context.Context, string) error) grpc.UnaryClientInterceptor {
+	return func(
+		ctx context.Context, method string, request, response any, connection *grpc.ClientConn,
+		invoker grpc.UnaryInvoker, options ...grpc.CallOption,
+	) error {
+		if err := invoker(ctx, method, request, response, connection, options...); err != nil {
+			return err
+		}
+		return deliver(ctx, method)
+	}
+}

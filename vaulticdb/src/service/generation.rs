@@ -76,7 +76,8 @@ impl Service {
             &request.get_ref().repository_id,
             request.get_ref().context.as_ref(),
         )?;
-        let _intent = self.authority_intent().await?;
+        let _admission = self.state.mutation_admission.write().await;
+        self.ensure_writer_authority().await?;
         let request = request.into_inner();
         if !request.approve {
             return Err(VaulticDbError::Precondition {

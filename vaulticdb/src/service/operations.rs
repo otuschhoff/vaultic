@@ -467,19 +467,6 @@ impl Service {
         Ok(())
     }
 
-    async fn with_write_intent<T, F>(&self, operation: F) -> Result<T, Status>
-    where
-        F: Future<Output = Result<T, Status>>,
-    {
-        let _intent = self.write_intent().await?;
-        let result = operation.await;
-        process_test_barrier("VAULTICDB_TEST_MUTATION_COMPLETE_BARRIER").await?;
-        if result.is_err() {
-            self.ensure_writer_authority().await?;
-        }
-        result
-    }
-
     async fn writer_status_response(&self) -> WriterStatusResponse {
         let storage = self.storage().await.ok();
         let status = self.state.writer_role.lock().await.status();

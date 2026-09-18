@@ -6,13 +6,13 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     proto::{
-        BeginResponse, CommitResponse, Empty, TransactionRequest, WriteBatchRequest,
-        WriteBatchResponse,
+        AwaitDurableThroughRequest, AwaitDurableThroughResponse, BeginResponse, CommitResponse,
+        DurabilityToken, Empty, TransactionRequest, WriteBatchRequest, WriteBatchResponse,
     },
     MAX_BATCH_ITEMS, MAX_MESSAGE_BYTES,
 };
 
-use super::{check_storage_request, role_error, Service};
+use super::{check_storage_request, process_test_barrier, role_error, Service};
 
 pub(crate) fn validate_write_batch(request: &WriteBatchRequest) -> Result<(), Status> {
     let item_count = request
@@ -52,14 +52,81 @@ impl Service {
             check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
             validate_write_batch(request.get_ref())?;
             let storage = self.storage().await?;
-            let durable = self
-                .with_write_intent(storage.write_batch(request.get_ref()))
-                .await?;
-            Ok(Response::new(WriteBatchResponse { durable }))
+            let _intent = self.write_intent().await?;
+            let authority = self.durability_authority(storage.as_ref()).await?;
+            let outcome = storage.write_batch(request.get_ref()).await;
+            process_test_barrier("VAULTICDB_TEST_MUTATION_COMPLETE_BARRIER").await?;
+            if outcome.is_err() {
+                self.ensure_writer_authority().await?;
+            }
+            let outcome = outcome?;
+            let durability_token = self.durability_token(authority, outcome.applied_sequence);
+            Ok(Response::new(WriteBatchResponse {
+                durable: outcome.durable,
+                durability_token,
+            }))
         }
         .await;
         timer.record_result(&result);
         result
+    }
+
+    pub(super) async fn handle_await_durable_through(
+        &self,
+        request: Request<AwaitDurableThroughRequest>,
+    ) -> Result<Response<AwaitDurableThroughResponse>, Status> {
+        check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        let token = request
+            .get_ref()
+            .token
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("durability token is required"))?;
+        let storage = self.storage().await?;
+        let durable_sequence = storage
+            .await_durable_through(
+                self.state.repository_id.as_str(),
+                token.repository_generation,
+                token.writer_epoch,
+                token.applied_sequence,
+            )
+            .await?;
+        Ok(Response::new(AwaitDurableThroughResponse {
+            durable_through: Some(DurabilityToken {
+                repository_generation: token.repository_generation,
+                writer_epoch: token.writer_epoch,
+                applied_sequence: durable_sequence,
+            }),
+        }))
+    }
+
+    async fn durability_authority(
+        &self,
+        storage: &crate::storage::Storage,
+    ) -> Result<Option<(u64, u64)>, Status> {
+        if storage.supports_durability_tokens() {
+            Ok(Some((
+                storage
+                    .active_generation(self.state.repository_id.as_str())
+                    .await?,
+                storage.writer_epoch(),
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn durability_token(
+        &self,
+        authority: Option<(u64, u64)>,
+        applied_sequence: Option<u64>,
+    ) -> Option<DurabilityToken> {
+        authority.zip(applied_sequence).map(
+            |((repository_generation, writer_epoch), applied_sequence)| DurabilityToken {
+                repository_generation,
+                writer_epoch,
+                applied_sequence,
+            },
+        )
     }
 
     pub(super) async fn handle_begin(
@@ -134,11 +201,13 @@ impl Service {
             let _admission = self.mutation_admission().await?;
             let storage = self.storage().await?;
             self.ensure_writer_authority().await?;
+            let authority = self.durability_authority(storage.as_ref()).await?;
             let result = storage
                 .commit(
                     &request.get_ref().transaction_id,
                     &request.get_ref().idempotency_key,
                     request.get_ref().defer_durability,
+                    request.get_ref().require_durability_token,
                 )
                 .await;
             let consumed = match &result {
@@ -152,9 +221,10 @@ impl Service {
             if result.is_err() && !consumed {
                 self.ensure_writer_authority().await?;
             }
-            result.map_err(|failure| failure.status)?;
+            let outcome = result.map_err(|failure| failure.status)?;
             Ok(Response::new(CommitResponse {
                 durable: !request.get_ref().defer_durability,
+                durability_token: self.durability_token(authority, outcome.applied_sequence),
             }))
         }
         .await;

@@ -701,61 +701,123 @@ func (t *Transaction) WriteBatch(ctx context.Context, puts []Mutation, deletes [
 	return err
 }
 
+// DurabilityToken identifies one applied write within a repository generation and writer epoch.
+type DurabilityToken struct {
+	RepositoryGeneration uint64
+	WriterEpoch          uint64
+	AppliedSequence      uint64
+}
+
 // Commit atomically publishes all mutations and waits for durability.
 func (t *Transaction) Commit(ctx context.Context) error {
-	return t.commit(ctx, "", false)
+	_, err := t.commit(ctx, "", false, false)
+	return err
 }
 
 // CommitDeferred publishes all mutations without waiting for durability.
 func (t *Transaction) CommitDeferred(ctx context.Context) error {
-	return t.commit(ctx, "", true)
+	_, err := t.commit(ctx, "", true, false)
+	return err
+}
+
+// CommitDeferredWithToken publishes all mutations and returns a token that can fence their durability.
+func (t *Transaction) CommitDeferredWithToken(ctx context.Context) (DurabilityToken, error) {
+	return t.commit(ctx, "", true, true)
 }
 
 // CommitWithIdempotency commits once and permits recovery of an uncertain response using the same key.
 func (t *Transaction) CommitWithIdempotency(ctx context.Context, idempotencyKey string) error {
-	return t.commit(ctx, idempotencyKey, false)
+	_, err := t.commit(ctx, idempotencyKey, false, false)
+	return err
 }
 
-func (t *Transaction) commit(ctx context.Context, idempotencyKey string, deferDurability bool) error {
+func (t *Transaction) commit(ctx context.Context, idempotencyKey string, deferDurability, requireToken bool) (DurabilityToken, error) {
 	state := t.state.Load()
 	if state == transactionCommitUncertain {
 		if idempotencyKey == "" || idempotencyKey != t.idempotencyKey {
-			return fmt.Errorf("transaction is already closed; uncertain commit requires its original idempotency key")
+			return DurabilityToken{}, fmt.Errorf("transaction is already closed; uncertain commit requires its original idempotency key")
 		}
 	} else if !t.state.CompareAndSwap(transactionOpen, transactionClosed) {
-		return fmt.Errorf("transaction is already closed")
+		return DurabilityToken{}, fmt.Errorf("transaction is already closed")
 	}
 	t.idempotencyKey = idempotencyKey
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
 	response, err := t.client.rpc.Commit(ctx, &vaulticdbv1.TransactionRequest{
 		Context: requestContext(ctx), TransactionId: t.id, IdempotencyKey: idempotencyKey,
-		DeferDurability: deferDurability,
+		DeferDurability: deferDurability, RequireDurabilityToken: requireToken,
 	})
 	if err != nil {
 		t.client.auditRPCError(ctx, "commit", err)
+		if requireToken && status.Code(err) == codes.FailedPrecondition {
+			t.state.Store(transactionOpen)
+			return DurabilityToken{}, err
+		}
 		switch status.Code(err) {
 		case codes.Aborted, codes.NotFound, codes.InvalidArgument, codes.FailedPrecondition:
 		default:
 			t.state.Store(transactionCommitUncertain)
 		}
-		return err
+		return DurabilityToken{}, err
 	}
 	if !deferDurability && !response.GetDurable() {
-		return fmt.Errorf("vaulticdb committed transaction without durability acknowledgement")
+		return DurabilityToken{}, fmt.Errorf("vaulticdb committed transaction without durability acknowledgement")
 	}
-	if delay := t.client.options.commitResponseDelayForTesting; delay > 0 {
+	token := durabilityTokenFromProto(response.GetDurabilityToken())
+	if requireToken && token.AppliedSequence == 0 {
+		return DurabilityToken{}, status.Error(codes.FailedPrecondition, "vaulticdb deferred commit did not provide a durability token")
+	}
+	if delay := t.client.options.commitResponseDelayForTesting; delay > 0 && t.client.options.ResponseDeliveryForTesting == nil {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			t.state.Store(transactionCommitUncertain)
-			return ctx.Err()
+			return DurabilityToken{}, ctx.Err()
 		}
 	}
 	t.state.Store(transactionClosed)
-	return nil
+	return token, nil
+}
+
+// AwaitDurableThrough waits until the write identified by token is durable.
+func (c *Client) AwaitDurableThrough(ctx context.Context, token DurabilityToken) (DurabilityToken, error) {
+	if token.RepositoryGeneration == 0 || token.WriterEpoch == 0 || token.AppliedSequence == 0 {
+		return DurabilityToken{}, fmt.Errorf("durability token fields must be non-zero")
+	}
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.AwaitDurableThrough(ctx, &vaulticdbv1.AwaitDurableThroughRequest{
+		Context: requestContext(ctx),
+		Token: &vaulticdbv1.DurabilityToken{
+			RepositoryGeneration: token.RepositoryGeneration,
+			WriterEpoch:          token.WriterEpoch,
+			AppliedSequence:      token.AppliedSequence,
+		},
+	})
+	if err != nil {
+		c.auditRPCError(ctx, "await_durable_through", err)
+		return DurabilityToken{}, err
+	}
+	durableThrough := durabilityTokenFromProto(response.GetDurableThrough())
+	if durableThrough.RepositoryGeneration != token.RepositoryGeneration ||
+		durableThrough.WriterEpoch != token.WriterEpoch ||
+		durableThrough.AppliedSequence < token.AppliedSequence {
+		return DurabilityToken{}, fmt.Errorf("vaulticdb returned an invalid durability fence")
+	}
+	return durableThrough, nil
+}
+
+func durabilityTokenFromProto(token *vaulticdbv1.DurabilityToken) DurabilityToken {
+	if token == nil {
+		return DurabilityToken{}
+	}
+	return DurabilityToken{
+		RepositoryGeneration: token.GetRepositoryGeneration(),
+		WriterEpoch:          token.GetWriterEpoch(),
+		AppliedSequence:      token.GetAppliedSequence(),
+	}
 }
 
 // Rollback discards all transaction mutations.

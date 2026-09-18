@@ -208,7 +208,8 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .unwrap());
+            .unwrap()
+            .durable);
         assert_eq!(storage.get(b"key", "").await.unwrap().value, b"value");
 
         for snapshot in [
@@ -667,6 +668,9 @@ mod tests {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
+            last_applied_engine_sequence: AtomicU64::new(0),
+            durable_engine_sequence: AtomicU64::new(0),
+            latest_write_handle: Mutex::new(None),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
             slatedb_tuning: SlateDbTuning::default(),
@@ -758,13 +762,19 @@ mod tests {
         assert_eq!(storage.transactions.read().await.len(), 1);
 
         arm_storage_failpoint(StorageFailpoint::BeforeTransactionCommit(path));
-        let failure = storage.commit(&transaction_id, "", false).await.unwrap_err();
+        let failure = storage
+            .commit(&transaction_id, "", false, false)
+            .await
+            .unwrap_err();
 
         assert!(failure.consumed);
         assert_eq!(storage.transactions.read().await.len(), 0);
         assert_eq!(storage.attribution.engine_submit.snapshot().attempts, 1);
         assert_eq!(storage.attribution.engine_submit.snapshot().failures, 1);
-        let missing = storage.commit("unknown", "", false).await.unwrap_err();
+        let missing = storage
+            .commit("unknown", "", false, false)
+            .await
+            .unwrap_err();
         assert!(!missing.consumed);
         storage.close().await.unwrap();
     }
@@ -797,7 +807,10 @@ mod tests {
             .await
             .unwrap();
 
-        let rejected = storage.commit(&transaction_id, "", true).await.unwrap_err();
+        let rejected = storage
+            .commit(&transaction_id, "", true, false)
+            .await
+            .unwrap_err();
         assert!(!rejected.consumed);
         assert_eq!(rejected.status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(storage.transactions.read().await.len(), 1);
@@ -805,7 +818,11 @@ mod tests {
 
         storage.metadata_rebuild_reset = true;
         arm_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(path.clone()));
-        assert!(storage.commit(&transaction_id, "", true).await.unwrap().consumed);
+        assert!(storage
+            .commit(&transaction_id, "", true, false)
+            .await
+            .unwrap()
+            .consumed);
         assert_eq!(storage.last_durable_sequence.load(Ordering::Acquire), 0);
         assert_eq!(storage.attribution.durable_wait.snapshot().attempts, 0);
 
@@ -821,12 +838,68 @@ mod tests {
             })
             .await
             .unwrap();
-        let failure = storage.commit(&durable_id, "", false).await.unwrap_err();
+        let failure = storage
+            .commit(&durable_id, "", false, false)
+            .await
+            .unwrap_err();
         assert!(failure.consumed);
         assert_eq!(storage.attribution.engine_submit.snapshot().attempts, 2);
         assert_eq!(storage.attribution.engine_submit.snapshot().failures, 0);
         assert_eq!(storage.attribution.durable_wait.snapshot().attempts, 1);
         assert_eq!(storage.attribution.durable_wait.snapshot().failures, 1);
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_required_commit_rejects_memory_wal_before_consumption() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None).await.unwrap(),
+            Some(1)
+        );
+        let path = format!("memory-token-{}", rand::random::<u64>());
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
+        let mut storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+        storage.metadata_rebuild_reset = true;
+        storage.wal_target = "memory";
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage
+            .write_batch(&WriteBatchRequest {
+                transaction_id: transaction_id.clone(),
+                puts: vec![KeyValue {
+                    key: b"memory-token".to_vec(),
+                    value: b"value".to_vec(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let rejected = storage
+            .commit(&transaction_id, "", true, true)
+            .await
+            .unwrap_err();
+        assert!(!rejected.consumed);
+        assert_eq!(rejected.status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(storage.transactions.read().await.len(), 1);
+        assert_eq!(storage.read_value(b"memory-token").await.unwrap(), None);
+
+        assert!(storage
+            .commit(&transaction_id, "", true, false)
+            .await
+            .unwrap()
+            .consumed);
+        assert_eq!(
+            storage.read_value(b"memory-token").await.unwrap().as_deref(),
+            Some(&b"value"[..])
+        );
         storage.close().await.unwrap();
     }
 
@@ -941,11 +1014,63 @@ mod tests {
         assert_eq!(cancelled.completed, 1);
     }
 
+    #[test]
+    fn object_delay_profile_accepts_shared_schema_only_for_exact_target() {
+        let encoded = r#"{
+            "schema_version":1,
+            "profile_id":"m2-rust-shared",
+            "enabled":true,
+            "test_only":true,
+            "scenario":"local",
+            "backend":"local",
+            "mode":"service",
+            "operation":"import",
+            "role":"wal",
+            "method":"put",
+            "access_pattern":"sequential",
+            "target_id":"test-repository",
+            "resource_id":"local-fixture-device",
+            "placement":"inside_service",
+            "latency_semantics":"service_completion",
+            "interpretation":"additive",
+            "endpoint":"dependency",
+            "acknowledgement":"unchanged",
+            "delay_us":25000,
+            "jitter_us":0,
+            "tail_delay_us":0,
+            "tail_every":0,
+            "correlated_for":0,
+            "bandwidth_bytes_per_second":0,
+            "concurrency":1,
+            "deadline_ms":0,
+            "max_retries":0,
+            "retry_error":"none",
+            "seed":34,
+            "holds":["local-fixture-device"],
+            "unknowns":[]
+        }"#;
+
+        let profile = TestObjectDelayProfile::parse(encoded, "test-repository").unwrap();
+        assert_eq!(profile.role, ObjectStoreRole::Wal);
+        assert_eq!(profile.operation, "put");
+        assert_eq!(
+            profile.delay_duration(ObjectStoreRole::Wal, "put"),
+            Some(std::time::Duration::from_millis(25))
+        );
+        assert!(TestObjectDelayProfile::parse(encoded, "other-repository").is_err());
+        assert!(TestObjectDelayProfile::parse(
+            &encoded.replace("\"endpoint\":\"dependency\"", "\"endpoint\":\"caller\""),
+            "test-repository",
+        )
+        .is_err());
+    }
+
     #[tokio::test]
     async fn object_delay_profile_targets_only_wal_puts() {
         let profile = Arc::new(
             TestObjectDelayProfile::parse(
                 r#"{"version":1,"target":"isolated","role":"wal","operation":"put","delay_ms":25}"#,
+                "test-repository",
             )
             .unwrap(),
         );
@@ -981,6 +1106,339 @@ mod tests {
         assert!(wal_started.elapsed() >= std::time::Duration::from_millis(25));
         assert_eq!(main_metrics.snapshot().put.timing.attempts, 1);
         assert_eq!(wal_metrics.snapshot().put.timing.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn object_delay_profile_delays_get_body_consumption_and_listing() {
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&Path::from("object"), Bytes::from_static(b"payload").into())
+            .await
+            .unwrap();
+        let body_profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"main","operation":"get_body","delay_ms":25}"#,
+                "test-repository",
+            )
+            .unwrap(),
+        );
+        let store = role_aware_object_store(
+            inner.clone(),
+            Arc::new(ObjectStoreRoleMetrics::default()),
+            None,
+            ObjectStoreRole::Main,
+            Some(body_profile),
+        );
+        let response_started = Instant::now();
+        let result = store.get(&Path::from("object")).await.unwrap();
+        assert!(response_started.elapsed() < std::time::Duration::from_millis(20));
+        let body_started = Instant::now();
+        assert_eq!(result.bytes().await.unwrap(), Bytes::from_static(b"payload"));
+        assert!(body_started.elapsed() >= std::time::Duration::from_millis(25));
+
+        let list_profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"main","operation":"list","delay_ms":25}"#,
+                "test-repository",
+            )
+            .unwrap(),
+        );
+        let list_store = role_aware_object_store(
+            inner,
+            Arc::new(ObjectStoreRoleMetrics::default()),
+            None,
+            ObjectStoreRole::Main,
+            Some(list_profile),
+        );
+        let mut objects = list_store.list(None);
+        let list_started = Instant::now();
+        assert!(objects.next().await.unwrap().is_ok());
+        assert!(list_started.elapsed() >= std::time::Duration::from_millis(25));
+    }
+
+    #[tokio::test]
+    async fn object_delay_profile_releases_capacity_when_body_consumption_is_cancelled() {
+        let profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"main","operation":"get_body","delay_ms":250,"concurrency":1}"#,
+                "test-repository",
+            )
+            .unwrap(),
+        );
+        let store = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            Arc::new(ObjectStoreRoleMetrics::default()),
+            None,
+            ObjectStoreRole::Main,
+            Some(profile),
+        );
+        store
+            .put(&Path::from("cancelled"), Bytes::from_static(b"cancelled").into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("after-cancel"), Bytes::from_static(b"available").into())
+            .await
+            .unwrap();
+        let result = store.get(&Path::from("cancelled")).await.unwrap();
+        let pending = tokio::spawn(async move { result.bytes().await });
+        tokio::task::yield_now().await;
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+
+        let result = store.get(&Path::from("after-cancel")).await.unwrap();
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            result.bytes(),
+        )
+        .await
+        .expect("cancelled body released shared capacity")
+        .unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"available"));
+    }
+
+    #[tokio::test]
+    async fn object_delay_profile_targets_multipart_completion() {
+        let profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"main","operation":"multipart_complete","delay_ms":25}"#,
+                "test-repository",
+            )
+            .unwrap(),
+        );
+        let store = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            Arc::new(ObjectStoreRoleMetrics::default()),
+            None,
+            ObjectStoreRole::Main,
+            Some(profile),
+        );
+        let mut upload = store.put_multipart(&Path::from("multipart")).await.unwrap();
+        let part_started = Instant::now();
+        upload
+            .put_part(Bytes::from_static(b"payload").into())
+            .await
+            .unwrap();
+        assert!(part_started.elapsed() < std::time::Duration::from_millis(20));
+        let complete_started = Instant::now();
+        upload.complete().await.unwrap();
+        assert!(complete_started.elapsed() >= std::time::Duration::from_millis(25));
+    }
+
+    #[tokio::test]
+    async fn object_delay_profile_preserves_conditional_puts() {
+        let profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"main","operation":"conditional_put","delay_ms":1}"#,
+                "test-repository",
+            )
+            .unwrap(),
+        );
+        let store = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            Arc::new(ObjectStoreRoleMetrics::default()),
+            None,
+            ObjectStoreRole::Main,
+            Some(profile),
+        );
+        let options = PutOptions {
+            mode: PutMode::Create,
+            ..PutOptions::default()
+        };
+        store
+            .put_opts(
+                &Path::from("conditional"),
+                Bytes::from_static(b"first").into(),
+                options.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .put_opts(
+                &Path::from("conditional"),
+                Bytes::from_static(b"second").into(),
+                options,
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn object_delay_profile_shares_bounded_capacity() {
+        let profile = Arc::new(
+            TestObjectDelayProfile::parse(
+                r#"{"version":1,"target":"isolated","role":"main","operation":"put","delay_ms":25,"concurrency":1}"#,
+                "test-repository",
+            )
+            .unwrap(),
+        );
+        let store = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            Arc::new(ObjectStoreRoleMetrics::default()),
+            None,
+            ObjectStoreRole::Main,
+            Some(profile),
+        );
+        let first_store = store.clone();
+        let first = tokio::spawn(async move {
+            first_store
+                .put(&Path::from("first"), Bytes::from_static(b"first").into())
+                .await
+        });
+        let second_store = store.clone();
+        let second = tokio::spawn(async move {
+            second_store
+                .put(&Path::from("second"), Bytes::from_static(b"second").into())
+                .await
+        });
+        let started = Instant::now();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn durability_fence_coalesces_waiters_and_covers_prefix() {
+        let entered = Arc::new(AtomicU64::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let handle = WriteHandle::new(10, 0, {
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    entered.fetch_add(1, Ordering::AcqRel);
+                    release.notified().await;
+                    Ok(())
+                }
+            }
+        });
+        let latest = Mutex::new(Some(handle));
+        let durable = AtomicU64::new(0);
+        let release_waiters = async {
+            while entered.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+            release.notify_waiters();
+        };
+        let (first, second, ()) = tokio::join!(
+            await_engine_durable_through(&latest, &durable, 10, 5),
+            await_engine_durable_through(&latest, &durable, 10, 10),
+            release_waiters,
+        );
+        assert_eq!(first.unwrap(), 10);
+        assert_eq!(second.unwrap(), 10);
+        assert_eq!(durable.load(Ordering::Acquire), 10);
+        assert_eq!(
+            await_engine_durable_through(&latest, &durable, 10, 5)
+                .await
+                .unwrap(),
+            10
+        );
+        assert_eq!(entered.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn durability_fence_rejects_future_sequence_and_propagates_wal_failure() {
+        let failed = WriteHandle::new(7, 0, || async {
+            Err(slatedb::Error::unavailable("injected WAL failure".to_owned()))
+        });
+        let latest = Mutex::new(Some(failed));
+        let durable = AtomicU64::new(0);
+        let future = await_engine_durable_through(&latest, &durable, 7, 8)
+            .await
+            .unwrap_err();
+        assert_eq!(future.code(), tonic::Code::FailedPrecondition);
+        let wal = await_engine_durable_through(&latest, &durable, 7, 7)
+            .await
+            .unwrap_err();
+        assert_eq!(wal.code(), tonic::Code::Unavailable);
+        assert_eq!(durable.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn durability_fence_retains_the_highest_concurrent_write_handle() {
+        let latest = Mutex::new(None);
+        let newer = WriteHandle::new(10, 0, || async { Ok(()) });
+        let older = WriteHandle::new(5, 0, || async { Ok(()) });
+
+        retain_latest_write_handle(&latest, &newer).await;
+        retain_latest_write_handle(&latest, &older).await;
+
+        assert_eq!(latest.lock().await.as_ref().unwrap().seqnum(), 10);
+    }
+
+    #[tokio::test]
+    async fn durability_fence_rejects_generation_change_during_wait() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None).await.unwrap(),
+            Some(1)
+        );
+        let path = format!("generation-fence-{}", rand::random::<u64>());
+        let writer = open_writer(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+        )
+        .await
+        .unwrap();
+        let storage = Arc::new(transition_storage(
+            Database::Writer(writer),
+            path,
+            object_store.clone(),
+            1,
+        ));
+        storage.last_applied_engine_sequence.store(10, Ordering::Release);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let handle = WriteHandle::new(10, 0, {
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                }
+            }
+        });
+        *storage.latest_write_handle.lock().await = Some(handle);
+        let waiting = {
+            let storage = storage.clone();
+            tokio::spawn(async move { storage.await_durable_through("repo", 1, 1, 10).await })
+        };
+        entered.notified().await;
+        let (current, version) = read_generation_authority(object_store.as_ref(), "repo")
+            .await
+            .unwrap();
+        let changed = GenerationAuthority {
+            format: 1,
+            repository_id: "repo".into(),
+            decision: current.decision + 1,
+            active_generation: 2,
+            namespace: "generation-2".into(),
+            previous_generation: current.active_generation,
+            previous_namespace: current.namespace,
+            state: "post-activation".to_owned(),
+            report_sha256: "ab".repeat(32),
+            decided_at_ms: 1,
+            observation_until_ms: 2,
+            retired_generation: 0,
+        };
+        publish_generation_authority(object_store.as_ref(), &changed, version)
+            .await
+            .unwrap();
+        release.notify_waiters();
+
+        let error = waiting.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("became stale while waiting"));
+        storage.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1827,6 +2285,9 @@ mod tests {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
+            last_applied_engine_sequence: AtomicU64::new(0),
+            durable_engine_sequence: AtomicU64::new(0),
+            latest_write_handle: Mutex::new(None),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
             slatedb_tuning: SlateDbTuning::default(),
@@ -2027,6 +2488,9 @@ mod tests {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
+            last_applied_engine_sequence: AtomicU64::new(0),
+            durable_engine_sequence: AtomicU64::new(0),
+            latest_write_handle: Mutex::new(None),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
             slatedb_tuning: SlateDbTuning::default(),
@@ -2094,6 +2558,9 @@ mod tests {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
+            last_applied_engine_sequence: AtomicU64::new(0),
+            durable_engine_sequence: AtomicU64::new(0),
+            latest_write_handle: Mutex::new(None),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
             slatedb_tuning: SlateDbTuning::default(),
@@ -2182,6 +2649,9 @@ mod tests {
             transactions: RwLock::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
+            last_applied_engine_sequence: AtomicU64::new(0),
+            durable_engine_sequence: AtomicU64::new(0),
+            latest_write_handle: Mutex::new(None),
             transaction_idle_timeout_ms: 1_000,
             slatedb_multiget: false,
             slatedb_tuning: SlateDbTuning::default(),

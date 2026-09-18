@@ -66,6 +66,22 @@ message WriteBatchRequest {
 
 message WriteBatchResponse {
   bool durable = 1;
+  DurabilityToken durability_token = 2;
+}
+
+message DurabilityToken {
+  uint64 repository_generation = 1;
+  uint64 writer_epoch = 2;
+  uint64 applied_sequence = 3;
+}
+
+message AwaitDurableThroughRequest {
+  RequestContext context = 1;
+  DurabilityToken token = 2;
+}
+
+message AwaitDurableThroughResponse {
+  DurabilityToken durable_through = 1;
 }
 
 message ScanRequest {
@@ -86,6 +102,7 @@ message TransactionRequest {
   string transaction_id = 2;
   string idempotency_key = 3;
   bool defer_durability = 4;
+  bool require_durability_token = 5;
 }
 
 message BeginResponse {
@@ -94,6 +111,7 @@ message BeginResponse {
 
 message CommitResponse {
   bool durable = 1;
+  DurabilityToken durability_token = 2;
 }
 
 message HealthRequest {
@@ -627,6 +645,7 @@ service VaulticDB {
   rpc MultiGet(MultiGetRequest) returns (MultiGetResponse);
   rpc Scan(ScanRequest) returns (ScanResponse);
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
+  rpc AwaitDurableThrough(AwaitDurableThroughRequest) returns (AwaitDurableThroughResponse);
   rpc Begin(Empty) returns (BeginResponse);
   rpc Commit(TransactionRequest) returns (CommitResponse);
   rpc Rollback(TransactionRequest) returns (Empty);
