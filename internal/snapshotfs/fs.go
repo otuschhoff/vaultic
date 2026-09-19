@@ -49,6 +49,7 @@ type CacheStats struct {
 }
 
 type Filesystem struct {
+	owner        context.Context
 	repo         vaultic.Repository
 	snapshotID   vaultic.ID
 	repositoryID string
@@ -85,6 +86,7 @@ func New(ctx context.Context, repo vaultic.Repository, snapshot *data.Snapshot, 
 	}
 
 	fs := &Filesystem{
+		owner:        ctx,
 		repo:         repo,
 		snapshotID:   *snapshot.ID(),
 		repositoryID: repo.Config().ID,

@@ -163,10 +163,16 @@ func loadPackFromCandidates(
 
 func (r *Repository) readPackAtFromPlacements(ctx context.Context, handle backend.Handle, offset int64, buffer []byte) (int, error) {
 	read := 0
+	dependency := r.accounting.StartDependency(ctx, "repository")
 	err := r.loadPackFromPlacements(ctx, handle, len(buffer), offset, func(reader io.Reader) error {
 		var err error
 		read, err = io.ReadFull(reader, buffer)
 		return err
 	})
+	dependency.AddBytes(uint64(read))
+	dependency.Finish(err)
+	if err == nil {
+		r.accounting.AddProcessed(ctx, "repository", uint64(read))
+	}
 	return read, err
 }

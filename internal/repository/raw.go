@@ -14,9 +14,27 @@ import (
 // If the backend returns data that does not match the id, then the buffer is returned
 // along with an error that is a vaultic.ErrInvalidData error.
 func (r *Repository) LoadRaw(ctx context.Context, t vaultic.FileType, id vaultic.ID) (buf []byte, err error) {
+	done := r.accounting.StartBlocking(ctx, "read", "backend_io")
+	defer done.Done()
 	h := backend.Handle{Type: backend.FileType(t), Name: id.String()}
 
-	buf, err = loadRaw(ctx, r.be, h)
+	load := func() ([]byte, error) {
+		dependency := r.accounting.StartDependency(ctx, "repository")
+		loaded, loadErr := loadRaw(ctx, r.be, h)
+		dependency.AddBytes(uint64(len(loaded)))
+		valid := h.Type == backend.ConfigFile || id == vaultic.Hash(loaded)
+		outcomeErr := loadErr
+		if outcomeErr == nil && !valid {
+			outcomeErr = vaultic.ErrInvalidData
+		}
+		dependency.Finish(outcomeErr)
+		if outcomeErr == nil {
+			r.accounting.AddProcessed(ctx, "repository", uint64(len(loaded)))
+		}
+		return loaded, loadErr
+	}
+
+	buf, err = load()
 
 	// retry loading damaged data only once. If a file fails to download correctly
 	// the second time, then it is likely corrupted at the backend.
@@ -27,7 +45,7 @@ func (r *Repository) LoadRaw(ctx context.Context, t vaultic.FileType, id vaultic
 			_ = r.cache.Forget(h) // Cache eviction cannot change the authoritative backend result.
 		}
 
-		buf, err = loadRaw(ctx, r.be, h)
+		buf, err = load()
 
 		if err == nil && id != vaultic.Hash(buf) {
 			// Return corrupted data to the caller if it is still broken the second time to

@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -356,7 +357,9 @@ func runForget(ctx context.Context, options forgetOptions, pruneOptions pruneOpt
 func runForgetWithPhaseACallback(
 	ctx context.Context, options forgetOptions, pruneOptions pruneOptions,
 	globalOptions global.Options, term ui.Terminal, args []string, afterPhaseA func(),
-) error {
+) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "forget", "planning", "")
+	defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
 	if err := verifyForgetOptions(&options); err != nil {
 		return err
 	}
@@ -424,7 +427,10 @@ func runForgetWithPhaseACallback(
 	}
 	if len(plan.remove) != 0 && options.Prune {
 		printer.P("%d snapshots have been removed, running prune\n", len(plan.remove))
-		return runPruneWithRepo(ctx, pruneOptions, globalOptions, repo, plan.remove, printer)
+		pruneCtx, pruneAction := telemetry.DefaultProductionAccounting().StartOperation(ctx, "prune", "planning", "")
+		pruneErr := runPruneWithRepo(pruneCtx, pruneOptions, globalOptions, repo, plan.remove, printer)
+		pruneAction.Done(telemetry.ClassifyOutcome(pruneErr))
+		return pruneErr
 	}
 	return nil
 }

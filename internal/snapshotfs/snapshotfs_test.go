@@ -12,6 +12,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -72,6 +73,60 @@ func TestLookupOrderingFlatteningAndSubfolder(t *testing.T) {
 	if _, err := subRoot.Lookup(ctx, "zeta"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("subfolder escaped selected root: %v", err)
 	}
+}
+
+func TestVFSReadInheritsRestoreOperation(t *testing.T) {
+	repo := repository.TestRepository(t)
+	owner, action := telemetry.DefaultProductionAccounting().StartOperation(context.Background(), "restore", "read", "")
+	var treeID vaultic.ID
+	withUploader(t, repo, func(uploader vaultic.BlobSaver) {
+		treeID = data.TestSaveNodes(t, owner, uploader, []*data.Node{{Name: "file", Type: data.NodeTypeFile}})
+	})
+	snapshot := saveSnapshotTree(t, repo, []*data.Node{{Name: "dir", Type: data.NodeTypeDir, Subtree: &treeID}})
+	before, _, _, _ := telemetry.DefaultProductionAccounting().Snapshot(telemetry.MaxMonitorMetrics)
+	filesystem, err := New(owner, repo, snapshot, "", Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = filesystem.Close() })
+	root, err := filesystem.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.ReadDir(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	action.Done(telemetry.OutcomeSuccess)
+	after, _, _, _ := telemetry.DefaultProductionAccounting().Snapshot(telemetry.MaxMonitorMetrics)
+	if metricDelta(after, before, "dependency_requests", "operation", "restore", "role", "source", "outcome", "success") == 0 {
+		t.Fatal("VFS read did not inherit restore/source attribution")
+	}
+}
+
+func metricDelta(after, before []telemetry.Metric, name string, labels ...string) uint64 {
+	value := func(metrics []telemetry.Metric) uint64 {
+		for _, metric := range metrics {
+			if metric.Name != name {
+				continue
+			}
+			matched := true
+			for index := 0; index < len(labels); index += 2 {
+				found := false
+				for _, label := range metric.Labels {
+					if label.Name == labels[index] && label.Value == labels[index+1] {
+						found = true
+						break
+					}
+				}
+				matched = matched && found
+			}
+			if matched {
+				return metric.Value
+			}
+		}
+		return 0
+	}
+	return value(after) - value(before)
 }
 
 func TestInvalidNamesAndCollisions(t *testing.T) {

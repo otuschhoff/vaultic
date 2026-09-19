@@ -21,6 +21,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 
@@ -131,7 +132,9 @@ func (options *mountOptions) AddFlags(f *pflag.FlagSet) {
 	}
 }
 
-func runMount(ctx context.Context, options mountOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+func runMount(ctx context.Context, options mountOptions, globalOptions global.Options, args []string, term ui.Terminal) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "restore", "read", "")
+	defer func() { action.Done(classifyCommandOutcome(resultErr)) }()
 	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 
 	if options.TimeTemplate == "" {
@@ -197,7 +200,7 @@ func runMount(ctx context.Context, options mountOptions, globalOptions global.Op
 		TimeTemplate:  options.TimeTemplate,
 		PathTemplates: options.PathTemplates,
 	}
-	root := fuse.NewRoot(repo, cfg)
+	root := fuse.NewRootWithContext(ctx, repo, cfg)
 	// load repository before reporting the mountpoint
 	printer.S("Loading snapshots...")
 	_, err = root.ReadDirAll(ctx)

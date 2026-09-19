@@ -25,6 +25,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -603,19 +604,36 @@ func (r *Repository) ReadCacheStatus() readCacheStatus {
 }
 
 func (r *Repository) UpdateReadCachePolicy(update readCachePolicyUpdate) error {
+	return r.UpdateReadCachePolicyContext(context.Background(), update)
+}
+
+func (r *Repository) UpdateReadCachePolicyContext(ctx context.Context, update readCachePolicyUpdate) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "cache_fill", "planning")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
 	manager := r.readCacheManager()
 	if manager == nil {
 		return fmt.Errorf("read-cache is not configured")
 	}
-	return manager.updatePolicy(context.Background(), update)
+	dependency := r.accounting.StartDependency(ctx, "coordination")
+	resultErr = manager.updatePolicy(ctx, update)
+	dependency.Finish(resultErr)
+	return resultErr
 }
 
-func (r *Repository) DrainReadCache(ctx context.Context) error {
+func (r *Repository) DrainReadCache(ctx context.Context) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "cache_evict", "cleanup")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
 	//nolint:contextcheck // The shared cache worker is owned by Repository.Close; ctx only bounds this drain operation.
 	manager := r.readCacheManager()
 	if manager == nil {
 		return nil
 	}
+	dependency := r.accounting.StartDependency(ctx, "cache")
+	defer func() { dependency.Finish(resultErr) }()
 	for _, tier := range manager.tiers {
 		if err := tier.drain(ctx); err != nil {
 			return err
@@ -624,12 +642,18 @@ func (r *Repository) DrainReadCache(ctx context.Context) error {
 	return nil
 }
 
-func (r *Repository) ClearReadCache(ctx context.Context, tierID string) error {
+func (r *Repository) ClearReadCache(ctx context.Context, tierID string) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "cache_evict", "cleanup")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
 	//nolint:contextcheck // The shared cache worker is owned by Repository.Close; ctx only bounds this clear operation.
 	manager := r.readCacheManager()
 	if manager == nil {
 		return nil
 	}
+	dependency := r.accounting.StartDependency(ctx, "cache")
+	defer func() { dependency.Finish(resultErr) }()
 	if tierID == "" {
 		for _, tier := range manager.tiers {
 			if err := tier.drain(ctx); err != nil {

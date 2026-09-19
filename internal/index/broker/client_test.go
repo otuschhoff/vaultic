@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 func TestLoadCapsuleAcceptsOnlyFormatOneWithTopology(t *testing.T) {
@@ -75,6 +78,108 @@ func TestRequestErrorPreservesBrokerCode(t *testing.T) {
 	if got := err.Error(); got != "key broker rejected request (locked): broker is locked" {
 		t.Fatalf("request error = %q", got)
 	}
+}
+
+func TestBrokerCallAttributesBlockedResponseWait(t *testing.T) {
+	clientConnection, serverConnection := net.Pipe()
+	defer clientConnection.Close()
+	defer serverConnection.Close()
+	accounting := telemetry.NewProductionAccounting(true)
+	waitStarted := make(chan struct{})
+	client := &Client{connection: clientConnection, reader: bufio.NewReader(clientConnection), protocol: protocolVersion, accounting: accounting, responseWaitStarted: func() { close(waitStarted) }}
+	requestRead := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_, _ = bufio.NewReader(serverConnection).ReadBytes('\n')
+		close(requestRead)
+		<-release
+		_, _ = serverConnection.Write([]byte("{\"result\":\"locked\"}\n"))
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		var response responseEnvelope
+		done <- client.call(context.Background(), map[string]any{"operation": "lock"}, &response)
+	}()
+	<-requestRead
+	<-waitStarted
+	metrics, active, _, _ := accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	if len(active) != 1 || active[0].Class != "key_management" || active[0].Phase != "wait" {
+		t.Fatalf("active broker operation = %#v", active)
+	}
+	if value := brokerMetricValue(metrics, "wait_active", "operation", "key_management", "role", "broker", "throttle", "none"); value != 1 {
+		t.Fatalf("active broker waits = %d", value)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	metrics, active, _, _ = accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	if len(active) != 0 {
+		t.Fatalf("active broker operation after response = %#v", active)
+	}
+	if value := brokerMetricValue(metrics, "wait_completed", "operation", "key_management", "role", "broker", "throttle", "none", "outcome", "success"); value != 1 {
+		t.Fatalf("completed broker waits = %d", value)
+	}
+}
+
+func TestBrokerCallAttributesCanceledResponseWait(t *testing.T) {
+	clientConnection, serverConnection := net.Pipe()
+	defer clientConnection.Close()
+	defer serverConnection.Close()
+	accounting := telemetry.NewProductionAccounting(true)
+	waitStarted := make(chan struct{})
+	client := &Client{connection: clientConnection, reader: bufio.NewReader(clientConnection), protocol: protocolVersion, accounting: accounting, responseWaitStarted: func() { close(waitStarted) }}
+	requestRead := make(chan struct{})
+	go func() {
+		_, _ = bufio.NewReader(serverConnection).ReadBytes('\n')
+		close(requestRead)
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		var response responseEnvelope
+		done <- client.call(ctx, map[string]any{"operation": "lock"}, &response)
+	}()
+	<-requestRead
+	<-waitStarted
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("canceled broker call succeeded")
+	}
+	metrics, active, _, _ := accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	if len(active) != 0 {
+		t.Fatalf("active broker operation after cancellation = %#v", active)
+	}
+	if value := brokerMetricValue(metrics, "wait_completed", "operation", "key_management", "role", "broker", "throttle", "none", "outcome", "cancellation"); value != 1 {
+		t.Fatalf("canceled broker waits = %d", value)
+	}
+}
+
+func brokerMetricValue(metrics []telemetry.Metric, name string, labels ...string) uint64 {
+	for _, metric := range metrics {
+		if metric.Name != name {
+			continue
+		}
+		matched := true
+		for index := 0; index < len(labels); index += 2 {
+			found := false
+			for _, label := range metric.Labels {
+				if label.Name == labels[index] && label.Value == labels[index+1] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return metric.Value
+		}
+	}
+	return 0
 }
 
 func TestStatusRequiresOrderedProcessTimestamps(t *testing.T) {

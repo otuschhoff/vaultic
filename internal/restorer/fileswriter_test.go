@@ -1,6 +1,7 @@
 package restorer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,12 +9,13 @@ import (
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestFilesWriterBasic(t *testing.T) {
 	dir := rtest.TempDir(t)
-	w := newFilesWriter(1, false)
+	w := newFilesWriter(context.Background(), 1, false)
 
 	f1 := dir + "/f1"
 	f2 := dir + "/f2"
@@ -41,6 +43,39 @@ func TestFilesWriterBasic(t *testing.T) {
 	rtest.Equals(t, []byte{2, 2}, buf)
 }
 
+func TestFilesWriterAttributesRestoreDestinationBytes(t *testing.T) {
+	accounting := telemetry.DefaultProductionAccounting()
+	ctx, action := accounting.StartOperation(context.Background(), "restore", "write", "")
+	before, _, _, _ := accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	writer := newFilesWriter(ctx, 1, false)
+	payload := []byte("restored")
+	if err := writer.writeToFile(filepath.Join(t.TempDir(), "file"), payload, 0, int64(len(payload)), false); err != nil {
+		t.Fatal(err)
+	}
+	writer.flush()
+	action.Done(telemetry.OutcomeSuccess)
+	after, _, _, _ := accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	if filesWriterMetric(after, "dependency_bytes", "restore", "source", "success")-filesWriterMetric(before, "dependency_bytes", "restore", "source", "success") != uint64(len(payload)) {
+		t.Fatal("restore destination bytes were not attributed")
+	}
+}
+
+func filesWriterMetric(metrics []telemetry.Metric, name, operation, role, outcome string) uint64 {
+	for _, metric := range metrics {
+		if metric.Name != name {
+			continue
+		}
+		labels := map[string]string{}
+		for _, label := range metric.Labels {
+			labels[label.Name] = label.Value
+		}
+		if labels["operation"] == operation && labels["role"] == role && labels["outcome"] == outcome {
+			return metric.Value
+		}
+	}
+	return 0
+}
+
 func TestFilesWriterRecursiveOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test")
 
@@ -49,14 +84,14 @@ func TestFilesWriterRecursiveOverwrite(t *testing.T) {
 	rtest.OK(t, os.WriteFile(filepath.Join(path, "file"), []byte("data"), 0o400))
 
 	// must error if recursive delete is not allowed
-	w := newFilesWriter(1, false)
+	w := newFilesWriter(context.Background(), 1, false)
 	err := w.writeToFile(path, []byte{1}, 0, 2, false)
 	rtest.Assert(t, errors.Is(err, notEmptyDirError()), "unexpected error got %v", err)
 	rtest.Equals(t, 0, len(w.buckets[0].files))
 	w.flush()
 
 	// must replace directory
-	w = newFilesWriter(1, true)
+	w = newFilesWriter(context.Background(), 1, true)
 	rtest.OK(t, w.writeToFile(path, []byte{1, 1}, 0, 2, false))
 	rtest.Equals(t, 0, len(w.buckets[0].files))
 	w.flush()

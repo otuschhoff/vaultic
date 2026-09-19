@@ -42,42 +42,25 @@ func slateDBLatencyBounds() []uint64 {
 	return []uint64{1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000, math.MaxUint64}
 }
 
-func monitorValues(kind string) map[string]struct{} {
-	switch kind {
-	case "component":
-		return values("vaultic", "vaulticdb", "key_broker", "cache_coordinator")
-	case "queue":
-		return values("batch_write", "legacy_import_ingest", "legacy_import_reduce")
-	case "operation":
-		return values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery")
-	case "outcome":
-		return values("success", "failure", "cancellation", "timeout")
-	case "role":
-		return values("repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker")
-	case "representation":
-		return values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata")
-	case "throttle":
-		return values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown")
-	case "phase":
-		return values("queued", "admission", "planning", "source", "read", "write", "upload", "publish", "reconcile", "ingest", "reduce", "cleanup", "finalize", "verify", "delete", "retry", "wait", "complete")
-	case "blocking":
-		return values("prerequisite", "lock", "concurrency", "byte_budget", "source_io", "backend_io", "rpc_response", "retry_backoff", "credential_renewal", "writer_fencing", "durability", "wal_flush", "compaction", "human_confirmation", "shutdown")
-	case "storage_role":
-		return values("repository", "database", "wal", "coordination", "source", "scratch", "cache")
-	case "storage_class":
-		return values("pack", "index", "snapshot", "sst", "manifest", "wal_segment", "coordination", "scratch", "unknown")
-	case "placement_state":
-		return values("primary", "replica", "pending", "deleting", "reconciled", "unknown")
-	case "cache_family":
-		return values("aggregate", "memory", "disk", "remote", "slatedb", "unknown")
-	case "acknowledgement":
-		return values("unknown", "inherited", "memory", "persistent", "local-process", "shared-remote", "durable-object-store", "test", "unsupported")
-	case "wal_target":
-		return values("inherited", "local", "memory", "s3", "rados", "test", "unsupported-azure", "unsupported-gcs")
-	default:
-		return nil
-	}
+var monitorValueSets = map[string]map[string]struct{}{
+	"component":       values("vaultic", "vaulticdb", "key_broker", "cache_coordinator"),
+	"queue":           values("batch_write", "legacy_import_ingest", "legacy_import_reduce"),
+	"operation":       values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery"),
+	"outcome":         values("success", "failure", "cancellation", "timeout"),
+	"role":            values("repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker"),
+	"representation":  values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata"),
+	"throttle":        values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown"),
+	"phase":           values("queued", "admission", "planning", "source", "read", "write", "upload", "publish", "reconcile", "ingest", "reduce", "cleanup", "finalize", "verify", "delete", "retry", "wait", "complete"),
+	"blocking":        values("prerequisite", "lock", "concurrency", "byte_budget", "source_io", "backend_io", "rpc_response", "retry_backoff", "credential_renewal", "writer_fencing", "durability", "wal_flush", "compaction", "human_confirmation", "shutdown"),
+	"storage_role":    values("repository", "database", "wal", "coordination", "source", "scratch", "cache"),
+	"storage_class":   values("pack", "index", "snapshot", "sst", "manifest", "wal_segment", "coordination", "scratch", "unknown"),
+	"placement_state": values("primary", "replica", "pending", "deleting", "reconciled", "unknown"),
+	"cache_family":    values("aggregate", "memory", "disk", "remote", "slatedb", "unknown"),
+	"acknowledgement": values("unknown", "inherited", "memory", "persistent", "local-process", "shared-remote", "durable-object-store", "test", "unsupported"),
+	"wal_target":      values("inherited", "local", "memory", "s3", "rados", "test", "unsupported-azure", "unsupported-gcs"),
 }
+
+func monitorValues(kind string) map[string]struct{} { return monitorValueSets[kind] }
 
 type Availability string
 

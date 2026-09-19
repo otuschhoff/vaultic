@@ -19,7 +19,16 @@ func (r *Repository) PlacePack(ctx context.Context, packID vaultic.ID, targetHas
 	if err != nil {
 		return err
 	}
-	if info, statErr := target.Stat(ctx, handle); statErr == nil && uint64(info.Size) == expectedSize {
+	statDone := r.accounting.StartBlocking(ctx, "read", "backend_io")
+	statDependency := r.accounting.StartDependency(ctx, "repository")
+	info, statErr := target.Stat(ctx, handle)
+	statDone.Done()
+	if statErr == nil || target.IsNotExist(statErr) {
+		statDependency.Finish(nil)
+	} else {
+		statDependency.Finish(statErr)
+	}
+	if statErr == nil && uint64(info.Size) == expectedSize {
 		return nil
 	}
 	file, err := os.CreateTemp("", "vaultic-placement-*")
@@ -45,15 +54,23 @@ func (r *Repository) PlacePack(ctx context.Context, packID vaultic.ID, targetHas
 			return err
 		}
 		hasher := target.Hasher()
+		loadedBytes := uint64(0)
+		loadDone := r.accounting.StartBlocking(ctx, "read", "backend_io")
+		dependency := r.accounting.StartDependency(ctx, "repository")
 		loadErr = source.Load(ctx, handle, 0, 0, func(reader io.Reader) error {
 			writer := io.Writer(file)
 			if hasher != nil {
 				writer = io.MultiWriter(file, hasher)
 			}
-			_, err := io.Copy(writer, reader)
+			copied, err := io.Copy(writer, reader)
+			loadedBytes = uint64(copied)
 			return err
 		})
+		loadDone.Done()
+		dependency.AddBytes(loadedBytes)
+		dependency.Finish(loadErr)
 		if loadErr == nil {
+			r.accounting.AddProcessed(ctx, "repository", loadedBytes)
 			loaded = true
 			if hasher != nil {
 				contentHash = hasher.Sum(nil)
@@ -71,9 +88,17 @@ func (r *Repository) PlacePack(ctx context.Context, packID vaultic.ID, targetHas
 	if err != nil {
 		return err
 	}
+	uploadDone := r.accounting.StartBlocking(ctx, "upload", "backend_io")
+	dependency := r.accounting.StartDependency(ctx, "repository")
+	dependency.AddBytes(expectedSize)
 	if err := target.Save(ctx, handle, reader); err != nil {
+		uploadDone.Done()
+		dependency.Finish(err)
 		return fmt.Errorf("save pack %s to placement: %w", packID.Str(), err)
 	}
+	uploadDone.Done()
+	dependency.Finish(nil)
+	r.accounting.AddProcessed(ctx, "repository", expectedSize)
 	return nil
 }
 
@@ -89,7 +114,16 @@ func (r *Repository) EvictPack(ctx context.Context, packID vaultic.ID, targetHas
 		return err
 	}
 	if target != r.be {
-		if err := target.Remove(ctx, handle); err != nil && !target.IsNotExist(err) {
+		deleteDone := r.accounting.StartBlocking(ctx, "delete", "backend_io")
+		dependency := r.accounting.StartDependency(ctx, "repository")
+		err := target.Remove(ctx, handle)
+		deleteDone.Done()
+		if err == nil || target.IsNotExist(err) {
+			dependency.Finish(nil)
+		} else {
+			dependency.Finish(err)
+		}
+		if err != nil && !target.IsNotExist(err) {
 			return err
 		}
 		return nil
@@ -97,7 +131,16 @@ func (r *Repository) EvictPack(ctx context.Context, packID vaultic.ID, targetHas
 	if !model.HotCold {
 		return fmt.Errorf("cannot evict the only physical repository backend")
 	}
-	if err := target.Remove(ctx, handle); err != nil && !target.IsNotExist(err) {
+	deleteDone := r.accounting.StartBlocking(ctx, "delete", "backend_io")
+	dependency := r.accounting.StartDependency(ctx, "repository")
+	err = target.Remove(ctx, handle)
+	deleteDone.Done()
+	if err == nil || target.IsNotExist(err) {
+		dependency.Finish(nil)
+	} else {
+		dependency.Finish(err)
+	}
+	if err != nil && !target.IsNotExist(err) {
 		return err
 	}
 	return nil

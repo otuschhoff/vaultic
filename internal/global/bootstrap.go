@@ -11,6 +11,7 @@ import (
 	indexbroker "github.com/otuschhoff/vaultic/internal/index/broker"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/repository/bootstrap"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
@@ -358,6 +359,7 @@ func createRepositoryInstance(be backend.Backend, gopts Options) (*repository.Re
 		TreePackSize:  uint64(gopts.TreePackSize) * 1024 * 1024,
 		DataPackSize:  uint64(gopts.DataPackSize) * 1024 * 1024,
 		NoExtraVerify: gopts.NoExtraVerify,
+		Accounting:    telemetry.DefaultProductionAccounting(),
 	})
 	if err != nil {
 		return nil, errors.Fatalf("%s", err)

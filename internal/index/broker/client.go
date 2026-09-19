@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cloudflare/circl/hpke"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/topology"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
@@ -34,10 +35,12 @@ const (
 )
 
 type Client struct {
-	connection net.Conn
-	reader     *bufio.Reader
-	protocol   string
-	challenge  string
+	connection          net.Conn
+	reader              *bufio.Reader
+	protocol            string
+	challenge           string
+	accounting          *monitor.ProductionAccounting
+	responseWaitStarted func()
 }
 
 type RequestError struct {
@@ -301,7 +304,7 @@ func Dial(ctx context.Context, socket string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect key broker: %w", err)
 	}
-	client := &Client{connection: connection, reader: bufio.NewReaderSize(connection, maxResponse)}
+	client := &Client{connection: connection, reader: bufio.NewReaderSize(connection, maxResponse), accounting: monitor.DefaultProductionAccounting()}
 	var response responseEnvelope
 	if err := client.call(ctx, map[string]any{"operation": "negotiate", "protocols": []string{protocolVersion}}, &response); err != nil {
 		_ = connection.Close() // Preserve the handshake failure; the connection is not usable.
@@ -661,7 +664,31 @@ func (client *Client) authorizedOperation(manifestPath string) (map[string]any, 
 	}, nil
 }
 
-func (client *Client) call(ctx context.Context, request any, response *responseEnvelope) error {
+func (client *Client) call(ctx context.Context, request any, response *responseEnvelope) (resultErr error) {
+	observed := brokerRequestIsObserved(request)
+	operationCtx := ctx
+	var accountingErr error
+	var wait *monitor.WaitGuard
+	var blocking *monitor.BlockingGuard
+	if observed {
+		var action *monitor.ActionGuard
+		operationCtx, action = client.accounting.StartOperation(ctx, "key_management", "wait", "")
+		dependency := client.accounting.StartDependency(operationCtx, "broker")
+		defer func() {
+			settlementErr := accountingErr
+			if settlementErr == nil {
+				settlementErr = resultErr
+			}
+			if blocking != nil {
+				blocking.Done()
+			}
+			if wait != nil {
+				wait.Finish(settlementErr)
+			}
+			dependency.Finish(settlementErr)
+			action.Done(monitor.ClassifyOutcome(settlementErr))
+		}()
+	}
 	deadline, hasDeadline := ctx.Deadline()
 	if hasDeadline {
 		if err := client.connection.SetDeadline(deadline); err != nil {
@@ -686,10 +713,23 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 	defer clear(encoded)
 	encoded = append(encoded, '\n')
 	if _, err := client.connection.Write(encoded); err != nil {
+		if ctx.Err() != nil {
+			accountingErr = ctx.Err()
+		}
 		return fmt.Errorf("write broker request: %w", err)
+	}
+	if observed {
+		wait = client.accounting.StartWait(operationCtx, "broker", "none")
+		blocking = client.accounting.StartBlocking(operationCtx, "wait", "rpc_response")
+		if client.responseWaitStarted != nil {
+			client.responseWaitStarted()
+		}
 	}
 	line, err := client.reader.ReadBytes('\n')
 	if err != nil {
+		if ctx.Err() != nil {
+			accountingErr = ctx.Err()
+		}
 		return fmt.Errorf("read broker response: %w", err)
 	}
 	defer clear(line)
@@ -703,6 +743,15 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 		return &RequestError{Code: response.Code, Message: response.Message}
 	}
 	return nil
+}
+
+func brokerRequestIsObserved(request any) bool {
+	fields, ok := request.(map[string]any)
+	if !ok {
+		return false
+	}
+	operation, _ := fields["operation"].(string)
+	return operation != "" && operation != "negotiate" && operation != "status"
 }
 
 func LoadCapsule(path string) (*capsule, error) {

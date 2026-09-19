@@ -149,7 +149,9 @@ func (hooks *backupHooks) wireDeferredUploader(options *archiver.SnapshotOptions
 	}
 }
 
-func runBackupPipeline(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string) error {
+func runBackupPipeline(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "backup", "planning", "")
+	defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
 	run := &backupRun{ctx: ctx, options: options, globalOptions: globalOptions, term: term, args: args, success: true}
 	if err := prepareBackupTargets(run); err != nil {
 		return err
@@ -328,7 +330,12 @@ func loadBackupParent(run *backupRun) error {
 	return run.repo.LoadIndex(run.ctx, run.printer)
 }
 
-func openBackupFilesystem(run *backupRun) error {
+func openBackupFilesystem(run *backupRun) (resultErr error) {
+	defer func() {
+		if resultErr == nil {
+			run.targetFS = telemetry.WrapProductionFS(run.ctx, run.targetFS, telemetry.DefaultProductionAccounting())
+		}
+	}()
 	run.targetFS = fs.NewLocal()
 	if runtime.GOOS == "windows" && run.options.UseFsSnapshot {
 		if err := fs.HasSufficientPrivilegesForVSS(); err != nil {
@@ -1136,7 +1143,9 @@ func publishBackupTelemetry(run *backupRun) {
 		InfluxBucket: run.globalOptions.InfluxBucket,
 	}, telemetry.Backup{
 		Repository: run.globalOptions.Repo, SnapshotID: run.snapshotID.String(),
-		Label: run.snapshotOpts.Label, Summary: run.summary,
+		Label: run.snapshotOpts.Label, BackupStart: run.summary.BackupStart, BackupEnd: run.summary.BackupEnd,
+		FilesProcessed: uint64(run.summary.Files.New + run.summary.Files.Changed + run.summary.Files.Unchanged),
+		ProcessedBytes: run.summary.ProcessedBytes, DataAddedBytes: run.summary.DataSizeInRepo,
 	})
 	if err != nil {
 		run.printer.E("telemetry publish failed: %v\n", err)

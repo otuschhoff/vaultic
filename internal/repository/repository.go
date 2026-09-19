@@ -18,6 +18,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
@@ -45,6 +46,7 @@ type Repository struct {
 	ownedPlacementBackends []backend.Backend
 	ownedClosers           []io.Closer
 	stagedPackRoots        StagedPackRoots
+	accounting             *monitor.ProductionAccounting
 
 	opts Options
 
@@ -188,6 +190,7 @@ type Options struct {
 	Compression   CompressionMode
 	PackSize      uint
 	NoExtraVerify bool
+	Accounting    *monitor.ProductionAccounting
 
 	// TreePackSize and DataPackSize optionally override PackSize for tree and
 	// data packs respectively (from the in-repo config). Zero means PackSize.
@@ -288,6 +291,7 @@ func New(be backend.Backend, opts Options) (*Repository, error) {
 	repo := &Repository{
 		be:                be,
 		opts:              opts,
+		accounting:        opts.Accounting,
 		idx:               index.NewMasterIndex(),
 		packerCount:       defaultPackerCount,
 		placementBackends: make(map[uint64]backend.Backend),

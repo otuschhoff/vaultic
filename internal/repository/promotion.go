@@ -7,12 +7,17 @@ import (
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 // PromotePack rewrites the retained blobs of one source pack into newly
 // published packs. It never copies the encrypted source object verbatim.
-func PromotePack(ctx context.Context, repo *Repository, packID vaultic.ID, targetBackend uint64, printer vaultic.Printer) ([]vaultic.ID, error) {
+func PromotePack(ctx context.Context, repo *Repository, packID vaultic.ID, targetBackend uint64, printer vaultic.Printer) (successors []vaultic.ID, resultErr error) {
+	ctx, action, owned := repo.accounting.StartOperationIfAbsent(ctx, "placement", "planning")
+	if owned {
+		defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
+	}
 	if repo.Engine().Mode() != metadataindex.ModeSlateDB {
 		return nil, fmt.Errorf("promotion requires a SlateDB-authoritative repository")
 	}
@@ -35,7 +40,7 @@ func PromotePack(ctx context.Context, repo *Repository, packID vaultic.ID, targe
 		return nil, fmt.Errorf("promotion target %q is not addressable by the repository write route", target.ID)
 	}
 	store := engine.SchemaStore()
-	successors, err := findPublishedRepackSuccessors(ctx, store, packID, targetBackend)
+	successors, err = findPublishedRepackSuccessors(ctx, store, packID, targetBackend)
 	if err != nil {
 		return nil, err
 	}

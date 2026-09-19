@@ -335,7 +335,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	}
 	restoredFileCount := uint64(0)
 	idx := data.NewHardlinkIndex[string]()
-	filerestorer := res.createFileRestorer(dst)
+	filerestorer := res.createFileRestorer(ctx, dst)
 
 	debug.Log("first pass for %q", dst)
 
@@ -455,9 +455,9 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	return restoredFileCount, err
 }
 
-func (res *Restorer) createFileRestorer(destination string) *fileRestorer {
+func (res *Restorer) createFileRestorer(ctx context.Context, destination string) *fileRestorer {
 	restore := newFileRestorer(fileRestorerParams{
-		destination: destination, blobsLoader: res.repo.LoadBlobsFromPack, index: res.repo.LookupBlob,
+		ctx: ctx, destination: destination, blobsLoader: res.repo.LoadBlobsFromPack, index: res.repo.LookupBlob,
 		connections: res.repo.Connections(), sparse: res.options.Sparse, allowRecursiveDelete: res.options.Delete,
 		startWarmup: res.repo.StartWarmup, progress: res.options.Progress, zeroChunk: res.repo.ChunkerFactory().ZeroChunk(),
 	})

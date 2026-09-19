@@ -170,7 +170,7 @@ func newCacheUpdateCommand(globalOptions *global.Options) *cobra.Command {
 			if command.Flags().Changed("expected-revision") {
 				update.ExpectedRev = &options.ExpectedRevision
 			}
-			if err := repo.UpdateReadCachePolicy(update); err != nil {
+			if err := repo.UpdateReadCachePolicyContext(command.Context(), update); err != nil {
 				return err
 			}
 			status := repo.ReadCacheStatus()

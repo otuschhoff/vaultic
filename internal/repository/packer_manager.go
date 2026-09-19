@@ -293,7 +293,15 @@ func (r *Repository) savePacker(ctx context.Context, t vaultic.BlobType, p *pack
 		return err
 	}
 
+	done := r.accounting.StartBlocking(ctx, "upload", "backend_io")
+	defer done.Done()
+	dependency := r.accounting.StartDependency(ctx, "repository")
+	dependency.AddBytes(uint64(packInfo.Size()))
 	err = r.be.Save(ctx, h, rrd)
+	dependency.Finish(err)
+	if err == nil {
+		r.accounting.AddProcessed(ctx, "repository", uint64(packInfo.Size()))
+	}
 	if err != nil {
 		debug.Log("Save(%v) error: %v", h, err)
 		return err

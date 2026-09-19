@@ -108,6 +108,10 @@ func (metric *ActionMetric) Snapshot() ([]Metric, []ActiveOperation, []Operation
 	return metrics, operations, overflow
 }
 
+func (metric *ActionMetric) touched() bool {
+	return metric != nil && metric.enabled && metric.started.Load() != 0
+}
+
 type DependencyMetric struct {
 	enabled   bool
 	operation string
@@ -158,6 +162,11 @@ func (guard *DependencyGuard) Succeeded() { guard.setOutcome(OutcomeSuccess) }
 func (guard *DependencyGuard) Failed()    { guard.setOutcome(OutcomeFailure) }
 func (guard *DependencyGuard) TimedOut()  { guard.setOutcome(OutcomeTimeout) }
 
+func (guard *DependencyGuard) Finish(err error) {
+	guard.setOutcome(ClassifyOutcome(err))
+	guard.Done()
+}
+
 func (guard *DependencyGuard) setOutcome(outcome Outcome) {
 	if guard != nil && guard.metric != nil && !guard.settled.Load() {
 		guard.outcome.Store(uint32(outcomeIndex(outcome)))
@@ -189,4 +198,16 @@ func (metric *DependencyMetric) Metrics() []Metric {
 		)
 	}
 	return metrics
+}
+
+func (metric *DependencyMetric) touched() bool {
+	if metric == nil || !metric.enabled {
+		return false
+	}
+	for index := range metric.requests {
+		if metric.requests[index].Load() != 0 {
+			return true
+		}
+	}
+	return false
 }

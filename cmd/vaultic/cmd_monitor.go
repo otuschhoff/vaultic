@@ -323,14 +323,24 @@ func validateMonitorExportOptions(options monitorExportOptions) error {
 }
 
 func addMonitorExportHealth(snapshot *telemetry.MonitorSnapshot, worker *telemetry.AsyncExporter) {
+	addMonitorExportHealthValues(snapshot, worker.Failures(), worker.Dropped())
+}
+
+func addMonitorExportHealthValues(snapshot *telemetry.MonitorSnapshot, failures, dropped uint64) {
 	for index := range snapshot.Components {
 		if snapshot.Components[index].Component != "vaultic" {
 			continue
 		}
-		snapshot.Components[index].Metrics = append(snapshot.Components[index].Metrics,
-			telemetry.Metric{Name: "monitor_export_failures", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: worker.Failures()},
-			telemetry.Metric{Name: "monitor_export_dropped", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: worker.Dropped()},
-		)
+		health := []telemetry.Metric{
+			{Name: "monitor_export_failures", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: failures},
+			{Name: "monitor_export_dropped", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: dropped},
+		}
+		metrics := snapshot.Components[index].Metrics
+		if displaced := max(len(metrics)+len(health)-telemetry.MaxMonitorMetrics, 0); displaced != 0 {
+			metrics = metrics[:len(metrics)-displaced]
+			snapshot.Components[index].CardinalityDropped += uint64(displaced)
+		}
+		snapshot.Components[index].Metrics = append(metrics, health...)
 		return
 	}
 }
@@ -380,7 +390,7 @@ func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, 
 		if countErr != nil {
 			return telemetry.MonitorSnapshot{}, fmt.Errorf("reconcile repository placement storage: %w", countErr)
 		}
-		components[0].Storage = placementStorageSnapshots(counts, now)
+		components[0].Storage = placementStorageSnapshots(counts)
 	}
 	writer, writerErr := daemonEngine.Client().WriterStatus(ctx)
 	if writerErr != nil {
@@ -418,15 +428,15 @@ func repositoryAggregateStorage(stats maintenance.StatsResult) []telemetry.Stora
 	}}
 }
 
-func placementStorageSnapshots(counts map[string]maintenance.BackendPlacementCount, captured time.Time) []telemetry.StorageSnapshot {
+func placementStorageSnapshots(counts map[string]maintenance.BackendPlacementCount) []telemetry.StorageSnapshot {
 	storage := make([]telemetry.StorageSnapshot, 0, len(counts))
 	for backendID, count := range counts {
 		storage = append(storage, telemetry.StorageSnapshot{
 			BackendID: backendID, Role: "repository", Availability: telemetry.AvailabilityEstimated,
-			ObjectCount: count.Objects, PayloadBytes: count.Bytes, ReconciledAtMS: captured.UnixMilli(),
-			ObjectClass: "pack", PlacementState: "reconciled", Representation: "encrypted_pack",
-			ObjectCountAvailability: telemetry.AvailabilityEstimated, PayloadAvailability: telemetry.AvailabilityEstimated,
-			PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityExact,
+			ObjectCount: count.Objects, PhysicalBytes: count.Bytes,
+			ObjectClass: "pack", PlacementState: "unknown", Representation: "encrypted_pack",
+			ObjectCountAvailability: telemetry.AvailabilityEstimated, PayloadAvailability: telemetry.AvailabilityUnavailable,
+			PhysicalAvailability: telemetry.AvailabilityEstimated, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
 		})
 	}
 	sort.Slice(storage, func(left, right int) bool { return storage[left].BackendID < storage[right].BackendID })
@@ -471,9 +481,12 @@ func collectBrokerMonitorComponent(ctx context.Context, socket string, now time.
 
 func repositoryMonitorComponent(repo *repository.Repository, now time.Time) telemetry.ComponentSnapshot {
 	status := repo.ReadCacheStatus()
+	accountingMetrics, accountingOperations, accountingOverflow, accountingDropped := telemetry.DefaultProductionAccounting().Snapshot(telemetry.MaxMonitorMetrics)
 	component := telemetry.ComponentSnapshot{
 		Component: "vaultic", ProcessStartID: strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(monitorProcessStarted.UnixMilli(), 10),
 		CapturedUnixMS: now.UnixMilli(), Availability: telemetry.AvailabilityExact,
+		Metrics: accountingMetrics, Operations: accountingOperations, OperationOverflow: accountingOverflow,
+		CardinalityDropped: accountingDropped,
 		Storage: []telemetry.StorageSnapshot{{
 			BackendID: "repository", Role: "repository", Availability: telemetry.AvailabilityUnavailable,
 			ObjectClass: "unknown", PlacementState: "unknown", Representation: "encrypted_pack",

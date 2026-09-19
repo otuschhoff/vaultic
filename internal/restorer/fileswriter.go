@@ -1,6 +1,7 @@
 package restorer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/fileio"
 	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 // writes blobs to target files.
@@ -20,6 +22,7 @@ import (
 // TODO I am not 100% convinced this is necessary, i.e. it may be okay
 // to use multiple os.File to write to the same target file
 type filesWriter struct {
+	ctx                  context.Context
 	buckets              []filesWriterBucket
 	allowRecursiveDelete bool
 	cacheMu              sync.Mutex
@@ -37,7 +40,7 @@ type partialFile struct {
 	sparse bool
 }
 
-func newFilesWriter(count int, allowRecursiveDelete bool) *filesWriter {
+func newFilesWriter(ctx context.Context, count int, allowRecursiveDelete bool) *filesWriter {
 	// use a large number of buckets to minimize bucket contention
 	// creating a new file can be slow, so make sure that files typically end up in different buckets.
 	buckets := make([]filesWriterBucket, 1024)
@@ -57,6 +60,7 @@ func newFilesWriter(count int, allowRecursiveDelete bool) *filesWriter {
 	}
 
 	return &filesWriter{
+		ctx:                  ctx,
 		buckets:              buckets,
 		allowRecursiveDelete: allowRecursiveDelete,
 		cache:                cache,
@@ -184,7 +188,11 @@ func ensureSize(f *os.File, fi os.FileInfo, createSize int64, sparse bool) (*os.
 	return f, nil
 }
 
-func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, createSize int64, sparse bool) error {
+func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, createSize int64, sparse bool) (resultErr error) {
+	done := telemetry.DefaultProductionAccounting().StartBlocking(w.ctx, "write", "source_io")
+	defer done.Done()
+	dependency := telemetry.DefaultProductionAccounting().StartDependency(w.ctx, "source")
+	defer func() { dependency.Finish(resultErr) }()
 	bucket := &w.buckets[uint(xxhash.Sum64String(path))%uint(len(w.buckets))]
 
 	acquireWriter := func() (*partialFile, error) {
@@ -250,7 +258,9 @@ func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, create
 		return err
 	}
 
-	_, err = wr.WriteAt(blob, offset)
+	written, err := wr.WriteAt(blob, offset)
+	dependency.AddBytes(uint64(written))
+	telemetry.DefaultProductionAccounting().AddProcessed(w.ctx, "source", uint64(written))
 
 	if err != nil {
 		// ignore subsequent errors

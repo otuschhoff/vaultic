@@ -8,16 +8,14 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/otuschhoff/vaultic/internal/archiver"
 )
 
 func testBackup() Backup {
 	return Backup{
-		Repository: "repo one",
-		SnapshotID: "abc",
-		Label:      "daily",
-		Summary:    &archiver.Summary{BackupStart: time.Unix(0, 0), BackupEnd: time.Unix(2, 0), ProcessedBytes: 42},
+		Repository:  "repo one",
+		SnapshotID:  "abc",
+		Label:       "daily",
+		BackupStart: time.Unix(1, 0), BackupEnd: time.Unix(2, 0), ProcessedBytes: 42,
 	}
 }
 

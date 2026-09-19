@@ -26,6 +26,8 @@ func NewLocal() FS {
 // IsLocal reports whether filesystem accesses the host filesystem directly.
 func IsLocal(filesystem FS) bool {
 	switch filesystem := filesystem.(type) {
+	case interface{ UnwrapFS() FS }:
+		return IsLocal(filesystem.UnwrapFS())
 	case local, *local:
 		return true
 	case Track:

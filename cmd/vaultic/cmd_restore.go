@@ -12,6 +12,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/filter"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/restorer"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	restoreui "github.com/otuschhoff/vaultic/internal/ui/restore"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -105,7 +106,9 @@ func (options *restoreOptions) AddFlags(f *pflag.FlagSet) {
 }
 
 func runRestore(ctx context.Context, options restoreOptions, globalOptions global.Options,
-	term ui.Terminal, args []string) error {
+	term ui.Terminal, args []string) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "restore", "planning", "")
+	defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
 
 	var printer restoreui.ProgressPrinter
 	if globalOptions.JSON {

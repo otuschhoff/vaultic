@@ -31,6 +31,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/hooks"
 	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui/termstatus"
 )
 
@@ -40,6 +41,13 @@ func init() {
 }
 
 var ErrOK = errors.New("ok")
+
+func classifyCommandOutcome(err error) telemetry.Outcome {
+	if errors.Is(err, ErrOK) {
+		return telemetry.OutcomeSuccess
+	}
+	return telemetry.ClassifyOutcome(err)
+}
 
 var cmdGroupDefault = "default"
 var cmdGroupAdvanced = "advanced"

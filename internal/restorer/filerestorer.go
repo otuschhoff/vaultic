@@ -70,6 +70,7 @@ type fileRestorer struct {
 }
 
 type fileRestorerParams struct {
+	ctx                  context.Context
 	destination          string
 	blobsLoader          blobsLoaderFn
 	index                func(vaultic.BlobHandle) []vaultic.PackBlob
@@ -90,7 +91,7 @@ func newFileRestorer(params fileRestorerParams) *fileRestorer {
 		idx:                  params.index,
 		blobsLoader:          params.blobsLoader,
 		startWarmup:          params.startWarmup,
-		filesWriter:          newFilesWriter(workerCount, params.allowRecursiveDelete),
+		filesWriter:          newFilesWriter(params.ctx, workerCount, params.allowRecursiveDelete),
 		zeroChunk:            params.zeroChunk,
 		sparse:               params.sparse,
 		progress:             progressOrNoop(params.progress),

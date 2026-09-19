@@ -3,6 +3,7 @@
 package fuse
 
 import (
+	"context"
 	"os"
 
 	"github.com/otuschhoff/vaultic/internal/data"
@@ -22,6 +23,7 @@ type Config struct {
 
 // Root is the root node of the fuse mount of a repository.
 type Root struct {
+	ctx  context.Context
 	repo vaultic.Repository
 	cfg  Config
 
@@ -38,9 +40,14 @@ const rootInode = 1
 
 // NewRoot initializes a new root node from a repository.
 func NewRoot(repo vaultic.Repository, cfg Config) *Root {
+	return NewRootWithContext(context.Background(), repo, cfg)
+}
+
+func NewRootWithContext(ctx context.Context, repo vaultic.Repository, cfg Config) *Root {
 	debug.Log("NewRoot(), config %v", cfg)
 
 	root := &Root{
+		ctx:  ctx,
 		repo: repo,
 		cfg:  cfg,
 	}

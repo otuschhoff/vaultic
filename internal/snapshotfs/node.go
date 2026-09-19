@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/data"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 type Attr struct {
@@ -57,7 +60,9 @@ func (node *Node) RawNode() data.Node {
 	return *cloneNode(node.node)
 }
 
-func (node *Node) Attr(ctx context.Context) (Attr, error) {
+func (node *Node) Attr(ctx context.Context) (result Attr, resultErr error) {
+	ctx, dependency, done := node.startVFSDependency(ctx)
+	defer func() { done.Done(); dependency.Finish(resultErr) }()
 	if err := node.lock(ctx); err != nil {
 		return Attr{}, err
 	}
@@ -92,7 +97,9 @@ func (node *Node) Attr(ctx context.Context) (Attr, error) {
 	}, nil
 }
 
-func (node *Node) Lookup(ctx context.Context, name string) (*Node, error) {
+func (node *Node) Lookup(ctx context.Context, name string) (result *Node, resultErr error) {
+	ctx, dependency, done := node.startVFSDependency(ctx)
+	defer func() { done.Done(); dependency.Finish(resultErr) }()
 	return node.lookup(ctx, name, true)
 }
 
@@ -119,7 +126,9 @@ func (node *Node) lookup(ctx context.Context, name string, lifecycleLock bool) (
 	return entries[index].Node, nil
 }
 
-func (node *Node) ReadDir(ctx context.Context) ([]Entry, error) {
+func (node *Node) ReadDir(ctx context.Context) (result []Entry, resultErr error) {
+	ctx, dependency, done := node.startVFSDependency(ctx)
+	defer func() { done.Done(); dependency.Finish(resultErr) }()
 	if err := node.lock(ctx); err != nil {
 		return nil, err
 	}
@@ -171,7 +180,18 @@ func (node *Node) entries(ctx context.Context) ([]Entry, error) {
 	return entries, nil
 }
 
-func (node *Node) ReadAt(ctx context.Context, offset uint64, dst []byte) (int, error) {
+func (node *Node) ReadAt(ctx context.Context, offset uint64, dst []byte) (read int, resultErr error) {
+	ctx, dependency, done := node.startVFSDependency(ctx)
+	defer func() {
+		done.Done()
+		dependency.AddBytes(uint64(read))
+		if errors.Is(resultErr, io.EOF) {
+			dependency.Finish(nil)
+		} else {
+			dependency.Finish(resultErr)
+		}
+		monitor.DefaultProductionAccounting().AddProcessed(ctx, "source", uint64(read))
+	}()
 	if err := node.lock(ctx); err != nil {
 		return 0, err
 	}
@@ -198,7 +218,9 @@ func (node *Node) ReadAt(ctx context.Context, offset uint64, dst []byte) (int, e
 	return n, nil
 }
 
-func (node *Node) Readlink(ctx context.Context) (string, error) {
+func (node *Node) Readlink(ctx context.Context) (result string, resultErr error) {
+	ctx, dependency, done := node.startVFSDependency(ctx)
+	defer func() { done.Done(); dependency.Finish(resultErr) }()
 	if err := node.lock(ctx); err != nil {
 		return "", err
 	}
@@ -207,6 +229,12 @@ func (node *Node) Readlink(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%w: %s is not a symlink", ErrInvalidNode, node.path)
 	}
 	return node.node.LinkTarget, nil
+}
+
+func (node *Node) startVFSDependency(ctx context.Context) (context.Context, *monitor.DependencyGuard, *monitor.BlockingGuard) {
+	ctx = monitor.InheritOperation(ctx, node.fs.owner)
+	done := monitor.DefaultProductionAccounting().StartBlocking(ctx, "read", "source_io")
+	return ctx, monitor.DefaultProductionAccounting().StartDependency(ctx, "source"), done
 }
 
 func (node *Node) lock(ctx context.Context) error {

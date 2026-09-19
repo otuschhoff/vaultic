@@ -12,6 +12,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -123,7 +124,9 @@ func yieldCopySnapshot(
 	return nil
 }
 
-func runCopy(ctx context.Context, options copyOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+func runCopy(ctx context.Context, options copyOptions, globalOptions global.Options, args []string, term ui.Terminal) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "replicate", "planning", "")
+	defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
 	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 	secondaryGopts, isFromRepo, err := options.SecondaryRepoOptions.FillGlobalOpts(ctx, globalOptions, "destination")
 	if err != nil {

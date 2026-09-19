@@ -18,6 +18,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -568,6 +569,8 @@ func TestReadCacheRestartStartsFreshIdleAge(t *testing.T) {
 
 func TestReadCachePolicyAndDrain(t *testing.T) {
 	repo, _, _, _, blobID := promotionTestRepository(t)
+	accounting := telemetry.NewProductionAccounting(true)
+	repo.accounting = accounting
 	cacheBackend := mem.New()
 	cfg := repo.Config()
 	cfg.PlacementBackends = []vaultic.PlacementBackend{
@@ -584,7 +587,7 @@ func TestReadCachePolicyAndDrain(t *testing.T) {
 		t.Fatalf("unexpected cache status: %#v", status)
 	}
 	disable := false
-	if err := repo.UpdateReadCachePolicy(readCachePolicyUpdate{ID: "rc", Enabled: &disable}); err != nil {
+	if err := repo.UpdateReadCachePolicyContext(context.Background(), readCachePolicyUpdate{ID: "rc", Enabled: &disable}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.DrainReadCache(context.Background()); err != nil {
@@ -593,6 +596,13 @@ func TestReadCachePolicyAndDrain(t *testing.T) {
 	status = repo.ReadCacheStatus()
 	if len(status.Tiers) != 1 || status.Tiers[0].Entries != 0 || status.Tiers[0].UsedBytes != 0 {
 		t.Fatalf("drain status mismatch: %#v", status)
+	}
+	metrics, _, _, _ := accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	if phase34M3Metric(metrics, "dependency_requests", "operation", "cache_fill", "role", "coordination", "outcome", "success").Value != 1 {
+		t.Fatal("cache policy coordination was not attributed")
+	}
+	if phase34M3Metric(metrics, "dependency_requests", "operation", "cache_evict", "role", "cache", "outcome", "success").Value != 1 {
+		t.Fatal("cache drain was not attributed")
 	}
 }
 

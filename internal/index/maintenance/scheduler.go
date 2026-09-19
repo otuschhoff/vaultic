@@ -11,6 +11,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -87,8 +88,10 @@ type placementEventStore interface {
 var ErrPlacementObsolete = schema.ErrPlacementObsolete
 
 //nolint:funlen,gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
-func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions, options PlacementWorkerOptions) (PlacementWorkerResult, error) {
-	var result PlacementWorkerResult
+func ExecutePlacement(ctx context.Context, store Store, actions PlacementActions, options PlacementWorkerOptions) (result PlacementWorkerResult, resultErr error) {
+	ctx, action := monitor.DefaultProductionAccounting().StartOperation(ctx, "placement", "planning", "")
+	defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	store = withProductionStore(store)
 	if actions == nil {
 		return result, errors.New("placement worker requires storage actions")
 	}
@@ -390,7 +393,7 @@ func recordPlacementEvent(
 	eventType schema.PackEventType,
 	reason string,
 ) error {
-	eventStore, ok := store.(placementEventStore)
+	eventStore, ok := unwrapProductionStore(store).(placementEventStore)
 	if !ok {
 		return nil
 	}
@@ -424,8 +427,13 @@ func evictionPreservesDurability(
 }
 
 //nolint:gocognit,gocyclo // Existing domain flow is an explicit complexity exception; new code remains gated.
-func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerOptions) (PlacementSchedulerResult, error) {
-	result := PlacementSchedulerResult{SchemaVersion: IntrospectSchemaVersion}
+func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerOptions) (result PlacementSchedulerResult, resultErr error) {
+	ctx, action, owned := monitor.DefaultProductionAccounting().StartOperationIfAbsent(ctx, "placement", "planning")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
+	store = withProductionStore(store)
+	result = PlacementSchedulerResult{SchemaVersion: IntrospectSchemaVersion}
 	if options.Now.IsZero() {
 		options.Now = time.Now()
 	}

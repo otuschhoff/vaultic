@@ -21,6 +21,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/nfs"
 	"github.com/otuschhoff/vaultic/internal/snapshotfs"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 )
@@ -195,7 +196,9 @@ func nfsServerConfig(options serveNFSOptions) (nfs.Config, error) {
 	return config, nil
 }
 
-func runServeNFS(ctx context.Context, options serveNFSOptions, globalOptions global.Options, args []string, term ui.Terminal) error {
+func runServeNFS(ctx context.Context, options serveNFSOptions, globalOptions global.Options, args []string, term ui.Terminal) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "restore", "read", "")
+	defer func() { action.Done(classifyCommandOutcome(resultErr)) }()
 	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
 	filesystemConfig, err := nfsSnapshotConfig(options)
 	if err != nil {

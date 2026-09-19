@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -85,6 +86,34 @@ func TestPlacementPlanQueuesUnsatisfiedOffsiteDeadline(t *testing.T) {
 	if result.RequestsWritten != 0 || store.batchWrites != writes {
 		t.Fatalf("unchanged plan rewrote queue: result=%#v writes=%d want=%d", result, store.batchWrites, writes)
 	}
+}
+
+func TestPlacementPlanAttributesDatabaseDependencies(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	before, _, _, _ := monitor.DefaultProductionAccounting().Snapshot(monitor.MaxMonitorMetrics)
+	if _, err := PlanPlacement(context.Background(), store, PlacementSchedulerOptions{Now: time.Unix(1_700_000_000, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _, _ := monitor.DefaultProductionAccounting().Snapshot(monitor.MaxMonitorMetrics)
+	if maintenanceMetric(after, "dependency_requests", "placement", "database", "success") <= maintenanceMetric(before, "dependency_requests", "placement", "database", "success") {
+		t.Fatal("placement database calls were not attributed")
+	}
+}
+
+func maintenanceMetric(metrics []monitor.Metric, name, operation, role, outcome string) uint64 {
+	for _, metric := range metrics {
+		if metric.Name != name {
+			continue
+		}
+		labels := map[string]string{}
+		for _, label := range metric.Labels {
+			labels[label.Name] = label.Value
+		}
+		if labels["operation"] == operation && labels["role"] == role && labels["outcome"] == outcome {
+			return metric.Value
+		}
+	}
+	return 0
 }
 
 func TestPlacementPlanSkipsReadOnlyLegacyBackend(t *testing.T) {

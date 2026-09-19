@@ -9,6 +9,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -163,7 +164,12 @@ func expectedBackendPackMutations(placements map[vaultic.ID]placementSet) ([]dae
 	return mutations, nil
 }
 
-func RebuildBackendPackIndex(ctx context.Context, store Store, dryRun bool) (uint64, error) {
+func RebuildBackendPackIndex(ctx context.Context, store Store, dryRun bool) (changes uint64, resultErr error) {
+	ctx, action, owned := monitor.DefaultProductionAccounting().StartOperationIfAbsent(ctx, "placement", "reconcile")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
+	store = withProductionStore(store)
 	placements, _, err := loadPlacements(ctx, store)
 	if err != nil {
 		return 0, err
@@ -185,7 +191,6 @@ func RebuildBackendPackIndex(ctx context.Context, store Store, dryRun bool) (uin
 	}); err != nil {
 		return 0, err
 	}
-	var changes uint64
 	for _, mutation := range expected {
 		value, found, getErr := store.Get(ctx, mutation.Key)
 		if getErr != nil {
@@ -202,7 +207,12 @@ func RebuildBackendPackIndex(ctx context.Context, store Store, dryRun bool) (uin
 	return changes, store.WriteMutableBatch(ctx, expected, deletes, false)
 }
 
-func RebuildDerivedTierSummary(ctx context.Context, store Store, model PlacementModel, dryRun bool) (uint64, error) {
+func RebuildDerivedTierSummary(ctx context.Context, store Store, model PlacementModel, dryRun bool) (changes uint64, resultErr error) {
+	ctx, action, owned := monitor.DefaultProductionAccounting().StartOperationIfAbsent(ctx, "placement", "reconcile")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
+	store = withProductionStore(store)
 	packs, err := loadPacks(ctx, store)
 	if err != nil {
 		return 0, err
@@ -237,7 +247,12 @@ func RebuildDerivedTierSummary(ctx context.Context, store Store, model Placement
 	return uint64(len(puts)), store.WriteMutableBatch(ctx, puts, nil, false)
 }
 
-func RebuildPlacementRecords(ctx context.Context, store Store, model PlacementModel, dryRun bool) (uint64, error) {
+func RebuildPlacementRecords(ctx context.Context, store Store, model PlacementModel, dryRun bool) (changes uint64, resultErr error) {
+	ctx, action, owned := monitor.DefaultProductionAccounting().StartOperationIfAbsent(ctx, "placement", "reconcile")
+	if owned {
+		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
+	}
+	store = withProductionStore(store)
 	packs, err := loadPacks(ctx, store)
 	if err != nil {
 		return 0, err

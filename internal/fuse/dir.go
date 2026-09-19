@@ -13,6 +13,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/snapshotfs"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 // Statically ensure that *dir implement those interface
@@ -56,6 +57,7 @@ func unwrapCtxCanceled(err error) error {
 
 func newDirFromSnapshot(ctx context.Context, root *Root, forget forgetFn, parentInode uint64, snapshot *data.Snapshot) (*dir, error) {
 	debug.Log("new dir for snapshot %v (%v)", snapshot.ID(), snapshot.Tree)
+	ctx = telemetry.InheritOperation(ctx, root.ctx)
 	owner := snapshotfs.OwnerPreserved
 	if root.cfg.OwnerIsRoot {
 		owner = snapshotfs.OwnerRoot

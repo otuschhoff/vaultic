@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/otuschhoff/vaultic/internal/archiver"
 )
 
 // Config selects optional telemetry publishers.
@@ -27,15 +25,19 @@ type Config struct {
 
 // Backup contains the stable backup result fields emitted by all publishers.
 type Backup struct {
-	Repository string
-	SnapshotID string
-	Label      string
-	Summary    *archiver.Summary
+	Repository     string
+	SnapshotID     string
+	Label          string
+	BackupStart    time.Time
+	BackupEnd      time.Time
+	FilesProcessed uint64
+	ProcessedBytes uint64
+	DataAddedBytes uint64
 }
 
 // Publish sends a successful backup summary to every configured publisher.
 func Publish(ctx context.Context, cfg Config, backup Backup) error {
-	if backup.Summary == nil {
+	if backup.BackupStart.IsZero() || backup.BackupEnd.IsZero() {
 		return fmt.Errorf("backup summary is missing")
 	}
 	if cfg.PrometheusURL != "" {
@@ -110,8 +112,7 @@ func send(req *http.Request, target string) error {
 }
 
 func prometheusText(backup Backup) string {
-	s := backup.Summary
-	duration := s.BackupEnd.Sub(s.BackupStart).Seconds()
+	duration := backup.BackupEnd.Sub(backup.BackupStart).Seconds()
 	return fmt.Sprintf(
 		("vaultic_backup_success 1\nvaultic_backup_duration_seconds " +
 			"%s\nvaultic_backup_files_processed %d\nvaultic_backup_bytes_processed " +
@@ -123,9 +124,9 @@ func prometheusText(backup Backup) string {
 			-1,
 			64,
 		),
-		s.Files.New+s.Files.Changed+s.Files.Unchanged,
-		s.ProcessedBytes,
-		s.DataSizeInRepo,
+		backup.FilesProcessed,
+		backup.ProcessedBytes,
+		backup.DataAddedBytes,
 		backup.SnapshotID,
 		backup.Label,
 		backup.Repository,
@@ -133,7 +134,6 @@ func prometheusText(backup Backup) string {
 }
 
 func influxLine(backup Backup) string {
-	s := backup.Summary
 	tags := "repository=" + escapeTag(
 		backup.Repository,
 	) + ",snapshot=" + escapeTag(
@@ -143,12 +143,12 @@ func influxLine(backup Backup) string {
 	)
 	fields := fmt.Sprintf(
 		"success=1i,files_processed=%di,bytes_processed=%di,data_added=%di,duration_seconds=%s",
-		s.Files.New+s.Files.Changed+s.Files.Unchanged,
-		s.ProcessedBytes,
-		s.DataSizeInRepo,
-		strconv.FormatFloat(s.BackupEnd.Sub(s.BackupStart).Seconds(), 'f', -1, 64),
+		backup.FilesProcessed,
+		backup.ProcessedBytes,
+		backup.DataAddedBytes,
+		strconv.FormatFloat(backup.BackupEnd.Sub(backup.BackupStart).Seconds(), 'f', -1, 64),
 	)
-	return "vaultic_backup," + tags + " " + fields + " " + strconv.FormatInt(s.BackupEnd.UnixNano(), 10) + "\n"
+	return "vaultic_backup," + tags + " " + fields + " " + strconv.FormatInt(backup.BackupEnd.UnixNano(), 10) + "\n"
 }
 
 func escapeTag(value string) string {

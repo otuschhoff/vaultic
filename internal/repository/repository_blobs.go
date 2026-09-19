@@ -495,6 +495,8 @@ func (r *internalRepository) SaveUnpacked(
 }
 
 func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf []byte) (id vaultic.ID, err error) {
+	done := r.accounting.StartBlocking(ctx, "upload", "backend_io")
+	defer done.Done()
 	p := buf
 	if t != vaultic.ConfigFile {
 		p, err = r.compressUnpacked(p)
@@ -535,7 +537,13 @@ func (r *Repository) saveUnpacked(ctx context.Context, t vaultic.FileType, buf [
 		}
 	}
 
+	dependency := r.accounting.StartDependency(ctx, "repository")
+	dependency.AddBytes(uint64(len(ciphertext)))
 	err = r.be.Save(ctx, h, backend.NewByteReader(ciphertext, r.be.Hasher()))
+	dependency.Finish(err)
+	if err == nil {
+		r.accounting.AddProcessed(ctx, "repository", uint64(len(ciphertext)))
+	}
 	//nolint:nestif // Existing domain flow is an explicit complexity exception; new code remains gated.
 	if err != nil {
 		if t == vaultic.SnapshotFile {
@@ -585,7 +593,11 @@ func (r *internalRepository) RemoveUnpacked(ctx context.Context, t vaultic.FileT
 }
 
 func (r *Repository) removeUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) error {
+	done := r.accounting.StartBlocking(ctx, "delete", "backend_io")
+	defer done.Done()
+	dependency := r.accounting.StartDependency(ctx, "repository")
 	removeErr := r.be.Remove(ctx, backend.Handle{Type: backend.FileType(t), Name: id.String()})
+	dependency.Finish(removeErr)
 	if t == vaultic.SnapshotFile {
 		if engine, ok := r.Engine().(*enginepkg.DaemonEngine); ok {
 			if removeErr != nil && !r.be.IsNotExist(removeErr) {

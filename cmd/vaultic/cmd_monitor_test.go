@@ -60,6 +60,40 @@ func TestMonitorExportBounds(t *testing.T) {
 	}
 }
 
+func TestMonitorExportHealthReservesBoundedMetricCapacity(t *testing.T) {
+	accounting := telemetry.NewProductionAccounting(true)
+	operations := []string{"backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery"}
+	roles := []string{"repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker"}
+	for _, operation := range operations {
+		ctx, action := accounting.StartOperation(context.Background(), operation, "planning", "")
+		for _, role := range roles {
+			dependency := accounting.StartDependency(ctx, role)
+			dependency.Finish(nil)
+		}
+		action.Done(telemetry.OutcomeSuccess)
+	}
+	metrics, operationsActive, overflow, accountingDropped := accounting.Snapshot(telemetry.MaxMonitorMetrics)
+	if len(metrics) != telemetry.MaxMonitorMetrics || accountingDropped == 0 {
+		t.Fatalf("saturated accounting metrics = %d, dropped = %d", len(metrics), accountingDropped)
+	}
+	snapshot := telemetry.NewMonitorSnapshot(time.Now(), telemetry.ComponentSnapshot{
+		Component: "vaultic", ProcessStartID: "test", CapturedUnixMS: time.Now().UnixMilli(),
+		Availability: telemetry.AvailabilityExact, Metrics: metrics, Operations: operationsActive,
+		OperationOverflow: overflow, CardinalityDropped: accountingDropped,
+	})
+	addMonitorExportHealthValues(&snapshot, 3, 4)
+	component := snapshot.Components[0]
+	if len(component.Metrics) != telemetry.MaxMonitorMetrics || component.CardinalityDropped != accountingDropped+2 {
+		t.Fatalf("metric capacity = %d, dropped = %d", len(component.Metrics), component.CardinalityDropped)
+	}
+	if component.Metrics[len(component.Metrics)-2].Name != "monitor_export_failures" || component.Metrics[len(component.Metrics)-1].Name != "monitor_export_dropped" {
+		t.Fatalf("health metric tail = %#v", component.Metrics[len(component.Metrics)-2:])
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatalf("saturated export snapshot: %v", err)
+	}
+}
+
 func TestMonitorCommandsExposeDocumentedFilters(t *testing.T) {
 	command := newMonitorCommand(&global.Options{})
 	for _, test := range []struct {
@@ -198,10 +232,13 @@ func TestMonitorLinesRenderUnavailableStorageFields(t *testing.T) {
 
 func TestPlacementStorageSnapshotsAreSorted(t *testing.T) {
 	storage := placementStorageSnapshots(map[string]maintenance.BackendPlacementCount{
-		"z-backend": {Objects: 1}, "a-backend": {Objects: 2},
-	}, time.Unix(1, 0))
+		"z-backend": {Objects: 1}, "a-backend": {Objects: 2, Bytes: 17},
+	})
 	if len(storage) != 2 || storage[0].BackendID != "a-backend" || storage[1].BackendID != "z-backend" {
 		t.Fatalf("storage = %+v", storage)
+	}
+	if storage[0].PhysicalBytes != 17 || storage[0].PhysicalAvailability != telemetry.AvailabilityEstimated || storage[0].PayloadAvailability != telemetry.AvailabilityUnavailable || storage[0].ReconciliationAvailability != telemetry.AvailabilityUnavailable || storage[0].PlacementState != "unknown" {
+		t.Fatalf("placement metadata semantics = %+v", storage[0])
 	}
 }
 

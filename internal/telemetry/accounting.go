@@ -130,6 +130,11 @@ func (guard *WaitGuard) Succeeded() { guard.setOutcome(OutcomeSuccess) }
 func (guard *WaitGuard) Failed()    { guard.setOutcome(OutcomeFailure) }
 func (guard *WaitGuard) TimedOut()  { guard.setOutcome(OutcomeTimeout) }
 
+func (guard *WaitGuard) Finish(err error) {
+	guard.setOutcome(ClassifyOutcome(err))
+	guard.Done()
+}
+
 func (guard *WaitGuard) setOutcome(outcome Outcome) {
 	if guard != nil && guard.metric != nil && !guard.settled.Load() {
 		guard.outcome.Store(uint32(outcomeIndex(outcome)))
@@ -217,6 +222,10 @@ func (metric *WaitMetric) Dropped() uint64 {
 		return 0
 	}
 	return metric.dropped.Load()
+}
+
+func (metric *WaitMetric) touched() bool {
+	return metric != nil && metric.enabled && metric.attempts.Load() != 0
 }
 
 func outcomeIndex(outcome Outcome) int {

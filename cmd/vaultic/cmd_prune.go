@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -267,7 +268,9 @@ func parseMaxRepack(s string) (bytes uint64, percent float64, err error) {
 	return uint64(size), 0, nil
 }
 
-func runPrune(ctx context.Context, options pruneOptions, globalOptions global.Options, term ui.Terminal) error {
+func runPrune(ctx context.Context, options pruneOptions, globalOptions global.Options, term ui.Terminal) (resultErr error) {
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "prune", "planning", "")
+	defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
 	err := verifyPruneOptions(&options)
 	if err != nil {
 		return err

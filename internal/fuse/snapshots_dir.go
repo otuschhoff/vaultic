@@ -9,6 +9,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 
 	"github.com/anacrolix/fuse"
 	"github.com/anacrolix/fuse/fs"
@@ -59,6 +60,7 @@ func (d *SnapshotsDir) Attr(_ context.Context, attr *fuse.Attr) error {
 // ReadDirAll returns all entries of the SnapshotsDir.
 func (d *SnapshotsDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	debug.Log("ReadDirAll()")
+	ctx = telemetry.InheritOperation(ctx, d.root.ctx)
 
 	// update snapshots
 	meta, _, err := d.dirStruct.UpdatePrefix(ctx, d.prefix)
@@ -103,6 +105,7 @@ func (d *SnapshotsDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 // Lookup returns a specific entry from the SnapshotsDir.
 func (d *SnapshotsDir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	debug.Log("Lookup(%s)", name)
+	ctx = telemetry.InheritOperation(ctx, d.root.ctx)
 
 	meta, gen, err := d.dirStruct.UpdatePrefix(ctx, d.prefix)
 	if err != nil {

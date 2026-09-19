@@ -13,6 +13,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/restic/chunker"
 )
@@ -28,7 +29,11 @@ func (r *Repository) ApplyRepoSettings() {
 
 // UpdateConfig applies fn to the repository config, validates the result and
 // writes it back. The write is rejected on an append-only repository.
-func (r *Repository) UpdateConfig(ctx context.Context, fn func(*vaultic.Config) error) error {
+func (r *Repository) UpdateConfig(ctx context.Context, fn func(*vaultic.Config) error) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "maintenance", "planning")
+	if owned {
+		defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
+	}
 	if r.cfg.AppendOnly() {
 		return errors.Fatal("cannot modify config: repository is in append-only mode")
 	}
@@ -60,7 +65,11 @@ func (r *Repository) UpdateConfigAtomically(ctx context.Context, fn func(*vaulti
 
 // Init creates a new master key with the supplied password, initializes and
 // saves the repository config.
-func (r *Repository) Init(ctx context.Context, version uint, password string, chunkerPolynomial *chunker.Pol) error {
+func (r *Repository) Init(ctx context.Context, version uint, password string, chunkerPolynomial *chunker.Pol) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "maintenance", "planning")
+	if owned {
+		defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
+	}
 	if version > vaultic.MaxRepoVersion {
 		return fmt.Errorf("repository version %v too high", version)
 	}
@@ -69,7 +78,13 @@ func (r *Repository) Init(ctx context.Context, version uint, password string, ch
 		return fmt.Errorf("repository version %v too low", version)
 	}
 
+	dependency := r.accounting.StartDependency(ctx, "repository")
 	_, err := r.be.Stat(ctx, backend.Handle{Type: backend.ConfigFile})
+	if err == nil || r.be.IsNotExist(err) {
+		dependency.Finish(nil)
+	} else {
+		dependency.Finish(err)
+	}
 	if err != nil && !r.be.IsNotExist(err) {
 		return err
 	}
@@ -106,7 +121,11 @@ func (r *Repository) Init(ctx context.Context, version uint, password string, ch
 // it does not generate a new repository ID; this is used to create the hot
 // part of a hot/cold repository, which shares the cold part's identity (and
 // chunker parameters) so that keys/snapshots/indexes are interchangeable.
-func (r *Repository) InitWithConfig(ctx context.Context, password string, cfg vaultic.Config) error {
+func (r *Repository) InitWithConfig(ctx context.Context, password string, cfg vaultic.Config) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "maintenance", "planning")
+	if owned {
+		defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
+	}
 	if cfg.Version > vaultic.MaxRepoVersion || cfg.Version < vaultic.MinRepoVersion {
 		return fmt.Errorf("repository version %v out of range", cfg.Version)
 	}
@@ -117,7 +136,11 @@ func (r *Repository) InitWithConfig(ctx context.Context, password string, cfg va
 // existing master key (instead of generating a new one). This is used for the
 // hot part of a hot/cold repository so that data written by either part can be
 // read with the same master key.
-func (r *Repository) InitWithConfigAndKey(ctx context.Context, password string, cfg vaultic.Config, masterKey *crypto.Key) error {
+func (r *Repository) InitWithConfigAndKey(ctx context.Context, password string, cfg vaultic.Config, masterKey *crypto.Key) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "maintenance", "planning")
+	if owned {
+		defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
+	}
 	if cfg.Version > vaultic.MaxRepoVersion || cfg.Version < vaultic.MinRepoVersion {
 		return fmt.Errorf("repository version %v out of range", cfg.Version)
 	}
@@ -161,7 +184,8 @@ func (r *Repository) KeyID() vaultic.ID {
 
 // List runs fn for all files of type t in the repo.
 func (r *Repository) List(ctx context.Context, t vaultic.FileType, fn func(vaultic.ID, int64) error) error {
-	return r.be.List(ctx, backend.FileType(t), func(fi backend.FileInfo) error {
+	dependency := r.accounting.StartDependency(ctx, "repository")
+	err := r.be.List(ctx, backend.FileType(t), func(fi backend.FileInfo) error {
 		id, err := vaultic.ParseID(fi.Name)
 		if err != nil {
 			debug.Log("unable to parse %v as an ID", fi.Name)
@@ -169,6 +193,8 @@ func (r *Repository) List(ctx context.Context, t vaultic.FileType, fn func(vault
 		}
 		return fn(id, fi.Size)
 	})
+	dependency.Finish(err)
+	return err
 }
 
 // listPack returns blob entries from the pack file header including offsets.
@@ -203,8 +229,17 @@ func (r *Repository) ListPackHandles(ctx context.Context, id vaultic.ID, size in
 
 // Delete calls backend.Delete() if implemented, and returns an error
 // otherwise.
-func (r *Repository) Delete(ctx context.Context) error {
-	return r.be.Delete(ctx)
+func (r *Repository) Delete(ctx context.Context) (resultErr error) {
+	ctx, action, owned := r.accounting.StartOperationIfAbsent(ctx, "maintenance", "delete")
+	if owned {
+		defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
+	}
+	done := r.accounting.StartBlocking(ctx, "delete", "backend_io")
+	defer done.Done()
+	dependency := r.accounting.StartDependency(ctx, "repository")
+	resultErr = r.be.Delete(ctx)
+	dependency.Finish(resultErr)
+	return resultErr
 }
 
 // Close closes the repository by closing the backend.

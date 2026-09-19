@@ -16,6 +16,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/env"
 	"github.com/otuschhoff/vaultic/internal/options"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
@@ -637,7 +638,13 @@ func readPassword(ctx context.Context, globalOptions Options, prompt string) (st
 		return globalOptions.Password, nil
 	}
 
+	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "key_management", "wait", "")
+	done := telemetry.DefaultProductionAccounting().StartBlocking(ctx, "wait", "human_confirmation")
+	wait := telemetry.DefaultProductionAccounting().StartWait(ctx, "coordination", "none")
 	password, err := globalOptions.Term.ReadPassword(ctx, prompt)
+	done.Done()
+	wait.Finish(err)
+	action.Done(telemetry.ClassifyOutcome(err))
 	if err != nil {
 		return "", fmt.Errorf("unable to read password: %w", err)
 	}
