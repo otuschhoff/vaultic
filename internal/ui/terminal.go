@@ -16,6 +16,8 @@ type Terminal interface {
 	SetStatus(lines []string)
 	// CanUpdateStatus returns true if the terminal can update the status lines.
 	CanUpdateStatus() bool
+	// Width returns the current terminal width, or zero when unavailable.
+	Width() int
 
 	// InputRaw returns the input reader.
 	InputRaw() io.ReadCloser

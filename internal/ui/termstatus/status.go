@@ -169,6 +169,13 @@ func (t *terminal) CanUpdateStatus() bool {
 	return t.canUpdateStatus
 }
 
+func (t *terminal) Width() int {
+	if !t.outputIsTerminal {
+		return 0
+	}
+	return tty.Width(t.fd)
+}
+
 // OutputWriter returns a output writer that is safe for concurrent use with
 // other output methods. Output is only shown after a line break.
 func (t *terminal) OutputWriter() io.Writer {

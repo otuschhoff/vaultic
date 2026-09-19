@@ -22,6 +22,16 @@ import (
 
 var monitorProcessStarted = time.Now()
 
+const (
+	monitorViewOverview   = "overview"
+	monitorViewStatus     = "status"
+	monitorViewStorage    = "storage"
+	monitorViewOperations = "operations"
+	monitorViewWAL        = "wal"
+	monitorViewCaches     = "caches"
+	monitorViewLatency    = "latency"
+)
+
 type monitorOptions struct {
 	JSON      bool
 	Component string
@@ -81,7 +91,7 @@ func newMonitorSnapshotCommand(view, description string, globalOptions *global.O
 					return err
 				}
 			}
-			snapshot, err := collectMonitorSnapshotWithTimeout(command.Context(), globalOptions, options.Reconcile, options.Timeout)
+			snapshot, err := collectMonitorSnapshotForCommand(command.Context(), globalOptions, view, options)
 			if err != nil {
 				return err
 			}
@@ -118,7 +128,7 @@ func newMonitorSnapshotCommand(view, description string, globalOptions *global.O
 }
 
 func newMonitorWatchCommand(globalOptions *global.Options) *cobra.Command {
-	options := monitorOptions{Interval: time.Second, View: "status", Timeout: 10 * time.Second}
+	options := monitorOptions{Interval: time.Second, View: "overview", Timeout: 10 * time.Second}
 	command := &cobra.Command{
 		Use:               "watch",
 		Short:             "Watch bounded operational monitoring snapshots",
@@ -133,43 +143,12 @@ func newMonitorWatchCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	command.Flags().DurationVar(&options.Interval, "interval", time.Second, "snapshot refresh interval")
 	command.Flags().DurationVar(&options.Timeout, "collector-timeout", 10*time.Second, "maximum time for one snapshot collection")
-	command.Flags().StringVar(&options.View, "view", "status", "view: overview, storage, operations, wal, caches, or latency")
+	command.Flags().StringVar(&options.View, "view", monitorViewOverview, "view: overview, storage, operations, wal, caches, or latency")
 	return command
 }
 
 func watchMonitor(ctx context.Context, globalOptions *global.Options, options monitorOptions) error {
-	if options.Interval < 100*time.Millisecond || options.Interval > time.Minute {
-		return fmt.Errorf("monitor interval must be between 100ms and 1m")
-	}
-	view := options.View
-	if view == "overview" {
-		view = "status"
-	}
-	switch view {
-	case "status", "storage", "operations", "wal", "caches", "latency":
-	default:
-		return fmt.Errorf("unknown monitor view %q", options.View)
-	}
-	ticker := time.NewTicker(options.Interval)
-	defer ticker.Stop()
-	defer globalOptions.Term.SetStatus(nil)
-	var previous *telemetry.MonitorSnapshot
-	for {
-		snapshot, err := collectMonitorSnapshotWithTimeout(ctx, globalOptions, false, options.Timeout)
-		if err != nil {
-			return err
-		}
-		derived := monitorDerivedLines(previous, snapshot, view)
-		unfiltered := snapshot
-		previous = &unfiltered
-		filterMonitorSnapshot(&snapshot, view, options)
-		globalOptions.Term.SetStatus(append(monitorLines(snapshot, view), derived...))
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
+	return runMonitorWatchLoop(ctx, globalOptions, options, monitorWatchDeps{})
 }
 
 func monitorDerivedLines(previous *telemetry.MonitorSnapshot, current telemetry.MonitorSnapshot, view string) []string {
@@ -667,7 +646,8 @@ func monitorLines(snapshot telemetry.MonitorSnapshot, view string) []string {
 			for _, cache := range component.Caches {
 				availability := monitorInheritedAvailability(component.Availability, cache.Availability)
 				trafficAvailability := monitorInheritedAvailability(component.Availability, cache.TrafficAvailability)
-				lines = append(lines, fmt.Sprintf("  cache %-20s availability=%s used=%s reserved=%s available=%s hits=%s misses=%s", cache.ID, availability, monitorAvailableUint(cache.UsedBytes, availability), monitorAvailableUint(cache.ReservedBytes, availability), monitorAvailableUint(cache.AvailableBytes, availability), monitorAvailableUint(cache.Hits, trafficAvailability), monitorAvailableUint(cache.Misses, trafficAvailability)))
+				hitRatio := monitorAvailableRatio(cache.Hits, cache.Hits+cache.Misses, monitorCacheHitRatioAvailability(component.Availability, cache))
+				lines = append(lines, fmt.Sprintf("  cache %-20s availability=%s used=%s reserved=%s available=%s hits=%s misses=%s hit_ratio=%s", cache.ID, availability, monitorAvailableUint(cache.UsedBytes, availability), monitorAvailableUint(cache.ReservedBytes, availability), monitorAvailableUint(cache.AvailableBytes, availability), monitorAvailableUint(cache.Hits, trafficAvailability), monitorAvailableUint(cache.Misses, trafficAvailability), hitRatio))
 			}
 		}
 		if (view == "wal" || view == "status") && component.WAL != nil {

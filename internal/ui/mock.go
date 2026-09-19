@@ -8,8 +8,9 @@ import (
 var _ Terminal = &MockTerminal{}
 
 type MockTerminal struct {
-	Output []string
-	Errors []string
+	Output        []string
+	Errors        []string
+	TerminalWidth int
 }
 
 func (m *MockTerminal) Print(line string) {
@@ -26,6 +27,10 @@ func (m *MockTerminal) SetStatus(lines []string) {
 
 func (m *MockTerminal) CanUpdateStatus() bool {
 	return true
+}
+
+func (m *MockTerminal) Width() int {
+	return m.TerminalWidth
 }
 
 func (m *MockTerminal) InputRaw() io.ReadCloser {
