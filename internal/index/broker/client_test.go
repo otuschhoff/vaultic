@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -189,9 +191,14 @@ func TestStatusRequiresOrderedProcessTimestamps(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "valid", response: `{"result":"status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1000,"captured_unix_ms":1001}`},
+		{name: "additive field", response: `{"result":"status","protocol":"vaultic-key-broker.v1","future_field":{"nested":true}}`},
 		{name: "legacy missing", response: `{"result":"status","protocol":"vaultic-key-broker.v1"}`},
+		{name: "unsupported protocol", response: `{"result":"status","protocol":"vaultic-key-broker.v2"}`, wantErr: true},
 		{name: "partial", response: `{"result":"status","protocol":"vaultic-key-broker.v1","captured_unix_ms":1000}`, wantErr: true},
 		{name: "captured before start", response: `{"result":"status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1001,"captured_unix_ms":1000}`, wantErr: true},
+		{name: "negative sessions", response: `{"result":"status","protocol":"vaultic-key-broker.v1","active_sessions":-1}`, wantErr: true},
+		{name: "negative leases", response: `{"result":"status","protocol":"vaultic-key-broker.v1","active_leases":-1}`, wantErr: true},
+		{name: "negative custodians", response: `{"result":"status","protocol":"vaultic-key-broker.v1","minimum_custodians":-1}`, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -215,6 +222,82 @@ func TestStatusRequiresOrderedProcessTimestamps(t *testing.T) {
 				t.Fatalf("legacy timestamps = %d/%d, want zero fallback", status.ProcessStartedUnixMS, status.CapturedUnixMS)
 			}
 		})
+	}
+}
+
+func TestMonitorStatusRequiresBoundedIdentityAndCounts(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "valid", response: `{"result":"monitor_status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1000,"process_instance_id":"instance-a","captured_unix_ms":1001,"active_sessions":2,"active_leases":3}`},
+		{name: "additive", response: `{"result":"monitor_status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1000,"process_instance_id":"instance-a","captured_unix_ms":1001,"future":true}`},
+		{name: "missing instance", response: `{"result":"monitor_status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1000,"captured_unix_ms":1001}`, wantErr: true},
+		{name: "negative count", response: `{"result":"monitor_status","protocol":"vaultic-key-broker.v1","process_started_unix_ms":1000,"process_instance_id":"instance-a","captured_unix_ms":1001,"active_leases":-1}`, wantErr: true},
+		{name: "unsupported protocol", response: `{"result":"monitor_status","protocol":"vaultic-key-broker.v2","process_started_unix_ms":1000,"process_instance_id":"instance-a","captured_unix_ms":1001}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clientConnection, serverConnection := net.Pipe()
+			defer clientConnection.Close()
+			defer serverConnection.Close()
+			client := &Client{connection: clientConnection, reader: bufio.NewReader(clientConnection), protocol: protocolVersion}
+			go func() {
+				_, _ = bufio.NewReader(serverConnection).ReadBytes('\n')
+				_, _ = serverConnection.Write([]byte(test.response + "\n"))
+			}()
+			status, err := client.MonitorStatus(t.Context())
+			if (err != nil) != test.wantErr {
+				t.Fatalf("MonitorStatus() error = %v, wantErr %t", err, test.wantErr)
+			}
+			if !test.wantErr && status.ProcessInstanceID != "instance-a" {
+				t.Fatalf("process instance = %q", status.ProcessInstanceID)
+			}
+		})
+	}
+}
+
+func TestReadBrokerResponseEnforcesBoundWhileReading(t *testing.T) {
+	valid := append(bytes.Repeat([]byte{'x'}, maxResponse-1), '\n')
+	line, err := readBrokerResponse(bufio.NewReaderSize(bytes.NewReader(valid), 4096))
+	if err != nil || len(line) != maxResponse {
+		t.Fatalf("exact-limit response: len=%d err=%v", len(line), err)
+	}
+
+	oversized := append(bytes.Repeat([]byte{'x'}, maxResponse), '\n')
+	reader := bufio.NewReaderSize(bytes.NewReader(oversized), 4096)
+	if _, err := readBrokerResponse(reader); !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("oversized response error = %v, want %v", err, errResponseTooLarge)
+	}
+	if reader.Buffered() != 0 {
+		t.Fatalf("oversized response buffered remainder = %d, want early rejection at a fragment boundary", reader.Buffered())
+	}
+}
+
+func TestStatusClosesConnectionAfterOversizedResponse(t *testing.T) {
+	clientConnection, serverConnection := net.Pipe()
+	defer serverConnection.Close()
+	client := &Client{
+		connection: clientConnection,
+		reader:     bufio.NewReaderSize(clientConnection, 4096),
+		protocol:   protocolVersion,
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, _ = bufio.NewReader(serverConnection).ReadBytes('\n')
+		_, err := serverConnection.Write(append(bytes.Repeat([]byte{'x'}, maxResponse), '\n'))
+		writeDone <- err
+	}()
+
+	if _, err := client.Status(t.Context()); !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("Status() error = %v, want %v", err, errResponseTooLarge)
+	}
+	if err := <-writeDone; err == nil {
+		t.Fatal("oversized response writer unexpectedly completed after client closed the stream")
+	}
+	if _, err := client.Status(t.Context()); err == nil {
+		t.Fatal("Status() reused a connection closed after an oversized response")
 	}
 }
 

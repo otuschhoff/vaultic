@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -241,5 +242,36 @@ func TestVaulticDBComponentDisablesAggregateWhenAllTiersDisabled(t *testing.T) {
 	aggregate := component.Caches[0]
 	if aggregate.Enabled || aggregate.EffectiveBytes != 0 || aggregate.AvailableBytes != 0 || aggregate.ControllerState != "not_applicable" || aggregate.UsedBytes != 20 {
 		t.Fatalf("aggregate cache = %+v", aggregate)
+	}
+}
+
+func TestVaulticDBComponentBoundsCacheTierHandoff(t *testing.T) {
+	tiers := make([]daemon.ReadCacheTierStatus, MaxMonitorCaches)
+	for index := range tiers {
+		tiers[index] = daemon.ReadCacheTierStatus{ID: fmt.Sprintf("tier-%02d", index), Enabled: true}
+	}
+	writer := daemon.WriterStatus{ProcessStartedUnixMS: 100, CapturedUnixMS: 200}
+	cache := daemon.ReadCacheStatus{
+		Configured: true, AggregateMaxBytesKnown: true, QuotaCoordinationHealthy: true,
+		Tiers: tiers[:MaxMonitorCaches-1],
+	}
+	component := VaulticDBComponent(writer, cache, daemon.WALInfo{})
+	if len(component.Caches) != MaxMonitorCaches || component.CardinalityDropped != 0 || component.Availability != AvailabilityExact {
+		t.Fatalf("at-limit cache handoff = caches:%d dropped:%d availability:%s", len(component.Caches), component.CardinalityDropped, component.Availability)
+	}
+	if err := ValidateVaulticDBComponent(component); err != nil {
+		t.Fatal(err)
+	}
+
+	cache.Tiers = tiers
+	component = VaulticDBComponent(writer, cache, daemon.WALInfo{})
+	if len(component.Caches) != MaxMonitorCaches || component.CardinalityDropped != 1 || component.Availability != AvailabilityEstimated {
+		t.Fatalf("overflow cache handoff = caches:%d dropped:%d availability:%s", len(component.Caches), component.CardinalityDropped, component.Availability)
+	}
+	if component.Caches[len(component.Caches)-1].ID != "tier-62" {
+		t.Fatalf("last retained cache = %q, want deterministic prefix", component.Caches[len(component.Caches)-1].ID)
+	}
+	if err := ValidateVaulticDBComponent(component); err != nil {
+		t.Fatal(err)
 	}
 }

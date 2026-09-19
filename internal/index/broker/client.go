@@ -34,6 +34,8 @@ const (
 	maxResponse     = 1024 * 1024
 )
 
+var errResponseTooLarge = errors.New("broker response exceeds size limit")
+
 type Client struct {
 	connection          net.Conn
 	reader              *bufio.Reader
@@ -74,6 +76,16 @@ type Status struct {
 	PendingCapsuleGeneration *uint64  `json:"pending_capsule_generation"`
 	PendingCapsuleSHA256     *string  `json:"pending_capsule_sha256"`
 	IdentityRecovery         bool     `json:"identity_recovery"`
+}
+
+type MonitorStatus struct {
+	Protocol             string `json:"protocol"`
+	ProcessStartedUnixMS int64  `json:"process_started_unix_ms"`
+	ProcessInstanceID    string `json:"process_instance_id"`
+	CapturedUnixMS       int64  `json:"captured_unix_ms"`
+	Locked               bool   `json:"locked"`
+	ActiveSessions       int    `json:"active_sessions"`
+	ActiveLeases         int    `json:"active_leases"`
 }
 
 type ReleaseManifest struct {
@@ -261,6 +273,7 @@ type responseEnvelope struct {
 	Protocol                 string          `json:"protocol"`
 	ProcessStartedUnixMS     int64           `json:"process_started_unix_ms"`
 	CapturedUnixMS           int64           `json:"captured_unix_ms"`
+	ProcessInstanceID        string          `json:"process_instance_id"`
 	Challenge                string          `json:"challenge"`
 	Locked                   bool            `json:"locked"`
 	RepositoryID             string          `json:"repository_id"`
@@ -332,6 +345,9 @@ func (client *Client) Status(ctx context.Context) (Status, error) {
 	if (response.ProcessStartedUnixMS == 0) != (response.CapturedUnixMS == 0) || response.ProcessStartedUnixMS < 0 || response.CapturedUnixMS < response.ProcessStartedUnixMS {
 		return Status{}, errors.New("key broker returned invalid status timestamps")
 	}
+	if response.ActiveSessions < 0 || response.ActiveLeases < 0 || response.MinimumCustodians < 0 {
+		return Status{}, errors.New("key broker returned invalid negative status count")
+	}
 	return Status{
 		Protocol:                 response.Protocol,
 		ProcessStartedUnixMS:     response.ProcessStartedUnixMS,
@@ -354,6 +370,27 @@ func (client *Client) Status(ctx context.Context) (Status, error) {
 		PendingCapsuleGeneration: response.PendingCapsuleGeneration,
 		PendingCapsuleSHA256:     response.PendingCapsuleSHA256,
 		IdentityRecovery:         response.IdentityRecovery,
+	}, nil
+}
+
+func (client *Client) MonitorStatus(ctx context.Context) (MonitorStatus, error) {
+	var response responseEnvelope
+	if err := client.call(ctx, map[string]any{"operation": "monitor_status"}, &response); err != nil {
+		return MonitorStatus{}, err
+	}
+	if response.Result != "monitor_status" || response.Protocol != protocolVersion {
+		return MonitorStatus{}, fmt.Errorf("unexpected broker monitoring response or protocol %q", response.Protocol)
+	}
+	if response.ProcessStartedUnixMS <= 0 || response.ProcessInstanceID == "" || response.CapturedUnixMS < response.ProcessStartedUnixMS {
+		return MonitorStatus{}, errors.New("key broker returned invalid monitoring identity")
+	}
+	if response.ActiveSessions < 0 || response.ActiveLeases < 0 {
+		return MonitorStatus{}, errors.New("key broker returned invalid negative monitoring count")
+	}
+	return MonitorStatus{
+		Protocol: response.Protocol, ProcessStartedUnixMS: response.ProcessStartedUnixMS,
+		ProcessInstanceID: response.ProcessInstanceID, CapturedUnixMS: response.CapturedUnixMS,
+		Locked: response.Locked, ActiveSessions: response.ActiveSessions, ActiveLeases: response.ActiveLeases,
 	}, nil
 }
 
@@ -725,17 +762,20 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 			client.responseWaitStarted()
 		}
 	}
-	line, err := client.reader.ReadBytes('\n')
+	line, err := readBrokerResponse(client.reader)
 	if err != nil {
+		if errors.Is(err, errResponseTooLarge) {
+			if closeErr := client.connection.Close(); closeErr != nil {
+				return fmt.Errorf("%w (close broker connection: %v)", err, closeErr)
+			}
+			return err
+		}
 		if ctx.Err() != nil {
 			accountingErr = ctx.Err()
 		}
 		return fmt.Errorf("read broker response: %w", err)
 	}
 	defer clear(line)
-	if len(line) > maxResponse {
-		return errors.New("broker response exceeds size limit")
-	}
 	if err := json.Unmarshal(line, response); err != nil {
 		return fmt.Errorf("decode broker response: %w", err)
 	}
@@ -745,13 +785,36 @@ func (client *Client) call(ctx context.Context, request any, response *responseE
 	return nil
 }
 
+func readBrokerResponse(reader *bufio.Reader) ([]byte, error) {
+	line := make([]byte, 0, min(reader.Size(), maxResponse))
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > maxResponse-len(line) {
+			clear(line)
+			return nil, errResponseTooLarge
+		}
+		line = append(line, fragment...)
+		if err == nil {
+			return line, nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			clear(line)
+			return nil, err
+		}
+		if len(line) == maxResponse {
+			clear(line)
+			return nil, errResponseTooLarge
+		}
+	}
+}
+
 func brokerRequestIsObserved(request any) bool {
 	fields, ok := request.(map[string]any)
 	if !ok {
 		return false
 	}
 	operation, _ := fields["operation"].(string)
-	return operation != "" && operation != "negotiate" && operation != "status"
+	return operation != "" && operation != "negotiate" && operation != "status" && operation != "monitor_status"
 }
 
 func LoadCapsule(path string) (*capsule, error) {

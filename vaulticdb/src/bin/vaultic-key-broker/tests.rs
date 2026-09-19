@@ -83,6 +83,21 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn broker_status_socket_is_owner_only() {
+        let root = PathBuf::from("/tmp").join(format!(
+            "vaultic-broker-mode-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let socket = root.join("broker.sock");
+        let listener = bind_broker_socket(&socket).await.unwrap();
+        assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o600);
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn installation_path_rejects_mutable_ancestors_and_accepts_system_binary() {
@@ -288,6 +303,7 @@ mod tests {
             "unix:/test/broker.sock".to_owned(),
             notification.clone(),
             1_000,
+            "instance-a".to_owned(),
         ));
         let task_b = tokio::spawn(serve_connection(
             server_b,
@@ -295,6 +311,7 @@ mod tests {
             "unix:/test/broker.sock".to_owned(),
             notification,
             1_000,
+            "instance-a".to_owned(),
         ));
 
         for stream in [&mut client_a, &mut client_b] {
@@ -309,6 +326,28 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| !value.is_empty()));
         }
+        let broker_guard = broker.lock().await;
+        let busy = exchange(
+            &mut client_b,
+            serde_json::json!({"operation":"monitor_status"}),
+        )
+        .await;
+        drop(broker_guard);
+        assert_eq!(busy["result"], "error");
+        assert_eq!(busy["code"], "request_rejected");
+
+        let monitoring = exchange(
+            &mut client_b,
+            serde_json::json!({"operation":"monitor_status"}),
+        )
+        .await;
+        assert_eq!(monitoring["result"], "monitor_status");
+        assert_eq!(monitoring["protocol"], PROTOCOL_VERSION);
+        assert_eq!(monitoring["process_started_unix_ms"], 1_000);
+        assert_eq!(monitoring["process_instance_id"], "instance-a");
+        assert!(monitoring.get("repository_id").is_none());
+        assert!(monitoring.get("policy_hash").is_none());
+        assert!(monitoring.get("findings").is_none());
         let status = exchange(&mut client_b, serde_json::json!({"operation":"status"})).await;
         assert_eq!(status["result"], "status");
         assert_eq!(status["repository_id"], "repo-a");
@@ -435,6 +474,7 @@ mod tests {
             "unix:/test/broker.sock",
             &mut protocol,
             1_000,
+            "instance-a",
         )
         .await
         .unwrap();
@@ -459,6 +499,7 @@ mod tests {
             "unix:/test/broker.sock",
             &mut protocol,
             1_000,
+            "instance-a",
         )
         .await
         .unwrap();
@@ -484,6 +525,7 @@ mod tests {
             "unix:/test/broker.sock",
             &mut protocol,
             1_000,
+            "instance-a",
         )
         .await
         .is_err());
@@ -507,6 +549,7 @@ mod tests {
             "unix:/test/broker.sock",
             &mut protocol,
             1_000,
+            "instance-a",
         )
         .await
         .unwrap();

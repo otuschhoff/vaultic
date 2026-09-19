@@ -597,6 +597,12 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 		capabilities.GetMaxConcurrentRequests() != 128 {
 		t.Fatalf("unexpected bounded-work capabilities: %#v", capabilities)
 	}
+	if _, err := client.WriterStatus(context.Background()); err != nil {
+		t.Fatalf("authorized writer status: %v", err)
+	}
+	if _, err := client.ReadCacheStatus(context.Background()); err != nil {
+		t.Fatalf("authorized cache status: %v", err)
+	}
 
 	for tokenName, token := range map[string]string{"missing": "", "wrong": "wrong-secret"} {
 		rpc := vaulticdbv1.NewVaulticDBClient(client.conn)
@@ -604,6 +610,20 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 			rpc = &authenticatedClient{VaulticDBClient: rpc, token: token}
 		}
 		checks := map[string]func() error{
+			"writer-status": func() error {
+				_, err := rpc.WriterStatus(
+					context.Background(),
+					&vaulticdbv1.WriterStatusRequest{RepositoryId: options.RepositoryID, Context: requestContext(context.Background())},
+				)
+				return err
+			},
+			"cache-status": func() error {
+				_, err := rpc.CacheStatus(
+					context.Background(),
+					&vaulticdbv1.ReadCacheStatusRequest{RepositoryId: options.RepositoryID, Context: requestContext(context.Background())},
+				)
+				return err
+			},
 			"health": func() error {
 				_, err := rpc.Health(
 					context.Background(),

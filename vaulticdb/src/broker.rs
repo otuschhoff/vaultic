@@ -148,6 +148,13 @@ pub struct UnlockStatus {
     pub identity_recovery: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorStatus {
+    pub locked: bool,
+    pub active_sessions: usize,
+    pub active_leases: usize,
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct ExpirationSummary {
     pub expired_sessions: usize,
@@ -271,6 +278,14 @@ pub struct KeyBroker {
 }
 
 impl KeyBroker {
+    pub fn monitor_status(&self) -> MonitorStatus {
+        MonitorStatus {
+            locked: self.epoch.is_none(),
+            active_sessions: self.sessions.len(),
+            active_leases: self.leases.len(),
+        }
+    }
+
     pub fn new(
         capsule: RecoveryCapsule,
         identity: SigningKey,

@@ -35,6 +35,7 @@ const (
 	ProtocolVersion    = "vaulticdb.v1"
 	SchemaVersion      = "0"
 	defaultRPCDeadline = 10 * time.Second
+	maxStatusResponse  = 1024 * 1024
 )
 
 var requestSequence atomic.Uint64
@@ -1084,6 +1085,14 @@ func (c *authenticatedClient) CacheStatus(
 	return c.VaulticDBClient.CacheStatus(withAuth(ctx, c.token), in, callOptions...)
 }
 
+func (c *authenticatedClient) WriterStatus(
+	ctx context.Context,
+	in *vaulticdbv1.WriterStatusRequest,
+	callOptions ...grpc.CallOption,
+) (*vaulticdbv1.WriterStatusResponse, error) {
+	return c.VaulticDBClient.WriterStatus(withAuth(ctx, c.token), in, callOptions...)
+}
+
 func (c *authenticatedClient) UpdateCachePolicy(
 	ctx context.Context,
 	in *vaulticdbv1.UpdateReadCachePolicyRequest,
@@ -1357,6 +1366,7 @@ func (c *Client) writerStatus(ctx context.Context) (WriterStatus, error) {
 	response, err := c.rpc.WriterStatus(
 		ctx,
 		&vaulticdbv1.WriterStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+		grpc.MaxCallRecvMsgSize(maxStatusResponse),
 	)
 	if err != nil {
 		return WriterStatus{}, err
@@ -1370,6 +1380,7 @@ func (c *Client) ReadCacheStatus(ctx context.Context) (ReadCacheStatus, error) {
 	response, err := c.rpc.CacheStatus(
 		ctx,
 		&vaulticdbv1.ReadCacheStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)},
+		grpc.MaxCallRecvMsgSize(maxStatusResponse),
 	)
 	if err != nil {
 		return ReadCacheStatus{}, err

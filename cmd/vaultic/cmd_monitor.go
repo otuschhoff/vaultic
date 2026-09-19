@@ -362,22 +362,24 @@ func collectMonitorSnapshotWithTimeout(ctx context.Context, globalOptions *globa
 }
 
 func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, reconcile bool) (telemetry.MonitorSnapshot, error) {
+	now := time.Now()
+	brokerResult := startMonitorComponentCollection(ctx, "key_broker", now, func(collectorCtx context.Context) telemetry.ComponentSnapshot {
+		return collectBrokerMonitorComponent(collectorCtx, globalOptions.KeyBrokerSocket, now)
+	})
 	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, globalOptions.Term)
 	_, repo, unlock, err := openWithReadLock(ctx, *globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
-		now := time.Now()
 		return telemetry.NewMonitorSnapshot(now,
-			unavailableMonitorComponent("vaultic", now),
-			collectBrokerMonitorComponent(ctx, globalOptions.KeyBrokerSocket, now),
+			repositoryMonitorComponent(nil, now),
+			awaitMonitorComponent(ctx, "key_broker", now, brokerResult),
 			unavailableMonitorComponent("vaulticdb", now),
 		), nil
 	}
 	defer unlock()
-	now := time.Now()
 	components := []telemetry.ComponentSnapshot{repositoryMonitorComponent(repo, now)}
-	components = append(components, collectBrokerMonitorComponent(ctx, globalOptions.KeyBrokerSocket, now))
 	daemonEngine, ok := repo.Engine().(*metadataindex.DaemonEngine)
 	if !ok {
+		components = append(components, awaitMonitorComponent(ctx, "key_broker", now, brokerResult))
 		components = append(components, unavailableMonitorComponent("vaulticdb", now))
 		return telemetry.NewMonitorSnapshot(now, components...), nil
 	}
@@ -394,11 +396,13 @@ func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, 
 	}
 	writer, writerErr := daemonEngine.Client().WriterStatus(ctx)
 	if writerErr != nil {
+		components = append(components, awaitMonitorComponent(ctx, "key_broker", now, brokerResult))
 		components = append(components, unavailableMonitorComponent("vaulticdb", now))
 		return telemetry.NewMonitorSnapshot(now, components...), nil
 	}
 	cache, cacheErr := daemonEngine.Client().ReadCacheStatus(ctx)
 	component := telemetry.VaulticDBComponent(writer, cache, daemonEngine.Client().WALInfo())
+	markRemoteMonitorComponentStale(&component, now)
 	if cacheErr != nil {
 		component.Caches = []telemetry.CacheSnapshot{{
 			ID: "slatedb", Availability: telemetry.AvailabilityUnavailable,
@@ -409,8 +413,35 @@ func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, 
 			ReconciliationLagAvailability: telemetry.AvailabilityUnavailable,
 		}}
 	}
+	components = append(components, awaitMonitorComponent(ctx, "key_broker", now, brokerResult))
 	components = append(components, component)
 	return telemetry.NewMonitorSnapshot(now, components...), nil
+}
+
+func startMonitorComponentCollection(
+	ctx context.Context,
+	name string,
+	now time.Time,
+	collect func(context.Context) telemetry.ComponentSnapshot,
+) <-chan telemetry.ComponentSnapshot {
+	result := make(chan telemetry.ComponentSnapshot, 1)
+	go func() {
+		component := collect(ctx)
+		if component.Component != name {
+			component = unavailableMonitorComponent(name, now)
+		}
+		result <- component
+	}()
+	return result
+}
+
+func awaitMonitorComponent(ctx context.Context, name string, now time.Time, result <-chan telemetry.ComponentSnapshot) telemetry.ComponentSnapshot {
+	select {
+	case component := <-result:
+		return component
+	case <-ctx.Done():
+		return unavailableMonitorComponent(name, now)
+	}
 }
 
 func repositoryAggregateStorage(stats maintenance.StatsResult) []telemetry.StorageSnapshot {
@@ -452,10 +483,14 @@ func collectBrokerMonitorComponent(ctx context.Context, socket string, now time.
 		return unavailableMonitorComponent("key_broker", now)
 	}
 	defer client.Close()
-	status, err := client.Status(ctx)
+	status, err := client.MonitorStatus(ctx)
 	if err != nil {
 		return unavailableMonitorComponent("key_broker", now)
 	}
+	return brokerMonitorComponent(status, now)
+}
+
+func brokerMonitorComponent(status broker.MonitorStatus, now time.Time) telemetry.ComponentSnapshot {
 	locked := uint64(0)
 	if status.Locked {
 		locked = 1
@@ -464,11 +499,11 @@ func collectBrokerMonitorComponent(ctx context.Context, socket string, now time.
 	capturedUnixMS := now.UnixMilli()
 	availability := telemetry.AvailabilityEstimated
 	if status.ProcessStartedUnixMS > 0 {
-		processStartID = strconv.FormatInt(status.ProcessStartedUnixMS, 10)
+		processStartID = strconv.FormatInt(status.ProcessStartedUnixMS, 10) + "-" + status.ProcessInstanceID
 		capturedUnixMS = status.CapturedUnixMS
 		availability = telemetry.AvailabilityExact
 	}
-	return telemetry.ComponentSnapshot{
+	component := telemetry.ComponentSnapshot{
 		Component: "key_broker", ProcessStartID: processStartID, CapturedUnixMS: capturedUnixMS,
 		Availability: availability,
 		Metrics: []telemetry.Metric{
@@ -477,10 +512,18 @@ func collectBrokerMonitorComponent(ctx context.Context, socket string, now time.
 			{Name: "broker_active_leases", Kind: telemetry.MetricGauge, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: uint64(status.ActiveLeases)},
 		},
 	}
+	markRemoteMonitorComponentStale(&component, now)
+	return component
+}
+
+func markRemoteMonitorComponentStale(component *telemetry.ComponentSnapshot, collectionStarted time.Time) {
+	if component.Availability != telemetry.AvailabilityUnavailable && component.CapturedUnixMS < collectionStarted.UnixMilli() {
+		component.Availability = telemetry.AvailabilityStale
+		component.Stale = true
+	}
 }
 
 func repositoryMonitorComponent(repo *repository.Repository, now time.Time) telemetry.ComponentSnapshot {
-	status := repo.ReadCacheStatus()
 	accountingMetrics, accountingOperations, accountingOverflow, accountingDropped := telemetry.DefaultProductionAccounting().Snapshot(telemetry.MaxMonitorMetrics)
 	component := telemetry.ComponentSnapshot{
 		Component: "vaultic", ProcessStartID: strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(monitorProcessStarted.UnixMilli(), 10),
@@ -494,6 +537,10 @@ func repositoryMonitorComponent(repo *repository.Repository, now time.Time) tele
 			PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
 		}},
 	}
+	if repo == nil {
+		return component
+	}
+	status := repo.ReadCacheStatus()
 	if status.Enabled {
 		availability, reconciliationAgeAvailability := repositoryCacheAvailability(status.TelemetryState)
 		controllerState := "healthy"

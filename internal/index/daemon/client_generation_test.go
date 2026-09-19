@@ -16,6 +16,7 @@ import (
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -438,6 +439,7 @@ type testService struct {
 	schema        string
 	blockShutdown bool
 	corruptKeys   bool
+	statusPayload int
 }
 
 func testSocket(t *testing.T) string {
@@ -496,6 +498,14 @@ func (s testService) Capabilities(_ context.Context, request *vaulticdbv1.Capabi
 		WalRetainedBytes: 105, WalRetainedSegments: 6, WalOldestSegmentUnixMs: 7,
 		WalCleanupFailures: 8,
 	}, nil
+}
+
+func (s testService) WriterStatus(_ context.Context, _ *vaulticdbv1.WriterStatusRequest) (*vaulticdbv1.WriterStatusResponse, error) {
+	return &vaulticdbv1.WriterStatusResponse{InstanceId: strings.Repeat("w", s.statusPayload)}, nil
+}
+
+func (s testService) CacheStatus(_ context.Context, _ *vaulticdbv1.ReadCacheStatusRequest) (*vaulticdbv1.ReadCacheStatusResponse, error) {
+	return &vaulticdbv1.ReadCacheStatusResponse{Namespace: strings.Repeat("c", s.statusPayload)}, nil
 }
 
 func (s testService) Shutdown(ctx context.Context, _ *vaulticdbv1.Empty) (*vaulticdbv1.Empty, error) {
@@ -666,9 +676,41 @@ func TestConnectRejectsIncompatibleDaemon(t *testing.T) {
 	vaulticdbv1.RegisterVaulticDBServer(server, testService{protocol: "vaulticdb.v0", schema: SchemaVersion})
 	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
-
 	if _, err := Connect(context.Background(), Options{Socket: socket, RepositoryID: "test-repo"}); err == nil {
 		t.Fatal("expected incompatible daemon error")
+	}
+}
+
+func TestMonitoringStatusResponsesHaveExplicitReceiveLimit(t *testing.T) {
+	socket := testSocket(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.Chmod(filepath.Dir(socket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	vaulticdbv1.RegisterVaulticDBServer(server, testService{
+		protocol: ProtocolVersion, schema: SchemaVersion, statusPayload: maxStatusResponse + 1,
+	})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := Connect(context.Background(), Options{Socket: socket, RepositoryID: "test-repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	if _, err := client.WriterStatus(context.Background()); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("oversized writer status error = %v, want ResourceExhausted", err)
+	}
+	if _, err := client.ReadCacheStatus(context.Background()); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("oversized cache status error = %v, want ResourceExhausted", err)
 	}
 }
 

@@ -58,6 +58,38 @@ func TestProcessWriterStatusDisablesAttributionOnlyWithCapability(t *testing.T) 
 	assertAttributionCountersZero(t, reflect.ValueOf(status.Attribution))
 }
 
+func TestProcessWriterStatusIdentityChangesAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "monitor-reset-identity", DaemonPath: failureDaemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "local",
+	}
+	first, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := first.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close(ctx)
+	after, err := second.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ProcessStartedUnixMS == after.ProcessStartedUnixMS && before.InstanceID == after.InstanceID {
+		t.Fatalf("writer status identity did not change across restart: before=%d-%s after=%d-%s", before.ProcessStartedUnixMS, before.InstanceID, after.ProcessStartedUnixMS, after.InstanceID)
+	}
+}
+
 func TestProcessWriterStatusAttributesServiceAndEngineBoundaries(t *testing.T) {
 	ctx := context.Background()
 	barrierPath := testSocket(t)

@@ -74,6 +74,13 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 		component.Availability = AvailabilityEstimated
 	}
 	if cache.Configured {
+		tiers := cache.Tiers
+		maxTiers := MaxMonitorCaches - 1
+		if len(tiers) > maxTiers {
+			component.CardinalityDropped += uint64(len(tiers) - maxTiers)
+			component.Availability = AvailabilityEstimated
+			tiers = tiers[:maxTiers]
+		}
 		globalAvailability := AvailabilityExact
 		if !cache.QuotaCoordinationHealthy || cache.QuotaReconciliationLag != 0 || cache.PolicySyncLag != 0 || cache.PolicySyncError != "" {
 			globalAvailability = AvailabilityStale
@@ -95,7 +102,7 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 			}
 		}
 		component.Caches = append(component.Caches, vaulticDBCacheSnapshot("slatedb", cache, aggregateAvailability, aggregateLag, aggregateEnabled, aggregateCircuitOpen))
-		for _, tier := range cache.Tiers {
+		for _, tier := range tiers {
 			tierAvailability := globalAvailability
 			if tier.ReconciliationLag != 0 || tier.CircuitOpen {
 				tierAvailability = AvailabilityStale

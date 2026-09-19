@@ -36,6 +36,7 @@ use super::{replica_store, ReplicaStoreConfig};
 
 pub(crate) const CACHE_FORMAT: u32 = 1;
 pub(crate) const DEFAULT_PART_SIZE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CACHE_TIERS: usize = 63;
 pub(crate) const DEFAULT_CACHE_TIMEOUT: Duration = Duration::from_millis(250);
 const CACHE_PREFIX: &str = "_vaultic/read-cache";
 const POLICY_PREFIX: &str = "_vaultic/read-cache-policy";
@@ -84,6 +85,9 @@ impl CacheConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.tiers.len() > MAX_CACHE_TIERS {
+            bail!("read-cache tiers exceed monitoring limit {MAX_CACHE_TIERS}");
+        }
         if self.part_size_bytes < 4 * 1024 || !self.part_size_bytes.is_multiple_of(1024) {
             bail!("read-cache part size must be a multiple of 1 KiB and at least 4 KiB");
         }
@@ -906,12 +910,31 @@ impl CacheManager {
     pub(crate) fn status(&self) -> CacheStatus {
         let now = now_ms();
         let policy_snapshot = self.policy();
-        let ledger = self
+        let ledger_accounting = self
             .quota
             .latest_ledger
             .read()
             .unwrap_or_else(|lock| lock.into_inner())
-            .clone();
+            .as_ref()
+            .map(|ledger| {
+                let mut accounting = HashMap::<String, (u64, u64, u64)>::new();
+                for entry in ledger.entries.values() {
+                    let values = accounting.entry(entry.tier_id.clone()).or_default();
+                    if entry.state != QuotaEntryState::Admitting {
+                        values.0 = values.0.saturating_add(entry.bytes);
+                    }
+                    if entry.state == QuotaEntryState::Deleting {
+                        values.2 = values.2.saturating_add(entry.bytes);
+                    }
+                }
+                for grant in ledger.managers.values() {
+                    for (tier_id, bytes) in &grant.reserved_by_tier {
+                        let values = accounting.entry(tier_id.clone()).or_default();
+                        values.1 = values.1.saturating_add(*bytes);
+                    }
+                }
+                accounting
+            });
         let state = self
             .capacity
             .lock()
@@ -924,33 +947,16 @@ impl CacheManager {
                 let policy = policy_snapshot.policies[index].clone();
                 let local_used = state.used_by_tier.get(&index).copied().unwrap_or(0);
                 let local_reserved = state.reserved_by_tier.get(&index).copied().unwrap_or(0);
-                let used = ledger.as_ref().map_or(local_used, |ledger| {
-                    ledger
-                        .entries
-                        .values()
-                        .filter(|entry| {
-                            entry.tier_id == tier.id && entry.state != QuotaEntryState::Admitting
-                        })
-                        .map(|entry| entry.bytes)
-                        .fold(0u64, u64::saturating_add)
-                });
-                let reserved = ledger.as_ref().map_or(local_reserved, |ledger| {
-                    ledger
-                        .managers
-                        .values()
-                        .map(|grant| grant.reserved_by_tier.get(&tier.id).copied().unwrap_or(0))
-                        .fold(0u64, u64::saturating_add)
-                });
-                let deletion_pending_bytes = ledger.as_ref().map_or(0, |ledger| {
-                    ledger
-                        .entries
-                        .values()
-                        .filter(|entry| {
-                            entry.tier_id == tier.id && entry.state == QuotaEntryState::Deleting
-                        })
-                        .map(|entry| entry.bytes)
-                        .fold(0u64, u64::saturating_add)
-                });
+                let shared = ledger_accounting
+                    .as_ref()
+                    .and_then(|accounting| accounting.get(&tier.id));
+                let used = ledger_accounting
+                    .as_ref()
+                    .map_or(local_used, |_| shared.map_or(0, |values| values.0));
+                let reserved = ledger_accounting
+                    .as_ref()
+                    .map_or(local_reserved, |_| shared.map_or(0, |values| values.1));
+                let deletion_pending_bytes = shared.map_or(0, |values| values.2);
                 CacheTierStatus {
                     id: tier.id.clone(),
                     confidentiality: tier.confidentiality,
@@ -963,7 +969,7 @@ impl CacheManager {
                     pinned_bytes: state.pinned_by_tier.get(&index).copied().unwrap_or(0),
                     requested_max_bytes: policy.max_bytes,
                     deletion_pending_bytes,
-                    deletion_pending_known: ledger.is_some(),
+                    deletion_pending_known: ledger_accounting.is_some(),
                     pending_reclaim_bytes: if policy.enabled {
                         used.saturating_sub(policy.max_bytes)
                     } else {
@@ -1016,7 +1022,7 @@ impl CacheManager {
             inflight_bytes: state.inflight_reserved,
             max_inflight_bytes: self.max_inflight_bytes,
             deletion_pending_bytes,
-            deletion_pending_known: ledger.is_some(),
+            deletion_pending_known: ledger_accounting.is_some(),
             pending_reclaim_bytes,
             quota_coordination_healthy: self.quota.healthy.load(Ordering::Acquire),
             quota_ledger_revision: self.quota.ledger_revision.load(Ordering::Acquire),
@@ -5289,6 +5295,85 @@ mod tests {
         assert!(config.validate().is_err());
         config.tiers[0].id = "a".repeat(129);
         assert!(config.validate().is_err());
+
+        config.tiers = (0..=MAX_CACHE_TIERS)
+            .map(|index| CacheTierConfig {
+                id: format!("tier-{index}"),
+                store: ReplicaStoreConfig::Memory,
+                confidentiality: CacheConfidentiality::Encrypted,
+                policy: policy(4096),
+            })
+            .collect();
+        assert!(config.validate().is_err());
+        config.tiers.pop();
+        assert!(config.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn maximum_cardinality_status_does_not_block_cache_reads() {
+        let origin = Arc::new(InMemory::new());
+        let cache = Arc::new(
+            CacheManager::new(
+                origin.clone(),
+                Arc::new(InMemory::new()),
+                CacheConfig {
+                    tiers: (0..MAX_CACHE_TIERS)
+                        .map(|index| CacheTierConfig {
+                            id: format!("tier-{index}"),
+                            store: ReplicaStoreConfig::Memory,
+                            confidentiality: CacheConfidentiality::Encrypted,
+                            policy: policy(4096),
+                        })
+                        .collect(),
+                    aggregate_max_bytes: None,
+                    part_size_bytes: 4096,
+                    max_inflight_bytes: 4096,
+                },
+                "repository",
+                "maximum-status-cardinality",
+            )
+            .await
+            .unwrap(),
+        );
+        let path = ObjectPath::from("sst/status-concurrency");
+        origin
+            .put(&path, Bytes::from_static(b"value").into())
+            .await
+            .unwrap();
+        let store = cache.store(origin, CacheConfidentiality::Encrypted);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let status_task = {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                for _ in 0..64 {
+                    assert_eq!(cache.status().tiers.len(), MAX_CACHE_TIERS);
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let read_task = {
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                cached_get(
+                    &*store,
+                    &path,
+                    options(TableStoreKind::Main, SstType::Compacted, false),
+                )
+                .await
+            })
+        };
+        barrier.wait().await;
+        let (status_result, read_result) = tokio::time::timeout(
+            Duration::from_secs(2),
+            futures_util::future::join(status_task, read_task),
+        )
+        .await
+        .expect("status and read remain responsive at maximum cardinality");
+        status_result.unwrap();
+        assert_eq!(read_result.unwrap(), b"value"[..]);
     }
 
     #[tokio::test]
@@ -8056,6 +8141,48 @@ mod tests {
         assert_eq!(status.tiers[0].reserved_bytes, 128);
         assert_eq!(status.tiers[0].local_reserved_bytes, 0);
         first.release_reservation(reservation).await;
+    }
+
+    #[tokio::test]
+    async fn status_reports_zero_shared_accounting_for_unlisted_tiers() {
+        let cache = two_tier_manager("unlisted-tier-status").await;
+        {
+            let mut capacity = cache.capacity.lock().unwrap();
+            capacity.used_by_tier.insert(1, 256);
+            capacity.reserved_by_tier.insert(1, 128);
+        }
+        let mut ledger = QuotaLedger {
+            format: QUOTA_FORMAT,
+            namespace: cache.namespace.clone(),
+            revision: 0,
+            next_generation: 0,
+            policy_revision: 0,
+            aggregate_max_bytes: None,
+            managers: HashMap::new(),
+            entries: HashMap::new(),
+            reconciler: None,
+        };
+        ledger.entries.insert(
+            "first-entry".to_owned(),
+            QuotaEntry {
+                key: "first-entry".to_owned(),
+                tier_id: "first".to_owned(),
+                owner_manager_id: cache.quota.manager_id.clone(),
+                bytes: 64,
+                generation: 0,
+                policy_revision: 0,
+                expires_ms: u64::MAX,
+                state: QuotaEntryState::Active,
+            },
+        );
+        *cache.quota.latest_ledger.write().unwrap() = Some(ledger);
+
+        let status = cache.status();
+        assert_eq!(status.tiers[0].used_bytes, 64);
+        assert_eq!(status.tiers[1].used_bytes, 0);
+        assert_eq!(status.tiers[1].reserved_bytes, 0);
+        assert_eq!(status.tiers[1].local_used_bytes, 256);
+        assert_eq!(status.tiers[1].local_reserved_bytes, 128);
     }
 
     #[tokio::test]

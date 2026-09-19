@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,27 @@ func validMonitorSnapshot() MonitorSnapshot {
 func TestMonitorSnapshotValidationAcceptsBoundedSchema(t *testing.T) {
 	if err := validMonitorSnapshot().Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMonitorSnapshotJSONCompatibility(t *testing.T) {
+	encoded, err := json.Marshal(validMonitorSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = []byte(strings.Replace(string(encoded), `"components":[`, `"future_top_level":true,"components":[`, 1))
+	encoded = []byte(strings.Replace(string(encoded), `"availability":"exact"`, `"availability":"exact","future_component_field":{"nested":true}`, 1))
+	var decoded MonitorSnapshot
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode additive schema fields: %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("validate additive schema fields: %v", err)
+	}
+
+	decoded.SchemaVersion = MonitorSchemaVersion + 1
+	if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported major schema validation = %v", err)
 	}
 }
 

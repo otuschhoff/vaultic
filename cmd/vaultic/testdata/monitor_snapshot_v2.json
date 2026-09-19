@@ -1,0 +1,1713 @@
+{
+  "schema_version": 2,
+  "captured_unix_ms": 2000,
+  "components": [
+    {
+      "component": "vaultic",
+      "process_start_id": "123-1000",
+      "captured_unix_ms": 2000,
+      "availability": "exact",
+      "stale": false,
+      "cardinality_dropped": 0,
+      "storage": [
+        {
+          "backend_id": "repository",
+          "role": "repository",
+          "availability": "unavailable",
+          "object_count": 0,
+          "payload_bytes": 0,
+          "object_class": "unknown",
+          "placement_state": "unknown",
+          "representation": "encrypted_pack",
+          "object_count_availability": "unavailable",
+          "payload_availability": "unavailable",
+          "physical_availability": "unavailable",
+          "reconciliation_availability": "unavailable"
+        }
+      ]
+    },
+    {
+      "component": "key_broker",
+      "process_start_id": "1000-broker-one",
+      "captured_unix_ms": 1999,
+      "availability": "stale",
+      "stale": true,
+      "metrics": [
+        {
+          "name": "broker_locked",
+          "kind": "gauge",
+          "unit": "state",
+          "availability": "exact",
+          "value": 1
+        },
+        {
+          "name": "broker_active_sessions",
+          "kind": "gauge",
+          "unit": "operations",
+          "availability": "exact",
+          "value": 2
+        },
+        {
+          "name": "broker_active_leases",
+          "kind": "gauge",
+          "unit": "operations",
+          "availability": "exact",
+          "value": 3
+        }
+      ],
+      "cardinality_dropped": 0
+    },
+    {
+      "component": "vaulticdb",
+      "process_start_id": "1100-daemon-one",
+      "captured_unix_ms": 2000,
+      "availability": "exact",
+      "stale": false,
+      "metrics": [
+        {
+          "name": "engine_write_batches",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_write_operations",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_backpressure_events",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_memtable_write_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_wal_flush_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_compacted_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_memtable_bytes",
+          "kind": "gauge",
+          "unit": "bytes",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_l0_sst_objects",
+          "kind": "gauge",
+          "unit": "objects",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_sst_objects",
+          "kind": "gauge",
+          "unit": "objects",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_sorted_runs",
+          "kind": "gauge",
+          "unit": "objects",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_running_compactions",
+          "kind": "gauge",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "admission_wait_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "admission_lock_hold_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "fence_check_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "write_batch_request_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "transaction_begin_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "engine_submit_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "durable_wait_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "finalization_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "engine_backpressure_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "engine_batch_queue_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "engine_batch_service_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_put_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_put_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_init_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_init_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_part_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_part_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_complete_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_complete_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_abort_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_abort_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_get_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_head_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_head_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_get_body_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_body_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_get_ranges_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_ranges_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_delete_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_delete_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_list_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_list_with_offset_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_with_offset_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_list_with_delimiter_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_with_delimiter_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_copy_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_copy_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_rename_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_rename_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "database"
+            }
+          ]
+        },
+        {
+          "name": "object_put_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_put_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_init_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_init_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_part_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_part_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_complete_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_complete_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_abort_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_abort_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_get_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_head_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_head_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_get_body_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_body_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_get_ranges_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_ranges_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_delete_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_delete_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_list_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_list_with_offset_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_with_offset_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_list_with_delimiter_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_with_delimiter_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_copy_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_copy_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_rename_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_rename_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "wal"
+            }
+          ]
+        },
+        {
+          "name": "object_put_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_put_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_init_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_init_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_part_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_part_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_complete_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_complete_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_multipart_abort_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_multipart_abort_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_get_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_head_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_head_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_get_body_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_body_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_get_ranges_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_get_ranges_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_delete_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_delete_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_list_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_list_with_offset_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_with_offset_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_list_with_delimiter_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_list_with_delimiter_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_copy_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_copy_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        },
+        {
+          "name": "object_rename_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ],
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "object_rename_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable",
+          "labels": [
+            {
+              "name": "role",
+              "value": "coordination"
+            }
+          ]
+        }
+      ],
+      "queues": [
+        {
+          "name": "batch_write",
+          "availability": "exact",
+          "capacity_availability": "unavailable",
+          "depth": 0,
+          "capacity": 0,
+          "active_workers": 0,
+          "admitted": 0,
+          "rejected": 0,
+          "oldest_item_age_us": 0,
+          "backpressure": "none"
+        }
+      ],
+      "cardinality_dropped": 0,
+      "storage": [
+        {
+          "backend_id": "database",
+          "role": "database",
+          "availability": "estimated",
+          "object_count": 0,
+          "payload_bytes": 0,
+          "acknowledgement": "unknown",
+          "object_class": "sst",
+          "placement_state": "primary",
+          "representation": "sst",
+          "object_count_availability": "estimated",
+          "payload_availability": "unavailable",
+          "physical_availability": "unavailable",
+          "reconciliation_availability": "unavailable"
+        },
+        {
+          "backend_id": "wal",
+          "role": "wal",
+          "availability": "unavailable",
+          "object_count": 0,
+          "payload_bytes": 0,
+          "acknowledgement": "unknown",
+          "object_class": "wal_segment",
+          "placement_state": "primary",
+          "representation": "metadata",
+          "object_count_availability": "unavailable",
+          "payload_availability": "unavailable",
+          "physical_availability": "unavailable",
+          "reconciliation_availability": "unavailable"
+        }
+      ],
+      "caches": [
+        {
+          "id": "slatedb",
+          "availability": "stale",
+          "requested_bytes": 0,
+          "effective_bytes": 0,
+          "used_bytes": 0,
+          "reserved_bytes": 0,
+          "pinned_bytes": 0,
+          "staging_bytes": 0,
+          "deletion_pending_bytes": 0,
+          "reclaim_pending_bytes": 0,
+          "available_bytes": 0,
+          "hits": 0,
+          "misses": 0,
+          "origin_bytes": 0,
+          "cache_bytes": 0,
+          "origin_reads_avoided": 0,
+          "inflight_fills": 0,
+          "reconciliation_lag": 0,
+          "controller_state": "degraded",
+          "circuit_state": "closed",
+          "enabled": true,
+          "family": "aggregate",
+          "representation": "block",
+          "object_count": 0,
+          "traffic_availability": "exact",
+          "traffic_bytes_availability": "unavailable",
+          "fill_availability": "unavailable",
+          "inventory_availability": "unavailable",
+          "deletion_availability": "unavailable",
+          "reconciliation_age_availability": "unavailable",
+          "reconciliation_lag_availability": "exact"
+        }
+      ],
+      "wal": {
+        "target": "",
+        "durability": "",
+        "availability": "unavailable",
+        "uploaded_bytes": 0,
+        "outstanding_flushes": 0,
+        "retained_bytes": 0,
+        "retained_segments": 0,
+        "oldest_uncheckpointed_ms": 0,
+        "durability_failures": 0,
+        "cleanup_failures": 0,
+        "throttle_reason": "none"
+      }
+    }
+  ]
+}

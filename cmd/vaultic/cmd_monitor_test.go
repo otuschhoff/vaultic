@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/global"
+	"github.com/otuschhoff/vaultic/internal/index/broker"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
@@ -158,6 +163,114 @@ func TestBrokerMonitorWithoutSocketIsExplicitlyUnavailable(t *testing.T) {
 	component := collectBrokerMonitorComponent(context.Background(), "", time.Unix(1, 0))
 	if component.Component != "key_broker" || component.Availability != telemetry.AvailabilityUnavailable || !component.Stale {
 		t.Fatalf("component = %+v", component)
+	}
+}
+
+func TestMonitorComponentCollectionIsolatesTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	now := time.Unix(1, 0)
+	blocked := make(chan struct{})
+	slow := startMonitorComponentCollection(ctx, "key_broker", now, func(context.Context) telemetry.ComponentSnapshot {
+		<-blocked
+		return telemetry.ComponentSnapshot{Component: "key_broker"}
+	})
+	fast := startMonitorComponentCollection(ctx, "vaulticdb", now, func(context.Context) telemetry.ComponentSnapshot {
+		return telemetry.ComponentSnapshot{Component: "vaulticdb", ProcessStartID: "one", CapturedUnixMS: 1000, Availability: telemetry.AvailabilityExact}
+	})
+	if component := awaitMonitorComponent(ctx, "vaulticdb", now, fast); component.Availability != telemetry.AvailabilityExact {
+		t.Fatalf("fast component = %+v", component)
+	}
+	cancel()
+	if component := awaitMonitorComponent(ctx, "key_broker", now, slow); component.Availability != telemetry.AvailabilityUnavailable || !component.Stale {
+		t.Fatalf("timed-out component = %+v", component)
+	}
+	close(blocked)
+}
+
+func TestRepositoryMonitorComponentPreservesLocalAccountingWithoutRepository(t *testing.T) {
+	component := repositoryMonitorComponent(nil, time.Unix(1, 0))
+	if component.Component != "vaultic" || component.ProcessStartID == "unavailable" || component.Availability != telemetry.AvailabilityExact {
+		t.Fatalf("local component = %+v", component)
+	}
+	if len(component.Storage) != 1 || component.Storage[0].Availability != telemetry.AvailabilityUnavailable {
+		t.Fatalf("repository storage = %+v", component.Storage)
+	}
+	if err := telemetry.NewMonitorSnapshot(time.Unix(1, 0), component).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMonitorSnapshotGoldenAndRedaction(t *testing.T) {
+	captured := time.UnixMilli(2_000)
+	brokerComponent := brokerMonitorComponent(broker.MonitorStatus{
+		Protocol: protocolVersionForTest, ProcessStartedUnixMS: 1_000, CapturedUnixMS: 1_999,
+		ProcessInstanceID: "broker-one", Locked: true, ActiveSessions: 2, ActiveLeases: 3,
+	}, captured)
+	if brokerComponent.Availability != telemetry.AvailabilityStale || !brokerComponent.Stale {
+		t.Fatalf("stale broker component = %+v", brokerComponent)
+	}
+	vaulticDBComponent := telemetry.VaulticDBComponent(
+		daemon.WriterStatus{
+			ProcessStartedUnixMS: 1_100, CapturedUnixMS: 2_000, InstanceID: "daemon-one",
+			TransitionReason: "/secret/repository/path",
+		},
+		daemon.ReadCacheStatus{Configured: true, AggregateMaxBytesKnown: true, QuotaCoordinationHealthy: false, PolicySyncError: "secret credential error"},
+		daemon.WALInfo{},
+	)
+	snapshot := telemetry.NewMonitorSnapshot(captured,
+		telemetry.ComponentSnapshot{
+			Component: "vaultic", ProcessStartID: "123-1000", CapturedUnixMS: 2_000, Availability: telemetry.AvailabilityExact,
+			Storage: []telemetry.StorageSnapshot{{
+				BackendID: "repository", Role: "repository", Availability: telemetry.AvailabilityUnavailable,
+				ObjectClass: "unknown", PlacementState: "unknown", Representation: "encrypted_pack",
+				ObjectCountAvailability: telemetry.AvailabilityUnavailable, PayloadAvailability: telemetry.AvailabilityUnavailable,
+				PhysicalAvailability: telemetry.AvailabilityUnavailable, ReconciliationAvailability: telemetry.AvailabilityUnavailable,
+			}},
+		},
+		brokerComponent,
+		vaulticDBComponent,
+	)
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	for _, secret := range []string{"/secret/repository/path", "secret credential error"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("monitor snapshot contains redacted value %q", secret)
+		}
+	}
+	path := filepath.Join("testdata", "monitor_snapshot_v2.json")
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expected, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != string(expected) {
+		t.Fatalf("monitor snapshot golden mismatch:\nwant:\n%s\ngot:\n%s", expected, encoded)
+	}
+}
+
+const protocolVersionForTest = "vaultic-key-broker.v1"
+
+func TestRemoteMonitorComponentFreshness(t *testing.T) {
+	now := time.UnixMilli(2_000)
+	component := telemetry.ComponentSnapshot{Availability: telemetry.AvailabilityExact, CapturedUnixMS: 2_000}
+	markRemoteMonitorComponentStale(&component, now)
+	if component.Stale || component.Availability != telemetry.AvailabilityExact {
+		t.Fatalf("fresh component = %+v", component)
+	}
+	component.CapturedUnixMS--
+	markRemoteMonitorComponentStale(&component, now)
+	if !component.Stale || component.Availability != telemetry.AvailabilityStale {
+		t.Fatalf("old component = %+v", component)
 	}
 }
 

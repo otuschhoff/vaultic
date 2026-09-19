@@ -60,6 +60,7 @@ pub enum BrokerRequest {
         protocols: Vec<String>,
     },
     Status,
+    MonitorStatus,
     CreateSession {
         ttl_seconds: u64,
     },
@@ -126,8 +127,47 @@ pub async fn handle_request(
     endpoint_binding: &str,
     protocol: &mut ConnectionProtocol,
     process_started_unix_ms: u64,
+    process_instance_id: &str,
 ) -> Result<BrokerResponse> {
     let now = unix_time_ms()?;
+    if matches!(request, BrokerRequest::MonitorStatus) {
+        if !protocol.negotiated {
+            bail!("broker protocol negotiation is required");
+        }
+        let mut broker = broker
+            .try_lock()
+            .context("broker monitoring status is busy")?;
+        let expiration = broker.expire_state(now);
+        if expiration.expired_sessions != 0 {
+            emit_security_event(
+                "notice",
+                "lifecycle",
+                "sessions_expired",
+                &[("expired_sessions", expiration.expired_sessions.to_string())],
+            );
+        }
+        if expiration.expired_leases != 0 {
+            emit_security_event(
+                "warning",
+                "lifecycle",
+                "leases_expired_or_revoked",
+                &[("expired_leases", expiration.expired_leases.to_string())],
+            );
+        }
+        if expiration.automatic_lock {
+            emit_security_event("critical", "lifecycle", "maximum_epoch_lifetime_lock", &[]);
+        }
+        let status = broker.monitor_status();
+        return Ok(BrokerResponse::MonitorStatus {
+            protocol: PROTOCOL_VERSION,
+            process_started_unix_ms,
+            process_instance_id: process_instance_id.to_owned(),
+            captured_unix_ms: now,
+            locked: status.locked,
+            active_sessions: status.active_sessions,
+            active_leases: status.active_leases,
+        });
+    }
     let mut broker = broker.lock().await;
     let expiration = broker.expire_state(now);
     if expiration.expired_sessions != 0 {
@@ -168,7 +208,7 @@ pub async fn handle_request(
         bail!("broker protocol negotiation is required");
     }
     match request {
-        BrokerRequest::Negotiate { .. } => unreachable!(),
+        BrokerRequest::Negotiate { .. } | BrokerRequest::MonitorStatus => unreachable!(),
         BrokerRequest::Status => {
             let status = broker.status(now)?;
             Ok(BrokerResponse::Status {
@@ -700,6 +740,15 @@ pub enum BrokerResponse {
         pending_capsule_generation: Option<u64>,
         pending_capsule_sha256: Option<String>,
         identity_recovery: bool,
+    },
+    MonitorStatus {
+        protocol: &'static str,
+        process_started_unix_ms: u64,
+        process_instance_id: String,
+        captured_unix_ms: u64,
+        locked: bool,
+        active_sessions: usize,
+        active_leases: usize,
     },
     Session {
         session: SignedSession,

@@ -41,6 +41,7 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 async fn main() -> Result<()> {
     disable_core_dumps();
     let process_started_unix_ms = unix_time_ms()?;
+    let process_instance_id = random_id();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments.len() == 1 && arguments[0] == "--version" {
         vaulticdb::build_info::print_version("vaultic-key-broker");
@@ -67,10 +68,7 @@ async fn main() -> Result<()> {
     let broker = startup.broker;
     let lock_notification = Arc::new(Notify::new());
 
-    remove_stale_socket(&startup.socket_path).await?;
-    let listener = UnixListener::bind(&startup.socket_path)
-        .with_context(|| format!("bind broker socket {}", startup.socket_path.display()))?;
-    set_mode(&startup.socket_path, 0o600)?;
+    let listener = bind_broker_socket(&startup.socket_path).await?;
 
     loop {
         tokio::select! {
@@ -79,8 +77,9 @@ async fn main() -> Result<()> {
                 let broker = broker.clone();
                 let endpoint_binding = startup.endpoint_binding.clone();
                 let lock_notification = lock_notification.clone();
+                let process_instance_id = process_instance_id.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = serve_connection(stream, broker, endpoint_binding, lock_notification, process_started_unix_ms).await {
+                    if let Err(error) = serve_connection(stream, broker, endpoint_binding, lock_notification, process_started_unix_ms, process_instance_id).await {
                         eprintln!("vaultic-key-broker: connection rejected: {error:#}");
                     }
                 });
@@ -98,12 +97,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn bind_broker_socket(socket_path: &PathBuf) -> Result<UnixListener> {
+    remove_stale_socket(socket_path).await?;
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("bind broker socket {}", socket_path.display()))?;
+    set_mode(socket_path, 0o600)?;
+    Ok(listener)
+}
+
 async fn serve_connection(
     stream: UnixStream,
     broker: Arc<Mutex<KeyBroker>>,
     endpoint_binding: String,
     lock_notification: Arc<Notify>,
     process_started_unix_ms: u64,
+    process_instance_id: String,
 ) -> Result<()> {
     let peer = inspect_peer(&stream)?;
     let connection_id = random_id();
@@ -137,6 +145,7 @@ async fn serve_connection(
                         &endpoint_binding,
                         &mut protocol,
                         process_started_unix_ms,
+                        &process_instance_id,
                     )
                     .await
                     .unwrap_or_else(|error| {
