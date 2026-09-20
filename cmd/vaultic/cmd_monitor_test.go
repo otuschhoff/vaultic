@@ -66,6 +66,9 @@ func TestMonitorExportBounds(t *testing.T) {
 }
 
 func TestMonitorExportHealthReservesBoundedMetricCapacity(t *testing.T) {
+	if monitorExportHealthMetricCount != 6 {
+		t.Fatalf("export health metric count = %d", monitorExportHealthMetricCount)
+	}
 	accounting := telemetry.NewProductionAccounting(true)
 	operations := []string{"backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery"}
 	roles := []string{"repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker"}
@@ -86,13 +89,13 @@ func TestMonitorExportHealthReservesBoundedMetricCapacity(t *testing.T) {
 		Availability: telemetry.AvailabilityExact, Metrics: metrics, Operations: operationsActive,
 		OperationOverflow: overflow, CardinalityDropped: accountingDropped,
 	})
-	addMonitorExportHealthValues(&snapshot, 3, 4)
+	addMonitorExportHealthValues(&snapshot, telemetry.ExporterStats{Failures: 3, Dropped: 4, Pending: 3, Capacity: 5, InFlight: true, OldestAge: 5 * time.Second})
 	component := snapshot.Components[0]
-	if len(component.Metrics) != telemetry.MaxMonitorMetrics || component.CardinalityDropped != accountingDropped+2 {
+	if len(component.Metrics) != telemetry.MaxMonitorMetrics || component.CardinalityDropped != accountingDropped+6 {
 		t.Fatalf("metric capacity = %d, dropped = %d", len(component.Metrics), component.CardinalityDropped)
 	}
-	if component.Metrics[len(component.Metrics)-2].Name != "monitor_export_failures" || component.Metrics[len(component.Metrics)-1].Name != "monitor_export_dropped" {
-		t.Fatalf("health metric tail = %#v", component.Metrics[len(component.Metrics)-2:])
+	if component.Metrics[len(component.Metrics)-6].Name != "monitor_export_failures" || component.Metrics[len(component.Metrics)-1].Name != "monitor_export_oldest_age" {
+		t.Fatalf("health metric tail = %#v", component.Metrics[len(component.Metrics)-6:])
 	}
 	if err := snapshot.Validate(); err != nil {
 		t.Fatalf("saturated export snapshot: %v", err)

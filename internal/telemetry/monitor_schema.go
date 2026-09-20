@@ -645,6 +645,10 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	for _, name := range []string{"engine_running_compactions", "broker_active_sessions", "broker_active_leases"} {
 		add(name, MetricGauge, "operations", nil, nil)
 	}
+	add("monitor_export_pending", MetricGauge, "operations", nil, nil)
+	add("monitor_export_capacity", MetricGauge, "operations", nil, nil)
+	add("monitor_export_in_flight", MetricGauge, "operations", nil, nil)
+	add("monitor_export_oldest_age", MetricGauge, "microseconds", nil, nil)
 	add("broker_locked", MetricGauge, "state", nil, nil)
 	for _, name := range []string{"admission_wait_latency", "admission_lock_hold_latency", "fence_check_latency", "write_batch_request_latency", "transaction_begin_latency", "engine_submit_latency", "durable_wait_latency", "finalization_latency"} {
 		add(name, MetricHistogram, "microseconds", []string{"outcome"}, nil, vaulticLatencyBounds())

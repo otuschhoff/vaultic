@@ -24,9 +24,10 @@ type SnapshotExporter interface {
 
 type AsyncExporter struct {
 	exporter SnapshotExporter
-	queue    chan MonitorSnapshot
+	queue    chan queuedMonitorSnapshot
 	dropped  Counter
 	failures Counter
+	activeAt atomic.Pointer[time.Time]
 	closed   atomic.Bool
 	done     chan struct{}
 	once     sync.Once
@@ -34,6 +35,21 @@ type AsyncExporter struct {
 	config   AsyncExporterConfig
 	ctx      context.Context
 	cancel   context.CancelFunc
+	now      func() time.Time
+}
+
+type queuedMonitorSnapshot struct {
+	snapshot   MonitorSnapshot
+	enqueuedAt time.Time
+}
+
+type ExporterStats struct {
+	Failures  uint64
+	Dropped   uint64
+	Pending   int
+	Capacity  int
+	InFlight  bool
+	OldestAge time.Duration
 }
 
 type AsyncExporterConfig struct {
@@ -58,7 +74,7 @@ func NewAsyncExporterWithConfig(exporter SnapshotExporter, config AsyncExporterC
 		panic("telemetry exporter requires an implementation and bounded positive capacity")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := &AsyncExporter{exporter: exporter, queue: make(chan MonitorSnapshot, config.Capacity), done: make(chan struct{}), config: config, ctx: ctx, cancel: cancel}
+	worker := &AsyncExporter{exporter: exporter, queue: make(chan queuedMonitorSnapshot, config.Capacity), done: make(chan struct{}), config: config, ctx: ctx, cancel: cancel, now: time.Now}
 	go worker.run()
 	return worker
 }
@@ -69,9 +85,9 @@ func (worker *AsyncExporter) Submit(snapshot MonitorSnapshot) bool {
 	if worker.closed.Load() || snapshot.Validate() != nil {
 		return false
 	}
-	snapshot = cloneMonitorSnapshot(snapshot)
+	queued := queuedMonitorSnapshot{snapshot: cloneMonitorSnapshot(snapshot), enqueuedAt: worker.now()}
 	select {
-	case worker.queue <- snapshot:
+	case worker.queue <- queued:
 		return true
 	default:
 		select {
@@ -80,7 +96,7 @@ func (worker *AsyncExporter) Submit(snapshot MonitorSnapshot) bool {
 		default:
 		}
 		select {
-		case worker.queue <- snapshot:
+		case worker.queue <- queued:
 			return true
 		default:
 			worker.dropped.Add(1)
@@ -117,6 +133,24 @@ func cloneMonitorSnapshot(snapshot MonitorSnapshot) MonitorSnapshot {
 func (worker *AsyncExporter) Dropped() uint64  { return worker.dropped.Load() }
 func (worker *AsyncExporter) Failures() uint64 { return worker.failures.Load() }
 
+func (worker *AsyncExporter) Stats() ExporterStats {
+	worker.mu.RLock()
+	defer worker.mu.RUnlock()
+	stats := ExporterStats{
+		Failures: worker.failures.Load(), Dropped: worker.dropped.Load(),
+		Pending: len(worker.queue), Capacity: cap(worker.queue) + 1,
+	}
+	if activeAt := worker.activeAt.Load(); activeAt != nil {
+		stats.InFlight = true
+		stats.Pending++
+		stats.OldestAge = worker.now().Sub(*activeAt)
+		if stats.OldestAge < 0 {
+			stats.OldestAge = 0
+		}
+	}
+	return stats
+}
+
 func (worker *AsyncExporter) Close() {
 	worker.CloseWithin(30 * time.Second)
 }
@@ -144,7 +178,10 @@ func (worker *AsyncExporter) CloseWithin(timeout time.Duration) {
 
 func (worker *AsyncExporter) run() {
 	defer close(worker.done)
-	for snapshot := range worker.queue {
+	defer worker.activeAt.Store(nil)
+	for queued := range worker.queue {
+		worker.activeAt.Store(&queued.enqueuedAt)
+		snapshot := queued.snapshot
 		var retryBackoffTotal time.Duration
 		for attempt := 0; ; attempt++ {
 			ctx := worker.ctx
@@ -189,6 +226,7 @@ func (worker *AsyncExporter) run() {
 				retryBackoffTotal += delay
 			}
 		}
+		worker.activeAt.Store(nil)
 	}
 }
 
@@ -376,6 +414,7 @@ func influxSnapshotWithProcesses(snapshot MonitorSnapshot, deploymentID string, 
 		}
 		nextProcesses[component.Component] = component.ProcessStartID
 		fmt.Fprintf(&output, measurementPrefix+"component%s process_start_id=\"%s\",available=%v,availability=\"%s\",stale=%v %d\n", baseTags, escapeFieldString(component.ProcessStartID), component.Availability == AvailabilityExact, component.Availability, component.Stale, component.CapturedUnixMS)
+		writeCounter(&output, counterPrevious, next, measurementPrefix+"cardinality_dropped"+baseTags, component.CardinalityDropped, component.Availability, component.CapturedUnixMS)
 		for _, metric := range component.Metrics {
 			tags := baseTags
 			labels := append([]Label(nil), metric.Labels...)

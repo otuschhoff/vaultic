@@ -23,13 +23,14 @@ import (
 var monitorProcessStarted = time.Now()
 
 const (
-	monitorViewOverview   = "overview"
-	monitorViewStatus     = "status"
-	monitorViewStorage    = "storage"
-	monitorViewOperations = "operations"
-	monitorViewWAL        = "wal"
-	monitorViewCaches     = "caches"
-	monitorViewLatency    = "latency"
+	monitorExportHealthMetricCount = 6
+	monitorViewOverview            = "overview"
+	monitorViewStatus              = "status"
+	monitorViewStorage             = "storage"
+	monitorViewOperations          = "operations"
+	monitorViewWAL                 = "wal"
+	monitorViewCaches              = "caches"
+	monitorViewLatency             = "latency"
 )
 
 type monitorOptions struct {
@@ -271,7 +272,7 @@ func runMonitorInfluxExport(ctx context.Context, globalOptions *global.Options, 
 	ticker := time.NewTicker(options.Interval)
 	defer ticker.Stop()
 	for {
-		snapshot, collectErr := collectMonitorSnapshotWithTimeout(ctx, globalOptions, false, options.Timeout)
+		snapshot, collectErr := collectMonitorSnapshotWithTimeoutAndMetricLimit(ctx, globalOptions, false, options.Timeout, telemetry.MaxMonitorMetrics-monitorExportHealthMetricCount)
 		if collectErr != nil {
 			return collectErr
 		}
@@ -302,19 +303,26 @@ func validateMonitorExportOptions(options monitorExportOptions) error {
 }
 
 func addMonitorExportHealth(snapshot *telemetry.MonitorSnapshot, worker *telemetry.AsyncExporter) {
-	addMonitorExportHealthValues(snapshot, worker.Failures(), worker.Dropped())
+	addMonitorExportHealthValues(snapshot, worker.Stats())
 }
 
-func addMonitorExportHealthValues(snapshot *telemetry.MonitorSnapshot, failures, dropped uint64) {
+func addMonitorExportHealthValues(snapshot *telemetry.MonitorSnapshot, stats telemetry.ExporterStats) {
 	for index := range snapshot.Components {
 		if snapshot.Components[index].Component != "vaultic" {
 			continue
 		}
 		health := []telemetry.Metric{
-			{Name: "monitor_export_failures", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: failures},
-			{Name: "monitor_export_dropped", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: dropped},
+			{Name: "monitor_export_failures", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: stats.Failures},
+			{Name: "monitor_export_dropped", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: stats.Dropped},
+			{Name: "monitor_export_pending", Kind: telemetry.MetricGauge, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: uint64(stats.Pending)},
+			{Name: "monitor_export_capacity", Kind: telemetry.MetricGauge, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: uint64(stats.Capacity)},
+			{Name: "monitor_export_in_flight", Kind: telemetry.MetricGauge, Unit: "operations", Availability: telemetry.AvailabilityExact, Value: boolUint64(stats.InFlight)},
+			{Name: "monitor_export_oldest_age", Kind: telemetry.MetricGauge, Unit: "microseconds", Availability: telemetry.AvailabilityExact, Value: uint64(stats.OldestAge / time.Microsecond)},
 		}
 		metrics := snapshot.Components[index].Metrics
+		sort.Slice(metrics, func(left, right int) bool {
+			return monitorMetricIdentity(metrics[left]) < monitorMetricIdentity(metrics[right])
+		})
 		if displaced := max(len(metrics)+len(health)-telemetry.MaxMonitorMetrics, 0); displaced != 0 {
 			metrics = metrics[:len(metrics)-displaced]
 			snapshot.Components[index].CardinalityDropped += uint64(displaced)
@@ -324,13 +332,24 @@ func addMonitorExportHealthValues(snapshot *telemetry.MonitorSnapshot, failures,
 	}
 }
 
+func boolUint64(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func collectMonitorSnapshotWithTimeout(ctx context.Context, globalOptions *global.Options, reconcile bool, timeout time.Duration) (telemetry.MonitorSnapshot, error) {
+	return collectMonitorSnapshotWithTimeoutAndMetricLimit(ctx, globalOptions, reconcile, timeout, telemetry.MaxMonitorMetrics)
+}
+
+func collectMonitorSnapshotWithTimeoutAndMetricLimit(ctx context.Context, globalOptions *global.Options, reconcile bool, timeout time.Duration, metricLimit int) (telemetry.MonitorSnapshot, error) {
 	if timeout < 100*time.Millisecond || timeout > time.Minute {
 		return telemetry.MonitorSnapshot{}, fmt.Errorf("monitor collector timeout must be between 100ms and 1m")
 	}
 	collectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	snapshot, err := collectMonitorSnapshot(collectCtx, globalOptions, reconcile)
+	snapshot, err := collectMonitorSnapshotWithMetricLimit(collectCtx, globalOptions, reconcile, metricLimit)
 	if err != nil {
 		return telemetry.MonitorSnapshot{}, err
 	}
@@ -341,6 +360,10 @@ func collectMonitorSnapshotWithTimeout(ctx context.Context, globalOptions *globa
 }
 
 func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, reconcile bool) (telemetry.MonitorSnapshot, error) {
+	return collectMonitorSnapshotWithMetricLimit(ctx, globalOptions, reconcile, telemetry.MaxMonitorMetrics)
+}
+
+func collectMonitorSnapshotWithMetricLimit(ctx context.Context, globalOptions *global.Options, reconcile bool, metricLimit int) (telemetry.MonitorSnapshot, error) {
 	now := time.Now()
 	brokerResult := startMonitorComponentCollection(ctx, "key_broker", now, func(collectorCtx context.Context) telemetry.ComponentSnapshot {
 		return collectBrokerMonitorComponent(collectorCtx, globalOptions.KeyBrokerSocket, now)
@@ -349,13 +372,13 @@ func collectMonitorSnapshot(ctx context.Context, globalOptions *global.Options, 
 	_, repo, unlock, err := openWithReadLock(ctx, *globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return telemetry.NewMonitorSnapshot(now,
-			repositoryMonitorComponent(nil, now),
+			repositoryMonitorComponentWithMetricLimit(nil, now, metricLimit),
 			awaitMonitorComponent(ctx, "key_broker", now, brokerResult),
 			unavailableMonitorComponent("vaulticdb", now),
 		), nil
 	}
 	defer unlock()
-	components := []telemetry.ComponentSnapshot{repositoryMonitorComponent(repo, now)}
+	components := []telemetry.ComponentSnapshot{repositoryMonitorComponentWithMetricLimit(repo, now, metricLimit)}
 	daemonEngine, ok := repo.Engine().(*metadataindex.DaemonEngine)
 	if !ok {
 		components = append(components, awaitMonitorComponent(ctx, "key_broker", now, brokerResult))
@@ -503,7 +526,11 @@ func markRemoteMonitorComponentStale(component *telemetry.ComponentSnapshot, col
 }
 
 func repositoryMonitorComponent(repo *repository.Repository, now time.Time) telemetry.ComponentSnapshot {
-	accountingMetrics, accountingOperations, accountingOverflow, accountingDropped := telemetry.DefaultProductionAccounting().Snapshot(telemetry.MaxMonitorMetrics)
+	return repositoryMonitorComponentWithMetricLimit(repo, now, telemetry.MaxMonitorMetrics)
+}
+
+func repositoryMonitorComponentWithMetricLimit(repo *repository.Repository, now time.Time, metricLimit int) telemetry.ComponentSnapshot {
+	accountingMetrics, accountingOperations, accountingOverflow, accountingDropped := telemetry.DefaultProductionAccounting().Snapshot(metricLimit)
 	component := telemetry.ComponentSnapshot{
 		Component: "vaultic", ProcessStartID: strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(monitorProcessStarted.UnixMilli(), 10),
 		CapturedUnixMS: now.UnixMilli(), Availability: telemetry.AvailabilityExact,

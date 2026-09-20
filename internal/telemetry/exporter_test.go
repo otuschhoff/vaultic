@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/otuschhoff/vaultic/internal/fs"
 )
 
 type transientExporter struct {
@@ -83,6 +87,283 @@ func TestAsyncExporterDropsOldestWithoutBlocking(t *testing.T) {
 	}
 	close(exporter.release)
 	worker.Close()
+}
+
+func TestAsyncExporterStatsExposeBoundedQueueStaleness(t *testing.T) {
+	exporter := &blockingExporter{started: make(chan struct{}), release: make(chan struct{})}
+	worker := NewAsyncExporter(exporter, 2)
+	now := time.Unix(10, 0)
+	worker.now = func() time.Time { return now }
+	snapshot := validMonitorSnapshot()
+	if !worker.Submit(snapshot) {
+		t.Fatal("initial submit failed")
+	}
+	<-exporter.started
+	if !worker.Submit(snapshot) || !worker.Submit(snapshot) {
+		t.Fatal("queue fill failed")
+	}
+	now = now.Add(time.Second)
+	stats := worker.Stats()
+	if stats.Pending != 3 || stats.Capacity != 3 || !stats.InFlight || stats.OldestAge != time.Second {
+		t.Fatalf("stats = %+v", stats)
+	}
+	close(exporter.release)
+	worker.Close()
+}
+
+func TestAsyncInfluxExporterBlockedEndpointRemainsBounded(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	releaseRequests := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRequests) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case requestStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-request.Context().Done():
+		case <-releaseRequests:
+		}
+	}))
+	defer func() {
+		release()
+		server.Close()
+	}()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("secret-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exporter, err := NewInfluxExporter(InfluxConfig{
+		URL: server.URL, Org: "ops", Bucket: "monitor", TokenFile: tokenFile,
+		Timeout: 10 * time.Second, BatchLimit: 100, AllowInsecureHTTP: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := NewAsyncExporterWithConfig(exporter, AsyncExporterConfig{Capacity: 2, Timeout: 5 * time.Second})
+	snapshot := maximumCardinalityMonitorSnapshot()
+	if !worker.Submit(snapshot) {
+		t.Fatal("initial submit failed")
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		worker.CloseWithin(0)
+		t.Fatal("maximum-cardinality export did not reach blocked endpoint")
+	}
+	for range 3 {
+		if !worker.Submit(snapshot) {
+			t.Fatal("maximum-cardinality replacement submit failed")
+		}
+	}
+	maximumStats := worker.Stats()
+	if maximumStats.Pending != maximumStats.Capacity || maximumStats.Dropped != 1 || !maximumStats.InFlight {
+		t.Fatalf("maximum-cardinality overflow stats = %+v", maximumStats)
+	}
+	queuedSnapshot := validMonitorSnapshot()
+	started := time.Now()
+	for range 100 {
+		if !worker.Submit(queuedSnapshot) {
+			t.Fatal("bounded replacement submit failed")
+		}
+	}
+	elapsed := time.Since(started)
+	if elapsed > time.Second {
+		t.Fatalf("blocked endpoint delayed submissions by %s", elapsed)
+	}
+	stats := worker.Stats()
+	if stats.Pending > stats.Capacity || stats.Capacity != 3 || !stats.InFlight || stats.Dropped < 98 || stats.OldestAge < 0 {
+		t.Fatalf("blocked endpoint stats = %+v", stats)
+	}
+	t.Logf("blocked export: submissions=100 elapsed=%s pending=%d capacity=%d dropped=%d oldest_age=%s", elapsed, stats.Pending, stats.Capacity, stats.Dropped, stats.OldestAge)
+	accounting := NewProductionAccounting(true)
+	ctx, action := accounting.StartOperation(context.Background(), "backup", "source", "")
+	source, err := fs.NewReader("fixture", io.NopCloser(bytes.NewReader([]byte("payload"))), fs.ReaderOptions{Size: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readDone := make(chan error, 1)
+	readStarted := time.Now()
+	go func() {
+		file, openErr := WrapProductionFS(ctx, source, accounting).OpenFile("fixture", fs.O_RDONLY, false)
+		if openErr != nil {
+			readDone <- openErr
+			return
+		}
+		payload, readErr := io.ReadAll(file)
+		if readErr == nil && string(payload) != "payload" {
+			readErr = fmt.Errorf("payload = %q", payload)
+		}
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked exporter delayed production filesystem read")
+	}
+	t.Logf("instrumented filesystem read while export blocked: elapsed=%s", time.Since(readStarted))
+	action.Done(OutcomeSuccess)
+	release()
+	worker.CloseWithin(5 * time.Second)
+}
+
+func TestInfluxExporterMaximumCardinalityBatchesRemainBounded(t *testing.T) {
+	snapshot := maximumCardinalityMonitorSnapshot()
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := influxSnapshot(snapshot, "maximum", nil)
+	lines := strings.Count(strings.TrimSpace(body), "\n") + 1
+	if lines < len(snapshot.Components)*(MaxMonitorMetrics+MaxMonitorOperations+MaxMonitorStorage+MaxMonitorCaches) || len(body) > 32*1024*1024 {
+		t.Fatalf("maximum export lines=%d bytes=%d", lines, len(body))
+	}
+	if !strings.Contains(body, "vaultic_monitor_v2_cardinality_dropped") {
+		t.Fatal("cardinality loss counter was not exported")
+	}
+	t.Logf("maximum-cardinality export: components=%d metrics=%d operations=%d overflow=%d queues=%d storage=%d caches=%d points=%d bytes=%d",
+		len(snapshot.Components), len(snapshot.Components[0].Metrics), len(snapshot.Components[0].Operations), len(snapshot.Components[0].OperationOverflow),
+		len(snapshot.Components[0].Queues), len(snapshot.Components[0].Storage), len(snapshot.Components[0].Caches), lines, len(body))
+}
+
+func BenchmarkInfluxSnapshotMaximumCardinality(benchmark *testing.B) {
+	snapshot := maximumCardinalityMonitorSnapshot()
+	body, _ := influxSnapshot(snapshot, "maximum", nil)
+	benchmark.ReportAllocs()
+	benchmark.SetBytes(int64(len(body)))
+	for benchmark.Loop() {
+		influxSnapshot(snapshot, "maximum", nil)
+	}
+}
+
+func maximumCardinalityMonitorSnapshot() MonitorSnapshot {
+	components := make([]ComponentSnapshot, 0, len(monitorValues("component")))
+	componentNames := make([]string, 0, len(monitorValues("component")))
+	for name := range monitorValues("component") {
+		componentNames = append(componentNames, name)
+	}
+	sort.Strings(componentNames)
+	for _, name := range componentNames {
+		component := maximumCardinalityMonitorComponent(name)
+		components = append(components, component)
+	}
+	return NewMonitorSnapshot(time.Unix(1, 0), components...)
+}
+
+func maximumCardinalityMonitorComponent(name string) ComponentSnapshot {
+	component := ComponentSnapshot{
+		Component: name, ProcessStartID: "maximum", CapturedUnixMS: 1000,
+		Availability: AvailabilityExact, CardinalityDropped: 7,
+		Metrics: maximumCardinalityMetrics(),
+		WAL:     &WALSnapshot{Target: "test", Durability: "test", Availability: AvailabilityExact},
+	}
+	component.Queues = []QueueSnapshot{
+		{Name: "batch_write", Availability: AvailabilityExact, CapacityAvailability: AvailabilityExact, Capacity: 8},
+		{Name: "legacy_import_ingest", Availability: AvailabilityExact, CapacityAvailability: AvailabilityExact, Capacity: 8},
+		{Name: "legacy_import_reduce", Availability: AvailabilityExact, CapacityAvailability: AvailabilityExact, Capacity: 8},
+	}
+	operationClasses := sortedMonitorValues("operation")
+	component.Operations = make([]ActiveOperation, MaxMonitorOperations)
+	for index := range component.Operations {
+		component.Operations[index] = ActiveOperation{
+			ID: fmt.Sprintf("operation-%03d", index), Class: operationClasses[index%len(operationClasses)], Phase: "queued",
+			StartedUnixMS: 1, UpdatedUnixMS: 1,
+		}
+	}
+	component.OperationOverflow = make([]OperationOverflowSnapshot, len(operationClasses))
+	for index, class := range operationClasses {
+		component.OperationOverflow[index] = OperationOverflowSnapshot{Class: class, Count: uint64(index + 1)}
+	}
+	component.Storage = make([]StorageSnapshot, MaxMonitorStorage)
+	for index := range component.Storage {
+		component.Storage[index] = StorageSnapshot{
+			BackendID: fmt.Sprintf("backend-%03d", index), Role: "repository", Availability: AvailabilityExact,
+			ObjectCountAvailability: AvailabilityExact, PayloadAvailability: AvailabilityExact,
+			PhysicalAvailability: AvailabilityExact, ReconciliationAvailability: AvailabilityUnavailable,
+		}
+	}
+	component.Caches = make([]CacheSnapshot, MaxMonitorCaches)
+	for index := range component.Caches {
+		component.Caches[index] = CacheSnapshot{
+			ID: fmt.Sprintf("cache-%03d", index), Availability: AvailabilityExact, CircuitState: "closed",
+			TrafficAvailability: AvailabilityExact, TrafficBytesAvailability: AvailabilityExact,
+			FillAvailability: AvailabilityExact, InventoryAvailability: AvailabilityExact,
+			DeletionAvailability: AvailabilityExact, ReconciliationAgeAvailability: AvailabilityExact,
+			ReconciliationLagAvailability: AvailabilityExact,
+		}
+	}
+	return component
+}
+
+func maximumCardinalityMetrics() []Metric {
+	specs := newMonitorMetricSpecs()
+	names := make([]string, 0, len(specs))
+	for name := range specs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	metrics := make([]Metric, 0, MaxMonitorMetrics)
+	for _, name := range names {
+		spec := specs[name]
+		labelSets := maximumMetricLabelSets(spec.labels, MaxMonitorMetrics*2)
+		for _, labels := range labelSets {
+			if operation, role := labelValue(labels, "operation"), labelValue(labels, "role"); operation != "" && role != "" && !validOperationRole(operation, role) {
+				continue
+			}
+			metric := Metric{Name: name, Kind: spec.kind, Unit: spec.unit, Availability: AvailabilityExact, Labels: labels, Value: 1}
+			if spec.kind == MetricHistogram {
+				metric.Value = 0
+				metric.Count, metric.Sum, metric.Maximum = 1, 1, 1
+				metric.BucketUpper = append([]uint64(nil), spec.bounds[0]...)
+				metric.BucketCounts = make([]uint64, len(metric.BucketUpper))
+				for index := range metric.BucketCounts {
+					metric.BucketCounts[index] = 1
+				}
+			}
+			metrics = append(metrics, metric)
+			if len(metrics) == MaxMonitorMetrics {
+				return metrics
+			}
+		}
+	}
+	panic(fmt.Sprintf("monitor schema provides only %d metric identities", len(metrics)))
+}
+
+func maximumMetricLabelSets(names []string, limit int) [][]Label {
+	if len(names) == 0 {
+		return [][]Label{nil}
+	}
+	sets := [][]Label{{}}
+	for _, name := range names {
+		values := sortedMonitorValues(name)
+		next := make([][]Label, 0, len(sets)*len(values))
+		for _, set := range sets {
+			for _, value := range values {
+				labels := append(append([]Label(nil), set...), Label{Name: name, Value: value})
+				next = append(next, labels)
+				if len(next) == limit {
+					break
+				}
+			}
+			if len(next) == limit {
+				break
+			}
+		}
+		sets = next
+	}
+	return sets
+}
+
+func sortedMonitorValues(kind string) []string {
+	values := make([]string, 0, len(monitorValues(kind)))
+	for value := range monitorValues(kind) {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
 }
 
 func TestAsyncExporterConcurrentCloseDoesNotPanic(t *testing.T) {
