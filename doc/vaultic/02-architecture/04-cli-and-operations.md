@@ -25,6 +25,7 @@ Options should include:
 - `--max-errors`
 - `--resume`
 - `--snapshot-depth` for bounded optional tree traversal
+- `--monitor-export-*` for opt-in bounded Phase 34 InfluxDB telemetry during the complete import lifecycle
 - `--dry-run`
 - `--json`
 

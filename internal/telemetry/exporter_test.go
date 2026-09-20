@@ -111,6 +111,19 @@ func TestAsyncExporterStatsExposeBoundedQueueStaleness(t *testing.T) {
 	worker.Close()
 }
 
+func TestAsyncExporterCloseWithinReportsTimeout(t *testing.T) {
+	exporter := &blockingExporter{started: make(chan struct{}), release: make(chan struct{})}
+	worker := NewAsyncExporter(exporter, 1)
+	if !worker.Submit(validMonitorSnapshot()) {
+		t.Fatal("initial submit failed")
+	}
+	<-exporter.started
+	if worker.CloseWithin(time.Millisecond) {
+		t.Fatal("blocked exporter reported a complete drain")
+	}
+	close(exporter.release)
+}
+
 func TestAsyncInfluxExporterBlockedEndpointRemainsBounded(t *testing.T) {
 	requestStarted := make(chan struct{}, 1)
 	releaseRequests := make(chan struct{})

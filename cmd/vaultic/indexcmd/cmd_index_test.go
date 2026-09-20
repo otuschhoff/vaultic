@@ -916,6 +916,25 @@ func TestIndexImportDefaultsPublicationLanesForNonFresh(t *testing.T) {
 	}
 }
 
+func TestIndexImportMonitorExportValidation(t *testing.T) {
+	valid := importMonitorExportOptions{
+		URL: "https://influx.example", Org: "ops", Bucket: "imports", TokenEnv: "INFLUX_TOKEN",
+		Interval: time.Second, Timeout: time.Second, Queue: 1, BatchLimit: 1,
+	}
+	if _, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true, MonitorExport: valid}); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []importMonitorExportOptions{
+		{Org: "ops"},
+		{URL: valid.URL, Org: valid.Org, Bucket: valid.Bucket, TokenEnv: valid.TokenEnv, Interval: time.Millisecond, Timeout: valid.Timeout, Queue: valid.Queue, BatchLimit: valid.BatchLimit},
+		{URL: valid.URL, Org: valid.Org, Bucket: valid.Bucket, TokenEnv: valid.TokenEnv, Interval: valid.Interval, Timeout: valid.Timeout, Queue: 0, BatchLimit: valid.BatchLimit},
+	} {
+		if _, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true, MonitorExport: invalid}); err == nil {
+			t.Fatalf("invalid monitor export options were accepted: %+v", invalid)
+		}
+	}
+}
+
 func TestBulkImportMemoryProfileScalesAndCaps(t *testing.T) {
 	const gib = uint64(1024 * 1024 * 1024)
 	for _, test := range []struct {

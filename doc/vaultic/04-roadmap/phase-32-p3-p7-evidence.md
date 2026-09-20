@@ -1,12 +1,20 @@
 # Phase 32 P3-P7 Experiment and Acceptance Evidence
 
-This record reports the currently executable Phase 32 work as of 2026-09-17.
+This record reports the currently executable Phase 32 work as of 2026-09-20.
 P3a, P3b, P7a, matched NFS/RGW/native-RADOS sampling, native RADOS lifecycle
 tests, live RADOS-WAL latency, and P4 are validated. P3c remains partial: its
 memory-WAL role pilots pass, but the complete response matrix is not yet run.
 P4 decouples ordered reduction with a bounded worker and coordinator-owned
 acknowledgements. P5 and P6 remain unselected. A current full import remains
 incomplete, so this is not final repository-scale acceptance.
+
+Importer-owned Phase 34 export is now implemented for future full runs. It emits
+the scheduler and Go runtime component together with VaulticDB queue/service,
+WAL, cache, LSM and role-specific object-store measurements at a bounded interval,
+then makes a bounded final snapshot attempt after the lifecycle action completes. Export failures
+and replace-oldest drops are explicit metrics and never block the import. No new
+representative or uncapped result is claimed here: those runs still require a
+fresh, explicitly authorized target and three matched repetitions.
 
 ## Frozen Inputs and Build
 

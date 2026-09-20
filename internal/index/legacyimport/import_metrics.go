@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/bits"
+	runtimemetrics "runtime/metrics"
 	"sync"
 	"time"
 
@@ -98,7 +99,7 @@ func NewSchedulerTelemetry() *SchedulerTelemetry {
 func NewSchedulerTelemetryEnabled(enabled bool) *SchedulerTelemetry {
 	return &SchedulerTelemetry{
 		last: time.Now(), operations: make(map[string]durationHistogram),
-		state:  SchedulerSnapshot{Phase: "source", PhaseTime: make(map[string]time.Duration)},
+		state:  SchedulerSnapshot{Phase: "setup", PhaseTime: make(map[string]time.Duration)},
 		action: monitor.NewActionMetric("legacy_import", 1, enabled),
 		waits: map[string]*monitor.WaitMetric{
 			"dependency_wait": monitor.NewWaitMetric("legacy_import", "database", "capacity", maxPublicationLanes, enabled),
@@ -118,11 +119,19 @@ func (telemetry *SchedulerTelemetry) startAction() bool {
 	if telemetry.operation != nil {
 		return false
 	}
-	telemetry.operation = telemetry.action.Start("source", "")
+	telemetry.operation = telemetry.action.Start("planning", "")
 	return true
 }
 
 func (telemetry *SchedulerTelemetry) StartAction() { telemetry.startAction() }
+
+func (telemetry *SchedulerTelemetry) BeginSource() { telemetry.phase("source") }
+
+func (telemetry *SchedulerTelemetry) BeginValidation() { telemetry.phase("verify") }
+
+func (telemetry *SchedulerTelemetry) BeginHandoff() { telemetry.phase("handoff") }
+
+func (telemetry *SchedulerTelemetry) BeginActivation() { telemetry.phase("activation") }
 
 func (telemetry *SchedulerTelemetry) FinishAction(result Result, err error) {
 	telemetry.phase("finished")
@@ -202,8 +211,16 @@ func schedulerOperationPhase(phase string) (string, string) {
 		return "cleanup", ""
 	case "finalize":
 		return "finalize", ""
+	case "verify":
+		return "verify", ""
+	case "handoff":
+		return "finalize", "durability"
+	case "activation":
+		return "publish", ""
 	case "finished":
 		return "complete", ""
+	case "setup":
+		return "planning", ""
 	default:
 		return "source", ""
 	}
@@ -335,7 +352,39 @@ func (telemetry *SchedulerTelemetry) Component(now time.Time) monitor.ComponentS
 		{Name: "legacy_import_ingest", Availability: monitor.AvailabilityEstimated, CapacityAvailability: monitor.AvailabilityUnavailable, Depth: uint64(max(scheduler.ReadyBatches, 0)), ActiveWorkers: uint64(max(scheduler.ActiveLanes, 0)), Admitted: ingestCount, OldestItemAgeUS: uint64(max(scheduler.OldestUnreducedAge.Microseconds(), 0)), Backpressure: queueBackpressure(scheduler.ReadyBatches)},
 		{Name: "legacy_import_reduce", Availability: monitor.AvailabilityEstimated, CapacityAvailability: monitor.AvailabilityUnavailable, Depth: uint64(max(scheduler.PendingReductionBatches, 0)), ActiveWorkers: boolUint64(scheduler.PendingReductionBatches > 0), Admitted: reduceCount, OldestItemAgeUS: uint64(max(scheduler.OldestUnreducedAge.Microseconds(), 0)), Backpressure: queueBackpressure(scheduler.PendingReductionBatches)},
 	}
+	runtimeValues := importRuntimeMetrics()
+	component.Metrics = append(component.Metrics,
+		monitor.Metric{Name: "runtime_goroutines", Kind: monitor.MetricGauge, Unit: "operations", Availability: monitor.AvailabilityExact, Value: runtimeValues[0].Value.Uint64()},
+		monitor.Metric{Name: "runtime_heap_alloc_bytes", Kind: monitor.MetricGauge, Unit: "bytes", Availability: monitor.AvailabilityExact, Value: runtimeValues[1].Value.Uint64()},
+		monitor.Metric{Name: "runtime_heap_inuse_bytes", Kind: monitor.MetricGauge, Unit: "bytes", Availability: monitor.AvailabilityExact, Value: saturatingAddLocal(runtimeValues[1].Value.Uint64(), runtimeValues[2].Value.Uint64())},
+		monitor.Metric{Name: "runtime_heap_sys_bytes", Kind: monitor.MetricGauge, Unit: "bytes", Availability: monitor.AvailabilityExact, Value: importRuntimeHeapSystemBytes(runtimeValues)},
+		monitor.Metric{Name: "runtime_gc_cycles", Kind: monitor.MetricCounter, Unit: "operations", Availability: monitor.AvailabilityExact, Value: runtimeValues[6].Value.Uint64()},
+		monitor.Metric{Name: "runtime_gc_pause_cpu", Kind: monitor.MetricCounter, Unit: "microseconds", Availability: monitor.AvailabilityExact, Value: uint64(max(runtimeValues[7].Value.Float64()*float64(time.Second/time.Microsecond), 0))},
+	)
 	return component
+}
+
+func importRuntimeMetrics() []runtimemetrics.Sample {
+	samples := []runtimemetrics.Sample{
+		{Name: "/sched/goroutines:goroutines"},
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/memory/classes/heap/stacks:bytes"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+		{Name: "/cpu/classes/gc/pause:cpu-seconds"},
+	}
+	runtimemetrics.Read(samples)
+	return samples
+}
+
+func importRuntimeHeapSystemBytes(samples []runtimemetrics.Sample) uint64 {
+	value := samples[1].Value.Uint64()
+	for index := 2; index <= 5; index++ {
+		value = saturatingAddLocal(value, samples[index].Value.Uint64())
+	}
+	return value
 }
 
 func queueBackpressure(depth int) string {

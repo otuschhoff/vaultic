@@ -7,14 +7,14 @@
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) |
 [Operational monitoring](phase-34-operational-monitoring-and-metrics-export.md)
 
-**Status:** Stages 1-3, P0-P2, P3a0-P3b, and P7a are complete as of 2026-09-17.
+**Status:** Stages 1-3, P0-P2, P3a0-P3b, P4, and P7a are complete as of 2026-09-20.
 Stage 3 is fresh-reset-only and defaults to two ingestion lanes; deferred cleanup
-is opt-in. Representative NFS evidence selects P4 as the next isolated experiment
-because eligible work waits during synchronous ordered reduction. The baseline
-remains unchanged until P4 satisfies its correctness and performance gates; P5
-and P6 are not selected. P3c, P3d, and P7b remain partial pending the complete
-response matrix, remote main-store comparison, and current-revision uncapped
-acceptance, so repository-scale performance acceptance is not claimed.
+is opt-in. Representative NFS evidence selected P4 because eligible work waited
+during synchronous ordered reduction; P4 is now implemented and accepted.
+Importer-owned Phase 34 time-series export is available,
+but P5 and P6 are not selected. P3c, P3d, and P7b remain partial pending the
+complete response matrix, remote main-store comparison, and current-revision
+uncapped acceptance, so repository-scale performance acceptance is not claimed.
 
 **Goal:** sustain legacy-index-to-SlateDB throughput as the candidate grows,
 without weakening duplicate preservation, metadata ordering, atomicity,
@@ -278,9 +278,63 @@ wait totals are worker-time, not additive job wall-time. Correlate sampled
 dependencies without raw IDs as metric labels. Profiles remain necessary for
 CPU/runtime scheduling time not explained by explicit waits.
 
-P2/P3 deliver the minimum Phase 34 M0-M2 foundation and first write-heavy
-experiments, without waiting for monitor commands or exporters. These additions
-remain pending; completed P0/P1 evidence does not certify the new contract.
+P2/P3 delivered the minimum Phase 34 foundation and first write-heavy experiments.
+The import command can now export its process-local scheduler, active-operation,
+wait, Go runtime, VaulticDB queue/service, WAL, cache, LSM and role-specific
+object-store measurements directly through the bounded asynchronous InfluxDB v2
+exporter. A separate `vaultic monitor export` process cannot observe the importer's
+process-local scheduler, so use the import flags for Phase 32 runs:
+
+```sh
+export VAULTIC_IMPORT_INFLUX_TOKEN='...'
+vaultic index import [repository and import options] \
+  --monitor-export-url https://influx.example \
+  --monitor-export-org ops \
+  --monitor-export-bucket phase32 \
+  --monitor-export-token-env VAULTIC_IMPORT_INFLUX_TOKEN \
+  --monitor-export-deployment-id phase32-current-baseline \
+  --monitor-export-interval 5s
+```
+
+The token environment variable is read once during setup and is never emitted.
+Export delivery uses a bounded replace-oldest queue and cannot block import work.
+Shutdown makes one timeout-bounded final attempt and logs whether it drained.
+Collection, delivery, retry, drop, queue and age signals remain visible in logs
+or exported health metrics; telemetry failure does not invalidate imported data
+but makes a performance run incomplete evidence.
+
+### Full-import bottleneck loop
+
+Run three no-injection current-revision baselines on a fresh, explicitly authorized
+target. Freeze source ordering and identity, candidate namespace, binaries,
+`GOMAXPROCS`, `GOMEMLIMIT`, encryption, cache, WAL, transaction bounds and storage
+placement. Record one acceptance interval from command start through source import,
+marker, validation, close/flush, WAL handoff, reopen, checkpoint verification and
+activation. The exported `legacy_import` action starts before source traversal and
+finishes after those command-owned lifecycle phases; retain the command-total log
+to include candidate preparation and startup as well.
+
+Correlate, rather than add, these cumulative and overlapping measurements:
+
+| Signal pattern | Selected next experiment |
+|---|---|
+| Preparation starvation with CPU/allocation pressure and idle ingest | P5a immutable ID/canonical representation reuse. |
+| Growing reduction depth/oldest age while ingest can proceed | P5b bounded combined reads or contiguous receipt reduction. |
+| Transaction-begin or admission lock wait dominates | P5c lock-scope reduction. |
+| Batch queue remains occupied and queue latency rises | One P6 sequential-writer experiment; do not add lanes first. |
+| Writer service dominates without queue growth | Measure apply/encoding/transaction shape before changing concurrency. |
+| WAL wait or backpressure tracks stalls | One durability-safe coalescing/unflushed-threshold experiment. |
+| L0/SST count, flush bytes or compaction grows with slowdown | One flusher/compactor, codec or object-store experiment. |
+| Main-store GET latency/cache misses track slowdown | One bounded read batching or cache experiment. |
+| Marker/close/handoff/reopen/activation dominates | Optimize that tail while retaining it inside acceptance time. |
+
+For each selected row, change one variable, repeat the full run, verify exact
+result/checkpoint digests and bounded resource behavior, and retain the change only
+when median total elapsed improves without a material tail regression. Do not use
+summed lane, reducer, RPC or engine service time as a wall-clock fraction. Queue
+depth alone is insufficient: require aligned queue wait, service, backpressure,
+active age and throughput evidence. CPU/heap profiles remain required when CPU cost
+dominates because bounded Phase 34 metrics identify the boundary, not the function.
 
 ### 2. Test a Bounded Asynchronous Reducer
 
@@ -747,10 +801,10 @@ P7c hands the result and sensitivity-based recommendation to Phase 34 M7; no
 standalone predictive simulator is required for this phase.
 
 **P7 status:** P7a and the frozen-fixture component of P7b are validated as of
-2026-09-17; P7b overall remains partial. The two-lane deferred fixture is 41.6%
+2026-09-20; P7b overall remains partial. The two-lane deferred fixture is 41.6%
 faster end to end than the Stage 2 equivalent; four and eight lanes are flat. Go
 race suites, Rust library and serial binary suites, crash/replay/handoff gates,
-and timeout recovery pass. A successful 379,934,385-blob uncapped run is
+timeout recovery, and importer-owned bounded telemetry export pass. A successful 379,934,385-blob uncapped run is
 historical evidence from revision `8bc9cd7cb`, not current-revision acceptance.
 Current uncapped and representative backend runs remain blocked on authorized
 isolated resources. P7c therefore retains all current defaults and reports

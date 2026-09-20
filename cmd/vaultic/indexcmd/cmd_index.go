@@ -393,6 +393,22 @@ type indexImportOptions struct {
 	SnapshotDepth              uint
 	SnapshotWorkBudget         uint64
 	ConfirmMetadataLossRebuild bool
+	MonitorExport              importMonitorExportOptions
+}
+
+type importMonitorExportOptions struct {
+	URL          string
+	Org          string
+	Bucket       string
+	DeploymentID string
+	TokenFile    string
+	TokenEnv     string
+	Interval     time.Duration
+	Timeout      time.Duration
+	Queue        int
+	BatchLimit   int
+	RetryLimit   int
+	RetryBackoff time.Duration
 }
 
 const (
@@ -588,7 +604,10 @@ func emitImportStatus(message string) {
 }
 
 func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
-	var options indexImportOptions
+	options := indexImportOptions{MonitorExport: importMonitorExportOptions{
+		DeploymentID: "default", Interval: 15 * time.Second, Timeout: 5 * time.Second,
+		Queue: 4, BatchLimit: 1000, RetryLimit: 3, RetryBackoff: time.Second,
+	}}
 	command := &cobra.Command{
 		Use:   "import",
 		Short: "Import legacy JSON indexes into SlateDB",
@@ -646,6 +665,18 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 		false,
 		"acknowledge replacement of lost or suspect authoritative metadata after candidate validation",
 	)
+	flags.StringVar(&options.MonitorExport.URL, "monitor-export-url", "", "InfluxDB v2 URL for in-process import telemetry export")
+	flags.StringVar(&options.MonitorExport.Org, "monitor-export-org", "", "InfluxDB organization for import telemetry")
+	flags.StringVar(&options.MonitorExport.Bucket, "monitor-export-bucket", "", "InfluxDB bucket for import telemetry")
+	flags.StringVar(&options.MonitorExport.DeploymentID, "monitor-export-deployment-id", options.MonitorExport.DeploymentID, "bounded telemetry deployment identity")
+	flags.StringVar(&options.MonitorExport.TokenFile, "monitor-export-token-file", "", "protected Unix file containing the InfluxDB token")
+	flags.StringVar(&options.MonitorExport.TokenEnv, "monitor-export-token-env", "", "environment variable containing the InfluxDB token")
+	flags.DurationVar(&options.MonitorExport.Interval, "monitor-export-interval", options.MonitorExport.Interval, "import telemetry snapshot interval")
+	flags.DurationVar(&options.MonitorExport.Timeout, "monitor-export-timeout", options.MonitorExport.Timeout, "telemetry request timeout")
+	flags.IntVar(&options.MonitorExport.Queue, "monitor-export-queue-capacity", options.MonitorExport.Queue, "maximum queued import telemetry snapshots")
+	flags.IntVar(&options.MonitorExport.BatchLimit, "monitor-export-batch-limit", options.MonitorExport.BatchLimit, "maximum telemetry points per HTTP request")
+	flags.IntVar(&options.MonitorExport.RetryLimit, "monitor-export-retry-limit", options.MonitorExport.RetryLimit, "maximum retries per import telemetry snapshot")
+	flags.DurationVar(&options.MonitorExport.RetryBackoff, "monitor-export-retry-backoff", options.MonitorExport.RetryBackoff, "initial bounded telemetry retry backoff")
 	return command
 }
 
@@ -657,11 +688,10 @@ func runIndexImport(
 ) (result legacyimport.Result, err error) {
 	commandStarted := time.Now()
 	var telemetry *legacyimport.SchedulerTelemetry
-	defer func() {
-		if telemetry != nil {
-			telemetry.FinishAction(result, err)
-		}
-	}()
+	var monitorExport *legacyImportMonitorExport
+	var monitorSource *legacyImportMonitorSource
+	var storeSession *Session
+	var unlock func()
 	defer func() {
 		log.Printf("legacy import lifecycle: total=%s success=%t", time.Since(commandStarted), err == nil)
 	}()
@@ -669,6 +699,28 @@ func runIndexImport(
 	if err != nil {
 		return result, err
 	}
+	telemetry = legacyimport.NewSchedulerTelemetry()
+	telemetry.StartAction()
+	monitorSource = &legacyImportMonitorSource{}
+	monitorExport, monitorErr := startLegacyImportMonitorExport(ctx, options.MonitorExport, telemetry, monitorSource)
+	if monitorErr != nil {
+		return result, monitorErr
+	}
+	defer func() {
+		monitorExport.StopCollection()
+		monitorSource.SetClient(nil)
+		if storeSession != nil {
+			closeStarted := time.Now()
+			closeErr := storeSession.Close()
+			log.Printf("legacy import lifecycle: close=%s success=%t", time.Since(closeStarted), closeErr == nil)
+			err = errors.Join(err, closeErr)
+		}
+		if unlock != nil {
+			unlock()
+		}
+		telemetry.FinishAction(result, err)
+		monitorExport.Close()
+	}()
 	if options.Daemon.FreshBulkImport {
 		log.Printf(
 			"fresh legacy bulk-import profile: physical_memory=%d read_cache=%d max_unflushed=%d l0_sst=%d wal=%s flush_interval=%s",
@@ -688,11 +740,11 @@ func runIndexImport(
 	repositoryConfig.RebuildReset = false
 	ctx = repository.WithDaemonOptions(ctx, repositoryConfig)
 	printer := progress.NewTerminalPrinter(false, globalOptions.Verbosity, term)
-	ctx, repo, unlock, err := openWithExclusiveLock(ctx, globalOptions, false, printer)
+	var repo *repository.Repository
+	ctx, repo, unlock, err = openWithExclusiveLock(ctx, globalOptions, false, printer)
 	if err != nil {
 		return result, err
 	}
-	defer unlock()
 	if options.ForceResetOldIndex {
 		if _, authoritative := repo.Engine().(*metadataindex.DaemonEngine); authoritative {
 			return result, fmt.Errorf("--force-reset-old-idx refuses an authoritative SlateDB index")
@@ -702,7 +754,7 @@ func runIndexImport(
 	if options.ForceResetOldIndex {
 		resetStarted = time.Now()
 	}
-	storeSession, err := openStoreSession(ctx, repo, options.Daemon)
+	storeSession, err = openStoreSession(ctx, repo, options.Daemon)
 	if err != nil {
 		return result, fmt.Errorf("connect vaulticdb: %w", err)
 	}
@@ -718,19 +770,12 @@ func runIndexImport(
 	if options.ForceResetOldIndex {
 		store.EnableFreshLegacyImport()
 	}
-	defer func() {
-		closeStarted := time.Now()
-		closeErr := storeSession.Close()
-		log.Printf("legacy import lifecycle: close=%s success=%t", time.Since(closeStarted), closeErr == nil)
-		err = errors.Join(err, closeErr)
-	}()
 	if options.ImportDeferCleanup {
 		if err := store.EnableDeferredLegacyImportCleanup(); err != nil {
 			return result, err
 		}
 	}
-	telemetry = legacyimport.NewSchedulerTelemetry()
-	telemetry.StartAction()
+	monitorSource.SetClient(storeSession.Client)
 	stopStats := startLegacyImportStats(ctx, store, 10*time.Second, func(stats daemon.LegacyImportStats) {
 		logLegacyImportStats(stats)
 		log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
@@ -750,6 +795,7 @@ func runIndexImport(
 		options.PreparedImportBytes, options.ImportPublicationLanes, options.ImportBatchTimeout, options.SnapshotDepth, options.Resume,
 		options.ForceResetOldIndex,
 	)
+	telemetry.BeginSource()
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
 		Resume: options.Resume, DryRun: options.DryRun, MaxErrors: options.MaxErrors,
 		BatchSize: options.BatchSize, PackWorkers: options.PackWorkers,
@@ -779,15 +825,20 @@ func runIndexImport(
 		return result, fmt.Errorf("%w: import completed with %d findings", errIndexIncomplete, result.ErrorsSeen)
 	}
 	if options.Activate && options.Daemon.RebuildInitialize {
+		telemetry.BeginValidation()
 		if validationErr := validateRebuiltIndex(ctx, options, repo, store, result); validationErr != nil {
 			return result, validationErr
 		}
 	}
+	telemetry.BeginHandoff()
+	monitorSource.SetClient(nil)
 	storeSession, client, err := completeFreshBulkImport(ctx, options, repo, storeSession)
 	if err != nil {
 		return result, err
 	}
+	monitorSource.SetClient(storeSession.Client)
 	if options.Activate {
+		telemetry.BeginActivation()
 		if activateErr := activateImportedIndex(ctx, options, repo, client); activateErr != nil {
 			return result, activateErr
 		}
@@ -957,6 +1008,9 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 	if !options.FromLegacy {
 		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
 	}
+	if err := validateImportMonitorExportOptions(options.MonitorExport); err != nil {
+		return options, err
+	}
 	if options.ImportPublicationLanes > 8 {
 		return options, fmt.Errorf("--import-publication-lanes must not exceed 8")
 	}
@@ -995,6 +1049,23 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 		return options, fmt.Errorf("--activate cannot be combined with --dry-run")
 	}
 	return options, nil
+}
+
+func validateImportMonitorExportOptions(options importMonitorExportOptions) error {
+	configured := options.URL != "" || options.Org != "" || options.Bucket != "" || options.TokenFile != "" || options.TokenEnv != ""
+	if !configured {
+		return nil
+	}
+	if options.URL == "" || options.Org == "" || options.Bucket == "" || options.TokenFile == "" == (options.TokenEnv == "") {
+		return fmt.Errorf("import monitor export requires URL, organization, bucket, and exactly one token source")
+	}
+	if options.Interval < time.Second || options.Interval > time.Hour || options.Timeout < 100*time.Millisecond || options.Timeout > time.Minute {
+		return fmt.Errorf("import monitor export interval or timeout is outside its bounded range")
+	}
+	if options.Queue < 1 || options.Queue > 1024 || options.BatchLimit < 1 || options.BatchLimit > 10000 || options.RetryLimit < 0 || options.RetryLimit > 16 || options.RetryBackoff < 0 || options.RetryBackoff > time.Minute || options.RetryLimit > 0 && options.RetryBackoff == 0 {
+		return fmt.Errorf("import monitor export queue, batch, or retry bounds are invalid")
+	}
+	return nil
 }
 
 func prepareMetadataRebuild(ctx context.Context, options indexImportOptions, globalOptions global.Options) error {

@@ -632,17 +632,20 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	add := func(name string, kind MetricKind, unit string, labels, required []string, bounds ...[]uint64) {
 		specs[name] = metricSpec{kind: kind, unit: unit, labels: labels, required: required, bounds: bounds}
 	}
-	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "monitor_export_failures", "monitor_export_dropped"} {
+	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "monitor_export_failures", "monitor_export_dropped", "runtime_gc_cycles"} {
 		add(name, MetricCounter, "operations", nil, nil)
 	}
+	add("runtime_gc_pause_cpu", MetricCounter, "microseconds", nil, nil)
 	for _, name := range []string{"engine_memtable_write_bytes", "engine_wal_flush_bytes", "engine_compacted_bytes"} {
 		add(name, MetricCounter, "bytes", nil, nil)
 	}
-	add("engine_memtable_bytes", MetricGauge, "bytes", nil, nil)
+	for _, name := range []string{"engine_memtable_bytes", "runtime_heap_alloc_bytes", "runtime_heap_inuse_bytes", "runtime_heap_sys_bytes"} {
+		add(name, MetricGauge, "bytes", nil, nil)
+	}
 	for _, name := range []string{"engine_l0_sst_objects", "engine_sst_objects", "engine_sorted_runs"} {
 		add(name, MetricGauge, "objects", nil, nil)
 	}
-	for _, name := range []string{"engine_running_compactions", "broker_active_sessions", "broker_active_leases"} {
+	for _, name := range []string{"engine_running_compactions", "broker_active_sessions", "broker_active_leases", "runtime_goroutines"} {
 		add(name, MetricGauge, "operations", nil, nil)
 	}
 	add("monitor_export_pending", MetricGauge, "operations", nil, nil)

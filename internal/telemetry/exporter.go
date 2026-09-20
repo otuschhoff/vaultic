@@ -155,7 +155,7 @@ func (worker *AsyncExporter) Close() {
 	worker.CloseWithin(30 * time.Second)
 }
 
-func (worker *AsyncExporter) CloseWithin(timeout time.Duration) {
+func (worker *AsyncExporter) CloseWithin(timeout time.Duration) bool {
 	worker.once.Do(func() {
 		worker.mu.Lock()
 		worker.closed.Store(true)
@@ -164,15 +164,16 @@ func (worker *AsyncExporter) CloseWithin(timeout time.Duration) {
 	})
 	if timeout <= 0 {
 		worker.cancel()
-		return
+		return false
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-worker.done:
-		return
+		return true
 	case <-timer.C:
 		worker.cancel()
+		return false
 	}
 }
 

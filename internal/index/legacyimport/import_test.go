@@ -691,14 +691,14 @@ func TestSchedulerTelemetryAccountsDisjointTime(t *testing.T) {
 	telemetry.state.ActiveLanes = 0
 	telemetry.state.Phase = "cleanup"
 	stats := telemetry.Snapshot()
-	if stats.PhaseTime["source"] != time.Second || stats.LaneTime[2] != time.Second {
+	if stats.PhaseTime["setup"] != time.Second || stats.LaneTime[2] != time.Second {
 		t.Fatalf("initial time accounting: %+v", stats)
 	}
 	if stats.PhaseTime["cleanup"] < 2*time.Second || stats.PhaseTime["cleanup"] != stats.LaneTime[0] {
 		t.Fatalf("cleanup attribution: %+v", stats)
 	}
-	stats.PhaseTime["source"] = 0
-	if telemetry.Snapshot().PhaseTime["source"] != time.Second {
+	stats.PhaseTime["setup"] = 0
+	if telemetry.Snapshot().PhaseTime["setup"] != time.Second {
 		t.Fatal("snapshot aliases mutable telemetry")
 	}
 	telemetry.observe("receive", 0)
@@ -739,6 +739,19 @@ func TestSchedulerTelemetryProducesValidMonitorComponent(t *testing.T) {
 	if len(component.Operations) != 0 {
 		t.Fatalf("settled component = %+v", component)
 	}
+}
+
+func TestSchedulerTelemetrySeparatesSetupFromSource(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	telemetry.StartAction()
+	if snapshot := telemetry.Snapshot(); snapshot.Phase != "setup" {
+		t.Fatalf("initial phase = %q, want setup", snapshot.Phase)
+	}
+	telemetry.BeginSource()
+	if snapshot := telemetry.Snapshot(); snapshot.Phase != "source" || snapshot.PhaseTime["setup"] <= 0 {
+		t.Fatalf("source transition snapshot = %+v", snapshot)
+	}
+	telemetry.FinishAction(Result{}, nil)
 }
 
 func TestSchedulerTelemetryExternalOwnerIncludesFinalization(t *testing.T) {

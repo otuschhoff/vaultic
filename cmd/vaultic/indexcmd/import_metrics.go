@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"sync"
 	"time"
 
@@ -23,14 +24,31 @@ func startLegacyImportStats(ctx context.Context, store *daemon.SchemaStore, inte
 				return
 			case <-ticker.C:
 				emit(store.LegacyImportStats())
-				var memory runtime.MemStats
-				runtime.ReadMemStats(&memory)
-				log.Printf("legacy import runtime: gomaxprocs=%d goroutines=%d heap_alloc=%d heap_inuse=%d heap_sys=%d gc_cycles=%d gc_pause_total=%s",
-					runtime.GOMAXPROCS(0), runtime.NumGoroutine(), memory.HeapAlloc, memory.HeapInuse, memory.HeapSys,
-					memory.NumGC, time.Duration(memory.PauseTotalNs))
+				samples := legacyImportRuntimeLogMetrics()
+				heapInUse := samples[1].Value.Uint64() + samples[2].Value.Uint64()
+				heapSystem := heapInUse + samples[3].Value.Uint64() + samples[4].Value.Uint64() + samples[5].Value.Uint64()
+				gcPauseCPU := time.Duration(samples[7].Value.Float64() * float64(time.Second))
+				log.Printf("legacy import runtime: gomaxprocs=%d goroutines=%d heap_alloc=%d heap_inuse=%d heap_sys=%d gc_cycles=%d gc_pause_cpu_total=%s",
+					runtime.GOMAXPROCS(0), samples[0].Value.Uint64(), samples[1].Value.Uint64(), heapInUse, heapSystem,
+					samples[6].Value.Uint64(), gcPauseCPU)
 			}
 		}
 	}()
 	var once sync.Once
 	return func() { once.Do(func() { cancel(); <-done }) }
+}
+
+func legacyImportRuntimeLogMetrics() []runtimemetrics.Sample {
+	samples := []runtimemetrics.Sample{
+		{Name: "/sched/goroutines:goroutines"},
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/memory/classes/heap/stacks:bytes"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+		{Name: "/cpu/classes/gc/pause:cpu-seconds"},
+	}
+	runtimemetrics.Read(samples)
+	return samples
 }
