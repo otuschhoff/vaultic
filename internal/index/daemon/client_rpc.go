@@ -866,11 +866,7 @@ func (c *Client) auditRPCError(ctx context.Context, operation string, err error)
 // Close closes the RPC connection and shuts down only a daemon started by this client.
 func (c *Client) Close(ctx context.Context) error {
 	var result error
-	shutdownCtx := ctx
-	cancel := func() {}
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		shutdownCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
-	}
+	shutdownCtx, cancel := withDefaultShutdownDeadline(ctx)
 	defer cancel()
 	if c.process != nil {
 		_, err := c.rpc.Shutdown(shutdownCtx, &vaulticdbv1.Empty{Context: requestContext(shutdownCtx)})
@@ -906,6 +902,13 @@ func (c *Client) Close(ctx context.Context) error {
 		c.process = nil
 	}
 	return result
+}
+
+func withDefaultShutdownDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultShutdownTimeout)
 }
 
 func requestContext(ctx context.Context) *vaulticdbv1.RequestContext {

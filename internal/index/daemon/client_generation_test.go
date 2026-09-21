@@ -553,6 +553,16 @@ func TestDefaultRPCContextHasDeadline(t *testing.T) {
 	}
 }
 
+func TestDefaultShutdownContextHasScaleAwareDeadline(t *testing.T) {
+	ctx, cancel := withDefaultShutdownDeadline(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	remaining := time.Until(deadline)
+	if !ok || remaining <= defaultRPCDeadline || remaining > defaultShutdownTimeout {
+		t.Fatalf("default shutdown deadline = %v, %t", deadline, ok)
+	}
+}
+
 func TestDefaultSocketIsRepositoryScoped(t *testing.T) {
 	if DefaultSocket("first") == DefaultSocket("second") {
 		t.Fatal("repository-scoped socket paths must differ")

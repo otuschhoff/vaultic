@@ -65,6 +65,18 @@ func TestIndexFreshBulkImportHandoffAndActivation(t *testing.T) {
 	if err != nil || imported == 0 {
 		t.Fatalf("fresh bulk import packs=%d err=%v", imported, err)
 	}
+	var stats maintenance.StatsResult
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		var runErr error
+		stats, runErr = runIndexStats(ctx, indexStatsOptions{Daemon: daemonOptions}, globalOptions, globalOptions.Term)
+		return runErr
+	})
+	if err != nil || stats.Totals.PackCount != imported {
+		t.Fatalf("authoritative stats packs=%d want=%d err=%v", stats.Totals.PackCount, imported, err)
+	}
+	if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("non-persistent stats daemon socket remains: %v", err)
+	}
 
 	client, err := daemon.Ensure(context.Background(), daemon.Options{
 		Socket: socket, RepositoryID: repoID, DaemonPath: daemonPath,

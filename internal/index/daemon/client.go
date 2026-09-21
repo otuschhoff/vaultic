@@ -32,10 +32,11 @@ import (
 )
 
 const (
-	ProtocolVersion    = "vaulticdb.v1"
-	SchemaVersion      = "0"
-	defaultRPCDeadline = 10 * time.Second
-	maxStatusResponse  = 1024 * 1024
+	ProtocolVersion        = "vaulticdb.v1"
+	SchemaVersion          = "0"
+	defaultRPCDeadline     = 10 * time.Second
+	defaultShutdownTimeout = time.Minute
+	maxStatusResponse      = 1024 * 1024
 )
 
 var requestSequence atomic.Uint64

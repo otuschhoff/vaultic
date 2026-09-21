@@ -1,14 +1,14 @@
 # Phase 32 P3-P7 Experiment and Acceptance Evidence
 
-This record reports the currently executable Phase 32 work as of 2026-09-20.
+This record reports the currently executable Phase 32 work as of 2026-09-21.
 P3a, P3b, P7a, matched NFS/RGW/native-RADOS sampling, native RADOS lifecycle
 tests, live RADOS-WAL latency, and P4 are validated. P3c remains partial: its
 memory-WAL role pilots pass, but the complete response matrix is not yet run.
 P4 decouples ordered reduction with a bounded worker and coordinator-owned
 acknowledgements. A current telemetry baseline selects P5 read amplification,
 not P6 writer concurrency, as the next optimization area. The first P5 cache
-fill-budget experiment was rejected. A current full import remains incomplete,
-so this is not final repository-scale acceptance.
+fill-budget experiment was rejected. The current uncapped import and recovered
+activation now provide final repository-scale P7b acceptance.
 
 Importer-owned Phase 34 export is now implemented for future full runs. It emits
 the scheduler and Go runtime component together with VaulticDB queue/service,
@@ -16,7 +16,7 @@ WAL, cache, LSM and role-specific object-store measurements at a bounded interva
 then makes a bounded final snapshot attempt after the lifecycle action completes. Export failures
 and replace-oldest drops are explicit metrics and never block the import. The
 new representative results below are accepted only as bounded diagnostic
-evidence; an uncapped result and three matched repetitions remain outstanding.
+evidence; the uncapped acceptance result is reported separately under P7.
 
 ## Current Telemetry Baseline and P5 Selection
 
@@ -450,12 +450,33 @@ packs, and 254,818,044 blobs in 2h52m39s before an operator cancellation; it is
 not a completion result. The matched 45-minute checkpoints above are the
 accepted comparison boundary.
 
+The current uncapped HDD run is retained at
+`phase32-p7-uncapped-current-20260921-hdd-r1`. It imported all 10,019 indexes,
+419,530 packs, and 379,934,385 blobs in 2:37:13, using 82,479 successful ingest,
+reduction, and commit batches with zero failures, retries, or conflicts. The
+memory-WAL completion handoff, persistent-WAL reopen, and checkpoint validation
+completed in 5.564 seconds. The wrapper ran for 2:37:34 at 359% CPU and reached
+35,004,800 KiB maximum RSS. Its 1,889 five-second monitor records are retained
+with the run artifacts.
+
+That first command exited 1 only after data completion because its final daemon
+shutdown inherited the ordinary 10-second RPC deadline; close failed after
+10.009 seconds with `context deadline exceeded`, and the fallback terminated
+the owned daemon. Shutdown now has a one-minute default while explicit caller
+deadlines remain authoritative. A no-reset recovery scanned all 10,019 durable
+checkpoints without republishing a pack or blob. The feature-gated activation
+then exited 0 in 1:23.18, closed the daemon in 8.349 milliseconds, and left no
+daemon process or socket. A separate fresh-process `index stats` read through
+the activated SlateDB authority returned exactly 419,530 packs and 379,934,385
+blobs. This recovered completion is accepted as P7b because the original data,
+handoff, and reopen were durable, while recovery performed only checkpoint
+validation, authority activation, and clean shutdown.
+
 Representative NFS, RADOS, and RGW/S3 are no longer external blockers. Full
-current-revision import, close/handoff/reopen, and post-import validation remain
-P7b work. P4 is accepted with the two-lane setting; do not increase lanes. The
+current-revision import, close/handoff/reopen, activation, and post-import
+validation now satisfy P7b. P4 is accepted with the two-lane setting; do not increase lanes. The
 current aligned telemetry selects P5 read amplification over P6 writer
 concurrency. Cache fill-budget and task-count experiments remain rejected, while
 the combined reducer prefetch is accepted as an 8.8% median bounded-throughput
 improvement. Candidate SST fanout, needed-block and coalesced-range telemetry is
-complete and rejects larger coalescing gaps; full-import P7b acceptance remains
-open.
+complete and rejects larger coalescing gaps.

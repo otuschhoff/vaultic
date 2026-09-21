@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/global"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
@@ -100,6 +101,13 @@ func runIndexStats(ctx context.Context, options indexStatsOptions, globalOptions
 		return result, err
 	}
 	defer unlock()
+	if options.Daemon.Start && !options.Daemon.Persistent {
+		defer func() {
+			if closeErr := repo.Close(); closeErr != nil {
+				debug.Log("close index stats repository: %v", closeErr)
+			}
+		}()
+	}
 	if err := requireSlateDBRepository(repo); err != nil {
 		return result, err
 	}
