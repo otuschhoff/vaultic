@@ -113,6 +113,27 @@ accepted for bounded P5 use because no measured capacity limit was approached;
 resource efficiency remains a later tuning target. These timeout runs do not
 prove full-import completion or finalization acceptance.
 
+SlateDB multi-get instrumentation is now pinned at revision
+`f549d4af9e8a7e41f46c45f4f31095cc743a703a`. It reports calls, input and unique
+keys, SST visits, candidate keys, needed blocks and bytes, active coalesced reads
+and bytes, plus exact request/byte projections for gaps 8, 32 and 128. A separate
+`engine_multi_get_metrics_available` capability prevents mixed-version daemons
+from presenting absent counters as exact zero. Three matched 30-minute baselines
+at `phase32-p5-multiget-telemetry-20260921-hdd-30m-r1` through `r3` produced
+44,055.5, 47,253.0 and 46,352.1 blobs/s.
+
+The frozen projection run at
+`phase32-p6-coalescing-projection-20260921-hdd-30m-r1` used Vaultic SHA-256
+`e498c7cd352fb5422135f08ecd2aa1587fa4fea099bfaaa412ec1ab8a9940e38` and
+VaulticDB SHA-256
+`2cc115d3124b7cb79f84f5820349e97910ff4b8450beafa669c2c2ddcb86b48c`.
+It reached 46,870.5 blobs/s with 361 valid snapshots. Against the active gap 2,
+gap 8 reduced requests by 2.16% but increased bytes by 11.59%; gap 32 reduced
+requests by 9.84% but increased bytes by 163%; gap 128 reduced requests by
+30.90% but increased bytes by 17.25 times. All larger gaps are rejected, gap 2
+is retained, and no post-change repetitions are required because no policy
+change was promoted.
+
 ## Frozen Inputs and Build
 
 The real-daemon fixture contains four ordered indexes, 128 preselected packs,
@@ -436,4 +457,5 @@ current aligned telemetry selects P5 read amplification over P6 writer
 concurrency. Cache fill-budget and task-count experiments remain rejected, while
 the combined reducer prefetch is accepted as an 8.8% median bounded-throughput
 improvement. Candidate SST fanout, needed-block and coalesced-range telemetry is
-the next diagnostic dependency work; full-import P7b acceptance remains open.
+complete and rejects larger coalescing gaps; full-import P7b acceptance remains
+open.

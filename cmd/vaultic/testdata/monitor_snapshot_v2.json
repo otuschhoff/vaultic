@@ -83,6 +83,12 @@
           "availability": "exact"
         },
         {
+          "name": "engine_immutable_memtable_flushes",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
           "name": "engine_memtable_write_bytes",
           "kind": "counter",
           "unit": "bytes",
@@ -95,10 +101,148 @@
           "availability": "exact"
         },
         {
+          "name": "engine_l0_flush_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "exact"
+        },
+        {
           "name": "engine_compacted_bytes",
           "kind": "counter",
           "unit": "bytes",
           "availability": "exact"
+        },
+        {
+          "name": "engine_compacted_ssts",
+          "kind": "counter",
+          "unit": "objects",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_l0_stalls_sst_count",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_l0_stalls_ssts_per_key",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "engine_get_keys",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_filter_point_positives",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_filter_point_negatives",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_filter_point_false_positives",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_calls",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_input_keys",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_unique_keys",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_sst_visits",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_candidate_keys",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_needed_blocks",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_coalesced_reads",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_needed_block_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_coalesced_read_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_projected_reads_gap_8",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_projected_read_bytes_gap_8",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_projected_reads_gap_32",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_projected_read_bytes_gap_32",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_projected_reads_gap_128",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_multi_get_projected_read_bytes_gap_128",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
         },
         {
           "name": "engine_memtable_bytes",
@@ -179,7 +323,67 @@
           ]
         },
         {
+          "name": "begin_request_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "commit_request_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "rollback_request_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
           "name": "transaction_begin_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "transaction_map_lock_wait_latency",
+          "kind": "histogram",
+          "unit": "microseconds",
+          "availability": "unavailable",
+          "bucket_upper": [
+            18446744073709551615
+          ],
+          "bucket_counts": [
+            0
+          ]
+        },
+        {
+          "name": "transaction_slot_lock_wait_latency",
           "kind": "histogram",
           "unit": "microseconds",
           "availability": "unavailable",
@@ -1611,6 +1815,186 @@
               "value": "coordination"
             }
           ]
+        },
+        {
+          "name": "engine_flush_interval",
+          "kind": "gauge",
+          "unit": "milliseconds",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_max_unflushed_bytes",
+          "kind": "gauge",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_l0_sst_size_bytes",
+          "kind": "gauge",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "process_cpu_user",
+          "kind": "counter",
+          "unit": "microseconds",
+          "availability": "unavailable"
+        },
+        {
+          "name": "process_cpu_system",
+          "kind": "counter",
+          "unit": "microseconds",
+          "availability": "unavailable"
+        },
+        {
+          "name": "process_rss_bytes",
+          "kind": "gauge",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "process_threads",
+          "kind": "gauge",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "process_read_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "process_write_bytes",
+          "kind": "counter",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "cache_hits",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_misses",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_origin_reads",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_origin_reads_avoided",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_corruptions",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_timeouts",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_failures",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_bypasses",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_admissions",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_admission_rejections",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_admission_rejections_reservation",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "cache_admission_rejections_background_budget",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "cache_admission_rejections_background_task",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "unavailable"
+        },
+        {
+          "name": "cache_capacity_evictions",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_idle_evictions",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_absolute_evictions",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_corruption_evictions",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_read_latency_total",
+          "kind": "counter",
+          "unit": "microseconds",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_read_latency_count",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_write_latency_total",
+          "kind": "counter",
+          "unit": "microseconds",
+          "availability": "exact"
+        },
+        {
+          "name": "cache_write_latency_count",
+          "kind": "counter",
+          "unit": "operations",
+          "availability": "exact"
         }
       ],
       "queues": [

@@ -30,6 +30,14 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 			EngineL0StallsSSTCount: 6, EngineL0StallsSSTsPerKey: 7,
 			EngineGetKeys: 8, EngineFilterPointPositive: 9, EngineFilterPointNegative: 10,
 			EngineFilterPointFalsePositive: 11, EngineReadMetricsAvailable: true,
+			EngineMultiGetMetricsAvailable: true,
+			EngineMultiGetCalls:            12, EngineMultiGetInputKeys: 13, EngineMultiGetUniqueKeys: 14,
+			EngineMultiGetSSTVisits: 15, EngineMultiGetCandidateKeys: 16,
+			EngineMultiGetNeededBlocks: 17, EngineMultiGetCoalescedReads: 18,
+			EngineMultiGetNeededBlockBytes: 19, EngineMultiGetCoalescedReadBytes: 20,
+			EngineMultiGetProjectedReadsGap8: 21, EngineMultiGetProjectedReadBytesGap8: 22,
+			EngineMultiGetProjectedReadsGap32: 23, EngineMultiGetProjectedReadBytesGap32: 24,
+			EngineMultiGetProjectedReadsGap128: 25, EngineMultiGetProjectedReadBytesGap128: 26,
 		},
 	}
 	cache := daemon.ReadCacheStatus{
@@ -64,22 +72,37 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 		t.Fatalf("WAL age = %d", component.WAL.OldestUncheckpointedMS)
 	}
 	for name, want := range map[string]uint64{
-		"engine_immutable_memtable_flushes":            3,
-		"engine_l0_flush_bytes":                        4,
-		"engine_compacted_ssts":                        5,
-		"engine_l0_stalls_sst_count":                   6,
-		"engine_l0_stalls_ssts_per_key":                7,
-		"engine_get_keys":                              8,
-		"engine_filter_point_positives":                9,
-		"engine_filter_point_negatives":                10,
-		"engine_filter_point_false_positives":          11,
-		"cache_origin_reads_avoided":                   2,
-		"cache_admissions":                             3,
-		"cache_admission_rejections":                   15,
-		"cache_admission_rejections_reservation":       4,
-		"cache_admission_rejections_background_budget": 5,
-		"cache_admission_rejections_background_task":   6,
-		"cache_read_latency_total":                     4,
+		"engine_immutable_memtable_flushes":             3,
+		"engine_l0_flush_bytes":                         4,
+		"engine_compacted_ssts":                         5,
+		"engine_l0_stalls_sst_count":                    6,
+		"engine_l0_stalls_ssts_per_key":                 7,
+		"engine_get_keys":                               8,
+		"engine_filter_point_positives":                 9,
+		"engine_filter_point_negatives":                 10,
+		"engine_filter_point_false_positives":           11,
+		"engine_multi_get_calls":                        12,
+		"engine_multi_get_input_keys":                   13,
+		"engine_multi_get_unique_keys":                  14,
+		"engine_multi_get_sst_visits":                   15,
+		"engine_multi_get_candidate_keys":               16,
+		"engine_multi_get_needed_blocks":                17,
+		"engine_multi_get_coalesced_reads":              18,
+		"engine_multi_get_needed_block_bytes":           19,
+		"engine_multi_get_coalesced_read_bytes":         20,
+		"engine_multi_get_projected_reads_gap_8":        21,
+		"engine_multi_get_projected_read_bytes_gap_8":   22,
+		"engine_multi_get_projected_reads_gap_32":       23,
+		"engine_multi_get_projected_read_bytes_gap_32":  24,
+		"engine_multi_get_projected_reads_gap_128":      25,
+		"engine_multi_get_projected_read_bytes_gap_128": 26,
+		"cache_origin_reads_avoided":                    2,
+		"cache_admissions":                              3,
+		"cache_admission_rejections":                    15,
+		"cache_admission_rejections_reservation":        4,
+		"cache_admission_rejections_background_budget":  5,
+		"cache_admission_rejections_background_task":    6,
+		"cache_read_latency_total":                      4,
 	} {
 		found := false
 		for _, metric := range component.Metrics {
@@ -127,12 +150,18 @@ func TestVaulticDBComponentMarksLegacyDeletionMetricUnavailable(t *testing.T) {
 
 func TestVaulticDBComponentMarksLegacyAdditiveMetricsUnavailable(t *testing.T) {
 	component := VaulticDBComponent(
-		daemon.WriterStatus{ProcessStartedUnixMS: 100, CapturedUnixMS: 200},
+		daemon.WriterStatus{ProcessStartedUnixMS: 100, CapturedUnixMS: 200, Attribution: daemon.AttributionSnapshot{EngineReadMetricsAvailable: true}},
 		daemon.ReadCacheStatus{Configured: true, Metrics: daemon.ReadCacheMetrics{AdmissionRejections: 3}},
 		daemon.WALInfo{},
 	)
 	for _, metric := range component.Metrics {
-		if metric.Name == "engine_flush_interval" || strings.HasPrefix(metric.Name, "engine_filter_point_") || metric.Name == "engine_get_keys" || strings.HasPrefix(metric.Name, "cache_admission_rejections_") {
+		if strings.HasPrefix(metric.Name, "engine_filter_point_") || metric.Name == "engine_get_keys" {
+			if metric.Availability != AvailabilityExact {
+				t.Fatalf("legacy point-read metric %s availability = %q", metric.Name, metric.Availability)
+			}
+			continue
+		}
+		if metric.Name == "engine_flush_interval" || strings.HasPrefix(metric.Name, "engine_multi_get_") || strings.HasPrefix(metric.Name, "cache_admission_rejections_") {
 			if metric.Availability != AvailabilityUnavailable {
 				t.Fatalf("legacy metric %s availability = %q", metric.Name, metric.Availability)
 			}

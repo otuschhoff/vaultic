@@ -52,8 +52,7 @@ fn process_metrics() -> ProcessMetrics {
                     fields.get(12).and_then(|value| value.parse::<u64>().ok()),
                 ) {
                     metrics.cpu_user_us = user.saturating_mul(1_000_000) / clock_ticks as u64;
-                    metrics.cpu_system_us =
-                        system.saturating_mul(1_000_000) / clock_ticks as u64;
+                    metrics.cpu_system_us = system.saturating_mul(1_000_000) / clock_ticks as u64;
                     metrics.cpu_available = true;
                 }
             }
@@ -76,7 +75,8 @@ fn process_metrics() -> ProcessMetrics {
                     .and_then(|value| value.trim().parse::<u64>().ok())
             })
         };
-        if let (Some(read_bytes), Some(write_bytes)) = (value("read_bytes:"), value("write_bytes:")) {
+        if let (Some(read_bytes), Some(write_bytes)) = (value("read_bytes:"), value("write_bytes:"))
+        {
             metrics.read_bytes = read_bytes;
             metrics.write_bytes = write_bytes;
             metrics.io_available = true;
@@ -675,6 +675,25 @@ impl Service {
                 engine_filter_point_negatives: engine.filter_point_negatives,
                 engine_filter_point_false_positives: engine.filter_point_false_positives,
                 engine_read_metrics_available: true,
+                engine_multi_get_calls: engine.multi_get_calls,
+                engine_multi_get_input_keys: engine.multi_get_input_keys,
+                engine_multi_get_unique_keys: engine.multi_get_unique_keys,
+                engine_multi_get_sst_visits: engine.multi_get_sst_visits,
+                engine_multi_get_candidate_keys: engine.multi_get_candidate_keys,
+                engine_multi_get_needed_blocks: engine.multi_get_needed_blocks,
+                engine_multi_get_coalesced_reads: engine.multi_get_coalesced_reads,
+                engine_multi_get_needed_block_bytes: engine.multi_get_needed_block_bytes,
+                engine_multi_get_coalesced_read_bytes: engine.multi_get_coalesced_read_bytes,
+                engine_multi_get_projected_reads_gap_8: engine.multi_get_projected_reads_gap_8,
+                engine_multi_get_projected_read_bytes_gap_8: engine
+                    .multi_get_projected_read_bytes_gap_8,
+                engine_multi_get_projected_reads_gap_32: engine.multi_get_projected_reads_gap_32,
+                engine_multi_get_projected_read_bytes_gap_32: engine
+                    .multi_get_projected_read_bytes_gap_32,
+                engine_multi_get_projected_reads_gap_128: engine.multi_get_projected_reads_gap_128,
+                engine_multi_get_projected_read_bytes_gap_128: engine
+                    .multi_get_projected_read_bytes_gap_128,
+                engine_multi_get_metrics_available: true,
             }
         });
         let process = process_metrics();

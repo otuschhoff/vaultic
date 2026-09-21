@@ -3,12 +3,10 @@ mod tests {
     //! Storage persistence and generation authority tests.
 
     use super::*;
-    use std::{collections::HashMap, env};
     use slatedb::object_store::{path::Path, ObjectStoreExt};
     use slatedb_common::metrics::{MetricsRecorder, LATENCY_BOUNDARIES};
-    use vaulticdb::encryption::envelope::{
-        EncryptionConfig, EncryptionMode, ProviderCredentials,
-    };
+    use std::{collections::HashMap, env};
+    use vaulticdb::encryption::envelope::{EncryptionConfig, EncryptionMode, ProviderCredentials};
 
     static STORAGE_FAILPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -121,7 +119,10 @@ mod tests {
         }
         .settings();
 
-        assert_eq!(settings.flush_interval, Some(std::time::Duration::from_millis(500)));
+        assert_eq!(
+            settings.flush_interval,
+            Some(std::time::Duration::from_millis(500))
+        );
         assert_eq!(settings.max_unflushed_bytes, 4 * 1024 * 1024 * 1024);
         assert_eq!(settings.l0_sst_size_bytes, defaults.l0_sst_size_bytes);
     }
@@ -198,19 +199,24 @@ mod tests {
         let storage = Storage::open(&repository_id, &config).await.unwrap();
 
         assert!(!storage.object_store.to_string().contains("role-aware"));
-        assert!(!storage.coordination_store.to_string().contains("role-aware"));
-        assert!(storage
-            .write_batch(&WriteBatchRequest {
-                puts: vec![KeyValue {
-                    key: b"key".to_vec(),
-                    value: b"value".to_vec(),
-                }],
-                await_durable: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .durable);
+        assert!(!storage
+            .coordination_store
+            .to_string()
+            .contains("role-aware"));
+        assert!(
+            storage
+                .write_batch(&WriteBatchRequest {
+                    puts: vec![KeyValue {
+                        key: b"key".to_vec(),
+                        value: b"value".to_vec(),
+                    }],
+                    await_durable: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .durable
+        );
         assert_eq!(storage.get(b"key", "").await.unwrap().value, b"value");
 
         for snapshot in [
@@ -236,12 +242,14 @@ mod tests {
         assert_eq!(engine.write_ops, 0);
         assert_eq!(engine.batch_write_queue.completed, 0);
         assert_eq!(engine.batch_write_service.completed, 0);
-        assert!(!storage
-            .attribution
-            .object_store_main
-            .snapshot()
-            .put
-            .transferred_bytes_available);
+        assert!(
+            !storage
+                .attribution
+                .object_store_main
+                .snapshot()
+                .put
+                .transferred_bytes_available
+        );
         storage.close().await.unwrap();
     }
 
@@ -339,8 +347,7 @@ mod tests {
     async fn dedicated_wal_inventory_failure_precedes_cache_startup() {
         let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let repository_id = format!("failed-wal-inventory-cache-{}", rand::random::<u64>());
-        let mut config =
-            cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
         config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
         arm_storage_failpoint(StorageFailpoint::InventoryWal);
 
@@ -427,8 +434,7 @@ mod tests {
         let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let repository_id = format!("failed-reader-epoch-cache-{}", rand::random::<u64>());
         let root = std::env::temp_dir().join(&repository_id);
-        let mut config =
-            cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
         config.object_store = ObjectStoreConfig::Local { root: root.clone() };
         Storage::open(&repository_id, &config)
             .await
@@ -469,10 +475,18 @@ mod tests {
         .await
         .unwrap();
         let mut compacted = std::collections::HashSet::new();
-        for (key, value) in [(b"first".as_slice(), b"one".as_slice()), (b"second", b"two")] {
+        for (key, value) in [
+            (b"first".as_slice(), b"one".as_slice()),
+            (b"second", b"two"),
+        ] {
             let mut batch = WriteBatch::new();
             batch.put(key, value);
-            db.write(batch).await.unwrap().await_durable().await.unwrap();
+            db.write(batch)
+                .await
+                .unwrap()
+                .await_durable()
+                .await
+                .unwrap();
             db.flush_with_options(FlushOptions {
                 flush_type: FlushType::MemTable,
             })
@@ -490,7 +504,10 @@ mod tests {
             compacted.extend(observed);
         }
         db.close().await.unwrap();
-        assert!(compacted.len() >= 2, "each flush must publish a fresh compacted SST identity");
+        assert!(
+            compacted.len() >= 2,
+            "each flush must publish a fresh compacted SST identity"
+        );
     }
 
     #[tokio::test]
@@ -509,7 +526,12 @@ mod tests {
         .unwrap();
         let mut batch = WriteBatch::new();
         batch.put(b"key", b"value");
-        db.write(batch).await.unwrap().await_durable().await.unwrap();
+        db.write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         db.close().await.unwrap();
 
         let counter = |name, outcome| {
@@ -584,6 +606,30 @@ mod tests {
             slatedb::db_stats::OUTCOME_CANCELLATION,
         )
         .increment(5);
+        for (name, value) in [
+            (slatedb::db_stats::MULTI_GET_CALLS, 6),
+            (slatedb::db_stats::MULTI_GET_INPUT_KEYS, 7),
+            (slatedb::db_stats::MULTI_GET_UNIQUE_KEYS, 8),
+            (slatedb::db_stats::MULTI_GET_SST_VISITS, 9),
+            (slatedb::db_stats::MULTI_GET_CANDIDATE_KEYS, 10),
+            (slatedb::db_stats::MULTI_GET_NEEDED_BLOCKS, 11),
+            (slatedb::db_stats::MULTI_GET_COALESCED_READS, 12),
+            (slatedb::db_stats::MULTI_GET_NEEDED_BLOCK_BYTES, 13),
+            (slatedb::db_stats::MULTI_GET_COALESCED_READ_BYTES, 14),
+            (slatedb::db_stats::MULTI_GET_PROJECTED_READS_GAP_8, 15),
+            (slatedb::db_stats::MULTI_GET_PROJECTED_READ_BYTES_GAP_8, 16),
+            (slatedb::db_stats::MULTI_GET_PROJECTED_READS_GAP_32, 17),
+            (slatedb::db_stats::MULTI_GET_PROJECTED_READ_BYTES_GAP_32, 18),
+            (slatedb::db_stats::MULTI_GET_PROJECTED_READS_GAP_128, 19),
+            (
+                slatedb::db_stats::MULTI_GET_PROJECTED_READ_BYTES_GAP_128,
+                20,
+            ),
+        ] {
+            engine_metrics
+                .register_counter(name, "", &[])
+                .increment(value);
+        }
         engine_metrics
             .register_up_down_counter(slatedb::db_stats::BATCH_WRITE_SERVICE_ACTIVE, "", &[])
             .increment(1);
@@ -595,17 +641,27 @@ mod tests {
             )
             .set(now_unix_ms.saturating_add(60_000));
 
-        let mut storage = transition_storage(
-            Database::Writer(db),
-            database,
-            object_store,
-            1,
-        );
+        let mut storage = transition_storage(Database::Writer(db), database, object_store, 1);
         storage.engine_metrics = Some(engine_metrics);
         let engine = storage.engine_metrics_snapshot();
         assert_eq!(engine.write_batches, 1);
         assert_eq!(engine.write_ops, 1);
         assert!(engine.memtable_write_bytes > 0);
+        assert_eq!(engine.multi_get_calls, 6);
+        assert_eq!(engine.multi_get_input_keys, 7);
+        assert_eq!(engine.multi_get_unique_keys, 8);
+        assert_eq!(engine.multi_get_sst_visits, 9);
+        assert_eq!(engine.multi_get_candidate_keys, 10);
+        assert_eq!(engine.multi_get_needed_blocks, 11);
+        assert_eq!(engine.multi_get_coalesced_reads, 12);
+        assert_eq!(engine.multi_get_needed_block_bytes, 13);
+        assert_eq!(engine.multi_get_coalesced_read_bytes, 14);
+        assert_eq!(engine.multi_get_projected_reads_gap_8, 15);
+        assert_eq!(engine.multi_get_projected_read_bytes_gap_8, 16);
+        assert_eq!(engine.multi_get_projected_reads_gap_32, 17);
+        assert_eq!(engine.multi_get_projected_read_bytes_gap_32, 18);
+        assert_eq!(engine.multi_get_projected_reads_gap_128, 19);
+        assert_eq!(engine.multi_get_projected_read_bytes_gap_128, 20);
         assert_eq!(engine.backpressure.active, 2);
         assert!((4_000..=20_000).contains(&engine.backpressure.oldest_active_us));
         assert_eq!(engine.backpressure.completed, 2);
@@ -626,7 +682,14 @@ mod tests {
         assert_eq!(engine.batch_write_queue.cancellations, 3);
         assert_eq!(engine.batch_write_queue.completed, 1);
         assert_eq!(engine.batch_write_queue.latency_bucket_upper_us.len(), 13);
-        assert_eq!(engine.batch_write_queue.latency_bucket_counts.iter().sum::<u64>(), 1);
+        assert_eq!(
+            engine
+                .batch_write_queue
+                .latency_bucket_counts
+                .iter()
+                .sum::<u64>(),
+            1
+        );
         assert_eq!(engine.batch_write_service.successes, 1);
         assert_eq!(engine.batch_write_service.failures, 4);
         assert_eq!(engine.batch_write_service.cancellations, 5);
@@ -634,7 +697,14 @@ mod tests {
         assert_eq!(engine.batch_write_service.oldest_active_us, 0);
         assert_eq!(engine.batch_write_service.completed, 1);
         assert_eq!(engine.batch_write_service.latency_bucket_upper_us.len(), 13);
-        assert_eq!(engine.batch_write_service.latency_bucket_counts.iter().sum::<u64>(), 1);
+        assert_eq!(
+            engine
+                .batch_write_service
+                .latency_bucket_counts
+                .iter()
+                .sum::<u64>(),
+            1
+        );
         assert_eq!(oldest_active_age_us(0, 100), 0);
         assert_eq!(oldest_active_age_us(101, 100), 0);
     }
@@ -689,19 +759,26 @@ mod tests {
     async fn failed_promotion_open_releases_claim_and_recovers_reader() {
         let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("failed-promotion-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         writer.close().await.unwrap();
-        let reader = open_reader(&path, object_store.clone(), None).await.unwrap();
-        let storage = transition_storage(Database::Reader(reader), path.clone(), object_store.clone(), 1);
+        let reader = open_reader(&path, object_store.clone(), None)
+            .await
+            .unwrap();
+        let storage = transition_storage(
+            Database::Reader(reader),
+            path.clone(),
+            object_store.clone(),
+            1,
+        );
 
         arm_storage_failpoint(StorageFailpoint::OpenWriter(path.clone()));
         let failure = storage.promote(Some(1)).await.unwrap_err();
@@ -709,8 +786,14 @@ mod tests {
         assert_eq!(failure.database, DatabaseState::Reader);
         assert!(!failure.claim_held);
         assert_eq!(failure.epoch, 2);
-        assert_eq!(active_writer_epoch(object_store.as_ref()).await.unwrap(), None);
-        assert!(matches!(&*storage.database.read().await, Database::Reader(_)));
+        assert_eq!(
+            active_writer_epoch(object_store.as_ref()).await.unwrap(),
+            None
+        );
+        assert!(matches!(
+            &*storage.database.read().await,
+            Database::Reader(_)
+        ));
         storage.close().await.unwrap();
     }
 
@@ -718,46 +801,55 @@ mod tests {
     async fn failed_demotion_release_keeps_reader_and_reports_claim() {
         let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("failed-demotion-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
 
-        arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaim(
-            object_store.as_ref() as *const dyn ObjectStore as *const () as usize,
-        ));
+        arm_storage_failpoint(StorageFailpoint::ReleaseWriterClaim(object_store.as_ref()
+            as *const dyn ObjectStore
+            as *const ()
+            as usize));
         let failure = storage.demote().await.unwrap_err();
 
         assert_eq!(failure.database, DatabaseState::Reader);
         assert!(failure.claim_held);
         assert_eq!(failure.epoch, 1);
-        assert_eq!(active_writer_epoch(object_store.as_ref()).await.unwrap(), Some(1));
-        assert!(matches!(&*storage.database.read().await, Database::Reader(_)));
+        assert_eq!(
+            active_writer_epoch(object_store.as_ref()).await.unwrap(),
+            Some(1)
+        );
+        assert!(matches!(
+            &*storage.database.read().await,
+            Database::Reader(_)
+        ));
         storage.close().await.unwrap();
-        release_writer_claim(object_store.as_ref(), 1).await.unwrap();
+        release_writer_claim(object_store.as_ref(), 1)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn failed_commit_reports_consumed_transaction() {
         let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("failed-commit-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         assert_eq!(storage.transactions.read().await.len(), 1);
@@ -784,17 +876,18 @@ mod tests {
     async fn deferred_commit_requires_rebuild_reset_and_skips_durability_wait() {
         let _failpoint_guard = STORAGE_FAILPOINT_TEST_LOCK.lock().await;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("deferred-commit-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
-        let mut storage = transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
+        let mut storage =
+            transition_storage(Database::Writer(writer), path.clone(), object_store, 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
             .write_batch(&WriteBatchRequest {
@@ -819,11 +912,13 @@ mod tests {
 
         storage.metadata_rebuild_reset = true;
         arm_storage_failpoint(StorageFailpoint::BeforeTransactionDurability(path.clone()));
-        assert!(storage
-            .commit(&transaction_id, "", true, false)
-            .await
-            .unwrap()
-            .consumed);
+        assert!(
+            storage
+                .commit(&transaction_id, "", true, false)
+                .await
+                .unwrap()
+                .consumed
+        );
         assert_eq!(storage.last_durable_sequence.load(Ordering::Acquire), 0);
         assert_eq!(storage.attribution.durable_wait.snapshot().attempts, 0);
 
@@ -855,18 +950,15 @@ mod tests {
     async fn token_required_commit_rejects_memory_wal_before_consumption() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(
-            claim_writer_epoch(object_store.as_ref(), None).await.unwrap(),
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
             Some(1)
         );
         let path = format!("memory-token-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let mut storage = transition_storage(Database::Writer(writer), path, object_store, 1);
         storage.metadata_rebuild_reset = true;
         storage.wal_target = "memory";
@@ -892,13 +984,19 @@ mod tests {
         assert_eq!(storage.transactions.read().await.len(), 1);
         assert_eq!(storage.read_value(b"memory-token").await.unwrap(), None);
 
-        assert!(storage
-            .commit(&transaction_id, "", true, false)
-            .await
-            .unwrap()
-            .consumed);
+        assert!(
+            storage
+                .commit(&transaction_id, "", true, false)
+                .await
+                .unwrap()
+                .consumed
+        );
         assert_eq!(
-            storage.read_value(b"memory-token").await.unwrap().as_deref(),
+            storage
+                .read_value(b"memory-token")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(&b"value"[..])
         );
         storage.close().await.unwrap();
@@ -907,19 +1005,26 @@ mod tests {
     #[tokio::test]
     async fn writer_fence_check_distinguishes_a_stale_claim() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("stale-fence-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
-        release_writer_claim(object_store.as_ref(), 1).await.unwrap();
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(2));
+        release_writer_claim(object_store.as_ref(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(2)
+        );
 
         assert!(matches!(
             storage.ensure_writer_fence().await,
@@ -927,7 +1032,9 @@ mod tests {
         ));
         assert!(storage.close().await.is_err());
         assert_eq!(storage.attribution.finalization.snapshot().failures, 1);
-        release_writer_claim(object_store.as_ref(), 2).await.unwrap();
+        release_writer_claim(object_store.as_ref(), 2)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -996,7 +1103,10 @@ mod tests {
         let pending_store = store.clone();
         let pending = tokio::spawn(async move {
             pending_store
-                .put(&Path::from("stalled"), Bytes::from_static(b"payload").into())
+                .put(
+                    &Path::from("stalled"),
+                    Bytes::from_static(b"payload").into(),
+                )
                 .await
         });
         controlled.put_started.notified().await;
@@ -1090,12 +1200,12 @@ mod tests {
             .unwrap();
 
         let mut wal_options = PutOptions::default();
-        wal_options.extensions.insert(
-            slatedb::object_store_tag::ObjectStoreCallTag::new(
+        wal_options
+            .extensions
+            .insert(slatedb::object_store_tag::ObjectStoreCallTag::new(
                 slatedb::object_store_tag::TableStoreKind::Main,
                 slatedb::object_store_tag::SstType::Wal,
-            ),
-        );
+            ));
         let wal_started = Instant::now();
         main.put_opts(
             &Path::from("database/wal/0001.sst"),
@@ -1134,7 +1244,10 @@ mod tests {
         let result = store.get(&Path::from("object")).await.unwrap();
         assert!(response_started.elapsed() < std::time::Duration::from_millis(20));
         let body_started = Instant::now();
-        assert_eq!(result.bytes().await.unwrap(), Bytes::from_static(b"payload"));
+        assert_eq!(
+            result.bytes().await.unwrap(),
+            Bytes::from_static(b"payload")
+        );
         assert!(body_started.elapsed() >= std::time::Duration::from_millis(25));
 
         let list_profile = Arc::new(
@@ -1174,11 +1287,17 @@ mod tests {
             Some(profile),
         );
         store
-            .put(&Path::from("cancelled"), Bytes::from_static(b"cancelled").into())
+            .put(
+                &Path::from("cancelled"),
+                Bytes::from_static(b"cancelled").into(),
+            )
             .await
             .unwrap();
         store
-            .put(&Path::from("after-cancel"), Bytes::from_static(b"available").into())
+            .put(
+                &Path::from("after-cancel"),
+                Bytes::from_static(b"available").into(),
+            )
             .await
             .unwrap();
         let result = store.get(&Path::from("cancelled")).await.unwrap();
@@ -1188,13 +1307,10 @@ mod tests {
         assert!(pending.await.unwrap_err().is_cancelled());
 
         let result = store.get(&Path::from("after-cancel")).await.unwrap();
-        let bytes = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            result.bytes(),
-        )
-        .await
-        .expect("cancelled body released shared capacity")
-        .unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_millis(500), result.bytes())
+            .await
+            .expect("cancelled body released shared capacity")
+            .unwrap();
         assert_eq!(bytes, Bytes::from_static(b"available"));
     }
 
@@ -1343,7 +1459,9 @@ mod tests {
     #[tokio::test]
     async fn durability_fence_rejects_future_sequence_and_propagates_wal_failure() {
         let failed = WriteHandle::new(7, 0, || async {
-            Err(slatedb::Error::unavailable("injected WAL failure".to_owned()))
+            Err(slatedb::Error::unavailable(
+                "injected WAL failure".to_owned(),
+            ))
         });
         let latest = Mutex::new(Some(failed));
         let durable = AtomicU64::new(0);
@@ -1374,25 +1492,24 @@ mod tests {
     async fn durability_fence_rejects_generation_change_during_wait() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(
-            claim_writer_epoch(object_store.as_ref(), None).await.unwrap(),
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
             Some(1)
         );
         let path = format!("generation-fence-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = Arc::new(transition_storage(
             Database::Writer(writer),
             path,
             object_store.clone(),
             1,
         ));
-        storage.last_applied_engine_sequence.store(10, Ordering::Release);
+        storage
+            .last_applied_engine_sequence
+            .store(10, Ordering::Release);
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let handle = WriteHandle::new(10, 0, {
@@ -1473,12 +1590,12 @@ mod tests {
             .is_err());
 
         let mut wal_options = PutOptions::default();
-        wal_options.extensions.insert(
-            slatedb::object_store_tag::ObjectStoreCallTag::new(
+        wal_options
+            .extensions
+            .insert(slatedb::object_store_tag::ObjectStoreCallTag::new(
                 slatedb::object_store_tag::TableStoreKind::Main,
                 slatedb::object_store_tag::SstType::Wal,
-            ),
-        );
+            ));
         main.put_opts(
             &Path::from("database/wal/0001.sst"),
             Bytes::from_static(b"wal-data").into(),
@@ -1494,7 +1611,10 @@ mod tests {
             .unwrap();
         controlled
             .inner
-            .put(&Path::from("main-delete"), Bytes::from_static(b"main").into())
+            .put(
+                &Path::from("main-delete"),
+                Bytes::from_static(b"main").into(),
+            )
             .await
             .unwrap();
         controlled
@@ -1519,24 +1639,25 @@ mod tests {
         assert!(mixed_delete[0].is_err());
         assert!(mixed_delete[1].is_ok());
         let mut cancelled_delete = main.delete_stream(
-            futures_util::stream::once(async {
-                Ok(Path::from("database/wal/cancelled.sst"))
-            })
-            .chain(futures_util::stream::pending())
-            .boxed(),
+            futures_util::stream::once(async { Ok(Path::from("database/wal/cancelled.sst")) })
+                .chain(futures_util::stream::pending())
+                .boxed(),
         );
         assert!(futures_util::poll!(&mut cancelled_delete.next()).is_ready());
         assert_eq!(wal_metrics.snapshot().delete.timing.active, 1);
         assert!(futures_util::poll!(&mut cancelled_delete.next()).is_pending());
         drop(cancelled_delete);
 
-        let body = main.get(&Path::from("main")).await.unwrap().bytes().await.unwrap();
-        assert_eq!(body, Bytes::from_static(b"main-data"));
-
-        let mut upload = main
-            .put_multipart(&Path::from("multipart"))
+        let body = main
+            .get(&Path::from("main"))
+            .await
+            .unwrap()
+            .bytes()
             .await
             .unwrap();
+        assert_eq!(body, Bytes::from_static(b"main-data"));
+
+        let mut upload = main.put_multipart(&Path::from("multipart")).await.unwrap();
         upload
             .put_part(Bytes::from_static(b"part-one").into())
             .await
@@ -1594,12 +1715,9 @@ mod tests {
             .unwrap();
         let (wal, metrics) = monitored_wal_store(raw).await.unwrap();
 
-        wal.copy(
-            &Path::from("staging/0001"),
-            &Path::from("wal/0001.sst"),
-        )
-        .await
-        .unwrap();
+        wal.copy(&Path::from("staging/0001"), &Path::from("wal/0001.sst"))
+            .await
+            .unwrap();
 
         let status = metrics.snapshot();
         assert_eq!(status.uploaded_bytes, 8);
@@ -1621,11 +1739,16 @@ mod tests {
             Some(wal.clone()),
             &SlateDbTuning::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut batch = WriteBatch::new();
         batch.put(b"wal-key", b"wal-value");
-        db.write(batch).await.unwrap().await_durable().await.unwrap();
+        db.write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         let status = wal_metrics.snapshot();
         assert!(status.uploaded_bytes > 0);
@@ -1645,16 +1768,21 @@ mod tests {
         let reader = open_reader(&path, main.clone(), Some(wal.clone()))
             .await
             .unwrap();
-        assert_eq!(reader.get(b"wal-key").await.unwrap().as_deref(), Some(&b"wal-value"[..]));
+        assert_eq!(
+            reader.get(b"wal-key").await.unwrap().as_deref(),
+            Some(&b"wal-value"[..])
+        );
         reader.close().await.unwrap();
         db.close().await.unwrap();
 
         ensure_wal_target_identity(main.as_ref(), "s3:bucket-a:wal", false)
             .await
             .unwrap();
-        assert!(ensure_wal_target_identity(main.as_ref(), "s3:bucket-b:wal", true)
-            .await
-            .is_err());
+        assert!(
+            ensure_wal_target_identity(main.as_ref(), "s3:bucket-b:wal", true)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1669,7 +1797,12 @@ mod tests {
             .unwrap();
         let mut batch = WriteBatch::new();
         batch.put(b"replayed-key", b"replayed-value");
-        db.write(batch).await.unwrap().await_durable().await.unwrap();
+        db.write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         db.close_with_options(slatedb::config::CloseOptions { flush_type: None })
             .await
             .unwrap();
@@ -1680,8 +1813,8 @@ mod tests {
             Some(wal.clone()),
             &SlateDbTuning::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let reader = DbReader::builder(path.as_str(), main)
             .with_wal_object_store(wal)
             .with_reader_mode(DbReaderMode::FollowLatest)
@@ -2083,16 +2216,16 @@ mod tests {
     async fn multi_get_preserves_transaction_order_and_response_limit() {
         for slatedb_multiget in [false, true] {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+            assert_eq!(
+                claim_writer_epoch(object_store.as_ref(), None)
+                    .await
+                    .unwrap(),
+                Some(1)
+            );
             let path = format!("multi-get-{}", rand::random::<u64>());
-            let writer = open_writer(
-                &path,
-                object_store.clone(),
-                None,
-                &SlateDbTuning::default(),
-            )
-            .await
-            .unwrap();
+            let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+                .await
+                .unwrap();
             let mut storage = transition_storage(Database::Writer(writer), path, object_store, 1);
             storage.slatedb_multiget = slatedb_multiget;
             assert!(storage
@@ -2111,7 +2244,11 @@ mod tests {
                 .await
                 .unwrap();
             let committed = storage
-                .multi_get(&[b"committed".to_vec(), b"missing".to_vec()], "", usize::MAX)
+                .multi_get(
+                    &[b"committed".to_vec(), b"missing".to_vec()],
+                    "",
+                    usize::MAX,
+                )
                 .await
                 .unwrap();
             assert_eq!(committed[0].value, b"stored");
@@ -2149,7 +2286,13 @@ mod tests {
             assert_eq!(results[0].value, b"value");
             assert!(!results[1].found);
             assert_eq!(results[2].value, b"value");
-            assert!(storage.get(b"present", &transaction_id).await.unwrap().found);
+            assert!(
+                storage
+                    .get(b"present", &transaction_id)
+                    .await
+                    .unwrap()
+                    .found
+            );
             assert!(!storage
                 .scan(b"present", b"", 1, &transaction_id)
                 .await
@@ -2157,15 +2300,106 @@ mod tests {
                 .entries
                 .is_empty());
 
-            let error = storage.multi_get(&keys, &transaction_id, 0).await.unwrap_err();
+            let error = storage
+                .multi_get(&keys, &transaction_id, 0)
+                .await
+                .unwrap_err();
             assert_eq!(error.code(), tonic::Code::ResourceExhausted);
             assert_eq!(
-                storage.attribution.transaction_slot_lock_wait.snapshot().completed,
+                storage
+                    .attribution
+                    .transaction_slot_lock_wait
+                    .snapshot()
+                    .completed,
                 5
             );
             storage.rollback(&transaction_id).await.unwrap();
             storage.close().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn slatedb_multi_get_reports_read_amplification() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        let path = format!("multi-get-metrics-{}", rand::random::<u64>());
+        let engine_metrics = Arc::new(DefaultMetricsRecorder::new());
+        let writer = open_writer_with_metrics(
+            &path,
+            object_store.clone(),
+            None,
+            &SlateDbTuning::default(),
+            engine_metrics.clone(),
+        )
+        .await
+        .unwrap();
+        writer
+            .put(b"present", b"value")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        writer
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        let mut storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+        storage.engine_metrics = Some(engine_metrics);
+        storage.slatedb_multiget = true;
+        let results = storage
+            .multi_get(
+                &[
+                    b"present".to_vec(),
+                    b"missing".to_vec(),
+                    b"present".to_vec(),
+                ],
+                "",
+                usize::MAX,
+            )
+            .await
+            .unwrap();
+        assert_eq!(results[0].value, b"value");
+        assert!(!results[1].found);
+        assert_eq!(results[2].value, b"value");
+
+        let engine = storage.engine_metrics_snapshot();
+        assert_eq!(engine.multi_get_calls, 1);
+        assert_eq!(engine.multi_get_input_keys, 3);
+        assert_eq!(engine.multi_get_unique_keys, 2);
+        assert!(engine.multi_get_sst_visits > 0);
+        assert!(engine.multi_get_candidate_keys > 0);
+        assert!(engine.multi_get_needed_blocks > 0);
+        assert!(engine.multi_get_coalesced_reads > 0);
+        assert!(engine.multi_get_needed_block_bytes > 0);
+        assert!(engine.multi_get_coalesced_read_bytes >= engine.multi_get_needed_block_bytes);
+        for (reads, bytes) in [
+            (
+                engine.multi_get_projected_reads_gap_8,
+                engine.multi_get_projected_read_bytes_gap_8,
+            ),
+            (
+                engine.multi_get_projected_reads_gap_32,
+                engine.multi_get_projected_read_bytes_gap_32,
+            ),
+            (
+                engine.multi_get_projected_reads_gap_128,
+                engine.multi_get_projected_read_bytes_gap_128,
+            ),
+        ] {
+            assert!(reads > 0);
+            assert!(reads <= engine.multi_get_coalesced_reads);
+            assert!(bytes >= engine.multi_get_coalesced_read_bytes);
+        }
+        storage.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -2180,7 +2414,9 @@ mod tests {
             .await
             .unwrap();
         db.close().await.unwrap();
-        let reader = open_reader(&path, object_store.clone(), None).await.unwrap();
+        let reader = open_reader(&path, object_store.clone(), None)
+            .await
+            .unwrap();
         let mut storage = transition_storage(Database::Reader(reader), path, object_store, 0);
         storage.slatedb_multiget = true;
 
@@ -2196,16 +2432,16 @@ mod tests {
     #[tokio::test]
     async fn expired_transactions_report_counter_reconciliation() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("expired-transaction-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
@@ -2225,16 +2461,16 @@ mod tests {
     #[tokio::test]
     async fn failed_begin_reports_transactions_pruned_before_failure() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("failed-begin-expiry-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store.clone(), 1);
         let transaction_id = storage.begin().await.unwrap().transaction_id;
         storage
@@ -2258,7 +2494,9 @@ mod tests {
         assert_eq!(failure.expired, 1);
         assert_eq!(storage.transactions.read().await.len(), 0);
         assert_eq!(storage.attribution.transaction_begin.snapshot().failures, 1);
-        release_writer_claim(object_store.as_ref(), 1).await.unwrap();
+        release_writer_claim(object_store.as_ref(), 1)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2348,18 +2586,21 @@ mod tests {
     #[tokio::test]
     async fn capsule_migration_intention_preserves_bytes_and_progress() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("migration-intent-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
-        storage.store_master_key(b"repository-key").await.unwrap_err();
+        storage
+            .store_master_key(b"repository-key")
+            .await
+            .unwrap_err();
         let capsule = b"exact capsule bytes\n".to_vec();
         let digest = format!("{:x}", Sha256::digest(&capsule));
         let intent = CapsuleMigrationIntent {
@@ -2374,13 +2615,19 @@ mod tests {
             mirror_path: None,
         };
         assert_eq!(
-            storage.store_capsule_migration_intent(&intent).await.unwrap(),
+            storage
+                .store_capsule_migration_intent(&intent)
+                .await
+                .unwrap(),
             intent
         );
         let mut progressed = storage.capsule_migration_intent().await.unwrap().unwrap();
         assert_eq!(progressed.capsule, capsule);
         progressed.local_path = Some("/capsules/recovery.json".to_owned());
-        storage.write_capsule_migration_intent(&progressed).await.unwrap();
+        storage
+            .write_capsule_migration_intent(&progressed)
+            .await
+            .unwrap();
         assert_eq!(
             storage
                 .finalize_capsule_migration(&digest)
@@ -2390,7 +2637,10 @@ mod tests {
             tonic::Code::FailedPrecondition
         );
         progressed.mirror_path = Some("meta:capsule-mirror".to_owned());
-        storage.write_capsule_migration_intent(&progressed).await.unwrap();
+        storage
+            .write_capsule_migration_intent(&progressed)
+            .await
+            .unwrap();
         assert_eq!(
             storage.capsule_migration_status().await.unwrap(),
             (Some(digest.clone()), None)
@@ -2406,17 +2656,22 @@ mod tests {
     #[tokio::test]
     async fn concurrent_capsule_migration_intentions_have_one_winner() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        assert_eq!(
+            claim_writer_epoch(object_store.as_ref(), None)
+                .await
+                .unwrap(),
+            Some(1)
+        );
         let path = format!("migration-race-{}", rand::random::<u64>());
-        let writer = open_writer(
-            &path,
-            object_store.clone(),
-            None,
-            &SlateDbTuning::default(),
-        )
-        .await
-        .unwrap();
-        let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
+        let storage = Arc::new(transition_storage(
+            Database::Writer(writer),
+            path,
+            object_store,
+            1,
+        ));
         let intent = |suffix: u8| {
             let capsule = vec![suffix; 32];
             CapsuleMigrationIntent {
@@ -2464,8 +2719,13 @@ mod tests {
                 .unwrap(),
             Some(2)
         );
-        assert!(release_writer_claim(object_store.as_ref(), 1).await.is_err());
-        assert_eq!(active_writer_epoch(object_store.as_ref()).await.unwrap(), Some(2));
+        assert!(release_writer_claim(object_store.as_ref(), 1)
+            .await
+            .is_err());
+        assert_eq!(
+            active_writer_epoch(object_store.as_ref()).await.unwrap(),
+            Some(2)
+        );
         assert!(claim_writer_epoch(object_store.as_ref(), Some(1))
             .await
             .is_err());
@@ -2523,9 +2783,7 @@ mod tests {
     async fn reader_validates_existing_encryption_policy_for_writer_takeover() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = format!("encrypted-reader-{}", rand::random::<u64>());
-        let db = Db::open(path.as_str(), object_store.clone())
-            .await
-            .unwrap();
+        let db = Db::open(path.as_str(), object_store.clone()).await.unwrap();
         let policy = EncryptionPolicy {
             format: 1,
             required: true,
@@ -2684,14 +2942,7 @@ mod tests {
         assert!(!storage.mutations_allowed("repo").await.unwrap());
 
         let activated = storage
-            .activate_generation(
-                "repo",
-                1,
-                2,
-                "candidate-2".into(),
-                "bb".repeat(32),
-                60_000,
-            )
+            .activate_generation("repo", 1, 2, "candidate-2".into(), "bb".repeat(32), 60_000)
             .await
             .unwrap();
         assert_eq!(activated.state, "post-activation");

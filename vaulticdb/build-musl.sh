@@ -43,7 +43,7 @@ cp "$repo_root/vaulticdb/target/$target/release/vaultic-key-custodian" "$out_dir
     "$out_dir/vaultic-key-custodian"
 {
     printf 'target=%s\n' "$target"
-    printf 'slatedb_revision=%s\n' 'fc68f09a25defb128edfd722ec82696492dbb692'
+    printf 'slatedb_revision=%s\n' 'f549d4af9e8a7e41f46c45f4f31095cc743a703a'
     printf 'rustc=%s\n' "$(rustup run "$toolchain" rustc --version)"
     printf 'cargo=%s\n' "$(rustup run "$toolchain" cargo --version)"
 } > "$out_dir/build-metadata.txt"

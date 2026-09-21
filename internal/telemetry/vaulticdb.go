@@ -224,6 +224,10 @@ func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
 	if attribution.EngineReadMetricsAvailable {
 		readAvailability = AvailabilityExact
 	}
+	multiGetAvailability := AvailabilityUnavailable
+	if attribution.EngineMultiGetMetricsAvailable {
+		multiGetAvailability = AvailabilityExact
+	}
 	metrics := []Metric{
 		counterMetric("engine_write_batches", "operations", attribution.EngineWriteBatches),
 		counterMetric("engine_write_operations", "operations", attribution.EngineWriteOps),
@@ -240,6 +244,21 @@ func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
 		{Name: "engine_filter_point_positives", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineFilterPointPositive},
 		{Name: "engine_filter_point_negatives", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineFilterPointNegative},
 		{Name: "engine_filter_point_false_positives", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineFilterPointFalsePositive},
+		{Name: "engine_multi_get_calls", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetCalls},
+		{Name: "engine_multi_get_input_keys", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetInputKeys},
+		{Name: "engine_multi_get_unique_keys", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetUniqueKeys},
+		{Name: "engine_multi_get_sst_visits", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetSSTVisits},
+		{Name: "engine_multi_get_candidate_keys", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetCandidateKeys},
+		{Name: "engine_multi_get_needed_blocks", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetNeededBlocks},
+		{Name: "engine_multi_get_coalesced_reads", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetCoalescedReads},
+		{Name: "engine_multi_get_needed_block_bytes", Kind: MetricCounter, Unit: "bytes", Availability: multiGetAvailability, Value: attribution.EngineMultiGetNeededBlockBytes},
+		{Name: "engine_multi_get_coalesced_read_bytes", Kind: MetricCounter, Unit: "bytes", Availability: multiGetAvailability, Value: attribution.EngineMultiGetCoalescedReadBytes},
+		{Name: "engine_multi_get_projected_reads_gap_8", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetProjectedReadsGap8},
+		{Name: "engine_multi_get_projected_read_bytes_gap_8", Kind: MetricCounter, Unit: "bytes", Availability: multiGetAvailability, Value: attribution.EngineMultiGetProjectedReadBytesGap8},
+		{Name: "engine_multi_get_projected_reads_gap_32", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetProjectedReadsGap32},
+		{Name: "engine_multi_get_projected_read_bytes_gap_32", Kind: MetricCounter, Unit: "bytes", Availability: multiGetAvailability, Value: attribution.EngineMultiGetProjectedReadBytesGap32},
+		{Name: "engine_multi_get_projected_reads_gap_128", Kind: MetricCounter, Unit: "operations", Availability: multiGetAvailability, Value: attribution.EngineMultiGetProjectedReadsGap128},
+		{Name: "engine_multi_get_projected_read_bytes_gap_128", Kind: MetricCounter, Unit: "bytes", Availability: multiGetAvailability, Value: attribution.EngineMultiGetProjectedReadBytesGap128},
 		gaugeMetric("engine_memtable_bytes", "bytes", attribution.EngineMemtableBytes),
 		gaugeMetric("engine_l0_sst_objects", "objects", attribution.EngineL0SSTCount),
 		gaugeMetric("engine_sst_objects", "objects", attribution.EngineSSTCount),

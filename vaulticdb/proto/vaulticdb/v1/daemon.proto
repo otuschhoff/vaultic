@@ -395,6 +395,22 @@ message AttributionSnapshot {
   uint64 engine_filter_point_negatives = 39;
   uint64 engine_filter_point_false_positives = 40;
   bool engine_read_metrics_available = 41;
+  uint64 engine_multi_get_calls = 42;
+  uint64 engine_multi_get_input_keys = 43;
+  uint64 engine_multi_get_unique_keys = 44;
+  uint64 engine_multi_get_sst_visits = 45;
+  uint64 engine_multi_get_candidate_keys = 46;
+  uint64 engine_multi_get_needed_blocks = 47;
+  uint64 engine_multi_get_coalesced_reads = 48;
+  uint64 engine_multi_get_needed_block_bytes = 49;
+  uint64 engine_multi_get_coalesced_read_bytes = 50;
+  uint64 engine_multi_get_projected_reads_gap_8 = 51;
+  uint64 engine_multi_get_projected_read_bytes_gap_8 = 52;
+  uint64 engine_multi_get_projected_reads_gap_32 = 53;
+  uint64 engine_multi_get_projected_read_bytes_gap_32 = 54;
+  uint64 engine_multi_get_projected_reads_gap_128 = 55;
+  uint64 engine_multi_get_projected_read_bytes_gap_128 = 56;
+  bool engine_multi_get_metrics_available = 57;
 }
 
 message DemoteWriterRequest {

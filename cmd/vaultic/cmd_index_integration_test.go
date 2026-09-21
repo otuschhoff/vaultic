@@ -163,6 +163,7 @@ func TestPhase34M2ImportCommitResponseSweep(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = client.Close(context.Background()) })
 		marker, found, err := client.Get(context.Background(), []byte("_vaultic/bulk-import-complete-v1"), "")
 		if err != nil || !found || string(marker) != "complete" {
 			t.Fatalf("bulk import completion marker: found=%t value=%q err=%v", found, marker, err)

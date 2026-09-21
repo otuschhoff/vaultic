@@ -29,12 +29,30 @@ func TestWriterStatusAttributionMapping(t *testing.T) {
 				Contentions:          4,
 				ActiveOverflow:       5,
 			},
-			AdmissionLockHold:        &vaulticdbv1.TimingSnapshot{Completed: 7},
-			EngineWriteBatches:       5,
-			EngineBackpressureCount:  2,
-			EngineCompactedBytes:     1024,
-			EngineMemtableWriteBytes: 2048,
-			EngineWalFlushBytes:      4096,
+			AdmissionLockHold:                       &vaulticdbv1.TimingSnapshot{Completed: 7},
+			EngineWriteBatches:                      5,
+			EngineBackpressureCount:                 2,
+			EngineCompactedBytes:                    1024,
+			EngineMemtableWriteBytes:                2048,
+			EngineWalFlushBytes:                     4096,
+			EngineGetKeys:                           11,
+			EngineMultiGetCalls:                     12,
+			EngineMultiGetInputKeys:                 13,
+			EngineMultiGetUniqueKeys:                14,
+			EngineMultiGetSstVisits:                 15,
+			EngineMultiGetCandidateKeys:             16,
+			EngineMultiGetNeededBlocks:              17,
+			EngineMultiGetCoalescedReads:            18,
+			EngineMultiGetNeededBlockBytes:          19,
+			EngineMultiGetCoalescedReadBytes:        20,
+			EngineMultiGetProjectedReadsGap_8:       21,
+			EngineMultiGetProjectedReadBytesGap_8:   22,
+			EngineMultiGetProjectedReadsGap_32:      23,
+			EngineMultiGetProjectedReadBytesGap_32:  24,
+			EngineMultiGetProjectedReadsGap_128:     25,
+			EngineMultiGetProjectedReadBytesGap_128: 26,
+			EngineReadMetricsAvailable:              true,
+			EngineMultiGetMetricsAvailable:          true,
 			EngineBackpressure: &vaulticdbv1.TimingSnapshot{
 				Attempts:             9,
 				Failures:             2,
@@ -99,6 +117,9 @@ func TestWriterStatusAttributionMapping(t *testing.T) {
 	}
 	if status.Attribution.EngineWriteBatches != 5 || status.Attribution.EngineBackpressureCount != 2 || status.Attribution.EngineCompactedBytes != 1024 || status.Attribution.EngineMemtableWriteBytes != 2048 || status.Attribution.EngineWALFlushBytes != 4096 {
 		t.Fatalf("engine snapshot = %+v", status.Attribution)
+	}
+	if status.Attribution.EngineGetKeys != 11 || status.Attribution.EngineMultiGetCalls != 12 || status.Attribution.EngineMultiGetInputKeys != 13 || status.Attribution.EngineMultiGetUniqueKeys != 14 || status.Attribution.EngineMultiGetSSTVisits != 15 || status.Attribution.EngineMultiGetCandidateKeys != 16 || status.Attribution.EngineMultiGetNeededBlocks != 17 || status.Attribution.EngineMultiGetCoalescedReads != 18 || status.Attribution.EngineMultiGetNeededBlockBytes != 19 || status.Attribution.EngineMultiGetCoalescedReadBytes != 20 || status.Attribution.EngineMultiGetProjectedReadsGap8 != 21 || status.Attribution.EngineMultiGetProjectedReadBytesGap8 != 22 || status.Attribution.EngineMultiGetProjectedReadsGap32 != 23 || status.Attribution.EngineMultiGetProjectedReadBytesGap32 != 24 || status.Attribution.EngineMultiGetProjectedReadsGap128 != 25 || status.Attribution.EngineMultiGetProjectedReadBytesGap128 != 26 || !status.Attribution.EngineReadMetricsAvailable || !status.Attribution.EngineMultiGetMetricsAvailable {
+		t.Fatalf("engine read snapshot = %+v", status.Attribution)
 	}
 	backpressure := status.Attribution.EngineBackpressure
 	if backpressure.Attempts != 9 || backpressure.Completed != 8 || backpressure.Successes != 5 || backpressure.Failures != 2 || backpressure.Cancellations != 1 || backpressure.Timeouts != 4 || backpressure.Active != 1 || backpressure.OldestActiveUS != 6000 || backpressure.TotalUS != 7000 || backpressure.MaxUS != 5000 || !reflect.DeepEqual(backpressure.LatencyBucketUpperUS, []uint64{1000, 5000}) || !reflect.DeepEqual(backpressure.LatencyBucketCounts, []uint64{3, 5}) {

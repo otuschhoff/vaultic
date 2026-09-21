@@ -3195,50 +3195,66 @@ func (x *ObjectStoreRoleSnapshot) GetBackgroundPressureAvailable() bool {
 }
 
 type AttributionSnapshot struct {
-	state                           protoimpl.MessageState   `protogen:"open.v1"`
-	AdmissionWait                   *TimingSnapshot          `protobuf:"bytes,1,opt,name=admission_wait,json=admissionWait,proto3" json:"admission_wait,omitempty"`
-	FenceCheck                      *TimingSnapshot          `protobuf:"bytes,2,opt,name=fence_check,json=fenceCheck,proto3" json:"fence_check,omitempty"`
-	WriteBatchRequest               *TimingSnapshot          `protobuf:"bytes,3,opt,name=write_batch_request,json=writeBatchRequest,proto3" json:"write_batch_request,omitempty"`
-	BeginRequest                    *TimingSnapshot          `protobuf:"bytes,4,opt,name=begin_request,json=beginRequest,proto3" json:"begin_request,omitempty"`
-	CommitRequest                   *TimingSnapshot          `protobuf:"bytes,5,opt,name=commit_request,json=commitRequest,proto3" json:"commit_request,omitempty"`
-	RollbackRequest                 *TimingSnapshot          `protobuf:"bytes,6,opt,name=rollback_request,json=rollbackRequest,proto3" json:"rollback_request,omitempty"`
-	TransactionBegin                *TimingSnapshot          `protobuf:"bytes,7,opt,name=transaction_begin,json=transactionBegin,proto3" json:"transaction_begin,omitempty"`
-	EngineSubmit                    *TimingSnapshot          `protobuf:"bytes,8,opt,name=engine_submit,json=engineSubmit,proto3" json:"engine_submit,omitempty"`
-	DurableWait                     *TimingSnapshot          `protobuf:"bytes,9,opt,name=durable_wait,json=durableWait,proto3" json:"durable_wait,omitempty"`
-	Finalization                    *TimingSnapshot          `protobuf:"bytes,10,opt,name=finalization,proto3" json:"finalization,omitempty"`
-	EngineWriteBatches              uint64                   `protobuf:"varint,11,opt,name=engine_write_batches,json=engineWriteBatches,proto3" json:"engine_write_batches,omitempty"`
-	EngineWriteOps                  uint64                   `protobuf:"varint,12,opt,name=engine_write_ops,json=engineWriteOps,proto3" json:"engine_write_ops,omitempty"`
-	EngineBackpressureCount         uint64                   `protobuf:"varint,13,opt,name=engine_backpressure_count,json=engineBackpressureCount,proto3" json:"engine_backpressure_count,omitempty"`
-	EngineImmutableMemtableFlushes  uint64                   `protobuf:"varint,14,opt,name=engine_immutable_memtable_flushes,json=engineImmutableMemtableFlushes,proto3" json:"engine_immutable_memtable_flushes,omitempty"`
-	EngineMemtableBytes             uint64                   `protobuf:"varint,15,opt,name=engine_memtable_bytes,json=engineMemtableBytes,proto3" json:"engine_memtable_bytes,omitempty"`
-	EngineL0SstCount                uint64                   `protobuf:"varint,16,opt,name=engine_l0_sst_count,json=engineL0SstCount,proto3" json:"engine_l0_sst_count,omitempty"`
-	EngineSstCount                  uint64                   `protobuf:"varint,17,opt,name=engine_sst_count,json=engineSstCount,proto3" json:"engine_sst_count,omitempty"`
-	EngineSortedRunCount            uint64                   `protobuf:"varint,18,opt,name=engine_sorted_run_count,json=engineSortedRunCount,proto3" json:"engine_sorted_run_count,omitempty"`
-	EngineL0FlushBytes              uint64                   `protobuf:"varint,19,opt,name=engine_l0_flush_bytes,json=engineL0FlushBytes,proto3" json:"engine_l0_flush_bytes,omitempty"`
-	EngineCompactedBytes            uint64                   `protobuf:"varint,20,opt,name=engine_compacted_bytes,json=engineCompactedBytes,proto3" json:"engine_compacted_bytes,omitempty"`
-	EngineCompactedSsts             uint64                   `protobuf:"varint,21,opt,name=engine_compacted_ssts,json=engineCompactedSsts,proto3" json:"engine_compacted_ssts,omitempty"`
-	EngineRunningCompactions        uint64                   `protobuf:"varint,22,opt,name=engine_running_compactions,json=engineRunningCompactions,proto3" json:"engine_running_compactions,omitempty"`
-	EngineL0StallsSstCount          uint64                   `protobuf:"varint,23,opt,name=engine_l0_stalls_sst_count,json=engineL0StallsSstCount,proto3" json:"engine_l0_stalls_sst_count,omitempty"`
-	EngineL0StallsSstsPerKey        uint64                   `protobuf:"varint,24,opt,name=engine_l0_stalls_ssts_per_key,json=engineL0StallsSstsPerKey,proto3" json:"engine_l0_stalls_ssts_per_key,omitempty"`
-	EngineMemtableWriteBytes        uint64                   `protobuf:"varint,25,opt,name=engine_memtable_write_bytes,json=engineMemtableWriteBytes,proto3" json:"engine_memtable_write_bytes,omitempty"`
-	EngineWalFlushBytes             uint64                   `protobuf:"varint,26,opt,name=engine_wal_flush_bytes,json=engineWalFlushBytes,proto3" json:"engine_wal_flush_bytes,omitempty"`
-	AdmissionLockHold               *TimingSnapshot          `protobuf:"bytes,27,opt,name=admission_lock_hold,json=admissionLockHold,proto3" json:"admission_lock_hold,omitempty"`
-	EngineBackpressure              *TimingSnapshot          `protobuf:"bytes,28,opt,name=engine_backpressure,json=engineBackpressure,proto3" json:"engine_backpressure,omitempty"`
-	EngineBatchWriteQueueDepth      uint64                   `protobuf:"varint,29,opt,name=engine_batch_write_queue_depth,json=engineBatchWriteQueueDepth,proto3" json:"engine_batch_write_queue_depth,omitempty"`
-	EngineBatchWriteQueue           *TimingSnapshot          `protobuf:"bytes,30,opt,name=engine_batch_write_queue,json=engineBatchWriteQueue,proto3" json:"engine_batch_write_queue,omitempty"`
-	EngineBatchWriteService         *TimingSnapshot          `protobuf:"bytes,31,opt,name=engine_batch_write_service,json=engineBatchWriteService,proto3" json:"engine_batch_write_service,omitempty"`
-	ObjectStoreMain                 *ObjectStoreRoleSnapshot `protobuf:"bytes,32,opt,name=object_store_main,json=objectStoreMain,proto3" json:"object_store_main,omitempty"`
-	ObjectStoreWal                  *ObjectStoreRoleSnapshot `protobuf:"bytes,33,opt,name=object_store_wal,json=objectStoreWal,proto3" json:"object_store_wal,omitempty"`
-	ObjectStoreCoordination         *ObjectStoreRoleSnapshot `protobuf:"bytes,34,opt,name=object_store_coordination,json=objectStoreCoordination,proto3" json:"object_store_coordination,omitempty"`
-	TransactionMapLockWait          *TimingSnapshot          `protobuf:"bytes,35,opt,name=transaction_map_lock_wait,json=transactionMapLockWait,proto3" json:"transaction_map_lock_wait,omitempty"`
-	TransactionSlotLockWait         *TimingSnapshot          `protobuf:"bytes,36,opt,name=transaction_slot_lock_wait,json=transactionSlotLockWait,proto3" json:"transaction_slot_lock_wait,omitempty"`
-	EngineGetKeys                   uint64                   `protobuf:"varint,37,opt,name=engine_get_keys,json=engineGetKeys,proto3" json:"engine_get_keys,omitempty"`
-	EngineFilterPointPositives      uint64                   `protobuf:"varint,38,opt,name=engine_filter_point_positives,json=engineFilterPointPositives,proto3" json:"engine_filter_point_positives,omitempty"`
-	EngineFilterPointNegatives      uint64                   `protobuf:"varint,39,opt,name=engine_filter_point_negatives,json=engineFilterPointNegatives,proto3" json:"engine_filter_point_negatives,omitempty"`
-	EngineFilterPointFalsePositives uint64                   `protobuf:"varint,40,opt,name=engine_filter_point_false_positives,json=engineFilterPointFalsePositives,proto3" json:"engine_filter_point_false_positives,omitempty"`
-	EngineReadMetricsAvailable      bool                     `protobuf:"varint,41,opt,name=engine_read_metrics_available,json=engineReadMetricsAvailable,proto3" json:"engine_read_metrics_available,omitempty"`
-	unknownFields                   protoimpl.UnknownFields
-	sizeCache                       protoimpl.SizeCache
+	state                                   protoimpl.MessageState   `protogen:"open.v1"`
+	AdmissionWait                           *TimingSnapshot          `protobuf:"bytes,1,opt,name=admission_wait,json=admissionWait,proto3" json:"admission_wait,omitempty"`
+	FenceCheck                              *TimingSnapshot          `protobuf:"bytes,2,opt,name=fence_check,json=fenceCheck,proto3" json:"fence_check,omitempty"`
+	WriteBatchRequest                       *TimingSnapshot          `protobuf:"bytes,3,opt,name=write_batch_request,json=writeBatchRequest,proto3" json:"write_batch_request,omitempty"`
+	BeginRequest                            *TimingSnapshot          `protobuf:"bytes,4,opt,name=begin_request,json=beginRequest,proto3" json:"begin_request,omitempty"`
+	CommitRequest                           *TimingSnapshot          `protobuf:"bytes,5,opt,name=commit_request,json=commitRequest,proto3" json:"commit_request,omitempty"`
+	RollbackRequest                         *TimingSnapshot          `protobuf:"bytes,6,opt,name=rollback_request,json=rollbackRequest,proto3" json:"rollback_request,omitempty"`
+	TransactionBegin                        *TimingSnapshot          `protobuf:"bytes,7,opt,name=transaction_begin,json=transactionBegin,proto3" json:"transaction_begin,omitempty"`
+	EngineSubmit                            *TimingSnapshot          `protobuf:"bytes,8,opt,name=engine_submit,json=engineSubmit,proto3" json:"engine_submit,omitempty"`
+	DurableWait                             *TimingSnapshot          `protobuf:"bytes,9,opt,name=durable_wait,json=durableWait,proto3" json:"durable_wait,omitempty"`
+	Finalization                            *TimingSnapshot          `protobuf:"bytes,10,opt,name=finalization,proto3" json:"finalization,omitempty"`
+	EngineWriteBatches                      uint64                   `protobuf:"varint,11,opt,name=engine_write_batches,json=engineWriteBatches,proto3" json:"engine_write_batches,omitempty"`
+	EngineWriteOps                          uint64                   `protobuf:"varint,12,opt,name=engine_write_ops,json=engineWriteOps,proto3" json:"engine_write_ops,omitempty"`
+	EngineBackpressureCount                 uint64                   `protobuf:"varint,13,opt,name=engine_backpressure_count,json=engineBackpressureCount,proto3" json:"engine_backpressure_count,omitempty"`
+	EngineImmutableMemtableFlushes          uint64                   `protobuf:"varint,14,opt,name=engine_immutable_memtable_flushes,json=engineImmutableMemtableFlushes,proto3" json:"engine_immutable_memtable_flushes,omitempty"`
+	EngineMemtableBytes                     uint64                   `protobuf:"varint,15,opt,name=engine_memtable_bytes,json=engineMemtableBytes,proto3" json:"engine_memtable_bytes,omitempty"`
+	EngineL0SstCount                        uint64                   `protobuf:"varint,16,opt,name=engine_l0_sst_count,json=engineL0SstCount,proto3" json:"engine_l0_sst_count,omitempty"`
+	EngineSstCount                          uint64                   `protobuf:"varint,17,opt,name=engine_sst_count,json=engineSstCount,proto3" json:"engine_sst_count,omitempty"`
+	EngineSortedRunCount                    uint64                   `protobuf:"varint,18,opt,name=engine_sorted_run_count,json=engineSortedRunCount,proto3" json:"engine_sorted_run_count,omitempty"`
+	EngineL0FlushBytes                      uint64                   `protobuf:"varint,19,opt,name=engine_l0_flush_bytes,json=engineL0FlushBytes,proto3" json:"engine_l0_flush_bytes,omitempty"`
+	EngineCompactedBytes                    uint64                   `protobuf:"varint,20,opt,name=engine_compacted_bytes,json=engineCompactedBytes,proto3" json:"engine_compacted_bytes,omitempty"`
+	EngineCompactedSsts                     uint64                   `protobuf:"varint,21,opt,name=engine_compacted_ssts,json=engineCompactedSsts,proto3" json:"engine_compacted_ssts,omitempty"`
+	EngineRunningCompactions                uint64                   `protobuf:"varint,22,opt,name=engine_running_compactions,json=engineRunningCompactions,proto3" json:"engine_running_compactions,omitempty"`
+	EngineL0StallsSstCount                  uint64                   `protobuf:"varint,23,opt,name=engine_l0_stalls_sst_count,json=engineL0StallsSstCount,proto3" json:"engine_l0_stalls_sst_count,omitempty"`
+	EngineL0StallsSstsPerKey                uint64                   `protobuf:"varint,24,opt,name=engine_l0_stalls_ssts_per_key,json=engineL0StallsSstsPerKey,proto3" json:"engine_l0_stalls_ssts_per_key,omitempty"`
+	EngineMemtableWriteBytes                uint64                   `protobuf:"varint,25,opt,name=engine_memtable_write_bytes,json=engineMemtableWriteBytes,proto3" json:"engine_memtable_write_bytes,omitempty"`
+	EngineWalFlushBytes                     uint64                   `protobuf:"varint,26,opt,name=engine_wal_flush_bytes,json=engineWalFlushBytes,proto3" json:"engine_wal_flush_bytes,omitempty"`
+	AdmissionLockHold                       *TimingSnapshot          `protobuf:"bytes,27,opt,name=admission_lock_hold,json=admissionLockHold,proto3" json:"admission_lock_hold,omitempty"`
+	EngineBackpressure                      *TimingSnapshot          `protobuf:"bytes,28,opt,name=engine_backpressure,json=engineBackpressure,proto3" json:"engine_backpressure,omitempty"`
+	EngineBatchWriteQueueDepth              uint64                   `protobuf:"varint,29,opt,name=engine_batch_write_queue_depth,json=engineBatchWriteQueueDepth,proto3" json:"engine_batch_write_queue_depth,omitempty"`
+	EngineBatchWriteQueue                   *TimingSnapshot          `protobuf:"bytes,30,opt,name=engine_batch_write_queue,json=engineBatchWriteQueue,proto3" json:"engine_batch_write_queue,omitempty"`
+	EngineBatchWriteService                 *TimingSnapshot          `protobuf:"bytes,31,opt,name=engine_batch_write_service,json=engineBatchWriteService,proto3" json:"engine_batch_write_service,omitempty"`
+	ObjectStoreMain                         *ObjectStoreRoleSnapshot `protobuf:"bytes,32,opt,name=object_store_main,json=objectStoreMain,proto3" json:"object_store_main,omitempty"`
+	ObjectStoreWal                          *ObjectStoreRoleSnapshot `protobuf:"bytes,33,opt,name=object_store_wal,json=objectStoreWal,proto3" json:"object_store_wal,omitempty"`
+	ObjectStoreCoordination                 *ObjectStoreRoleSnapshot `protobuf:"bytes,34,opt,name=object_store_coordination,json=objectStoreCoordination,proto3" json:"object_store_coordination,omitempty"`
+	TransactionMapLockWait                  *TimingSnapshot          `protobuf:"bytes,35,opt,name=transaction_map_lock_wait,json=transactionMapLockWait,proto3" json:"transaction_map_lock_wait,omitempty"`
+	TransactionSlotLockWait                 *TimingSnapshot          `protobuf:"bytes,36,opt,name=transaction_slot_lock_wait,json=transactionSlotLockWait,proto3" json:"transaction_slot_lock_wait,omitempty"`
+	EngineGetKeys                           uint64                   `protobuf:"varint,37,opt,name=engine_get_keys,json=engineGetKeys,proto3" json:"engine_get_keys,omitempty"`
+	EngineFilterPointPositives              uint64                   `protobuf:"varint,38,opt,name=engine_filter_point_positives,json=engineFilterPointPositives,proto3" json:"engine_filter_point_positives,omitempty"`
+	EngineFilterPointNegatives              uint64                   `protobuf:"varint,39,opt,name=engine_filter_point_negatives,json=engineFilterPointNegatives,proto3" json:"engine_filter_point_negatives,omitempty"`
+	EngineFilterPointFalsePositives         uint64                   `protobuf:"varint,40,opt,name=engine_filter_point_false_positives,json=engineFilterPointFalsePositives,proto3" json:"engine_filter_point_false_positives,omitempty"`
+	EngineReadMetricsAvailable              bool                     `protobuf:"varint,41,opt,name=engine_read_metrics_available,json=engineReadMetricsAvailable,proto3" json:"engine_read_metrics_available,omitempty"`
+	EngineMultiGetCalls                     uint64                   `protobuf:"varint,42,opt,name=engine_multi_get_calls,json=engineMultiGetCalls,proto3" json:"engine_multi_get_calls,omitempty"`
+	EngineMultiGetInputKeys                 uint64                   `protobuf:"varint,43,opt,name=engine_multi_get_input_keys,json=engineMultiGetInputKeys,proto3" json:"engine_multi_get_input_keys,omitempty"`
+	EngineMultiGetUniqueKeys                uint64                   `protobuf:"varint,44,opt,name=engine_multi_get_unique_keys,json=engineMultiGetUniqueKeys,proto3" json:"engine_multi_get_unique_keys,omitempty"`
+	EngineMultiGetSstVisits                 uint64                   `protobuf:"varint,45,opt,name=engine_multi_get_sst_visits,json=engineMultiGetSstVisits,proto3" json:"engine_multi_get_sst_visits,omitempty"`
+	EngineMultiGetCandidateKeys             uint64                   `protobuf:"varint,46,opt,name=engine_multi_get_candidate_keys,json=engineMultiGetCandidateKeys,proto3" json:"engine_multi_get_candidate_keys,omitempty"`
+	EngineMultiGetNeededBlocks              uint64                   `protobuf:"varint,47,opt,name=engine_multi_get_needed_blocks,json=engineMultiGetNeededBlocks,proto3" json:"engine_multi_get_needed_blocks,omitempty"`
+	EngineMultiGetCoalescedReads            uint64                   `protobuf:"varint,48,opt,name=engine_multi_get_coalesced_reads,json=engineMultiGetCoalescedReads,proto3" json:"engine_multi_get_coalesced_reads,omitempty"`
+	EngineMultiGetNeededBlockBytes          uint64                   `protobuf:"varint,49,opt,name=engine_multi_get_needed_block_bytes,json=engineMultiGetNeededBlockBytes,proto3" json:"engine_multi_get_needed_block_bytes,omitempty"`
+	EngineMultiGetCoalescedReadBytes        uint64                   `protobuf:"varint,50,opt,name=engine_multi_get_coalesced_read_bytes,json=engineMultiGetCoalescedReadBytes,proto3" json:"engine_multi_get_coalesced_read_bytes,omitempty"`
+	EngineMultiGetProjectedReadsGap_8       uint64                   `protobuf:"varint,51,opt,name=engine_multi_get_projected_reads_gap_8,json=engineMultiGetProjectedReadsGap8,proto3" json:"engine_multi_get_projected_reads_gap_8,omitempty"`
+	EngineMultiGetProjectedReadBytesGap_8   uint64                   `protobuf:"varint,52,opt,name=engine_multi_get_projected_read_bytes_gap_8,json=engineMultiGetProjectedReadBytesGap8,proto3" json:"engine_multi_get_projected_read_bytes_gap_8,omitempty"`
+	EngineMultiGetProjectedReadsGap_32      uint64                   `protobuf:"varint,53,opt,name=engine_multi_get_projected_reads_gap_32,json=engineMultiGetProjectedReadsGap32,proto3" json:"engine_multi_get_projected_reads_gap_32,omitempty"`
+	EngineMultiGetProjectedReadBytesGap_32  uint64                   `protobuf:"varint,54,opt,name=engine_multi_get_projected_read_bytes_gap_32,json=engineMultiGetProjectedReadBytesGap32,proto3" json:"engine_multi_get_projected_read_bytes_gap_32,omitempty"`
+	EngineMultiGetProjectedReadsGap_128     uint64                   `protobuf:"varint,55,opt,name=engine_multi_get_projected_reads_gap_128,json=engineMultiGetProjectedReadsGap128,proto3" json:"engine_multi_get_projected_reads_gap_128,omitempty"`
+	EngineMultiGetProjectedReadBytesGap_128 uint64                   `protobuf:"varint,56,opt,name=engine_multi_get_projected_read_bytes_gap_128,json=engineMultiGetProjectedReadBytesGap128,proto3" json:"engine_multi_get_projected_read_bytes_gap_128,omitempty"`
+	EngineMultiGetMetricsAvailable          bool                     `protobuf:"varint,57,opt,name=engine_multi_get_metrics_available,json=engineMultiGetMetricsAvailable,proto3" json:"engine_multi_get_metrics_available,omitempty"`
+	unknownFields                           protoimpl.UnknownFields
+	sizeCache                               protoimpl.SizeCache
 }
 
 func (x *AttributionSnapshot) Reset() {
@@ -3554,6 +3570,118 @@ func (x *AttributionSnapshot) GetEngineFilterPointFalsePositives() uint64 {
 func (x *AttributionSnapshot) GetEngineReadMetricsAvailable() bool {
 	if x != nil {
 		return x.EngineReadMetricsAvailable
+	}
+	return false
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetCalls() uint64 {
+	if x != nil {
+		return x.EngineMultiGetCalls
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetInputKeys() uint64 {
+	if x != nil {
+		return x.EngineMultiGetInputKeys
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetUniqueKeys() uint64 {
+	if x != nil {
+		return x.EngineMultiGetUniqueKeys
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetSstVisits() uint64 {
+	if x != nil {
+		return x.EngineMultiGetSstVisits
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetCandidateKeys() uint64 {
+	if x != nil {
+		return x.EngineMultiGetCandidateKeys
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetNeededBlocks() uint64 {
+	if x != nil {
+		return x.EngineMultiGetNeededBlocks
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetCoalescedReads() uint64 {
+	if x != nil {
+		return x.EngineMultiGetCoalescedReads
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetNeededBlockBytes() uint64 {
+	if x != nil {
+		return x.EngineMultiGetNeededBlockBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetCoalescedReadBytes() uint64 {
+	if x != nil {
+		return x.EngineMultiGetCoalescedReadBytes
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetProjectedReadsGap_8() uint64 {
+	if x != nil {
+		return x.EngineMultiGetProjectedReadsGap_8
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetProjectedReadBytesGap_8() uint64 {
+	if x != nil {
+		return x.EngineMultiGetProjectedReadBytesGap_8
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetProjectedReadsGap_32() uint64 {
+	if x != nil {
+		return x.EngineMultiGetProjectedReadsGap_32
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetProjectedReadBytesGap_32() uint64 {
+	if x != nil {
+		return x.EngineMultiGetProjectedReadBytesGap_32
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetProjectedReadsGap_128() uint64 {
+	if x != nil {
+		return x.EngineMultiGetProjectedReadsGap_128
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetProjectedReadBytesGap_128() uint64 {
+	if x != nil {
+		return x.EngineMultiGetProjectedReadBytesGap_128
+	}
+	return 0
+}
+
+func (x *AttributionSnapshot) GetEngineMultiGetMetricsAvailable() bool {
+	if x != nil {
+		return x.EngineMultiGetMetricsAvailable
 	}
 	return false
 }
@@ -6266,7 +6394,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x04copy\x18\x0e \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x04copy\x12=\n" +
 	"\x06rename\x18\x0f \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x06rename\x122\n" +
 	"\x15retry_delay_available\x18\x10 \x01(\bR\x13retryDelayAvailable\x12B\n" +
-	"\x1dbackground_pressure_available\x18\x11 \x01(\bR\x1bbackgroundPressureAvailable\"\xc9\x15\n" +
+	"\x1dbackground_pressure_available\x18\x11 \x01(\bR\x1bbackgroundPressureAvailable\"\x89\x1f\n" +
 	"\x13AttributionSnapshot\x12C\n" +
 	"\x0eadmission_wait\x18\x01 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\radmissionWait\x12=\n" +
 	"\vfence_check\x18\x02 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\n" +
@@ -6310,7 +6438,23 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x1dengine_filter_point_positives\x18& \x01(\x04R\x1aengineFilterPointPositives\x12A\n" +
 	"\x1dengine_filter_point_negatives\x18' \x01(\x04R\x1aengineFilterPointNegatives\x12L\n" +
 	"#engine_filter_point_false_positives\x18( \x01(\x04R\x1fengineFilterPointFalsePositives\x12A\n" +
-	"\x1dengine_read_metrics_available\x18) \x01(\bR\x1aengineReadMetricsAvailable\"\xbf\x01\n" +
+	"\x1dengine_read_metrics_available\x18) \x01(\bR\x1aengineReadMetricsAvailable\x123\n" +
+	"\x16engine_multi_get_calls\x18* \x01(\x04R\x13engineMultiGetCalls\x12<\n" +
+	"\x1bengine_multi_get_input_keys\x18+ \x01(\x04R\x17engineMultiGetInputKeys\x12>\n" +
+	"\x1cengine_multi_get_unique_keys\x18, \x01(\x04R\x18engineMultiGetUniqueKeys\x12<\n" +
+	"\x1bengine_multi_get_sst_visits\x18- \x01(\x04R\x17engineMultiGetSstVisits\x12D\n" +
+	"\x1fengine_multi_get_candidate_keys\x18. \x01(\x04R\x1bengineMultiGetCandidateKeys\x12B\n" +
+	"\x1eengine_multi_get_needed_blocks\x18/ \x01(\x04R\x1aengineMultiGetNeededBlocks\x12F\n" +
+	" engine_multi_get_coalesced_reads\x180 \x01(\x04R\x1cengineMultiGetCoalescedReads\x12K\n" +
+	"#engine_multi_get_needed_block_bytes\x181 \x01(\x04R\x1eengineMultiGetNeededBlockBytes\x12O\n" +
+	"%engine_multi_get_coalesced_read_bytes\x182 \x01(\x04R engineMultiGetCoalescedReadBytes\x12P\n" +
+	"&engine_multi_get_projected_reads_gap_8\x183 \x01(\x04R engineMultiGetProjectedReadsGap8\x12Y\n" +
+	"+engine_multi_get_projected_read_bytes_gap_8\x184 \x01(\x04R$engineMultiGetProjectedReadBytesGap8\x12R\n" +
+	"'engine_multi_get_projected_reads_gap_32\x185 \x01(\x04R!engineMultiGetProjectedReadsGap32\x12[\n" +
+	",engine_multi_get_projected_read_bytes_gap_32\x186 \x01(\x04R%engineMultiGetProjectedReadBytesGap32\x12T\n" +
+	"(engine_multi_get_projected_reads_gap_128\x187 \x01(\x04R\"engineMultiGetProjectedReadsGap128\x12]\n" +
+	"-engine_multi_get_projected_read_bytes_gap_128\x188 \x01(\x04R&engineMultiGetProjectedReadBytesGap128\x12J\n" +
+	"\"engine_multi_get_metrics_available\x189 \x01(\bR\x1eengineMultiGetMetricsAvailable\"\xbf\x01\n" +
 	"\x13DemoteWriterRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12\x14\n" +

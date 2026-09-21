@@ -2160,7 +2160,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3338,7 +3338,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.44",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3377,7 +3377,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4067,7 +4067,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slatedb"
 version = "0.16.0"
-source = "git+https://github.com/otuschhoff/slatedb.git?rev=fc68f09a25defb128edfd722ec82696492dbb692#fc68f09a25defb128edfd722ec82696492dbb692"
+source = "git+https://github.com/otuschhoff/slatedb.git?rev=f549d4af9e8a7e41f46c45f4f31095cc743a703a#f549d4af9e8a7e41f46c45f4f31095cc743a703a"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -4111,7 +4111,7 @@ dependencies = [
 [[package]]
 name = "slatedb-common"
 version = "0.16.0"
-source = "git+https://github.com/otuschhoff/slatedb.git?rev=fc68f09a25defb128edfd722ec82696492dbb692#fc68f09a25defb128edfd722ec82696492dbb692"
+source = "git+https://github.com/otuschhoff/slatedb.git?rev=f549d4af9e8a7e41f46c45f4f31095cc743a703a#f549d4af9e8a7e41f46c45f4f31095cc743a703a"
 dependencies = [
  "chrono",
  "log",
@@ -4126,7 +4126,7 @@ dependencies = [
 [[package]]
 name = "slatedb-txn-obj"
 version = "0.16.0"
-source = "git+https://github.com/otuschhoff/slatedb.git?rev=fc68f09a25defb128edfd722ec82696492dbb692#fc68f09a25defb128edfd722ec82696492dbb692"
+source = "git+https://github.com/otuschhoff/slatedb.git?rev=f549d4af9e8a7e41f46c45f4f31095cc743a703a#f549d4af9e8a7e41f46c45f4f31095cc743a703a"
 dependencies = [
  "async-trait",
  "bytes",

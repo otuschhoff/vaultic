@@ -849,6 +849,15 @@ Live resources: owned processes, sockets/candidates; untouched user resources
 
 ## Validation and Profiling
 
+Use a three-tier duration policy for performance experiments. Run new candidates
+for 10 minutes to reject regressions and identify directional changes quickly.
+Promote only plausible improvements to three matched 30-minute runs before
+making a performance decision. Reserve uncapped runs for final acceptance through
+marker publication, close/flush, handoff, reopen, checkpoint verification and
+activation. A 10-minute result cannot validate depth-dependent compaction, cache
+evolution, growing-backlog behavior or finalization cost, and cannot replace a
+30-minute comparison or uncapped acceptance run.
+
 Freeze ordered source indexes **and pack selection**, not just a record budget:
 parallel decode completion can select different prefixes. Repeat at least three
 times; report spread, warm/cold cache, candidate age, encryption, WAL/cache/SST
