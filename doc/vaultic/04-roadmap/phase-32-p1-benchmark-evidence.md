@@ -1,5 +1,9 @@
 # Phase 32 P1 Instrumentation Evidence
 
+[Phase 32 status and document map](phase-32-scalable-legacy-metadata-bulk-import.md)
+
+This is frozen P1 evidence, not the current binary profile or experiment policy.
+
 This record retains the paired benchmark summaries used for the P1 overhead
 check. The baseline is commit `236330f4403c0b89fc136f5a65e2fa17a56d1b7c`.
 The candidate is the commit containing this record. Both runs used Linux amd64

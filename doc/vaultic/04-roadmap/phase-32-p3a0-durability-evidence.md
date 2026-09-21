@@ -1,5 +1,8 @@
 # Phase 32 P3a0 Import Durability Evidence
 
+[Phase 32 status and document map](phase-32-scalable-legacy-metadata-bulk-import.md) |
+[Repository-scale recovery evidence](phase-32-p3-p7-evidence.md#scale-and-external-limits)
+
 P3a0 is complete for the supported fresh-import restart-from-zero contract as
 of 2026-09-16. This record does not claim persistent resume for memory-WAL
 imports and does not change normal backup or non-fresh import durability.
@@ -24,6 +27,10 @@ The only activation-authorizing sequence is:
 Failure before handoff leaves the memory binding intact. Completed-mode reopen
 must reject that binding. Recovery destroys and restarts the private candidate
 from input position zero; it never resumes from an intermediate checkpoint.
+
+The later P7b checkpoint-only recovery occurred after successful durable close,
+handoff, and persistent-WAL reopen. It completed activation after a final daemon
+shutdown timeout; it is not recovery of an unfinished memory-WAL import.
 
 `WriterStatus.last_durable_sequence` is a process-local count of successful
 VaulticDB durability waits. It resets at process start and is neither the engine

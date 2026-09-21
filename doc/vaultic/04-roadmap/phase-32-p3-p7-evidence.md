@@ -1,26 +1,35 @@
 # Phase 32 P3-P7 Experiment and Acceptance Evidence
 
-This record reports the currently executable Phase 32 work as of 2026-09-21.
-P3a, P3b, P7a, matched NFS/RGW/native-RADOS sampling, native RADOS lifecycle
-tests, live RADOS-WAL latency, and P4 are validated. P3c remains partial: its
-memory-WAL role pilots pass, but the complete response matrix is not yet run.
-P4 decouples ordered reduction with a bounded worker and coordinator-owned
-acknowledgements. A current telemetry baseline selects P5 read amplification,
-not P6 writer concurrency, as the next optimization area. The first P5 cache
-fill-budget experiment was rejected. The current uncapped import and recovered
-activation now provide final repository-scale P7b acceptance.
+[Phase 32 status and document map](phase-32-scalable-legacy-metadata-bulk-import.md) |
+[Telemetry coverage](phase-32-vaulticdb-critical-path-telemetry.md)
 
-Importer-owned Phase 34 export is now implemented for future full runs. It emits
-the scheduler and Go runtime component together with VaulticDB queue/service,
-WAL, cache, LSM and role-specific object-store measurements at a bounded interval,
-then makes a bounded final snapshot attempt after the lifecycle action completes. Export failures
-and replace-oldest drops are explicit metrics and never block the import. The
-new representative results below are accepted only as bounded diagnostic
-evidence; the uncapped acceptance result is reported separately under P7.
+This is the run-level evidence ledger as of 2026-09-21. It retains historical
+settings and results rather than applying today's binary or duration policy to
+older runs. The roadmap owns current defaults and remaining execution gates;
+the telemetry document owns metric coverage and interpretation.
+
+## Decision Summary
+
+| Work | Decision and scope | Evidence |
+|---|---|---|
+| P3a/P3b attribution and latency pilots | Validated; P3c/P3d's full response/scenario matrix remains partial | [P3 results](#p3-results) |
+| P4 ordered reducer worker | Accepted; keep two ingestion lanes | [P4 results](#p4-results) |
+| P5 cache fill budget / fill tasks | Rejected; retain 256 MiB fill budget and derived 16-task limit | [Telemetry experiments](#current-telemetry-baseline-and-p5-selection) |
+| P5 combined reducer prefetch | Accepted bounded result: +8.8% median throughput over its matched baseline | [Telemetry experiments](#current-telemetry-baseline-and-p5-selection) |
+| Larger MultiGet coalescing gaps | Rejected; retain gap 2 | [Telemetry experiments](#current-telemetry-baseline-and-p5-selection) |
+| Deferred cleanup / cross-index grouping | Provisional ten-minute performance results; confirmation and candidate-specific full lifecycle remain open | [Ten-minute experiments](#ten-minute-full-import-experiments) |
+| Positive-record cache / 512 MiB L0 target | Rejected; record cache removed and 256 MiB L0 retained | [Ten-minute experiments](#ten-minute-full-import-experiments) |
+| P7a / P7b | Local validation and repository-scale recovered completion accepted for the recorded builds; not blanket acceptance of later candidates or every backend scenario | [Local validation](#p7-local-validation), [scale and recovery](#scale-and-external-limits) |
+
+A timeout boundary is not completion evidence. Concurrent worker, RPC, and
+background totals are attribution measures, not additive wall-clock percentages.
+Compare each candidate with its named baseline; percentages across different
+profiles or input prefixes are not interchangeable.
 
 ## Current Telemetry Baseline and P5 Selection
 
-The valid current-revision HDD baseline is retained at
+This section records the earlier 30-minute campaign, before the ten-minute cap.
+Its historical baseline is retained at
 `phase32-telemetry-20260920-hdd-30m-r2`. Vaultic SHA-256 was
 `84510e9ea3e91849769153cfe3ada8b62e6cb09050712ef26b7f1dbf92bc3da2` and
 VaulticDB SHA-256 was
@@ -80,9 +89,9 @@ fell 0.9% from 42,733.9 to 42,343.7 blobs/s. Database GET bytes rose 1.6%, GET
 latency rose 9.3%, wrapper CPU rose from 317% to 349%, and process read/write
 bytes approximately doubled. The 128-task profile is therefore rejected. The
 fresh-import default remains the prior derived 16 tasks; an optional bounded
-task setting remains available for controlled diagnostics. The next P5
-experiment must improve cache admission selectivity or reuse rather than merely
-increase fill concurrency.
+task setting remains available for controlled diagnostics. This ruled out
+merely increasing fill concurrency; the subsequent experiment targeted reducer
+read amortization instead.
 
 The accepted bounded P5 candidate combines the reducer's aggregate and history planning reads
 into one transactional `MultiGet` after the receipt idempotency check. Stage 2
@@ -136,12 +145,41 @@ change was promoted.
 
 ## Ten-Minute Full-Import Experiments
 
+These are capped samples of the full-import workload, not completed full
+imports. The current [test policy](phase-32-scalable-legacy-metadata-bulk-import.md#validation-and-profiling)
+also caps confirmation runs at ten minutes. The profile used `GOMAXPROCS=32`,
+`GOMEMLIMIT=160GiB`, 32 connections, 32 pack workers, two lanes, memory WAL,
+local object storage on HDD NFS, disabled read-cache tiers, five-second JSONL,
+and a 595-second SIGINT boundary plus five-second hard-kill allowance. Deferred
+cleanup was enabled except in the explicitly named no-defer controls.
+
+Artifacts below are under `/volume2/NASDA2/rustic/db.test/nfs/hdd/`. Imports used
+the disposable `phase32-p8-defer-cleanup-20260921-hdd-10m-r3/legacy-source` view,
+not the protected `/volume2/NASDA2/rustic/repo`. No benchmark authorizes changes
+to that protected repository. Rates below use sampled counter deltas; matched
+window endpoints can differ slightly from whole-run or first-to-last rates.
+
+### Deferred Cleanup Baseline
+
+Run `phase32-p8-defer-cleanup-20260921-hdd-10m-r4` is the provisional baseline
+for subsequent experiments. Against the fresh no-defer control
+`phase32-p8-baseline-20260921-hdd-10m-r5`, the matched-window rate was 81.17k
+versus 53.95k blobs/s (+50.4%), and cleanup fell from 227.1 to 11.3 seconds.
+Both slowed about 20.5% from early to late windows, so cleanup did not explain
+the shared decay. Sampled peak RSS rose 66.7%, read bytes/blob 59.1%, and write
+bytes/blob 49.1% versus that control. Deferred cleanup remains opt-in; bounded
+throughput does not certify its final completion/reopen durability.
+
+### Experiment 1: Positive-Record Reuse
+
 The session-local positive-record cache candidate is rejected. Run
 `phase32-p9-record-cache-20260921-hdd-10m-r1` reused only 1,164 records and
 reduced catalog keys by 3.32%, while throughput fell 1.91% versus the deferred
 cleanup baseline. Early throughput was effectively flat (+0.63%), late
 throughput fell 7.60%, and planning, blob-read, and reducer-prefetch time all
 increased.
+
+### Experiment 2: Cross-Index Grouping
 
 Cross-index transaction batching is provisionally accepted for matched
 confirmation. The corrected candidate
@@ -163,6 +201,15 @@ call between windows. Ingest wait remained the largest scheduler phase at
 at 33.6 seconds. The next optimization should target growing-state reads rather
 than publication lanes or write backpressure.
 
+The first `phase32-p10-cross-index-20260921-hdd-10m-r1` failed before useful
+measurement with a checkpoint source-index mismatch; it is not performance
+evidence. The fix makes final ingest receipts checkpoint-aware, includes
+checkpoint metadata in their hash, and atomically reduces all per-index tallies.
+Focused regression and package/race tests passed. The implementation was
+committed in `8aa37b04e`; matched confirmation is still pending.
+
+### Experiment 3: Larger L0 SSTs
+
 Doubling the L0 SST target from 256 MiB to 512 MiB is rejected. Run
 `phase32-p11-l0-512m-20260921-hdd-10m-r1` produced 86,828 blobs/s, 2.78% below
 the cross-index r2 candidate. Early throughput fell 6.74% and late throughput
@@ -176,7 +223,20 @@ time rose from 7.03 to 11.46 ms per batch. There were no retries, conflicts,
 backpressure events, or L0 stalls before timeout-bound cancellation. Keep the
 256 MiB L0 SST target.
 
+Experiment 3 changed only `--daemon-l0-sst-size-bytes=536870912`. It reused
+experiment 2's Vaultic binary; both runs used VaulticDB SHA-256
+`3a8b8278046cc6656e8a68fcdf89bbf968437a8a4afeedaf67fc3d8e2bbeefe5`.
+The run exited with the expected timeout status 124 after 9m56.71s, emitted
+120 monitor records, and left no daemon process. The final ingest/reduce
+failure counters appeared only at cancellation. Ingest wait remained the
+largest scheduler phase at 408.5 seconds, followed by schedule work at 125.6
+seconds, dependency wait at 34.9 seconds, and reducer wait at 11.5 seconds.
+
 ## Frozen Inputs and Build
+
+This section describes the original P3/P4/P7 fixture and storage comparisons
+below, not the later telemetry or ten-minute campaigns above. Those campaigns
+carry their own build identities and profiles.
 
 The real-daemon fixture contains four ordered indexes, 128 preselected packs,
 and 65,536 blobs. Import runs used `GOMAXPROCS=4`, `GOMEMLIMIT=8GiB`, and three
@@ -451,7 +511,7 @@ and respectively `role=main` or `role=coordination`, `operation=put`, and
 
 ## P7 Local Validation
 
-The current-revision frozen comparison completed all five variants:
+The recorded P7 frozen comparison completed all five variants:
 
 | Variant | Time | End-to-end throughput |
 |---|---:|---:|
@@ -487,12 +547,12 @@ response, and timeout recovery tests also pass.
 A historical uncapped run at revision `8bc9cd7cb` successfully imported 10,019
 indexes, 419,530 packs, and 379,934,385 blobs through close, handoff, and reopen
 in 1:54:32. It proves that revision's completion path only; it does not certify
-the current changes. A current SSD run reached 6,049 imported indexes, 327,065
+later changes. A separate SSD run reached 6,049 imported indexes, 327,065
 packs, and 254,818,044 blobs in 2h52m39s before an operator cancellation; it is
 not a completion result. The matched 45-minute checkpoints above are the
 accepted comparison boundary.
 
-The current uncapped HDD run is retained at
+The 2026-09-21 uncapped HDD run, before the later ten-minute experiments, is retained at
 `phase32-p7-uncapped-current-20260921-hdd-r1`. It imported all 10,019 indexes,
 419,530 packs, and 379,934,385 blobs in 2:37:13, using 82,479 successful ingest,
 reduction, and commit batches with zero failures, retries, or conflicts. The
@@ -514,11 +574,9 @@ blobs. This recovered completion is accepted as P7b because the original data,
 handoff, and reopen were durable, while recovery performed only checkpoint
 validation, authority activation, and clean shutdown.
 
-Representative NFS, RADOS, and RGW/S3 are no longer external blockers. Full
-current-revision import, close/handoff/reopen, activation, and post-import
-validation now satisfy P7b. P4 is accepted with the two-lane setting; do not increase lanes. The
-current aligned telemetry selects P5 read amplification over P6 writer
-concurrency. Cache fill-budget and task-count experiments remain rejected, while
-the combined reducer prefetch is accepted as an 8.8% median bounded-throughput
-improvement. Candidate SST fanout, needed-block and coalesced-range telemetry is
-complete and rejects larger coalescing gaps.
+Representative NFS, RADOS, and RGW/S3 resources are no longer external blockers.
+The recorded import, durable close/handoff/reopen, recovered activation, and
+fresh-process validation satisfy the repository-scale P7b lifecycle gate.
+This does not complete the remaining P3c/P3d scenario matrix or certify later
+cross-index grouping. Current optimization decisions are summarized at the top
+of this record; retain two lanes and require candidate-specific acceptance.

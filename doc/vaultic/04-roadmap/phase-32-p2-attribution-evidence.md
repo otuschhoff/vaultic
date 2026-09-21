@@ -1,10 +1,13 @@
 # Phase 32 P2 Attribution Evidence
 
+[Phase 32 status and document map](phase-32-scalable-legacy-metadata-bulk-import.md) |
+[Current telemetry coverage](phase-32-vaulticdb-critical-path-telemetry.md)
+
 This record closes P2 against the frozen P0 fixture. The final Linux amd64
 VaulticDB binary was built with Rust `1.98.1`, release optimization, debug
 symbols, and the `test-failpoints` feature. Its SHA-256 is
 `3699f624c6d06e2b2f15a4f7277278d5e47a36422120cc7c2cf5a2cb328ffc7a`.
-Cargo pins `slatedb` and `slatedb-common` directly to fork revision
+The evidence build pinned `slatedb` and `slatedb-common` directly to fork revision
 `fc68f09a25defb128edfd722ec82696492dbb692`; the binary's embedded dependency
 report attests the direct `slatedb` and `slatedb-common` identities. That
 revision contains parent `a970051`, which introduced batch-writer queue and
@@ -24,7 +27,23 @@ Service/storage scopes are admission wait and hold, fence validation,
 write-batch/begin/commit/rollback requests, SlateDB transaction begin, aggregate
 engine submit, explicit durable-handle wait, and full storage finalization.
 Deferred commits do not create durable-wait attempts. `engine_submit` contains
-the three separately reported fork stages but excludes explicit durability:
+the three separately reported fork stages but excludes explicit durability.
+
+| Boundary | Exact scope |
+|---|---|
+| `admission_wait` | Before the mutation-admission read-lock await through acquisition; excludes drain checks and the remaining request |
+| `fence_check` | Storage load and active writer authority read through confirmed authority; stale or unavailable authority is a failure |
+| `*_request` | Fixed write-batch, begin, commit, and rollback handler timers, including validation and subordinate work |
+| `transaction_begin` | SlateDB transaction creation including expiry pruning, excluding service admission and fencing |
+| `engine_submit` | Before the storage failpoint through returned write handle, including backpressure, queue, conflict checks, and apply; excludes explicit durability wait |
+| `durable_wait` | Only `WriteHandle::await_durable`; deferred commits create no attempt |
+| `finalization` | Storage flush/close, handoff eligibility, cache/credential cleanup, and writer-claim release |
+
+Write-batch and transaction-commit submits share `engine_submit`; their service
+timers distinguish the callers. Engine counters are cumulative for the storage
+lifetime; gauges reflect the latest recorder state.
+
+The engine substages have these boundaries:
 
 | Engine stage | Start | End |
 |---|---|---|
