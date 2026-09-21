@@ -25,13 +25,13 @@ const (
 )
 
 type stage3LogicalBatch struct {
-	ordinal    uint64
-	rootBatch  uint64
-	items      []packPreparation
-	imports    []daemon.LegacyPackImport
-	checkpoint *daemon.Mutation
-	deps       []string
-	queuedAt   time.Time
+	ordinal     uint64
+	rootBatch   uint64
+	items       []packPreparation
+	imports     []daemon.LegacyPackImport
+	checkpoints []daemon.Mutation
+	deps        []string
+	queuedAt    time.Time
 }
 
 type stage3IngestOutcome struct {
@@ -64,13 +64,29 @@ func importPacksStage3(
 	checkpointIndex bool,
 	report func(packPipelineStats),
 ) ([]packImportResult, uint64, packPipelineStats, int) {
+	return importPacksStage3Sources(
+		ctx, statter, store, sourceIndex, packs, nil, options, checkpointIndex, report,
+	)
+}
+
+func importPacksStage3Sources(
+	ctx context.Context,
+	statter PackStatter,
+	store SplitStore,
+	session schema.ID,
+	packs []legacyindex.PackBlobs,
+	sourceIndexes []schema.ID,
+	options Options,
+	checkpointIndex bool,
+	report func(packPipelineStats),
+) ([]packImportResult, uint64, packPipelineStats, int) {
 	options.Telemetry.phase("schedule")
 	defer options.Telemetry.phase("source")
 	defer options.Telemetry.queues(0, 0, 0, 0, time.Time{})
 	outcomes := make([]packImportResult, len(packs))
 	counters := &packPipelineCounters{report: report}
 	if len(packs) == 0 {
-		return importEmptyPackIndex(ctx, store, sourceIndex, options, checkpointIndex, counters)
+		return importEmptyPackIndex(ctx, store, session, options, checkpointIndex, counters)
 	}
 
 	pipelineOptions := resolvePackPipelineOptions(options, len(packs))
@@ -85,7 +101,7 @@ func importPacksStage3(
 		go func() {
 			defer group.Done()
 			preparePackJobs(
-				workerCtx, jobs, prepared, statter, sourceIndex, packs, options, pipelineOptions.packTimeout, counters,
+				workerCtx, jobs, prepared, statter, session, sourceIndexes, packs, options, pipelineOptions.packTimeout, counters,
 			)
 		}()
 	}
@@ -107,7 +123,7 @@ func importPacksStage3(
 	reducerDone := make(chan struct{})
 	go func() {
 		defer close(reducerDone)
-		stage3ReduceBatches(ctx, store, sourceIndex, reductionJobs, reduced, options, counters)
+		stage3ReduceBatches(ctx, store, session, reductionJobs, reduced, options, counters)
 	}()
 	defer func() {
 		cancel()
@@ -126,7 +142,8 @@ func importPacksStage3(
 	nextReduce := uint64(1)
 	var batch packBatch
 	batch.items = make([]packPreparation, 0, pipelineOptions.packsPerTransaction)
-	var checkpoint schema.ImportCheckpointRecord
+	checkpoints := make(map[schema.ID]schema.ImportCheckpointRecord)
+	checkpointOrder := make([]schema.ID, 0, 1)
 	prepareClosed := false
 	failedPack := -1
 	failureSeen := false
@@ -151,21 +168,24 @@ func importPacksStage3(
 		for index := range batch.items {
 			imports[index] = batch.items[index].outcome.imported
 		}
-		var finalCheckpoint *daemon.Mutation
+		var finalCheckpoints []daemon.Mutation
 		if final && checkpointIndex && !options.DryRun {
-			mutation, err := importCheckpointMutation(sourceIndex, checkpoint)
-			if err != nil {
-				failedPack = batch.items[0].index
-				outcomes[failedPack].err = err
-				stopAdmission = true
-				cancel()
-				return false
+			finalCheckpoints = make([]daemon.Mutation, 0, len(checkpointOrder))
+			for _, sourceIndex := range checkpointOrder {
+				mutation, err := importCheckpointMutation(sourceIndex, checkpoints[sourceIndex])
+				if err != nil {
+					failedPack = batch.items[0].index
+					outcomes[failedPack].err = err
+					stopAdmission = true
+					cancel()
+					return false
+				}
+				finalCheckpoints = append(finalCheckpoints, mutation)
 			}
-			finalCheckpoint = &mutation
 		}
 		ready = append(ready, stage3LogicalBatch{
 			ordinal: nextOrdinal, rootBatch: rootBatch, items: append([]packPreparation(nil), batch.items...),
-			imports: imports, checkpoint: finalCheckpoint, deps: stage3DependencyKeys(imports), queuedAt: time.Now(),
+			imports: imports, checkpoints: finalCheckpoints, deps: stage3DependencyKeys(imports), queuedAt: time.Now(),
 		})
 		nextOrdinal++
 		batch.reset()
@@ -205,7 +225,7 @@ func importPacksStage3(
 			go func(logical stage3LogicalBatch) {
 				options.Telemetry.lane(1)
 				outcome := stage3IngestOutcome{ordinal: logical.ordinal}
-				parts, failureOffset, err := stage3IngestSplitBatch(workerCtx, store, sourceIndex, logical, options, counters)
+				parts, failureOffset, err := stage3IngestSplitBatch(workerCtx, store, session, logical, options, counters)
 				options.Telemetry.lane(-1)
 				if failureOffset >= 0 && failureOffset < len(logical.items) {
 					outcome.failedPack = logical.items[failureOffset].index
@@ -319,7 +339,7 @@ func importPacksStage3(
 		}
 		counters.committedPacks.Add(uint64(len(logical.items)))
 		counters.committedBatches.Add(1)
-		counters.checkpointPending.Store(logical.checkpoint == nil)
+		counters.checkpointPending.Store(len(logical.checkpoints) == 0)
 		counters.reportSnapshot()
 		delete(active, outcome.ordinal)
 		stage3ReleaseDependencies(depBusy, logical)
@@ -350,11 +370,17 @@ func importPacksStage3(
 				}
 			}
 			batch.add(item)
+			sourceIndex := item.outcome.imported.SourceIndex
+			checkpoint, found := checkpoints[sourceIndex]
+			if !found {
+				checkpointOrder = append(checkpointOrder, sourceIndex)
+			}
 			checkpoint.PacksImported++
 			checkpoint.BlobsImported += item.outcome.imported.Record.BlobCount
 			if item.outcome.debt != nil {
 				checkpoint.ErrorsSeen++
 			}
+			checkpoints[sourceIndex] = checkpoint
 			nextPack++
 			if nextPack == len(packs) || batch.full(pipelineOptions) {
 				if !queueBatch(nextPack == len(packs)) {
@@ -494,7 +520,7 @@ func importPacksStage3(
 
 	if checkpointIndex && !options.DryRun {
 		options.Telemetry.phase("cleanup")
-		if err := store.CompleteLegacyImportSession(ctx, sourceIndex); err != nil {
+		if err := store.CompleteLegacyImportSession(ctx, session); err != nil {
 			outcomes[len(outcomes)-1].err = err
 			return outcomes, counters.committedBatches.Load(), counters.snapshot(), len(outcomes) - 1
 		}
@@ -545,11 +571,11 @@ func stage3ReduceBatches(
 			ordinal: job.outcome.ordinal, failedPack: job.logical.items[0].index,
 		}
 		for index, part := range job.outcome.parts {
-			var checkpoint *daemon.Mutation
+			var checkpoints []daemon.Mutation
 			if index == len(job.outcome.parts)-1 {
-				checkpoint = job.logical.checkpoint
+				checkpoints = job.logical.checkpoints
 			}
-			if err := reduceLegacyImportBatch(ctx, store, session, part, checkpoint, options, counters); err != nil {
+			if err := reduceLegacyImportBatch(ctx, store, session, part, checkpoints, options, counters); err != nil {
 				result.err = err
 				break
 			}
@@ -576,7 +602,9 @@ func stage3IngestSplitBatch(
 	options Options,
 	counters *packPipelineCounters,
 ) ([]uint64, int, error) {
-	return stage3IngestSplitParts(ctx, store, session, logical.rootBatch, logical.imports, options, counters)
+	return stage3IngestSplitParts(
+		ctx, store, session, logical.rootBatch, logical.imports, logical.checkpoints, options, counters,
+	)
 }
 
 func stage3IngestSplitParts(
@@ -585,10 +613,11 @@ func stage3IngestSplitParts(
 	session schema.ID,
 	batchID uint64,
 	imports []daemon.LegacyPackImport,
+	checkpoints []daemon.Mutation,
 	options Options,
 	counters *packPipelineCounters,
 ) ([]uint64, int, error) {
-	err := ingestLegacyImportBatch(ctx, store, session, batchID, imports, options, counters)
+	err := ingestLegacyImportBatch(ctx, store, session, batchID, imports, checkpoints, options, counters)
 	if err == nil {
 		counters.ingestedBatches.Add(1)
 		return []uint64{batchID}, -1, nil
@@ -602,11 +631,15 @@ func stage3IngestSplitParts(
 		return nil, 0, idErr
 	}
 	middle := len(imports) / 2
-	leftParts, leftFailure, leftErr := stage3IngestSplitParts(ctx, store, session, leftID, imports[:middle], options, counters)
+	leftParts, leftFailure, leftErr := stage3IngestSplitParts(
+		ctx, store, session, leftID, imports[:middle], nil, options, counters,
+	)
 	if leftErr != nil {
 		return nil, leftFailure, leftErr
 	}
-	rightParts, rightFailure, rightErr := stage3IngestSplitParts(ctx, store, session, rightID, imports[middle:], options, counters)
+	rightParts, rightFailure, rightErr := stage3IngestSplitParts(
+		ctx, store, session, rightID, imports[middle:], checkpoints, options, counters,
+	)
 	if rightErr != nil {
 		return nil, middle + rightFailure, rightErr
 	}
@@ -619,6 +652,7 @@ func ingestLegacyImportBatch(
 	session schema.ID,
 	batchID uint64,
 	imports []daemon.LegacyPackImport,
+	checkpoints []daemon.Mutation,
 	options Options,
 	counters *packPipelineCounters,
 ) error {
@@ -629,7 +663,7 @@ func ingestLegacyImportBatch(
 	started := time.Now()
 	batchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := store.IngestLegacyPacks(batchCtx, session, batchID, imports)
+	err := store.IngestLegacyPacksCheckpoints(batchCtx, session, batchID, imports, checkpoints)
 	elapsed := uint64(time.Since(started))
 	counters.ingestNanos.Add(elapsed)
 	counters.publicationNanos.Add(elapsed)
@@ -647,7 +681,7 @@ func reduceLegacyImportBatch(
 	store SplitStore,
 	session schema.ID,
 	batchID uint64,
-	checkpoint *daemon.Mutation,
+	checkpoints []daemon.Mutation,
 	options Options,
 	counters *packPipelineCounters,
 ) error {
@@ -658,18 +692,18 @@ func reduceLegacyImportBatch(
 	started := time.Now()
 	batchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := store.ReduceLegacyImportBatch(batchCtx, session, batchID, checkpoint)
+	err := store.ReduceLegacyImportBatchCheckpoints(batchCtx, session, batchID, checkpoints)
 	elapsed := uint64(time.Since(started))
 	counters.reductionNanos.Add(elapsed)
 	counters.publicationNanos.Add(elapsed)
-	if checkpoint != nil {
+	if len(checkpoints) > 0 {
 		counters.checkpointBatchNanos.Add(elapsed)
 	}
 	if err != nil {
 		if errors.Is(batchCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			return fmt.Errorf("legacy import reduction batch exceeded %s: %w", timeout, err)
 		}
-		if checkpoint != nil {
+		if len(checkpoints) > 0 {
 			return &checkpointBatchError{err: err}
 		}
 		return err

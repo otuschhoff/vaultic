@@ -152,7 +152,9 @@ type Store interface {
 type SplitStore interface {
 	Store
 	IngestLegacyPacks(context.Context, schema.ID, uint64, []daemon.LegacyPackImport) error
+	IngestLegacyPacksCheckpoints(context.Context, schema.ID, uint64, []daemon.LegacyPackImport, []daemon.Mutation) error
 	ReduceLegacyImportBatch(context.Context, schema.ID, uint64, *daemon.Mutation) error
+	ReduceLegacyImportBatchCheckpoints(context.Context, schema.ID, uint64, []daemon.Mutation) error
 	CompleteLegacyImportSession(context.Context, schema.ID) error
 }
 
@@ -314,6 +316,22 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 		}
 	}
 	reportProgress()
+	if useStage3 && options.WorkBudget == 0 && options.SnapshotDepth == 0 && options.SnapshotWorkBudget == 0 {
+		stats, groupedErr := importGroupedStage3Indexes(
+			ctx, indexList, source, statter, splitStore, options, &result, reportProgress,
+		)
+		applyGroupedStage3Stats(&result, stats)
+		preparationTime = stats.preparationTime
+		ingestTime = stats.ingestTime
+		reductionTime = stats.reductionTime
+		publicationTime = stats.publicationTime
+		checkpointBatchTime = stats.checkpointBatchTime
+		checkpointPending = stats.checkpointPending
+		inFlightLanes = stats.inFlightLanes
+		peakLanes = stats.peakLanes
+		reportProgress()
+		return result, groupedErr
+	}
 	var workUsed uint64
 	forAllIndexes := legacyindex.ForAllIndexes
 	if options.PreserveIndexOrder {
@@ -526,7 +544,7 @@ func importPacks(
 		go func() {
 			defer group.Done()
 			preparePackJobs(
-				workerCtx, jobs, prepared, statter, sourceIndex, packs, options, pipelineOptions.packTimeout, counters,
+				workerCtx, jobs, prepared, statter, sourceIndex, nil, packs, options, pipelineOptions.packTimeout, counters,
 			)
 		}()
 	}
@@ -733,6 +751,7 @@ func preparePackJobs(
 	prepared chan<- packPreparation,
 	statter PackStatter,
 	sourceIndex schema.ID,
+	sourceIndexes []schema.ID,
 	packs []legacyindex.PackBlobs,
 	options Options,
 	packTimeout time.Duration,
@@ -747,7 +766,11 @@ func preparePackJobs(
 				return
 			}
 			started := time.Now()
-			outcome := preparePack(ctx, statter, sourceIndex, packs[job.index], options, packTimeout)
+			packSourceIndex := sourceIndex
+			if len(sourceIndexes) == len(packs) {
+				packSourceIndex = sourceIndexes[job.index]
+			}
+			outcome := preparePack(ctx, statter, packSourceIndex, packs[job.index], options, packTimeout)
 			counters.preparationNanos.Add(uint64(time.Since(started)))
 			currentPacks := counters.preparedPacks.Add(1)
 			currentBytes := counters.preparedBytes.Add(outcome.bytes)

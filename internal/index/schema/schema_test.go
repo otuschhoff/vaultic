@@ -191,6 +191,10 @@ func TestLegacyImportReceiptRoundTrips(t *testing.T) {
 		ContentHash: id, SourceIndex: second, PacksImported: 3, BlobsImported: 4, ErrorsSeen: 5, Reduced: true,
 		Changes: []LegacyImportPackChange{{PackID: id, Current: packValue}},
 		Events:  []LegacyImportEvent{{PackID: id, Value: eventValue}},
+		IndexTallies: []LegacyImportIndexTally{
+			{SourceIndex: id, PacksImported: 1, BlobsImported: 2},
+			{SourceIndex: second, PacksImported: 2, BlobsImported: 2, ErrorsSeen: 5},
+		},
 	}
 	encoded, err := want.MarshalBinary()
 	if err != nil {

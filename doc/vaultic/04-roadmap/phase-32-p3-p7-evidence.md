@@ -134,6 +134,48 @@ requests by 9.84% but increased bytes by 163%; gap 128 reduced requests by
 is retained, and no post-change repetitions are required because no policy
 change was promoted.
 
+## Ten-Minute Full-Import Experiments
+
+The session-local positive-record cache candidate is rejected. Run
+`phase32-p9-record-cache-20260921-hdd-10m-r1` reused only 1,164 records and
+reduced catalog keys by 3.32%, while throughput fell 1.91% versus the deferred
+cleanup baseline. Early throughput was effectively flat (+0.63%), late
+throughput fell 7.60%, and planning, blob-read, and reducer-prefetch time all
+increased.
+
+Cross-index transaction batching is provisionally accepted for matched
+confirmation. The corrected candidate
+`phase32-p10-cross-index-20260921-hdd-10m-r2`, Vaultic SHA-256
+`d188984d386e191191ed851bf8d4c72c3fd5868ad9224120a848e1fb84925bc7`, produced
+89,308 blobs/s over 591.2 seconds versus 80,921 blobs/s for deferred-cleanup r4,
+a 10.36% gain. Early throughput improved 11.89% and late throughput improved
+9.70%. Cleanup calls fell from 1,114 to 308, cleanup time per million blobs fell
+72%, read bytes per blob fell 5.4%, write bytes per blob fell 4.5%, and sampled
+peak RSS fell from 12.08 to 11.75 GiB. There were no retries, conflicts,
+backpressure events, or L0 stalls before timeout-bound cancellation.
+
+The candidate does not remove the shared runtime decay: throughput fell 21.96%
+from the early to late windows versus 20.41% for r4. Late planning remained
+23.18 ms per batch, blob reads 11.72 ms per batch, and reducer prefetch rose to
+7.03 ms per batch. SlateDB multi-get SST visits increased from 1.96 to 6.13 per
+call between windows. Ingest wait remained the largest scheduler phase at
+405.7 seconds, followed by schedule work at 129.3 seconds and dependency wait
+at 33.6 seconds. The next optimization should target growing-state reads rather
+than publication lanes or write backpressure.
+
+Doubling the L0 SST target from 256 MiB to 512 MiB is rejected. Run
+`phase32-p11-l0-512m-20260921-hdd-10m-r1` produced 86,828 blobs/s, 2.78% below
+the cross-index r2 candidate. Early throughput fell 6.74% and late throughput
+fell 5.97%; decay improved only from 21.96% to 21.32%. The larger target cut
+read bytes per blob by 35.9% and write bytes per blob by 33.8%, but sampled peak
+RSS rose from 11.75 to 12.45 GiB and commit time per million blobs rose 18.0%.
+It also failed the read-amplification hypothesis: late multi-get SST visits rose
+from 6.13 to 6.72 per call, needed bytes per key rose from 913 to 1,006, late
+blob-read time rose from 11.72 to 14.64 ms per batch, and late reducer-prefetch
+time rose from 7.03 to 11.46 ms per batch. There were no retries, conflicts,
+backpressure events, or L0 stalls before timeout-bound cancellation. Keep the
+256 MiB L0 SST target.
+
 ## Frozen Inputs and Build
 
 The real-daemon fixture contains four ordered indexes, 128 preselected packs,

@@ -301,6 +301,56 @@ func TestSchemaStoreLegacyIngestReduceMatchesStage2WithDuplicatePackBlob(t *test
 	}
 }
 
+func TestSchemaStoreLegacyGroupedBatchCommitsCheckpointsAtomically(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "phase32-stage3-grouped-checkpoints", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), RebuildReset: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+
+	indexA, indexB := daemonTestID(180), daemonTestID(181)
+	packA, packB := daemonTestID(182), daemonTestID(183)
+	blobA, blobB := daemonTestID(184), daemonTestID(185)
+	importA := legacyPackImport(indexA, packA, map[schema.ID]schema.BlobRecord{
+		blobA: {Locations: []schema.BlobLocation{{PackID: packA, Length: 3, Type: schema.BlobData}}},
+	})
+	importB := legacyPackImport(indexB, packB, map[schema.ID]schema.BlobRecord{
+		blobB: {Locations: []schema.BlobLocation{{PackID: packB, Length: 4, Type: schema.BlobData}}},
+	})
+	session := indexA
+	if err := store.IngestLegacyPacks(ctx, session, 1, []LegacyPackImport{importA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReduceLegacyImportBatch(ctx, session, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	checkpoints := []Mutation{
+		{Key: schema.ImportCheckpointKey(indexA), Value: encodeSchemaRecord(t, schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1})},
+		{Key: schema.ImportCheckpointKey(indexB), Value: encodeSchemaRecord(t, schema.ImportCheckpointRecord{PacksImported: 1, BlobsImported: 1})},
+	}
+	if err := store.IngestLegacyPacksCheckpoints(ctx, session, 2, []LegacyPackImport{importB}, checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReduceLegacyImportBatchCheckpoints(ctx, session, 2, checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	for _, checkpoint := range checkpoints {
+		value, found, err := store.Get(ctx, checkpoint.Key)
+		if err != nil || !found || !bytes.Equal(value, checkpoint.Value) {
+			t.Fatalf("checkpoint %x: found=%t err=%v value=%x", checkpoint.Key, found, err, value)
+		}
+	}
+	if stats := store.LegacyImportStats(); stats.IngestedBatches != 2 || stats.ReducedBatches != 2 {
+		t.Fatalf("grouped batch metrics = %+v", stats)
+	}
+}
+
 func TestSchemaStoreLegacyIngestIdempotencyConflict(t *testing.T) {
 	ctx := context.Background()
 	client, err := Ensure(ctx, Options{

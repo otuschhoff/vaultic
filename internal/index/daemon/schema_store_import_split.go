@@ -28,6 +28,16 @@ func (store *SchemaStore) IngestLegacyPacks(
 	session schema.ID,
 	batch uint64,
 	imports []LegacyPackImport,
+) error {
+	return store.IngestLegacyPacksCheckpoints(ctx, session, batch, imports, nil)
+}
+
+func (store *SchemaStore) IngestLegacyPacksCheckpoints(
+	ctx context.Context,
+	session schema.ID,
+	batch uint64,
+	imports []LegacyPackImport,
+	finalCheckpoints []Mutation,
 ) (returnErr error) {
 	started := time.Now()
 	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
@@ -39,6 +49,11 @@ func (store *SchemaStore) IngestLegacyPacks(
 	}()
 	if session == (schema.ID{}) {
 		return fmt.Errorf("legacy import session is required")
+	}
+	for index := range finalCheckpoints {
+		if err := validateLegacyImportCheckpoint(&finalCheckpoints[index]); err != nil {
+			return err
+		}
 	}
 	if !store.allowLegacySplitSession(session, true) {
 		return fmt.Errorf("%w: rerun with --force-reset-old-idx to enable fresh import split sessions", ErrLegacyImportFreshRequired)
@@ -54,7 +69,7 @@ func (store *SchemaStore) IngestLegacyPacks(
 	}
 	receiptKey := schema.LegacyImportReceiptKey(session, batch)
 	hashStarted := time.Now()
-	contentHash, err := legacyImportContentHash(session, batch, prepared)
+	contentHash, err := legacyImportContentHash(session, batch, prepared, finalCheckpoints)
 	store.legacyMetrics.operations.hash.observe(time.Since(hashStarted))
 	if err != nil {
 		return err
@@ -78,6 +93,7 @@ func (store *SchemaStore) IngestLegacyPacks(
 			receiptKey,
 			prepared,
 			contentHash,
+			finalCheckpoints,
 			attemptHints,
 			deferDurability,
 			attempt > 0,
@@ -144,6 +160,7 @@ func (store *SchemaStore) ingestLegacyPacksOnce(
 	receiptKey []byte,
 	imports []LegacyPackImport,
 	contentHash schema.ID,
+	finalCheckpoints []Mutation,
 	hints legacyImportBatchHints,
 	deferDurability bool,
 	replanned bool,
@@ -179,7 +196,9 @@ func (store *SchemaStore) ingestLegacyPacksOnce(
 		return false, nil
 	}
 	planningStarted := time.Now()
-	plan, limits, err := store.planLegacyIngestBatch(ctx, transaction, receiptKey, imports, contentHash, hints)
+	plan, limits, err := store.planLegacyIngestBatch(
+		ctx, transaction, receiptKey, imports, contentHash, finalCheckpoints, hints,
+	)
 	store.legacyMetrics.planningNanos.Add(uint64(time.Since(planningStarted)))
 	if err != nil {
 		return fail(err)
@@ -223,6 +242,7 @@ func (store *SchemaStore) planLegacyIngestBatch(
 	receiptKey []byte,
 	imports []LegacyPackImport,
 	contentHash schema.ID,
+	finalCheckpoints []Mutation,
 	hints legacyImportBatchHints,
 ) (legacyImportBatchPlan, Limits, error) {
 	packIDs, blobIDs := uniqueLegacyImportIDs(imports)
@@ -263,7 +283,7 @@ func (store *SchemaStore) planLegacyIngestBatch(
 			state.mutations[key] = Mutation{Key: []byte(key), Value: value}
 		}
 	}
-	receipt, err := buildLegacyImportReceipt(contentHash, imports, packIDs, packOriginal, state)
+	receipt, err := buildLegacyImportReceipt(contentHash, imports, finalCheckpoints, packIDs, packOriginal, state)
 	if err != nil {
 		return legacyImportBatchPlan{}, Limits{}, err
 	}
@@ -306,6 +326,7 @@ func (store *SchemaStore) planLegacyIngestBatch(
 func buildLegacyImportReceipt(
 	contentHash schema.ID,
 	imports []LegacyPackImport,
+	finalCheckpoints []Mutation,
 	packIDs []schema.ID,
 	packOriginal map[schema.ID]*schema.PackRecord,
 	state *legacyImportBatchState,
@@ -349,7 +370,39 @@ func buildLegacyImportReceipt(
 		ErrorsSeen:    errorsSeen,
 		Changes:       changes,
 		Events:        events,
+		IndexTallies:  legacyImportReceiptIndexTallies(imports, finalCheckpoints),
 	}, nil
+}
+
+func legacyImportReceiptIndexTallies(imports []LegacyPackImport, finalCheckpoints []Mutation) []schema.LegacyImportIndexTally {
+	if len(finalCheckpoints) > 0 {
+		tallies := make([]schema.LegacyImportIndexTally, 0, len(finalCheckpoints))
+		for _, checkpoint := range finalCheckpoints {
+			parsed, _ := schema.ParseKey(checkpoint.Key)
+			record, _ := schema.UnmarshalImportCheckpointRecord(checkpoint.Value)
+			tallies = append(tallies, schema.LegacyImportIndexTally{
+				SourceIndex: parsed.ID, PacksImported: record.PacksImported,
+				BlobsImported: record.BlobsImported, ErrorsSeen: record.ErrorsSeen,
+			})
+		}
+		return tallies
+	}
+	tallies := make([]schema.LegacyImportIndexTally, 0, 1)
+	indexes := make(map[schema.ID]int)
+	for _, imported := range imports {
+		index, found := indexes[imported.SourceIndex]
+		if !found {
+			index = len(tallies)
+			indexes[imported.SourceIndex] = index
+			tallies = append(tallies, schema.LegacyImportIndexTally{SourceIndex: imported.SourceIndex})
+		}
+		tallies[index].PacksImported++
+		tallies[index].BlobsImported += imported.Record.BlobCount
+		if imported.Debt != nil {
+			tallies[index].ErrorsSeen++
+		}
+	}
+	return tallies
 }
 
 func legacyImportReceiptCounters(imports []LegacyPackImport) (uint64, uint64, uint64) {
@@ -366,7 +419,12 @@ func legacyImportReceiptCounters(imports []LegacyPackImport) (uint64, uint64, ui
 }
 
 //nolint:gocognit // The hash deliberately frames every persisted import field in schema order.
-func legacyImportContentHash(session schema.ID, batch uint64, imports []LegacyPackImport) (schema.ID, error) {
+func legacyImportContentHash(
+	session schema.ID,
+	batch uint64,
+	imports []LegacyPackImport,
+	finalCheckpoints []Mutation,
+) (schema.ID, error) {
 	hasher := sha256.New()
 	if _, err := hasher.Write(session[:]); err != nil {
 		return schema.ID{}, err
@@ -457,6 +515,17 @@ func legacyImportContentHash(session schema.ID, batch uint64, imports []LegacyPa
 			return schema.ID{}, err
 		}
 	}
+	if err := hashFramedU64(hasher, uint64(len(finalCheckpoints))); err != nil {
+		return schema.ID{}, err
+	}
+	for _, checkpoint := range finalCheckpoints {
+		if err := hashFramedBytes(hasher, checkpoint.Key); err != nil {
+			return schema.ID{}, err
+		}
+		if err := hashFramedBytes(hasher, checkpoint.Value); err != nil {
+			return schema.ID{}, err
+		}
+	}
 	var contentHash schema.ID
 	copy(contentHash[:], hasher.Sum(nil))
 	return contentHash, nil
@@ -515,6 +584,19 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 	session schema.ID,
 	batch uint64,
 	finalCheckpoint *Mutation,
+) error {
+	var checkpoints []Mutation
+	if finalCheckpoint != nil {
+		checkpoints = []Mutation{*finalCheckpoint}
+	}
+	return store.ReduceLegacyImportBatchCheckpoints(ctx, session, batch, checkpoints)
+}
+
+func (store *SchemaStore) ReduceLegacyImportBatchCheckpoints(
+	ctx context.Context,
+	session schema.ID,
+	batch uint64,
+	finalCheckpoints []Mutation,
 ) (returnErr error) {
 	started := time.Now()
 	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
@@ -530,8 +612,10 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 	if !store.allowLegacySplitSession(session, false) {
 		return fmt.Errorf("%w: rerun with --force-reset-old-idx to enable fresh import split sessions", ErrLegacyImportFreshRequired)
 	}
-	if err := validateLegacyImportCheckpoint(finalCheckpoint); err != nil {
-		return err
+	for index := range finalCheckpoints {
+		if err := validateLegacyImportCheckpoint(&finalCheckpoints[index]); err != nil {
+			return err
+		}
 	}
 	deferDurability := store.freshImportSeen != nil
 	backoff := 100 * time.Microsecond
@@ -539,7 +623,7 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 	for range revisionAllocationAttempts {
 		store.legacyMetrics.reduceAttempts.Add(1)
 		reduceStarted := time.Now()
-		committed, err := store.reduceLegacyImportBatchOnce(ctx, receiptKey, finalCheckpoint, deferDurability)
+		committed, err := store.reduceLegacyImportBatchOnce(ctx, receiptKey, finalCheckpoints, deferDurability)
 		store.legacyMetrics.reductionNanos.Add(uint64(time.Since(reduceStarted)))
 		if status.Code(err) == codes.Aborted {
 			store.legacyMetrics.conflicts.Add(1)
@@ -563,12 +647,12 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 			store.legacyMetrics.recoveryReads.Add(1)
 			store.legacyMetrics.operations.reduceRecoveryRead.observe(time.Since(recoveryStarted))
 			if lookupErr == nil && state {
-				if finalCheckpoint == nil {
+				if len(finalCheckpoints) == 0 {
 					return nil
 				}
 				checkpointStarted := time.Now()
-				checkpointErr := store.ensureCheckpointMatches(ctx, *finalCheckpoint)
-				store.legacyMetrics.reduceCheckpointReads.Add(1)
+				checkpointErr := store.ensureCheckpointsMatch(ctx, finalCheckpoints)
+				store.legacyMetrics.reduceCheckpointReads.Add(uint64(len(finalCheckpoints)))
 				store.legacyMetrics.operations.reduceCheckpointRead.observe(time.Since(checkpointStarted))
 				return checkpointErr
 			}
@@ -588,7 +672,7 @@ func (store *SchemaStore) ReduceLegacyImportBatch(
 func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	ctx context.Context,
 	receiptKey []byte,
-	finalCheckpoint *Mutation,
+	finalCheckpoints []Mutation,
 	deferDurability bool,
 ) (bool, error) {
 	beginStarted := time.Now()
@@ -609,10 +693,10 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 		return fail(err)
 	}
 	if !found {
-		if finalCheckpoint != nil {
+		if len(finalCheckpoints) > 0 {
 			checkpointStarted := time.Now()
-			applied, err := checkpointMatchesInTransaction(ctx, transaction, *finalCheckpoint)
-			store.legacyMetrics.reduceCheckpointReads.Add(1)
+			applied, err := checkpointsMatchInTransaction(ctx, transaction, finalCheckpoints)
+			store.legacyMetrics.reduceCheckpointReads.Add(uint64(len(finalCheckpoints)))
 			store.legacyMetrics.operations.reduceCheckpointRead.observe(time.Since(checkpointStarted))
 			if err != nil {
 				return fail(err)
@@ -630,16 +714,16 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	if err != nil {
 		return fail(err)
 	}
-	if finalCheckpoint != nil {
-		if err := validateCheckpointForLegacyReceipt(*finalCheckpoint, receipt); err != nil {
+	for _, checkpoint := range finalCheckpoints {
+		if err := validateCheckpointForLegacyReceipt(checkpoint, receipt); err != nil {
 			return fail(err)
 		}
 	}
 	if receipt.Reduced {
-		if finalCheckpoint != nil {
+		if len(finalCheckpoints) > 0 {
 			checkpointStarted := time.Now()
-			applied, err := checkpointMatchesInTransaction(ctx, transaction, *finalCheckpoint)
-			store.legacyMetrics.reduceCheckpointReads.Add(1)
+			applied, err := checkpointsMatchInTransaction(ctx, transaction, finalCheckpoints)
+			store.legacyMetrics.reduceCheckpointReads.Add(uint64(len(finalCheckpoints)))
 			store.legacyMetrics.operations.reduceCheckpointRead.observe(time.Since(checkpointStarted))
 			if err != nil {
 				return fail(err)
@@ -714,9 +798,7 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 		encodeStarted := time.Now()
 		defer func() { store.legacyMetrics.operations.reduceEncode.observe(time.Since(encodeStarted)) }()
 		mutations = append(mutations, history...)
-		if finalCheckpoint != nil {
-			mutations = append(mutations, *finalCheckpoint)
-		}
+		mutations = append(mutations, finalCheckpoints...)
 		receipt.Reduced = true
 		encodedReceipt, encodeErr := receipt.MarshalBinary()
 		if encodeErr != nil {
@@ -758,19 +840,35 @@ func validateCheckpointForLegacyReceipt(checkpoint Mutation, receipt schema.Lega
 	if err != nil || parsed.Kind != schema.KeyImportCheckpoint {
 		return fmt.Errorf("legacy import checkpoint has an invalid key")
 	}
-	if parsed.ID != receipt.SourceIndex {
+	tally, found := legacyReceiptIndexTally(receipt, parsed.ID)
+	if !found {
 		return fmt.Errorf("legacy import checkpoint source index mismatch")
 	}
 	record, err := schema.UnmarshalImportCheckpointRecord(checkpoint.Value)
 	if err != nil {
 		return fmt.Errorf("legacy import checkpoint has an invalid value: %w", err)
 	}
-	if record.PacksImported < receipt.PacksImported ||
-		record.BlobsImported < receipt.BlobsImported ||
-		record.ErrorsSeen < receipt.ErrorsSeen {
+	if record.PacksImported < tally.PacksImported ||
+		record.BlobsImported < tally.BlobsImported ||
+		record.ErrorsSeen < tally.ErrorsSeen {
 		return fmt.Errorf("legacy import checkpoint counters mismatch")
 	}
 	return nil
+}
+
+func legacyReceiptIndexTally(receipt schema.LegacyImportReceiptRecord, sourceIndex schema.ID) (schema.LegacyImportIndexTally, bool) {
+	for _, tally := range receipt.IndexTallies {
+		if tally.SourceIndex == sourceIndex {
+			return tally, true
+		}
+	}
+	if len(receipt.IndexTallies) == 0 && receipt.SourceIndex == sourceIndex {
+		return schema.LegacyImportIndexTally{
+			SourceIndex: receipt.SourceIndex, PacksImported: receipt.PacksImported,
+			BlobsImported: receipt.BlobsImported, ErrorsSeen: receipt.ErrorsSeen,
+		}, true
+	}
+	return schema.LegacyImportIndexTally{}, false
 }
 
 func receiptPackChanges(receipt schema.LegacyImportReceiptRecord) ([]packChange, error) {
@@ -819,6 +917,16 @@ func checkpointMatchesInTransaction(ctx context.Context, transaction *Transactio
 	return true, nil
 }
 
+func checkpointsMatchInTransaction(ctx context.Context, transaction *Transaction, checkpoints []Mutation) (bool, error) {
+	for _, checkpoint := range checkpoints {
+		matched, err := checkpointMatchesInTransaction(ctx, transaction, checkpoint)
+		if err != nil || !matched {
+			return matched, err
+		}
+	}
+	return true, nil
+}
+
 func (store *SchemaStore) ensureCheckpointMatches(ctx context.Context, checkpoint Mutation) error {
 	value, found, err := store.Get(ctx, checkpoint.Key)
 	if err != nil {
@@ -829,6 +937,15 @@ func (store *SchemaStore) ensureCheckpointMatches(ctx context.Context, checkpoin
 	}
 	if !bytes.Equal(value, checkpoint.Value) {
 		return fmt.Errorf("legacy import checkpoint conflicts with existing value")
+	}
+	return nil
+}
+
+func (store *SchemaStore) ensureCheckpointsMatch(ctx context.Context, checkpoints []Mutation) error {
+	for _, checkpoint := range checkpoints {
+		if err := store.ensureCheckpointMatches(ctx, checkpoint); err != nil {
+			return err
+		}
 	}
 	return nil
 }

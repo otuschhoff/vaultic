@@ -306,6 +306,14 @@ type LegacyImportReceiptRecord struct {
 	Reduced       bool
 	Changes       []LegacyImportPackChange
 	Events        []LegacyImportEvent
+	IndexTallies  []LegacyImportIndexTally
+}
+
+type LegacyImportIndexTally struct {
+	SourceIndex   ID
+	PacksImported uint64
+	BlobsImported uint64
+	ErrorsSeen    uint64
 }
 
 type LegacyImportPackChange struct {
@@ -363,6 +371,19 @@ func (record LegacyImportReceiptRecord) MarshalBinary() ([]byte, error) {
 		if err := e.bytes(event.Value); err != nil {
 			return nil, err
 		}
+	}
+	if len(record.IndexTallies) > 256 {
+		return nil, fmt.Errorf("%w: too many legacy import receipt index tallies", ErrMalformed)
+	}
+	e.u32(uint32(len(record.IndexTallies)))
+	for _, tally := range record.IndexTallies {
+		if tally.SourceIndex == (ID{}) {
+			return nil, fmt.Errorf("%w: invalid legacy import receipt index tally", ErrMalformed)
+		}
+		e.id(tally.SourceIndex)
+		e.u64(tally.PacksImported)
+		e.u64(tally.BlobsImported)
+		e.u64(tally.ErrorsSeen)
 	}
 	return e.finish()
 }
@@ -438,6 +459,31 @@ func UnmarshalLegacyImportReceiptRecord(data []byte) (LegacyImportReceiptRecord,
 		}
 		if _, err := UnmarshalPackHistoryEvent(event.Value); err != nil {
 			return LegacyImportReceiptRecord{}, err
+		}
+	}
+	if d.at < len(d.data) {
+		tallyCount, err := d.u32()
+		if err != nil || tallyCount > 256 {
+			return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt index tallies", ErrMalformed)
+		}
+		record.IndexTallies = make([]LegacyImportIndexTally, tallyCount)
+		for index := range record.IndexTallies {
+			tally := &record.IndexTallies[index]
+			if tally.SourceIndex, err = d.id(); err != nil {
+				return record, err
+			}
+			if tally.PacksImported, err = d.u64(); err != nil {
+				return record, err
+			}
+			if tally.BlobsImported, err = d.u64(); err != nil {
+				return record, err
+			}
+			if tally.ErrorsSeen, err = d.u64(); err != nil {
+				return record, err
+			}
+			if tally.SourceIndex == (ID{}) {
+				return LegacyImportReceiptRecord{}, fmt.Errorf("%w: invalid legacy import receipt index tally", ErrMalformed)
+			}
 		}
 	}
 	if record.ContentHash == (ID{}) || record.SourceIndex == (ID{}) {

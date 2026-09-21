@@ -492,6 +492,16 @@ func (store *splitStore) IngestLegacyPacks(
 	return nil
 }
 
+func (store *splitStore) IngestLegacyPacksCheckpoints(
+	ctx context.Context,
+	session schema.ID,
+	batch uint64,
+	imports []daemon.LegacyPackImport,
+	_ []daemon.Mutation,
+) error {
+	return store.IngestLegacyPacks(ctx, session, batch, imports)
+}
+
 func (store *splitStore) ReduceLegacyImportBatch(
 	ctx context.Context,
 	_ schema.ID,
@@ -537,6 +547,27 @@ func (store *splitStore) CompleteLegacyImportSession(_ context.Context, _ schema
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.completeCalls++
+	return nil
+}
+
+func (store *splitStore) ReduceLegacyImportBatchCheckpoints(
+	ctx context.Context,
+	session schema.ID,
+	batch uint64,
+	checkpoints []daemon.Mutation,
+) error {
+	var checkpoint *daemon.Mutation
+	if len(checkpoints) > 0 {
+		checkpoint = &checkpoints[0]
+	}
+	if err := store.ReduceLegacyImportBatch(ctx, session, batch, checkpoint); err != nil {
+		return err
+	}
+	for index := 1; index < len(checkpoints); index++ {
+		if err := store.Put(ctx, checkpoints[index].Key, checkpoints[index].Value, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -680,6 +711,63 @@ func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
 	}
 	if got := importMetricValue(telemetry.Component(time.Now()).Metrics, "operation_processed_bytes", map[string]string{"role": "database"}); got == 0 {
 		t.Fatal("Stage 3 did not account published database bytes")
+	}
+}
+
+func TestImportStage3BatchesAcrossSourceIndexes(t *testing.T) {
+	indexA, indexB := schema.ID(vaultic.NewRandomID()), schema.ID(vaultic.NewRandomID())
+	packA, packB := vaultic.NewRandomID(), vaultic.NewRandomID()
+	packs := []index.PackBlobs{
+		{PackID: packA, Blobs: pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}}},
+		{PackID: packB, Blobs: pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.DataBlob}, Length: 1}}},
+	}
+	store := newSplitStore()
+	outcomes, _, stats, failed := importPacksStage3Sources(
+		context.Background(), fixedStatter{size: 16}, store, indexA, packs, []schema.ID{indexA, indexB},
+		Options{PublicationLanes: 2, PacksPerTransaction: 8, Telemetry: NewSchedulerTelemetry()}, true, nil,
+	)
+	if failed >= 0 || len(outcomes) != 2 || !outcomes[0].complete || !outcomes[1].complete {
+		t.Fatalf("grouped outcomes = %+v, failed=%d", outcomes, failed)
+	}
+	if stats.ingestedBatches != 1 || stats.reducedBatches != 1 {
+		t.Fatalf("grouped batch stats = %+v", stats)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.ingestedImports) != 1 {
+		t.Fatalf("ingest transactions = %d, want 1", len(store.ingestedImports))
+	}
+	for _, sourceIndex := range []schema.ID{indexA, indexB} {
+		if _, found := store.values[string(schema.ImportCheckpointKey(sourceIndex))]; !found {
+			t.Fatalf("checkpoint for %x is missing", sourceIndex)
+		}
+	}
+}
+
+func TestImportFreshStage3UsesCrossIndexTransactions(t *testing.T) {
+	indexA, indexB := vaultic.NewRandomID(), vaultic.NewRandomID()
+	source := &memorySource{indexes: map[vaultic.ID][]byte{
+		indexA: encodedIndexWithPacks(t, []vaultic.ID{vaultic.NewRandomID()}),
+		indexB: encodedIndexWithPacks(t, []vaultic.ID{vaultic.NewRandomID()}),
+	}}
+	store := newSplitStore()
+	result, err := Import(
+		context.Background(), source, fixedStatter{size: 16}, store,
+		Options{PublicationLanes: 2, PacksPerTransaction: 8, Telemetry: NewSchedulerTelemetry()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IndexesImported != 2 || result.PacksImported != 2 || result.BatchesIngested != 1 || result.BatchesReduced != 1 {
+		t.Fatalf("grouped import result = %+v", result)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.ingestedImports) != 1 || len(store.ingestedImports[store.ingestedOrder[0]]) != 2 {
+		t.Fatalf("grouped ingest batches = %#v", store.ingestedImports)
+	}
+	if store.completeCalls != 1 {
+		t.Fatalf("grouped session cleanup calls = %d, want 1", store.completeCalls)
 	}
 }
 
