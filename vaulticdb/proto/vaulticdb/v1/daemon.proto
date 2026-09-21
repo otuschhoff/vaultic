@@ -194,6 +194,10 @@ message ReadCacheMetrics {
   uint64 read_latency_count = 16;
   uint64 write_latency_total_us = 17;
   uint64 write_latency_count = 18;
+  uint64 admission_rejections_reservation = 19;
+  uint64 admission_rejections_background_budget = 20;
+  uint64 admission_rejections_background_task = 21;
+  bool admission_rejection_reasons_available = 22;
 }
 
 message ReadCacheTierPolicy {
@@ -289,6 +293,19 @@ message WriterStatusResponse {
   AttributionSnapshot attribution = 12;
   int64 process_started_unix_ms = 13;
   int64 captured_unix_ms = 14;
+  uint64 process_cpu_user_us = 15;
+  uint64 process_cpu_system_us = 16;
+  uint64 process_rss_bytes = 17;
+  uint64 process_threads = 18;
+  uint64 process_read_bytes = 19;
+  uint64 process_write_bytes = 20;
+  bool process_cpu_available = 21;
+  bool process_memory_available = 22;
+  bool process_io_available = 23;
+  uint64 engine_flush_interval_ms = 24;
+  uint64 engine_max_unflushed_bytes = 25;
+  uint64 engine_l0_sst_size_bytes = 26;
+  bool engine_tuning_available = 27;
 }
 
 message TimingSnapshot {
@@ -371,6 +388,8 @@ message AttributionSnapshot {
   ObjectStoreRoleSnapshot object_store_main = 32;
   ObjectStoreRoleSnapshot object_store_wal = 33;
   ObjectStoreRoleSnapshot object_store_coordination = 34;
+  TimingSnapshot transaction_map_lock_wait = 35;
+  TimingSnapshot transaction_slot_lock_wait = 36;
 }
 
 message DemoteWriterRequest {

@@ -303,6 +303,22 @@ Collection, delivery, retry, drop, queue and age signals remain visible in logs
 or exported health metrics; telemetry failure does not invalidate imported data
 but makes a performance run incomplete evidence.
 
+For self-contained diagnostic runs, prefer a new local JSONL artifact. The path
+is created exclusively with mode `0600`; an existing file or symlink is rejected.
+It is mutually exclusive with the InfluxDB destination and uses the same bounded
+collection, queue, retry and final-drain behavior:
+
+```sh
+vaultic index import [repository and import options] \
+  --monitor-export-jsonl "$run_dir/monitor.jsonl" \
+  --monitor-export-interval 5s
+```
+
+Each line is one schema-validated snapshot containing aligned importer and
+VaulticDB components. See the
+[critical-path telemetry design](phase-32-vaulticdb-critical-path-telemetry.md)
+for coverage, interpretation and acceptance requirements.
+
 ### Full-import bottleneck loop
 
 Run three no-injection current-revision baselines on a fresh, explicitly authorized

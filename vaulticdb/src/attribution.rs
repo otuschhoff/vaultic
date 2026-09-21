@@ -351,6 +351,8 @@ impl ServiceAttribution {
 #[derive(Debug)]
 pub(crate) struct StorageAttribution {
     pub(crate) transaction_begin: TimingMetric,
+    pub(crate) transaction_map_lock_wait: TimingMetric,
+    pub(crate) transaction_slot_lock_wait: TimingMetric,
     pub(crate) engine_submit: TimingMetric,
     pub(crate) durable_wait: TimingMetric,
     pub(crate) finalization: TimingMetric,
@@ -376,6 +378,8 @@ impl StorageAttribution {
         };
         Self {
             transaction_begin: metric(),
+            transaction_map_lock_wait: metric(),
+            transaction_slot_lock_wait: metric(),
             engine_submit: metric(),
             durable_wait: metric(),
             finalization: metric(),

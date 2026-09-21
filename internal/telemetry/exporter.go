@@ -155,6 +155,10 @@ func (worker *AsyncExporter) Close() {
 	worker.CloseWithin(30 * time.Second)
 }
 
+func (worker *AsyncExporter) Done() <-chan struct{} {
+	return worker.done
+}
+
 func (worker *AsyncExporter) CloseWithin(timeout time.Duration) bool {
 	worker.once.Do(func() {
 		worker.mu.Lock()

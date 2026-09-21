@@ -256,6 +256,13 @@ fn cache_from_env() -> Result<CacheConfig> {
         "VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES",
         part_size_bytes.saturating_mul(8),
     )?;
+    let default_background_tasks = max_inflight_bytes.div_ceil(part_size_bytes).max(1);
+    let max_background_tasks = parse_u64(
+        "VAULTICDB_READ_CACHE_MAX_BACKGROUND_TASKS",
+        default_background_tasks,
+    )?
+    .try_into()
+    .context("VAULTICDB_READ_CACHE_MAX_BACKGROUND_TASKS exceeds platform limits")?;
     let aggregate_max_bytes = optional_u64("VAULTICDB_READ_CACHE_AGGREGATE_MAX_BYTES")?;
     let mut ids = std::collections::HashSet::new();
     let mut environment_ids = std::collections::HashSet::new();
@@ -281,6 +288,7 @@ fn cache_from_env() -> Result<CacheConfig> {
         aggregate_max_bytes,
         part_size_bytes,
         max_inflight_bytes,
+        max_background_tasks,
     };
     config.validate()?;
     Ok(config)
@@ -993,10 +1001,12 @@ mod tests {
             env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_ABSOLUTE_AGE", "2h");
             env::set_var("VAULTICDB_READ_CACHE_REMOTE_EAST_TIMEOUT", "750ms");
             env::set_var("VAULTICDB_READ_CACHE_AGGREGATE_MAX_BYTES", "2500000");
+            env::set_var("VAULTICDB_READ_CACHE_MAX_BACKGROUND_TASKS", "128");
         }
         let cache = cache_from_env().unwrap();
         assert_eq!(cache.tiers.len(), 2);
         assert_eq!(cache.aggregate_max_bytes, Some(2_500_000));
+        assert_eq!(cache.max_background_tasks, 128);
         assert_eq!(
             cache.tiers[0].confidentiality,
             CacheConfidentiality::Encrypted
@@ -1005,6 +1015,21 @@ mod tests {
         assert_eq!(cache.tiers[0].policy.read_priority, 2);
         assert_eq!(cache.tiers[1].policy.absolute_age_ms, Some(7_200_000));
         assert_eq!(cache.tiers[1].policy.timeout_ms, 750);
+        clear_cache_environment();
+    }
+
+    #[test]
+    fn derives_fresh_import_background_task_limit() {
+        let _guard = environment_lock().lock().unwrap();
+        clear_cache_environment();
+        unsafe {
+            env::set_var("VAULTICDB_READ_CACHE_TIERS", "ram");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_OBJECT_STORE", "memory");
+            env::set_var("VAULTICDB_READ_CACHE_RAM_MAX_BYTES", "68719476736");
+            env::set_var("VAULTICDB_READ_CACHE_PART_SIZE_BYTES", "16777216");
+            env::set_var("VAULTICDB_READ_CACHE_MAX_INFLIGHT_BYTES", "268435456");
+        }
+        assert_eq!(cache_from_env().unwrap().max_background_tasks, 16);
         clear_cache_environment();
     }
 

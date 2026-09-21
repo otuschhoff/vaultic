@@ -168,6 +168,7 @@ mod tests {
                 aggregate_max_bytes: Some(64 * 1024),
                 part_size_bytes: 4096,
                 max_inflight_bytes: 8192,
+                max_background_tasks: 2,
             },
             fencing_replica: None,
             metadata_rebuild_initialize: false,
@@ -2148,9 +2149,20 @@ mod tests {
             assert_eq!(results[0].value, b"value");
             assert!(!results[1].found);
             assert_eq!(results[2].value, b"value");
+            assert!(storage.get(b"present", &transaction_id).await.unwrap().found);
+            assert!(!storage
+                .scan(b"present", b"", 1, &transaction_id)
+                .await
+                .unwrap()
+                .entries
+                .is_empty());
 
             let error = storage.multi_get(&keys, &transaction_id, 0).await.unwrap_err();
             assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+            assert_eq!(
+                storage.attribution.transaction_slot_lock_wait.snapshot().completed,
+                5
+            );
             storage.rollback(&transaction_id).await.unwrap();
             storage.close().await.unwrap();
         }

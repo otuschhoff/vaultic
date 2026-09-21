@@ -64,6 +64,7 @@ pub(crate) struct CacheConfig {
     pub(crate) aggregate_max_bytes: Option<u64>,
     pub(crate) part_size_bytes: u64,
     pub(crate) max_inflight_bytes: u64,
+    pub(crate) max_background_tasks: usize,
 }
 
 impl Default for CacheConfig {
@@ -73,6 +74,7 @@ impl Default for CacheConfig {
             aggregate_max_bytes: None,
             part_size_bytes: DEFAULT_PART_SIZE_BYTES,
             max_inflight_bytes: DEFAULT_PART_SIZE_BYTES.saturating_mul(8),
+            max_background_tasks: 8,
         }
     }
 }
@@ -96,6 +98,9 @@ impl CacheConfig {
         }
         if self.max_inflight_bytes > u32::MAX as u64 {
             bail!("read-cache in-flight budget must not exceed 4 GiB");
+        }
+        if self.max_background_tasks == 0 || self.max_background_tasks > 4096 {
+            bail!("read-cache background task limit must be between 1 and 4096");
         }
         if self.aggregate_max_bytes == Some(0) {
             bail!("read-cache aggregate byte limit must be non-zero when configured");
@@ -199,6 +204,9 @@ pub(crate) struct CacheMetricsSnapshot {
     pub(crate) bypasses: u64,
     pub(crate) admissions: u64,
     pub(crate) admission_rejections: u64,
+    pub(crate) admission_rejections_reservation: u64,
+    pub(crate) admission_rejections_background_budget: u64,
+    pub(crate) admission_rejections_background_task: u64,
     pub(crate) capacity_evictions: u64,
     pub(crate) idle_evictions: u64,
     pub(crate) absolute_evictions: u64,
@@ -266,6 +274,9 @@ struct CacheMetrics {
     bypasses: AtomicU64,
     admissions: AtomicU64,
     admission_rejections: AtomicU64,
+    admission_rejections_reservation: AtomicU64,
+    admission_rejections_background_budget: AtomicU64,
+    admission_rejections_background_task: AtomicU64,
     capacity_evictions: AtomicU64,
     idle_evictions: AtomicU64,
     absolute_evictions: AtomicU64,
@@ -289,6 +300,15 @@ impl CacheMetrics {
             bypasses: self.bypasses.load(Ordering::Acquire),
             admissions: self.admissions.load(Ordering::Acquire),
             admission_rejections: self.admission_rejections.load(Ordering::Acquire),
+            admission_rejections_reservation: self
+                .admission_rejections_reservation
+                .load(Ordering::Acquire),
+            admission_rejections_background_budget: self
+                .admission_rejections_background_budget
+                .load(Ordering::Acquire),
+            admission_rejections_background_task: self
+                .admission_rejections_background_task
+                .load(Ordering::Acquire),
             capacity_evictions: self.capacity_evictions.load(Ordering::Acquire),
             idle_evictions: self.idle_evictions.load(Ordering::Acquire),
             absolute_evictions: self.absolute_evictions.load(Ordering::Acquire),
@@ -831,12 +851,7 @@ impl CacheManager {
             max_inflight_bytes: config.max_inflight_bytes,
             part_size_bytes: config.part_size_bytes,
             background_budget: Arc::new(Semaphore::new(config.max_inflight_bytes as usize)),
-            background_task_budget: Arc::new(Semaphore::new(
-                config
-                    .max_inflight_bytes
-                    .div_ceil(config.part_size_bytes)
-                    .max(1) as usize,
-            )),
+            background_task_budget: Arc::new(Semaphore::new(config.max_background_tasks)),
             background_tasks: Arc::new(StdMutex::new(Vec::new())),
             pending_deletions: Arc::new(StdMutex::new(HashMap::new())),
             deletion_wake: Arc::new(Notify::new()),
@@ -2294,6 +2309,12 @@ impl CacheManager {
             self.metrics
                 .admission_rejections
                 .fetch_add(1, Ordering::AcqRel);
+            tier.metrics
+                .admission_rejections_reservation
+                .fetch_add(1, Ordering::AcqRel);
+            self.metrics
+                .admission_rejections_reservation
+                .fetch_add(1, Ordering::AcqRel);
             return;
         };
         let started = Instant::now();
@@ -3701,11 +3722,17 @@ impl ObjectStore for CacheManager {
                 self.metrics
                     .admission_rejections
                     .fetch_add(1, Ordering::AcqRel);
+                self.metrics
+                    .admission_rejections_background_task
+                    .fetch_add(1, Ordering::AcqRel);
             }
         } else {
             self.remove_flight(&key, &flight);
             self.metrics
                 .admission_rejections
+                .fetch_add(1, Ordering::AcqRel);
+            self.metrics
+                .admission_rejections_background_budget
                 .fetch_add(1, Ordering::AcqRel);
         }
         Ok(result_from_bytes(
@@ -5054,6 +5081,8 @@ mod tests {
                     aggregate_max_bytes: None,
                     part_size_bytes: 4096,
                     max_inflight_bytes: max_bytes.saturating_mul(2).max(4096),
+                    max_background_tasks: max_bytes.saturating_mul(2).max(4096).div_ceil(4096)
+                        as usize,
                 },
                 "repository",
                 "database",
@@ -5179,6 +5208,7 @@ mod tests {
                     aggregate_max_bytes: None,
                     part_size_bytes: 4096,
                     max_inflight_bytes: 4096,
+                    max_background_tasks: 1,
                 },
                 "repository",
                 database_identity,
@@ -5328,6 +5358,7 @@ mod tests {
                     aggregate_max_bytes: None,
                     part_size_bytes: 4096,
                     max_inflight_bytes: 4096,
+                    max_background_tasks: 1,
                 },
                 "repository",
                 "maximum-status-cardinality",
@@ -5392,6 +5423,7 @@ mod tests {
                 aggregate_max_bytes: Some(75),
                 part_size_bytes: 4096,
                 max_inflight_bytes: 4096,
+                max_background_tasks: 1,
             },
             "repository",
             "aggregate-status",
@@ -5432,6 +5464,7 @@ mod tests {
                 aggregate_max_bytes: None,
                 part_size_bytes: 4096,
                 max_inflight_bytes: 4096,
+                max_background_tasks: 1,
             },
             "repository",
             "policy-tier",
@@ -5468,6 +5501,7 @@ mod tests {
             aggregate_max_bytes: None,
             part_size_bytes: 4096,
             max_inflight_bytes: 4096,
+            max_background_tasks: 1,
         };
         let first = CacheManager::new(
             Arc::new(InMemory::new()),
@@ -5605,6 +5639,7 @@ mod tests {
                     aggregate_max_bytes: None,
                     part_size_bytes: 4096,
                     max_inflight_bytes: 64 * 1024,
+                    max_background_tasks: 16,
                 },
                 "repository",
                 "encrypted-cache",
@@ -5682,6 +5717,7 @@ mod tests {
                     aggregate_max_bytes: Some(128 * 1024),
                     part_size_bytes: 4096,
                     max_inflight_bytes: 64 * 1024,
+                    max_background_tasks: 16,
                 },
                 "repository",
                 "mixed-cache",
@@ -5790,6 +5826,7 @@ mod tests {
                     aggregate_max_bytes: None,
                     part_size_bytes: 4096,
                     max_inflight_bytes: 64 * 1024,
+                    max_background_tasks: 16,
                 },
                 "repository",
                 "restart-cache",
@@ -5820,6 +5857,7 @@ mod tests {
                     aggregate_max_bytes: None,
                     part_size_bytes: 4096,
                     max_inflight_bytes: 64 * 1024,
+                    max_background_tasks: 16,
                 },
                 "repository",
                 "restart-cache",
@@ -5882,6 +5920,57 @@ mod tests {
         .expect("background oversized admission rejection");
         assert_eq!(cache.status().used_bytes, 0);
         assert_eq!(cache.status().metrics.admission_rejections, 1);
+        assert_eq!(cache.status().metrics.admission_rejections_reservation, 1);
+    }
+
+    #[tokio::test]
+    async fn background_admission_rejections_report_budget_reason() {
+        for task_budget in [false, true] {
+            let (origin, cache) = manager(4096).await;
+            let path = ObjectPath::from(if task_budget {
+                "sst/task-budget"
+            } else {
+                "sst/byte-budget"
+            });
+            origin
+                .put(&path, Bytes::from_static(b"value").into())
+                .await
+                .unwrap();
+            let _permit = if task_budget {
+                let permits = cache.background_task_budget.available_permits() as u32;
+                cache
+                    .background_task_budget
+                    .clone()
+                    .acquire_many_owned(permits)
+                    .await
+                    .unwrap()
+            } else {
+                let permits = cache.background_budget.available_permits() as u32;
+                cache
+                    .background_budget
+                    .clone()
+                    .acquire_many_owned(permits)
+                    .await
+                    .unwrap()
+            };
+            cached_get(
+                &cache,
+                &path,
+                options(TableStoreKind::Main, SstType::Compacted, false),
+            )
+            .await;
+            let metrics = cache.status().metrics;
+            assert_eq!(metrics.admission_rejections, 1);
+            assert_eq!(
+                metrics.admission_rejections_background_task,
+                u64::from(task_budget)
+            );
+            assert_eq!(
+                metrics.admission_rejections_background_budget,
+                u64::from(!task_budget)
+            );
+            assert_eq!(metrics.admission_rejections_reservation, 0);
+        }
     }
 
     #[tokio::test]
@@ -6273,6 +6362,7 @@ mod tests {
                     aggregate_max_bytes: Some(128),
                     part_size_bytes: 4096,
                     max_inflight_bytes: 4096,
+                    max_background_tasks: 1,
                 },
                 "repository",
                 "aggregate-race",
@@ -6740,6 +6830,7 @@ mod tests {
             aggregate_max_bytes: Some(4096),
             part_size_bytes: 4096,
             max_inflight_bytes: 4096,
+            max_background_tasks: 1,
         };
         let path = ObjectPath::from("sst/local-restart");
         let request = options(TableStoreKind::Main, SstType::Compacted, false);
@@ -7441,6 +7532,7 @@ mod tests {
                 aggregate_max_bytes: Some(4096),
                 part_size_bytes: 4096,
                 max_inflight_bytes: 4096,
+                max_background_tasks: 1,
             },
             "repository",
             "startup-policy-outage",
@@ -7794,6 +7886,7 @@ mod tests {
                     aggregate_max_bytes: Some(4096),
                     part_size_bytes: 4096,
                     max_inflight_bytes: 4096,
+                    max_background_tasks: 1,
                 },
                 "repository",
                 "startup-partial-inventory",

@@ -397,6 +397,7 @@ type indexImportOptions struct {
 }
 
 type importMonitorExportOptions struct {
+	JSONLPath    string
 	URL          string
 	Org          string
 	Bucket       string
@@ -665,6 +666,7 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 		false,
 		"acknowledge replacement of lost or suspect authoritative metadata after candidate validation",
 	)
+	flags.StringVar(&options.MonitorExport.JSONLPath, "monitor-export-jsonl", "", "new local JSONL file for in-process import telemetry export")
 	flags.StringVar(&options.MonitorExport.URL, "monitor-export-url", "", "InfluxDB v2 URL for in-process import telemetry export")
 	flags.StringVar(&options.MonitorExport.Org, "monitor-export-org", "", "InfluxDB organization for import telemetry")
 	flags.StringVar(&options.MonitorExport.Bucket, "monitor-export-bucket", "", "InfluxDB bucket for import telemetry")
@@ -1052,11 +1054,15 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 }
 
 func validateImportMonitorExportOptions(options importMonitorExportOptions) error {
-	configured := options.URL != "" || options.Org != "" || options.Bucket != "" || options.TokenFile != "" || options.TokenEnv != ""
+	influxConfigured := options.URL != "" || options.Org != "" || options.Bucket != "" || options.TokenFile != "" || options.TokenEnv != ""
+	configured := options.JSONLPath != "" || influxConfigured
 	if !configured {
 		return nil
 	}
-	if options.URL == "" || options.Org == "" || options.Bucket == "" || options.TokenFile == "" == (options.TokenEnv == "") {
+	if options.JSONLPath != "" && influxConfigured {
+		return fmt.Errorf("import monitor export accepts exactly one of local JSONL or InfluxDB")
+	}
+	if influxConfigured && (options.URL == "" || options.Org == "" || options.Bucket == "" || options.TokenFile == "" == (options.TokenEnv == "")) {
 		return fmt.Errorf("import monitor export requires URL, organization, bucket, and exactly one token source")
 	}
 	if options.Interval < time.Second || options.Interval > time.Hour || options.Timeout < 100*time.Millisecond || options.Timeout > time.Minute {

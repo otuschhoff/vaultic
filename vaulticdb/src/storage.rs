@@ -284,6 +284,9 @@ pub(crate) struct EngineMetricsSnapshot {
     pub(crate) batch_write_queue_depth: u64,
     pub(crate) batch_write_queue: EngineTimingSnapshot,
     pub(crate) batch_write_service: EngineTimingSnapshot,
+    pub(crate) flush_interval_ms: u64,
+    pub(crate) max_unflushed_bytes: u64,
+    pub(crate) l0_sst_size_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -2039,8 +2042,20 @@ impl Storage {
     }
 
     pub(crate) fn engine_metrics_snapshot(&self) -> EngineMetricsSnapshot {
+        let settings = self.slatedb_tuning.settings();
+        let configured = || EngineMetricsSnapshot {
+            flush_interval_ms: settings
+                .flush_interval
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            max_unflushed_bytes: settings.max_unflushed_bytes.try_into().unwrap_or(u64::MAX),
+            l0_sst_size_bytes: settings.l0_sst_size_bytes.try_into().unwrap_or(u64::MAX),
+            ..EngineMetricsSnapshot::default()
+        };
         let Some(engine_metrics) = &self.engine_metrics else {
-            return EngineMetricsSnapshot::default();
+            return configured();
         };
         let metrics = engine_metrics.snapshot();
         let now_unix_ms = SystemTime::now()
@@ -2145,6 +2160,7 @@ impl Storage {
                 ),
                 0,
             ),
+            ..configured()
         }
     }
 
@@ -3125,7 +3141,10 @@ impl Storage {
             self.read_value(key).await?
         } else {
             let transaction = self.transaction(transaction_id).await?;
+            let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
             let transaction = transaction.transaction.lock().await;
+            lock_timer.succeeded();
+            drop(lock_timer);
             transaction
                 .as_ref()
                 .ok_or_else(|| transaction_not_found("transaction was closed"))?
@@ -3189,7 +3208,10 @@ impl Storage {
             }
         } else {
             let transaction = self.transaction(transaction_id).await?;
+            let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
             let transaction = transaction.transaction.lock().await;
+            lock_timer.succeeded();
+            drop(lock_timer);
             let transaction = transaction
                 .as_ref()
                 .ok_or_else(|| transaction_not_found("transaction was closed"))?;
@@ -3291,7 +3313,10 @@ impl Storage {
             }
         } else {
             let transaction = self.transaction(transaction_id).await?;
+            let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
             let transaction = transaction.transaction.lock().await;
+            lock_timer.succeeded();
+            drop(lock_timer);
             scan_prefix_transaction(
                 transaction
                     .as_ref()
@@ -3406,7 +3431,10 @@ impl Storage {
             .into());
         }
         let transaction = self.transaction(&request.transaction_id).await?;
+        let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
         let transaction = transaction.transaction.lock().await;
+        lock_timer.succeeded();
+        drop(lock_timer);
         let transaction = transaction
             .as_ref()
             .ok_or_else(|| transaction_not_found("transaction was closed"))?;
@@ -3430,7 +3458,10 @@ impl Storage {
             .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
         let mut timer = self.attribution.transaction_begin.timer();
         let result = async {
+            let mut lock_timer = self.attribution.transaction_map_lock_wait.timer();
             let mut transactions = self.transactions.write().await;
+            lock_timer.succeeded();
+            drop(lock_timer);
             let now = unix_time_ms()
                 .map_err(storage_status)
                 .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
@@ -3549,9 +3580,12 @@ impl Storage {
             .remove_transaction(transaction_id)
             .await
             .map_err(TransactionFailure::before_consumption)?;
+        let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
         let transaction = transaction.transaction.lock().await.take().ok_or_else(|| {
             TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
         })?;
+        lock_timer.succeeded();
+        drop(lock_timer);
         if let Some(key) = record_key {
             let record = IdempotencyRecord {
                 format: 1,
@@ -3660,9 +3694,12 @@ impl Storage {
             .remove_transaction(transaction_id)
             .await
             .map_err(TransactionFailure::before_consumption)?;
+        let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
         let transaction = transaction.transaction.lock().await.take().ok_or_else(|| {
             TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
         })?;
+        lock_timer.succeeded();
+        drop(lock_timer);
         transaction.rollback();
         Ok(TransactionOutcome {
             consumed: true,
@@ -3678,10 +3715,11 @@ impl Storage {
             }
             .into());
         }
-        let transaction = self
-            .transactions
-            .read()
-            .await
+        let mut lock_timer = self.attribution.transaction_map_lock_wait.timer();
+        let transactions = self.transactions.read().await;
+        lock_timer.succeeded();
+        drop(lock_timer);
+        let transaction = transactions
             .get(transaction_id)
             .cloned()
             .ok_or_else(|| transaction_not_found("transaction was not found"))?;
@@ -3719,9 +3757,11 @@ impl Storage {
             }
             .into());
         }
-        self.transactions
-            .write()
-            .await
+        let mut lock_timer = self.attribution.transaction_map_lock_wait.timer();
+        let mut transactions = self.transactions.write().await;
+        lock_timer.succeeded();
+        drop(lock_timer);
+        transactions
             .remove(transaction_id)
             .ok_or_else(|| transaction_not_found("transaction was not found"))
     }

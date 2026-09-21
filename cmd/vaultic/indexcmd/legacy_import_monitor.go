@@ -92,6 +92,7 @@ type legacyImportMonitorExport struct {
 	done    chan struct{}
 	stop    sync.Once
 	worker  *telemetry.AsyncExporter
+	close   func() error
 	timeout time.Duration
 	collect func(context.Context, time.Time) (telemetry.MonitorSnapshot, error)
 	onError func(error)
@@ -99,24 +100,38 @@ type legacyImportMonitorExport struct {
 }
 
 func startLegacyImportMonitorExport(ctx context.Context, options importMonitorExportOptions, scheduler *legacyimport.SchedulerTelemetry, source *legacyImportMonitorSource) (*legacyImportMonitorExport, error) {
-	if options.URL == "" {
+	if options.URL == "" && options.JSONLPath == "" {
 		return nil, nil
 	}
-	exporter, err := telemetry.NewInfluxExporter(telemetry.InfluxConfig{
-		URL: options.URL, Org: options.Org, Bucket: options.Bucket, DeploymentID: options.DeploymentID,
-		TokenFile: options.TokenFile, TokenEnv: options.TokenEnv, Timeout: options.Timeout, BatchLimit: options.BatchLimit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("configure legacy import monitor export: %w", err)
+	var exporter telemetry.SnapshotExporter
+	var closeExporter func() error
+	if options.JSONLPath != "" {
+		localExporter, err := telemetry.NewJSONLExporter(options.JSONLPath)
+		if err != nil {
+			return nil, fmt.Errorf("configure legacy import monitor export: %w", err)
+		}
+		exporter = localExporter
+		closeExporter = localExporter.Close
+	} else {
+		influxExporter, err := telemetry.NewInfluxExporter(telemetry.InfluxConfig{
+			URL: options.URL, Org: options.Org, Bucket: options.Bucket, DeploymentID: options.DeploymentID,
+			TokenFile: options.TokenFile, TokenEnv: options.TokenEnv, Timeout: options.Timeout, BatchLimit: options.BatchLimit,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("configure legacy import monitor export: %w", err)
+		}
+		exporter = influxExporter
 	}
 	worker := telemetry.NewAsyncExporterWithConfig(exporter, telemetry.AsyncExporterConfig{
 		Capacity: options.Queue, RetryLimit: options.RetryLimit, RetryBackoff: options.RetryBackoff, Timeout: options.Timeout,
 	})
-	return startLegacyImportMonitorLoop(ctx, options.Interval, options.Timeout, worker, func(collectCtx context.Context, now time.Time) (telemetry.MonitorSnapshot, error) {
+	monitor := startLegacyImportMonitorLoop(ctx, options.Interval, options.Timeout, worker, func(collectCtx context.Context, now time.Time) (telemetry.MonitorSnapshot, error) {
 		return source.Snapshot(collectCtx, scheduler, now)
 	}, func(err error) {
 		log.Printf("legacy import monitor export: %v", err)
-	}), nil
+	})
+	monitor.close = closeExporter
+	return monitor, nil
 }
 
 func startLegacyImportMonitorLoop(
@@ -199,6 +214,21 @@ func (monitor *legacyImportMonitorExport) Close() {
 	finalSubmitted := monitor.submit(context.Background())
 	remaining := max(monitor.timeout-time.Since(started), 0)
 	drained := monitor.worker.CloseWithin(remaining)
+	if monitor.close != nil {
+		closeExporter := func() {
+			if err := monitor.close(); err != nil {
+				log.Printf("legacy import monitor export close: %v", err)
+			}
+		}
+		if drained {
+			closeExporter()
+		} else {
+			go func() {
+				<-monitor.worker.Done()
+				closeExporter()
+			}()
+		}
+	}
 	stats := monitor.worker.Stats()
 	if !finalSubmitted || !drained || stats.Failures != 0 || stats.Dropped != 0 {
 		log.Printf("legacy import monitor export completed: final_submitted=%t drained=%t failures=%d dropped=%d pending=%d", finalSubmitted, drained, stats.Failures, stats.Dropped, stats.Pending)

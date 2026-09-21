@@ -29,6 +29,10 @@ fn metrics_response(metrics: CacheMetricsSnapshot) -> ReadCacheMetrics {
         bypasses: metrics.bypasses,
         admissions: metrics.admissions,
         admission_rejections: metrics.admission_rejections,
+        admission_rejections_reservation: metrics.admission_rejections_reservation,
+        admission_rejections_background_budget: metrics.admission_rejections_background_budget,
+        admission_rejections_background_task: metrics.admission_rejections_background_task,
+        admission_rejection_reasons_available: true,
         capacity_evictions: metrics.capacity_evictions,
         idle_evictions: metrics.idle_evictions,
         absolute_evictions: metrics.absolute_evictions,
@@ -264,6 +268,7 @@ mod tests {
             aggregate_max_bytes: Some(1024 * 1024),
             part_size_bytes: 4096,
             max_inflight_bytes: 8192,
+            max_background_tasks: 2,
         }
     }
 

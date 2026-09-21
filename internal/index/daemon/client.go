@@ -237,20 +237,33 @@ type EncryptionAudit struct {
 
 // WriterStatus describes observable VaulticDB writer ownership without exposing protobuf types.
 type WriterStatus struct {
-	InstanceID           string              `json:"instance_id"`
-	Role                 string              `json:"role"`
-	CurrentEpoch         uint64              `json:"current_epoch"`
-	ObservedEpoch        uint64              `json:"observed_epoch"`
-	TransitionReason     string              `json:"transition_reason"`
-	TransitionUnixMS     int64               `json:"transition_unix_ms"`
-	ActiveWriteIntents   uint64              `json:"active_write_intents"`
-	ActiveTransactions   uint64              `json:"active_transactions"`
-	LastDurableSequence  uint64              `json:"last_durable_sequence"`
-	IdleDeadlineUnixMS   int64               `json:"idle_deadline_unix_ms"`
-	PromotionSafe        bool                `json:"promotion_safe"`
-	Attribution          AttributionSnapshot `json:"attribution"`
-	ProcessStartedUnixMS int64               `json:"process_started_unix_ms"`
-	CapturedUnixMS       int64               `json:"captured_unix_ms"`
+	InstanceID              string              `json:"instance_id"`
+	Role                    string              `json:"role"`
+	CurrentEpoch            uint64              `json:"current_epoch"`
+	ObservedEpoch           uint64              `json:"observed_epoch"`
+	TransitionReason        string              `json:"transition_reason"`
+	TransitionUnixMS        int64               `json:"transition_unix_ms"`
+	ActiveWriteIntents      uint64              `json:"active_write_intents"`
+	ActiveTransactions      uint64              `json:"active_transactions"`
+	LastDurableSequence     uint64              `json:"last_durable_sequence"`
+	IdleDeadlineUnixMS      int64               `json:"idle_deadline_unix_ms"`
+	PromotionSafe           bool                `json:"promotion_safe"`
+	Attribution             AttributionSnapshot `json:"attribution"`
+	ProcessStartedUnixMS    int64               `json:"process_started_unix_ms"`
+	CapturedUnixMS          int64               `json:"captured_unix_ms"`
+	ProcessCPUUserUS        uint64              `json:"process_cpu_user_us"`
+	ProcessCPUSystemUS      uint64              `json:"process_cpu_system_us"`
+	ProcessRSSBytes         uint64              `json:"process_rss_bytes"`
+	ProcessThreads          uint64              `json:"process_threads"`
+	ProcessReadBytes        uint64              `json:"process_read_bytes"`
+	ProcessWriteBytes       uint64              `json:"process_write_bytes"`
+	ProcessCPUAvailable     bool                `json:"process_cpu_available"`
+	ProcessMemAvailable     bool                `json:"process_memory_available"`
+	ProcessIOAvailable      bool                `json:"process_io_available"`
+	EngineFlushIntervalMS   uint64              `json:"engine_flush_interval_ms"`
+	EngineMaxUnflushedBytes uint64              `json:"engine_max_unflushed_bytes"`
+	EngineL0SSTSizeBytes    uint64              `json:"engine_l0_sst_size_bytes"`
+	EngineTuningAvailable   bool                `json:"engine_tuning_available"`
 }
 
 type TimingSnapshot struct {
@@ -299,24 +312,28 @@ type ObjectStoreRoleSnapshot struct {
 }
 
 type ReadCacheMetrics struct {
-	Hits                uint64 `json:"hits"`
-	Misses              uint64 `json:"misses"`
-	OriginReads         uint64 `json:"origin_reads"`
-	OriginReadsAvoided  uint64 `json:"origin_reads_avoided"`
-	Corruptions         uint64 `json:"corruptions"`
-	Timeouts            uint64 `json:"timeouts"`
-	Failures            uint64 `json:"failures"`
-	Bypasses            uint64 `json:"bypasses"`
-	Admissions          uint64 `json:"admissions"`
-	AdmissionRejections uint64 `json:"admission_rejections"`
-	CapacityEvictions   uint64 `json:"capacity_evictions"`
-	IdleEvictions       uint64 `json:"idle_evictions"`
-	AbsoluteEvictions   uint64 `json:"absolute_evictions"`
-	CorruptionEvictions uint64 `json:"corruption_evictions"`
-	ReadLatencyTotalUS  uint64 `json:"read_latency_total_us"`
-	ReadLatencyCount    uint64 `json:"read_latency_count"`
-	WriteLatencyTotalUS uint64 `json:"write_latency_total_us"`
-	WriteLatencyCount   uint64 `json:"write_latency_count"`
+	Hits                                uint64 `json:"hits"`
+	Misses                              uint64 `json:"misses"`
+	OriginReads                         uint64 `json:"origin_reads"`
+	OriginReadsAvoided                  uint64 `json:"origin_reads_avoided"`
+	Corruptions                         uint64 `json:"corruptions"`
+	Timeouts                            uint64 `json:"timeouts"`
+	Failures                            uint64 `json:"failures"`
+	Bypasses                            uint64 `json:"bypasses"`
+	Admissions                          uint64 `json:"admissions"`
+	AdmissionRejections                 uint64 `json:"admission_rejections"`
+	AdmissionRejectionsReservation      uint64 `json:"admission_rejections_reservation"`
+	AdmissionRejectionsBackgroundBudget uint64 `json:"admission_rejections_background_budget"`
+	AdmissionRejectionsBackgroundTask   uint64 `json:"admission_rejections_background_task"`
+	AdmissionRejectionReasonsAvailable  bool   `json:"admission_rejection_reasons_available"`
+	CapacityEvictions                   uint64 `json:"capacity_evictions"`
+	IdleEvictions                       uint64 `json:"idle_evictions"`
+	AbsoluteEvictions                   uint64 `json:"absolute_evictions"`
+	CorruptionEvictions                 uint64 `json:"corruption_evictions"`
+	ReadLatencyTotalUS                  uint64 `json:"read_latency_total_us"`
+	ReadLatencyCount                    uint64 `json:"read_latency_count"`
+	WriteLatencyTotalUS                 uint64 `json:"write_latency_total_us"`
+	WriteLatencyCount                   uint64 `json:"write_latency_count"`
 }
 
 type ReadCacheTierStatus struct {
@@ -373,6 +390,8 @@ type AttributionSnapshot struct {
 	CommitRequest            TimingSnapshot          `json:"commit_request"`
 	RollbackRequest          TimingSnapshot          `json:"rollback_request"`
 	TransactionBegin         TimingSnapshot          `json:"transaction_begin"`
+	TransactionMapLockWait   TimingSnapshot          `json:"transaction_map_lock_wait"`
+	TransactionSlotLockWait  TimingSnapshot          `json:"transaction_slot_lock_wait"`
 	EngineSubmit             TimingSnapshot          `json:"engine_submit"`
 	DurableWait              TimingSnapshot          `json:"durable_wait"`
 	Finalization             TimingSnapshot          `json:"finalization"`
@@ -1615,38 +1634,57 @@ func (c *Client) promoteWriterWithTakeover(
 func writerStatus(response *vaulticdbv1.WriterStatusResponse) WriterStatus {
 	role := strings.ToLower(strings.TrimPrefix(response.GetRole().String(), "WRITER_ROLE_"))
 	role = strings.ReplaceAll(role, "_", "-")
-	return WriterStatus{
-		InstanceID:           response.GetInstanceId(),
-		Role:                 role,
-		CurrentEpoch:         response.GetCurrentEpoch(),
-		ObservedEpoch:        response.GetObservedEpoch(),
-		TransitionReason:     response.GetTransitionReason(),
-		TransitionUnixMS:     response.GetTransitionUnixMs(),
-		ActiveWriteIntents:   response.GetActiveWriteIntents(),
-		ActiveTransactions:   response.GetActiveTransactions(),
-		LastDurableSequence:  response.GetLastDurableSequence(),
-		IdleDeadlineUnixMS:   response.GetIdleDeadlineUnixMs(),
-		PromotionSafe:        response.GetPromotionSafe(),
-		Attribution:          attributionSnapshot(response.GetAttribution()),
-		ProcessStartedUnixMS: response.GetProcessStartedUnixMs(),
-		CapturedUnixMS:       response.GetCapturedUnixMs(),
+	status := WriterStatus{
+		InstanceID:              response.GetInstanceId(),
+		Role:                    role,
+		CurrentEpoch:            response.GetCurrentEpoch(),
+		ObservedEpoch:           response.GetObservedEpoch(),
+		TransitionReason:        response.GetTransitionReason(),
+		TransitionUnixMS:        response.GetTransitionUnixMs(),
+		ActiveWriteIntents:      response.GetActiveWriteIntents(),
+		ActiveTransactions:      response.GetActiveTransactions(),
+		LastDurableSequence:     response.GetLastDurableSequence(),
+		IdleDeadlineUnixMS:      response.GetIdleDeadlineUnixMs(),
+		PromotionSafe:           response.GetPromotionSafe(),
+		Attribution:             attributionSnapshot(response.GetAttribution()),
+		ProcessStartedUnixMS:    response.GetProcessStartedUnixMs(),
+		CapturedUnixMS:          response.GetCapturedUnixMs(),
+		ProcessCPUUserUS:        response.GetProcessCpuUserUs(),
+		ProcessCPUSystemUS:      response.GetProcessCpuSystemUs(),
+		ProcessRSSBytes:         response.GetProcessRssBytes(),
+		ProcessThreads:          response.GetProcessThreads(),
+		ProcessReadBytes:        response.GetProcessReadBytes(),
+		ProcessWriteBytes:       response.GetProcessWriteBytes(),
+		ProcessCPUAvailable:     response.GetProcessCpuAvailable(),
+		ProcessMemAvailable:     response.GetProcessMemoryAvailable(),
+		ProcessIOAvailable:      response.GetProcessIoAvailable(),
+		EngineFlushIntervalMS:   response.GetEngineFlushIntervalMs(),
+		EngineMaxUnflushedBytes: response.GetEngineMaxUnflushedBytes(),
+		EngineL0SSTSizeBytes:    response.GetEngineL0SstSizeBytes(),
 	}
+	status.EngineTuningAvailable = response.GetEngineTuningAvailable()
+	return status
 }
 
 func readCacheMetrics(response *vaulticdbv1.ReadCacheMetrics) ReadCacheMetrics {
 	if response == nil {
 		return ReadCacheMetrics{}
 	}
-	return ReadCacheMetrics{
+	metrics := ReadCacheMetrics{
 		Hits: response.GetHits(), Misses: response.GetMisses(), OriginReads: response.GetOriginReads(),
 		OriginReadsAvoided: response.GetOriginReadsAvoided(), Corruptions: response.GetCorruptions(),
 		Timeouts: response.GetTimeouts(), Failures: response.GetFailures(), Bypasses: response.GetBypasses(),
 		Admissions: response.GetAdmissions(), AdmissionRejections: response.GetAdmissionRejections(),
-		CapacityEvictions: response.GetCapacityEvictions(), IdleEvictions: response.GetIdleEvictions(),
+		AdmissionRejectionsReservation:      response.GetAdmissionRejectionsReservation(),
+		AdmissionRejectionsBackgroundBudget: response.GetAdmissionRejectionsBackgroundBudget(),
+		AdmissionRejectionsBackgroundTask:   response.GetAdmissionRejectionsBackgroundTask(),
+		CapacityEvictions:                   response.GetCapacityEvictions(), IdleEvictions: response.GetIdleEvictions(),
 		AbsoluteEvictions: response.GetAbsoluteEvictions(), CorruptionEvictions: response.GetCorruptionEvictions(),
 		ReadLatencyTotalUS: response.GetReadLatencyTotalUs(), ReadLatencyCount: response.GetReadLatencyCount(),
 		WriteLatencyTotalUS: response.GetWriteLatencyTotalUs(), WriteLatencyCount: response.GetWriteLatencyCount(),
 	}
+	metrics.AdmissionRejectionReasonsAvailable = response.GetAdmissionRejectionReasonsAvailable()
+	return metrics
 }
 
 func readCacheStatus(response *vaulticdbv1.ReadCacheStatusResponse) ReadCacheStatus {
@@ -1756,6 +1794,8 @@ func attributionSnapshot(response *vaulticdbv1.AttributionSnapshot) AttributionS
 		CommitRequest:            timingSnapshot(response.GetCommitRequest()),
 		RollbackRequest:          timingSnapshot(response.GetRollbackRequest()),
 		TransactionBegin:         timingSnapshot(response.GetTransactionBegin()),
+		TransactionMapLockWait:   timingSnapshot(response.GetTransactionMapLockWait()),
+		TransactionSlotLockWait:  timingSnapshot(response.GetTransactionSlotLockWait()),
 		EngineSubmit:             timingSnapshot(response.GetEngineSubmit()),
 		DurableWait:              timingSnapshot(response.GetDurableWait()),
 		Finalization:             timingSnapshot(response.GetFinalization()),

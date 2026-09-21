@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -10,24 +11,36 @@ import (
 func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 	timing := daemon.TimingSnapshot{
 		Completed: 2, Successes: 2, TotalUS: 12, MaxUS: 8,
-		LatencyBucketUpperUS: vaulticLatencyBounds(), LatencyBucketCounts: []uint64{2, 2, 2, 2, 2, 2, 2, 2},
+		LatencyBucketUpperUS: vaulticLatencyBounds(), LatencyBucketCounts: []uint64{1, 1, 0, 0, 0, 0, 0, 0},
 	}
 	engineTiming := timing
 	engineTiming.LatencyBucketUpperUS = slateDBLatencyBounds()
-	engineTiming.LatencyBucketCounts = []uint64{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}
+	engineTiming.LatencyBucketCounts = []uint64{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	writer := daemon.WriterStatus{
 		ProcessStartedUnixMS: 100, CapturedUnixMS: 200,
+		EngineFlushIntervalMS: 100, EngineMaxUnflushedBytes: 200, EngineL0SSTSizeBytes: 300,
+		EngineTuningAvailable: true,
 		Attribution: daemon.AttributionSnapshot{
 			AdmissionWait: timing, AdmissionLockHold: timing, FenceCheck: timing,
-			WriteBatchRequest: timing, TransactionBegin: timing, EngineSubmit: timing,
+			WriteBatchRequest: timing, BeginRequest: timing, CommitRequest: timing, RollbackRequest: timing,
+			TransactionBegin: timing, EngineSubmit: timing,
 			DurableWait: timing, Finalization: timing, EngineBackpressure: engineTiming,
 			EngineBatchQueue: engineTiming, EngineBatchService: engineTiming,
+			EngineImmutableFlushes: 3, EngineL0FlushBytes: 4, EngineCompactedSSTs: 5,
+			EngineL0StallsSSTCount: 6, EngineL0StallsSSTsPerKey: 7,
 		},
 	}
 	cache := daemon.ReadCacheStatus{
 		Configured: true, AggregateMaxBytesKnown: true, AggregateMaxBytes: 1000,
 		QuotaCoordinationHealthy: true,
-		UsedBytes:                500, ReservedBytes: 100, InflightBytes: 8, DeletionPendingBytes: 25, DeletionPendingKnown: true, Metrics: daemon.ReadCacheMetrics{Hits: 3, Misses: 1},
+		UsedBytes:                500, ReservedBytes: 100, InflightBytes: 8, DeletionPendingBytes: 25, DeletionPendingKnown: true,
+		Metrics: daemon.ReadCacheMetrics{
+			Hits: 3, Misses: 1, OriginReads: 1, OriginReadsAvoided: 2, Admissions: 3,
+			AdmissionRejections: 15, AdmissionRejectionsReservation: 4,
+			AdmissionRejectionsBackgroundBudget: 5, AdmissionRejectionsBackgroundTask: 6,
+			AdmissionRejectionReasonsAvailable: true,
+			ReadLatencyTotalUS:                 4, ReadLatencyCount: 1,
+		},
 	}
 	component := VaulticDBComponent(writer, cache, daemon.WALInfo{Target: "s3", Durability: "shared-remote", OldestSegmentUnixMS: 125})
 	if err := ValidateVaulticDBComponent(component); err != nil {
@@ -48,6 +61,33 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 	if component.WAL.OldestUncheckpointedMS != 75 {
 		t.Fatalf("WAL age = %d", component.WAL.OldestUncheckpointedMS)
 	}
+	for name, want := range map[string]uint64{
+		"engine_immutable_memtable_flushes":            3,
+		"engine_l0_flush_bytes":                        4,
+		"engine_compacted_ssts":                        5,
+		"engine_l0_stalls_sst_count":                   6,
+		"engine_l0_stalls_ssts_per_key":                7,
+		"cache_origin_reads_avoided":                   2,
+		"cache_admissions":                             3,
+		"cache_admission_rejections":                   15,
+		"cache_admission_rejections_reservation":       4,
+		"cache_admission_rejections_background_budget": 5,
+		"cache_admission_rejections_background_task":   6,
+		"cache_read_latency_total":                     4,
+	} {
+		found := false
+		for _, metric := range component.Metrics {
+			if metric.Name == name {
+				found = true
+				if metric.Value != want {
+					t.Errorf("metric %s = %d, want %d", name, metric.Value, want)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("metric %s was not exported", name)
+		}
+	}
 	attribution := daemon.AttributionSnapshot{EngineBackpressure: daemon.TimingSnapshot{Active: 1}}
 	if got := vaulticDBBackpressure(attribution); got != "capacity" {
 		t.Fatalf("backpressure = %q, want capacity", got)
@@ -55,6 +95,16 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 	attribution.EngineBackpressure.Active = 0
 	if got := vaulticDBBackpressure(attribution); got != "none" {
 		t.Fatalf("inactive backpressure = %q, want none", got)
+	}
+}
+
+func TestCumulativeBucketCountsSaturates(t *testing.T) {
+	counts := cumulativeBucketCounts([]uint64{1, 2, ^uint64(0), 1})
+	want := []uint64{1, 3, ^uint64(0), ^uint64(0)}
+	for index := range want {
+		if counts[index] != want[index] {
+			t.Fatalf("bucket %d = %d, want %d", index, counts[index], want[index])
+		}
 	}
 }
 
@@ -66,6 +116,21 @@ func TestVaulticDBComponentMarksLegacyDeletionMetricUnavailable(t *testing.T) {
 	)
 	if component.Caches[0].DeletionAvailability != AvailabilityUnavailable {
 		t.Fatalf("legacy deletion availability = %q", component.Caches[0].DeletionAvailability)
+	}
+}
+
+func TestVaulticDBComponentMarksLegacyAdditiveMetricsUnavailable(t *testing.T) {
+	component := VaulticDBComponent(
+		daemon.WriterStatus{ProcessStartedUnixMS: 100, CapturedUnixMS: 200},
+		daemon.ReadCacheStatus{Configured: true, Metrics: daemon.ReadCacheMetrics{AdmissionRejections: 3}},
+		daemon.WALInfo{},
+	)
+	for _, metric := range component.Metrics {
+		if metric.Name == "engine_flush_interval" || strings.HasPrefix(metric.Name, "cache_admission_rejections_") {
+			if metric.Availability != AvailabilityUnavailable {
+				t.Fatalf("legacy metric %s availability = %q", metric.Name, metric.Availability)
+			}
+		}
 	}
 }
 

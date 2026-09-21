@@ -25,6 +25,71 @@ pub(crate) async fn process_test_barrier(_variable: &'static str) -> Result<(), 
     Ok(())
 }
 
+#[derive(Default)]
+struct ProcessMetrics {
+    cpu_user_us: u64,
+    cpu_system_us: u64,
+    rss_bytes: u64,
+    threads: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    cpu_available: bool,
+    memory_available: bool,
+    io_available: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn process_metrics() -> ProcessMetrics {
+    let mut metrics = ProcessMetrics::default();
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+        if let Some((_, fields)) = stat.rsplit_once(") ") {
+            let fields: Vec<&str> = fields.split_whitespace().collect();
+            let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if clock_ticks > 0 {
+                if let (Some(user), Some(system)) = (
+                    fields.get(11).and_then(|value| value.parse::<u64>().ok()),
+                    fields.get(12).and_then(|value| value.parse::<u64>().ok()),
+                ) {
+                    metrics.cpu_user_us = user.saturating_mul(1_000_000) / clock_ticks as u64;
+                    metrics.cpu_system_us =
+                        system.saturating_mul(1_000_000) / clock_ticks as u64;
+                    metrics.cpu_available = true;
+                }
+            }
+            if page_size > 0 {
+                if let (Some(threads), Some(rss_pages)) = (
+                    fields.get(17).and_then(|value| value.parse::<u64>().ok()),
+                    fields.get(21).and_then(|value| value.parse::<u64>().ok()),
+                ) {
+                    metrics.threads = threads;
+                    metrics.rss_bytes = rss_pages.saturating_mul(page_size as u64);
+                    metrics.memory_available = true;
+                }
+            }
+        }
+    }
+    if let Ok(io) = std::fs::read_to_string("/proc/self/io") {
+        let value = |name: &str| {
+            io.lines().find_map(|line| {
+                line.strip_prefix(name)
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+            })
+        };
+        if let (Some(read_bytes), Some(write_bytes)) = (value("read_bytes:"), value("write_bytes:")) {
+            metrics.read_bytes = read_bytes;
+            metrics.write_bytes = write_bytes;
+            metrics.io_available = true;
+        }
+    }
+    metrics
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_metrics() -> ProcessMetrics {
+    ProcessMetrics::default()
+}
+
 fn verify_capsule_migration_proof(
     master_key: &[u8],
     repository_id: &str,
@@ -599,8 +664,19 @@ impl Service {
                 object_store_coordination: Some(object_store_role(
                     storage.attribution().object_store_coordination.snapshot(),
                 )),
+                transaction_map_lock_wait: Some(timing(
+                    storage.attribution().transaction_map_lock_wait.snapshot(),
+                )),
+                transaction_slot_lock_wait: Some(timing(
+                    storage.attribution().transaction_slot_lock_wait.snapshot(),
+                )),
             }
         });
+        let process = process_metrics();
+        let engine_config = storage
+            .as_ref()
+            .map(|storage| storage.engine_metrics_snapshot())
+            .unwrap_or_default();
         WriterStatusResponse {
             instance_id: self.state.daemon_id.to_string(),
             role: match status.role {
@@ -624,6 +700,19 @@ impl Service {
             attribution,
             process_started_unix_ms: self.state.clock_started_unix_ms,
             captured_unix_ms: unix_time_ms_i64().unwrap_or_default(),
+            process_cpu_user_us: process.cpu_user_us,
+            process_cpu_system_us: process.cpu_system_us,
+            process_rss_bytes: process.rss_bytes,
+            process_threads: process.threads,
+            process_read_bytes: process.read_bytes,
+            process_write_bytes: process.write_bytes,
+            process_cpu_available: process.cpu_available,
+            process_memory_available: process.memory_available,
+            process_io_available: process.io_available,
+            engine_flush_interval_ms: engine_config.flush_interval_ms,
+            engine_max_unflushed_bytes: engine_config.max_unflushed_bytes,
+            engine_l0_sst_size_bytes: engine_config.l0_sst_size_bytes,
+            engine_tuning_available: true,
         }
     }
 

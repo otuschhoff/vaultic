@@ -632,28 +632,32 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	add := func(name string, kind MetricKind, unit string, labels, required []string, bounds ...[]uint64) {
 		specs[name] = metricSpec{kind: kind, unit: unit, labels: labels, required: required, bounds: bounds}
 	}
-	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "monitor_export_failures", "monitor_export_dropped", "runtime_gc_cycles"} {
+	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "engine_immutable_memtable_flushes", "engine_l0_stalls_sst_count", "engine_l0_stalls_ssts_per_key", "cache_hits", "cache_misses", "cache_origin_reads", "cache_origin_reads_avoided", "cache_corruptions", "cache_timeouts", "cache_failures", "cache_bypasses", "cache_admissions", "cache_admission_rejections", "cache_admission_rejections_reservation", "cache_admission_rejections_background_budget", "cache_admission_rejections_background_task", "cache_capacity_evictions", "cache_idle_evictions", "cache_absolute_evictions", "cache_corruption_evictions", "cache_read_latency_count", "cache_write_latency_count", "monitor_export_failures", "monitor_export_dropped", "runtime_gc_cycles"} {
 		add(name, MetricCounter, "operations", nil, nil)
 	}
-	add("runtime_gc_pause_cpu", MetricCounter, "microseconds", nil, nil)
-	for _, name := range []string{"engine_memtable_write_bytes", "engine_wal_flush_bytes", "engine_compacted_bytes"} {
+	for _, name := range []string{"runtime_gc_pause_cpu", "cache_read_latency_total", "cache_write_latency_total", "process_cpu_user", "process_cpu_system"} {
+		add(name, MetricCounter, "microseconds", nil, nil)
+	}
+	for _, name := range []string{"engine_memtable_write_bytes", "engine_wal_flush_bytes", "engine_l0_flush_bytes", "engine_compacted_bytes", "process_read_bytes", "process_write_bytes"} {
 		add(name, MetricCounter, "bytes", nil, nil)
 	}
-	for _, name := range []string{"engine_memtable_bytes", "runtime_heap_alloc_bytes", "runtime_heap_inuse_bytes", "runtime_heap_sys_bytes"} {
+	add("engine_compacted_ssts", MetricCounter, "objects", nil, nil)
+	for _, name := range []string{"engine_memtable_bytes", "engine_max_unflushed_bytes", "engine_l0_sst_size_bytes", "runtime_heap_alloc_bytes", "runtime_heap_inuse_bytes", "runtime_heap_sys_bytes", "process_rss_bytes"} {
 		add(name, MetricGauge, "bytes", nil, nil)
 	}
 	for _, name := range []string{"engine_l0_sst_objects", "engine_sst_objects", "engine_sorted_runs"} {
 		add(name, MetricGauge, "objects", nil, nil)
 	}
-	for _, name := range []string{"engine_running_compactions", "broker_active_sessions", "broker_active_leases", "runtime_goroutines"} {
+	for _, name := range []string{"engine_running_compactions", "broker_active_sessions", "broker_active_leases", "runtime_goroutines", "process_threads"} {
 		add(name, MetricGauge, "operations", nil, nil)
 	}
 	add("monitor_export_pending", MetricGauge, "operations", nil, nil)
 	add("monitor_export_capacity", MetricGauge, "operations", nil, nil)
 	add("monitor_export_in_flight", MetricGauge, "operations", nil, nil)
 	add("monitor_export_oldest_age", MetricGauge, "microseconds", nil, nil)
+	add("engine_flush_interval", MetricGauge, "milliseconds", nil, nil)
 	add("broker_locked", MetricGauge, "state", nil, nil)
-	for _, name := range []string{"admission_wait_latency", "admission_lock_hold_latency", "fence_check_latency", "write_batch_request_latency", "transaction_begin_latency", "engine_submit_latency", "durable_wait_latency", "finalization_latency"} {
+	for _, name := range []string{"admission_wait_latency", "admission_lock_hold_latency", "fence_check_latency", "write_batch_request_latency", "begin_request_latency", "commit_request_latency", "rollback_request_latency", "transaction_begin_latency", "transaction_map_lock_wait_latency", "transaction_slot_lock_wait_latency", "engine_submit_latency", "durable_wait_latency", "finalization_latency"} {
 		add(name, MetricHistogram, "microseconds", []string{"outcome"}, nil, vaulticLatencyBounds())
 	}
 	for _, name := range []string{"engine_backpressure_latency", "engine_batch_queue_latency", "engine_batch_service_latency"} {

@@ -5,16 +5,84 @@ P3a, P3b, P7a, matched NFS/RGW/native-RADOS sampling, native RADOS lifecycle
 tests, live RADOS-WAL latency, and P4 are validated. P3c remains partial: its
 memory-WAL role pilots pass, but the complete response matrix is not yet run.
 P4 decouples ordered reduction with a bounded worker and coordinator-owned
-acknowledgements. P5 and P6 remain unselected. A current full import remains
-incomplete, so this is not final repository-scale acceptance.
+acknowledgements. A current telemetry baseline selects P5 read amplification,
+not P6 writer concurrency, as the next optimization area. The first P5 cache
+fill-budget experiment was rejected. A current full import remains incomplete,
+so this is not final repository-scale acceptance.
 
 Importer-owned Phase 34 export is now implemented for future full runs. It emits
 the scheduler and Go runtime component together with VaulticDB queue/service,
 WAL, cache, LSM and role-specific object-store measurements at a bounded interval,
 then makes a bounded final snapshot attempt after the lifecycle action completes. Export failures
-and replace-oldest drops are explicit metrics and never block the import. No new
-representative or uncapped result is claimed here: those runs still require a
-fresh, explicitly authorized target and three matched repetitions.
+and replace-oldest drops are explicit metrics and never block the import. The
+new representative results below are accepted only as bounded diagnostic
+evidence; an uncapped result and three matched repetitions remain outstanding.
+
+## Current Telemetry Baseline and P5 Selection
+
+The valid current-revision HDD baseline is retained at
+`phase32-telemetry-20260920-hdd-30m-r2`. Vaultic SHA-256 was
+`84510e9ea3e91849769153cfe3ada8b62e6cb09050712ef26b7f1dbf92bc3da2` and
+VaulticDB SHA-256 was
+`b888cf2d0d6366213b85267361ca32414f57e3d776a8fb2b3ec0ee5420540087`.
+The 30m01.985s capture contains 361 schema-valid JSONL snapshots at mode `0600`:
+359 exact VaulticDB samples, one startup-unavailable sample, one stale sample,
+one process identity, and zero exporter failures or drops. The timeout exit 124
+is the intended diagnostic boundary, not full-import completion evidence.
+
+At the boundary the importer had processed 1,905 of 10,019 indexes, 100,143
+packs, and 80,622,391 blobs at 44,819.9 blobs/s. The wrapper used 319% CPU and
+19,901,000 KiB maximum RSS. VaulticDB averaged about 2.54 CPU cores, reached
+20.11 GB RSS, read 40.63 GB and wrote 43.54 GB. Its writer queue had p95 depth
+zero and maximum depth two, with no queue rejects, backpressure, or L0 stalls.
+Transaction-map and slot-lock waits averaged 0.315 and 0.137 microseconds.
+Those observations reject P6 as the first experiment: the sequential writer was
+not saturated and had substantial memory and CPU headroom.
+
+P5 is selected because planning and reduction accumulated 16m41.765s and
+13m55.638s of concurrent worker time while database reads grew with the data
+set. VaulticDB issued 325,336 database GETs carrying 263.98 GB, with 3,467.9s
+of concurrent GET latency. The 64 GiB memory cache ended at only 389.2 MB used:
+94,322 hits, 215,651 misses, 231,002 origin reads, 8,111 admissions, and 200,600
+admission rejections. These overlapping worker, RPC, and background totals are
+diagnostic concurrency measures and are not summed as wall-clock percentages.
+
+The first P5 experiment increased only the fresh-import cache in-flight fill
+budget from 256 MiB to 2 GiB. Its frozen Vaultic SHA-256 was
+`2963a34a04f80e5fd2bfcd40c154a2f0f28c9072738c7ee00efe0fc60b0a4192`; the
+VaulticDB binary and all other import settings matched the baseline. The bounded
+candidate is retained at `phase32-p5-cache-20260920-hdd-30m-r1` and produced 360
+valid snapshots with zero exporter failures or drops. It increased admissions
+from 8,111 to 13,372 and final cache occupancy from 389.2 MB to 538.1 MB, but
+rejections remained 197,141. Database GET count fell only 0.2%, GET bytes rose
+3.3% to 272.73 GB, process read/write bytes more than doubled, wrapper CPU rose
+from 319% to 355%, maximum RSS rose to 22,839,700 KiB, and throughput fell 0.9%
+to 44,432.2 blobs/s. The experiment is rejected and the 256 MiB default is
+retained.
+
+A second 30-minute run, retained at
+`phase32-cache-reasons-20260920-hdd-30m-r1`, kept the accepted 256 MiB byte
+budget and added reason-specific counters. Of 184,545 rejections, 184,538
+(99.996%) were background-task-limit failures, seven were reservation failures,
+and none were byte-budget failures. The run produced 360 valid snapshots with
+zero exporter failures or drops and used 317% CPU and 20,341,756 KiB maximum
+RSS. This identifies the existing derived 16-task limit as the immediate
+admission gate without claiming that admitting more entries improves runtime.
+
+The third bounded experiment raised only that task limit from 16 to 128 while
+retaining the 256 MiB byte budget. Frozen binaries were Vaultic
+`0aa32b9df9d53277889d953b1250c946ec0ca099d871780e5e93f62ecde9156d` and
+VaulticDB
+`66f7b6b544731287813ad53c6aa2d0be7a6f4f834bfc03a04aa208e404940638`;
+artifacts are retained at `phase32-p5-cache-tasks-20260921-hdd-30m-r1`.
+Admissions rose from 6,820 to 12,958 and origin reads fell 5.1%, but throughput
+fell 0.9% from 42,733.9 to 42,343.7 blobs/s. Database GET bytes rose 1.6%, GET
+latency rose 9.3%, wrapper CPU rose from 317% to 349%, and process read/write
+bytes approximately doubled. The 128-task profile is therefore rejected. The
+fresh-import default remains the prior derived 16 tasks; an optional bounded
+task setting remains available for controlled diagnostics. The next P5
+experiment must improve cache admission selectivity or reuse rather than merely
+increase fill concurrency.
 
 ## Frozen Inputs and Build
 
@@ -334,5 +402,7 @@ accepted comparison boundary.
 
 Representative NFS, RADOS, and RGW/S3 are no longer external blockers. Full
 current-revision import, close/handoff/reopen, and post-import validation remain
-P7b work. P4 is accepted with the two-lane setting; do not increase lanes or
-select P5/P6 from these measurements alone.
+P7b work. P4 is accepted with the two-lane setting; do not increase lanes. The
+current aligned telemetry selects P5 read amplification over P6 writer
+concurrency, but its first cache fill-budget experiment is rejected as
+regressive and does not advance P5 acceptance.

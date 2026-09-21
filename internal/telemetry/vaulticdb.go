@@ -57,6 +57,10 @@ func VaulticDBComponent(writer daemon.WriterStatus, cache daemon.ReadCacheStatus
 			},
 		},
 	}
+	component.Metrics = append(component.Metrics, vaulticDBProcessMetrics(writer)...)
+	if cache.Configured {
+		component.Metrics = append(component.Metrics, vaulticDBCacheMetrics(cache.Metrics)...)
+	}
 	if writer.InstanceID != "" {
 		component.ProcessStartID += "-" + writer.InstanceID
 	}
@@ -220,9 +224,14 @@ func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
 		counterMetric("engine_write_batches", "operations", attribution.EngineWriteBatches),
 		counterMetric("engine_write_operations", "operations", attribution.EngineWriteOps),
 		counterMetric("engine_backpressure_events", "operations", attribution.EngineBackpressureCount),
+		counterMetric("engine_immutable_memtable_flushes", "operations", attribution.EngineImmutableFlushes),
 		counterMetric("engine_memtable_write_bytes", "bytes", attribution.EngineMemtableWriteBytes),
 		counterMetric("engine_wal_flush_bytes", "bytes", attribution.EngineWALFlushBytes),
+		counterMetric("engine_l0_flush_bytes", "bytes", attribution.EngineL0FlushBytes),
 		counterMetric("engine_compacted_bytes", "bytes", attribution.EngineCompactedBytes),
+		counterMetric("engine_compacted_ssts", "objects", attribution.EngineCompactedSSTs),
+		counterMetric("engine_l0_stalls_sst_count", "operations", attribution.EngineL0StallsSSTCount),
+		counterMetric("engine_l0_stalls_ssts_per_key", "operations", attribution.EngineL0StallsSSTsPerKey),
 		gaugeMetric("engine_memtable_bytes", "bytes", attribution.EngineMemtableBytes),
 		gaugeMetric("engine_l0_sst_objects", "objects", attribution.EngineL0SSTCount),
 		gaugeMetric("engine_sst_objects", "objects", attribution.EngineSSTCount),
@@ -238,7 +247,12 @@ func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
 		{name: "admission_lock_hold_latency", value: attribution.AdmissionLockHold},
 		{name: "fence_check_latency", value: attribution.FenceCheck},
 		{name: "write_batch_request_latency", value: attribution.WriteBatchRequest},
+		{name: "begin_request_latency", value: attribution.BeginRequest},
+		{name: "commit_request_latency", value: attribution.CommitRequest},
+		{name: "rollback_request_latency", value: attribution.RollbackRequest},
 		{name: "transaction_begin_latency", value: attribution.TransactionBegin},
+		{name: "transaction_map_lock_wait_latency", value: attribution.TransactionMapLockWait},
+		{name: "transaction_slot_lock_wait_latency", value: attribution.TransactionSlotLockWait},
 		{name: "engine_submit_latency", value: attribution.EngineSubmit},
 		{name: "durable_wait_latency", value: attribution.DurableWait},
 		{name: "finalization_latency", value: attribution.Finalization},
@@ -250,6 +264,57 @@ func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
 		metrics = append(metrics, timingMetric(timing.name, timing.value, timing.labels...))
 	}
 	return metrics
+}
+
+func vaulticDBCacheMetrics(cache daemon.ReadCacheMetrics) []Metric {
+	reasonAvailability := AvailabilityUnavailable
+	if cache.AdmissionRejectionReasonsAvailable {
+		reasonAvailability = AvailabilityExact
+	}
+	return []Metric{
+		counterMetric("cache_hits", "operations", cache.Hits),
+		counterMetric("cache_misses", "operations", cache.Misses),
+		counterMetric("cache_origin_reads", "operations", cache.OriginReads),
+		counterMetric("cache_origin_reads_avoided", "operations", cache.OriginReadsAvoided),
+		counterMetric("cache_corruptions", "operations", cache.Corruptions),
+		counterMetric("cache_timeouts", "operations", cache.Timeouts),
+		counterMetric("cache_failures", "operations", cache.Failures),
+		counterMetric("cache_bypasses", "operations", cache.Bypasses),
+		counterMetric("cache_admissions", "operations", cache.Admissions),
+		counterMetric("cache_admission_rejections", "operations", cache.AdmissionRejections),
+		{Name: "cache_admission_rejections_reservation", Kind: MetricCounter, Unit: "operations", Availability: reasonAvailability, Value: cache.AdmissionRejectionsReservation},
+		{Name: "cache_admission_rejections_background_budget", Kind: MetricCounter, Unit: "operations", Availability: reasonAvailability, Value: cache.AdmissionRejectionsBackgroundBudget},
+		{Name: "cache_admission_rejections_background_task", Kind: MetricCounter, Unit: "operations", Availability: reasonAvailability, Value: cache.AdmissionRejectionsBackgroundTask},
+		counterMetric("cache_capacity_evictions", "operations", cache.CapacityEvictions),
+		counterMetric("cache_idle_evictions", "operations", cache.IdleEvictions),
+		counterMetric("cache_absolute_evictions", "operations", cache.AbsoluteEvictions),
+		counterMetric("cache_corruption_evictions", "operations", cache.CorruptionEvictions),
+		counterMetric("cache_read_latency_total", "microseconds", cache.ReadLatencyTotalUS),
+		counterMetric("cache_read_latency_count", "operations", cache.ReadLatencyCount),
+		counterMetric("cache_write_latency_total", "microseconds", cache.WriteLatencyTotalUS),
+		counterMetric("cache_write_latency_count", "operations", cache.WriteLatencyCount),
+	}
+}
+
+func vaulticDBProcessMetrics(writer daemon.WriterStatus) []Metric {
+	availability := func(available bool) Availability {
+		if available {
+			return AvailabilityExact
+		}
+		return AvailabilityUnavailable
+	}
+	engineAvailability := availability(writer.EngineTuningAvailable)
+	return []Metric{
+		{Name: "engine_flush_interval", Kind: MetricGauge, Unit: "milliseconds", Availability: engineAvailability, Value: writer.EngineFlushIntervalMS},
+		{Name: "engine_max_unflushed_bytes", Kind: MetricGauge, Unit: "bytes", Availability: engineAvailability, Value: writer.EngineMaxUnflushedBytes},
+		{Name: "engine_l0_sst_size_bytes", Kind: MetricGauge, Unit: "bytes", Availability: engineAvailability, Value: writer.EngineL0SSTSizeBytes},
+		{Name: "process_cpu_user", Kind: MetricCounter, Unit: "microseconds", Availability: availability(writer.ProcessCPUAvailable), Value: writer.ProcessCPUUserUS},
+		{Name: "process_cpu_system", Kind: MetricCounter, Unit: "microseconds", Availability: availability(writer.ProcessCPUAvailable), Value: writer.ProcessCPUSystemUS},
+		{Name: "process_rss_bytes", Kind: MetricGauge, Unit: "bytes", Availability: availability(writer.ProcessMemAvailable), Value: writer.ProcessRSSBytes},
+		{Name: "process_threads", Kind: MetricGauge, Unit: "operations", Availability: availability(writer.ProcessMemAvailable), Value: writer.ProcessThreads},
+		{Name: "process_read_bytes", Kind: MetricCounter, Unit: "bytes", Availability: availability(writer.ProcessIOAvailable), Value: writer.ProcessReadBytes},
+		{Name: "process_write_bytes", Kind: MetricCounter, Unit: "bytes", Availability: availability(writer.ProcessIOAvailable), Value: writer.ProcessWriteBytes},
+	}
 }
 
 func vaulticDBObjectMetrics(attribution daemon.AttributionSnapshot) []Metric {
@@ -309,8 +374,18 @@ func timingMetric(name string, timing daemon.TimingSnapshot, labels ...Label) Me
 		Name: name, Kind: MetricHistogram, Unit: "microseconds", Availability: availability, Labels: labels,
 		Count: timing.Completed, Sum: timing.TotalUS, Maximum: timing.MaxUS,
 		BucketUpper:  append([]uint64(nil), timing.LatencyBucketUpperUS...),
-		BucketCounts: append([]uint64(nil), timing.LatencyBucketCounts...),
+		BucketCounts: cumulativeBucketCounts(timing.LatencyBucketCounts),
 	}
+}
+
+func cumulativeBucketCounts(counts []uint64) []uint64 {
+	cumulative := make([]uint64, len(counts))
+	var total uint64
+	for index, count := range counts {
+		total = saturatingAdd(total, count)
+		cumulative[index] = total
+	}
+	return cumulative
 }
 
 func counterMetric(name, unit string, value uint64) Metric {

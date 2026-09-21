@@ -924,8 +924,15 @@ func TestIndexImportMonitorExportValidation(t *testing.T) {
 	if _, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true, MonitorExport: valid}); err != nil {
 		t.Fatal(err)
 	}
+	local := valid
+	local.JSONLPath = "monitor.jsonl"
+	local.URL, local.Org, local.Bucket, local.TokenEnv = "", "", "", ""
+	if _, err := validateIndexImportOptions(indexImportOptions{FromLegacy: true, MonitorExport: local}); err != nil {
+		t.Fatal(err)
+	}
 	for _, invalid := range []importMonitorExportOptions{
 		{Org: "ops"},
+		{JSONLPath: "monitor.jsonl", URL: valid.URL, Org: valid.Org, Bucket: valid.Bucket, TokenEnv: valid.TokenEnv, Interval: valid.Interval, Timeout: valid.Timeout, Queue: valid.Queue, BatchLimit: valid.BatchLimit},
 		{URL: valid.URL, Org: valid.Org, Bucket: valid.Bucket, TokenEnv: valid.TokenEnv, Interval: time.Millisecond, Timeout: valid.Timeout, Queue: valid.Queue, BatchLimit: valid.BatchLimit},
 		{URL: valid.URL, Org: valid.Org, Bucket: valid.Bucket, TokenEnv: valid.TokenEnv, Interval: valid.Interval, Timeout: valid.Timeout, Queue: 0, BatchLimit: valid.BatchLimit},
 	} {

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,23 @@ type transientExporter struct {
 }
 
 type failingExporter struct{}
+
+type partialWriteFile struct {
+	*os.File
+	fail bool
+}
+
+func (file *partialWriteFile) Write(buffer []byte) (int, error) {
+	if !file.fail {
+		return file.File.Write(buffer)
+	}
+	file.fail = false
+	written, err := file.File.Write(buffer[:len(buffer)/2])
+	if err != nil {
+		return written, err
+	}
+	return written, errors.New("injected partial write")
+}
 
 func (failingExporter) Export(context.Context, MonitorSnapshot) error {
 	return errors.New("unavailable")
@@ -66,6 +84,129 @@ func (exporter *blockingExporter) Export(context.Context, MonitorSnapshot) error
 	exporter.count++
 	exporter.mu.Unlock()
 	return nil
+}
+
+func TestJSONLExporterWritesValidatedPrivateSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "monitor.jsonl")
+	exporter, err := NewJSONLExporter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := validMonitorSnapshot()
+	second := validMonitorSnapshot()
+	second.CapturedUnixMS++
+	if err := exporter.Export(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Export(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("JSONL permissions = %o, want 600", info.Mode().Perm())
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(encoded)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("JSONL records = %d, want 2", len(lines))
+	}
+	for index, line := range lines {
+		var snapshot MonitorSnapshot
+		if err := json.Unmarshal([]byte(line), &snapshot); err != nil {
+			t.Fatalf("decode JSONL record %d: %v", index, err)
+		}
+		if err := snapshot.Validate(); err != nil {
+			t.Fatalf("validate JSONL record %d: %v", index, err)
+		}
+	}
+}
+
+func TestJSONLExporterRejectsExistingAndSymlinkTargets(t *testing.T) {
+	directory := t.TempDir()
+	existing := filepath.Join(directory, "existing")
+	if err := os.WriteFile(existing, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewJSONLExporter(existing); err == nil {
+		t.Fatal("existing JSONL target was accepted")
+	}
+	symlink := filepath.Join(directory, "symlink")
+	if err := os.Symlink(existing, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewJSONLExporter(symlink); err == nil {
+		t.Fatal("symlink JSONL target was accepted")
+	}
+	contents, err := os.ReadFile(existing)
+	if err != nil || string(contents) != "preserve" {
+		t.Fatalf("existing target changed: %q, %v", contents, err)
+	}
+}
+
+func TestJSONLExporterRejectsInvalidSnapshotAndWritesAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "monitor.jsonl")
+	exporter, err := NewJSONLExporter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Export(context.Background(), MonitorSnapshot{}); err == nil {
+		t.Fatal("invalid snapshot was accepted")
+	}
+	if err := exporter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	if err := exporter.Export(context.Background(), validMonitorSnapshot()); err == nil {
+		t.Fatal("snapshot was accepted after close")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("invalid snapshot wrote %d bytes", info.Size())
+	}
+}
+
+func TestJSONLExporterRollsBackPartialRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "monitor.jsonl")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exporter := &JSONLExporter{file: &partialWriteFile{File: file, fail: true}}
+	if err := exporter.Export(context.Background(), validMonitorSnapshot()); err == nil {
+		t.Fatal("partial write succeeded")
+	}
+	if err := exporter.Export(context.Background(), validMonitorSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(encoded), []byte{'\n'})
+	if len(lines) != 1 {
+		t.Fatalf("JSONL records = %d, want 1", len(lines))
+	}
+	var snapshot MonitorSnapshot
+	if err := json.Unmarshal(lines[0], &snapshot); err != nil {
+		t.Fatalf("decode JSONL record: %v", err)
+	}
 }
 
 func TestAsyncExporterDropsOldestWithoutBlocking(t *testing.T) {
