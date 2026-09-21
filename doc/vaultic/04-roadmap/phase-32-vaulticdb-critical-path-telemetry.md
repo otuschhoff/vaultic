@@ -9,6 +9,17 @@ distinguish the main client, service, queue, durability, LSM and backend waits.
 A valid 30-minute representative HDD timeline selects P5 read amplification,
 not P6 writer concurrency. Its first cache fill-budget experiment was rejected;
 reason-specific admission rejection counters now discriminate the next run.
+Aligned importer-stage distributions and existing SlateDB GET-key and point-
+filter counters are now included in monitor snapshots. Candidate SST fanout,
+needed blocks and coalesced range reads still require a separately published
+pinned SlateDB revision.
+
+Three matched bounded runs of the combined reducer prefetch produced an 8.8%
+median throughput gain while reducing planning RPCs from approximately three
+per reduced batch to one. Median CPU, peak RSS and filesystem I/O increased but
+remained below measured capacity limits; these are recorded efficiency costs,
+not reasons to reject the faster candidate. The runs do not establish uncapped
+completion or finalization acceptance.
 
 ## Objective
 
@@ -30,13 +41,13 @@ latency. Every diagnostic run must answer:
 
 | Boundary | Current signal | Required work |
 |---|---|---|
-| Import scheduler | lanes, ready/reduction queues, active age, bounded waits | Persist locally with the daemon timeline. |
+| Import scheduler | lanes, ready/reduction queues, active age, bounded waits, and process-local importer stage distributions persisted with the daemon timeline | Add no new stage until the combined reducer-prefetch run shows an unresolved boundary. |
 | Admission/fencing | admission wait/contention/hold and fence-check histograms | Map active age/contentions into explicit wait-state metrics. |
 | RPC request | write-batch, begin, commit and rollback request histograms exist in VaulticDB | Export all four; begin/commit/rollback are currently dropped by the monitor adapter. |
 | Transaction internals | transaction begin, map/slot lock wait and engine submit elapsed | Lock hold and submit prework remain part of their enclosing spans. |
 | Sequential writer | queue depth, queue wait, service time and backpressure | Export capacity when known; add exclusive validation, conflict, WAL append and memtable-apply stages. |
 | WAL/durability | retained/uploaded bytes, flushes, durable wait, WAL object operations | Add configured limits and outstanding/oldest ages needed for saturation ratios. |
-| LSM output | memtable/L0/SST/sorted-run gauges, flush/compaction counters | Export currently dropped flush/stall/compacted-SST counters; add immutable backlog and oldest age. |
+| LSM output | memtable/L0/SST/sorted-run gauges, flush/compaction counters, GET keys, and point-filter outcomes | Add multi-get batch size, candidate SST fanout, needed blocks, and coalesced range reads in a separately pinned SlateDB revision. |
 | Object store | operation histograms and bytes by database/WAL/coordination role | Add active request count/oldest age to utilization views; record retry delay when the backend exposes it. |
 | Cache | occupancy, traffic, admission/eviction/failure, latency, and admission-rejection reasons | Add object identity/reuse distribution only if reason counters cannot select the next experiment. |
 | Process resources | importer Go runtime plus VaulticDB CPU time, RSS, thread count and process I/O bytes on Linux | Virtual memory remains unavailable; non-Linux process fields are explicitly unavailable. |

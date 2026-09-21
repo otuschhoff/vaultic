@@ -180,14 +180,25 @@ func applyPackAggregateDeltas(
 	if err != nil {
 		return nil, err
 	}
+	return applyPackAggregateDeltasFromValues(keys, values, found, changes, advanceUntouched)
+}
+
+func applyPackAggregateDeltasFromValues(
+	keys [][]byte,
+	values []KeyValue,
+	found []bool,
+	changes []packChange,
+	advanceUntouched bool,
+) ([]Mutation, error) {
 	puts := make([]Mutation, 0, len(keys))
 	for offset, key := range keys {
 		aggregate := schema.PackAggregate{}
 		if found[offset] {
-			aggregate, err = schema.UnmarshalPackAggregate(values[offset].Value)
+			decoded, err := schema.UnmarshalPackAggregate(values[offset].Value)
 			if err != nil {
 				return nil, err
 			}
+			aggregate = decoded
 		}
 		touched := false
 		for _, change := range changes {

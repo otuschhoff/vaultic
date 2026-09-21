@@ -91,7 +91,7 @@ type legacyOperationMetrics struct {
 	reduceCheckpointRead, ingestRetryBackoff                           lockedDurationHistogram
 	reduceReceiptRead, reduceAggregateRead, reduceHistoryRead          lockedDurationHistogram
 	reduceBegin, reduceEncode, reduceMutationRPC, reduceCommit         lockedDurationHistogram
-	reduceRecoveryRead, reduceRetryBackoff                             lockedDurationHistogram
+	reducePrefetch, reduceRecoveryRead, reduceRetryBackoff             lockedDurationHistogram
 }
 
 func (metrics *legacyOperationMetrics) snapshots() map[string]DurationDistribution {
@@ -103,6 +103,7 @@ func (metrics *legacyOperationMetrics) snapshots() map[string]DurationDistributi
 		"commit": metrics.commit.snapshot(), "post_commit": metrics.postCommit.snapshot(),
 		"ingest_recovery_read": metrics.ingestRecoveryRead.snapshot(), "reduce_receipt_read": metrics.reduceReceiptRead.snapshot(),
 		"reduce_checkpoint_read": metrics.reduceCheckpointRead.snapshot(),
+		"reduce_prefetch":        metrics.reducePrefetch.snapshot(),
 		"reduce_aggregate_plan":  metrics.reduceAggregateRead.snapshot(), "reduce_history_plan": metrics.reduceHistoryRead.snapshot(),
 		"reduce_encode": metrics.reduceEncode.snapshot(), "reduce_mutation_rpc": metrics.reduceMutationRPC.snapshot(),
 		"reduce_begin": metrics.reduceBegin.snapshot(), "reduce_commit": metrics.reduceCommit.snapshot(),

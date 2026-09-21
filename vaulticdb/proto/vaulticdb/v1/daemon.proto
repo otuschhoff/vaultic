@@ -390,6 +390,11 @@ message AttributionSnapshot {
   ObjectStoreRoleSnapshot object_store_coordination = 34;
   TimingSnapshot transaction_map_lock_wait = 35;
   TimingSnapshot transaction_slot_lock_wait = 36;
+  uint64 engine_get_keys = 37;
+  uint64 engine_filter_point_positives = 38;
+  uint64 engine_filter_point_negatives = 39;
+  uint64 engine_filter_point_false_positives = 40;
+  bool engine_read_metrics_available = 41;
 }
 
 message DemoteWriterRequest {

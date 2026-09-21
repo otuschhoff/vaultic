@@ -385,3 +385,26 @@ func TestRecordPackEventsAppendsObservations(t *testing.T) {
 		t.Fatalf("reason code lost: %+v", recorded[1])
 	}
 }
+
+func TestPackHistoryMutationsFromValuesRepairsMalformedSequence(t *testing.T) {
+	packID := daemonTestID(91)
+	events := []PackEvent{{
+		PackID: packID,
+		Record: schema.PackHistoryEvent{Type: schema.EventOrphanDetected, PackType: schema.PackUnknown},
+	}}
+	mutations, err := packHistoryMutationsFromValues(events, false, []byte("malformed"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mutations) != 3 {
+		t.Fatalf("mutations = %d, want marker, event, and sequence", len(mutations))
+	}
+	if string(mutations[0].Key) != string(schema.HistoryEnabledAtKey()) ||
+		string(mutations[2].Key) != string(schema.NextEventSequenceKey()) {
+		t.Fatalf("unexpected history mutations: %#v", mutations)
+	}
+	next, err := schema.UnmarshalNextEventSequence(mutations[2].Value)
+	if err != nil || next != 2 {
+		t.Fatalf("repaired next sequence = %d, err = %v", next, err)
+	}
+}

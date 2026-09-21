@@ -382,42 +382,47 @@ type ReadCacheStatus struct {
 }
 
 type AttributionSnapshot struct {
-	AdmissionWait            TimingSnapshot          `json:"admission_wait"`
-	AdmissionLockHold        TimingSnapshot          `json:"admission_lock_hold"`
-	FenceCheck               TimingSnapshot          `json:"fence_check"`
-	WriteBatchRequest        TimingSnapshot          `json:"write_batch_request"`
-	BeginRequest             TimingSnapshot          `json:"begin_request"`
-	CommitRequest            TimingSnapshot          `json:"commit_request"`
-	RollbackRequest          TimingSnapshot          `json:"rollback_request"`
-	TransactionBegin         TimingSnapshot          `json:"transaction_begin"`
-	TransactionMapLockWait   TimingSnapshot          `json:"transaction_map_lock_wait"`
-	TransactionSlotLockWait  TimingSnapshot          `json:"transaction_slot_lock_wait"`
-	EngineSubmit             TimingSnapshot          `json:"engine_submit"`
-	DurableWait              TimingSnapshot          `json:"durable_wait"`
-	Finalization             TimingSnapshot          `json:"finalization"`
-	EngineWriteBatches       uint64                  `json:"engine_write_batches"`
-	EngineWriteOps           uint64                  `json:"engine_write_ops"`
-	EngineBackpressureCount  uint64                  `json:"engine_backpressure_count"`
-	EngineImmutableFlushes   uint64                  `json:"engine_immutable_memtable_flushes"`
-	EngineMemtableBytes      uint64                  `json:"engine_memtable_bytes"`
-	EngineL0SSTCount         uint64                  `json:"engine_l0_sst_count"`
-	EngineSSTCount           uint64                  `json:"engine_sst_count"`
-	EngineSortedRunCount     uint64                  `json:"engine_sorted_run_count"`
-	EngineL0FlushBytes       uint64                  `json:"engine_l0_flush_bytes"`
-	EngineCompactedBytes     uint64                  `json:"engine_compacted_bytes"`
-	EngineCompactedSSTs      uint64                  `json:"engine_compacted_ssts"`
-	EngineRunningCompactions uint64                  `json:"engine_running_compactions"`
-	EngineL0StallsSSTCount   uint64                  `json:"engine_l0_stalls_sst_count"`
-	EngineL0StallsSSTsPerKey uint64                  `json:"engine_l0_stalls_ssts_per_key"`
-	EngineMemtableWriteBytes uint64                  `json:"engine_memtable_write_bytes"`
-	EngineWALFlushBytes      uint64                  `json:"engine_wal_flush_bytes"`
-	EngineBackpressure       TimingSnapshot          `json:"engine_backpressure"`
-	EngineBatchQueueDepth    uint64                  `json:"engine_batch_write_queue_depth"`
-	EngineBatchQueue         TimingSnapshot          `json:"engine_batch_write_queue"`
-	EngineBatchService       TimingSnapshot          `json:"engine_batch_write_service"`
-	ObjectStoreMain          ObjectStoreRoleSnapshot `json:"object_store_main"`
-	ObjectStoreWAL           ObjectStoreRoleSnapshot `json:"object_store_wal"`
-	ObjectStoreCoordination  ObjectStoreRoleSnapshot `json:"object_store_coordination"`
+	AdmissionWait                  TimingSnapshot          `json:"admission_wait"`
+	AdmissionLockHold              TimingSnapshot          `json:"admission_lock_hold"`
+	FenceCheck                     TimingSnapshot          `json:"fence_check"`
+	WriteBatchRequest              TimingSnapshot          `json:"write_batch_request"`
+	BeginRequest                   TimingSnapshot          `json:"begin_request"`
+	CommitRequest                  TimingSnapshot          `json:"commit_request"`
+	RollbackRequest                TimingSnapshot          `json:"rollback_request"`
+	TransactionBegin               TimingSnapshot          `json:"transaction_begin"`
+	TransactionMapLockWait         TimingSnapshot          `json:"transaction_map_lock_wait"`
+	TransactionSlotLockWait        TimingSnapshot          `json:"transaction_slot_lock_wait"`
+	EngineSubmit                   TimingSnapshot          `json:"engine_submit"`
+	DurableWait                    TimingSnapshot          `json:"durable_wait"`
+	Finalization                   TimingSnapshot          `json:"finalization"`
+	EngineWriteBatches             uint64                  `json:"engine_write_batches"`
+	EngineWriteOps                 uint64                  `json:"engine_write_ops"`
+	EngineBackpressureCount        uint64                  `json:"engine_backpressure_count"`
+	EngineImmutableFlushes         uint64                  `json:"engine_immutable_memtable_flushes"`
+	EngineMemtableBytes            uint64                  `json:"engine_memtable_bytes"`
+	EngineL0SSTCount               uint64                  `json:"engine_l0_sst_count"`
+	EngineSSTCount                 uint64                  `json:"engine_sst_count"`
+	EngineSortedRunCount           uint64                  `json:"engine_sorted_run_count"`
+	EngineL0FlushBytes             uint64                  `json:"engine_l0_flush_bytes"`
+	EngineCompactedBytes           uint64                  `json:"engine_compacted_bytes"`
+	EngineCompactedSSTs            uint64                  `json:"engine_compacted_ssts"`
+	EngineRunningCompactions       uint64                  `json:"engine_running_compactions"`
+	EngineL0StallsSSTCount         uint64                  `json:"engine_l0_stalls_sst_count"`
+	EngineL0StallsSSTsPerKey       uint64                  `json:"engine_l0_stalls_ssts_per_key"`
+	EngineMemtableWriteBytes       uint64                  `json:"engine_memtable_write_bytes"`
+	EngineWALFlushBytes            uint64                  `json:"engine_wal_flush_bytes"`
+	EngineGetKeys                  uint64                  `json:"engine_get_keys"`
+	EngineFilterPointPositive      uint64                  `json:"engine_filter_point_positives"`
+	EngineFilterPointNegative      uint64                  `json:"engine_filter_point_negatives"`
+	EngineFilterPointFalsePositive uint64                  `json:"engine_filter_point_false_positives"`
+	EngineReadMetricsAvailable     bool                    `json:"engine_read_metrics_available"`
+	EngineBackpressure             TimingSnapshot          `json:"engine_backpressure"`
+	EngineBatchQueueDepth          uint64                  `json:"engine_batch_write_queue_depth"`
+	EngineBatchQueue               TimingSnapshot          `json:"engine_batch_write_queue"`
+	EngineBatchService             TimingSnapshot          `json:"engine_batch_write_service"`
+	ObjectStoreMain                ObjectStoreRoleSnapshot `json:"object_store_main"`
+	ObjectStoreWAL                 ObjectStoreRoleSnapshot `json:"object_store_wal"`
+	ObjectStoreCoordination        ObjectStoreRoleSnapshot `json:"object_store_coordination"`
 }
 
 type GenerationStatus struct {
@@ -1786,41 +1791,46 @@ func attributionSnapshot(response *vaulticdbv1.AttributionSnapshot) AttributionS
 		return AttributionSnapshot{}
 	}
 	return AttributionSnapshot{
-		AdmissionWait:            timingSnapshot(response.GetAdmissionWait()),
-		AdmissionLockHold:        timingSnapshot(response.GetAdmissionLockHold()),
-		FenceCheck:               timingSnapshot(response.GetFenceCheck()),
-		WriteBatchRequest:        timingSnapshot(response.GetWriteBatchRequest()),
-		BeginRequest:             timingSnapshot(response.GetBeginRequest()),
-		CommitRequest:            timingSnapshot(response.GetCommitRequest()),
-		RollbackRequest:          timingSnapshot(response.GetRollbackRequest()),
-		TransactionBegin:         timingSnapshot(response.GetTransactionBegin()),
-		TransactionMapLockWait:   timingSnapshot(response.GetTransactionMapLockWait()),
-		TransactionSlotLockWait:  timingSnapshot(response.GetTransactionSlotLockWait()),
-		EngineSubmit:             timingSnapshot(response.GetEngineSubmit()),
-		DurableWait:              timingSnapshot(response.GetDurableWait()),
-		Finalization:             timingSnapshot(response.GetFinalization()),
-		EngineWriteBatches:       response.GetEngineWriteBatches(),
-		EngineWriteOps:           response.GetEngineWriteOps(),
-		EngineBackpressureCount:  response.GetEngineBackpressureCount(),
-		EngineImmutableFlushes:   response.GetEngineImmutableMemtableFlushes(),
-		EngineMemtableBytes:      response.GetEngineMemtableBytes(),
-		EngineL0SSTCount:         response.GetEngineL0SstCount(),
-		EngineSSTCount:           response.GetEngineSstCount(),
-		EngineSortedRunCount:     response.GetEngineSortedRunCount(),
-		EngineL0FlushBytes:       response.GetEngineL0FlushBytes(),
-		EngineCompactedBytes:     response.GetEngineCompactedBytes(),
-		EngineCompactedSSTs:      response.GetEngineCompactedSsts(),
-		EngineRunningCompactions: response.GetEngineRunningCompactions(),
-		EngineL0StallsSSTCount:   response.GetEngineL0StallsSstCount(),
-		EngineL0StallsSSTsPerKey: response.GetEngineL0StallsSstsPerKey(),
-		EngineMemtableWriteBytes: response.GetEngineMemtableWriteBytes(),
-		EngineWALFlushBytes:      response.GetEngineWalFlushBytes(),
-		EngineBackpressure:       timingSnapshot(response.GetEngineBackpressure()),
-		EngineBatchQueueDepth:    response.GetEngineBatchWriteQueueDepth(),
-		EngineBatchQueue:         timingSnapshot(response.GetEngineBatchWriteQueue()),
-		EngineBatchService:       timingSnapshot(response.GetEngineBatchWriteService()),
-		ObjectStoreMain:          objectStoreRoleSnapshot(response.GetObjectStoreMain()),
-		ObjectStoreWAL:           objectStoreRoleSnapshot(response.GetObjectStoreWal()),
-		ObjectStoreCoordination:  objectStoreRoleSnapshot(response.GetObjectStoreCoordination()),
+		AdmissionWait:                  timingSnapshot(response.GetAdmissionWait()),
+		AdmissionLockHold:              timingSnapshot(response.GetAdmissionLockHold()),
+		FenceCheck:                     timingSnapshot(response.GetFenceCheck()),
+		WriteBatchRequest:              timingSnapshot(response.GetWriteBatchRequest()),
+		BeginRequest:                   timingSnapshot(response.GetBeginRequest()),
+		CommitRequest:                  timingSnapshot(response.GetCommitRequest()),
+		RollbackRequest:                timingSnapshot(response.GetRollbackRequest()),
+		TransactionBegin:               timingSnapshot(response.GetTransactionBegin()),
+		TransactionMapLockWait:         timingSnapshot(response.GetTransactionMapLockWait()),
+		TransactionSlotLockWait:        timingSnapshot(response.GetTransactionSlotLockWait()),
+		EngineSubmit:                   timingSnapshot(response.GetEngineSubmit()),
+		DurableWait:                    timingSnapshot(response.GetDurableWait()),
+		Finalization:                   timingSnapshot(response.GetFinalization()),
+		EngineWriteBatches:             response.GetEngineWriteBatches(),
+		EngineWriteOps:                 response.GetEngineWriteOps(),
+		EngineBackpressureCount:        response.GetEngineBackpressureCount(),
+		EngineImmutableFlushes:         response.GetEngineImmutableMemtableFlushes(),
+		EngineMemtableBytes:            response.GetEngineMemtableBytes(),
+		EngineL0SSTCount:               response.GetEngineL0SstCount(),
+		EngineSSTCount:                 response.GetEngineSstCount(),
+		EngineSortedRunCount:           response.GetEngineSortedRunCount(),
+		EngineL0FlushBytes:             response.GetEngineL0FlushBytes(),
+		EngineCompactedBytes:           response.GetEngineCompactedBytes(),
+		EngineCompactedSSTs:            response.GetEngineCompactedSsts(),
+		EngineRunningCompactions:       response.GetEngineRunningCompactions(),
+		EngineL0StallsSSTCount:         response.GetEngineL0StallsSstCount(),
+		EngineL0StallsSSTsPerKey:       response.GetEngineL0StallsSstsPerKey(),
+		EngineMemtableWriteBytes:       response.GetEngineMemtableWriteBytes(),
+		EngineWALFlushBytes:            response.GetEngineWalFlushBytes(),
+		EngineGetKeys:                  response.GetEngineGetKeys(),
+		EngineFilterPointPositive:      response.GetEngineFilterPointPositives(),
+		EngineFilterPointNegative:      response.GetEngineFilterPointNegatives(),
+		EngineFilterPointFalsePositive: response.GetEngineFilterPointFalsePositives(),
+		EngineReadMetricsAvailable:     response.GetEngineReadMetricsAvailable(),
+		EngineBackpressure:             timingSnapshot(response.GetEngineBackpressure()),
+		EngineBatchQueueDepth:          response.GetEngineBatchWriteQueueDepth(),
+		EngineBatchQueue:               timingSnapshot(response.GetEngineBatchWriteQueue()),
+		EngineBatchService:             timingSnapshot(response.GetEngineBatchWriteService()),
+		ObjectStoreMain:                objectStoreRoleSnapshot(response.GetObjectStoreMain()),
+		ObjectStoreWAL:                 objectStoreRoleSnapshot(response.GetObjectStoreWal()),
+		ObjectStoreCoordination:        objectStoreRoleSnapshot(response.GetObjectStoreCoordination()),
 	}
 }

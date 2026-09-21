@@ -351,6 +351,11 @@ summed lane, reducer, RPC or engine service time as a wall-clock fraction. Queue
 depth alone is insufficient: require aligned queue wait, service, backpressure,
 active age and throughput evidence. CPU/heap profiles remain required when CPU cost
 dominates because bounded Phase 34 metrics identify the boundary, not the function.
+Rank candidates by total elapsed and useful throughput while CPU, memory, I/O,
+queue and compaction signals remain within measured headroom. Report higher
+per-item resource cost, but do not reject a faster candidate for efficiency alone;
+it becomes a blocker when a hard limit approaches, tails grow materially, or the
+cost prevents the throughput gain from repeating.
 
 ### 2. Test a Bounded Asynchronous Reducer
 

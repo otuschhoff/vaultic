@@ -42,7 +42,12 @@ func appendPackHistory(ctx context.Context, transaction *Transaction, events []P
 	if err != nil {
 		return nil, err
 	}
+	return appendPackHistoryFromSequence(events, encoded, found)
+}
+
+func appendPackHistoryFromSequence(events []PackEvent, encoded []byte, found bool) ([]Mutation, error) {
 	next := uint64(1)
+	var err error
 	if found {
 		if next, err = schema.UnmarshalNextEventSequence(encoded); err != nil {
 			// A corrupt counter must not block the catalog transition. Skip
@@ -79,7 +84,7 @@ func appendPackHistory(ctx context.Context, transaction *Transaction, events []P
 	if err != nil {
 		return nil, err
 	}
-	return append(mutations, Mutation{Key: key, Value: encodedNext}), nil
+	return append(mutations, Mutation{Key: schema.NextEventSequenceKey(), Value: encodedNext}), nil
 }
 
 // ensureHistoryEnabledMarker records when history collection began. Buckets
@@ -95,6 +100,13 @@ func ensureHistoryEnabledMarker(ctx context.Context, transaction *Transaction, o
 	if err != nil || found {
 		return nil, err
 	}
+	return historyEnabledMarkerMutation(found)
+}
+
+func historyEnabledMarkerMutation(found bool) ([]Mutation, error) {
+	if found {
+		return nil, nil
+	}
 	seconds := historyClock().UTC().Unix()
 	if seconds < 0 {
 		seconds = 0
@@ -103,7 +115,7 @@ func ensureHistoryEnabledMarker(ctx context.Context, transaction *Transaction, o
 	if err != nil {
 		return nil, err
 	}
-	return []Mutation{{Key: key, Value: value}}, nil
+	return []Mutation{{Key: schema.HistoryEnabledAtKey(), Value: value}}, nil
 }
 
 // packHistoryMutations builds the history mutations for a transition, including
@@ -126,6 +138,29 @@ func packHistoryMutationsMeasured(
 		return nil, err
 	}
 	entries, err := appendPackHistory(ctx, transaction, events, observeRead)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return append(marker, entries...), nil
+}
+
+func packHistoryMutationsFromValues(
+	events []PackEvent,
+	markerFound bool,
+	sequence []byte,
+	sequenceFound bool,
+) ([]Mutation, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	marker, err := historyEnabledMarkerMutation(markerFound)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := appendPackHistoryFromSequence(events, sequence, sequenceFound)
 	if err != nil {
 		return nil, err
 	}

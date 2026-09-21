@@ -657,31 +657,55 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	if err != nil {
 		return fail(err)
 	}
+	events, err := receiptPackEvents(receipt)
+	if err != nil {
+		return fail(err)
+	}
 	mutations := make([]Mutation, 0, len(changes)+len(receipt.Events)+2+len(aggregateKeys()))
+	aggregateReadKeys := aggregateKeys()
+	readKeys := make([][]byte, 0, len(aggregateReadKeys)+2)
 	if len(changes) > 0 {
-		store.legacyMetrics.planningReads.Add(uint64(len(aggregateKeys())))
-		aggregateStarted := time.Now()
+		readKeys = append(readKeys, aggregateReadKeys...)
+	}
+	if len(events) > 0 {
+		readKeys = append(readKeys, schema.HistoryEnabledAtKey(), schema.NextEventSequenceKey())
+	}
+	var readValues []KeyValue
+	var readFound []bool
+	if len(readKeys) > 0 {
+		prefetchStarted := time.Now()
+		store.legacyMetrics.planningReads.Add(uint64(len(readKeys)))
 		store.legacyMetrics.reductionPlanReadRPCs.Add(1)
-		store.legacyMetrics.reductionPlanReadKeys.Add(uint64(len(aggregateKeys())))
-		aggregates, err := applyPackAggregateDeltas(ctx, transaction, changes, true)
+		store.legacyMetrics.reductionPlanReadKeys.Add(uint64(len(readKeys)))
+		readValues, readFound, err = transaction.MultiGet(ctx, readKeys)
+		store.legacyMetrics.operations.reducePrefetch.observe(time.Since(prefetchStarted))
+		if err != nil {
+			return fail(err)
+		}
+	}
+	if len(changes) > 0 {
+		aggregateStarted := time.Now()
+		aggregateCount := len(aggregateReadKeys)
+		aggregates, err := applyPackAggregateDeltasFromValues(
+			aggregateReadKeys, readValues[:aggregateCount], readFound[:aggregateCount], changes, true,
+		)
 		store.legacyMetrics.operations.reduceAggregateRead.observe(time.Since(aggregateStarted))
 		if err != nil {
 			return fail(err)
 		}
 		mutations = append(mutations, aggregates...)
 	}
-	events, err := receiptPackEvents(receipt)
-	if err != nil {
-		return fail(err)
-	}
-	if len(events) > 0 {
-		store.legacyMetrics.planningReads.Add(2)
-	}
 	historyStarted := time.Now()
-	history, err := packHistoryMutationsMeasured(ctx, transaction, events, func() {
-		store.legacyMetrics.reductionPlanReadRPCs.Add(1)
-		store.legacyMetrics.reductionPlanReadKeys.Add(1)
-	})
+	historyOffset := 0
+	if len(changes) > 0 {
+		historyOffset = len(aggregateReadKeys)
+	}
+	var history []Mutation
+	if len(events) > 0 {
+		history, err = packHistoryMutationsFromValues(
+			events, readFound[historyOffset], readValues[historyOffset+1].Value, readFound[historyOffset+1],
+		)
+	}
 	store.legacyMetrics.operations.reduceHistoryRead.observe(time.Since(historyStarted))
 	if err != nil {
 		return fail(err)

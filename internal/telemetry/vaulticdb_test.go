@@ -28,6 +28,8 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 			EngineBatchQueue: engineTiming, EngineBatchService: engineTiming,
 			EngineImmutableFlushes: 3, EngineL0FlushBytes: 4, EngineCompactedSSTs: 5,
 			EngineL0StallsSSTCount: 6, EngineL0StallsSSTsPerKey: 7,
+			EngineGetKeys: 8, EngineFilterPointPositive: 9, EngineFilterPointNegative: 10,
+			EngineFilterPointFalsePositive: 11, EngineReadMetricsAvailable: true,
 		},
 	}
 	cache := daemon.ReadCacheStatus{
@@ -67,6 +69,10 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 		"engine_compacted_ssts":                        5,
 		"engine_l0_stalls_sst_count":                   6,
 		"engine_l0_stalls_ssts_per_key":                7,
+		"engine_get_keys":                              8,
+		"engine_filter_point_positives":                9,
+		"engine_filter_point_negatives":                10,
+		"engine_filter_point_false_positives":          11,
 		"cache_origin_reads_avoided":                   2,
 		"cache_admissions":                             3,
 		"cache_admission_rejections":                   15,
@@ -126,7 +132,7 @@ func TestVaulticDBComponentMarksLegacyAdditiveMetricsUnavailable(t *testing.T) {
 		daemon.WALInfo{},
 	)
 	for _, metric := range component.Metrics {
-		if metric.Name == "engine_flush_interval" || strings.HasPrefix(metric.Name, "cache_admission_rejections_") {
+		if metric.Name == "engine_flush_interval" || strings.HasPrefix(metric.Name, "engine_filter_point_") || metric.Name == "engine_get_keys" || strings.HasPrefix(metric.Name, "cache_admission_rejections_") {
 			if metric.Availability != AvailabilityUnavailable {
 				t.Fatalf("legacy metric %s availability = %q", metric.Name, metric.Availability)
 			}

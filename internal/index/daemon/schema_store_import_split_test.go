@@ -128,12 +128,12 @@ func TestSchemaStoreLegacyIngestReduceMatchesStage2(t *testing.T) {
 		t.Fatalf("successful stage 3 RPC attempt counters = %#v", stats)
 	}
 	if stats.CatalogReadRPCs == 0 || stats.CatalogReadKeys == 0 ||
-		stats.ReductionPlanReadRPCs == 0 || stats.ReductionPlanReadKeys == 0 {
+		stats.ReductionPlanReadRPCs != stats.ReducedBatches || stats.ReductionPlanReadKeys == 0 {
 		t.Fatalf("stage 3 actual read counters = %#v", stats)
 	}
 	for _, operation := range []string{
 		"prepare", "hash", "hints", "ingest_begin", "receipt_read", "pack_read", "blob_read", "plan_build",
-		"mutation_rpc", "commit", "post_commit", "reduce_receipt_read", "reduce_aggregate_plan",
+		"mutation_rpc", "commit", "post_commit", "reduce_receipt_read", "reduce_prefetch", "reduce_aggregate_plan",
 		"reduce_history_plan", "reduce_begin", "reduce_encode", "reduce_mutation_rpc", "reduce_commit",
 	} {
 		if stats.Operations[operation].Count == 0 {
@@ -154,6 +154,18 @@ func TestSchemaStoreLegacySplitValidationFailuresAreCounted(t *testing.T) {
 	if stats.Batches != 2 || stats.IngestFailures != 1 || stats.ReduceFailures != 1 ||
 		stats.IngestAttempts != 0 || stats.ReduceAttempts != 0 {
 		t.Fatalf("validation failure counters = %#v", stats)
+	}
+}
+
+func TestReducerPrefetchRejectsMalformedAggregate(t *testing.T) {
+	keys := aggregateKeys()
+	values := make([]KeyValue, len(keys))
+	found := make([]bool, len(keys))
+	values[0] = KeyValue{Key: keys[0], Value: []byte("malformed")}
+	found[0] = true
+	_, err := applyPackAggregateDeltasFromValues(keys, values, found, nil, true)
+	if err == nil {
+		t.Fatal("malformed prefetched aggregate was accepted")
 	}
 }
 

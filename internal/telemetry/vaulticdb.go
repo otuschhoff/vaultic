@@ -220,6 +220,10 @@ func availabilityFromKnown(known bool) Availability {
 }
 
 func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
+	readAvailability := AvailabilityUnavailable
+	if attribution.EngineReadMetricsAvailable {
+		readAvailability = AvailabilityExact
+	}
 	metrics := []Metric{
 		counterMetric("engine_write_batches", "operations", attribution.EngineWriteBatches),
 		counterMetric("engine_write_operations", "operations", attribution.EngineWriteOps),
@@ -232,6 +236,10 @@ func vaulticDBEngineMetrics(attribution daemon.AttributionSnapshot) []Metric {
 		counterMetric("engine_compacted_ssts", "objects", attribution.EngineCompactedSSTs),
 		counterMetric("engine_l0_stalls_sst_count", "operations", attribution.EngineL0StallsSSTCount),
 		counterMetric("engine_l0_stalls_ssts_per_key", "operations", attribution.EngineL0StallsSSTsPerKey),
+		{Name: "engine_get_keys", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineGetKeys},
+		{Name: "engine_filter_point_positives", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineFilterPointPositive},
+		{Name: "engine_filter_point_negatives", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineFilterPointNegative},
+		{Name: "engine_filter_point_false_positives", Kind: MetricCounter, Unit: "operations", Availability: readAvailability, Value: attribution.EngineFilterPointFalsePositive},
 		gaugeMetric("engine_memtable_bytes", "bytes", attribution.EngineMemtableBytes),
 		gaugeMetric("engine_l0_sst_objects", "objects", attribution.EngineL0SSTCount),
 		gaugeMetric("engine_sst_objects", "objects", attribution.EngineSSTCount),

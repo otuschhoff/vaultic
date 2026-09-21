@@ -43,14 +43,32 @@ func slateDBLatencyBounds() []uint64 {
 }
 
 var monitorValueSets = map[string]map[string]struct{}{
-	"component":       values("vaultic", "vaulticdb", "key_broker", "cache_coordinator"),
-	"queue":           values("batch_write", "legacy_import_ingest", "legacy_import_reduce"),
-	"operation":       values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery"),
-	"outcome":         values("success", "failure", "cancellation", "timeout"),
-	"role":            values("repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker"),
-	"representation":  values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata"),
-	"throttle":        values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown"),
-	"phase":           values("queued", "admission", "planning", "source", "read", "write", "upload", "publish", "reconcile", "ingest", "reduce", "cleanup", "finalize", "verify", "delete", "retry", "wait", "complete"),
+	"component":      values("vaultic", "vaulticdb", "key_broker", "cache_coordinator"),
+	"queue":          values("batch_write", "legacy_import_ingest", "legacy_import_reduce"),
+	"operation":      values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery"),
+	"outcome":        values("success", "failure", "cancellation", "timeout"),
+	"role":           values("repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker"),
+	"representation": values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata"),
+	"throttle":       values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown"),
+	"phase":          values("queued", "admission", "planning", "source", "read", "write", "upload", "publish", "reconcile", "ingest", "reduce", "cleanup", "finalize", "verify", "delete", "retry", "wait", "complete"),
+	"stage": values(
+		"prepare", "hash", "hints", "ingest_begin", "receipt_read", "pack_read", "blob_read", "plan_build",
+		"mutation_rpc", "commit", "post_commit", "ingest_retry_backoff", "ingest_recovery_read",
+		"reduce_begin", "reduce_receipt_read", "reduce_prefetch", "reduce_aggregate_plan", "reduce_history_plan", "reduce_encode",
+		"reduce_mutation_rpc", "reduce_commit", "reduce_retry_backoff", "reduce_recovery_read", "reduce_checkpoint_read",
+		"planning_total", "reduction_total", "gate_wait", "transaction_total", "cleanup_total", "cleanup_scan",
+		"cleanup_begin", "cleanup_write", "cleanup_commit",
+	),
+	"statistic": values(
+		"batches", "ingested_batches", "reduced_batches", "attempts", "ingest_attempts", "reduce_attempts",
+		"ingest_failures", "reduce_failures", "commits", "retries", "conflicts", "packs_committed", "blobs_committed",
+		"mutations_committed", "mutation_rpcs", "mutation_rpc_attempts", "reduction_mutation_rpcs",
+		"reduction_mutation_rpc_attempts", "reduction_mutations", "receipt_reads", "reduction_receipt_reads",
+		"recovery_reads", "reduce_checkpoint_reads", "catalog_read_rpcs", "catalog_read_keys", "reduction_plan_read_rpcs",
+		"reduction_plan_read_keys", "planning_reads", "source_indexes", "definitely_absent", "possibly_present", "found",
+		"false_positive_equivalent", "cleanup_calls", "cleanup_pages", "cleanup_receipts", "cleanup_deferred_commits",
+		"filter_inserts", "encoded_committed", "replanned",
+	),
 	"blocking":        values("prerequisite", "lock", "concurrency", "byte_budget", "source_io", "backend_io", "rpc_response", "retry_backoff", "credential_renewal", "writer_fencing", "durability", "wal_flush", "compaction", "human_confirmation", "shutdown"),
 	"storage_role":    values("repository", "database", "wal", "coordination", "source", "scratch", "cache"),
 	"storage_class":   values("pack", "index", "snapshot", "sst", "manifest", "wal_segment", "coordination", "scratch", "unknown"),
@@ -632,7 +650,7 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	add := func(name string, kind MetricKind, unit string, labels, required []string, bounds ...[]uint64) {
 		specs[name] = metricSpec{kind: kind, unit: unit, labels: labels, required: required, bounds: bounds}
 	}
-	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "engine_immutable_memtable_flushes", "engine_l0_stalls_sst_count", "engine_l0_stalls_ssts_per_key", "cache_hits", "cache_misses", "cache_origin_reads", "cache_origin_reads_avoided", "cache_corruptions", "cache_timeouts", "cache_failures", "cache_bypasses", "cache_admissions", "cache_admission_rejections", "cache_admission_rejections_reservation", "cache_admission_rejections_background_budget", "cache_admission_rejections_background_task", "cache_capacity_evictions", "cache_idle_evictions", "cache_absolute_evictions", "cache_corruption_evictions", "cache_read_latency_count", "cache_write_latency_count", "monitor_export_failures", "monitor_export_dropped", "runtime_gc_cycles"} {
+	for _, name := range []string{"engine_write_batches", "engine_write_operations", "engine_backpressure_events", "engine_immutable_memtable_flushes", "engine_l0_stalls_sst_count", "engine_l0_stalls_ssts_per_key", "engine_get_keys", "engine_filter_point_positives", "engine_filter_point_negatives", "engine_filter_point_false_positives", "cache_hits", "cache_misses", "cache_origin_reads", "cache_origin_reads_avoided", "cache_corruptions", "cache_timeouts", "cache_failures", "cache_bypasses", "cache_admissions", "cache_admission_rejections", "cache_admission_rejections_reservation", "cache_admission_rejections_background_budget", "cache_admission_rejections_background_task", "cache_capacity_evictions", "cache_idle_evictions", "cache_absolute_evictions", "cache_corruption_evictions", "cache_read_latency_count", "cache_write_latency_count", "monitor_export_failures", "monitor_export_dropped", "runtime_gc_cycles"} {
 		add(name, MetricCounter, "operations", nil, nil)
 	}
 	for _, name := range []string{"runtime_gc_pause_cpu", "cache_read_latency_total", "cache_write_latency_total", "process_cpu_user", "process_cpu_system"} {
@@ -677,6 +695,16 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	add("wait_active", MetricGauge, "operations", []string{"operation", "role", "throttle"}, []string{"operation", "role", "throttle"})
 	add("wait_oldest_age", MetricGauge, "microseconds", []string{"operation", "role", "throttle"}, []string{"operation", "role", "throttle"})
 	add("wait_duration", MetricHistogram, "microseconds", []string{"operation", "role", "throttle", "outcome"}, []string{"operation", "role", "throttle", "outcome"}, vaulticLatencyBounds())
+	add("legacy_import_stage_count", MetricCounter, "operations", []string{"stage"}, []string{"stage"})
+	add("legacy_import_stage_time", MetricCounter, "microseconds", []string{"stage"}, []string{"stage"})
+	for _, name := range []string{"legacy_import_stage_p50", "legacy_import_stage_p95", "legacy_import_stage_p99"} {
+		add(name, MetricGauge, "microseconds", []string{"stage"}, []string{"stage"})
+	}
+	add("legacy_import_events", MetricCounter, "operations", []string{"statistic"}, []string{"statistic"})
+	add("legacy_import_processed_bytes", MetricCounter, "bytes", []string{"statistic"}, []string{"statistic"})
+	add("legacy_import_filter_bytes", MetricGauge, "bytes", nil, nil)
+	add("legacy_import_filter_layers", MetricGauge, "objects", nil, nil)
+	add("legacy_import_filter_fallback", MetricGauge, "state", nil, nil)
 	add("dependency_requests", MetricCounter, "operations", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
 	add("dependency_bytes", MetricCounter, "bytes", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
 	add("dependency_latency", MetricHistogram, "microseconds", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"}, vaulticLatencyBounds())

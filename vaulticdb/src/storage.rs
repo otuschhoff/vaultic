@@ -280,6 +280,10 @@ pub(crate) struct EngineMetricsSnapshot {
     pub(crate) compacted_bytes: u64,
     pub(crate) compacted_ssts: u64,
     pub(crate) running_compactions: u64,
+    pub(crate) get_keys: u64,
+    pub(crate) filter_point_positives: u64,
+    pub(crate) filter_point_negatives: u64,
+    pub(crate) filter_point_false_positives: u64,
     pub(crate) backpressure: EngineTimingSnapshot,
     pub(crate) batch_write_queue_depth: u64,
     pub(crate) batch_write_queue: EngineTimingSnapshot,
@@ -2096,6 +2100,28 @@ impl Storage {
             compacted_bytes: value(slatedb::compactor::stats::BYTES_COMPACTED),
             compacted_ssts: value(slatedb::compactor::stats::SSTS_WRITTEN),
             running_compactions: value(slatedb::compactor::stats::RUNNING_COMPACTIONS),
+            get_keys: labeled(slatedb::db_stats::REQUEST_COUNT, &[("op", "get")]),
+            filter_point_positives: labeled(
+                slatedb::db_stats::SST_FILTER_POSITIVE_COUNT,
+                &[(
+                    slatedb::db_stats::FILTER_KIND_LABEL,
+                    slatedb::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
+            filter_point_negatives: labeled(
+                slatedb::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                &[(
+                    slatedb::db_stats::FILTER_KIND_LABEL,
+                    slatedb::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
+            filter_point_false_positives: labeled(
+                slatedb::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    slatedb::db_stats::FILTER_KIND_LABEL,
+                    slatedb::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             backpressure: engine_timing(
                 &metrics,
                 slatedb::db_stats::BACKPRESSURE_WAIT_SECONDS,

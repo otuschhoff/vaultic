@@ -84,6 +84,35 @@ task setting remains available for controlled diagnostics. The next P5
 experiment must improve cache admission selectivity or reuse rather than merely
 increase fill concurrency.
 
+The accepted bounded P5 candidate combines the reducer's aggregate and history planning reads
+into one transactional `MultiGet` after the receipt idempotency check. Stage 2
+and Stage 3 output-equivalence tests pass, and telemetry now requires exactly
+one planning read RPC per reduced batch. Process-local importer distributions
+are exported in the same aligned monitor snapshot as VaulticDB, including the
+new `reduce_prefetch` I/O stage and separate local aggregate/history planning
+stages. Existing SlateDB GET-key and point-filter positive, negative and false-
+positive counters are also exported with explicit mixed-version availability.
+
+Three matched 30-minute HDD runs are retained at
+`phase32-p5-reducer-prefetch-20260921-hdd-30m-r1` through `r3`. They processed
+83,961,394, 81,485,471, and 83,576,762 blobs; the median 46,451 blobs/s is 8.8%
+above the retained accepted-default baseline's 42,709 blobs/s. Planning reads
+fell from approximately three RPCs per reduced batch to one. Median reducer
+service fell 21.0% and reducer wait fell 42.9%. Every run produced 361 valid
+private snapshots with 359 exact VaulticDB samples, one stale sample, one
+startup-unavailable sample, and zero exporter failures or drops. No run
+reported retries, conflicts, backpressure, or L0 stalls.
+
+The throughput gain costs more available resources: median wrapper CPU rose
+from 317% to 355%, maximum RSS from 20,341,756 KiB to 23,638,476 KiB, filesystem
+input by 25.6%, and filesystem output by 28.6%. At a matched blob prefix in the
+first repetition, database GET count was effectively flat, GET bytes were 1.9%
+lower, and cumulative GET latency was 1.6% lower, so the larger terminal totals
+primarily reflect more work and deeper LSM progress. The speed improvement is
+accepted for bounded P5 use because no measured capacity limit was approached;
+resource efficiency remains a later tuning target. These timeout runs do not
+prove full-import completion or finalization acceptance.
+
 ## Frozen Inputs and Build
 
 The real-daemon fixture contains four ordered indexes, 128 preselected packs,
@@ -404,5 +433,7 @@ Representative NFS, RADOS, and RGW/S3 are no longer external blockers. Full
 current-revision import, close/handoff/reopen, and post-import validation remain
 P7b work. P4 is accepted with the two-lane setting; do not increase lanes. The
 current aligned telemetry selects P5 read amplification over P6 writer
-concurrency, but its first cache fill-budget experiment is rejected as
-regressive and does not advance P5 acceptance.
+concurrency. Cache fill-budget and task-count experiments remain rejected, while
+the combined reducer prefetch is accepted as an 8.8% median bounded-throughput
+improvement. Candidate SST fanout, needed-block and coalesced-range telemetry is
+the next diagnostic dependency work; full-import P7b acceptance remains open.
