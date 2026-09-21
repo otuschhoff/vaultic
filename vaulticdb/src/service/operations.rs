@@ -737,6 +737,8 @@ impl Service {
             engine_max_unflushed_bytes: engine_config.max_unflushed_bytes,
             engine_l0_sst_size_bytes: engine_config.l0_sst_size_bytes,
             engine_tuning_available: true,
+            engine_block_cache_bytes: engine_config.block_cache_bytes,
+            engine_meta_cache_bytes: engine_config.meta_cache_bytes,
         }
     }
 

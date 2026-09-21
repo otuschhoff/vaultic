@@ -240,6 +240,8 @@ fn slatedb_tuning_from_env() -> Result<SlateDbTuning> {
         },
         max_unflushed_bytes: optional_positive_usize("VAULTICDB_MAX_UNFLUSHED_BYTES")?,
         l0_sst_size_bytes: optional_positive_usize("VAULTICDB_L0_SST_SIZE_BYTES")?,
+        block_cache_bytes: optional_positive_usize("VAULTICDB_BLOCK_CACHE_BYTES")?,
+        meta_cache_bytes: optional_positive_usize("VAULTICDB_META_CACHE_BYTES")?,
     })
 }
 
@@ -925,6 +927,8 @@ mod tests {
             "VAULTICDB_WAL_FLUSH_INTERVAL",
             "VAULTICDB_MAX_UNFLUSHED_BYTES",
             "VAULTICDB_L0_SST_SIZE_BYTES",
+            "VAULTICDB_BLOCK_CACHE_BYTES",
+            "VAULTICDB_META_CACHE_BYTES",
         ] {
             unsafe { env::remove_var(name) };
         }
@@ -938,16 +942,22 @@ mod tests {
         assert_eq!(defaults.flush_interval, None);
         assert_eq!(defaults.max_unflushed_bytes, None);
         assert_eq!(defaults.l0_sst_size_bytes, None);
+        assert_eq!(defaults.block_cache_bytes, None);
+        assert_eq!(defaults.meta_cache_bytes, None);
 
         unsafe {
             env::set_var("VAULTICDB_WAL_FLUSH_INTERVAL", "500ms");
             env::set_var("VAULTICDB_MAX_UNFLUSHED_BYTES", "4294967296");
             env::set_var("VAULTICDB_L0_SST_SIZE_BYTES", "268435456");
+            env::set_var("VAULTICDB_BLOCK_CACHE_BYTES", "8589934592");
+            env::set_var("VAULTICDB_META_CACHE_BYTES", "1073741824");
         }
         let tuning = slatedb_tuning_from_env().unwrap();
         assert_eq!(tuning.flush_interval, Some(Duration::from_millis(500)));
         assert_eq!(tuning.max_unflushed_bytes, Some(4_294_967_296));
         assert_eq!(tuning.l0_sst_size_bytes, Some(268_435_456));
+        assert_eq!(tuning.block_cache_bytes, Some(8_589_934_592));
+        assert_eq!(tuning.meta_cache_bytes, Some(1_073_741_824));
         clear_slatedb_tuning_environment();
     }
 
@@ -958,6 +968,8 @@ mod tests {
             "VAULTICDB_WAL_FLUSH_INTERVAL",
             "VAULTICDB_MAX_UNFLUSHED_BYTES",
             "VAULTICDB_L0_SST_SIZE_BYTES",
+            "VAULTICDB_BLOCK_CACHE_BYTES",
+            "VAULTICDB_META_CACHE_BYTES",
         ] {
             clear_slatedb_tuning_environment();
             unsafe { env::set_var(name, "0") };

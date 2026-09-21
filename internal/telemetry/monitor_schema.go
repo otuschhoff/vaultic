@@ -660,7 +660,7 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 		add(name, MetricCounter, "bytes", nil, nil)
 	}
 	add("engine_compacted_ssts", MetricCounter, "objects", nil, nil)
-	for _, name := range []string{"engine_memtable_bytes", "engine_max_unflushed_bytes", "engine_l0_sst_size_bytes", "runtime_heap_alloc_bytes", "runtime_heap_inuse_bytes", "runtime_heap_sys_bytes", "process_rss_bytes"} {
+	for _, name := range []string{"engine_memtable_bytes", "engine_max_unflushed_bytes", "engine_l0_sst_size_bytes", "engine_block_cache_bytes", "engine_meta_cache_bytes", "runtime_heap_alloc_bytes", "runtime_heap_inuse_bytes", "runtime_heap_sys_bytes", "process_rss_bytes"} {
 		add(name, MetricGauge, "bytes", nil, nil)
 	}
 	for _, name := range []string{"engine_l0_sst_objects", "engine_sst_objects", "engine_sorted_runs"} {

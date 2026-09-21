@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slatedb::{
     config::{DbReaderOptions, FlushOptions, FlushType, Settings},
+    db_cache::{
+        foyer::{FoyerCache, FoyerCacheOptions},
+        DbCache, SplitCache, DEFAULT_BLOCK_CACHE_CAPACITY, DEFAULT_META_CACHE_CAPACITY,
+    },
     object_store::{
         aws::AmazonS3Builder,
         azure::{split_sas, MicrosoftAzureBuilder},
@@ -306,6 +310,8 @@ pub(crate) struct EngineMetricsSnapshot {
     pub(crate) flush_interval_ms: u64,
     pub(crate) max_unflushed_bytes: u64,
     pub(crate) l0_sst_size_bytes: u64,
+    pub(crate) block_cache_bytes: u64,
+    pub(crate) meta_cache_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -477,6 +483,8 @@ pub(crate) struct SlateDbTuning {
     pub(crate) flush_interval: Option<std::time::Duration>,
     pub(crate) max_unflushed_bytes: Option<usize>,
     pub(crate) l0_sst_size_bytes: Option<usize>,
+    pub(crate) block_cache_bytes: Option<usize>,
+    pub(crate) meta_cache_bytes: Option<usize>,
 }
 
 impl SlateDbTuning {
@@ -492,6 +500,32 @@ impl SlateDbTuning {
             settings.l0_sst_size_bytes = l0_sst_size_bytes;
         }
         settings
+    }
+
+    fn cache(&self) -> Option<Arc<dyn DbCache>> {
+        if self.block_cache_bytes.is_none() && self.meta_cache_bytes.is_none() {
+            return None;
+        }
+        let block_cache = Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+            max_capacity: self
+                .block_cache_bytes
+                .map(|capacity| capacity as u64)
+                .unwrap_or(DEFAULT_BLOCK_CACHE_CAPACITY),
+            ..Default::default()
+        })) as Arc<dyn DbCache>;
+        let meta_cache = Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+            max_capacity: self
+                .meta_cache_bytes
+                .map(|capacity| capacity as u64)
+                .unwrap_or(DEFAULT_META_CACHE_CAPACITY),
+            ..Default::default()
+        })) as Arc<dyn DbCache>;
+        Some(Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(block_cache))
+                .with_meta_cache(Some(meta_cache))
+                .build(),
+        ))
     }
 }
 
@@ -546,6 +580,9 @@ async fn open_writer_with_metrics(
     let mut builder = Db::builder(path, object_store)
         .with_settings(tuning.settings())
         .with_metrics_recorder(engine_metrics);
+    if let Some(cache) = tuning.cache() {
+        builder = builder.with_db_cache(cache, 0);
+    }
     if let Some(wal_store) = wal_object_store {
         builder = builder.with_wal_object_store(wal_store);
     }
@@ -2071,6 +2108,16 @@ impl Storage {
                 .unwrap_or(u64::MAX),
             max_unflushed_bytes: settings.max_unflushed_bytes.try_into().unwrap_or(u64::MAX),
             l0_sst_size_bytes: settings.l0_sst_size_bytes.try_into().unwrap_or(u64::MAX),
+            block_cache_bytes: self
+                .slatedb_tuning
+                .block_cache_bytes
+                .map(|capacity| capacity as u64)
+                .unwrap_or(DEFAULT_BLOCK_CACHE_CAPACITY),
+            meta_cache_bytes: self
+                .slatedb_tuning
+                .meta_cache_bytes
+                .map(|capacity| capacity as u64)
+                .unwrap_or(DEFAULT_META_CACHE_CAPACITY),
             ..EngineMetricsSnapshot::default()
         };
         let Some(engine_metrics) = &self.engine_metrics else {

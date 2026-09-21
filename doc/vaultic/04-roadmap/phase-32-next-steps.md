@@ -7,10 +7,12 @@
 
 **Assessment: 2026-09-21.** This is a proposed experiment sequence, not an
 accepted configuration or evidence of gains. The host budget is 32 CPU cores,
-approximately 300 GB RAM, and high-bandwidth networking. Authoritative SSTs
-will reside on native Ceph RADOS and/or S3 and will predominantly serve queries
-after import. Local SSD/NVMe capacity and performance must be measured before
-assigning a persistent-cache budget.
+approximately 300 GB RAM, and high-bandwidth networking. There is no local
+SSD/NVMe: available local storage is NFS-HDD or RADOS. The expected production
+topology is an authoritative database in Azure S3-compatible object storage,
+with abundant RAM as the primary low-latency cache and RADOS as the only
+persistent local cache candidate. The database will predominantly serve queries
+after import.
 
 ## Objectives and Decision Rules
 
@@ -57,9 +59,18 @@ CPU, bandwidth, and tail latency are still finite shared resources.
 | Layer | Purpose | Experiment and constraint |
 |---|---|---|
 | SlateDB metadata cache in RAM | Reuse SST indexes/filters and avoid repeated metadata fetch/decode | Test 128 MiB to 1 GiB independently; measure occupancy, hits, misses, and evictions by entry class |
-| SlateDB data-block cache in RAM | Serve hot decoded blocks without repeated origin/cache I/O | Test 512 MiB to 8 GiB independently; consider 16/32 GiB only if reuse and eviction data support it |
-| Persistent local SSD/NVMe tier | Retain immutable SST ranges across daemon restarts and absorb a larger read working set | Reuse Phase 29, initially ciphertext; size to a measured working set and actual free disk space |
-| Authoritative RADOS/S3 | Durable SST storage and cache-miss service | Measure real remote requests, bytes, retries, and latency separately from local hits |
+| SlateDB data-block cache in RAM | Serve hot decoded blocks without repeated origin/cache I/O | Test 512 MiB to 8 GiB independently; consider 16/32 GiB because RAM is plentiful, but only when reuse and RSS data support it |
+| Persistent RADOS cache | Retain immutable SST ranges across daemon restarts and absorb a working set larger than practical RAM | Reuse Phase 29 with RADOS as the cache store, initially ciphertext; size from measured reuse and shared-cluster capacity |
+| Authoritative Azure S3-compatible storage | Durable database storage and cache-miss service | Measure provider-visible requests, bytes, retries, latency, and cost separately from RAM and RADOS hits |
+| NFS-HDD | Current benchmark fixture or fallback storage, not a low-latency production cache | Use for matched historical comparisons; do not infer Azure S3 plus RADOS-cache behavior from it |
+
+The current import baseline is 1 GiB of SlateDB metadata cache and 512 MiB of
+data-block cache. Two metadata-cache runs averaged 11.28% more blobs/s than the
+prior cross-index control. Raising only the block cache to 8 GiB reduced
+throughput 1.14%, left database GET-body bytes effectively flat, and doubled
+sampled VaulticDB RSS. Do not test larger block caches until hit/eviction data
+or a query workload demonstrates reusable data blocks. Abundant RAM remains
+valuable, but capacity is assigned by observed reuse rather than availability.
 
 The existing external cache admits tagged foreground compacted-SST reads;
 WAL, manifests, fencing, coordination, conditional reads, and retry reads bypass
@@ -72,12 +83,15 @@ latency and S3 cost model. A local hit is not proof the overall cache system
 generates zero remote requests. Preserve current lease, quota, identity,
 integrity, and fencing guarantees; optimize bookkeeping only after attribution.
 
+RAM is the preferred resource to spend before adding another network storage
+hop. Test larger engine caches aggressively but incrementally; abundant RAM does
+not remove the need to measure effective capacity, allocator overhead, and RSS.
 Do not allocate the nominal 160 GiB Go limit plus arbitrarily large Rust caches
 against the same 300 GB host. Budget observed Go/Rust heaps, engine caches,
 memtables, preparation, in-flight reads, cache metadata, OS page cache, and other
 services together, using effective cgroup limits as well as host RAM. Avoid
 swap and leave explicit safety headroom. Account for duplicate cached bytes
-across decoded blocks, ciphertext disk cache, and OS page cache.
+across decoded blocks, RADOS-cached ciphertext, and OS page cache.
 
 ## Minimum Additional Telemetry
 
@@ -105,10 +119,12 @@ Keep labels bounded and report counter resets and availability explicitly.
 
 Confirm the cross-index candidate with matched ten-minute repetitions. Keep two
 lanes, 256 MiB L0 SSTs, and the existing safety/durability settings as controls.
-Repeat the control on authorized native RADOS and S3 targets with source order,
-dataset, encryption, resource limits, and WAL/coordination placement frozen.
-RGW compatibility or latency is not evidence of a public S3 provider's pricing
-or network behavior; retain separate identities for each deployment.
+Repeat the control first on authoritative Azure S3-compatible storage without a
+persistent cache, then with RADOS caching, while freezing source order, dataset,
+encryption, resource limits, and WAL/coordination placement. Native RADOS remains
+a useful backend control, but it is not the expected authoritative production
+topology. RGW compatibility or latency is not evidence of Azure's pricing or
+network behavior; retain separate identities for each deployment.
 
 Use an existing completed, isolated database for read tests where possible.
 Include random point hits/misses, batched lookups, and realistic range/history
@@ -121,15 +137,18 @@ proof of full-sized read performance.
 ### 2. Spend RAM on the Engine Working Set
 
 Run the metadata-cache and then data-block-cache capacity experiments above,
-changing one capacity at a time and leaving external tiers unchanged. Reuse
-SlateDB's supported cache constructors rather than implementing a new cache.
-Accept only if reduced misses translate into import throughput or query latency
-benefits with bounded memory. Flat hit rates or latency falsify the hypothesis;
-more occupancy alone is not success.
+changing one capacity at a time and leaving external tiers unchanged. Since RAM
+is plentiful and no fast local disk exists, complete this sweep before tuning a
+persistent cache. Reuse SlateDB's supported cache constructors rather than
+implementing a new cache. Accept only if reduced misses translate into import
+throughput or query latency benefits with bounded RSS. Flat hit rates, physical
+read bytes, or latency falsify the hypothesis; more occupancy alone is not
+success.
 
-### 3. Make Local Persistent Caching Pay for Itself
+### 3. Make RADOS Persistent Caching Pay for Itself
 
-Compare the selected RAM profile with and without one local SSD/NVMe tier.
+Compare the selected RAM profile against authoritative Azure S3-compatible
+storage with and without a RADOS cache tier. There is no SSD/NVMe candidate.
 Measure cold fill, warm service, and restart/reconciliation independently.
 Vary admission/range granularity only after identifying which fetched ranges
 are reused: avoid filling large regions for isolated random reads and avoid
@@ -139,8 +158,9 @@ Use existing foreground-only policy as the control, not speculative warming.
 Account for fill requests/bytes and coordination work against origin operations
 saved over repeated query windows. Report a break-even query volume for warming
 or persistent caching; useful warm hits do not guarantee a net cost saving.
-Test missing/corrupt/slow cache fallback and unchanged results. A local cache
-never becomes authoritative or substitutes for close/flush durability.
+Test missing/corrupt/slow RADOS-cache fallback and unchanged results. RADOS must
+remain disposable in this role: it never becomes authoritative or substitutes
+for Azure S3 close/flush durability.
 
 ### 4. Amortize Import Transactions and Preparation
 

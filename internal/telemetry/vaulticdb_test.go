@@ -19,6 +19,7 @@ func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 	writer := daemon.WriterStatus{
 		ProcessStartedUnixMS: 100, CapturedUnixMS: 200,
 		EngineFlushIntervalMS: 100, EngineMaxUnflushedBytes: 200, EngineL0SSTSizeBytes: 300,
+		EngineBlockCacheBytes: 400, EngineMetaCacheBytes: 500,
 		EngineTuningAvailable: true,
 		Attribution: daemon.AttributionSnapshot{
 			AdmissionWait: timing, AdmissionLockHold: timing, FenceCheck: timing,

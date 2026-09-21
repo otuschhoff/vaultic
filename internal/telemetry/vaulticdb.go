@@ -335,6 +335,8 @@ func vaulticDBProcessMetrics(writer daemon.WriterStatus) []Metric {
 		{Name: "engine_flush_interval", Kind: MetricGauge, Unit: "milliseconds", Availability: engineAvailability, Value: writer.EngineFlushIntervalMS},
 		{Name: "engine_max_unflushed_bytes", Kind: MetricGauge, Unit: "bytes", Availability: engineAvailability, Value: writer.EngineMaxUnflushedBytes},
 		{Name: "engine_l0_sst_size_bytes", Kind: MetricGauge, Unit: "bytes", Availability: engineAvailability, Value: writer.EngineL0SSTSizeBytes},
+		{Name: "engine_block_cache_bytes", Kind: MetricGauge, Unit: "bytes", Availability: engineAvailability, Value: writer.EngineBlockCacheBytes},
+		{Name: "engine_meta_cache_bytes", Kind: MetricGauge, Unit: "bytes", Availability: engineAvailability, Value: writer.EngineMetaCacheBytes},
 		{Name: "process_cpu_user", Kind: MetricCounter, Unit: "microseconds", Availability: availability(writer.ProcessCPUAvailable), Value: writer.ProcessCPUUserUS},
 		{Name: "process_cpu_system", Kind: MetricCounter, Unit: "microseconds", Availability: availability(writer.ProcessCPUAvailable), Value: writer.ProcessCPUSystemUS},
 		{Name: "process_rss_bytes", Kind: MetricGauge, Unit: "bytes", Availability: availability(writer.ProcessMemAvailable), Value: writer.ProcessRSSBytes},

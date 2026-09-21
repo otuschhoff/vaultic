@@ -116,6 +116,8 @@ mod tests {
             flush_interval: Some(std::time::Duration::from_millis(500)),
             max_unflushed_bytes: Some(4 * 1024 * 1024 * 1024),
             l0_sst_size_bytes: None,
+            block_cache_bytes: None,
+            meta_cache_bytes: None,
         }
         .settings();
 

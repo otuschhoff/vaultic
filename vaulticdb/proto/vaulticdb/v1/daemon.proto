@@ -306,6 +306,8 @@ message WriterStatusResponse {
   uint64 engine_max_unflushed_bytes = 25;
   uint64 engine_l0_sst_size_bytes = 26;
   bool engine_tuning_available = 27;
+  uint64 engine_block_cache_bytes = 28;
+  uint64 engine_meta_cache_bytes = 29;
 }
 
 message TimingSnapshot {

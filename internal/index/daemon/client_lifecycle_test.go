@@ -217,6 +217,8 @@ func TestPrepareDaemonCommandWithMemoryWAL(t *testing.T) {
 		WALFlushInterval:  500 * time.Millisecond,
 		MaxUnflushedBytes: 4 * 1024 * 1024 * 1024,
 		L0SSTSizeBytes:    256 * 1024 * 1024,
+		BlockCacheBytes:   8 * 1024 * 1024 * 1024,
+		MetaCacheBytes:    1024 * 1024 * 1024,
 	}).withDefaults()
 	cmd, authRead, authWrite, err := prepareDaemonCommand(options)
 	if err != nil {
@@ -231,6 +233,8 @@ func TestPrepareDaemonCommandWithMemoryWAL(t *testing.T) {
 		"VAULTICDB_WAL_FLUSH_INTERVAL=500ms",
 		"VAULTICDB_MAX_UNFLUSHED_BYTES=4294967296",
 		"VAULTICDB_L0_SST_SIZE_BYTES=268435456",
+		"VAULTICDB_BLOCK_CACHE_BYTES=8589934592",
+		"VAULTICDB_META_CACHE_BYTES=1073741824",
 	} {
 		if !slices.Contains(cmd.Env, entry) {
 			t.Errorf("daemon environment missing %q: %q", entry, cmd.Env)

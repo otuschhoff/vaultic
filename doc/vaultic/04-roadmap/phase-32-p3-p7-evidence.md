@@ -232,6 +232,57 @@ failure counters appeared only at cancellation. Ingest wait remained the
 largest scheduler phase at 408.5 seconds, followed by schedule work at 125.6
 seconds, dependency wait at 34.9 seconds, and reducer wait at 11.5 seconds.
 
+### Experiment 4: Larger SlateDB Metadata Cache
+
+A 1 GiB metadata cache is accepted as the baseline for the next import
+experiments. It is not yet a general query-time or remote-backend default. Runs
+`phase32-p9-meta-cache-1g-20260921-hdd-10m-r1` and `r2` retained the
+512 MiB block cache, two lanes, 256 MiB L0 target, memory WAL, and disabled
+external cache. They produced 99,180 and 99,587 blobs/s, respectively, only
+0.41% apart and averaging 11.28% above cross-index r2's 89,308 blobs/s. The
+first run reached the control's terminal blob count in 525.0 seconds, 11.20%
+sooner. Early-to-late decay narrowed from 21.30% in the control to 14.92% and
+13.10%.
+
+The physical-read evidence supports the cache hypothesis. Database GET
+operations fell 21.9% per blob and GET-body bytes fell from 2,806.5 to 174.3
+bytes per blob, a 93.8% reduction. Blob-read time fell from 8.54 to 3.50 ms per
+batch and reducer-prefetch time from 6.69 to 1.37 ms per reduced batch. Logical
+fanout was not fixed: late multi-get SST visits rose from 6.11 to 7.35 per call,
+partly because the candidate reached a larger database state in the same wall
+time. Plan-build and commit time per batch changed little.
+
+The memory cost is material. Sampled VaulticDB peak RSS rose from 11.75 GiB to
+17.69 and 17.61 GiB, much more than the 896 MiB configured-capacity increase.
+Both runs exited with expected timeout status 124 after about 9m57s, emitted
+119 usable monitor records, left no process, and reported exact effective
+capacities of 512 MiB block and 1 GiB metadata. Socket/control files remained
+as the same harmless shutdown residue seen in prior runs. Vaultic SHA-256 was
+`082d091a4dbf7866f931dabc29c6afab53fb1b137bb6ba2d7dac39f8c7284527`;
+VaulticDB SHA-256 was
+`12e8b472570449133e7ca454ca50c49df6ef3a78f3caef82a7d0254b40aeac06`.
+Test block-cache size independently from this baseline. Internal cache
+hit/miss/eviction telemetry is still needed to explain the RSS multiplier and
+choose a smaller metadata capacity if possible.
+
+### Experiment 5: Larger SlateDB Block Cache
+
+An 8 GiB block cache is rejected for import. Run
+`phase32-p10-block-cache-8g-20260921-hdd-10m-r1` kept the accepted 1 GiB
+metadata cache and changed only the block cache from 512 MiB to 8 GiB. It
+produced 98,250 blobs/s, 1.14% below the 99,384 blobs/s mean of the two matched
+metadata-cache runs. Early-to-late throughput declined 17.12%, also worse than
+the two controls' 14.92% and 13.10%.
+
+The extra capacity did not reduce physical data reads: database GET-body bytes
+changed by only -0.10%, while database GET operations fell 2.72%. Sampled peak
+VaulticDB RSS rose from a 17.65 GiB control mean to 36.12 GiB, a 104.7%
+increase. The run exited with expected timeout status 124 after 9m59.39s,
+emitted 119 usable monitor records, left no process, and reported exact 8 GiB
+block and 1 GiB metadata capacities. Keep the 512 MiB block cache for import;
+do not test 16 or 32 GiB without cache hit/eviction evidence from a workload
+that can plausibly reuse those blocks.
+
 ## Frozen Inputs and Build
 
 This section describes the original P3/P4/P7 fixture and storage comparisons

@@ -66,6 +66,8 @@ type indexDaemonOptions struct {
 	WALFlushInterval              time.Duration
 	MaxUnflushedBytes             uint64
 	L0SSTSizeBytes                uint64
+	BlockCacheBytes               uint64
+	MetaCacheBytes                uint64
 	WALS3Bucket                   string
 	WALS3Prefix                   string
 	WALS3Endpoint                 string
@@ -146,6 +148,8 @@ func (options *indexDaemonOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.DurationVar(&options.WALFlushInterval, "daemon-wal-flush-interval", 0, "SlateDB WAL flush interval (zero uses the default)")
 	flags.Uint64Var(&options.MaxUnflushedBytes, "daemon-max-unflushed-bytes", 0, "SlateDB total unflushed byte limit (zero uses the default)")
 	flags.Uint64Var(&options.L0SSTSizeBytes, "daemon-l0-sst-size-bytes", 0, "SlateDB L0 SST size threshold (zero uses the default)")
+	flags.Uint64Var(&options.BlockCacheBytes, "daemon-block-cache-bytes", 0, "SlateDB in-memory data-block cache capacity (zero uses the default)")
+	flags.Uint64Var(&options.MetaCacheBytes, "daemon-meta-cache-bytes", 0, "SlateDB in-memory index/filter cache capacity (zero uses the default)")
 	flags.StringVar(&options.WALS3Bucket, "daemon-wal-s3-bucket", "", "vaulticdb WAL S3 bucket")
 	flags.StringVar(&options.WALS3Prefix, "daemon-wal-s3-prefix", "", "vaulticdb WAL S3 key prefix")
 	flags.StringVar(&options.WALS3Endpoint, "daemon-wal-s3-endpoint", "", "vaulticdb WAL S3 endpoint URL")
@@ -247,8 +251,9 @@ func (options indexDaemonOptions) config(repositoryID string) (daemon.Options, e
 		RadosPrefix: options.RadosPrefix, RadosClient: options.RadosClient, RadosKey: radosKey,
 		WALStore: options.WALStore, WALDataDir: options.WALDataDir,
 		WALFlushInterval: options.WALFlushInterval, MaxUnflushedBytes: options.MaxUnflushedBytes,
-		L0SSTSizeBytes: options.L0SSTSizeBytes,
-		WALS3Bucket:    options.WALS3Bucket, WALS3Prefix: options.WALS3Prefix,
+		L0SSTSizeBytes:  options.L0SSTSizeBytes,
+		BlockCacheBytes: options.BlockCacheBytes, MetaCacheBytes: options.MetaCacheBytes,
+		WALS3Bucket: options.WALS3Bucket, WALS3Prefix: options.WALS3Prefix,
 		WALS3Endpoint: options.WALS3Endpoint, WALS3Region: options.WALS3Region,
 		WALS3Provider: options.WALS3Provider, WALS3BucketLookup: options.WALS3BucketLookup,
 		WALRadosMonitors: options.WALRadosMonitors, WALRadosFSID: options.WALRadosFSID,

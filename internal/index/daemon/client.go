@@ -82,6 +82,8 @@ type Options struct {
 	WALFlushInterval              time.Duration
 	MaxUnflushedBytes             uint64
 	L0SSTSizeBytes                uint64
+	BlockCacheBytes               uint64
+	MetaCacheBytes                uint64
 	WALS3Bucket                   string
 	WALS3Prefix                   string
 	WALS3Endpoint                 string
@@ -264,6 +266,8 @@ type WriterStatus struct {
 	EngineFlushIntervalMS   uint64              `json:"engine_flush_interval_ms"`
 	EngineMaxUnflushedBytes uint64              `json:"engine_max_unflushed_bytes"`
 	EngineL0SSTSizeBytes    uint64              `json:"engine_l0_sst_size_bytes"`
+	EngineBlockCacheBytes   uint64              `json:"engine_block_cache_bytes"`
+	EngineMetaCacheBytes    uint64              `json:"engine_meta_cache_bytes"`
 	EngineTuningAvailable   bool                `json:"engine_tuning_available"`
 }
 
@@ -799,6 +803,12 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 	}
 	if options.L0SSTSizeBytes > 0 {
 		cmd.Env = append(cmd.Env, "VAULTICDB_L0_SST_SIZE_BYTES="+strconv.FormatUint(options.L0SSTSizeBytes, 10))
+	}
+	if options.BlockCacheBytes > 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_BLOCK_CACHE_BYTES="+strconv.FormatUint(options.BlockCacheBytes, 10))
+	}
+	if options.MetaCacheBytes > 0 {
+		cmd.Env = append(cmd.Env, "VAULTICDB_META_CACHE_BYTES="+strconv.FormatUint(options.MetaCacheBytes, 10))
 	}
 	if options.FreshBulkImport {
 		setEnvironment(&cmd.Env, "VAULTICDB_SLATEDB_MULTIGET", "true")
@@ -1683,6 +1693,8 @@ func writerStatus(response *vaulticdbv1.WriterStatusResponse) WriterStatus {
 		EngineFlushIntervalMS:   response.GetEngineFlushIntervalMs(),
 		EngineMaxUnflushedBytes: response.GetEngineMaxUnflushedBytes(),
 		EngineL0SSTSizeBytes:    response.GetEngineL0SstSizeBytes(),
+		EngineBlockCacheBytes:   response.GetEngineBlockCacheBytes(),
+		EngineMetaCacheBytes:    response.GetEngineMetaCacheBytes(),
 	}
 	status.EngineTuningAvailable = response.GetEngineTuningAvailable()
 	return status

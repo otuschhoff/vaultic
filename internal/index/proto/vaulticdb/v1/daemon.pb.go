@@ -2575,6 +2575,8 @@ type WriterStatusResponse struct {
 	EngineMaxUnflushedBytes uint64                 `protobuf:"varint,25,opt,name=engine_max_unflushed_bytes,json=engineMaxUnflushedBytes,proto3" json:"engine_max_unflushed_bytes,omitempty"`
 	EngineL0SstSizeBytes    uint64                 `protobuf:"varint,26,opt,name=engine_l0_sst_size_bytes,json=engineL0SstSizeBytes,proto3" json:"engine_l0_sst_size_bytes,omitempty"`
 	EngineTuningAvailable   bool                   `protobuf:"varint,27,opt,name=engine_tuning_available,json=engineTuningAvailable,proto3" json:"engine_tuning_available,omitempty"`
+	EngineBlockCacheBytes   uint64                 `protobuf:"varint,28,opt,name=engine_block_cache_bytes,json=engineBlockCacheBytes,proto3" json:"engine_block_cache_bytes,omitempty"`
+	EngineMetaCacheBytes    uint64                 `protobuf:"varint,29,opt,name=engine_meta_cache_bytes,json=engineMetaCacheBytes,proto3" json:"engine_meta_cache_bytes,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -2796,6 +2798,20 @@ func (x *WriterStatusResponse) GetEngineTuningAvailable() bool {
 		return x.EngineTuningAvailable
 	}
 	return false
+}
+
+func (x *WriterStatusResponse) GetEngineBlockCacheBytes() uint64 {
+	if x != nil {
+		return x.EngineBlockCacheBytes
+	}
+	return 0
+}
+
+func (x *WriterStatusResponse) GetEngineMetaCacheBytes() uint64 {
+	if x != nil {
+		return x.EngineMetaCacheBytes
+	}
+	return 0
 }
 
 type TimingSnapshot struct {
@@ -6321,8 +6337,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x05tiers\x18\x04 \x03(\v2!.vaulticdb.v1.ReadCacheTierPolicyR\x05tiers\"r\n" +
 	"\x13WriterStatusRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
-	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xbe\n" +
-	"\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xae\v\n" +
 	"\x14WriterStatusResponse\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12,\n" +
@@ -6352,7 +6367,9 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x18engine_flush_interval_ms\x18\x18 \x01(\x04R\x15engineFlushIntervalMs\x12;\n" +
 	"\x1aengine_max_unflushed_bytes\x18\x19 \x01(\x04R\x17engineMaxUnflushedBytes\x126\n" +
 	"\x18engine_l0_sst_size_bytes\x18\x1a \x01(\x04R\x14engineL0SstSizeBytes\x126\n" +
-	"\x17engine_tuning_available\x18\x1b \x01(\bR\x15engineTuningAvailable\"\xa3\x04\n" +
+	"\x17engine_tuning_available\x18\x1b \x01(\bR\x15engineTuningAvailable\x127\n" +
+	"\x18engine_block_cache_bytes\x18\x1c \x01(\x04R\x15engineBlockCacheBytes\x125\n" +
+	"\x17engine_meta_cache_bytes\x18\x1d \x01(\x04R\x14engineMetaCacheBytes\"\xa3\x04\n" +
 	"\x0eTimingSnapshot\x12\x1a\n" +
 	"\battempts\x18\x01 \x01(\x04R\battempts\x12\x1a\n" +
 	"\bfailures\x18\x02 \x01(\x04R\bfailures\x12\x19\n" +
