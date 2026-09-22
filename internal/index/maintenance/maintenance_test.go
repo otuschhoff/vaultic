@@ -250,6 +250,175 @@ func TestLoadSlateDBLocationsScansPartitionsConcurrently(t *testing.T) {
 	}
 }
 
+type countOnlyScanStore struct {
+	*memoryStore
+	entries []daemon.KeyValue
+}
+
+func (store *countOnlyScanStore) ScanRange(_ context.Context, prefix []byte, _ uint32, consume func([]daemon.KeyValue) error) error {
+	if !bytes.Equal(prefix, []byte{'b', ':', 0}) {
+		return nil
+	}
+	for _, entry := range store.entries {
+		if err := consume([]daemon.KeyValue{entry}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestLoadSlateDBLocationsCountOnlyValidation(t *testing.T) {
+	value, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{
+		PackID: schema.ID{42}, Type: schema.BlobData, Length: 1,
+	}}}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := daemon.KeyValue{Key: schema.BlobKey(schema.ID{0, 1}), Value: value}
+	second := daemon.KeyValue{Key: schema.BlobKey(schema.ID{0, 2}), Value: value}
+	for _, mode := range []string{"empty", "single", "ordered", "duplicate", "reversed", "wrong_prefix", "wrong_kind", "malformed", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := &countOnlyScanStore{memoryStore: &memoryStore{}, entries: []daemon.KeyValue{first, second}}
+			want := uint64(2)
+			switch mode {
+			case "empty":
+				store.entries, want = nil, 0
+			case "single":
+				store.entries, want = []daemon.KeyValue{first}, 1
+			case "duplicate":
+				store.entries = []daemon.KeyValue{first, first}
+			case "reversed":
+				store.entries = []daemon.KeyValue{second, first}
+			case "wrong_prefix":
+				store.entries = []daemon.KeyValue{{Key: schema.BlobKey(schema.ID{1}), Value: value}}
+			case "wrong_kind":
+				store.entries = []daemon.KeyValue{{Key: schema.PackKey(schema.ID{0, 1}), Value: value}}
+			case "malformed":
+				store.entries = []daemon.KeyValue{{Key: first.Key, Value: []byte("invalid")}}
+			}
+			scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			locations, err := newLocationSpool(ctx, scratch, 256*locationTupleMemorySize, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packs, err := newLocationMultisetSpool(ctx, scratch, 256*locationTupleMemorySize, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var finalizing func()
+			if mode == "cancel" {
+				finalizing = cancel
+			}
+			count := uint64(99)
+			err = loadSlateDBLocationsWithCount(ctx, store, locations, packs, 4, finalizing, &count)
+			if mode == "empty" || mode == "single" || mode == "ordered" {
+				if err != nil || count != want {
+					t.Fatalf("count=%d want=%d err=%v", count, want, err)
+				}
+			} else if err == nil || count != 99 {
+				t.Fatalf("invalid scan published count=%d err=%v", count, err)
+			}
+			if mode == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation: %v", err)
+			}
+			if err := errors.Join(locations.close(), packs.close()); err != nil {
+				t.Fatal(err)
+			}
+			if scratch.used != 0 {
+				t.Fatal("scratch reservations leaked")
+			}
+		})
+	}
+}
+
+func TestLoadSlateDBLocationsCountOnlyMatchesSpool(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	base := schema.BlobLocation{PackID: schema.ID{42}, Type: schema.BlobData, Length: 1}
+	variants := []schema.BlobLocation{base, base, base, base, base, base, base}
+	variants[2].PackID[1] = 1
+	variants[3].Type = schema.BlobTree
+	variants[4].Offset = 1
+	variants[5].Length = 2
+	variants[6].UncompressedSize = 1
+	for _, partition := range []byte{0, 127, 255} {
+		for ordinal := byte(0); ordinal < 3; ordinal++ {
+			store.set(t, schema.BlobKey(schema.ID{partition, ordinal}), schema.BlobRecord{Locations: variants})
+		}
+	}
+	var expected uint64
+	var expectedPacks []locationTuple
+	for _, countOnly := range []bool{false, true} {
+		scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer scratch.close()
+		locations, err := newLocationSpool(context.Background(), scratch, 256*locationTupleMemorySize, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packs, err := newLocationMultisetSpool(context.Background(), scratch, 256*locationTupleMemorySize, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var actual uint64
+		var target *uint64
+		if countOnly {
+			target = &actual
+		}
+		if err := loadSlateDBLocationsWithCount(context.Background(), store, locations, packs, 4, nil, target); err != nil {
+			t.Fatal(err)
+		}
+		if countOnly {
+			if actual != expected || actual != 54 {
+				t.Fatalf("count=%d spool=%d, want 54", actual, expected)
+			}
+			if len(locations.runs) != 0 || len(locations.memoryRuns) != 0 || locations.memoryUsed != 0 {
+				t.Fatal("count-only scan retained location tuples")
+			}
+		} else {
+			expected, err = countLocationSpool(locations)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		iterator, err := packs.iterator()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var actualPacks []locationTuple
+		for {
+			tuple, found, err := iterator.next()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !found {
+				break
+			}
+			actualPacks = append(actualPacks, tuple)
+		}
+		if err := iterator.close(); err != nil {
+			t.Fatal(err)
+		}
+		if countOnly && (!slices.Equal(actualPacks, expectedPacks) || len(actualPacks) != 63) {
+			t.Fatal("count-only scan changed pack multiset")
+		}
+		expectedPacks = actualPacks
+		if err := errors.Join(locations.close(), packs.close()); err != nil {
+			t.Fatal(err)
+		}
+		if scratch.used != 0 {
+			t.Fatal("scratch reservations leaked")
+		}
+	}
+}
+
 func TestLoadSlateDBLocationsFinalizesSpilledPartitions(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}
 	for ordinal := byte(1); ordinal <= 3; ordinal++ {

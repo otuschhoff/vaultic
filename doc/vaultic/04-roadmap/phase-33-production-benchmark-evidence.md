@@ -715,6 +715,86 @@ complete-check runtime, repeated performance acceptance or a full differential
 clean verdict. The next target is the subsequent location-count pass and its
 remaining serial merge, with clearer stage attribution before further parallelism.
 
+### Avoid the Count-Only Location Spool (r11-r12)
+
+The iterator follow-up above was committed as `cfc301939`, including the r9
+attribution and r10 production evidence. Inspection of the next bottleneck found
+that SlateDB-only checking builds a complete blob-ordered spool solely to count
+distinct tuples after catalog comparison. Full differential checking still needs
+that spool to compare legacy and authoritative locations.
+
+The new candidate counts distinct locations within each blob during the existing
+partition scan, only in SlateDB-only mode. It validates blob key kind, partition
+prefix and strictly increasing IDs across callback/page boundaries; therefore
+the same blob cannot contribute twice. Every location field participates in
+per-blob deduplication. Single-location records need no deduplication map, and
+multi-location maps live only for the current decoded record. Partition-local
+counts avoid shared per-record atomics and are combined with overflow checks
+only after successful scan, finalization and adoption. Errors do not publish a
+partial count. The unused blob-ordered spool stays empty, eliminating its sort,
+spill, encryption, merge and readback work. Pack-contribution tuples retain their
+original multiset, including duplicates; full differential and legacy-only
+counting retain their existing spool paths.
+
+Tests compare the new count against the old spilled/deduplicated spool across
+partitions, duplicates and differences in every location field, and require exact
+pack-multiset equality. Separate cases cover empty/singleton scans, duplicate and
+reversed IDs across callbacks, wrong prefixes/kinds, malformed values and
+cancellation without partial publication. Existing concurrent scan/finalization
+tests and all maintenance, telemetry and index-command race suites pass. Editor
+diagnostics and diff checks are clean.
+
+Both diagnostics used the unchanged epoch-39 daemon, the same HDD-NFS paths,
+96 GiB memory/scratch limits, 32 scan workers/RPCs and ten-minute cap. There was
+no profiling or overlapping build/test work. The separate CLI
+`bin/phase33-count-only/linux-amd64/vaultic` has SHA-256
+`7dd0d82ded80972b0437f87e679639a1e3f0108a8be93eddd20e89527d52b3ff`.
+Artifacts are under `db.test/phase33-production-2026-09-22-stream32-count-only-r11`
+and `db.test/phase33-production-2026-09-22-stream32-count-only-r12`.
+
+| Measurement | r10 prior iterator | r11 count-only | r12 unchanged repeat |
+| --- | ---: | ---: | ---: |
+| Encryption audit | 52s | 219s | 52s |
+| Location scan | 119s | 91s | 94s |
+| Finalization | 33s | 15s | 16s |
+| Catalog starts | 3m24s | 5m25s | 2m42s |
+| Parallel validation starts | Not reached | Not reached | 7m42s |
+| Exit / total wall including cleanup | 124 / 10m08.96s | 124 / 10m01.88s | 0 / 8m12.27s |
+| CLI CPU seconds | 2,023.14 | 1,474.18 | 1,499.19 |
+| Peak RSS, KiB | 115,413,100 | 57,757,532 | 57,886,232 |
+| Scratch reservation peak, bytes | 90,567,039,078 | 48,774,247,512 | 48,774,247,512 |
+| Merge groups started | 36 | 24 | 24 |
+
+R11's unusually slow unchanged encryption audit consumed the saved time; it
+timed out during catalog comparison and did not publish its computed location
+count. R12 completed the reduced-coverage command successfully, reporting
+379,934,385 distinct locations from 376,346,710 blob records across all 256
+ranges. All 24 merges succeeded by the 4m55s snapshot, totaling 445.132 group
+service seconds. Parallel validation took about 29s, reaching finalization at
+8m11s. Relative to r10, r12's scan was 21% shorter and finalization 52% shorter;
+CPU was 26% lower while completing later work. Peak RSS fell about 50%, and
+scratch reservation peak fell 46%. These resource reductions are consequences
+of eliminating unnecessary work, not resource-minimization goals.
+
+Both manifests verified, scratch was empty and the writer remained healthy with
+zero active transactions/intents. Neither run swapped. R11 exported 121 monitor
+snapshots; r12 exported 100. Service binaries were not replaced.
+
+R12 is the first completed SlateDB-only run in this sequence, not a full
+differential clean verdict: `coverage.complete` remains false and legacy indexes,
+legacy snapshots and export provenance are skipped. The result also reports
+419,530 warnings, with pending-export, unknown-tier, retention-unknown and
+usage-unaccounted counters each at 419,530; exit zero does not mean warning-free.
+Sequential cache effects and r11's audit variability remain confounders, and no
+complete baseline runtime exists for a total-runtime speedup percentage.
+
+The remaining dominant interval is catalog preparation/comparison: about 2m13s
+to complete the 24 merge groups, then approximately 2m47s for the ordered catalog
+comparison and subsequent cleanup/aggregate checks. Parallel validation is much
+smaller. Further optimization should target this measured interval while keeping
+the full differential-check path covered; it should not infer performance from
+raising scan concurrency or from the count-only shortcut alone.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

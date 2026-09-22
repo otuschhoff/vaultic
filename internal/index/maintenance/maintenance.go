@@ -854,9 +854,14 @@ func CheckWithOptions(
 		}
 	}
 	progress.set("slatedb_scan")
-	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks, workers, func() {
+	var locationCount uint64
+	var countOnly *uint64
+	if options.SlateDBOnly {
+		countOnly = &locationCount
+	}
+	if err := loadSlateDBLocationsWithCount(ctx, store, slatedb, slatedbPacks, workers, func() {
 		progress.set("slatedb_finalize")
-	}); err != nil {
+	}, countOnly); err != nil {
 		return result, err
 	}
 	progress.set("catalog_join")
@@ -871,10 +876,7 @@ func CheckWithOptions(
 			return result, err
 		}
 	} else {
-		result.SlateDBLocations, err = countLocationSpool(slatedb)
-		if err != nil {
-			return result, err
-		}
+		result.SlateDBLocations = locationCount
 	}
 	if err := legacy.close(); err != nil {
 		return result, err
@@ -1585,11 +1587,16 @@ func checkPackCatalog(
 }
 
 func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locationSpool, workers uint, finalizing func()) error {
+	return loadSlateDBLocationsWithCount(ctx, store, result, packs, workers, finalizing, nil)
+}
+
+func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, packs *locationSpool, workers uint, finalizing func(), countOnly *uint64) error {
 	group, groupContext := errgroup.WithContext(ctx)
 	group.SetLimit(int(workers))
 	partitionMemory := max(result.memoryBytes/256, locationTupleMemorySize)
 	locationPartitions := make([]*locationSpool, 256)
 	packPartitions := make([]*locationSpool, 256)
+	var partitionCounts [256]uint64
 	defer func() {
 		for partition := range locationPartitions {
 			if locationPartitions[partition] != nil {
@@ -1613,18 +1620,44 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 				return err
 			}
 			packPartitions[partition] = packLocations
+			var previousID schema.ID
+			hasPrevious := false
 			return scanRange(groupContext, store, prefix, scanPageSize, func(entries []daemon.KeyValue) error {
 				for _, entry := range entries {
+					if err := groupContext.Err(); err != nil {
+						return err
+					}
 					parsed, err := schema.ParseKey(entry.Key)
 					if err != nil {
 						return err
+					}
+					if countOnly != nil {
+						if parsed.Kind != schema.KeyBlob || !bytes.HasPrefix(entry.Key, prefix) ||
+							hasPrevious && bytes.Compare(previousID[:], parsed.ID[:]) >= 0 {
+							return fmt.Errorf("invalid or unordered blob key in count-only scan")
+						}
+						previousID, hasPrevious = parsed.ID, true
 					}
 					record, err := schema.UnmarshalBlobRecord(entry.Value)
 					if err != nil {
 						return err
 					}
+					var seen map[schema.BlobLocation]struct{}
+					if countOnly != nil && len(record.Locations) > 1 {
+						seen = make(map[schema.BlobLocation]struct{}, len(record.Locations))
+					}
 					for _, item := range record.Locations {
-						if err := locations.add(locationTuple{BlobID: vaultic.ID(parsed.ID),
+						if countOnly != nil {
+							if _, duplicate := seen[item]; !duplicate {
+								if partitionCounts[partition] == math.MaxUint64 {
+									return fmt.Errorf("checker location count overflow")
+								}
+								partitionCounts[partition]++
+								if seen != nil {
+									seen[item] = struct{}{}
+								}
+							}
+						} else if err := locations.add(locationTuple{BlobID: vaultic.ID(parsed.ID),
 							PackID:             vaultic.ID(item.PackID),
 							Type:               uint8(item.Type),
 							Offset:             item.Offset,
@@ -1680,6 +1713,16 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 		if err := packs.adopt(packPartitions[partition]); err != nil {
 			return err
 		}
+	}
+	if countOnly != nil {
+		var count uint64
+		for _, partitionCount := range partitionCounts {
+			if partitionCount > math.MaxUint64-count {
+				return fmt.Errorf("checker location count overflow")
+			}
+			count += partitionCount
+		}
+		*countOnly = count
 	}
 	return nil
 }
