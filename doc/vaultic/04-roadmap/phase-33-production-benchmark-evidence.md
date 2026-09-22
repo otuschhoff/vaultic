@@ -927,6 +927,81 @@ uncontrolled. Full differential and cross-backend acceptance remain pending.
 Before claiming further runtime gains, profile the changed catalog path and scan
 waits; reduced allocation/I/O alone does not demonstrate a shorter critical path.
 
+### Reattribute and Stream the Catalog (r17-r19)
+
+Bounded aggregation was committed as `caecdd695` after fresh affected race suites
+passed. R17 profiled the unchanged r16 CLI with stage-triggered 30-second CPU
+windows and subsequent three-second traces for scan and catalog. The sampler no
+longer waits for disk merges, which this workload no longer performs. Artifacts
+are under `db.test/phase33-production-2026-09-22-stream32-current-profile-r17`;
+CPU/wait reports have a separately verified `analysis/SHA256SUMS`.
+
+The scan window captured 263.83 CPU seconds in 30 seconds. Pack-buffer insertion
+accounted for 24.48% cumulative CPU, protobuf eager unmarshalling 24.69%, blob
+record decoding 15.27% and key parsing 8.41%; these overlapping shares are not
+additive. Its trace attributed 53.03 goroutine-seconds of synchronization delay
+to `ReadSession.ScanRange` in the three-second window, consistent with substantial
+receive-side waiting but not sufficient to identify the daemon's internal wait
+owner. No new daemon CPU profile was collected.
+
+The catalog CPU window captured 17.06 CPU seconds, 96.07% cumulatively in
+`compactPackMemory`; map lookup accounted for 68.17%. The subsequent trace sampled
+a different part of the stage: 1.50 seconds of blocking beneath unary `ScanPage`
+calls, with only about 1.77 ms total syscall time. CPU compaction and paginated
+remote reads are distinct costs, not percentages of the same wall-time window.
+R17 completed in 3m40.36s with unchanged logical results, no sampler errors,
+verified manifests/cleanup and healthy writer state. Profiling and sequential
+cache variation make it attribution evidence rather than a performance control.
+
+The next candidate switches the catalog's `p:` scan to the existing retained
+streaming range API when no legacy contribution iterator is present. It reuses
+the same record visitor, transaction, cancellation and validation paths and
+retains unary fallback for stores without range support. When a legacy iterator
+exists, pagination is retained: missing-pack callbacks can issue nested `Get`
+requests, which could deadlock under a single RPC permit held by a range scan.
+This avoids widening the change to full differential catalog reads.
+
+Regression tests verify exact pagination/range results and aggregates, range
+dispatch, malformed-record rejection, cancellation and unchanged legacy
+pagination. All maintenance, telemetry and index-command race suites pass, as
+do editor diagnostics and diff checks.
+
+R18/r19 used the same candidate binary, unchanged daemon and HDD-NFS paths,
+96 GiB limits, 32 workers/RPCs and lightweight monitoring under the ten-minute
+cap, without overlapping builds/tests. Candidate
+`bin/phase33-catalog-stream/linux-amd64/vaultic` SHA-256 is
+`3113876a877b9dfc7e8dbc998bbcf30213f3706ea6817c9675b54817d3a7b108`.
+Artifacts are under `db.test/phase33-production-2026-09-22-stream32-catalog-stream-r18`
+and `db.test/phase33-production-2026-09-22-stream32-catalog-stream-r19`.
+
+| Measurement | r16 unary catalog | r18 streaming | r19 unchanged repeat |
+| --- | ---: | ---: | ---: |
+| Encryption audit | 51s | 50s | 50s |
+| Blob scan | 82s | 82s | 83s |
+| Finalization | 2s | 2s | 2s |
+| Catalog interval | 67s | 22s | 26s |
+| Parallel validation | 34s | 31s | 32s |
+| Total wall including cleanup | 3m57.55s | 3m09.56s | 3m13.56s |
+| CLI CPU seconds | 813.10 | 807.40 | 803.87 |
+| Peak RSS, KiB | 14,431,300 | 14,606,612 | 14,137,216 |
+
+Both candidates exited zero, with zero scratch bytes, disk merges or swap.
+Mean runtime was 3m11.56s, 19.4% shorter than r16, with catalog time averaging
+24s instead of 67s. Logical JSON results matched r16 exactly after excluding
+`resources` and `consistency`: 379,934,385 distinct locations and all 419,530
+warnings remain unchanged. Shared range telemetry now includes the catalog:
+376,766,240 records equals 376,346,710 blob records plus 419,530 pack records;
+257 completed ranges means 256 blob partitions plus one catalog range. These
+totals must not be compared as if they were blob-only scan measurements.
+
+Both manifests verified, scratch was empty, and writer epoch 39 remained healthy
+with zero active transactions/intents. No service binaries were replaced. This
+is repeated completed SlateDB-only evidence, not full differential or cross-backend
+acceptance; sequential cache effects remain uncontrolled. The scan at 82-83s
+and serial encryption audit at 50s are now the largest remaining stages. Further
+scan work needs daemon-side attribution, while bounded parallel authentication
+remains a separate candidate that must preserve complete object verification.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

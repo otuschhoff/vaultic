@@ -1510,7 +1510,7 @@ func checkPackCatalog(
 		}
 		return nil
 	}
-	err = scan(ctx, store, []byte("p:"), func(entry daemon.KeyValue) error {
+	visit := func(entry daemon.KeyValue) error {
 		parsed, err := schema.ParseKey(entry.Key)
 		if err != nil || parsed.Kind != schema.KeyPack {
 			return fmt.Errorf("invalid pack key %q", entry.Key)
@@ -1570,7 +1570,22 @@ func checkPackCatalog(
 			}
 		}
 		return nil
-	})
+	}
+	if legacyIterator != nil {
+		err = scan(ctx, store, []byte("p:"), visit)
+	} else {
+		err = scanRange(ctx, store, []byte("p:"), scanPageSize, func(entries []daemon.KeyValue) error {
+			for _, entry := range entries {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := visit(entry); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
 	if err != nil {
 		return nil, nil, err
 	}

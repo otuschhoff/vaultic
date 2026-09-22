@@ -1263,6 +1263,107 @@ func TestExportIsDeterministicCheckpointedAndResumable(t *testing.T) {
 	}
 }
 
+type catalogRangeStore struct {
+	*memoryStore
+	ranges int
+	cancel context.CancelFunc
+}
+
+func (store *catalogRangeStore) ScanRange(ctx context.Context, prefix []byte, _ uint32, consume func([]daemon.KeyValue) error) error {
+	store.ranges++
+	if !bytes.Equal(prefix, []byte("p:")) {
+		return fmt.Errorf("unexpected catalog prefix %q", prefix)
+	}
+	return scanRange(ctx, store.memoryStore, prefix, 1, func(entries []daemon.KeyValue) error {
+		if store.cancel != nil {
+			store.cancel()
+		}
+		return consume(entries)
+	})
+}
+
+func TestPackCatalogRangeMatchesPagination(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, mode := range []string{"complete", "malformed", "cancel"} {
+			if legacy && mode == "cancel" {
+				continue
+			}
+			t.Run(fmt.Sprintf("legacy=%t/%s", legacy, mode), func(t *testing.T) {
+				base, _, _ := newMemoryStore(t, schema.PackImported)
+				if mode == "malformed" {
+					for key := range base.values {
+						if bytes.HasPrefix([]byte(key), []byte("p:")) {
+							base.values[key] = []byte{0}
+							break
+						}
+					}
+				}
+				var expected CheckResult
+				var expectedAggregates map[schema.AggregateKind]schema.PackAggregate
+				var expectedTiers map[schema.PackTier]schema.PackAggregate
+				for _, ranged := range []bool{false, true} {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer scratch.close()
+					spool, err := newLocationMultisetSpool(ctx, scratch, 1<<20, 2)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var legacySpool *locationSpool
+					if legacy {
+						legacySpool, err = newLocationMultisetSpool(ctx, scratch, 1<<20, 2)
+						if err != nil {
+							t.Fatal(err)
+						}
+						defer legacySpool.close()
+					}
+					wrapper := &catalogRangeStore{memoryStore: base}
+					var store Store = base
+					if ranged {
+						store = wrapper
+					}
+					if mode == "cancel" && ranged {
+						wrapper.cancel = cancel
+					}
+					var result CheckResult
+					aggregates, tiers, err := checkPackCatalog(ctx, store, legacySpool, spool, legacy, &result, 100)
+					if mode == "malformed" {
+						if err == nil {
+							t.Fatal("accepted malformed pack")
+						}
+					} else if mode == "cancel" && ranged {
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("cancellation: %v", err)
+						}
+					} else {
+						if err != nil {
+							t.Fatal(err)
+						}
+						if ranged && (!reflect.DeepEqual(result, expected) || !reflect.DeepEqual(aggregates, expectedAggregates) || !reflect.DeepEqual(tiers, expectedTiers)) {
+							t.Fatal("range scan changed catalog results")
+						}
+					}
+					wantRanges := 0
+					if ranged && !legacy {
+						wantRanges = 1
+					}
+					if wrapper.ranges != wantRanges {
+						t.Fatalf("ranges=%d want=%d", wrapper.ranges, wantRanges)
+					}
+					expected, expectedAggregates, expectedTiers = result, aggregates, tiers
+					if err := spool.close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestMaintenanceRejectsMalformedPackCatalog(t *testing.T) {
 	store := &memoryStore{values: map[string][]byte{string(schema.PackKey(schema.ID(vaultic.NewRandomID()))): {0}}}
 	if _, err := Export(context.Background(), store, &memoryDestination{}, ExportOptions{}); err == nil {
