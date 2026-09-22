@@ -20,7 +20,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slatedb::{
-    config::{DbReaderOptions, FlushOptions, FlushType, Settings},
+    config::{DbReaderOptions, FlushOptions, FlushType, ScanOptions, Settings},
     db_cache::{
         foyer::{FoyerCache, FoyerCacheOptions},
         DbCache, SplitCache, DEFAULT_BLOCK_CACHE_CAPACITY, DEFAULT_META_CACHE_CAPACITY,
@@ -3444,6 +3444,7 @@ impl Storage {
                     .ok_or_else(|| transaction_not_found("transaction was closed"))?,
                 prefix,
                 suffix,
+                &ScanOptions::default(),
             )
             .await?
         };
@@ -3494,6 +3495,7 @@ impl Storage {
                     after_key
                         .strip_prefix(prefix.as_slice())
                         .unwrap_or_default(),
+                    &ScanOptions::default().with_read_ahead_bytes(1024 * 1024),
                 )
                 .await?;
                 drop(transaction);

@@ -15,6 +15,7 @@ type CheckTelemetry struct {
 	scratchEncodeWrite *monitor.DependencyMetric
 	scratchFlush       *monitor.DependencyMetric
 	scratchSync        *monitor.DependencyMetric
+	scratchMerge       *monitor.DependencyMetric
 }
 
 func NewCheckTelemetry() *CheckTelemetry { return NewCheckTelemetryEnabled(true) }
@@ -29,6 +30,7 @@ func NewCheckTelemetryEnabled(enabled bool) *CheckTelemetry {
 		scratchEncodeWrite: monitor.NewDependencyMetric("check", "scratch", enabled),
 		scratchFlush:       monitor.NewDependencyMetric("check", "scratch", enabled),
 		scratchSync:        monitor.NewDependencyMetric("check", "scratch", enabled),
+		scratchMerge:       monitor.NewDependencyMetric("check", "scratch", enabled),
 	}
 }
 
@@ -102,6 +104,7 @@ func (telemetry *CheckTelemetry) Component(now time.Time) monitor.ComponentSnaps
 	}{
 		{"sort", telemetry.scratchSort}, {"encode_write", telemetry.scratchEncodeWrite},
 		{"flush", telemetry.scratchFlush}, {"sync", telemetry.scratchSync},
+		{"merge", telemetry.scratchMerge},
 	} {
 		for _, metric := range stage.metric.Metrics() {
 			metric.Name = "check_scratch_" + stage.name + "_" + metric.Name

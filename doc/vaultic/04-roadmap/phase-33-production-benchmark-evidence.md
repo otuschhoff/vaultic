@@ -408,6 +408,230 @@ duration; the existing server iterator timer excludes output-channel reservation
 wait. A daemon-side async wait breakdown is still needed if the captured CPU,
 cache and client-wait evidence cannot discriminate the next hypothesis.
 
+### Accounting Comparison Follow-Up
+
+The available storage choices are native RADOS and HDD-backed NFS, not local
+disk. The current checker scratch writer requires filesystem operations; RADOS
+is not a drop-in value for `--check-temp-dir`. Prioritize avoiding unnecessary
+spill and repeated reads using RAM before considering a new scratch backend.
+Do not assume historical SSD test targets remain available.
+
+Commit `80ab5b4e6` preserves bounded parallel finalization, attribution and the
+post-r4 accounting correction. Its separate profile-tag CLI has SHA-256
+`f5d89abe485b9bbf0fbc9935399cb0a7afa487a67f2399d520664eb6146eddde`.
+The retained pre-fix r4 CLI is the comparison control. Both runs keep the daemon,
+96 GiB checker budget, 96 GiB NFS scratch limit, 32 workers/RPCs, encryption and
+SlateDB-only coverage unchanged. Each is capped at ten minutes with TERM and a
+45-second kill grace. Five-second JSONL, process and host samples remain enabled;
+CPU profiling, execution traces and perf context-switch capture are disabled.
+No cache drops, daemon restart, builds or tests overlap the runs. Sequential
+cache warming and backend variability remain confounders; a single pair cannot
+establish a repeatable end-to-end speedup. The candidate harness mirrors existing
+progress lines through `tee`; the control redirects them only to its log. Both
+retain exact harness copies. The workspace revision in the control artifacts is
+the harness workspace, not the retained pre-fix binary's source revision; use its
+binary hash and the r4 source patch for measured-code provenance.
+
+#### R5/R6 Results
+
+Artifacts are under the same `db.test` root, with names
+`phase33-production-2026-09-22-stream32-accounting-control-r5` and
+`phase33-production-2026-09-22-stream32-accounting-batched-r6`.
+Both manifests verified. Each hit timeout 124, returned incomplete SlateDB-only
+coverage, cleaned scratch, and left the unchanged writer healthy at epoch 38
+with zero transactions/intents. Neither run is full-check acceptance.
+
+| Measurement | Pre-fix r5 | Batched r6 |
+| --- | ---: | ---: |
+| Encryption audit | 51s | 51s |
+| Location scan (stage duration) | 547s | 454s |
+| Location records / completed ranges | 376,346,710 / 256 | 376,346,710 / 256 |
+| Finalization start (elapsed) | 9m58s | 8m25s |
+| Catalog join start (elapsed) | Not reached | 8m57s |
+| CLI user + system CPU seconds | 1,709.48 | 1,362.34 |
+| Wall time including cleanup | 10m21.45s | 10m23.49s |
+| Peak RSS (KiB) | 101,765,404 | 115,474,960 |
+| Scratch peak (bytes) | 60,589,131,042 | 85,342,828,262 |
+| Merge passes | 0 | 4 |
+| Daemon logical read bytes | 2,625,980,781,200 | 2,625,996,773,108 |
+| Daemon CPU seconds | 6,405.55 | 6,451.37 |
+| Monitor snapshots | 121 | 121 |
+| Swaps | 0 | 0 |
+
+The observed scan stage is 17.0% shorter (20.5% greater records/s), and total CLI
+CPU is 20.3% lower despite the candidate reaching more work. The candidate
+finishes bounded parallel finalization in 32s. Greater RSS/scratch and four
+merges are associated with reaching later stages, not equal-work resource
+regressions. Complete-check runtime remains unknown. Both binaries already
+contain parallel finalization; the pair compares the accounting correction plus
+the post-r4 histogram handling and profile-label changes, not an isolated
+single-instruction A/B. Retain the result as provisional pending repetitions.
+
+GET counts remain approximately 9.7 million and daemon logical reads remain
+2.63 TB. Accounting reduces client cost without fixing read amplification.
+The next backend candidate therefore targets fetch granularity rather than
+increasing RPC admission or moving scratch to an unavailable local disk.
+
+#### Next Read-Path Hypothesis
+
+The retained streaming iterator calls `scan_prefix_transaction`, which uses
+SlateDB's default `ScanOptions`: `read_ahead_bytes=1` (one block per fetch),
+`max_fetch_tasks=1`, and `cache_blocks=false`. The encrypted store rounds each
+requested plaintext range to complete authenticated chunks (256 KiB by default),
+decrypts them, then returns the requested slice. Adjacent small-block requests
+can therefore repeatedly fetch and decrypt overlapping chunks. The local-file
+object-store implementation also zero-initializes the expanded read buffer.
+
+R4 recorded 9,699,251 database GETs and 43,073,470,791 plaintext GET-body bytes;
+daemon `/proc` logical read bytes increased by 2,625,792,550,135. The roughly
+61-fold aggregate ratio supports this hypothesis but is not an exact per-read
+amplification measurement: the counters have different boundaries, the process
+window includes perf drain, and logical reads are not physical NFS traffic.
+
+The next narrow candidate implements 1 MiB read-ahead for retained streaming iterators
+only, retaining one fetch task per SST and the 32-stream limit. SlateDB bounds
+fetch block ranges to the iterator range; this does not remove authentication,
+change snapshots, or require new plaintext disk caching. Memory scales with
+active SST iterators, not just stream count, so measure daemon RSS rather than
+claiming a fixed 32 MiB total. Verify exact ordered keys/values, exclusive cursor
+and prefix boundaries on persisted SSTs, fewer backend GETs, and existing stream
+expiry/cancellation/cleanup behavior before any production deployment.
+
+Local implementation and validation completed before the approved deployment
+recorded below. Unary scans retain default options. The persisted-SST regression
+uses disabled block caching and checks full keys/values, neighboring prefixes,
+exact and between-key exclusive cursors, empty results and a pinned snapshot
+excluding later writes. Streaming performs over eight times fewer GETs than
+default one-block fetching in this fixture. This is a backend-call regression,
+not a production runtime or encrypted-byte reduction claim. Existing stream
+snapshot/expiry/admission/cleanup tests pass, as do all 63 storage tests:
+
+```text
+cargo test --manifest-path vaulticdb/Cargo.toml --bin vaulticdb storage::tests:: -- --test-threads=1
+```
+
+Additional RAM remains a separate experiment: the checker currently divides its
+budget into four spool shares even for SlateDB-only coverage. Size it from tuple
+footprints and peak later-stage memory rather than assuming the entire configured
+budget is available to each ordering.
+
+#### R7 Read-Ahead Deployment And Result
+
+With explicit deployment/restart approval, the static frame-pointer release build
+passed and only the daemon executable was replaced. The previous daemon remains
+at `bin/phase33-read-ahead/rollback/vaulticdb`. The deployed SHA-256 is
+`2963b4456fe2cd7f1738f19635745060f5f41df307c496a10e54a917f20a4305`;
+PID 100168 reopened read-write at epoch 39. Configuration, service CLI and storage
+were unchanged. Deployment provenance is under
+`db.test/phase33-read-ahead-deployment-2026-09-22`; diagnostic artifacts are under
+`db.test/phase33-production-2026-09-22-stream32-read-ahead-r7`.
+
+The same r6 accounting CLI and resource limits produced:
+
+| Measurement | r6 default reads | r7 1 MiB read-ahead |
+| --- | ---: | ---: |
+| Encryption audit | 51s | 49s |
+| Location scan duration | 454s | 117s |
+| Location records / completed ranges | 376,346,710 / 256 | 376,346,710 / 256 |
+| Finalization duration | 32s | 30s |
+| Catalog join start (elapsed) | 8m57s | 3m16s |
+| Database GET calls (monitor delta) | 9,699,968 | 41,784 |
+| Plaintext GET-body bytes | 43,094,546,875 | 42,809,360,880 |
+| Daemon logical read bytes | 2,625,996,773,108 | 93,741,772,175 |
+| Daemon CPU seconds | 6,451.37 | 1,580.19 |
+| CLI CPU seconds | 1,362.34 | 1,842.18 |
+| CLI peak RSS (KiB) | 115,474,960 | 115,470,136 |
+| Scratch peak (bytes) | 85,342,828,262 | 85,343,106,436 |
+| Merge count | 4 | 21 |
+
+Scan duration fell 74.2% (3.88 times throughput), while logical read bytes fell
+96.4%. The aggregate logical/plaintext read ratio is about 2.19 rather than 61;
+it is still not an exact scan-only or physical NFS amplification measure. Daemon
+high-water RSS since restart was 1,315,328 KiB, ending at 528,488 KiB. The restart
+reset daemon caches, and r7 performs more later-stage work, so this is strong
+mechanism evidence but not a repeated matched complete-check speedup result.
+
+R7 hit timeout 124 in `catalog_join`, with wall time 10m06.76s including cleanup,
+zero swaps and 121 monitor snapshots. Both manifests verified; scratch is empty,
+only the daemon remains, and the writer is healthy with zero transactions/intents.
+Coverage is still incomplete SlateDB-only, not a full differential clean verdict.
+
+The user's observation of sustained approximately 100% CLI CPU is consistent
+with the newly exposed serial merge path: `checkPackCatalog` constructs a spool
+iterator, whose `seal()` synchronously merges each fan-in group in sequence.
+Each `mergeRuns()` executes record decryption, heap selection and encryption in
+one goroutine. R7 records 21 merge calls during its longer catalog-stage window;
+there is no r7 CPU profile to assign exact function percentages. The progress
+stage includes preparatory merging, not just the final catalog comparison.
+
+Next target: bounded parallel independent merge groups, initially 2-4 workers,
+with explicit output-space admission, joined cancellation/cleanup and unchanged
+ordered results. Each 32-input group already needs about 32 MiB of input buffers
+plus its output buffer, and retains inputs until output publication. With about
+79.5 GiB scratch occupied under a 96 GiB limit, launching all groups concurrently
+can exhaust scratch. Measure group CPU/waits and HDD-NFS throughput before
+increasing concurrency. The eventual final ordered merge/pack aggregation is
+also serial and may need a separately validated partitioned design later.
+
+### Bounded Parallel Merge Diagnostic (r8)
+
+The checker now admits up to four independent scratch merge groups per wave,
+bounded by the spool's configured buffer budget and shared scratch headroom.
+Admission reserves the worst-case output size before starting a group; successful
+publication releases unused reservation and removes inputs only after workers
+join. Failed waves discard outputs while retaining input ownership for cleanup.
+This conservative reservation can reject a merge whose deduplicated output would
+fit but whose maximum output would not. The buffer bound is not a total RSS bound.
+Other spool callers retain serial merging by default.
+
+The new `check_scratch_merge_dependency_*` family records group outcomes and
+elapsed service time, including iterator setup and output flush/sync. It does not
+measure CPU time or separate admission, filesystem and crypto waits. Reservation
+accounting replaces per-record reservation locking in merge output writers.
+
+Deterministic virtual-time tests cover four simultaneous outputs, scratch- and
+buffer-limited single-worker admission, deduplication and multiset ordering,
+cancellation, corrupt input, joined workers and exact reservation cleanup.
+The maintenance, telemetry and index-command race suites pass. An initial test
+run inherited deployment `umask 077`, causing permission-fixture failures; all
+three suites passed with `umask 022`. Editor diagnostics and `git diff --check`
+also pass.
+
+R8 used the unchanged r7 daemon, the same NFS paths, 96 GiB memory/scratch limits,
+32 scan workers/RPCs and ten-minute cap. No build or test overlapped measurement.
+The separate CLI at `bin/phase33-parallel-merge/linux-amd64/vaultic` has SHA-256
+`8a04b4dde3ec3fd4331086f311932c7321d65b907d0eab4ca9ddcd45666e3fec`;
+service binaries were not replaced. Artifacts are under
+`db.test/phase33-production-2026-09-22-stream32-parallel-merge-r8`.
+
+| Measurement | r7 serial groups | r8 bounded parallel groups |
+| --- | ---: | ---: |
+| Encryption audit | 49s | 48s |
+| Location scan | 117s | 115s |
+| Finalization | 30s | 28s |
+| Catalog stage starts | 3m16s | 3m11s |
+| Merge calls started by cap | 21 | 24 |
+| CLI CPU seconds | 1,842.18 | 2,183.94 |
+| CLI peak RSS, KiB | 115,470,136 | 115,318,008 |
+| Scratch accounting peak, bytes | 85,343,106,436 | 90,567,039,078 |
+
+All 24 r8 merge groups succeeded by the 6m05s monitor snapshot, with 627.269
+aggregate group-service seconds and a maximum group duration of 38.378s. This
+demonstrates overlapping production group service, not an exact CPU-core count.
+Scratch peak now includes up-front output reservations, so it is not directly
+comparable to r7's incrementally charged bytes or physical NFS allocation.
+All 376,346,710 records and 256 ranges completed. The remaining catalog work
+continued until timeout 124; total wall time including cleanup was 10m05.29s.
+There were zero swaps and 121 monitor snapshots. The artifact manifest verified,
+scratch was empty, and the unchanged writer remained healthy at epoch 39 with
+zero active transactions/intents.
+
+This establishes completion of merge preparation within the cap, not a measured
+complete-check speedup. Both runs remain incomplete SlateDB-only diagnostics,
+and sequential cache effects are not controlled. The remaining serial ordered
+iterator and per-pack aggregation are the next profiling targets; r8 has no CPU
+profile to assign their exact costs or distinguish them from catalog scan waits.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

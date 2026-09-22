@@ -713,7 +713,7 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	add("dependency_requests", MetricCounter, "operations", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
 	add("dependency_bytes", MetricCounter, "bytes", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
 	add("dependency_latency", MetricHistogram, "microseconds", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"}, vaulticLatencyBounds())
-	for _, stage := range []string{"sort", "encode_write", "flush", "sync"} {
+	for _, stage := range []string{"sort", "encode_write", "flush", "sync", "merge"} {
 		prefix := "check_scratch_" + stage + "_dependency_"
 		add(prefix+"requests", MetricCounter, "operations", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})
 		add(prefix+"bytes", MetricCounter, "bytes", []string{"operation", "role", "outcome"}, []string{"operation", "role", "outcome"})

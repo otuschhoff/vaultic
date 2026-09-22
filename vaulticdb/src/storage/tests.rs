@@ -47,6 +47,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_scan_stream_read_ahead_reduces_gets_without_changing_results() {
+        let attribution = StorageAttribution::default();
+        let object_store = role_aware_object_store(
+            Arc::new(InMemory::new()),
+            attribution.object_store_main.clone(),
+            None,
+            ObjectStoreRole::Main,
+            None,
+        );
+        claim_writer_epoch(object_store.as_ref(), None).await.unwrap();
+        let path = format!("stream-read-ahead-{}", rand::random::<u64>());
+        let writer = Db::builder(path.as_str(), object_store.clone())
+            .with_db_cache_disabled()
+            .build().await.unwrap();
+        let mut batch = WriteBatch::new();
+        for ordinal in 0..4096u32 {
+            batch.put(format!("scan:{ordinal:05}"), vec![(ordinal % 251) as u8; 1024]);
+        }
+        batch.put(b"scan-before:key", b"outside");
+        batch.put(b"scan;after", b"outside");
+        writer.write(batch).await.unwrap();
+        writer.flush_with_options(FlushOptions { flush_type: FlushType::MemTable }).await.unwrap();
+        let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage.write_batch(&WriteBatchRequest {
+            puts: vec![KeyValue { key: b"scan:99999".to_vec(), value: b"later".to_vec() }],
+            await_durable: true,
+            ..Default::default()
+        }).await.unwrap();
+        for suffix in [b"".as_slice(), b"01023", b"01023x", b"99999"] {
+            let before = attribution.object_store_main.snapshot().get.timing.completed;
+            let slot = storage.transaction(&transaction_id).await.unwrap();
+            let transaction = slot.transaction.lock().await;
+            let mut iterator = scan_prefix_transaction(
+                transaction.as_ref().unwrap(), b"scan:", suffix, &ScanOptions::default(),
+            ).await.unwrap();
+            drop(transaction);
+            drop(slot);
+            let mut expected = Vec::new();
+            while let Some(entry) = iterator.next().await.unwrap() {
+                expected.push(KeyValue { key: entry.key.to_vec(), value: entry.value.to_vec() });
+            }
+            drop(iterator);
+            let default_gets = attribution.object_store_main.snapshot().get.timing.completed - before;
+            let before = attribution.object_store_main.snapshot().get.timing.completed;
+            let cursor = if suffix.is_empty() { Vec::new() } else { [b"scan:", suffix].concat() };
+            let mut stream = storage.clone().scan_stream(
+                b"scan:".to_vec(), cursor, 113, transaction_id.clone(), 0,
+            ).await.unwrap();
+            let mut actual = Vec::new();
+            let mut done = false;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.unwrap();
+                assert!(!done);
+                assert!(chunk.entries.len() <= 113);
+                done = chunk.done;
+                actual.extend(chunk.entries);
+            }
+            let streaming_gets = attribution.object_store_main.snapshot().get.timing.completed - before;
+            assert!(done);
+            assert_eq!(actual, expected);
+            let first = if suffix.is_empty() { 0 } else if suffix == b"99999" { 4096 } else { 1024 };
+            assert_eq!(actual.len(), 4096 - first);
+            for (offset, entry) in actual.iter().enumerate() {
+                let ordinal = first + offset;
+                assert_eq!(entry.key, format!("scan:{ordinal:05}").as_bytes());
+                assert_eq!(entry.value, vec![(ordinal % 251) as u8; 1024]);
+            }
+            if !actual.is_empty() {
+                assert!(default_gets > 100, "fixture must read persisted blocks: {default_gets}");
+                assert!(streaming_gets * 8 < default_gets, "streaming={streaming_gets}, default={default_gets}");
+            }
+        }
+        storage.rollback(&transaction_id).await.unwrap();
+        storage.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn persistent_scan_stream_snapshot_expiry_and_cleanup() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         claim_writer_epoch(object_store.as_ref(), None).await.unwrap();

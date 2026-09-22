@@ -464,15 +464,16 @@ async fn scan_prefix_transaction(
     transaction: &DbTransaction,
     prefix: &[u8],
     suffix: &[u8],
+    options: &ScanOptions,
 ) -> Result<DbIterator, Status> {
     if suffix.is_empty() {
         transaction
-            .scan_prefix(prefix, ..)
+            .scan_prefix_with_options(prefix, .., options)
             .await
             .map_err(storage_error)
     } else {
         transaction
-            .scan_prefix(prefix, (Excluded(suffix), Unbounded))
+            .scan_prefix_with_options(prefix, (Excluded(suffix), Unbounded), options)
             .await
             .map_err(storage_error)
     }

@@ -848,6 +848,11 @@ func CheckWithOptions(
 	if err != nil {
 		return result, err
 	}
+	for _, spool := range []*locationSpool{legacy, legacyPacks, slatedb, slatedbPacks} {
+		if spool != nil {
+			spool.mergeWorkers = int(min(workers, 4))
+		}
+	}
 	progress.set("slatedb_scan")
 	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks, workers, func() {
 		progress.set("slatedb_finalize")

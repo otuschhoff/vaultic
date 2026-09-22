@@ -21,6 +21,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -323,18 +325,19 @@ type checkRun struct {
 }
 
 type locationSpool struct {
-	ctx         context.Context
-	scratch     *checkScratch
-	memoryBytes uint64
-	memoryUsed  uint64
-	chunkItems  int
-	fanIn       int
-	deduplicate bool
-	buffer      []locationTuple
-	memoryRuns  [][]locationTuple
-	runs        []checkRun
-	diskMode    bool
-	sealed      bool
+	ctx          context.Context
+	scratch      *checkScratch
+	memoryBytes  uint64
+	memoryUsed   uint64
+	chunkItems   int
+	fanIn        int
+	mergeWorkers int
+	deduplicate  bool
+	buffer       []locationTuple
+	memoryRuns   [][]locationTuple
+	runs         []checkRun
+	diskMode     bool
+	sealed       bool
 }
 
 func newLocationSpool(ctx context.Context, scratch *checkScratch, memoryBytes uint64, fanIn int) (*locationSpool, error) {
@@ -589,22 +592,83 @@ func (spool *locationSpool) seal() error {
 		return err
 	}
 	for len(spool.runs) > spool.fanIn {
-		var reduced []checkRun
-		for start := 0; start < len(spool.runs); start += spool.fanIn {
-			end := min(start+spool.fanIn, len(spool.runs))
-			if end-start == 1 {
-				reduced = append(reduced, spool.runs[start])
-				continue
-			}
-			run, err := spool.mergeRuns(spool.runs[start:end])
-			if err != nil {
-				return err
-			}
-			reduced = append(reduced, run)
+		if err := spool.mergePass(); err != nil {
+			return err
 		}
-		spool.runs = reduced
 	}
 	spool.sealed = true
+	return nil
+}
+
+func (spool *locationSpool) mergePass() error {
+	var inputBytes uint64
+	for _, run := range spool.runs {
+		if run.size < checkRunHeaderSize || run.size > math.MaxUint64-inputBytes {
+			return fmt.Errorf("invalid checker merge run size")
+		}
+		inputBytes += run.size
+	}
+	workers := max(1, min(spool.mergeWorkers, 4, int(spool.memoryBytes/uint64((spool.fanIn+1)*locationRunBufferSize))))
+	completed := 0
+	for len(spool.runs)-completed > 1 {
+		if err := spool.ctx.Err(); err != nil {
+			return err
+		}
+		group, ctx := errgroup.WithContext(spool.ctx)
+		outputs := make([]checkRun, workers)
+		end := completed
+		started := 0
+		for started < workers && len(spool.runs)-end > 1 {
+			next := min(end+spool.fanIn, len(spool.runs))
+			inputs := spool.runs[end:next]
+			reserved := uint64(checkRunHeaderSize)
+			for _, run := range inputs {
+				reserved += run.size - checkRunHeaderSize
+			}
+			if err := spool.scratch.reserve(reserved); err != nil {
+				if started == 0 {
+					_ = group.Wait()
+					return err
+				}
+				break
+			}
+			outputIndex := started
+			worker := *spool
+			worker.ctx = ctx
+			group.Go(func() error {
+				var err error
+				outputs[outputIndex], err = worker.mergeRuns(inputs, reserved)
+				return err
+			})
+			started++
+			end = next
+		}
+		err := group.Wait()
+		if err == nil {
+			err = spool.ctx.Err()
+		}
+		if err != nil {
+			for _, output := range outputs {
+				if output.path != "" {
+					_ = spool.scratch.remove(output.path)
+					spool.scratch.release(output.size)
+				}
+			}
+			return err
+		}
+		inputs := append([]checkRun(nil), spool.runs[completed:end]...)
+		nextRuns := append([]checkRun(nil), spool.runs[:completed]...)
+		nextRuns = append(nextRuns, outputs[:started]...)
+		spool.runs = append(nextRuns, spool.runs[end:]...)
+		for index, input := range inputs {
+			if err := spool.scratch.remove(input.path); err != nil {
+				spool.runs = append(spool.runs, inputs[index:]...)
+				return fmt.Errorf("remove merged checker run: %w", err)
+			}
+			spool.scratch.release(input.size)
+		}
+		completed += started
+	}
 	return nil
 }
 
@@ -636,11 +700,17 @@ type locationRunWriter struct {
 	prefix   [4]byte
 	counter  uint64
 	reserved uint64
+	size     uint64
 	closed   bool
 	request  *monitor.DependencyGuard
 }
 
-func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
+func (spool *locationSpool) newRunWriter(reserved uint64) (_ *locationRunWriter, err error) {
+	defer func() {
+		if err != nil {
+			spool.scratch.release(reserved)
+		}
+	}()
 	block, err := aes.NewCipher(spool.scratch.key[:])
 	if err != nil {
 		return nil, err
@@ -649,29 +719,25 @@ func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := spool.scratch.reserve(checkRunHeaderSize); err != nil {
-		return nil, err
-	}
 	request := spool.scratch.telemetry.startScratch()
 	path, prefix, err := spool.scratch.nextPath()
 	if err != nil {
-		spool.scratch.release(checkRunHeaderSize)
 		settleDependency(request, err)
 		return nil, err
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		spool.scratch.release(checkRunHeaderSize)
 		settleDependency(request, err)
 		return nil, err
 	}
 	writer := &locationRunWriter{
 		spool: spool, file: file, buffered: bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, locationRunBufferSize), path: path,
-		aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request,
+		aead: aead, prefix: prefix, reserved: reserved, size: checkRunHeaderSize, request: request,
 	}
 	header := append(checkRunMagic[:], writer.prefix[:]...)
 	if err := writeAll(writer.buffered, header); err != nil {
 		writer.abort()
+		reserved = 0
 		return nil, err
 	}
 	return writer, nil
@@ -679,10 +745,10 @@ func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
 
 func (writer *locationRunWriter) append(tuple locationTuple) error {
 	recordBytes := uint64(4 + locationTupleSize + writer.aead.Overhead())
-	if err := writer.spool.scratch.reserve(recordBytes); err != nil {
-		return err
+	if writer.size > writer.reserved || recordBytes > writer.reserved-writer.size {
+		return fmt.Errorf("checker merge output exceeds reserved size")
 	}
-	writer.reserved += recordBytes
+	writer.size += recordBytes
 	var nonce [12]byte
 	copy(nonce[:4], writer.prefix[:])
 	binary.BigEndian.PutUint64(nonce[4:], writer.counter)
@@ -718,7 +784,9 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 		return checkRun{}, err
 	}
 	settleDependency(writer.request, nil)
-	return checkRun{path: writer.path, size: writer.reserved}, nil
+	writer.spool.scratch.release(writer.reserved - writer.size)
+	writer.reserved = writer.size
+	return checkRun{path: writer.path, size: writer.size}, nil
 }
 
 func (writer *locationRunWriter) abort() {
@@ -739,14 +807,19 @@ func (writer *locationRunWriter) abortFile() {
 	writer.reserved = 0
 }
 
-func (spool *locationSpool) mergeRuns(runs []checkRun) (merged checkRun, err error) {
+func (spool *locationSpool) mergeRuns(runs []checkRun, reserved uint64) (merged checkRun, err error) {
+	if spool.scratch.telemetry != nil {
+		request := spool.scratch.telemetry.scratchMerge.Start()
+		defer func() { settleDependency(request, err) }()
+	}
 	spool.scratch.recordMerge()
 	iterator, err := newLocationIterator(spool.ctx, runs, nil, spool.scratch, spool.deduplicate)
 	if err != nil {
+		spool.scratch.release(reserved)
 		return checkRun{}, err
 	}
 	defer func() { err = errors.Join(err, iterator.close()) }()
-	writer, err := spool.newRunWriter()
+	writer, err := spool.newRunWriter(reserved)
 	if err != nil {
 		return checkRun{}, err
 	}
@@ -767,12 +840,6 @@ func (spool *locationSpool) mergeRuns(runs []checkRun) (merged checkRun, err err
 	merged, err = writer.close()
 	if err != nil {
 		return checkRun{}, err
-	}
-	for _, run := range runs {
-		if err := spool.scratch.remove(run.path); err != nil {
-			return checkRun{}, fmt.Errorf("remove merged checker run: %w", err)
-		}
-		spool.scratch.release(run.size)
 	}
 	return merged, nil
 }

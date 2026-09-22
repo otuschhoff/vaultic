@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -594,6 +597,148 @@ func TestLocationSpoolMergeHonorsScratchBudget(t *testing.T) {
 	}
 	if _, err := spool.iterator(); err == nil {
 		t.Fatal("merge exceeded the scratch budget")
+	}
+}
+
+func TestLocationSpoolParallelMergeAdmissionAndCleanup(t *testing.T) {
+	for _, mode := range []string{"complete", "headroom", "memory", "cancel", "corrupt"} {
+		for _, deduplicate := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/deduplicate=%t", mode, deduplicate), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					parent := t.TempDir()
+					scratch, err := newCheckScratchWithScenario(ctx, parent, 1<<20, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer scratch.close()
+					scratch.telemetry = NewCheckTelemetry()
+					spool, err := newLocationSpoolMode(ctx, scratch, 16<<20, 2, deduplicate)
+					if err != nil {
+						t.Fatal(err)
+					}
+					spool.mergeWorkers = 4
+					var expected []locationTuple
+					for ordinal := byte(0); ordinal < 8; ordinal++ {
+						records := []locationTuple{testLocation(ordinal + 1), testLocation(ordinal + 2)}
+						run, err := spool.writeRun(records)
+						if err != nil {
+							t.Fatal(err)
+						}
+						spool.runs = append(spool.runs, run)
+						expected = append(expected, records...)
+					}
+					initialUsed := scratch.used
+					if mode == "headroom" {
+						scratch.maxBytes = initialUsed + checkRunHeaderSize + 8*(4+locationTupleSize+16)
+					}
+					if mode == "memory" {
+						spool.memoryBytes = 3 << 20
+					}
+					if mode == "corrupt" {
+						if err := os.WriteFile(spool.runs[2].path, []byte("corrupt"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					profile, err := monitor.DecodeExperimentProfile([]byte(`{
+						"schema_version":1,"profile_id":"check-merge-test","enabled":true,"test_only":true,
+						"scenario":"local","backend":"scratch","mode":"service","operation":"check",
+						"role":"scratch","method":"put","access_pattern":"sequential","target_id":"scratch-target",
+						"resource_id":"scratch-device","placement":"inside_service","latency_semantics":"service_completion",
+						"interpretation":"additive","endpoint":"dependency","acknowledgement":"unknown",
+						"delay_us":1000000,"jitter_us":0,"tail_delay_us":0,"tail_every":0,"correlated_for":0,
+						"bandwidth_bytes_per_second":0,"concurrency":32,"deadline_ms":0,"max_retries":0,
+						"retry_error":"none","seed":34,"holds":["backend_capacity"]
+					}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					controller, err := monitor.NewScenarioHarness().Controller(profile, monitor.ExperimentTarget{
+						ID: "scratch-target", Disposable: true, Confirmed: true,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					scratch.scenario = controller
+					result := make(chan error, 1)
+					go func() { result <- spool.seal() }()
+					synctest.Wait()
+					if mode != "corrupt" {
+						want := uint64(4)
+						if mode == "headroom" || mode == "memory" {
+							want = 1
+						}
+						if active := controller.Observation().Active; active != want {
+							t.Errorf("active merge writers=%d, want %d", active, want)
+						}
+					}
+					if mode == "cancel" {
+						cancel()
+					}
+					err = <-result
+					if mode == "cancel" {
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("cancellation: %v", err)
+						}
+					} else if mode == "corrupt" {
+						if err == nil {
+							t.Fatal("accepted corrupt run")
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					if controller.Observation().Active != 0 {
+						t.Fatal("merge workers still active")
+					}
+					scratch.scenario = nil
+					if mode == "cancel" || mode == "corrupt" {
+						if scratch.used != initialUsed {
+							t.Fatalf("output reservations leaked: %d vs %d", scratch.used, initialUsed)
+						}
+					} else {
+						iterator, err := spool.iterator()
+						if err != nil {
+							t.Fatal(err)
+						}
+						var actual []locationTuple
+						for {
+							tuple, found, err := iterator.next()
+							if err != nil {
+								t.Fatal(err)
+							}
+							if !found {
+								break
+							}
+							actual = append(actual, tuple)
+						}
+						if err := iterator.close(); err != nil {
+							t.Fatal(err)
+						}
+						slices.SortFunc(expected, compareLocationTuple)
+						if deduplicate {
+							expected = slices.Compact(expected)
+						}
+						if !slices.Equal(actual, expected) {
+							t.Fatal("merge changed ordered tuples")
+						}
+					}
+					if err := spool.close(); err != nil {
+						t.Fatal(err)
+					}
+					if scratch.used != 0 || scratch.peak > scratch.maxBytes {
+						t.Fatalf("scratch used=%d peak=%d limit=%d", scratch.used, scratch.peak, scratch.maxBytes)
+					}
+					if err := scratch.close(); err != nil {
+						t.Fatal(err)
+					}
+					entries, err := os.ReadDir(parent)
+					if err != nil || len(entries) != 0 {
+						t.Fatalf("cleanup entries=%d err=%v", len(entries), err)
+					}
+				})
+			})
+		}
 	}
 }
 
