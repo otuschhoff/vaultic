@@ -325,19 +325,20 @@ type checkRun struct {
 }
 
 type locationSpool struct {
-	ctx          context.Context
-	scratch      *checkScratch
-	memoryBytes  uint64
-	memoryUsed   uint64
-	chunkItems   int
-	fanIn        int
-	mergeWorkers int
-	deduplicate  bool
-	buffer       []locationTuple
-	memoryRuns   [][]locationTuple
-	runs         []checkRun
-	diskMode     bool
-	sealed       bool
+	ctx           context.Context
+	scratch       *checkScratch
+	memoryBytes   uint64
+	memoryUsed    uint64
+	chunkItems    int
+	fanIn         int
+	mergeWorkers  int
+	deduplicate   bool
+	packSummaries bool
+	buffer        []locationTuple
+	memoryRuns    [][]locationTuple
+	runs          []checkRun
+	diskMode      bool
+	sealed        bool
 }
 
 func newLocationSpool(ctx context.Context, scratch *checkScratch, memoryBytes uint64, fanIn int) (*locationSpool, error) {
@@ -397,6 +398,16 @@ func (spool *locationSpool) add(tuple locationTuple) error {
 			return err
 		}
 	}
+	if spool.packSummaries {
+		summary := packContributionSummary{id: tuple.BlobID}
+		if tuple.Type == 0 {
+			summary.present = true
+		} else {
+			summary.count, summary.payload = 1, tuple.Length
+			summary.types = summarizePackType(0, schema.BlobType(tuple.Type))
+		}
+		tuple = summary.tuple()
+	}
 	spool.buffer = append(spool.buffer, tuple)
 	if len(spool.buffer) == cap(spool.buffer) {
 		return spool.finishBuffer()
@@ -427,6 +438,24 @@ func (spool *locationSpool) finishBuffer() error {
 		return nil
 	}
 	records := spool.sortRecords(spool.buffer)
+	if spool.packSummaries {
+		compacted := records[:0]
+		var summary packContributionSummary
+		for index, tuple := range records {
+			if index == 0 || tuple.BlobID != summary.id {
+				if index > 0 {
+					compacted = append(compacted, summary.tuple())
+				}
+				summary = packContributionSummary{id: tuple.BlobID}
+			}
+			if err := summary.addPartial(tuple); err != nil {
+				return err
+			}
+		}
+		compacted = append(compacted, summary.tuple())
+		records = compacted
+		spool.buffer = records
+	}
 	if spool.diskMode {
 		run, err := spool.writeRun(records)
 		if err != nil {
@@ -673,7 +702,7 @@ func (spool *locationSpool) mergePass() error {
 }
 
 func (spool *locationSpool) adopt(source *locationSpool) error {
-	if spool.sealed || source.sealed || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate {
+	if spool.sealed || source.sealed || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate || spool.packSummaries != source.packSummaries {
 		return fmt.Errorf("incompatible checker location spools")
 	}
 	if err := source.finishBuffer(); err != nil {
@@ -823,8 +852,18 @@ func (spool *locationSpool) mergeRuns(runs []checkRun, reserved uint64) (merged 
 	if err != nil {
 		return checkRun{}, err
 	}
+	contributions := &packContributionIterator{iterator: iterator, partials: true}
 	for {
-		tuple, found, err := iterator.next()
+		var tuple locationTuple
+		var found bool
+		var err error
+		if spool.packSummaries {
+			var summary packContributionSummary
+			summary, found, err = contributions.next()
+			tuple = summary.tuple()
+		} else {
+			tuple, found, err = iterator.next()
+		}
 		if err != nil {
 			writer.abort()
 			return checkRun{}, err
@@ -1285,10 +1324,30 @@ type packContributionSummary struct {
 	payload uint64
 }
 
+func (summary packContributionSummary) tuple() locationTuple {
+	var present uint64
+	if summary.present {
+		present = 1
+	}
+	return locationTuple{BlobID: summary.id, Type: summary.types, Offset: summary.count, Length: summary.payload, UncompressedLength: present}
+}
+
+func (summary *packContributionSummary) addPartial(tuple locationTuple) error {
+	if tuple.Offset > math.MaxUint64-summary.count || tuple.Length > math.MaxUint64-summary.payload {
+		return fmt.Errorf("pack %s contribution overflow", summary.id.String())
+	}
+	summary.count += tuple.Offset
+	summary.payload += tuple.Length
+	summary.types |= tuple.Type
+	summary.present = summary.present || tuple.UncompressedLength != 0
+	return nil
+}
+
 type packContributionIterator struct {
 	iterator *locationIterator
 	pending  locationTuple
 	has      bool
+	partials bool
 }
 
 func newPackContributionIterator(spool *locationSpool) (*packContributionIterator, error) {
@@ -1296,7 +1355,7 @@ func newPackContributionIterator(spool *locationSpool) (*packContributionIterato
 	if err != nil {
 		return nil, err
 	}
-	return &packContributionIterator{iterator: iterator}, nil
+	return &packContributionIterator{iterator: iterator, partials: spool.packSummaries}, nil
 }
 
 func optionalPackContributionIterator(spool *locationSpool) (*packContributionIterator, error) {
@@ -1324,7 +1383,11 @@ func (iterator *packContributionIterator) next() (packContributionSummary, bool,
 	summary := packContributionSummary{id: iterator.pending.BlobID}
 	for iterator.has && iterator.pending.BlobID == summary.id {
 		tuple := iterator.pending
-		if tuple.Type == 0 {
+		if iterator.partials {
+			if err := summary.addPartial(tuple); err != nil {
+				return packContributionSummary{}, false, err
+			}
+		} else if tuple.Type == 0 {
 			summary.present = true
 		} else {
 			if summary.count == math.MaxUint64 || summary.payload > math.MaxUint64-tuple.Length {

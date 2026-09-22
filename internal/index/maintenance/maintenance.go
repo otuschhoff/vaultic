@@ -848,6 +848,7 @@ func CheckWithOptions(
 	if err != nil {
 		return result, err
 	}
+	slatedbPacks.packSummaries = true
 	for _, spool := range []*locationSpool{legacy, legacyPacks, slatedb, slatedbPacks} {
 		if spool != nil {
 			spool.mergeWorkers = int(min(workers, 4))
@@ -1620,6 +1621,7 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 				return err
 			}
 			packPartitions[partition] = packLocations
+			packLocations.packSummaries = packs.packSummaries
 			var previousID schema.ID
 			hasPrevious := false
 			return scanRange(groupContext, store, prefix, scanPageSize, func(entries []daemon.KeyValue) error {

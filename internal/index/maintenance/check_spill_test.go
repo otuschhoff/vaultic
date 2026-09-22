@@ -600,6 +600,138 @@ func TestLocationSpoolMergeHonorsScratchBudget(t *testing.T) {
 	}
 }
 
+func TestPackSummarySpoolMatchesMultiset(t *testing.T) {
+	for _, memory := range []uint64{8 * locationTupleMemorySize, 1 << 20} {
+		t.Run(fmt.Sprintf("memory=%d", memory), func(t *testing.T) {
+			var expected []packContributionSummary
+			var baselineBytes uint64
+			for _, compact := range []bool{false, true} {
+				scratch, err := newCheckScratch(t.TempDir(), 8<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scratch.close()
+				spool, err := newLocationMultisetSpool(context.Background(), scratch, memory, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				spool.packSummaries, spool.mergeWorkers = compact, 4
+				for ordinal := 0; ordinal < 256; ordinal++ {
+					for _, tuple := range []locationTuple{
+						{BlobID: vaultic.ID{1}, PackID: vaultic.ID{byte(ordinal)}, Type: uint8(schema.BlobData), Length: 3},
+						{BlobID: vaultic.ID{1}, PackID: vaultic.ID{byte(ordinal)}, Type: uint8(schema.BlobData), Length: 3},
+						{BlobID: vaultic.ID{1}, Type: uint8(schema.BlobTree), Length: 5},
+						{BlobID: vaultic.ID{2}},
+					} {
+						if err := spool.add(tuple); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				iterator, err := newPackContributionIterator(spool)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var actual []packContributionSummary
+				for {
+					summary, found, err := iterator.next()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !found {
+						break
+					}
+					actual = append(actual, summary)
+				}
+				if err := iterator.close(); err != nil {
+					t.Fatal(err)
+				}
+				if compact {
+					if !slices.Equal(actual, expected) {
+						t.Fatalf("summaries=%+v want=%+v", actual, expected)
+					}
+					if len(spool.runs) > 0 && scratch.used >= baselineBytes {
+						t.Fatal("summary runs did not shrink")
+					}
+				} else {
+					expected, baselineBytes = actual, scratch.used
+				}
+				if len(actual) != 2 || actual[0].count != 768 || actual[0].payload != 2816 || !actual[1].present {
+					t.Fatalf("unexpected summaries: %+v", actual)
+				}
+				if err := spool.close(); err != nil {
+					t.Fatal(err)
+				}
+				if scratch.used != 0 {
+					t.Fatal("reservations leaked")
+				}
+			}
+		})
+	}
+}
+
+func TestPackSummarySpoolRetriesFailedWrite(t *testing.T) {
+	scratch, err := newCheckScratch(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	spool, err := newLocationMultisetSpool(context.Background(), scratch, 8*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool.packSummaries, spool.diskMode = true, true
+	for range 4 {
+		if err := spool.add(locationTuple{BlobID: vaultic.ID{1}, Type: uint8(schema.BlobData), Length: 3}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := spool.finishBuffer(); err == nil {
+		t.Fatal("accepted output without scratch headroom")
+	}
+	scratch.maxBytes = 1 << 20
+	iterator, err := newPackContributionIterator(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, found, err := iterator.next()
+	if err != nil || !found || summary.count != 4 || summary.payload != 12 {
+		t.Fatalf("retry summary=%+v found=%t err=%v", summary, found, err)
+	}
+	if _, found, err := iterator.next(); found || err != nil {
+		t.Fatalf("EOF found=%t err=%v", found, err)
+	}
+	if err := errors.Join(iterator.close(), spool.close()); err != nil {
+		t.Fatal(err)
+	}
+	if scratch.used != 0 {
+		t.Fatal("reservations leaked")
+	}
+}
+
+func TestPackPartialSummaryOverflow(t *testing.T) {
+	for _, countOverflow := range []bool{false, true} {
+		first := locationTuple{BlobID: vaultic.ID{1}, Type: 1, Offset: 1, Length: 1}
+		second := first
+		if countOverflow {
+			first.Offset = ^uint64(0)
+		} else {
+			first.Length = ^uint64(0)
+		}
+		iterator, err := newLocationIterator(context.Background(), nil, [][]locationTuple{{first}, {second}}, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contributions := &packContributionIterator{iterator: iterator, partials: true}
+		if _, _, err := contributions.next(); err == nil {
+			t.Fatal("accepted partial summary overflow")
+		}
+		if err := contributions.close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkLocationRunReader(b *testing.B) {
 	scratch, err := newCheckScratch(b.TempDir(), 1<<20)
 	if err != nil {

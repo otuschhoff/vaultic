@@ -795,6 +795,73 @@ smaller. Further optimization should target this measured interval while keeping
 the full differential-check path covered; it should not infer performance from
 raising scan concurrency or from the count-only shortcut alone.
 
+### Compact Pack Contributions Before Merging (r13-r14)
+
+The count-only optimization was committed as `c6deb2e05` with the r11/r12 evidence.
+The next candidate removes redundant catalog work: the catalog consumes per-pack
+count, payload sum, type flags and presence, but previously merged every blob
+contribution individually before computing those fields.
+
+An explicit pack-summary mode now compacts the authoritative pack-contribution
+spool's sorted buffers and merge outputs by pack ID. Private temporary tuples
+encode partial count, payload, type flags and presence using the existing
+authenticated scratch format; they are not repository records. Duplicates add to
+counts and payload rather than being discarded. Count and payload addition are
+overflow-checked at every combining boundary, and type/presence flags are ORed.
+The final iterator combines partial summaries using the same arithmetic. Ordinary
+location spools and legacy contribution spools remain unchanged; adoption rejects
+mismatched modes. The authoritative pack-summary path applies to both full and
+SlateDB-only checking, independently of the count-only optimization.
+
+Tests compare exact summaries with the original multiset path through memory-only
+and repeated disk merge passes, including duplicate contributions, mixed types,
+presence-only packs, reduced output size and reservation cleanup. Count and payload
+overflow are rejected. A failed-write/retry test checks that already compacted
+buffers cannot double-count on retry. All affected maintenance, telemetry and
+index-command race suites pass, as do focused summary tests and editor diagnostics.
+
+R13 and r14 use the same candidate binary, unchanged daemon, HDD-NFS paths,
+96 GiB limits and 32 scan workers/RPCs, with lightweight telemetry and a ten-minute
+cap. No tests or builds overlapped either run. Candidate
+`bin/phase33-pack-summary/linux-amd64/vaultic` SHA-256 is
+`e8eb0b690206f738c89d1d1b1d6ea9d1f9750294a6b97bceeb08ec5fca65eb9d`.
+Artifacts are under `db.test/phase33-production-2026-09-22-stream32-pack-summary-r13`
+and `db.test/phase33-production-2026-09-22-stream32-pack-summary-r14`.
+
+| Measurement | r12 multiset baseline | r13 summaries | r14 unchanged repeat |
+| --- | ---: | ---: | ---: |
+| Encryption audit | 52s | 50s | 51s |
+| Location scan | 94s | 85s | 84s |
+| Finalization | 16s | 6s | 8s |
+| Catalog interval | 300s | 61s | 61s |
+| Parallel validation interval | 29s | 31s | 31s |
+| Total wall including cleanup | 8m12.27s | 3m53.40s | 4m01.33s |
+| CLI CPU seconds | 1,499.19 | 965.02 | 940.65 |
+| Peak RSS, KiB | 57,886,232 | 55,545,860 | 53,129,728 |
+| Scratch reservation peak, bytes | 48,774,247,512 | 15,657,805,264 | 15,657,805,264 |
+| Successful merge groups | 24 | 24 | 24 |
+| Aggregate merge service seconds | 445.132 | 78.871 | 71.569 |
+
+Both candidates exited zero. Mean total runtime was 3m57.365s, 51.8% shorter
+than r12; the catalog interval fell 79.7%. Mean CLI CPU fell 36.4%, and scratch
+reservation peak fell 67.9%. R14 spent roughly six seconds after the finalization
+progress transition, explaining much of its total-wall difference from r13.
+Both scanned 376,346,710 records over 256 ranges and reported 379,934,385 distinct
+locations. JSON results matched r12 exactly after excluding only `resources`
+and `consistency` (resource telemetry and session consistency metadata).
+
+Manifests verified, scratch cleanup succeeded, and the unchanged writer remained
+healthy at epoch 39 with no active transactions/intents. There was no swap;
+r13/r14 exported 48/49 monitor snapshots. No service binaries were replaced.
+
+This is repeated completed-run evidence for the current SlateDB-only NFS workload,
+not full differential or cross-backend acceptance. Sequential cache effects remain
+uncontrolled. All 419,530 warnings and the related counters remain unchanged;
+coverage is still explicitly incomplete. The scan is now the largest individual
+stage at 84-85s, followed by catalog work at 61s and encryption audit at 50-51s.
+Further optimization should reattribute these remaining intervals rather than
+assuming the earlier per-record merge bottleneck still dominates.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against
