@@ -95,6 +95,8 @@ message ScanRequest {
 message ScanResponse {
   repeated KeyValue entries = 1;
   bool done = 2;
+  uint64 iterator_setup_ns = 3;
+  uint64 iterator_service_ns = 4;
 }
 
 message TransactionRequest {
@@ -168,6 +170,7 @@ message CapabilitiesResponse {
   uint64 wal_retained_segments = 29;
   uint64 wal_oldest_segment_unix_ms = 30;
   uint64 wal_cleanup_failures = 31;
+  bool scan_stream = 32;
 }
 
 message ReadCacheStatusRequest {
@@ -686,6 +689,7 @@ service VaulticDB {
   rpc Get(GetRequest) returns (GetResponse);
   rpc MultiGet(MultiGetRequest) returns (MultiGetResponse);
   rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc ScanStream(ScanRequest) returns (stream ScanResponse);
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
   rpc AwaitDurableThrough(AwaitDurableThroughRequest) returns (AwaitDurableThroughResponse);
   rpc Begin(Empty) returns (BeginResponse);

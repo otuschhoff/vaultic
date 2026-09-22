@@ -266,6 +266,7 @@ impl Service {
             wal_retained_segments: wal_status.retained_segments,
             wal_oldest_segment_unix_ms: wal_status.oldest_segment_unix_ms,
             wal_cleanup_failures: wal_status.cleanup_failures,
+            scan_stream: true,
         }))
     }
 

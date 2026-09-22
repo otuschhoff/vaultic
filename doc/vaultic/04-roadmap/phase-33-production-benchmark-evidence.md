@@ -1,5 +1,128 @@
 # Phase 33 Production Benchmark Evidence
 
+## Local streaming follow-up, 2026-09-22
+
+The working-tree follow-up implements a negotiated `ScanStream` RPC. After
+explicit operator approval it was deployed to `vaulticdb-rustic.service` using
+the configured clean-demotion stop hook. Preflight found zero active write
+intents and transactions; restart advanced writer epoch 37 to 38 and restored
+the read-write role. The earlier measurements below still describe the unary
+implementation; they are not evidence of a streaming speedup.
+
+Matched profile binaries were built with `make profile BIN_DIR=bin/phase33-stream`.
+The deployed CLI SHA-256 is
+`0a73f3c753843eb67ea7d966ba33a756ee14ecda80371c14c3f0122ebcdf8267`;
+the daemon SHA-256 is
+`211d77ca61951ec0d709faa9354630308dd44045b1b69b5bfd0a2d9627a19fbe`.
+Previous binaries are retained under `bin/phase33-stream/rollback/`.
+The ten-minute diagnostic artifacts are under
+`/volume2/NASDA2/rustic/db.test/phase33-production-2026-09-22-stream32-r1/`,
+including source revision/diff and binary hashes. It uses 32 workers/RPCs,
+96 GiB checker memory, 96 GiB scratch on the same NFS parent, reduced SlateDB-only
+coverage, encryption auditing and crawl-debt details. No production caches were
+dropped. The daemon restart resets its process-local caches, so this is not an
+identical warm-cache control against the earlier runs.
+
+The new path retains one pinned-transaction iterator per range, including the
+lookahead record at item and byte boundaries. The daemon admits at most 32
+streams, each with one queued response and bounded chunk construction. Responses
+remain below 16 MiB including telemetry, with one retained lookahead record.
+These are application-buffer bounds, not a combined RSS guarantee: SlateDB
+iterator/cache allocations and transport buffers remain additional costs.
+Receiver cancellation drops the iterator; delivery waits are bounded by the
+transaction idle timeout and a range lasts at most one hour or the shorter
+caller deadline. There is no reconnect/resume against a new transaction.
+
+The Go client negotiates the capability, checks ordering, prefix coverage,
+response limits and explicit completion, and cancels on consumer failure.
+Older daemons retain the pinned unary path. Checker wrappers hold one RPC permit
+through the whole range and exclude tuple consumption from database wait spans.
+Session identity is validated after each completed range and before success.
+Expired ordinary transaction reads now fail instead of refreshing an already
+expired lease. Operators must allow enough idle time for non-database stages;
+this patch does not add a read-session heartbeat.
+
+Progress and result resources expose records, protobuf bytes, chunks,
+started/completed ranges, iterator setup/service nanoseconds, receive wait and
+consumer time. Final results retain at most 256 first-byte partition summaries.
+Receive wait includes server work and delivery; it is not pure network latency.
+Existing backend metrics remain separate: per-scan table/object read attribution
+and active continuation age are not implemented by this follow-up.
+
+Local validation:
+
+```text
+cargo test --manifest-path vaulticdb/Cargo.toml --all-targets
+cargo fmt --manifest-path vaulticdb/Cargo.toml --check
+cargo build --manifest-path vaulticdb/Cargo.toml --bin vaulticdb
+go test ./internal/index/daemon -count=1
+go test ./internal/index/maintenance ./cmd/vaultic/indexcmd
+go test -race ./internal/index/daemon ./internal/index/maintenance ./cmd/vaultic/indexcmd \
+  -run 'TestReadSession|TestScanStream|TestScanRange|TestLoadSlateDBLocations|TestCheck|TestIndexCheck' -count=1
+```
+
+The native all-targets run passes 307 tests. Owner suites and focused race checks
+pass. Fixtures cover persistent item/byte boundaries, snapshot parity, one
+iterator setup per range, stream capacity, expiry/rollback, cancellation cleanup,
+malformed/truncated responses, legacy fallback, and wrapper admission cleanup.
+The CI Clippy command remains blocked by unchanged `double_parens`,
+`obfuscated_if_else`, `collapsible_if`, `unnecessary_lazy_evaluations`, and RADOS
+`dead_code` warnings. No unrelated lint fixes are included.
+
+### Streaming diagnostic outcome
+
+The run was interrupted before its configured ten-minute cap. It exited 130
+with `context canceled`, not timeout status 124, after 8m37.56s including cleanup.
+The captured artifacts do not establish the source of cancellation. The last
+periodic progress was at 8m25s; no completed-check verdict was produced.
+
+Encryption audit completed at about 1m04s. By the 8m20s sample, all 256 ranges
+had completed, delivering 376,346,710 blob records in 37,769 chunks and
+35,556,199,869 protobuf bytes. These are blob-key records, not the imported
+location/multiplicity count of 379,934,385; their different cardinalities alone
+do not imply missing data. The checker still reported `slatedb_scan` after range
+completion: spool adoption/finalization precedes `catalog_join`, which was not
+reached. The entire scan stage therefore remains incomplete.
+
+| Metric | Interrupted stream32 r1 |
+|---|---:|
+| CLI user / system CPU | 1,674.24 s / 185.91 s |
+| CLI peak RSS | 99,071,456 KiB (94.5 GiB) |
+| Major faults / swap | 0 / 0 |
+| Encrypted scratch peak | 59,103,515,330 B (55.0 GiB) |
+| Daemon user + system CPU | 6,536.77 s |
+| Daemon logical / physical reads | 2,625,923,374,777 B / 9,428,381,696 B |
+| Main object-store GET attempts | 9,699,631 |
+| Main object-store GET-body bytes | 43,026,979,884 B |
+| Host NFSv3 operations / getattr | 11,931,784 / 9,933,334 |
+| Host NFSv3 reads / writes | 146,716 / 860,738 |
+| Iterator setup / service | 12.234 s / 12,507.482 worker-s |
+| Client receive / consume | 11,539.735 s / 1,993.562 s |
+
+Worker/service/receive times overlap and must not be added into wall time.
+Backend body bytes and process logical reads measure different boundaries.
+NFS counters include unrelated host activity. The old buffered32 run accumulated
+2,490,400,225,853 logical read bytes and 7,870,426 host `getattr` calls over its
+longer timeout run, so this experiment does not establish reduced read
+amplification or a matched end-to-end speedup. Stream delivery completion is
+new progress, but it is not complete scan-stage or full-check acceptance.
+
+After cancellation, the service remained read-write at epoch 38 with zero active
+transactions/write intents; the diagnostic process exited and the configured
+scratch parent had no remaining session directories. The artifact manifest
+verified successfully. Rollback binaries remain available; the streaming
+candidate remains deployed.
+
+Next handoff: instrument/profile spool adoption and finalization separately from
+range delivery, and address read-session renewal during long non-database stages
+before attempting a full differential check. The historical legacy stage alone
+exceeds the default 300-second idle lease; the stricter expiry check must not be
+weakened to bypass that limit. Repeat the bounded diagnostic to obtain an
+uninterrupted control, then measure the full path and later validators. Full
+differential success and the representative acceptance matrix remain pending.
+
+## Prior Production Runs
+
 This record captures bounded full and reduced-coverage check attempts against
 the activated production takeover on 2026-09-22. It is representative evidence
 for the current NFS deployment, but it is not a successful Phase 33 acceptance

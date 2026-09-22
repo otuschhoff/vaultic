@@ -379,6 +379,33 @@ impl VaulticDb for Service {
         self.handle_scan(request).await
     }
 
+    type ScanStreamStream = futures_util::stream::BoxStream<'static, Result<ScanResponse, Status>>;
+
+    async fn scan_stream(
+        &self,
+        request: Request<ScanRequest>,
+    ) -> Result<Response<Self::ScanStreamStream>, Status> {
+        kv::check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+        kv::validate_scan(request.get_ref())?;
+        let request = request.into_inner();
+        let deadline = request
+            .context
+            .as_ref()
+            .map_or(0, |context| context.deadline_unix_ms);
+        let stream = self
+            .storage()
+            .await?
+            .scan_stream(
+                request.prefix,
+                request.after_key,
+                request.page_size as usize,
+                request.transaction_id,
+                deadline,
+            )
+            .await?;
+        Ok(Response::new(stream))
+    }
+
     async fn write_batch(
         &self,
         request: Request<WriteBatchRequest>,

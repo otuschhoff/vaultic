@@ -999,11 +999,13 @@ func (x *ScanRequest) GetTransactionId() string {
 }
 
 type ScanResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Entries       []*KeyValue            `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
-	Done          bool                   `protobuf:"varint,2,opt,name=done,proto3" json:"done,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Entries           []*KeyValue            `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	Done              bool                   `protobuf:"varint,2,opt,name=done,proto3" json:"done,omitempty"`
+	IteratorSetupNs   uint64                 `protobuf:"varint,3,opt,name=iterator_setup_ns,json=iteratorSetupNs,proto3" json:"iterator_setup_ns,omitempty"`
+	IteratorServiceNs uint64                 `protobuf:"varint,4,opt,name=iterator_service_ns,json=iteratorServiceNs,proto3" json:"iterator_service_ns,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ScanResponse) Reset() {
@@ -1048,6 +1050,20 @@ func (x *ScanResponse) GetDone() bool {
 		return x.Done
 	}
 	return false
+}
+
+func (x *ScanResponse) GetIteratorSetupNs() uint64 {
+	if x != nil {
+		return x.IteratorSetupNs
+	}
+	return 0
+}
+
+func (x *ScanResponse) GetIteratorServiceNs() uint64 {
+	if x != nil {
+		return x.IteratorServiceNs
+	}
+	return 0
 }
 
 type TransactionRequest struct {
@@ -1467,6 +1483,7 @@ type CapabilitiesResponse struct {
 	WalRetainedSegments    uint64                 `protobuf:"varint,29,opt,name=wal_retained_segments,json=walRetainedSegments,proto3" json:"wal_retained_segments,omitempty"`
 	WalOldestSegmentUnixMs uint64                 `protobuf:"varint,30,opt,name=wal_oldest_segment_unix_ms,json=walOldestSegmentUnixMs,proto3" json:"wal_oldest_segment_unix_ms,omitempty"`
 	WalCleanupFailures     uint64                 `protobuf:"varint,31,opt,name=wal_cleanup_failures,json=walCleanupFailures,proto3" json:"wal_cleanup_failures,omitempty"`
+	ScanStream             bool                   `protobuf:"varint,32,opt,name=scan_stream,json=scanStream,proto3" json:"scan_stream,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -1716,6 +1733,13 @@ func (x *CapabilitiesResponse) GetWalCleanupFailures() uint64 {
 		return x.WalCleanupFailures
 	}
 	return 0
+}
+
+func (x *CapabilitiesResponse) GetScanStream() bool {
+	if x != nil {
+		return x.ScanStream
+	}
+	return false
 }
 
 type ReadCacheStatusRequest struct {
@@ -6178,10 +6202,12 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x06prefix\x18\x02 \x01(\fR\x06prefix\x12\x1b\n" +
 	"\tpage_size\x18\x03 \x01(\rR\bpageSize\x12\x1b\n" +
 	"\tafter_key\x18\x04 \x01(\fR\bafterKey\x12%\n" +
-	"\x0etransaction_id\x18\x05 \x01(\tR\rtransactionId\"T\n" +
+	"\x0etransaction_id\x18\x05 \x01(\tR\rtransactionId\"\xb0\x01\n" +
 	"\fScanResponse\x120\n" +
 	"\aentries\x18\x01 \x03(\v2\x16.vaulticdb.v1.KeyValueR\aentries\x12\x12\n" +
-	"\x04done\x18\x02 \x01(\bR\x04done\"\x81\x02\n" +
+	"\x04done\x18\x02 \x01(\bR\x04done\x12*\n" +
+	"\x11iterator_setup_ns\x18\x03 \x01(\x04R\x0fiteratorSetupNs\x12.\n" +
+	"\x13iterator_service_ns\x18\x04 \x01(\x04R\x11iteratorServiceNs\"\x81\x02\n" +
 	"\x12TransactionRequest\x126\n" +
 	"\acontext\x18\x01 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12%\n" +
 	"\x0etransaction_id\x18\x02 \x01(\tR\rtransactionId\x12'\n" +
@@ -6208,7 +6234,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x13state_since_unix_ms\x18\t \x01(\x03R\x10stateSinceUnixMs\"r\n" +
 	"\x13CapabilitiesRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
-	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xdd\n" +
+	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\xfe\n" +
 	"\n" +
 	"\x14CapabilitiesResponse\x12\x1b\n" +
 	"\tdaemon_id\x18\x01 \x01(\tR\bdaemonId\x12)\n" +
@@ -6246,7 +6272,9 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x12wal_retained_bytes\x18\x1c \x01(\x04R\x10walRetainedBytes\x122\n" +
 	"\x15wal_retained_segments\x18\x1d \x01(\x04R\x13walRetainedSegments\x12:\n" +
 	"\x1awal_oldest_segment_unix_ms\x18\x1e \x01(\x04R\x16walOldestSegmentUnixMs\x120\n" +
-	"\x14wal_cleanup_failures\x18\x1f \x01(\x04R\x12walCleanupFailures\"u\n" +
+	"\x14wal_cleanup_failures\x18\x1f \x01(\x04R\x12walCleanupFailures\x12\x1f\n" +
+	"\vscan_stream\x18  \x01(\bR\n" +
+	"scanStream\"u\n" +
 	"\x16ReadCacheStatusRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\"\x9d\b\n" +
@@ -6695,7 +6723,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x15WRITER_ROLE_PROMOTING\x10\x02\x12\x1a\n" +
 	"\x16WRITER_ROLE_READ_WRITE\x10\x03\x12\x18\n" +
 	"\x14WRITER_ROLE_DEMOTING\x10\x04\x12\x16\n" +
-	"\x12WRITER_ROLE_FENCED\x10\x052\xb7\x1a\n" +
+	"\x12WRITER_ROLE_FENCED\x10\x052\xfe\x1a\n" +
 	"\tVaulticDB\x12C\n" +
 	"\x06Health\x12\x1b.vaulticdb.v1.HealthRequest\x1a\x1c.vaulticdb.v1.HealthResponse\x12U\n" +
 	"\fCapabilities\x12!.vaulticdb.v1.CapabilitiesRequest\x1a\".vaulticdb.v1.CapabilitiesResponse\x12Z\n" +
@@ -6714,7 +6742,9 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\bShutdown\x12\x13.vaulticdb.v1.Empty\x1a\x13.vaulticdb.v1.Empty\x12:\n" +
 	"\x03Get\x12\x18.vaulticdb.v1.GetRequest\x1a\x19.vaulticdb.v1.GetResponse\x12I\n" +
 	"\bMultiGet\x12\x1d.vaulticdb.v1.MultiGetRequest\x1a\x1e.vaulticdb.v1.MultiGetResponse\x12=\n" +
-	"\x04Scan\x12\x19.vaulticdb.v1.ScanRequest\x1a\x1a.vaulticdb.v1.ScanResponse\x12O\n" +
+	"\x04Scan\x12\x19.vaulticdb.v1.ScanRequest\x1a\x1a.vaulticdb.v1.ScanResponse\x12E\n" +
+	"\n" +
+	"ScanStream\x12\x19.vaulticdb.v1.ScanRequest\x1a\x1a.vaulticdb.v1.ScanResponse0\x01\x12O\n" +
 	"\n" +
 	"WriteBatch\x12\x1f.vaulticdb.v1.WriteBatchRequest\x1a .vaulticdb.v1.WriteBatchResponse\x12j\n" +
 	"\x13AwaitDurableThrough\x12(.vaulticdb.v1.AwaitDurableThroughRequest\x1a).vaulticdb.v1.AwaitDurableThroughResponse\x129\n" +
@@ -6930,68 +6960,70 @@ var file_vaulticdb_v1_daemon_proto_depIdxs = []int32{
 	7,   // 101: vaulticdb.v1.VaulticDB.Get:input_type -> vaulticdb.v1.GetRequest
 	9,   // 102: vaulticdb.v1.VaulticDB.MultiGet:input_type -> vaulticdb.v1.MultiGetRequest
 	16,  // 103: vaulticdb.v1.VaulticDB.Scan:input_type -> vaulticdb.v1.ScanRequest
-	11,  // 104: vaulticdb.v1.VaulticDB.WriteBatch:input_type -> vaulticdb.v1.WriteBatchRequest
-	14,  // 105: vaulticdb.v1.VaulticDB.AwaitDurableThrough:input_type -> vaulticdb.v1.AwaitDurableThroughRequest
-	3,   // 106: vaulticdb.v1.VaulticDB.Begin:input_type -> vaulticdb.v1.Empty
-	18,  // 107: vaulticdb.v1.VaulticDB.Commit:input_type -> vaulticdb.v1.TransactionRequest
-	18,  // 108: vaulticdb.v1.VaulticDB.Rollback:input_type -> vaulticdb.v1.TransactionRequest
-	46,  // 109: vaulticdb.v1.VaulticDB.GetMasterKey:input_type -> vaulticdb.v1.MasterKeyRequest
-	48,  // 110: vaulticdb.v1.VaulticDB.StoreMasterKey:input_type -> vaulticdb.v1.StoreMasterKeyRequest
-	49,  // 111: vaulticdb.v1.VaulticDB.KeyStatus:input_type -> vaulticdb.v1.KeyStatusRequest
-	52,  // 112: vaulticdb.v1.VaulticDB.AddLocalKeySlot:input_type -> vaulticdb.v1.AddLocalKeySlotRequest
-	53,  // 113: vaulticdb.v1.VaulticDB.AddCloudKeySlot:input_type -> vaulticdb.v1.AddCloudKeySlotRequest
-	54,  // 114: vaulticdb.v1.VaulticDB.RemoveKeySlot:input_type -> vaulticdb.v1.RemoveKeySlotRequest
-	55,  // 115: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:input_type -> vaulticdb.v1.RotateLocalKeySlotRequest
-	56,  // 116: vaulticdb.v1.VaulticDB.RotateDek:input_type -> vaulticdb.v1.RotateDekRequest
-	57,  // 117: vaulticdb.v1.VaulticDB.RewriteDek:input_type -> vaulticdb.v1.RewriteDekRequest
-	59,  // 118: vaulticdb.v1.VaulticDB.EscrowMasterKey:input_type -> vaulticdb.v1.EscrowMasterKeyRequest
-	63,  // 119: vaulticdb.v1.VaulticDB.RecoverEscrow:input_type -> vaulticdb.v1.RecoverEscrowRequest
-	49,  // 120: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:input_type -> vaulticdb.v1.KeyStatusRequest
-	49,  // 121: vaulticdb.v1.VaulticDB.CheckEncryption:input_type -> vaulticdb.v1.KeyStatusRequest
-	65,  // 122: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:input_type -> vaulticdb.v1.PrepareCapsuleMigrationRequest
-	67,  // 123: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:input_type -> vaulticdb.v1.FinalizeCapsuleMigrationRequest
-	68,  // 124: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:input_type -> vaulticdb.v1.PublishCapsuleMutationRequest
-	22,  // 125: vaulticdb.v1.VaulticDB.Health:output_type -> vaulticdb.v1.HealthResponse
-	24,  // 126: vaulticdb.v1.VaulticDB.Capabilities:output_type -> vaulticdb.v1.CapabilitiesResponse
-	29,  // 127: vaulticdb.v1.VaulticDB.CacheStatus:output_type -> vaulticdb.v1.ReadCacheStatusResponse
-	29,  // 128: vaulticdb.v1.VaulticDB.UpdateCachePolicy:output_type -> vaulticdb.v1.ReadCacheStatusResponse
-	32,  // 129: vaulticdb.v1.VaulticDB.WriterStatus:output_type -> vaulticdb.v1.WriterStatusResponse
-	32,  // 130: vaulticdb.v1.VaulticDB.DemoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
-	32,  // 131: vaulticdb.v1.VaulticDB.PromoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
-	40,  // 132: vaulticdb.v1.VaulticDB.GenerationStatus:output_type -> vaulticdb.v1.GenerationStatusResponse
-	40,  // 133: vaulticdb.v1.VaulticDB.QuarantineGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	40,  // 134: vaulticdb.v1.VaulticDB.ActivateGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	40,  // 135: vaulticdb.v1.VaulticDB.VerifyGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	40,  // 136: vaulticdb.v1.VaulticDB.RollbackGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	40,  // 137: vaulticdb.v1.VaulticDB.RetireGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
-	3,   // 138: vaulticdb.v1.VaulticDB.Drain:output_type -> vaulticdb.v1.Empty
-	3,   // 139: vaulticdb.v1.VaulticDB.Shutdown:output_type -> vaulticdb.v1.Empty
-	8,   // 140: vaulticdb.v1.VaulticDB.Get:output_type -> vaulticdb.v1.GetResponse
-	10,  // 141: vaulticdb.v1.VaulticDB.MultiGet:output_type -> vaulticdb.v1.MultiGetResponse
-	17,  // 142: vaulticdb.v1.VaulticDB.Scan:output_type -> vaulticdb.v1.ScanResponse
-	12,  // 143: vaulticdb.v1.VaulticDB.WriteBatch:output_type -> vaulticdb.v1.WriteBatchResponse
-	15,  // 144: vaulticdb.v1.VaulticDB.AwaitDurableThrough:output_type -> vaulticdb.v1.AwaitDurableThroughResponse
-	19,  // 145: vaulticdb.v1.VaulticDB.Begin:output_type -> vaulticdb.v1.BeginResponse
-	20,  // 146: vaulticdb.v1.VaulticDB.Commit:output_type -> vaulticdb.v1.CommitResponse
-	3,   // 147: vaulticdb.v1.VaulticDB.Rollback:output_type -> vaulticdb.v1.Empty
-	47,  // 148: vaulticdb.v1.VaulticDB.GetMasterKey:output_type -> vaulticdb.v1.MasterKeyResponse
-	3,   // 149: vaulticdb.v1.VaulticDB.StoreMasterKey:output_type -> vaulticdb.v1.Empty
-	51,  // 150: vaulticdb.v1.VaulticDB.KeyStatus:output_type -> vaulticdb.v1.KeyStatusResponse
-	51,  // 151: vaulticdb.v1.VaulticDB.AddLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	51,  // 152: vaulticdb.v1.VaulticDB.AddCloudKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	51,  // 153: vaulticdb.v1.VaulticDB.RemoveKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	51,  // 154: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
-	51,  // 155: vaulticdb.v1.VaulticDB.RotateDek:output_type -> vaulticdb.v1.KeyStatusResponse
-	58,  // 156: vaulticdb.v1.VaulticDB.RewriteDek:output_type -> vaulticdb.v1.RewriteDekResponse
-	60,  // 157: vaulticdb.v1.VaulticDB.EscrowMasterKey:output_type -> vaulticdb.v1.EscrowMasterKeyResponse
-	47,  // 158: vaulticdb.v1.VaulticDB.RecoverEscrow:output_type -> vaulticdb.v1.MasterKeyResponse
-	61,  // 159: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:output_type -> vaulticdb.v1.ExportKeyEnvelopeResponse
-	62,  // 160: vaulticdb.v1.VaulticDB.CheckEncryption:output_type -> vaulticdb.v1.EncryptionAuditResponse
-	66,  // 161: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:output_type -> vaulticdb.v1.PrepareCapsuleMigrationResponse
-	3,   // 162: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:output_type -> vaulticdb.v1.Empty
-	69,  // 163: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:output_type -> vaulticdb.v1.PublishCapsuleMutationResponse
-	125, // [125:164] is the sub-list for method output_type
-	86,  // [86:125] is the sub-list for method input_type
+	16,  // 104: vaulticdb.v1.VaulticDB.ScanStream:input_type -> vaulticdb.v1.ScanRequest
+	11,  // 105: vaulticdb.v1.VaulticDB.WriteBatch:input_type -> vaulticdb.v1.WriteBatchRequest
+	14,  // 106: vaulticdb.v1.VaulticDB.AwaitDurableThrough:input_type -> vaulticdb.v1.AwaitDurableThroughRequest
+	3,   // 107: vaulticdb.v1.VaulticDB.Begin:input_type -> vaulticdb.v1.Empty
+	18,  // 108: vaulticdb.v1.VaulticDB.Commit:input_type -> vaulticdb.v1.TransactionRequest
+	18,  // 109: vaulticdb.v1.VaulticDB.Rollback:input_type -> vaulticdb.v1.TransactionRequest
+	46,  // 110: vaulticdb.v1.VaulticDB.GetMasterKey:input_type -> vaulticdb.v1.MasterKeyRequest
+	48,  // 111: vaulticdb.v1.VaulticDB.StoreMasterKey:input_type -> vaulticdb.v1.StoreMasterKeyRequest
+	49,  // 112: vaulticdb.v1.VaulticDB.KeyStatus:input_type -> vaulticdb.v1.KeyStatusRequest
+	52,  // 113: vaulticdb.v1.VaulticDB.AddLocalKeySlot:input_type -> vaulticdb.v1.AddLocalKeySlotRequest
+	53,  // 114: vaulticdb.v1.VaulticDB.AddCloudKeySlot:input_type -> vaulticdb.v1.AddCloudKeySlotRequest
+	54,  // 115: vaulticdb.v1.VaulticDB.RemoveKeySlot:input_type -> vaulticdb.v1.RemoveKeySlotRequest
+	55,  // 116: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:input_type -> vaulticdb.v1.RotateLocalKeySlotRequest
+	56,  // 117: vaulticdb.v1.VaulticDB.RotateDek:input_type -> vaulticdb.v1.RotateDekRequest
+	57,  // 118: vaulticdb.v1.VaulticDB.RewriteDek:input_type -> vaulticdb.v1.RewriteDekRequest
+	59,  // 119: vaulticdb.v1.VaulticDB.EscrowMasterKey:input_type -> vaulticdb.v1.EscrowMasterKeyRequest
+	63,  // 120: vaulticdb.v1.VaulticDB.RecoverEscrow:input_type -> vaulticdb.v1.RecoverEscrowRequest
+	49,  // 121: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:input_type -> vaulticdb.v1.KeyStatusRequest
+	49,  // 122: vaulticdb.v1.VaulticDB.CheckEncryption:input_type -> vaulticdb.v1.KeyStatusRequest
+	65,  // 123: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:input_type -> vaulticdb.v1.PrepareCapsuleMigrationRequest
+	67,  // 124: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:input_type -> vaulticdb.v1.FinalizeCapsuleMigrationRequest
+	68,  // 125: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:input_type -> vaulticdb.v1.PublishCapsuleMutationRequest
+	22,  // 126: vaulticdb.v1.VaulticDB.Health:output_type -> vaulticdb.v1.HealthResponse
+	24,  // 127: vaulticdb.v1.VaulticDB.Capabilities:output_type -> vaulticdb.v1.CapabilitiesResponse
+	29,  // 128: vaulticdb.v1.VaulticDB.CacheStatus:output_type -> vaulticdb.v1.ReadCacheStatusResponse
+	29,  // 129: vaulticdb.v1.VaulticDB.UpdateCachePolicy:output_type -> vaulticdb.v1.ReadCacheStatusResponse
+	32,  // 130: vaulticdb.v1.VaulticDB.WriterStatus:output_type -> vaulticdb.v1.WriterStatusResponse
+	32,  // 131: vaulticdb.v1.VaulticDB.DemoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
+	32,  // 132: vaulticdb.v1.VaulticDB.PromoteWriter:output_type -> vaulticdb.v1.WriterStatusResponse
+	40,  // 133: vaulticdb.v1.VaulticDB.GenerationStatus:output_type -> vaulticdb.v1.GenerationStatusResponse
+	40,  // 134: vaulticdb.v1.VaulticDB.QuarantineGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	40,  // 135: vaulticdb.v1.VaulticDB.ActivateGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	40,  // 136: vaulticdb.v1.VaulticDB.VerifyGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	40,  // 137: vaulticdb.v1.VaulticDB.RollbackGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	40,  // 138: vaulticdb.v1.VaulticDB.RetireGeneration:output_type -> vaulticdb.v1.GenerationStatusResponse
+	3,   // 139: vaulticdb.v1.VaulticDB.Drain:output_type -> vaulticdb.v1.Empty
+	3,   // 140: vaulticdb.v1.VaulticDB.Shutdown:output_type -> vaulticdb.v1.Empty
+	8,   // 141: vaulticdb.v1.VaulticDB.Get:output_type -> vaulticdb.v1.GetResponse
+	10,  // 142: vaulticdb.v1.VaulticDB.MultiGet:output_type -> vaulticdb.v1.MultiGetResponse
+	17,  // 143: vaulticdb.v1.VaulticDB.Scan:output_type -> vaulticdb.v1.ScanResponse
+	17,  // 144: vaulticdb.v1.VaulticDB.ScanStream:output_type -> vaulticdb.v1.ScanResponse
+	12,  // 145: vaulticdb.v1.VaulticDB.WriteBatch:output_type -> vaulticdb.v1.WriteBatchResponse
+	15,  // 146: vaulticdb.v1.VaulticDB.AwaitDurableThrough:output_type -> vaulticdb.v1.AwaitDurableThroughResponse
+	19,  // 147: vaulticdb.v1.VaulticDB.Begin:output_type -> vaulticdb.v1.BeginResponse
+	20,  // 148: vaulticdb.v1.VaulticDB.Commit:output_type -> vaulticdb.v1.CommitResponse
+	3,   // 149: vaulticdb.v1.VaulticDB.Rollback:output_type -> vaulticdb.v1.Empty
+	47,  // 150: vaulticdb.v1.VaulticDB.GetMasterKey:output_type -> vaulticdb.v1.MasterKeyResponse
+	3,   // 151: vaulticdb.v1.VaulticDB.StoreMasterKey:output_type -> vaulticdb.v1.Empty
+	51,  // 152: vaulticdb.v1.VaulticDB.KeyStatus:output_type -> vaulticdb.v1.KeyStatusResponse
+	51,  // 153: vaulticdb.v1.VaulticDB.AddLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	51,  // 154: vaulticdb.v1.VaulticDB.AddCloudKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	51,  // 155: vaulticdb.v1.VaulticDB.RemoveKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	51,  // 156: vaulticdb.v1.VaulticDB.RotateLocalKeySlot:output_type -> vaulticdb.v1.KeyStatusResponse
+	51,  // 157: vaulticdb.v1.VaulticDB.RotateDek:output_type -> vaulticdb.v1.KeyStatusResponse
+	58,  // 158: vaulticdb.v1.VaulticDB.RewriteDek:output_type -> vaulticdb.v1.RewriteDekResponse
+	60,  // 159: vaulticdb.v1.VaulticDB.EscrowMasterKey:output_type -> vaulticdb.v1.EscrowMasterKeyResponse
+	47,  // 160: vaulticdb.v1.VaulticDB.RecoverEscrow:output_type -> vaulticdb.v1.MasterKeyResponse
+	61,  // 161: vaulticdb.v1.VaulticDB.ExportKeyEnvelope:output_type -> vaulticdb.v1.ExportKeyEnvelopeResponse
+	62,  // 162: vaulticdb.v1.VaulticDB.CheckEncryption:output_type -> vaulticdb.v1.EncryptionAuditResponse
+	66,  // 163: vaulticdb.v1.VaulticDB.PrepareCapsuleMigration:output_type -> vaulticdb.v1.PrepareCapsuleMigrationResponse
+	3,   // 164: vaulticdb.v1.VaulticDB.FinalizeCapsuleMigration:output_type -> vaulticdb.v1.Empty
+	69,  // 165: vaulticdb.v1.VaulticDB.PublishCapsuleMutation:output_type -> vaulticdb.v1.PublishCapsuleMutationResponse
+	126, // [126:166] is the sub-list for method output_type
+	86,  // [86:126] is the sub-list for method input_type
 	86,  // [86:86] is the sub-list for extension type_name
 	86,  // [86:86] is the sub-list for extension extendee
 	0,   // [0:86] is the sub-list for field type_name

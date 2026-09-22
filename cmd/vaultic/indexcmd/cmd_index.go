@@ -1432,9 +1432,12 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			ProgressInterval: options.ProgressInterval,
 			Progress: func(update maintenance.CheckProgress) {
 				term.Error(fmt.Sprintf(
-					"index check: %s; elapsed %s; workers %d; RPCs %d; scratch %d/%d bytes",
+					"index check: %s; elapsed %s; workers %d; RPCs %d; scratch %d/%d bytes; scan %d records/%d bytes/%d chunks; ranges %d/%d; iterator setup %s/service %s",
 					update.Stage, update.Elapsed.Round(time.Second), update.Workers, update.RPCConcurrency,
 					update.ScratchPeakBytes, update.ScratchLimitBytes,
+					update.Scan.Records, update.Scan.Bytes, update.Scan.Chunks,
+					update.Scan.RangesCompleted, update.Scan.RangesStarted,
+					time.Duration(update.Scan.IteratorSetupNS), time.Duration(update.Scan.IteratorServiceNS),
 				))
 			},
 			PlacementModel: placementModel,

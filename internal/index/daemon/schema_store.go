@@ -140,6 +140,9 @@ type ReadSession struct {
 	transaction *Transaction
 	decision    uint64
 	Identity    ReadSessionIdentity
+	scanMu      sync.Mutex
+	scanStats   ScanStats
+	rangeStats  [256]ScanStats
 }
 
 func (store *SchemaStore) BeginReadSession(ctx context.Context) (*ReadSession, error) {
@@ -245,6 +248,70 @@ func (session *ReadSession) ScanPrefix(ctx context.Context, prefix, afterKey []b
 
 func (session *ReadSession) Close(ctx context.Context) error {
 	return session.transaction.Rollback(ctx)
+}
+
+func (session *ReadSession) ScanStats() ScanStats {
+	session.scanMu.Lock()
+	defer session.scanMu.Unlock()
+	return session.scanStats
+}
+
+func (session *ReadSession) ScanRanges() []RangeScanStats {
+	session.scanMu.Lock()
+	defer session.scanMu.Unlock()
+	var ranges []RangeScanStats
+	for partition, stats := range session.rangeStats {
+		if stats.RangesStarted > 0 {
+			ranges = append(ranges, RangeScanStats{Partition: uint8(partition), ScanStats: stats})
+		}
+	}
+	return ranges
+}
+
+func (session *ReadSession) ScanRange(ctx context.Context, prefix []byte, pageSize uint32, consume func([]KeyValue) error) (resultErr error) {
+	pageSize = min(pageSize, session.client.Limits().MaxPageItems)
+	partition := -1
+	if len(prefix) == 3 && prefix[0] == 'b' && prefix[1] == ':' {
+		partition = int(prefix[2])
+	}
+	session.scanMu.Lock()
+	session.scanStats.RangesStarted++
+	if partition >= 0 {
+		session.rangeStats[partition].RangesStarted++
+	}
+	session.scanMu.Unlock()
+	defer func() {
+		if resultErr == nil {
+			session.scanMu.Lock()
+			session.scanStats.RangesCompleted++
+			if partition >= 0 {
+				session.rangeStats[partition].RangesCompleted++
+			}
+			session.scanMu.Unlock()
+		}
+	}()
+	err := session.transaction.scanRange(ctx, prefix, pageSize, func(entries []KeyValue, stats ScanStats) error {
+		session.scanMu.Lock()
+		session.scanStats.add(stats)
+		if partition >= 0 {
+			session.rangeStats[partition].add(stats)
+		}
+		session.scanMu.Unlock()
+		started := time.Now()
+		err := consume(entries)
+		elapsed := uint64(time.Since(started))
+		session.scanMu.Lock()
+		session.scanStats.ConsumeNS += elapsed
+		if partition >= 0 {
+			session.rangeStats[partition].ConsumeNS += elapsed
+		}
+		session.scanMu.Unlock()
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return session.Validate(ctx)
 }
 
 type legacyImportMetrics struct {

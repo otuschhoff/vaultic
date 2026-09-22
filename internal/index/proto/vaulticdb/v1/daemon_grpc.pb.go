@@ -37,6 +37,7 @@ const (
 	VaulticDB_Get_FullMethodName                      = "/vaulticdb.v1.VaulticDB/Get"
 	VaulticDB_MultiGet_FullMethodName                 = "/vaulticdb.v1.VaulticDB/MultiGet"
 	VaulticDB_Scan_FullMethodName                     = "/vaulticdb.v1.VaulticDB/Scan"
+	VaulticDB_ScanStream_FullMethodName               = "/vaulticdb.v1.VaulticDB/ScanStream"
 	VaulticDB_WriteBatch_FullMethodName               = "/vaulticdb.v1.VaulticDB/WriteBatch"
 	VaulticDB_AwaitDurableThrough_FullMethodName      = "/vaulticdb.v1.VaulticDB/AwaitDurableThrough"
 	VaulticDB_Begin_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Begin"
@@ -82,6 +83,7 @@ type VaulticDBClient interface {
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	MultiGet(ctx context.Context, in *MultiGetRequest, opts ...grpc.CallOption) (*MultiGetResponse, error)
 	Scan(ctx context.Context, in *ScanRequest, opts ...grpc.CallOption) (*ScanResponse, error)
+	ScanStream(ctx context.Context, in *ScanRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScanResponse], error)
 	WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error)
 	AwaitDurableThrough(ctx context.Context, in *AwaitDurableThroughRequest, opts ...grpc.CallOption) (*AwaitDurableThroughResponse, error)
 	Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error)
@@ -292,6 +294,25 @@ func (c *vaulticDBClient) Scan(ctx context.Context, in *ScanRequest, opts ...grp
 	}
 	return out, nil
 }
+
+func (c *vaulticDBClient) ScanStream(ctx context.Context, in *ScanRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScanResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &VaulticDB_ServiceDesc.Streams[0], VaulticDB_ScanStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ScanRequest, ScanResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type VaulticDB_ScanStreamClient = grpc.ServerStreamingClient[ScanResponse]
 
 func (c *vaulticDBClient) WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -525,6 +546,7 @@ type VaulticDBServer interface {
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	MultiGet(context.Context, *MultiGetRequest) (*MultiGetResponse, error)
 	Scan(context.Context, *ScanRequest) (*ScanResponse, error)
+	ScanStream(*ScanRequest, grpc.ServerStreamingServer[ScanResponse]) error
 	WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error)
 	AwaitDurableThrough(context.Context, *AwaitDurableThroughRequest) (*AwaitDurableThroughResponse, error)
 	Begin(context.Context, *Empty) (*BeginResponse, error)
@@ -609,6 +631,9 @@ func (UnimplementedVaulticDBServer) MultiGet(context.Context, *MultiGetRequest) 
 }
 func (UnimplementedVaulticDBServer) Scan(context.Context, *ScanRequest) (*ScanResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Scan not implemented")
+}
+func (UnimplementedVaulticDBServer) ScanStream(*ScanRequest, grpc.ServerStreamingServer[ScanResponse]) error {
+	return status.Error(codes.Unimplemented, "method ScanStream not implemented")
 }
 func (UnimplementedVaulticDBServer) WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteBatch not implemented")
@@ -1017,6 +1042,17 @@ func _VaulticDB_Scan_Handler(srv interface{}, ctx context.Context, dec func(inte
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _VaulticDB_ScanStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ScanRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(VaulticDBServer).ScanStream(m, &grpc.GenericServerStream[ScanRequest, ScanResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type VaulticDB_ScanStreamServer = grpc.ServerStreamingServer[ScanResponse]
 
 func _VaulticDB_WriteBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(WriteBatchRequest)
@@ -1560,6 +1596,12 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _VaulticDB_PublishCapsuleMutation_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ScanStream",
+			Handler:       _VaulticDB_ScanStream_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "vaulticdb/v1/daemon.proto",
 }

@@ -474,6 +474,7 @@ type Limits struct {
 	MaxBatchItems   uint32
 	MaxMessageBytes uint32
 	MaxPageItems    uint32
+	ScanStream      bool
 }
 
 // KeyValue is one binary metadata record returned by a scan.
@@ -1193,6 +1194,10 @@ func (c *authenticatedClient) Scan(
 	return c.VaulticDBClient.Scan(withAuth(ctx, c.token), in, callOptions...)
 }
 
+func (c *authenticatedClient) ScanStream(ctx context.Context, in *vaulticdbv1.ScanRequest, callOptions ...grpc.CallOption) (grpc.ServerStreamingClient[vaulticdbv1.ScanResponse], error) {
+	return c.VaulticDBClient.ScanStream(withAuth(ctx, c.token), in, callOptions...)
+}
+
 func (c *authenticatedClient) WriteBatch(
 	ctx context.Context,
 	in *vaulticdbv1.WriteBatchRequest,
@@ -1357,6 +1362,7 @@ func (c *Client) validate(ctx context.Context) error {
 		MaxBatchItems:   capabilities.GetMaxBatchItems(),
 		MaxMessageBytes: capabilities.GetMaxMessageBytes(),
 		MaxPageItems:    capabilities.GetMaxPageItems(),
+		ScanStream:      capabilities.GetScanStream(),
 	}
 	c.encryption = EncryptionInfo{
 		Enabled: capabilities.GetEncryptionEnabled(), Algorithm: capabilities.GetEncryptionAlgorithm(),

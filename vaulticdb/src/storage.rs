@@ -3446,6 +3446,119 @@ impl Storage {
         collect_page(&mut iterator, page_size).await
     }
 
+    pub(crate) async fn scan_stream(
+        self: Arc<Self>,
+        prefix: Vec<u8>,
+        after_key: Vec<u8>,
+        page_size: usize,
+        transaction_id: String,
+        deadline_unix_ms: i64,
+    ) -> Result<BoxStream<'static, Result<ScanResponse, Status>>, Status> {
+        static PERMITS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(32)));
+        let permit = PERMITS
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("active scan stream limit exceeded"))?;
+        if transaction_id.is_empty() || (!after_key.is_empty() && !after_key.starts_with(&prefix)) {
+            return Err(Status::invalid_argument(
+                "scan stream requires a transaction and an in-range cursor",
+            ));
+        }
+        self.validate_scan_transaction(&transaction_id).await?;
+        let now = unix_time_ms().map_err(storage_status)?;
+        let remaining = if deadline_unix_ms > 0 {
+            (deadline_unix_ms as u64).saturating_sub(now).min(3_600_000)
+        } else {
+            3_600_000
+        };
+        if remaining == 0 {
+            return Err(Status::deadline_exceeded("scan stream deadline expired"));
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let work = async {
+                let setup = Instant::now();
+                let slot = self.transaction(&transaction_id).await?;
+                let transaction = slot.transaction.lock().await;
+                let mut iterator = scan_prefix_transaction(
+                    transaction
+                        .as_ref()
+                        .ok_or_else(|| transaction_not_found("transaction was closed"))?,
+                    &prefix,
+                    after_key
+                        .strip_prefix(prefix.as_slice())
+                        .unwrap_or_default(),
+                )
+                .await?;
+                drop(transaction);
+                drop(slot);
+                let mut setup_ns = setup.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                let mut pending = None;
+                loop {
+                    let reservation = tokio::time::timeout(
+                        std::time::Duration::from_millis(self.transaction_idle_timeout_ms),
+                        sender.reserve(),
+                    )
+                    .await
+                    .map_err(|_| Status::deadline_exceeded("scan stream delivery expired"))?
+                    .map_err(|_| Status::cancelled("scan stream closed"))?;
+                    self.validate_scan_transaction(&transaction_id).await?;
+                    let service = Instant::now();
+                    let mut chunk = collect_scan_chunk(
+                        &mut iterator,
+                        &mut pending,
+                        page_size,
+                        crate::MAX_MESSAGE_BYTES as usize - 32,
+                    )
+                    .await?;
+                    chunk.iterator_setup_ns = setup_ns;
+                    setup_ns = 0;
+                    chunk.iterator_service_ns =
+                        service.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                    self.validate_scan_transaction(&transaction_id).await?;
+                    let done = chunk.done;
+                    reservation.send(Ok(chunk));
+                    if done {
+                        return Ok::<(), Status>(());
+                    }
+                }
+            };
+            let result = tokio::select! {
+                _ = sender.closed() => return,
+                result = tokio::time::timeout(std::time::Duration::from_millis(remaining), work) =>
+                    result.unwrap_or_else(|_| Err(Status::deadline_exceeded("scan stream deadline expired"))),
+            };
+            if let Err(error) = result {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    sender.send(Err(error)),
+                )
+                .await;
+            }
+        });
+        Ok(tokio_stream::wrappers::ReceiverStream::new(receiver).boxed())
+    }
+
+    async fn validate_scan_transaction(&self, transaction_id: &str) -> Result<(), Status> {
+        let transactions = self.transactions.read().await;
+        let slot = transactions
+            .get(transaction_id)
+            .ok_or_else(|| transaction_not_found("scan transaction was closed"))?;
+        let now = unix_time_ms().map_err(storage_status)?;
+        if transaction_expired(
+            slot.last_touched_ms.load(Ordering::Relaxed),
+            now,
+            self.transaction_idle_timeout_ms,
+        ) || slot.transaction.lock().await.is_none()
+        {
+            return Err(transaction_not_found("scan transaction expired or closed"));
+        }
+        slot.last_touched_ms.fetch_max(now, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub(crate) async fn write_batch(
         &self,
         request: &WriteBatchRequest,
@@ -3840,9 +3953,17 @@ impl Storage {
             .get(transaction_id)
             .cloned()
             .ok_or_else(|| transaction_not_found("transaction was not found"))?;
+        let now = unix_time_ms().map_err(storage_status)?;
+        if transaction_expired(
+            transaction.last_touched_ms.load(Ordering::Relaxed),
+            now,
+            self.transaction_idle_timeout_ms,
+        ) {
+            return Err(transaction_not_found("transaction expired"));
+        }
         transaction
             .last_touched_ms
-            .store(unix_time_ms().map_err(storage_status)?, Ordering::Relaxed);
+            .fetch_max(now, Ordering::Relaxed);
         Ok(transaction)
     }
 

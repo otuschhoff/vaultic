@@ -10,6 +10,32 @@ mod tests {
 
     static STORAGE_FAILPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    #[tokio::test]
+    async fn persistent_scan_chunks_preserve_item_and_byte_boundaries() {
+        let database = Db::builder("scan-chunks", Arc::new(InMemory::new()))
+            .build().await.unwrap();
+        for ordinal in 0..7 {
+            database.put(format!("scan:{ordinal}"), vec![42; 16]).await.unwrap();
+        }
+        for (page_size, max_bytes) in [(2, 1024), (10, 60), (1, 1024)] {
+            let mut iterator = scan_prefix_db(&database, b"scan:", b"").await.unwrap();
+            let mut pending = None;
+            let mut keys = Vec::new();
+            loop {
+                let chunk = collect_scan_chunk(&mut iterator, &mut pending, page_size, max_bytes)
+                    .await.unwrap();
+                assert!(chunk.encoded_len() <= max_bytes);
+                assert!(chunk.entries.len() <= page_size);
+                keys.extend(chunk.entries.into_iter().map(|entry| entry.key));
+                if chunk.done { break; }
+            }
+            assert_eq!(keys, (0..7).map(|ordinal| format!("scan:{ordinal}").into_bytes()).collect::<Vec<_>>());
+        }
+        let mut iterator = scan_prefix_db(&database, b"scan:", b"").await.unwrap();
+        assert_eq!(collect_scan_chunk(&mut iterator, &mut None, 10, 8).await.unwrap_err().code(), tonic::Code::ResourceExhausted);
+        database.close().await.unwrap();
+    }
+
     #[derive(Debug, Default)]
     struct ControlledObjectStore {
         inner: InMemory,
@@ -18,6 +44,81 @@ mod tests {
         fail_main_delete: Arc<std::sync::atomic::AtomicBool>,
         put_started: tokio::sync::Notify,
         put_release: tokio::sync::Notify,
+    }
+
+    #[tokio::test]
+    async fn persistent_scan_stream_snapshot_expiry_and_cleanup() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        claim_writer_epoch(object_store.as_ref(), None).await.unwrap();
+        let path = format!("stream-lifecycle-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default()).await.unwrap();
+        for ordinal in 0..20 {
+            writer.put(format!("scan:{ordinal:02}"), b"value").await.unwrap();
+        }
+        let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        storage.write_batch(&WriteBatchRequest {
+            puts: vec![KeyValue { key: b"scan:99".to_vec(), value: b"later".to_vec() }],
+            await_durable: true,
+            ..Default::default()
+        }).await.unwrap();
+        let mut stream = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 3, transaction_id.clone(), 0).await.unwrap();
+        let mut keys = Vec::new();
+        let mut setups = 0;
+        let mut done = false;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            assert!(!done);
+            done = chunk.done;
+            setups += usize::from(chunk.iterator_setup_ns > 0);
+            keys.extend(chunk.entries.into_iter().map(|entry| entry.key));
+        }
+        assert!(done);
+        assert_eq!(setups, 1);
+        assert_eq!(keys, (0..20).map(|ordinal| format!("scan:{ordinal:02}").into_bytes()).collect::<Vec<_>>());
+        assert_eq!(Arc::strong_count(&storage), 1);
+
+        let mut streams = Vec::new();
+        for _ in 0..32 {
+            streams.push(storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.unwrap());
+        }
+        let error = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.err().unwrap();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        drop(streams);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while Arc::strong_count(&storage) != 1 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+
+        for expire in [true, false] {
+            let transaction_id = storage.begin().await.unwrap().transaction_id;
+            let mut stream = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.unwrap();
+            assert!(!stream.next().await.unwrap().unwrap().done);
+            if expire {
+                storage.transactions.read().await.get(&transaction_id).unwrap().last_touched_ms.store(0, Ordering::Relaxed);
+                assert!(storage.get(b"scan:00", &transaction_id).await.is_err());
+            } else {
+                storage.rollback(&transaction_id).await.unwrap();
+            }
+            let mut failed = false;
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => assert!(!chunk.done),
+                    Err(_) => { failed = true; break; }
+                }
+            }
+            assert!(failed);
+        }
+
+        let transaction_id = storage.begin().await.unwrap().transaction_id;
+        let mut stream = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.unwrap();
+        stream.next().await.unwrap().unwrap();
+        drop(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while Arc::strong_count(&storage) != 1 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let error = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id, 1).await.err().unwrap();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        storage.close().await.unwrap();
     }
 
     impl std::fmt::Display for ControlledObjectStore {

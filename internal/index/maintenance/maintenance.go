@@ -142,6 +142,60 @@ func (store *limitedStore) ScanPrefix(ctx context.Context, prefix, after []byte,
 	return values, more, err
 }
 
+type rangeScanner interface {
+	ScanRange(context.Context, []byte, uint32, func([]daemon.KeyValue) error) error
+}
+
+func scanRange(ctx context.Context, store Store, prefix []byte, limit uint32, consume func([]daemon.KeyValue) error) error {
+	if scanner, ok := store.(rangeScanner); ok {
+		return scanner.ScanRange(ctx, prefix, limit, consume)
+	}
+	var after []byte
+	for {
+		entries, done, err := store.ScanPrefix(ctx, prefix, after, limit)
+		if err != nil {
+			return err
+		}
+		if !done && len(entries) == 0 {
+			return fmt.Errorf("scan %q made no progress", prefix)
+		}
+		if len(entries) > 0 {
+			after = append(after[:0], entries[len(entries)-1].Key...)
+		}
+		if err := consume(entries); err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+func (store *limitedStore) ScanRange(ctx context.Context, prefix []byte, limit uint32, consume func([]daemon.KeyValue) error) error {
+	if err := store.acquire(ctx); err != nil {
+		return err
+	}
+	defer func() { <-store.semaphore }()
+	if store.telemetry == nil {
+		return scanRange(ctx, store.Store, prefix, limit, consume)
+	}
+	request := store.telemetry.database.Start()
+	err := scanRange(ctx, store.Store, prefix, limit, func(entries []daemon.KeyValue) error {
+		var bytes uint64
+		for _, entry := range entries {
+			bytes = saturatingAddCheck(bytes, uint64(len(entry.Key)+len(entry.Value)))
+		}
+		request.AddBytes(bytes)
+		store.telemetry.process(store.operation, "database", bytes)
+		settleDependency(request, nil)
+		err := consume(entries)
+		request = store.telemetry.database.Start()
+		return err
+	})
+	settleDependency(request, err)
+	return err
+}
+
 func (store *limitedStore) CheckEncryption(ctx context.Context) (daemon.EncryptionAudit, error) {
 	auditor, ok := store.Store.(EncryptionAuditor)
 	if !ok {
@@ -273,12 +327,14 @@ type CheckConsistency struct {
 }
 
 type CheckResources struct {
-	MemoryLimitBytes  uint64 `json:"memory_limit_bytes"`
-	ScratchLimitBytes uint64 `json:"scratch_limit_bytes"`
-	ScratchPeakBytes  uint64 `json:"scratch_peak_bytes"`
-	MergePasses       uint64 `json:"merge_passes"`
-	Workers           uint   `json:"workers"`
-	RPCConcurrency    uint   `json:"rpc_concurrency"`
+	MemoryLimitBytes  uint64                  `json:"memory_limit_bytes"`
+	ScratchLimitBytes uint64                  `json:"scratch_limit_bytes"`
+	ScratchPeakBytes  uint64                  `json:"scratch_peak_bytes"`
+	MergePasses       uint64                  `json:"merge_passes"`
+	Workers           uint                    `json:"workers"`
+	RPCConcurrency    uint                    `json:"rpc_concurrency"`
+	Scan              daemon.ScanStats        `json:"scan"`
+	ScanRanges        []daemon.RangeScanStats `json:"scan_ranges,omitempty"`
 }
 
 type CheckCoverage struct {
@@ -393,6 +449,7 @@ type CheckProgress struct {
 	MemoryLimitBytes  uint64
 	ScratchLimitBytes uint64
 	ScratchPeakBytes  uint64
+	Scan              daemon.ScanStats
 }
 
 type checkProgressReporter struct {
@@ -405,6 +462,7 @@ type checkProgressReporter struct {
 	finished  chan struct{}
 	telemetry *CheckTelemetry
 	operation *monitor.ActionGuard
+	scanStats func() daemon.ScanStats
 }
 
 func newCheckProgressReporter(options CheckOptions, scratch *checkScratch) *checkProgressReporter {
@@ -445,12 +503,16 @@ func (reporter *checkProgressReporter) emit() {
 	}
 	reporter.mu.Lock()
 	stage := reporter.stage
+	scanStats := reporter.scanStats
 	reporter.mu.Unlock()
 	peak, _ := reporter.scratch.stats()
 	update := CheckProgress{
 		Stage: stage, Elapsed: time.Since(reporter.started), Workers: reporter.options.Workers,
 		RPCConcurrency: reporter.options.RPCConcurrency, MemoryLimitBytes: reporter.options.MemoryBytes,
 		ScratchLimitBytes: reporter.options.TempMaxBytes, ScratchPeakBytes: peak,
+	}
+	if scanStats != nil {
+		update.Scan = scanStats()
 	}
 	if reporter.options.Progress != nil {
 		reporter.options.Progress(update)
@@ -695,6 +757,19 @@ func CheckWithOptions(
 	scratch.telemetry = telemetry
 	scratch.operation = operation
 	progress := newCheckProgressReporter(options, scratch)
+	if limited, ok := store.(*limitedStore); ok {
+		if measured, ok := unwrapProductionStore(limited.Store).(interface{ ScanStats() daemon.ScanStats }); ok {
+			progress.mu.Lock()
+			progress.scanStats = measured.ScanStats
+			progress.mu.Unlock()
+			defer func() { result.Resources.Scan = measured.ScanStats() }()
+		}
+		if measured, ok := unwrapProductionStore(limited.Store).(interface {
+			ScanRanges() []daemon.RangeScanStats
+		}); ok {
+			defer func() { result.Resources.ScanRanges = measured.ScanRanges() }()
+		}
+	}
 	progress.telemetry = telemetry
 	progress.operation = operation
 	defer progress.close()
@@ -1528,12 +1603,7 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 				return err
 			}
 			packPartitions[partition] = packLocations
-			var after []byte
-			for {
-				entries, done, err := store.ScanPrefix(groupContext, prefix, after, scanPageSize)
-				if err != nil {
-					return err
-				}
+			return scanRange(groupContext, store, prefix, scanPageSize, func(entries []daemon.KeyValue) error {
 				for _, entry := range entries {
 					parsed, err := schema.ParseKey(entry.Key)
 					if err != nil {
@@ -1559,15 +1629,9 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 							return err
 						}
 					}
-					after = append(after[:0], entry.Key...)
 				}
-				if done {
-					return nil
-				}
-				if len(entries) == 0 {
-					return fmt.Errorf("scan %q made no progress", prefix)
-				}
-			}
+				return nil
+			})
 		})
 	}
 	if err := group.Wait(); err != nil {

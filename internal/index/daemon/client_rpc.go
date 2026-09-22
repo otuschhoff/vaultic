@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -694,6 +695,109 @@ func (t *Transaction) MultiGet(ctx context.Context, keys [][]byte) ([]KeyValue, 
 
 func (t *Transaction) ScanPage(ctx context.Context, prefix, afterKey []byte, pageSize uint32) ([]KeyValue, bool, error) {
 	return t.client.ScanPage(ctx, prefix, afterKey, pageSize, t.id)
+}
+
+type ScanStats struct {
+	Records           uint64 `json:"records"`
+	Bytes             uint64 `json:"bytes"`
+	Chunks            uint64 `json:"chunks"`
+	IteratorSetupNS   uint64 `json:"iterator_setup_ns"`
+	IteratorServiceNS uint64 `json:"iterator_service_ns"`
+	ReceiveNS         uint64 `json:"receive_ns"`
+	ConsumeNS         uint64 `json:"consume_ns"`
+	RangesStarted     uint64 `json:"ranges_started"`
+	RangesCompleted   uint64 `json:"ranges_completed"`
+}
+
+func (stats *ScanStats) add(chunk ScanStats) {
+	stats.Records += chunk.Records
+	stats.Bytes += chunk.Bytes
+	stats.Chunks += chunk.Chunks
+	stats.IteratorSetupNS += chunk.IteratorSetupNS
+	stats.IteratorServiceNS += chunk.IteratorServiceNS
+	stats.ReceiveNS += chunk.ReceiveNS
+	stats.ConsumeNS += chunk.ConsumeNS
+}
+
+type RangeScanStats struct {
+	Partition uint8 `json:"partition"`
+	ScanStats
+}
+
+func (t *Transaction) scanRange(ctx context.Context, prefix []byte, pageSize uint32, consume func([]KeyValue, ScanStats) error) error {
+	if pageSize == 0 || pageSize > t.client.limits.MaxPageItems {
+		return fmt.Errorf("invalid scan stream page size %d", pageSize)
+	}
+	if !t.client.limits.ScanStream {
+		var after []byte
+		for {
+			entries, done, err := t.ScanPage(ctx, prefix, after, pageSize)
+			if err != nil {
+				return err
+			}
+			if !done && len(entries) == 0 {
+				return fmt.Errorf("scan made no progress")
+			}
+			if len(entries) > 0 {
+				after = append(after[:0], entries[len(entries)-1].Key...)
+			}
+			if err := consume(entries, ScanStats{}); err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Hour)
+	defer cancel()
+	stream, err := t.client.rpc.ScanStream(ctx, &vaulticdbv1.ScanRequest{
+		Context: requestContext(ctx), TransactionId: t.id, Prefix: prefix, PageSize: pageSize,
+	})
+	if err != nil {
+		return err
+	}
+	var previous []byte
+	for {
+		receiveStarted := time.Now()
+		response, err := stream.Recv()
+		receiveElapsed := time.Since(receiveStarted)
+		if err == io.EOF {
+			return fmt.Errorf("scan stream ended without completion")
+		}
+		if err != nil {
+			return err
+		}
+		if len(response.Entries) > int(pageSize) || proto.Size(response) > int(t.client.limits.MaxMessageBytes) {
+			return fmt.Errorf("scan stream exceeded negotiated limits")
+		}
+		if !response.Done && len(response.Entries) == 0 {
+			return fmt.Errorf("scan stream made no progress")
+		}
+		entries := make([]KeyValue, len(response.Entries))
+		for index, entry := range response.Entries {
+			if !bytes.HasPrefix(entry.GetKey(), prefix) || (len(previous) > 0 && bytes.Compare(entry.GetKey(), previous) <= 0) {
+				return fmt.Errorf("vaulticdb returned an out-of-order scan stream")
+			}
+			entries[index] = KeyValue{Key: entry.GetKey(), Value: entry.GetValue()}
+			previous = entry.GetKey()
+		}
+		previous = bytes.Clone(previous)
+		stats := ScanStats{Records: uint64(len(entries)), Bytes: uint64(proto.Size(response)), Chunks: 1,
+			IteratorSetupNS: response.GetIteratorSetupNs(), IteratorServiceNS: response.GetIteratorServiceNs(), ReceiveNS: uint64(receiveElapsed)}
+		if err := consume(entries, stats); err != nil {
+			return err
+		}
+		if response.Done {
+			if _, err := stream.Recv(); err != io.EOF {
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("scan stream continued after completion")
+			}
+			return nil
+		}
+	}
 }
 
 func (t *Transaction) WriteBatch(ctx context.Context, puts []Mutation, deletes [][]byte) error {

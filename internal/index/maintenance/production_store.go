@@ -38,6 +38,18 @@ func (store *productionStore) ScanPrefix(ctx context.Context, prefix, after []by
 	return store.Store.ScanPrefix(ctx, prefix, after, limit)
 }
 
+func (store *productionStore) ScanRange(ctx context.Context, prefix []byte, limit uint32, consume func([]daemon.KeyValue) error) error {
+	dependency := store.accounting.StartDependency(ctx, "database")
+	err := scanRange(ctx, store.Store, prefix, limit, func(entries []daemon.KeyValue) error {
+		dependency.Finish(nil)
+		err := consume(entries)
+		dependency = store.accounting.StartDependency(ctx, "database")
+		return err
+	})
+	dependency.Finish(err)
+	return err
+}
+
 func (store *productionStore) MarkIndexPublished(ctx context.Context, id schema.ID, packs []schema.ID) (sequence uint64, resultErr error) {
 	dependency := store.accounting.StartDependency(ctx, "database")
 	defer func() { dependency.Finish(resultErr) }()

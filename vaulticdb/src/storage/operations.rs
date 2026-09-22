@@ -479,18 +479,26 @@ async fn scan_prefix_transaction(
 }
 
 async fn collect_page(iterator: &mut DbIterator, page_size: usize) -> Result<ScanResponse, Status> {
+    collect_scan_chunk(iterator, &mut None, page_size, crate::MAX_MESSAGE_BYTES as usize).await
+}
+
+async fn collect_scan_chunk(
+    iterator: &mut DbIterator,
+    pending: &mut Option<KeyValue>,
+    page_size: usize,
+    max_bytes: usize,
+) -> Result<ScanResponse, Status> {
     let mut entries = Vec::with_capacity(page_size);
     let mut response_bytes = 0usize;
     while entries.len() < page_size {
-        let Some(item) = iterator.next().await.map_err(storage_error)? else {
-            return Ok(ScanResponse {
-                entries,
-                done: true,
-            });
-        };
-        let entry = KeyValue {
-            key: item.key.to_vec(),
-            value: item.value.to_vec(),
+        let entry = match pending.take() {
+            Some(entry) => entry,
+            None => {
+                let Some(item) = iterator.next().await.map_err(storage_error)? else {
+                    return Ok(ScanResponse { entries, done: true, ..Default::default() });
+                };
+                KeyValue { key: item.key.to_vec(), value: item.value.to_vec() }
+            }
         };
         let next_size = response_bytes
             .checked_add(repeated_message_encoded_len(entry.encoded_len()))
@@ -500,7 +508,7 @@ async fn collect_page(iterator: &mut DbIterator, page_size: usize) -> Result<Sca
                     retryable: false,
                 })
             })?;
-        if next_size > crate::MAX_MESSAGE_BYTES as usize - DONE_FIELD_ENCODED_LEN {
+        if next_size > max_bytes.saturating_sub(DONE_FIELD_ENCODED_LEN) {
             if entries.is_empty() {
                 return Err(VaulticDbError::ResourceExhausted {
                     message: "scan entry exceeds response byte limit".to_owned(),
@@ -508,16 +516,21 @@ async fn collect_page(iterator: &mut DbIterator, page_size: usize) -> Result<Sca
                 }
                 .into());
             }
+            *pending = Some(entry);
             return Ok(ScanResponse {
                 entries,
                 done: false,
+                ..Default::default()
             });
         }
         response_bytes = next_size;
         entries.push(entry);
     }
-    let done = iterator.next().await.map_err(storage_error)?.is_none();
-    Ok(ScanResponse { entries, done })
+    *pending = iterator.next().await.map_err(storage_error)?.map(|item| KeyValue {
+        key: item.key.to_vec(),
+        value: item.value.to_vec(),
+    });
+    Ok(ScanResponse { entries, done: pending.is_none(), ..Default::default() })
 }
 
 pub(crate) fn repeated_message_encoded_len(message_len: usize) -> usize {

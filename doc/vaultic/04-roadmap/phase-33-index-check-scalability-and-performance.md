@@ -4,8 +4,9 @@
 
 [← Phase 32](phase-32-scalable-legacy-metadata-bulk-import.md) · [Phase 34 →](phase-34-operational-monitoring-and-metrics-export.md)
 
-**Status: bounded implementation complete; production NFS validation reaches
-the SlateDB location scan; representative scale acceptance pending.**
+**Status: persistent streaming implemented and deployed; all production blob
+ranges delivered in a partial diagnostic, scan finalization still incomplete;
+representative scale acceptance pending.**
 
 The bounded checker implementation is available on the development branch. It
 includes pinned serializable read sessions, immutable legacy inventory fencing,
@@ -14,8 +15,10 @@ pack/reference/snapshot/path and analytics reductions, deterministic finding
 selection, global worker and RPC limits, and stage progress. Synthetic profiling
 has already driven spool/sort, audit-I/O, scan-page, key-range parallelism, and
 scratch-I/O optimizations. Production NFS runs removed the encryption-audit
-blocker and showed that the current paged SlateDB location scan still exceeds
-the ten-minute feedback window. The 50/500 GB NFS, native RADOS, and S3
+blocker and showed that the paged SlateDB location scan still exceeds
+the ten-minute feedback window. A subsequent persistent-stream diagnostic
+delivered all 256 ranges by 8m20s, but was interrupted before scan finalization
+or catalog join completed. The 50/500 GB NFS, native RADOS, and S3
 acceptance matrix remains open.
 
 **Goal:** make the complete `vaultic index check` practical at ten times the
@@ -374,6 +377,17 @@ join, or later validators. The evidence remains partial, not a clean check or an
 acceptance pass.
 
 ## Consolidated state and next steps
+
+The [streaming follow-up](phase-33-production-benchmark-evidence.md#local-streaming-follow-up-2026-09-22)
+implements step 1 below and the initial records/bytes/timing portion of step 2.
+Native owner tests, Go integration and focused race tests pass. After authorized
+deployment, all 256 production ranges delivered 376,346,710 records by 8m20s.
+Cancellation ended that diagnostic before the full `slatedb_scan` stage or catalog
+join finished, so it is neither a matched ten-minute result nor a clean check.
+The immediate handoff is separate spool-adoption/finalization measurement and
+read-session renewal across long non-database stages, then an uninterrupted
+bounded diagnostic. Per-scan backend-read attribution and continuation-age
+telemetry remain pending; no representative acceptance gate is closed.
 
 Implemented and retained:
 

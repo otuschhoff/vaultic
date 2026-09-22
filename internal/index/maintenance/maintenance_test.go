@@ -47,6 +47,51 @@ type gatedScanStore struct {
 	release chan struct{}
 }
 
+type streamOnlyStore struct {
+	*memoryStore
+	calls int
+}
+
+func (store *streamOnlyStore) ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error) {
+	return nil, false, errors.New("unexpected unary scan")
+}
+
+func (store *streamOnlyStore) ScanRange(ctx context.Context, prefix []byte, limit uint32, consume func([]daemon.KeyValue) error) error {
+	store.calls++
+	return scanRange(ctx, store.memoryStore, prefix, limit, consume)
+}
+
+func TestScanRangeWrappersPreserveStreamingAndReleaseAdmission(t *testing.T) {
+	source := &streamOnlyStore{memoryStore: &memoryStore{values: map[string][]byte{"b:1": {1}, "b:2": {2}}}}
+	store := &limitedStore{Store: withProductionStore(source), semaphore: make(chan struct{}, 1)}
+	for _, failConsumer := range []bool{false, true} {
+		count := 0
+		consumerErr := errors.New("consumer stopped")
+		err := scanRange(context.Background(), store, []byte("b:"), 1, func(entries []daemon.KeyValue) error {
+			if len(store.semaphore) != 1 {
+				t.Fatal("range did not retain RPC admission")
+			}
+			count += len(entries)
+			if failConsumer {
+				return consumerErr
+			}
+			return nil
+		})
+		if failConsumer && !errors.Is(err, consumerErr) {
+			t.Fatalf("consumer error: %v", err)
+		}
+		if !failConsumer && (err != nil || count != 2) {
+			t.Fatalf("count=%d err=%v", count, err)
+		}
+		if len(store.semaphore) != 0 {
+			t.Fatal("range leaked RPC admission")
+		}
+	}
+	if source.calls != 2 {
+		t.Fatalf("stream calls = %d", source.calls)
+	}
+}
+
 func (store *blockingMemoryStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	active := store.active.Add(1)
 	defer store.active.Add(-1)
