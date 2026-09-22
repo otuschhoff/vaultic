@@ -381,6 +381,20 @@ func (spool *locationSpool) allocateBuffer() error {
 }
 
 func (spool *locationSpool) add(tuple locationTuple) error {
+	if spool.packSummaries {
+		summary := packContributionSummary{id: tuple.BlobID}
+		if tuple.Type == 0 {
+			summary.present = true
+		} else {
+			summary.count, summary.payload = 1, tuple.Length
+			summary.types = summarizePackType(0, schema.BlobType(tuple.Type))
+		}
+		tuple = summary.tuple()
+	}
+	return spool.addEncoded(tuple)
+}
+
+func (spool *locationSpool) addEncoded(tuple locationTuple) error {
 	if spool.sealed {
 		return fmt.Errorf("checker location spool is sealed")
 	}
@@ -397,16 +411,6 @@ func (spool *locationSpool) add(tuple locationTuple) error {
 		if err := spool.allocateBuffer(); err != nil {
 			return err
 		}
-	}
-	if spool.packSummaries {
-		summary := packContributionSummary{id: tuple.BlobID}
-		if tuple.Type == 0 {
-			summary.present = true
-		} else {
-			summary.count, summary.payload = 1, tuple.Length
-			summary.types = summarizePackType(0, schema.BlobType(tuple.Type))
-		}
-		tuple = summary.tuple()
 	}
 	spool.buffer = append(spool.buffer, tuple)
 	if len(spool.buffer) == cap(spool.buffer) {
@@ -1324,6 +1328,60 @@ type packContributionSummary struct {
 	payload uint64
 }
 
+const packContributionEntryBudget = 256
+
+type packContributionBuffer struct {
+	spool *locationSpool
+	limit int
+	packs map[vaultic.ID]packContributionSummary
+	err   error
+}
+
+func (buffer *packContributionBuffer) add(id vaultic.ID, blobType schema.BlobType, length uint64) error {
+	if buffer.err != nil {
+		return buffer.err
+	}
+	if err := buffer.spool.ctx.Err(); err != nil {
+		buffer.err = err
+		return err
+	}
+	summary, found := buffer.packs[id]
+	if !found {
+		if len(buffer.packs) >= buffer.limit {
+			if err := buffer.flush(); err != nil {
+				return err
+			}
+		}
+		if buffer.packs == nil {
+			buffer.packs = make(map[vaultic.ID]packContributionSummary)
+		}
+		summary.id = id
+	}
+	if summary.count == math.MaxUint64 || length > math.MaxUint64-summary.payload {
+		buffer.err = fmt.Errorf("pack %s contribution overflow", id.String())
+		return buffer.err
+	}
+	summary.count++
+	summary.payload += length
+	summary.types = summarizePackType(summary.types, blobType)
+	buffer.packs[id] = summary
+	return nil
+}
+
+func (buffer *packContributionBuffer) flush() error {
+	if buffer.err != nil {
+		return buffer.err
+	}
+	for _, summary := range buffer.packs {
+		if err := buffer.spool.addEncoded(summary.tuple()); err != nil {
+			buffer.err = err
+			return err
+		}
+	}
+	clear(buffer.packs)
+	return nil
+}
+
 func (summary packContributionSummary) tuple() locationTuple {
 	var present uint64
 	if summary.present {
@@ -1351,11 +1409,62 @@ type packContributionIterator struct {
 }
 
 func newPackContributionIterator(spool *locationSpool) (*packContributionIterator, error) {
+	if spool.packSummaries && !spool.sealed {
+		if err := spool.finishBuffer(); err != nil {
+			return nil, err
+		}
+		if err := spool.compactPackMemory(); err != nil {
+			return nil, err
+		}
+	}
 	iterator, err := spool.iterator()
 	if err != nil {
 		return nil, err
 	}
 	return &packContributionIterator{iterator: iterator, partials: spool.packSummaries}, nil
+}
+
+func (spool *locationSpool) compactPackMemory() error {
+	if len(spool.memoryRuns) < 2 || spool.memoryUsed >= spool.memoryBytes {
+		return nil
+	}
+	limit := (spool.memoryBytes - spool.memoryUsed) / packContributionEntryBudget
+	if limit == 0 {
+		return nil
+	}
+	packs := make(map[vaultic.ID]packContributionSummary)
+	for _, run := range spool.memoryRuns {
+		for _, tuple := range run {
+			if err := spool.ctx.Err(); err != nil {
+				return err
+			}
+			summary, found := packs[tuple.BlobID]
+			if !found {
+				if uint64(len(packs)) >= limit {
+					return nil
+				}
+				summary.id = tuple.BlobID
+			}
+			if err := summary.addPartial(tuple); err != nil {
+				return err
+			}
+			packs[tuple.BlobID] = summary
+		}
+	}
+	records := make([]locationTuple, 0, len(packs))
+	for _, summary := range packs {
+		records = append(records, summary.tuple())
+	}
+	slices.SortFunc(records, compareLocationTuple)
+	if err := spool.ctx.Err(); err != nil {
+		return err
+	}
+	for _, run := range spool.memoryRuns {
+		spool.memoryUsed -= uint64(cap(run)) * locationTupleMemorySize
+	}
+	spool.memoryUsed += uint64(cap(records)) * locationTupleMemorySize
+	spool.memoryRuns = [][]locationTuple{records}
+	return nil
 }
 
 func optionalPackContributionIterator(spool *locationSpool) (*packContributionIterator, error) {

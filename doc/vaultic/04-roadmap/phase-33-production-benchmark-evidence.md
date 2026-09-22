@@ -862,6 +862,71 @@ stage at 84-85s, followed by catalog work at 61s and encryption audit at 50-51s.
 Further optimization should reattribute these remaining intervals rather than
 assuming the earlier per-record merge bottleneck still dominates.
 
+### Bounded Scan-Time Pack Aggregation (r15-r16)
+
+After commit `cbdacda92`, the next candidate aggregates pack contributions in
+partition-local maps before appending partial summaries to the encrypted spool.
+Half the pack-spool budget remains available for retained partition buffers;
+the other half is divided among configured scan workers for active maps. Entry
+admission uses a conservative 256-byte allowance, not an exact Go heap/RSS bound.
+Small budgets retain the existing tuple path. At the entry limit, the map flushes
+exact partial summaries to the existing spill-capable spool; no global per-record
+lock is added. Count/payload overflow and cancellation are checked, and failed
+flushes are sticky so retry cannot replay partially emitted contributions.
+
+R15 removed scratch I/O but left many retained memory runs for the final ordered
+heap. R16 adds a bounded reduction of those memory runs by pack ID before final
+iteration. It uses only estimated unused spool headroom, leaves original runs
+untouched on cancellation/error or when the map limit is reached, and replaces
+them with one sorted summary run only after successful reduction. Disk runs
+continue through the existing encrypted merge path. Both changes affect only
+authoritative pack summaries, not full-check location comparison semantics.
+
+Tests compare map limits 1, 3 and 128 with the original summary spool through
+multiple flush/spill passes, including duplicate/mixed-type contributions. Tests
+cover repeated empty flushes, count/payload overflow, cancellation, sticky scratch
+failure and reservation cleanup. Memory reduction tests cover exact results,
+successful compaction, no headroom, entry-limit fallback and cancellation without
+mutating the retained runs. All affected maintenance, telemetry and index-command
+race suites pass, along with editor diagnostics and diff checks.
+
+Both diagnostics used the unchanged epoch-39 daemon, HDD-NFS paths, 96 GiB limits,
+32 workers/RPCs, lightweight telemetry and ten-minute cap, without overlapping
+builds/tests. R15 CLI `bin/phase33-scan-aggregate/linux-amd64/vaultic` SHA-256 is
+`9d244f7420ed2e2b9e777720875becfec254e4fcbe3ed04d0f27364bd19fe2a4`.
+R16 CLI `bin/phase33-scan-aggregate-reduce/linux-amd64/vaultic` SHA-256 is
+`afd0df5f93deb1dd9681ab197d601cb0805605ac8d871ef724175f034dd7495c`.
+Artifacts are under `db.test/phase33-production-2026-09-22-stream32-scan-aggregate-r15`
+and `db.test/phase33-production-2026-09-22-stream32-scan-aggregate-reduce-r16`.
+
+| Measurement | r13/r14 baseline | r15 aggregation | r16 plus memory reduction |
+| --- | ---: | ---: | ---: |
+| Audit | 50-51s | 51s | 51s |
+| Scan | 84-85s | 83s | 82s |
+| Finalization | 6-8s | 2s | 2s |
+| Catalog interval | 61s | 73s | 67s |
+| Parallel validation | 31s | 34s | 34s |
+| Total wall including cleanup | 3m57.365s mean | 4m04.96s | 3m57.55s |
+| CLI CPU seconds | 952.835 mean | 828.89 | 813.10 |
+| Peak RSS, KiB | 53,129,728-55,545,860 | 14,428,988 | 14,431,300 |
+| Scratch reservation peak, bytes | 15,657,805,264 | 0 | 0 |
+| Disk merge groups | 24 | 0 | 0 |
+
+Both exited zero and matched r14's logical JSON results exactly after excluding
+only `resources` and `consistency`. Both scanned all 376,346,710 blob records in
+256 ranges, counted 379,934,385 distinct locations, and retained 419,530 warnings.
+Manifests verified, scratch was empty, no swap occurred, and writer health checks
+showed zero active transactions/intents. No service binaries were replaced.
+
+R16 reduces CPU about 14.7% versus the prior mean and peak RSS about 73%, while
+eliminating scratch I/O for this workload. It does not establish lower runtime:
+total wall is essentially unchanged and the catalog interval remains longer.
+This is a scalability candidate, not a throughput win. It has one production
+measurement in its final form; cache effects and host variability remain
+uncontrolled. Full differential and cross-backend acceptance remain pending.
+Before claiming further runtime gains, profile the changed catalog path and scan
+waits; reduced allocation/I/O alone does not demonstrate a shorter critical path.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

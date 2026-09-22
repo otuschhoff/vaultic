@@ -1595,6 +1595,7 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 	group, groupContext := errgroup.WithContext(ctx)
 	group.SetLimit(int(workers))
 	partitionMemory := max(result.memoryBytes/256, locationTupleMemorySize)
+	aggregationMemory := packs.memoryBytes / 2 / uint64(max(workers, 1))
 	locationPartitions := make([]*locationSpool, 256)
 	packPartitions := make([]*locationSpool, 256)
 	var partitionCounts [256]uint64
@@ -1616,15 +1617,23 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 				return err
 			}
 			locationPartitions[partition] = locations
-			packLocations, err := newLocationMultisetSpool(groupContext, packs.scratch, partitionMemory, packs.fanIn)
+			packMemory := partitionMemory
+			if packs.packSummaries && partitionMemory >= 2*locationTupleMemorySize && aggregationMemory >= packContributionEntryBudget {
+				packMemory = partitionMemory / 2
+			}
+			packLocations, err := newLocationMultisetSpool(groupContext, packs.scratch, packMemory, packs.fanIn)
 			if err != nil {
 				return err
 			}
 			packPartitions[partition] = packLocations
 			packLocations.packSummaries = packs.packSummaries
+			var contributions *packContributionBuffer
+			if packMemory < partitionMemory {
+				contributions = &packContributionBuffer{spool: packLocations, limit: int(aggregationMemory / packContributionEntryBudget)}
+			}
 			var previousID schema.ID
 			hasPrevious := false
-			return scanRange(groupContext, store, prefix, scanPageSize, func(entries []daemon.KeyValue) error {
+			err = scanRange(groupContext, store, prefix, scanPageSize, func(entries []daemon.KeyValue) error {
 				for _, entry := range entries {
 					if err := groupContext.Err(); err != nil {
 						return err
@@ -1667,7 +1676,11 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 							UncompressedLength: uint64(item.UncompressedSize)}); err != nil {
 							return err
 						}
-						if err := packLocations.add(locationTuple{
+						if contributions != nil {
+							if err := contributions.add(vaultic.ID(item.PackID), item.Type, uint64(item.Length)); err != nil {
+								return err
+							}
+						} else if err := packLocations.add(locationTuple{
 							BlobID: vaultic.ID(item.PackID), PackID: vaultic.ID(parsed.ID), Type: uint8(item.Type),
 							Offset: item.Offset, Length: uint64(item.Length), UncompressedLength: uint64(item.UncompressedSize),
 						}); err != nil {
@@ -1677,6 +1690,13 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 				}
 				return nil
 			})
+			if err != nil {
+				return err
+			}
+			if contributions != nil {
+				return contributions.flush()
+			}
+			return nil
 		})
 	}
 	if err := group.Wait(); err != nil {

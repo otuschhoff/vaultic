@@ -600,6 +600,197 @@ func TestLocationSpoolMergeHonorsScratchBudget(t *testing.T) {
 	}
 }
 
+func TestPackSummaryCompactsMemoryWithinHeadroom(t *testing.T) {
+	for _, mode := range []string{"compact", "no_headroom", "limited", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			spool, err := newLocationMultisetSpool(ctx, scratch, 1<<20, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spool.packSummaries = true
+			for range 32 {
+				records := make([]locationTuple, 128)
+				for index := range records {
+					records[index] = locationTuple{BlobID: vaultic.ID{byte(index)}, Type: 1, Offset: 2, Length: 6}
+				}
+				spool.memoryRuns = append(spool.memoryRuns, records)
+				spool.memoryUsed += uint64(cap(records)) * locationTupleMemorySize
+			}
+			initialUsed := spool.memoryUsed
+			switch mode {
+			case "no_headroom":
+				spool.memoryBytes = initialUsed
+			case "limited":
+				spool.memoryBytes = initialUsed + packContributionEntryBudget
+			case "cancel":
+				cancel()
+			}
+			iterator, err := newPackContributionIterator(spool)
+			if mode == "cancel" {
+				if !errors.Is(err, context.Canceled) || spool.memoryUsed != initialUsed {
+					t.Fatalf("cancel err=%v used=%d", err, spool.memoryUsed)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantRuns := 32
+				if mode == "compact" {
+					wantRuns = 1
+				}
+				if len(spool.memoryRuns) != wantRuns || spool.memoryUsed > spool.memoryBytes {
+					t.Fatal("unexpected memory compaction")
+				}
+				for index := range 128 {
+					summary, found, err := iterator.next()
+					if err != nil || !found || summary.id != (vaultic.ID{byte(index)}) || summary.count != 64 || summary.payload != 192 {
+						t.Fatalf("summary=%+v found=%t err=%v", summary, found, err)
+					}
+				}
+				if _, found, err := iterator.next(); found || err != nil {
+					t.Fatalf("EOF found=%t err=%v", found, err)
+				}
+				if err := iterator.close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := spool.close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPackContributionBufferMatchesSpool(t *testing.T) {
+	for _, limit := range []int{1, 3, 128} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			var expected []packContributionSummary
+			for _, aggregate := range []bool{false, true} {
+				scratch, err := newCheckScratch(t.TempDir(), 8<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scratch.close()
+				spool, err := newLocationMultisetSpool(context.Background(), scratch, 8*locationTupleMemorySize, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				spool.packSummaries = true
+				buffer := &packContributionBuffer{spool: spool, limit: limit}
+				for ordinal := 0; ordinal < 256; ordinal++ {
+					for _, blobType := range []schema.BlobType{schema.BlobData, schema.BlobTree, schema.BlobData} {
+						id := vaultic.ID{byte(ordinal % 17)}
+						if aggregate {
+							err = buffer.add(id, blobType, 7)
+							if len(buffer.packs) > limit {
+								t.Fatal("map exceeded entry limit")
+							}
+						} else {
+							err = spool.add(locationTuple{BlobID: id, Type: uint8(blobType), Length: 7})
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if err := buffer.flush(); err != nil {
+					t.Fatal(err)
+				}
+				if err := buffer.flush(); err != nil {
+					t.Fatal(err)
+				}
+				iterator, err := newPackContributionIterator(spool)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var actual []packContributionSummary
+				for {
+					summary, found, err := iterator.next()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !found {
+						break
+					}
+					actual = append(actual, summary)
+				}
+				if aggregate && !slices.Equal(actual, expected) {
+					t.Fatalf("summaries=%+v want=%+v", actual, expected)
+				}
+				expected = actual
+				if err := errors.Join(iterator.close(), spool.close()); err != nil {
+					t.Fatal(err)
+				}
+				if scratch.used != 0 {
+					t.Fatal("reservation leak")
+				}
+			}
+		})
+	}
+}
+
+func TestPackContributionBufferFailureIsSticky(t *testing.T) {
+	for _, mode := range []string{"cancel", "scratch", "count", "payload"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			scratch, err := newCheckScratch(t.TempDir(), 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			spool, err := newLocationMultisetSpool(ctx, scratch, locationTupleMemorySize, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spool.packSummaries, spool.diskMode = true, true
+			buffer := &packContributionBuffer{spool: spool, limit: 1}
+			id := vaultic.ID{1}
+			if err := buffer.add(id, schema.BlobData, 1); err != nil {
+				t.Fatal(err)
+			}
+			summary := buffer.packs[id]
+			switch mode {
+			case "cancel":
+				cancel()
+			case "count":
+				summary.count = ^uint64(0)
+			case "payload":
+				summary.payload = ^uint64(0)
+			}
+			buffer.packs[id] = summary
+			if mode == "scratch" {
+				err = buffer.flush()
+			} else {
+				err = buffer.add(id, schema.BlobData, 1)
+			}
+			if err == nil {
+				t.Fatal("accepted failed aggregation")
+			}
+			if mode == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancel: %v", err)
+			}
+			scratch.maxBytes = 1 << 20
+			if buffer.flush() != err || buffer.add(id, schema.BlobData, 1) != err {
+				t.Fatal("failure was not sticky")
+			}
+			if err := spool.close(); err != nil {
+				t.Fatal(err)
+			}
+			if scratch.used != 0 {
+				t.Fatal("reservation leak")
+			}
+		})
+	}
+}
+
 func TestPackSummarySpoolMatchesMultiset(t *testing.T) {
 	for _, memory := range []uint64{8 * locationTupleMemorySize, 1 << 20} {
 		t.Run(fmt.Sprintf("memory=%d", memory), func(t *testing.T) {
