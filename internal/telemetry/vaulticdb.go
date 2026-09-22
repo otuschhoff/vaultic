@@ -395,7 +395,10 @@ func vaulticDBObjectMetrics(attribution daemon.AttributionSnapshot) []Metric {
 
 func timingMetric(name string, timing daemon.TimingSnapshot, labels ...Label) Metric {
 	availability := AvailabilityExact
-	if len(timing.LatencyBucketUpperUS) == 0 || len(timing.LatencyBucketUpperUS) != len(timing.LatencyBucketCounts) {
+	counts := cumulativeBucketCounts(timing.LatencyBucketCounts)
+	if len(timing.LatencyBucketUpperUS) == 0 || len(timing.LatencyBucketUpperUS) != len(counts) ||
+		counts[len(counts)-1] != timing.Completed || timing.MaxUS > timing.TotalUS ||
+		timing.Completed == 0 && (timing.TotalUS != 0 || timing.MaxUS != 0) {
 		availability = AvailabilityUnavailable
 		return Metric{Name: name, Kind: MetricHistogram, Unit: "microseconds", Availability: availability, Labels: labels, BucketUpper: []uint64{^uint64(0)}, BucketCounts: []uint64{0}}
 	}
@@ -403,7 +406,7 @@ func timingMetric(name string, timing daemon.TimingSnapshot, labels ...Label) Me
 		Name: name, Kind: MetricHistogram, Unit: "microseconds", Availability: availability, Labels: labels,
 		Count: timing.Completed, Sum: timing.TotalUS, Maximum: timing.MaxUS,
 		BucketUpper:  append([]uint64(nil), timing.LatencyBucketUpperUS...),
-		BucketCounts: cumulativeBucketCounts(timing.LatencyBucketCounts),
+		BucketCounts: counts,
 	}
 }
 

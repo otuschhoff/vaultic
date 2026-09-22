@@ -8,6 +8,22 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 )
 
+func TestTimingMetricRejectsIncoherentConcurrentSnapshot(t *testing.T) {
+	for _, timing := range []daemon.TimingSnapshot{
+		{Completed: 2, TotalUS: 12, MaxUS: 8, LatencyBucketUpperUS: vaulticLatencyBounds(), LatencyBucketCounts: []uint64{1, 0, 0, 0, 0, 0, 0, 0}},
+		{Completed: 0, TotalUS: 12, MaxUS: 8, LatencyBucketUpperUS: vaulticLatencyBounds(), LatencyBucketCounts: make([]uint64, 8)},
+		{Completed: 1, TotalUS: 4, MaxUS: 8, LatencyBucketUpperUS: vaulticLatencyBounds(), LatencyBucketCounts: []uint64{1, 0, 0, 0, 0, 0, 0, 0}},
+	} {
+		metric := timingMetric("object_get_latency", timing, Label{Name: "role", Value: "database"})
+		if metric.Availability != AvailabilityUnavailable {
+			t.Fatalf("incoherent snapshot reported as exact: %+v", metric)
+		}
+		if err := validateMetrics([]Metric{metric}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestVaulticDBComponentMapsBoundedStatus(t *testing.T) {
 	timing := daemon.TimingSnapshot{
 		Completed: 2, Successes: 2, TotalUS: 12, MaxUS: 8,

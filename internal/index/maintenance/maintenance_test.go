@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"runtime/pprof"
 	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -302,6 +305,161 @@ func TestLoadSlateDBLocationsFinalizesSpilledPartitions(t *testing.T) {
 	}
 }
 
+func TestLoadSlateDBLocationsFinalizationBoundsAndCleanup(t *testing.T) {
+	for _, mode := range []string{"complete", "cancel", "scratch_limit"} {
+		for _, workers := range []uint{1, 4} {
+			t.Run(fmt.Sprintf("%s/workers=%d", mode, workers), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					profile, err := monitor.DecodeExperimentProfile([]byte(`{
+						"schema_version":1,"profile_id":"check-finalize-test","enabled":true,"test_only":true,
+						"scenario":"local","backend":"scratch","mode":"service","operation":"check",
+						"role":"scratch","method":"put","access_pattern":"sequential","target_id":"scratch-target",
+						"resource_id":"scratch-device","placement":"inside_service","latency_semantics":"service_completion",
+						"interpretation":"additive","endpoint":"dependency","acknowledgement":"unknown",
+						"delay_us":1000000,"jitter_us":0,"tail_delay_us":0,"tail_every":0,"correlated_for":0,
+						"bandwidth_bytes_per_second":0,"concurrency":32,"deadline_ms":0,"max_retries":0,
+						"retry_error":"none","seed":34,"holds":["backend_capacity"]
+					}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					controller, err := monitor.NewScenarioHarness().Controller(profile, monitor.ExperimentTarget{
+						ID: "scratch-target", Disposable: true, Confirmed: true,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					parent := t.TempDir()
+					scratch, err := newCheckScratchWithScenario(ctx, parent, 1<<20, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer scratch.close()
+					store := &memoryStore{values: make(map[string][]byte)}
+					var expectedLocations, expectedPacks []locationTuple
+					for partition := byte(0); partition < 8; partition++ {
+						for ordinal := byte(1); ordinal <= 3; ordinal++ {
+							blobID, packID := schema.ID{partition, ordinal}, schema.ID{42}
+							store.set(t, schema.BlobKey(blobID), schema.BlobRecord{Locations: []schema.BlobLocation{{
+								PackID: packID, Type: schema.BlobData, Length: 1,
+							}}})
+							expectedLocations = append(expectedLocations, locationTuple{
+								BlobID: vaultic.ID(blobID), PackID: vaultic.ID(packID), Type: uint8(schema.BlobData), Length: 1,
+							})
+							expectedPacks = append(expectedPacks, locationTuple{
+								BlobID: vaultic.ID(packID), PackID: vaultic.ID(blobID), Type: uint8(schema.BlobData), Length: 1,
+							})
+						}
+					}
+					locations, err := newLocationSpool(ctx, scratch, 512*locationTupleMemorySize, 2)
+					if err != nil {
+						t.Fatal(err)
+					}
+					packs, err := newLocationMultisetSpool(ctx, scratch, 512*locationTupleMemorySize, 2)
+					if err != nil {
+						t.Fatal(err)
+					}
+					entered, result := make(chan struct{}), make(chan error, 1)
+					go func() {
+						result <- loadSlateDBLocations(ctx, store, locations, packs, workers, func() {
+							scratch.scenario = controller
+							if mode == "scratch_limit" {
+								scratch.maxBytes = scratch.used
+							}
+							close(entered)
+						})
+					}()
+					<-entered
+					synctest.Wait()
+					if mode != "scratch_limit" {
+						if active := controller.Observation().Active; active != uint64(workers) {
+							t.Errorf("active finalizers=%d, want %d", active, workers)
+						}
+					}
+					if mode == "cancel" {
+						cancel()
+					}
+					err = <-result
+					if mode == "complete" && err != nil || mode == "cancel" && !errors.Is(err, context.Canceled) || mode == "scratch_limit" && err == nil {
+						t.Fatalf("%s result: %v", mode, err)
+					}
+					if active := controller.Observation().Active; active != 0 {
+						t.Fatalf("finalizers still active after return: %d", active)
+					}
+					scratch.scenario = nil
+					for index, spool := range []*locationSpool{locations, packs} {
+						if spool.memoryUsed > spool.memoryBytes {
+							t.Fatal("adopted spool exceeded memory budget")
+						}
+						if mode == "complete" {
+							iterator, err := spool.iterator()
+							if err != nil {
+								t.Fatal(err)
+							}
+							var actual []locationTuple
+							for {
+								tuple, found, err := iterator.next()
+								if err != nil {
+									t.Fatal(err)
+								}
+								if !found {
+									break
+								}
+								actual = append(actual, tuple)
+							}
+							if err := iterator.close(); err != nil {
+								t.Fatal(err)
+							}
+							expected := [][]locationTuple{expectedLocations, expectedPacks}[index]
+							slices.SortFunc(expected, compareLocationTuple)
+							if !slices.Equal(actual, expected) {
+								t.Fatalf("spool %d result mismatch: got %d tuples, want %d", index, len(actual), len(expected))
+							}
+						}
+						if err := spool.close(); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if scratch.used != 0 || scratch.peak > scratch.maxBytes {
+						t.Fatalf("scratch used=%d peak=%d limit=%d", scratch.used, scratch.peak, scratch.maxBytes)
+					}
+					if err := scratch.close(); err != nil {
+						t.Fatal(err)
+					}
+					entries, err := os.ReadDir(parent)
+					if err != nil || len(entries) != 0 {
+						t.Fatalf("scratch cleanup: entries=%d err=%v", len(entries), err)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestCheckProgressLabelsCPUProfiles(t *testing.T) {
+	scratch := &checkScratch{ctx: context.Background()}
+	reporter := newCheckProgressReporter(CheckOptions{}, scratch)
+	defer reporter.close()
+	reporter.set("slatedb_finalize")
+	var profile bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&profile, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(profile.Bytes(), []byte(`"check_stage":"slatedb_finalize"`)) {
+		t.Fatal("stage label missing from goroutine profile")
+	}
+	reporter.close()
+	profile.Reset()
+	if err := pprof.Lookup("goroutine").WriteTo(&profile, 1); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(profile.Bytes(), []byte(`"check_stage":"slatedb_finalize"`)) {
+		t.Fatal("stage profile label leaked after check")
+	}
+}
+
 func TestCheckTelemetryIncludesFinalReadSessionValidation(t *testing.T) {
 	validationErr := fmt.Errorf("session expired")
 	store := &validatingMemoryStore{
@@ -484,7 +642,7 @@ func TestCheckScratchTelemetryDoesNotSucceedCanceledRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	metrics := telemetry.Component(time.Now()).Metrics
-	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "cancellation"}) != 1 || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "cancellation"}) != checkRunHeaderSize || checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "failure"}) != 0 {
+	if checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "cancellation"}) != 1 || checkMetricValue(metrics, "dependency_bytes", map[string]string{"role": "scratch", "outcome": "cancellation"}) != 0 || checkMetricValue(metrics, "dependency_requests", map[string]string{"role": "scratch", "outcome": "failure"}) != 0 {
 		t.Fatalf("scratch telemetry = %+v", metrics)
 	}
 }

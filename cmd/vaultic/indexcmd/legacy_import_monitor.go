@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
-	"github.com/otuschhoff/vaultic/internal/index/legacyimport"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
@@ -43,7 +42,11 @@ func (source *legacyImportMonitorSource) SetStatsProvider(provider legacyImportS
 	source.mu.Unlock()
 }
 
-func (source *legacyImportMonitorSource) Snapshot(ctx context.Context, scheduler *legacyimport.SchedulerTelemetry, now time.Time) (telemetry.MonitorSnapshot, error) {
+type monitorComponentSource interface {
+	Component(time.Time) telemetry.ComponentSnapshot
+}
+
+func (source *legacyImportMonitorSource) Snapshot(ctx context.Context, scheduler monitorComponentSource, now time.Time) (telemetry.MonitorSnapshot, error) {
 	source.mu.RLock()
 	client := source.client
 	statsProvider := source.stats
@@ -195,7 +198,7 @@ type legacyImportMonitorExport struct {
 	now     func() time.Time
 }
 
-func startLegacyImportMonitorExport(ctx context.Context, options importMonitorExportOptions, scheduler *legacyimport.SchedulerTelemetry, source *legacyImportMonitorSource) (*legacyImportMonitorExport, error) {
+func startLegacyImportMonitorExport(ctx context.Context, options importMonitorExportOptions, scheduler monitorComponentSource, source *legacyImportMonitorSource) (*legacyImportMonitorExport, error) {
 	if options.URL == "" && options.JSONLPath == "" {
 		return nil, nil
 	}

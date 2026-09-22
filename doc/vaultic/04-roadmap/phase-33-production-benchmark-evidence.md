@@ -191,12 +191,222 @@ zero active transactions/intents, no diagnostic process remained, and scratch
 cleanup left no session directories. Only the diagnostic CLI changed; production
 service binaries remain the r1 deployment.
 
-Next: finalize pending partition buffers inside the bounded worker lifecycle or
-in a bounded finalization pool before serial ownership transfer, preserving
-parent cancellation, scratch admission, memory bounds and exact results. Measure
-that change in an isolated bounded repeat. Then profile catalog joins and later
-validators and run full differential coverage. Full differential success and
-the representative acceptance matrix remain open.
+### Bounded parallel finalization
+
+The follow-up to `d4d5d223e` flushes pending partition buffers in a separate
+`errgroup` capped by `--check-workers`, after all scan workers join and before
+serial ownership transfer. Each worker finishes one partition's location and
+pack buffers sequentially, so at most one run writer per worker is active.
+Existing partition buffers, shared scratch reservations and run-name allocation
+are reused; no additional tuple buffers or per-partition memory allowances are
+introduced. Each active writer retains the existing 1 MiB output buffer and
+encryption allocations, outside the tuple-memory budget.
+
+Workers use the finalization group's cancellation context. All workers join on
+success or failure before cleanup; successful ownership transfer restores the
+parent context and checks caller cancellation. The `slatedb_finalize` stage
+remains separate, allowing measurement of this tail independently of delivery.
+
+Focused virtual-time regressions cover one and four simultaneous finalizers,
+exact sorted location/pack results, memory bounds, cancellation during active
+writes, scratch exhaustion, joined workers, released reservations and scratch
+directory cleanup. The existing spill and scan regressions pass, as do:
+
+```text
+go test -race ./internal/index/maintenance ./cmd/vaultic/indexcmd -count=1
+make vaultic BIN_DIR=bin/phase33-parallel-finalize VAULTIC_BUILD_TAGS=profile
+```
+
+Diagnostic r3 uses that separate CLI against the unchanged epoch-38 daemon,
+with the same 32-worker/RPC, 96 GiB memory/scratch and ten-minute limits.
+Tests and builds completed before measurement; no local test/build workloads
+overlap this run, and there is no cache drop, daemon replacement or restart.
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/phase33-production-2026-09-22-stream32-parallel-finalize-r3/`.
+The CLI SHA-256 is
+`711d95b7c08bc7192c6725596f61b6d175c70740fcefb632b49efbb1edb7e248`;
+the daemon hash is unchanged from r1. Starting host load averages were
+2.00/3.64/8.91. Cache state still differs from earlier attempts; a single bounded
+repeat is not a matched end-to-end speedup measurement.
+
+R3 entered `slatedb_scan` at the 1m55s sample and remained there until the
+ten-minute timeout (wrapper exit 124). It delivered 375,902,743 records in
+37,720 chunks, totaling 35,514,250,080 protobuf bytes; 250 of 256 ranges completed.
+Neither `slatedb_finalize` nor `catalog_join` was reached, so production behavior
+and performance of the new finalizer pool remain unverified. The slower scan
+cannot be attributed to a finalization path that did not execute.
+
+| Metric | Capped parallel-finalize r3 |
+|---|---:|
+| Wall time including cleanup | 10m19.20s |
+| CLI user / system CPU | 1,440.90 s / 174.49 s |
+| CLI peak RSS | 101,242,676 KiB (96.6 GiB) |
+| Swap | 0 |
+| Encrypted scratch peak | 59,055,812,608 B (55.0 GiB) |
+| Merge passes | 0 |
+| Daemon CPU | 6,433.03 s |
+| Iterator setup / service | 13.301 s / 14,120.982 worker-s |
+| Client receive / consume | 13,409.859 s / 1,752.187 s |
+
+The artifact manifest verified. Scratch cleanup left no session directories,
+only the daemon process remained, and the writer stayed read-write at epoch 38
+with zero active transactions and write intents. Production service binaries
+were not replaced. Local exact-result, concurrency and race tests pass; this
+production run is incomplete evidence, not finalization or full-check acceptance.
+
+Next: obtain stage-scoped finalization timing without spending most of each
+feedback window rescanning the database, and investigate scan/audit variability.
+Then assess finalization completion, profile catalog joins and later validators,
+and run full differential coverage. The ten-minute diagnostic limit remains in
+force; full differential success and the representative acceptance matrix remain
+open.
+
+### Attribution Gate
+
+The optimization objective is minimum complete-check runtime and maximum useful
+throughput, not minimum CPU or RAM consumption. Additional resource use is
+acceptable when it improves that objective within explicit safety limits.
+Further tuning requires an attributable bottleneck hypothesis, a distinguishing
+measurement and a matched correctness/throughput comparison.
+
+R1-r3 captured aggregate resource use but did not capture production CPU stacks
+or persist checker dependency-wait snapshots. Those runs do not establish which
+functions consumed CPU or distinguish storage latency from scheduling and
+backpressure inside iterator service. Low host I/O-wait is not evidence that
+application storage waits are absent. Service, receive and consume timers are
+overlapping elapsed worker times, not CPU-time partitions.
+
+The attribution follow-up adds opt-in `index check --monitor-export-jsonl` using
+the existing bounded asynchronous exporter: five-second checker and daemon/cache
+snapshots, a four-snapshot queue, two-second collection/drain timeouts and
+explicit dropped/failure counters. Initial spill runs expose separate sort,
+encode/write, buffered flush and `fsync` elapsed histograms. Measurements occur
+at run boundaries, not per record. Encode/write includes encryption, allocation,
+buffered writes and any full-buffer kernel writes; CPU profiles distinguish
+those costs. These stage timers currently cover initial spill runs, not the
+later merge writer. `slatedb_finalize` maps to the finalization telemetry phase.
+
+The r4 attribution diagnostic captures a Go CPU profile, a three-second scan
+execution trace, five-second goroutine and Linux thread/wait-channel samples,
+and timestamped daemon `perf` CPU call stacks with context-switch records.
+The unchanged deployed daemon has symbols and frame pointers. Profiling is
+local, artifacts are protected, no service restart is required, and the check
+retains the ten-minute cap. Profiling overhead means this is an attribution
+run, not a clean performance comparison. Tests/builds finish before measurement.
+
+Collection uses the profile-build CLI's existing `--cpu-profile DIR` and
+`--listen-profile 127.0.0.1:PORT`, plus the checker's `--monitor-export-jsonl FILE`.
+The trace comes from `/debug/pprof/trace?seconds=3`, goroutine stacks from
+`/debug/pprof/goroutine?debug=1`, and daemon sampling uses
+`perf record -e cpu-clock -F 49 --call-graph fp --switch-events --timestamp
+--clockid mono -p PID`. All collectors stop before artifact checksums are made.
+Context-switch capture can produce multi-GiB artifacts; retain it for attribution
+runs, not ordinary throughput comparisons. The monitor performs serial status
+requests outside scan admission, adding at most one concurrent control request
+beside the existing single renewal request. Export drops/failures and incomplete
+profiles must be reported, not silently treated as zero waits.
+
+For each experiment, report stage wall time and records/s first, then process
+CPU-seconds, peak RSS, scratch and backend bytes/record. Attribute CPU using flat
+and cumulative stack profiles; attribute waits using their owner, downstream
+resource, contention count and elapsed distribution. Do not add nested profile
+percentages or overlapping worker spans, and do not count intentionally idle
+maintenance threads as bottlenecks. Use matched unprofiled repeats to accept a
+performance change after an attribution run identifies the controlling work.
+
+The raw r4 artifacts are under
+`/volume2/NASDA2/rustic/db.test/phase33-production-2026-09-22-stream32-attribution-r4/`.
+The measured CLI SHA-256 is
+`ee8b0cf16d03f36317afb753fa2ddd69f105d2ef83b9083c3d3e6f300e150cf6`.
+The audit ended at 52s; timeout 124 stopped `slatedb_scan` with 376,304,659 records,
+37,762 chunks and 252/256 ranges complete. Finalization was not reached. Check
+wall time including cleanup was 10m18.67s, CLI CPU was 1,951.47s user plus
+191.90s system, peak RSS was 103,139,192 KiB (98.4 GiB), scratch was 55.0 GiB,
+and swap was zero. Daemon status deltas include the subsequent perf drain:
+6,848.29 CPU-seconds over 702.067s, not just checker wall time.
+
+The raw manifest verified; the nested CLI CPU profile and derived reports have
+supplemental checksums under `analysis/`. The writer stayed read-write at epoch
+38 with zero transactions/intents; only the daemon remained and scratch was
+empty. The service binaries are unchanged.
+
+#### Measured Wait Owners
+
+- 2,008 of 2,533 sampled scan-worker observations (79.3%) were in gRPC receive;
+  369 were in spill writes, 34 in `fsync`, 34 in sorting, and 88 elsewhere.
+  These are sampled worker states, not exact wall-time shares.
+- The three-second trace at 20:23:34-37 UTC shows 77.02 worker-seconds blocked in
+  scan receive, about 5.02ms of scan-worker scheduling delay, and 2.62s in the
+  transport reader's network poll. This supports waiting for responses rather
+  than client CPU scheduling as the controlling delay in that window.
+- RPC admission had zero contentions and 442us total across 257 admissions.
+  Recorded daemon transaction-map/slot waits totaled 386us/0.528s respectively.
+  These metrics do not measure every iterator-internal lock.
+- Database GET request service totaled 13,946.089 worker-seconds over 9,699,251
+  calls. It includes local backend work and async scheduling, not pure NFS wait.
+  The separately recorded body-stream time was 24.750s; these boundaries must
+  not be interpreted as a complete I/O-time partition.
+- Across 1,024 initial spill runs, sorting totaled 166.536 worker-seconds,
+  encode/write 1,597.465s, buffered flush 0.212s and `fsync` 232.419s. These
+  overlapping worker spans are not additive to overall runtime.
+
+#### Measured CPU Owners
+
+The Go CPU profile has 2,124.61 sampled CPU-seconds. `ActionGuard.Processed`
+accounts for 53.57% cumulatively beneath per-record scratch accounting;
+atomic compare-and-swap alone is 25.93% flat. This is a demonstrated telemetry
+contention cost, not encryption or useful record validation. `writeRun` is
+70.25% cumulative and includes that accounting cost; do not add those shares.
+Allocation (`mallocgc`) is 9.46% cumulative and AES-GCM encryption 3.25% flat.
+
+The daemon profile contains 331,192 CPU samples and reports zero lost samples.
+It reports 75 out-of-order context-switch events, so no exact off-CPU duration
+is inferred. Flat CPU includes 17.48% buffer zeroing (17.44% traced to
+`object_store::local::read_range`), 14.55% AES-GCM (callers resolve to
+`EncryptedObjectStore::decrypt_chunks_sync`), 6.90% kernel copying, and 4.13%
+user-space copying. These establish allocation/copy/decryption costs on the
+read path; they do not prove that increasing workers or cache alone will help.
+
+#### Post-Run Corrections
+
+Scratch accounting now sits below the existing 1 MiB buffer, so shared counters
+are updated per underlying write rather than twice per tuple. The encrypted
+format and successful byte totals are unchanged; canceled bytes now count only
+bytes accepted by the underlying writer, not unflushed buffer contents. Exact
+byte/short-write, cancellation, corruption, spill and cleanup tests pass.
+
+The accounting-only benchmark, 32-way concurrency and three one-second repeats,
+measured 794,980/810,203/817,690 ns per fixed batch at the old accounting boundary
+versus 6,525/6,450/6,453 ns buffered. This excludes encryption and disk I/O and is
+not an end-to-end speedup. A follow-up local CPU profile is dominated by buffer
+writes/copies, with shared telemetry updates absent from the leading costs.
+Production runtime improvement still needs a matched capped repeat.
+
+R4 preserved 120 valid monitor snapshots; one additional snapshot was rejected
+because daemon histogram count and buckets were sampled inconsistently under
+concurrent updates. The adapter now marks only that histogram unavailable rather
+than dropping the entire snapshot or fabricating coherent values. Exporter
+queue drops/failures were zero; the rejected collection is a separate gap.
+
+Future Go profiles carry `check_stage` labels inherited by stage workers and
+restored after the check. These labels, histogram handling and batched accounting
+are post-r4 changes, not part of its measured binary. Final race suites pass:
+
+```text
+go test -race ./internal/index/maintenance ./internal/telemetry ./cmd/vaultic/indexcmd -count=1
+```
+
+Next hypotheses: confirm the accounting correction in a matched production
+repeat, then investigate unnecessary local read-range initialization/copying and
+repeated encrypted-range work. Use available CPU/RAM when the measured working
+set or concurrency bottleneck justifies it; do not trade away verification or
+authenticated encryption for throughput.
+
+Remaining attribution boundaries must stay explicit: Linux thread sleep is not
+equivalent to a parked Rust async task; CPU samples cannot quantify async wait
+duration; the existing server iterator timer excludes output-channel reservation
+wait. A daemon-side async wait breakdown is still needed if the captured CPU,
+cache and client-wait evidence cannot discriminate the next hypothesis.
 
 ## Prior Production Runs
 

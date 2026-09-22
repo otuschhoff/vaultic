@@ -389,8 +389,22 @@ flushes a partial spill buffer after successful `errgroup.Wait()`. It adds a
 distinct `slatedb_finalize` progress stage and bounded read-session renewal across
 long non-database stages. The repeat reached `slatedb_finalize` at 9m03s and
 continued until the actual ten-minute timeout, confirming the cancellation fix.
-Serial pending-buffer finalization is now the next bounded optimization target;
-catalog joins and full differential completion remain unmeasured.
+Pending-buffer finalization now uses a separate worker-bounded pool before
+serial ownership transfer, with exact-result, resource-limit and active
+cancellation regressions. The isolated capped repeat timed out in `slatedb_scan`
+after 375,902,743 records and 250 of 256 ranges, before exercising the pool.
+Production finalization performance, catalog joins and full differential
+completion remain unmeasured. A subsequent capped attribution run now records
+CPU profiles, Go trace/goroutine samples, daemon thread states and five-second
+checker/backend telemetry. Sampled scan workers mostly wait for gRPC responses;
+RPC admission is uncontended. The CLI profile exposed per-record telemetry
+contention (53.57% cumulative CPU), now moved below buffered scratch writes with
+exact-byte tests. Daemon CPU hotspots resolve to local read-range buffer zeroing
+and authenticated chunk decryption. Confirm the accounting correction in a
+matched capped repeat, then investigate read allocation/copy and repeated
+encrypted-range work. The objective is lowest runtime/highest throughput using
+available CPU/RAM, not minimum resource consumption. See the production evidence
+for profiling overhead, remaining async-wait boundaries and acceptance limits.
 Per-scan backend-read attribution and continuation-age
 telemetry remain pending; no representative acceptance gate is closed.
 

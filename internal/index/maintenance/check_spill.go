@@ -402,6 +402,10 @@ func (spool *locationSpool) add(tuple locationTuple) error {
 }
 
 func (spool *locationSpool) sortRecords(records []locationTuple) []locationTuple {
+	if spool.scratch.telemetry != nil {
+		request := spool.scratch.telemetry.scratchSort.Start()
+		defer settleDependency(request, nil)
+	}
 	slices.SortFunc(records, compareLocationTuple)
 	if spool.deduplicate {
 		unique := records[:0]
@@ -476,7 +480,7 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		return checkRun{}, err
 	}
 	succeeded := false
-	buffered := bufio.NewWriterSize(file, locationRunBufferSize)
+	buffered := bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, locationRunBufferSize)
 	defer func() {
 		_ = file.Close() // Preserve the primary write or sync error.
 		if !succeeded {
@@ -485,9 +489,18 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		}
 	}()
 	header := append(checkRunMagic[:], prefix[:]...)
-	if err := writeScratch(spool.scratch, request, buffered, header); err != nil {
+	if err := writeAll(buffered, header); err != nil {
 		return checkRun{}, err
 	}
+	var encodeWrite *monitor.DependencyGuard
+	if spool.scratch.telemetry != nil {
+		encodeWrite = spool.scratch.telemetry.scratchEncodeWrite.Start()
+	}
+	defer func() {
+		if encodeWrite != nil {
+			settleDependency(encodeWrite, err)
+		}
+	}()
 	for index, record := range records {
 		if err := spool.ctx.Err(); err != nil {
 			return checkRun{}, err
@@ -499,17 +512,31 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		sealed := aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-		if err := writeScratch(spool.scratch, request, buffered, length[:]); err != nil {
+		if err := writeAll(buffered, length[:]); err != nil {
 			return checkRun{}, err
 		}
-		if err := writeScratch(spool.scratch, request, buffered, sealed); err != nil {
+		if err := writeAll(buffered, sealed); err != nil {
 			return checkRun{}, err
 		}
 	}
-	if err := buffered.Flush(); err != nil {
+	settleDependency(encodeWrite, nil)
+	encodeWrite = nil
+	var flush *monitor.DependencyGuard
+	if spool.scratch.telemetry != nil {
+		flush = spool.scratch.telemetry.scratchFlush.Start()
+	}
+	err = buffered.Flush()
+	settleDependency(flush, err)
+	if err != nil {
 		return checkRun{}, err
 	}
-	if err := file.Sync(); err != nil {
+	var sync *monitor.DependencyGuard
+	if spool.scratch.telemetry != nil {
+		sync = spool.scratch.telemetry.scratchSync.Start()
+	}
+	err = file.Sync()
+	settleDependency(sync, err)
+	if err != nil {
 		return checkRun{}, err
 	}
 	if err := file.Close(); err != nil {
@@ -534,23 +561,24 @@ func writeAll(writer io.Writer, value []byte) error {
 }
 
 func writeScratch(scratch *checkScratch, request *monitor.DependencyGuard, writer io.Writer, value []byte) error {
-	for len(value) > 0 {
-		var written int
-		err := scratch.run("put", uint64(len(value)), func() error {
-			var writeErr error
-			written, writeErr = writer.Write(value)
-			return writeErr
-		})
-		scratch.telemetry.processScratch(scratch.operation, request, uint64(written))
-		if err != nil {
-			return err
-		}
-		if written == 0 {
-			return io.ErrShortWrite
-		}
-		value = value[written:]
-	}
-	return nil
+	return writeAll(&scratchOutputWriter{scratch: scratch, request: request, writer: writer}, value)
+}
+
+type scratchOutputWriter struct {
+	scratch *checkScratch
+	request *monitor.DependencyGuard
+	writer  io.Writer
+}
+
+func (writer *scratchOutputWriter) Write(value []byte) (int, error) {
+	var written int
+	err := writer.scratch.run("put", uint64(len(value)), func() error {
+		var writeErr error
+		written, writeErr = writer.writer.Write(value)
+		return writeErr
+	})
+	writer.scratch.telemetry.processScratch(writer.scratch.operation, writer.request, uint64(written))
+	return written, err
 }
 
 func (spool *locationSpool) seal() error {
@@ -638,11 +666,11 @@ func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
 		return nil, err
 	}
 	writer := &locationRunWriter{
-		spool: spool, file: file, buffered: bufio.NewWriterSize(file, locationRunBufferSize), path: path,
+		spool: spool, file: file, buffered: bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, locationRunBufferSize), path: path,
 		aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request,
 	}
 	header := append(checkRunMagic[:], writer.prefix[:]...)
-	if err := writeScratch(spool.scratch, request, writer.buffered, header); err != nil {
+	if err := writeAll(writer.buffered, header); err != nil {
 		writer.abort()
 		return nil, err
 	}
@@ -663,10 +691,10 @@ func (writer *locationRunWriter) append(tuple locationTuple) error {
 	sealed := writer.aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
 	var length [4]byte
 	binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-	if err := writeScratch(writer.spool.scratch, writer.request, writer.buffered, length[:]); err != nil {
+	if err := writeAll(writer.buffered, length[:]); err != nil {
 		return err
 	}
-	if err := writeScratch(writer.spool.scratch, writer.request, writer.buffered, sealed); err != nil {
+	if err := writeAll(writer.buffered, sealed); err != nil {
 		return err
 	}
 	return nil

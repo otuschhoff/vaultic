@@ -1,12 +1,14 @@
 package maintenance
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -16,10 +18,51 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 const benchmarkBlobsPerPack = 64
+
+func BenchmarkScratchAccounting(b *testing.B) {
+	for _, bufferedAccounting := range []bool{false, true} {
+		b.Run(fmt.Sprintf("buffered=%t", bufferedAccounting), func(b *testing.B) {
+			telemetry := NewCheckTelemetry()
+			operation := telemetry.start()
+			defer operation.Done(monitor.OutcomeSuccess)
+			scratch := &checkScratch{ctx: context.Background(), telemetry: telemetry, operation: operation}
+			b.SetBytes(4096 * 110)
+			b.ReportAllocs()
+			b.RunParallel(func(batch *testing.PB) {
+				request := telemetry.startScratch()
+				defer settleDependency(request, nil)
+				var destination io.Writer = io.Discard
+				if bufferedAccounting {
+					destination = &scratchOutputWriter{scratch: scratch, request: request, writer: destination}
+				}
+				buffered := bufio.NewWriterSize(destination, locationRunBufferSize)
+				var header [4]byte
+				var payload [106]byte
+				for batch.Next() {
+					for range 4096 {
+						for _, value := range [][]byte{header[:], payload[:]} {
+							if err := writeAll(buffered, value); err != nil {
+								b.Error(err)
+								return
+							}
+							if !bufferedAccounting {
+								telemetry.processScratch(operation, request, uint64(len(value)))
+							}
+						}
+					}
+				}
+				if err := buffered.Flush(); err != nil {
+					b.Error(err)
+				}
+			})
+		})
+	}
+}
 
 type benchmarkStore struct {
 	*memoryStore

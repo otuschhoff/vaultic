@@ -7,20 +7,28 @@ import (
 )
 
 type CheckTelemetry struct {
-	action   *monitor.ActionMetric
-	rpcWait  *monitor.WaitMetric
-	database *monitor.DependencyMetric
-	scratch  *monitor.DependencyMetric
+	action             *monitor.ActionMetric
+	rpcWait            *monitor.WaitMetric
+	database           *monitor.DependencyMetric
+	scratch            *monitor.DependencyMetric
+	scratchSort        *monitor.DependencyMetric
+	scratchEncodeWrite *monitor.DependencyMetric
+	scratchFlush       *monitor.DependencyMetric
+	scratchSync        *monitor.DependencyMetric
 }
 
 func NewCheckTelemetry() *CheckTelemetry { return NewCheckTelemetryEnabled(true) }
 
 func NewCheckTelemetryEnabled(enabled bool) *CheckTelemetry {
 	return &CheckTelemetry{
-		action:   monitor.NewActionMetric("check", 1, enabled),
-		rpcWait:  monitor.NewWaitMetric("check", "database", "concurrency", monitor.MaxActiveWaits, enabled),
-		database: monitor.NewDependencyMetric("check", "database", enabled),
-		scratch:  monitor.NewDependencyMetric("check", "scratch", enabled),
+		action:             monitor.NewActionMetric("check", 1, enabled),
+		rpcWait:            monitor.NewWaitMetric("check", "database", "concurrency", monitor.MaxActiveWaits, enabled),
+		database:           monitor.NewDependencyMetric("check", "database", enabled),
+		scratch:            monitor.NewDependencyMetric("check", "scratch", enabled),
+		scratchSort:        monitor.NewDependencyMetric("check", "scratch", enabled),
+		scratchEncodeWrite: monitor.NewDependencyMetric("check", "scratch", enabled),
+		scratchFlush:       monitor.NewDependencyMetric("check", "scratch", enabled),
+		scratchSync:        monitor.NewDependencyMetric("check", "scratch", enabled),
 	}
 }
 
@@ -43,7 +51,7 @@ func (telemetry *CheckTelemetry) progress(operation *monitor.ActionGuard, update
 		phase = "read"
 	case "catalog_join", "parallel_validation":
 		phase = "verify"
-	case "finalization":
+	case "slatedb_finalize", "finalization":
 		phase = "finalize"
 	}
 	operation.Progress(phase, "", update.ScratchPeakBytes, update.ScratchLimitBytes)
@@ -88,6 +96,18 @@ func (telemetry *CheckTelemetry) Component(now time.Time) monitor.ComponentSnaps
 	component.Metrics = append(component.Metrics, telemetry.rpcWait.Metrics()...)
 	component.Metrics = append(component.Metrics, telemetry.database.Metrics()...)
 	component.Metrics = append(component.Metrics, telemetry.scratch.Metrics()...)
+	for _, stage := range []struct {
+		name   string
+		metric *monitor.DependencyMetric
+	}{
+		{"sort", telemetry.scratchSort}, {"encode_write", telemetry.scratchEncodeWrite},
+		{"flush", telemetry.scratchFlush}, {"sync", telemetry.scratchSync},
+	} {
+		for _, metric := range stage.metric.Metrics() {
+			metric.Name = "check_scratch_" + stage.name + "_" + metric.Name
+			component.Metrics = append(component.Metrics, metric)
+		}
+	}
 	component.Operations = operations
 	component.OperationOverflow = overflow
 	component.CardinalityDropped = telemetry.rpcWait.Dropped()

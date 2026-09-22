@@ -1,6 +1,7 @@
 package maintenance
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
@@ -473,6 +475,50 @@ func TestWriteAllHandlesShortWrites(t *testing.T) {
 	}
 	if err := writeAll(zeroWriter{}, []byte("x")); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("zero-length write error = %v", err)
+	}
+}
+
+func TestBufferedScratchAccountingPreservesBytes(t *testing.T) {
+	telemetry := NewCheckTelemetry()
+	operation := telemetry.start()
+	defer operation.Done(monitor.OutcomeSuccess)
+	scratch := &checkScratch{ctx: context.Background(), telemetry: telemetry, operation: operation}
+	request := telemetry.startScratch()
+	var output bytes.Buffer
+	buffered := bufio.NewWriterSize(&scratchOutputWriter{scratch: scratch, request: request, writer: &output}, 16)
+	for range 100 {
+		if err := writeAll(buffered, []byte("abcdef")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := buffered.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	settleDependency(request, nil)
+	partial := &chunkWriter{}
+	request = telemetry.startScratch()
+	if err := writeScratch(scratch, request, partial, []byte("abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	settleDependency(request, nil)
+	if output.Len() != 600 || string(partial.bytes) != "abcdef" {
+		t.Fatal("buffered or short-write output changed")
+	}
+	var actionBytes, dependencyBytes uint64
+	for _, metric := range telemetry.Component(time.Now()).Metrics {
+		for _, label := range metric.Labels {
+			if label.Name == "role" && label.Value == "scratch" {
+				if metric.Name == "operation_processed_bytes" {
+					actionBytes += metric.Value
+				}
+				if metric.Name == "dependency_bytes" {
+					dependencyBytes += metric.Value
+				}
+			}
+		}
+	}
+	if actionBytes != 606 || dependencyBytes != 606 {
+		t.Fatalf("action bytes=%d dependency bytes=%d, want 606", actionBytes, dependencyBytes)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"sort"
 	"strings"
@@ -491,6 +492,7 @@ func newCheckProgressReporter(options CheckOptions, scratch *checkScratch) *chec
 }
 
 func (reporter *checkProgressReporter) set(stage string) {
+	pprof.SetGoroutineLabels(pprof.WithLabels(reporter.scratch.ctx, pprof.Labels("check_stage", stage)))
 	reporter.mu.Lock()
 	reporter.stage = stage
 	reporter.mu.Unlock()
@@ -521,6 +523,7 @@ func (reporter *checkProgressReporter) emit() {
 }
 
 func (reporter *checkProgressReporter) close() {
+	pprof.SetGoroutineLabels(reporter.scratch.ctx)
 	select {
 	case <-reporter.finished:
 		return
@@ -1642,7 +1645,28 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 	if finalizing != nil {
 		finalizing()
 	}
+	finalizers, finalizeContext := errgroup.WithContext(ctx)
+	finalizers.SetLimit(int(workers))
 	for partition := range locationPartitions {
+		finalizers.Go(func() error {
+			if err := finalizeContext.Err(); err != nil {
+				return err
+			}
+			locationPartitions[partition].ctx = finalizeContext
+			packPartitions[partition].ctx = finalizeContext
+			if err := locationPartitions[partition].finishBuffer(); err != nil {
+				return err
+			}
+			return packPartitions[partition].finishBuffer()
+		})
+	}
+	if err := finalizers.Wait(); err != nil {
+		return err
+	}
+	for partition := range locationPartitions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		locationPartitions[partition].ctx = ctx
 		packPartitions[partition].ctx = ctx
 		if err := result.adopt(locationPartitions[partition]); err != nil {

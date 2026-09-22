@@ -1281,6 +1281,7 @@ func runIndexExport(ctx context.Context, options indexExportOptions, globalOptio
 
 type indexCheckOptions struct {
 	Daemon               indexDaemonOptions
+	MonitorJSONL         string
 	MaxFindings          uint
 	Memory               string
 	TempDir              string
@@ -1323,6 +1324,7 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 	command.Flags().UintVar(&options.Workers, "check-workers", 0, "checker workers (zero uses the effective CPU quota)")
 	command.Flags().UintVar(&options.RPCConcurrency, "check-rpc-concurrency", 0, "maximum in-flight metadata RPCs (zero follows workers)")
 	command.Flags().DurationVar(&options.ProgressInterval, "check-progress-interval", 30*time.Second, "index-check progress reporting interval (zero disables repeats)")
+	command.Flags().StringVar(&options.MonitorJSONL, "monitor-export-jsonl", "", "new local JSONL file for checker and daemon telemetry (5s snapshots)")
 	command.Flags().BoolVar(&options.LegacyOnly, "legacy-only", false, "validate only legacy JSON indexes")
 	command.Flags().BoolVar(&options.SlateDBOnly, "slatedb-only", false, "validate only SlateDB metadata")
 	command.Flags().BoolVar(&options.IncludeCrawlDebt, "include-crawl-debt", false, "include individual pending crawl-debt findings")
@@ -1416,6 +1418,18 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 		}
 	}
 	telemetry := maintenance.NewCheckTelemetry()
+	monitorSource := &legacyImportMonitorSource{}
+	if storeSession != nil {
+		monitorSource.SetClient(storeSession.Client)
+	}
+	monitorExport, err := startLegacyImportMonitorExport(ctx, importMonitorExportOptions{
+		JSONLPath: options.MonitorJSONL, Interval: 5 * time.Second,
+		Timeout: 2 * time.Second, Queue: 4,
+	}, telemetry, monitorSource)
+	if err != nil {
+		return result, err
+	}
+	defer monitorExport.Close()
 	result, err = maintenance.CheckWithOptions(
 		ctx,
 		repo,

@@ -2,13 +2,18 @@ package indexcmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/legacyimport"
+	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
@@ -16,6 +21,55 @@ type recordingMonitorExporter struct {
 	mu        sync.Mutex
 	snapshots []telemetry.MonitorSnapshot
 	exported  chan struct{}
+}
+
+func TestCheckMonitorExportsValidatedJSONL(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "check.jsonl")
+	monitor, err := startLegacyImportMonitorExport(ctx, importMonitorExportOptions{
+		JSONLPath: path, Interval: time.Hour, Timeout: time.Second, Queue: 4,
+	}, maintenance.NewCheckTelemetry(), &legacyImportMonitorSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	monitor.Close()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	var snapshots int
+	for {
+		var snapshot telemetry.MonitorSnapshot
+		if err := decoder.Decode(&snapshot); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		var scratchSync, rpcWait bool
+		for _, metric := range snapshot.Components[0].Metrics {
+			scratchSync = scratchSync || metric.Name == "check_scratch_sync_dependency_latency"
+			rpcWait = rpcWait || metric.Name == "wait_duration"
+		}
+		if !scratchSync || !rpcWait {
+			t.Fatalf("missing attribution metrics: scratch_sync=%t rpc_wait=%t", scratchSync, rpcWait)
+		}
+		snapshots++
+	}
+	if snapshots == 0 {
+		t.Fatal("final snapshot was not exported after cancellation")
+	}
+	if _, err := startLegacyImportMonitorExport(context.Background(), importMonitorExportOptions{
+		JSONLPath: path, Interval: time.Hour, Timeout: time.Second, Queue: 4,
+	}, maintenance.NewCheckTelemetry(), &legacyImportMonitorSource{}); err == nil {
+		t.Fatal("existing telemetry artifact was overwritten")
+	}
 }
 
 type monitorStatusClient struct {
