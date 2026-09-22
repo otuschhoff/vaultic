@@ -1,18 +1,54 @@
-# Phase 32: Next Steps for Remote SST Performance
+# Phase 32: Optimization Closeout and Outlook
 
 [Phase 32 status](phase-32-scalable-legacy-metadata-bulk-import.md) |
 [Experiment evidence](phase-32-p3-p7-evidence.md) |
 [Telemetry coverage](phase-32-vaulticdb-critical-path-telemetry.md) |
 [Read-cache contract](phase-29-slatedb-read-cache-tiers.md)
 
-**Assessment: 2026-09-21.** This is a proposed experiment sequence, not an
-accepted configuration or evidence of gains. The host budget is 32 CPU cores,
-approximately 300 GB RAM, and high-bandwidth networking. There is no local
-SSD/NVMe: available local storage is NFS-HDD or RADOS. The expected production
-topology is an authoritative database in Azure S3-compatible object storage,
-with abundant RAM as the primary low-latency cache and RADOS as the only
-persistent local cache candidate. The database will predominantly serve queries
-after import.
+**Assessment: 2026-09-22.** Import-loop optimization is closed for now. The
+accepted measured profile is p21 grouped ordered reduction with four publication
+lanes, eager completion draining, deferred cleanup, cross-index batching,
+eight-pack ingest transactions, an 8,000-mutation and 8 MiB transaction cap,
+a 256 MiB L0 target, 1 GiB metadata cache, and 512 MiB block cache. Two matched
+NFS-HDD runs averaged 126.04k blobs/s, 4.32% above p14, with no pre-cancellation
+retry, conflict, backpressure, L0-stall, or adaptive-split signal.
+
+This closes scheduler and transaction-shape exploration, not production
+acceptance. The ten-minute candidates do not prove complete-import durability,
+final handoff/reopen/activation, long-lived read performance, or behavior on the
+expected Azure S3-compatible authoritative store with optional RADOS cache.
+Those are deferred validation tracks, not reasons to continue speculative
+import-loop tuning.
+
+## Closeout Decision
+
+Keep the p21 profile as the benchmark baseline. Do not spend further work on
+publication width, scheduler dispatch, admission priority, parallel reducers,
+larger ingest transactions, larger block caches, or local CPU micro-optimizations
+without new evidence. These paths either regressed throughput, had too little
+opportunity, or conflict with ordering and shared-state guarantees.
+
+The remaining dominant import wait is an already-active next-ordinal ingest,
+not coordinator overhead. P21 averaged about 224 seconds waiting for a missing
+ordinal, about 207 seconds of it active ingest. Further optimization is likely
+to require engine/backend changes or a measured reduction in active transaction
+tail latency. It is unlikely to come from more Go scheduler concurrency.
+
+Reopen implementation optimization only when at least one trigger exists:
+
+- a full import shows materially different late-life behavior or finalization
+  cost than the ten-minute runs;
+- production-backend telemetry attributes a significant share to a specific
+  engine, object-store, or transaction substage;
+- p21's approximately 15% higher process reads per blob causes a repeatable
+  equal-state or full-run regression;
+- a query workload demonstrates cache or persistent-layout changes that improve
+  total time-to-ready or lifecycle cost; or
+- a correctness-preserving engine capability changes the ordered commit model.
+
+Until then, the next work is validation: one authorized full lifecycle run,
+fixed-trace query testing, and backend-specific Azure/RADOS measurement. Record
+import, finalization, cache warming, and query service separately.
 
 ## Objectives and Decision Rules
 
@@ -140,7 +176,7 @@ Keep labels bounded and report counter resets and availability explicitly.
 - Query throughput and tail latency alongside process CPU/RSS, actual interface
   traffic, local disk latency, engine queues, backpressure, and compaction.
 
-## Ranked Experiment Sequence
+## Deferred Validation Sequence
 
 ### 1. Establish Remote and Query Controls
 
@@ -189,7 +225,7 @@ Test missing/corrupt/slow RADOS-cache fallback and unchanged results. RADOS must
 remain disposable in this role: it never becomes authoritative or substitutes
 for Azure S3 close/flush durability.
 
-### 4. Amortize Import Transactions and Preparation
+### 4. Preserve the Accepted Import Profile
 
 Grouped ordered reducer transactions are accepted. P21 grouped only contiguous
 successful receipts already available at dispatch, preserving receipt
@@ -228,9 +264,10 @@ transaction variance, not an admission or reducer-parallelism problem. P21
 reduced normalized process writes but increased reads per blob about 15%; carry
 that tradeoff into equal-state and full-import validation.
 
-Next reuse immutable ID/canonical preparation across hashing, hints, planning,
-filter publication, and counters. Parallelize pure preparation only after a
-profile demonstrates a serial cost; retain ordered dependency admission and
+Do not revisit immutable ID/canonical preparation across hashing, hints,
+planning, filter publication, and counters: p19 improved local work but regressed
+end-to-end throughput. Parallelize pure preparation only if a new profile makes
+it a material serial cost; retain ordered dependency admission and
 state-dependent retry reads. Spare cores can hide independent work, not justify
 parallel commit visibility or stale authority checks.
 

@@ -495,6 +495,24 @@ as an equal-state/full-run concern. Do not address the remaining wait by
 reordering visible history, raising ingest transaction size, or returning to
 eight publication lanes.
 
+### Optimization Closeout
+
+The import-loop optimization campaign is closed as of 2026-09-22 with p21 as
+the accepted measured baseline. Eager completion draining and grouped ordered
+reduction delivered repeatable end-to-end gains; telemetry eliminated scheduler
+dispatch, admission priority, wider publication, parallel reduction, larger
+ingest transactions, larger block caches, and local ID reuse as justified next
+steps on this workload.
+
+This decision does not convert capped NFS-HDD evidence into production or full
+lifecycle acceptance. Before deployment, run an explicitly authorized complete
+import through final durability, handoff, reopen, activation, and fixed-trace
+read validation. Measure Azure S3-compatible authoritative storage and optional
+RADOS caching independently. Reopen implementation optimization only if those
+runs expose a material attributed bottleneck, if p21's higher normalized reads
+cause a repeatable equal-state regression, or if the engine's ordered commit
+capabilities materially change.
+
 ## Frozen Inputs and Build
 
 This section describes the original P3/P4/P7 fixture and storage comparisons
@@ -841,5 +859,6 @@ Representative NFS, RADOS, and RGW/S3 resources are no longer external blockers.
 The recorded import, durable close/handoff/reopen, recovered activation, and
 fresh-process validation satisfy the repository-scale P7b lifecycle gate.
 This does not complete the remaining P3c/P3d scenario matrix or certify later
-cross-index grouping. Current optimization decisions are summarized at the top
-of this record; retain two lanes and require candidate-specific acceptance.
+cross-index grouping or p21. Current optimization decisions are summarized in
+the closeout above; retain the measured four-lane p21 profile for benchmarks and
+require candidate-specific full-lifecycle acceptance before deployment.

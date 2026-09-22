@@ -7,15 +7,22 @@
 [CLI and operations architecture](../02-architecture/04-cli-and-operations.md) |
 [Operational monitoring](phase-34-operational-monitoring-and-metrics-export.md)
 
-**Status (2026-09-21):** Stages 1-3, P0-P2, P3a0-P3b, P4, and P7a are
-complete. P5 reducer prefetch is accepted; P7b repository-scale lifecycle
-acceptance is recorded for the uncapped import and recovered activation.
+**Status (2026-09-22):** implementation optimization is closed for now. Stages
+1-3, P0-P2, P3a0-P3b, P4, and P7a are complete. P5 reducer prefetch is
+accepted; P7b repository-scale lifecycle acceptance is recorded for the
+uncapped import and recovered activation. The latest matched NFS-HDD profile
+uses four publication lanes, eager completion draining, deferred cleanup,
+cross-index batching, eight-pack ingest transactions, and grouped ordered
+reduction. Its two p21 runs averaged 126.04k blobs/s, 4.32% above the prior p14
+baseline. Product defaults are unchanged unless separately documented.
+
 P3c's complete response matrix and P3d's full combined-scenario matrix remain
-partial; representative remote main-store samples are recorded. Later
-ten-minute deferred-cleanup and cross-index batching results
-are provisional performance evidence, not renewed full-lifecycle acceptance.
-Stage 3 defaults to two ingestion lanes; deferred cleanup remains opt-in.
-Importer-owned Phase 34 telemetry is available.
+partial; representative remote main-store samples are recorded. P21 is
+ten-minute performance acceptance, not renewed full-lifecycle or production
+backend acceptance. A full import through final durability, reopen, activation,
+and read validation remains required before deployment. Import-loop tuning
+should reopen only with new profile evidence or a materially different backend
+or workload. Importer-owned Phase 34 telemetry is available.
 
 This page owns the current status, invariants, implementation map, and remaining
 gates. The [experiment and acceptance record](phase-32-p3-p7-evidence.md) owns
@@ -30,7 +37,7 @@ bounded recovery, or final durability. Normal backup publication is unchanged.
 | Document | Purpose |
 |---|---|
 | This page | Current status, invariants, implementation, execution gates, and test policy |
-| [Next steps for remote SST performance](phase-32-next-steps.md) | Proposed import/query experiments, RAM and local-cache use, and RADOS/S3 cost tradeoffs |
+| [Optimization closeout and outlook](phase-32-next-steps.md) | Accepted profile, deferred validation, reopening criteria, and RADOS/S3 cost tradeoffs |
 | [P1 instrumentation evidence](phase-32-p1-benchmark-evidence.md) | Frozen instrumentation overhead comparison and raw summary rows |
 | [P2 attribution evidence](phase-32-p2-attribution-evidence.md) | Service/engine timer contract, role coverage, and validation at the recorded revision |
 | [P3a0 durability evidence](phase-32-p3a0-durability-evidence.md) | Memory-WAL restart contract and executable crash matrix |
@@ -38,7 +45,7 @@ bounded recovery, or final durability. Normal backup publication is unchanged.
 | [Critical-path telemetry](phase-32-vaulticdb-critical-path-telemetry.md) | Current monitor coverage, remaining attribution gaps, and interpretation rules |
 
 P0-P7 name execution phases, not benchmark sequence numbers. Later artifact names
-`p8`-`p11` identify experiments within this phase, not additional acceptance gates.
+`p8`-`p21` identify experiments within this phase, not additional acceptance gates.
 Frozen evidence retains its original revisions and durations; it is not a claim
 that those settings describe the current binary.
 
@@ -46,8 +53,9 @@ that those settings describe the current binary.
 
 The pipeline remains latency-sensitive, but its earlier synchronous reducer
 bottleneck has been addressed by P4's bounded worker. P5 combines reducer
-aggregate/history reads into one transactional `MultiGet`. Later cross-index
-grouping amortizes scheduler and cleanup work and is provisionally retained.
+aggregate/history reads into one transactional `MultiGet`. Cross-index grouping,
+eager completion draining, and p21 grouped ordered reduction now amortize
+scheduler, cleanup, and reducer transaction work.
 
 The latest bounded runs still spend most coordinator time in `ingest_wait` and
 show growing late-window planning reads and SST fanout. This supports targeting
@@ -55,11 +63,13 @@ growing-state reads, not adding publication lanes: measured writer queues,
 backpressure, and L0 stalls do not establish engine saturation. Coordinator
 waits and overlapping worker/RPC timers are not additive wall-clock fractions.
 
-Retain two lanes, the 256 MiB L0 SST target, and the existing cache/coalescing
-defaults. Larger cache fill budgets, more fill tasks, wider coalescing, positive
-record reuse, and a 512 MiB L0 target did not justify promotion. Preparation and
-prepared-buffer capacity are not current priorities. Library changes remain in
-scope when measurements identify a limiting function.
+Retain the measured p21 profile: four publication lanes, eight-pack ingest
+transactions, grouped ordered reduction, the 256 MiB L0 SST target, and the
+accepted cache settings. Larger cache fill budgets, more fill tasks, wider
+coalescing, positive record reuse, a 512 MiB L0 target, and larger ingest
+transactions did not justify promotion. Preparation and prepared-buffer
+capacity are not current priorities. Library changes remain in scope only when
+new measurements identify a limiting function.
 
 ## Required Invariants
 
@@ -348,9 +358,11 @@ VaulticDB components. See the
 [critical-path telemetry design](phase-32-vaulticdb-critical-path-telemetry.md)
 for coverage, interpretation and acceptance requirements.
 
-### Full-import bottleneck loop
+### Bottleneck Loop When Reopened
 
-Run three no-injection, ten-minute current-revision baselines on fresh,
+Use this loop only after a reopening trigger in the
+[optimization outlook](phase-32-next-steps.md#closeout-decision). Run three
+no-injection, ten-minute current-revision baselines on fresh,
 explicitly authorized targets. Freeze source ordering and identity, candidate namespace, binaries,
 `GOMAXPROCS`, `GOMEMLIMIT`, encryption, cache, WAL, transaction bounds and storage
 placement. For a separately authorized uncapped acceptance run, record one
@@ -412,14 +424,13 @@ measure existing settings and utilization before inventing another uploader pool
 
 ### Resource Defaults
 
-Retain two lanes and the prepared budget until repository-sized tests show
-otherwise. Do not generalize the tiny fixture's four-CPU result into production
-affinity changes. Compare 1/2/4/8 lanes and CPU limits independently with fixed
-input/encryption/backend; stop at a plateau or rising latency/backlog. Test cache
-and RAM after observing misses or byte-budget/backpressure stalls. More unflushed
-RAM absorbs bursts but cannot raise steady-state disk or sequential-writer
-capacity, and may worsen shutdown/recovery. Never trade fencing, isolation,
-encryption, or durability for benchmark speed.
+Retain four publication lanes and the accepted prepared budget for the measured
+p21 profile. Do not infer production-backend acceptance from NFS-HDD or change
+CPU affinity without new evidence. Reopen lane or cache sweeps only when aligned
+queue, reuse, latency, or backpressure telemetry invalidates the current result.
+More unflushed RAM absorbs bursts but cannot raise steady-state disk or
+sequential-writer capacity, and may worsen shutdown/recovery. Never trade
+fencing, isolation, encryption, or durability for benchmark speed.
 
 ## Phased Execution Plan
 
