@@ -600,6 +600,80 @@ func TestLocationSpoolMergeHonorsScratchBudget(t *testing.T) {
 	}
 }
 
+func BenchmarkLocationRunReader(b *testing.B) {
+	scratch, err := newCheckScratch(b.TempDir(), 1<<20)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer scratch.close()
+	spool, err := newLocationSpool(context.Background(), scratch, 1<<20, 32)
+	if err != nil {
+		b.Fatal(err)
+	}
+	records := make([]locationTuple, 4096)
+	for index := range records {
+		records[index] = testLocation(byte(index))
+	}
+	run, err := spool.writeRun(records)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		reader, err := openLocationRun(run, scratch)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, expected := range records {
+			actual, found, err := reader.next()
+			if err != nil || !found || actual != expected {
+				b.Fatalf("record mismatch: found=%t err=%v", found, err)
+			}
+		}
+		if _, found, err := reader.next(); found || err != nil {
+			b.Fatalf("EOF: found=%t err=%v", found, err)
+		}
+		if err := reader.close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkLocationIteratorMerge(b *testing.B) {
+	memoryRuns := make([][]locationTuple, 32)
+	for runIndex := range memoryRuns {
+		memoryRuns[runIndex] = make([]locationTuple, 1024)
+		for tupleIndex := range memoryRuns[runIndex] {
+			ordinal := tupleIndex*len(memoryRuns) + runIndex
+			memoryRuns[runIndex][tupleIndex] = locationTuple{BlobID: vaultic.ID{byte(ordinal >> 8), byte(ordinal)}}
+		}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		iterator, err := newLocationIterator(context.Background(), nil, memoryRuns, nil, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		count := 0
+		for {
+			_, found, err := iterator.next()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if !found {
+				break
+			}
+			count++
+		}
+		if count != 32*1024 {
+			b.Fatalf("read %d tuples", count)
+		}
+		if err := iterator.close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestLocationSpoolParallelMergeAdmissionAndCleanup(t *testing.T) {
 	for _, mode := range []string{"complete", "headroom", "memory", "cancel", "corrupt"} {
 		for _, deduplicate := range []bool{false, true} {

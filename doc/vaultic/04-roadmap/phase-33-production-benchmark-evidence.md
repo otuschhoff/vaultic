@@ -632,6 +632,89 @@ and sequential cache effects are not controlled. The remaining serial ordered
 iterator and per-pack aggregation are the next profiling targets; r8 has no CPU
 profile to assign their exact costs or distinguish them from catalog scan waits.
 
+### Catalog Attribution and Iterator Follow-Up (r9-r10)
+
+The read-ahead and bounded-merge work above was committed as `8b65896d7` after
+fresh affected Go race suites passed. R9 retained the r8 CLI and daemon, adding
+loopback-only pprof, five-second CLI thread/goroutine samples, a 30-second CPU
+profile after 24 successful merges, and a subsequent three-second Go trace.
+Artifacts are under `db.test/phase33-production-2026-09-22-stream32-catalog-profile-r9`;
+derived reports have a separate `analysis/SHA256SUMS`, preserving the raw manifest.
+
+The CPU window at 22:11:08 UTC captured 29.11 CPU seconds in 30 seconds:
+
+| CPU path | Share of sampled CPU |
+| --- | ---: |
+| Pack contribution iterator, cumulative | 77.74% |
+| Ordered location iterator, cumulative | 76.57% |
+| Encrypted run reader, cumulative | 45.76% |
+| Heap pop plus push, cumulative | 27.13% |
+| AES-GCM Open, cumulative | 25.21% |
+| Allocator, cumulative | 11.61% |
+
+These overlapping percentages must not be added. The trace attributed 602.52 ms
+to scratch read syscalls under the catalog iterator, 0.329 ms to network-read
+blocking and 13.141 ms to scheduler delay across goroutines. This short window
+supports CPU work as the primary target with material filesystem time; it is not
+a complete accounting of every async/network wait. R9 timed out in catalog work,
+used 2,141.01 CLI CPU seconds and 115,371,828 KiB peak RSS, and took 10m08.46s
+including cleanup. The sampler reported no errors; writer health, scratch cleanup
+and both artifact manifests verified. Profiling overhead precludes treating r9
+as a matched lightweight timing control.
+
+The next candidate changes only the shared scratch iterator hot path:
+
+- Replace per-tuple heap pop/push with root replacement and one sift-down; retain
+  normal pop when the contributing reader reaches EOF.
+- Give each run reader private reusable length, nonce and ciphertext buffers;
+  authenticate/decrypt in place, then decode into a tuple whose fields are copied
+  by value. Record format, nonce sequence, authentication and length checks remain
+  unchanged. No per-record allocation is needed on the successful read path.
+
+Three benchmark repetitions measured 32-run in-memory merge time falling from
+7.425-7.636 ms to 6.177-6.239 ms per 32,768 tuples, about 17%. Reading 4,096
+encrypted records fell from 1.862-1.871 ms to 1.092-1.143 ms; allocations fell
+from 16,395 to 11, with bytes allocated falling from about 1.968 MB to 1.050 MB
+(including the reader's 1 MiB I/O buffer). These isolate mechanisms, not complete
+checker speedup. Existing ordering, deduplication, multiset, corruption,
+truncation, cancellation and parallel cleanup tests pass, along with full affected
+maintenance/telemetry/index-command race suites and editor diagnostics.
+
+R10 uses this candidate with lightweight monitoring, no profiling, unchanged
+daemon and the same NFS paths, 96 GiB limits, 32 workers and ten-minute cap.
+No builds or tests overlapped. Candidate CLI
+`bin/phase33-iterator/linux-amd64/vaultic` SHA-256 is
+`c6d98d7bd6fa6b0de9e09724458b34fecc0fffc28383b07f5587e118f46effb6`;
+artifacts are under `db.test/phase33-production-2026-09-22-stream32-iterator-r10`.
+
+| Measurement | r8 baseline | r10 iterator candidate |
+| --- | ---: | ---: |
+| Audit / scan / finalization | 48s / 115s / 28s | 52s / 119s / 33s |
+| Catalog stage starts | 3m11s | 3m24s |
+| First 24 merges successful by snapshot | 6m05s | 6m05s |
+| Total merge calls at cancellation | 24 | 36 |
+| Successful / canceled merge groups | 24 / 0 | 32 / 4 |
+| CLI CPU seconds | 2,183.94 | 2,023.14 |
+| Peak RSS, KiB | 115,318,008 | 115,413,100 |
+| Scratch reservation peak, bytes | 90,567,039,078 | 90,567,039,078 |
+
+R10 completed `checkPackCatalog` and entered the subsequent location-count spool
+merge by the 9m25s snapshot, when successful groups first exceeded 24. The
+`catalog_join` progress label covers both operations, so it does not expose this
+boundary directly. The control remained in the catalog comparison at its cap.
+R10 used 7.4% less CLI CPU despite reaching later work. Its 32 successful groups
+accumulated 684.207 service seconds; four groups were canceled by the cap.
+All 376,346,710 records and 256 scan ranges completed, but the later location
+count did not finish and its result field remains zero, not a valid count.
+
+Exit was 124; wall time including cleanup was 10m08.96s, with zero swaps and 121
+monitor snapshots. Manifest and empty scratch checks passed; the writer remained
+healthy at epoch 39 with zero active transactions/intents. Service binaries were
+not changed. These results support the iterator optimization but do not establish
+complete-check runtime, repeated performance acceptance or a full differential
+clean verdict. The next target is the subsequent location-count pass and its
+remaining serial merge, with clearer stage attribution before further parallelism.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

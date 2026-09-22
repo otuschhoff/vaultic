@@ -848,7 +848,9 @@ type locationRunReader struct {
 	file    *scratchReadFile
 	reader  *bufio.Reader
 	aead    cipher.AEAD
-	prefix  [4]byte
+	length  [4]byte
+	nonce   [12]byte
+	sealed  []byte
 	counter uint64
 }
 
@@ -877,32 +879,28 @@ func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, e
 		_ = file.Close() // Preserve the AEAD-construction error.
 		return nil, err
 	}
-	result := &locationRunReader{file: file, reader: reader, aead: aead}
-	copy(result.prefix[:], header[8:])
+	result := &locationRunReader{file: file, reader: reader, aead: aead, sealed: make([]byte, locationTupleSize+aead.Overhead())}
+	copy(result.nonce[:4], header[8:])
 	return result, nil
 }
 
 func (reader *locationRunReader) next() (locationTuple, bool, error) {
-	var length [4]byte
-	if _, err := io.ReadFull(reader.reader, length[:]); err != nil {
+	if _, err := io.ReadFull(reader.reader, reader.length[:]); err != nil {
 		if errors.Is(err, io.EOF) {
 			return locationTuple{}, false, nil
 		}
 		return locationTuple{}, false, fmt.Errorf("read checker run record length: %w", err)
 	}
-	sealedLength := binary.BigEndian.Uint32(length[:])
+	sealedLength := binary.BigEndian.Uint32(reader.length[:])
 	if sealedLength != locationTupleSize+uint32(reader.aead.Overhead()) {
 		return locationTuple{}, false, fmt.Errorf("invalid checker run record length")
 	}
-	sealed := make([]byte, sealedLength)
-	if _, err := io.ReadFull(reader.reader, sealed); err != nil {
+	if _, err := io.ReadFull(reader.reader, reader.sealed); err != nil {
 		return locationTuple{}, false, fmt.Errorf("read checker run record: %w", err)
 	}
-	var nonce [12]byte
-	copy(nonce[:4], reader.prefix[:])
-	binary.BigEndian.PutUint64(nonce[4:], reader.counter)
+	binary.BigEndian.PutUint64(reader.nonce[4:], reader.counter)
 	reader.counter++
-	plain, err := reader.aead.Open(nil, nonce[:], sealed, checkRunMagic[:])
+	plain, err := reader.aead.Open(reader.sealed[:0], reader.nonce[:], reader.sealed, checkRunMagic[:])
 	if err != nil {
 		return locationTuple{}, false, fmt.Errorf("authenticate checker run record: %w", err)
 	}
@@ -960,6 +958,11 @@ func (items *locationHeap) pop() locationHeapItem {
 		return result
 	}
 	(*items)[0] = last
+	items.siftDown()
+	return result
+}
+
+func (items *locationHeap) siftDown() {
 	for index := 0; ; {
 		left := index*2 + 1
 		if left >= len(*items) {
@@ -976,7 +979,6 @@ func (items *locationHeap) pop() locationHeapItem {
 		(*items)[index], (*items)[smallest] = (*items)[smallest], (*items)[index]
 		index = smallest
 	}
-	return result
 }
 
 type locationIterator struct {
@@ -1052,13 +1054,16 @@ func (iterator *locationIterator) next() (locationTuple, bool, error) {
 		if err := iterator.ctx.Err(); err != nil {
 			return locationTuple{}, false, err
 		}
-		item := iterator.heap.pop()
+		item := iterator.heap[0]
 		next, found, err := iterator.readers[item.reader].next()
 		if err != nil {
 			return locationTuple{}, false, err
 		}
 		if found {
-			iterator.heap.push(locationHeapItem{tuple: next, reader: item.reader})
+			iterator.heap[0] = locationHeapItem{tuple: next, reader: item.reader}
+			iterator.heap.siftDown()
+		} else {
+			iterator.heap.pop()
 		}
 		if iterator.deduplicate && iterator.hasLast && compareLocationTuple(iterator.last, item.tuple) == 0 {
 			continue
