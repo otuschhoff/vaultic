@@ -13,6 +13,8 @@ import (
 
 const durationHistogramBuckets = 64
 
+var batchFlushReasons = [...]string{"pack_count", "byte_limit", "mutation_limit", "end_of_input", "error"}
+
 type DurationDistribution struct {
 	Count uint64
 	Sum   time.Duration
@@ -77,18 +79,26 @@ type SchedulerSnapshot struct {
 	UnreducedPreparedBytes  uint64
 	OldestUnreducedAge      time.Duration
 	Operations              map[string]DurationDistribution
+	BatchFlushes            map[string]uint64
+	BatchPacks              uint64
+	BatchBytes              uint64
+	BatchMutations          uint64
 }
 
 type SchedulerTelemetry struct {
-	mu         sync.Mutex
-	last       time.Time
-	state      SchedulerSnapshot
-	operations map[string]durationHistogram
-	oldest     time.Time
-	published  int
-	action     *monitor.ActionMetric
-	operation  *monitor.ActionGuard
-	waits      map[string]*monitor.WaitMetric
+	mu             sync.Mutex
+	last           time.Time
+	state          SchedulerSnapshot
+	operations     map[string]durationHistogram
+	batchFlushes   map[string]uint64
+	batchPacks     uint64
+	batchBytes     uint64
+	batchMutations uint64
+	oldest         time.Time
+	published      int
+	action         *monitor.ActionMetric
+	operation      *monitor.ActionGuard
+	waits          map[string]*monitor.WaitMetric
 }
 
 func NewSchedulerTelemetry() *SchedulerTelemetry {
@@ -99,8 +109,9 @@ func NewSchedulerTelemetry() *SchedulerTelemetry {
 func NewSchedulerTelemetryEnabled(enabled bool) *SchedulerTelemetry {
 	return &SchedulerTelemetry{
 		last: time.Now(), operations: make(map[string]durationHistogram),
-		state:  SchedulerSnapshot{Phase: "setup", PhaseTime: make(map[string]time.Duration)},
-		action: monitor.NewActionMetric("legacy_import", 1, enabled),
+		batchFlushes: make(map[string]uint64),
+		state:        SchedulerSnapshot{Phase: "setup", PhaseTime: make(map[string]time.Duration)},
+		action:       monitor.NewActionMetric("legacy_import", 1, enabled),
 		waits: map[string]*monitor.WaitMetric{
 			"dependency_wait": monitor.NewWaitMetric("legacy_import", "database", "capacity", maxPublicationLanes, enabled),
 			"ingest_wait":     monitor.NewWaitMetric("legacy_import", "rpc", "concurrency", maxPublicationLanes, enabled),
@@ -108,6 +119,18 @@ func NewSchedulerTelemetryEnabled(enabled bool) *SchedulerTelemetry {
 			"prepare_wait":    monitor.NewWaitMetric("legacy_import", "source", "concurrency", maxDefaultPackWorkers, enabled),
 		},
 	}
+}
+
+func (telemetry *SchedulerTelemetry) batchFlushed(reason string, packs int, bytes, mutations uint64) {
+	if telemetry == nil {
+		return
+	}
+	telemetry.mu.Lock()
+	defer telemetry.mu.Unlock()
+	telemetry.batchFlushes[reason]++
+	telemetry.batchPacks += uint64(packs)
+	telemetry.batchBytes += bytes
+	telemetry.batchMutations += mutations
 }
 
 func (telemetry *SchedulerTelemetry) startAction() bool {
@@ -324,6 +347,13 @@ func (telemetry *SchedulerTelemetry) Snapshot() SchedulerSnapshot {
 	for operation, histogram := range telemetry.operations {
 		result.Operations[operation] = histogram.snapshot()
 	}
+	result.BatchFlushes = make(map[string]uint64, len(telemetry.batchFlushes))
+	for reason, count := range telemetry.batchFlushes {
+		result.BatchFlushes[reason] = count
+	}
+	result.BatchPacks = telemetry.batchPacks
+	result.BatchBytes = telemetry.batchBytes
+	result.BatchMutations = telemetry.batchMutations
 	return result
 }
 
@@ -341,6 +371,15 @@ func (telemetry *SchedulerTelemetry) Component(now time.Time) monitor.ComponentS
 	component.Metrics = append(component.Metrics, metrics...)
 	component.Operations = operations
 	component.OperationOverflow = overflow
+	for _, reason := range batchFlushReasons {
+		count := scheduler.BatchFlushes[reason]
+		component.Metrics = append(component.Metrics, monitor.Metric{Name: "legacy_import_batch_flushes", Kind: monitor.MetricCounter, Unit: "operations", Availability: monitor.AvailabilityExact, Labels: []monitor.Label{{Name: "reason", Value: reason}}, Value: count})
+	}
+	component.Metrics = append(component.Metrics,
+		monitor.Metric{Name: "legacy_import_batch_packs", Kind: monitor.MetricCounter, Unit: "operations", Availability: monitor.AvailabilityExact, Value: scheduler.BatchPacks},
+		monitor.Metric{Name: "legacy_import_batch_bytes", Kind: monitor.MetricCounter, Unit: "bytes", Availability: monitor.AvailabilityExact, Value: scheduler.BatchBytes},
+		monitor.Metric{Name: "legacy_import_batch_mutations", Kind: monitor.MetricCounter, Unit: "operations", Availability: monitor.AvailabilityExact, Value: scheduler.BatchMutations},
+	)
 	for _, phase := range []string{"dependency_wait", "ingest_wait", "reducer_wait", "prepare_wait"} {
 		wait := telemetry.waits[phase]
 		component.Metrics = append(component.Metrics, wait.Metrics()...)

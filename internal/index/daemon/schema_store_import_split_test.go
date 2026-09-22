@@ -487,6 +487,67 @@ func TestSchemaStoreLegacyCheckpointOnlyAtFinalReduction(t *testing.T) {
 	}
 }
 
+func TestSchemaStoreReducesContiguousLegacyReceiptsInOneTransaction(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "phase32-stage3-grouped-reduction", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+		RebuildReset: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	store := NewSchemaStore(client)
+	store.EnableFreshLegacyImport()
+	session := daemonTestID(240)
+	source := daemonTestID(241)
+	for batch := uint64(1); batch <= 2; batch++ {
+		packID := daemonTestID(byte(241 + batch))
+		blobID := daemonTestID(byte(243 + batch))
+		imports := []LegacyPackImport{legacyPackImport(source, packID, map[schema.ID]schema.BlobRecord{
+			blobID: {Locations: []schema.BlobLocation{{PackID: packID, Offset: batch, Length: 2, Type: schema.BlobData}}},
+		})}
+		if err := store.IngestLegacyPacks(ctx, session, batch, imports); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkpoint := Mutation{
+		Key: schema.ImportCheckpointKey(source),
+		Value: encodeSchemaRecord(t, schema.ImportCheckpointRecord{
+			PacksImported: 2,
+			BlobsImported: 2,
+		}),
+	}
+	if err := store.ReduceLegacyImportBatchesCheckpoints(ctx, session, []uint64{1, 2}, []Mutation{checkpoint}); err != nil {
+		t.Fatal(err)
+	}
+	for batch := uint64(1); batch <= 2; batch++ {
+		value, found, err := store.Get(ctx, schema.LegacyImportReceiptKey(session, batch))
+		if err != nil || !found {
+			t.Fatalf("read receipt %d: found=%t err=%v", batch, found, err)
+		}
+		receipt, err := schema.UnmarshalLegacyImportReceiptRecord(value)
+		if err != nil || !receipt.Reduced {
+			t.Fatalf("receipt %d = %#v, err=%v", batch, receipt, err)
+		}
+	}
+	value, found, err := store.Get(ctx, checkpoint.Key)
+	if err != nil || !found || !bytes.Equal(value, checkpoint.Value) {
+		t.Fatalf("grouped checkpoint: found=%t err=%v value=%x", found, err, value)
+	}
+	stats := store.LegacyImportStats()
+	if stats.Commits != 3 || stats.ReducedBatches != 2 || stats.ReduceAttempts != 1 {
+		t.Fatalf("grouped reduction counters = %#v", stats)
+	}
+	if err := store.ReduceLegacyImportBatchesCheckpoints(ctx, session, []uint64{1, 2}, []Mutation{checkpoint}); err != nil {
+		t.Fatal(err)
+	}
+	replayed := store.LegacyImportStats()
+	if replayed.Commits != stats.Commits || replayed.ReducedBatches != stats.ReducedBatches || replayed.ReduceAttempts != 2 {
+		t.Fatalf("grouped replay counters = %#v", replayed)
+	}
+}
+
 func TestSchemaStoreCompleteLegacyImportSessionRejectsUnresolved(t *testing.T) {
 	ctx := context.Background()
 	client, err := Ensure(ctx, Options{

@@ -377,6 +377,7 @@ type splitStore struct {
 	ignoreReduceCancel bool
 	ingestCalls        uint64
 	reduceCalls        uint64
+	reduceTransactions uint64
 	failByEnter        map[uint64]error
 	failByPack         map[schema.ID]error
 	failReduceByEnter  map[uint64]error
@@ -571,6 +572,32 @@ func (store *splitStore) ReduceLegacyImportBatchCheckpoints(
 	return nil
 }
 
+func (store *splitStore) ReduceLegacyImportBatchesCheckpoints(
+	ctx context.Context,
+	session schema.ID,
+	batches []uint64,
+	checkpoints []daemon.Mutation,
+) error {
+	store.mu.Lock()
+	store.reduceTransactions++
+	store.mu.Unlock()
+	for index, batch := range batches {
+		var checkpoint *daemon.Mutation
+		if index == len(batches)-1 && len(checkpoints) > 0 {
+			checkpoint = &checkpoints[0]
+		}
+		if err := store.ReduceLegacyImportBatch(ctx, session, batch, checkpoint); err != nil {
+			return err
+		}
+	}
+	for index := 1; index < len(checkpoints); index++ {
+		if err := store.Put(ctx, checkpoints[index].Key, checkpoints[index].Value, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func stage3TestBatchFingerprint(imports []daemon.LegacyPackImport) [32]byte {
 	hasher := sha256.New()
 	var framed [8]byte
@@ -705,9 +732,13 @@ func TestImportStage3IndependentIngestsOverlapAndReduceInOrder(t *testing.T) {
 		t.Fatalf("checkpoint flags = %v", store.reduceCheckpoint)
 	}
 	stats := telemetry.Snapshot()
-	if stats.ActiveLanes != 0 || stats.LaneTime[2] <= 0 || stats.Operations["reduce_service"].Count != 4 ||
+	reducerTransactions := stats.Operations["reduce_service"].Count
+	if stats.ActiveLanes != 0 || stats.LaneTime[2] <= 0 || reducerTransactions == 0 || reducerTransactions >= 4 ||
 		stats.PhaseTime["cleanup"] <= 0 {
 		t.Fatalf("scheduler attribution: %+v", stats)
+	}
+	if store.reduceTransactions != reducerTransactions {
+		t.Fatalf("reducer transactions = %d, telemetry = %d", store.reduceTransactions, reducerTransactions)
 	}
 	if got := importMetricValue(telemetry.Component(time.Now()).Metrics, "operation_processed_bytes", map[string]string{"role": "database"}); got == 0 {
 		t.Fatal("Stage 3 did not account published database bytes")
@@ -826,6 +857,64 @@ func TestSchedulerTelemetryProducesValidMonitorComponent(t *testing.T) {
 	}
 	if len(component.Operations) != 0 {
 		t.Fatalf("settled component = %+v", component)
+	}
+}
+
+func TestStage3DependencyWaitReason(t *testing.T) {
+	ready := []stage3LogicalBatch{{deps: []string{"busy"}}, {deps: []string{"later"}}}
+	inFlight := map[string]uint64{"busy": 1}
+	if reason := stage3DependencyWaitReason(ready, inFlight); reason != "mixed" {
+		t.Fatalf("mixed dependency wait reason = %q", reason)
+	}
+	ready[1].deps = []string{"busy"}
+	if reason := stage3DependencyWaitReason(ready, inFlight); reason != "inflight" {
+		t.Fatalf("in-flight dependency wait reason = %q", reason)
+	}
+	if reason := stage3DependencyWaitReason(ready, nil); reason != "ordered" {
+		t.Fatalf("ordered dependency wait reason = %q", reason)
+	}
+}
+
+func TestStage3ReductionIngestBlocker(t *testing.T) {
+	active := map[uint64]stage3LogicalBatch{2: {ordinal: 2}}
+	if blocker := stage3ReductionIngestBlocker(2, active); blocker != "active" {
+		t.Fatalf("active ingest blocker = %q", blocker)
+	}
+	if blocker := stage3ReductionIngestBlocker(1, active); blocker != "admission" {
+		t.Fatalf("unadmitted ingest blocker = %q", blocker)
+	}
+}
+
+func TestPackBatchFlushReasonBefore(t *testing.T) {
+	options := packPipelineOptions{packsPerTransaction: 2, transactionBytes: 100}
+	batch := packBatch{items: []packPreparation{{}}, bytes: 60, mutations: 7_990}
+	item := packPreparation{outcome: packImportResult{bytes: 41, mutations: 11}}
+	if reason := batch.flushReasonBefore(item, options); reason != "byte_limit" {
+		t.Fatalf("byte-limit flush reason = %q", reason)
+	}
+	batch.bytes = 0
+	if reason := batch.flushReasonBefore(item, options); reason != "mutation_limit" {
+		t.Fatalf("mutation-limit flush reason = %q", reason)
+	}
+	batch.items = append(batch.items, packPreparation{})
+	if reason := batch.flushReasonBefore(item, options); reason != "pack_count" {
+		t.Fatalf("pack-count flush reason = %q", reason)
+	}
+}
+
+func TestSchedulerTelemetryRecordsBatchFlushes(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	telemetry.batchFlushed("pack_count", 8, 1024, 80)
+	telemetry.batchFlushed("end_of_input", 3, 256, 30)
+
+	snapshot := telemetry.Snapshot()
+	if snapshot.BatchFlushes["pack_count"] != 1 || snapshot.BatchFlushes["end_of_input"] != 1 ||
+		snapshot.BatchPacks != 11 || snapshot.BatchBytes != 1280 || snapshot.BatchMutations != 110 {
+		t.Fatalf("batch flush telemetry = %+v", snapshot)
+	}
+	component := telemetry.Component(time.Now())
+	if got := importMetricValue(component.Metrics, "legacy_import_batch_flushes", map[string]string{"reason": "pack_count"}); got != 1 {
+		t.Fatalf("pack-count flush metric = %d", got)
 	}
 }
 
@@ -1043,8 +1132,17 @@ readyLoop:
 		t.Fatalf("progress did not advance after reduction acknowledgements: %+v", finalProgress)
 	}
 	operations := finalSnapshot.Operations
-	if operations["completion_to_receive"].Count == 0 || operations["reduce_service"].Count != uint64(len(packIDs)) {
+	if operations["completion_to_receive"].Count == 0 ||
+		operations["ingest_completion_to_reduce_dispatch"].Count != uint64(len(packIDs)) ||
+		operations["reduce_dispatch_wait_order"].Count == 0 ||
+		operations["reduce_dispatch_wait_ready"].Count != uint64(len(packIDs)) ||
+		operations["reduce_dispatch_blocked_service"].Count == 0 ||
+		operations["reduce_service"].Count < 2 ||
+		operations["reduce_service"].Count >= uint64(len(packIDs)) {
 		t.Fatalf("blocked reducer operations = %+v", operations)
+	}
+	if store.reduceTransactions != operations["reduce_service"].Count {
+		t.Fatalf("reducer transactions = %d, telemetry = %d", store.reduceTransactions, operations["reduce_service"].Count)
 	}
 	if service := operations["reduce_service"].Sum; service < eligibleHold {
 		t.Fatalf("reducer service = %s, want at least %s", service, eligibleHold)
@@ -1305,6 +1403,7 @@ func TestImportStage3FinalCheckpointWaitsForReductionAcknowledgement(t *testing.
 }
 
 func TestImportStage3DelayedEarliestIngestStillReducesInOrder(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
 	indexID := vaultic.NewRandomID()
 	packIDs := make([]vaultic.ID, 4)
 	for index := range packIDs {
@@ -1321,7 +1420,7 @@ func TestImportStage3DelayedEarliestIngestStillReducesInOrder(t *testing.T) {
 			&memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}},
 			fixedStatter{size: 16},
 			store,
-			Options{PublicationLanes: 2, PacksPerTransaction: 1},
+			Options{PublicationLanes: 2, PacksPerTransaction: 1, Telemetry: telemetry},
 		)
 		done <- err
 	}()
@@ -1364,6 +1463,17 @@ func TestImportStage3DelayedEarliestIngestStillReducesInOrder(t *testing.T) {
 	}
 	if !slices.Equal(store.reducedOrder, wantOrder) {
 		t.Fatalf("reduction order = %v, want %v", store.reducedOrder, wantOrder)
+	}
+	operations := telemetry.Snapshot().Operations
+	if operations["reduce_dispatch_blocked_ingest"].Count == 0 {
+		t.Fatal("missing reducer idle wait for delayed earliest ingest")
+	}
+	if operations["reduce_dispatch_blocked_ingest_active"].Count == 0 {
+		t.Fatal("missing active-ingest reducer idle wait for delayed earliest ingest")
+	}
+	if operations["ingest_service_reducer_unblock"].Count == 0 ||
+		operations["ingest_service_other"].Count == 0 {
+		t.Fatalf("missing reducer-unblock ingest attribution: %+v", operations)
 	}
 }
 

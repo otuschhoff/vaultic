@@ -47,6 +47,7 @@ var monitorValueSets = map[string]map[string]struct{}{
 	"queue":          values("batch_write", "legacy_import_ingest", "legacy_import_reduce"),
 	"operation":      values("backup", "restore", "check", "legacy_import", "forget", "prune", "replicate", "cache_fill", "cache_evict", "placement", "export", "analytics", "maintenance", "gdpr", "staging_reconcile", "key_management", "compaction", "recovery"),
 	"outcome":        values("success", "failure", "cancellation", "timeout"),
+	"reason":         values("pack_count", "byte_limit", "mutation_limit", "end_of_input", "error"),
 	"role":           values("repository", "database", "wal", "coordination", "source", "scratch", "cache", "rpc", "broker"),
 	"representation": values("encrypted_pack", "encrypted_range", "compressed_container", "decoded_extent", "whole_file", "sst", "block", "metadata"),
 	"throttle":       values("none", "concurrency", "bandwidth", "capacity", "backend_retry", "credential_renewal", "writer_fencing", "wal_flush", "wal_retention", "compaction", "durability", "shutdown"),
@@ -702,6 +703,10 @@ func newMonitorMetricSpecs() map[string]metricSpec {
 	}
 	add("legacy_import_events", MetricCounter, "operations", []string{"statistic"}, []string{"statistic"})
 	add("legacy_import_processed_bytes", MetricCounter, "bytes", []string{"statistic"}, []string{"statistic"})
+	add("legacy_import_batch_flushes", MetricCounter, "operations", []string{"reason"}, []string{"reason"})
+	add("legacy_import_batch_packs", MetricCounter, "operations", nil, nil)
+	add("legacy_import_batch_bytes", MetricCounter, "bytes", nil, nil)
+	add("legacy_import_batch_mutations", MetricCounter, "operations", nil, nil)
 	add("legacy_import_filter_bytes", MetricGauge, "bytes", nil, nil)
 	add("legacy_import_filter_layers", MetricGauge, "objects", nil, nil)
 	add("legacy_import_filter_fallback", MetricGauge, "state", nil, nil)

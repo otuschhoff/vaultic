@@ -35,20 +35,28 @@ type stage3LogicalBatch struct {
 }
 
 type stage3IngestOutcome struct {
-	ordinal     uint64
-	parts       []uint64
-	failedPack  int
-	err         error
-	completedAt time.Time
+	ordinal       uint64
+	parts         []uint64
+	failedPack    int
+	err           error
+	ingestElapsed time.Duration
+	completedAt   time.Time
 }
 
 type stage3ReductionJob struct {
+	logical    stage3LogicalBatch
+	outcome    stage3IngestOutcome
+	additional []stage3ReductionItem
+}
+
+type stage3ReductionItem struct {
 	logical stage3LogicalBatch
 	outcome stage3IngestOutcome
 }
 
 type stage3ReductionOutcome struct {
 	ordinal    uint64
+	count      uint64
 	failedPack int
 	err        error
 }
@@ -140,6 +148,7 @@ func importPacksStage3Sources(
 	nextPack := 0
 	nextOrdinal := uint64(1)
 	nextReduce := uint64(1)
+	orderReadyAt := time.Now()
 	var batch packBatch
 	batch.items = make([]packPreparation, 0, pipelineOptions.packsPerTransaction)
 	checkpoints := make(map[schema.ID]schema.ImportCheckpointRecord)
@@ -152,7 +161,7 @@ func importPacksStage3Sources(
 	activeLanes := uint(0)
 	reductionActive := false
 
-	queueBatch := func(final bool) bool {
+	queueBatch := func(reason string, final bool) bool {
 		if len(batch.items) == 0 {
 			return true
 		}
@@ -187,6 +196,7 @@ func importPacksStage3Sources(
 			ordinal: nextOrdinal, rootBatch: rootBatch, items: append([]packPreparation(nil), batch.items...),
 			imports: imports, checkpoints: finalCheckpoints, deps: stage3DependencyKeys(imports), queuedAt: time.Now(),
 		})
+		options.Telemetry.batchFlushed(reason, len(batch.items), batch.bytes, batch.mutations)
 		nextOrdinal++
 		batch.reset()
 		return true
@@ -225,6 +235,7 @@ func importPacksStage3Sources(
 			go func(logical stage3LogicalBatch) {
 				options.Telemetry.lane(1)
 				outcome := stage3IngestOutcome{ordinal: logical.ordinal}
+				ingestStarted := time.Now()
 				parts, failureOffset, err := stage3IngestSplitBatch(workerCtx, store, session, logical, options, counters)
 				options.Telemetry.lane(-1)
 				if failureOffset >= 0 && failureOffset < len(logical.items) {
@@ -232,7 +243,8 @@ func importPacksStage3Sources(
 				} else {
 					outcome.failedPack = logical.items[0].index
 				}
-				outcome.parts, outcome.err, outcome.completedAt = parts, err, time.Now()
+				outcome.parts, outcome.err = parts, err
+				outcome.ingestElapsed, outcome.completedAt = time.Since(ingestStarted), time.Now()
 				options.Telemetry.pendingCompletion(1)
 				ingested <- outcome
 			}(batchToIngest)
@@ -242,7 +254,14 @@ func importPacksStage3Sources(
 	acceptIngested := func(outcome stage3IngestOutcome) {
 		options.Telemetry.pendingCompletion(-1)
 		receivedAt := time.Now()
-		options.Telemetry.observe("completion_to_receive", receivedAt.Sub(outcome.completedAt))
+		completionDelay := receivedAt.Sub(outcome.completedAt)
+		options.Telemetry.observe("completion_to_receive", completionDelay)
+		options.Telemetry.observe(fmt.Sprintf("completion_to_receive_active_%d", activeLanes), completionDelay)
+		if !reductionActive && outcome.ordinal == nextReduce {
+			options.Telemetry.observe("ingest_service_reducer_unblock", outcome.ingestElapsed)
+		} else {
+			options.Telemetry.observe("ingest_service_other", outcome.ingestElapsed)
+		}
 		if activeLanes > 0 {
 			activeLanes--
 		}
@@ -295,7 +314,36 @@ func importPacksStage3Sources(
 				progress = true
 				continue
 			}
-			reductionJobs <- stage3ReductionJob{logical: logical, outcome: outcome}
+			job := stage3ReductionJob{logical: logical, outcome: outcome}
+			for ordinal := nextReduce + 1; ; ordinal++ {
+				additionalOutcome, found := completed[ordinal]
+				if !found || additionalOutcome.err != nil {
+					break
+				}
+				additionalLogical, known := active[ordinal]
+				if !known {
+					break
+				}
+				delete(completed, ordinal)
+				job.additional = append(job.additional, stage3ReductionItem{
+					logical: additionalLogical, outcome: additionalOutcome,
+				})
+			}
+			dispatchedAt := time.Now()
+			observeDispatch := func(candidate stage3IngestOutcome) {
+				options.Telemetry.observe("ingest_completion_to_reduce_dispatch", dispatchedAt.Sub(candidate.completedAt))
+				if candidate.completedAt.Before(orderReadyAt) {
+					options.Telemetry.observe("reduce_dispatch_wait_order", orderReadyAt.Sub(candidate.completedAt))
+					options.Telemetry.observe("reduce_dispatch_wait_ready", dispatchedAt.Sub(orderReadyAt))
+				} else {
+					options.Telemetry.observe("reduce_dispatch_wait_ready", dispatchedAt.Sub(candidate.completedAt))
+				}
+			}
+			observeDispatch(outcome)
+			for _, additional := range job.additional {
+				observeDispatch(additional.outcome)
+			}
+			reductionJobs <- job
 			reductionActive = true
 			return true
 		}
@@ -303,16 +351,6 @@ func importPacksStage3Sources(
 
 	acceptReduced := func(outcome stage3ReductionOutcome) {
 		reductionActive = false
-		logical, known := active[outcome.ordinal]
-		if !known {
-			if failedPack < 0 {
-				failedPack = outcome.failedPack
-			}
-			failureSeen = true
-			stopAdmission = true
-			cancel()
-			return
-		}
 		if outcome.err != nil {
 			failures = append(failures, stage3IngestOutcome{
 				ordinal: outcome.ordinal, failedPack: outcome.failedPack, err: outcome.err,
@@ -323,32 +361,68 @@ func importPacksStage3Sources(
 			failureSeen = true
 			stopAdmission = true
 			cancel()
-			delete(active, outcome.ordinal)
-			stage3ReleaseDependencies(depBusy, logical)
+			for ordinal := outcome.ordinal; ordinal < outcome.ordinal+outcome.count; ordinal++ {
+				if logical, known := active[ordinal]; known {
+					delete(active, ordinal)
+					stage3ReleaseDependencies(depBusy, logical)
+				}
+			}
 			return
 		}
-		for _, item := range logical.items {
-			current := outcomes[item.index]
-			current.complete = true
-			outcomes[item.index] = current
-			options.Telemetry.processed("database", item.outcome.bytes)
-			counters.preparedPacks.Add(^uint64(0))
-			counters.preparedBytes.Add(^uint64(item.outcome.bytes - 1))
-			released <- item.reservedBytes
-			counters.committedBlobs.Add(item.outcome.imported.Record.BlobCount)
+		for ordinal := outcome.ordinal; ordinal < outcome.ordinal+outcome.count; ordinal++ {
+			logical, known := active[ordinal]
+			if !known {
+				if failedPack < 0 {
+					failedPack = outcome.failedPack
+				}
+				failureSeen = true
+				stopAdmission = true
+				cancel()
+				return
+			}
+			for _, item := range logical.items {
+				current := outcomes[item.index]
+				current.complete = true
+				outcomes[item.index] = current
+				options.Telemetry.processed("database", item.outcome.bytes)
+				counters.preparedPacks.Add(^uint64(0))
+				counters.preparedBytes.Add(^uint64(item.outcome.bytes - 1))
+				released <- item.reservedBytes
+				counters.committedBlobs.Add(item.outcome.imported.Record.BlobCount)
+			}
+			counters.committedPacks.Add(uint64(len(logical.items)))
+			counters.committedBatches.Add(1)
+			counters.checkpointPending.Store(len(logical.checkpoints) == 0)
+			counters.reportSnapshot()
+			delete(active, ordinal)
+			stage3ReleaseDependencies(depBusy, logical)
 		}
-		counters.committedPacks.Add(uint64(len(logical.items)))
-		counters.committedBatches.Add(1)
-		counters.checkpointPending.Store(len(logical.checkpoints) == 0)
-		counters.reportSnapshot()
-		delete(active, outcome.ordinal)
-		stage3ReleaseDependencies(depBusy, logical)
-		nextReduce++
+		nextReduce += outcome.count
+		orderReadyAt = time.Now()
+	}
+
+	drainCompletions := func() bool {
+		progress := false
+		for {
+			select {
+			case outcome := <-ingested:
+				acceptIngested(outcome)
+				progress = true
+			case outcome := <-reduced:
+				acceptReduced(outcome)
+				progress = true
+			default:
+				return progress
+			}
+		}
 	}
 
 	for {
 		options.Telemetry.phase("schedule")
-		progress := false
+		progress := drainCompletions()
+		if dispatchReduction() {
+			progress = true
+		}
 		for {
 			item, found := pendingPrepared[nextPack]
 			if !found || stopAdmission {
@@ -361,11 +435,11 @@ func importPacksStage3Sources(
 				outcomes[failedPack].err = item.outcome.err
 				stopAdmission = true
 				cancel()
-				queueBatch(false)
+				queueBatch("error", false)
 				break
 			}
-			if batch.shouldFlushBefore(item, pipelineOptions) {
-				if !queueBatch(false) {
+			if reason := batch.flushReasonBefore(item, pipelineOptions); reason != "" {
+				if !queueBatch(reason, false) {
 					break
 				}
 			}
@@ -383,7 +457,12 @@ func importPacksStage3Sources(
 			checkpoints[sourceIndex] = checkpoint
 			nextPack++
 			if nextPack == len(packs) || batch.full(pipelineOptions) {
-				if !queueBatch(nextPack == len(packs)) {
+				final := nextPack == len(packs)
+				reason := "pack_count"
+				if final {
+					reason = "end_of_input"
+				}
+				if !queueBatch(reason, final) {
 					break
 				}
 			}
@@ -416,9 +495,21 @@ func importPacksStage3Sources(
 		}
 		if !progress {
 			waitPhase := "prepare_wait"
+			dependencyReason := ""
+			reductionBlocker := ""
+			reductionIngestBlocker := ""
+			if len(completed) > 0 {
+				if reductionActive {
+					reductionBlocker = "service"
+				} else if _, found := completed[nextReduce]; !found {
+					reductionBlocker = "ingest"
+					reductionIngestBlocker = stage3ReductionIngestBlocker(nextReduce, active)
+				}
+			}
 			switch {
 			case len(ready) > 0 && activeLanes < lanes:
 				waitPhase = "dependency_wait"
+				dependencyReason = stage3DependencyWaitReason(ready, depBusy)
 			case activeLanes > 0:
 				waitPhase = "ingest_wait"
 			case reductionActive:
@@ -426,8 +517,21 @@ func importPacksStage3Sources(
 			}
 			options.Telemetry.phase(waitPhase)
 			waitGuard := options.Telemetry.beginWait(waitPhase)
+			waitStarted := time.Now()
+			recordAttributedWait := func() {
+				if dependencyReason != "" {
+					options.Telemetry.observe("dependency_wait_"+dependencyReason, time.Since(waitStarted))
+				}
+				if reductionBlocker != "" {
+					options.Telemetry.observe("reduce_dispatch_blocked_"+reductionBlocker, time.Since(waitStarted))
+				}
+				if reductionIngestBlocker != "" {
+					options.Telemetry.observe("reduce_dispatch_blocked_ingest_"+reductionIngestBlocker, time.Since(waitStarted))
+				}
+			}
 			select {
 			case item, ok := <-prepared:
+				recordAttributedWait()
 				waitGuard.Succeeded()
 				waitGuard.Done()
 				if !ok {
@@ -441,14 +545,17 @@ func importPacksStage3Sources(
 				}
 				pendingPrepared[item.index] = item
 			case outcome := <-ingested:
+				recordAttributedWait()
 				waitGuard.Succeeded()
 				waitGuard.Done()
 				acceptIngested(outcome)
 			case outcome := <-reduced:
+				recordAttributedWait()
 				waitGuard.Succeeded()
 				waitGuard.Done()
 				acceptReduced(outcome)
 			case <-ctx.Done():
+				recordAttributedWait()
 				settleImportWait(waitGuard, ctx.Err())
 				if failedPack < 0 {
 					failedPack = min(nextPack, len(outcomes)-1)
@@ -568,18 +675,20 @@ func stage3ReduceBatches(
 	for job := range jobs {
 		started := time.Now()
 		result := stage3ReductionOutcome{
-			ordinal: job.outcome.ordinal, failedPack: job.logical.items[0].index,
+			ordinal: job.outcome.ordinal, count: uint64(1 + len(job.additional)), failedPack: job.logical.items[0].index,
 		}
-		for index, part := range job.outcome.parts {
-			var checkpoints []daemon.Mutation
-			if index == len(job.outcome.parts)-1 {
-				checkpoints = job.logical.checkpoints
-			}
-			if err := reduceLegacyImportBatch(ctx, store, session, part, checkpoints, options, counters); err != nil {
-				result.err = err
-				break
-			}
-			counters.reducedBatches.Add(1)
+		batchIDs := append([]uint64(nil), job.outcome.parts...)
+		for _, additional := range job.additional {
+			batchIDs = append(batchIDs, additional.outcome.parts...)
+		}
+		checkpoints := job.logical.checkpoints
+		if len(job.additional) > 0 {
+			checkpoints = job.additional[len(job.additional)-1].logical.checkpoints
+		}
+		if err := reduceLegacyImportBatches(ctx, store, session, batchIDs, checkpoints, options, counters); err != nil {
+			result.err = err
+		} else {
+			counters.reducedBatches.Add(uint64(len(batchIDs)))
 		}
 		options.Telemetry.observe("reduce_service", time.Since(started))
 		select {
@@ -685,6 +794,18 @@ func reduceLegacyImportBatch(
 	options Options,
 	counters *packPipelineCounters,
 ) error {
+	return reduceLegacyImportBatches(ctx, store, session, []uint64{batchID}, checkpoints, options, counters)
+}
+
+func reduceLegacyImportBatches(
+	ctx context.Context,
+	store SplitStore,
+	session schema.ID,
+	batchIDs []uint64,
+	checkpoints []daemon.Mutation,
+	options Options,
+	counters *packPipelineCounters,
+) error {
 	timeout := options.ImportBatchTimeout
 	if timeout == 0 {
 		timeout = defaultImportBatchTimeout
@@ -692,7 +813,7 @@ func reduceLegacyImportBatch(
 	started := time.Now()
 	batchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := store.ReduceLegacyImportBatchCheckpoints(batchCtx, session, batchID, checkpoints)
+	err := store.ReduceLegacyImportBatchesCheckpoints(batchCtx, session, batchIDs, checkpoints)
 	elapsed := uint64(time.Since(started))
 	counters.reductionNanos.Add(elapsed)
 	counters.publicationNanos.Add(elapsed)
@@ -833,6 +954,13 @@ func stage3SelectFailure(failures []stage3IngestOutcome) (stage3IngestOutcome, b
 	return failures[bestIndex], true
 }
 
+func stage3ReductionIngestBlocker(nextReduce uint64, active map[uint64]stage3LogicalBatch) string {
+	if _, found := active[nextReduce]; found {
+		return "active"
+	}
+	return "admission"
+}
+
 func stage3IsCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
@@ -933,6 +1061,23 @@ func stage3DependenciesFree(inFlight map[string]uint64, deps []string) bool {
 		}
 	}
 	return true
+}
+
+func stage3DependencyWaitReason(ready []stage3LogicalBatch, inFlight map[string]uint64) string {
+	directlyBlocked := 0
+	for _, batch := range ready {
+		if !stage3DependenciesFree(inFlight, batch.deps) {
+			directlyBlocked++
+		}
+	}
+	switch {
+	case directlyBlocked == len(ready):
+		return "inflight"
+	case directlyBlocked > 0:
+		return "mixed"
+	default:
+		return "ordered"
+	}
 }
 
 func stage3DependenciesOverlap(blocked map[string]struct{}, deps []string) bool {

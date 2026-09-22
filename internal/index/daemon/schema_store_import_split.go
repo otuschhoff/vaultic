@@ -598,14 +598,26 @@ func (store *SchemaStore) ReduceLegacyImportBatchCheckpoints(
 	batch uint64,
 	finalCheckpoints []Mutation,
 ) (returnErr error) {
+	return store.ReduceLegacyImportBatchesCheckpoints(ctx, session, []uint64{batch}, finalCheckpoints)
+}
+
+func (store *SchemaStore) ReduceLegacyImportBatchesCheckpoints(
+	ctx context.Context,
+	session schema.ID,
+	batches []uint64,
+	finalCheckpoints []Mutation,
+) (returnErr error) {
 	started := time.Now()
 	defer func() { store.legacyMetrics.totalNanos.Add(uint64(time.Since(started))) }()
-	store.legacyMetrics.batches.Add(1)
+	store.legacyMetrics.batches.Add(uint64(len(batches)))
 	defer func() {
 		if returnErr != nil {
 			store.legacyMetrics.reduceFailures.Add(1)
 		}
 	}()
+	if len(batches) == 0 {
+		return fmt.Errorf("legacy import reduction requires at least one batch")
+	}
 	if session == (schema.ID{}) {
 		return fmt.Errorf("legacy import session is required")
 	}
@@ -619,11 +631,21 @@ func (store *SchemaStore) ReduceLegacyImportBatchCheckpoints(
 	}
 	deferDurability := store.freshImportSeen != nil
 	backoff := 100 * time.Microsecond
-	receiptKey := schema.LegacyImportReceiptKey(session, batch)
+	receiptKeys := make([][]byte, len(batches))
+	seenBatches := make(map[uint64]struct{}, len(batches))
+	for index, batch := range batches {
+		if _, found := seenBatches[batch]; found {
+			return fmt.Errorf("legacy import reduction batch %d is duplicated", batch)
+		}
+		seenBatches[batch] = struct{}{}
+		receiptKeys[index] = schema.LegacyImportReceiptKey(session, batch)
+	}
 	for range revisionAllocationAttempts {
 		store.legacyMetrics.reduceAttempts.Add(1)
 		reduceStarted := time.Now()
-		committed, err := store.reduceLegacyImportBatchOnce(ctx, receiptKey, finalCheckpoints, deferDurability)
+		committed, reduced, err := store.reduceLegacyImportBatchesOnce(
+			ctx, receiptKeys, finalCheckpoints, deferDurability,
+		)
 		store.legacyMetrics.reductionNanos.Add(uint64(time.Since(reduceStarted)))
 		if status.Code(err) == codes.Aborted {
 			store.legacyMetrics.conflicts.Add(1)
@@ -643,10 +665,19 @@ func (store *SchemaStore) ReduceLegacyImportBatchCheckpoints(
 		}
 		if err != nil {
 			recoveryStarted := time.Now()
-			state, lookupErr := store.lookupReducedLegacyImportReceipt(ctx, receiptKey)
-			store.legacyMetrics.recoveryReads.Add(1)
+			allReduced := true
+			var lookupErr error
+			for _, receiptKey := range receiptKeys {
+				var reduced bool
+				reduced, lookupErr = store.lookupReducedLegacyImportReceipt(ctx, receiptKey)
+				store.legacyMetrics.recoveryReads.Add(1)
+				if lookupErr != nil || !reduced {
+					allReduced = false
+					break
+				}
+			}
 			store.legacyMetrics.operations.reduceRecoveryRead.observe(time.Since(recoveryStarted))
-			if lookupErr == nil && state {
+			if lookupErr == nil && allReduced {
 				if len(finalCheckpoints) == 0 {
 					return nil
 				}
@@ -662,37 +693,51 @@ func (store *SchemaStore) ReduceLegacyImportBatchCheckpoints(
 			return nil
 		}
 		store.legacyMetrics.commits.Add(1)
-		store.legacyMetrics.reducedBatches.Add(1)
+		store.legacyMetrics.reducedBatches.Add(reduced)
 		return nil
 	}
-	return fmt.Errorf("reduce legacy import batch: %w", errors.New("transaction conflict retry limit exceeded"))
+	return fmt.Errorf("reduce legacy import batches: %w", errors.New("transaction conflict retry limit exceeded"))
 }
 
 //nolint:gocognit,nestif // Recovery-state validation and atomic reduction share one transaction boundary.
-func (store *SchemaStore) reduceLegacyImportBatchOnce(
+func (store *SchemaStore) reduceLegacyImportBatchesOnce(
 	ctx context.Context,
-	receiptKey []byte,
+	receiptKeys [][]byte,
 	finalCheckpoints []Mutation,
 	deferDurability bool,
-) (bool, error) {
+) (bool, uint64, error) {
 	beginStarted := time.Now()
 	transaction, err := store.client.Begin(ctx)
 	store.legacyMetrics.operations.reduceBegin.observe(time.Since(beginStarted))
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
-	fail := func(err error) (bool, error) {
+	fail := func(err error) (bool, uint64, error) {
 		rollbackTransaction(ctx, transaction)
-		return false, err
+		return false, 0, err
 	}
 	receiptStarted := time.Now()
-	value, found, err := transaction.Get(ctx, receiptKey)
-	store.legacyMetrics.reductionReceiptReads.Add(1)
+	values := make([]KeyValue, len(receiptKeys))
+	found := make([]bool, len(receiptKeys))
+	if len(receiptKeys) == 1 {
+		var value []byte
+		value, found[0], err = transaction.Get(ctx, receiptKeys[0])
+		values[0] = KeyValue{Key: receiptKeys[0], Value: value}
+	} else {
+		values, found, err = transaction.MultiGet(ctx, receiptKeys)
+	}
+	store.legacyMetrics.reductionReceiptReads.Add(uint64(len(receiptKeys)))
 	store.legacyMetrics.operations.reduceReceiptRead.observe(time.Since(receiptStarted))
 	if err != nil {
 		return fail(err)
 	}
-	if !found {
+	missing := 0
+	for _, present := range found {
+		if !present {
+			missing++
+		}
+	}
+	if missing > 0 {
 		if len(finalCheckpoints) > 0 {
 			checkpointStarted := time.Now()
 			applied, err := checkpointsMatchInTransaction(ctx, transaction, finalCheckpoints)
@@ -701,25 +746,35 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 			if err != nil {
 				return fail(err)
 			}
-			if applied {
+			if applied && missing == len(receiptKeys) {
 				if err := transaction.Rollback(ctx); err != nil {
-					return false, err
+					return false, 0, err
 				}
-				return false, nil
+				return false, 0, nil
 			}
 		}
 		return fail(fmt.Errorf("%w", ErrLegacyImportReceiptMissing))
 	}
-	receipt, err := schema.UnmarshalLegacyImportReceiptRecord(value)
-	if err != nil {
-		return fail(err)
-	}
-	for _, checkpoint := range finalCheckpoints {
-		if err := validateCheckpointForLegacyReceipt(checkpoint, receipt); err != nil {
+	receipts := make([]schema.LegacyImportReceiptRecord, len(values))
+	for index := range values {
+		receipts[index], err = schema.UnmarshalLegacyImportReceiptRecord(values[index].Value)
+		if err != nil {
 			return fail(err)
 		}
 	}
-	if receipt.Reduced {
+	for _, checkpoint := range finalCheckpoints {
+		if err := validateCheckpointForLegacyReceipt(checkpoint, receipts[len(receipts)-1]); err != nil {
+			return fail(err)
+		}
+	}
+	firstUnreduced := len(receipts)
+	for index, receipt := range receipts {
+		if !receipt.Reduced {
+			firstUnreduced = index
+			break
+		}
+	}
+	if firstUnreduced == len(receipts) {
 		if len(finalCheckpoints) > 0 {
 			checkpointStarted := time.Now()
 			applied, err := checkpointsMatchInTransaction(ctx, transaction, finalCheckpoints)
@@ -733,19 +788,28 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 			}
 		}
 		if err := transaction.Rollback(ctx); err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, nil
+		return false, 0, nil
 	}
-	changes, err := receiptPackChanges(receipt)
-	if err != nil {
-		return fail(err)
+	changes := make([]packChange, 0)
+	events := make([]PackEvent, 0)
+	for index := firstUnreduced; index < len(receipts); index++ {
+		if receipts[index].Reduced {
+			return fail(fmt.Errorf("legacy import receipts are not reduced in order"))
+		}
+		receiptChanges, err := receiptPackChanges(receipts[index])
+		if err != nil {
+			return fail(err)
+		}
+		changes = append(changes, receiptChanges...)
+		receiptEvents, err := receiptPackEvents(receipts[index])
+		if err != nil {
+			return fail(err)
+		}
+		events = append(events, receiptEvents...)
 	}
-	events, err := receiptPackEvents(receipt)
-	if err != nil {
-		return fail(err)
-	}
-	mutations := make([]Mutation, 0, len(changes)+len(receipt.Events)+2+len(aggregateKeys()))
+	mutations := make([]Mutation, 0, len(changes)+len(events)+len(receipts)-firstUnreduced+2+len(aggregateKeys()))
 	aggregateReadKeys := aggregateKeys()
 	readKeys := make([][]byte, 0, len(aggregateReadKeys)+2)
 	if len(changes) > 0 {
@@ -799,12 +863,14 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 		defer func() { store.legacyMetrics.operations.reduceEncode.observe(time.Since(encodeStarted)) }()
 		mutations = append(mutations, history...)
 		mutations = append(mutations, finalCheckpoints...)
-		receipt.Reduced = true
-		encodedReceipt, encodeErr := receipt.MarshalBinary()
-		if encodeErr != nil {
-			return encodeErr
+		for index := firstUnreduced; index < len(receipts); index++ {
+			receipts[index].Reduced = true
+			encodedReceipt, encodeErr := receipts[index].MarshalBinary()
+			if encodeErr != nil {
+				return encodeErr
+			}
+			mutations = append(mutations, Mutation{Key: receiptKeys[index], Value: encodedReceipt})
 		}
-		mutations = append(mutations, Mutation{Key: receiptKey, Value: encodedReceipt})
 		sort.Slice(mutations, func(left, right int) bool { return bytes.Compare(mutations[left].Key, mutations[right].Key) < 0 })
 		return validateLegacyImportMutations(mutations)
 	}()
@@ -828,11 +894,11 @@ func (store *SchemaStore) reduceLegacyImportBatchOnce(
 	if err := commit(ctx); err != nil {
 		store.legacyMetrics.operations.reduceCommit.observe(time.Since(commitStarted))
 		rollbackTransaction(ctx, transaction)
-		return false, err
+		return false, 0, err
 	}
 	store.legacyMetrics.operations.reduceCommit.observe(time.Since(commitStarted))
 	store.legacyMetrics.reductionMutations.Add(uint64(len(mutations)))
-	return true, nil
+	return true, uint64(len(receipts) - firstUnreduced), nil
 }
 
 func validateCheckpointForLegacyReceipt(checkpoint Mutation, receipt schema.LegacyImportReceiptRecord) error {

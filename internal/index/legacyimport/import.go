@@ -155,6 +155,7 @@ type SplitStore interface {
 	IngestLegacyPacksCheckpoints(context.Context, schema.ID, uint64, []daemon.LegacyPackImport, []daemon.Mutation) error
 	ReduceLegacyImportBatch(context.Context, schema.ID, uint64, *daemon.Mutation) error
 	ReduceLegacyImportBatchCheckpoints(context.Context, schema.ID, uint64, []daemon.Mutation) error
+	ReduceLegacyImportBatchesCheckpoints(context.Context, schema.ID, []uint64, []daemon.Mutation) error
 	CompleteLegacyImportSession(context.Context, schema.ID) error
 }
 
@@ -724,9 +725,23 @@ func awaitPreparedPack(
 }
 
 func (batch *packBatch) shouldFlushBefore(item packPreparation, options packPipelineOptions) bool {
-	return len(batch.items) > 0 && (batch.full(options) ||
-		batch.bytes+item.outcome.bytes > options.transactionBytes ||
-		batch.mutations+item.outcome.mutations > daemon.LegacyImportTransactionMutationLimit)
+	return batch.flushReasonBefore(item, options) != ""
+}
+
+func (batch *packBatch) flushReasonBefore(item packPreparation, options packPipelineOptions) string {
+	if len(batch.items) == 0 {
+		return ""
+	}
+	if batch.full(options) {
+		return "pack_count"
+	}
+	if batch.bytes+item.outcome.bytes > options.transactionBytes {
+		return "byte_limit"
+	}
+	if batch.mutations+item.outcome.mutations > daemon.LegacyImportTransactionMutationLimit {
+		return "mutation_limit"
+	}
+	return ""
 }
 
 func (batch *packBatch) full(options packPipelineOptions) bool {

@@ -283,6 +283,218 @@ block and 1 GiB metadata capacities. Keep the 512 MiB block cache for import;
 do not test 16 or 32 GiB without cache hit/eviction evidence from a workload
 that can plausibly reuse those blocks.
 
+### Experiment 6: Four Publication Lanes
+
+Four publication lanes are accepted for the next import baseline. Runs
+`phase32-p12-publication-lanes-4-20260921-hdd-10m-r1` and `r2` kept the
+accepted 1 GiB metadata cache, 512 MiB block cache, 256 MiB L0 target, memory
+WAL, and deferred cleanup, changing only publication lanes from two to four.
+They produced 113,794 and 114,609 blobs/s, only 0.71% apart, and averaged
+114,201 blobs/s: 14.91% above the 99,384 blobs/s mean of the two metadata-cache
+controls. Mean early throughput improved 10.80%, mean late throughput improved
+16.85%, and early-to-late decay narrowed from 14.01% to 9.32%. Sampled peak
+VaulticDB RSS averaged 18.10 GiB, only 2.54% above the 17.65 GiB control mean.
+
+The additional concurrency moved rather than removed the bottleneck. Engine
+batch service changed little, from 7.53 to 7.86 ms per commit, while engine
+queue time rose from 2.36 to 5.94 and 6.01 ms and commit-request time from
+14.68 to 20.76 and 20.81 ms. Scheduler ingest wait fell from about 405 seconds
+to 201 and 205 seconds, but schedule work rose from about 142 seconds to 266
+and 265 seconds, dependency wait from 29 seconds to 96 and 93 seconds, and
+reducer wait from 5 seconds to 16 seconds in both runs. Completed ingest work
+waited 177 and 179 seconds in aggregate for scheduler receipt, and the single
+ordered reducer consumed 185 and 188 seconds. There were no pre-cancellation
+conflicts, retries, backpressure events, or L0 stalls. The next ceiling is
+scheduler/reducer serialization plus engine commit queueing, not transaction
+identity allocation.
+
+Physical I/O remained secondary but became somewhat less efficient at the
+larger reached state. Process read bytes per blob rose 2.30%, process write
+bytes per blob rose 4.51%, and database GET-body bytes per blob rose 17.27%.
+Both runs exited with expected timeout status 124 after 9m56.52s, emitted 119
+usable monitor records, reached all four lanes, and left no process. Their
+final ingest/reduction failures occurred only during timeout cancellation.
+Socket residue matched prior clean shutdowns.
+
+### Experiment 7: Eight Publication Lanes
+
+Eight publication lanes are rejected. Run
+`phase32-p13-publication-lanes-8-20260922-hdd-10m-r1` retained the accepted
+cache, L0, WAL, batching, worker, and cleanup settings and changed only
+publication lanes from four to eight. It produced 102,709 blobs/s, 10.06% below
+the 114,201 blobs/s mean of the two confirmed four-lane runs. Early throughput
+fell 13.89% and late throughput fell 8.44%. Sampled peak VaulticDB RSS was
+18.15 GiB, only 0.28% above the four-lane mean, so memory capacity does not
+explain the regression.
+
+The engine service rate had already reached its useful concurrency point.
+Batch service remained effectively flat at 7.87 ms per commit versus 7.85 ms
+for four lanes, but queue time rose 126% from a 5.97 ms mean to 13.50 ms and
+commit-request time rose 41.8% from 20.78 to 29.47 ms. Scheduler work consumed
+368.4 seconds, 62.0% of measured wall time, while dependency wait consumed
+121.9 seconds, 20.5%. Completed ingest work waited 415.4 seconds in aggregate
+for scheduler receipt. All eight lanes were reached, but useful concurrency was
+not sustained: the scheduler reported 297.0 seconds with no active lane and
+only 58.2 seconds with all eight active.
+
+There were no pre-cancellation retries, conflicts, backpressure events, or L0
+stalls. The final six ingest failures and one reduction failure appeared only
+after the timeout signal. The run exited with expected status 124 after
+9m57.05s, emitted 119 usable monitor records, and left no process. Keep four
+publication lanes and target scheduler completion handling, ordered reduction,
+dependency-release latency, and commit queueing before reconsidering wider
+publication.
+
+### Experiment 8: Eager Scheduler Completion Draining
+
+Eager scheduler completion draining is accepted for the next import baseline.
+Matched normal-build runs `phase32-p14-scheduler-drain-20260922-hdd-10m-r2`
+and `r3` retained four lanes and every accepted cache, L0, WAL, batching,
+worker, and cleanup setting. They produced 120,971 and 120,677 blobs/s, only
+0.24% apart, and averaged 120,824 blobs/s: 5.80% above the 114,201 blobs/s
+four-lane control mean. Mean early throughput improved 8.57%. Mean late
+throughput was 6.40% below the controls because the candidates reached a larger
+database state; early-to-late decay was 21.82% versus 9.32%. At equal work, r2
+reached the controls' terminal blob counts 36 to 51 seconds sooner. Sampled
+peak VaulticDB RSS was effectively unchanged at -0.28%.
+
+The scheduler change affected the intended path. Aggregate completion pickup
+delay fell 34.72%, from 178.0 to 116.2 seconds, while scheduler work fell 6.93%,
+from 265.5 to 247.1 seconds. Average completion pickup was 7.08 ms. Dependency
+wait was nearly flat at 96.0 seconds; the new attribution assigned means of
+47.5 seconds to batches directly blocked by in-flight dependencies and 43.7
+seconds to mixed direct and order-propagated blocking. No pure ordered-only
+wait was observed. Ingest wait rose 7.65% because the scheduler spent less time
+processing completions and reached more transaction work in the same interval.
+
+The next measured coordinator bottleneck initially appeared to be ordered
+reduction dispatch. Ingested batches waited an average 255.0 ms from completion
+to reducer dispatch, while reducer service averaged about 12.2 ms per batch.
+Engine service remained flat at 7.82 ms per commit versus 7.85 ms for the
+controls. Queue time rose only 3.70%, from 5.97 to 6.19 ms, and commit-request
+time rose 1.67%, from 20.78 to 21.13 ms. Neither run reported pre-cancellation
+retries, conflicts, backpressure, or L0 stalls.
+
+Batch-boundary telemetry was stable across both runs. Batches averaged 5.44
+packs; 57.4% ended at the eight-pack limit, 40.0% at the 8,000-mutation limit,
+2.6% at an index-tail/end-of-input boundary, and none at the 8 MiB byte limit.
+A packs-per-transaction increase can affect only the pack-limited portion unless
+the mutation limit also changes, so prioritize ordered reduction before testing
+16 packs.
+
+The candidates reached a larger database state and paid more physical I/O per
+blob: process write bytes rose 21.71% and database GET-body bytes rose 21.95%,
+while process read bytes were approximately flat. This is a remaining full-run
+and equal-state concern, not evidence that the scheduler optimization caused
+additional logical writes. Both matched runs exited with expected status 124
+after about 9m57s, emitted 119 usable monitor records, and left no process. A
+preceding `r1` used profile-tagged binaries and is diagnostic only; it is
+excluded from acceptance calculations.
+
+### Experiment 9: Ordered Dispatch Attribution
+
+Runs `phase32-p15-reducer-attribution-20260922-hdd-10m-r1` and
+`phase32-p16-reducer-blocker-20260922-hdd-10m-r1` added behavior-neutral timing
+only. They produced 120,240 and 121,138 blobs/s; the latter was 0.26% above the
+accepted p14 mean. Both exited at the expected boundary with valid telemetry,
+clean process shutdown, and only cancellation-time failure. P16 reported no
+retry, conflict, backpressure, or L0 stall. Its engine service was 7.91 ms per
+commit and its batch mix remained 57.4% pack-limited, 40.0% mutation-limited,
+and 0% byte-limited. The diagnostics therefore represent the accepted workload.
+
+The earlier 255 ms interpretation was queue-age amplification, not scheduler
+execution time. P15 attributed 99.53% of aggregate completion-to-dispatch age
+to predecessor ordering; once an ordinal was eligible, dispatch took only 1.22
+ms on average. P16 reproduced this with 99.58% order wait and 1.07 ms average
+ready-to-dispatch delay. Do not optimize the coordinator dispatch loop further.
+
+P16 split 287.2 seconds of blocked-dispatch wall time into 168.1 seconds
+(58.5%) waiting for the next ordinal's ingest to complete and 119.1 seconds
+(41.5%) waiting behind active reducer service. Reduction cannot simply run out
+of order or in parallel: each receipt transaction reads and rewrites shared
+aggregate records and the global history sequence, and existing failure
+semantics stop later reduction after an earlier failure. Extra reducer workers
+would introduce transaction conflicts and visibility-order risk.
+
+Run `phase32-p17-ingest-unblock-20260922-hdd-10m-r1` then split ingest service
+by whether completion directly made an idle reducer eligible. Those 3,340
+reducer-unblocking ingests averaged 99.26 ms versus 85.73 ms for 12,780 other
+ingests, 15.8% slower; their p50 moved from the 67 ms bucket to 134 ms while
+p95 and p99 remained in the same buckets. The blocker split reproduced p16 at
+164.4 seconds (56.8%) ingest and 125.1 seconds (43.2%) reducer service. P17 was
+healthy but produced 118,417 blobs/s, 1.99% below the p14 mean, so use it as
+diagnostic rather than performance evidence. Because direct-unblock selection
+naturally favors slow ordinals, this result does not by itself justify admission
+changes.
+
+The next diagnostic partitions missing-next-ordinal wall time between an
+ordinal already active in ingest and one not yet admitted. If active ingest
+dominates, optimize transaction service variance or amortization. If admission
+dominates, test an ordinal-aware admission preference while retaining dependency
+exclusion and the invariant that an earlier dependency waiter prevents later
+overlapping work from bypassing it.
+
+Run `phase32-p18-ingest-state-20260922-hdd-10m-r1` resolved that choice. Of
+161.1 seconds waiting for a missing next ordinal, 151.2 seconds (93.9%) waited
+for an already-active ingest and only 9.85 seconds (6.1%) waited for admission.
+The overall split remained stable at 56.5% ingest and 43.5% reducer service.
+P18 produced 119,962 blobs/s, 0.71% below the p14 mean, with no retries,
+conflicts, backpressure, or L0 stalls before expected cancellation. Do not add
+ordinal admission priority: its maximum observed opportunity is small and it
+cannot shorten the dominant active transaction.
+
+The first active-service candidate reused one sorted unique pack/blob ID set
+across hints, transaction planning, post-commit filter publication, counters,
+and retries. Runs `phase32-p19-id-reuse-20260922-hdd-10m-r1` and `r2` reduced
+combined hint plus post-commit work by about 7%, but produced 118,016 and
+119,036 blobs/s. Their 118,526 blobs/s mean was 1.90% below p14, while engine
+latency varied adversely. Reject and revert this local CPU optimization because
+it did not reduce end-to-end runtime.
+
+Runs `phase32-p20-packs16-20260922-hdd-10m-r1` and `r2` then tested 16 packs
+with the 8,000-mutation and 8 MiB limits unchanged. They produced 118,270 and
+117,968 blobs/s, a tightly repeated 118,119 blobs/s mean that was 2.24% below
+p14 and 1.54% below p18. The intended coalescing occurred: average packs per
+ingest batch increased 38.7%, ingest batches fell about 29%, pack-limited
+flushes fell from 57.3% to 33.1%, and mutation-limited flushes rose from 40.2%
+to 63.4%. Neither run reported adaptive splits, retries, conflicts,
+backpressure, or L0 stalls before cancellation.
+
+The lower transaction count did not shorten total runtime. Larger active
+ingests increased missing-next-ordinal wall time from 161.1 seconds in p18 to
+176.8 seconds on average, while blocker-service wall time fell from about
+124 seconds to 97.7 seconds and aggregate reducer service fell to 167.0
+seconds. Normalized process writes also rose to about 354.4 bytes/blob versus
+352.0 in p18. Reject 16-pack ingest transactions: the saved fixed transaction
+and reducer overhead did not offset longer ingest head-of-line occupancy. Keep
+eight packs, 8,000 mutations, and 8 MiB as the import baseline.
+
+Runs `phase32-p21-grouped-reduce-20260922-hdd-10m-r1` and `r2` atomically
+reduced the contiguous successful receipts already available at dispatch while
+retaining eight-pack ingest transactions. They produced 126,723 and 125,352
+blobs/s, a 126,038 blobs/s mean that was 4.32% above p14 and 5.07% above p18;
+the repeat spread was 1.09%. Accept grouped ordered reduction as the new import
+baseline.
+
+The intended transaction amortization was repeatable. The runs reduced 17,195
+and 17,009 receipts through 7,284 and 7,168 transactions, respectively: about
+2.37 receipts per transaction and 57.8% fewer reducer transactions. Aggregate
+reducer service fell to about 116.7 seconds and reducer-blocked wall time to
+45.6 seconds, versus about 196 and 119 seconds before grouping. Both runs
+preserved ordered acknowledgement and dependency release and reported no
+pre-cancellation retries, conflicts, backpressure, L0 stalls, or adaptive
+splits. Sampled peak RSS remained within the prior range.
+
+The remaining dominant ordered blocker is active ingest. Missing-next-ordinal
+wall time averaged 223.8 seconds, of which 207.1 seconds (92.5%) was active
+ingest and 15.8 seconds (7.1%) admission. Grouping shifted completed receipts
+out of reducer service but did not remove ingest head-of-line variance.
+Normalized process writes improved to about 338.6 bytes/blob from 349.6 in p14,
+while reads rose to about 289.2 bytes/blob from 251.3; retain the read increase
+as an equal-state/full-run concern. Do not address the remaining wait by
+reordering visible history, raising ingest transaction size, or returning to
+eight publication lanes.
+
 ## Frozen Inputs and Build
 
 This section describes the original P3/P4/P7 fixture and storage comparisons

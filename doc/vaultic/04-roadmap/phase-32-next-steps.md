@@ -65,12 +65,23 @@ CPU, bandwidth, and tail latency are still finite shared resources.
 | NFS-HDD | Current benchmark fixture or fallback storage, not a low-latency production cache | Use for matched historical comparisons; do not infer Azure S3 plus RADOS-cache behavior from it |
 
 The current import baseline is 1 GiB of SlateDB metadata cache and 512 MiB of
-data-block cache. Two metadata-cache runs averaged 11.28% more blobs/s than the
-prior cross-index control. Raising only the block cache to 8 GiB reduced
-throughput 1.14%, left database GET-body bytes effectively flat, and doubled
-sampled VaulticDB RSS. Do not test larger block caches until hit/eviction data
-or a query workload demonstrates reusable data blocks. Abundant RAM remains
-valuable, but capacity is assigned by observed reuse rather than availability.
+data-block cache with four publication lanes and eager scheduler completion
+draining. Two matched scheduler runs averaged 120.82k blobs/s, 5.80% above the
+prior four-lane controls, with effectively unchanged sampled VaulticDB RSS.
+Completion pickup delay fell 34.72% and scheduler work fell 6.93%. Follow-up
+attribution showed the apparent 255 ms reducer dispatch delay was 99.6%
+predecessor-order queue age; eligible work reached the reducer in about 1.1 ms.
+Blocked-dispatch wall time was 58.5% next-ordinal ingest wait and 41.5% active
+reducer service. It did not reveal an ID-allocation bottleneck, write
+backpressure, or L0 stalls. Eight lanes remains rejected because it regressed
+throughput 10.06% before this scheduler change and raised engine queue time
+126%. Keep four lanes; do not spend more work on the coordinator dispatch loop.
+
+Raising only the block cache to 8 GiB reduced throughput 1.14%, left database
+GET-body bytes effectively flat, and doubled sampled VaulticDB RSS. Do not test
+larger block caches until hit/eviction data or a query workload demonstrates
+reusable data blocks. Abundant RAM remains valuable, but capacity is assigned
+by observed reuse rather than availability.
 
 The existing external cache admits tagged foreground compacted-SST reads;
 WAL, manifests, fencing, coordination, conditional reads, and retry reads bypass
@@ -107,9 +118,25 @@ Keep labels bounded and report counter resets and availability explicitly.
 - Useful returned bytes versus fetched range bytes, cache-fill bytes later
   reused, admission/bypass reasons, and remote operations avoided. Existing
   SST-visit and needed-byte counters do not alone count billable requests.
-- Batch termination reason, actual mutations/bytes, adaptive splits, and commits
-  per million imported blobs. Split commit authority checks, optional idempotency
-  lookup, transaction extraction, engine submission, and response overhead.
+- Batch termination reason and actual packs, mutations, and bytes are now exposed
+  as `legacy_import_batch_flushes{reason}`, `legacy_import_batch_packs`,
+  `legacy_import_batch_mutations`, and `legacy_import_batch_bytes`. Use their
+  deltas to decide whether pack count, the byte cap, or the mutation cap controls
+  batching. Adaptive splits and commits per million imported blobs remain to be
+  added. Split commit authority checks, optional idempotency lookup, transaction
+  extraction, engine submission, and response overhead.
+- `completion_to_receive_active_<lanes>`,
+  `ingest_completion_to_reduce_dispatch`, and
+  `dependency_wait_{inflight,mixed,ordered}` now separate scheduler pickup,
+  ordered reducer dispatch, and direct versus order-propagated dependency
+  blocking. `reduce_dispatch_wait_{order,ready}` and
+  `reduce_dispatch_blocked_{ingest,service}` further separate amplified queue
+  age from wall-time causes. `ingest_service_{reducer_unblock,other}` separates
+  ingests that directly make an idle reducer eligible from other lane service.
+  `reduce_dispatch_blocked_ingest_{active,admission}` then separates active
+  transaction service from dependency/admission delay. The matched diagnostics
+  show completion pickup and ready dispatch are no longer targets;
+  next-ordinal ingest variance and ordered reducer service are.
 - Query throughput and tail latency alongside process CPU/RSS, actual interface
   traffic, local disk latency, engine queues, backpressure, and compaction.
 
@@ -117,14 +144,14 @@ Keep labels bounded and report counter resets and availability explicitly.
 
 ### 1. Establish Remote and Query Controls
 
-Confirm the cross-index candidate with matched ten-minute repetitions. Keep two
-lanes, 256 MiB L0 SSTs, and the existing safety/durability settings as controls.
-Repeat the control first on authoritative Azure S3-compatible storage without a
-persistent cache, then with RADOS caching, while freezing source order, dataset,
-encryption, resource limits, and WAL/coordination placement. Native RADOS remains
-a useful backend control, but it is not the expected authoritative production
-topology. RGW compatibility or latency is not evidence of Azure's pricing or
-network behavior; retain separate identities for each deployment.
+Use the accepted four-lane eager-draining profile for matched ten-minute
+repetitions. Repeat it first on authoritative Azure S3-compatible storage
+without a persistent cache, then with RADOS caching, while freezing source
+order, dataset, encryption, resource limits, and WAL/coordination placement.
+Native RADOS remains a useful backend control, but it is not the expected
+authoritative production topology. RGW compatibility or latency is not evidence
+of Azure's pricing or network behavior; retain separate identities for each
+deployment.
 
 Use an existing completed, isolated database for read tests where possible.
 Include random point hits/misses, batched lookups, and realistic range/history
@@ -164,11 +191,42 @@ for Azure S3 close/flush durability.
 
 ### 4. Amortize Import Transactions and Preparation
 
-Test 8 to 16 packs per transaction while holding byte/mutation limits fixed.
-If the 8,000-mutation cap already ends most batches, the pack-count change is
-not a useful experiment; a separate bounded mutation-limit experiment would
-need correctness and adaptive-split validation. Measure remote fencing and
-receipt overhead per blob, not just transaction count.
+Grouped ordered reducer transactions are accepted. P21 grouped only contiguous
+successful receipts already available at dispatch, preserving receipt
+idempotency, aggregate/history order, adaptive children, final checkpoints,
+failure precedence, and acknowledgement-gated dependency and byte release. Two
+matched runs averaged 126.04k blobs/s, 4.32% above p14, with a 1.09% spread.
+They averaged 2.37 receipts per reducer transaction, reducing reducer
+transaction count by 57.8%, reducer service to about 117 seconds, and
+reducer-blocked wall time to about 46 seconds. Keep this behavior with four
+publication lanes. Do not add parallel reducer workers: reductions rewrite
+shared aggregate keys and the global history sequence, so concurrency would
+add conflicts and visibility-order risk.
+
+Treat the remaining 168 seconds of blocked-dispatch wall time as next-ordinal
+ingest variance. P17 found reducer-unblocking ingests averaged 99.3 ms versus
+85.7 ms for other ingests, but that post-completion classification selects for
+slow ordinals. P18 then attributed 93.9% of missing-ordinal wall time to an
+already-active ingest and only 6.1% to admission. Do not add ordinal admission
+priority. Optimize active transaction service first, beginning with reuse of
+the unique pack/blob ID sets across hints, planning, filter publication, and
+counters. That candidate reduced its combined local work by about 7% but its
+two-run throughput mean regressed 1.90%, so it is rejected. The subsequent
+16-pack experiment also failed: despite about 29% fewer ingest transactions,
+its tightly repeated 118.12k blobs/s mean was 2.24% below the accepted p14
+mean. Larger transactions shifted the batch mix from 57.3% pack-limited and
+40.2% mutation-limited to 33.1% and 63.4%, respectively, but increased active
+ingest head-of-line wall time. Keep eight packs, 8,000 mutations, and 8 MiB;
+do not raise the mutation limit without new evidence that longer active ingests
+will not worsen ordered blocking.
+
+P21 retained the accepted ingest limits and reported no pre-cancellation
+retries, conflicts, backpressure, L0 stalls, or adaptive splits. It also left
+active ingest as the dominant ordered blocker: about 207 seconds of the 224
+seconds waiting for a missing next ordinal. Continue to treat this as active
+transaction variance, not an admission or reducer-parallelism problem. P21
+reduced normalized process writes but increased reads per blob about 15%; carry
+that tradeoff into equal-state and full-import validation.
 
 Next reuse immutable ID/canonical preparation across hashing, hints, planning,
 filter publication, and counters. Parallelize pure preparation only after a
