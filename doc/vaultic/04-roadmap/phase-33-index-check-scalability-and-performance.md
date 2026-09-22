@@ -362,40 +362,69 @@ local costs. It also records that four-worker throughput improved only 5.8% on
 the synthetic 10x fixture, so the CPU-scaling gate remains open.
 
 The [production NFS benchmark evidence](phase-33-production-benchmark-evidence.md)
-records a ten-minute-bounded full-check attempt against the activated 46 GiB
-authority. Legacy inventory and scan completed in about 5m11s for 10,019 index
-files and 379,934,385 imported blobs. The CLI averaged 3.72 logical CPUs, peaked
-at 93.7 GiB RSS, used no scratch, and ran while the host averaged 86.94% idle and
-0.11% I/O wait. The subsequent whole-store encryption audit exceeded its fixed
-ten-second RPC deadline, so no SlateDB scan or later validator ran. The result is
-partial evidence, not a clean check or an acceptance pass.
+records the initial full-check attempt and the subsequent bounded optimization
+runs against the activated 46 GiB authority. Legacy inventory and scan complete
+in about 5m11s for 10,019 index files and 379,934,385 imported blobs. The fixed
+encryption-audit deadline and duplicate full-object read are resolved; production
+audits now complete and the checker reaches `slatedb_scan`. Reduced-coverage
+diagnostics show that 256 concurrent key ranges and independent spools remove
+client insertion serialization, while raising concurrency from 32 to 64 does not
+increase completed scan output. No run has completed the SlateDB scan, catalog
+join, or later validators. The evidence remains partial, not a clean check or an
+acceptance pass.
 
-## Current optimization outlook
+## Consolidated state and next steps
 
-Execute the next work in this order:
+Implemented and retained:
 
-1. Replace the monolithic encryption-audit RPC with a bounded paged/resumable
-  operation tied to the pinned read session. A dedicated long-operation timeout
-  may unblock diagnosis, but raising the generic deadline is not the durable
-  design. Report objects, bytes, continuation identity, and audit findings.
-2. Complete one production full check before tuning later stages. The current
-  run provides no evidence about SlateDB scan, catalog join, or parallel
-  validation throughput.
-3. Benchmark explicit 32/64/96 GiB checker budgets with local encrypted scratch
-  and matched 4/8/16/32-worker runs. Use three repetitions and preserve coverage
-  and result digests. Do not accept the auto budget or 32 workers from one run.
-4. Partition legacy tuple production per decode worker and merge sorted producer
-  runs, then profile JSON/index decode and packed-blob conversion. Existing
-  synthetic mutex evidence and production's low CPU utilization make this more
-  promising than simply increasing worker count.
-5. Expose stage-local records/bytes, RPC count/latency, queue/admission waits,
-  CPU/RSS high-water, and daemon monitor attachment before broader backend
-  tuning. Current progress cannot directly attribute the measured waits.
+- pinned serializable read sessions and immutable legacy inventory fencing;
+- exact bounded reducers and encrypted external spools;
+- a dedicated encryption-audit deadline and bounded header classification;
+- a 10,000-item scan limit with the 16 MiB response cap retained;
+- 256 exhaustive first-ID-byte scan ranges with independent bounded spools;
+- 64 MiB sort chunks and 1 MiB buffered encrypted run I/O;
+- cancellation cleanup, production writer safety, and reduced/full coverage
+  labeling.
 
-The earlier memory-first and tuple/chunk changes remain accepted. Further
-sorting or scratch work is lower priority until a complete production run shows
-those paths are active; this run used zero scratch and stopped before SlateDB
-comparison.
+The remaining production bottleneck is the unary paged SlateDB location scan.
+Every page recreates an iterator inside the pinned transaction. At approximately
+380 million blob records this repeatedly traverses table metadata, producing
+hundreds of GiB of daemon logical reads and millions of NFS metadata operations.
+The best measured setting is 32 workers/RPCs; 64 did not improve completed
+output. Host I/O wait remained below 1%, so more workers, larger checker memory,
+larger scratch limits, and further item-page growth are not supported as primary
+optimizations.
+
+Execute the remaining work in this order:
+
+1. Add a server-owned resumable range scan or server-streaming RPC. Keep one
+  SlateDB iterator alive across bounded response chunks and bind it to the
+  existing read-session identity, lease, generation and cancellation contract.
+  Enforce response-byte and in-flight-byte limits, cursor expiry, exhaustive
+  range coverage, and compatibility negotiation.
+2. Add scan-local telemetry before production tuning: records, encoded bytes,
+  pages/chunks, iterator setup and service time, table/object reads, continuation
+  age, and per-range progress. Preserve separate client delivery, RPC admission,
+  daemon service and object-store timing.
+3. If persistent scans expose range skew, split only slow first-byte ranges into
+  bounded second-byte subranges. Do not add more partitions while each partition
+  still pays unary iterator reconstruction.
+4. Consider server-side projection of canonical location tuples after the stream
+  contract is proven. It may reduce protobuf volume, Go allocation and duplicate
+  blob-record decoding, but must preserve every exact location field and remain
+  versioned/negotiated.
+5. Rerun the ten-minute SlateDB-only diagnostic at 32 workers, then run one full
+  differential check. Only after `slatedb_scan` completes should catalog join
+  and later validators be profiled and optimized.
+6. Optimize the approximately 5m11s legacy stage next by giving decode workers
+  independent producer spools and profiling JSON/index decode and packed-blob
+  conversion. Preserve the final immutable-inventory confirmation.
+7. Replace the interim monolithic encryption audit with a paged/resumable audit
+  tied to the same stable physical inventory contract. This is still desirable
+  for progress and bounded cancellation, but it is no longer the critical path.
+8. Complete repeated 32/64/96 GiB memory curves and the NFS/RADOS/S3 acceptance
+  matrix only after a full exact check can finish. Full differential success,
+  stable consistency identity and exact result digests remain the sign-off gate.
 
 ## LLM-executable implementation stages
 

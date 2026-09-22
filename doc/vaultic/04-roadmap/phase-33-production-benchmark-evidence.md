@@ -90,7 +90,7 @@ process; they are supporting context, not proof of service time.
 
 ## Bottlenecks and decisions
 
-### P0: encryption audit cannot complete
+### Initial P0, resolved: encryption audit could not complete
 
 `CheckEncryption` uses the generic ten-second unary RPC deadline. The server's
 `audit_objects` implementation lists every metadata object, downloads each full
@@ -147,19 +147,17 @@ next tuning campaign. This is required to distinguish source decode, RPC
 admission, daemon service, object-store read, response delivery, and scratch
 backpressure.
 
-## Next experiment order
+## Superseded initial experiment order
 
-1. Make encryption audit bounded and capable of completing on this store; add a
-   test proving a response can exceed the generic unary deadline without changing
-   other RPC deadlines.
-2. Run one complete production check to expose SlateDB scan, joins, and parallel
-   validation. Preserve exact result and consistency digests.
-3. Run matched worker and explicit-memory sweeps with three repetitions. Capture
-   CLI and daemon CPU/RSS plus stage records and RPC/byte/wait telemetry.
-4. Profile one representative full run. Evaluate per-worker legacy spools and
-   decode/allocation reductions before range sharding or more concurrency.
-5. Continue the 50/500 GB, RADOS, S3, cold/warm, and failure matrix only after
-   the production NFS run completes exactly.
+This initial experiment order has been superseded by the follow-up evidence
+below. The audit now completes, range sharding and independent spools are
+implemented, and 64 workers do not outperform 32. The next experiment requires
+a server-owned resumable range scan or stream that retains iterator state across
+bounded response chunks. After focused protocol/session tests, rerun the same
+ten-minute SlateDB-only diagnostic at 32 workers. Proceed to a full differential
+check only when `slatedb_scan` completes; then profile catalog join and later
+validators. Defer broader memory and backend matrices until that exact path can
+finish.
 
 No Phase 33 representative-scale acceptance gate is closed by these attempts.
 
