@@ -51,7 +51,7 @@ commit series so it can be reviewed or reverted independently.
 | 30 | [Vaultic best-effort read-cache tier](phase-30-vaultic-best-effort-read-cache-tier.md) | design |
 | 31 | [Read-only NFSv3 snapshot server](phase-31-read-only-nfsv3-snapshot-server.md) | implemented; native validation pending |
 | 32 | [Scalable legacy metadata bulk import](phase-32-scalable-legacy-metadata-bulk-import.md) | implemented; optimization and scenario validation ongoing |
-| 33 | [index check scalability & performance](phase-33-index-check-scalability-and-performance.md) | design |
+| 33 | [index check scalability & performance](phase-33-index-check-scalability-and-performance.md) | implemented; production validation reaches SlateDB scan |
 | 34 | [Operational monitoring and bounded metrics export](phase-34-operational-monitoring-and-metrics-export.md) | design |
 | 35 | [Native SMB backup, restore, and Windows metadata indexing](phase-35-native-smb-backup-source.md) | design |
 | 36 | [Writable FUSE and durable writeback](phase-36-writable-fuse-and-durable-writeback.md) | design |

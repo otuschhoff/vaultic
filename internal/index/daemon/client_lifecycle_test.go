@@ -597,7 +597,7 @@ func TestTCPLifecycleAuthenticationDrainDeadlineAndLimit(t *testing.T) {
 	if !capabilities.GetTcpEnabled() || capabilities.GetUnixSocket() {
 		t.Fatalf("unexpected transport capabilities: %#v", capabilities)
 	}
-	if capabilities.GetMaxBatchItems() != 10_000 || capabilities.GetMaxPageItems() != 1_000 || capabilities.GetMaxMessageBytes() != 16*1024*1024 ||
+	if capabilities.GetMaxBatchItems() != 10_000 || capabilities.GetMaxPageItems() != 10_000 || capabilities.GetMaxMessageBytes() != 16*1024*1024 ||
 		capabilities.GetMaxConcurrentRequests() != 128 {
 		t.Fatalf("unexpected bounded-work capabilities: %#v", capabilities)
 	}

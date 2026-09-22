@@ -55,7 +55,7 @@ use storage::Storage;
 const PROTOCOL_VERSION: &str = "vaulticdb.v1";
 const SCHEMA_VERSION: &str = "0";
 const MAX_BATCH_ITEMS: u32 = 10_000;
-const MAX_PAGE_ITEMS: u32 = 1_000;
+const MAX_PAGE_ITEMS: u32 = 10_000;
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 128;
 

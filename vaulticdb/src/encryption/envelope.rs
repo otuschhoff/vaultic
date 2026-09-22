@@ -400,7 +400,11 @@ impl KeyManager {
                 continue;
             }
             audit.objects += 1;
-            let raw = self.inner.get(&object.location).await?.bytes().await?;
+            let header_end = object.size.min(super::HEADER_SIZE as u64);
+            let raw = self
+                .inner
+                .get_range(&object.location, 0..header_end)
+                .await?;
             if !raw.starts_with(super::MAGIC) {
                 audit.plaintext_objects += 1;
                 continue;

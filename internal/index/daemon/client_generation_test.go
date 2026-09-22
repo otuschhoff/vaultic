@@ -553,6 +553,24 @@ func TestDefaultRPCContextHasDeadline(t *testing.T) {
 	}
 }
 
+func TestDefaultAuditContextHasScaleAwareDeadline(t *testing.T) {
+	ctx, cancel := withDefaultAuditDeadline(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	remaining := time.Until(deadline)
+	if !ok || remaining <= defaultShutdownTimeout || remaining > defaultAuditDeadline {
+		t.Fatalf("default audit deadline = %v, %t", deadline, ok)
+	}
+
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelParent()
+	ctx, cancel = withDefaultAuditDeadline(parent)
+	defer cancel()
+	if got, want := ctx, parent; got != want {
+		t.Fatal("audit deadline replaced the caller deadline")
+	}
+}
+
 func TestDefaultShutdownContextHasScaleAwareDeadline(t *testing.T) {
 	ctx, cancel := withDefaultShutdownDeadline(context.Background())
 	defer cancel()

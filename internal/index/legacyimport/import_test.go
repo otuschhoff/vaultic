@@ -2923,7 +2923,7 @@ func BenchmarkImportStage3Daemon(b *testing.B) {
 				encryption, wal, limits := client.Encryption(), client.WALInfo(), client.Limits()
 				if encryption.Enabled || encryption.Algorithm != "" || encryption.ActiveDEKVersion != 0 ||
 					wal.Target != "memory" || wal.Durability != "local-process" || wal.Encrypted ||
-					limits.MaxBatchItems != 10000 || limits.MaxMessageBytes != 16<<20 || limits.MaxPageItems != 1000 {
+					limits.MaxBatchItems != 10000 || limits.MaxMessageBytes != 16<<20 || limits.MaxPageItems != 10000 {
 					b.Fatalf("effective daemon contract mismatch: encryption=%+v wal=%+v limits=%+v", encryption, wal, limits)
 				}
 				b.Logf(

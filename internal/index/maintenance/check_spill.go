@@ -27,12 +27,13 @@ import (
 )
 
 const (
-	locationTupleVersion = 1
-	locationTupleSize    = 90
-	locationChunkBytes   = 4 << 20
-	checkRunHeaderSize   = 12
-	checkRunPrefix       = "run-"
-	checkScratchPrefix   = "vaultic-check-"
+	locationTupleVersion  = 1
+	locationTupleSize     = 90
+	locationChunkBytes    = 64 << 20
+	locationRunBufferSize = 1 << 20
+	checkRunHeaderSize    = 12
+	checkRunPrefix        = "run-"
+	checkScratchPrefix    = "vaultic-check-"
 )
 
 var checkRunMagic = [8]byte{'V', 'L', 'T', 'C', 'H', 'K', '0', '1'}
@@ -475,6 +476,7 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		return checkRun{}, err
 	}
 	succeeded := false
+	buffered := bufio.NewWriterSize(file, locationRunBufferSize)
 	defer func() {
 		_ = file.Close() // Preserve the primary write or sync error.
 		if !succeeded {
@@ -483,7 +485,7 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		}
 	}()
 	header := append(checkRunMagic[:], prefix[:]...)
-	if err := writeScratch(spool.scratch, request, file, header); err != nil {
+	if err := writeScratch(spool.scratch, request, buffered, header); err != nil {
 		return checkRun{}, err
 	}
 	for index, record := range records {
@@ -497,12 +499,15 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		sealed := aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-		if err := writeScratch(spool.scratch, request, file, length[:]); err != nil {
+		if err := writeScratch(spool.scratch, request, buffered, length[:]); err != nil {
 			return checkRun{}, err
 		}
-		if err := writeScratch(spool.scratch, request, file, sealed); err != nil {
+		if err := writeScratch(spool.scratch, request, buffered, sealed); err != nil {
 			return checkRun{}, err
 		}
+	}
+	if err := buffered.Flush(); err != nil {
+		return checkRun{}, err
 	}
 	if err := file.Sync(); err != nil {
 		return checkRun{}, err
@@ -575,9 +580,29 @@ func (spool *locationSpool) seal() error {
 	return nil
 }
 
+func (spool *locationSpool) adopt(source *locationSpool) error {
+	if spool.sealed || source.sealed || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate {
+		return fmt.Errorf("incompatible checker location spools")
+	}
+	if err := source.finishBuffer(); err != nil {
+		return err
+	}
+	if source.memoryUsed > spool.memoryBytes-spool.memoryUsed {
+		return fmt.Errorf("checker location spool memory limit exceeded")
+	}
+	spool.memoryRuns = append(spool.memoryRuns, source.memoryRuns...)
+	spool.runs = append(spool.runs, source.runs...)
+	spool.memoryUsed += source.memoryUsed
+	source.memoryRuns = nil
+	source.runs = nil
+	source.memoryUsed = 0
+	return nil
+}
+
 type locationRunWriter struct {
 	spool    *locationSpool
 	file     *os.File
+	buffered *bufio.Writer
 	path     string
 	aead     cipher.AEAD
 	prefix   [4]byte
@@ -613,10 +638,11 @@ func (spool *locationSpool) newRunWriter() (*locationRunWriter, error) {
 		return nil, err
 	}
 	writer := &locationRunWriter{
-		spool: spool, file: file, path: path, aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request,
+		spool: spool, file: file, buffered: bufio.NewWriterSize(file, locationRunBufferSize), path: path,
+		aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request,
 	}
 	header := append(checkRunMagic[:], writer.prefix[:]...)
-	if err := writeScratch(spool.scratch, request, file, header); err != nil {
+	if err := writeScratch(spool.scratch, request, writer.buffered, header); err != nil {
 		writer.abort()
 		return nil, err
 	}
@@ -637,10 +663,10 @@ func (writer *locationRunWriter) append(tuple locationTuple) error {
 	sealed := writer.aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
 	var length [4]byte
 	binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-	if err := writeScratch(writer.spool.scratch, writer.request, writer.file, length[:]); err != nil {
+	if err := writeScratch(writer.spool.scratch, writer.request, writer.buffered, length[:]); err != nil {
 		return err
 	}
-	if err := writeScratch(writer.spool.scratch, writer.request, writer.file, sealed); err != nil {
+	if err := writeScratch(writer.spool.scratch, writer.request, writer.buffered, sealed); err != nil {
 		return err
 	}
 	return nil
@@ -651,6 +677,10 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 		return checkRun{}, fmt.Errorf("checker run writer is closed")
 	}
 	writer.closed = true
+	if err := writer.buffered.Flush(); err != nil {
+		writer.abortFile()
+		return checkRun{}, err
+	}
 	if err := writer.file.Sync(); err != nil {
 		writer.abortFile()
 		return checkRun{}, err
@@ -732,7 +762,7 @@ func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, e
 	if err != nil {
 		return nil, err
 	}
-	reader := bufio.NewReaderSize(file, 32<<10)
+	reader := bufio.NewReaderSize(file, locationRunBufferSize)
 	header := make([]byte, checkRunHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		_ = file.Close() // Preserve the header-read error.

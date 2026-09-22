@@ -39,6 +39,14 @@ type blockingMemoryStore struct {
 	release chan struct{}
 }
 
+type gatedScanStore struct {
+	*memoryStore
+	active  atomic.Int64
+	maximum atomic.Int64
+	entered chan struct{}
+	release chan struct{}
+}
+
 func (store *blockingMemoryStore) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	active := store.active.Add(1)
 	defer store.active.Add(-1)
@@ -52,6 +60,24 @@ func (store *blockingMemoryStore) Get(ctx context.Context, key []byte) ([]byte, 
 	select {
 	case <-store.release:
 		return store.memoryStore.Get(ctx, key)
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+}
+
+func (store *gatedScanStore) ScanPrefix(ctx context.Context, prefix, after []byte, limit uint32) ([]daemon.KeyValue, bool, error) {
+	active := store.active.Add(1)
+	defer store.active.Add(-1)
+	for {
+		maximum := store.maximum.Load()
+		if active <= maximum || store.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	store.entered <- struct{}{}
+	select {
+	case <-store.release:
+		return store.memoryStore.ScanPrefix(ctx, prefix, after, limit)
 	case <-ctx.Done():
 		return nil, false, ctx.Err()
 	}
@@ -121,6 +147,58 @@ func TestCheckValidatesDeclaredReadSession(t *testing.T) {
 	}
 	if !validating.validated {
 		t.Fatal("read session was not validated")
+	}
+}
+
+func TestLoadSlateDBLocationsScansPartitionsConcurrently(t *testing.T) {
+	packID := vaultic.NewRandomID()
+	store := &gatedScanStore{
+		memoryStore: &memoryStore{values: make(map[string][]byte)},
+		entered:     make(chan struct{}, 256),
+		release:     make(chan struct{}),
+	}
+	for _, partition := range []byte{0x00, 0x7f, 0xff} {
+		var blobID schema.ID
+		blobID[0] = partition
+		blobID[31] = partition + 1
+		store.set(t, schema.BlobKey(blobID), schema.BlobRecord{Locations: []schema.BlobLocation{{
+			PackID: schema.ID(packID), Type: schema.BlobData, Length: 1,
+		}}})
+	}
+	scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	locations, err := newLocationSpool(context.Background(), scratch, 1<<20, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packs, err := newLocationMultisetSpool(context.Background(), scratch, 1<<20, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- loadSlateDBLocations(context.Background(), store, locations, packs, 4)
+	}()
+	for range 2 {
+		<-store.entered
+	}
+	close(store.release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	locationCount, err := countLocationSpool(locations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packCount, err := countLocationSpool(packs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.maximum.Load() < 2 || locationCount != 3 || packCount != 3 {
+		t.Fatalf("maximum scans=%d location count=%d pack count=%d", store.maximum.Load(), locationCount, packCount)
 	}
 }
 

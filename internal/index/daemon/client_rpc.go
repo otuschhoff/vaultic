@@ -304,7 +304,7 @@ func (c *Client) ExportKeyEnvelope(ctx context.Context) ([]byte, uint64, error) 
 
 // CheckEncryption validates every raw metadata object header and DEK version.
 func (c *Client) CheckEncryption(ctx context.Context) (EncryptionAudit, error) {
-	ctx, cancel := withDefaultRPCDeadline(ctx)
+	ctx, cancel := withDefaultAuditDeadline(ctx)
 	defer cancel()
 	response, err := c.rpc.CheckEncryption(ctx, &vaulticdbv1.KeyStatusRequest{RepositoryId: c.options.RepositoryID, Context: requestContext(ctx)})
 	if err != nil {
@@ -927,6 +927,13 @@ func withDefaultRPCDeadline(ctx context.Context) (context.Context, context.Cance
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, defaultRPCDeadline)
+}
+
+func withDefaultAuditDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultAuditDeadline)
 }
 
 // SocketDir returns the private directory expected for an endpoint socket.

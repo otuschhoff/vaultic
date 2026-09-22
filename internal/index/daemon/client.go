@@ -35,6 +35,7 @@ const (
 	ProtocolVersion        = "vaulticdb.v1"
 	SchemaVersion          = "0"
 	defaultRPCDeadline     = 10 * time.Second
+	defaultAuditDeadline   = time.Hour
 	defaultShutdownTimeout = time.Minute
 	maxStatusResponse      = 1024 * 1024
 )

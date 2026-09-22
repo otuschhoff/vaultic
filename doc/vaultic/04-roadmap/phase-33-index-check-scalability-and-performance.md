@@ -4,14 +4,19 @@
 
 [← Phase 32](phase-32-scalable-legacy-metadata-bulk-import.md) · [Phase 34 →](phase-34-operational-monitoring-and-metrics-export.md)
 
-**Status: implementation complete; representative scale acceptance pending.**
+**Status: bounded implementation complete; production NFS validation reaches
+the SlateDB location scan; representative scale acceptance pending.**
 
 The bounded checker implementation is available on the development branch. It
 includes pinned serializable read sessions, immutable legacy inventory fencing,
-memory-first canonical sorting with encrypted disk overflow, bounded pack/reference/snapshot/path and
-analytics reductions, deterministic finding selection, global worker and RPC
-limits, and stage progress. The 50/500 GB NFS, native RADOS, and S3 acceptance
-matrix remains an infrastructure gate and is not inferred from unit tests.
+memory-first canonical sorting with encrypted disk overflow, bounded
+pack/reference/snapshot/path and analytics reductions, deterministic finding
+selection, global worker and RPC limits, and stage progress. Synthetic profiling
+has already driven spool/sort, audit-I/O, scan-page, key-range parallelism, and
+scratch-I/O optimizations. Production NFS runs removed the encryption-audit
+blocker and showed that the current paged SlateDB location scan still exceeds
+the ten-minute feedback window. The 50/500 GB NFS, native RADOS, and S3
+acceptance matrix remains open.
 
 **Goal:** make the complete `vaultic index check` practical at ten times the
 current metadata scale, with bounded working memory, exact results, observable
@@ -24,42 +29,60 @@ that physical database bytes alone predict runtime or memory requirements.
 The controlling implementation is
 [CheckWithOptions](../../../internal/index/maintenance/maintenance.go), called by
 [the index CLI](../../../cmd/vaultic/indexcmd/cmd_index.go).
-The current pipeline loads legacy locations, audits metadata encryption, loads
-SlateDB locations and packs, then checks catalogs, aggregates, placements,
-verification state, operational state, export provenance, references, snapshots,
-path versions, and analytics. These top-level stages run sequentially; that
-does not mean every backend or legacy loader operation is single-threaded.
+The current pipeline inventories and scans legacy locations, audits metadata
+encryption, scans SlateDB locations and packs, then checks catalogs, aggregates,
+placements, verification state, operational state, export provenance,
+references, snapshots, path versions, and analytics. These top-level stages run
+sequentially; eligible work inside legacy decoding and independent validators is
+parallel.
 
-Concrete sources of scale-dependent cost:
+Current scale-dependent costs and blockers:
 
-- `loadLegacyLocations` and `loadSlateDBLocations` retain entire location sets
-  as formatted string keys. Both sets coexist during differential comparison.
-- `packLocationStats` retains a type entry per location as well as pack count
-  and payload maps. `loadPacks` retains the catalog; aggregate checking copies
-  it into another slice. Optimizing only the differential comparison is not
-  sufficient to bound the whole command.
-- `checkReferences` retains distinct inode and manifest sets per blob and a
-  separate reference-count map. High fan-out and skew matter as much as DB size.
-- Snapshot validation issues root and checkpoint point reads. Related checkers
-  must be audited for repeated scans, per-record RPCs, and full-result slices,
-  including export provenance, path indexes, history, placement and
-  [analytics consistency](../../../internal/index/analytics/consistency_checker.go).
-- Maintenance requests pages of 10,000 entries, but
-  [SchemaStore.ScanPrefix](../../../internal/index/daemon/schema_store.go)
-  clamps requests to the daemon's negotiated `MaxPageItems`. RPC count and
-  response bytes must be measured at the effective page size.
+- Canonical location, pack-contribution, reference, snapshot, placement,
+  path-version, and analytics sets now use byte-budgeted memory runs with
+  encrypted external overflow. The pre-Phase-33 formatted-string maps and
+  unbounded per-blob sets are no longer the production implementation.
+- Memory-first spooling, direct tuple comparison, and fixed-capacity runs removed
+  the dominant synthetic encrypted-I/O, comparison, and slice-growth costs.
+  Remaining synthetic CPU/allocation ownership is concentrated in legacy JSON
+  decode, packed-blob conversion, runtime scanning/GC, and shared legacy-spool
+  insertion.
+- Metadata encryption remains a monolithic server operation, but the checker now
+  applies a dedicated one-hour default audit deadline without replacing a caller
+  deadline. Initial classification reads only the bounded 38-byte envelope
+  header before one authenticated full read. Production audits complete in
+  roughly 48 seconds to 2 minutes 24 seconds. A paged/resumable audit remains the
+  durable observability and cancellation design.
+- Production `--check-memory=auto` can admit nearly all reclaimable memory. The
+  first partial production run admitted 260.3 GiB and peaked at 93.7 GiB RSS
+  without spilling. This is bounded by configuration but requires an explicit
+  production budget and a measured memory/spill curve.
+- Snapshot validation still issues root and checkpoint point reads. Related
+  checkers need production measurement for repeated scans, per-record RPCs, and
+  response volume after the encryption blocker is removed.
+- Maintenance requests pages of 10,000 entries and the daemon now advertises the
+  same item limit; the 16 MiB message limit remains the effective byte boundary.
+  Blob locations are split into 256 exhaustive first-ID-byte prefixes and scan
+  concurrently through the pinned read transaction. Each partition owns bounded
+  spools, avoiding shared insertion serialization, and transfers its sorted runs
+  to the downstream exact reducers without copying tuples.
+- The production location scan still rebuilds a SlateDB iterator for every unary
+  response. At roughly 380 million blob records this causes hundreds of GiB of
+  logical reads and millions of NFS metadata operations. Raising concurrency
+  from 32 to 64 did not improve completed output; a leased server-side range
+  stream or resumable scan cursor is the next required architectural change.
 - [Crawl-debt handling](../../../internal/index/maintenance/check_helpers.go)
   scans pending debt even without `--include-crawl-debt`; that flag controls
   detailed findings, not coverage. `--max-findings` caps retained details, not
   work. `--slatedb-only` skips legacy comparison and export-provenance checks;
   it is not a substitute for migration validation.
 
-The observed deployment uses an NFS-backed target behind a local-looking DB
-symlink. Resolve real storage paths before attributing latency. NFS is a
-candidate bottleneck, not a demonstrated explanation for elapsed time. The
-earlier informal 2-6 hour estimate for a 50 GB database is not a benchmark or
-an acceptance target. Measure CLI and daemon CPU, memory, network and storage
-separately; process CPU percentages cannot identify wall-time ownership.
+The observed deployment uses separate NFS-backed source and database mounts;
+the database path is a symlink. The first warm production run averaged 86.94%
+host CPU idle and 0.11% I/O wait during the legacy stage, so NFS latency was not
+the dominant limiter in that run. This does not characterize cold cache or later
+SlateDB stages. Continue to measure CLI and daemon CPU, memory, network, and
+storage separately.
 
 ## Correctness and coverage contract
 
@@ -161,6 +184,9 @@ is preferred. Cleanup is restricted to a verified session-owned directory on
 success, failure and cancellation; never recursively remove a user-supplied
 directory. Abrupt termination leaves identifiable encrypted orphan runs with a
 documented cleanup procedure. Secure deletion on SSD/NFS is not guaranteed.
+Encrypted location runs use 64 MiB bounded sort chunks with 1 MiB buffered I/O.
+This reduced one ten-minute production run from about 13,200 run-file cycles to
+778; it does not change the encrypted format or scratch admission accounting.
 
 ### Parallelism and backpressure
 
@@ -334,6 +360,42 @@ mutex, heap, and runtime-trace findings. It identifies encrypted spill I/O,
 tuple merge/allocation work, and shared legacy-spool contention as the dominant
 local costs. It also records that four-worker throughput improved only 5.8% on
 the synthetic 10x fixture, so the CPU-scaling gate remains open.
+
+The [production NFS benchmark evidence](phase-33-production-benchmark-evidence.md)
+records a ten-minute-bounded full-check attempt against the activated 46 GiB
+authority. Legacy inventory and scan completed in about 5m11s for 10,019 index
+files and 379,934,385 imported blobs. The CLI averaged 3.72 logical CPUs, peaked
+at 93.7 GiB RSS, used no scratch, and ran while the host averaged 86.94% idle and
+0.11% I/O wait. The subsequent whole-store encryption audit exceeded its fixed
+ten-second RPC deadline, so no SlateDB scan or later validator ran. The result is
+partial evidence, not a clean check or an acceptance pass.
+
+## Current optimization outlook
+
+Execute the next work in this order:
+
+1. Replace the monolithic encryption-audit RPC with a bounded paged/resumable
+  operation tied to the pinned read session. A dedicated long-operation timeout
+  may unblock diagnosis, but raising the generic deadline is not the durable
+  design. Report objects, bytes, continuation identity, and audit findings.
+2. Complete one production full check before tuning later stages. The current
+  run provides no evidence about SlateDB scan, catalog join, or parallel
+  validation throughput.
+3. Benchmark explicit 32/64/96 GiB checker budgets with local encrypted scratch
+  and matched 4/8/16/32-worker runs. Use three repetitions and preserve coverage
+  and result digests. Do not accept the auto budget or 32 workers from one run.
+4. Partition legacy tuple production per decode worker and merge sorted producer
+  runs, then profile JSON/index decode and packed-blob conversion. Existing
+  synthetic mutex evidence and production's low CPU utilization make this more
+  promising than simply increasing worker count.
+5. Expose stage-local records/bytes, RPC count/latency, queue/admission waits,
+  CPU/RSS high-water, and daemon monitor attachment before broader backend
+  tuning. Current progress cannot directly attribute the measured waits.
+
+The earlier memory-first and tuple/chunk changes remain accepted. Further
+sorting or scratch work is lower priority until a complete production run shows
+those paths are active; this run used zero scratch and stopped before SlateDB
+comparison.
 
 ## LLM-executable implementation stages
 

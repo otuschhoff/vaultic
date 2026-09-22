@@ -771,7 +771,7 @@ func CheckWithOptions(
 		return result, err
 	}
 	progress.set("slatedb_scan")
-	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks); err != nil {
+	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks, workers); err != nil {
 		return result, err
 	}
 	progress.set("catalog_join")
@@ -1499,36 +1499,89 @@ func checkPackCatalog(
 	return want, wantTiers, nil
 }
 
-func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locationSpool) error {
-	err := scan(ctx, store, []byte("b:"), func(entry daemon.KeyValue) error {
-		parsed, err := schema.ParseKey(entry.Key)
-		if err != nil {
-			return err
-		}
-		record, err := schema.UnmarshalBlobRecord(entry.Value)
-		if err != nil {
-			return err
-		}
-		for _, item := range record.Locations {
-			packID := vaultic.ID(item.PackID)
-			if err := result.add(locationTuple{BlobID: vaultic.ID(parsed.ID),
-				PackID:             vaultic.ID(item.PackID),
-				Type:               uint8(item.Type),
-				Offset:             item.Offset,
-				Length:             uint64(item.Length),
-				UncompressedLength: uint64(item.UncompressedSize)}); err != nil {
-				return err
+func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locationSpool, workers uint) error {
+	group, groupContext := errgroup.WithContext(ctx)
+	group.SetLimit(int(workers))
+	partitionMemory := max(result.memoryBytes/256, locationTupleMemorySize)
+	locationPartitions := make([]*locationSpool, 256)
+	packPartitions := make([]*locationSpool, 256)
+	defer func() {
+		for partition := range locationPartitions {
+			if locationPartitions[partition] != nil {
+				_ = locationPartitions[partition].close()
 			}
-			if err := packs.add(locationTuple{
-				BlobID: packID, PackID: vaultic.ID(parsed.ID), Type: uint8(item.Type),
-				Offset: item.Offset, Length: uint64(item.Length), UncompressedLength: uint64(item.UncompressedSize),
-			}); err != nil {
-				return err
+			if packPartitions[partition] != nil {
+				_ = packPartitions[partition].close()
 			}
 		}
-		return nil
-	})
-	return err
+	}()
+	for partition := 0; partition < 256; partition++ {
+		prefix := []byte{'b', ':', byte(partition)}
+		group.Go(func() error {
+			locations, err := newLocationSpool(groupContext, result.scratch, partitionMemory, result.fanIn)
+			if err != nil {
+				return err
+			}
+			locationPartitions[partition] = locations
+			packLocations, err := newLocationMultisetSpool(groupContext, packs.scratch, partitionMemory, packs.fanIn)
+			if err != nil {
+				return err
+			}
+			packPartitions[partition] = packLocations
+			var after []byte
+			for {
+				entries, done, err := store.ScanPrefix(groupContext, prefix, after, scanPageSize)
+				if err != nil {
+					return err
+				}
+				for _, entry := range entries {
+					parsed, err := schema.ParseKey(entry.Key)
+					if err != nil {
+						return err
+					}
+					record, err := schema.UnmarshalBlobRecord(entry.Value)
+					if err != nil {
+						return err
+					}
+					for _, item := range record.Locations {
+						if err := locations.add(locationTuple{BlobID: vaultic.ID(parsed.ID),
+							PackID:             vaultic.ID(item.PackID),
+							Type:               uint8(item.Type),
+							Offset:             item.Offset,
+							Length:             uint64(item.Length),
+							UncompressedLength: uint64(item.UncompressedSize)}); err != nil {
+							return err
+						}
+						if err := packLocations.add(locationTuple{
+							BlobID: vaultic.ID(item.PackID), PackID: vaultic.ID(parsed.ID), Type: uint8(item.Type),
+							Offset: item.Offset, Length: uint64(item.Length), UncompressedLength: uint64(item.UncompressedSize),
+						}); err != nil {
+							return err
+						}
+					}
+					after = append(after[:0], entry.Key...)
+				}
+				if done {
+					return nil
+				}
+				if len(entries) == 0 {
+					return fmt.Errorf("scan %q made no progress", prefix)
+				}
+			}
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	for partition := range locationPartitions {
+		if err := result.adopt(locationPartitions[partition]); err != nil {
+			return err
+		}
+		if err := packs.adopt(packPartitions[partition]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func checkAggregates(
