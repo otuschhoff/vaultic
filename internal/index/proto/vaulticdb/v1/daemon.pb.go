@@ -1145,6 +1145,7 @@ func (x *TransactionRequest) GetRequireDurabilityToken() bool {
 type BeginResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TransactionId string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	IdleTimeoutMs uint64                 `protobuf:"varint,2,opt,name=idle_timeout_ms,json=idleTimeoutMs,proto3" json:"idle_timeout_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1184,6 +1185,13 @@ func (x *BeginResponse) GetTransactionId() string {
 		return x.TransactionId
 	}
 	return ""
+}
+
+func (x *BeginResponse) GetIdleTimeoutMs() uint64 {
+	if x != nil {
+		return x.IdleTimeoutMs
+	}
+	return 0
 }
 
 type CommitResponse struct {
@@ -6213,9 +6221,10 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x0etransaction_id\x18\x02 \x01(\tR\rtransactionId\x12'\n" +
 	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\x12)\n" +
 	"\x10defer_durability\x18\x04 \x01(\bR\x0fdeferDurability\x128\n" +
-	"\x18require_durability_token\x18\x05 \x01(\bR\x16requireDurabilityToken\"6\n" +
+	"\x18require_durability_token\x18\x05 \x01(\bR\x16requireDurabilityToken\"^\n" +
 	"\rBeginResponse\x12%\n" +
-	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"t\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\x12&\n" +
+	"\x0fidle_timeout_ms\x18\x02 \x01(\x04R\ridleTimeoutMs\"t\n" +
 	"\x0eCommitResponse\x12\x18\n" +
 	"\adurable\x18\x01 \x01(\bR\adurable\x12H\n" +
 	"\x10durability_token\x18\x02 \x01(\v2\x1d.vaulticdb.v1.DurabilityTokenR\x0fdurabilityToken\"l\n" +

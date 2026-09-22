@@ -2971,6 +2971,10 @@ impl Storage {
         Ok(epoch)
     }
 
+    pub(crate) fn transaction_idle_timeout_ms(&self) -> u64 {
+        self.transaction_idle_timeout_ms
+    }
+
     pub(crate) async fn prune_expired_transactions(&self) -> (usize, usize) {
         let mut transactions = self.transactions.write().await;
         let before = transactions.len();

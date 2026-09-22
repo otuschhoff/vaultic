@@ -225,7 +225,7 @@ func TestLoadSlateDBLocationsScansPartitionsConcurrently(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		result <- loadSlateDBLocations(context.Background(), store, locations, packs, 4)
+		result <- loadSlateDBLocations(context.Background(), store, locations, packs, 4, nil)
 	}()
 	for range 2 {
 		<-store.entered
@@ -244,6 +244,61 @@ func TestLoadSlateDBLocationsScansPartitionsConcurrently(t *testing.T) {
 	}
 	if store.maximum.Load() < 2 || locationCount != 3 || packCount != 3 {
 		t.Fatalf("maximum scans=%d location count=%d pack count=%d", store.maximum.Load(), locationCount, packCount)
+	}
+}
+
+func TestLoadSlateDBLocationsFinalizesSpilledPartitions(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	for ordinal := byte(1); ordinal <= 3; ordinal++ {
+		var blobID, packID schema.ID
+		blobID[31], packID[31] = ordinal, 42
+		store.set(t, schema.BlobKey(blobID), schema.BlobRecord{Locations: []schema.BlobLocation{{
+			PackID: packID, Type: schema.BlobData, Length: 1,
+		}}})
+	}
+	scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	locations, err := newLocationSpool(context.Background(), scratch, 512*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packs, err := newLocationMultisetSpool(context.Background(), scratch, 512*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing := false
+	if err := loadSlateDBLocations(context.Background(), store, locations, packs, 4, func() { finalizing = true }); err != nil {
+		t.Fatal(err)
+	}
+	if !finalizing {
+		t.Fatal("finalization stage was not reported")
+	}
+	for _, spool := range []*locationSpool{locations, packs} {
+		count, err := countLocationSpool(spool)
+		if err != nil || count != 3 {
+			t.Fatalf("count=%d err=%v", count, err)
+		}
+	}
+	peak, _ := scratch.stats()
+	if peak == 0 {
+		t.Fatal("fixture did not spill")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	canceledLocations, err := newLocationSpool(ctx, scratch, 512*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceledPacks, err := newLocationMultisetSpool(ctx, scratch, 512*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = loadSlateDBLocations(ctx, store, canceledLocations, canceledPacks, 4, cancel)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation was lost: %v", err)
 	}
 }
 

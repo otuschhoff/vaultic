@@ -143,6 +143,9 @@ type ReadSession struct {
 	scanMu      sync.Mutex
 	scanStats   ScanStats
 	rangeStats  [256]ScanStats
+	ctx         context.Context
+	cancel      context.CancelCauseFunc
+	renewed     chan struct{}
 }
 
 func (store *SchemaStore) BeginReadSession(ctx context.Context) (*ReadSession, error) {
@@ -173,7 +176,7 @@ func (store *SchemaStore) BeginReadSession(ctx context.Context) (*ReadSession, e
 	if before.RepositoryID != after.RepositoryID || before.ActiveGeneration != after.ActiveGeneration || before.Decision != after.Decision {
 		return closeOnError(fmt.Errorf("metadata generation changed while opening check read session"))
 	}
-	return &ReadSession{
+	session := &ReadSession{
 		SchemaStore: store,
 		transaction: transaction,
 		decision:    after.Decision,
@@ -183,10 +186,23 @@ func (store *SchemaStore) BeginReadSession(ctx context.Context) (*ReadSession, e
 			Sequence:     sequence,
 			SessionID:    transaction.ID(),
 		},
-	}, nil
+	}
+	interval := time.Second
+	renewalTimeout := 10 * time.Second
+	if transaction.idleTimeout > 0 {
+		interval = max(time.Millisecond, min(transaction.idleTimeout/3, 30*time.Second))
+		renewalTimeout = min(interval, renewalTimeout)
+	}
+	session.startRenewal(ctx, interval, renewalTimeout, session.Validate)
+	return session, nil
 }
 
 func (session *ReadSession) Validate(ctx context.Context) error {
+	if session.ctx != nil {
+		if err := context.Cause(session.ctx); err != nil {
+			return err
+		}
+	}
 	value, found, err := session.transaction.Get(ctx, schema.NextRevisionKey())
 	if err != nil {
 		return fmt.Errorf("validate check read session: %w", err)
@@ -247,7 +263,37 @@ func (session *ReadSession) ScanPrefix(ctx context.Context, prefix, afterKey []b
 }
 
 func (session *ReadSession) Close(ctx context.Context) error {
+	if session.cancel != nil {
+		session.cancel(context.Canceled)
+		<-session.renewed
+	}
 	return session.transaction.Rollback(ctx)
+}
+
+func (session *ReadSession) Context() context.Context { return session.ctx }
+
+func (session *ReadSession) startRenewal(ctx context.Context, interval, timeout time.Duration, renew func(context.Context) error) {
+	session.ctx, session.cancel = context.WithCancelCause(ctx)
+	session.renewed = make(chan struct{})
+	go func() {
+		defer close(session.renewed)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-session.ctx.Done():
+				return
+			case <-ticker.C:
+				requestCtx, cancel := context.WithTimeout(session.ctx, timeout)
+				err := renew(requestCtx)
+				cancel()
+				if err != nil {
+					session.cancel(fmt.Errorf("renew check read session: %w", err))
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (session *ReadSession) ScanStats() ScanStats {

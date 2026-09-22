@@ -661,6 +661,7 @@ type Transaction struct {
 	id             string
 	state          atomic.Uint32
 	idempotencyKey string
+	idleTimeout    time.Duration
 }
 
 const (
@@ -680,7 +681,8 @@ func (c *Client) begin(ctx context.Context) (*Transaction, error) {
 	if response.GetTransactionId() == "" {
 		return nil, fmt.Errorf("vaulticdb returned an empty transaction ID")
 	}
-	return &Transaction{client: c, id: response.GetTransactionId()}, nil
+	idleTimeout := time.Duration(min(response.GetIdleTimeoutMs(), uint64((24*time.Hour)/time.Millisecond))) * time.Millisecond
+	return &Transaction{client: c, id: response.GetTransactionId(), idleTimeout: idleTimeout}, nil
 }
 
 func (t *Transaction) ID() string { return t.id }

@@ -1386,6 +1386,7 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			return result, err
 		}
 		checkStore = readSession
+		ctx = readSession.Context()
 	}
 	if storeSession != nil {
 		defer storeSession.CloseAndLog()
@@ -1447,6 +1448,9 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 		},
 	)
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return result, fmt.Errorf("index check interrupted: %w", cause)
+		}
 		return result, err
 	}
 	if options.QuorumCapsule != "" {

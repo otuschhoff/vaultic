@@ -846,7 +846,9 @@ func CheckWithOptions(
 		return result, err
 	}
 	progress.set("slatedb_scan")
-	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks, workers); err != nil {
+	if err := loadSlateDBLocations(ctx, store, slatedb, slatedbPacks, workers, func() {
+		progress.set("slatedb_finalize")
+	}); err != nil {
 		return result, err
 	}
 	progress.set("catalog_join")
@@ -1574,7 +1576,7 @@ func checkPackCatalog(
 	return want, wantTiers, nil
 }
 
-func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locationSpool, workers uint) error {
+func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locationSpool, workers uint, finalizing func()) error {
 	group, groupContext := errgroup.WithContext(ctx)
 	group.SetLimit(int(workers))
 	partitionMemory := max(result.memoryBytes/256, locationTupleMemorySize)
@@ -1637,7 +1639,12 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 	if err := group.Wait(); err != nil {
 		return err
 	}
+	if finalizing != nil {
+		finalizing()
+	}
 	for partition := range locationPartitions {
+		locationPartitions[partition].ctx = ctx
+		packPartitions[partition].ctx = ctx
 		if err := result.adopt(locationPartitions[partition]); err != nil {
 			return err
 		}

@@ -109,6 +109,7 @@ message TransactionRequest {
 
 message BeginResponse {
   string transaction_id = 1;
+  uint64 idle_timeout_ms = 2;
 }
 
 message CommitResponse {

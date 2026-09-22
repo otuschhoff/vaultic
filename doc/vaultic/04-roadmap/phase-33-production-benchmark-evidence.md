@@ -39,8 +39,8 @@ Older daemons retain the pinned unary path. Checker wrappers hold one RPC permit
 through the whole range and exclude tuple consumption from database wait spans.
 Session identity is validated after each completed range and before success.
 Expired ordinary transaction reads now fail instead of refreshing an already
-expired lease. Operators must allow enough idle time for non-database stages;
-this patch does not add a read-session heartbeat.
+expired lease. The initial streaming patch required enough idle time for
+non-database stages; the subsequent lease follow-up below adds renewal.
 
 Progress and result resources expose records, protobuf bytes, chunks,
 started/completed ranges, iterator setup/service nanoseconds, receive wait and
@@ -73,7 +73,9 @@ The CI Clippy command remains blocked by unchanged `double_parens`,
 
 The run was interrupted before its configured ten-minute cap. It exited 130
 with `context canceled`, not timeout status 124, after 8m37.56s including cleanup.
-The captured artifacts do not establish the source of cancellation. The last
+The captured artifacts alone did not establish the source of cancellation. A
+subsequent forced-spill regression reproduced self-cancellation during spool
+adoption after successful `errgroup.Wait()`; see the follow-up below. The last
 periodic progress was at 8m25s; no completed-check verdict was produced.
 
 Encryption audit completed at about 1m04s. By the 8m20s sample, all 256 ranges
@@ -113,13 +115,88 @@ scratch parent had no remaining session directories. The artifact manifest
 verified successfully. Rollback binaries remain available; the streaming
 candidate remains deployed.
 
-Next handoff: instrument/profile spool adoption and finalization separately from
-range delivery, and address read-session renewal during long non-database stages
-before attempting a full differential check. The historical legacy stage alone
-exceeds the default 300-second idle lease; the stricter expiry check must not be
-weakened to bypass that limit. Repeat the bounded diagnostic to obtain an
-uninterrupted control, then measure the full path and later validators. Full
-differential success and the representative acceptance matrix remain pending.
+### Finalization and lease follow-up
+
+Commit `e06a8ffd6` records the streaming implementation and r1 results. The next
+patch reproduces the finalization failure using three records in one partition
+with a two-record memory buffer: the remaining spilled record must be flushed
+during adoption. `errgroup.Wait()` cancels its context even when every worker
+succeeds. Partition spools retained that context, so encrypted `writeRun` failed
+with `context canceled`. The fixture fails before the fix and passes afterward.
+
+After workers join successfully, adoption now uses the parent check context.
+An explicit cancellation at the adoption boundary still fails, proving the fix
+does not detach from caller cancellation. Progress reports `slatedb_finalize`
+separately from range delivery and `catalog_join`.
+
+Read sessions now renew by validating the pinned sequence and generation on a
+bounded background request. New daemons advertise transaction idle milliseconds
+in `BeginResponse`; the interval is one-third of that timeout, capped at 30s,
+with a request timeout at most 10s and no longer than the interval. Older daemons
+use a 1s interval and a 10s request timeout; unknown custom lease settings are not
+guaranteed to survive, and renewal failure fails incomplete. No expired lease
+is revived and no replacement transaction is opened. The CLI runs the checker
+with the failure-aware session context; close cancels and joins the renewal
+worker before rollback. Virtual-time tests cover idle work, bounded stalled
+renewals, sticky errors, and cancellation cleanup. Real daemon tests cover timeout
+advertisement and session close.
+
+Renewal runs at most one control request at a time outside the checker's scan
+RPC semaphore, so the configured 32-RPC scan budget is not a strict total RPC
+cap: up to one additional renewal request can be active. Reserving this control
+capacity prevents long-lived range streams from starving lease maintenance.
+
+The affected Go owner suites, full owner race suites and 62 native storage tests
+pass. A later parallel native all-targets run failed two existing tests because
+`clean_incomplete_memory_wal_rebuild_does_not_handoff` consumed the global
+`InventoryWal` failpoint intended for
+`dedicated_wal_inventory_failure_precedes_cache_startup`. A focused serial rerun
+of the daemon target passed all 190 tests, including both failures:
+
+```text
+cargo test --manifest-path vaulticdb/Cargo.toml --bin vaulticdb -- --test-threads=1
+```
+
+The broader serial retry passed all 102 library tests before being deliberately
+stopped during unrelated broker tests; it is not a completed all-targets pass.
+No unrelated test changes are made.
+The native timeout field was validated locally but does not require another
+production restart: diagnostic r2 uses the new profile CLI against the existing
+epoch-38 streaming daemon via the legacy timeout-advertisement fallback.
+
+The repeated ten-minute diagnostic is captured under
+`/volume2/NASDA2/rustic/db.test/phase33-production-2026-09-22-stream32-finalize-r2/`.
+It preserves 32 workers/RPCs, 96 GiB memory/scratch and the same scratch parent,
+with no cache drops, daemon replacement or restart. The CLI SHA-256 is
+`8c86b3b768cfd8f30e234c829334b7410cda82f32e52ae6a8733d9cdc8be22b7`;
+the daemon hash is unchanged from r1. Local regression workloads overlapped this
+run, so timing is diagnostic rather than an isolated performance comparison.
+
+R2 completed the audit at 1m35s and entered `slatedb_finalize` at 9m03s after
+delivering the same 376,346,710 records in 37,769 chunks across all 256 ranges.
+It remained in finalization until the actual ten-minute timeout (wrapper exit
+124), then returned the expected canceled outcome and cleaned up. Wall time
+including cleanup was 10m19.47s. This confirms the premature self-cancellation
+is fixed, not that the complete scan stage or check finishes within ten minutes.
+
+CLI user/system CPU was 1,662.47/210.22 seconds; peak RSS was 102,249,352 KiB
+(97.5 GiB), with no swap. Scratch grew from 59,055,812,608 bytes at finalization
+entry to 66,767,726,000 bytes (62.2 GiB) at cancellation, with zero merge passes.
+Daemon CPU totaled 6,515.28 seconds. Iterator setup was 11.704 seconds;
+service/receive/consume worker times were 12,787.753/11,960.122/1,997.716 seconds.
+These overlapping times must not be summed into wall time.
+
+The artifact manifest verified. The writer stayed read-write at epoch 38 with
+zero active transactions/intents, no diagnostic process remained, and scratch
+cleanup left no session directories. Only the diagnostic CLI changed; production
+service binaries remain the r1 deployment.
+
+Next: finalize pending partition buffers inside the bounded worker lifecycle or
+in a bounded finalization pool before serial ownership transfer, preserving
+parent cancellation, scratch admission, memory bounds and exact results. Measure
+that change in an isolated bounded repeat. Then profile catalog joins and later
+validators and run full differential coverage. Full differential success and
+the representative acceptance matrix remain open.
 
 ## Prior Production Runs
 

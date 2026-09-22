@@ -174,6 +174,7 @@ impl Service {
             *self.state.last_writer_activity.lock().await = Instant::now();
             Ok(Response::new(BeginResponse {
                 transaction_id: outcome.transaction_id,
+                idle_timeout_ms: storage.transaction_idle_timeout_ms(),
             }))
         }
         .await;

@@ -384,9 +384,14 @@ Native owner tests, Go integration and focused race tests pass. After authorized
 deployment, all 256 production ranges delivered 376,346,710 records by 8m20s.
 Cancellation ended that diagnostic before the full `slatedb_scan` stage or catalog
 join finished, so it is neither a matched ten-minute result nor a clean check.
-The immediate handoff is separate spool-adoption/finalization measurement and
-read-session renewal across long non-database stages, then an uninterrupted
-bounded diagnostic. Per-scan backend-read attribution and continuation-age
+The subsequent follow-up reproduces and fixes self-cancellation when adoption
+flushes a partial spill buffer after successful `errgroup.Wait()`. It adds a
+distinct `slatedb_finalize` progress stage and bounded read-session renewal across
+long non-database stages. The repeat reached `slatedb_finalize` at 9m03s and
+continued until the actual ten-minute timeout, confirming the cancellation fix.
+Serial pending-buffer finalization is now the next bounded optimization target;
+catalog joins and full differential completion remain unmeasured.
+Per-scan backend-read attribution and continuation-age
 telemetry remain pending; no representative acceptance gate is closed.
 
 Implemented and retained:
