@@ -65,6 +65,108 @@ func TestCompareLocationSpoolsReportsStages(t *testing.T) {
 	}
 }
 
+func TestCompareLocationPartitionsMatchesSerial(t *testing.T) {
+	for _, maxFindings := range []uint{0, 3, 64} {
+		for _, failure := range []string{"", "cancel", "corrupt"} {
+			t.Run(fmt.Sprintf("findings=%d/failure=%s", maxFindings, failure), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				scratch, err := newCheckScratch(t.TempDir(), 8<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scratch.close()
+				var spools []*locationSpool
+				for _, partitions := range []int{0, 0, 4, 16} {
+					spool, err := newLocationSpool(ctx, scratch, 8*locationTupleMemorySize, 2)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if partitions != 0 {
+						spool.memoryBytes = 256 << 20
+						if err := spool.partitionByBlob(partitions); err != nil {
+							t.Fatal(err)
+						}
+						for _, child := range spool.blobPartitions {
+							child.memoryBytes, child.chunkItems = 4*locationTupleMemorySize, 2
+						}
+						spool.mergeWorkers = 4
+					}
+					spools = append(spools, spool)
+					defer spool.close()
+				}
+				for ordinal := 0; ordinal < 256; ordinal++ {
+					for side := 0; side < 2; side++ {
+						if ordinal%7 == side {
+							continue
+						}
+						tuple := testLocation(byte(ordinal))
+						if ordinal%11 == 0 {
+							tuple.Length = uint64(side + 1)
+						}
+						for _, spool := range []*locationSpool{spools[side], spools[side+2]} {
+							for range 2 {
+								if err := spool.add(tuple); err != nil {
+									t.Fatal(err)
+								}
+							}
+							if spool.memoryUsed > spool.memoryBytes {
+								t.Fatal("partition capacity exceeds parent budget")
+							}
+						}
+					}
+				}
+				var expected, actual CheckResult
+				for _, result := range []*CheckResult{&expected, &actual} {
+					addFinding(result, maxFindings, Finding{Kind: "existing", Key: "prior"})
+				}
+				if err := compareLocationSpools(spools[0], spools[1], &expected, maxFindings); err != nil {
+					t.Fatal(err)
+				}
+				switch failure {
+				case "cancel":
+					cancel()
+				case "corrupt":
+					run := spools[2].blobPartitions[0].runs[0]
+					data, err := os.ReadFile(run.path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					data[len(data)-1] ^= 1
+					if err := os.WriteFile(run.path, data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var stages []string
+				err = compareLocationSpoolsWithProgress(spools[2], spools[3], &actual, maxFindings, func(stage string) { stages = append(stages, stage) })
+				if !slices.Equal(stages, []string{"location_compare_partitioned"}) {
+					t.Fatalf("stages=%v", stages)
+				}
+				if failure == "" {
+					if err != nil || actual.LegacyLocations != expected.LegacyLocations || actual.SlateDBLocations != expected.SlateDBLocations || actual.MissingInLegacy != expected.MissingInLegacy || actual.MissingInSlateDB != expected.MissingInSlateDB || !slices.Equal(actual.Findings, expected.Findings) {
+						t.Fatalf("actual=%+v expected=%+v err=%v", actual, expected, err)
+					}
+				} else if err == nil || failure == "cancel" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("failure=%s err=%v", failure, err)
+				}
+				for _, spool := range spools {
+					for _, child := range spool.blobPartitions {
+						if child.ctx != ctx {
+							t.Fatal("child context was not restored")
+						}
+					}
+					if err := spool.close(); err != nil || spool.memoryUsed != 0 {
+						t.Fatalf("cleanup: memory=%d err=%v", spool.memoryUsed, err)
+					}
+				}
+				if scratch.used != 0 {
+					t.Fatalf("scratch retained %d bytes", scratch.used)
+				}
+			})
+		}
+	}
+}
+
 func testLocation(value byte) locationTuple {
 	return locationTuple{BlobID: vaultic.ID{value}, PackID: vaultic.ID{value + 1}, Type: uint8(value % 2), Offset: uint64(value)}
 }

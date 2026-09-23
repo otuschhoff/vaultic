@@ -821,6 +821,11 @@ func CheckWithOptions(
 			return result, err
 		}
 		legacyPacks.packSummaries = true
+		if spoolMemory/uint64(max(workers, 1))/16 >= locationRunBufferSize {
+			if err := legacy.partitionByBlob(16); err != nil {
+				return result, err
+			}
+		}
 	}
 	if !options.SlateDBOnly {
 		progress.set("legacy_scan")
@@ -1205,7 +1210,7 @@ func loadLegacyLocations(
 	packs *locationSpool,
 	workers uint,
 ) (*locationSpool, uint64, error) {
-	workers = uint(min(uint64(max(workers, 1)), uint64(32), result.memoryBytes/locationTupleMemorySize))
+	workers = uint(min(uint64(max(workers, 1)), uint64(32), result.memoryBytes/locationTupleMemorySize/uint64(max(1, len(result.blobPartitions)))))
 	if packs != nil {
 		workers = uint(min(uint64(workers), packs.memoryBytes/locationTupleMemorySize))
 	}
@@ -1229,6 +1234,11 @@ func loadLegacyLocations(
 		locations[worker], err = newLocationSpool(ctx, result.scratch, result.memoryBytes/uint64(workers), result.fanIn)
 		if err != nil {
 			return result, 0, err
+		}
+		if len(result.blobPartitions) != 0 {
+			if err := locations[worker].partitionByBlob(len(result.blobPartitions)); err != nil {
+				return result, 0, err
+			}
 		}
 		if packs != nil {
 			packMemory := packs.memoryBytes / uint64(workers)

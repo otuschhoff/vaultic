@@ -404,8 +404,16 @@ func (spool *locationSpool) add(tuple locationTuple) error {
 }
 
 func (spool *locationSpool) addEncoded(tuple locationTuple) error {
-	if spool.sealed || len(spool.blobPartitions) != 0 {
+	if spool.sealed {
 		return fmt.Errorf("checker location spool is sealed")
+	}
+	if len(spool.blobPartitions) != 0 {
+		partition := spool.blobPartitions[int(tuple.BlobID[0])*len(spool.blobPartitions)/256]
+		partition.ctx = spool.ctx
+		before := partition.memoryUsed
+		err := partition.addEncoded(tuple)
+		spool.memoryUsed += partition.memoryUsed - before
+		return err
 	}
 	if err := spool.ctx.Err(); err != nil {
 		return err
@@ -447,6 +455,12 @@ func (spool *locationSpool) sortRecords(records []locationTuple) []locationTuple
 }
 
 func (spool *locationSpool) finishBuffer() error {
+	for _, partition := range spool.blobPartitions {
+		partition.ctx = spool.ctx
+		if err := partition.finishBuffer(); err != nil {
+			return err
+		}
+	}
 	if len(spool.buffer) == 0 {
 		return nil
 	}
@@ -714,8 +728,23 @@ func (spool *locationSpool) mergePass() error {
 	return nil
 }
 
+func (spool *locationSpool) partitionByBlob(partitions int) error {
+	if spool.sealed || len(spool.blobPartitions) != 0 || len(spool.runs) != 0 || len(spool.memoryRuns) != 0 || len(spool.buffer) != 0 || !spool.deduplicate || spool.packSummaries || partitions < 1 || partitions > 256 || 256%partitions != 0 || spool.memoryBytes/uint64(partitions) < locationTupleMemorySize {
+		return fmt.Errorf("invalid checker blob partition configuration")
+	}
+	for range partitions {
+		partition, err := newLocationSpool(spool.ctx, spool.scratch, spool.memoryBytes/uint64(partitions), spool.fanIn)
+		if err != nil {
+			return err
+		}
+		partition.chunkItems = min(partition.chunkItems, int(max(1, partition.memoryBytes/locationTupleMemorySize/8)))
+		spool.blobPartitions = append(spool.blobPartitions, partition)
+	}
+	return nil
+}
+
 func (spool *locationSpool) adopt(source *locationSpool) error {
-	if spool.sealed || source.sealed || len(spool.blobPartitions) != 0 || len(source.blobPartitions) != 0 || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate || spool.packSummaries != source.packSummaries {
+	if spool.sealed || source.sealed || len(spool.blobPartitions) != len(source.blobPartitions) || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate || spool.packSummaries != source.packSummaries {
 		return fmt.Errorf("incompatible checker location spools")
 	}
 	if err := source.finishBuffer(); err != nil {
@@ -723,6 +752,16 @@ func (spool *locationSpool) adopt(source *locationSpool) error {
 	}
 	if source.memoryUsed > spool.memoryBytes-spool.memoryUsed {
 		return fmt.Errorf("checker location spool memory limit exceeded")
+	}
+	for index, partition := range spool.blobPartitions {
+		partition.ctx = spool.ctx
+		before := partition.memoryUsed
+		if err := partition.adopt(source.blobPartitions[index]); err != nil {
+			return err
+		}
+		transferred := partition.memoryUsed - before
+		spool.memoryUsed += transferred
+		source.memoryUsed -= transferred
 	}
 	spool.memoryRuns = append(spool.memoryRuns, source.memoryRuns...)
 	spool.runs = append(spool.runs, source.runs...)
@@ -1056,6 +1095,10 @@ type locationIterator struct {
 
 func (spool *locationSpool) iterator() (*locationIterator, error) {
 	if len(spool.blobPartitions) != 0 {
+		if err := spool.finishBuffer(); err != nil {
+			return nil, err
+		}
+		spool.sealed = true
 		return &locationIterator{ctx: spool.ctx, blobPartitions: spool.blobPartitions}, nil
 	}
 	if err := spool.seal(); err != nil {
@@ -1242,6 +1285,10 @@ func compareLocationSpools(legacy, slatedb *locationSpool, result *CheckResult, 
 }
 
 func compareLocationSpoolsWithProgress(legacy, slatedb *locationSpool, result *CheckResult, maxFindings uint, stage func(string)) (err error) {
+	if len(legacy.blobPartitions) != 0 && len(slatedb.blobPartitions) >= len(legacy.blobPartitions) && len(slatedb.blobPartitions)%len(legacy.blobPartitions) == 0 && legacy.mergeWorkers > 1 {
+		stage("location_compare_partitioned")
+		return compareLocationPartitions(legacy, slatedb, result, maxFindings)
+	}
 	stage("location_merge_legacy")
 	legacyIterator, err := legacy.iterator()
 	if err != nil {
@@ -1310,6 +1357,54 @@ func compareLocationSpoolsWithProgress(legacy, slatedb *locationSpool, result *C
 		}
 	}
 	return nil
+}
+
+func compareLocationPartitions(legacy, slatedb *locationSpool, result *CheckResult, maxFindings uint) error {
+	if err := legacy.finishBuffer(); err != nil {
+		return err
+	}
+	if err := slatedb.finishBuffer(); err != nil {
+		return err
+	}
+	legacy.sealed, slatedb.sealed = true, true
+	group, ctx := errgroup.WithContext(legacy.ctx)
+	workers := max(1, min(legacy.mergeWorkers, 4, int(min(legacy.memoryBytes, slatedb.memoryBytes)/uint64((legacy.fanIn+slatedb.fanIn+2)*locationRunBufferSize))))
+	group.SetLimit(workers)
+	results := make([]CheckResult, len(legacy.blobPartitions))
+	stride := len(slatedb.blobPartitions) / len(legacy.blobPartitions)
+	defer func() {
+		for _, partition := range legacy.blobPartitions {
+			partition.ctx = legacy.ctx
+		}
+		for _, partition := range slatedb.blobPartitions {
+			partition.ctx = slatedb.ctx
+		}
+	}()
+	for index, partition := range legacy.blobPartitions {
+		group.Go(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			partition.ctx = ctx
+			partitions := slatedb.blobPartitions[index*stride : (index+1)*stride]
+			for _, child := range partitions {
+				child.ctx = ctx
+			}
+			view := &locationSpool{ctx: ctx, blobPartitions: partitions, sealed: true}
+			return compareLocationSpools(partition, view, &results[index], maxFindings)
+		})
+	}
+	err := group.Wait()
+	for _, partial := range results {
+		result.LegacyLocations += partial.LegacyLocations
+		result.SlateDBLocations += partial.SlateDBLocations
+		result.MissingInLegacy += partial.MissingInLegacy
+		result.MissingInSlateDB += partial.MissingInSlateDB
+		for _, finding := range partial.Findings {
+			addFinding(result, maxFindings, finding)
+		}
+	}
+	return err
 }
 
 func reduceReferenceSpool(spool *locationSpool, result *CheckResult, maxFindings uint) (err error) {

@@ -1308,80 +1308,90 @@ func TestLoadLegacyLocationsParallelMatchesSerial(t *testing.T) {
 	for _, memory := range []uint64{locationTupleMemorySize, 8 * locationTupleMemorySize, 1 << 20} {
 		for _, workers := range []uint{0, 1, 4, 32} {
 			for _, withPacks := range []bool{false, true} {
-				t.Run(fmt.Sprintf("memory=%d/workers=%d/packs=%t", memory, workers, withPacks), func(t *testing.T) {
-					ctx := context.Background()
-					scratch, err := newCheckScratch(t.TempDir(), 1<<24)
-					if err != nil {
-						t.Fatal(err)
+				for _, partitions := range []int{0, 4} {
+					if partitions != 0 && memory < uint64(partitions)*locationTupleMemorySize {
+						continue
 					}
-					defer scratch.close()
-					makeSpools := func() (*locationSpool, *locationSpool) {
-						locations, err := newLocationSpool(ctx, scratch, memory, 4)
+					t.Run(fmt.Sprintf("memory=%d/workers=%d/packs=%t/partitions=%d", memory, workers, withPacks, partitions), func(t *testing.T) {
+						ctx := context.Background()
+						scratch, err := newCheckScratch(t.TempDir(), 1<<24)
 						if err != nil {
 							t.Fatal(err)
 						}
-						t.Cleanup(func() { _ = locations.close() })
-						var packs *locationSpool
-						if withPacks {
-							packs, err = newLocationMultisetSpool(ctx, scratch, memory, 4)
+						defer scratch.close()
+						makeSpools := func() (*locationSpool, *locationSpool) {
+							locations, err := newLocationSpool(ctx, scratch, memory, 4)
 							if err != nil {
 								t.Fatal(err)
 							}
-							t.Cleanup(func() { _ = packs.close() })
+							t.Cleanup(func() { _ = locations.close() })
+							var packs *locationSpool
+							if withPacks {
+								packs, err = newLocationMultisetSpool(ctx, scratch, memory, 4)
+								if err != nil {
+									t.Fatal(err)
+								}
+								t.Cleanup(func() { _ = packs.close() })
+							}
+							return locations, packs
 						}
-						return locations, packs
-					}
-					readSpool := func(spool *locationSpool) []locationTuple {
-						if spool == nil {
-							return nil
+						readSpool := func(spool *locationSpool) []locationTuple {
+							if spool == nil {
+								return nil
+							}
+							if spool.memoryUsed > memory {
+								t.Fatal("adoption exceeded memory budget")
+							}
+							iterator, err := spool.iterator()
+							if err != nil {
+								t.Fatal(err)
+							}
+							defer iterator.close()
+							var tuples []locationTuple
+							for {
+								tuple, found, err := iterator.next()
+								if err != nil {
+									t.Fatal(err)
+								}
+								if !found {
+									return tuples
+								}
+								tuples = append(tuples, tuple)
+							}
 						}
-						if spool.memoryUsed > memory {
-							t.Fatal("adoption exceeded memory budget")
-						}
-						iterator, err := spool.iterator()
+						expected, expectedPacks := makeSpools()
+						err = legacyindex.ForAllIndexesWorkers(ctx, source, source, 1, func(_ vaultic.ID, index *legacyindex.Index, err error) error {
+							if err != nil {
+								return err
+							}
+							return collectLegacyIndex(index, expected, expectedPacks)
+						})
 						if err != nil {
 							t.Fatal(err)
 						}
-						defer iterator.close()
-						var tuples []locationTuple
-						for {
-							tuple, found, err := iterator.next()
-							if err != nil {
+						actual, actualPacks := makeSpools()
+						if partitions != 0 {
+							if err := actual.partitionByBlob(partitions); err != nil {
 								t.Fatal(err)
 							}
-							if !found {
-								return tuples
-							}
-							tuples = append(tuples, tuple)
 						}
-					}
-					expected, expectedPacks := makeSpools()
-					err = legacyindex.ForAllIndexesWorkers(ctx, source, source, 1, func(_ vaultic.ID, index *legacyindex.Index, err error) error {
-						if err != nil {
-							return err
+						_, count, err := loadLegacyLocations(ctx, source, actual, actualPacks, workers)
+						if err != nil || count != 12 {
+							t.Fatalf("count=%d err=%v", count, err)
 						}
-						return collectLegacyIndex(index, expected, expectedPacks)
+						locations := readSpool(actual)
+						if len(locations) != 13 || !reflect.DeepEqual(locations, readSpool(expected)) {
+							t.Fatal("location deduplication changed")
+						}
+						packs := readSpool(actualPacks)
+						if withPacks && len(packs) != 48 {
+							t.Fatalf("pack multiset has %d entries", len(packs))
+						}
+						if !reflect.DeepEqual(packs, readSpool(expectedPacks)) {
+							t.Fatal("pack contributions changed")
+						}
 					})
-					if err != nil {
-						t.Fatal(err)
-					}
-					actual, actualPacks := makeSpools()
-					_, count, err := loadLegacyLocations(ctx, source, actual, actualPacks, workers)
-					if err != nil || count != 12 {
-						t.Fatalf("count=%d err=%v", count, err)
-					}
-					locations := readSpool(actual)
-					if len(locations) != 13 || !reflect.DeepEqual(locations, readSpool(expected)) {
-						t.Fatal("location deduplication changed")
-					}
-					packs := readSpool(actualPacks)
-					if withPacks && len(packs) != 48 {
-						t.Fatalf("pack multiset has %d entries", len(packs))
-					}
-					if !reflect.DeepEqual(packs, readSpool(expectedPacks)) {
-						t.Fatal("pack contributions changed")
-					}
-				})
+				}
 			}
 		}
 	}

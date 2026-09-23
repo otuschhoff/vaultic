@@ -1,5 +1,83 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded partitioned comparison (r45, 2026-09-23)
+
+After buffered-reader commit `2d3950da5`, the next working-tree candidate routes
+legacy locations into 16 ordered blob-ID partitions. Worker and partition tuple
+allocations divide the existing legacy spool budget. Each partition uses chunks
+of at most one eighth of its allocation so overflow retains other sorted memory
+runs. Parent adoption accounts for child capacity and transfers run ownership.
+Full checks enable partitioning only when each requested worker/partition can
+receive at least 1 MiB; smaller budgets retain the existing serial path. Legacy
+worker count is also clamped by per-partition tuple capacity.
+
+Comparison aligns each legacy partition with 16 of SlateDB's existing 256 prefix
+partitions. Up to four tasks run concurrently, further limited by the existing
+memory allocation and merge-reader buffer sizing. Necessary within-partition
+merges execute inside these tasks; there is no global legacy merge. Tasks retain
+separate results and combine counters and bounded findings deterministically.
+Errors cancel sibling tasks, parent contexts are restored, and cleanup retains
+the original spool ownership. Exact tuple comparison, deduplication, pack
+contributions, scratch encryption and configured resource limits are unchanged.
+The `location_compare_partitioned` stage includes both merge preparation and
+comparison; partial counters are combined when the tasks finish, not live.
+
+Extended loader tests compare partitioned output with a serial global reference
+across budgets, worker counts and optional pack contributions. New concurrent
+comparison tests cover duplicates, asymmetric records, tuple differences, existing
+findings, unlimited and bounded findings, cancellation, corrupted encrypted runs,
+context restoration and cleanup. Focused tests, full maintenance race tests
+(9.712s), affected CLI `Test(Check|Index)` race tests (21.669s), formatting,
+editor diagnostics and the isolated profile build passed.
+
+R45 used HDD-NFS data and scratch, the same adopted daemon without restart,
+32 loader workers/RPCs, at most four comparison tasks, unchanged 96 GiB checker
+memory/scratch limits and the ten-minute TERM cap with 45-second kill grace.
+No builds or tests overlapped measurement. Rounded progress boundaries:
+
+| Measurement | r44 buffered reader | r45 partitioned comparison |
+| --- | ---: | ---: |
+| Legacy scan | 73s | 79s |
+| Encryption audit | 14s | 14s |
+| SlateDB scan | 72s | 72s |
+| SlateDB finalization | 15s | 14s |
+| Catalog join | 42s | 47s |
+| Location merge preparation plus comparison | 330s | 113s |
+| Location cleanup starts | 546s | 339s |
+| Finalization starts | 572s | 364s |
+| Wall time including cleanup | 578.22s | 372.62s |
+| CLI CPU seconds | 3,513.95 | 3,505.92 |
+| Peak RSS, KiB | 92,798,392 | 91,338,172 |
+| Peak scratch bytes | 55,711,066,520 | 48,700,116,290 |
+| Recorded scratch read/write bytes | 122,802,430,740 | 127,723,817,060 |
+| Completed merge groups | 7 | 96 |
+
+The complete logical results match exactly after excluding only resources and
+the consistency session ID. This includes all retained findings, encryption
+counts, legacy inventory digest and options digest. Both sides contain exactly
+379,934,385 locations with zero location, pack, aggregate or reference mismatches.
+Both completed checks exit 2 for the same 143 missing SlateDB snapshots; 419,530
+warnings and pending exports remain. This is not clean full-check acceptance.
+The unchanged harness exits 1 at its final accepted-exit gate after saving and
+validating the run artifacts; no metadata repair was attempted.
+
+Both scans cover 10,019 legacy indexes and 376,346,710 SlateDB records in 37,769
+chunks across 256 ranges; r45 records 35,556,163,085 scan bytes and zero swaps.
+Observed elapsed time is 35.6% lower and peak scratch 12.6% lower, while scratch
+traffic is 4.0% higher and CLI CPU is essentially unchanged (0.23% lower).
+The larger number of smaller merge groups is not a reduction in aggregate work.
+These are single sequential completed runs, not matched repeated trials; no
+confidence bounds or stable speedup claim follow from this pair. The result
+supports retaining the candidate for repeat testing, not deployment acceptance.
+
+The measured source matches the saved candidate patch. Raw checksums, empty
+scratch and final health checks passed. PID 431717 remained read-write at epoch
+55 with zero transactions/intents and the adopted executable unchanged. The
+candidate is uncommitted and not installed. Matched repeats, snapshot discrepancy
+resolution and native RADOS acceptance remain outstanding. Artifacts are under
+`db.test/phase33-parallel-compare-2026-09-23` and
+`db.test/phase33-production-2026-09-23-stream32-parallel-compare-full-r45`.
+
 ## Buffered scratch reader (r44, 2026-09-23)
 
 The legacy-summary implementation and r43 evidence were committed as
