@@ -1280,6 +1280,153 @@ The next gate is a matched end-to-end scan experiment with an approved candidate
 daemon. Keep the existing worker count and read-ahead configuration for that test.
 Do not infer a total runtime gain from these isolated merge-loop timings.
 
+### Matched Merge Runs (r25-r28, 2026-09-23)
+
+With operator approval, four HDD-NFS checks compared the committed merge change
+in control/candidate/candidate/control order. Each run started after a daemon
+restart and a read-write, idle-writer health gate. No caches were dropped. The
+same catalog-stream CLI used 32 workers/RPCs, 96 GiB limits, and unchanged
+read-ahead. Each check had a ten-minute TERM cap and 45-second kill grace.
+No builds or tests overlapped the checks. Process-name checks found no backup
+jobs, but cannot exclude external backup activity.
+
+Both static musl daemons used Vaultic `7b46cd41d`, the production frame-pointer
+build flags, and the same compiler and allocator. Both therefore included the
+check-only audit retry, unlike the previously deployed daemon. Control used
+SlateDB `f549d4a`. Candidate used the clean local checkout of committed
+`67abacef0044f5e285c1f59af6c936de4c051954` through Cargo patch overrides.
+Generated lockfiles differ only in the three SlateDB package sources.
+Tracked dependency pins and lockfiles remain unchanged.
+
+The workspace filesystem was full. Source snapshots, build caches, and temporary
+executables used RAM. Build artifacts and all diagnostic output were saved on
+NFS. Repository data and check scratch stayed on HDD-NFS. A temporary systemd
+override selected each daemon without overwriting the installed binary.
+
+| Run | Variant | Total | Audit | Scan | Catalog | Daemon CPU-seconds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r25 | Control | 2m34.93s | 30s | 82s | 19s | 1708.01 |
+| r26 | Candidate | 2m23.99s | 15s | 80s | 24s | 1553.67 |
+| r27 | Candidate | 2m41.61s | 31s | 80s | 27s | 1624.07 |
+| r28 | Control | 2m40.29s | 31s | 83s | 20s | 1721.91 |
+
+Stage durations come from rounded progress timestamps. Mean total time fell from
+157.61 to 152.80 seconds, or 3.05%. Mean scan time fell from 82.5 to 80 seconds,
+or 3.03%. Mean per-run scan throughput rose from 4.567 to 4.710 million records/s.
+Mean daemon CPU fell from 1714.96 to 1588.87 CPU-seconds, or 7.35%. Mean CLI CPU
+rose from 804.405 to 808.675 CPU-seconds, or 0.53%.
+
+The two runs per variant do not establish confidence bounds. Candidate r27 was
+slower overall than either control. Audit and catalog variation exceed the scan
+wall-time gain. Whole-check CPU also includes the variable audit work. These
+results support a modest scan improvement, not a stable 3% total-runtime promise.
+The available counters do not establish the cause of the audit variation.
+
+Accumulated iterator service time fell from a mean 1920.70 to 1786.77 seconds,
+or 6.97%. Client receive time fell from 2039.58 to 1968.91 seconds, or 3.47%.
+Consumer time fell from 513.67 to 504.19 seconds. These values sum concurrent
+range durations. They are not wall time or independent CPU measurements.
+
+All four checks exited zero. All logical result fields match after excluding
+resources, consistency session IDs, and encrypted-object counts. The analysis
+also compares the remaining consistency fields and engine configuration exactly.
+Each run scanned 376,766,240 records in 37,811 chunks across 257 ranges and
+reported 379,934,385 locations and 419,530 warnings. Scanned byte totals vary by
+five bytes across runs. Encrypted-object counts are 164/169/169/169. These are
+live-maintenance observations, not a byte-identical immutable fixture.
+Coverage remains SlateDB-only and incomplete, not full differential or RADOS
+acceptance. Scratch and daemon swap stayed zero.
+
+Each scan captured daemon CPU at 49 Hz and CLI CPU for 30 seconds, followed by
+a three-second Go trace. All daemon captures report zero lost samples and
+expected interrupt status 130. Control heap pop/push symbols total 3.59%/3.77%
+flat sampled CPU. Candidate `PeekMut` heap repair is 0.86%/1.02%. The main merge
+advance symbol rises from 2.97%/2.87% to 4.49%/4.55%, so some work moves there.
+`memcpyFast` falls from 15.82%/15.66% to 14.32%/14.63%. These percentages describe
+sampled symbols, not isolated operation timings or allocation counts.
+
+SlateDB iteration still dominates daemon CPU. The largest boxed-next symbol is
+10.29-11.02% flat across the runs. CLI traces show 49.46-52.23 aggregate
+goroutine-seconds in gRPC receive during each three-second window. This identifies
+the client wait location, not the daemon's asynchronous wait cause. Iterator
+allocation and row copying remain useful next targets. No scheduler-switch or
+separate Rust future-wait trace was collected.
+
+Artifacts are under `db.test/phase33-merge-e2e-2026-09-23` and the four
+`db.test/phase33-production-2026-09-23-stream32-merge-{variant}-r{25..28}`
+directories. They preserve build/run/analysis scripts, source revisions,
+lockfiles, executables, raw profiles, decoded reports, and structured comparisons.
+Each run's manifest verifies. The harness records the actual `/proc/PID/exe`
+hash, rather than the installed binary path, to identify temporary overrides.
+Control SHA-256 is
+`4160b8ce4ecea8926fb29eacff010e18552e17e7493dcd15f349e98f23487edd`.
+Candidate SHA-256 is
+`40458409358812e17c51561a22657237e382c389e90cf191fbfa801b95d6adf1`.
+
+The runner removed its override and restored the original daemon after r28.
+Binary comparison confirms SHA-256
+`efb779ff8e9eda3cb267a7cf56ef9b1726e6fc07c6423e91392afacd430e6cfb`.
+Final PID is 268961, epoch 45, read-write with zero transactions and write intents.
+No permanent deployment or dependency update was made.
+
+### Local Boxed-Next Experiment (2026-09-23)
+
+The next local experiment targets the boxed iterator adapters in SlateDB
+`slatedb/src/iter.rs`. Their async `next` methods create an outer boxed future,
+an allocated object that represents pending asynchronous work. The inner iterator
+already returns a boxed future. The candidate returns that inner future directly
+for both `Box<dyn RowEntryIterator>` and `Box<dyn TrackedRowEntryIterator>`.
+It retains the existing async-trait lifetime and Send contract. Initialization,
+seek, comparison rules, row storage, and public interfaces stay unchanged.
+
+Two regression tests compare the returned future's address with the inner
+allocation through nested boxes. Both use borrowed state and a future that first
+returns Pending. They cover polling, cancellation while pending, future drop,
+error propagation, and tracked-byte forwarding. The returned future is the same
+allocation, not another wrapper. This does not measure all iterator allocations
+or eliminate boxing inside the concrete iterators.
+
+Both release test binaries were built at the same source path, with baseline
+`67abacef0044f5e285c1f59af6c936de4c051954` and the candidate patch applied afterward.
+The existing RAM-only merge probe is unchanged: 120,000 rows, 34-byte keys,
+56-byte values, one warm-up round, and ten measured rounds. Builds finished
+before timing. CPU 0 ran baseline/candidate/candidate/baseline/baseline/candidate.
+Values below are means of three per-run medians:
+
+| Input streams | Key layout | Baseline ns/row | Candidate ns/row | Time reduction |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | Interleaved | 203.15 | 178.98 | 11.90% |
+| 1 | Disjoint | 206.05 | 178.83 | 13.21% |
+| 6 | Interleaved | 263.26 | 232.37 | 11.73% |
+| 6 | Disjoint | 208.28 | 181.54 | 12.84% |
+| 32 | Interleaved | 533.12 | 492.49 | 7.62% |
+| 32 | Disjoint | 200.01 | 173.17 | 13.42% |
+
+Raw logs retain timing outliers, including baseline round maxima of 747.54 and
+772.50 ns/row. The means above are not confidence bounds. These gains are relative
+to the committed heap optimization, not the original push/pop implementation.
+The probe does not model production I/O, concurrent scans, or the full iterator
+stack. No new production runtime gain is established by this experiment.
+
+Validation passes 13 focused merge tests, two direct-forwarding tests, 164 broader
+iterator tests, 41 snapshot tests, and 169 compaction-filtered tests. These suites
+overlap and must not be added into a unique test count. The first compaction run
+had six failures because the persistent terminal retained a removed temporary
+directory in `TMPDIR`. All 169 tests passed after setting the current RAM path
+explicitly. Both logs are retained. No source change was needed for that failure.
+
+All 63 Vaultic storage tests pass against the candidate through Cargo patch
+overrides in a RAM source snapshot. This leaves the workspace manifest and
+lockfile untouched. Rustfmt, editor diagnostics, and whitespace checks pass.
+No tests or builds overlapped a production diagnostic.
+
+Artifacts are under `db.test/phase33-boxed-next-2026-09-23`. They include build and
+integration scripts, baseline revision, candidate patch, compiler version, both
+test executables, raw timings, and validation logs. SlateDB commit
+`43a562e3637d3d9ce12bec82a5b9e3deb47843fa` records the tested patch on
+`vaultic-multiget-rebase`. Production stays on the restored original daemon. A matched
+end-to-end comparison is still needed before a deployment decision for this patch.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against
