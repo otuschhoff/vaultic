@@ -1,5 +1,71 @@
 # Phase 33 Production Benchmark Evidence
 
+## Block scratch matched repeats (r49-r52, 2026-09-23)
+
+The block-scratch implementation, tests and initial r48 evidence were committed
+as `e008f4c01` with a detailed message, without pushing. A fresh
+control/block/block/control sequence reused the exact saved partitioned
+per-record and block-scratch executables. No rebuild, daemon restart, cache reset
+or installation occurred. Paired executable hashes match; current workspace
+revisions in run metadata are not the source identity of the saved binaries.
+
+All four runs used HDD-NFS data and scratch, 32 loader workers/RPCs, at most four
+comparison tasks, unchanged 96 GiB checker memory/scratch limits and separate
+ten-minute TERM caps with 45-second kill grace. Runs were sequential with no
+overlapping builds/tests or detected backup workloads. The wrapper stopped on
+unexpected results, cleanup failures or daemon changes; all four completed its
+known-exit-2, logical parity, scan scope, limits and operational health gates.
+
+| Measurement | r49 control | r50 block | r51 block | r52 control |
+| --- | ---: | ---: | ---: | ---: |
+| Wall seconds including cleanup | 375.80 | 324.75 | 321.67 | 370.15 |
+| CLI CPU seconds | 3,518.38 | 3,202.00 | 3,140.33 | 3,507.70 |
+| Legacy scan | 81s | 75s | 72s | 79s |
+| Encryption audit | 14s | 14s | 14s | 14s |
+| SlateDB scan | 74s | 70s | 70s | 73s |
+| SlateDB finalization | 13s | 9s | 9s | 14s |
+| Catalog join | 46s | 41s | 43s | 42s |
+| Partitioned merge plus comparison | 115s | 84s | 82s | 116s |
+| Peak RSS, KiB | 90,979,164 | 81,942,052 | 82,213,332 | 89,455,116 |
+| Peak scratch bytes | 48,720,798,086 | 39,874,827,674 | 39,902,974,248 | 48,714,978,284 |
+| Recorded scratch read/write bytes | 127,723,817,300 | 104,546,699,652 | 104,544,992,400 | 127,723,722,760 |
+| Completed merge groups | 96 | 96 | 95 | 95 |
+
+Both block runs finished faster than both controls and used fewer CLI CPU
+seconds. Mean elapsed time decreased from 372.975 to 323.210 seconds (13.3%),
+CLI CPU from 3,513.040 to 3,171.165 seconds (9.7%), and merge/comparison from
+115.5 to 83 seconds (28.1%). Mean peak RSS decreased 9.0%, peak scratch 18.1%
+and recorded scratch traffic 18.1%. All runs had zero swaps. The scratch traffic
+counter combines reads and writes; it is not a physical disk-byte measurement.
+
+Complete logical results match across all four runs after excluding resource
+telemetry, consistency session ID and the separately recorded live
+encrypted-object count, which was 161 throughout. This includes retained
+findings, inventory/options digests and all 379,934,385 locations on each side.
+Location, pack, aggregate and reference mismatches remain zero. Every run exits
+2 for the same 143 missing SlateDB snapshots and retains 419,530 warnings and
+pending exports. Harness exit 1 is its known final accepted-exit gate, not a
+crash. No metadata repair was performed and clean full-check acceptance remains
+blocked by the snapshot discrepancies.
+
+Configured limits and scan scope match exactly: 10,019 legacy indexes,
+376,346,710 SlateDB records, 37,769 chunks and 256 ranges. Scan byte totals vary
+slightly (35,556,163,085 / 35,556,163,083 / 35,556,163,092 / 35,556,163,084).
+Two observations per variant support the measured NFS elapsed/CPU/I/O improvement
+but provide no confidence bounds or cold-cache, other-workload or native RADOS
+acceptance. No deployment decision is implied.
+
+All four raw manifests verified, and the saved analysis reproduces exactly,
+including paired binary identities, logical parity, scope, limits and health.
+Final live checks confirmed empty scratch and unchanged PID 431717, epoch 55,
+read-write with zero transactions/intents and the adopted executable unchanged.
+Runner, analyzer, comparison JSON, copied binaries and logs are under
+`db.test/phase33-block-repeats-2026-09-23`. Raw runs are
+`db.test/phase33-production-2026-09-23-stream32-block-control-full-r49`,
+`db.test/phase33-production-2026-09-23-stream32-block-candidate-full-r50`,
+`db.test/phase33-production-2026-09-23-stream32-block-candidate-full-r51` and
+`db.test/phase33-production-2026-09-23-stream32-block-control-full-r52`.
+
 ## Block-authenticated scratch (r48, 2026-09-23)
 
 The repeat evidence was committed as `aa677ab5b`, without pushing. The next
