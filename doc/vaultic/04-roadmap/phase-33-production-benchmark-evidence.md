@@ -1,5 +1,80 @@
 # Phase 33 Production Benchmark Evidence
 
+## Block-authenticated scratch (r48, 2026-09-23)
+
+The repeat evidence was committed as `aa677ab5b`, without pushing. The next
+working-tree candidate batches up to 512 location tuples into one authenticated
+scratch frame instead of one frame per tuple. Temporary run magic changes from
+`VLTCHK01` to `VLTCHK02`; repository and daemon formats are unchanged. Scratch
+runs are session-owned and are not resumed across binaries. Each frame retains
+AES-GCM authentication with the run prefix and sequential block nonce, with
+strict positive, aligned and bounded plaintext lengths.
+
+Both direct spill and streaming merge writers construct and encrypt blocks in
+the existing 1 MiB buffered output allocation. Readers authenticate a complete
+block in their existing input buffer before exposing any of its tuples. No
+additional per-reader block allocation or tuple-budget increase is introduced.
+Readers also check framing against the trusted in-memory run size, rejecting
+whole-block removal and trailing frames as well as partial truncation. This
+does not add a separately authenticated EOF footer. Empty runs contain only
+the header. Direct reservations account for tuple bytes plus per-block framing;
+merge reservations remain bounded by input payload sizes, with unused capacity
+released on close and all reserved bytes released on abort.
+
+The first focused check exposed the intermediate mismatch between block-sized
+direct writes and old per-tuple merge framing. Batching merge output resolved
+the reservation failures, and the merge-headroom fixture now uses actual input
+sizes. Block tests cover empty, partial, full, boundary-crossing and multi-buffer
+runs for both writer paths, exact tuples and file sizes, surplus reservations,
+abort cleanup and writes after close. Reader tests cover refill boundaries,
+length/alignment tampering, ciphertext/tag corruption, replay, whole-block
+removal and representative partial-frame truncations. Authentication failures
+are rejected before returning the affected block's first tuple. Concurrent merge
+admission, cancellation, corruption and cleanup tests also pass.
+
+Full maintenance race tests (9.301s), affected CLI `Test(Check|Index)` race tests
+(20.445s), formatting, editor diagnostics and isolated profile build passed.
+No builds/tests overlapped the HDD-NFS diagnostic. R48 retained 32 loader
+workers/RPCs, at most four comparison tasks, 96 GiB checker memory/scratch limits,
+the ten-minute TERM cap with 45-second kill grace and the unchanged adopted
+daemon without restart or installation.
+
+| Measurement | Prior partitioned r45/r46 | r48 block scratch |
+| --- | ---: | ---: |
+| Wall seconds including cleanup | 372.62 / 405.09 | 325.26 |
+| CLI CPU seconds | 3,505.92 / 3,514.54 | 3,120.18 |
+| Merge plus comparison | 113s / 116s | 83s |
+| Peak RSS, KiB | 91,338,172 / 87,492,952 | 81,184,508 |
+| Peak scratch bytes | 48,700,116,290 / 48,722,914,994 | 39,885,561,628 |
+| Recorded scratch read/write bytes | 127,723,817,060 / 127,723,816,892 | 104,543,545,952 |
+| Completed merge groups | 96 / 96 | 91 |
+
+R48's rounded stages were legacy scan 73s, audit 14s, SlateDB scan 69s,
+finalization 11s, catalog join 45s, partitioned merge/comparison 83s, location
+cleanup 4s and parallel validation 16s. Finalization began at 315 seconds.
+Relative to the prior two-run mean, observed elapsed time is 16.4% lower, CLI CPU
+11.1% lower, scratch traffic 18.1% lower and peak scratch 18.1% lower. These are
+one candidate run against prior runs, not matched repeats; the figures are
+promising evidence, not a stable speedup or CPU-saving guarantee. The number of
+merge groups also changed with runtime spill distribution.
+
+Complete logical results match r45 after excluding only resources, session ID
+and the live encrypted-object count (161 in both runs). Configured limits and
+scan records/chunks/ranges match exactly: 10,019 legacy indexes, 376,346,710
+SlateDB records, 37,769 chunks and 256 ranges. R48 records 35,556,163,090 scan
+bytes and zero swaps. All 379,934,385 locations on each side match, with zero
+location, pack, aggregate or reference mismatches. Exit remains 2 for the same
+143 missing SlateDB snapshots and 419,530 warnings/pending exports; the harness
+then returns 1 at its known accepted-exit gate. No snapshot repair was attempted.
+
+The measured source matches the saved candidate patch. Raw checksums, empty
+scratch and final live health checks passed. PID 431717 remained read-write at
+epoch 55 with zero transactions/intents and the adopted executable unchanged.
+The candidate remains uncommitted and is not installed. Matched repeats, clean
+snapshot acceptance and native RADOS acceptance remain open. Artifacts are under
+`db.test/phase33-block-scratch-2026-09-23` and
+`db.test/phase33-production-2026-09-23-stream32-block-scratch-full-r48`.
+
 ## Partitioned comparison repeats (r44-r47, 2026-09-23)
 
 The partitioned implementation and r45 evidence were committed as `f7cb4252a`

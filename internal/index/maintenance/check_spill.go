@@ -33,12 +33,13 @@ const (
 	locationTupleSize     = 90
 	locationChunkBytes    = 64 << 20
 	locationRunBufferSize = 1 << 20
+	locationBlockTuples   = 512
 	checkRunHeaderSize    = 12
 	checkRunPrefix        = "run-"
 	checkScratchPrefix    = "vaultic-check-"
 )
 
-var checkRunMagic = [8]byte{'V', 'L', 'T', 'C', 'H', 'K', '0', '1'}
+var checkRunMagic = [8]byte{'V', 'L', 'T', 'C', 'H', 'K', '0', '2'}
 
 type locationTuple struct {
 	BlobID             vaultic.ID
@@ -521,8 +522,8 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 	if err != nil {
 		return checkRun{}, err
 	}
-	recordBytes := uint64(4 + locationTupleSize + aead.Overhead())
-	predicted := uint64(checkRunHeaderSize) + uint64(len(records))*recordBytes
+	blockCount := (uint64(len(records)) + locationBlockTuples - 1) / locationBlockTuples
+	predicted := uint64(checkRunHeaderSize) + uint64(len(records))*locationTupleSize + blockCount*uint64(4+aead.Overhead())
 	if err := spool.scratch.reserve(predicted); err != nil {
 		return checkRun{}, err
 	}
@@ -560,21 +561,29 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 			settleDependency(encodeWrite, err)
 		}
 	}()
-	for index, record := range records {
+	for start := 0; start < len(records); start += locationBlockTuples {
 		if err := spool.ctx.Err(); err != nil {
 			return checkRun{}, err
 		}
+		end := min(start+locationBlockTuples, len(records))
+		blockBytes := (end-start)*locationTupleSize + aead.Overhead()
+		if buffered.Available() < 4+blockBytes {
+			if err := buffered.Flush(); err != nil {
+				return checkRun{}, err
+			}
+		}
+		storage := buffered.AvailableBuffer()[:4+blockBytes]
+		plain := storage[4 : len(storage)-aead.Overhead()]
+		for index, record := range records[start:end] {
+			encoded := record.marshalBinary()
+			copy(plain[index*locationTupleSize:], encoded[:])
+		}
 		var nonce [12]byte
 		copy(nonce[:4], prefix[:])
-		binary.BigEndian.PutUint64(nonce[4:], uint64(index))
-		encoded := record.marshalBinary()
-		sealed := aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
-		var length [4]byte
-		binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-		if err := writeAll(buffered, length[:]); err != nil {
-			return checkRun{}, err
-		}
-		if err := writeAll(buffered, sealed); err != nil {
+		binary.BigEndian.PutUint64(nonce[4:], uint64(start/locationBlockTuples))
+		sealed := aead.Seal(plain[:0], nonce[:], plain, checkRunMagic[:])
+		binary.BigEndian.PutUint32(storage[:4], uint32(len(sealed)))
+		if err := writeAll(buffered, storage); err != nil {
 			return checkRun{}, err
 		}
 	}
@@ -784,6 +793,8 @@ type locationRunWriter struct {
 	size     uint64
 	closed   bool
 	request  *monitor.DependencyGuard
+	pending  []byte
+	storage  []byte
 }
 
 func (spool *locationSpool) newRunWriter(reserved uint64) (_ *locationRunWriter, err error) {
@@ -825,25 +836,52 @@ func (spool *locationSpool) newRunWriter(reserved uint64) (_ *locationRunWriter,
 }
 
 func (writer *locationRunWriter) append(tuple locationTuple) error {
-	recordBytes := uint64(4 + locationTupleSize + writer.aead.Overhead())
+	if writer.closed {
+		return fmt.Errorf("checker run writer is closed")
+	}
+	if err := writer.spool.ctx.Err(); err != nil {
+		return err
+	}
+	recordBytes := uint64(locationTupleSize)
+	if len(writer.pending) == 0 {
+		recordBytes += uint64(4 + writer.aead.Overhead())
+	}
 	if writer.size > writer.reserved || recordBytes > writer.reserved-writer.size {
 		return fmt.Errorf("checker merge output exceeds reserved size")
 	}
+	if len(writer.pending) == 0 {
+		maximum := 4 + locationBlockTuples*locationTupleSize + writer.aead.Overhead()
+		if writer.buffered.Available() < maximum {
+			if err := writer.buffered.Flush(); err != nil {
+				return err
+			}
+		}
+		writer.storage = writer.buffered.AvailableBuffer()[:maximum]
+		writer.pending = writer.storage[4:4]
+	}
 	writer.size += recordBytes
+	encoded := tuple.marshalBinary()
+	writer.pending = append(writer.pending, encoded[:]...)
+	if len(writer.pending) == locationBlockTuples*locationTupleSize {
+		return writer.flushBlock()
+	}
+	return nil
+}
+
+func (writer *locationRunWriter) flushBlock() error {
+	if len(writer.pending) == 0 {
+		return nil
+	}
 	var nonce [12]byte
 	copy(nonce[:4], writer.prefix[:])
 	binary.BigEndian.PutUint64(nonce[4:], writer.counter)
 	writer.counter++
-	encoded := tuple.marshalBinary()
-	sealed := writer.aead.Seal(nil, nonce[:], encoded[:], checkRunMagic[:])
-	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(sealed)))
-	if err := writeAll(writer.buffered, length[:]); err != nil {
+	sealed := writer.aead.Seal(writer.pending[:0], nonce[:], writer.pending, checkRunMagic[:])
+	binary.BigEndian.PutUint32(writer.storage[:4], uint32(len(sealed)))
+	if err := writeAll(writer.buffered, writer.storage[:4+len(sealed)]); err != nil {
 		return err
 	}
-	if err := writeAll(writer.buffered, sealed); err != nil {
-		return err
-	}
+	writer.pending, writer.storage = nil, nil
 	return nil
 }
 
@@ -852,6 +890,10 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 		return checkRun{}, fmt.Errorf("checker run writer is closed")
 	}
 	writer.closed = true
+	if err := writer.flushBlock(); err != nil {
+		writer.abortFile()
+		return checkRun{}, err
+	}
 	if err := writer.buffered.Flush(); err != nil {
 		writer.abortFile()
 		return checkRun{}, err
@@ -936,11 +978,14 @@ func (spool *locationSpool) mergeRuns(runs []checkRun, reserved uint64) (merged 
 }
 
 type locationRunReader struct {
-	file    *scratchReadFile
-	reader  *bufio.Reader
-	aead    cipher.AEAD
-	nonce   [12]byte
-	counter uint64
+	file       *scratchReadFile
+	reader     *bufio.Reader
+	aead       cipher.AEAD
+	nonce      [12]byte
+	counter    uint64
+	remaining  uint64
+	plain      []byte
+	blockBytes int
 }
 
 func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, error) {
@@ -968,15 +1013,22 @@ func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, e
 		_ = file.Close() // Preserve the AEAD-construction error.
 		return nil, err
 	}
-	result := &locationRunReader{file: file, reader: reader, aead: aead}
+	if run.size < checkRunHeaderSize {
+		_ = file.Close()
+		return nil, fmt.Errorf("invalid checker run size")
+	}
+	result := &locationRunReader{file: file, reader: reader, aead: aead, remaining: run.size - checkRunHeaderSize}
 	copy(result.nonce[:4], header[8:])
 	return result, nil
 }
 
 func (reader *locationRunReader) next() (locationTuple, bool, error) {
+	if len(reader.plain) != 0 {
+		return reader.nextTuple()
+	}
 	length, err := reader.reader.Peek(4)
 	if err != nil {
-		if errors.Is(err, io.EOF) && len(length) == 0 {
+		if errors.Is(err, io.EOF) && len(length) == 0 && reader.remaining == 0 {
 			return locationTuple{}, false, nil
 		}
 		if errors.Is(err, io.EOF) {
@@ -985,7 +1037,8 @@ func (reader *locationRunReader) next() (locationTuple, bool, error) {
 		return locationTuple{}, false, fmt.Errorf("read checker run record length: %w", err)
 	}
 	sealedLength := binary.BigEndian.Uint32(length)
-	if sealedLength != locationTupleSize+uint32(reader.aead.Overhead()) {
+	overhead := uint32(reader.aead.Overhead())
+	if sealedLength <= overhead || sealedLength > locationBlockTuples*locationTupleSize+overhead || (sealedLength-overhead)%locationTupleSize != 0 || uint64(sealedLength)+4 > reader.remaining {
 		return locationTuple{}, false, fmt.Errorf("invalid checker run record length")
 	}
 	record, err := reader.reader.Peek(4 + int(sealedLength))
@@ -1002,9 +1055,20 @@ func (reader *locationRunReader) next() (locationTuple, bool, error) {
 	if err != nil {
 		return locationTuple{}, false, fmt.Errorf("authenticate checker run record: %w", err)
 	}
-	tuple, err := unmarshalLocationTuple(plain)
-	if err == nil {
-		_, err = reader.reader.Discard(len(record))
+	reader.plain = plain
+	reader.blockBytes = len(record)
+	return reader.nextTuple()
+}
+
+func (reader *locationRunReader) nextTuple() (locationTuple, bool, error) {
+	tuple, err := unmarshalLocationTuple(reader.plain[:locationTupleSize])
+	if err != nil {
+		return locationTuple{}, false, err
+	}
+	reader.plain = reader.plain[locationTupleSize:]
+	if len(reader.plain) == 0 {
+		_, err = reader.reader.Discard(reader.blockBytes)
+		reader.remaining -= uint64(reader.blockBytes)
 	}
 	return tuple, err == nil, err
 }

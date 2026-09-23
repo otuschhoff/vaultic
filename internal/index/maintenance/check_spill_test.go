@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1150,7 +1151,7 @@ func TestLocationRunReaderBufferedBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const recordBytes = 4 + locationTupleSize + 16
+	const recordBytes = 4 + locationBlockTuples*locationTupleSize + 16
 	for _, bufferBytes := range []int{recordBytes, recordBytes + 1, 2*recordBytes - 1, locationRunBufferSize} {
 		t.Run(fmt.Sprintf("buffer=%d", bufferBytes), func(t *testing.T) {
 			reader, err := openLocationRun(run, scratch)
@@ -1172,7 +1173,7 @@ func TestLocationRunReaderBufferedBoundaries(t *testing.T) {
 			}
 		})
 	}
-	for truncated := 1; truncated < recordBytes; truncated++ {
+	for _, truncated := range []int{0, 1, 2, 3, 4, 5, 4 + locationTupleSize - 1, 4 + locationTupleSize, recordBytes - 17, recordBytes - 16, recordBytes - 1} {
 		t.Run(fmt.Sprintf("truncated=%d", truncated), func(t *testing.T) {
 			reader, err := openLocationRun(run, scratch)
 			if err != nil {
@@ -1180,8 +1181,10 @@ func TestLocationRunReaderBufferedBoundaries(t *testing.T) {
 			}
 			defer reader.close()
 			reader.reader = bufio.NewReaderSize(bytes.NewReader(encoded[checkRunHeaderSize:checkRunHeaderSize+recordBytes+truncated]), recordBytes+1)
-			if actual, found, err := reader.next(); err != nil || !found || actual != records[0] {
-				t.Fatalf("first record: found=%t err=%v", found, err)
+			for _, expected := range records[:locationBlockTuples] {
+				if actual, found, err := reader.next(); err != nil || !found || actual != expected {
+					t.Fatalf("first block: found=%t err=%v", found, err)
+				}
 			}
 			wantErr := io.ErrUnexpectedEOF
 			if truncated == 4 {
@@ -1192,7 +1195,7 @@ func TestLocationRunReaderBufferedBoundaries(t *testing.T) {
 			}
 		})
 	}
-	for _, corruption := range []string{"length", "tag", "replay"} {
+	for _, corruption := range []string{"length", "unaligned", "empty", "shorter", "tag", "ciphertext", "replay", "remove"} {
 		t.Run(corruption, func(t *testing.T) {
 			reader, err := openLocationRun(run, scratch)
 			if err != nil {
@@ -1203,20 +1206,135 @@ func TestLocationRunReaderBufferedBoundaries(t *testing.T) {
 			switch corruption {
 			case "length":
 				data[recordBytes] = 255
+			case "unaligned":
+				binary.BigEndian.PutUint32(data[recordBytes:], 17)
+			case "empty":
+				binary.BigEndian.PutUint32(data[recordBytes:], 16)
+			case "shorter":
+				binary.BigEndian.PutUint32(data[recordBytes:], locationTupleSize+16)
 			case "tag":
 				data[len(data)-1] ^= 1
+			case "ciphertext":
+				data[recordBytes+4] ^= 1
 			case "replay":
 				copy(data[recordBytes:], data[:recordBytes])
+			case "remove":
+				data = data[:recordBytes]
 			}
 			reader.reader = bufio.NewReaderSize(bytes.NewReader(data), recordBytes+1)
-			if actual, found, err := reader.next(); err != nil || !found || actual != records[0] {
-				t.Fatalf("first record: found=%t err=%v", found, err)
+			for _, expected := range records[:locationBlockTuples] {
+				if actual, found, err := reader.next(); err != nil || !found || actual != expected {
+					t.Fatalf("first block: found=%t err=%v", found, err)
+				}
 			}
 			if _, found, err := reader.next(); found || err == nil {
 				t.Fatalf("corrupt record accepted: found=%t err=%v", found, err)
 			}
 		})
 	}
+}
+
+func TestLocationBlockWritersAccounting(t *testing.T) {
+	for _, count := range []int{0, 1, locationBlockTuples - 1, locationBlockTuples, locationBlockTuples + 1, 12000} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("count=%d/streaming=%t", count, streaming), func(t *testing.T) {
+				scratch, err := newCheckScratch(t.TempDir(), 4<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scratch.close()
+				spool, err := newLocationSpool(context.Background(), scratch, 1<<20, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer spool.close()
+				records := make([]locationTuple, count)
+				for index := range records {
+					records[index] = testLocation(byte(index))
+					records[index].Offset = uint64(index)
+				}
+				expectedSize := uint64(checkRunHeaderSize + count*locationTupleSize + ((count+locationBlockTuples-1)/locationBlockTuples)*20)
+				var run checkRun
+				if streaming {
+					reserved := expectedSize + 123
+					if err := scratch.reserve(reserved); err != nil {
+						t.Fatal(err)
+					}
+					writer, err := spool.newRunWriter(reserved)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, record := range records {
+						if err := writer.append(record); err != nil {
+							writer.abort()
+							t.Fatal(err)
+						}
+					}
+					run, err = writer.close()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := writer.append(testLocation(0)); err == nil {
+						t.Fatal("closed writer accepted a tuple")
+					}
+				} else {
+					run, err = spool.writeRun(records)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				spool.runs = append(spool.runs, run)
+				info, err := os.Stat(run.path)
+				if err != nil || run.size != expectedSize || scratch.used != expectedSize || uint64(info.Size()) != expectedSize {
+					t.Fatalf("size=%d want=%d used=%d err=%v", run.size, expectedSize, scratch.used, err)
+				}
+				reader, err := openLocationRun(run, scratch)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, expected := range records {
+					if actual, found, err := reader.next(); err != nil || !found || actual != expected {
+						t.Fatalf("tuple mismatch: found=%t err=%v", found, err)
+					}
+				}
+				if _, found, err := reader.next(); err != nil || found || reader.counter != uint64((count+locationBlockTuples-1)/locationBlockTuples) {
+					t.Fatalf("EOF or block count: found=%t blocks=%d err=%v", found, reader.counter, err)
+				}
+				if err := errors.Join(reader.close(), spool.close()); err != nil || scratch.used != 0 {
+					t.Fatalf("cleanup: used=%d err=%v", scratch.used, err)
+				}
+			})
+		}
+	}
+	t.Run("reservation-abort", func(t *testing.T) {
+		scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer scratch.close()
+		spool, err := newLocationSpool(context.Background(), scratch, 1<<20, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const reserved = checkRunHeaderSize + locationTupleSize + 20
+		if err := scratch.reserve(reserved); err != nil {
+			t.Fatal(err)
+		}
+		writer, err := spool.newRunWriter(reserved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.append(testLocation(1)); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.append(testLocation(2)); err == nil {
+			t.Fatal("accepted tuple beyond reservation")
+		}
+		writer.abort()
+		if _, err := os.Stat(writer.path); !errors.Is(err, os.ErrNotExist) || scratch.used != 0 {
+			t.Fatalf("abort: used=%d err=%v", scratch.used, err)
+		}
+	})
 }
 
 func BenchmarkLocationRunReader(b *testing.B) {
@@ -1324,7 +1442,7 @@ func TestLocationSpoolParallelMergeAdmissionAndCleanup(t *testing.T) {
 					}
 					initialUsed := scratch.used
 					if mode == "headroom" {
-						scratch.maxBytes = initialUsed + checkRunHeaderSize + 8*(4+locationTupleSize+16)
+						scratch.maxBytes = initialUsed + checkRunHeaderSize + 4*(spool.runs[0].size-checkRunHeaderSize)
 					}
 					if mode == "memory" {
 						spool.memoryBytes = 3 << 20
