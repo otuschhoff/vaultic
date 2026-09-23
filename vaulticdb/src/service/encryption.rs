@@ -392,7 +392,7 @@ impl Service {
         let manager = storage.key_manager()?;
         let (envelope_generation, active_dek_version, _) = manager.status().await;
         let audit = manager
-            .audit_objects()
+            .audit_objects_for_check()
             .await
             .map_err(key_management_error)?;
         Ok(Response::new(EncryptionAuditResponse {

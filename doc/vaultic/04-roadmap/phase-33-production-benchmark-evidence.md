@@ -1104,6 +1104,37 @@ and intents; the candidate remains deployed. Source and evidence remain uncommit
 These are repeated completed NFS measurements, not full differential or RADOS
 acceptance. Restart/cache differences and r21's listing/read race remain unresolved.
 
+### Listing Race Follow-up (2026-09-23, Local Only)
+
+Commit `fb1d589ea` records the bounded parallel audit and r20-r23 evidence.
+After the reported host stall, the host was responsive with low load and about
+289 GiB available RAM; the same daemon PID 165437 remained read-write at epoch
+40 with zero transactions/intents. The operator subsequently identified the host
+backup as the cause of the slowdown. No production diagnostic or service restart
+was performed during this follow-up; avoid overlapping future timing runs with
+the host backup.
+
+A deterministic gated-store regression reproduces deletion between listing and
+reading with both one and four audit workers. Both strict audits fail with
+`ObjectStore::Error::NotFound`, confirming that this failure mode is not unique
+to parallel auditing; its relative production frequency remains unmeasured.
+
+The local read-only encryption-check entry point now permits one fresh full audit
+after a typed `NotFound` error. It does not skip the missing object, retain partial
+counts, or suppress a second failure. The replacement listing is fully checked,
+and backend errors other than `NotFound` and authentication failures still fail
+without this retry. Key retirement and capsule migration retain the strict audit
+entry point. This is bounded recovery from a non-snapshot listing, not a guarantee
+that the object set stays fixed while checking; sustained churn can still fail.
+It can roughly double audit work on the retry path, and already-submitted crypto
+work from the first attempt may finish after its futures are dropped.
+
+All five focused audit tests pass: serial/parallel disappearance, fresh replacement
+listing and counters, second-disappearance failure, nonretryable I/O failure,
+payload corruption, admission and cancellation. The daemon binary target passes
+`cargo check`; editor diagnostics and whitespace checks are clean. The new retry
+has not been deployed or benchmarked, and its source/evidence remain uncommitted.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

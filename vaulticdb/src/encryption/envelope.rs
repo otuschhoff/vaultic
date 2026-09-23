@@ -392,6 +392,22 @@ impl KeyManager {
         self.audit_objects_with_workers(AUDIT_WORKERS).await
     }
 
+    pub async fn audit_objects_for_check(&self) -> Result<EncryptionAudit> {
+        match self.audit_objects().await {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<slatedb::object_store::Error>(),
+                    Some(slatedb::object_store::Error::NotFound { .. })
+                ) =>
+            {
+                self.audit_objects()
+                    .await
+                    .context("repeat encryption check after listed object disappeared")
+            }
+            result => result,
+        }
+    }
+
     async fn audit_objects_with_workers(&self, workers: usize) -> Result<EncryptionAudit> {
         let state = self.state.lock().await;
         let known_versions = readable_deks(&state.envelope, &state.dek)?

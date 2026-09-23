@@ -486,6 +486,8 @@ mod tests {
                 .unwrap_err();
             assert!(crate::encryption::is_integrity_error(error.as_ref()));
         }
+        let error = manager.audit_objects_for_check().await.unwrap_err();
+        assert!(crate::encryption::is_integrity_error(error.as_ref()));
     }
 
     #[tokio::test]
@@ -572,5 +574,99 @@ mod tests {
         assert_eq!(memory.available_permits(), 0);
         drop(permits);
         assert_eq!(memory.available_permits(), AUDIT_MEMORY_UNITS as usize);
+    }
+
+    #[tokio::test]
+    async fn audit_fails_closed_when_listed_metadata_disappears() {
+        let raw = Arc::new(AuditStore {
+            inner: InMemory::new(),
+            listed_size: AtomicU64::new(5),
+            started: AtomicUsize::new(0),
+            active: Semaphore::new(100),
+            release: Semaphore::new(0),
+            fail_get: AtomicBool::new(false),
+        });
+        let (envelope, dek) = new_local_envelope("repo-a", b"recovery").unwrap();
+        let (_, _, manager) =
+            encrypted_store(raw.clone(), "repo-a", envelope, dek, "local-recovery").unwrap();
+        let manager = manager.unwrap();
+        let location = Path::from("db/compactions/00000000000000000377.compactions");
+        for workers in [1, AUDIT_WORKERS] {
+            raw.put(&location, b"plain".as_slice().into()).await.unwrap();
+            {
+                let audit = manager.audit_objects_with_workers(workers);
+                tokio::pin!(audit);
+                assert!(futures_util::poll!(&mut audit).is_pending());
+                assert_eq!(raw.active.available_permits(), 99);
+                raw.inner.delete(&location).await.unwrap();
+                raw.release.add_permits(1);
+                let error = audit.await.unwrap_err();
+                assert!(matches!(
+                    error.downcast_ref::<slatedb::object_store::Error>(),
+                    Some(slatedb::object_store::Error::NotFound { .. })
+                ));
+            }
+            assert_eq!(raw.active.available_permits(), 100);
+            assert_eq!(manager.audit_objects().await.unwrap().objects, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn check_audit_relists_once_only_for_missing_objects() {
+        let raw = Arc::new(AuditStore {
+            inner: InMemory::new(),
+            listed_size: AtomicU64::new(5),
+            started: AtomicUsize::new(0),
+            active: Semaphore::new(100),
+            release: Semaphore::new(0),
+            fail_get: AtomicBool::new(false),
+        });
+        let (envelope, dek) = new_local_envelope("repo-a", b"recovery").unwrap();
+        let (_, _, manager) =
+            encrypted_store(raw.clone(), "repo-a", envelope, dek, "local-recovery").unwrap();
+        let manager = manager.unwrap();
+        let location = Path::from("db/compactions/first");
+        let replacement = Path::from("db/compactions/replacement");
+        for missing_again in [false, true] {
+            raw.started.store(0, Ordering::SeqCst);
+            raw.put(&location, b"plain".as_slice().into()).await.unwrap();
+            {
+                let audit = manager.audit_objects_for_check();
+                tokio::pin!(audit);
+                assert!(futures_util::poll!(&mut audit).is_pending());
+                assert_eq!(raw.started.load(Ordering::SeqCst), 1);
+                raw.inner.delete(&location).await.unwrap();
+                raw.put(&replacement, b"plain".as_slice().into()).await.unwrap();
+                raw.release.add_permits(1);
+                assert!(futures_util::poll!(&mut audit).is_pending());
+                assert_eq!(raw.started.load(Ordering::SeqCst), 2);
+                if missing_again {
+                    raw.inner.delete(&replacement).await.unwrap();
+                }
+                raw.release.add_permits(1);
+                let result = audit.await;
+                if missing_again {
+                    let error = result.unwrap_err();
+                    assert!(matches!(
+                        error.downcast_ref::<slatedb::object_store::Error>(),
+                        Some(slatedb::object_store::Error::NotFound { .. })
+                    ));
+                } else {
+                    let audit = result.unwrap();
+                    assert_eq!((audit.objects, audit.plaintext_objects), (1, 1));
+                    raw.inner.delete(&replacement).await.unwrap();
+                }
+                assert_eq!(raw.started.load(Ordering::SeqCst), 2);
+            }
+            assert_eq!(raw.active.available_permits(), 100);
+        }
+        raw.put(&location, b"plain".as_slice().into()).await.unwrap();
+        raw.started.store(0, Ordering::SeqCst);
+        raw.fail_get.store(true, Ordering::SeqCst);
+        raw.release.add_permits(2);
+        let error = manager.audit_objects_for_check().await.unwrap_err();
+        assert!(error.to_string().contains("injected read failure"));
+        assert_eq!(raw.started.load(Ordering::SeqCst), 1);
+        assert_eq!(raw.active.available_permits(), 100);
     }
 }
