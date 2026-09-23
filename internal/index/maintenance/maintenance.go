@@ -1202,47 +1202,129 @@ func loadLegacyLocations(
 	packs *locationSpool,
 	workers uint,
 ) (*locationSpool, uint64, error) {
+	workers = uint(min(uint64(max(workers, 1)), uint64(32), result.memoryBytes/locationTupleMemorySize))
+	if packs != nil {
+		workers = uint(min(uint64(workers), packs.memoryBytes/locationTupleMemorySize))
+	}
+	locations := make([]*locationSpool, workers)
+	contributions := make([]*locationSpool, workers)
+	counts := make([]uint64, workers)
+	available := make(chan int, workers)
+	defer func() {
+		for worker := range locations {
+			if locations[worker] != nil {
+				_ = locations[worker].close()
+			}
+			if contributions[worker] != nil {
+				_ = contributions[worker].close()
+			}
+		}
+	}()
+	for worker := range locations {
+		var err error
+		locations[worker], err = newLocationSpool(ctx, result.scratch, result.memoryBytes/uint64(workers), result.fanIn)
+		if err != nil {
+			return result, 0, err
+		}
+		if packs != nil {
+			contributions[worker], err = newLocationMultisetSpool(ctx, packs.scratch, packs.memoryBytes/uint64(workers), packs.fanIn)
+			if err != nil {
+				return result, 0, err
+			}
+		}
+		available <- worker
+	}
+	err := vaultic.ParallelList(ctx, source, vaultic.IndexFile, workers, func(workerContext context.Context, id vaultic.ID, _ int64) error {
+		var worker int
+		select {
+		case worker = <-available:
+		case <-workerContext.Done():
+			return workerContext.Err()
+		}
+		defer func() { available <- worker }()
+		counts[worker]++
+		buf, err := source.LoadUnpacked(workerContext, vaultic.IndexFile, id)
+		if err != nil {
+			return err
+		}
+		index, err := legacyindex.DecodeIndex(buf, id)
+		if err != nil {
+			return err
+		}
+		locations[worker].ctx = workerContext
+		if contributions[worker] != nil {
+			contributions[worker].ctx = workerContext
+		}
+		return collectLegacyIndex(index, locations[worker], contributions[worker])
+	})
 	var indexes uint64
-	err := legacyindex.ForAllIndexesWorkers(
-		ctx,
-		source,
-		source,
-		workers,
-		func(_ vaultic.ID, index *legacyindex.Index, loadErr error) error {
-			indexes++
-			if loadErr != nil {
-				return loadErr
+	for _, count := range counts {
+		indexes += count
+	}
+	if err != nil {
+		return result, indexes, err
+	}
+	finalizers, finalizeContext := errgroup.WithContext(ctx)
+	for worker := range locations {
+		finalizers.Go(func() error {
+			locations[worker].ctx = finalizeContext
+			if err := locations[worker].finishBuffer(); err != nil {
+				return err
 			}
-			for item := range index.Values() {
-				if err := result.add(locationTuple{BlobID: item.Blob.ID,
-					PackID:             item.Pack,
-					Type:               uint8(item.Blob.Type),
-					Offset:             uint64(item.Blob.Offset),
-					Length:             uint64(item.Blob.Length),
-					UncompressedLength: uint64(item.Blob.UncompressedLength)}); err != nil {
-					return err
-				}
-				if packs != nil {
-					if err := packs.add(locationTuple{
-						BlobID: item.Pack, PackID: item.Blob.ID, Type: uint8(item.Blob.Type),
-						Offset: uint64(item.Blob.Offset), Length: uint64(item.Blob.Length),
-						UncompressedLength: uint64(item.Blob.UncompressedLength),
-					}); err != nil {
-						return err
-					}
-				}
-			}
-			if packs != nil {
-				for id := range index.Packs() {
-					if err := packs.add(locationTuple{BlobID: id}); err != nil {
-						return err
-					}
-				}
+			if contributions[worker] != nil {
+				contributions[worker].ctx = finalizeContext
+				return contributions[worker].finishBuffer()
 			}
 			return nil
-		},
-	)
+		})
+	}
+	if err := finalizers.Wait(); err != nil {
+		return result, indexes, err
+	}
+	for worker := range locations {
+		if err := ctx.Err(); err != nil {
+			return result, indexes, err
+		}
+		locations[worker].ctx = ctx
+		if err := result.adopt(locations[worker]); err != nil {
+			return result, indexes, err
+		}
+		if packs != nil {
+			contributions[worker].ctx = ctx
+			if err := packs.adopt(contributions[worker]); err != nil {
+				return result, indexes, err
+			}
+		}
+	}
 	return result, indexes, err
+}
+
+func collectLegacyIndex(index *legacyindex.Index, locations, packs *locationSpool) error {
+	for item := range index.Values() {
+		if err := locations.add(locationTuple{BlobID: item.Blob.ID,
+			PackID: item.Pack, Type: uint8(item.Blob.Type), Offset: uint64(item.Blob.Offset),
+			Length: uint64(item.Blob.Length), UncompressedLength: uint64(item.Blob.UncompressedLength),
+		}); err != nil {
+			return err
+		}
+		if packs != nil {
+			if err := packs.add(locationTuple{
+				BlobID: item.Pack, PackID: item.Blob.ID, Type: uint8(item.Blob.Type),
+				Offset: uint64(item.Blob.Offset), Length: uint64(item.Blob.Length),
+				UncompressedLength: uint64(item.Blob.UncompressedLength),
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if packs != nil {
+		for id := range index.Packs() {
+			if err := packs.add(locationTuple{BlobID: id}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func checkReferences(

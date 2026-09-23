@@ -1194,6 +1194,147 @@ type memoryDestination struct {
 	snapshots map[vaultic.ID][]byte
 }
 
+func TestLoadLegacyLocationsParallelMatchesSerial(t *testing.T) {
+	source := &memoryDestination{indexes: make(map[vaultic.ID][]byte)}
+	sharedPack := vaultic.Hash([]byte("shared-pack"))
+	sharedBlob := vaultic.Hash([]byte("shared-blob"))
+	for ordinal := 0; ordinal < 12; ordinal++ {
+		packID := vaultic.Hash(fmt.Appendf(nil, "pack-%d", ordinal))
+		blobID := vaultic.Hash(fmt.Appendf(nil, "blob-%d", ordinal))
+		encoded := fmt.Appendf(nil, `{"packs":[{"id":"%s","blobs":[{"id":"%s","type":"data","offset":0,"length":42}]},{"id":"%s","blobs":[{"id":"%s","type":"tree","offset":10,"length":73,"uncompressed_length":100}]}]}`, sharedPack, sharedBlob, packID, blobID)
+		source.indexes[vaultic.Hash(encoded)] = encoded
+	}
+	for _, memory := range []uint64{locationTupleMemorySize, 8 * locationTupleMemorySize, 1 << 20} {
+		for _, workers := range []uint{0, 1, 4, 32} {
+			for _, withPacks := range []bool{false, true} {
+				t.Run(fmt.Sprintf("memory=%d/workers=%d/packs=%t", memory, workers, withPacks), func(t *testing.T) {
+					ctx := context.Background()
+					scratch, err := newCheckScratch(t.TempDir(), 1<<24)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer scratch.close()
+					makeSpools := func() (*locationSpool, *locationSpool) {
+						locations, err := newLocationSpool(ctx, scratch, memory, 4)
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() { _ = locations.close() })
+						var packs *locationSpool
+						if withPacks {
+							packs, err = newLocationMultisetSpool(ctx, scratch, memory, 4)
+							if err != nil {
+								t.Fatal(err)
+							}
+							t.Cleanup(func() { _ = packs.close() })
+						}
+						return locations, packs
+					}
+					readSpool := func(spool *locationSpool) []locationTuple {
+						if spool == nil {
+							return nil
+						}
+						if spool.memoryUsed > memory {
+							t.Fatal("adoption exceeded memory budget")
+						}
+						iterator, err := spool.iterator()
+						if err != nil {
+							t.Fatal(err)
+						}
+						defer iterator.close()
+						var tuples []locationTuple
+						for {
+							tuple, found, err := iterator.next()
+							if err != nil {
+								t.Fatal(err)
+							}
+							if !found {
+								return tuples
+							}
+							tuples = append(tuples, tuple)
+						}
+					}
+					expected, expectedPacks := makeSpools()
+					err = legacyindex.ForAllIndexesWorkers(ctx, source, source, 1, func(_ vaultic.ID, index *legacyindex.Index, err error) error {
+						if err != nil {
+							return err
+						}
+						return collectLegacyIndex(index, expected, expectedPacks)
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					actual, actualPacks := makeSpools()
+					_, count, err := loadLegacyLocations(ctx, source, actual, actualPacks, workers)
+					if err != nil || count != 12 {
+						t.Fatalf("count=%d err=%v", count, err)
+					}
+					locations := readSpool(actual)
+					if len(locations) != 13 || !reflect.DeepEqual(locations, readSpool(expected)) {
+						t.Fatal("location deduplication changed")
+					}
+					packs := readSpool(actualPacks)
+					if withPacks && len(packs) != 48 {
+						t.Fatalf("pack multiset has %d entries", len(packs))
+					}
+					if !reflect.DeepEqual(packs, readSpool(expectedPacks)) {
+						t.Fatal("pack contributions changed")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLoadLegacyLocationsParallelFailureDoesNotAdopt(t *testing.T) {
+	for _, failure := range []string{"decode", "cancel", "scratch"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			limit := uint64(1 << 20)
+			if failure == "scratch" {
+				limit = 1
+			}
+			scratch, err := newCheckScratch(t.TempDir(), limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			locations, err := newLocationSpool(ctx, scratch, locationTupleMemorySize, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer locations.close()
+			packID := vaultic.Hash([]byte("pack"))
+			blobID := vaultic.Hash([]byte("blob"))
+			encoded := fmt.Appendf(nil, `{"packs":[{"id":"%s","blobs":[{"id":"%s","type":"data","offset":0,"length":42},{"id":"%s","type":"data","offset":42,"length":42}]}]}`, packID, blobID, blobID)
+			if failure == "decode" {
+				encoded = []byte("invalid json")
+			}
+			source := &memoryDestination{indexes: map[vaultic.ID][]byte{vaultic.Hash(encoded): encoded}}
+			if failure == "cancel" {
+				cancel()
+			}
+			_, _, err = loadLegacyLocations(ctx, source, locations, nil, 4)
+			if err == nil {
+				t.Fatal("failure was ignored")
+			}
+			if failure == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation: %v", err)
+			}
+			if locations.memoryUsed != 0 || len(locations.runs) != 0 || len(locations.memoryRuns) != 0 {
+				t.Fatal("partial results adopted")
+			}
+			if scratch.dir != "" {
+				entries, err := os.ReadDir(scratch.dir)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("spill cleanup: entries=%d err=%v", len(entries), err)
+				}
+			}
+		})
+	}
+}
+
 func (destination *memoryDestination) SaveLegacyIndex(_ context.Context, index *legacyindex.Index) (vaultic.ID, error) {
 	var buffer bytes.Buffer
 	if err := index.Encode(&buffer); err != nil {

@@ -1,5 +1,56 @@
 # Phase 33 Production Benchmark Evidence
 
+## Parallel legacy consumer experiment, 2026-09-23
+
+The diagnostic attribution changes were committed as `41207ec50` with a detailed
+implementation and evidence message, without pushing. The subsequent working-tree
+experiment removes the serialized `ForAllIndexesWorkers` callback from the full
+check's legacy loader. Up to 32 workers own private location and pack-multiset
+spools, with the existing total spool budgets divided among workers. Workers are
+also limited by the number of tuples those budgets can hold. Final buffers are
+finished concurrently, then adopted using the parent context rather than the
+completed worker group's canceled context. Shared legacy-index APIs are unchanged.
+
+Local validation passed the maintenance and index-command package suites, plus
+focused race tests. Serial-reference tests cover worker requests 0/1/4/32,
+one-tuple, eight-tuple, and memory-only budgets, optional pack contributions,
+duplicate locations, and preserved pack multiplicity. Failure tests cover malformed
+input, pre-cancellation, scratch exhaustion, and private spill cleanup. These are
+correctness fixtures, not representative-storage performance measurements.
+
+One full HDD-NFS diagnostic, `stream32-legacy-parallel-full-r39`, used 32 workers
+and RPCs, 96 GiB checker memory, 96 GiB scratch, and the ten-minute cap. No builds
+or tests overlapped the measurement and no known backup workload was observed.
+The adopted daemon was not restarted or replaced. The separate CLI was built
+with Go 1.27.1 and `selfupdate,disable_grpc_modules,profile`, with SHA-256
+`fff9713f3172f6b47fdfc6b0d532245c3659399a3a298a2b8838fcfe24295a75`.
+
+The legacy scan loaded all 10,019 indexes and reached encryption auditing at
+about 181 seconds, with 83,631,727,424 bytes of scratch. Auditing completed at
+about 196 seconds. The SlateDB scan then exhausted the unchanged scratch cap:
+it needed another 76,895,512 bytes with 103,009,415,936 of 103,079,215,104 bytes
+already used. The CLI exited 1 after 266.29 seconds including cleanup, before
+any merge pass or final differential verdict. Partial scan counters were
+250,485,342 records, 25,127 chunks, and 155 completed ranges. Zero final location
+or mismatch counters in this failed result are not evidence of equivalence.
+
+CLI CPU was 3,438.25 seconds and peak RSS was 86,211,860 KiB, with no swaps.
+Host interval samples averaged 32.77% idle and 10.93% I/O wait. The earlier r34
+serial run had not finished legacy scanning at the ten-minute cap, but it is not
+a matched control. This establishes progress beyond the previous bottleneck,
+not an end-to-end speedup ratio, CPU reduction, or full-check acceptance.
+
+Scratch was empty after failure. The same daemon PID 431717 remained read-write
+at epoch 55 with zero transactions and write intents. No installed CLI, daemon,
+backend, or resource limit was changed. The next gate needs an explicitly agreed
+scratch budget or bounded spill reduction, followed by a completed full check.
+Native RADOS validation remains blocked by the previously recorded prerequisites.
+
+Raw artifacts and their verified manifest are under
+`/volume2/NASDA2/rustic/db.test/phase33-production-2026-09-23-stream32-legacy-parallel-full-r39/`.
+The source patch, candidate binary, build and test logs, and harness are under
+`/volume2/NASDA2/rustic/db.test/phase33-legacy-parallel-2026-09-23/`.
+
 ## Local streaming follow-up, 2026-09-22
 
 The working-tree follow-up implements a negotiated `ScanStream` RPC. After
