@@ -8,7 +8,7 @@ mkdir -p /var/lib/ceph/mon/ceph-a /var/lib/ceph/osd/ceph-0 /run/ceph /etc/ceph
 cat > /etc/ceph/ceph.conf <<EOF
 [global]
 fsid = $fsid
-mon host = $ip:6789
+mon host = [v2:$ip:3300/0,v1:$ip:6789/0]
 auth cluster required = cephx
 auth service required = cephx
 auth client required = cephx
@@ -20,10 +20,10 @@ ceph-authtool --create-keyring /tmp/mon.keyring --gen-key -n mon. --cap mon 'all
 ceph-authtool /tmp/mon.keyring --gen-key -n client.admin --cap mon 'allow *' --cap osd 'allow *' --cap mgr 'allow *'
 ceph-authtool --create-keyring /etc/ceph/ceph.client.admin.keyring
 ceph-authtool /etc/ceph/ceph.client.admin.keyring --import-keyring /tmp/mon.keyring
-monmaptool --create --add a "$ip:6789" --fsid "$fsid" /tmp/monmap
+monmaptool --create --addv a "[v2:$ip:3300/0,v1:$ip:6789/0]" --fsid "$fsid" /tmp/monmap
 ceph-mon --mkfs -i a --monmap /tmp/monmap --keyring /tmp/mon.keyring
 chown -R ceph:ceph /var/lib/ceph /run/ceph
-ceph-mon -i a --public-addr "$ip:6789" --setuser ceph --setgroup ceph
+ceph-mon -i a --setuser ceph --setgroup ceph
 until ceph -s --connect-timeout 2 >/dev/null 2>&1; do sleep 1; done
 
 ceph config set mon mon_allow_pool_size_one true

@@ -2,15 +2,16 @@ PLATFORMS := macos-arm64 linux-amd64 linux-arm64
 
 .PHONY: all build profile clean test metrics vaultic vaulticdb \
 	vaulticdb-proto vaulticdb-musl vaulticdb-smoke \
-	vaultic-rados-linux-amd64 vaultic-rados-image-linux-amd64
+	vaultic-rados-linux-amd64 vaultic-rados-linux-arm64
 
 BIN_DIR := bin
 VAULTICDB_RUST_TOOLCHAIN ?= stable
 VAULTICDB_PREPARE_DEBUG ?= 0
 VAULTIC_BUILD_TAGS ?=
+VAULTICDB_FEATURES ?=
+VAULTICDB_TARGET_DIR ?= vaulticdb/target
 MACOS_CODESIGN_IDENTITY ?= -
 MACOS_CUSTODIAN_ENTITLEMENTS ?= contrib/macos/vaultic-key-custodian.entitlements
-VAULTIC_RADOS_IMAGE ?= vaultic:rados-linux-amd64
 
 # Map uname -s/-m to one of $(PLATFORMS). Empty if the host isn't supported
 # (e.g. Intel Macs, which are not one of the supported build targets).
@@ -60,6 +61,8 @@ vaultic-%:
 		macos-arm64) goos=darwin; goarch=arm64 ;; \
 		linux-amd64) goos=linux; goarch=amd64 ;; \
 		linux-arm64) goos=linux; goarch=arm64 ;; \
+		linux-amd64-rados) goos=linux; goarch=amd64 ;; \
+		linux-arm64-rados) goos=linux; goarch=arm64 ;; \
 		"") echo "vaultic: unsupported host platform ($(HOST_OS)/$(HOST_ARCH)); use one of: $(PLATFORMS)" >&2; exit 1 ;; \
 		*) echo "vaultic: unsupported platform '$*'; supported: $(PLATFORMS)" >&2; exit 1 ;; \
 	esac; \
@@ -79,6 +82,8 @@ vaulticdb-%:
 		macos-arm64) target=aarch64-apple-darwin ;; \
 		linux-amd64) target=x86_64-unknown-linux-musl ;; \
 		linux-arm64) target=aarch64-unknown-linux-musl ;; \
+		linux-amd64-rados) target=x86_64-unknown-linux-musl ;; \
+		linux-arm64-rados) target=aarch64-unknown-linux-musl ;; \
 		"") echo "vaulticdb: unsupported host platform ($(HOST_OS)/$(HOST_ARCH)); use one of: $(PLATFORMS)" >&2; exit 1 ;; \
 		*) echo "vaulticdb: unsupported platform '$*'; supported: $(PLATFORMS)" >&2; exit 1 ;; \
 	esac; \
@@ -88,13 +93,13 @@ vaulticdb-%:
 		*-musl) \
 			command -v cargo-zigbuild >/dev/null 2>&1 || { echo "vaulticdb: cargo-zigbuild is required for $$target (install with: cargo install cargo-zigbuild)" >&2; exit 1; }; \
 			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-D warnings -A linker_messages -C link-arg=-Wl,--build-id=sha1" RUSTUP_TOOLCHAIN=$(VAULTICDB_RUST_TOOLCHAIN) \
-				cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --target "$$target" --release ;; \
+				CARGO_TARGET_DIR=$(VAULTICDB_TARGET_DIR) cargo-zigbuild zigbuild --manifest-path vaulticdb/Cargo.toml --locked --target "$$target" --release $(if $(VAULTICDB_FEATURES),--features "$(VAULTICDB_FEATURES)") ;; \
 		*) \
-			rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo build --manifest-path vaulticdb/Cargo.toml --release --target "$$target" ;; \
+			CARGO_TARGET_DIR=$(VAULTICDB_TARGET_DIR) rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo build --manifest-path vaulticdb/Cargo.toml --locked --release --target "$$target" $(if $(VAULTICDB_FEATURES),--features "$(VAULTICDB_FEATURES)") ;; \
 	esac; \
-	cp vaulticdb/target/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb; \
-	cp vaulticdb/target/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker; \
-	cp vaulticdb/target/$$target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian; \
+	cp $(VAULTICDB_TARGET_DIR)/$$target/release/vaulticdb $(BIN_DIR)/$*/vaulticdb; \
+	cp $(VAULTICDB_TARGET_DIR)/$$target/release/vaultic-key-broker $(BIN_DIR)/$*/vaultic-key-broker; \
+	cp $(VAULTICDB_TARGET_DIR)/$$target/release/vaultic-key-custodian $(BIN_DIR)/$*/vaultic-key-custodian; \
 	if [ "$(VAULTICDB_PREPARE_DEBUG)" = "1" ]; then \
 		case "$$target" in *-linux-*) os=linux ;; *-apple-*) os=macos ;; esac; \
 		./vaulticdb/prepare-debug-symbols.sh "$$os" $(BIN_DIR)/$* $(BIN_DIR)/$*-debug; \
@@ -115,17 +120,11 @@ vaulticdb-smoke:
 	VAULTICDB_NATIVE_SMOKE=1 rustup run $(VAULTICDB_RUST_TOOLCHAIN) cargo run --manifest-path vaulticdb/Cargo.toml --quiet
 
 # Produce non-container Linux amd64 binaries with native RADOS support. Vaultic
-# uses the pure-Go RADOS client. VaulticDB dynamically links glibc, librados,
-# and librados' native dependency closure.
+# uses the pure-Go RADOS client and VaulticDB uses the pure-Rust RADOS client.
 vaultic-rados-linux-amd64:
-	rm -rf $(BIN_DIR)/linux-amd64-rados
-	docker build --platform linux/amd64 --file docker/Dockerfile.rados \
-		--target binaries --output type=local,dest=$(BIN_DIR) .
+	$(MAKE) vaultic-linux-amd64-rados vaulticdb-linux-amd64-rados VAULTIC_BUILD_TAGS="$(VAULTIC_BUILD_TAGS) rados" VAULTICDB_FEATURES=rados
 
-# Build all Linux amd64 components with native RADOS support and package the
-# dynamic librados runtime required by VaulticDB. Generic builds stay static.
-vaultic-rados-image-linux-amd64:
-	docker build --platform linux/amd64 --file docker/Dockerfile.rados \
-		--tag $(VAULTIC_RADOS_IMAGE) .
+vaultic-rados-linux-arm64:
+	$(MAKE) vaultic-linux-arm64-rados vaulticdb-linux-arm64-rados VAULTIC_BUILD_TAGS="$(VAULTIC_BUILD_TAGS) rados" VAULTICDB_FEATURES=rados
 
 

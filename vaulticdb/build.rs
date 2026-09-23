@@ -13,6 +13,7 @@ const IMPORTANT_DEPENDENCIES: &[&str] = &[
     "jsonwebtoken",
     "object_store",
     "p256",
+    "rados-rs",
     "reqwest",
     "rustls",
     "sha2",
@@ -25,9 +26,6 @@ const IMPORTANT_DEPENDENCIES: &[&str] = &[
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     embed_dependency_versions()?;
-    if std::env::var_os("CARGO_FEATURE_RADOS").is_some() {
-        println!("cargo:rustc-link-lib=rados");
-    }
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
     tonic_prost_build::configure()
         .build_server(true)

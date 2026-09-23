@@ -9,22 +9,26 @@ endpoint. Native RADOS is a separate provider named ``rados``; an existing
 Support matrix
 ==============
 
-Native support is optional. The Vaultic Go backend is a pure-Go client and does
-not require glibc or librados. The RADOS release package currently targets
-Linux amd64 because the bundled VaulticDB adapter still uses librados. The
-automated integration harness uses a Ceph Tentacle 20.2.4 cluster and runtime.
+Native support is optional. Vaultic uses a pure-Go client and VaulticDB uses
+a pure-Rust client; neither RADOS adapter requires librados. RADOS releases
+provide fully static Linux amd64 and arm64 executables. The automated
+integration harness uses a separate Ceph Tentacle 20.2.4 test cluster.
 
-Vaultic does not currently build or test its RADOS adapter on Windows or macOS;
-those releases remain generic builds without RADOS. Use the Linux amd64 image
-for the supported packaged deployment.
+Tagged releases contain only static Linux binaries, matching debug symbols,
+and source archives. No Docker images are built or published by CI. macOS
+development builds remain available locally but cannot be fully static.
 
 The Go backend uses ``github.com/otuschhoff/rados-go`` for pure-Go RADOS
-protocol access. The VaulticDB backend uses the stable librados C ABI because
-the evaluated Rust wrappers did not expose both writes and atomic version
-assertions. Both adapters verify the cluster FSID after connecting.
+protocol access. The VaulticDB backend uses ``github.com/otuschhoff/rados-rs``
+pinned to revision ``8a724626e614dbedff836d98f27c81f0ed3b65ea`` for atomic
+conditional writes, attributes, versioned reads, and namespace-scoped listing.
+Both adapters verify the cluster FSID after connecting. The Rust client's
+release qualification remains incomplete; offline adapter tests are not live
+Ceph acceptance or production migration sign-off.
 
-Build Vaultic directly with Go. Building VaulticDB's RADOS feature additionally
-requires ``librados-dev``:
+Build Vaultic directly with Go and VaulticDB with Rust 1.98 or newer. No Ceph
+development libraries are needed. Cargo resolves the pinned public
+``rados-rs`` repository when generating or using the lockfile:
 
 .. code-block:: console
 
@@ -35,35 +39,25 @@ Builds without the tag or feature have no native dependency. Selecting a
 sealed RADOS backend with such a build returns an explicit unsupported-backend
 error.
 
-Release builds provide two non-container Linux amd64 variants:
+Release builds provide generic and RADOS-enabled static variants:
 
 .. code-block:: console
 
     $ make vaultic-linux-amd64 vaulticdb-linux-amd64
     $ make vaultic-rados-linux-amd64
+    $ make vaultic-rados-linux-arm64
 
-The first produces generic, fully static musl executables without RADOS. The
-second writes RADOS-enabled executables to ``bin/linux-amd64-rados``. Vaultic
-is built with ``CGO_ENABLED=0`` and does not load librados. VaulticDB requires
-compatible glibc and librados installations; those native dependencies remain
-dynamic. Statically combining glibc with the dynamic C++ Ceph client is not a
-supported VaulticDB release configuration.
+The first produces generic executables without RADOS. The others write all
+four RADOS-enabled executables to ``bin/linux-amd64-rados`` and
+``bin/linux-arm64-rados``. Vaultic uses ``CGO_ENABLED=0``; VaulticDB, the key
+broker, and the key custodian use musl. Release gates reject executables with
+a dynamic interpreter or shared-library dependencies.
 
-For a host without librados, or with an incompatible librados version, build
-the Linux amd64 all-components image instead:
-
-.. code-block:: console
-
-    $ make vaultic-rados-image-linux-amd64
-    $ docker run --rm vaultic:rados-linux-amd64 version
-    $ docker run --rm vaultic:rados-linux-amd64 vaulticdb --help
-
-The image contains Vaultic, VaulticDB, the key broker, the key custodian, and
-the official Ceph Tentacle 20.2.4 ``librados2`` runtime for VaulticDB on CentOS
-Stream 9. The image does not load librados from the host. Configuration,
-sockets, credentials, and repository paths still need to be mounted explicitly.
-The generic non-container Linux amd64 artifacts remain static and do not
-include native RADOS support.
+The pure-Rust client is LGPL-2.1-only. RADOS binary archives preserve its license
+and notices; releases also include a matching Rust source bundle with vendored
+dependencies and instructions for rebuilding with modified library sources.
+See ``vaulticdb/REBUILDING.md``. Static linking does not remove hardware or
+external service requirements of optional key providers.
 
 Topology and credentials
 ========================
@@ -155,10 +149,10 @@ protected-file permission checks; do not pass keys in command arguments.
         --daemon-wal-rados-prefix wal --daemon-wal-rados-client client.vaultic \
         --daemon-wal-rados-key-file /run/secrets/vaultic-rados.keyring
 
-SlateDB publishes immutable WAL objects through librados before a durable write
+SlateDB publishes immutable WAL objects through the Rust RADOS client before a durable write
 handle resolves. The RADOS adapter's completed atomic write is the durability
 boundary; errors and credential expiry fail the write and never select local
-storage. WAL objects pass through metadata encryption before librados and stay
+storage. WAL objects pass through metadata encryption before RADOS transport and stay
 outside every cache-eviction namespace.
 
 Changing the target is restart-required. Drain and stop the writer, retain the
@@ -197,8 +191,17 @@ objects; completion publishes the destination through one atomic full-object
 write, abort removes its staging, and staging older than 24 hours is swept
 before a new upload.
 
-Native librados calls are blocking and are moved off VaulticDB async executor
-threads. The Go backend stops waiting when its caller is canceled; an admitted
+VaulticDB bridges its blocking object-store driver to a dedicated Tokio runtime.
+The Rust client uses secure messenger sessions and finite 30-second operation
+timeouts. Writes combine data and attributes with create/version assertions in
+one atomic request. The pinned client limits compound write payloads to 64 MiB
+including attributes and operation metadata; larger objects fail rather than
+being split into non-atomic writes. Account for this limit when choosing SlateDB
+SST and WAL sizes. Reads use bounded chunks asserted against one object version
+and retry version conflicts at most three times. Unknown write outcomes remain
+errors and are not retried by the adapter.
+
+The Go backend stops waiting when its caller is canceled; an admitted
 RADOS operation continues under its configured operation timeout so ambiguous
 write outcomes can be handled consistently. Compound compare-and-write requests
 remain atomic at the OSD.

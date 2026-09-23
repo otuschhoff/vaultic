@@ -1,29 +1,38 @@
-name: Build and Release Binaries
+name: Build and Release Static Binaries
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build-linux:
-    name: Build Linux ${{ matrix.architecture }}
+    name: Static ${{ matrix.platform }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - architecture: amd64
-            platform: linux-amd64
-            rust-target: x86_64-unknown-linux-musl
-          - architecture: arm64
-            platform: linux-arm64
-            rust-target: aarch64-unknown-linux-musl
+          - platform: linux-amd64
+            target: x86_64-unknown-linux-musl
+            features: ''
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-musl
+            features: ''
+          - platform: linux-amd64-rados
+            target: x86_64-unknown-linux-musl
+            features: rados
+          - platform: linux-arm64-rados
+            target: aarch64-unknown-linux-musl
+            features: rados
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v7
         with:
@@ -31,56 +40,45 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust-target }}
+          targets: ${{ matrix.target }}
 
       - name: Install Zig
         env:
-          ZIG_VERSION: "0.16.0"
+          ZIG_VERSION: '0.16.0'
           ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
         run: |
           archive="$RUNNER_TEMP/zig.tar.xz"
           install_dir="$RUNNER_TEMP/zig"
-          curl --fail --location --silent --show-error \
-            --output "$archive" \
+          curl --fail --location --silent --show-error --output "$archive" \
             "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
           echo "$ZIG_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$install_dir"
           tar --extract --xz --file "$archive" --directory "$install_dir" --strip-components=1
           echo "$install_dir" >> "$GITHUB_PATH"
 
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --version 0.23.2 --locked
+      - name: Install build tools
+        run: |
+          cargo install cargo-zigbuild --version 0.23.2 --locked
+          sudo apt-get update
+          sudo apt-get install --yes llvm
 
-      - name: Install debug symbol tools
-        run: sudo apt-get update && sudo apt-get install --yes llvm
-
-      - name: Install protobuf compiler
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
         env:
-          PROTOC_VERSION: "36.0"
-          PROTOC_SHA256: bc8211ce760bd43ee21ddc145d6d9dbaeeabae205267a79d9054a240e367d4b4
-        run: |
-          archive="$RUNNER_TEMP/protoc.zip"
-          install_dir="$RUNNER_TEMP/protoc"
-          curl --fail --location --silent --show-error \
-            --output "$archive" \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v$PROTOC_VERSION/protoc-$PROTOC_VERSION-linux-x86_64.zip"
-          echo "$PROTOC_SHA256  $archive" | sha256sum --check --strict
-          unzip -q "$archive" -d "$install_dir"
-          echo "$install_dir/bin" >> "$GITHUB_PATH"
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: test "$RELEASE_TAG" = "v$(cat VERSION)"
 
-      - name: Build static Linux binaries
-        run: make vaultic-${{ matrix.platform }} vaulticdb-${{ matrix.platform }} VAULTICDB_PREPARE_DEBUG=1 AR=llvm-ar OBJCOPY=llvm-objcopy
-
-      - name: Verify static Linux binaries
+      - name: Build static binaries
         run: |
-          ./vaulticdb/verify-static-linux.sh \
-            bin/${{ matrix.platform }}/vaultic \
-            bin/${{ matrix.platform }}/vaulticdb \
-            bin/${{ matrix.platform }}/vaultic-key-broker \
+          make vaultic-${{ matrix.platform }} vaulticdb-${{ matrix.platform }} \
+            VAULTIC_BUILD_TAGS='${{ matrix.features }}' VAULTICDB_FEATURES='${{ matrix.features }}' \
+            VAULTICDB_PREPARE_DEBUG=1 AR=llvm-ar OBJCOPY=llvm-objcopy
+
+      - name: Verify static linkage and debug symbols
+        run: |
+          ./vaulticdb/verify-static-linux.sh bin/${{ matrix.platform }}/vaultic \
+            bin/${{ matrix.platform }}/vaulticdb bin/${{ matrix.platform }}/vaultic-key-broker \
             bin/${{ matrix.platform }}/vaultic-key-custodian
-
-      - name: Verify Linux debug symbol identities
-        run: |
           for binary in vaulticdb vaultic-key-broker vaultic-key-custodian; do
             release_id=$(llvm-readelf --notes "bin/${{ matrix.platform }}/$binary" | awk '/Build ID:/ { print $3; exit }')
             debug_id=$(llvm-readelf --notes "bin/${{ matrix.platform }}-debug/$binary.debug" | awk '/Build ID:/ { print $3; exit }')
@@ -89,32 +87,27 @@ jobs:
             llvm-readelf --string-dump=.gnu_debuglink "bin/${{ matrix.platform }}/$binary" | grep -Fq "$binary.debug"
           done
 
-      - name: Run Linux amd64 binaries
-        if: matrix.architecture == 'amd64'
+      - name: Smoke test amd64 executables
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           bin/${{ matrix.platform }}/vaultic version
           ./vaulticdb/smoke-static-linux.sh bin/${{ matrix.platform }}
 
-      - name: Test generic Linux amd64 binaries across distributions
-        if: matrix.architecture == 'amd64'
-        run: |
-          for image in almalinux:8 debian:stable-slim ubuntu:latest; do
-            docker run --rm \
-              --platform linux/amd64 \
-              --volume "$PWD/bin/${{ matrix.platform }}:/opt/vaultic:ro" \
-              --volume "$PWD/vaulticdb/smoke-static-linux.sh:/opt/smoke-static-linux.sh:ro" \
-              "$image" \
-              /bin/sh -c '/opt/vaultic/vaultic version && /bin/sh /opt/smoke-static-linux.sh /opt/vaultic'
-          done
-
-      - name: Package Linux binaries
+      - name: Package binaries and dependency notices
         run: |
           cp LICENSE bin/${{ matrix.platform }}/LICENSE
-          tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz" "${{ matrix.platform }}"
-          tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}-debug.tar.gz" "${{ matrix.platform }}-debug"
+          cp vaulticdb/REBUILDING.md bin/${{ matrix.platform }}/REBUILDING.md
+          if test '${{ matrix.features }}' = rados; then
+            cargo metadata --manifest-path vaulticdb/Cargo.toml --locked --features rados --format-version 1 > "$RUNNER_TEMP/metadata.json"
+            source=$(jq -r '.packages[] | select(.name == "rados-rs") | .manifest_path' "$RUNNER_TEMP/metadata.json")
+            mkdir -p bin/${{ matrix.platform }}/licenses/rados-rs
+            cp "$(dirname "$source")/LICENSE" "$(dirname "$source")/THIRD_PARTY_NOTICES" \
+              "$(dirname "$source")/RUST_THIRD_PARTY_NOTICES" bin/${{ matrix.platform }}/licenses/rados-rs/
+          fi
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz" '${{ matrix.platform }}'
+          tar -C bin -czf "vaultic-${{ github.ref_name }}-${{ matrix.platform }}-debug.tar.gz" '${{ matrix.platform }}-debug'
 
-      - name: Upload Linux release archive
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -122,173 +115,60 @@ jobs:
             vaultic-${{ github.ref_name }}-${{ matrix.platform }}-debug.tar.gz
           if-no-files-found: error
 
-  build-linux-rados:
-    name: Build Linux amd64 with native RADOS
+  package-source:
+    name: Package Rebuildable Rust Sources
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Build RADOS-enabled Linux binaries
-        run: make vaultic-rados-linux-amd64
-
-      - name: Verify RADOS linkage and executables
-        run: |
-          docker run --rm --platform linux/amd64 \
-            --volume "$PWD/bin/linux-amd64-rados:/opt/vaultic:ro" \
-            quay.io/ceph/ceph:v20.2.4 \
-            /bin/sh -c 'test "$(rpm -q --queryformat "%{VERSION}" librados2)" = 20.2.4 &&
-              ! ldd /opt/vaultic/vaultic 2>&1 | grep -q librados.so &&
-              ldd /opt/vaultic/vaulticdb | grep -q librados.so &&
-              /opt/vaultic/vaultic version &&
-              VAULTICDB_NATIVE_SMOKE=1 /opt/vaultic/vaulticdb'
-
-      - name: Verify RADOS debug symbol identities
-        run: |
-          for binary in vaulticdb vaultic-key-broker vaultic-key-custodian; do
-            release_id=$(readelf --notes "bin/linux-amd64-rados/$binary" | awk '/Build ID:/ { print $3; exit }')
-            debug_id=$(readelf --notes "bin/linux-amd64-rados-debug/$binary.debug" | awk '/Build ID:/ { print $3; exit }')
-            test -n "$release_id"
-            test "$release_id" = "$debug_id"
-            readelf --string-dump=.gnu_debuglink "bin/linux-amd64-rados/$binary" | grep -Fq "$binary.debug"
-          done
-
-      - name: Package RADOS-enabled Linux binaries
-        run: |
-          tar -C bin -czf "vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz" linux-amd64-rados
-          tar -C bin -czf "vaultic-${{ github.ref_name }}-linux-amd64-rados-debug.tar.gz" linux-amd64-rados-debug
-
-      - name: Upload RADOS-enabled Linux archive
-        uses: actions/upload-artifact@v7
         with:
-          name: release-linux-amd64-rados
-          path: |
-            vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz
-            vaultic-${{ github.ref_name }}-linux-amd64-rados-debug.tar.gz
-          if-no-files-found: error
-
-  build-macos:
-    name: Build macOS arm64
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install protobuf compiler
-        run: brew install protobuf
-
-      - name: Build native macOS binaries
-        run: make vaultic-macos-arm64 vaulticdb-macos-arm64 VAULTICDB_PREPARE_DEBUG=1
-
-      - name: Verify and run macOS binaries
-        run: |
-          codesign --verify --strict bin/macos-arm64/vaultic-key-custodian
-          if otool -L bin/macos-arm64/* | grep -E '/(opt/homebrew|usr/local)/'; then
-            echo "macOS release binaries link to non-system libraries" >&2
-            exit 1
-          fi
-          bin/macos-arm64/vaultic version
-          VAULTICDB_NATIVE_SMOKE=1 bin/macos-arm64/vaulticdb
-          if bin/macos-arm64/vaultic-key-broker >broker.log 2>&1; then
-            echo "vaultic-key-broker unexpectedly accepted an empty command line" >&2
-            exit 1
-          fi
-          grep -q 'usage: vaultic-key-broker' broker.log
-
-      - name: Verify macOS debug symbol identities
-        run: |
-          for binary in vaulticdb vaultic-key-broker vaultic-key-custodian; do
-            release_uuid=$(dwarfdump --uuid "bin/macos-arm64/$binary" | awk 'NR == 1 { print $2 }')
-            debug_uuid=$(dwarfdump --uuid "bin/macos-arm64-debug/$binary.dSYM" | awk 'NR == 1 { print $2 }')
-            test -n "$release_uuid"
-            test "$release_uuid" = "$debug_uuid"
-          done
-
-      - name: Package macOS binaries
-        run: |
-          cp LICENSE bin/macos-arm64/LICENSE
-          tar -C bin -czf "vaultic-${{ github.ref_name }}-macos-arm64.tar.gz" macos-arm64
-          tar -C bin -czf "vaultic-${{ github.ref_name }}-macos-arm64-debug.tar.gz" macos-arm64-debug
-
-      - name: Upload macOS release archive
-        uses: actions/upload-artifact@v7
+      - name: Vendor locked sources and verify offline resolution
+        run: sh vaulticdb/package-source.sh "$PWD/vaultic-${{ github.ref_name }}-rust-source.tar.gz"
+      - uses: actions/upload-artifact@v7
         with:
-          name: release-macos-arm64
-          path: |
-            vaultic-${{ github.ref_name }}-macos-arm64.tar.gz
-            vaultic-${{ github.ref_name }}-macos-arm64-debug.tar.gz
-          if-no-files-found: error
-
-  build-windows:
-    name: Build Windows amd64 CLI (optional)
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
-      - name: Build Windows CLI
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force bin/windows-amd64 | Out-Null
-          go run build.go --goos windows --goarch amd64 -o bin/windows-amd64/vaultic.exe
-
-      - name: Run Windows CLI
-        shell: pwsh
-        run: bin/windows-amd64/vaultic.exe version
-
-      - name: Package Windows CLI
-        shell: pwsh
-        run: |
-          Copy-Item LICENSE bin/windows-amd64/LICENSE
-          Compress-Archive -Path bin/windows-amd64 -DestinationPath "vaultic-${{ github.ref_name }}-windows-amd64.zip"
-
-      - name: Upload Windows release archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-windows-amd64
-          path: vaultic-${{ github.ref_name }}-windows-amd64.zip
+          name: release-rust-source
+          path: vaultic-${{ github.ref_name }}-rust-source.tar.gz
           if-no-files-found: error
 
   publish-release:
-    name: Publish GitHub Release
-    needs: [build-linux, build-linux-rados, build-macos, build-windows]
-    if: ${{ !cancelled() && needs.build-linux.result == 'success' && needs.build-linux-rados.result == 'success' && needs.build-macos.result == 'success' }}
+    name: Publish Static Binary Archives
+    needs: [build-linux, package-source]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download release archives
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-assets
           merge-multiple: true
 
-      - name: Require Linux and macOS archives
+      - name: Verify complete static release
         run: |
-          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64-debug.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64-rados.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-amd64-rados-debug.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-arm64.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-linux-arm64-debug.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-macos-arm64.tar.gz"
-          test -f "release-assets/vaultic-${{ github.ref_name }}-macos-arm64-debug.tar.gz"
+          for platform in linux-amd64 linux-arm64 linux-amd64-rados linux-arm64-rados; do
+            test -f "release-assets/vaultic-${{ github.ref_name }}-$platform.tar.gz"
+            test -f "release-assets/vaultic-${{ github.ref_name }}-$platform-debug.tar.gz"
+          done
+          test -f "release-assets/vaultic-${{ github.ref_name }}-rust-source.tar.gz"
+          test "$(find release-assets -type f | wc -l)" -eq 9
 
       - name: Generate checksums
         working-directory: release-assets
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum *.tar.gz > SHA256SUMS
 
-      - name: Publish release archives
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
           fail_on_unmatched_files: true
+          body: |
+            ## Static Linux releases
+            - Generic and RADOS-enabled suites for amd64 and arm64, each containing Vaultic, VaulticDB, the key broker, and the key custodian.
+            - Every executable is checked for static linkage before packaging. Matching Rust debug symbols and SHA256SUMS are included.
+            - No Docker images, macOS binaries, or Windows binaries are published.
+            - VaulticDB now uses the pinned pure-Rust rados-rs client instead of librados. Atomic conditional writes, version-checked reads, and sealed cluster identity are preserved.
+            - The Rust source archive includes vendored dependencies, licenses, and instructions for rebuilding with a modified LGPL-2.1-only RADOS client.
+
+            ## Qualification limits
+            The RADOS client's upstream release qualification remains incomplete. Static builds and offline smoke tests are not live Ceph acceptance. Compound writes are limited to 64 MiB including attributes and operation metadata; oversized writes fail rather than being split non-atomically. Production services are not automatically upgraded by this release.

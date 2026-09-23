@@ -70,12 +70,18 @@ Tagged builds are published on the
 | --- | --- |
 | `linux-amd64` | Statically linked `vaultic`, `vaulticdb`, key broker, and key custodian |
 | `linux-arm64` | Statically linked `vaultic`, `vaulticdb`, key broker, and key custodian |
-| `macos-arm64` | `vaultic` and the native, signed `vaulticdb` service suite |
-| `windows-amd64` | Best-effort, self-contained `vaultic.exe` CLI |
+| `linux-amd64-rados` | The same static suite with native RADOS support |
+| `linux-arm64-rados` | The same static suite with native RADOS support |
+| `*-debug` | Matching debug symbols for the Rust executables |
+| `rust-source` | Rebuildable Rust sources, vendored dependencies, and license files |
 
-Linux artifacts do not require distribution libraries. macOS uses Apple system
-libraries. Windows is an optional legacy-compatible CLI target; the service
-suite currently requires Unix sockets and Unix peer credentials.
+Starting with v0.3.0, release executables are static Linux binaries only; CI
+does not build or publish Docker images. macOS and Windows are not release
+artifact targets. Local macOS development builds still use Apple system
+libraries. See [rebuilding static releases](vaulticdb/REBUILDING.md) for the
+LGPL-2.1-only RADOS client sources and relinking instructions. Its upstream
+release qualification remains incomplete; offline tests do not replace live
+Ceph acceptance.
 
 ## Start a repository on NFS
 

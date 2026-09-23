@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -419,25 +418,6 @@ func signFiles(filenames ...string) {
 	}
 }
 
-func updateDocker(sourceDir, version string) string {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	builderName := fmt.Sprintf("vaultic-release-builder-%d", r.Int())
-	run("docker", "buildx", "create", "--name", builderName, "--driver", "docker-container", "--bootstrap")
-
-	buildCmd := fmt.Sprintf(
-		"docker buildx build --builder %s --platform linux/386,linux/amd64,linux/arm,linux/arm64 --pull -f docker/Dockerfile.release %q",
-		builderName,
-		sourceDir,
-	)
-	run("sh", "-c", buildCmd+" --no-cache")
-
-	var publishCmds strings.Builder
-	for _, tag := range []string{"otuschhoff/vaultic:latest", "otuschhoff/vaultic:" + version} {
-		publishCmds.WriteString(buildCmd + fmt.Sprintf(" --tag %q --push\n", tag))
-	}
-	return publishCmds.String() + "\ndocker buildx rm " + builderName
-}
-
 func tempdir(prefix string) string {
 	dir, err := os.MkdirTemp(getwd(), prefix)
 	if err != nil {
@@ -447,6 +427,7 @@ func tempdir(prefix string) string {
 }
 
 func main() {
+	die("legacy release preparation is disabled: use the static-only release.yml workflow; local builds use the Linux Make targets")
 	if len(pflag.Args()) == 0 {
 		die("USAGE: release-version [OPTIONS] VERSION")
 	}
@@ -490,9 +471,7 @@ func main() {
 
 	signFiles(filepath.Join(options.OutputDir, "SHA256SUMS"), tarFilename)
 
-	dockerCmds := updateDocker(sourceDir, options.Version)
-
 	msg("done, output dir is %v", options.OutputDir)
 
-	msg("now run:\n\ngit push --tags origin %s\n%s\n\nrm -rf %q", branch, dockerCmds, sourceDir)
+	msg("now run:\n\ngit push --tags origin %s\n\nrm -rf %q", branch, sourceDir)
 }
