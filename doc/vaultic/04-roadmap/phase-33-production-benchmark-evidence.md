@@ -1,5 +1,71 @@
 # Phase 33 Production Benchmark Evidence
 
+## Partitioned comparison repeats (r44-r47, 2026-09-23)
+
+The partitioned implementation and r45 evidence were committed as `f7cb4252a`
+with a detailed message, without pushing. A candidate repeat (r46) followed by a
+control repeat (r47) extended r44/r45 into a control/candidate/candidate/control
+sequence. Each variant reused its exact saved executable; no rebuild, daemon
+restart or installation occurred. Binary identity was verified within each pair.
+The run metadata records the current workspace revision, while the executable
+hashes and original candidate patches identify the actual tested sources.
+
+Every run used HDD-NFS repository and scratch, 32 loader workers/RPCs, unchanged
+96 GiB checker memory/scratch limits and a ten-minute TERM cap with 45-second
+kill grace. The candidate uses at most four comparison tasks. Runs were strictly
+sequential, without overlapping builds/tests or detected backup workloads. The
+repeat wrapper verifies the known exit-2 result, complete logical parity, scan
+scope, limits, scratch cleanup, daemon identity and health before continuing.
+It does not treat the harness's final exit-1 gate as a successful checker verdict.
+
+| Measurement | r44 control | r45 candidate | r46 candidate | r47 control |
+| --- | ---: | ---: | ---: | ---: |
+| Wall seconds including cleanup | 578.22 | 372.62 | 405.09 | 594.24 |
+| Merge preparation plus comparison | 330s | 113s | 116s | 333s |
+| Encryption audit | 14s | 14s | 14s | 14s |
+| SlateDB scan | 72s | 72s | 75s | 73s |
+| Catalog join | 42s | 47s | 56s | 50s |
+| Parallel validation | 20s | 18s | 35s | 22s |
+| CLI CPU seconds | 3,513.95 | 3,505.92 | 3,514.54 | 3,523.04 |
+| Peak RSS, KiB | 92,798,392 | 91,338,172 | 87,492,952 | 90,924,088 |
+| Peak scratch bytes | 55,711,066,520 | 48,700,116,290 | 48,722,914,994 | 55,683,485,230 |
+| Recorded scratch read/write bytes | 122,802,430,740 | 127,723,817,060 | 127,723,816,892 | 122,802,430,740 |
+| Completed merge groups | 7 | 96 | 96 | 7 |
+
+Both candidates finished faster than both controls. Mean elapsed time decreased
+from 586.23 to 388.855 seconds (33.7%), and mean merge/comparison time from 331.5
+to 114.5 seconds (65.5%). Mean peak scratch decreased 12.5%, while recorded
+scratch traffic increased 4.0%. Mean CLI CPU changed only from 3,518.495 to
+3,510.23 seconds (0.23% lower); this is a parallelism benefit, not evidence of
+material CPU savings. Mean peak RSS was 2.7% lower and all runs had zero swaps.
+The slower candidate repeat spent more time in catalog and parallel validation;
+its merge/comparison stage remained close to the first candidate.
+
+All four completed checks exit 2 with matching logical results, including all
+retained findings, inventory/options digests and 379,934,385 locations on each
+side. Location, pack, aggregate and reference mismatch counters remain zero.
+The same 143 missing SlateDB snapshots and 419,530 warnings/pending exports
+remain; no metadata repair was attempted. Logical comparison excludes resource
+telemetry, session ID and the live encrypted-object count. The latter was
+recorded separately and was 161 in every run. Scan records/chunks/ranges and
+configured limits match exactly; scan byte totals vary slightly. R46/r47 record
+35,556,163,098 and 35,556,163,090 bytes respectively.
+
+The reverse-order repeat supports the elapsed-time improvement under this NFS
+configuration. There are only two observations per variant, with no confidence
+bounds, cache reset or daemon restart; this does not establish cold-cache
+performance, other workloads or native RADOS acceptance. Snapshot discrepancies
+still prevent clean full-check acceptance. No deployment decision is implied.
+
+All four raw manifests verified, and the reproducible analysis checks paired CLI
+hashes, logical equality, scope, limits, cleanup and daemon health. Final live
+checks confirmed empty scratch and the unchanged adopted executable at PID
+431717, epoch 55, read-write with zero transactions/intents. The repeat runner,
+analysis, copied executables, logs and comparison JSON are under
+`db.test/phase33-partition-repeats-2026-09-23`. New raw runs are under
+`db.test/phase33-production-2026-09-23-stream32-partition-repeat-full-r46` and
+`db.test/phase33-production-2026-09-23-stream32-buffered-repeat-full-r47`.
+
 ## Bounded partitioned comparison (r45, 2026-09-23)
 
 After buffered-reader commit `2d3950da5`, the next working-tree candidate routes
