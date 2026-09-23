@@ -1557,6 +1557,113 @@ That directory contains the deployment script, rollback gates, health records,
 locked-resolution metadata, and test logs. Raw r33 results reside under
 `db.test/phase33-production-2026-09-23-stream32-boxed-next-adopted-r33`.
 
+### Full Differential Attempt (r34, 2026-09-23)
+
+The first full differential attempt after adoption reached the ten-minute cap
+in `legacy_scan`. It did not reach the encryption audit or SlateDB scan.
+The timeout wrapper returned 124. The CLI reported cancellation and completed
+cleanup within the 45-second grace period. Total elapsed time was 10m11.50s.
+No final comparison summary exists, so this attempt provides no clean verdict.
+
+The command omitted `--slatedb-only` and retained 32 workers/RPCs, 96 GiB memory
+and scratch limits, and HDD-backed NFS storage. Scratch reached 64,438,495,400
+bytes at the cap. CLI peak RSS was 81,082,900 KiB and CPU time was 1303.56s.
+The 122 interval samples averaged 90.88% host idle and 0.44% I/O wait.
+These host counters do not isolate legacy parsing, serialization, or NFS latency.
+No build, test, or detected backup workload overlapped this measurement.
+
+The final monitor snapshot gives a more specific explanation. Scratch sorting
+took 261.16s across 841 completed operations. The 839 completed spill writes
+spent 225.40s in encoding/write, 0.078s in final buffered flush, and 59.63s in
+file sync. One additional encoding/write operation was cancelled. No merge
+completed. These are elapsed stage totals, not CPU or pure device wait time.
+
+`ForAllIndexesWorkers` loads and decodes concurrently but holds one mutex while
+calling the legacy consumer. `loadLegacyLocations` sorts and spills both spools
+inside that serialized callback. Each spool receives one quarter of the memory
+budget, or 24 GiB here. These facts support a bounded parallel legacy-consumer
+experiment with private spools. They do not support adding more decoder workers
+or treating all scratch time as NFS latency. No legacy behavior changed here.
+
+The daemon remained at PID 391849, epoch 51, read-write with zero transactions
+and write intents after cancellation. Scratch cleanup left no files. The raw
+manifest verifies under `db.test/phase33-production-2026-09-23-stream32-adopted-full-r34`.
+Legacy scan and spill attribution is now the next full-check acceptance blocker.
+Do not extend the diagnostic cap or infer success from the reduced checks.
+
+Native RADOS validation remains blocked on this host. The installed daemon is
+a generic static build, and the host has no discoverable librados, Ceph CLI,
+Docker, or RADOS-enabled binary. The existing integration harness provisions
+a disposable container cluster, not the authorized production storage.
+No credential contents were exposed and no production backend was changed.
+
+### Scan Wait Diagnostics (r35-r38, 2026-09-23)
+
+An opt-in `VAULTICDB_SCAN_TIMING=1` probe now records one JSON event per scan
+stream. It measures elapsed and polling wall time for setup, chunk collection,
+transaction validation, and response-channel reservation. Cancellation settles
+the active measurement. The event contains no keys, values, or transaction IDs.
+The probe is disabled by default and does not change the wire protocol.
+
+The locked published dependency built as a static musl release with the existing
+frame-pointer flags. All 63 storage tests passed with timing disabled. All three
+persistent-scan tests passed with timing enabled, and all ten attribution tests
+passed. Enabled test logs contained 40 valid timing records across success,
+error, and cancellation. The unused RADOS test constant warning is unrelated.
+
+Temporary service overrides selected the same instrumented binary for r35-r37.
+Each check retained 32 workers/RPCs, 96 GiB limits, and HDD-backed NFS storage.
+No builds, tests, or detected backup processes overlapped the measurements.
+
+| Run | Timing | Total | Approximate scan | Daemon CPU seconds | Timing records |
+|---|---|---:|---:|---:|---:|
+| r35 | Off | 2m24.80s | 66s | 1175.01 | 0 |
+| r36 | On | 2m11.31s | 67s | 1101.33 | 257 |
+| r37 | On, raw scheduler attempt | 2m11.50s | 67s | 1101.75 | 257 |
+
+The audit took 29s in r35 and 15s in r36/r37. The lower total with timing enabled
+is not evidence of a speedup. One off/on pair cannot establish precise probe
+overhead. Logical results, scan counts, and configuration match r33 under the
+same dynamic-field exclusions. Every enabled production timing record reports
+success. The scan still returns 376,766,240 records in 37,811 chunks and 257 ranges.
+
+Across the 257 r36 streams, setup elapsed time totals 20.05s, with 0.17s inside
+polls. Chunk collection totals 1212.50s, with 829.34s inside polls and 383.16s
+between polls. Delivery reservation totals 733.75s, almost entirely between
+polls. Transaction validation totals 93.53s, with 0.15s inside polls.
+These concurrent durations overlap and are not command wall time. Polling wall
+time includes preemption and synchronous blocking, not just CPU execution.
+SlateDB explicitly consumes Tokio's cooperative budget during iteration, so
+the 2,954,179 pending collection polls include fairness yields, not only I/O.
+Delivery time identifies downstream backpressure but not its client-side cause.
+
+The raw scheduler attempt in r37 produced metadata but no switch/wakeup samples.
+Its local-thread filters are not validated in this PID namespace. Those artifacts
+remain available, but they provide no scheduler-delay evidence.
+The runner then restored the adopted daemon and removed its override.
+
+R38 used the adopted binary without a restart or source change. A separate
+30-second process-scoped perf capture recorded context switches with namespace-safe
+attachment. The check exited zero in 2m05.99s and matched r33 logical results,
+scan counts, and check configuration. This is not a matched runtime comparison.
+The trace contains 3,511,260 records over a 29.46s event window, with no lost-record
+markers or decoder errors. Complete intervals across 66 observed threads total
+439.67s on CPU and 1474.33s off CPU. Preempted switch-outs account for 97.23s of
+the off-CPU total. Initial and trailing boundaries are excluded.
+These aggregates include idle workers and background tasks. Without wakeup
+events, off-CPU time cannot be split into sleeping time and runnable delay.
+They are neither asynchronous-task wait time nor critical-path wall time.
+
+The adopted daemon remains active at PID 431717, epoch 55, read-write with zero
+transactions and write intents. Its executable matches the saved adopted binary,
+and no runtime override remains. The instrumentation is not permanently deployed.
+Artifacts, source patch, test/build logs, diagnostic journals, and analyzers reside
+under `db.test/phase33-scan-timing-2026-09-23`. Raw checks use
+`db.test/phase33-production-2026-09-23-stream32-scan-timing-{off-r35,on-r36,scheduler-r37}`
+and `db.test/phase33-production-2026-09-23-stream32-adopted-context-r38`.
+The next performance experiment must address the measured serialized legacy
+consumer before another full differential acceptance attempt.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

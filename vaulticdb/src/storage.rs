@@ -3483,47 +3483,78 @@ impl Storage {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
             let _permit = permit;
+            let mut timing = crate::attribution::ScanStreamTiming::new(
+                std::env::var("VAULTICDB_SCAN_TIMING").as_deref() == Ok("1"),
+            );
             let work = async {
                 let setup = Instant::now();
-                let slot = self.transaction(&transaction_id).await?;
-                let transaction = slot.transaction.lock().await;
-                let mut iterator = scan_prefix_transaction(
-                    transaction
-                        .as_ref()
-                        .ok_or_else(|| transaction_not_found("transaction was closed"))?,
-                    &prefix,
-                    after_key
-                        .strip_prefix(prefix.as_slice())
-                        .unwrap_or_default(),
-                    &ScanOptions::default().with_read_ahead_bytes(1024 * 1024),
-                )
-                .await?;
-                drop(transaction);
-                drop(slot);
+                let mut iterator = timing
+                    .setup
+                    .measure(timing.enabled, async {
+                        let slot = self.transaction(&transaction_id).await?;
+                        let transaction = slot.transaction.lock().await;
+                        let iterator = scan_prefix_transaction(
+                            transaction
+                                .as_ref()
+                                .ok_or_else(|| transaction_not_found("transaction was closed"))?,
+                            &prefix,
+                            after_key
+                                .strip_prefix(prefix.as_slice())
+                                .unwrap_or_default(),
+                            &ScanOptions::default().with_read_ahead_bytes(1024 * 1024),
+                        )
+                        .await?;
+                        drop(transaction);
+                        drop(slot);
+                        Ok::<_, Status>(iterator)
+                    })
+                    .await?;
                 let mut setup_ns = setup.elapsed().as_nanos().min(u64::MAX as u128) as u64;
                 let mut pending = None;
                 loop {
-                    let reservation = tokio::time::timeout(
-                        std::time::Duration::from_millis(self.transaction_idle_timeout_ms),
-                        sender.reserve(),
-                    )
-                    .await
-                    .map_err(|_| Status::deadline_exceeded("scan stream delivery expired"))?
-                    .map_err(|_| Status::cancelled("scan stream closed"))?;
-                    self.validate_scan_transaction(&transaction_id).await?;
+                    let reservation = timing
+                        .delivery
+                        .measure(
+                            timing.enabled,
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(self.transaction_idle_timeout_ms),
+                                sender.reserve(),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| Status::deadline_exceeded("scan stream delivery expired"))?
+                        .map_err(|_| Status::cancelled("scan stream closed"))?;
+                    timing
+                        .validation
+                        .measure(
+                            timing.enabled,
+                            self.validate_scan_transaction(&transaction_id),
+                        )
+                        .await?;
                     let service = Instant::now();
-                    let mut chunk = collect_scan_chunk(
-                        &mut iterator,
-                        &mut pending,
-                        page_size,
-                        crate::MAX_MESSAGE_BYTES as usize - 32,
-                    )
-                    .await?;
+                    let mut chunk = timing
+                        .collect
+                        .measure(
+                            timing.enabled,
+                            collect_scan_chunk(
+                                &mut iterator,
+                                &mut pending,
+                                page_size,
+                                crate::MAX_MESSAGE_BYTES as usize - 32,
+                            ),
+                        )
+                        .await?;
                     chunk.iterator_setup_ns = setup_ns;
                     setup_ns = 0;
                     chunk.iterator_service_ns =
                         service.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-                    self.validate_scan_transaction(&transaction_id).await?;
+                    timing
+                        .validation
+                        .measure(
+                            timing.enabled,
+                            self.validate_scan_transaction(&transaction_id),
+                        )
+                        .await?;
                     let done = chunk.done;
                     reservation.send(Ok(chunk));
                     if done {
@@ -3535,6 +3566,11 @@ impl Storage {
                 _ = sender.closed() => return,
                 result = tokio::time::timeout(std::time::Duration::from_millis(remaining), work) =>
                     result.unwrap_or_else(|_| Err(Status::deadline_exceeded("scan stream deadline expired"))),
+            };
+            timing.outcome = match &result {
+                Ok(()) => "success",
+                Err(error) if error.code() == tonic::Code::DeadlineExceeded => "deadline_exceeded",
+                Err(_) => "error",
             };
             if let Err(error) = result {
                 let _ = tokio::time::timeout(

@@ -10,6 +10,107 @@ use std::{
 
 const ACTIVE_TIMING_CAPACITY: usize = 128;
 
+#[derive(Default, serde::Serialize)]
+pub(crate) struct FutureTiming {
+    elapsed_ns: u64,
+    poll_ns: u64,
+    polls: u64,
+    pending_polls: u64,
+}
+
+impl FutureTiming {
+    pub(crate) async fn measure<F: std::future::Future>(
+        &mut self,
+        enabled: bool,
+        future: F,
+    ) -> F::Output {
+        if !enabled {
+            return future.await;
+        }
+        let guard = FutureTimingGuard {
+            timing: self,
+            started: Instant::now(),
+        };
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|context| {
+            let started = Instant::now();
+            let result = future.as_mut().poll(context);
+            guard.timing.poll_ns = guard
+                .timing
+                .poll_ns
+                .saturating_add(duration_ns(started.elapsed()));
+            guard.timing.polls = guard.timing.polls.saturating_add(1);
+            if result.is_pending() {
+                guard.timing.pending_polls = guard.timing.pending_polls.saturating_add(1);
+            }
+            result
+        })
+        .await
+    }
+}
+
+struct FutureTimingGuard<'a> {
+    timing: &'a mut FutureTiming,
+    started: Instant,
+}
+
+impl Drop for FutureTimingGuard<'_> {
+    fn drop(&mut self) {
+        self.timing.elapsed_ns = self
+            .timing
+            .elapsed_ns
+            .saturating_add(duration_ns(self.started.elapsed()));
+    }
+}
+
+fn duration_ns(elapsed: Duration) -> u64 {
+    elapsed.as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+pub(crate) struct ScanStreamTiming {
+    pub(crate) enabled: bool,
+    pub(crate) setup: FutureTiming,
+    pub(crate) delivery: FutureTiming,
+    pub(crate) collect: FutureTiming,
+    pub(crate) validation: FutureTiming,
+    pub(crate) outcome: &'static str,
+    started: Instant,
+}
+
+impl ScanStreamTiming {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            setup: FutureTiming::default(),
+            delivery: FutureTiming::default(),
+            collect: FutureTiming::default(),
+            validation: FutureTiming::default(),
+            outcome: "cancelled",
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for ScanStreamTiming {
+    fn drop(&mut self) {
+        if self.enabled {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "{}",
+                serde_json::json!({
+                    "category": "diagnostic", "component": "vaulticdb", "event": "scan_stream_timing",
+                    "fields": {
+                        "elapsed_ns": duration_ns(self.started.elapsed()), "outcome": self.outcome,
+                        "setup": self.setup, "delivery": self.delivery,
+                        "collect": self.collect, "validation": self.validation,
+                    },
+                })
+            );
+        }
+    }
+}
+
 pub(crate) const LATENCY_BUCKET_UPPER_US: [u64; 8] = [
     10,
     100,
@@ -400,6 +501,55 @@ impl StorageAttribution {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn future_timing_preserves_pending_and_error_results() {
+        let mut timing = FutureTiming::default();
+        let mut first = true;
+        let result = timing
+            .measure(
+                true,
+                std::future::poll_fn(|context| {
+                    if first {
+                        first = false;
+                        context.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Err::<(), _>("expected"))
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(result, Err("expected"));
+        assert_eq!(timing.polls, 2);
+        assert_eq!(timing.pending_polls, 1);
+        assert!(timing.elapsed_ns >= timing.poll_ns);
+        assert!(timing.elapsed_ns > 0);
+    }
+
+    #[test]
+    fn future_timing_settles_on_cancellation_and_disabled_is_empty() {
+        use std::future::Future;
+        let mut timing = FutureTiming::default();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        {
+            let mut future = std::pin::pin!(timing.measure(true, std::future::pending::<()>()));
+            assert!(future.as_mut().poll(&mut context).is_pending());
+        }
+        assert_eq!(timing.polls, 1);
+        assert_eq!(timing.pending_polls, 1);
+        assert!(timing.elapsed_ns >= timing.poll_ns);
+        let mut disabled = FutureTiming::default();
+        {
+            let mut future = std::pin::pin!(disabled.measure(false, std::future::ready(42)));
+            assert_eq!(
+                future.as_mut().poll(&mut context),
+                std::task::Poll::Ready(42)
+            );
+        }
+        assert_eq!(disabled.polls, 0);
+        assert_eq!(disabled.elapsed_ns, 0);
+    }
 
     #[test]
     fn guard_is_active_until_drop_and_settles_success() {

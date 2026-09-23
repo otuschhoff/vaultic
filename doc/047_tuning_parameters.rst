@@ -53,6 +53,33 @@ use ``GOMAXPROCS=1``. Limiting the number of usable CPU cores can slightly reduc
 usage of vaultic.
 
 
+Scan diagnostics
+================
+
+To measure asynchronous scan work, set ``VAULTICDB_SCAN_TIMING=1`` in the
+VaulticDB daemon environment before starting it. The diagnostic is disabled
+by default. It emits one JSON ``scan_stream_timing`` event to stderr when
+each admitted scan task ends, including cancellation and timeout paths.
+It does not emit keys, values, or transaction identifiers.
+
+The event separates iterator setup, chunk collection, transaction validation,
+and delivery reservation. Delivery reservation waits for space in the bounded
+response channel. Each phase reports ``elapsed_ns``, ``poll_ns``, ``polls``,
+and ``pending_polls``. Polling means executing a future until it returns a
+result or requests another poll.
+
+``poll_ns`` measures wall time inside polls, not thread CPU time. It includes
+operating-system preemption and synchronous blocking. The difference between
+``elapsed_ns`` and ``poll_ns`` includes dependency waits, runtime scheduling,
+and measurement overhead. It does not isolate storage latency or scheduler
+delay. Concurrent streams overlap, so their totals are not command wall time.
+Use separate CPU profiles and scheduler traces to interpret these values.
+
+This diagnostic adds clock reads per phase poll and one log record per stream.
+Compare enabled and disabled runs before using their timings as performance
+evidence. Remove the variable and restart the daemon after the diagnostic.
+
+
 Compression
 ===========
 
