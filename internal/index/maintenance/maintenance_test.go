@@ -1387,6 +1387,74 @@ func TestLoadLegacyLocationsParallelMatchesSerial(t *testing.T) {
 	}
 }
 
+func TestLoadLegacyPackSummariesMatchRawContributions(t *testing.T) {
+	for _, memory := range []uint64{locationTupleMemorySize, 8 * locationTupleMemorySize, 1 << 20} {
+		for _, workers := range []uint{1, 4, 32} {
+			t.Run(fmt.Sprintf("memory=%d/workers=%d", memory, workers), func(t *testing.T) {
+				ctx := context.Background()
+				scratch, err := newCheckScratch(t.TempDir(), 1<<24)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scratch.close()
+				source := &memoryDestination{indexes: make(map[vaultic.ID][]byte)}
+				packID := vaultic.Hash([]byte("shared-pack"))
+				blobID := vaultic.Hash([]byte("shared-blob"))
+				for ordinal := 0; ordinal < 12; ordinal++ {
+					otherPack := vaultic.Hash(fmt.Appendf(nil, "pack-%d", ordinal))
+					encoded := fmt.Appendf(nil, `{"packs":[{"id":"%s","blobs":[{"id":"%s","type":"data","offset":0,"length":42},{"id":"%s","type":"data","offset":0,"length":42}]},{"id":"%s","blobs":[{"id":"%s","type":"tree","offset":5,"length":73}]}]}`, packID, blobID, blobID, otherPack, blobID)
+					source.indexes[vaultic.Hash(encoded)] = encoded
+				}
+				var expected []packContributionSummary
+				for _, summarized := range []bool{false, true} {
+					locations, err := newLocationSpool(ctx, scratch, memory, 4)
+					if err != nil {
+						t.Fatal(err)
+					}
+					packs, err := newLocationMultisetSpool(ctx, scratch, memory, 4)
+					if err != nil {
+						t.Fatal(err)
+					}
+					packs.packSummaries = summarized
+					_, count, err := loadLegacyLocations(ctx, source, locations, packs, workers)
+					if err != nil || count != 12 || packs.memoryUsed > memory {
+						t.Fatalf("count=%d memory=%d err=%v", count, packs.memoryUsed, err)
+					}
+					locationCount, err := countLocationSpool(locations)
+					if err != nil || locationCount != 13 {
+						t.Fatalf("locations=%d err=%v", locationCount, err)
+					}
+					iterator, err := newPackContributionIterator(packs)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var actual []packContributionSummary
+					for {
+						summary, found, err := iterator.next()
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !found {
+							break
+						}
+						if summary.id == packID && (summary.count != 24 || summary.payload != 1008 || !summary.present) {
+							t.Fatalf("duplicate contribution changed: %+v", summary)
+						}
+						actual = append(actual, summary)
+					}
+					if len(actual) != 13 || summarized && !reflect.DeepEqual(actual, expected) {
+						t.Fatalf("pack summaries differ: got=%+v want=%+v", actual, expected)
+					}
+					expected = actual
+					if err := errors.Join(iterator.close(), locations.close(), packs.close()); err != nil || scratch.used != 0 {
+						t.Fatalf("cleanup: used=%d err=%v", scratch.used, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestLoadLegacyLocationsParallelFailureDoesNotAdopt(t *testing.T) {
 	for _, failure := range []string{"decode", "cancel", "scratch"} {
 		t.Run(failure, func(t *testing.T) {

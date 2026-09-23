@@ -1,5 +1,76 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded legacy pack summaries (r43, 2026-09-23)
+
+The ordered-partition implementation and r41/r42 evidence were committed as
+`8e23554fe` with a detailed message, without pushing. The next working-tree
+candidate enables the existing pack-summary representation for legacy catalog
+contributions. Each legacy worker reserves half of its pack-spool allocation
+for a bounded aggregation map when the budget permits, flushing partial
+summaries into the other half. Tiny budgets retain direct summary insertion.
+Finalization flushes and releases the maps before adopting worker spools.
+Exact location tuples and pack-presence markers remain unchanged; duplicate
+contributions retain their counts, payload totals and type information. Scratch
+encryption and total configured memory/scratch budgets are unchanged.
+
+New regression tests compare raw and summarized pack streams with one-tuple,
+eight-tuple and 1 MiB budgets and requested worker counts 1/4/32. They verify
+duplicate multiplicity, payload totals, pack presence, exact location counts,
+bounded retained tuple capacity and cleanup. Existing loader, catalog and
+pack-contribution tests passed, as did the full maintenance race suite and
+affected CLI `Test(Check|Index)` race tests. Formatting, editor diagnostics and
+the isolated profile build passed. The previously documented unrelated full
+CLI failures were not rerun or modified.
+
+R43 used the same adopted daemon without restart, HDD-NFS repository and scratch,
+32 workers/RPCs, 96 GiB checker memory/scratch limits and ten-minute TERM cap with
+45-second kill grace. Builds and tests completed before measurement. Progress
+boundaries are rounded:
+
+| Measurement | r42 ordered partitions | r43 legacy summaries |
+| --- | ---: | ---: |
+| Legacy scan | 101s | 74s |
+| Encryption audit | 42s | 35s |
+| SlateDB scan | 74s | 73s |
+| SlateDB finalization | 20s | 17s |
+| Catalog join | 179s | 43s |
+| Legacy merge preparation | 68s | 56s |
+| SlateDB merge preparation | <1s | <1s |
+| Comparison starts | 484s | 298s |
+| Comparison window before cap | 116s | 302s |
+| Partial legacy locations | 140,963,015 | 378,503,112 |
+| Partial SlateDB locations | 140,963,014 | 378,503,111 |
+| Completed merge groups | 14 | 7 |
+| Recorded scratch read/write bytes | 152,533,184,512 | 122,633,354,410 |
+| Peak scratch bytes | 70,198,433,856 | 55,679,304,826 |
+| CLI CPU seconds | 3,906.20 | 3,541.78 |
+| Peak RSS, KiB | 122,980,788 | 92,782,444 |
+| Wall time including cleanup | 616.18s | 611.78s |
+
+Both runs scanned 10,019 legacy indexes and 376,346,710 SlateDB records in
+37,769 chunks across 256 ranges. R43 recorded 35,556,163,089 scan bytes. It exited
+124 with CLI cancellation 130 and zero swaps. The one-location partial-count
+difference can occur when cancellation interrupts iterator advancement; zero
+partial mismatch counters are not a completed correctness verdict.
+
+Catalog joining took 136 seconds less in this run, with seven fewer merge groups,
+19.6% less recorded cumulative scratch traffic and 20.7% lower peak scratch,
+despite substantially more comparison work. Peak RSS was 24.6% lower. The memory
+limit is a tuple/aggregation budget, not an RSS cap. This supports the bounded
+summary approach, but sequential single capped runs are not matched repeated
+full-check measurements. Audit time also varied, and partial work boundaries
+differ. The CPU figures do not establish total completed-check CPU savings.
+
+Raw checksums and empty scratch cleanup passed. The daemon remained PID 431717,
+epoch 55, read-write with zero transactions/intents and its adopted executable
+unchanged. The candidate remains uncommitted and is not installed. A completed
+differential verdict and matched repeats remain open; native RADOS acceptance
+is also outstanding. The remaining measured tail is legacy merge preparation
+and exact comparison, which should guide the next bounded optimization.
+
+Artifacts are under `db.test/phase33-legacy-summaries-2026-09-23` and
+`db.test/phase33-production-2026-09-23-stream32-legacy-summaries-full-r43`.
+
 ## Preserve ordered SlateDB partitions (r42, 2026-09-23)
 
 The r41 attribution identified 95 seconds preparing the global SlateDB location

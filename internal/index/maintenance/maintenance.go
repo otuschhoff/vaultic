@@ -820,6 +820,7 @@ func CheckWithOptions(
 		if err != nil {
 			return result, err
 		}
+		legacyPacks.packSummaries = true
 	}
 	if !options.SlateDBOnly {
 		progress.set("legacy_scan")
@@ -1210,6 +1211,7 @@ func loadLegacyLocations(
 	}
 	locations := make([]*locationSpool, workers)
 	contributions := make([]*locationSpool, workers)
+	buffers := make([]*packContributionBuffer, workers)
 	counts := make([]uint64, workers)
 	available := make(chan int, workers)
 	defer func() {
@@ -1229,9 +1231,19 @@ func loadLegacyLocations(
 			return result, 0, err
 		}
 		if packs != nil {
-			contributions[worker], err = newLocationMultisetSpool(ctx, packs.scratch, packs.memoryBytes/uint64(workers), packs.fanIn)
+			packMemory := packs.memoryBytes / uint64(workers)
+			aggregationMemory := uint64(0)
+			if packs.packSummaries && packMemory/2 >= max(locationTupleMemorySize, packContributionEntryBudget) {
+				aggregationMemory = packMemory / 2
+				packMemory -= aggregationMemory
+			}
+			contributions[worker], err = newLocationMultisetSpool(ctx, packs.scratch, packMemory, packs.fanIn)
 			if err != nil {
 				return result, 0, err
+			}
+			contributions[worker].packSummaries = packs.packSummaries
+			if aggregationMemory != 0 {
+				buffers[worker] = &packContributionBuffer{spool: contributions[worker], limit: int(aggregationMemory / packContributionEntryBudget)}
 			}
 		}
 		available <- worker
@@ -1257,7 +1269,7 @@ func loadLegacyLocations(
 		if contributions[worker] != nil {
 			contributions[worker].ctx = workerContext
 		}
-		return collectLegacyIndex(index, locations[worker], contributions[worker])
+		return collectLegacyIndexWithContributions(index, locations[worker], contributions[worker], buffers[worker])
 	})
 	var indexes uint64
 	for _, count := range counts {
@@ -1275,6 +1287,12 @@ func loadLegacyLocations(
 			}
 			if contributions[worker] != nil {
 				contributions[worker].ctx = finalizeContext
+				if buffers[worker] != nil {
+					if err := buffers[worker].flush(); err != nil {
+						return err
+					}
+					buffers[worker] = nil
+				}
 				return contributions[worker].finishBuffer()
 			}
 			return nil
@@ -1302,6 +1320,10 @@ func loadLegacyLocations(
 }
 
 func collectLegacyIndex(index *legacyindex.Index, locations, packs *locationSpool) error {
+	return collectLegacyIndexWithContributions(index, locations, packs, nil)
+}
+
+func collectLegacyIndexWithContributions(index *legacyindex.Index, locations, packs *locationSpool, contributions *packContributionBuffer) error {
 	for item := range index.Values() {
 		if err := locations.add(locationTuple{BlobID: item.Blob.ID,
 			PackID: item.Pack, Type: uint8(item.Blob.Type), Offset: uint64(item.Blob.Offset),
@@ -1309,7 +1331,11 @@ func collectLegacyIndex(index *legacyindex.Index, locations, packs *locationSpoo
 		}); err != nil {
 			return err
 		}
-		if packs != nil {
+		if contributions != nil {
+			if err := contributions.add(item.Pack, schema.BlobType(item.Blob.Type), uint64(item.Blob.Length)); err != nil {
+				return err
+			}
+		} else if packs != nil {
 			if err := packs.add(locationTuple{
 				BlobID: item.Pack, PackID: item.Blob.ID, Type: uint8(item.Blob.Type),
 				Offset: uint64(item.Blob.Offset), Length: uint64(item.Blob.Length),
