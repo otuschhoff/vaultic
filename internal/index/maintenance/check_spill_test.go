@@ -1023,6 +1023,100 @@ func TestPackPartialSummaryOverflow(t *testing.T) {
 	}
 }
 
+func TestLocationRunReaderBufferedBoundaries(t *testing.T) {
+	scratch, err := newCheckScratch(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	spool, err := newLocationSpool(context.Background(), scratch, 1<<20, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]locationTuple, 12000)
+	for index := range records {
+		records[index] = testLocation(byte(index))
+		records[index].Offset = uint64(index)
+		records[index].Length = uint64(index + 1)
+		records[index].UncompressedLength = uint64(index + 2)
+	}
+	run, err := spool.writeRun(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(run.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const recordBytes = 4 + locationTupleSize + 16
+	for _, bufferBytes := range []int{recordBytes, recordBytes + 1, 2*recordBytes - 1, locationRunBufferSize} {
+		t.Run(fmt.Sprintf("buffer=%d", bufferBytes), func(t *testing.T) {
+			reader, err := openLocationRun(run, scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.close()
+			reader.reader = bufio.NewReaderSize(bytes.NewReader(encoded[checkRunHeaderSize:]), bufferBytes)
+			for _, expected := range records {
+				actual, found, err := reader.next()
+				if err != nil || !found || actual != expected {
+					t.Fatalf("offset=%d: actual=%+v found=%t err=%v", expected.Offset, actual, found, err)
+				}
+			}
+			for range 2 {
+				if _, found, err := reader.next(); found || err != nil {
+					t.Fatalf("EOF: found=%t err=%v", found, err)
+				}
+			}
+		})
+	}
+	for truncated := 1; truncated < recordBytes; truncated++ {
+		t.Run(fmt.Sprintf("truncated=%d", truncated), func(t *testing.T) {
+			reader, err := openLocationRun(run, scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.close()
+			reader.reader = bufio.NewReaderSize(bytes.NewReader(encoded[checkRunHeaderSize:checkRunHeaderSize+recordBytes+truncated]), recordBytes+1)
+			if actual, found, err := reader.next(); err != nil || !found || actual != records[0] {
+				t.Fatalf("first record: found=%t err=%v", found, err)
+			}
+			wantErr := io.ErrUnexpectedEOF
+			if truncated == 4 {
+				wantErr = io.EOF
+			}
+			if _, found, err := reader.next(); found || !errors.Is(err, wantErr) {
+				t.Fatalf("truncated record: found=%t err=%v, want %v", found, err, wantErr)
+			}
+		})
+	}
+	for _, corruption := range []string{"length", "tag", "replay"} {
+		t.Run(corruption, func(t *testing.T) {
+			reader, err := openLocationRun(run, scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.close()
+			data := bytes.Clone(encoded[checkRunHeaderSize : checkRunHeaderSize+2*recordBytes])
+			switch corruption {
+			case "length":
+				data[recordBytes] = 255
+			case "tag":
+				data[len(data)-1] ^= 1
+			case "replay":
+				copy(data[recordBytes:], data[:recordBytes])
+			}
+			reader.reader = bufio.NewReaderSize(bytes.NewReader(data), recordBytes+1)
+			if actual, found, err := reader.next(); err != nil || !found || actual != records[0] {
+				t.Fatalf("first record: found=%t err=%v", found, err)
+			}
+			if _, found, err := reader.next(); found || err == nil {
+				t.Fatalf("corrupt record accepted: found=%t err=%v", found, err)
+			}
+		})
+	}
+}
+
 func BenchmarkLocationRunReader(b *testing.B) {
 	scratch, err := newCheckScratch(b.TempDir(), 1<<20)
 	if err != nil {

@@ -1,5 +1,78 @@
 # Phase 33 Production Benchmark Evidence
 
+## Buffered scratch reader (r44, 2026-09-23)
+
+The legacy-summary implementation and r43 evidence were committed as
+`366a9532f` with a detailed message, without pushing. The next working-tree
+candidate removes two per-record copies from encrypted scratch reads. It peeks
+at the length and complete record in the existing buffered reader, authenticates
+and decrypts in place, decodes the tuple, then discards the consumed bytes.
+The scratch format, AES-GCM authentication, nonce sequence, length validation
+and partial-record error semantics remain unchanged. No resource limit changed.
+
+Focused tests passed, including a 12,000-record fixture crossing buffer refills
+with 110/111/219-byte and production 1 MiB buffers, all 109 partial-record lengths,
+repeated EOF, invalid length, corrupted authentication tag and replay rejection.
+Full maintenance race tests and affected CLI `Test(Check|Index)` race tests,
+formatting, editor diagnostics and isolated profile build passed. No builds or
+tests overlapped the measurement.
+
+R44 used the same adopted daemon without restart, HDD-NFS repository and scratch,
+32 workers/RPCs, 96 GiB checker memory/scratch limits and ten-minute TERM cap with
+45-second kill grace. Rounded progress boundaries:
+
+| Measurement | r43 legacy summaries | r44 buffered reader |
+| --- | ---: | ---: |
+| Legacy scan | 74s | 73s |
+| Encryption audit | 35s | 14s |
+| SlateDB scan | 73s | 72s |
+| SlateDB finalization | 17s | 15s |
+| Catalog join | 43s | 42s |
+| Legacy merge preparation | 56s | 53s |
+| SlateDB merge preparation | <1s | <1s |
+| Comparison starts | 298s | 269s |
+| Comparison duration | 302s, interrupted | 277s, completed |
+| Legacy locations | 378,503,112, partial | 379,934,385 |
+| SlateDB locations | 378,503,111, partial | 379,934,385 |
+| Completed merge groups | 7 | 7 |
+| Recorded scratch read/write bytes | 122,633,354,410 | 122,802,430,740 |
+| Peak scratch bytes | 55,679,304,826 | 55,711,066,520 |
+| CLI CPU seconds | 3,541.78 | 3,513.95 |
+| Peak RSS, KiB | 92,782,444 | 92,798,392 |
+| Wall time including cleanup | 611.78s | 578.22s |
+| CLI exit | 130, wrapper timeout 124 | 2, metadata indexes differ |
+
+R44 completed location comparison at 546 seconds, location cleanup at 552 seconds,
+and parallel validation at 572 seconds before finalization. All 379,934,385
+locations matched exactly. Missing/invalid packs, aggregate mismatches, reverse
+edge mismatches and unresolved references were zero. The final result reported
+143 legacy snapshots, zero SlateDB snapshots and 143 snapshot mismatches; its
+100 retained findings were all `missing_snapshot`, wanting `slatedb`. The
+snapshot comparator reports this category when neither a matching snapshot nor
+an import checkpoint is present. This run does not establish when that state
+arose, and no metadata repair was attempted. The result also retains 419,530
+pending exports and warnings, including unknown-tier, retention and usage counts.
+
+The check finished before the cap but did not pass. The harness subsequently
+returned 1 because its accepted exits are only 0 and 124; the checker exit was
+2, not an execution crash. Raw artifacts, post-run health and cleanup had already
+been saved and verified before that harness exit gate. This is a completed
+differential result, not clean full-check acceptance.
+
+The run scanned the same 10,019 legacy indexes and 376,346,710 SlateDB records in
+37,769 chunks across 256 ranges, recording 35,556,163,091 scan bytes and zero swaps.
+Comparison completed in less time than r43's interrupted comparison, but these
+are single sequential runs with different work boundaries. Audit alone was
+21 seconds shorter. No precise completed-check speedup or total CPU-saving claim
+is justified without matched repeats. Native RADOS acceptance remains open.
+
+The measured Go patch matches the working source. Raw checksums, empty scratch
+and final health checks passed. The daemon remained PID 431717, epoch 55,
+read-write with zero transactions/intents and the adopted executable unchanged.
+The reader candidate remains uncommitted and is not installed. Artifacts are
+under `db.test/phase33-buffered-reader-2026-09-23` and
+`db.test/phase33-production-2026-09-23-stream32-buffered-reader-full-r44`.
+
 ## Bounded legacy pack summaries (r43, 2026-09-23)
 
 The ordered-partition implementation and r41/r42 evidence were committed as

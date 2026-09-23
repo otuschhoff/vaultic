@@ -900,9 +900,7 @@ type locationRunReader struct {
 	file    *scratchReadFile
 	reader  *bufio.Reader
 	aead    cipher.AEAD
-	length  [4]byte
 	nonce   [12]byte
-	sealed  []byte
 	counter uint64
 }
 
@@ -931,32 +929,44 @@ func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, e
 		_ = file.Close() // Preserve the AEAD-construction error.
 		return nil, err
 	}
-	result := &locationRunReader{file: file, reader: reader, aead: aead, sealed: make([]byte, locationTupleSize+aead.Overhead())}
+	result := &locationRunReader{file: file, reader: reader, aead: aead}
 	copy(result.nonce[:4], header[8:])
 	return result, nil
 }
 
 func (reader *locationRunReader) next() (locationTuple, bool, error) {
-	if _, err := io.ReadFull(reader.reader, reader.length[:]); err != nil {
-		if errors.Is(err, io.EOF) {
+	length, err := reader.reader.Peek(4)
+	if err != nil {
+		if errors.Is(err, io.EOF) && len(length) == 0 {
 			return locationTuple{}, false, nil
+		}
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
 		}
 		return locationTuple{}, false, fmt.Errorf("read checker run record length: %w", err)
 	}
-	sealedLength := binary.BigEndian.Uint32(reader.length[:])
+	sealedLength := binary.BigEndian.Uint32(length)
 	if sealedLength != locationTupleSize+uint32(reader.aead.Overhead()) {
 		return locationTuple{}, false, fmt.Errorf("invalid checker run record length")
 	}
-	if _, err := io.ReadFull(reader.reader, reader.sealed); err != nil {
+	record, err := reader.reader.Peek(4 + int(sealedLength))
+	if err != nil {
+		if errors.Is(err, io.EOF) && len(record) > 4 {
+			err = io.ErrUnexpectedEOF
+		}
 		return locationTuple{}, false, fmt.Errorf("read checker run record: %w", err)
 	}
 	binary.BigEndian.PutUint64(reader.nonce[4:], reader.counter)
 	reader.counter++
-	plain, err := reader.aead.Open(reader.sealed[:0], reader.nonce[:], reader.sealed, checkRunMagic[:])
+	sealed := record[4:]
+	plain, err := reader.aead.Open(sealed[:0], reader.nonce[:], sealed, checkRunMagic[:])
 	if err != nil {
 		return locationTuple{}, false, fmt.Errorf("authenticate checker run record: %w", err)
 	}
 	tuple, err := unmarshalLocationTuple(plain)
+	if err == nil {
+		_, err = reader.reader.Discard(len(record))
+	}
 	return tuple, err == nil, err
 }
 
