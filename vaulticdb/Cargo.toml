@@ -44,8 +44,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 sharks = "0.5"
-slatedb = { git = "https://github.com/otuschhoff/slatedb.git", rev = "f549d4af9e8a7e41f46c45f4f31095cc743a703a" }
-slatedb-common = { git = "https://github.com/otuschhoff/slatedb.git", rev = "f549d4af9e8a7e41f46c45f4f31095cc743a703a" }
+slatedb = { git = "https://github.com/otuschhoff/slatedb.git", rev = "43a562e3637d3d9ce12bec82a5b9e3deb47843fa" }
+slatedb-common = { git = "https://github.com/otuschhoff/slatedb.git", rev = "43a562e3637d3d9ce12bec82a5b9e3deb47843fa" }
 tokio = { version = "1.47", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-prost = "0.14"

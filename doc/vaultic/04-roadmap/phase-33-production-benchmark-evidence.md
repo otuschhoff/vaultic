@@ -1427,6 +1427,136 @@ test executables, raw timings, and validation logs. SlateDB commit
 `vaultic-multiget-rebase`. Production stays on the restored original daemon. A matched
 end-to-end comparison is still needed before a deployment decision for this patch.
 
+### Matched Boxed-Next Runs (r29-r32, 2026-09-23)
+
+With operator approval, four HDD-NFS checks compared heap-only SlateDB `67abace`
+against direct future forwarding in `43a562e`. Both static musl daemons used
+Vaultic `d9e4b9fd1`, the same source paths, frame-pointer flags, compiler, and
+allocator. Both used identical Cargo patch overrides and generated lockfiles.
+The build refreshed the changed source timestamp after archive extraction, and
+the logs confirm that Cargo rebuilt SlateDB for the candidate. Binary hashes
+differ. Tracked manifests and lockfiles remain unchanged.
+
+The experiment retained the catalog-stream CLI, 32 workers/RPCs, 96 GiB limits,
+and existing read-ahead. Control/candidate/candidate/control runs each started
+after a daemon restart and an idle-writer health gate. Each check had a ten-minute
+TERM cap with 45-second kill grace. Builds completed before measurement. No caches
+were dropped. Process-name gates found no backup or build jobs, but cannot exclude
+external backup activity. Temporary build output used RAM. Repository data and
+check scratch stayed on HDD-NFS, with evidence saved on NFS.
+
+| Run | Variant | Total | Audit | Scan | Catalog | Daemon CPU-seconds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r29 | Control | 2m38.41s | 29s | 82s | 22s | 1623.44 |
+| r30 | Candidate | 2m11.20s | 16s | 67s | 22s | 1111.36 |
+| r31 | Candidate | 2m25.42s | 31s | 67s | 22s | 1172.35 |
+| r32 | Control | 2m30.99s | 16s | 78s | 31s | 1497.74 |
+
+Stage durations come from rounded progress timestamps. Mean scan time fell from
+80 to 67 seconds, or 16.25%. Mean per-run scan throughput rose from 4.713 to
+5.623 million records/s, or 19.33%. Mean total time fell from 154.70 to 138.31
+seconds, or 10.59%. Both candidate runs finished faster than either control.
+Audit and catalog times still vary, and two runs per variant do not establish
+confidence bounds. These are measured results for this workload, not guarantees
+for other repositories or storage backends.
+
+Mean whole-check daemon CPU fell from 1560.590 to 1141.855 CPU-seconds, or 26.83%.
+Mean CLI CPU rose from 830.995 to 853.960 CPU-seconds, or 2.76%. Iterator service
+time fell from 1746.35 to 1230.49 accumulated seconds, or 29.54%. Client receive
+time fell from 1928.50 to 1552.21 accumulated seconds, or 19.51%. Consumer time
+fell from 534.74 to 524.28 seconds. Accumulated range times overlap and are not
+independent CPU measurements. Whole-check CPU includes the variable audit work.
+
+All four checks and the runner exited zero. Logical result fields match after
+excluding resources, consistency session IDs, and encrypted-object counts. The
+remaining consistency fields and recorded engine configuration match exactly.
+Each run scanned 376,766,240 records in 37,811 chunks across 257 ranges and
+reported 379,934,385 locations and 419,530 warnings. Byte totals vary by 25 bytes.
+Encrypted-object counts are 164/169/172/174. This is a live repository, not an
+immutable byte-identical fixture. Coverage remains incomplete and SlateDB-only,
+not full differential or RADOS acceptance. Scratch and daemon swap stayed zero.
+
+Each scan captured daemon CPU at 49 Hz and CLI CPU for 30 seconds, followed by
+a three-second Go trace. Daemon sample counts are 24,558/20,374/19,986/24,339,
+with zero reported lost samples. All captures report expected interrupt status
+130, and sampler error logs are empty. Daemon CPU counters across the roughly
+31.6-second capture windows are 561.03/464.56/461.63/560.41 CPU-seconds.
+
+The largest control boxed-next symbol accounts for 11.12%/10.56% flat sampled
+CPU. Candidate boxed-next entries peak at 2.15% in both runs. These are different
+remaining symbols, not the same wrapper with a lower cost. `DbIterator::next`
+falls from 81.47%/80.86% cumulative samples to 72.58%/73.08%. `memcpyFast` rises
+from 14.35%/14.89% to 16.61%/16.54% of samples. The percentage rise does not
+establish an absolute increase in copying, because the candidate consumes less
+CPU and processes more rows during the fixed window. No allocation counts were
+collected in production.
+
+CLI CPU profiles contain 295.99/353.29/356.04/292.26 sampled CPU-seconds in their
+30-second windows. Pack aggregation remains about 25% cumulative sampled CPU.
+The later three-second traces contain 47.13-51.51 aggregate goroutine-seconds
+under gRPC receive. These short windows do not represent total run wait time.
+They identify the client wait location, not the daemon's asynchronous wait cause.
+Separate Rust future-wait and scheduler-switch attribution remains unavailable.
+Row copying and the remaining iterator allocations are further investigation
+targets, not changes included in this experiment.
+
+Artifacts reside under `db.test/phase33-boxed-next-e2e-2026-09-23` and the four
+`db.test/phase33-production-2026-09-23-stream32-boxed-next-{variant}-r{29..32}`
+directories. They include build/run/analysis scripts, revisions, lockfiles,
+executables, raw profiles, decoded reports, and structured comparisons. All four
+raw run manifests verify. Control SHA-256 is
+`cb710d2a779f2dc67a1ecda9ed4f07e9e220495b0c6df8a303877346bf228cb7`.
+Candidate SHA-256 is
+`6b00ab81536468897b2e38fa458ed86a39c201464d036608e19afc72e2fc1014`.
+
+The runner removed its temporary override and restored the original daemon.
+Binary comparison confirms SHA-256
+`efb779ff8e9eda3cb267a7cf56ef9b1726e6fc07c6423e91392afacd430e6cfb`.
+Final PID is 385190, epoch 50, read-write with zero transactions and write intents.
+No permanent deployment, dependency update, commit, or push occurred during this
+experiment. The result supports adopting the candidate for this NFS workflow,
+subject to an explicit dependency and deployment decision.
+
+### NFS Adoption (r33, 2026-09-23)
+
+The user approved adoption after the matched comparison. The SlateDB fork now
+publishes `43a562e3637d3d9ce12bec82a5b9e3deb47843fa` on
+`vaultic-multiget-rebase`. Both direct Vaultic dependencies pin that revision.
+The lockfile changes only the three SlateDB Git source identities.
+Cargo metadata resolves all three packages from the published revision with
+`--locked` and no local overrides. All 63 Vaultic storage tests pass against
+that locked Git dependency.
+
+The durable service executable now contains the exact candidate from r30/r31:
+`6b00ab81536468897b2e38fa458ed86a39c201464d036608e19afc72e2fc1014`.
+That binary was built from Vaultic `d9e4b9fd1` with a local Cargo patch to
+SlateDB `43a562e`, not rebuilt from the new Git pin. The published-pin tests
+provide a separate dependency-resolution gate. Installation used an adjacent
+staged file, a graceful service stop, and an atomic rename. The service
+configuration and CLI remain unchanged, with no runtime override.
+
+The capped post-deployment check exited zero in 2m23.58s. Approximate audit,
+scan, and catalog durations were 31s, 67s, and 22s. The daemon used 1180.46 CPU
+seconds and the CLI used 837.38 CPU seconds. This single run had no CPU or trace
+profiling and is a deployment check, not another matched performance comparison.
+It used the same 32 workers/RPCs, 96 GiB limits, and HDD-backed NFS storage.
+No builds, tests, or detected backup processes overlapped the check.
+
+Logical results match r31 under the same dynamic-field exclusions used above.
+The remaining consistency fields and engine configuration match. Scan totals
+remain 376,766,240 records, 37,811 chunks, and 257 completed ranges. Locations
+remain 379,934,385 and warnings remain 419,530. Encrypted objects total 164.
+Scratch use and daemon swap are zero. Coverage remains incomplete and
+SlateDB-only. This adoption does not close full differential or RADOS acceptance.
+
+Final PID is 391849, epoch 51, read-write with zero transactions and write intents.
+The original daemon remains available as `rollback-vaulticdb` under
+`db.test/phase33-boxed-next-adoption-2026-09-23`, with SHA-256
+`efb779ff8e9eda3cb267a7cf56ef9b1726e6fc07c6423e91392afacd430e6cfb`.
+That directory contains the deployment script, rollback gates, health records,
+locked-resolution metadata, and test logs. Raw r33 results reside under
+`db.test/phase33-production-2026-09-23-stream32-boxed-next-adopted-r33`.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

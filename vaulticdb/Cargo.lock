@@ -4067,7 +4067,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slatedb"
 version = "0.16.0"
-source = "git+https://github.com/otuschhoff/slatedb.git?rev=f549d4af9e8a7e41f46c45f4f31095cc743a703a#f549d4af9e8a7e41f46c45f4f31095cc743a703a"
+source = "git+https://github.com/otuschhoff/slatedb.git?rev=43a562e3637d3d9ce12bec82a5b9e3deb47843fa#43a562e3637d3d9ce12bec82a5b9e3deb47843fa"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -4111,7 +4111,7 @@ dependencies = [
 [[package]]
 name = "slatedb-common"
 version = "0.16.0"
-source = "git+https://github.com/otuschhoff/slatedb.git?rev=f549d4af9e8a7e41f46c45f4f31095cc743a703a#f549d4af9e8a7e41f46c45f4f31095cc743a703a"
+source = "git+https://github.com/otuschhoff/slatedb.git?rev=43a562e3637d3d9ce12bec82a5b9e3deb47843fa#43a562e3637d3d9ce12bec82a5b9e3deb47843fa"
 dependencies = [
  "chrono",
  "log",
@@ -4126,7 +4126,7 @@ dependencies = [
 [[package]]
 name = "slatedb-txn-obj"
 version = "0.16.0"
-source = "git+https://github.com/otuschhoff/slatedb.git?rev=f549d4af9e8a7e41f46c45f4f31095cc743a703a#f549d4af9e8a7e41f46c45f4f31095cc743a703a"
+source = "git+https://github.com/otuschhoff/slatedb.git?rev=43a562e3637d3d9ce12bec82a5b9e3deb47843fa#43a562e3637d3d9ce12bec82a5b9e3deb47843fa"
 dependencies = [
  "async-trait",
  "bytes",
