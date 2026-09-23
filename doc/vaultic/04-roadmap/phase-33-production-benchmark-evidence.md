@@ -1002,6 +1002,108 @@ and serial encryption audit at 50s are now the largest remaining stages. Further
 scan work needs daemon-side attribution, while bounded parallel authentication
 remains a separate candidate that must preserve complete object verification.
 
+### Bounded Encryption Audit (r20-r23)
+
+Commit `4de3c0076` records the catalog-streaming implementation and r17-r19
+evidence. The next candidate overlaps up to four encryption-audit objects
+using bounded futures, without spawning an unbounded task per listed object.
+Byte-weighted admission allows 2 GiB of listed ciphertext sizes per audit,
+rounded up to 1 MiB units; an oversized object consumes the entire allowance
+and runs alone. The allowance accommodates four nominal 256 MiB SSTs including
+encryption overhead, unlike a 512 MiB allowance that could serialize them.
+
+Every admitted object retains the existing header classification, readable-key
+snapshot, old-key accounting and complete payload authentication. Internal
+`_vaultic/` objects remain excluded. Payload authentication errors from `get()`
+still fail the audit; classification and body-stream error handling are unchanged.
+Completion order changes, so the first reported error need not follow list order.
+Rotation retirement continues to require a successful clean audit.
+
+This is an admission bound, not a strict RSS ceiling: backend and crypto buffers
+add overhead, listed sizes can become stale, oversized objects exceed the byte
+allowance, and concurrent audit calls have independent budgets. Dropping the
+audit or encountering an error drops pending I/O futures and their permits;
+already-submitted crypto work can finish on the existing executor afterward.
+
+Local validation: all 51 library encryption tests passed, including rotation
+retirement across restart. After increasing the allowance from 512 MiB to 2 GiB,
+all three focused audit tests passed again. Deterministic gated reads demonstrate
+four-way overlap, byte-limited two-way admission, oversized-object exclusivity,
+cancellation and read-error cleanup. Mixed encrypted/plaintext/malformed/old-key
+fixtures match serial counts, and corruption in the final payload byte fails
+both serial and parallel audits. Editor diagnostics and whitespace checks pass.
+
+With explicit approval, the three focused audit tests passed again and
+`RUSTFLAGS="-C force-frame-pointers=yes" make vaulticdb BIN_DIR=bin/phase33-audit-parallel`
+built the static release candidate. After a fresh serial-audit control (r20),
+only the service daemon was replaced through the configured clean shutdown/start
+path. PID 100168 / epoch 39 became PID 165437 / epoch 40, read-write with zero
+active transactions and write intents. The service CLI was not replaced.
+
+The deployed daemon SHA-256 is
+`efb779ff8e9eda3cb267a7cf56ef9b1726e6fc07c6423e91392afacd430e6cfb`.
+Rollback is preserved at `bin/phase33-audit-parallel/rollback/vaulticdb`, SHA-256
+`2963b4456fe2cd7f1738f19635745060f5f41df307c496a10e54a917f20a4305`.
+Deployment source patch, revision, hashes and before/after health are under
+`db.test/phase33-audit-parallel-deployment-2026-09-22`; its manifest verifies.
+
+All runs used the unchanged r18/r19 catalog-stream CLI, 96 GiB memory/scratch,
+32 scan workers/RPCs, HDD-NFS paths, five-second lightweight telemetry and the
+ten-minute TERM cap with 45-second kill grace. No tests/builds overlapped runs,
+and no caches were dropped. Artifacts under `db.test/phase33-production-2026-09-22-`
+have suffixes `stream32-audit-control-r20`, `stream32-audit-parallel-r21`,
+`stream32-audit-parallel-r22` and `stream32-audit-parallel-r23`.
+
+R21 failed closed after 15.93s: a listed compaction metadata object,
+`db/compactions/00000000000000000377.compactions`, disappeared before its read.
+Main-store puts advanced from 10 to 12 and deletes from 1 to 2 during the attempt;
+no SST compactions were recorded. This is consistent with concurrent metadata
+maintenance after startup, but does not establish the exact cause or whether
+parallel auditing increases race exposure. No missing-object errors were suppressed
+and no automatic retry was added. The writer stayed healthy and scratch was empty.
+R21 is a failed startup-adjacent attempt, excluded from successful timing averages,
+and remains an operational reliability caveat rather than being discarded.
+
+R22 and r23 completed on the same daemon without another restart:
+
+| Metric | r20 serial control | r22 parallel | r23 parallel |
+| --- | ---: | ---: | ---: |
+| Exit | 0 | 0 | 0 |
+| Wall time | 3m18.70s | 2m45.84s | 2m41.76s |
+| Encryption audit interval | 51s | 15s | 15s |
+| Blob scan interval | 82s | 84s | 83s |
+| Finalize interval | 2s | 2s | 1s |
+| Catalog interval | 28s | 26s | 22s |
+| Parallel validation interval | 33s | 36s | 38s |
+| CLI CPU seconds | 821.00 | 838.55 | 819.48 |
+| CLI peak RSS, KiB | 14,988,656 | 14,978,548 | 15,140,192 |
+| Daemon CPU seconds | 1,594.03 | 1,585.58 | 1,566.83 |
+| Daemon logical read bytes | 102,465,262,687 | 102,465,601,438 | 102,405,566,354 |
+| Main-store GET attempts | 73,667 | 73,562 | 73,526 |
+| Main-store body bytes | 42,828,492,916 | 42,828,762,623 | 42,771,271,632 |
+| Daemon post-run lifetime VmHWM, KiB | 1,386,180 | 1,319,980 | 1,534,288 |
+
+Successful candidate mean wall time is 2m43.80s, 17.6% shorter than the fresh
+control. The audit interval fell 70.6%, with roughly unchanged total daemon CPU
+and logical reads: this supports overlapping authentication work rather than
+skipping it. Stage intervals are rounded progress boundaries; daemon CPU uses
+before/after process counters, logical reads are not physical NFS traffic, and
+VmHWM is a process-lifetime high-water mark, not a per-stage peak.
+
+R22/r23 logical results match each other exactly after excluding `resources`
+and `consistency`. Compared with r20, the sole remaining differing field is
+`encrypted_objects`: 161 before restart, 164 afterward. Do not describe that as
+exact cross-restart JSON equality. Both retain 379,934,385 distinct locations,
+419,530 warnings, and reduced SlateDB-only coverage (`complete=false`). Final
+range telemetry remains 376,766,240 records / 257 ranges.
+
+All four raw manifests verified and all scratch directories were empty afterward.
+Completed-run telemetry contains 40/33/33 valid snapshots; host and CLI swap stayed
+zero. Final writer health is read-write at epoch 40 with zero active transactions
+and intents; the candidate remains deployed. Source and evidence remain uncommitted.
+These are repeated completed NFS measurements, not full differential or RADOS
+acceptance. Restart/cache differences and r21's listing/read race remain unresolved.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against

@@ -14,7 +14,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slatedb::object_store::{path::Path, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{EncryptedObjectStore, EncryptionKey};
@@ -35,6 +35,15 @@ const DEFAULT_ITERATIONS: u32 = 3;
 const DEFAULT_PARALLELISM: u32 = 1;
 const CLOUD_BINDING_MAGIC: &[u8] = b"VLTDBKMS1";
 const ROTATION_AAD_PREFIX: &str = "vaulticdb-dek-rotation";
+const AUDIT_WORKERS: usize = 4;
+const AUDIT_MEMORY_UNITS: u32 = 2048;
+const AUDIT_MEMORY_UNIT_BYTES: u64 = 1024 * 1024;
+
+fn audit_memory_units(bytes: u64) -> u32 {
+    bytes
+        .div_ceil(AUDIT_MEMORY_UNIT_BYTES)
+        .clamp(1, u64::from(AUDIT_MEMORY_UNITS)) as u32
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -380,6 +389,10 @@ impl KeyManager {
     }
 
     pub async fn audit_objects(&self) -> Result<EncryptionAudit> {
+        self.audit_objects_with_workers(AUDIT_WORKERS).await
+    }
+
+    async fn audit_objects_with_workers(&self, workers: usize) -> Result<EncryptionAudit> {
         let state = self.state.lock().await;
         let known_versions = readable_deks(&state.envelope, &state.dek)?
             .into_iter()
@@ -393,37 +406,63 @@ impl KeyManager {
             plaintext_objects: 0,
             old_version_objects: 0,
         };
-        let mut objects = self.inner.list(None);
-        while let Some(object) = objects.next().await {
-            let object = object.context("list object for encryption audit")?;
-            if object.location.as_ref().starts_with("_vaultic/") {
-                continue;
-            }
-            audit.objects += 1;
-            let header_end = object.size.min(super::HEADER_SIZE as u64);
-            let raw = self
-                .inner
-                .get_range(&object.location, 0..header_end)
-                .await?;
-            if !raw.starts_with(super::MAGIC) {
-                audit.plaintext_objects += 1;
-                continue;
-            }
-            match super::decode_header(&raw) {
-                Ok(header) if known_versions.contains(&header.key_version) => {
-                    if header.key_version != active_version {
-                        audit.old_version_objects += 1;
+        let memory = Semaphore::new(AUDIT_MEMORY_UNITS as usize);
+        let mut objects = self
+            .inner
+            .list(None)
+            .map(|object| {
+                let memory = &memory;
+                let known_versions = &known_versions;
+                async move {
+                    let object = object.context("list object for encryption audit")?;
+                    let mut audit = EncryptionAudit {
+                        objects: 0,
+                        invalid_objects: 0,
+                        plaintext_objects: 0,
+                        old_version_objects: 0,
+                    };
+                    if object.location.as_ref().starts_with("_vaultic/") {
+                        return Ok::<_, anyhow::Error>(audit);
                     }
-                    if let Err(error) = self.encrypted.get(&object.location).await?.bytes().await {
-                        if super::is_integrity_error(&error) {
-                            audit.invalid_objects += 1;
-                        } else {
-                            return Err(error).context("authenticate object for encryption audit");
+                    let _admission = memory.acquire_many(audit_memory_units(object.size)).await?;
+                    audit.objects = 1;
+                    let header_end = object.size.min(super::HEADER_SIZE as u64);
+                    let raw = self
+                        .inner
+                        .get_range(&object.location, 0..header_end)
+                        .await?;
+                    if !raw.starts_with(super::MAGIC) {
+                        audit.plaintext_objects += 1;
+                        return Ok(audit);
+                    }
+                    match super::decode_header(&raw) {
+                        Ok(header) if known_versions.contains(&header.key_version) => {
+                            if header.key_version != active_version {
+                                audit.old_version_objects += 1;
+                            }
+                            if let Err(error) =
+                                self.encrypted.get(&object.location).await?.bytes().await
+                            {
+                                if super::is_integrity_error(&error) {
+                                    audit.invalid_objects += 1;
+                                } else {
+                                    return Err(error)
+                                        .context("authenticate object for encryption audit");
+                                }
+                            }
                         }
+                        _ => audit.invalid_objects += 1,
                     }
+                    Ok(audit)
                 }
-                _ => audit.invalid_objects += 1,
-            }
+            })
+            .buffer_unordered(workers);
+        while let Some(result) = objects.next().await {
+            let object = result?;
+            audit.objects += object.objects;
+            audit.invalid_objects += object.invalid_objects;
+            audit.plaintext_objects += object.plaintext_objects;
+            audit.old_version_objects += object.old_version_objects;
         }
         Ok(audit)
     }

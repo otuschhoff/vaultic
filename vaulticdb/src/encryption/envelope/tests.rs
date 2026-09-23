@@ -4,8 +4,106 @@ mod tests {
 
     use super::*;
     use async_trait::async_trait;
+    use futures_util::stream::BoxStream;
     use sha2::{Digest, Sha256};
     use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        PutMultipartOptions, PutPayload, PutResult,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct AuditStore {
+        inner: InMemory,
+        listed_size: AtomicU64,
+        started: AtomicUsize,
+        active: Semaphore,
+        release: Semaphore,
+        fail_get: AtomicBool,
+    }
+
+    impl std::fmt::Display for AuditStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("audit test store")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for AuditStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> slatedb::object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> slatedb::object_store::Result<GetResult> {
+            let _active = self.active.acquire().await.unwrap();
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.release.acquire().await.unwrap().forget();
+            if self.fail_get.load(Ordering::SeqCst) {
+                return Err(slatedb::object_store::Error::Generic {
+                    store: "audit-test",
+                    source: "injected read failure".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, slatedb::object_store::Result<Path>>,
+        ) -> BoxStream<'static, slatedb::object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+            let size = self.listed_size.load(Ordering::SeqCst);
+            self.inner
+                .list(prefix)
+                .map(move |object| {
+                    object.map(|mut meta| {
+                        meta.size = size;
+                        meta
+                    })
+                })
+                .boxed()
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> slatedb::object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> slatedb::object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     #[tokio::test]
     async fn local_slot_round_trip_and_binding() {
@@ -306,5 +404,173 @@ mod tests {
         assert_eq!(audit.plaintext_objects, 1);
         let error = encrypted.get(&location).await.unwrap_err();
         assert!(crate::encryption::is_integrity_error(&error));
+    }
+
+    #[tokio::test]
+    async fn parallel_audit_matches_serial_and_authenticates_payloads() {
+        let raw = Arc::new(InMemory::new());
+        let (envelope, dek) = new_local_envelope("repo-a", b"recovery").unwrap();
+        let (encrypted, _, manager) =
+            encrypted_store(raw.clone(), "repo-a", envelope, dek, "local-recovery").unwrap();
+        let manager = manager.unwrap();
+        encrypted
+            .put(&Path::from("db/old"), b"old".as_slice().into())
+            .await
+            .unwrap();
+        manager.rotate_dek().await.unwrap();
+        for ordinal in 0..8 {
+            encrypted
+                .put(
+                    &Path::from(format!("db/current-{ordinal}")),
+                    vec![ordinal as u8; 300_000].into(),
+                )
+                .await
+                .unwrap();
+        }
+        raw.put(&Path::from("db/plain"), b"plain".as_slice().into())
+            .await
+            .unwrap();
+        raw.put(
+            &Path::from("db/bad-header"),
+            crate::encryption::MAGIC.to_vec().into(),
+        )
+        .await
+        .unwrap();
+        raw.put(
+            &Path::from("_vaultic/ignored"),
+            b"internal".as_slice().into(),
+        )
+        .await
+        .unwrap();
+        let serial = manager.audit_objects_with_workers(1).await.unwrap();
+        let parallel = manager.audit_objects().await.unwrap();
+        assert_eq!(
+            (
+                serial.objects,
+                serial.invalid_objects,
+                serial.plaintext_objects,
+                serial.old_version_objects
+            ),
+            (11, 1, 1, 1)
+        );
+        assert_eq!(
+            (
+                parallel.objects,
+                parallel.invalid_objects,
+                parallel.plaintext_objects,
+                parallel.old_version_objects
+            ),
+            (
+                serial.objects,
+                serial.invalid_objects,
+                serial.plaintext_objects,
+                serial.old_version_objects
+            )
+        );
+        let location = Path::from("db/current-7");
+        let mut bytes = raw
+            .get(&location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        raw.put(&location, bytes.into()).await.unwrap();
+        for workers in [1, AUDIT_WORKERS] {
+            let error = manager
+                .audit_objects_with_workers(workers)
+                .await
+                .unwrap_err();
+            assert!(crate::encryption::is_integrity_error(error.as_ref()));
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_overlaps_reads_with_count_and_byte_limits() {
+        let raw = Arc::new(AuditStore {
+            inner: InMemory::new(),
+            listed_size: AtomicU64::new(5),
+            started: AtomicUsize::new(0),
+            active: Semaphore::new(100),
+            release: Semaphore::new(0),
+            fail_get: AtomicBool::new(false),
+        });
+        for ordinal in 0..12 {
+            raw.put(
+                &Path::from(format!("db/{ordinal:02}")),
+                b"plain".as_slice().into(),
+            )
+            .await
+            .unwrap();
+        }
+        let (envelope, dek) = new_local_envelope("repo-a", b"recovery").unwrap();
+        let (_, _, manager) =
+            encrypted_store(raw.clone(), "repo-a", envelope, dek, "local-recovery").unwrap();
+        let manager = manager.unwrap();
+        let half_budget = u64::from(AUDIT_MEMORY_UNITS / 2) * AUDIT_MEMORY_UNIT_BYTES;
+        for (size, expected) in [(5, 4), (half_budget, 2), (u64::MAX, 1)] {
+            raw.listed_size.store(size, Ordering::SeqCst);
+            raw.started.store(0, Ordering::SeqCst);
+            {
+                let audit = manager.audit_objects();
+                tokio::pin!(audit);
+                assert!(futures_util::poll!(&mut audit).is_pending());
+                assert_eq!(raw.started.load(Ordering::SeqCst), expected);
+                assert_eq!(raw.active.available_permits(), 100 - expected);
+            }
+            assert_eq!(raw.active.available_permits(), 100);
+        }
+        raw.listed_size.store(5, Ordering::SeqCst);
+        raw.started.store(0, Ordering::SeqCst);
+        raw.release.add_permits(12);
+        let audit = manager.audit_objects().await.unwrap();
+        assert_eq!((audit.objects, audit.plaintext_objects), (12, 12));
+        assert_eq!(raw.started.load(Ordering::SeqCst), 12);
+        assert_eq!(raw.active.available_permits(), 100);
+        raw.fail_get.store(true, Ordering::SeqCst);
+        {
+            let audit = manager.audit_objects();
+            tokio::pin!(audit);
+            assert!(futures_util::poll!(&mut audit).is_pending());
+            assert_eq!(raw.active.available_permits(), 96);
+            raw.release.add_permits(1);
+            let error = audit.await.unwrap_err();
+            assert!(error.to_string().contains("injected read failure"));
+        }
+        assert_eq!(raw.active.available_permits(), 100);
+    }
+
+    #[tokio::test]
+    async fn audit_byte_admission_is_exclusive_and_cancellation_safe() {
+        assert_eq!(audit_memory_units(0), 1);
+        assert_eq!(audit_memory_units(AUDIT_MEMORY_UNIT_BYTES), 1);
+        assert_eq!(audit_memory_units(AUDIT_MEMORY_UNIT_BYTES + 1), 2);
+        assert_eq!(audit_memory_units(u64::MAX), AUDIT_MEMORY_UNITS);
+        let memory = Semaphore::new(AUDIT_MEMORY_UNITS as usize);
+        let small = memory.acquire_many(1).await.unwrap();
+        {
+            let large = memory.acquire_many(audit_memory_units(u64::MAX));
+            tokio::pin!(large);
+            assert!(futures_util::poll!(&mut large).is_pending());
+        }
+        drop(small);
+        assert_eq!(memory.available_permits(), AUDIT_MEMORY_UNITS as usize);
+        let large = memory
+            .acquire_many(audit_memory_units(u64::MAX))
+            .await
+            .unwrap();
+        assert!(memory.try_acquire().is_err());
+        drop(large);
+        let permits = futures_util::future::join_all(
+            (0..AUDIT_WORKERS).map(|_| memory.acquire_many(AUDIT_MEMORY_UNITS / AUDIT_WORKERS as u32)),
+        )
+        .await;
+        assert!(permits.iter().all(Result::is_ok));
+        assert_eq!(memory.available_permits(), 0);
+        drop(permits);
+        assert_eq!(memory.available_permits(), AUDIT_MEMORY_UNITS as usize);
     }
 }
