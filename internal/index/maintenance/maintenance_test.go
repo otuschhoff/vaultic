@@ -267,6 +267,107 @@ func (store *countOnlyScanStore) ScanRange(_ context.Context, prefix []byte, _ u
 	return nil
 }
 
+func TestLoadSlateDBLocationsPreservesOrderedPartitions(t *testing.T) {
+	store := &memoryStore{values: make(map[string][]byte)}
+	scratch, err := newCheckScratch(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	locations, err := newLocationSpool(context.Background(), scratch, 256*8*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packs, err := newLocationMultisetSpool(context.Background(), scratch, 256*8*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := newLocationSpool(context.Background(), scratch, 256*8*locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []byte{0, 1, 31, 63, 127, 128, 254, 255} {
+		for ordinal := byte(0); ordinal < 4; ordinal++ {
+			blobID := schema.ID{prefix, ordinal}
+			base := schema.BlobLocation{PackID: schema.ID{42}, Type: schema.BlobData, Length: 1}
+			other := base
+			other.Offset = 7
+			record := schema.BlobRecord{Locations: []schema.BlobLocation{other, base, base}}
+			store.set(t, schema.BlobKey(blobID), record)
+			for _, item := range record.Locations {
+				if err := reference.add(locationTuple{BlobID: vaultic.ID(blobID), PackID: vaultic.ID(item.PackID), Type: uint8(item.Type), Offset: item.Offset, Length: uint64(item.Length)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if err := loadSlateDBLocations(context.Background(), store, locations, packs, 4, nil); err != nil {
+		t.Fatal(err)
+	}
+	peak, before := scratch.stats()
+	if peak == 0 || len(locations.blobPartitions) != 256 || locations.memoryUsed > locations.memoryBytes {
+		t.Fatal("fixture did not retain bounded, spilled partitions")
+	}
+	var result CheckResult
+	if err := compareLocationSpools(reference, locations, &result, 10); err != nil {
+		t.Fatal(err)
+	}
+	if result.LegacyLocations != 64 || result.SlateDBLocations != 64 || result.MissingInLegacy != 0 || result.MissingInSlateDB != 0 {
+		t.Fatalf("partition comparison differs: %+v", result)
+	}
+	if _, after := scratch.stats(); after != before {
+		t.Fatalf("disjoint partitions required a global merge: before=%d after=%d", before, after)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	locations.ctx = ctx
+	iterator, err := locations.iterator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := iterator.next(); err != nil || !found {
+		t.Fatalf("first tuple: found=%v err=%v", found, err)
+	}
+	cancel()
+	if _, _, err := iterator.next(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("partition cancellation: %v", err)
+	}
+	if err := errors.Join(iterator.close(), locations.close(), packs.close(), reference.close()); err != nil {
+		t.Fatal(err)
+	}
+	if scratch.used != 0 || locations.memoryUsed != 0 {
+		t.Fatal("partition resources leaked")
+	}
+}
+
+func TestLoadSlateDBLocationsRejectsOutOfPartitionKeys(t *testing.T) {
+	value, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: schema.ID{42}, Type: schema.BlobData, Length: 1}}}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range [][]byte{schema.BlobKey(schema.ID{1}), schema.PackKey(schema.ID{0, 1})} {
+		scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer scratch.close()
+		locations, err := newLocationSpool(context.Background(), scratch, 256*locationTupleMemorySize, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packs, err := newLocationMultisetSpool(context.Background(), scratch, 256*locationTupleMemorySize, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := &countOnlyScanStore{memoryStore: &memoryStore{}, entries: []daemon.KeyValue{{Key: key, Value: value}}}
+		if err := loadSlateDBLocations(context.Background(), store, locations, packs, 4, nil); err == nil {
+			t.Fatalf("accepted key outside blob partition: %x", key)
+		}
+		if err := errors.Join(locations.close(), packs.close()); err != nil || scratch.used != 0 {
+			t.Fatalf("cleanup: used=%d err=%v", scratch.used, err)
+		}
+	}
+}
+
 func TestLoadSlateDBLocationsCountOnlyValidation(t *testing.T) {
 	value, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{
 		PackID: schema.ID{42}, Type: schema.BlobData, Length: 1,

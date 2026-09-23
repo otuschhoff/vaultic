@@ -873,12 +873,13 @@ func CheckWithOptions(
 		return result, err
 	}
 	if !options.SlateDBOnly {
-		if err := compareLocationSpools(legacy, slatedb, &result, options.MaxFindings); err != nil {
+		if err := compareLocationSpoolsWithProgress(legacy, slatedb, &result, options.MaxFindings, progress.set); err != nil {
 			return result, err
 		}
 	} else {
 		result.SlateDBLocations = locationCount
 	}
+	progress.set("location_cleanup")
 	if err := legacy.close(); err != nil {
 		return result, err
 	}
@@ -893,6 +894,7 @@ func CheckWithOptions(
 	if err := slatedbPacks.close(); err != nil {
 		return result, err
 	}
+	progress.set("aggregate_validation")
 	if err := checkAggregateValues(ctx, store, wantAggregates, wantTierAggregates, &result, options.MaxFindings); err != nil {
 		return result, err
 	}
@@ -1689,6 +1691,9 @@ func loadSlateDBLocations(ctx context.Context, store Store, result, packs *locat
 }
 
 func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, packs *locationSpool, workers uint, finalizing func(), countOnly *uint64) error {
+	if result.sealed || len(result.blobPartitions) != 0 || len(result.runs) != 0 || len(result.memoryRuns) != 0 || len(result.buffer) != 0 {
+		return fmt.Errorf("checker blob partition destination is not empty")
+	}
 	group, groupContext := errgroup.WithContext(ctx)
 	group.SetLimit(int(workers))
 	partitionMemory := max(result.memoryBytes/256, locationTupleMemorySize)
@@ -1738,6 +1743,9 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 					parsed, err := schema.ParseKey(entry.Key)
 					if err != nil {
 						return err
+					}
+					if parsed.Kind != schema.KeyBlob || !bytes.HasPrefix(entry.Key, prefix) {
+						return fmt.Errorf("invalid blob key in partition scan")
 					}
 					if countOnly != nil {
 						if parsed.Kind != schema.KeyBlob || !bytes.HasPrefix(entry.Key, prefix) ||
@@ -1826,13 +1834,20 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 		}
 		locationPartitions[partition].ctx = ctx
 		packPartitions[partition].ctx = ctx
-		if err := result.adopt(locationPartitions[partition]); err != nil {
-			return err
+		if countOnly == nil {
+			locations := locationPartitions[partition]
+			if locations.memoryUsed > result.memoryBytes-result.memoryUsed {
+				return fmt.Errorf("checker location spool memory limit exceeded")
+			}
+			result.blobPartitions = append(result.blobPartitions, locations)
+			result.memoryUsed += locations.memoryUsed
+			locationPartitions[partition] = nil
 		}
 		if err := packs.adopt(packPartitions[partition]); err != nil {
 			return err
 		}
 	}
+	result.sealed = true
 	if countOnly != nil {
 		var count uint64
 		for _, partitionCount := range partitionCounts {

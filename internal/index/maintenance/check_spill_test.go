@@ -20,6 +20,51 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+func TestCompareLocationSpoolsReportsStages(t *testing.T) {
+	scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scratch.close()
+	legacy, err := newLocationSpool(context.Background(), scratch, locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slatedb, err := newLocationSpool(context.Background(), scratch, locationTupleMemorySize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 40; index++ {
+		tuple := locationTuple{}
+		tuple.BlobID[0] = byte(index)
+		for _, spool := range []*locationSpool{legacy, slatedb} {
+			if err := spool.add(tuple); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var stages []string
+	var result CheckResult
+	err = compareLocationSpoolsWithProgress(legacy, slatedb, &result, 0, func(stage string) {
+		stages = append(stages, stage)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"location_merge_legacy", "location_merge_slatedb", "location_compare"}
+	if len(stages) != len(want) {
+		t.Fatalf("stages = %v, want %v", stages, want)
+	}
+	for index := range want {
+		if stages[index] != want[index] {
+			t.Fatalf("stages = %v, want %v", stages, want)
+		}
+	}
+	if result.LegacyLocations != 40 || result.SlateDBLocations != 40 || result.MissingInLegacy != 0 || result.MissingInSlateDB != 0 {
+		t.Fatalf("comparison changed: %+v", result)
+	}
+}
+
 func testLocation(value byte) locationTuple {
 	return locationTuple{BlobID: vaultic.ID{value}, PackID: vaultic.ID{value + 1}, Type: uint8(value % 2), Offset: uint64(value)}
 }

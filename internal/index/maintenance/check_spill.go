@@ -325,20 +325,21 @@ type checkRun struct {
 }
 
 type locationSpool struct {
-	ctx           context.Context
-	scratch       *checkScratch
-	memoryBytes   uint64
-	memoryUsed    uint64
-	chunkItems    int
-	fanIn         int
-	mergeWorkers  int
-	deduplicate   bool
-	packSummaries bool
-	buffer        []locationTuple
-	memoryRuns    [][]locationTuple
-	runs          []checkRun
-	diskMode      bool
-	sealed        bool
+	ctx            context.Context
+	scratch        *checkScratch
+	memoryBytes    uint64
+	memoryUsed     uint64
+	chunkItems     int
+	fanIn          int
+	mergeWorkers   int
+	deduplicate    bool
+	packSummaries  bool
+	buffer         []locationTuple
+	memoryRuns     [][]locationTuple
+	runs           []checkRun
+	blobPartitions []*locationSpool
+	diskMode       bool
+	sealed         bool
 }
 
 func newLocationSpool(ctx context.Context, scratch *checkScratch, memoryBytes uint64, fanIn int) (*locationSpool, error) {
@@ -403,7 +404,7 @@ func (spool *locationSpool) add(tuple locationTuple) error {
 }
 
 func (spool *locationSpool) addEncoded(tuple locationTuple) error {
-	if spool.sealed {
+	if spool.sealed || len(spool.blobPartitions) != 0 {
 		return fmt.Errorf("checker location spool is sealed")
 	}
 	if err := spool.ctx.Err(); err != nil {
@@ -714,7 +715,7 @@ func (spool *locationSpool) mergePass() error {
 }
 
 func (spool *locationSpool) adopt(source *locationSpool) error {
-	if spool.sealed || source.sealed || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate || spool.packSummaries != source.packSummaries {
+	if spool.sealed || source.sealed || len(spool.blobPartitions) != 0 || len(source.blobPartitions) != 0 || spool.scratch != source.scratch || spool.deduplicate != source.deduplicate || spool.packSummaries != source.packSummaries {
 		return fmt.Errorf("incompatible checker location spools")
 	}
 	if err := source.finishBuffer(); err != nil {
@@ -1033,15 +1034,20 @@ func (items *locationHeap) siftDown() {
 }
 
 type locationIterator struct {
-	ctx         context.Context
-	readers     []locationReader
-	heap        locationHeap
-	last        locationTuple
-	hasLast     bool
-	deduplicate bool
+	ctx               context.Context
+	readers           []locationReader
+	heap              locationHeap
+	last              locationTuple
+	hasLast           bool
+	deduplicate       bool
+	blobPartitions    []*locationSpool
+	partitionIterator *locationIterator
 }
 
 func (spool *locationSpool) iterator() (*locationIterator, error) {
+	if len(spool.blobPartitions) != 0 {
+		return &locationIterator{ctx: spool.ctx, blobPartitions: spool.blobPartitions}, nil
+	}
 	if err := spool.seal(); err != nil {
 		return nil, err
 	}
@@ -1050,6 +1056,10 @@ func (spool *locationSpool) iterator() (*locationIterator, error) {
 
 func (spool *locationSpool) close() error {
 	var first error
+	for _, partition := range spool.blobPartitions {
+		first = errors.Join(first, partition.close())
+	}
+	spool.blobPartitions = nil
 	for _, run := range spool.runs {
 		if err := spool.scratch.remove(run.path); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
 			first = err
@@ -1101,6 +1111,27 @@ func newLocationIterator(
 }
 
 func (iterator *locationIterator) next() (locationTuple, bool, error) {
+	for len(iterator.blobPartitions) != 0 {
+		if err := iterator.ctx.Err(); err != nil {
+			return locationTuple{}, false, err
+		}
+		if iterator.partitionIterator == nil {
+			var err error
+			iterator.partitionIterator, err = iterator.blobPartitions[0].iterator()
+			if err != nil {
+				return locationTuple{}, false, err
+			}
+		}
+		tuple, found, err := iterator.partitionIterator.next()
+		if err != nil || found {
+			return tuple, found, err
+		}
+		if err := iterator.partitionIterator.close(); err != nil {
+			return locationTuple{}, false, err
+		}
+		iterator.partitionIterator = nil
+		iterator.blobPartitions = iterator.blobPartitions[1:]
+	}
 	for len(iterator.heap) > 0 {
 		if err := iterator.ctx.Err(); err != nil {
 			return locationTuple{}, false, err
@@ -1127,6 +1158,11 @@ func (iterator *locationIterator) next() (locationTuple, bool, error) {
 
 func (iterator *locationIterator) close() error {
 	var result error
+	if iterator.partitionIterator != nil {
+		result = iterator.partitionIterator.close()
+		iterator.partitionIterator = nil
+	}
+	iterator.blobPartitions = nil
 	for _, reader := range iterator.readers {
 		result = errors.Join(result, reader.close())
 	}
@@ -1192,16 +1228,23 @@ func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *ch
 }
 
 func compareLocationSpools(legacy, slatedb *locationSpool, result *CheckResult, maxFindings uint) (err error) {
+	return compareLocationSpoolsWithProgress(legacy, slatedb, result, maxFindings, func(string) {})
+}
+
+func compareLocationSpoolsWithProgress(legacy, slatedb *locationSpool, result *CheckResult, maxFindings uint, stage func(string)) (err error) {
+	stage("location_merge_legacy")
 	legacyIterator, err := legacy.iterator()
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, legacyIterator.close()) }()
+	stage("location_merge_slatedb")
 	slatedbIterator, err := slatedb.iterator()
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, slatedbIterator.close()) }()
+	stage("location_compare")
 	legacyTuple, hasLegacy, err := legacyIterator.next()
 	if err != nil {
 		return err

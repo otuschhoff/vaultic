@@ -1,5 +1,122 @@
 # Phase 33 Production Benchmark Evidence
 
+## Preserve ordered SlateDB partitions (r42, 2026-09-23)
+
+The r41 attribution identified 95 seconds preparing the global SlateDB location
+iterator. The next candidate retains the 256 disjoint blob-ID partition spools
+and concatenates their sorted iterators in prefix order, opening one partition
+at a time. Full-mode scans now validate blob key kind and partition membership
+before accepting a record. Memory capacity remains charged to the parent spool;
+partition ownership, cancellation and cleanup follow the existing parent
+context. Legacy spools, pack contributions, exact comparison and the configured
+resource limits are unchanged. Any necessary within-partition merges execute
+lazily during comparison rather than being hidden as eliminated work.
+
+Tests compare spilled partitions with a global reference spool, including
+duplicates, empty and widely separated prefixes, exact counts, cancellation,
+resource cleanup and rejection of out-of-partition keys. The fixture verifies
+that no global merge is performed. Focused race tests and the full maintenance
+race suite passed. The full CLI suite failed in backup permission expectations,
+Phase 34 scan-response result equality, monitor snapshot golden output and the
+default version string. Each failure category was reproduced on clean HEAD
+`326450df5`; the Phase 34 reproduction used the same existing test daemon and
+the `0ms/repeat-1` case. These failures were not changed by this experiment.
+
+R42 used the same adopted daemon without restart, HDD-NFS repository and scratch,
+32 workers/RPCs, 96 GiB memory/scratch limits and ten-minute cap as r41. Builds
+and tests finished before measurement. Rounded progress boundaries:
+
+| Measurement | r41 attribution control | r42 ordered partitions |
+| --- | ---: | ---: |
+| Legacy scan | 98s | 101s |
+| Encryption audit | 56s | 42s |
+| SlateDB scan | 75s | 74s |
+| SlateDB finalization | 16s | 20s |
+| Catalog join | 183s | 179s |
+| Legacy merge preparation | 69s | 68s |
+| SlateDB merge preparation | 95s | <1s |
+| Comparison starts | 592s | 484s |
+| Comparison window before cap | 8s | 116s |
+| Partial legacy locations | 7,158,424 | 140,963,015 |
+| Partial SlateDB locations | 7,158,424 | 140,963,014 |
+| Completed merge groups | 30 | 14 |
+| Recorded scratch read/write bytes | 200,006,112,552 | 152,533,184,512 |
+| Peak scratch bytes | 70,240,992,196 | 70,198,433,856 |
+| CLI CPU seconds | 3,908.50 | 3,906.20 |
+| Peak RSS, KiB | 119,816,020 | 122,980,788 |
+| Wall time including cleanup | 613.26s | 616.18s |
+
+Both runs scanned 10,019 legacy indexes and 376,346,710 SlateDB records in
+37,769 chunks across 256 ranges. R42 recorded 35,556,163,087 scan bytes, versus
+35,556,163,101 in r41. Both exited 124 with CLI cancellation 130 and zero swaps.
+The one-location partial-count difference in r42 can occur when cancellation
+interrupts advancement of the two iterators; it is not a mismatch verdict.
+
+R42 performed 16 fewer merge groups and recorded 23.7% less cumulative scratch
+traffic despite reaching substantially more comparison work. This supports
+removing the cross-partition merge, not merely relabeling it. It does not
+establish a completed-check speedup: neither run finished, their audit times
+differ, they were sequential single runs, and their work boundaries differ.
+Zero partial mismatch counters and full selected coverage are not correctness
+acceptance. Scratch peak remains almost unchanged because earlier catalog and
+legacy work still controls it. CPU consumption was effectively unchanged over
+the capped run; no total CPU-saving claim is made.
+
+Raw checksums and empty scratch cleanup passed; the daemon remained PID 431717,
+epoch 55, read-write with zero transactions/intents and its adopted executable
+unchanged. The candidate remains uncommitted and is not installed. Further work
+should target catalog reduction and the legacy global merge, or partition both
+sides for bounded parallel exact comparison. A complete differential verdict
+and matched repeats remain required before runtime acceptance.
+
+Artifacts are under `db.test/phase33-ordered-partitions-2026-09-23` and
+`db.test/phase33-production-2026-09-23-stream32-ordered-partitions-full-r42`.
+
+## Full-check tail attribution (r41, 2026-09-23)
+
+After release commit `326450df5`, a diagnostic-only CLI split the broad
+`catalog_join` progress label into catalog work, legacy iterator preparation,
+SlateDB iterator preparation, and exact location comparison. Additional cleanup
+and aggregate-validation labels distinguish later work. A spilled-input test
+checks the stage sequence and unchanged comparison output. Focused tests and
+affected maintenance/index-command race tests passed.
+
+The full HDD-NFS diagnostic used the adopted daemon without restart, 32 workers
+and RPCs, unchanged 96 GiB checker memory and scratch limits, and a ten-minute
+cap. No builds or tests overlapped. Stage boundaries, rounded by progress output:
+
+| Stage | Start | Duration before next stage/cap |
+| --- | ---: | ---: |
+| Legacy scan | 0s | 98s |
+| Encryption audit | 98s | 56s |
+| SlateDB scan | 154s | 75s |
+| SlateDB finalization | 229s | 16s |
+| Catalog join | 245s | 183s |
+| Legacy location merge preparation | 428s | 69s |
+| SlateDB location merge preparation | 497s | 95s |
+| Exact location comparison | 592s | 8s, interrupted |
+
+All 10,019 legacy indexes and 376,346,710 SlateDB records were scanned, with
+37,769 chunks and 256 completed ranges. Only 7,158,424 locations on each side
+were compared before cancellation. Zero partial mismatch counters do not imply
+a clean verdict. Exit was 124 (CLI cancellation 130), with 613.26 seconds wall
+time including cleanup, 3,908.50 CLI CPU seconds, peak RSS 119,816,020 KiB,
+zero swaps, 30 merge groups, and peak scratch 70,240,992,196 bytes.
+
+The result does not support attributing the whole tail to the serial comparison:
+catalog work and iterator preparation consumed almost all of the post-scan
+window. The longer audit also prevents treating r40/r41 as matched runtime
+controls. The next narrow candidate preserves SlateDB's disjoint blob-ID
+partitions through ordered iteration instead of merging them into a global
+spool. Necessary within-partition merges become lazy comparison work; total
+runtime, merge activity and exact results remain the evaluation criteria.
+
+Raw artifact checksums and empty scratch cleanup passed. The daemon remained
+PID 431717, epoch 55, read-write with zero transactions/intents. No production
+binary was installed. Artifacts are under
+`db.test/phase33-location-attribution-2026-09-23` and
+`db.test/phase33-production-2026-09-23-stream32-location-attribution-full-r41`.
+
 ## Retained-memory spill experiment, 2026-09-23
 
 The parallel legacy consumer and r39 evidence were committed as `35724eb1b`,
