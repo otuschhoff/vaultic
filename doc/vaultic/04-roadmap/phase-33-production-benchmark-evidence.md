@@ -1135,6 +1135,151 @@ payload corruption, admission and cancellation. The daemon binary target passes
 `cargo check`; editor diagnostics and whitespace checks are clean. The new retry
 has not been deployed or benchmarked, and its source/evidence remain uncommitted.
 
+### Current Scan Attribution (r24, 2026-09-23)
+
+Commit `b4855dd1d` records the check-only retry and the operator's confirmation
+that the intervening slowdown was the host backup. R24 did not deploy that retry:
+it retained daemon SHA-256 `efb779ff8e9eda3cb267a7cf56ef9b1726e6fc07c6423e91392afacd430e6cfb`,
+PID 165437 / epoch 40, and the r18/r19 catalog-stream CLI. Host load was low and
+process-name checks found no backup/build/test jobs before the run; these checks
+are not proof that no external backup activity occurred.
+
+The ten-minute capped HDD-NFS diagnostic used unchanged 96 GiB limits and 32
+workers/RPCs, with no overlapping builds/tests or service changes. The sampler
+captured CLI CPU for 30 seconds and daemon CPU at 49 Hz with frame-pointer stacks
+during the scan, followed by a three-second Go trace. No scheduler-switch stream
+was collected. Artifacts are under
+`db.test/phase33-production-2026-09-23-stream32-scan-profile-r24`, with independently
+verified raw and `analysis/` manifests.
+
+R24 exited zero in 2m26.87s: audit 15s, scan 81s, finalize 2s, catalog 26s,
+parallel validation 20s. CLI CPU was 801.21s and peak RSS 14,524,248 KiB;
+daemon before/after CPU was 1,577.60s. These are diagnostic timings, not a matched
+speedup result, particularly given the shorter parallel-validation interval.
+Thirty telemetry snapshots parsed successfully. Scratch and swap stayed zero,
+and final writer health remained read-write with zero transactions/intents.
+
+CPU windows started at 07:30:33 UTC; profile collection/drain ended at 07:31:04.895,
+and the subsequent trace ended at 07:31:07.933. The daemon process counters added
+576.16 CPU-seconds across approximately 31.6 seconds; the Go CPU profile recorded
+275.66 sampled CPU-seconds over 30 seconds. These are different accounting methods
+and windows, not directly additive utilization measurements.
+
+Daemon capture contains 25,080 samples, 7.19 MB, and zero reported lost samples.
+The sampler logged `perf capture failed` after its deliberate SIGINT stop because
+it treated every nonzero wait status as failure. The exact exit status was not
+retained, but the capture decodes successfully with a normal perf completion
+summary. Raw artifacts remain unchanged; the sampler now records the exit status
+and treats requested-interrupt status 130 separately. Some Rust symbols remain
+mangled with LLVM suffixes despite the system demangler; names below come from
+the identifiable symbol components.
+
+The dominant daemon CPU path is SlateDB iteration, not encryption:
+
+- `DbIterator::next` accounts for 81.98% cumulative sampled CPU.
+- `memcpyFast` is 15.73% flat, with stacks through segment/merge iterators.
+- One boxed `RowEntryIterator::next` specialization is 10.55% flat; another
+  boxed-next entry is 2.78%. These are distinct symbols, not summed cumulative costs.
+- `Bytes` shared clone/drop are 3.60% / 2.66% flat.
+- jemalloc malloc/deallocation entries are 3.33% / 3.28% flat.
+- Merge advance is 3.06% flat; heap pop/push are 2.22% / 1.59% flat.
+- The listed AES-GCM assembly hotspot is 1.11% flat, unlike the old amplified
+  read/decrypt path. This does not count all crypto cost.
+
+CLI scan CPU remains distributed across pack aggregation (25.19% cumulative),
+protobuf eager unmarshalling (24.01%), blob decoding (13.99%) and key parsing
+(8.64%); cumulative costs overlap. In the later three-second trace,
+48.93 aggregate goroutine-seconds are under gRPC receive and 48.96 under
+`ReadSession::ScanRange`. That identifies the CLI's wait location, not the daemon's
+async wait cause. Rust iterator/channel/crypto-queue waits are still not separately
+measured; CPU stacks alone cannot supply that attribution.
+
+Compared with r23, all logical result fields match after excluding resources,
+consistency and the explicitly reported encrypted-object count (164 -> 161).
+Distinct locations remain 379,934,385 and warnings 419,530. Coverage remains
+SlateDB-only and incomplete; this is not full differential or RADOS acceptance.
+
+The next discriminating experiment should benchmark the pinned SlateDB iterator's
+per-row boxed-future, row-copy and heap-advance costs with exact ordered-output
+equivalence before changing the dependency. The current evidence does not justify
+another read-ahead change or blindly increasing scan workers. No further source
+optimization or daemon deployment was made during r24 attribution.
+
+### Local Merge Experiment (2026-09-23)
+
+The operator authorized changes in the SlateDB fork. The supplied
+`/root/proj/slatedb` path did not exist in this environment. The clean checkout at
+`/root/proj/slatedb-phase32-p2` matched the pinned `f549d4a` revision in
+`otuschhoff/slatedb`, so the experiment used that checkout.
+
+The merge iterator combines ordered input streams with a heap, a structure that
+keeps the next row at its root. Its old advance path pushed an updated input into
+the heap, then immediately popped the next input. The candidate compares the
+updated input with the root instead. If the root comes first or compares equal,
+the candidate swaps the inputs and lets `peek_mut` repair the heap once.
+Otherwise, it keeps the updated input without a heap change. Exhausted inputs
+still select the next input with `pop`. No heap guard spans an await.
+
+The patch changes only `slatedb/src/merge_iterator.rs` in the fork. It keeps the
+existing key/sequence comparator, duplicate barriers, byte accounting, public
+interfaces, and seek path. It does not address boxed-future allocations or change
+payload storage. Those costs remain separate targets.
+
+An ignored release-mode test measures one, six, and 32 input streams. Each case
+uses 120,000 rows with 34-byte keys and 56-byte values. The fixture uses RAM,
+not local disk as a replacement for NFS or RADOS. Fixture creation and iterator
+initialization occur before timing. The timed loop consumes and drops every row
+through the existing asynchronous interface. One warm-up round precedes ten
+measured rounds per case. The probe lives beside the private iterator tests to
+avoid adding a public benchmark interface.
+
+The initial unpinned 32-stream interleaved result regressed from 505.30 to
+683.98 ns/row. Later unpinned runs did not reproduce that result. Both results
+remain in the raw logs. To reduce migration noise, six further runs used CPU 0
+in baseline/candidate/candidate/baseline/baseline/candidate order.
+The following values are means of three per-run medians, not confidence bounds:
+
+| Input streams | Key layout | Baseline ns/row | Candidate ns/row | Time reduction |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | Interleaved | 228.97 | 197.43 | 13.8% |
+| 1 | Disjoint | 235.08 | 202.20 | 14.0% |
+| 6 | Interleaved | 288.44 | 260.49 | 9.7% |
+| 6 | Disjoint | 276.75 | 207.29 | 25.1% |
+| 32 | Interleaved | 539.90 | 503.66 | 6.7% |
+| 32 | Disjoint | 306.53 | 201.15 | 34.4% |
+
+The fixture does not model the full SlateDB iterator stack, encryption, storage
+latency, or concurrent scans. Native release builds use a different allocator
+and link target from the production daemon. These results support a candidate
+for further measurement, not an end-to-end performance claim.
+
+A sorted-reference test compares every returned row across one, six, and 32
+streams in both directions. It covers values, tombstones, merge operands,
+duplicate suppression enabled/disabled, empty child streams, and exact processed
+byte totals. Existing seek and duplicate tests also pass. The broader iterator
+suite passes 164 tests, with the timing probe ignored. All 41 snapshot tests pass,
+including snapshot reads across compaction.
+
+All 63 Vaultic storage tests pass against the local fork through command-only
+Cargo `[patch]` overrides. They include persisted streaming scans, cursor bounds,
+snapshot expiry, encryption, and cleanup. An earlier compile used Cargo's legacy
+path override and emitted a dependency-resolution warning. The test run used the
+recommended patch mechanism instead. Its script preserves and restores the exact
+original generated lockfile. Vaultic's committed dependency pin is unchanged.
+
+Artifacts reside at `db.test/phase33-merge-iterator-2026-09-23`. They include saved
+baseline/candidate executables, timing logs, source patches, revision, compiler
+version, test logs, and the integration script. A SHA-256 manifest covers these
+files. Rustfmt and whitespace checks pass. SlateDB commit
+`67abacef0044f5e285c1f59af6c936de4c051954` records the tested patch on
+`vaultic-multiget-rebase`. Vaultic's dependency pin remains unchanged.
+No production service replacement or production diagnostic occurred during this
+local experiment.
+
+The next gate is a matched end-to-end scan experiment with an approved candidate
+daemon. Keep the existing worker count and read-ahead configuration for that test.
+Do not infer a total runtime gain from these isolated merge-loop timings.
+
 ## Prior Production Runs
 
 This record captures bounded full and reduced-coverage check attempts against
