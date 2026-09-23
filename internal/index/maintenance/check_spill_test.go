@@ -235,6 +235,58 @@ func TestLocationSpoolMergesBoundedMemoryChunks(t *testing.T) {
 	}
 }
 
+func TestLocationSpoolOverflowRetainsMemoryRuns(t *testing.T) {
+	for _, deduplicate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deduplicate=%t", deduplicate), func(t *testing.T) {
+			recordBytes := uint64(4 + locationTupleSize + 16)
+			scratch, err := newCheckScratch(t.TempDir(), 3*(checkRunHeaderSize+2*recordBytes))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			spool, err := newLocationSpoolMode(context.Background(), scratch, 6*locationTupleMemorySize, 8, deduplicate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer spool.close()
+			spool.chunkItems = 2
+			for _, value := range []byte{5, 1, 3, 1, 4, 2, 3, 6, 7, 8} {
+				if err := spool.add(testLocation(value)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(spool.memoryRuns) != 2 || len(spool.runs) != 3 || !spool.diskMode {
+				t.Fatalf("retained=%d spilled=%d disk=%t", len(spool.memoryRuns), len(spool.runs), spool.diskMode)
+			}
+			capacityBytes := uint64(cap(spool.buffer)) * locationTupleMemorySize
+			for _, records := range spool.memoryRuns {
+				capacityBytes += uint64(cap(records)) * locationTupleMemorySize
+			}
+			if capacityBytes != spool.memoryUsed || capacityBytes > spool.memoryBytes {
+				t.Fatalf("capacity=%d accounted=%d limit=%d", capacityBytes, spool.memoryUsed, spool.memoryBytes)
+			}
+			iterator, err := spool.iterator()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer iterator.close()
+			expected := []byte{1, 1, 2, 3, 3, 4, 5, 6, 7, 8}
+			if deduplicate {
+				expected = []byte{1, 2, 3, 4, 5, 6, 7, 8}
+			}
+			for _, value := range expected {
+				tuple, found, err := iterator.next()
+				if err != nil || !found || tuple != testLocation(value) {
+					t.Fatalf("want=%d tuple=%+v found=%t err=%v", value, tuple, found, err)
+				}
+			}
+			if _, found, err := iterator.next(); err != nil || found {
+				t.Fatalf("extra tuple found=%t err=%v", found, err)
+			}
+		})
+	}
+}
+
 func TestLocationSpoolRetriesPartialMemoryRunSpillWithoutDuplicates(t *testing.T) {
 	recordBytes := uint64(4 + locationTupleSize + 16)
 	scratch, err := newCheckScratch(t.TempDir(), checkRunHeaderSize+2*recordBytes)
@@ -253,13 +305,16 @@ func TestLocationSpoolRetriesPartialMemoryRunSpillWithoutDuplicates(t *testing.T
 	if err := spool.add(testLocation(1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := spool.add(testLocation(3)); err == nil {
+	if err := spool.spillMemoryRuns(); err == nil {
 		t.Fatal("partial memory-run spill unexpectedly fit scratch budget")
 	}
 	if len(spool.runs) != 1 || len(spool.memoryRuns) != 1 || spool.memoryUsed != locationTupleMemorySize {
 		t.Fatalf("partial spill state: disk=%d memory=%d used=%d", len(spool.runs), len(spool.memoryRuns), spool.memoryUsed)
 	}
 	scratch.maxBytes += 2 * (checkRunHeaderSize + recordBytes)
+	if err := spool.spillMemoryRuns(); err != nil {
+		t.Fatal(err)
+	}
 	if err := spool.add(testLocation(3)); err != nil {
 		t.Fatal(err)
 	}

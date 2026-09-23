@@ -1,5 +1,61 @@
 # Phase 33 Production Benchmark Evidence
 
+## Retained-memory spill experiment, 2026-09-23
+
+The parallel legacy consumer and r39 evidence were committed as `35724eb1b`,
+without pushing. The next working-tree change preserves sorted memory runs when
+a spool reaches its tuple-memory budget. Instead of writing every retained run
+to disk, automatic overflow writes one run and reuses its backing array as the
+disk-mode buffer. Other runs remain in memory within the same capacity accounting
+and are consumed by the existing mixed memory/disk iterator. Explicit full-spill
+behavior is unchanged.
+
+Focused tests verify exact set and multiset output, retained-run capacity, and
+a scratch limit that cannot accommodate spilling all runs. Existing full-spill
+retry coverage now invokes that explicit helper. The maintenance and index-command
+suites passed with the race detector, and formatting/editor checks passed.
+
+Full HDD-NFS run `stream32-retained-spill-full-r40` kept 32 workers/RPCs, 96 GiB
+checker memory, 96 GiB scratch, and the ten-minute cap. No builds/tests or known
+backup workloads overlapped it. The adopted daemon was unchanged and was not
+restarted. The isolated Go 1.27.1 profile CLI SHA-256 was
+`9c55f5f699762b22c5b996f46fc6bf6828ed38f9b853e6bab59e80d52dd3d43d`.
+
+All 10,019 legacy indexes loaded by about 97 seconds, with 29,497,229,840 bytes
+of scratch, compared with 181 seconds and 83,631,727,424 bytes in r39. Auditing
+finished at about 111 seconds. All 256 blob ranges completed by 185 seconds:
+376,346,710 records, 35,556,163,076 bytes, and 37,769 chunks. Finalization reached
+`catalog_join` at 203 seconds. Scratch peak was 70,418,506,212 bytes (about
+65.6 GiB), and 30 merge passes were recorded. This run progressed beyond the
+previous scratch-exhaustion boundary without increasing either configured limit.
+
+The ten-minute cap interrupted work still labeled `catalog_join`; this label
+also covers subsequent location comparison. Partial location counters had reached
+87,054,373 legacy and 87,054,372 SlateDB locations, so the stage label alone must
+not be used to attribute the entire wait to catalog reduction. The wrapper exited
+124 and the CLI reported cancellation code 130. Total time including cleanup was
+611.78 seconds, CLI CPU was 4,000.78 seconds, peak RSS was 122,151,980 KiB (about
+116.5 GiB), and no swaps occurred. The checker tuple budget is not an RSS cap.
+
+There is no final differential verdict or end-to-end acceptance. In particular,
+the partial result's `coverage.complete: true` describes the selected full-check
+coverage, not successful execution after cancellation. Neither incomplete location
+counts nor mismatch counters establish correctness. These sequential single runs
+are not matched repeated controls, and their different completion boundaries do
+not establish total CPU savings. The next diagnostic should distinguish catalog
+reduction, location merge, and exact comparison before choosing another change.
+
+Scratch cleanup and raw artifact checksums passed. PID 431717 remained read-write
+at epoch 55 with zero transactions and write intents, and its executable still
+matched the adopted binary. No installed binary, backend, or resource limit was
+changed. The retained-memory change remains uncommitted and native RADOS acceptance
+remains open.
+
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/phase33-retained-spill-2026-09-23/`
+and the raw run directory
+`/volume2/NASDA2/rustic/db.test/phase33-production-2026-09-23-stream32-retained-spill-full-r40/`.
+
 ## Parallel legacy consumer experiment, 2026-09-23
 
 The diagnostic attribution changes were committed as `41207ec50` with a detailed

@@ -368,9 +368,17 @@ func (spool *locationSpool) allocateBuffer() error {
 	if !spool.diskMode {
 		remaining := (spool.memoryBytes - spool.memoryUsed) / locationTupleMemorySize
 		if remaining == 0 {
-			if err := spool.spillMemoryRuns(); err != nil {
+			records := spool.memoryRuns[0]
+			run, err := spool.writeRun(records)
+			if err != nil {
 				return err
 			}
+			spool.runs = append(spool.runs, run)
+			spool.memoryRuns[0] = nil
+			spool.memoryRuns = spool.memoryRuns[1:]
+			spool.buffer = records[:0]
+			spool.diskMode = true
+			return nil
 		} else {
 			capacity = int(min(uint64(capacity), remaining))
 		}
