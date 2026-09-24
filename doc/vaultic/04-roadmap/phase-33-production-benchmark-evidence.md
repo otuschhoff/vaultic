@@ -1,5 +1,80 @@
 # Phase 33 Production Benchmark Evidence
 
+## Authorized 60-minute backup attempt (2026-09-24)
+
+After committing the socket-routing fix as `d350e4983`, a fresh profile CLI
+from that clean revision ran the same 52-root `cdot` backup against the existing
+primary. The user explicitly extended this backup's limit to 60 minutes;
+the 45-second TERM-to-KILL grace remained unchanged. No builds/tests overlapped
+measurement, and no daemon binary, service, repository policy, or source scope
+changed. Before/after binary checksums matched.
+
+The command reached the 60-minute cap and exited 124 after 3,601.117 seconds.
+It still had not reached file processing. All seven goroutine captures at
+60, 600, 1,200, 1,800, 2,400, 3,000 and 3,500 seconds show
+`loadBackupParent -> LoadIndex -> DaemonEngine.loadBlobCatalog -> ScanPrefix`;
+the final cancellation error identifies the same loader. Backup progress JSON
+remained empty. Both inventories contain the identical 143 snapshot IDs, with
+zero additional engine writes or commit requests. No new backup snapshot or
+normalized backup metadata was published.
+
+| Measurement | Value |
+| --- | ---: |
+| CLI user / system CPU, seconds | 181.00 / 31.22 |
+| CLI average CPU cores | 0.059 |
+| CLI peak RSS, KiB | 12,574,956 |
+| Daemon status window, seconds | 3,601.877 |
+| Daemon CPU, seconds / average cores | 2,656.97 / 0.738 |
+| Sampled daemon peak RSS, KiB | 694,228 |
+| Main-store GET requests | 3,307,923 |
+| Main-store GET aggregate service, seconds | 3,122.508038 |
+| Main-store GET-body bytes | 113,780,822,474 |
+| Engine backpressure / L0-stall event deltas | 0 / 0 |
+| Process / writer samples | 720 / 720 |
+| Sampler errors / swaps | 0 / 0 |
+
+The CPU profile contains 206.30 sampled CPU seconds across 3,599.98 seconds;
+83.16% of sampled CPU is cumulatively below `loadBlobCatalog`, including map
+operations, memory copying and protobuf decoding. These are CPU shares, not
+wall-time shares. Low CLI utilization and repeated RPC-wait stack captures
+identify serialized catalog fetching as the immediate startup bottleneck;
+materializing the full catalog is also a growing memory cost (about 12 GiB peak).
+
+Approximate ten-minute windows, computed from actual status timestamps:
+
+| Window, minutes | GET/s | Logical body MiB/s | Daemon cores | CLI RSS at boundary, GiB |
+| --- | ---: | ---: | ---: | ---: |
+| 0-10 | 1,172 | 56.80 | 0.909 | 3.33 |
+| 10-20 | 1,156 | 38.18 | 0.877 | 5.91 |
+| 20-30 | 1,140 | 34.83 | 0.863 | 8.69 |
+| 30-40 | 898 | 18.60 | 0.730 | 9.93 |
+| 40-50 | 623 | 19.94 | 0.566 | 11.35 |
+| 50-60 | 523 | 12.48 | 0.484 | 11.31 |
+
+The falling logical read rate is observed, but completed catalog record counts
+are unavailable: GET/s is not records/s or percent complete. No reliable ETA
+can be inferred. Logical bodies do not establish physical disk/NFS traffic or
+saturation; CPU and GET service durations overlap. This is one extended run,
+not a matched comparison with the earlier ten-minute attempt.
+
+Source inspection confirms each unary page constructs a new iterator and
+collects one page. Backup uses `SchemaStore.ScanPrefix` without a transaction;
+it does not use the existing transaction-scoped streaming scan with a retained
+iterator and explicit 1 MiB read-ahead. The first candidate is to reuse that
+bounded streaming path, preserving catalog validation, cancellation and lookup
+projection correctness, and expose catalog progress. The exact costs of
+iterator recreation, read-ahead and storage latency were not separately profiled
+in the daemon. On-demand lookup is a separate, larger memory optimization;
+simply removing `LoadIndex` remains unsafe while lookups require its projection.
+Raising file-read concurrency cannot fix this pre-archiving phase.
+
+The original primary remained PID 431717, read-write at epoch 55, with no active
+transactions/intents or surviving backup process. No new-snapshot durability,
+source traversal or payload throughput was measured. The command, committed
+revision, hashes, profiles, interval summaries, five-second samples, inventories,
+health snapshots, assertion-based analyzer and checksums are retained under
+`db.test/authoritative-backup-60m-2026-09-24`.
+
 ## Authoritative backup startup (2026-09-24)
 
 A real backup attempt used the saved `cdot` job's 52 readable source roots,
